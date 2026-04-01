@@ -5,3 +5,4 @@ export * from "./developers";
 export * from "./projects";
 export * from "./clients";
 export * from "./cases";
+export * from "./documents";

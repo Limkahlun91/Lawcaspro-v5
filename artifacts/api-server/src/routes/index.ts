@@ -9,6 +9,8 @@ import projectsRouter from "./projects";
 import clientsRouter from "./clients";
 import casesRouter from "./cases";
 import dashboardRouter from "./dashboard";
+import storageRouter from "./storage";
+import documentsRouter from "./documents";
 
 const router: IRouter = Router();
 
@@ -22,5 +24,7 @@ router.use(projectsRouter);
 router.use(clientsRouter);
 router.use(casesRouter);
 router.use(dashboardRouter);
+router.use(storageRouter);
+router.use(documentsRouter);
 
 export default router;

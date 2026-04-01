@@ -14,6 +14,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { useToast } from "@/hooks/use-toast";
 import { useState } from "react";
 import { Textarea } from "@/components/ui/textarea";
+import CaseDocumentsTab from "./components/CaseDocumentsTab";
 
 export default function CaseDetail() {
   const { id } = useParams<{ id: string }>();
@@ -94,10 +95,11 @@ export default function CaseDetail() {
       </div>
 
       <Tabs defaultValue="overview" className="w-full">
-        <TabsList className="grid w-full grid-cols-3 mb-6 bg-slate-100 p-1">
+        <TabsList className="grid w-full grid-cols-4 mb-6 bg-slate-100 p-1">
           <TabsTrigger value="overview">Overview</TabsTrigger>
-          <TabsTrigger value="workflow">Workflow Tracker</TabsTrigger>
-          <TabsTrigger value="notes">Notes & Activity</TabsTrigger>
+          <TabsTrigger value="workflow">Workflow</TabsTrigger>
+          <TabsTrigger value="documents">Documents</TabsTrigger>
+          <TabsTrigger value="notes">Notes</TabsTrigger>
         </TabsList>
 
         <TabsContent value="overview" className="space-y-6">
@@ -275,6 +277,10 @@ export default function CaseDetail() {
               </div>
             </CardContent>
           </Card>
+        </TabsContent>
+
+        <TabsContent value="documents">
+          <CaseDocumentsTab caseId={caseId} />
         </TabsContent>
 
         <TabsContent value="notes" className="space-y-6">

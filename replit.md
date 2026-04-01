@@ -49,6 +49,8 @@ All tables created in PostgreSQL:
 | `case_workflow_steps` | Workflow step instances per case |
 | `case_notes` | Internal case notes |
 | `audit_logs` | Action audit trail |
+| `document_templates` | DOCX template files per firm (stored in Replit Object Storage) |
+| `case_documents` | Generated/uploaded documents per case |
 
 ## API Routes (all under /api prefix)
 
@@ -84,6 +86,15 @@ All tables created in PostgreSQL:
 - `GET /api/cases/stats/by-status`
 - `GET /api/cases/stats/by-type`
 - `GET /api/cases/recent`
+- `GET /api/cases/:caseId/documents` — List case documents
+- `POST /api/cases/:caseId/documents/generate` — Generate document from DOCX template (docxtemplater)
+- `POST /api/cases/:caseId/documents/upload` — Register manually uploaded document
+- `GET /api/cases/:caseId/documents/:docId/download` — Download document binary
+- `DELETE /api/cases/:caseId/documents/:docId`
+- `GET/POST /api/document-templates` — Firm DOCX templates (list/upload)
+- `DELETE /api/document-templates/:templateId`
+- `POST /api/storage/uploads/request-url` — Get GCS presigned upload URL
+- `GET /api/storage/objects/*` — Serve private objects (auth required)
 
 ## Workflow Engine
 
@@ -116,7 +127,7 @@ Step paths: `common` → `loan` (if loan) → `mot` (individual/strata) or `noa_
 ## Development Phases
 
 - [x] **Phase 1**: Auth, multi-tenant architecture, CRUD for Users, Roles, Developers, Projects, Clients, Cases, Workflow Engine
-- [ ] **Phase 2**: Document management (DOCX templates, PDF, Replit Object Storage)
+- [x] **Phase 2**: Document management — DOCX template upload, docxtemplater field substitution, document generation per case, file upload, download. Object Storage (GCS via Replit). Settings page for template management. Documents tab on case detail.
 - [ ] **Phase 3**: Accounting & invoicing (billing statements, e-invoice UI)
 - [ ] **Phase 4**: Reporting & analytics
 - [ ] **Phase 5**: Communications (Email/WhatsApp UI structure)
