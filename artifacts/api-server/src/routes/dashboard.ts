@@ -1,7 +1,14 @@
 import { Router, type IRouter } from "express";
-import { eq, count, desc } from "drizzle-orm";
-import { db, casesTable, clientsTable, developersTable, projectsTable } from "@workspace/db";
+import { eq, count, desc, sql } from "drizzle-orm";
+import { db, casesTable, clientsTable, developersTable, projectsTable, caseAssignmentsTable, usersTable } from "@workspace/db";
 import { requireAuth, requireFirmUser, type AuthRequest } from "../lib/auth";
+
+async function queryRows(query: ReturnType<typeof sql>): Promise<Record<string, unknown>[]> {
+  const result = await db.execute(query);
+  if (Array.isArray(result)) return result as Record<string, unknown>[];
+  if ("rows" in result) return (result as { rows: Record<string, unknown>[] }).rows;
+  return [];
+}
 
 const router: IRouter = Router();
 
@@ -33,6 +40,12 @@ router.get("/dashboard", requireAuth, requireFirmUser, async (req: AuthRequest, 
     recentRows.map(async (c) => {
       const [proj] = await db.select().from(projectsTable).where(eq(projectsTable.id, c.projectId));
       const [dev] = await db.select().from(developersTable).where(eq(developersTable.id, c.developerId));
+      const [assignment] = await db
+        .select({ userName: usersTable.name })
+        .from(caseAssignmentsTable)
+        .leftJoin(usersTable, eq(caseAssignmentsTable.userId, usersTable.id))
+        .where(eq(caseAssignmentsTable.caseId, c.id))
+        .limit(1);
       return {
         id: c.id,
         referenceNo: c.referenceNo,
@@ -41,11 +54,30 @@ router.get("/dashboard", requireAuth, requireFirmUser, async (req: AuthRequest, 
         purchaseMode: c.purchaseMode,
         titleType: c.titleType,
         status: c.status,
-        assignedLawyerName: null,
+        assignedLawyerName: assignment?.userName ?? null,
         createdAt: c.createdAt.toISOString(),
       };
     })
   );
+
+  // Billing summary
+  const billingRows = await queryRows(sql`
+    SELECT
+      SUM(amount * quantity) as total_billed,
+      SUM(CASE WHEN is_paid THEN amount * quantity ELSE 0 END) as total_paid,
+      SUM(CASE WHEN NOT is_paid THEN amount * quantity ELSE 0 END) as total_outstanding
+    FROM case_billing_entries WHERE firm_id = ${firmId}
+  `);
+  const billing = billingRows[0] ?? {};
+
+  // Communications count this month
+  const commRows = await queryRows(sql`
+    SELECT COUNT(*) as total_this_month
+    FROM case_communications
+    WHERE firm_id = ${firmId}
+    AND created_at >= date_trunc('month', NOW())
+  `);
+  const commsThisMonth = Number(commRows[0]?.total_this_month ?? 0);
 
   res.json({
     totalCases: Number(totalCasesRes?.c ?? 0),
@@ -60,6 +92,12 @@ router.get("/dashboard", requireAuth, requireFirmUser, async (req: AuthRequest, 
     individualTitleCases,
     strataTitleCases,
     recentCases,
+    billing: {
+      totalBilled: Number(billing.total_billed ?? 0),
+      totalPaid: Number(billing.total_paid ?? 0),
+      totalOutstanding: Number(billing.total_outstanding ?? 0),
+    },
+    commsThisMonth,
   });
 });
 
