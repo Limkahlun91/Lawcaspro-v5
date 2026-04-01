@@ -16,6 +16,20 @@ async function queryRows(query: ReturnType<typeof sql>): Promise<Record<string, 
 
 const CATEGORIES = ["legal_fee", "disbursement", "stamp_duty", "professional_fee", "other"] as const;
 
+router.get("/accounting", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+  const rows = await queryRows(sql`
+    SELECT be.id, be.case_id, be.description, be.amount, be.quantity,
+      be.is_paid as "isPaid", be.created_at as "billedAt",
+      c.reference_no as "caseReferenceNo"
+    FROM case_billing_entries be
+    LEFT JOIN cases c ON be.case_id = c.id
+    WHERE be.firm_id = ${req.firmId!}
+    ORDER BY be.created_at DESC
+    LIMIT 100
+  `);
+  res.json(rows);
+});
+
 router.get("/cases/:caseId/billing", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
   const caseId = Number(req.params.caseId);
   const rows = await queryRows(sql`

@@ -15,7 +15,13 @@ export async function requireAuth(
   res: Response,
   next: NextFunction
 ): Promise<void> {
-  const token = req.cookies?.["auth_token"] as string | undefined;
+  let token = req.cookies?.["auth_token"] as string | undefined;
+  if (!token) {
+    const authHeader = req.headers["authorization"];
+    if (typeof authHeader === "string" && authHeader.startsWith("Bearer ")) {
+      token = authHeader.slice(7);
+    }
+  }
   if (!token) {
     res.status(401).json({ error: "Not authenticated" });
     return;

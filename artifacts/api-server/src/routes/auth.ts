@@ -73,6 +73,7 @@ router.post("/auth/login", async (req, res): Promise<void> => {
   });
 
   res.json({
+    token,
     id: user.id,
     email: user.email,
     name: user.name,
