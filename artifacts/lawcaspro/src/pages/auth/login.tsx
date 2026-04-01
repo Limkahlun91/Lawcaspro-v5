@@ -1,6 +1,7 @@
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
+import { useState } from "react";
 import { useLogin } from "@workspace/api-client-react";
 import { useAuth } from "@/lib/auth-context";
 import { useLocation } from "wouter";
@@ -9,7 +10,7 @@ import { Button } from "@/components/ui/button";
 import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { Building2 } from "lucide-react";
+import { Building2, Eye, EyeOff } from "lucide-react";
 
 const loginSchema = z.object({
   email: z.string().email("Please enter a valid email address"),
@@ -22,7 +23,8 @@ export default function Login() {
   const { login: setAuthUser } = useAuth();
   const [, setLocation] = useLocation();
   const { toast } = useToast();
-  
+  const [showPassword, setShowPassword] = useState(false);
+
   const form = useForm<LoginFormValues>({
     resolver: zodResolver(loginSchema),
     defaultValues: {
@@ -66,7 +68,7 @@ export default function Login() {
           <h1 className="text-3xl font-bold text-slate-900 tracking-tight">Lawcaspro</h1>
           <p className="text-slate-500 font-medium mt-1">Legal Operations System</p>
         </div>
-        
+
         <Card className="border-slate-200 shadow-sm">
           <CardHeader>
             <CardTitle>Sign in to your account</CardTitle>
@@ -95,15 +97,32 @@ export default function Login() {
                     <FormItem>
                       <FormLabel>Password</FormLabel>
                       <FormControl>
-                        <Input type="password" placeholder="••••••••" autoComplete="current-password" {...field} />
+                        <div className="relative">
+                          <Input
+                            type={showPassword ? "text" : "password"}
+                            placeholder="••••••••"
+                            autoComplete="current-password"
+                            className="pr-10"
+                            {...field}
+                          />
+                          <button
+                            type="button"
+                            onClick={() => setShowPassword((v) => !v)}
+                            className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 transition-colors"
+                            tabIndex={-1}
+                            aria-label={showPassword ? "Hide password" : "Show password"}
+                          >
+                            {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                          </button>
+                        </div>
                       </FormControl>
                       <FormMessage />
                     </FormItem>
                   )}
                 />
-                <Button 
-                  type="submit" 
-                  className="w-full bg-slate-900 hover:bg-slate-800 text-white" 
+                <Button
+                  type="submit"
+                  className="w-full bg-slate-900 hover:bg-slate-800 text-white"
                   disabled={loginMutation.isPending}
                 >
                   {loginMutation.isPending ? "Signing in..." : "Sign in"}
@@ -112,6 +131,8 @@ export default function Login() {
             </Form>
           </CardContent>
         </Card>
+
+        <p className="text-center text-xs text-slate-400 mt-6">Lawcaspro &copy; {new Date().getFullYear()}</p>
       </div>
     </div>
   );
