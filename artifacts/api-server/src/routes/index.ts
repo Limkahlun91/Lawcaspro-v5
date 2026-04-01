@@ -11,6 +11,9 @@ import casesRouter from "./cases";
 import dashboardRouter from "./dashboard";
 import storageRouter from "./storage";
 import documentsRouter from "./documents";
+import accountingRouter from "./accounting";
+import communicationsRouter from "./communications";
+import reportsRouter from "./reports";
 
 const router: IRouter = Router();
 
@@ -26,5 +29,8 @@ router.use(casesRouter);
 router.use(dashboardRouter);
 router.use(storageRouter);
 router.use(documentsRouter);
+router.use(accountingRouter);
+router.use(communicationsRouter);
+router.use(reportsRouter);
 
 export default router;

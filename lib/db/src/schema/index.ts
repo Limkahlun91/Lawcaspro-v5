@@ -6,3 +6,5 @@ export * from "./projects";
 export * from "./clients";
 export * from "./cases";
 export * from "./documents";
+export * from "./accounting";
+export * from "./communications";
