@@ -1,25 +1,119 @@
-import { Card, CardContent } from "@/components/ui/card";
-import { Activity } from "lucide-react";
+import { useQuery } from "@tanstack/react-query";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Activity, Building2, Users, Briefcase, FileText } from "lucide-react";
+
+const API_BASE = import.meta.env.BASE_URL.replace(/\/$/, "").replace(/^\/lawcaspro/, "") + "/api";
+
+async function apiFetch(path: string) {
+  const res = await fetch(`${API_BASE}${path}`, { credentials: "include" });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
 
 export default function PlatformMonitoring() {
+  const { data: stats, isLoading: statsLoading } = useQuery({
+    queryKey: ["platform-stats"],
+    queryFn: () => apiFetch("/platform/stats"),
+    refetchInterval: 30000,
+  });
+
+  const { data: firmsData, isLoading: firmsLoading } = useQuery<{ data: Record<string, unknown>[] }>({
+    queryKey: ["platform-firms-monitoring"],
+    queryFn: () => apiFetch("/platform/firms?limit=50"),
+  });
+
+  const firms = firmsData?.data ?? [];
+  const isLoading = statsLoading || firmsLoading;
+
   return (
     <div className="space-y-6">
       <div>
         <h1 className="text-3xl font-bold text-slate-900 tracking-tight">Platform Monitoring</h1>
-        <p className="text-slate-500 mt-1">System health and resource usage</p>
+        <p className="text-slate-500 mt-1">System health and tenant resource overview</p>
       </div>
 
-      <Card className="border-dashed bg-slate-50">
-        <CardContent className="flex flex-col items-center justify-center py-24 text-center">
-          <div className="w-16 h-16 bg-slate-200 rounded-full flex items-center justify-center mb-4">
-            <Activity className="w-8 h-8 text-slate-400" />
+      {isLoading ? (
+        <div className="text-slate-500 py-12 text-center">Loading platform data...</div>
+      ) : (
+        <>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+            {[
+              { label: "Total Firms", value: String(stats?.totalFirms ?? 0), icon: Building2, color: "bg-blue-50 text-blue-600" },
+              { label: "Total Users", value: String(stats?.totalUsers ?? 0), icon: Users, color: "bg-amber-50 text-amber-600" },
+              { label: "Total Cases", value: String(stats?.totalCases ?? 0), icon: Briefcase, color: "bg-green-50 text-green-600" },
+              { label: "Documents Generated", value: String(stats?.totalDocuments ?? 0), icon: FileText, color: "bg-purple-50 text-purple-600" },
+            ].map((item) => (
+              <Card key={item.label}>
+                <CardContent className="pt-6">
+                  <div className="flex items-center gap-3">
+                    <div className={`w-10 h-10 rounded-lg flex items-center justify-center ${item.color}`}>
+                      <item.icon className="w-5 h-5" />
+                    </div>
+                    <div>
+                      <div className="text-xs text-slate-500">{item.label}</div>
+                      <div className="text-xl font-bold text-slate-900">{item.value}</div>
+                    </div>
+                  </div>
+                </CardContent>
+              </Card>
+            ))}
           </div>
-          <h2 className="text-xl font-bold text-slate-900 mb-2">Coming in Phase 3</h2>
-          <p className="text-slate-500 max-w-md">
-            Real-time monitoring of database health, API latency, and tenant resource consumption.
-          </p>
-        </CardContent>
-      </Card>
+
+          <Card>
+            <CardHeader>
+              <div className="flex items-center gap-2">
+                <Activity className="w-4 h-4 text-green-500" />
+                <CardTitle>Tenant Overview</CardTitle>
+              </div>
+            </CardHeader>
+            <CardContent>
+              {firms.length === 0 ? (
+                <div className="text-center py-8 text-slate-400">No firms found</div>
+              ) : (
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="border-b border-slate-100 text-slate-500 text-left">
+                      <th className="py-2 font-medium">Firm</th>
+                      <th className="py-2 font-medium">Plan</th>
+                      <th className="py-2 font-medium text-right">Users</th>
+                      <th className="py-2 font-medium text-right">Cases</th>
+                      <th className="py-2 font-medium text-right">Documents</th>
+                      <th className="py-2 font-medium text-right">Billing</th>
+                      <th className="py-2 font-medium text-right">Comms</th>
+                      <th className="py-2 font-medium text-right">Status</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {firms.map((firm) => (
+                      <tr key={String(firm.id)} className="border-b border-slate-50 hover:bg-slate-50">
+                        <td className="py-3">
+                          <div className="font-medium text-slate-900">{String(firm.name)}</div>
+                          <div className="text-xs text-slate-400">{String(firm.slug ?? "")}</div>
+                        </td>
+                        <td className="py-3">
+                          <span className="text-xs px-1.5 py-0.5 rounded bg-amber-50 text-amber-700 capitalize font-medium">
+                            {String(firm.subscriptionPlan ?? firm.subscription_plan ?? "starter")}
+                          </span>
+                        </td>
+                        <td className="py-3 text-right text-slate-700">{String(firm.user_count ?? 0)}</td>
+                        <td className="py-3 text-right text-slate-700">{String(firm.case_count ?? 0)}</td>
+                        <td className="py-3 text-right text-slate-700">{String(firm.document_count ?? 0)}</td>
+                        <td className="py-3 text-right text-slate-700">{String(firm.billing_entry_count ?? 0)}</td>
+                        <td className="py-3 text-right text-slate-700">{String(firm.comm_count ?? 0)}</td>
+                        <td className="py-3 text-right">
+                          <span className={`text-xs px-1.5 py-0.5 rounded font-medium ${firm.status === "active" ? "bg-green-50 text-green-700" : "bg-red-50 text-red-600"}`}>
+                            {String(firm.status ?? "active")}
+                          </span>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </CardContent>
+          </Card>
+        </>
+      )}
     </div>
   );
 }

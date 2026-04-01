@@ -42,11 +42,26 @@ router.get("/platform/firms", requireAuth, requireFounder, async (req: AuthReque
         .select({ c: count() })
         .from(casesTable)
         .where(eq(casesTable.firmId, firm.id));
+
+      const docRes = await db.execute(sql`SELECT COUNT(*) as c FROM case_documents WHERE firm_id = ${firm.id}`);
+      const docCount = Number((Array.isArray(docRes) ? docRes[0] : (docRes as {rows: {c: string}[]}).rows[0])?.c ?? 0);
+
+      const billingRes = await db.execute(sql`SELECT COUNT(*) as c FROM case_billing_entries WHERE firm_id = ${firm.id}`);
+      const billingCount = Number((Array.isArray(billingRes) ? billingRes[0] : (billingRes as {rows: {c: string}[]}).rows[0])?.c ?? 0);
+
+      const commRes = await db.execute(sql`SELECT COUNT(*) as c FROM case_communications WHERE firm_id = ${firm.id}`);
+      const commCount = Number((Array.isArray(commRes) ? commRes[0] : (commRes as {rows: {c: string}[]}).rows[0])?.c ?? 0);
+
       return {
         ...firm,
         userCount: Number(userCountRes?.c ?? 0),
         partnerCount: Number(partnerCountRes?.c ?? 0),
         caseCount: Number(caseCountRes?.c ?? 0),
+        user_count: Number(userCountRes?.c ?? 0),
+        case_count: Number(caseCountRes?.c ?? 0),
+        document_count: docCount,
+        billing_entry_count: billingCount,
+        comm_count: commCount,
       };
     })
   );
@@ -156,22 +171,15 @@ router.get("/platform/stats", requireAuth, requireFounder, async (_req, res): Pr
   const [activeFirmsRes] = await db.select({ c: count() }).from(firmsTable).where(eq(firmsTable.status, "active"));
   const [totalUsersRes] = await db.select({ c: count() }).from(usersTable).where(eq(usersTable.userType, "firm_user"));
   const [totalCasesRes] = await db.select({ c: count() }).from(casesTable);
-
-  const recentFirms = await db.select().from(firmsTable).orderBy(desc(firmsTable.createdAt)).limit(5);
-  const enrichedFirms = await Promise.all(
-    recentFirms.map(async (firm) => {
-      const [uc] = await db.select({ c: count() }).from(usersTable).where(eq(usersTable.firmId, firm.id));
-      const [cc] = await db.select({ c: count() }).from(casesTable).where(eq(casesTable.firmId, firm.id));
-      return { ...firm, userCount: Number(uc?.c ?? 0), partnerCount: 0, caseCount: Number(cc?.c ?? 0) };
-    })
-  );
+  const docsRes = await db.execute(sql`SELECT COUNT(*) as c FROM case_documents`);
+  const totalDocuments = Number((Array.isArray(docsRes) ? docsRes[0] : (docsRes as {rows: {c: string}[]}).rows[0])?.c ?? 0);
 
   res.json({
     totalFirms: Number(totalFirmsRes?.c ?? 0),
     activeFirms: Number(activeFirmsRes?.c ?? 0),
     totalUsers: Number(totalUsersRes?.c ?? 0),
     totalCases: Number(totalCasesRes?.c ?? 0),
-    recentFirms: enrichedFirms,
+    totalDocuments,
   });
 });
 

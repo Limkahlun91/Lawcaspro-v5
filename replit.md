@@ -51,6 +51,8 @@ All tables created in PostgreSQL:
 | `audit_logs` | Action audit trail |
 | `document_templates` | DOCX template files per firm (stored in Replit Object Storage) |
 | `case_documents` | Generated/uploaded documents per case |
+| `case_billing_entries` | Per-case billing entries (legal fees, disbursements, stamp duty, etc.) |
+| `case_communications` | Per-case communication log (email, WhatsApp, phone, letter, portal) |
 
 ## API Routes (all under /api prefix)
 
@@ -96,6 +98,23 @@ All tables created in PostgreSQL:
 - `POST /api/storage/uploads/request-url` — Get GCS presigned upload URL
 - `GET /api/storage/objects/*` — Serve private objects (auth required)
 
+### Accounting (Phases 3)
+- `GET /api/cases/:caseId/billing` — List billing entries for a case
+- `POST /api/cases/:caseId/billing` — Add billing entry
+- `PATCH /api/cases/:caseId/billing/:entryId` — Update billing entry (incl. toggle paid)
+- `DELETE /api/cases/:caseId/billing/:entryId` — Delete billing entry
+- `GET /api/cases/:caseId/billing/summary` — Case billing summary by category
+- `GET /api/accounting/summary` — Firm-wide billing overview, monthly, top cases
+
+### Communications (Phase 5)
+- `GET /api/communications` — Firm-wide communications log (supports ?type filter)
+- `GET /api/cases/:caseId/communications` — Case-level comms log
+- `POST /api/cases/:caseId/communications` — Log communication
+- `DELETE /api/cases/:caseId/communications/:commId` — Delete communication record
+
+### Reports (Phase 4/6)
+- `GET /api/reports/overview` — Full analytics: cases by status, by month, lawyer workload, workflow completion, billing totals, comms stats
+
 ## Workflow Engine
 
 Case workflow steps are auto-generated at case creation based on:
@@ -128,10 +147,10 @@ Step paths: `common` → `loan` (if loan) → `mot` (individual/strata) or `noa_
 
 - [x] **Phase 1**: Auth, multi-tenant architecture, CRUD for Users, Roles, Developers, Projects, Clients, Cases, Workflow Engine
 - [x] **Phase 2**: Document management — DOCX template upload, docxtemplater field substitution, document generation per case, file upload, download. Object Storage (GCS via Replit). Settings page for template management. Documents tab on case detail.
-- [ ] **Phase 3**: Accounting & invoicing (billing statements, e-invoice UI)
-- [ ] **Phase 4**: Reporting & analytics
-- [ ] **Phase 5**: Communications (Email/WhatsApp UI structure)
-- [ ] **Phase 6**: Founder debug workspace (impersonation, full audit)
+- [x] **Phase 3**: Accounting — `case_billing_entries` table, billing CRUD per case (with paid toggle), firm-wide accounting dashboard with charts
+- [x] **Phase 4**: Reporting — `/reports/overview` aggregation, Reports page with Recharts (cases by status, by month, lawyer workload, workflow completion, billing totals, comms pie chart)
+- [x] **Phase 5**: Communications — `case_communications` table, per-case comms log (email/WhatsApp/phone/letter/portal), firm-wide Communications Hub with channel filter
+- [x] **Phase 6**: Platform monitoring — enhanced with real metrics (Documents Generated), per-tenant breakdown (Users, Cases, Docs, Billing, Comms columns)
 
 ## Design Decisions
 

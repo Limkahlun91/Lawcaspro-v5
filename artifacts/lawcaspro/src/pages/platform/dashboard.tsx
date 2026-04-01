@@ -53,21 +53,18 @@ export default function PlatformDashboard() {
       
       <Card>
         <CardHeader>
-          <CardTitle>Recent Firms</CardTitle>
+          <CardTitle>Platform Summary</CardTitle>
         </CardHeader>
         <CardContent>
-          <div className="space-y-4">
-            {stats.recentFirms.map(firm => (
-              <div key={firm.id} className="flex items-center justify-between border-b border-slate-100 pb-4 last:border-0 last:pb-0">
-                <div>
-                  <div className="font-medium">{firm.name}</div>
-                  <div className="text-sm text-slate-500">{firm.slug}</div>
-                </div>
-                <div className="text-sm text-slate-500">
-                  {firm.caseCount} cases
-                </div>
-              </div>
-            ))}
+          <div className="grid grid-cols-2 gap-4 text-sm">
+            <div className="p-3 bg-slate-50 rounded-lg">
+              <div className="text-slate-500 text-xs">Active Firms</div>
+              <div className="font-bold text-lg text-slate-900">{stats.activeFirms ?? 0}</div>
+            </div>
+            <div className="p-3 bg-slate-50 rounded-lg">
+              <div className="text-slate-500 text-xs">Documents Generated</div>
+              <div className="font-bold text-lg text-slate-900">{stats.totalDocuments ?? 0}</div>
+            </div>
           </div>
         </CardContent>
       </Card>

@@ -42,7 +42,7 @@ router.get("/reports/overview", requireAuth, requireFirmUser, async (req: AuthRe
     JOIN case_workflow_steps ws ON ws.case_id = c.id
     WHERE c.firm_id = ${req.firmId!}
     GROUP BY c.id, c.reference_no
-    ORDER BY completed_steps::numeric / NULLIF(COUNT(ws.id), 0) ASC
+    ORDER BY SUM(CASE WHEN ws.status = 'completed' THEN 1 ELSE 0 END)::numeric / NULLIF(COUNT(ws.id), 0) ASC
     LIMIT 10
   `);
 

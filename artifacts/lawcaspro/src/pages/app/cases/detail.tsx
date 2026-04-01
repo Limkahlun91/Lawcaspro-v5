@@ -15,6 +15,8 @@ import { useToast } from "@/hooks/use-toast";
 import { useState } from "react";
 import { Textarea } from "@/components/ui/textarea";
 import CaseDocumentsTab from "./components/CaseDocumentsTab";
+import CaseBillingTab from "./components/CaseBillingTab";
+import CaseCommunicationsTab from "./components/CaseCommunicationsTab";
 
 export default function CaseDetail() {
   const { id } = useParams<{ id: string }>();
@@ -95,10 +97,12 @@ export default function CaseDetail() {
       </div>
 
       <Tabs defaultValue="overview" className="w-full">
-        <TabsList className="grid w-full grid-cols-4 mb-6 bg-slate-100 p-1">
+        <TabsList className="grid w-full grid-cols-6 mb-6 bg-slate-100 p-1">
           <TabsTrigger value="overview">Overview</TabsTrigger>
           <TabsTrigger value="workflow">Workflow</TabsTrigger>
           <TabsTrigger value="documents">Documents</TabsTrigger>
+          <TabsTrigger value="billing">Billing</TabsTrigger>
+          <TabsTrigger value="communications">Comms</TabsTrigger>
           <TabsTrigger value="notes">Notes</TabsTrigger>
         </TabsList>
 
@@ -281,6 +285,14 @@ export default function CaseDetail() {
 
         <TabsContent value="documents">
           <CaseDocumentsTab caseId={caseId} />
+        </TabsContent>
+
+        <TabsContent value="billing">
+          <CaseBillingTab caseId={caseId} />
+        </TabsContent>
+
+        <TabsContent value="communications">
+          <CaseCommunicationsTab caseId={caseId} />
         </TabsContent>
 
         <TabsContent value="notes" className="space-y-6">

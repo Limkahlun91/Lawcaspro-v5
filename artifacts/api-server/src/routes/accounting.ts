@@ -3,6 +3,8 @@ import { sql } from "drizzle-orm";
 import { db } from "@workspace/db";
 import { requireAuth, requireFirmUser, type AuthRequest } from "../lib/auth";
 
+type SqlChunk = ReturnType<typeof sql>;
+
 const router: IRouter = Router();
 
 async function queryRows(query: ReturnType<typeof sql>): Promise<Record<string, unknown>[]> {
@@ -61,31 +63,27 @@ router.patch("/cases/:caseId/billing/:entryId", requireAuth, requireFirmUser, as
     isPaid: boolean;
   }>;
 
-  const fields: string[] = [];
-  const values: unknown[] = [];
+  const parts: SqlChunk[] = [];
 
-  if (category !== undefined) { fields.push(`category = $${values.length + 1}`); values.push(category); }
-  if (description !== undefined) { fields.push(`description = $${values.length + 1}`); values.push(description); }
-  if (amount !== undefined) { fields.push(`amount = $${values.length + 1}`); values.push(amount); }
-  if (quantity !== undefined) { fields.push(`quantity = $${values.length + 1}`); values.push(quantity); }
+  if (category !== undefined) parts.push(sql`category = ${category}`);
+  if (description !== undefined) parts.push(sql`description = ${description}`);
+  if (amount !== undefined) parts.push(sql`amount = ${amount}`);
+  if (quantity !== undefined) parts.push(sql`quantity = ${quantity}`);
   if (isPaid !== undefined) {
-    fields.push(`is_paid = $${values.length + 1}`);
-    values.push(isPaid);
-    if (isPaid) {
-      fields.push(`paid_at = NOW()`);
-    } else {
-      fields.push(`paid_at = NULL`);
-    }
+    parts.push(sql`is_paid = ${isPaid}`);
+    parts.push(isPaid ? sql`paid_at = NOW()` : sql`paid_at = NULL`);
   }
-  fields.push(`updated_at = NOW()`);
+  parts.push(sql`updated_at = NOW()`);
 
-  if (values.length === 0) {
+  if (parts.length <= 1) {
     res.status(400).json({ error: "No fields to update" });
     return;
   }
 
+  const setClause = sql.join(parts, sql`, `);
+
   const rows = await queryRows(sql`
-    UPDATE case_billing_entries SET ${sql.raw(fields.join(", "))}
+    UPDATE case_billing_entries SET ${setClause}
     WHERE id = ${entryId} AND case_id = ${caseId} AND firm_id = ${req.firmId!}
     RETURNING *
   `);

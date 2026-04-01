@@ -34,9 +34,9 @@ export function AppLayout({ children }: { children: ReactNode }) {
     { label: "Clients", href: "/app/clients", icon: Users },
     { label: "Users", href: "/app/users", icon: UserCircle },
     { label: "Roles & Permissions", href: "/app/roles", icon: ShieldCheck },
-    { label: "Communications", href: "/app/communications", icon: MessageSquare, badge: "Phase 5" },
-    { label: "Accounting", href: "/app/accounting", icon: Calculator, badge: "Phase 4" },
-    { label: "Reports", href: "/app/reports", icon: BarChart, badge: "Phase 6" },
+    { label: "Communications", href: "/app/communications", icon: MessageSquare },
+    { label: "Accounting", href: "/app/accounting", icon: Calculator },
+    { label: "Reports", href: "/app/reports", icon: BarChart },
     { label: "Audit Logs", href: "/app/audit-logs", icon: ScrollText },
     { label: "Settings", href: "/app/settings", icon: Settings },
   ];
