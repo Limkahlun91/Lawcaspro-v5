@@ -1,0 +1,470 @@
+import { Router, type IRouter } from "express";
+import { eq, ilike, count, desc, and, sql } from "drizzle-orm";
+import {
+  db, casesTable, casePurchasersTable, caseAssignmentsTable,
+  caseWorkflowStepsTable, caseNotesTable,
+  projectsTable, developersTable, clientsTable, usersTable, auditLogsTable
+} from "@workspace/db";
+import {
+  CreateCaseBody, UpdateCaseBody, ListCasesQueryParams,
+  GetCaseParams, UpdateCaseParams,
+  GetCaseWorkflowParams, UpdateWorkflowStepParams, UpdateWorkflowStepBody,
+  GetCaseNotesParams, CreateCaseNoteParams, CreateCaseNoteBody
+} from "@workspace/api-zod";
+import { requireAuth, requireFirmUser, type AuthRequest } from "../lib/auth";
+import { buildWorkflowSteps } from "../lib/workflow";
+
+const router: IRouter = Router();
+
+async function formatCaseDetail(c: typeof casesTable.$inferSelect) {
+  const [proj] = await db.select().from(projectsTable).where(eq(projectsTable.id, c.projectId));
+  const [dev] = await db.select().from(developersTable).where(eq(developersTable.id, c.developerId));
+
+  const purchaserRows = await db.select().from(casePurchasersTable).where(eq(casePurchasersTable.caseId, c.id));
+  const purchasers = await Promise.all(
+    purchaserRows.map(async (p) => {
+      const [client] = await db.select().from(clientsTable).where(eq(clientsTable.id, p.clientId));
+      return {
+        id: p.id,
+        clientId: p.clientId,
+        clientName: client?.name ?? "Unknown",
+        icNo: client?.icNo ?? null,
+        role: p.role,
+        orderNo: p.orderNo,
+      };
+    })
+  );
+
+  const assignRows = await db.select().from(caseAssignmentsTable)
+    .where(and(eq(caseAssignmentsTable.caseId, c.id), sql`unassigned_at IS NULL`));
+  const assignments = await Promise.all(
+    assignRows.map(async (a) => {
+      const [user] = await db.select().from(usersTable).where(eq(usersTable.id, a.userId));
+      return {
+        id: a.id,
+        userId: a.userId,
+        userName: user?.name ?? "Unknown",
+        roleInCase: a.roleInCase,
+        assignedAt: a.assignedAt.toISOString(),
+      };
+    })
+  );
+
+  return {
+    id: c.id,
+    firmId: c.firmId,
+    referenceNo: c.referenceNo,
+    projectId: c.projectId,
+    projectName: proj?.name ?? "Unknown",
+    developerId: c.developerId,
+    developerName: dev?.name ?? "Unknown",
+    purchaseMode: c.purchaseMode,
+    titleType: c.titleType,
+    spaPrice: c.spaPrice ? Number(c.spaPrice) : null,
+    status: c.status,
+    purchasers,
+    assignments,
+    createdBy: c.createdBy ?? null,
+    createdAt: c.createdAt.toISOString(),
+  };
+}
+
+async function formatCaseSummary(c: typeof casesTable.$inferSelect) {
+  const [proj] = await db.select().from(projectsTable).where(eq(projectsTable.id, c.projectId));
+  const [dev] = await db.select().from(developersTable).where(eq(developersTable.id, c.developerId));
+  const [lawyerAssign] = await db.select().from(caseAssignmentsTable)
+    .where(and(eq(caseAssignmentsTable.caseId, c.id), eq(caseAssignmentsTable.roleInCase, "lawyer"), sql`unassigned_at IS NULL`));
+  let lawyerName: string | null = null;
+  if (lawyerAssign) {
+    const [lawyer] = await db.select().from(usersTable).where(eq(usersTable.id, lawyerAssign.userId));
+    lawyerName = lawyer?.name ?? null;
+  }
+  return {
+    id: c.id,
+    referenceNo: c.referenceNo,
+    projectName: proj?.name ?? "Unknown",
+    developerName: dev?.name ?? "Unknown",
+    purchaseMode: c.purchaseMode,
+    titleType: c.titleType,
+    status: c.status,
+    assignedLawyerName: lawyerName,
+    createdAt: c.createdAt.toISOString(),
+  };
+}
+
+router.get("/cases/stats/by-status", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+  const rows = await db
+    .select({ status: casesTable.status, count: count() })
+    .from(casesTable)
+    .where(eq(casesTable.firmId, req.firmId!))
+    .groupBy(casesTable.status);
+  res.json(rows.map(r => ({ status: r.status, count: Number(r.count) })));
+});
+
+router.get("/cases/stats/by-type", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+  const rows = await db
+    .select({ purchaseMode: casesTable.purchaseMode, count: count() })
+    .from(casesTable)
+    .where(eq(casesTable.firmId, req.firmId!))
+    .groupBy(casesTable.purchaseMode);
+  res.json(rows.map(r => ({ purchaseMode: r.purchaseMode, count: Number(r.count) })));
+});
+
+router.get("/cases/recent", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+  const limitParam = req.query.limit ? Number(req.query.limit) : 5;
+  const cases = await db.select().from(casesTable)
+    .where(eq(casesTable.firmId, req.firmId!))
+    .orderBy(desc(casesTable.updatedAt))
+    .limit(limitParam);
+  const summaries = await Promise.all(cases.map(formatCaseSummary));
+  res.json(summaries);
+});
+
+router.get("/cases", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+  const params = ListCasesQueryParams.safeParse(req.query);
+  const search = params.success ? params.data.search : undefined;
+  const status = params.success ? params.data.status : undefined;
+  const projectId = params.success ? params.data.projectId : undefined;
+  const developerId = params.success ? params.data.developerId : undefined;
+  const purchaseMode = params.success ? params.data.purchaseMode : undefined;
+  const titleType = params.success ? params.data.titleType : undefined;
+  const page = params.success ? (params.data.page ?? 1) : 1;
+  const limit = params.success ? (params.data.limit ?? 20) : 20;
+  const offset = (page - 1) * limit;
+
+  const conditions = [eq(casesTable.firmId, req.firmId!)];
+  if (status) conditions.push(eq(casesTable.status, status));
+  if (projectId) conditions.push(eq(casesTable.projectId, projectId));
+  if (developerId) conditions.push(eq(casesTable.developerId, developerId));
+  if (purchaseMode) conditions.push(eq(casesTable.purchaseMode, purchaseMode));
+  if (titleType) conditions.push(eq(casesTable.titleType, titleType));
+
+  const cases = await db.select().from(casesTable)
+    .where(and(...conditions))
+    .orderBy(desc(casesTable.updatedAt))
+    .limit(limit).offset(offset);
+
+  const [totalRes] = await db.select({ c: count() }).from(casesTable).where(and(...conditions));
+
+  const summaries = await Promise.all(cases.map(formatCaseSummary));
+  res.json({ data: summaries, total: Number(totalRes?.c ?? 0), page, limit });
+});
+
+router.post("/cases", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+  const parsed = CreateCaseBody.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: parsed.error.message });
+    return;
+  }
+
+  const { projectId, developerId, purchaseMode, titleType, spaPrice, assignedLawyerId, assignedClerkId, purchaserIds } = parsed.data;
+
+  if (!purchaserIds || purchaserIds.length === 0) {
+    res.status(400).json({ error: "At least one purchaser is required" });
+    return;
+  }
+
+  const refNo = `LCP-${req.firmId}-${Date.now()}`;
+
+  const [newCase] = await db
+    .insert(casesTable)
+    .values({
+      firmId: req.firmId!,
+      projectId,
+      developerId,
+      referenceNo: refNo,
+      purchaseMode,
+      titleType,
+      spaPrice: spaPrice ? String(spaPrice) : null,
+      status: "File Opened / SPA Pending Signing",
+      createdBy: req.userId,
+    })
+    .returning();
+
+  for (let i = 0; i < purchaserIds.length; i++) {
+    await db.insert(casePurchasersTable).values({
+      caseId: newCase.id,
+      clientId: purchaserIds[i],
+      role: i === 0 ? "main" : "joint",
+      orderNo: i + 1,
+    });
+  }
+
+  await db.insert(caseAssignmentsTable).values({
+    caseId: newCase.id,
+    userId: assignedLawyerId,
+    roleInCase: "lawyer",
+    assignedBy: req.userId,
+  });
+
+  if (assignedClerkId) {
+    await db.insert(caseAssignmentsTable).values({
+      caseId: newCase.id,
+      userId: assignedClerkId,
+      roleInCase: "clerk",
+      assignedBy: req.userId,
+    });
+  }
+
+  const workflowSteps = buildWorkflowSteps(purchaseMode, titleType);
+  if (workflowSteps.length > 0) {
+    await db.insert(caseWorkflowStepsTable).values(
+      workflowSteps.map((s) => ({
+        caseId: newCase.id,
+        stepKey: s.stepKey,
+        stepName: s.stepName,
+        stepOrder: s.stepOrder,
+        pathType: s.pathType,
+        status: "pending",
+      }))
+    );
+  }
+
+  await db.insert(auditLogsTable).values({
+    firmId: req.firmId,
+    actorId: req.userId,
+    actorType: "firm_user",
+    action: "case.created",
+    entityType: "case",
+    entityId: newCase.id,
+    detail: `Case ${refNo} created`,
+  });
+
+  res.status(201).json(await formatCaseDetail(newCase));
+});
+
+router.get("/cases/:caseId", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+  const params = GetCaseParams.safeParse(req.params);
+  if (!params.success) {
+    res.status(400).json({ error: params.error.message });
+    return;
+  }
+
+  const [c] = await db.select().from(casesTable).where(eq(casesTable.id, params.data.caseId));
+  if (!c || c.firmId !== req.firmId) {
+    res.status(404).json({ error: "Case not found" });
+    return;
+  }
+
+  res.json(await formatCaseDetail(c));
+});
+
+router.patch("/cases/:caseId", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+  const params = UpdateCaseParams.safeParse(req.params);
+  if (!params.success) {
+    res.status(400).json({ error: params.error.message });
+    return;
+  }
+
+  const parsed = UpdateCaseBody.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: parsed.error.message });
+    return;
+  }
+
+  const updates: Record<string, unknown> = {};
+  if (parsed.data.status !== undefined) updates.status = parsed.data.status;
+  if (parsed.data.purchaseMode !== undefined) updates.purchaseMode = parsed.data.purchaseMode;
+  if (parsed.data.titleType !== undefined) updates.titleType = parsed.data.titleType;
+  if (parsed.data.spaPrice !== undefined) updates.spaPrice = String(parsed.data.spaPrice);
+  if (parsed.data.assignedLawyerId !== undefined) {
+    await db.update(caseAssignmentsTable)
+      .set({ unassignedAt: new Date() })
+      .where(and(eq(caseAssignmentsTable.caseId, params.data.caseId), eq(caseAssignmentsTable.roleInCase, "lawyer"), sql`unassigned_at IS NULL`));
+    await db.insert(caseAssignmentsTable).values({
+      caseId: params.data.caseId,
+      userId: parsed.data.assignedLawyerId,
+      roleInCase: "lawyer",
+      assignedBy: req.userId,
+    });
+  }
+
+  const [c] = await db
+    .update(casesTable)
+    .set(updates)
+    .where(eq(casesTable.id, params.data.caseId))
+    .returning();
+
+  if (!c || c.firmId !== req.firmId) {
+    res.status(404).json({ error: "Case not found" });
+    return;
+  }
+
+  await db.insert(auditLogsTable).values({
+    firmId: req.firmId,
+    actorId: req.userId,
+    actorType: "firm_user",
+    action: "case.updated",
+    entityType: "case",
+    entityId: c.id,
+    detail: JSON.stringify(updates),
+  });
+
+  res.json(await formatCaseDetail(c));
+});
+
+router.get("/cases/:caseId/workflow", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+  const params = GetCaseWorkflowParams.safeParse(req.params);
+  if (!params.success) {
+    res.status(400).json({ error: params.error.message });
+    return;
+  }
+
+  const steps = await db.select().from(caseWorkflowStepsTable)
+    .where(eq(caseWorkflowStepsTable.caseId, params.data.caseId))
+    .orderBy(caseWorkflowStepsTable.stepOrder);
+
+  const enriched = await Promise.all(
+    steps.map(async (s) => {
+      let completedByName: string | null = null;
+      if (s.completedBy) {
+        const [user] = await db.select().from(usersTable).where(eq(usersTable.id, s.completedBy));
+        completedByName = user?.name ?? null;
+      }
+      return {
+        id: s.id,
+        caseId: s.caseId,
+        stepKey: s.stepKey,
+        stepName: s.stepName,
+        stepOrder: s.stepOrder,
+        status: s.status,
+        pathType: s.pathType,
+        completedBy: s.completedBy ?? null,
+        completedByName,
+        completedAt: s.completedAt?.toISOString() ?? null,
+        notes: s.notes ?? null,
+      };
+    })
+  );
+
+  res.json(enriched);
+});
+
+router.patch("/cases/:caseId/workflow/:stepId", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+  const params = UpdateWorkflowStepParams.safeParse(req.params);
+  if (!params.success) {
+    res.status(400).json({ error: params.error.message });
+    return;
+  }
+
+  const parsed = UpdateWorkflowStepBody.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: parsed.error.message });
+    return;
+  }
+
+  const updates: Record<string, unknown> = {};
+  if (parsed.data.status !== undefined) {
+    updates.status = parsed.data.status;
+    if (parsed.data.status === "completed") {
+      updates.completedBy = req.userId;
+      updates.completedAt = new Date();
+    }
+  }
+  if (parsed.data.notes !== undefined) updates.notes = parsed.data.notes;
+
+  const [step] = await db
+    .update(caseWorkflowStepsTable)
+    .set(updates)
+    .where(eq(caseWorkflowStepsTable.id, params.data.stepId))
+    .returning();
+
+  if (!step) {
+    res.status(404).json({ error: "Workflow step not found" });
+    return;
+  }
+
+  await db.insert(auditLogsTable).values({
+    firmId: req.firmId,
+    actorId: req.userId,
+    actorType: "firm_user",
+    action: "workflow.step_updated",
+    entityType: "case_workflow_step",
+    entityId: step.id,
+    detail: `Step ${step.stepName} -> ${step.status}`,
+  });
+
+  let completedByName: string | null = null;
+  if (step.completedBy) {
+    const [user] = await db.select().from(usersTable).where(eq(usersTable.id, step.completedBy));
+    completedByName = user?.name ?? null;
+  }
+
+  res.json({
+    id: step.id,
+    caseId: step.caseId,
+    stepKey: step.stepKey,
+    stepName: step.stepName,
+    stepOrder: step.stepOrder,
+    status: step.status,
+    pathType: step.pathType,
+    completedBy: step.completedBy ?? null,
+    completedByName,
+    completedAt: step.completedAt?.toISOString() ?? null,
+    notes: step.notes ?? null,
+  });
+});
+
+router.get("/cases/:caseId/notes", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+  const params = GetCaseNotesParams.safeParse(req.params);
+  if (!params.success) {
+    res.status(400).json({ error: params.error.message });
+    return;
+  }
+
+  const notes = await db.select().from(caseNotesTable)
+    .where(eq(caseNotesTable.caseId, params.data.caseId))
+    .orderBy(desc(caseNotesTable.createdAt));
+
+  const enriched = await Promise.all(
+    notes.map(async (n) => {
+      const [author] = await db.select().from(usersTable).where(eq(usersTable.id, n.authorId));
+      return {
+        id: n.id,
+        caseId: n.caseId,
+        authorId: n.authorId,
+        authorName: author?.name ?? "Unknown",
+        content: n.content,
+        createdAt: n.createdAt.toISOString(),
+      };
+    })
+  );
+
+  res.json(enriched);
+});
+
+router.post("/cases/:caseId/notes", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+  const params = CreateCaseNoteParams.safeParse(req.params);
+  if (!params.success) {
+    res.status(400).json({ error: params.error.message });
+    return;
+  }
+
+  const parsed = CreateCaseNoteBody.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: parsed.error.message });
+    return;
+  }
+
+  const [note] = await db
+    .insert(caseNotesTable)
+    .values({
+      caseId: params.data.caseId,
+      authorId: req.userId!,
+      content: parsed.data.content,
+    })
+    .returning();
+
+  const [author] = await db.select().from(usersTable).where(eq(usersTable.id, note.authorId));
+
+  res.status(201).json({
+    id: note.id,
+    caseId: note.caseId,
+    authorId: note.authorId,
+    authorName: author?.name ?? "Unknown",
+    content: note.content,
+    createdAt: note.createdAt.toISOString(),
+  });
+});
+
+export default router;

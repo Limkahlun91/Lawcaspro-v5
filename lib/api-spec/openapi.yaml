@@ -1,22 +1,39 @@
 openapi: 3.1.0
 info:
-  # Do not change the title, if the title changes, the import paths will be broken
   title: Api
-  version: 0.1.0
-  description: API specification
+  version: 1.0.0
+  description: Lawcaspro Legal Operations System API
 servers:
   - url: /api
     description: Base API path
 tags:
   - name: health
     description: Health operations
+  - name: auth
+    description: Authentication
+  - name: platform
+    description: Founder platform management
+  - name: users
+    description: User management
+  - name: roles
+    description: Role and permission management
+  - name: developers
+    description: Developer management
+  - name: projects
+    description: Project management
+  - name: clients
+    description: Client management
+  - name: cases
+    description: Case management
+  - name: dashboard
+    description: Dashboard statistics
+
 paths:
   /healthz:
     get:
       operationId: healthCheck
       tags: [health]
       summary: Health check
-      description: Returns server health status
       responses:
         "200":
           description: Healthy
@@ -24,6 +41,977 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/HealthStatus"
+
+  # ── Auth ────────────────────────────────────────────────────────────────
+  /auth/login:
+    post:
+      operationId: login
+      tags: [auth]
+      summary: Login
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LoginBody"
+      responses:
+        "200":
+          description: Authenticated user
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthUser"
+        "401":
+          description: Invalid credentials
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /auth/logout:
+    post:
+      operationId: logout
+      tags: [auth]
+      summary: Logout
+      responses:
+        "200":
+          description: Logged out
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessResponse"
+
+  /auth/me:
+    get:
+      operationId: getMe
+      tags: [auth]
+      summary: Get current user
+      responses:
+        "200":
+          description: Current user
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthUser"
+        "401":
+          description: Not authenticated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  # ── Platform / Founder ──────────────────────────────────────────────────
+  /platform/firms:
+    get:
+      operationId: listFirms
+      tags: [platform]
+      summary: List all firms
+      parameters:
+        - name: search
+          in: query
+          schema:
+            type: string
+        - name: status
+          in: query
+          schema:
+            type: string
+        - name: page
+          in: query
+          schema:
+            type: integer
+        - name: limit
+          in: query
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: List of firms
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FirmListResponse"
+    post:
+      operationId: createFirm
+      tags: [platform]
+      summary: Create a new firm
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateFirmBody"
+      responses:
+        "201":
+          description: Created firm
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Firm"
+
+  /platform/firms/{firmId}:
+    get:
+      operationId: getFirm
+      tags: [platform]
+      summary: Get a firm
+      parameters:
+        - name: firmId
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Firm detail
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Firm"
+        "404":
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+    patch:
+      operationId: updateFirm
+      tags: [platform]
+      summary: Update a firm
+      parameters:
+        - name: firmId
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateFirmBody"
+      responses:
+        "200":
+          description: Updated firm
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Firm"
+
+  /platform/stats:
+    get:
+      operationId: getPlatformStats
+      tags: [platform]
+      summary: Get platform-level statistics
+      responses:
+        "200":
+          description: Platform statistics
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlatformStats"
+
+  # ── Dashboard ───────────────────────────────────────────────────────────
+  /dashboard:
+    get:
+      operationId: getDashboardStats
+      tags: [dashboard]
+      summary: Get firm dashboard statistics
+      responses:
+        "200":
+          description: Dashboard stats
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DashboardStats"
+
+  # ── Users ───────────────────────────────────────────────────────────────
+  /users:
+    get:
+      operationId: listUsers
+      tags: [users]
+      summary: List users in the firm
+      parameters:
+        - name: search
+          in: query
+          schema:
+            type: string
+        - name: roleId
+          in: query
+          schema:
+            type: integer
+        - name: status
+          in: query
+          schema:
+            type: string
+        - name: page
+          in: query
+          schema:
+            type: integer
+        - name: limit
+          in: query
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: List of users
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserListResponse"
+    post:
+      operationId: createUser
+      tags: [users]
+      summary: Create a user
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateUserBody"
+      responses:
+        "201":
+          description: Created user
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/User"
+
+  /users/{userId}:
+    get:
+      operationId: getUser
+      tags: [users]
+      summary: Get a user
+      parameters:
+        - name: userId
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: User detail
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/User"
+        "404":
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+    patch:
+      operationId: updateUser
+      tags: [users]
+      summary: Update a user
+      parameters:
+        - name: userId
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateUserBody"
+      responses:
+        "200":
+          description: Updated user
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/User"
+    delete:
+      operationId: deleteUser
+      tags: [users]
+      summary: Delete a user
+      parameters:
+        - name: userId
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "204":
+          description: Deleted
+
+  # ── Roles ───────────────────────────────────────────────────────────────
+  /roles:
+    get:
+      operationId: listRoles
+      tags: [roles]
+      summary: List roles in the firm
+      responses:
+        "200":
+          description: List of roles
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Role"
+    post:
+      operationId: createRole
+      tags: [roles]
+      summary: Create a role
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateRoleBody"
+      responses:
+        "201":
+          description: Created role
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Role"
+
+  /roles/{roleId}:
+    get:
+      operationId: getRole
+      tags: [roles]
+      summary: Get a role
+      parameters:
+        - name: roleId
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Role detail
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Role"
+    patch:
+      operationId: updateRole
+      tags: [roles]
+      summary: Update a role
+      parameters:
+        - name: roleId
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateRoleBody"
+      responses:
+        "200":
+          description: Updated role
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Role"
+    delete:
+      operationId: deleteRole
+      tags: [roles]
+      summary: Delete a role
+      parameters:
+        - name: roleId
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "204":
+          description: Deleted
+
+  # ── Developers ──────────────────────────────────────────────────────────
+  /developers:
+    get:
+      operationId: listDevelopers
+      tags: [developers]
+      summary: List developers
+      parameters:
+        - name: search
+          in: query
+          schema:
+            type: string
+        - name: page
+          in: query
+          schema:
+            type: integer
+        - name: limit
+          in: query
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: List of developers
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeveloperListResponse"
+    post:
+      operationId: createDeveloper
+      tags: [developers]
+      summary: Create a developer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateDeveloperBody"
+      responses:
+        "201":
+          description: Created developer
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Developer"
+
+  /developers/{developerId}:
+    get:
+      operationId: getDeveloper
+      tags: [developers]
+      summary: Get a developer
+      parameters:
+        - name: developerId
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Developer detail
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Developer"
+        "404":
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+    patch:
+      operationId: updateDeveloper
+      tags: [developers]
+      summary: Update a developer
+      parameters:
+        - name: developerId
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateDeveloperBody"
+      responses:
+        "200":
+          description: Updated developer
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Developer"
+    delete:
+      operationId: deleteDeveloper
+      tags: [developers]
+      summary: Delete a developer
+      parameters:
+        - name: developerId
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "204":
+          description: Deleted
+
+  # ── Projects ─────────────────────────────────────────────────────────────
+  /projects:
+    get:
+      operationId: listProjects
+      tags: [projects]
+      summary: List projects
+      parameters:
+        - name: search
+          in: query
+          schema:
+            type: string
+        - name: developerId
+          in: query
+          schema:
+            type: integer
+        - name: projectType
+          in: query
+          schema:
+            type: string
+        - name: titleType
+          in: query
+          schema:
+            type: string
+        - name: page
+          in: query
+          schema:
+            type: integer
+        - name: limit
+          in: query
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: List of projects
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProjectListResponse"
+    post:
+      operationId: createProject
+      tags: [projects]
+      summary: Create a project
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateProjectBody"
+      responses:
+        "201":
+          description: Created project
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Project"
+
+  /projects/{projectId}:
+    get:
+      operationId: getProject
+      tags: [projects]
+      summary: Get a project
+      parameters:
+        - name: projectId
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Project detail
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Project"
+        "404":
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+    patch:
+      operationId: updateProject
+      tags: [projects]
+      summary: Update a project
+      parameters:
+        - name: projectId
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateProjectBody"
+      responses:
+        "200":
+          description: Updated project
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Project"
+    delete:
+      operationId: deleteProject
+      tags: [projects]
+      summary: Delete a project
+      parameters:
+        - name: projectId
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "204":
+          description: Deleted
+
+  # ── Clients ──────────────────────────────────────────────────────────────
+  /clients:
+    get:
+      operationId: listClients
+      tags: [clients]
+      summary: List clients
+      parameters:
+        - name: search
+          in: query
+          schema:
+            type: string
+        - name: page
+          in: query
+          schema:
+            type: integer
+        - name: limit
+          in: query
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: List of clients
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ClientListResponse"
+    post:
+      operationId: createClient
+      tags: [clients]
+      summary: Create a client
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateClientBody"
+      responses:
+        "201":
+          description: Created client
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Client"
+
+  /clients/{clientId}:
+    get:
+      operationId: getClient
+      tags: [clients]
+      summary: Get a client
+      parameters:
+        - name: clientId
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Client detail
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Client"
+        "404":
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+    patch:
+      operationId: updateClient
+      tags: [clients]
+      summary: Update a client
+      parameters:
+        - name: clientId
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateClientBody"
+      responses:
+        "200":
+          description: Updated client
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Client"
+    delete:
+      operationId: deleteClient
+      tags: [clients]
+      summary: Delete a client
+      parameters:
+        - name: clientId
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "204":
+          description: Deleted
+
+  # ── Cases ─────────────────────────────────────────────────────────────────
+  /cases:
+    get:
+      operationId: listCases
+      tags: [cases]
+      summary: List cases
+      parameters:
+        - name: search
+          in: query
+          schema:
+            type: string
+        - name: status
+          in: query
+          schema:
+            type: string
+        - name: projectId
+          in: query
+          schema:
+            type: integer
+        - name: developerId
+          in: query
+          schema:
+            type: integer
+        - name: assignedLawyerId
+          in: query
+          schema:
+            type: integer
+        - name: purchaseMode
+          in: query
+          schema:
+            type: string
+        - name: titleType
+          in: query
+          schema:
+            type: string
+        - name: page
+          in: query
+          schema:
+            type: integer
+        - name: limit
+          in: query
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: List of cases
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CaseListResponse"
+    post:
+      operationId: createCase
+      tags: [cases]
+      summary: Create a case
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateCaseBody"
+      responses:
+        "201":
+          description: Created case
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CaseDetail"
+
+  /cases/{caseId}:
+    get:
+      operationId: getCase
+      tags: [cases]
+      summary: Get a case
+      parameters:
+        - name: caseId
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Case detail
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CaseDetail"
+        "404":
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+    patch:
+      operationId: updateCase
+      tags: [cases]
+      summary: Update a case
+      parameters:
+        - name: caseId
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateCaseBody"
+      responses:
+        "200":
+          description: Updated case
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CaseDetail"
+
+  /cases/{caseId}/workflow:
+    get:
+      operationId: getCaseWorkflow
+      tags: [cases]
+      summary: Get case workflow steps
+      parameters:
+        - name: caseId
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Workflow steps
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/WorkflowStep"
+
+  /cases/{caseId}/workflow/{stepId}:
+    patch:
+      operationId: updateWorkflowStep
+      tags: [cases]
+      summary: Update a workflow step
+      parameters:
+        - name: caseId
+          in: path
+          required: true
+          schema:
+            type: integer
+        - name: stepId
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateWorkflowStepBody"
+      responses:
+        "200":
+          description: Updated step
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkflowStep"
+
+  /cases/{caseId}/notes:
+    get:
+      operationId: getCaseNotes
+      tags: [cases]
+      summary: Get case notes
+      parameters:
+        - name: caseId
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Case notes
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/CaseNote"
+    post:
+      operationId: createCaseNote
+      tags: [cases]
+      summary: Add a note to a case
+      parameters:
+        - name: caseId
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateCaseNoteBody"
+      responses:
+        "201":
+          description: Created note
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CaseNote"
+
+  /cases/stats/by-status:
+    get:
+      operationId: getCaseStatsByStatus
+      tags: [cases]
+      summary: Get case counts grouped by status
+      responses:
+        "200":
+          description: Case status breakdown
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/CaseStatusCount"
+
+  /cases/stats/by-type:
+    get:
+      operationId: getCaseStatsByType
+      tags: [cases]
+      summary: Get case counts grouped by purchase mode
+      responses:
+        "200":
+          description: Case type breakdown
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/CaseTypeCount"
+
+  /cases/recent:
+    get:
+      operationId: getRecentCases
+      tags: [cases]
+      summary: Get recently updated cases
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Recent cases
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/CaseSummary"
+
 components:
   schemas:
     HealthStatus:
@@ -34,3 +1022,982 @@ components:
       required:
         - status
 
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: string
+      required:
+        - error
+
+    SuccessResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+      required:
+        - success
+
+    # ── Auth ────────────────────────────────────────────────────────────────
+    LoginBody:
+      type: object
+      properties:
+        email:
+          type: string
+        password:
+          type: string
+      required:
+        - email
+        - password
+
+    AuthUser:
+      type: object
+      properties:
+        id:
+          type: integer
+        email:
+          type: string
+        name:
+          type: string
+        userType:
+          type: string
+          description: "founder | firm_user"
+        firmId:
+          type: ["integer", "null"]
+        firmName:
+          type: ["string", "null"]
+        roleId:
+          type: ["integer", "null"]
+        roleName:
+          type: ["string", "null"]
+        status:
+          type: string
+      required:
+        - id
+        - email
+        - name
+        - userType
+        - firmId
+        - firmName
+        - roleId
+        - roleName
+        - status
+
+    # ── Platform ────────────────────────────────────────────────────────────
+    Firm:
+      type: object
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+        slug:
+          type: string
+        subscriptionPlan:
+          type: string
+        status:
+          type: string
+        partnerCount:
+          type: integer
+        userCount:
+          type: integer
+        caseCount:
+          type: integer
+        createdAt:
+          type: string
+          format: date-time
+      required:
+        - id
+        - name
+        - slug
+        - subscriptionPlan
+        - status
+        - partnerCount
+        - userCount
+        - caseCount
+        - createdAt
+
+    FirmListResponse:
+      type: object
+      properties:
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/Firm"
+        total:
+          type: integer
+        page:
+          type: integer
+        limit:
+          type: integer
+      required:
+        - data
+        - total
+        - page
+        - limit
+
+    CreateFirmBody:
+      type: object
+      properties:
+        name:
+          type: string
+        slug:
+          type: string
+        subscriptionPlan:
+          type: string
+        partnerName:
+          type: string
+        partnerEmail:
+          type: string
+        partnerPassword:
+          type: string
+      required:
+        - name
+        - slug
+        - partnerName
+        - partnerEmail
+        - partnerPassword
+
+    UpdateFirmBody:
+      type: object
+      properties:
+        name:
+          type: string
+        subscriptionPlan:
+          type: string
+        status:
+          type: string
+
+    PlatformStats:
+      type: object
+      properties:
+        totalFirms:
+          type: integer
+        activeFirms:
+          type: integer
+        totalUsers:
+          type: integer
+        totalCases:
+          type: integer
+        recentFirms:
+          type: array
+          items:
+            $ref: "#/components/schemas/Firm"
+      required:
+        - totalFirms
+        - activeFirms
+        - totalUsers
+        - totalCases
+        - recentFirms
+
+    # ── Dashboard ───────────────────────────────────────────────────────────
+    DashboardStats:
+      type: object
+      properties:
+        totalCases:
+          type: integer
+        activeCases:
+          type: integer
+        completedCases:
+          type: integer
+        totalClients:
+          type: integer
+        totalDevelopers:
+          type: integer
+        totalProjects:
+          type: integer
+        cashCases:
+          type: integer
+        loanCases:
+          type: integer
+        masterTitleCases:
+          type: integer
+        individualTitleCases:
+          type: integer
+        strataTitleCases:
+          type: integer
+        recentCases:
+          type: array
+          items:
+            $ref: "#/components/schemas/CaseSummary"
+      required:
+        - totalCases
+        - activeCases
+        - completedCases
+        - totalClients
+        - totalDevelopers
+        - totalProjects
+        - cashCases
+        - loanCases
+        - masterTitleCases
+        - individualTitleCases
+        - strataTitleCases
+        - recentCases
+
+    # ── Users ───────────────────────────────────────────────────────────────
+    User:
+      type: object
+      properties:
+        id:
+          type: integer
+        firmId:
+          type: integer
+        email:
+          type: string
+        name:
+          type: string
+        roleId:
+          type: ["integer", "null"]
+        roleName:
+          type: ["string", "null"]
+        status:
+          type: string
+        lastLoginAt:
+          type: ["string", "null"]
+          format: date-time
+        createdAt:
+          type: string
+          format: date-time
+      required:
+        - id
+        - firmId
+        - email
+        - name
+        - roleId
+        - roleName
+        - status
+        - lastLoginAt
+        - createdAt
+
+    UserListResponse:
+      type: object
+      properties:
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/User"
+        total:
+          type: integer
+        page:
+          type: integer
+        limit:
+          type: integer
+      required:
+        - data
+        - total
+        - page
+        - limit
+
+    CreateUserBody:
+      type: object
+      properties:
+        email:
+          type: string
+        name:
+          type: string
+        password:
+          type: string
+        roleId:
+          type: integer
+      required:
+        - email
+        - name
+        - password
+        - roleId
+
+    UpdateUserBody:
+      type: object
+      properties:
+        name:
+          type: string
+        roleId:
+          type: integer
+        status:
+          type: string
+
+    # ── Roles ───────────────────────────────────────────────────────────────
+    Permission:
+      type: object
+      properties:
+        id:
+          type: integer
+        module:
+          type: string
+        action:
+          type: string
+        allowed:
+          type: boolean
+      required:
+        - id
+        - module
+        - action
+        - allowed
+
+    Role:
+      type: object
+      properties:
+        id:
+          type: integer
+        firmId:
+          type: integer
+        name:
+          type: string
+        isSystemRole:
+          type: boolean
+        userCount:
+          type: integer
+        permissions:
+          type: array
+          items:
+            $ref: "#/components/schemas/Permission"
+        createdAt:
+          type: string
+          format: date-time
+      required:
+        - id
+        - firmId
+        - name
+        - isSystemRole
+        - userCount
+        - permissions
+        - createdAt
+
+    CreateRoleBody:
+      type: object
+      properties:
+        name:
+          type: string
+        permissions:
+          type: array
+          items:
+            type: object
+            properties:
+              module:
+                type: string
+              action:
+                type: string
+              allowed:
+                type: boolean
+            required:
+              - module
+              - action
+              - allowed
+      required:
+        - name
+
+    UpdateRoleBody:
+      type: object
+      properties:
+        name:
+          type: string
+        permissions:
+          type: array
+          items:
+            type: object
+            properties:
+              module:
+                type: string
+              action:
+                type: string
+              allowed:
+                type: boolean
+            required:
+              - module
+              - action
+              - allowed
+
+    # ── Developers ──────────────────────────────────────────────────────────
+    Developer:
+      type: object
+      properties:
+        id:
+          type: integer
+        firmId:
+          type: integer
+        name:
+          type: string
+        companyRegNo:
+          type: ["string", "null"]
+        address:
+          type: ["string", "null"]
+        contactPerson:
+          type: ["string", "null"]
+        phone:
+          type: ["string", "null"]
+        email:
+          type: ["string", "null"]
+        projectCount:
+          type: integer
+        createdAt:
+          type: string
+          format: date-time
+      required:
+        - id
+        - firmId
+        - name
+        - companyRegNo
+        - address
+        - contactPerson
+        - phone
+        - email
+        - projectCount
+        - createdAt
+
+    DeveloperListResponse:
+      type: object
+      properties:
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/Developer"
+        total:
+          type: integer
+        page:
+          type: integer
+        limit:
+          type: integer
+      required:
+        - data
+        - total
+        - page
+        - limit
+
+    CreateDeveloperBody:
+      type: object
+      properties:
+        name:
+          type: string
+        companyRegNo:
+          type: string
+        address:
+          type: string
+        contactPerson:
+          type: string
+        phone:
+          type: string
+        email:
+          type: string
+      required:
+        - name
+
+    UpdateDeveloperBody:
+      type: object
+      properties:
+        name:
+          type: string
+        companyRegNo:
+          type: string
+        address:
+          type: string
+        contactPerson:
+          type: string
+        phone:
+          type: string
+        email:
+          type: string
+
+    # ── Projects ─────────────────────────────────────────────────────────────
+    Project:
+      type: object
+      properties:
+        id:
+          type: integer
+        firmId:
+          type: integer
+        developerId:
+          type: integer
+        developerName:
+          type: string
+        name:
+          type: string
+        projectType:
+          type: string
+          description: "landed | highrise"
+        titleType:
+          type: string
+          description: "master | individual | strata"
+        landUse:
+          type: ["string", "null"]
+        developmentCondition:
+          type: ["string", "null"]
+        unitCategory:
+          type: ["string", "null"]
+        extraFields:
+          type: object
+          description: "Dynamic fields (landed/highrise specific)"
+        caseCount:
+          type: integer
+        createdAt:
+          type: string
+          format: date-time
+      required:
+        - id
+        - firmId
+        - developerId
+        - developerName
+        - name
+        - projectType
+        - titleType
+        - landUse
+        - developmentCondition
+        - unitCategory
+        - extraFields
+        - caseCount
+        - createdAt
+
+    ProjectListResponse:
+      type: object
+      properties:
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/Project"
+        total:
+          type: integer
+        page:
+          type: integer
+        limit:
+          type: integer
+      required:
+        - data
+        - total
+        - page
+        - limit
+
+    CreateProjectBody:
+      type: object
+      properties:
+        developerId:
+          type: integer
+        name:
+          type: string
+        projectType:
+          type: string
+        titleType:
+          type: string
+        landUse:
+          type: string
+        developmentCondition:
+          type: string
+        unitCategory:
+          type: string
+        extraFields:
+          type: object
+      required:
+        - developerId
+        - name
+        - projectType
+        - titleType
+
+    UpdateProjectBody:
+      type: object
+      properties:
+        name:
+          type: string
+        projectType:
+          type: string
+        titleType:
+          type: string
+        landUse:
+          type: string
+        developmentCondition:
+          type: string
+        unitCategory:
+          type: string
+        extraFields:
+          type: object
+
+    # ── Clients ──────────────────────────────────────────────────────────────
+    Client:
+      type: object
+      properties:
+        id:
+          type: integer
+        firmId:
+          type: integer
+        name:
+          type: string
+        icNo:
+          type: ["string", "null"]
+        nationality:
+          type: ["string", "null"]
+        address:
+          type: ["string", "null"]
+        email:
+          type: ["string", "null"]
+        phone:
+          type: ["string", "null"]
+        caseCount:
+          type: integer
+        createdAt:
+          type: string
+          format: date-time
+      required:
+        - id
+        - firmId
+        - name
+        - icNo
+        - nationality
+        - address
+        - email
+        - phone
+        - caseCount
+        - createdAt
+
+    ClientListResponse:
+      type: object
+      properties:
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/Client"
+        total:
+          type: integer
+        page:
+          type: integer
+        limit:
+          type: integer
+      required:
+        - data
+        - total
+        - page
+        - limit
+
+    CreateClientBody:
+      type: object
+      properties:
+        name:
+          type: string
+        icNo:
+          type: string
+        nationality:
+          type: string
+        address:
+          type: string
+        email:
+          type: string
+        phone:
+          type: string
+      required:
+        - name
+
+    UpdateClientBody:
+      type: object
+      properties:
+        name:
+          type: string
+        icNo:
+          type: string
+        nationality:
+          type: string
+        address:
+          type: string
+        email:
+          type: string
+        phone:
+          type: string
+
+    # ── Cases ─────────────────────────────────────────────────────────────────
+    CasePurchaser:
+      type: object
+      properties:
+        id:
+          type: integer
+        clientId:
+          type: integer
+        clientName:
+          type: string
+        icNo:
+          type: ["string", "null"]
+        role:
+          type: string
+          description: "main | joint"
+        orderNo:
+          type: integer
+      required:
+        - id
+        - clientId
+        - clientName
+        - icNo
+        - role
+        - orderNo
+
+    CaseAssignment:
+      type: object
+      properties:
+        id:
+          type: integer
+        userId:
+          type: integer
+        userName:
+          type: string
+        roleInCase:
+          type: string
+          description: "lawyer | clerk"
+        assignedAt:
+          type: string
+          format: date-time
+      required:
+        - id
+        - userId
+        - userName
+        - roleInCase
+        - assignedAt
+
+    CaseSummary:
+      type: object
+      properties:
+        id:
+          type: integer
+        referenceNo:
+          type: string
+        projectName:
+          type: string
+        developerName:
+          type: string
+        purchaseMode:
+          type: string
+        titleType:
+          type: string
+        status:
+          type: string
+        assignedLawyerName:
+          type: ["string", "null"]
+        createdAt:
+          type: string
+          format: date-time
+      required:
+        - id
+        - referenceNo
+        - projectName
+        - developerName
+        - purchaseMode
+        - titleType
+        - status
+        - assignedLawyerName
+        - createdAt
+
+    CaseDetail:
+      type: object
+      properties:
+        id:
+          type: integer
+        firmId:
+          type: integer
+        referenceNo:
+          type: string
+        projectId:
+          type: integer
+        projectName:
+          type: string
+        developerId:
+          type: integer
+        developerName:
+          type: string
+        purchaseMode:
+          type: string
+          description: "cash | loan"
+        titleType:
+          type: string
+          description: "master | individual | strata"
+        spaPrice:
+          type: ["number", "null"]
+        status:
+          type: string
+        purchasers:
+          type: array
+          items:
+            $ref: "#/components/schemas/CasePurchaser"
+        assignments:
+          type: array
+          items:
+            $ref: "#/components/schemas/CaseAssignment"
+        createdBy:
+          type: ["integer", "null"]
+        createdAt:
+          type: string
+          format: date-time
+      required:
+        - id
+        - firmId
+        - referenceNo
+        - projectId
+        - projectName
+        - developerId
+        - developerName
+        - purchaseMode
+        - titleType
+        - spaPrice
+        - status
+        - purchasers
+        - assignments
+        - createdBy
+        - createdAt
+
+    CaseListResponse:
+      type: object
+      properties:
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/CaseSummary"
+        total:
+          type: integer
+        page:
+          type: integer
+        limit:
+          type: integer
+      required:
+        - data
+        - total
+        - page
+        - limit
+
+    CreateCaseBody:
+      type: object
+      properties:
+        projectId:
+          type: integer
+        developerId:
+          type: integer
+        purchaseMode:
+          type: string
+        titleType:
+          type: string
+        spaPrice:
+          type: number
+        assignedLawyerId:
+          type: integer
+        assignedClerkId:
+          type: integer
+        purchaserIds:
+          type: array
+          items:
+            type: integer
+      required:
+        - projectId
+        - developerId
+        - purchaseMode
+        - titleType
+        - assignedLawyerId
+        - purchaserIds
+
+    UpdateCaseBody:
+      type: object
+      properties:
+        status:
+          type: string
+        purchaseMode:
+          type: string
+        titleType:
+          type: string
+        spaPrice:
+          type: number
+        assignedLawyerId:
+          type: integer
+        assignedClerkId:
+          type: integer
+
+    # ── Workflow ─────────────────────────────────────────────────────────────
+    WorkflowStep:
+      type: object
+      properties:
+        id:
+          type: integer
+        caseId:
+          type: integer
+        stepKey:
+          type: string
+        stepName:
+          type: string
+        stepOrder:
+          type: integer
+        status:
+          type: string
+          description: "pending | in_progress | completed | skipped"
+        pathType:
+          type: string
+          description: "common | loan | mot | noa_pa"
+        completedBy:
+          type: ["integer", "null"]
+        completedByName:
+          type: ["string", "null"]
+        completedAt:
+          type: ["string", "null"]
+          format: date-time
+        notes:
+          type: ["string", "null"]
+      required:
+        - id
+        - caseId
+        - stepKey
+        - stepName
+        - stepOrder
+        - status
+        - pathType
+        - completedBy
+        - completedByName
+        - completedAt
+        - notes
+
+    UpdateWorkflowStepBody:
+      type: object
+      properties:
+        status:
+          type: string
+        notes:
+          type: string
+
+    CaseNote:
+      type: object
+      properties:
+        id:
+          type: integer
+        caseId:
+          type: integer
+        authorId:
+          type: integer
+        authorName:
+          type: string
+        content:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+      required:
+        - id
+        - caseId
+        - authorId
+        - authorName
+        - content
+        - createdAt
+
+    CreateCaseNoteBody:
+      type: object
+      properties:
+        content:
+          type: string
+      required:
+        - content
+
+    CaseStatusCount:
+      type: object
+      properties:
+        status:
+          type: string
+        count:
+          type: integer
+      required:
+        - status
+        - count
+
+    CaseTypeCount:
+      type: object
+      properties:
+        purchaseMode:
+          type: string
+        count:
+          type: integer
+      required:
+        - purchaseMode
+        - count

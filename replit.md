@@ -1,96 +1,137 @@
-# Workspace
+# Lawcaspro — Legal Operations System
 
 ## Overview
+Multi-tenant legal operations SaaS for Malaysian law firms managing real estate conveyancing cases. Built as a full-stack monorepo with a React Vite frontend and Express API backend.
 
-pnpm workspace monorepo using TypeScript. Each package manages its own dependencies.
+## Architecture
 
-## Stack
+### Stack
+- **Frontend**: React + Vite + Tailwind CSS + Wouter routing + React Query
+- **Backend**: Express 5 + TypeScript + Drizzle ORM
+- **Database**: PostgreSQL (via Drizzle)
+- **Auth**: Cookie-based sessions (bcryptjs + SHA-256 token hashing, HttpOnly cookies)
+- **API Contract**: OpenAPI spec → orval codegen → typed React Query hooks + Zod validators
+- **Monorepo**: pnpm workspaces
 
-- **Monorepo tool**: pnpm workspaces
-- **Node.js version**: 24
-- **Package manager**: pnpm
-- **TypeScript version**: 5.9
-- **API framework**: Express 5
-- **Database**: PostgreSQL + Drizzle ORM
-- **Validation**: Zod (`zod/v4`), `drizzle-zod`
-- **API codegen**: Orval (from OpenAPI spec)
-- **Build**: esbuild (CJS bundle)
+### Multi-tenant Routing
+- `/platform/*` — Founder workspace (manages all firms)
+- `/app/*` — Firm workspace (cases, users, roles, data per firm)
+- User types: `founder` (firmId = null) | `firm_user` (firmId = their firm)
+- Firm context comes from session (not URL slug)
 
-## Structure
+### Artifacts
+- `artifacts/lawcaspro` — React Vite frontend (port from env, path `/`)
+- `artifacts/api-server` — Express API (port 8080, routes at `/api/*`)
 
-```text
-artifacts-monorepo/
-├── artifacts/              # Deployable applications
-│   └── api-server/         # Express API server
-├── lib/                    # Shared libraries
-│   ├── api-spec/           # OpenAPI spec + Orval codegen config
-│   ├── api-client-react/   # Generated React Query hooks
-│   ├── api-zod/            # Generated Zod schemas from OpenAPI
-│   └── db/                 # Drizzle ORM schema + DB connection
-├── scripts/                # Utility scripts (single workspace package)
-│   └── src/                # Individual .ts scripts, run via `pnpm --filter @workspace/scripts run <script>`
-├── pnpm-workspace.yaml     # pnpm workspace (artifacts/*, lib/*, lib/integrations/*, scripts)
-├── tsconfig.base.json      # Shared TS options (composite, bundler resolution, es2022)
-├── tsconfig.json           # Root TS project references
-└── package.json            # Root package with hoisted devDeps
-```
+### Shared Libraries
+- `lib/db` — Drizzle schema + db client
+- `lib/api-spec` — OpenAPI YAML spec
+- `lib/api-client-react` — Generated React Query hooks (orval)
+- `lib/api-zod` — Generated Zod validation schemas (orval)
 
-## TypeScript & Composite Projects
+## Database Schema
 
-Every package extends `tsconfig.base.json` which sets `composite: true`. The root `tsconfig.json` lists all packages as project references. This means:
+All tables created in PostgreSQL:
 
-- **Always typecheck from the root** — run `pnpm run typecheck` (which runs `tsc --build --emitDeclarationOnly`). This builds the full dependency graph so that cross-package imports resolve correctly. Running `tsc` inside a single package will fail if its dependencies haven't been built yet.
-- **`emitDeclarationOnly`** — we only emit `.d.ts` files during typecheck; actual JS bundling is handled by esbuild/tsx/vite...etc, not `tsc`.
-- **Project references** — when package A depends on package B, A's `tsconfig.json` must list B in its `references` array. `tsc --build` uses this to determine build order and skip up-to-date packages.
+| Table | Purpose |
+|---|---|
+| `firms` | Law firm tenants |
+| `users` | Founders + firm users |
+| `roles` | Per-firm roles (Partner, Lawyer, Clerk) |
+| `permissions` | Per-role module/action grants |
+| `sessions` | Auth session tokens (hashed) |
+| `developers` | Real estate developers |
+| `projects` | Development projects per developer |
+| `clients` | Purchaser/client registry |
+| `cases` | Core conveyancing case records |
+| `case_purchasers` | Case ↔ client relationships (main/joint) |
+| `case_assignments` | Case ↔ user (lawyer/clerk) assignments |
+| `case_workflow_steps` | Workflow step instances per case |
+| `case_notes` | Internal case notes |
+| `audit_logs` | Action audit trail |
 
-## Root Scripts
+## API Routes (all under /api prefix)
 
-- `pnpm run build` — runs `typecheck` first, then recursively runs `build` in all packages that define it
-- `pnpm run typecheck` — runs `tsc --build --emitDeclarationOnly` using project references
+### Auth
+- `POST /api/auth/login` — Email/password login, sets httpOnly cookie
+- `POST /api/auth/logout` — Clears session cookie
+- `GET /api/auth/me` — Current user info
 
-## Packages
+### Platform (Founder only)
+- `GET /api/platform/firms` — List all firms
+- `POST /api/platform/firms` — Create firm + partner user
+- `GET /api/platform/firms/:firmId` — Firm detail
+- `PATCH /api/platform/firms/:firmId` — Update firm
+- `GET /api/platform/stats` — Platform-level statistics
 
-### `artifacts/api-server` (`@workspace/api-server`)
+### Firm Workspace
+- `GET /api/dashboard` — Firm dashboard stats
+- `GET/POST /api/users` — List/create firm users
+- `GET/PATCH/DELETE /api/users/:userId`
+- `GET/POST /api/roles` — List/create roles
+- `GET/PATCH/DELETE /api/roles/:roleId`
+- `GET/POST /api/developers`
+- `GET/PATCH/DELETE /api/developers/:developerId`
+- `GET/POST /api/projects`
+- `GET/PATCH/DELETE /api/projects/:projectId`
+- `GET/POST /api/clients`
+- `GET/PATCH/DELETE /api/clients/:clientId`
+- `GET/POST /api/cases`
+- `GET/PATCH /api/cases/:caseId`
+- `GET /api/cases/:caseId/workflow`
+- `PATCH /api/cases/:caseId/workflow/:stepId`
+- `GET/POST /api/cases/:caseId/notes`
+- `GET /api/cases/stats/by-status`
+- `GET /api/cases/stats/by-type`
+- `GET /api/cases/recent`
 
-Express 5 API server. Routes live in `src/routes/` and use `@workspace/api-zod` for request and response validation and `@workspace/db` for persistence.
+## Workflow Engine
 
-- Entry: `src/index.ts` — reads `PORT`, starts Express
-- App setup: `src/app.ts` — mounts CORS, JSON/urlencoded parsing, routes at `/api`
-- Routes: `src/routes/index.ts` mounts sub-routers; `src/routes/health.ts` exposes `GET /health` (full path: `/api/health`)
-- Depends on: `@workspace/db`, `@workspace/api-zod`
-- `pnpm --filter @workspace/api-server run dev` — run the dev server
-- `pnpm --filter @workspace/api-server run build` — production esbuild bundle (`dist/index.cjs`)
-- Build bundles an allowlist of deps (express, cors, pg, drizzle-orm, zod, etc.) and externalizes the rest
+Case workflow steps are auto-generated at case creation based on:
+- **purchaseMode**: `cash` (no loan steps) | `loan` (adds loan path steps)
+- **titleType**: `individual` or `strata` → MOT path | `master` → NOA/PA path
 
-### `lib/db` (`@workspace/db`)
+Step paths: `common` → `loan` (if loan) → `mot` (individual/strata) or `noa_pa` (master)
 
-Database layer using Drizzle ORM with PostgreSQL. Exports a Drizzle client instance and schema models.
+## Seed Data (Demo)
 
-- `src/index.ts` — creates a `Pool` + Drizzle instance, exports schema
-- `src/schema/index.ts` — barrel re-export of all models
-- `src/schema/<modelname>.ts` — table definitions with `drizzle-zod` insert schemas (no models definitions exist right now)
-- `drizzle.config.ts` — Drizzle Kit config (requires `DATABASE_URL`, automatically provided by Replit)
-- Exports: `.` (pool, db, schema), `./schema` (schema only)
+**Founder:**
+- Email: `founder@lawcaspro.com` / Password: `founder123`
 
-Production migrations are handled by Replit when publishing. In development, we just use `pnpm --filter @workspace/db run push`, and we fallback to `pnpm --filter @workspace/db run push-force`.
+**Firm: Messrs. Tan & Associates (tan-associates)**
+- Partner: `partner@tan-associates.my` / `lawyer123`
+- Lawyer: `lawyer@tan-associates.my` / `lawyer123`
+- Clerk: `clerk@tan-associates.my` / `clerk123`
 
-### `lib/api-spec` (`@workspace/api-spec`)
+**Roles:** Partner, Lawyer, Clerk
 
-Owns the OpenAPI 3.1 spec (`openapi.yaml`) and the Orval config (`orval.config.ts`). Running codegen produces output into two sibling packages:
+**Developers:** Platinum Heights Sdn Bhd, Green Valley Development Bhd
 
-1. `lib/api-client-react/src/generated/` — React Query hooks + fetch client
-2. `lib/api-zod/src/generated/` — Zod schemas
+**Projects:** Platinum Residences @ KLCC (strata), Platinum Heights Tower B (master), Green Valley Bungalows Phase 2 (individual)
 
-Run codegen: `pnpm --filter @workspace/api-spec run codegen`
+**Clients:** Lee Chong Wei, Nurul Aina binti Abdullah, Kumar Selvam, Wong Mei Ling, Tan Ah Kow
 
-### `lib/api-zod` (`@workspace/api-zod`)
+**Cases:** LCP-1-001 through LCP-1-005
 
-Generated Zod schemas from the OpenAPI spec (e.g. `HealthCheckResponse`). Used by `api-server` for response validation.
+## Development Phases
 
-### `lib/api-client-react` (`@workspace/api-client-react`)
+- [x] **Phase 1**: Auth, multi-tenant architecture, CRUD for Users, Roles, Developers, Projects, Clients, Cases, Workflow Engine
+- [ ] **Phase 2**: Document management (DOCX templates, PDF, Replit Object Storage)
+- [ ] **Phase 3**: Accounting & invoicing (billing statements, e-invoice UI)
+- [ ] **Phase 4**: Reporting & analytics
+- [ ] **Phase 5**: Communications (Email/WhatsApp UI structure)
+- [ ] **Phase 6**: Founder debug workspace (impersonation, full audit)
 
-Generated React Query hooks and fetch client from the OpenAPI spec (e.g. `useHealthCheck`, `healthCheck`).
+## Design Decisions
 
-### `scripts` (`@workspace/scripts`)
+- **No Replit Auth** — custom email/password with bcrypt + session tokens
+- **No JWT** — server-side sessions in PostgreSQL for security
+- **DOCX primary** (docxtemplater) for document generation, PDF secondary
+- **SameSite=None; Secure** on auth cookie for cross-origin Replit proxy compatibility
+- **No emojis** in UI per user preference
+- **Malaysia-specific**: IC numbers, Malaysian developer/project patterns
 
-Utility scripts package. Each script is a `.ts` file in `src/` with a corresponding npm script in `package.json`. Run scripts via `pnpm --filter @workspace/scripts run <script>`. Scripts can import any workspace package (e.g., `@workspace/db`) by adding it as a dependency in `scripts/package.json`.
+## User Preferences
+- No emojis in UI
+- Professional, dense data-rich interface for legal professionals
+- Dark navy/slate theme with amber/gold accents
