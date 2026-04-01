@@ -1,0 +1,184 @@
+下面是系统的真实使用情境。你必须根据这些情境理解页面、流程、权限和数据关系。
+
+========================
+情境 1：Founder 创建一个新 firm
+========================
+Founder 登录平台后台，进入 Founder Dashboard。
+Founder 可以新增一个律师楼 firm，填写 firm 基本资料，并创建该 firm 的 Partner 账号。
+这个 firm 创建完成后，应自动拥有独立 workspace。
+Founder 能在平台层看到该 firm，但不能把所有 firm 数据混在一起。
+
+========================
+情境 2：Partner 设置 firm 内部用户与权限
+========================
+Partner 进入 firm workspace，进入 Users / Roles & Permissions。
+Partner 可以创建 Lawyer、Clerk、Account Admin 等用户，并分配角色。
+不同角色应看到不同模块和不同按钮。
+例如：
+- Partner：几乎全部权限
+- Lawyer：可更新 case / 审核法律流程
+- Clerk：可跟进案件、上传文件、触发文档生成
+- Account Admin：可处理账务、invoice、voucher、payment tracking
+- Viewer：只读
+
+========================
+情境 3：Partner 新增 Developer
+========================
+Partner 进入 Developers 页面，新增 developer。
+developer 页面不是单纯名字列表，而应保存开发商主资料，可供 project 和 case 使用。
+保存后必须可以在 Projects 页面被选择。
+
+========================
+情境 4：Partner 新增 Project
+========================
+Partner 进入 Projects 页面，选择 developer 后创建项目。
+项目需要字段例如：
+- project name
+- project type
+- title type
+- land use
+- development condition
+- unit category
+
+动态字段规则：
+若 project type = LANDED：
+- 显示 developer parcel no
+- building type
+- unit type
+- land area
+- build up area
+- 隐藏 highrise 专属字段
+
+若 project type = HIGHRISE：
+- 显示 storey no
+- building no
+- car park no
+- car park level
+- accessory parcel no
+- share units
+- 隐藏 landed 专属字段
+
+项目保存后，必须在 New Case 页面可选，并且 refresh 后数据仍存在。
+
+========================
+情境 5：Clerk 创建新 Case
+========================
+Clerk 进入 Cases > New Case。
+创建 case 时必须至少选择：
+- developer
+- project
+- purchaser / client
+- assigned lawyer
+
+规则：
+- 若 purchase mode = CASH，loan 信息隐藏
+- 若 case 属于 Master Title，系统自动走 NOA / PA 路径
+- 若 case 属于 Individual / Strata Title，系统自动走 MOT 路径
+
+保存后：
+- case 必须出现在 case list
+- dashboard 统计更新
+- assigned 人员应能看到该 case
+- 非 assigned 人员默认不可编辑
+
+========================
+情境 6：Lawyer 更新案件流程
+========================
+Lawyer 打开某个 case，进入 workflow 区域。
+Lawyer 可以更新 status，例如：
+- SPA Pending Signing
+- SPA Stamped
+- Letter of Offer Stamped
+- Loan Docs Pending Signing
+- Loan Docs Signed
+- Acting Letter Pending
+- Acting Letter Issued
+- Loan Doc Pending Bank Execution
+- Loan Doc Sent for Bank Execution
+- Loan Doc Bank Executed
+
+然后根据 case 类型自动进入：
+A. MOT 路径
+或
+B. NOA / PA 路径
+
+每次更新都必须记录：
+- 当前状态
+- 更新人
+- 更新时间
+- 可供 dashboard / reports 使用
+
+========================
+情境 7：Clerk 生成法律文件
+========================
+Clerk 在某个 case 页面点击 Generate Document。
+系统自动从：
+- case
+- project
+- developer
+- clients / purchasers
+- loan details
+读取变量
+
+然后根据模板生成 document instance。
+模板来源可能是：
+- system document
+- firm document
+- master template
+
+生成后：
+- 可预览
+- 可导出 docx / pdf
+- 写入 document audit logs
+
+========================
+情境 8：Account Admin 处理 quotation / invoice / voucher
+========================
+Account Admin 进入 Accounting 模块。
+先创建 quotation，然后转 invoice，之后可做 e-Invoice tracking。
+若要付款，则进入 Payment Voucher 流程。
+
+Payment Voucher 必须经过：
+- lawyer approval
+- partner approval
+- account dept processing
+
+付款后：
+- 更新 ledger
+- 标记 payment status
+- 若涉及 client account / office account 转移，必须有审批和记录
+
+========================
+情境 9：Firm 使用 Communication Hub
+========================
+用户进入 Communication Hub。
+这里集中管理：
+- Email
+- WhatsApp
+- Internal Chat
+
+例子：
+- clerk 直接在系统内发 WhatsApp 给客户
+- staff 在系统内回复 email
+- firm 内部成员发送文件给 founder team
+- founder team 回传 system document 更新资料
+
+消息应支持：
+- thread
+- 附件
+- 图片
+- 文件
+
+========================
+情境 10：Founder 监控平台并进入 Debug Workspace
+========================
+Founder 在平台后台查看：
+- total firms
+- active users
+- alerts
+- platform connections
+- sync logs
+- usage snapshots
+
+Founder 可进入指定测试 firm 的 debug workspace 进行测试。
+但此操作必须保留 audit 记录，且不能破坏 firm 数据隔离架构。

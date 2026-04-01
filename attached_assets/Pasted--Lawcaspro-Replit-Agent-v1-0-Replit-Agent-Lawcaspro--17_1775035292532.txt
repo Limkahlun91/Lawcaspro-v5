@@ -1,0 +1,914 @@
+《Lawcaspro Replit Agent 系统重建说明书》
+版本：正式版 v1.0
+用途：用于指导 Replit Agent 重新创建 Lawcaspro 全系统
+说明：本说明书不是简单功能清单，而是系统定位、业务规则、架构原则、模块范围、角色权限、核心流程、故事情境与阶段性交付要求的完整集合。你必须先理解系统，再设计蓝图，再分阶段开发。不得把本系统误做成普通 CRM、普通后台或纯前端 Demo。
+
+━━━━━━━━━━━━━━━━━━
+一、项目目标
+━━━━━━━━━━━━━━━━━━
+
+你要重建的系统名称是：
+
+Lawcaspro
+
+Lawcaspro 是一个面向律师楼的多租户法律业务 SaaS 系统，核心服务场景以房地产法律案件为主，覆盖：
+
+1. 律师楼多租户管理
+2. 开发商、项目、客户、案件管理
+3. 房地产买卖与贷款案件流程管理
+4. 文档模板与自动生成
+5. 律所账务、审批与收付款流程
+6. 通讯中心（Email / WhatsApp / Internal Chat）
+7. Founder 平台级监控、审计与调试工作区
+
+这个系统的目标不是“展示页面”，而是构建一个真实可运行、可扩展、可持久化、具备严格权限与业务规则的法律操作系统。
+
+━━━━━━━━━━━━━━━━━━
+二、系统本质定义
+━━━━━━━━━━━━━━━━━━
+
+Lawcaspro 不是以下任一种系统：
+
+- 不是普通 CRM
+- 不是普通 ERP
+- 不是简单文件上传系统
+- 不是只有列表增删改查的后台
+- 不是只做前端原型的 Demo
+
+Lawcaspro 应被理解为：
+
+一个以律师楼业务流程为核心的法律操作系统（Legal Operations System）
+
+其核心特征包括：
+
+1. Multi-tenant（多租户）
+2. Founder 层与 Firm 层双层结构
+3. 真实案件流程状态机
+4. 严格 RBAC 权限控制
+5. 文档变量自动化引擎
+6. Client Account 与 Office Account 分离账务
+7. 审批流与审计日志优先
+8. 可扩展的模块化架构
+
+━━━━━━━━━━━━━━━━━━
+三、系统层级结构
+━━━━━━━━━━━━━━━━━━
+
+系统有两个主层级：
+
+A. Founder / Platform Layer（平台层）
+B. Firm Workspace Layer（律所工作区层）
+
+----------------------------------
+A. Founder / Platform Layer
+----------------------------------
+
+这是平台拥有者使用的后台，功能包括：
+
+1. 管理全部 Firm
+2. 创建 Firm
+3. 为 Firm 创建 Partner 账号
+4. 查看平台监控数据
+5. 查看平台告警、连接状态、同步日志、用量快照
+6. 查看全局审计记录
+7. 进入指定测试 Firm 的 Debug Workspace 进行测试
+
+重要说明：
+Founder 不是普通 Firm User。
+Founder 层必须与 Firm 层逻辑隔离，不能简单共用普通用户模型。
+
+----------------------------------
+B. Firm Workspace Layer
+----------------------------------
+
+每一个律师楼 Firm 拥有自己的独立工作区，主要模块包括：
+
+1. Firm Dashboard
+2. Users
+3. Roles & Permissions
+4. Developers
+5. Projects
+6. Clients
+7. Cases
+8. Workflow Engine
+9. Documents
+10. Accounting / Billing
+11. Communication Hub
+12. Reports
+13. Settings
+14. Audit Logs（按权限可查看）
+
+每一个 Firm 的数据必须严格按 firm_id 隔离。
+
+━━━━━━━━━━━━━━━━━━
+四、核心角色定义
+━━━━━━━━━━━━━━━━━━
+
+系统至少应支持以下角色：
+
+1. Founder / Platform Admin
+2. Partner
+3. Senior Lawyer
+4. Junior Lawyer
+5. Senior Clerk
+6. Junior Clerk
+7. Account Admin
+8. HR Admin
+9. Manager
+10. Viewer
+
+建议理解如下：
+
+----------------------------------
+1. Founder / Platform Admin
+----------------------------------
+- 管理平台
+- 管理全部 Firm
+- 创建 Firm 与初始账号
+- 查看平台指标与监控
+- 进入 Debug Workspace
+- 不应被设计成普通 Firm 账号
+
+----------------------------------
+2. Partner
+----------------------------------
+- Firm 内最高权限
+- 可查看全部核心模块
+- 可审批付款、关键业务操作、权限调整
+- 可看到更完整数据
+
+----------------------------------
+3. Lawyer（Senior / Junior）
+----------------------------------
+- 负责案件法律进度
+- 更新 Case Workflow
+- 审核或处理法律流程节点
+- 可审批部分流程（视角色级别）
+
+----------------------------------
+4. Clerk（Senior / Junior）
+----------------------------------
+- 日常案件跟进
+- 更新资料
+- 上传文件
+- 触发文档生成
+- 跟进客户与开发商事项
+
+----------------------------------
+5. Account Admin
+----------------------------------
+- 处理报价、发票、付款、台账
+- 管理 client account / office account
+- 处理 Payment Voucher
+- 跟踪收付款状态
+
+----------------------------------
+6. HR Admin / Manager / Viewer
+----------------------------------
+- HR Admin：偏向人员与基础行政配置
+- Manager：根据授权查看/管理部分模块
+- Viewer：只读
+
+━━━━━━━━━━━━━━━━━━
+五、系统架构原则
+━━━━━━━━━━━━━━━━━━
+
+你必须按以下原则设计系统：
+
+1. 所有 Firm 数据必须通过 firm_id 做严格隔离
+2. Founder 层与 Firm 层必须逻辑分离
+3. 所有关键业务数据要可持久化，不可做假数据页面
+4. 所有关键动作必须可审计
+5. 页面不是静态 UI，而是实际可操作、可保存、可追踪
+6. 表单刷新后不得丢失已保存数据
+7. 模块必须具备扩展能力，不能写死
+8. 权限必须细化到页面、按钮、动作级别
+9. 重要审批流程不得被绕过
+10. 所有核心列表页应支持 search / filter / sort / pagination
+11. 有导出需求的模块要支持 export（至少预留结构）
+12. 设计时应考虑未来规模增长
+
+━━━━━━━━━━━━━━━━━━
+六、系统主模块清单
+━━━━━━━━━━━━━━━━━━
+
+一、Platform / Founder Layer
+1. Founder Dashboard
+2. Firms Management
+3. Platform Admins
+4. Platform Alerts
+5. Platform Connections
+6. Platform Sync Logs
+7. Platform Usage Snapshots
+8. Platform Monthly Summaries
+9. Platform Audit Logs
+10. Debug Workspace Entry
+
+二、Firm Workspace
+1. Firm Dashboard
+2. Users
+3. Roles & Permissions
+4. Developers
+5. Projects
+6. Clients
+7. Cases
+8. Workflow Engine
+9. Documents
+10. Accounting
+11. Communication Hub
+12. Reports
+13. Settings
+
+三、Documents Module
+1. Template Library
+2. Master Documents
+3. System Documents
+4. Firm Documents
+5. Template Variables
+6. Document Instances
+7. Batch Export Jobs
+8. Export History
+9. Document Audit Logs
+
+四、Accounting Module
+1. Quotations
+2. Invoices
+3. e-Invoice Tracking
+4. Payment Vouchers
+5. Client Account Ledger
+6. Office Account Ledger
+7. Trust / Internal Transfer
+8. Payment Tracking
+9. Financial Reports
+
+五、Communication Hub
+1. Email Inbox
+2. Email Compose
+3. WhatsApp Chats
+4. WhatsApp Templates
+5. Internal Conversations
+6. Attachments
+7. Message Logs
+
+六、Reports
+1. Case Status Report
+2. Workflow Report
+3. Payment Received Report
+4. Outstanding Report
+5. Document Generation Report
+6. User Activity Report
+7. Accounting / Collection Report
+
+━━━━━━━━━━━━━━━━━━
+七、核心业务对象
+━━━━━━━━━━━━━━━━━━
+
+系统内至少要围绕以下业务对象建模：
+
+1. Firm
+2. User
+3. Role
+4. Permission
+5. Developer
+6. Project
+7. Client
+8. Purchaser
+9. Case
+10. Case Assignment
+11. Case Status History
+12. Workflow Step / Workflow Log
+13. Document Template
+14. Document Instance
+15. Document Variable Definition
+16. Quotation
+17. Invoice
+18. e-Invoice Record
+19. Payment Voucher
+20. Client Ledger
+21. Office Ledger
+22. Payment / Receipt Record
+23. Internal Conversation
+24. Email Thread
+25. WhatsApp Thread
+26. Audit Log
+27. Platform Alert / Connection / Snapshot
+
+━━━━━━━━━━━━━━━━━━
+八、Case 模块业务规则
+━━━━━━━━━━━━━━━━━━
+
+Case 不是普通 Ticket，而是房地产法律案件。
+
+----------------------------------
+A. 新建 Case 最低要求
+----------------------------------
+
+创建 Case 时，必须至少绑定：
+
+1. Project
+2. Developer
+3. 至少 1 位 Purchaser / Client
+4. 至少 1 位 Assigned Lawyer
+
+建议也支持：
+- Assigned Clerk
+- Purchase Mode
+- SPA 价格
+- Property 信息
+- Loan 信息（视模式显示）
+- Special Clauses
+
+----------------------------------
+B. Purchase Mode 规则
+----------------------------------
+
+若 Purchase Mode = CASH：
+
+1. 隐藏 Loan 相关字段
+2. Workflow 不应进入贷款相关路径
+3. Dashboard / Report 的贷款状态统计应自动排除
+
+----------------------------------
+C. Title Type / Workflow Path 规则
+----------------------------------
+
+若 Case 对应 Title Type = Master Title：
+- 不走 MOT 路径
+- 自动走 NOA / PA 路径
+
+若 Title Type = Individual Title / Strata Title：
+- 不走 NOA / PA 路径
+- 自动走 MOT 路径
+
+这不是提示，而是系统自动判断规则。
+
+----------------------------------
+D. Assignment 规则
+----------------------------------
+
+1. 只有 Assigned 用户可编辑对应 Case / Project
+2. 非 Assigned 用户默认只读或不可见，视角色与权限而定
+3. Partner / Admin 可拥有更高权限
+4. 所有 Assignment 修改动作要写 audit log
+
+━━━━━━━━━━━━━━━━━━
+九、Case Workflow 设计要求
+━━━━━━━━━━━━━━━━━━
+
+系统必须有真实的案件流程状态记录能力。
+
+至少需要支持：
+
+1. 当前状态显示
+2. 状态流转
+3. 状态历史记录
+4. 状态更新时间
+5. 更新人
+6. Dashboard 统计引用
+7. Report 引用
+
+参考状态示例（可作为初始版本）：
+
+1. File Opened / SPA Pending Signing
+2. SPA Stamped
+3. Letter of Offer Stamped
+4. Loan Docs Pending Signing
+5. Loan Docs Signed
+6. Acting Letter Pending
+7. Acting Letter Issued
+8. Loan Doc. Pending Bank Execution
+9. Loan Doc. Sent for Bank Execution
+10. Loan Doc. Bank Executed
+11. Bank Letter of Undertaking Received
+12. Bank's Letter of Undertaking
+
+若为 Individual / Strata Title，则进入 MOT 路径，例如：
+13. Pending MOT From Developer
+14. MOT Executed & Received
+15. To Prepare Invoice for MOT Stamp Duty & Registration
+16. MOT Stamp Duty & Registration Received
+17. MOT Dated & Submitted Stamping
+18. MOT Stamp
+
+若为 Master Title，则进入 NOA / PA 路径，例如：
+13. To Prepare Notice of Assignment (NOA)
+14. NOA Served
+15. Pending Register Power of Attorney (PA)
+16. Power of Attorney Registered
+
+每次状态变化必须记录：
+- from_status
+- to_status
+- changed_by
+- changed_at
+- remarks（可选）
+
+━━━━━━━━━━━━━━━━━━
+十、Developers / Projects 模块要求
+━━━━━━━━━━━━━━━━━━
+
+----------------------------------
+A. Developers
+----------------------------------
+
+Developer 不是简单名字表，而是可供 Project 与 Case 调用的主数据。
+
+应至少支持：
+1. 基本资料
+2. 关联 Projects
+3. 检索与筛选
+4. 可在 Case 创建时调用
+
+----------------------------------
+B. Projects
+----------------------------------
+
+Project 是案件的重要上游数据对象。
+
+应支持字段概念：
+1. Project Name
+2. Developer
+3. Project Type
+4. Title Type
+5. Land Use
+6. Development Condition
+7. Unit Category
+
+动态字段规则：
+
+若 Project Type = LANDED：
+- 显示 developer parcel no
+- building type
+- unit type
+- land area
+- build up area
+- 隐藏 highrise 专属字段
+
+若 Project Type = HIGHRISE：
+- 显示 storey no
+- building no
+- car park no
+- car park level
+- accessory parcel no
+- share units
+- 隐藏 landed 专属字段
+
+要求：
+- 保存后必须能在 New Case 页面被选择
+- 刷新后数据不丢失
+- Assigned 控制要生效
+
+━━━━━━━━━━━━━━━━━━
+十一、Documents 模块要求
+━━━━━━━━━━━━━━━━━━
+
+Documents 模块不是简单上传下载，而是文件自动化引擎。
+
+----------------------------------
+A. 支持的能力
+----------------------------------
+
+1. DOCX 模板
+2. PDF 模板填值
+3. 变量绑定
+4. 模板版本管理
+5. Document Instance 生成
+6. 导出 DOCX / PDF
+7. 批量导出
+8. 审计日志
+
+----------------------------------
+B. 模板层级
+----------------------------------
+
+必须支持文档分层概念：
+
+1. Master Document / Template Library
+2. System Document
+3. Firm Document
+
+含义：
+- System Document：平台层统一提供给各 Firm 的系统文档
+- Firm Document：Firm 自己维护的文档
+- Master / Template Library：更上层或通用模板集合
+
+----------------------------------
+C. 变量来源
+----------------------------------
+
+变量必须可来自以下对象：
+
+1. Case
+2. Project
+3. Developer
+4. Client / Purchasers
+5. Loan Details
+6. 其他后续扩展字段
+
+----------------------------------
+D. 生成流程
+----------------------------------
+
+文档生成最少支持以下逻辑：
+
+1. 用户进入某个 Case
+2. 选择模板
+3. 系统自动读取相关变量
+4. 生成 Document Instance
+5. 用户可预览
+6. 用户可导出 docx / pdf
+7. 记录 document audit log
+
+----------------------------------
+E. 文档审计
+----------------------------------
+
+以下动作要写 Document Audit Logs：
+- 模板创建
+- 模板更新
+- 版本切换
+- 生成实例
+- 导出文件
+- 批量导出
+- 关键配置变更
+
+━━━━━━━━━━━━━━━━━━
+十二、Accounting 模块要求
+━━━━━━━━━━━━━━━━━━
+
+Accounting 不是简单收款记录，而是接近律所实务的财务流程系统。
+
+----------------------------------
+A. 核心子模块
+----------------------------------
+
+1. Quotation
+2. Invoice
+3. e-Invoice Tracking
+4. Payment Voucher
+5. Client Account Ledger
+6. Office Account Ledger
+7. Trust / Internal Transfer
+8. Payment Tracking
+9. Outstanding / Collection Report
+
+----------------------------------
+B. Quotation / Invoice / e-Invoice
+----------------------------------
+
+必须设计成可串联流程：
+
+Quotation -> Invoice -> e-Invoice Tracking -> Payment Tracking
+
+系统内部可自动把费用分类，但前台使用者不应被复杂会计术语干扰。
+
+需要考虑：
+- legal fees
+- disbursements
+- reimbursement
+
+前台操作可简化，但后台数据结构要能拆分。
+
+----------------------------------
+C. Payment Voucher 流程
+----------------------------------
+
+Payment Voucher 状态至少应支持：
+
+1. Draft
+2. Prepared
+3. Approved by Lawyer
+4. Approved by Partner
+5. Submitted to Account Dept
+6. Paid
+7. File Returned to Incharge Person
+8. Locked
+
+每个状态必须记录：
+- 日期
+- 时间
+- 操作人
+- 阶段时长（小时）
+
+----------------------------------
+D. Client Account 与 Office Account
+----------------------------------
+
+必须分开设计：
+
+1. Client Account
+2. Office Account
+
+关键规则：
+- 不可混账
+- client account 余额不足时默认不可付款
+- 如需强制通过，只能由 Partner override，并留下记录
+- client account 转 office account 时，必须走 internal voucher，并需审批
+
+----------------------------------
+E. Payment Tracking
+----------------------------------
+
+系统要能回答：
+- 哪个 Case 有没有收钱
+- 收了什么款
+- 还欠多少
+- 对应的是 quotation、invoice 还是 voucher 哪一部分
+
+━━━━━━━━━━━━━━━━━━
+十三、Communication Hub 要求
+━━━━━━━━━━━━━━━━━━
+
+Communication Hub 是集中通讯中心，不是单一聊天页。
+
+至少包括：
+
+1. Email
+2. WhatsApp
+3. Internal Chat
+
+----------------------------------
+A. Email
+----------------------------------
+目标风格：类似 Outlook 的内置邮件操作体验
+
+建议方向：
+- 可连接第三方邮箱
+- 在系统内查看 Inbox
+- 可 Reply / Compose
+- 附件支持
+- 线程支持
+
+----------------------------------
+B. WhatsApp
+----------------------------------
+目标：Firm 用自己的号码联系客户
+
+应考虑：
+- 联系客户入口
+- 线程列表
+- 消息记录
+- 后续模板消息能力
+
+----------------------------------
+C. Internal Chat
+----------------------------------
+支持：
+- Firm 内部成员之间沟通
+- Firm 与 Founder Team 沟通
+- 发送图片与文件
+- 用于 system documents 更新、问题反馈、内部协作
+
+━━━━━━━━━━━━━━━━━━
+十四、Founder 平台监控要求
+━━━━━━━━━━━━━━━━━━
+
+Founder Dashboard 至少应能看到：
+
+1. Firm 数量
+2. 活跃用户
+3. Platform Connections
+4. Alerts
+5. Sync Logs
+6. Usage Snapshots
+7. Monthly Summaries
+8. 平台级 Audit Logs
+
+还需要支持：
+
+Debug Workspace Entry
+
+说明：
+Founder 可进入指定测试 Firm 的调试工作区进行测试，但必须：
+
+1. 通过受控方式进入
+2. 记录 audit
+3. 不破坏多租户隔离逻辑
+
+测试 Firm 可预留：
+- LawcasPro Legal Firm（调试测试工作区）
+
+━━━━━━━━━━━━━━━━━━
+十五、审计与安全要求
+━━━━━━━━━━━━━━━━━━
+
+以下动作必须写 Audit Log：
+
+1. 登录关键动作
+2. 权限调整
+3. Founder 进入 Debug Workspace
+4. Case 状态更新
+5. Assignment 修改
+6. 文档生成与导出
+7. Payment Voucher 审批与付款
+8. 重要设置变更
+9. 平台监控关键操作
+
+安全要求：
+1. 严格 RBAC
+2. 自动登出机制可预留
+3. 敏感操作需审批
+4. 不允许跨 Firm 访问数据
+5. Founder 访问 Firm 工作区必须留痕
+
+━━━━━━━━━━━━━━━━━━
+十六、真实故事情境（必须据此理解系统）
+━━━━━━━━━━━━━━━━━━
+
+情境 1：Founder 创建新 Firm
+Founder 登录平台后台，创建一个新的律师楼 Firm，并创建该 Firm 的 Partner 账号。创建完成后，该 Firm 应自动拥有独立 workspace。Founder 在平台层能看到该 Firm，但不能把不同 Firm 数据混在一起。
+
+情境 2：Partner 管理内部用户与权限
+Partner 进入 Firm Workspace 的 Users / Roles & Permissions，创建 Lawyer、Clerk、Account Admin 等用户，并给不同角色不同模块权限。不同角色看到的页面、按钮、可执行操作必须不同。
+
+情境 3：Partner 新增 Developer
+Partner 在 Developers 页面新增开发商资料。Developer 保存后，应能在 Projects 页面被选择，并最终能在 Cases 中使用。
+
+情境 4：Partner 新增 Project
+Partner 在 Projects 页面创建新项目。项目要根据 project type 动态显示 landed 或 highrise 相关字段。保存后，New Case 页面必须能选择这个项目，刷新后数据仍存在。
+
+情境 5：Clerk 创建 Case
+Clerk 进入 Cases > New Case。必须至少选择 developer、project、purchaser、assigned lawyer。系统根据 purchase mode 与 title type 自动决定是否显示贷款字段，以及走 MOT 还是 NOA / PA 路径。保存后，Case 要出现在列表页，Dashboard 统计要更新。
+
+情境 6：Lawyer 更新案件流程
+Lawyer 打开某个 Case，更新 workflow 节点，例如 Loan Docs Signed、Acting Letter Issued 等。系统必须记录状态历史，并让 Dashboard / Reports 可统计这些状态。
+
+情境 7：Clerk 生成法律文件
+Clerk 在 Case 页面点击 Generate Document。系统从 case/project/developer/client/loan 等对象读取变量，生成 Document Instance，支持预览与导出，并写入 document audit logs。
+
+情境 8：Account Admin 处理财务流程
+Account Admin 创建 Quotation，转 Invoice，跟进 e-Invoice，再处理 Payment Voucher。若涉及 client account 付款或转 office account，必须经过相应审批与余额控制。
+
+情境 9：Firm 使用 Communication Hub
+Clerk 或其他用户在系统内发送 WhatsApp 给客户、回复 Email、或在 Internal Chat 中发送图片/文件给 Founder Team 请求更新系统文档。
+
+情境 10：Founder 监控平台并进入 Debug Workspace
+Founder 在平台后台查看所有 Firm、连接、告警、同步日志与使用量数据。必要时进入测试 Firm 的 Debug Workspace 测试功能，但整个过程必须可审计。
+
+━━━━━━━━━━━━━━━━━━
+十七、非功能要求
+━━━━━━━━━━━━━━━━━━
+
+1. 所有列表页应支持检索、筛选、分页
+2. 所有表单应有验证
+3. 所有关键页面要考虑空状态、错误状态、成功状态
+4. 刷新后数据必须保持
+5. 页面之间要可串联，不可成为信息孤岛
+6. 应预留扩展空间，不可把业务逻辑写死在单个组件
+7. 权限控制不应只做前端显示隐藏，数据层也应考虑隔离与保护
+8. 开发时先保证系统结构正确，再逐步完善高级特性
+
+━━━━━━━━━━━━━━━━━━
+十八、你必须先输出的内容
+━━━━━━━━━━━━━━━━━━
+
+在正式开发前，你必须先输出以下内容给我确认：
+
+1. System Understanding Summary
+2. Module Tree
+3. Page Tree
+4. Database / Entity Relationship Proposal
+5. Role Permission Matrix
+6. Workflow Design
+7. Phase-by-Phase Development Plan
+8. Risks / Ambiguities / Assumptions
+
+要求：
+- 先出蓝图
+- 不要直接跳到 UI 代码
+- 不要只做 Demo
+- 必须按真实业务系统方式设计
+
+━━━━━━━━━━━━━━━━━━
+十九、分阶段开发要求
+━━━━━━━━━━━━━━━━━━
+
+请按阶段开发，不得一口气乱做全部系统。
+
+----------------------------------
+Phase 1：基础架构与核心主数据
+----------------------------------
+目标：
+- Authentication
+- Multi-tenant architecture
+- Founder / Firm workspace shell
+- Users
+- Roles & Permissions
+- Developers / Projects / Clients / Cases 基础 CRUD
+
+每阶段输出：
+1. 目标
+2. 数据表设计
+3. API / Server Actions 设计
+4. 页面树
+5. 权限影响
+6. 验收清单
+
+----------------------------------
+Phase 2：案件流程与审计
+----------------------------------
+目标：
+- Assignment Rules
+- Workflow Engine
+- Case Status History
+- Dashboard Counters
+- Audit Logs
+
+----------------------------------
+Phase 3：Documents 模块
+----------------------------------
+目标：
+- Template Structure
+- Variable Mapping
+- Document Instances
+- Export Flow
+- Document Audit Logs
+
+----------------------------------
+Phase 4：Accounting 模块
+----------------------------------
+目标：
+- Quotation / Invoice / e-Invoice Tracking
+- Payment Voucher
+- Client Account / Office Account Ledger
+- Payment Tracking
+- Internal Transfer / Approval Flow
+
+----------------------------------
+Phase 5：Communication Hub
+----------------------------------
+目标：
+- Email
+- WhatsApp
+- Internal Chat
+- Attachments
+- Thread Structure
+
+----------------------------------
+Phase 6：Reports 与 Platform Monitoring
+----------------------------------
+目标：
+- Reports
+- Founder Monitoring
+- Alerts / Usage / Sync Logs
+- Final Permission Hardening
+- QA Checklist
+
+━━━━━━━━━━━━━━━━━━
+二十、验收标准
+━━━━━━━━━━━━━━━━━━
+
+系统完成时，至少应满足以下标准：
+
+1. Founder 可创建 Firm，并管理平台数据
+2. 每个 Firm 拥有独立 workspace
+3. Firm 可创建 Users，并分配角色权限
+4. Developer / Project / Client / Case 可实际保存、查询、编辑
+5. Case 能依据 title type 进入不同 workflow 路径
+6. Dashboard 能引用 workflow 数据做统计
+7. Documents 能基于业务变量生成实例
+8. Accounting 能支持 quotation / invoice / voucher / ledger 基本流程
+9. Communication Hub 具备结构，不是空壳页面
+10. 审计日志对关键动作可追踪
+11. 不同角色确实看到不同页面与动作
+12. 数据刷新不丢失
+13. 系统结构可继续扩展
+
+━━━━━━━━━━━━━━━━━━
+二十一、禁止事项
+━━━━━━━━━━━━━━━━━━
+
+你不得把系统做成以下形式：
+
+1. 只有前端页面，没有真实数据结构
+2. 所有角色看到一样内容
+3. 把 Founder 当作普通 Firm 用户处理
+4. Case 没有真实 workflow 逻辑
+5. Documents 只是上传下载，没有变量机制
+6. Accounting 只是简单收支记录，没有审批与分账逻辑
+7. Communication Hub 只是一个空白聊天框
+8. 没有 audit log
+9. 没有 firm_id 隔离
+10. 只做 mockup，不做真实业务系统
+
+━━━━━━━━━━━━━━━━━━
+二十二、最终执行指令
+━━━━━━━━━━━━━━━━━━
+
+现在请你不要直接开始写完整前端代码。
+
+请先基于本说明书输出：
+
+1. 你对 Lawcaspro 的系统理解摘要
+2. 完整模块树
+3. 页面树
+4. 数据模型与实体关系建议
+5. 角色权限矩阵
+6. Case / Document / Accounting 三大核心 workflow 设计
+7. 分阶段开发计划
+8. 你认为需要我确认的歧义点
+
+等我确认后，你再进入数据库设计与模块开发。
+
+这是一个真实业务 SaaS 的重建任务，不是 UI 练习。
+请按架构师 + 全栈系统设计师的标准来理解与执行。

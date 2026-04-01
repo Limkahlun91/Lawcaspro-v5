@@ -1,0 +1,198 @@
+你要帮我重新创建一个系统，名字叫 Lawcaspro。
+
+这不是普通 CRM，也不是普通文件系统，而是一个多租户法律事务管理 SaaS，主要服务律师楼，尤其是处理房地产买卖案件、贷款案件、文档自动化、账务审批、客户沟通和内部协作。
+
+========================
+一、系统定位
+========================
+Lawcaspro 是一个业务型法律操作系统，目标是把传统律师楼的核心业务数字化，集中在一个平台中完成：
+
+1. 多租户律师楼管理（multi-tenant）
+2. 房地产法律案件管理（sale & purchase / loan / title related workflow）
+3. 文件自动化生成（DOCX / PDF）
+4. 严格角色权限与审批
+5. client account 与 office account 分离的账务系统
+6. communication hub（email / whatsapp / internal chat）
+7. founder 级别的平台管理、监控和审计
+
+========================
+二、系统层级
+========================
+系统分为两个大层级：
+
+A. Founder / Platform Layer
+- 管理全部 firm
+- 创建 firm
+- 创建 partner 账号
+- 平台监控
+- 审计与系统告警
+- debug workspace（进入某个测试 firm 工作区进行测试，但必须有审计记录）
+
+B. Firm Workspace Layer
+- 律师楼自己的工作区
+- 管理 developers / projects / clients / cases / documents / accounting / communication
+- 严格按照 firm_id 做数据隔离
+
+========================
+三、主要角色
+========================
+1. Founder / Platform Admin
+2. Partner
+3. Senior Lawyer
+4. Junior Lawyer
+5. Senior Clerk
+6. Junior Clerk
+7. Account Admin
+8. HR Admin
+9. Manager
+10. Viewer
+
+========================
+四、核心模块
+========================
+1. Founder Dashboard / Platform Console
+2. Firms
+3. Users
+4. Roles & Permissions
+5. Developers
+6. Projects
+7. Clients
+8. Cases
+9. Workflow Engine
+10. Documents
+11. Accounting / Billing
+12. Communication Hub
+13. Reports
+14. Audit Logs
+15. Platform Monitoring / Usage / Alerts
+
+========================
+五、系统必须遵守的原则
+========================
+1. 这是 multi-tenant 系统，所有 firm 数据必须严格按 firm_id 隔离
+2. Founder 与 Firm 是两层空间，不可混淆
+3. Founder 不是普通 firm user
+4. 只有 assigned 人员可编辑对应 case / project
+5. 所有关键动作必须写入 audit log
+6. 所有 CRUD 必须可持久化，不是 mockup
+7. 表单保存后 refresh 不能丢数据
+8. 页面必须支持 search / filter / status / pagination / export（视模块而定）
+9. 架构必须可扩展，不能写死
+10. 重要审批流程不能省略
+
+========================
+六、案件业务特点
+========================
+Lawcaspro 的 case 不是普通 ticket，它是律师楼房地产法律案件。
+
+新建 case 时必须至少绑定：
+- project
+- developer
+- 至少 1 个 purchaser / client
+- 至少 1 位 assigned lawyer
+
+业务判断规则：
+- 如果 Purchase Mode = CASH，则隐藏 Loan 相关字段
+- 如果 Title Type = Master Title，则走 NOA / PA 路径
+- 如果 Title Type = Individual Title / Strata Title，则走 MOT 路径
+
+========================
+七、文档模块特点
+========================
+Documents 模块不是简单上传下载，而是文件自动化引擎：
+
+1. 支持 DOCX 模板
+2. 支持 PDF 模板填值
+3. 支持变量绑定
+4. 变量来自 case / project / developer / client / purchasers / loan data
+5. 模板层级包括：
+   - system document
+   - firm document
+   - master document / template library
+6. 支持 document instance
+7. 支持导出 docx / pdf
+8. 所有文档动作要写 document audit logs
+
+========================
+八、账务模块特点
+========================
+Accounting 不是简单收款记录，而是律师楼实务账务系统：
+
+1. Quotation
+2. Invoice
+3. e-Invoice tracking
+4. Payment Voucher
+5. Client Account
+6. Office Account
+7. Ledger
+8. Payment Tracking
+9. Trust / office transfer with approval
+
+Payment Voucher 状态流程：
+- Draft
+- Prepared
+- Approved by Lawyer
+- Approved by Partner
+- Submitted to Account Dept
+- Paid
+- File Returned to Incharge
+- Locked
+
+每个阶段要记录：
+- date
+- time
+- by whom
+- duration in hours
+
+规则：
+- client account 与 office account 必须分开
+- client account 转 office account 时，要走 internal voucher，并需 partner approval
+- 若 trust / client account 余额不足，不应默认允许付款，除非 partner override
+
+========================
+九、Communication Hub
+========================
+Communication Hub 应集中管理：
+1. Email（类似 Outlook 风格）
+2. WhatsApp（firm 用自己的号码联系客户）
+3. Internal Chat（firm 内部 / firm 与 founder team）
+
+需支持：
+- thread
+- 附件
+- 图片
+- 文件
+- 状态追踪
+- 后续可扩展模板消息
+
+========================
+十、Founder 平台监控
+========================
+Founder 需要能看到：
+- firm 数量
+- 活跃用户
+- platform connections
+- alerts
+- sync logs
+- usage snapshots
+- monthly summaries
+- 审计记录
+
+Founder 可进入 debug workspace 进行测试，但动作必须留痕。
+
+========================
+十一、开发要求
+========================
+不要直接开始乱写前端页面。
+先输出以下内容让我确认：
+
+1. 你对整个系统的理解摘要
+2. 模块树
+3. 页面树
+4. 数据表 / 实体关系建议
+5. 角色权限矩阵
+6. workflow 设计
+7. 分阶段开发计划
+8. 你认为有歧义或需要确认的地方
+
+等我确认后，再开始进入数据库设计和模块开发。
