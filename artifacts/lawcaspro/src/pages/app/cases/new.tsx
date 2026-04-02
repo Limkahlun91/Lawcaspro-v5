@@ -177,7 +177,7 @@ export default function NewCasePage() {
       spaPrice: purchasePrice ? Number(purchasePrice) : undefined,
       assignedLawyerId: Number(assignedLawyerId),
       assignedClerkId: resolvedClerkId,
-      purchaserIds: [] as number[],
+      purchasers: validPurchasers.map(p => ({ name: p.name.trim(), ic: p.ic.trim() || undefined })),
       caseType,
       parcelNo,
       spaDetails: {
@@ -238,7 +238,7 @@ export default function NewCasePage() {
     };
 
     try {
-      await createCase.mutateAsync(payload as Parameters<typeof createCase.mutateAsync>[0]);
+      await createCase.mutateAsync({ data: payload });
       queryClient.invalidateQueries({ queryKey: ["cases"] });
       toast({ title: "Case created successfully" });
       navigate("/app/cases");

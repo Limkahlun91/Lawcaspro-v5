@@ -940,7 +940,8 @@ export const CreateCaseBody = zod.object({
   spaPrice: zod.number().optional(),
   assignedLawyerId: zod.number(),
   assignedClerkId: zod.number().optional(),
-  purchaserIds: zod.array(zod.number()),
+  purchaserIds: zod.array(zod.number()).optional(),
+  purchasers: zod.array(zod.object({ name: zod.string(), ic: zod.string().optional() })).optional(),
 });
 
 /**

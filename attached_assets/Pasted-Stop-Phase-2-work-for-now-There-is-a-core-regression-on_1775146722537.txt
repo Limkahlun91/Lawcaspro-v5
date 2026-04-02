@@ -1,0 +1,73 @@
+Stop Phase 2 work for now.
+
+There is a core regression on Create New Case that must be fixed first before any more enterprise modules continue.
+
+Observed live issue:
+On /app/cases/new, after selecting Project and Case Type and filling Parcel/Unit No., submit returns HTTP 400 with required-field validation errors for:
+- projectId
+- developerId
+- purchaseMode
+- titleType
+- assignedLawyerId
+- purchaserIds
+
+This is a core intake regression. New case creation must work reliably before AML/KYC, workflow 2.0, or any later phase continues.
+
+==================================================
+P0 — CREATE CASE REGRESSION FIX
+==================================================
+
+Investigate and fix this end-to-end.
+
+1. Root cause audit
+Identify exactly where the mismatch happens:
+- frontend form state
+- field names
+- payload transformer
+- dropdown value mapping
+- derived values from selected project
+- backend validator / API contract
+- default values / missing hidden fields
+
+2. Required behavior
+When creating a new case:
+- selected Project must submit a real projectId
+- developerId must be auto-derived from the selected project if project owns developer
+- purchaseMode must be explicitly captured or correctly derived
+- titleType must be explicitly captured or correctly derived
+- at least one assigned lawyer must be selectable and submitted correctly
+- at least one purchaser must be selectable and submitted correctly
+- frontend must block submit with clear inline validation before sending invalid payload
+- backend and frontend field names must exactly match
+
+3. UI/UX correction
+Audit the Create New Case page and fix all required inputs:
+- if assigned lawyer and purchaser selection are missing from UI, add them
+- if purchaseMode/titleType are hidden but required by backend, expose or derive them properly
+- if developerId should be derived from project, do not require the user to choose it separately unless business logic truly needs it
+- show inline validation under the relevant fields, not raw JSON HTTP 400 dumps
+
+4. API contract correction
+- Align frontend payload with backend schema exactly
+- If the backend contract is wrong or outdated, correct it
+- If current field names are legacy names, normalize them
+- Do not allow “label text only” values where numeric IDs are required
+
+5. Regression tests
+Add automated tests for:
+- successful case creation with valid project/lawyer/purchaser selections
+- frontend payload includes all required IDs
+- developerId derivation from project
+- validation failure shown inline when required selections are missing
+- no raw JSON error dump shown to the user on normal validation errors
+
+6. Evidence package required
+When done, provide:
+- exact backend files changed
+- exact frontend files changed
+- exact schema/validator changes
+- exact tests added
+- a before/after explanation of why projectId/developerId/purchaseMode/titleType/assignedLawyerId/purchaserIds were missing
+- confirmation that /app/cases/new now creates a case successfully end-to-end
+
+Do not continue Phase 2 until this regression is fixed and verified.

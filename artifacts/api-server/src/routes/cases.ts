@@ -169,14 +169,34 @@ router.get("/cases", requireAuth, requireFirmUser, async (req: AuthRequest, res)
 router.post("/cases", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
   const parsed = CreateCaseBody.safeParse(req.body);
   if (!parsed.success) {
-    res.status(400).json({ error: parsed.error.message });
+    res.status(400).json({ error: "Validation failed", fields: parsed.error.flatten().fieldErrors });
     return;
   }
 
-  const { projectId, developerId, purchaseMode, titleType, spaPrice, assignedLawyerId, assignedClerkId, purchaserIds } = parsed.data;
+  const { projectId, developerId, purchaseMode, titleType, spaPrice, assignedLawyerId, assignedClerkId, purchaserIds, purchasers } = parsed.data;
 
-  if (!purchaserIds || purchaserIds.length === 0) {
-    res.status(400).json({ error: "At least one purchaser is required" });
+  // Resolve purchaser client IDs: either use provided IDs or create clients inline
+  let resolvedPurchaserIds: number[] = purchaserIds ?? [];
+
+  if (resolvedPurchaserIds.length === 0 && purchasers && purchasers.length > 0) {
+    // Create client records from inline purchaser data
+    for (const p of purchasers) {
+      if (!p.name.trim()) continue;
+      const [client] = await db
+        .insert(clientsTable)
+        .values({
+          firmId: req.firmId!,
+          name: p.name.trim(),
+          icNo: p.ic?.trim() || null,
+          createdBy: req.userId,
+        })
+        .returning();
+      resolvedPurchaserIds.push(client.id);
+    }
+  }
+
+  if (resolvedPurchaserIds.length === 0) {
+    res.status(400).json({ error: "At least one purchaser name is required" });
     return;
   }
 
@@ -212,10 +232,10 @@ router.post("/cases", requireAuth, requireFirmUser, async (req: AuthRequest, res
     })
     .returning();
 
-  for (let i = 0; i < purchaserIds.length; i++) {
+  for (let i = 0; i < resolvedPurchaserIds.length; i++) {
     await db.insert(casePurchasersTable).values({
       caseId: newCase.id,
-      clientId: purchaserIds[i],
+      clientId: resolvedPurchaserIds[i],
       role: i === 0 ? "main" : "joint",
       orderNo: i + 1,
     });

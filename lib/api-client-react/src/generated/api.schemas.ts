@@ -386,7 +386,8 @@ export interface CreateCaseBody {
   spaPrice?: number;
   assignedLawyerId: number;
   assignedClerkId?: number;
-  purchaserIds: number[];
+  purchaserIds?: number[];
+  purchasers?: { name: string; ic?: string }[];
 }
 
 export interface UpdateCaseBody {
