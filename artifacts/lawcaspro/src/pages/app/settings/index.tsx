@@ -6,15 +6,13 @@ import { Input } from "@/components/ui/input";
 import { Plus, Search } from "lucide-react";
 import { Link, useSearch } from "wouter";
 import { cn } from "@/lib/utils";
-import DocumentTemplates from "./DocumentTemplates";
 
-const TABS = ["Users", "Roles & Permissions", "Documents"] as const;
+const TABS = ["Users", "Roles & Permissions"] as const;
 type Tab = typeof TABS[number];
 
 const TAB_KEYS: Record<string, Tab> = {
   users: "Users",
   roles: "Roles & Permissions",
-  documents: "Documents",
 };
 
 export default function Settings() {
@@ -196,8 +194,6 @@ export default function Settings() {
         </div>
       )}
 
-      {/* Documents Tab */}
-      {activeTab === "Documents" && <DocumentTemplates />}
     </div>
   );
 }

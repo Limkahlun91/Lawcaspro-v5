@@ -11,6 +11,7 @@ import {
   BarChart, 
   ScrollText, 
   Settings,
+  FileText,
   LogOut,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -28,6 +29,7 @@ export function AppLayout({ children }: { children: ReactNode }) {
     { label: "Cases", href: "/app/cases", icon: Briefcase },
     { label: "Projects", href: "/app/projects", icon: Building2 },
     { label: "Developers", href: "/app/developers", icon: HardHat },
+    { label: "Documents", href: "/app/documents", icon: FileText },
     { label: "Communications", href: "/app/hub", icon: MessageSquare },
     { label: "Accounting", href: "/app/accounting", icon: Calculator },
     { label: "Reports", href: "/app/reports", icon: BarChart },
