@@ -14,7 +14,8 @@ import {
   BarChart, 
   ScrollText, 
   Settings,
-  LogOut
+  LogOut,
+  Inbox,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
@@ -39,6 +40,7 @@ export function AppLayout({ children }: { children: ReactNode }) {
     { label: "Reports", href: "/app/reports", icon: BarChart },
     { label: "Audit Logs", href: "/app/audit-logs", icon: ScrollText },
     { label: "Settings", href: "/app/settings", icon: Settings },
+    { label: "Communication Hub", href: "/app/hub", icon: Inbox },
   ];
 
   return (

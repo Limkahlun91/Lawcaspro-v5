@@ -53,6 +53,9 @@ All tables created in PostgreSQL:
 | `case_documents` | Generated/uploaded documents per case |
 | `case_billing_entries` | Per-case billing entries (legal fees, disbursements, stamp duty, etc.) |
 | `case_communications` | Per-case communication log (email, WhatsApp, phone, letter, portal) |
+| `platform_documents` | System documents uploaded by founder, shared with all/specific firms |
+| `platform_messages` | Direct messages between founder and law firms (bidirectional) |
+| `platform_message_attachments` | File attachments on platform messages (PDF, Word, Excel, images) |
 
 ## API Routes (all under /api prefix)
 
@@ -67,6 +70,20 @@ All tables created in PostgreSQL:
 - `GET /api/platform/firms/:firmId` — Firm detail
 - `PATCH /api/platform/firms/:firmId` — Update firm
 - `GET /api/platform/stats` — Platform-level statistics
+- `GET /api/platform/firms/:firmId/users` — List all users in a firm
+- `POST /api/platform/firms/:firmId/users/:userId/reset-password` — Reset a firm user's password
+- `GET /api/platform/documents` — List system documents (optionally filter by firmId)
+- `POST /api/platform/documents` — Upload a system document (via object storage)
+- `DELETE /api/platform/documents/:docId` — Delete a system document
+- `GET /api/platform/messages` — List messages (founder ↔ all firms; filter by firmId)
+- `POST /api/platform/messages` — Send message from founder to a firm (with attachments)
+- `PATCH /api/platform/messages/:msgId/read` — Mark message as read
+
+### Communication Hub (Firm users)
+- `GET /api/hub/messages` — Firm's message thread with Lawcaspro
+- `POST /api/hub/messages` — Firm sends message to Lawcaspro (with attachments)
+- `PATCH /api/hub/messages/:msgId/read` — Mark incoming message as read
+- `GET /api/hub/documents` — List system documents available to the firm
 
 ### Firm Workspace
 - `GET /api/dashboard` — Firm dashboard stats
@@ -151,6 +168,8 @@ Step paths: `common` → `loan` (if loan) → `mot` (individual/strata) or `noa_
 - [x] **Phase 4**: Reporting — `/reports/overview` aggregation, Reports page with Recharts (cases by status, by month, lawyer workload, workflow completion, billing totals, comms pie chart)
 - [x] **Phase 5**: Communications — `case_communications` table, per-case comms log (email/WhatsApp/phone/letter/portal), firm-wide Communications Hub with channel filter
 - [x] **Phase 6**: Platform monitoring — enhanced with real metrics (Documents Generated), per-tenant breakdown (Users, Cases, Docs, Billing, Comms columns)
+- [x] **Founder Features**: Firm user management (list users per firm, reset any user's password), System Documents page (upload/download/delete platform docs shared with firms), Communication Hub (founder ↔ firm bidirectional messaging with multi-format file attachments)
+- [x] **Firm Hub**: `/app/hub` page with Messages tab (thread with Lawcaspro, compose/read, mark-as-read) and System Documents tab (view/download documents shared by platform)
 
 ## Design Decisions
 

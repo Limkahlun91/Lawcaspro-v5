@@ -17,6 +17,8 @@ import NewFirm from "@/pages/platform/firms/new";
 import FirmDetail from "@/pages/platform/firms/detail";
 import PlatformMonitoring from "@/pages/platform/monitoring";
 import PlatformAuditLogs from "@/pages/platform/audit-logs";
+import PlatformDocuments from "@/pages/platform/documents";
+import PlatformMessages from "@/pages/platform/messages";
 
 // App Pages
 import AppDashboard from "@/pages/app/dashboard";
@@ -45,6 +47,7 @@ import Settings from "@/pages/app/settings";
 import Communications from "@/pages/app/communications";
 import Accounting from "@/pages/app/accounting";
 import Reports from "@/pages/app/reports";
+import Hub from "@/pages/app/hub";
 
 const queryClient = new QueryClient();
 
@@ -57,6 +60,8 @@ function PlatformRoutes() {
           <Route path="/platform/firms/new" component={NewFirm} />
           <Route path="/platform/firms/:id" component={FirmDetail} />
           <Route path="/platform/firms" component={FirmsList} />
+          <Route path="/platform/documents" component={PlatformDocuments} />
+          <Route path="/platform/messages" component={PlatformMessages} />
           <Route path="/platform/monitoring" component={PlatformMonitoring} />
           <Route path="/platform/audit-logs" component={PlatformAuditLogs} />
           <Route path="/platform/*" component={NotFound} />
@@ -99,6 +104,7 @@ function AppRoutes() {
           <Route path="/app/reports" component={Reports} />
           <Route path="/app/audit-logs" component={AuditLogs} />
           <Route path="/app/settings" component={Settings} />
+          <Route path="/app/hub" component={Hub} />
           
           <Route path="/app/*" component={NotFound} />
         </Switch>

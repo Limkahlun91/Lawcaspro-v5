@@ -15,6 +15,7 @@ import accountingRouter from "./accounting";
 import communicationsRouter from "./communications";
 import reportsRouter from "./reports";
 import auditRouter from "./audit";
+import hubRouter from "./hub";
 
 const router: IRouter = Router();
 
@@ -34,5 +35,6 @@ router.use(accountingRouter);
 router.use(communicationsRouter);
 router.use(reportsRouter);
 router.use(auditRouter);
+router.use(hubRouter);
 
 export default router;
