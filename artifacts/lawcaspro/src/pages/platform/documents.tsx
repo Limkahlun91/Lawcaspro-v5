@@ -103,46 +103,50 @@ function FolderTreeItem({
     <div>
       <div
         className={cn(
-          "group flex items-center gap-1 py-2 px-2 rounded-md cursor-pointer text-sm transition-colors",
+          "group rounded-md cursor-pointer text-sm transition-colors",
           isSelected ? "bg-amber-50 border border-amber-200" : "hover:bg-slate-50 border border-transparent",
           folder.isDisabled && "opacity-50"
         )}
-        style={{ paddingLeft: `${depth * 16 + 8}px` }}
         onClick={() => onSelect(folder.id)}
       >
-        {children.length > 0 && (
-          <button
-            onClick={e => { e.stopPropagation(); setExpanded(!expanded); }}
-            className="p-0.5 hover:bg-slate-200 rounded shrink-0"
-          >
-            <ChevronRight className={cn("w-3 h-3 transition-transform", expanded && "rotate-90")} />
+        <div className="flex items-center gap-1.5 py-2 px-2" style={{ paddingLeft: `${depth * 16 + 8}px` }}>
+          {children.length > 0 ? (
+            <button
+              onClick={e => { e.stopPropagation(); setExpanded(!expanded); }}
+              className="p-0.5 hover:bg-slate-200 rounded shrink-0"
+            >
+              <ChevronRight className={cn("w-3.5 h-3.5 transition-transform", expanded && "rotate-90")} />
+            </button>
+          ) : (
+            <span className="w-[18px]" />
+          )}
+          {isSelected ? (
+            <FolderOpen className="w-4 h-4 text-amber-500 shrink-0" />
+          ) : (
+            <Folder className="w-4 h-4 text-slate-400 shrink-0" />
+          )}
+          <span className={cn("font-medium flex-1 break-words leading-snug", isSelected ? "text-amber-700" : "text-slate-700")}>
+            {folder.name}
+          </span>
+        </div>
+        <div
+          className="hidden group-hover:flex items-center gap-1 pb-1.5 px-2"
+          style={{ paddingLeft: `${depth * 16 + 34}px` }}
+        >
+          <button onClick={e => { e.stopPropagation(); onReorder(folder.id, "up"); }} className="p-1 hover:bg-slate-200 rounded" title="Move up">
+            <ChevronUp className="w-3.5 h-3.5 text-slate-400" />
           </button>
-        )}
-        {children.length === 0 && <span className="w-4" />}
-        {isSelected ? (
-          <FolderOpen className="w-4 h-4 text-amber-500 shrink-0" />
-        ) : (
-          <Folder className="w-4 h-4 text-slate-400 shrink-0" />
-        )}
-        <span className={cn("font-medium truncate flex-1", isSelected ? "text-amber-700" : "text-slate-700")}>
-          {folder.name}
-        </span>
-
-        <div className="hidden group-hover:flex items-center gap-0.5 shrink-0">
-          <button onClick={e => { e.stopPropagation(); onReorder(folder.id, "up"); }} className="p-0.5 hover:bg-slate-200 rounded" title="Move up">
-            <ChevronUp className="w-3 h-3 text-slate-400" />
+          <button onClick={e => { e.stopPropagation(); onReorder(folder.id, "down"); }} className="p-1 hover:bg-slate-200 rounded" title="Move down">
+            <ChevronDown className="w-3.5 h-3.5 text-slate-400" />
           </button>
-          <button onClick={e => { e.stopPropagation(); onReorder(folder.id, "down"); }} className="p-0.5 hover:bg-slate-200 rounded" title="Move down">
-            <ChevronDown className="w-3 h-3 text-slate-400" />
+          <button onClick={e => { e.stopPropagation(); onEdit(folder); }} className="p-1 hover:bg-slate-200 rounded" title="Rename">
+            <Pencil className="w-3.5 h-3.5 text-slate-400" />
           </button>
-          <button onClick={e => { e.stopPropagation(); onEdit(folder); }} className="p-0.5 hover:bg-slate-200 rounded" title="Edit">
-            <Pencil className="w-3 h-3 text-slate-400" />
+          <button onClick={e => { e.stopPropagation(); onToggleDisable(folder); }} className="p-1 hover:bg-slate-200 rounded" title={folder.isDisabled ? "Enable" : "Disable"}>
+            {folder.isDisabled ? <Eye className="w-3.5 h-3.5 text-green-500" /> : <EyeOff className="w-3.5 h-3.5 text-slate-400" />}
           </button>
-          <button onClick={e => { e.stopPropagation(); onToggleDisable(folder); }} className="p-0.5 hover:bg-slate-200 rounded" title={folder.isDisabled ? "Enable" : "Disable"}>
-            {folder.isDisabled ? <Eye className="w-3 h-3 text-green-500" /> : <EyeOff className="w-3 h-3 text-slate-400" />}
-          </button>
-          <button onClick={e => { e.stopPropagation(); onAddSub(folder.id); }} className="p-0.5 hover:bg-slate-200 rounded" title="Add subfolder">
-            <FolderPlus className="w-3 h-3 text-slate-400" />
+          <button onClick={e => { e.stopPropagation(); onAddSub(folder.id); }} className="p-1 hover:bg-slate-200 rounded" title="Add subfolder">
+            <FolderPlus className="w-3.5 h-3.5 text-slate-400" />
           </button>
         </div>
       </div>
@@ -440,7 +444,7 @@ export default function PlatformDocuments() {
       </div>
 
       <div className="flex gap-6 min-h-[500px]">
-        <div className="w-72 shrink-0">
+        <div className="w-80 shrink-0">
           <Card>
             <CardContent className="p-4">
               <div className="flex items-center justify-between mb-3">
