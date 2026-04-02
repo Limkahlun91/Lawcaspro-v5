@@ -13,7 +13,11 @@ Lawcaspro is built as a full-stack monorepo using `pnpm` workspaces. The fronten
 
 The architecture supports multi-tenancy with distinct routing for the `/platform/*` founder workspace and `/app/*` firm workspace. Firm context is derived from the session, not the URL. Document generation leverages `docxtemplater` for DOCX files and `pdf-lib` for PDFs, including a visual PDF mapping editor for overlaying text onto PDF templates with variable replacement.
 
-Key UI/UX decisions include a professional, data-rich interface with a dark navy/slate theme accented by amber/gold. Navigation is structured with a consolidated sidebar and tabbed layouts for settings and case details. Data modeling includes tables for firms, users, roles, permissions, developers, projects, clients, cases, and various case-related entities like workflow steps, notes, documents, billing entries, and communications. A workflow engine dynamically generates case steps based on `purchaseMode` and `titleType`.
+Key UI/UX decisions include a professional, data-rich interface with a dark navy/slate theme accented by amber/gold. Navigation is structured with a consolidated sidebar (with unread notification badges for Communications) and tabbed layouts for settings and case details. Data modeling includes tables for firms, users, roles, permissions, developers, projects, clients, cases, and various case-related entities like workflow steps, notes, documents, billing entries, communication threads, and thread messages. A workflow engine dynamically generates case steps based on `purchaseMode` and `titleType`.
+
+Communications follow a subject-based thread model: users create a "subject" (thread) per case, then chat within it. Unread tracking uses a `communication_read_status` table with per-user last-read timestamps. The sidebar shows an unread count badge that auto-refreshes every 30 seconds.
+
+Projects support full CRUD including edit via the PATCH endpoint. The edit page pre-fills all fields from the existing project and accepts all fields including phase, developerName, title metadata, location fields, and extraFields (property types).
 
 ## External Dependencies
 - **PostgreSQL**: Primary database for all application data, managed via Drizzle ORM.

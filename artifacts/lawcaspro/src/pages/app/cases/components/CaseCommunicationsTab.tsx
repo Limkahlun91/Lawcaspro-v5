@@ -1,14 +1,11 @@
-import { useState } from "react";
+import { useState, useRef, useEffect } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { Textarea } from "@/components/ui/textarea";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { useToast } from "@/hooks/use-toast";
-import { Plus, Trash2, Mail, MessageCircle, Phone, FileText, Globe } from "lucide-react";
+import { Plus, ArrowLeft, Send, Trash2, MessageCircle } from "lucide-react";
 
 const API_BASE = import.meta.env.BASE_URL.replace(/\/$/, "").replace(/^\/lawcaspro/, "") + "/api";
 
@@ -23,188 +20,260 @@ async function apiFetch(path: string, init?: RequestInit) {
   return res.json();
 }
 
-const TYPES = [
-  { value: "email", label: "Email", icon: Mail, color: "text-blue-600 bg-blue-50" },
-  { value: "whatsapp", label: "WhatsApp", icon: MessageCircle, color: "text-green-600 bg-green-50" },
-  { value: "phone", label: "Phone Call", icon: Phone, color: "text-amber-600 bg-amber-50" },
-  { value: "letter", label: "Letter", icon: FileText, color: "text-purple-600 bg-purple-50" },
-  { value: "portal", label: "Portal", icon: Globe, color: "text-cyan-600 bg-cyan-50" },
-];
+interface Thread {
+  id: number;
+  subject: string;
+  created_by_name: string;
+  message_count: number;
+  last_message_at: string | null;
+  last_message: string | null;
+  unread_count: number;
+  created_at: string;
+}
 
-const TYPE_MAP = Object.fromEntries(TYPES.map((t) => [t.value, t]));
+interface Message {
+  id: number;
+  notes: string;
+  logged_by_name: string;
+  created_at: string;
+}
 
 export default function CaseCommunicationsTab({ caseId }: { caseId: number }) {
   const { toast } = useToast();
   const qc = useQueryClient();
-  const [addOpen, setAddOpen] = useState(false);
-  const [form, setForm] = useState({
-    type: "email",
-    direction: "outgoing",
-    recipientName: "",
-    recipientContact: "",
-    subject: "",
-    notes: "",
-    sentAt: new Date().toISOString().slice(0, 16),
+  const [createOpen, setCreateOpen] = useState(false);
+  const [newSubject, setNewSubject] = useState("");
+  const [activeThreadId, setActiveThreadId] = useState<number | null>(null);
+  const [messageInput, setMessageInput] = useState("");
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+
+  const { data: threads = [], isLoading } = useQuery<Thread[]>({
+    queryKey: ["case-threads", caseId],
+    queryFn: () => apiFetch(`/cases/${caseId}/threads`),
   });
 
-  const { data: comms = [], isLoading } = useQuery<Record<string, unknown>[]>({
-    queryKey: ["case-communications", caseId],
-    queryFn: () => apiFetch(`/cases/${caseId}/communications`),
+  const activeThread = threads.find(t => t.id === activeThreadId);
+
+  const { data: messages = [], isLoading: messagesLoading } = useQuery<Message[]>({
+    queryKey: ["thread-messages", activeThreadId],
+    queryFn: () => apiFetch(`/cases/${caseId}/threads/${activeThreadId}/messages`),
+    enabled: !!activeThreadId,
   });
 
-  const addMutation = useMutation({
-    mutationFn: (data: object) => apiFetch(`/cases/${caseId}/communications`, { method: "POST", body: JSON.stringify(data) }),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["case-communications", caseId] });
-      qc.invalidateQueries({ queryKey: ["communications"] });
-      setAddOpen(false);
-      setForm({ type: "email", direction: "outgoing", recipientName: "", recipientContact: "", subject: "", notes: "", sentAt: new Date().toISOString().slice(0, 16) });
-      toast({ title: "Communication logged" });
+  useEffect(() => {
+    if (activeThreadId && messages.length > 0) {
+      messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    }
+  }, [messages, activeThreadId]);
+
+  useEffect(() => {
+    if (activeThreadId) {
+      apiFetch(`/cases/${caseId}/threads/${activeThreadId}/read`, { method: "POST" }).then(() => {
+        qc.invalidateQueries({ queryKey: ["case-threads", caseId] });
+        qc.invalidateQueries({ queryKey: ["unread-count"] });
+      });
+    }
+  }, [activeThreadId, caseId, qc]);
+
+  const createThread = useMutation({
+    mutationFn: (subject: string) => apiFetch(`/cases/${caseId}/threads`, { method: "POST", body: JSON.stringify({ subject }) }),
+    onSuccess: (thread) => {
+      qc.invalidateQueries({ queryKey: ["case-threads", caseId] });
+      setCreateOpen(false);
+      setNewSubject("");
+      setActiveThreadId(thread.id);
+      toast({ title: "Subject created" });
     },
     onError: (err) => toast({ title: "Error", description: String(err), variant: "destructive" }),
   });
 
-  const deleteMutation = useMutation({
-    mutationFn: (commId: number) => apiFetch(`/cases/${caseId}/communications/${commId}`, { method: "DELETE" }),
+  const sendMessage = useMutation({
+    mutationFn: (notes: string) => apiFetch(`/cases/${caseId}/threads/${activeThreadId}/messages`, { method: "POST", body: JSON.stringify({ notes }) }),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["case-communications", caseId] });
-      qc.invalidateQueries({ queryKey: ["communications"] });
-      toast({ title: "Record deleted" });
+      qc.invalidateQueries({ queryKey: ["thread-messages", activeThreadId] });
+      qc.invalidateQueries({ queryKey: ["case-threads", caseId] });
+      qc.invalidateQueries({ queryKey: ["unread-count"] });
+      setMessageInput("");
+    },
+    onError: (err) => toast({ title: "Error", description: String(err), variant: "destructive" }),
+  });
+
+  const deleteThread = useMutation({
+    mutationFn: (threadId: number) => apiFetch(`/cases/${caseId}/threads/${threadId}`, { method: "DELETE" }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["case-threads", caseId] });
+      qc.invalidateQueries({ queryKey: ["unread-count"] });
+      setActiveThreadId(null);
+      toast({ title: "Subject deleted" });
     },
   });
 
-  function handleAdd() {
-    addMutation.mutate({
-      type: form.type,
-      direction: form.direction,
-      recipientName: form.recipientName || undefined,
-      recipientContact: form.recipientContact || undefined,
-      subject: form.subject || undefined,
-      notes: form.notes || undefined,
-      sentAt: form.sentAt ? new Date(form.sentAt).toISOString() : undefined,
-    });
+  const handleSend = () => {
+    if (!messageInput.trim()) return;
+    sendMessage.mutate(messageInput);
+  };
+
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      handleSend();
+    }
+  };
+
+  const formatTime = (dateStr: string) => {
+    const d = new Date(dateStr);
+    const now = new Date();
+    const isToday = d.toDateString() === now.toDateString();
+    if (isToday) return d.toLocaleTimeString("en-MY", { hour: "2-digit", minute: "2-digit" });
+    return d.toLocaleDateString("en-MY", { day: "2-digit", month: "short" });
+  };
+
+  if (activeThreadId && activeThread) {
+    return (
+      <div className="space-y-4">
+        <Card className="h-[600px] flex flex-col">
+          <div className="flex items-center gap-3 px-4 py-3 border-b border-slate-200 shrink-0">
+            <Button variant="ghost" size="sm" className="h-8 w-8 p-0" onClick={() => setActiveThreadId(null)}>
+              <ArrowLeft className="w-4 h-4" />
+            </Button>
+            <div className="flex-1 min-w-0">
+              <h3 className="text-sm font-semibold text-slate-900 truncate">{activeThread.subject}</h3>
+              <p className="text-xs text-slate-500">{activeThread.message_count} messages</p>
+            </div>
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-8 w-8 p-0 text-slate-400 hover:text-red-500"
+              onClick={() => { if (confirm("Delete this subject and all its messages?")) deleteThread.mutate(activeThreadId); }}
+            >
+              <Trash2 className="w-3.5 h-3.5" />
+            </Button>
+          </div>
+
+          <div className="flex-1 overflow-y-auto px-4 py-4 space-y-3">
+            {messagesLoading ? (
+              <div className="text-center py-8 text-slate-500">Loading...</div>
+            ) : messages.length === 0 ? (
+              <div className="text-center py-8 text-slate-500 text-sm">No messages yet. Start the conversation below.</div>
+            ) : (
+              messages.map((msg) => (
+                <div key={msg.id} className="flex gap-3">
+                  <div className="w-7 h-7 rounded-full bg-slate-200 flex items-center justify-center text-xs font-semibold text-slate-600 shrink-0 mt-0.5">
+                    {(msg.logged_by_name || "?")[0]}
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm font-medium text-slate-900">{msg.logged_by_name || "Unknown"}</span>
+                      <span className="text-xs text-slate-400">{formatTime(msg.created_at)}</span>
+                    </div>
+                    <p className="text-sm text-slate-700 mt-0.5 whitespace-pre-wrap">{msg.notes}</p>
+                  </div>
+                </div>
+              ))
+            )}
+            <div ref={messagesEndRef} />
+          </div>
+
+          <div className="px-4 py-3 border-t border-slate-200 shrink-0">
+            <div className="flex gap-2">
+              <Input
+                placeholder="Type a message..."
+                value={messageInput}
+                onChange={(e) => setMessageInput(e.target.value)}
+                onKeyDown={handleKeyDown}
+                className="flex-1"
+              />
+              <Button
+                size="sm"
+                className="bg-amber-500 hover:bg-amber-600 h-10 px-4"
+                onClick={handleSend}
+                disabled={!messageInput.trim() || sendMessage.isPending}
+              >
+                <Send className="w-4 h-4" />
+              </Button>
+            </div>
+          </div>
+        </Card>
+      </div>
+    );
   }
 
   return (
     <div className="space-y-4">
       <Card>
-        <CardHeader className="flex flex-row items-center justify-between pb-4">
-          <CardTitle>Communication Log</CardTitle>
-          <Button size="sm" className="bg-amber-500 hover:bg-amber-600 gap-1.5" onClick={() => setAddOpen(true)}>
+        <div className="flex items-center justify-between px-6 py-4 border-b border-slate-200">
+          <h3 className="text-base font-semibold text-slate-900">Communication Subjects</h3>
+          <Button size="sm" className="bg-amber-500 hover:bg-amber-600 gap-1.5" onClick={() => setCreateOpen(true)}>
             <Plus className="w-3.5 h-3.5" />
-            Log Communication
+            New Subject
           </Button>
-        </CardHeader>
-        <CardContent>
+        </div>
+        <CardContent className="p-0">
           {isLoading ? (
             <div className="text-slate-500 py-8 text-center">Loading...</div>
-          ) : comms.length === 0 ? (
-            <div className="text-center py-10 text-slate-500">
+          ) : threads.length === 0 ? (
+            <div className="text-center py-12 text-slate-500">
               <MessageCircle className="w-8 h-8 text-slate-300 mx-auto mb-2" />
-              <p className="font-medium text-slate-600 mb-1">No communications logged</p>
-              <p className="text-sm">Record emails, WhatsApp messages, phone calls, and letters sent for this case.</p>
+              <p className="font-medium text-slate-600 mb-1">No subjects yet</p>
+              <p className="text-sm">Create a subject to start a conversation thread for this case.</p>
             </div>
           ) : (
-            <div className="space-y-1">
-              {comms.map((comm) => {
-                const typeInfo = TYPE_MAP[comm.type as string] ?? TYPE_MAP.email;
-                const Icon = typeInfo.icon;
-                const sentAt = new Date(comm.sent_at as string ?? comm.created_at as string);
-                return (
-                  <div key={String(comm.id)} className="flex items-start gap-3 py-3 px-2 rounded-lg hover:bg-slate-50 group">
-                    <div className={`w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0 mt-0.5 ${typeInfo.color}`}>
-                      <Icon className="w-4 h-4" />
-                    </div>
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-center gap-2 flex-wrap">
-                        <span className="text-xs font-semibold uppercase tracking-wide text-slate-500">{typeInfo.label}</span>
-                        <span className={`text-xs px-1.5 py-0.5 rounded font-medium ${comm.direction === "incoming" ? "bg-blue-50 text-blue-700" : "bg-slate-100 text-slate-600"}`}>
-                          {comm.direction === "incoming" ? "Incoming" : "Outgoing"}
+            <div className="divide-y divide-slate-100">
+              {threads.map((thread) => (
+                <div
+                  key={thread.id}
+                  className="flex items-center gap-4 px-6 py-4 hover:bg-slate-50 cursor-pointer transition-colors"
+                  onClick={() => setActiveThreadId(thread.id)}
+                >
+                  <div className="w-9 h-9 rounded-lg bg-slate-100 flex items-center justify-center shrink-0">
+                    <MessageCircle className="w-4 h-4 text-slate-500" />
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm font-semibold text-slate-900 truncate">{thread.subject}</span>
+                      {Number(thread.unread_count) > 0 && (
+                        <span className="inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 text-[10px] font-bold text-white bg-amber-500 rounded-full">
+                          {thread.unread_count}
                         </span>
-                        {comm.subject && <span className="text-sm font-medium text-slate-900">{String(comm.subject)}</span>}
-                      </div>
-                      <div className="flex items-center gap-2 mt-0.5 text-xs text-slate-500 flex-wrap">
-                        {comm.recipient_name && <span>{String(comm.recipient_name)}</span>}
-                        {comm.recipient_contact && <span className="text-slate-400">{String(comm.recipient_contact)}</span>}
-                        {comm.notes && <span className="italic truncate max-w-xs">"{String(comm.notes)}"</span>}
-                      </div>
-                      {comm.logged_by_name && (
-                        <div className="text-xs text-slate-400 mt-0.5">Logged by {String(comm.logged_by_name)}</div>
                       )}
                     </div>
-                    <div className="text-right shrink-0">
-                      <div className="text-xs text-slate-600">{sentAt.toLocaleDateString("en-MY")}</div>
-                      <div className="text-xs text-slate-400">{sentAt.toLocaleTimeString("en-MY", { hour: "2-digit", minute: "2-digit" })}</div>
+                    <div className="flex items-center gap-2 mt-0.5">
+                      <span className="text-xs text-slate-500 truncate max-w-xs">{thread.last_message || "No messages yet"}</span>
                     </div>
-                    <Button
-                      size="icon"
-                      variant="ghost"
-                      className="h-7 w-7 text-slate-300 hover:text-red-500 shrink-0 opacity-0 group-hover:opacity-100"
-                      onClick={() => deleteMutation.mutate(Number(comm.id))}
-                    >
-                      <Trash2 className="w-3.5 h-3.5" />
-                    </Button>
                   </div>
-                );
-              })}
+                  <div className="text-right shrink-0">
+                    <div className="text-xs text-slate-400">
+                      {thread.last_message_at ? formatTime(thread.last_message_at) : formatTime(thread.created_at)}
+                    </div>
+                    <div className="text-xs text-slate-400 mt-0.5">{thread.message_count} messages</div>
+                  </div>
+                </div>
+              ))}
             </div>
           )}
         </CardContent>
       </Card>
 
-      <Dialog open={addOpen} onOpenChange={setAddOpen}>
+      <Dialog open={createOpen} onOpenChange={setCreateOpen}>
         <DialogContent className="sm:max-w-md">
-          <DialogHeader><DialogTitle>Log Communication</DialogTitle></DialogHeader>
+          <DialogHeader><DialogTitle>New Communication Subject</DialogTitle></DialogHeader>
           <div className="space-y-4 py-2">
-            <div className="grid grid-cols-2 gap-3">
-              <div className="space-y-1.5">
-                <Label>Channel</Label>
-                <Select value={form.type} onValueChange={(v) => setForm(f => ({ ...f, type: v }))}>
-                  <SelectTrigger><SelectValue /></SelectTrigger>
-                  <SelectContent>
-                    {TYPES.map((t) => (
-                      <SelectItem key={t.value} value={t.value}>{t.label}</SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
-              <div className="space-y-1.5">
-                <Label>Direction</Label>
-                <Select value={form.direction} onValueChange={(v) => setForm(f => ({ ...f, direction: v }))}>
-                  <SelectTrigger><SelectValue /></SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="outgoing">Outgoing</SelectItem>
-                    <SelectItem value="incoming">Incoming</SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
-            </div>
             <div className="space-y-1.5">
-              <Label>Subject / Purpose <span className="text-slate-400 text-xs">(optional)</span></Label>
-              <Input placeholder="e.g. SPA Stamping Receipt Sent" value={form.subject} onChange={(e) => setForm(f => ({ ...f, subject: e.target.value }))} />
-            </div>
-            <div className="grid grid-cols-2 gap-3">
-              <div className="space-y-1.5">
-                <Label>Recipient Name <span className="text-slate-400 text-xs">(optional)</span></Label>
-                <Input placeholder="e.g. Lee Chong Wei" value={form.recipientName} onChange={(e) => setForm(f => ({ ...f, recipientName: e.target.value }))} />
-              </div>
-              <div className="space-y-1.5">
-                <Label>Contact <span className="text-slate-400 text-xs">(optional)</span></Label>
-                <Input placeholder="e.g. +6012-3456789" value={form.recipientContact} onChange={(e) => setForm(f => ({ ...f, recipientContact: e.target.value }))} />
-              </div>
-            </div>
-            <div className="space-y-1.5">
-              <Label>Notes <span className="text-slate-400 text-xs">(optional)</span></Label>
-              <Textarea placeholder="Brief notes about this communication..." value={form.notes} onChange={(e) => setForm(f => ({ ...f, notes: e.target.value }))} className="resize-none text-sm" rows={2} />
-            </div>
-            <div className="space-y-1.5">
-              <Label>Date & Time</Label>
-              <Input type="datetime-local" value={form.sentAt} onChange={(e) => setForm(f => ({ ...f, sentAt: e.target.value }))} />
+              <Input
+                placeholder="e.g., SPA Stamping Discussion, Title Transfer Follow-up"
+                value={newSubject}
+                onChange={(e) => setNewSubject(e.target.value)}
+                onKeyDown={(e) => { if (e.key === "Enter") createThread.mutate(newSubject); }}
+              />
             </div>
             <div className="flex justify-end gap-2 pt-2">
-              <Button variant="outline" onClick={() => setAddOpen(false)}>Cancel</Button>
-              <Button className="bg-amber-500 hover:bg-amber-600" onClick={handleAdd} disabled={addMutation.isPending}>
-                {addMutation.isPending ? "Saving..." : "Log"}
+              <Button variant="outline" onClick={() => setCreateOpen(false)}>Cancel</Button>
+              <Button
+                className="bg-amber-500 hover:bg-amber-600"
+                onClick={() => createThread.mutate(newSubject)}
+                disabled={!newSubject.trim() || createThread.isPending}
+              >
+                {createThread.isPending ? "Creating..." : "Create"}
               </Button>
             </div>
           </div>

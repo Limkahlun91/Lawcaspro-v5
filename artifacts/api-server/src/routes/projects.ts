@@ -128,22 +128,41 @@ router.patch("/projects/:projectId", requireAuth, requireFirmUser, async (req: A
     return;
   }
 
-  const parsed = UpdateProjectBody.safeParse(req.body);
-  if (!parsed.success) {
-    res.status(400).json({ error: parsed.error.message });
-    return;
-  }
-
-  const [proj] = await db
-    .update(projectsTable)
-    .set(parsed.data as Record<string, unknown>)
-    .where(eq(projectsTable.id, params.data.projectId))
-    .returning();
-
-  if (!proj || proj.firmId !== req.firmId) {
+  const [existing] = await db.select().from(projectsTable).where(
+    and(eq(projectsTable.id, params.data.projectId), eq(projectsTable.firmId, req.firmId!))
+  );
+  if (!existing) {
     res.status(404).json({ error: "Project not found" });
     return;
   }
+
+  const { name, developerId, projectType, titleType, titleSubtype, masterTitleNumber, masterTitleLandSize,
+    mukim, daerah, negeri, phase, developerName, landUse, developmentCondition, unitCategory, extraFields } = req.body;
+
+  const updateData: Record<string, unknown> = {};
+  if (name !== undefined) updateData.name = name;
+  if (developerId !== undefined) updateData.developerId = developerId;
+  if (projectType !== undefined) updateData.projectType = projectType;
+  if (titleType !== undefined) updateData.titleType = titleType;
+  if (titleSubtype !== undefined) updateData.titleSubtype = titleSubtype || null;
+  if (masterTitleNumber !== undefined) updateData.masterTitleNumber = masterTitleNumber || null;
+  if (masterTitleLandSize !== undefined) updateData.masterTitleLandSize = masterTitleLandSize || null;
+  if (mukim !== undefined) updateData.mukim = mukim || null;
+  if (daerah !== undefined) updateData.daerah = daerah || null;
+  if (negeri !== undefined) updateData.negeri = negeri || null;
+  if (phase !== undefined) updateData.phase = phase || null;
+  if (developerName !== undefined) updateData.developerName = developerName || null;
+  if (landUse !== undefined) updateData.landUse = landUse || null;
+  if (developmentCondition !== undefined) updateData.developmentCondition = developmentCondition || null;
+  if (unitCategory !== undefined) updateData.unitCategory = unitCategory || null;
+  if (extraFields !== undefined) updateData.extraFields = extraFields;
+  updateData.updatedAt = new Date();
+
+  const [proj] = await db
+    .update(projectsTable)
+    .set(updateData)
+    .where(and(eq(projectsTable.id, params.data.projectId), eq(projectsTable.firmId, req.firmId!)))
+    .returning();
 
   res.json(await enrichProject(proj));
 });

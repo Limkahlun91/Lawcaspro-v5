@@ -12,82 +12,168 @@ async function queryRows(query: ReturnType<typeof sql>): Promise<Record<string, 
   return [];
 }
 
-router.get("/communications", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
-  const { type, caseId, limit = "50" } = req.query as Record<string, string>;
+router.get("/cases/:caseId/threads", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+  const caseId = Number(req.params.caseId);
+  const firmId = req.firmId!;
   const rows = await queryRows(sql`
-    SELECT cc.*, c.reference_no, u.name as logged_by_name
-    FROM case_communications cc
-    JOIN cases c ON cc.case_id = c.id
-    LEFT JOIN users u ON cc.logged_by = u.id
-    WHERE cc.firm_id = ${req.firmId!}
-    ${type ? sql`AND cc.type = ${type}` : sql``}
-    ${caseId ? sql`AND cc.case_id = ${Number(caseId)}` : sql``}
-    ORDER BY COALESCE(cc.sent_at, cc.created_at) DESC
-    LIMIT ${Number(limit)}
+    SELECT t.*,
+      u.name as created_by_name,
+      (SELECT COUNT(*) FROM case_communications cc WHERE cc.thread_id = t.id AND cc.firm_id = ${firmId}) as message_count,
+      (SELECT MAX(cc.created_at) FROM case_communications cc WHERE cc.thread_id = t.id AND cc.firm_id = ${firmId}) as last_message_at,
+      (SELECT cc.notes FROM case_communications cc WHERE cc.thread_id = t.id AND cc.firm_id = ${firmId} ORDER BY cc.created_at DESC LIMIT 1) as last_message,
+      CASE WHEN rs.last_read_at IS NULL THEN
+        (SELECT COUNT(*) FROM case_communications cc WHERE cc.thread_id = t.id AND cc.firm_id = ${firmId})
+      ELSE
+        (SELECT COUNT(*) FROM case_communications cc WHERE cc.thread_id = t.id AND cc.firm_id = ${firmId} AND cc.created_at > rs.last_read_at)
+      END as unread_count
+    FROM communication_threads t
+    LEFT JOIN users u ON t.created_by = u.id
+    LEFT JOIN communication_read_status rs ON rs.thread_id = t.id AND rs.user_id = ${req.userId!}
+    WHERE t.case_id = ${caseId} AND t.firm_id = ${firmId}
+    ORDER BY COALESCE((SELECT MAX(cc2.created_at) FROM case_communications cc2 WHERE cc2.thread_id = t.id AND cc2.firm_id = ${firmId}), t.created_at) DESC
   `);
   res.json(rows);
 });
 
-router.get("/cases/:caseId/communications", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+router.post("/cases/:caseId/threads", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
   const caseId = Number(req.params.caseId);
-  const rows = await queryRows(sql`
-    SELECT cc.*, u.name as logged_by_name
-    FROM case_communications cc
-    LEFT JOIN users u ON cc.logged_by = u.id
-    WHERE cc.case_id = ${caseId} AND cc.firm_id = ${req.firmId!}
-    ORDER BY COALESCE(cc.sent_at, cc.created_at) DESC
-  `);
-  res.json(rows);
-});
+  const { subject } = req.body as { subject: string };
 
-router.post("/cases/:caseId/communications", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
-  const caseId = Number(req.params.caseId);
-  const { type, direction, recipientName, recipientContact, subject, notes, sentAt } = req.body as {
-    type: string;
-    direction?: string;
-    recipientName?: string;
-    recipientContact?: string;
-    subject?: string;
-    notes?: string;
-    sentAt?: string;
-  };
-
-  if (!type) {
-    res.status(400).json({ error: "type is required" });
+  if (!subject?.trim()) {
+    res.status(400).json({ error: "Subject is required" });
     return;
   }
 
   const rows = await queryRows(sql`
-    INSERT INTO case_communications (case_id, firm_id, type, direction, recipient_name, recipient_contact, subject, notes, sent_at, logged_by)
-    VALUES (
-      ${caseId}, ${req.firmId!}, ${type}, ${direction ?? "outgoing"},
-      ${recipientName ?? null}, ${recipientContact ?? null},
-      ${subject ?? null}, ${notes ?? null},
-      ${sentAt ? new Date(sentAt).toISOString() : new Date().toISOString()},
-      ${req.userId!}
-    )
+    INSERT INTO communication_threads (case_id, firm_id, subject, created_by)
+    VALUES (${caseId}, ${req.firmId!}, ${subject.trim()}, ${req.userId!})
     RETURNING *
+  `);
+  res.status(201).json(rows[0]);
+});
+
+router.delete("/cases/:caseId/threads/:threadId", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+  const threadId = Number(req.params.threadId);
+  const firmId = req.firmId!;
+
+  const check = await queryRows(sql`
+    SELECT id FROM communication_threads WHERE id = ${threadId} AND firm_id = ${firmId}
+  `);
+  if (!check[0]) {
+    res.status(404).json({ error: "Thread not found" });
+    return;
+  }
+
+  await queryRows(sql`DELETE FROM case_communications WHERE thread_id = ${threadId} AND firm_id = ${firmId}`);
+  await queryRows(sql`DELETE FROM communication_read_status WHERE thread_id = ${threadId}`);
+  await queryRows(sql`DELETE FROM communication_threads WHERE id = ${threadId} AND firm_id = ${firmId}`);
+
+  res.sendStatus(204);
+});
+
+router.get("/cases/:caseId/threads/:threadId/messages", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+  const threadId = Number(req.params.threadId);
+  const rows = await queryRows(sql`
+    SELECT cc.*, u.name as logged_by_name
+    FROM case_communications cc
+    LEFT JOIN users u ON cc.logged_by = u.id
+    WHERE cc.thread_id = ${threadId} AND cc.firm_id = ${req.firmId!}
+    ORDER BY cc.created_at ASC
+  `);
+  res.json(rows);
+});
+
+router.post("/cases/:caseId/threads/:threadId/messages", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+  const caseId = Number(req.params.caseId);
+  const threadId = Number(req.params.threadId);
+  const { notes } = req.body as { notes: string };
+
+  if (!notes?.trim()) {
+    res.status(400).json({ error: "Message is required" });
+    return;
+  }
+
+  const rows = await queryRows(sql`
+    INSERT INTO case_communications (case_id, firm_id, thread_id, type, direction, notes, logged_by)
+    VALUES (${caseId}, ${req.firmId!}, ${threadId}, 'message', 'internal', ${notes.trim()}, ${req.userId!})
+    RETURNING *
+  `);
+
+  await queryRows(sql`
+    UPDATE communication_threads SET updated_at = NOW() WHERE id = ${threadId}
+  `);
+
+  await queryRows(sql`
+    INSERT INTO communication_read_status (thread_id, user_id, last_read_at)
+    VALUES (${threadId}, ${req.userId!}, NOW())
+    ON CONFLICT (thread_id, user_id) DO UPDATE SET last_read_at = NOW()
   `);
 
   res.status(201).json(rows[0]);
 });
 
-router.delete("/cases/:caseId/communications/:commId", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
-  const caseId = Number(req.params.caseId);
-  const commId = Number(req.params.commId);
+router.post("/cases/:caseId/threads/:threadId/read", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+  const threadId = Number(req.params.threadId);
 
-  const rows = await queryRows(sql`
-    DELETE FROM case_communications
-    WHERE id = ${commId} AND case_id = ${caseId} AND firm_id = ${req.firmId!}
-    RETURNING *
+  await queryRows(sql`
+    INSERT INTO communication_read_status (thread_id, user_id, last_read_at)
+    VALUES (${threadId}, ${req.userId!}, NOW())
+    ON CONFLICT (thread_id, user_id) DO UPDATE SET last_read_at = NOW()
   `);
 
-  if (!rows[0]) {
-    res.status(404).json({ error: "Communication record not found" });
-    return;
-  }
+  res.json({ success: true });
+});
 
-  res.sendStatus(204);
+router.get("/communications/unread-count", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+  const firmId = req.firmId!;
+  const userId = req.userId!;
+  const rows = await queryRows(sql`
+    SELECT COUNT(DISTINCT t.id) as count
+    FROM communication_threads t
+    WHERE t.firm_id = ${firmId}
+    AND (
+      NOT EXISTS (
+        SELECT 1 FROM communication_read_status rs
+        WHERE rs.thread_id = t.id AND rs.user_id = ${userId}
+      )
+      OR EXISTS (
+        SELECT 1 FROM case_communications cc
+        WHERE cc.thread_id = t.id AND cc.firm_id = ${firmId}
+        AND cc.created_at > (
+          SELECT rs2.last_read_at FROM communication_read_status rs2
+          WHERE rs2.thread_id = t.id AND rs2.user_id = ${userId}
+        )
+      )
+    )
+    AND EXISTS (SELECT 1 FROM case_communications cc2 WHERE cc2.thread_id = t.id AND cc2.firm_id = ${firmId})
+  `);
+  res.json({ count: Number(rows[0]?.count ?? 0) });
+});
+
+router.get("/communications", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+  const firmId = req.firmId!;
+  const userId = req.userId!;
+  const rows = await queryRows(sql`
+    SELECT t.*,
+      u.name as created_by_name,
+      c.reference_no,
+      (SELECT COUNT(*) FROM case_communications cc WHERE cc.thread_id = t.id AND cc.firm_id = ${firmId}) as message_count,
+      (SELECT MAX(cc.created_at) FROM case_communications cc WHERE cc.thread_id = t.id AND cc.firm_id = ${firmId}) as last_message_at,
+      (SELECT cc.notes FROM case_communications cc WHERE cc.thread_id = t.id AND cc.firm_id = ${firmId} ORDER BY cc.created_at DESC LIMIT 1) as last_message,
+      CASE WHEN rs.last_read_at IS NULL THEN
+        (SELECT COUNT(*) FROM case_communications cc WHERE cc.thread_id = t.id AND cc.firm_id = ${firmId})
+      ELSE
+        (SELECT COUNT(*) FROM case_communications cc WHERE cc.thread_id = t.id AND cc.firm_id = ${firmId} AND cc.created_at > rs.last_read_at)
+      END as unread_count
+    FROM communication_threads t
+    LEFT JOIN users u ON t.created_by = u.id
+    LEFT JOIN cases c ON t.case_id = c.id
+    LEFT JOIN communication_read_status rs ON rs.thread_id = t.id AND rs.user_id = ${userId}
+    WHERE t.firm_id = ${firmId}
+    ORDER BY COALESCE((SELECT MAX(cc2.created_at) FROM case_communications cc2 WHERE cc2.thread_id = t.id AND cc2.firm_id = ${firmId}), t.created_at) DESC
+    LIMIT 100
+  `);
+  res.json(rows);
 });
 
 export default router;

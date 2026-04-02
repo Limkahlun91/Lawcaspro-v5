@@ -34,6 +34,7 @@ import DeveloperDetail from "@/pages/app/developers/detail";
 
 import ProjectsList from "@/pages/app/projects";
 import NewProject from "@/pages/app/projects/new";
+import EditProject from "@/pages/app/projects/edit";
 import ProjectDetail from "@/pages/app/projects/detail";
 
 import ClientsList from "@/pages/app/clients";
@@ -84,6 +85,7 @@ function AppRoutes() {
           <Route path="/app/cases" component={CasesList} />
           
           <Route path="/app/projects/new" component={NewProject} />
+          <Route path="/app/projects/:id/edit" component={EditProject} />
           <Route path="/app/projects/:id" component={ProjectDetail} />
           <Route path="/app/projects" component={ProjectsList} />
           

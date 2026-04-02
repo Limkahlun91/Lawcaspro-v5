@@ -1,7 +1,7 @@
 import { useListProjects, useListDevelopers } from "@workspace/api-client-react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { Plus, Search } from "lucide-react";
+import { Plus, Search, Pencil } from "lucide-react";
 import { Link } from "wouter";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -99,11 +99,12 @@ export default function ProjectsList() {
                     <th className="px-6 py-3 font-semibold">Type</th>
                     <th className="px-6 py-3 font-semibold">Title Type</th>
                     <th className="px-6 py-3 font-semibold text-right">Cases</th>
+                    <th className="px-6 py-3 font-semibold text-right w-20"></th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
                   {response?.data.map((proj) => (
-                    <tr key={proj.id} className="hover:bg-slate-50/50">
+                    <tr key={proj.id} className="hover:bg-slate-50/50 group">
                       <td className="px-6 py-4">
                         <Link href={`/app/projects/${proj.id}`}>
                           <span className="font-medium text-slate-900 hover:text-amber-600 cursor-pointer transition-colors">
@@ -124,6 +125,13 @@ export default function ProjectsList() {
                         <span className="inline-flex items-center justify-center px-2 py-1 text-xs font-bold leading-none text-slate-600 bg-slate-100 rounded">
                           {proj.caseCount}
                         </span>
+                      </td>
+                      <td className="px-6 py-4 text-right">
+                        <Link href={`/app/projects/${proj.id}/edit`}>
+                          <Button variant="ghost" size="sm" className="h-8 w-8 p-0 opacity-0 group-hover:opacity-100 transition-opacity">
+                            <Pencil className="w-3.5 h-3.5 text-slate-400" />
+                          </Button>
+                        </Link>
                       </td>
                     </tr>
                   ))}

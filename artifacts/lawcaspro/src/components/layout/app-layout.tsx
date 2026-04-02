@@ -1,5 +1,6 @@
 import { ReactNode } from "react";
 import { useAuth } from "@/lib/auth-context";
+import { useQuery } from "@tanstack/react-query";
 import { Link, useLocation } from "wouter";
 import { 
   LayoutDashboard, 
@@ -16,9 +17,23 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
+const API_BASE = import.meta.env.BASE_URL.replace(/\/$/, "").replace(/^\/lawcaspro/, "") + "/api";
+
 export function AppLayout({ children }: { children: ReactNode }) {
   const { user, logout } = useAuth();
   const [location] = useLocation();
+
+  const { data: unreadData } = useQuery({
+    queryKey: ["unread-count"],
+    queryFn: async () => {
+      const res = await fetch(`${API_BASE}/communications/unread-count`, { credentials: "include" });
+      if (!res.ok) return { count: 0 };
+      return res.json();
+    },
+    refetchInterval: 30000,
+    enabled: !!user && user.userType === "firm_user",
+  });
+  const unreadCount = unreadData?.count ?? 0;
 
   if (!user || user.userType !== "firm_user") {
     return null;
@@ -62,7 +77,12 @@ export function AppLayout({ children }: { children: ReactNode }) {
                     : "text-slate-300 hover:bg-slate-800 hover:text-slate-100 cursor-pointer"
                 }`}>
                   <item.icon className="w-4 h-4 shrink-0" />
-                  <span className="truncate">{item.label}</span>
+                  <span className="truncate flex-1">{item.label}</span>
+                  {item.label === "Communications" && unreadCount > 0 && (
+                    <span className="inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 text-[10px] font-bold text-white bg-amber-500 rounded-full">
+                      {unreadCount}
+                    </span>
+                  )}
                 </div>
               </Link>
             );

@@ -1,8 +1,9 @@
 import { useParams, useLocation } from "wouter";
+import { Link } from "wouter";
 import { useGetProject, getGetProjectQueryKey } from "@workspace/api-client-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { ArrowLeft, Building2, MapPin, Tag } from "lucide-react";
+import { ArrowLeft, Building2, MapPin, Tag, Pencil } from "lucide-react";
 
 export default function ProjectDetail() {
   const { id } = useParams<{ id: string }>();
@@ -41,14 +42,22 @@ export default function ProjectDetail() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center gap-4">
-        <Button variant="outline" size="icon" onClick={() => setLocation("/app/projects")}>
-          <ArrowLeft className="w-4 h-4" />
-        </Button>
-        <div>
-          <h1 className="text-3xl font-bold text-slate-900 tracking-tight">{project.name}</h1>
-          <p className="text-slate-500 mt-1">Developer: {project.developerName}</p>
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-4">
+          <Button variant="outline" size="icon" onClick={() => setLocation("/app/projects")}>
+            <ArrowLeft className="w-4 h-4" />
+          </Button>
+          <div>
+            <h1 className="text-3xl font-bold text-slate-900 tracking-tight">{project.name}</h1>
+            <p className="text-slate-500 mt-1">Developer: {project.developerName}</p>
+          </div>
         </div>
+        <Link href={`/app/projects/${projectId}/edit`}>
+          <Button variant="outline" className="gap-2">
+            <Pencil className="w-4 h-4" />
+            Edit Project
+          </Button>
+        </Link>
       </div>
 
       <div className="grid grid-cols-1 gap-6">

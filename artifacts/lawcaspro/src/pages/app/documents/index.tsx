@@ -91,20 +91,20 @@ function FolderTreeItem({
             onClick={e => { e.stopPropagation(); setExpanded(!expanded); }}
             className="p-0.5 hover:bg-slate-200 rounded shrink-0"
           >
-            <ChevronRight className={cn("w-3 h-3 transition-transform", expanded && "rotate-90")} />
+            <ChevronRight className={cn("w-3.5 h-3.5 transition-transform", expanded && "rotate-90")} />
           </button>
         ) : (
-          <span className="w-4" />
+          <span className="w-[18px]" />
         )}
         {isSelected ? (
           <FolderOpen className="w-4 h-4 text-amber-500 shrink-0" />
         ) : (
           <Folder className="w-4 h-4 text-slate-400 shrink-0" />
         )}
-        <span className={cn("font-medium truncate", isSelected ? "text-amber-700" : "text-slate-700")}>
+        <span className={cn("font-medium flex-1 break-words leading-snug", isSelected ? "text-amber-700" : "text-slate-700")}>
           {folder.name}
         </span>
-        <Lock className="w-2.5 h-2.5 text-slate-300 ml-auto shrink-0" />
+        <Lock className="w-2.5 h-2.5 text-slate-300 shrink-0" />
       </div>
       {expanded && children.map(child => (
         <FolderTreeItem
@@ -181,7 +181,7 @@ function MasterDocumentsTab() {
       <p className="text-sm text-slate-500">Documents shared by Lawcaspro platform. These are read-only and cannot be modified.</p>
 
       <div className="flex gap-6 min-h-[400px]">
-        <div className="w-64 shrink-0">
+        <div className="w-80 shrink-0">
           <Card>
             <CardContent className="p-3">
               <div className="flex items-center gap-2 mb-3">
