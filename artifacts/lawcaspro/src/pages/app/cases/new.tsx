@@ -1,7 +1,7 @@
 import { useState, useEffect } from "react";
 import { useLocation } from "wouter";
 import { useQueryClient } from "@tanstack/react-query";
-import { useCreateCase, useListProjects, useListClients, useListUsers } from "@workspace/api-client-react";
+import { useCreateCase, useListProjects, useListUsers } from "@workspace/api-client-react";
 import { useToast } from "@/hooks/use-toast";
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
@@ -11,6 +11,7 @@ import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import { cn } from "@/lib/utils";
+import { Plus, X } from "lucide-react";
 
 const TABS = ["SPA Details", "Property", "Loan", "Lawyer", "Title", "Company"] as const;
 type Tab = typeof TABS[number];
@@ -29,8 +30,6 @@ export default function NewCasePage() {
 
   const { data: projectsRes } = useListProjects({ limit: 100 });
   const projects = projectsRes?.data || [];
-  const { data: clientsRes } = useListClients({ limit: 100 });
-  const clients = clientsRes?.data || [];
   const { data: usersRes } = useListUsers({ limit: 100 });
   const users = usersRes?.data || [];
   const lawyers = users.filter(u =>
@@ -46,17 +45,15 @@ export default function NewCasePage() {
   const [caseType, setCaseType] = useState("");
   const [parcelNo, setParcelNo] = useState("");
 
-  // SPA Details
-  const [purchaser1Id, setPurchaser1Id] = useState("");
-  const [purchaser2Id, setPurchaser2Id] = useState("");
-  const [purchaser3Id, setPurchaser3Id] = useState("");
-  const [purchaser4Id, setPurchaser4Id] = useState("");
+  // SPA Details - dynamic purchasers (manual text entry)
+  const [purchasers, setPurchasers] = useState<{ name: string; ic: string }[]>([{ name: "", ic: "" }]);
   const [addrLine1, setAddrLine1] = useState("");
   const [addrLine2, setAddrLine2] = useState("");
   const [addrLine3, setAddrLine3] = useState("");
   const [addrLine4, setAddrLine4] = useState("");
   const [addrLine5, setAddrLine5] = useState("");
   const [mailingAddress, setMailingAddress] = useState("");
+  const [mailingManuallyEdited, setMailingManuallyEdited] = useState(false);
   const [contactNumber, setContactNumber] = useState("");
   const [emailAddress, setEmailAddress] = useState("");
 
@@ -108,10 +105,6 @@ export default function NewCasePage() {
   // Auto-fill from selections
   const selectedLawyer = users.find(u => String(u.id) === assignedLawyerId);
   const selectedClerk = users.find(u => String(u.id) === assignedClerkId);
-  const p1 = clients.find(c => String(c.id) === purchaser1Id);
-  const p2 = clients.find(c => String(c.id) === purchaser2Id);
-  const p3 = clients.find(c => String(c.id) === purchaser3Id);
-  const p4 = clients.find(c => String(c.id) === purchaser4Id);
   const selectedProject = projects.find(p => String(p.id) === projectId);
   const developerId = selectedProject?.developerId ? String(selectedProject.developerId) : "";
 
@@ -122,6 +115,25 @@ export default function NewCasePage() {
     const bumi = parseFloat(bumiDiscount) || 0;
     if (price > 0) setApprovedPrice((price - dev - bumi).toFixed(2));
   }, [purchasePrice, devDiscount, bumiDiscount]);
+
+  // Auto-populate mailing address from address lines (unless manually edited)
+  useEffect(() => {
+    if (mailingManuallyEdited) return;
+    const lines = [addrLine1, addrLine2, addrLine3, addrLine4, addrLine5].filter(l => l.trim());
+    setMailingAddress(lines.join(", "));
+  }, [addrLine1, addrLine2, addrLine3, addrLine4, addrLine5, mailingManuallyEdited]);
+
+  function addPurchaser() {
+    setPurchasers(prev => [...prev, { name: "", ic: "" }]);
+  }
+
+  function removePurchaser(index: number) {
+    setPurchasers(prev => prev.filter((_, i) => i !== index));
+  }
+
+  function updatePurchaser(index: number, field: "name" | "ic", value: string) {
+    setPurchasers(prev => prev.map((p, i) => i === index ? { ...p, [field]: value } : p));
+  }
 
   const titleTypeApiMap: Record<string, string> = {
     "Master Title": "master",
@@ -136,8 +148,8 @@ export default function NewCasePage() {
       setActiveTab("SPA Details");
       return;
     }
-    if (!purchaser1Id) {
-      setFormError("Please select at least one purchaser in the SPA Details tab.");
+    if (!purchasers[0]?.name.trim()) {
+      setFormError("Please enter at least one purchaser name in the SPA Details tab.");
       setActiveTab("SPA Details");
       return;
     }
@@ -151,9 +163,7 @@ export default function NewCasePage() {
       return;
     }
 
-    const purchaserIds = [purchaser1Id, purchaser2Id, purchaser3Id, purchaser4Id]
-      .filter(id => id && id !== "__none__")
-      .map(Number);
+    const validPurchasers = purchasers.filter(p => p.name.trim());
 
     const resolvedClerkId = (assignedClerkId && assignedClerkId !== "__none__")
       ? Number(assignedClerkId)
@@ -167,10 +177,11 @@ export default function NewCasePage() {
       spaPrice: purchasePrice ? Number(purchasePrice) : undefined,
       assignedLawyerId: Number(assignedLawyerId),
       assignedClerkId: resolvedClerkId,
-      purchaserIds,
+      purchaserIds: [] as number[],
       caseType,
       parcelNo,
       spaDetails: {
+        purchasers: validPurchasers,
         addressLine1: addrLine1,
         addressLine2: addrLine2,
         addressLine3: addrLine3,
@@ -343,96 +354,52 @@ export default function NewCasePage() {
                   <p className="text-xs text-gray-500">Sale and Purchase Agreement information</p>
                 </div>
 
-                <div className="grid grid-cols-2 gap-x-6 gap-y-4">
-                  {/* Purchaser 1 */}
-                  <div className="space-y-1">
-                    <Label className="text-xs font-medium text-gray-600">
-                      Purchaser 1 Name <span className="text-red-500">*</span>
-                    </Label>
-                    <Select value={purchaser1Id} onValueChange={setPurchaser1Id}>
-                      <SelectTrigger className="h-9 text-sm border-gray-300">
-                        <SelectValue placeholder="Select purchaser" />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {clients.map(c => (
-                          <SelectItem key={c.id} value={String(c.id)}>{c.name}</SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                  </div>
-                  <div className="space-y-1">
-                    <Label className="text-xs font-medium text-gray-600">Purchaser 1 IC / Company No</Label>
-                    <Input
-                      className="h-9 text-sm border-gray-300 bg-gray-50"
-                      readOnly
-                      value={p1?.icNo ?? ""}
-                      placeholder="Auto-filled from client"
-                    />
-                  </div>
-
-                  {/* Purchaser 2 */}
-                  <div className="space-y-1">
-                    <Label className="text-xs font-medium text-gray-600">Purchaser 2 Name</Label>
-                    <Select value={purchaser2Id} onValueChange={setPurchaser2Id}>
-                      <SelectTrigger className="h-9 text-sm border-gray-300">
-                        <SelectValue placeholder="Select purchaser 2 (optional)" />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="__none__">None</SelectItem>
-                        {clients.filter(c => String(c.id) !== purchaser1Id).map(c => (
-                          <SelectItem key={c.id} value={String(c.id)}>{c.name}</SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                  </div>
-                  <div className="space-y-1">
-                    <Label className="text-xs font-medium text-gray-600">Purchaser 2 IC</Label>
-                    <Input className="h-9 text-sm border-gray-300 bg-gray-50" readOnly value={p2?.icNo ?? ""} placeholder="Auto-filled" />
-                  </div>
-
-                  {/* Purchaser 3 */}
-                  <div className="space-y-1">
-                    <Label className="text-xs font-medium text-gray-600">Purchaser 3 Name</Label>
-                    <Select value={purchaser3Id} onValueChange={setPurchaser3Id}>
-                      <SelectTrigger className="h-9 text-sm border-gray-300">
-                        <SelectValue placeholder="Select purchaser 3 (optional)" />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="__none__">None</SelectItem>
-                        {clients
-                          .filter(c => ![purchaser1Id, purchaser2Id].includes(String(c.id)))
-                          .map(c => (
-                            <SelectItem key={c.id} value={String(c.id)}>{c.name}</SelectItem>
-                          ))}
-                      </SelectContent>
-                    </Select>
-                  </div>
-                  <div className="space-y-1">
-                    <Label className="text-xs font-medium text-gray-600">Purchaser 3 IC</Label>
-                    <Input className="h-9 text-sm border-gray-300 bg-gray-50" readOnly value={p3?.icNo ?? ""} placeholder="Auto-filled" />
-                  </div>
-
-                  {/* Purchaser 4 */}
-                  <div className="space-y-1">
-                    <Label className="text-xs font-medium text-gray-600">Purchaser 4 Name</Label>
-                    <Select value={purchaser4Id} onValueChange={setPurchaser4Id}>
-                      <SelectTrigger className="h-9 text-sm border-gray-300">
-                        <SelectValue placeholder="Select purchaser 4 (optional)" />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="__none__">None</SelectItem>
-                        {clients
-                          .filter(c => ![purchaser1Id, purchaser2Id, purchaser3Id].includes(String(c.id)))
-                          .map(c => (
-                            <SelectItem key={c.id} value={String(c.id)}>{c.name}</SelectItem>
-                          ))}
-                      </SelectContent>
-                    </Select>
-                  </div>
-                  <div className="space-y-1">
-                    <Label className="text-xs font-medium text-gray-600">Purchaser 4 IC</Label>
-                    <Input className="h-9 text-sm border-gray-300 bg-gray-50" readOnly value={p4?.icNo ?? ""} placeholder="Auto-filled" />
-                  </div>
+                <div className="space-y-3">
+                  {purchasers.map((p, i) => (
+                    <div key={i} className="grid grid-cols-2 gap-x-6 gap-y-2 items-end">
+                      <div className="space-y-1">
+                        <Label className="text-xs font-medium text-gray-600">
+                          Purchaser {i + 1} Name {i === 0 && <span className="text-red-500">*</span>}
+                        </Label>
+                        <Input
+                          className="h-9 text-sm border-gray-300"
+                          placeholder="Enter purchaser name"
+                          value={p.name}
+                          onChange={e => updatePurchaser(i, "name", e.target.value)}
+                        />
+                      </div>
+                      <div className="flex items-end gap-2">
+                        <div className="space-y-1 flex-1">
+                          <Label className="text-xs font-medium text-gray-600">
+                            Purchaser {i + 1} IC / Company No
+                          </Label>
+                          <Input
+                            className="h-9 text-sm border-gray-300"
+                            placeholder="Enter IC / Company No"
+                            value={p.ic}
+                            onChange={e => updatePurchaser(i, "ic", e.target.value)}
+                          />
+                        </div>
+                        {i > 0 && (
+                          <button
+                            type="button"
+                            onClick={() => removePurchaser(i)}
+                            className="h-9 w-9 flex items-center justify-center rounded-md border border-gray-300 text-gray-400 hover:text-red-500 hover:border-red-300 transition-colors shrink-0"
+                          >
+                            <X className="w-4 h-4" />
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                  <button
+                    type="button"
+                    onClick={addPurchaser}
+                    className="flex items-center gap-1.5 text-sm text-[#f5a623] hover:text-[#e09000] font-medium mt-1"
+                  >
+                    <Plus className="w-4 h-4" />
+                    Add Purchaser
+                  </button>
                 </div>
 
                 {/* Address */}
@@ -461,10 +428,24 @@ export default function NewCasePage() {
                     <Textarea
                       className="text-sm border-gray-300 resize-none"
                       rows={3}
-                      placeholder="Enter mailing address"
+                      placeholder="Auto-filled from address lines above"
                       value={mailingAddress}
-                      onChange={e => setMailingAddress(e.target.value)}
+                      onChange={e => {
+                        setMailingManuallyEdited(true);
+                        setMailingAddress(e.target.value);
+                      }}
                     />
+                    {mailingManuallyEdited && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setMailingManuallyEdited(false);
+                        }}
+                        className="text-xs text-[#f5a623] hover:text-[#e09000]"
+                      >
+                        Reset to auto-fill from address lines
+                      </button>
+                    )}
                   </div>
                   <div className="space-y-3">
                     <div className="space-y-1">
