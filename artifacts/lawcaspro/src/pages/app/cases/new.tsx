@@ -251,9 +251,9 @@ export default function NewCase() {
               {purchasers.map((purchaserId, index) => (
                 <div key={index} className="flex items-end gap-4 p-4 border border-slate-100 rounded-lg bg-slate-50">
                   <div className="flex-1">
-                    <FormLabel className="text-xs font-semibold mb-2 block text-slate-500 uppercase tracking-wider">
+                    <div className="text-xs font-semibold mb-2 block text-slate-500 uppercase tracking-wider">
                       Purchaser {index + 1} {index === 0 ? "(Main)" : "(Joint)"}
-                    </FormLabel>
+                    </div>
                     <Select 
                       value={purchaserId ? purchaserId.toString() : ""} 
                       onValueChange={(val) => {

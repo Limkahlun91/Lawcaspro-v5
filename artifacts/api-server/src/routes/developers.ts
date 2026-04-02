@@ -1,13 +1,31 @@
 import { Router, type IRouter } from "express";
-import { eq, ilike, count, or, desc, and } from "drizzle-orm";
+import { eq, ilike, count, desc, and } from "drizzle-orm";
 import { db, developersTable, projectsTable } from "@workspace/db";
 import {
-  CreateDeveloperBody, UpdateDeveloperBody, ListDevelopersQueryParams,
+  ListDevelopersQueryParams,
   GetDeveloperParams, UpdateDeveloperParams, DeleteDeveloperParams
 } from "@workspace/api-zod";
 import { requireAuth, requireFirmUser, type AuthRequest } from "../lib/auth";
 
 const router: IRouter = Router();
+
+interface DeveloperContact {
+  name: string;
+  department: string;
+  phone: string;
+  phoneExt: string;
+  email: string;
+}
+
+function parseContacts(raw: string | null | undefined): DeveloperContact[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
 
 async function enrichDeveloper(dev: typeof developersTable.$inferSelect) {
   const [pcRes] = await db.select({ c: count() }).from(projectsTable).where(eq(projectsTable.developerId, dev.id));
@@ -17,6 +35,8 @@ async function enrichDeveloper(dev: typeof developersTable.$inferSelect) {
     name: dev.name,
     companyRegNo: dev.companyRegNo ?? null,
     address: dev.address ?? null,
+    businessAddress: (dev as any).businessAddress ?? null,
+    contacts: parseContacts((dev as any).contacts),
     contactPerson: dev.contactPerson ?? null,
     phone: dev.phone ?? null,
     email: dev.email ?? null,
@@ -57,15 +77,34 @@ router.get("/developers", requireAuth, requireFirmUser, async (req: AuthRequest,
 });
 
 router.post("/developers", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
-  const parsed = CreateDeveloperBody.safeParse(req.body);
-  if (!parsed.success) {
-    res.status(400).json({ error: parsed.error.message });
+  const { name, companyRegNo, address, businessAddress, contacts, contactPerson, phone, email } = req.body as {
+    name: string;
+    companyRegNo?: string;
+    address?: string;
+    businessAddress?: string;
+    contacts?: DeveloperContact[];
+    contactPerson?: string;
+    phone?: string;
+    email?: string;
+  };
+  if (!name) {
+    res.status(400).json({ error: "Company name is required" });
     return;
   }
-
   const [dev] = await db
     .insert(developersTable)
-    .values({ firmId: req.firmId!, ...parsed.data, createdBy: req.userId })
+    .values({
+      firmId: req.firmId!,
+      name,
+      companyRegNo: companyRegNo ?? null,
+      address: address ?? null,
+      businessAddress: businessAddress ?? null,
+      contacts: contacts ? JSON.stringify(contacts) : null,
+      contactPerson: contactPerson ?? null,
+      phone: phone ?? null,
+      email: email ?? null,
+      createdBy: req.userId,
+    } as any)
     .returning();
 
   res.status(201).json(await enrichDeveloper(dev));
@@ -94,15 +133,30 @@ router.patch("/developers/:developerId", requireAuth, requireFirmUser, async (re
     return;
   }
 
-  const parsed = UpdateDeveloperBody.safeParse(req.body);
-  if (!parsed.success) {
-    res.status(400).json({ error: parsed.error.message });
-    return;
-  }
+  const { name, companyRegNo, address, businessAddress, contacts, contactPerson, phone, email } = req.body as {
+    name?: string;
+    companyRegNo?: string;
+    address?: string;
+    businessAddress?: string;
+    contacts?: DeveloperContact[];
+    contactPerson?: string;
+    phone?: string;
+    email?: string;
+  };
+
+  const updateData: Record<string, unknown> = {};
+  if (name !== undefined) updateData.name = name;
+  if (companyRegNo !== undefined) updateData.companyRegNo = companyRegNo;
+  if (address !== undefined) updateData.address = address;
+  if (businessAddress !== undefined) updateData.businessAddress = businessAddress;
+  if (contacts !== undefined) updateData.contacts = JSON.stringify(contacts);
+  if (contactPerson !== undefined) updateData.contactPerson = contactPerson;
+  if (phone !== undefined) updateData.phone = phone;
+  if (email !== undefined) updateData.email = email;
 
   const [dev] = await db
     .update(developersTable)
-    .set(parsed.data)
+    .set(updateData as any)
     .where(eq(developersTable.id, params.data.developerId))
     .returning();
 

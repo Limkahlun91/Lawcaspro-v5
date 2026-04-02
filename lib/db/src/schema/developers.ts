@@ -8,6 +8,8 @@ export const developersTable = pgTable("developers", {
   name: text("name").notNull(),
   companyRegNo: text("company_reg_no"),
   address: text("address"),
+  businessAddress: text("business_address"),
+  contacts: text("contacts"),
   contactPerson: text("contact_person"),
   phone: text("phone"),
   email: text("email"),
