@@ -195,6 +195,8 @@ Step paths: `common` → `loan` (if loan) → `mot` (individual/strata) or `noa_
 - [x] **New Case Redesign**: Tabbed form (SPA Details, Property, Loan, Lawyer, Title, Company) with Basic Information section at top. Extended case columns: `case_type`, `parcel_no`, `spa_details` (JSON), `property_details` (JSON), `loan_details` (JSON), `company_details` (JSON).
 - [x] **Developer Enhancements**: Split address into Registered + Business Address, multi-contact support (up to 5, with Department/Phone/Ext/Email), inline edit mode on detail page.
 - [x] **Upload Bug Fix**: All file upload endpoints now send `{ name, size, contentType }` (was missing `name` and `size`, causing validation failure).
+- [x] **System Folders**: `system_folders` table for hierarchical folder organization of platform documents. Founder can create/edit/reorder/disable folders and subfolders. Firm-side shows read-only folder tree. Disabled folders hide from firms. Safe delete (blocks if children/docs exist).
+- [x] **Document Generation Enhanced**: `buildCaseContext` expanded with ALL case fields — SPA details, property details, loan/financing, company/directors, project (mukim/daerah/negeri), firm info, bank accounts. New `generate-from-master` endpoint for generating from system/master DOCX templates. CaseDocumentsTab now has tabbed generate dialog with "Firm Templates" and "Master Templates" (folder tree browser). Variable reference API at `/api/document-variables`.
 
 ## Design Decisions
 

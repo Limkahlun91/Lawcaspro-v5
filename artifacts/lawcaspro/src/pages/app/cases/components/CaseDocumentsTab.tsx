@@ -3,22 +3,18 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { useToast } from "@/hooks/use-toast";
-import { FileText, Upload, Trash2, Download, Plus, ChevronDown } from "lucide-react";
+import { Badge } from "@/components/ui/badge";
 import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
+  FileText, Upload, Trash2, Download, Plus, Folder, FolderOpen, ChevronRight,
+} from "lucide-react";
 import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
+  Dialog, DialogContent, DialogHeader, DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { cn } from "@/lib/utils";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 
 const API_BASE = import.meta.env.BASE_URL.replace(/\/$/, "").replace(/^\/lawcaspro/, "") + "/api";
 
@@ -42,6 +38,24 @@ interface CaseDocument {
   template_name: string | null;
   generated_by_name: string | null;
   created_at: string;
+}
+
+interface SystemFolder {
+  id: number;
+  name: string;
+  parentId: number | null;
+  sortOrder: number;
+}
+
+interface MasterDoc {
+  id: number;
+  name: string;
+  category: string;
+  fileName: string;
+  fileType: string;
+  fileSize: number | null;
+  objectPath: string;
+  folderId: number | null;
 }
 
 const DOCUMENT_TYPE_LABELS: Record<string, string> = {
@@ -68,14 +82,72 @@ async function apiFetch(path: string, init?: RequestInit) {
   return res.json();
 }
 
+function MasterFolderTree({
+  folders,
+  selectedId,
+  onSelect,
+}: {
+  folders: SystemFolder[];
+  selectedId: number | null;
+  onSelect: (id: number | null) => void;
+}) {
+  function FolderItem({ folder, depth = 0 }: { folder: SystemFolder; depth?: number }) {
+    const children = folders.filter(f => f.parentId === folder.id).sort((a, b) => a.sortOrder - b.sortOrder);
+    const isSelected = selectedId === folder.id;
+    const [expanded, setExpanded] = useState(true);
+
+    return (
+      <div>
+        <div
+          className={cn(
+            "flex items-center gap-1.5 py-1.5 px-2 rounded cursor-pointer text-xs transition-colors",
+            isSelected ? "bg-amber-50 text-amber-700 font-medium" : "hover:bg-slate-50 text-slate-600"
+          )}
+          style={{ paddingLeft: `${depth * 14 + 6}px` }}
+          onClick={() => onSelect(folder.id)}
+        >
+          {children.length > 0 ? (
+            <button onClick={e => { e.stopPropagation(); setExpanded(!expanded); }} className="p-0.5">
+              <ChevronRight className={cn("w-3 h-3 transition-transform", expanded && "rotate-90")} />
+            </button>
+          ) : <span className="w-4" />}
+          {isSelected ? <FolderOpen className="w-3.5 h-3.5 shrink-0" /> : <Folder className="w-3.5 h-3.5 shrink-0" />}
+          <span className="truncate">{folder.name}</span>
+        </div>
+        {expanded && children.map(c => <FolderItem key={c.id} folder={c} depth={depth + 1} />)}
+      </div>
+    );
+  }
+
+  const roots = folders.filter(f => f.parentId === null).sort((a, b) => a.sortOrder - b.sortOrder);
+
+  return (
+    <div className="space-y-0.5">
+      <div
+        className={cn(
+          "flex items-center gap-1.5 py-1.5 px-2 rounded cursor-pointer text-xs transition-colors",
+          selectedId === null ? "bg-amber-50 text-amber-700 font-medium" : "hover:bg-slate-50 text-slate-600"
+        )}
+        onClick={() => onSelect(null)}
+      >
+        <FolderOpen className="w-3.5 h-3.5" />
+        <span>All Templates</span>
+      </div>
+      {roots.map(f => <FolderItem key={f.id} folder={f} />)}
+    </div>
+  );
+}
+
 export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
   const { toast } = useToast();
   const qc = useQueryClient();
   const uploadRef = useRef<HTMLInputElement>(null);
-  const templateUploadRef = useRef<HTMLInputElement>(null);
 
   const [generateDialogOpen, setGenerateDialogOpen] = useState(false);
+  const [generateTab, setGenerateTab] = useState<string>("firm");
   const [selectedTemplateId, setSelectedTemplateId] = useState<string>("");
+  const [selectedMasterDocId, setSelectedMasterDocId] = useState<number | null>(null);
+  const [selectedMasterFolderId, setSelectedMasterFolderId] = useState<number | null>(null);
   const [documentName, setDocumentName] = useState("");
   const [uploadDialogOpen, setUploadDialogOpen] = useState(false);
   const [uploadName, setUploadName] = useState("");
@@ -94,6 +166,32 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
     queryFn: () => apiFetch("/document-templates"),
   });
 
+  const { data: masterFolders = [] } = useQuery<SystemFolder[]>({
+    queryKey: ["hub-folders"],
+    queryFn: async () => {
+      const res = await fetch(`${API_BASE}/hub/folders`, { credentials: "include" });
+      if (!res.ok) return [];
+      return res.json();
+    },
+  });
+
+  const { data: masterDocs = [] } = useQuery<MasterDoc[]>({
+    queryKey: ["hub-documents", selectedMasterFolderId],
+    queryFn: async () => {
+      const url = selectedMasterFolderId !== null
+        ? `${API_BASE}/hub/documents?folderId=${selectedMasterFolderId}`
+        : `${API_BASE}/hub/documents`;
+      const res = await fetch(url, { credentials: "include" });
+      if (!res.ok) return [];
+      return res.json();
+    },
+    enabled: generateDialogOpen && generateTab === "master",
+  });
+
+  const docxMasterDocs = masterDocs.filter(d =>
+    d.fileName.toLowerCase().endsWith(".docx") || d.fileName.toLowerCase().endsWith(".doc")
+  );
+
   const deleteMutation = useMutation({
     mutationFn: (docId: number) => apiFetch(`/cases/${caseId}/documents/${docId}`, { method: "DELETE" }),
     onSuccess: () => {
@@ -104,23 +202,46 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
   });
 
   async function handleGenerate() {
-    if (!selectedTemplateId) return;
-    setIsGenerating(true);
-    try {
-      await apiFetch(`/cases/${caseId}/documents/generate`, {
-        method: "POST",
-        body: JSON.stringify({ templateId: Number(selectedTemplateId), documentName: documentName || undefined }),
-      });
-      qc.invalidateQueries({ queryKey: ["case-documents", caseId] });
-      toast({ title: "Document generated successfully" });
-      setGenerateDialogOpen(false);
-      setSelectedTemplateId("");
-      setDocumentName("");
-    } catch (err) {
-      toast({ title: "Generation failed", description: String(err), variant: "destructive" });
-    } finally {
-      setIsGenerating(false);
+    if (generateTab === "firm") {
+      if (!selectedTemplateId) return;
+      setIsGenerating(true);
+      try {
+        await apiFetch(`/cases/${caseId}/documents/generate`, {
+          method: "POST",
+          body: JSON.stringify({ templateId: Number(selectedTemplateId), documentName: documentName || undefined }),
+        });
+        qc.invalidateQueries({ queryKey: ["case-documents", caseId] });
+        toast({ title: "Document generated successfully" });
+        closeGenerateDialog();
+      } catch (err) {
+        toast({ title: "Generation failed", description: String(err), variant: "destructive" });
+      } finally {
+        setIsGenerating(false);
+      }
+    } else {
+      if (!selectedMasterDocId) return;
+      setIsGenerating(true);
+      try {
+        await apiFetch(`/cases/${caseId}/documents/generate-from-master`, {
+          method: "POST",
+          body: JSON.stringify({ masterDocId: selectedMasterDocId, documentName: documentName || undefined }),
+        });
+        qc.invalidateQueries({ queryKey: ["case-documents", caseId] });
+        toast({ title: "Document generated from master template" });
+        closeGenerateDialog();
+      } catch (err) {
+        toast({ title: "Generation failed", description: String(err), variant: "destructive" });
+      } finally {
+        setIsGenerating(false);
+      }
     }
+  }
+
+  function closeGenerateDialog() {
+    setGenerateDialogOpen(false);
+    setSelectedTemplateId("");
+    setSelectedMasterDocId(null);
+    setDocumentName("");
   }
 
   async function handleUpload() {
@@ -189,6 +310,8 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
     return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
   }
 
+  const canGenerate = generateTab === "firm" ? !!selectedTemplateId : !!selectedMasterDocId;
+
   return (
     <div className="space-y-6">
       <Card>
@@ -208,7 +331,6 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
               size="sm"
               className="bg-amber-500 hover:bg-amber-600 gap-1.5"
               onClick={() => setGenerateDialogOpen(true)}
-              disabled={templates.length === 0}
             >
               <Plus className="w-3.5 h-3.5" />
               Generate from Template
@@ -222,7 +344,7 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
             <div className="text-center py-12 text-slate-500">
               <FileText className="w-10 h-10 text-slate-300 mx-auto mb-3" />
               <p className="font-medium text-slate-600 mb-1">No documents yet</p>
-              <p className="text-sm">Upload documents or generate them from DOCX templates.</p>
+              <p className="text-sm">Upload documents or generate them from templates.</p>
             </div>
           ) : (
             <div className="space-y-2">
@@ -272,63 +394,109 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
               ))}
             </div>
           )}
-
-          {templates.length === 0 && documents.length === 0 && (
-            <div className="mt-4 p-3 rounded-lg bg-amber-50 border border-amber-100 text-sm text-amber-700">
-              No DOCX templates uploaded yet. Go to Settings &gt; Document Templates to upload templates.
-            </div>
-          )}
         </CardContent>
       </Card>
 
-      {/* Generate Dialog */}
-      <Dialog open={generateDialogOpen} onOpenChange={setGenerateDialogOpen}>
-        <DialogContent className="sm:max-w-md">
+      <Dialog open={generateDialogOpen} onOpenChange={(v) => { if (!v) closeGenerateDialog(); else setGenerateDialogOpen(true); }}>
+        <DialogContent className="sm:max-w-2xl">
           <DialogHeader>
             <DialogTitle>Generate Document from Template</DialogTitle>
           </DialogHeader>
-          <div className="space-y-4 py-2">
-            <div className="space-y-1.5">
-              <Label>Template</Label>
-              <Select value={selectedTemplateId} onValueChange={setSelectedTemplateId}>
-                <SelectTrigger>
-                  <SelectValue placeholder="Select a template..." />
-                </SelectTrigger>
-                <SelectContent>
-                  {templates.map((t) => (
-                    <SelectItem key={t.id} value={String(t.id)}>
-                      {t.name}
-                      {t.document_type && t.document_type !== "other" && (
-                        <span className="ml-2 text-slate-400 text-xs">({DOCUMENT_TYPE_LABELS[t.document_type] ?? t.document_type})</span>
-                      )}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-            <div className="space-y-1.5">
-              <Label>Document Name <span className="text-slate-400 text-xs">(optional)</span></Label>
-              <Input
-                placeholder="Leave blank to use template name + reference"
-                value={documentName}
-                onChange={(e) => setDocumentName(e.target.value)}
-              />
-            </div>
-            <div className="flex justify-end gap-2 pt-2">
-              <Button variant="outline" onClick={() => setGenerateDialogOpen(false)}>Cancel</Button>
-              <Button
-                className="bg-amber-500 hover:bg-amber-600"
-                onClick={handleGenerate}
-                disabled={!selectedTemplateId || isGenerating}
-              >
-                {isGenerating ? "Generating..." : "Generate"}
-              </Button>
-            </div>
+          <Tabs value={generateTab} onValueChange={setGenerateTab}>
+            <TabsList className="mb-4">
+              <TabsTrigger value="firm">Firm Templates</TabsTrigger>
+              <TabsTrigger value="master">Master Templates</TabsTrigger>
+            </TabsList>
+
+            <TabsContent value="firm" className="space-y-4">
+              <div className="space-y-1.5">
+                <Label>Template</Label>
+                {templates.length === 0 ? (
+                  <p className="text-sm text-slate-500 py-4">No firm templates uploaded yet. Go to Settings &gt; Documents to upload DOCX templates.</p>
+                ) : (
+                  <Select value={selectedTemplateId} onValueChange={setSelectedTemplateId}>
+                    <SelectTrigger>
+                      <SelectValue placeholder="Select a template..." />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {templates.map((t) => (
+                        <SelectItem key={t.id} value={String(t.id)}>
+                          {t.name}
+                          {t.document_type && t.document_type !== "other" && (
+                            <span className="ml-2 text-slate-400 text-xs">({DOCUMENT_TYPE_LABELS[t.document_type] ?? t.document_type})</span>
+                          )}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                )}
+              </div>
+            </TabsContent>
+
+            <TabsContent value="master" className="space-y-4">
+              <p className="text-xs text-slate-500">Select a DOCX template from the system folder tree. Only Word documents (.docx) with {"{{variable}}"} placeholders will have variables replaced.</p>
+              <div className="flex gap-4 min-h-[200px]">
+                <div className="w-48 shrink-0 border rounded-lg p-2 overflow-y-auto max-h-[300px]">
+                  <MasterFolderTree
+                    folders={masterFolders}
+                    selectedId={selectedMasterFolderId}
+                    onSelect={setSelectedMasterFolderId}
+                  />
+                </div>
+                <div className="flex-1 border rounded-lg p-3 overflow-y-auto max-h-[300px]">
+                  {docxMasterDocs.length === 0 ? (
+                    <p className="text-xs text-slate-400 text-center py-8">No DOCX templates in this folder</p>
+                  ) : (
+                    <div className="space-y-1">
+                      {docxMasterDocs.map(doc => (
+                        <div
+                          key={doc.id}
+                          className={cn(
+                            "flex items-center gap-2 p-2 rounded cursor-pointer text-sm transition-colors",
+                            selectedMasterDocId === doc.id
+                              ? "bg-amber-50 border border-amber-200"
+                              : "hover:bg-slate-50 border border-transparent"
+                          )}
+                          onClick={() => setSelectedMasterDocId(doc.id)}
+                        >
+                          <FileText className="w-4 h-4 text-slate-400 shrink-0" />
+                          <div className="flex-1 min-w-0">
+                            <p className="font-medium text-slate-700 truncate">{doc.name}</p>
+                            <p className="text-xs text-slate-400">{doc.fileName}</p>
+                          </div>
+                          <Badge variant="outline" className="text-xs shrink-0">
+                            {doc.fileName.split(".").pop()?.toUpperCase()}
+                          </Badge>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </div>
+            </TabsContent>
+          </Tabs>
+
+          <div className="space-y-1.5">
+            <Label>Document Name <span className="text-slate-400 text-xs">(optional)</span></Label>
+            <Input
+              placeholder="Leave blank to use template name + reference"
+              value={documentName}
+              onChange={(e) => setDocumentName(e.target.value)}
+            />
+          </div>
+          <div className="flex justify-end gap-2 pt-2">
+            <Button variant="outline" onClick={closeGenerateDialog}>Cancel</Button>
+            <Button
+              className="bg-amber-500 hover:bg-amber-600"
+              onClick={handleGenerate}
+              disabled={!canGenerate || isGenerating}
+            >
+              {isGenerating ? "Generating..." : "Generate"}
+            </Button>
           </div>
         </DialogContent>
       </Dialog>
 
-      {/* Upload Dialog */}
       <Dialog open={uploadDialogOpen} onOpenChange={setUploadDialogOpen}>
         <DialogContent className="sm:max-w-md">
           <DialogHeader>
