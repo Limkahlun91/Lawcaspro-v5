@@ -22,7 +22,8 @@
     "google-auth-library": "^9.15.1",
     "pino": "^9",
     "pino-http": "^10",
-    "pizzip": "^3.1.7"
+    "pizzip": "^3.1.7",
+    "xlsx": "^0.18.5"
   },
   "devDependencies": {
     "@types/bcryptjs": "^2.4.6",
