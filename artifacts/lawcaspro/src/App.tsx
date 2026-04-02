@@ -46,6 +46,9 @@ import DocumentsPage from "@/pages/app/documents";
 import Accounting from "@/pages/app/accounting";
 import Reports from "@/pages/app/reports";
 import Hub from "@/pages/app/hub";
+import QuotationsList from "@/pages/app/quotations";
+import NewQuotation from "@/pages/app/quotations/new";
+import QuotationDetail from "@/pages/app/quotations/detail";
 
 const queryClient = new QueryClient();
 
@@ -98,6 +101,10 @@ function AppRoutes() {
           <Route path="/app/roles" component={() => <Redirect to="/app/settings?tab=roles" />} />
           
           <Route path="/app/communications" component={() => <Redirect to="/app/hub" />} />
+          <Route path="/app/quotations/new" component={NewQuotation} />
+          <Route path="/app/quotations/:id" component={QuotationDetail} />
+          <Route path="/app/quotations" component={QuotationsList} />
+          
           <Route path="/app/settings/documents" component={() => <Redirect to="/app/documents" />} />
           <Route path="/app/documents" component={DocumentsPage} />
           <Route path="/app/accounting" component={Accounting} />

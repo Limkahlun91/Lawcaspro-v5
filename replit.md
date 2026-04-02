@@ -56,6 +56,8 @@ All tables created in PostgreSQL:
 | `platform_documents` | System documents uploaded by founder, shared with all/specific firms |
 | `platform_messages` | Direct messages between founder and law firms (bidirectional) |
 | `platform_message_attachments` | File attachments on platform messages (PDF, Word, Excel, images) |
+| `quotations` | Fee quotations for legal services (per-firm, optionally linked to case) |
+| `quotation_items` | Line items per quotation (disbursement/fees/reimbursement/attachment sections) |
 
 ## API Routes (all under /api prefix)
 
@@ -129,6 +131,14 @@ All tables created in PostgreSQL:
 - `POST /api/cases/:caseId/communications` — Log communication
 - `DELETE /api/cases/:caseId/communications/:commId` — Delete communication record
 
+### Quotations
+- `GET /api/quotations` — List quotations for firm
+- `POST /api/quotations` — Create quotation with line items
+- `GET /api/quotations/:id` — Get quotation detail with all items
+- `PATCH /api/quotations/:id` — Update quotation (header + items)
+- `DELETE /api/quotations/:id` — Delete quotation
+- `POST /api/quotations/:id/duplicate` — Duplicate a quotation
+
 ### Reports (Phase 4/6)
 - `GET /api/reports/overview` — Full analytics: cases by status, by month, lawyer workload, workflow completion, billing totals, comms stats
 
@@ -170,6 +180,7 @@ Step paths: `common` → `loan` (if loan) → `mot` (individual/strata) or `noa_
 - [x] **Phase 6**: Platform monitoring — enhanced with real metrics (Documents Generated), per-tenant breakdown (Users, Cases, Docs, Billing, Comms columns)
 - [x] **Founder Features**: Firm user management (list users per firm, reset any user's password), System Documents page (upload/download/delete platform docs shared with firms), Communication Hub (founder ↔ firm bidirectional messaging with multi-format file attachments)
 - [x] **Firm Hub**: `/app/hub` page with Messages tab (thread with Lawcaspro, compose/read, mark-as-read) and System Documents tab (view/download documents shared by platform)
+- [x] **Quotations**: Fee quotation system matching law firm Excel template format. Standalone `/app/quotations` page + generate from case detail. 4 sections: Disbursement (Search, Stamp Duty, Registration), Professional Fees, Reimbursement, Attachment I. Auto-calculates 8% Service Tax, rounding adjustment. CRUD + duplicate + inline edit + print.
 - [x] **Nav Restructure**: Consolidated sidebar — removed duplicate "Users", "Roles & Permissions", "Communication Hub" nav items. "Communications" now links to `/app/hub`. Settings page has tabbed layout with Users, Roles & Permissions, Documents sub-tabs. Old URLs redirect with tab awareness.
 - [x] **New Case Redesign**: Tabbed form (SPA Details, Property, Loan, Lawyer, Title, Company) with Basic Information section at top. Extended case columns: `case_type`, `parcel_no`, `spa_details` (JSON), `property_details` (JSON), `loan_details` (JSON), `company_details` (JSON).
 - [x] **Developer Enhancements**: Split address into Registered + Business Address, multi-contact support (up to 5, with Department/Phone/Ext/Email), inline edit mode on detail page.

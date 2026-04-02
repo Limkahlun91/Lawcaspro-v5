@@ -445,6 +445,119 @@ export interface CaseTypeCount {
   count: number;
 }
 
+export interface QuotationItem {
+  id: number;
+  quotationId: number;
+  section: string;
+  category?: string | null;
+  itemNo?: string | null;
+  subItemNo?: string | null;
+  description: string;
+  taxCode: string;
+  amountExclTax: number;
+  taxRate: number;
+  taxAmount: number;
+  amountInclTax: number;
+  sortOrder: number;
+  createdAt: string;
+}
+
+export interface QuotationSummary {
+  id: number;
+  firmId: number;
+  caseId?: number | null;
+  referenceNo: string;
+  stNo?: string | null;
+  clientName: string;
+  propertyDescription?: string | null;
+  purchasePrice?: number | null;
+  bankName?: string | null;
+  loanAmount?: string | null;
+  status: string;
+  notes?: string | null;
+  createdBy?: number | null;
+  itemCount: number;
+  totalExclTax: number;
+  totalTax: number;
+  totalInclTax: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface QuotationDetail {
+  id: number;
+  firmId: number;
+  caseId?: number | null;
+  referenceNo: string;
+  stNo?: string | null;
+  clientName: string;
+  propertyDescription?: string | null;
+  purchasePrice?: number | null;
+  bankName?: string | null;
+  loanAmount?: string | null;
+  status: string;
+  notes?: string | null;
+  createdBy?: number | null;
+  items: QuotationItem[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type CreateQuotationBodyItemsItem = {
+  section: string;
+  category?: string;
+  itemNo?: string;
+  subItemNo?: string;
+  description: string;
+  taxCode?: string;
+  amountExclTax?: number;
+  taxRate?: number;
+  taxAmount?: number;
+  amountInclTax?: number;
+  sortOrder?: number;
+};
+
+export interface CreateQuotationBody {
+  referenceNo: string;
+  stNo?: string;
+  clientName: string;
+  caseId?: number;
+  propertyDescription?: string;
+  purchasePrice?: string;
+  bankName?: string;
+  loanAmount?: string;
+  notes?: string;
+  items: CreateQuotationBodyItemsItem[];
+}
+
+export type UpdateQuotationBodyItemsItem = {
+  section: string;
+  category?: string;
+  itemNo?: string;
+  subItemNo?: string;
+  description: string;
+  taxCode?: string;
+  amountExclTax?: number;
+  taxRate?: number;
+  taxAmount?: number;
+  amountInclTax?: number;
+  sortOrder?: number;
+};
+
+export interface UpdateQuotationBody {
+  referenceNo?: string;
+  stNo?: string;
+  clientName?: string;
+  caseId?: number;
+  propertyDescription?: string;
+  purchasePrice?: string;
+  bankName?: string;
+  loanAmount?: string;
+  status?: string;
+  notes?: string;
+  items?: UpdateQuotationBodyItemsItem[];
+}
+
 export type ListFirmsParams = {
   search?: string;
   status?: string;

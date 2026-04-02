@@ -12,6 +12,7 @@ import {
   ScrollText, 
   Settings,
   FileText,
+  Receipt,
   LogOut,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -30,6 +31,7 @@ export function AppLayout({ children }: { children: ReactNode }) {
     { label: "Projects", href: "/app/projects", icon: Building2 },
     { label: "Developers", href: "/app/developers", icon: HardHat },
     { label: "Documents", href: "/app/documents", icon: FileText },
+    { label: "Quotations", href: "/app/quotations", icon: Receipt },
     { label: "Communications", href: "/app/hub", icon: MessageSquare },
     { label: "Accounting", href: "/app/accounting", icon: Calculator },
     { label: "Reports", href: "/app/reports", icon: BarChart },

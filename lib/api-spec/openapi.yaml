@@ -209,6 +209,117 @@ paths:
               schema:
                 $ref: "#/components/schemas/PlatformStats"
 
+  # ── Quotations ──────────────────────────────────────────────────────────
+  /quotations:
+    get:
+      operationId: listQuotations
+      tags: [quotations]
+      summary: List quotations
+      responses:
+        "200":
+          description: List of quotations
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/QuotationSummary"
+    post:
+      operationId: createQuotation
+      tags: [quotations]
+      summary: Create a quotation
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateQuotationBody"
+      responses:
+        "201":
+          description: Created quotation
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/QuotationDetail"
+
+  /quotations/{id}:
+    get:
+      operationId: getQuotation
+      tags: [quotations]
+      summary: Get quotation by ID
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Quotation detail
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/QuotationDetail"
+    patch:
+      operationId: updateQuotation
+      tags: [quotations]
+      summary: Update a quotation
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateQuotationBody"
+      responses:
+        "200":
+          description: Updated quotation
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/QuotationDetail"
+    delete:
+      operationId: deleteQuotation
+      tags: [quotations]
+      summary: Delete a quotation
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Deleted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessResponse"
+
+  /quotations/{id}/duplicate:
+    post:
+      operationId: duplicateQuotation
+      tags: [quotations]
+      summary: Duplicate a quotation
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "201":
+          description: Duplicated quotation
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/QuotationDetail"
+
   # ── Dashboard ───────────────────────────────────────────────────────────
   /dashboard:
     get:
@@ -2001,3 +2112,282 @@ components:
       required:
         - purchaseMode
         - count
+
+    QuotationItem:
+      type: object
+      properties:
+        id:
+          type: integer
+        quotationId:
+          type: integer
+        section:
+          type: string
+        category:
+          type: string
+          nullable: true
+        itemNo:
+          type: string
+          nullable: true
+        subItemNo:
+          type: string
+          nullable: true
+        description:
+          type: string
+        taxCode:
+          type: string
+        amountExclTax:
+          type: number
+        taxRate:
+          type: number
+        taxAmount:
+          type: number
+        amountInclTax:
+          type: number
+        sortOrder:
+          type: integer
+        createdAt:
+          type: string
+          format: date-time
+      required:
+        - id
+        - quotationId
+        - section
+        - description
+        - taxCode
+        - amountExclTax
+        - taxRate
+        - taxAmount
+        - amountInclTax
+        - sortOrder
+        - createdAt
+
+    QuotationSummary:
+      type: object
+      properties:
+        id:
+          type: integer
+        firmId:
+          type: integer
+        caseId:
+          type: integer
+          nullable: true
+        referenceNo:
+          type: string
+        stNo:
+          type: string
+          nullable: true
+        clientName:
+          type: string
+        propertyDescription:
+          type: string
+          nullable: true
+        purchasePrice:
+          type: number
+          nullable: true
+        bankName:
+          type: string
+          nullable: true
+        loanAmount:
+          type: string
+          nullable: true
+        status:
+          type: string
+        notes:
+          type: string
+          nullable: true
+        createdBy:
+          type: integer
+          nullable: true
+        itemCount:
+          type: integer
+        totalExclTax:
+          type: number
+        totalTax:
+          type: number
+        totalInclTax:
+          type: number
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+      required:
+        - id
+        - firmId
+        - referenceNo
+        - clientName
+        - status
+        - itemCount
+        - totalExclTax
+        - totalTax
+        - totalInclTax
+        - createdAt
+        - updatedAt
+
+    QuotationDetail:
+      type: object
+      properties:
+        id:
+          type: integer
+        firmId:
+          type: integer
+        caseId:
+          type: integer
+          nullable: true
+        referenceNo:
+          type: string
+        stNo:
+          type: string
+          nullable: true
+        clientName:
+          type: string
+        propertyDescription:
+          type: string
+          nullable: true
+        purchasePrice:
+          type: number
+          nullable: true
+        bankName:
+          type: string
+          nullable: true
+        loanAmount:
+          type: string
+          nullable: true
+        status:
+          type: string
+        notes:
+          type: string
+          nullable: true
+        createdBy:
+          type: integer
+          nullable: true
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/QuotationItem"
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+      required:
+        - id
+        - firmId
+        - referenceNo
+        - clientName
+        - status
+        - items
+        - createdAt
+        - updatedAt
+
+    CreateQuotationBody:
+      type: object
+      properties:
+        referenceNo:
+          type: string
+        stNo:
+          type: string
+        clientName:
+          type: string
+        caseId:
+          type: integer
+        propertyDescription:
+          type: string
+        purchasePrice:
+          type: string
+        bankName:
+          type: string
+        loanAmount:
+          type: string
+        notes:
+          type: string
+        items:
+          type: array
+          items:
+            type: object
+            properties:
+              section:
+                type: string
+              category:
+                type: string
+              itemNo:
+                type: string
+              subItemNo:
+                type: string
+              description:
+                type: string
+              taxCode:
+                type: string
+              amountExclTax:
+                type: number
+              taxRate:
+                type: number
+              taxAmount:
+                type: number
+              amountInclTax:
+                type: number
+              sortOrder:
+                type: integer
+            required:
+              - section
+              - description
+      required:
+        - referenceNo
+        - clientName
+        - items
+
+    UpdateQuotationBody:
+      type: object
+      properties:
+        referenceNo:
+          type: string
+        stNo:
+          type: string
+        clientName:
+          type: string
+        caseId:
+          type: integer
+        propertyDescription:
+          type: string
+        purchasePrice:
+          type: string
+        bankName:
+          type: string
+        loanAmount:
+          type: string
+        status:
+          type: string
+        notes:
+          type: string
+        items:
+          type: array
+          items:
+            type: object
+            properties:
+              section:
+                type: string
+              category:
+                type: string
+              itemNo:
+                type: string
+              subItemNo:
+                type: string
+              description:
+                type: string
+              taxCode:
+                type: string
+              amountExclTax:
+                type: number
+              taxRate:
+                type: number
+              taxAmount:
+                type: number
+              amountInclTax:
+                type: number
+              sortOrder:
+                type: integer
+            required:
+              - section
+              - description

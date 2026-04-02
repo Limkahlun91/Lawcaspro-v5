@@ -165,6 +165,196 @@ export const GetPlatformStatsResponse = zod.object({
 });
 
 /**
+ * @summary List quotations
+ */
+export const ListQuotationsResponseItem = zod.object({
+  id: zod.number(),
+  firmId: zod.number(),
+  caseId: zod.number().nullish(),
+  referenceNo: zod.string(),
+  stNo: zod.string().nullish(),
+  clientName: zod.string(),
+  propertyDescription: zod.string().nullish(),
+  purchasePrice: zod.number().nullish(),
+  bankName: zod.string().nullish(),
+  loanAmount: zod.string().nullish(),
+  status: zod.string(),
+  notes: zod.string().nullish(),
+  createdBy: zod.number().nullish(),
+  itemCount: zod.number(),
+  totalExclTax: zod.number(),
+  totalTax: zod.number(),
+  totalInclTax: zod.number(),
+  createdAt: zod.coerce.date(),
+  updatedAt: zod.coerce.date(),
+});
+export const ListQuotationsResponse = zod.array(ListQuotationsResponseItem);
+
+/**
+ * @summary Create a quotation
+ */
+export const CreateQuotationBody = zod.object({
+  referenceNo: zod.string(),
+  stNo: zod.string().optional(),
+  clientName: zod.string(),
+  caseId: zod.number().optional(),
+  propertyDescription: zod.string().optional(),
+  purchasePrice: zod.string().optional(),
+  bankName: zod.string().optional(),
+  loanAmount: zod.string().optional(),
+  notes: zod.string().optional(),
+  items: zod.array(
+    zod.object({
+      section: zod.string(),
+      category: zod.string().optional(),
+      itemNo: zod.string().optional(),
+      subItemNo: zod.string().optional(),
+      description: zod.string(),
+      taxCode: zod.string().optional(),
+      amountExclTax: zod.number().optional(),
+      taxRate: zod.number().optional(),
+      taxAmount: zod.number().optional(),
+      amountInclTax: zod.number().optional(),
+      sortOrder: zod.number().optional(),
+    }),
+  ),
+});
+
+/**
+ * @summary Get quotation by ID
+ */
+export const GetQuotationParams = zod.object({
+  id: zod.coerce.number(),
+});
+
+export const GetQuotationResponse = zod.object({
+  id: zod.number(),
+  firmId: zod.number(),
+  caseId: zod.number().nullish(),
+  referenceNo: zod.string(),
+  stNo: zod.string().nullish(),
+  clientName: zod.string(),
+  propertyDescription: zod.string().nullish(),
+  purchasePrice: zod.number().nullish(),
+  bankName: zod.string().nullish(),
+  loanAmount: zod.string().nullish(),
+  status: zod.string(),
+  notes: zod.string().nullish(),
+  createdBy: zod.number().nullish(),
+  items: zod.array(
+    zod.object({
+      id: zod.number(),
+      quotationId: zod.number(),
+      section: zod.string(),
+      category: zod.string().nullish(),
+      itemNo: zod.string().nullish(),
+      subItemNo: zod.string().nullish(),
+      description: zod.string(),
+      taxCode: zod.string(),
+      amountExclTax: zod.number(),
+      taxRate: zod.number(),
+      taxAmount: zod.number(),
+      amountInclTax: zod.number(),
+      sortOrder: zod.number(),
+      createdAt: zod.coerce.date(),
+    }),
+  ),
+  createdAt: zod.coerce.date(),
+  updatedAt: zod.coerce.date(),
+});
+
+/**
+ * @summary Update a quotation
+ */
+export const UpdateQuotationParams = zod.object({
+  id: zod.coerce.number(),
+});
+
+export const UpdateQuotationBody = zod.object({
+  referenceNo: zod.string().optional(),
+  stNo: zod.string().optional(),
+  clientName: zod.string().optional(),
+  caseId: zod.number().optional(),
+  propertyDescription: zod.string().optional(),
+  purchasePrice: zod.string().optional(),
+  bankName: zod.string().optional(),
+  loanAmount: zod.string().optional(),
+  status: zod.string().optional(),
+  notes: zod.string().optional(),
+  items: zod
+    .array(
+      zod.object({
+        section: zod.string(),
+        category: zod.string().optional(),
+        itemNo: zod.string().optional(),
+        subItemNo: zod.string().optional(),
+        description: zod.string(),
+        taxCode: zod.string().optional(),
+        amountExclTax: zod.number().optional(),
+        taxRate: zod.number().optional(),
+        taxAmount: zod.number().optional(),
+        amountInclTax: zod.number().optional(),
+        sortOrder: zod.number().optional(),
+      }),
+    )
+    .optional(),
+});
+
+export const UpdateQuotationResponse = zod.object({
+  id: zod.number(),
+  firmId: zod.number(),
+  caseId: zod.number().nullish(),
+  referenceNo: zod.string(),
+  stNo: zod.string().nullish(),
+  clientName: zod.string(),
+  propertyDescription: zod.string().nullish(),
+  purchasePrice: zod.number().nullish(),
+  bankName: zod.string().nullish(),
+  loanAmount: zod.string().nullish(),
+  status: zod.string(),
+  notes: zod.string().nullish(),
+  createdBy: zod.number().nullish(),
+  items: zod.array(
+    zod.object({
+      id: zod.number(),
+      quotationId: zod.number(),
+      section: zod.string(),
+      category: zod.string().nullish(),
+      itemNo: zod.string().nullish(),
+      subItemNo: zod.string().nullish(),
+      description: zod.string(),
+      taxCode: zod.string(),
+      amountExclTax: zod.number(),
+      taxRate: zod.number(),
+      taxAmount: zod.number(),
+      amountInclTax: zod.number(),
+      sortOrder: zod.number(),
+      createdAt: zod.coerce.date(),
+    }),
+  ),
+  createdAt: zod.coerce.date(),
+  updatedAt: zod.coerce.date(),
+});
+
+/**
+ * @summary Delete a quotation
+ */
+export const DeleteQuotationParams = zod.object({
+  id: zod.coerce.number(),
+});
+
+export const DeleteQuotationResponse = zod.object({
+  success: zod.boolean(),
+});
+
+/**
+ * @summary Duplicate a quotation
+ */
+export const DuplicateQuotationParams = zod.object({
+  id: zod.coerce.number(),
+});
+
+/**
  * @summary Get firm dashboard statistics
  */
 export const GetDashboardStatsResponse = zod.object({
