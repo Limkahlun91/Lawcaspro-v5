@@ -1,0 +1,591 @@
+Upgrade Lawcaspro from its current V1 multi-tenant legal SaaS skeleton into an enterprise-grade Malaysian legal practice operations platform specialized in conveyancing.
+
+Do NOT rebuild from scratch.
+Preserve the current monorepo, Express API, React frontend, Drizzle/PostgreSQL, Founder/Firm dual workspace, cookie auth, object storage, document generation, PDF mapping editor, RBAC, and current route/module structure.
+Extend and harden the existing architecture.
+
+This must be a full-stack implementation:
+- database schema
+- migrations
+- backend routes/services
+- validation
+- authorization
+- background jobs
+- audit
+- frontend pages/components
+- reports
+- seed/demo data
+- automated tests
+
+Do NOT only patch UI.
+Do NOT only add placeholders.
+Do NOT stop at planning.
+Implement real working code.
+
+==================================================
+1. TENANT SECURITY + AUTHORIZATION + SAFE SUPPORT ACCESS
+==================================================
+
+Implement defense-in-depth tenant isolation:
+- database-enforced tenant isolation for all firm-scoped tables (PostgreSQL RLS or equivalent secure mechanism)
+- safe per-request tenant context
+- no reliance on frontend checks alone
+- strict tenant isolation tests
+
+Upgrade authorization into:
+- role-level
+- action-level
+- record-level
+- field-level
+- assignment-level authorization
+
+Implement founder support/debug workspace safely:
+- founder enters firm workspace only through explicit support sessions
+- full audit of viewed/edited/downloaded/exported records
+- support session reason, actor, timestamps, affected entities
+
+Security hardening:
+- rate limiting on auth and sensitive routes
+- optional 2FA / TOTP
+- secure session rotation
+- permission-denied audit logs
+- login security events
+- force re-auth for sensitive financial/admin actions
+
+Add lifecycle states:
+- soft delete
+- restore
+- archive
+- lock/finalize
+
+==================================================
+2. LEGAL ACCOUNTING COMPLIANCE ENGINE
+==================================================
+
+Replace simplistic billing architecture with Malaysian law-firm-grade accounting.
+
+Create/upgrade:
+- invoices
+- invoice_items
+- receipts
+- receipt_items
+- payment_vouchers
+- payment_voucher_items
+- client_cash_book
+- client_ledgers
+- office_ledgers
+- trust_ledgers
+- ledger_accounts
+- ledger_transactions
+- ledger_transaction_lines
+- journal_entries
+- bank_transactions
+- payment_allocations
+- bills_delivered_book
+- reconciliation_runs
+- reconciliation_items
+- credit_notes
+- debit_notes
+- disbursement_advices
+
+Upgrade firm_bank_accounts with explicit categories:
+- CLIENT / TRUST
+- OFFICE
+
+Requirements:
+- strict separation of client/trust money vs office money
+- immutable double-entry postings
+- balanced transaction lines
+- reversal-based corrections, not destructive edits
+- sequential non-editable receipts and vouchers
+- six-month balance reconciliation support
+- 6-year retention policy support for accounting records
+- trust balance must always be traceable by case and by client ledger reference
+
+Implement financial flows:
+- quotation → invoice → receipt
+- receipt allocation
+- payment voucher workflow
+- internal transfer from client/trust to office
+- refund
+- partial payment
+- disbursement recovery
+- pass-through disbursement tracking
+
+Payment Voucher statuses:
+- Draft
+- Prepared
+- Lawyer Approved
+- Partner Approved
+- Submitted to Accounts
+- Paid
+- Returned
+- Locked
+
+Reports:
+- outstanding
+- aging
+- collection
+- recovery
+- trust/client ledger views
+- office ledger views
+- client cash book
+- bills delivered register
+- reconciliation report
+
+==================================================
+3. MYINVOIS + SST + TAX COMPLIANCE
+==================================================
+
+Create/upgrade:
+- e_invoice_submissions
+- e_invoice_events
+- tax_codes
+- service_classification_codes
+- tax_rule_versions
+
+Implement:
+- MyInvois API bridge architecture
+- invoice validation status
+- unique identification number storage
+- QR code storage
+- error handling
+- retry queue
+- mock/sandbox endpoints for successful test validation
+- dashboard visibility for e-invoice status
+
+Tax requirements:
+- SST calculation support
+- service classification mapping
+- effective-date rule versioning
+- pass-through disbursement toggle so non-billable trust disbursements do not inflate taxable service volume
+- billable vs pass-through segregation in UI and accounting logic
+
+==================================================
+4. AML / CDD / KYC / RISK COMPLIANCE MODULE
+==================================================
+
+The current client model is insufficient.
+Implement a full compliance module.
+
+Create/upgrade:
+- parties
+- case_parties
+- compliance_profiles
+- cdd_checks
+- cdd_documents
+- beneficial_owners
+- sanctions_screenings
+- pep_flags
+- risk_assessments
+- source_of_funds_records
+- source_of_wealth_records
+- suspicious_review_notes
+- compliance_retention_records
+
+Support party types:
+- natural person
+- company / legal person
+- trust / legal arrangement
+
+Capture:
+- NRIC/passport/company reg no
+- DOB/incorporation data
+- nationality / jurisdiction
+- occupation / nature of business
+- address
+- transaction purpose
+- directors / controlling persons
+- beneficial owners
+- PEP status
+- high-risk jurisdiction flags
+- nominee / layered ownership alerts
+
+Implement:
+- sanctions screening workflow
+- risk scoring
+- EDD trigger rules
+- source of funds / source of wealth collection
+- compliance approval/review flow
+- 6-year retention support after file closure
+
+==================================================
+5. CONFLICT CHECK ENGINE
+==================================================
+
+Conflict checks must be mandatory during intake.
+
+Create/upgrade:
+- conflict_checks
+- conflict_matches
+- conflict_overrides
+
+Implement:
+- cross-check all parties at intake:
+  purchaser, vendor, borrower, guarantor, developer, bank, company, beneficial owner, prior adverse party
+- match on name, ID no, passport no, company reg no, and fuzzy name matching
+- case creation warning/block flow
+- partner override with audit
+- dashboard visibility for unresolved conflicts
+
+==================================================
+6. WORKFLOW ENGINE 2.0 — DUAL TRACK + TITLE/DOCUMENT AWARE
+==================================================
+
+Create/upgrade:
+- case_workflow_templates
+- case_workflow_template_steps
+- workflow_rules
+- workflow_rule_versions
+- approval_requests
+- approval_actions
+- case_tasks
+- task_comments
+- task_reminders
+- notifications
+
+Support workflow types:
+- SUB_SALE
+- DEVELOPER_SCHEDULE_G
+- DEVELOPER_SCHEDULE_H
+
+Each workflow step must support:
+- trigger source
+- relative due date rule
+- target_due_date
+- actual_completed_date
+- overdue status
+- dependency rules
+- assignee
+- approval gate
+- rollback / reopen
+- escalation
+
+SUB-SALE logic:
+- SPA date / CP fulfilled date / completion due date / extension due date
+- stamping deadlines
+- consent milestones
+- redemption milestones
+- title-sensitive branching
+
+DEVELOPER logic:
+- stage-based progress billing
+- architect certificate trigger
+- stage reminders
+- VP / completion milestones
+- Schedule G / H statutory path
+
+Title/document logic:
+- Master Title = developer consent / Deed of Assignment path
+- Individual/Strata Title = Form 14A / MOT path
+- with title = Form 16N handling
+- without title = Deed of Receipt and Reassignment path
+- all transfers = CKHT 2A path
+- support e-Tanah tracking references / urgent search checkpoints
+
+Add:
+- overdue detection
+- dashboard alerts
+- reminders
+- SLA analytics
+- stage duration analytics
+
+Case UI must include:
+- workflow tab
+- tasks tab
+- approvals tab
+- deadline indicators
+- title/document path indicator
+- full activity timeline
+
+==================================================
+7. REGULATORY RULES ENGINE
+==================================================
+
+Do NOT hard-code business formulas into random services only.
+Create versioned regulatory rule support.
+
+Create:
+- regulatory_rule_sets
+- regulatory_rule_versions
+- rule_effective_dates
+- formula_audit_logs
+
+Use this engine for:
+- Solicitors Remuneration Order fee scales
+- stamp duty tiers
+- SST rates
+- MyInvois classification mappings
+- workflow deadline rules
+- retention rules
+
+==================================================
+8. QUOTATION ENGINE 2.0
+==================================================
+
+Upgrade quotations into a rules-driven legal quotation module.
+
+Implement:
+- auto-calculation of legal fees based on property value
+- stamp duty calculator
+- auto-generated non-editable system line items
+- clear separation of:
+  professional fees
+  taxable services
+  disbursements
+  pass-through trust amounts
+- override path requiring approval and audit
+- quotation explanation / breakdown UI
+- support for linked financing documentation fees and transaction-specific rule sets
+
+==================================================
+9. DOCUMENT ENGINE 2.0
+==================================================
+
+Preserve DOCX/PDF generation foundation and PDF mapping editor.
+Upgrade into enterprise document lifecycle.
+
+Create/upgrade:
+- document_template_versions
+- document_variable_definitions
+- document_template_bindings
+- document_instances
+- document_instance_values
+- document_export_jobs
+- document_bundle_jobs
+- document_audit_logs
+- document_compare_versions
+- document_redline_events
+- original_document_register
+
+Implement:
+- draft / published / archived template states
+- system template → firm inherited template → firm override
+- central variable registry
+- preview / dry run
+- final generate
+- regenerate
+- batch generate
+- batch export
+- ZIP bundle export
+- document approval / lock
+- generation history
+- download/export history
+- actor logging
+- version comparison / draft history
+- original document return tracking
+
+Every generate / regenerate / export / download / approval action must be audited.
+
+==================================================
+10. FILE CLOSURE + RETENTION SOP
+==================================================
+
+Create/upgrade:
+- file_closure_checklists
+- file_closure_actions
+- closed_file_register
+- retention_schedules
+- legal_holds
+- destruction_actions
+
+Implement structured closure workflow:
+- outstanding fees check
+- trust balance must be zero or reconciled
+- original document return log
+- duplicate stripping / archive preparation
+- assign closed file number
+- destruction/review date
+- legal hold support
+- closure approval with audit
+
+==================================================
+11. COMMUNICATION HUB 2.0
+==================================================
+
+Create/upgrade:
+- email_accounts
+- email_threads
+- email_messages
+- email_attachments
+- whatsapp_accounts
+- whatsapp_templates
+- whatsapp_messages
+- internal_conversations
+- internal_messages
+- communication_events
+
+Implement:
+- inbox / sent / drafts / trash
+- compose / reply / reply all / forward
+- signature support
+- attachments
+- WhatsApp config
+- WhatsApp templates
+- send logs / status tracking
+- firm internal chat
+- firm ↔ founder support chat
+- file/photo attachments
+- case-linked communication timeline
+
+==================================================
+12. CASE / PROJECT / DEVELOPER DEEPENING
+==================================================
+
+Expand domain models:
+
+Case:
+- SPA structured fields
+- financing bank / loan package
+- redemption details
+- important dates
+- purchaser / vendor / borrower / guarantor / proprietor roles
+- conditions precedent
+- risks / blockers
+- linked workflow summary
+- linked billing summary
+- linked communication summary
+- linked compliance summary
+
+Project / Developer:
+- developer_compliance_documents
+- project_compliance_rules
+- compliance_alerts
+- project_stage_claims
+- architect certificate references
+- bank panel/release references
+- AP / DL / expiry tracking
+- HDA-related compliance items
+- linked standard documents
+
+Project and developer detail pages must show:
+- compliance section
+- expiry reminders
+- stage/billing references
+- linked standard docs
+
+==================================================
+13. BACKGROUND JOBS + RELIABILITY
+==================================================
+
+Heavy tasks must not run synchronously.
+
+Implement queue architecture for:
+- document generation
+- batch export
+- report export
+- email send
+- WhatsApp send
+- reminder scanning
+- e-invoice submission
+- scheduled notifications
+- import/sync jobs
+
+Requirements:
+- job state tracking
+- retry
+- dead-letter handling
+- failure audit
+- polling endpoint and/or SSE/WebSocket updates
+- frontend progress UI
+
+==================================================
+14. FOUNDER CONTROL CENTER
+==================================================
+
+Create/upgrade:
+- platform_usage_snapshots
+- platform_alert_rules
+- platform_alerts
+- platform_sync_logs
+- support_sessions
+- feature_flags
+- tenant_entitlements
+- practicing_certificate_records
+- practicing_certificate_alerts
+
+Founder dashboard must include:
+- per-firm usage
+- storage usage
+- job health
+- failed jobs
+- alert center
+- support session history
+- tenant health summary
+- feature/entitlement visibility
+- practicing certificate renewal reminders
+
+Do NOT prioritize employee device location or staff attendance as core conveyancing MVP.
+If implemented, keep them optional and privacy-controlled.
+
+==================================================
+15. API / FRONTEND / TESTING / DELIVERY
+==================================================
+
+Unify:
+- API base resolver
+- error response envelope
+- validation strategy
+- typed client patterns
+
+Frontend:
+- dense professional legal UI
+- no placeholder pages
+- no emojis
+- preserve /platform/* and /app/* structure
+
+Data safety:
+- optimistic locking / version checks for sensitive records
+- prevent silent overwrite
+
+Object/file safety:
+- signed URL controls
+- stronger object ACL
+- download/export audit
+
+Provide:
+- migrations
+- seed data
+- permission seeds
+- workflow template seeds
+- accounting demo flows
+- sub-sale demo cases
+- developer schedule G/H demo cases
+- compliance demo data
+- e-invoice mock data
+
+Add tests for:
+- tenant isolation
+- authorization
+- conflict checking
+- workflow template expansion
+- due date calculation
+- quotation rule calculation
+- document generation/export
+- accounting postings
+- voucher approval flow
+- e-invoice flow
+- compliance workflow
+- API smoke tests
+
+Final delivery must include:
+1. new tables list
+2. relationship summary
+3. backend routes/services added
+4. frontend pages/components added
+5. authorization model summary
+6. queue/jobs summary
+7. audit coverage summary
+8. reports added
+9. test coverage summary
+10. completed items vs pending items
+
+Implement in controlled phases:
+Phase 1 = tenant security + authorization + support sessions
+Phase 2 = legal accounting compliance + MyInvois + quotation rules
+Phase 3 = AML/KYC + conflict engine
+Phase 4 = workflow engine 2.0
+Phase 5 = document engine 2.0 + file closure/retention
+Phase 6 = communication hub + founder control center + reliability
+
+Do not jump across modules randomly. Finish each phase end-to-end across schema, backend, frontend, permissions, audit, queue, and tests before moving to the next phase.
