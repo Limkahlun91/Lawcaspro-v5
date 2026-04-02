@@ -425,7 +425,7 @@ router.post("/cases/:caseId/documents/generate-from-master", requireAuth, requir
   }
 });
 
-router.get("/document-variables", requireAuth, requireFirmUser, async (_req: AuthRequest, res): Promise<void> => {
+router.get("/document-variables", requireAuth, async (_req: AuthRequest, res): Promise<void> => {
   const variables = [
     { group: "General", vars: [
       { key: "reference_no", label: "Case Reference No" },
@@ -510,9 +510,9 @@ router.get("/document-variables", requireAuth, requireFirmUser, async (_req: Aut
       { key: "unit_category", label: "Unit Category" },
     ]},
     { group: "Project Property Types (Loop)", vars: [
-      { key: "project_property_types", label: "Property Types List — use {#project_property_types}...{/project_property_types}" },
-      { key: "building_type", label: "Building Type (inside loop)" },
-      { key: "index", label: "Index (inside loop)" },
+      { key: "project_property_types", label: "Property Types List", type: "loop" },
+      { key: "building_type", label: "Building Type (inside loop)", type: "loopField" },
+      { key: "index", label: "Index (inside loop)", type: "loopField" },
     ]},
     { group: "Developer", vars: [
       { key: "developer_name", label: "Developer Name" },
@@ -539,9 +539,9 @@ router.get("/document-variables", requireAuth, requireFirmUser, async (_req: Aut
       { key: "client_bank_account_no", label: "Client Bank Account No" },
     ]},
     { group: "Loops (use with {#name}...{/name})", vars: [
-      { key: "purchasers", label: "All Purchasers - fields: index, name, ic, nationality, address, phone, email, role" },
-      { key: "bank_accounts", label: "All Bank Accounts - fields: index, bank_name, account_no, account_type" },
-      { key: "developer_contacts", label: "Developer Contacts - fields: index, department, phone, ext, email" },
+      { key: "purchasers", label: "All Purchasers", type: "loop", fields: "index, name, ic, nationality, address, phone, email, role" },
+      { key: "bank_accounts", label: "All Bank Accounts", type: "loop", fields: "index, bank_name, account_no, account_type" },
+      { key: "developer_contacts", label: "Developer Contacts", type: "loop", fields: "index, department, phone, ext, email" },
     ]},
   ];
   res.json(variables);

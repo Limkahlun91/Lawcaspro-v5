@@ -13,7 +13,7 @@ import {
 import {
   FileText, Upload, Trash2, Download, Plus, File, Search,
   FolderOpen, Folder, ChevronUp, ChevronDown, Pencil, FolderPlus,
-  Eye, EyeOff, ChevronRight,
+  Eye, EyeOff, ChevronRight, BookOpen, Copy, Check,
 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import { cn } from "@/lib/utils";
@@ -181,6 +181,10 @@ export default function PlatformDocuments() {
   const [editingFolder, setEditingFolder] = useState<SystemFolder | null>(null);
   const [editFolderName, setEditFolderName] = useState("");
 
+  const [showVarRef, setShowVarRef] = useState(false);
+  const [copiedKey, setCopiedKey] = useState<string | null>(null);
+  const [expandedGroups, setExpandedGroups] = useState<Record<string, boolean>>({});
+
   const { data: folders = [] } = useQuery<SystemFolder[]>({
     queryKey: ["system-folders"],
     queryFn: async () => {
@@ -201,6 +205,34 @@ export default function PlatformDocuments() {
       return res.json();
     },
   });
+
+  const { data: varGroups = [] } = useQuery<{ group: string; vars: { key: string; label: string }[] }[]>({
+    queryKey: ["document-variables"],
+    queryFn: async () => {
+      const res = await fetch(`${API_BASE}/document-variables`, { credentials: "include" });
+      if (!res.ok) throw new Error("Failed to load variables");
+      return res.json();
+    },
+    enabled: showVarRef,
+  });
+
+  const handleCopyVar = (key: string, type?: string) => {
+    let text: string;
+    if (type === "loop") {
+      text = `{#${key}}...{/${key}}`;
+    } else if (type === "loopField") {
+      text = `{${key}}`;
+    } else {
+      text = `{{${key}}}`;
+    }
+    navigator.clipboard.writeText(text);
+    setCopiedKey(key);
+    setTimeout(() => setCopiedKey(null), 1500);
+  };
+
+  const toggleGroup = (group: string) => {
+    setExpandedGroups(prev => ({ ...prev, [group]: !prev[group] }));
+  };
 
   const rootFolders = folders.filter(f => f.parentId === null).sort((a, b) => a.sortOrder - b.sortOrder);
   const selectedFolder = folders.find(f => f.id === selectedFolderId);
@@ -449,10 +481,16 @@ export default function PlatformDocuments() {
                     {selectedFolder ? `Folder: ${folderPath()}` : "Showing all documents"}
                   </p>
                 </div>
-                <Button onClick={() => setShowUpload(true)} size="sm" className="gap-1.5">
-                  <Plus className="w-3.5 h-3.5" />
-                  Upload Document
-                </Button>
+                <div className="flex items-center gap-2">
+                  <Button variant="outline" size="sm" className="gap-1.5" onClick={() => { setShowVarRef(true); setExpandedGroups({}); }}>
+                    <BookOpen className="w-3.5 h-3.5" />
+                    Variable Reference
+                  </Button>
+                  <Button onClick={() => setShowUpload(true)} size="sm" className="gap-1.5">
+                    <Plus className="w-3.5 h-3.5" />
+                    Upload Document
+                  </Button>
+                </div>
               </div>
 
               {docsLoading ? (
@@ -661,6 +699,90 @@ export default function PlatformDocuments() {
             >
               {updateFolderMutation.isPending ? "Saving..." : "Save"}
             </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={showVarRef} onOpenChange={setShowVarRef}>
+        <DialogContent className="max-w-2xl max-h-[80vh] flex flex-col">
+          <DialogHeader>
+            <DialogTitle>Template Variable Reference</DialogTitle>
+            <p className="text-sm text-slate-500 mt-1">
+              Use these variables in DOCX templates. Click to copy. Variables use {"{{variable_name}}"} syntax.
+            </p>
+          </DialogHeader>
+          <div className="flex-1 overflow-y-auto space-y-2 pr-1">
+            {varGroups.map(group => {
+              const isExpanded = expandedGroups[group.group] !== false;
+              const isLoop = group.group.toLowerCase().includes("loop");
+              return (
+                <div key={group.group} className="border rounded-lg overflow-hidden">
+                  <button
+                    className={cn(
+                      "w-full flex items-center justify-between px-3 py-2.5 text-left text-sm font-medium transition-colors",
+                      isLoop ? "bg-blue-50 text-blue-800 hover:bg-blue-100" : "bg-slate-50 text-slate-700 hover:bg-slate-100"
+                    )}
+                    onClick={() => toggleGroup(group.group)}
+                  >
+                    <span className="flex items-center gap-2">
+                      {group.group}
+                      <Badge variant="secondary" className="text-xs font-normal">{group.vars.length}</Badge>
+                    </span>
+                    <ChevronRight className={cn("w-4 h-4 transition-transform", isExpanded && "rotate-90")} />
+                  </button>
+                  {isExpanded && (
+                    <div className="divide-y divide-slate-100">
+                      {group.vars.map((v: any) => {
+                        const varType = v.type as string | undefined;
+                        const isLoopVar = varType === "loop";
+                        const isLoopField = varType === "loopField";
+                        const displaySyntax = isLoopVar
+                          ? `{#${v.key}}...{/${v.key}}`
+                          : isLoopField
+                            ? `{${v.key}}`
+                            : `{{${v.key}}}`;
+                        const isCopied = copiedKey === v.key;
+                        return (
+                          <div
+                            key={v.key}
+                            className="flex items-center justify-between px-3 py-2 hover:bg-slate-50 cursor-pointer group"
+                            onClick={() => handleCopyVar(v.key, varType)}
+                          >
+                            <div className="flex-1 min-w-0">
+                              <span className="text-xs text-slate-500">{v.label}</span>
+                              {v.fields && (
+                                <span className="text-xs text-slate-400 ml-1">({v.fields})</span>
+                              )}
+                              <div className="flex items-center gap-2 mt-0.5">
+                                <code className={cn(
+                                  "text-xs px-1.5 py-0.5 rounded font-mono",
+                                  isLoopVar ? "bg-blue-50 text-blue-700" : isLoopField ? "bg-blue-50/50 text-blue-600" : "bg-amber-50 text-amber-800"
+                                )}>
+                                  {displaySyntax}
+                                </code>
+                              </div>
+                            </div>
+                            <div className="shrink-0 ml-2">
+                              {isCopied ? (
+                                <Check className="w-4 h-4 text-green-500" />
+                              ) : (
+                                <Copy className="w-4 h-4 text-slate-300 group-hover:text-slate-500" />
+                              )}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+            {varGroups.length === 0 && (
+              <div className="text-center py-8 text-slate-400 text-sm">Loading variables...</div>
+            )}
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setShowVarRef(false)}>Close</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
