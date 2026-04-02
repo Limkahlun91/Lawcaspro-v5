@@ -10,3 +10,4 @@ export * from "./accounting";
 export * from "./communications";
 export * from "./platform";
 export * from "./quotations";
+export * from "./regulatory";

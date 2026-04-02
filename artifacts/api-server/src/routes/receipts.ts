@@ -1,0 +1,131 @@
+import { Router, type IRouter } from "express";
+import { eq, and, desc, sql } from "drizzle-orm";
+import { db, receiptsTable, receiptAllocationsTable, invoicesTable, ledgerEntriesTable, firmBankAccountsTable } from "@workspace/db";
+import { requireAuth, requireFirmUser, type AuthRequest } from "../lib/auth";
+
+const router: IRouter = Router();
+
+async function nextReceiptNo(firmId: number): Promise<string> {
+  const [row] = await db.select({ c: sql<number>`COUNT(*)` }).from(receiptsTable).where(eq(receiptsTable.firmId, firmId));
+  const seq = (Number(row?.c ?? 0) + 1).toString().padStart(4, "0");
+  const yr = new Date().getFullYear();
+  return `REC-${yr}-${seq}`;
+}
+
+async function updateInvoicePaymentStatus(invoiceId: number, firmId: number) {
+  const [inv] = await db.select().from(invoicesTable).where(and(eq(invoicesTable.id, invoiceId), eq(invoicesTable.firmId, firmId)));
+  if (!inv) return;
+  const [allocSum] = await db.select({ total: sql<string>`COALESCE(SUM(amount), 0)` })
+    .from(receiptAllocationsTable).where(eq(receiptAllocationsTable.invoiceId, invoiceId));
+  const paid = Number(allocSum?.total ?? 0);
+  const grandTotal = Number(inv.grandTotal);
+  let status = inv.status;
+  if (paid >= grandTotal) status = "paid";
+  else if (paid > 0) status = "partially_paid";
+  else if (inv.status === "paid" || inv.status === "partially_paid") status = "issued";
+  await db.update(invoicesTable).set({
+    amountPaid: paid.toFixed(2) as any,
+    amountDue: Math.max(0, grandTotal - paid).toFixed(2) as any,
+    status, updatedAt: new Date()
+  }).where(eq(invoicesTable.id, invoiceId));
+}
+
+async function postLedger(firmId: number, caseId: number | null, opts: {
+  entryDate: string; entryType: string; accountType: string;
+  debit: number; credit: number; description: string;
+  referenceNo?: string; sourceType: string; sourceId: number; createdBy: number;
+}) {
+  const [last] = await db.select({ bal: sql<string>`COALESCE(SUM(credit - debit), 0)` })
+    .from(ledgerEntriesTable)
+    .where(and(eq(ledgerEntriesTable.firmId, firmId), eq(ledgerEntriesTable.accountType, opts.accountType),
+      caseId ? eq(ledgerEntriesTable.caseId, caseId) : sql`case_id IS NULL`));
+  const prevBal = Number(last?.bal ?? 0);
+  const balanceAfter = prevBal + opts.credit - opts.debit;
+  await db.insert(ledgerEntriesTable).values({
+    firmId, caseId, entryDate: opts.entryDate as any, entryType: opts.entryType,
+    accountType: opts.accountType, debit: opts.debit.toFixed(2) as any,
+    credit: opts.credit.toFixed(2) as any, balanceAfter: balanceAfter.toFixed(2) as any,
+    description: opts.description, referenceNo: opts.referenceNo,
+    sourceType: opts.sourceType, sourceId: opts.sourceId, createdBy: opts.createdBy,
+  });
+}
+
+// List
+router.get("/receipts", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+  const { caseId } = req.query as Record<string, string>;
+  let cond = eq(receiptsTable.firmId, req.firmId!);
+  if (caseId) cond = and(cond, eq(receiptsTable.caseId, parseInt(caseId))) as any;
+  const rows = await db.select().from(receiptsTable).where(cond).orderBy(desc(receiptsTable.createdAt));
+  res.json(rows);
+});
+
+// Detail
+router.get("/receipts/:id", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+  const id = parseInt(req.params.id);
+  const [rec] = await db.select().from(receiptsTable).where(and(eq(receiptsTable.id, id), eq(receiptsTable.firmId, req.firmId!)));
+  if (!rec) { res.status(404).json({ error: "Receipt not found" }); return; }
+  const allocs = await db.select().from(receiptAllocationsTable).where(eq(receiptAllocationsTable.receiptId, id));
+  res.json({ ...rec, allocations: allocs });
+});
+
+// Create receipt
+router.post("/receipts", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+  const { caseId, invoiceId, paymentMethod, bankAccountId, accountType, amount,
+    receivedDate, referenceNo, notes, allocations } = req.body;
+  if (!amount || !receivedDate) { res.status(400).json({ error: "amount and receivedDate required" }); return; }
+
+  const receiptNo = await nextReceiptNo(req.firmId!);
+  const [rec] = await db.insert(receiptsTable).values({
+    firmId: req.firmId!, caseId: caseId || null, invoiceId: invoiceId || null,
+    receiptNo, paymentMethod: paymentMethod || "bank_transfer",
+    bankAccountId: bankAccountId || null,
+    accountType: accountType || "client",
+    amount: Number(amount).toFixed(2) as any,
+    receivedDate: receivedDate as any,
+    referenceNo: referenceNo || null, notes: notes || null,
+    createdBy: req.userId!,
+  }).returning();
+
+  // Auto-allocate to invoice if specified
+  const allocList = allocations as { invoiceId: number; amount: number }[] || [];
+  if (invoiceId && !allocList.length) {
+    allocList.push({ invoiceId: parseInt(invoiceId), amount: Number(amount) });
+  }
+  for (const alloc of allocList) {
+    await db.insert(receiptAllocationsTable).values({ receiptId: rec.id, invoiceId: alloc.invoiceId || null, amount: Number(alloc.amount).toFixed(2) as any });
+    if (alloc.invoiceId) await updateInvoicePaymentStatus(alloc.invoiceId, req.firmId!);
+  }
+
+  // Post to ledger
+  await postLedger(req.firmId!, caseId || null, {
+    entryDate: receivedDate, entryType: "receipt", accountType: accountType || "client",
+    debit: 0, credit: Number(amount),
+    description: `Receipt ${receiptNo} — ${paymentMethod || "bank_transfer"}`,
+    referenceNo: receiptNo, sourceType: "receipt", sourceId: rec.id, createdBy: req.userId!,
+  });
+
+  res.status(201).json(rec);
+});
+
+// Reverse receipt
+router.post("/receipts/:id/reverse", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+  const id = parseInt(req.params.id);
+  const [rec] = await db.select().from(receiptsTable).where(and(eq(receiptsTable.id, id), eq(receiptsTable.firmId, req.firmId!)));
+  if (!rec) { res.status(404).json({ error: "Receipt not found" }); return; }
+  if (rec.isReversed) { res.status(400).json({ error: "Already reversed" }); return; }
+
+  await db.update(receiptsTable).set({ isReversed: true, reversedBy: req.userId!, reversedAt: new Date() }).where(eq(receiptsTable.id, id));
+  const allocs = await db.select().from(receiptAllocationsTable).where(eq(receiptAllocationsTable.receiptId, id));
+  for (const a of allocs) { if (a.invoiceId) await updateInvoicePaymentStatus(a.invoiceId, req.firmId!); }
+
+  await postLedger(req.firmId!, rec.caseId, {
+    entryDate: new Date().toISOString().slice(0, 10), entryType: "reversal",
+    accountType: rec.accountType, debit: Number(rec.amount), credit: 0,
+    description: `Reversal of Receipt ${rec.receiptNo}`,
+    referenceNo: rec.receiptNo, sourceType: "receipt", sourceId: id, createdBy: req.userId!,
+  });
+
+  res.json({ success: true });
+});
+
+export default router;

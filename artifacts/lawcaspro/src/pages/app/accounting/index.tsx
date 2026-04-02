@@ -1,14 +1,16 @@
 import { useState, useEffect } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { useLocation, useSearch } from "wouter";
+import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from "recharts";
 import {
-  BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
-} from "recharts";
-import { DollarSign, TrendingUp, Clock, Briefcase, Plus, Copy, Trash2, Search } from "lucide-react";
+  DollarSign, TrendingUp, Clock, Briefcase, Plus, Search, FileText,
+  Receipt, CreditCard, BookOpen, ChevronRight, RotateCcw, ArrowUpDown,
+} from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
+import { useToast } from "@/hooks/use-toast";
 
 const API_BASE = import.meta.env.BASE_URL.replace(/\/$/, "").replace(/^\/lawcaspro/, "") + "/api";
 
@@ -22,52 +24,87 @@ function fmt(val: unknown) {
   return `RM ${Number(val ?? 0).toLocaleString("en-MY", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
-const CATEGORY_LABELS: Record<string, string> = {
-  legal_fee: "Legal Fees",
-  disbursement: "Disbursements",
-  stamp_duty: "Stamp Duty",
-  professional_fee: "Professional Fees",
-  other: "Other",
-};
-
-const CATEGORY_COLORS: Record<string, string> = {
-  legal_fee: "#f59e0b",
-  disbursement: "#3b82f6",
-  stamp_duty: "#10b981",
-  professional_fee: "#8b5cf6",
-  other: "#6b7280",
-};
-
-const TABS = ["Overview", "Quotations"] as const;
+const TABS = ["Overview", "Invoices", "Receipts", "Payment Vouchers", "Ledger"] as const;
 type Tab = typeof TABS[number];
 
 const TAB_KEYS: Record<string, Tab> = {
   overview: "Overview",
-  quotations: "Quotations",
+  invoices: "Invoices",
+  receipts: "Receipts",
+  "payment-vouchers": "Payment Vouchers",
+  ledger: "Ledger",
 };
 
+const STATUS_COLORS: Record<string, string> = {
+  draft: "bg-slate-100 text-slate-600",
+  issued: "bg-blue-100 text-blue-700",
+  partially_paid: "bg-amber-100 text-amber-700",
+  paid: "bg-green-100 text-green-700",
+  void: "bg-red-100 text-red-600",
+  overdue: "bg-red-100 text-red-700",
+  prepared: "bg-blue-100 text-blue-700",
+  lawyer_approved: "bg-indigo-100 text-indigo-700",
+  partner_approved: "bg-violet-100 text-violet-700",
+  submitted: "bg-amber-100 text-amber-700",
+  returned: "bg-orange-100 text-orange-700",
+  locked: "bg-slate-100 text-slate-500",
+};
+
+function StatusBadge({ status }: { status: string }) {
+  const label = status.replace(/_/g, " ").replace(/\b\w/g, (c: string) => c.toUpperCase());
+  return (
+    <span className={cn("px-2 py-0.5 rounded-full text-xs font-medium", STATUS_COLORS[status] ?? "bg-slate-100 text-slate-600")}>
+      {label}
+    </span>
+  );
+}
+
+// ── OVERVIEW TAB ─────────────────────────────────────────────────────────────
+
+function LedgerSummaryInline() {
+  const { data } = useQuery({ queryKey: ["ledger-summary-overview"], queryFn: () => apiFetch("/ledger/summary") });
+  const rows = (data ?? []) as any[];
+  if (!rows.length) return <div className="text-slate-400 text-sm py-4 text-center">No ledger entries yet</div>;
+  return (
+    <div className="space-y-3">
+      {rows.map((r: any) => (
+        <div key={r.accountType} className="flex justify-between items-center py-2 border-b last:border-0">
+          <div>
+            <div className="text-sm font-medium text-slate-900 capitalize">{r.accountType} Account</div>
+            <div className="text-xs text-slate-400">Dr {fmt(r.totalDebit)} | Cr {fmt(r.totalCredit)}</div>
+          </div>
+          <div className={cn("text-base font-bold", Number(r.balance) >= 0 ? "text-green-600" : "text-red-500")}>
+            {fmt(r.balance)}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function OverviewTab() {
-  const [, setLocation] = useLocation();
-  const { data, isLoading } = useQuery({
+  const { data: invData } = useQuery({ queryKey: ["invoices"], queryFn: () => apiFetch("/invoices") });
+  const invoices = (invData ?? []) as any[];
+  const invTotals = invoices.reduce((acc, inv) => ({
+    total: acc.total + Number(inv.grandTotal),
+    paid: acc.paid + Number(inv.amountPaid),
+    due: acc.due + Number(inv.amountDue),
+  }), { total: 0, paid: 0, due: 0 });
+
+  const { data: accData } = useQuery({
     queryKey: ["accounting-summary"],
     queryFn: () => apiFetch("/accounting/summary"),
   });
-
-  const totals = (data?.totals ?? {}) as Record<string, unknown>;
-  const byCategory = (data?.byCategory ?? []) as Record<string, unknown>[];
-  const topCases = (data?.topCases ?? []) as Record<string, unknown>[];
-  const monthly = (data?.monthly ?? []) as Record<string, unknown>[];
-
-  if (isLoading) return <div className="text-slate-500 py-12 text-center">Loading...</div>;
+  const monthly = ((accData?.monthly ?? []) as any[]);
 
   return (
     <>
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
         {[
-          { label: "Total Billed", value: fmt(totals.total), icon: DollarSign, color: "bg-amber-50 text-amber-600" },
-          { label: "Collected", value: fmt(totals.paid), icon: TrendingUp, color: "bg-green-50 text-green-600" },
-          { label: "Outstanding", value: fmt(totals.outstanding), icon: Clock, color: "bg-red-50 text-red-500" },
-          { label: "Billed Cases", value: String(totals.case_count ?? 0), icon: Briefcase, color: "bg-slate-100 text-slate-600" },
+          { label: "Total Invoiced", value: fmt(invTotals.total), icon: FileText, color: "bg-amber-50 text-amber-600" },
+          { label: "Collected", value: fmt(invTotals.paid), icon: TrendingUp, color: "bg-green-50 text-green-600" },
+          { label: "Outstanding", value: fmt(invTotals.due), icon: Clock, color: "bg-red-50 text-red-500" },
+          { label: "Open Invoices", value: String(invoices.filter(i => i.status !== "void" && i.status !== "paid").length), icon: Briefcase, color: "bg-slate-100 text-slate-600" },
         ].map((item) => (
           <Card key={item.label}>
             <CardContent className="pt-6">
@@ -85,180 +122,674 @@ function OverviewTab() {
         ))}
       </div>
 
+      {monthly.length > 0 && (
+        <Card>
+          <CardHeader><CardTitle>Monthly Revenue</CardTitle></CardHeader>
+          <CardContent>
+            <ResponsiveContainer width="100%" height={220}>
+              <BarChart data={monthly}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" />
+                <XAxis dataKey="month" tick={{ fontSize: 12 }} />
+                <YAxis tick={{ fontSize: 12 }} tickFormatter={(v: number) => `RM${(v / 1000).toFixed(0)}k`} />
+                <Tooltip formatter={(v: unknown) => [`RM ${Number(v).toLocaleString("en-MY")}`, "Amount"]} />
+                <Bar dataKey="total" fill="#f5a623" radius={[4, 4, 0, 0]} />
+              </BarChart>
+            </ResponsiveContainer>
+          </CardContent>
+        </Card>
+      )}
+
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
         <Card>
-          <CardHeader><CardTitle>By Category</CardTitle></CardHeader>
+          <CardHeader><CardTitle>Recent Invoices</CardTitle></CardHeader>
           <CardContent>
-            {byCategory.length === 0 ? (
-              <div className="text-center py-8 text-slate-400 text-sm">No billing entries yet. Add entries from individual case pages.</div>
+            {invoices.length === 0 ? (
+              <div className="text-center py-6 text-slate-400 text-sm">No invoices yet</div>
             ) : (
-              <div className="space-y-3">
-                {byCategory.map((row) => {
-                  const cat = row.category as string;
-                  const total = Number(row.total ?? 0);
-                  const grand = Number(totals.total ?? 1) || 1;
-                  const pct = (total / grand) * 100;
-                  return (
-                    <div key={cat}>
-                      <div className="flex justify-between text-sm mb-1">
-                        <span className="font-medium text-slate-700">{CATEGORY_LABELS[cat] ?? cat}</span>
-                        <span className="text-slate-500">{fmt(total)}</span>
-                      </div>
-                      <div className="h-2 rounded-full bg-slate-100">
-                        <div className="h-full rounded-full" style={{ width: `${pct}%`, backgroundColor: CATEGORY_COLORS[cat] ?? "#6b7280" }} />
-                      </div>
+              <div className="divide-y">
+                {invoices.slice(0, 6).map((inv: any) => (
+                  <div key={inv.id} className="flex items-center justify-between py-3">
+                    <div>
+                      <div className="font-medium text-sm text-slate-900">{inv.invoiceNo}</div>
+                      <div className="text-xs text-slate-400">{inv.issuedDate ?? "—"}</div>
                     </div>
-                  );
-                })}
+                    <div className="flex items-center gap-3">
+                      <StatusBadge status={inv.status} />
+                      <span className="text-sm font-semibold text-slate-700">{fmt(inv.grandTotal)}</span>
+                    </div>
+                  </div>
+                ))}
               </div>
             )}
           </CardContent>
         </Card>
-
         <Card>
-          <CardHeader><CardTitle>Monthly Billing</CardTitle></CardHeader>
-          <CardContent>
-            {monthly.length === 0 ? (
-              <div className="text-center py-8 text-slate-400 text-sm">No data yet</div>
-            ) : (
-              <ResponsiveContainer width="100%" height={200}>
-                <BarChart data={monthly}>
-                  <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
-                  <XAxis dataKey="month" tick={{ fontSize: 10 }} />
-                  <YAxis tick={{ fontSize: 10 }} tickFormatter={(v) => `${(Number(v)/1000).toFixed(0)}k`} />
-                  <Tooltip formatter={(v) => [fmt(v), "Billed"]} />
-                  <Bar dataKey="total" fill="#f59e0b" radius={[3, 3, 0, 0]} />
-                </BarChart>
-              </ResponsiveContainer>
-            )}
-          </CardContent>
+          <CardHeader><CardTitle>Account Balance Summary</CardTitle></CardHeader>
+          <CardContent><LedgerSummaryInline /></CardContent>
         </Card>
       </div>
-
-      <Card>
-        <CardHeader><CardTitle>Top Cases by Billing</CardTitle></CardHeader>
-        <CardContent>
-          {topCases.length === 0 ? (
-            <div className="text-center py-8 text-slate-400 text-sm">No billing data. Open a case and add billing entries from the Accounting tab.</div>
-          ) : (
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="border-b border-slate-100 text-slate-500 text-left">
-                  <th className="py-2 font-medium">Case</th>
-                  <th className="py-2 font-medium text-right">Total</th>
-                  <th className="py-2 font-medium text-right">Paid</th>
-                  <th className="py-2 font-medium text-right">Outstanding</th>
-                </tr>
-              </thead>
-              <tbody>
-                {topCases.map((row) => (
-                  <tr key={String(row.case_id)} className="border-b border-slate-50 hover:bg-slate-50 cursor-pointer" onClick={() => setLocation(`/app/cases/${row.case_id}`)}>
-                    <td className="py-3 font-medium text-slate-900">{String(row.reference_no)}</td>
-                    <td className="py-3 text-right text-slate-700">{fmt(row.total)}</td>
-                    <td className="py-3 text-right text-green-600">{fmt(row.paid)}</td>
-                    <td className="py-3 text-right text-red-600">{fmt(row.outstanding)}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          )}
-        </CardContent>
-      </Card>
     </>
   );
 }
 
-function QuotationsTab() {
+// ── INVOICES TAB ─────────────────────────────────────────────────────────────
+
+function InvoicesTab() {
   const [, setLocation] = useLocation();
   const [search, setSearch] = useState("");
+  const [showCreate, setShowCreate] = useState(false);
+  const { toast } = useToast();
+  const qc = useQueryClient();
+  const [selectedQuotationId, setSelectedQuotationId] = useState("");
 
-  const { data: quotations, isLoading } = useQuery({
-    queryKey: ["quotations"],
-    queryFn: () => apiFetch("/quotations"),
+  const { data, isLoading } = useQuery({ queryKey: ["invoices"], queryFn: () => apiFetch("/invoices") });
+  const invoices = (data ?? []) as any[];
+  const { data: quotData } = useQuery({ queryKey: ["quotations-for-invoice"], queryFn: () => apiFetch("/quotations") });
+  const quotations = (quotData ?? []) as any[];
+
+  const createMut = useMutation({
+    mutationFn: () => apiFetch(`/invoices/from-quotation/${selectedQuotationId}`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({}),
+    }),
+    onSuccess: (inv: any) => {
+      qc.invalidateQueries({ queryKey: ["invoices"] });
+      setShowCreate(false);
+      toast({ title: "Invoice created", description: `${inv.invoiceNo} created as draft` });
+      setLocation(`/app/accounting/invoices/${inv.id}`);
+    },
+    onError: (e: any) => toast({ variant: "destructive", title: "Error", description: e.message }),
   });
 
-  const statusColors: Record<string, string> = {
-    draft: "bg-gray-100 text-gray-700",
-    sent: "bg-blue-100 text-blue-700",
-    accepted: "bg-green-100 text-green-700",
-    rejected: "bg-red-100 text-red-700",
-  };
+  const issueMut = useMutation({
+    mutationFn: (id: number) => apiFetch(`/invoices/${id}/issue`, { method: "POST" }),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ["invoices"] }); toast({ title: "Invoice issued" }); },
+    onError: (e: any) => toast({ variant: "destructive", title: "Error", description: e.message }),
+  });
 
-  const filtered = (quotations || []).filter((q: any) =>
-    !search ||
-    q.referenceNo?.toLowerCase().includes(search.toLowerCase()) ||
-    q.clientName?.toLowerCase().includes(search.toLowerCase())
+  const filtered = invoices.filter((i: any) =>
+    !search || i.invoiceNo?.toLowerCase().includes(search.toLowerCase())
   );
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between">
-        <div className="relative max-w-xs flex-1">
+      <div className="flex items-center justify-between gap-3">
+        <div className="relative flex-1 max-w-xs">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
-          <Input
-            placeholder="Search quotations..."
-            value={search}
-            onChange={e => setSearch(e.target.value)}
-            className="pl-9"
-          />
+          <Input className="pl-9" placeholder="Search invoices…" value={search} onChange={(e) => setSearch(e.target.value)} />
         </div>
-        <Button className="bg-amber-500 hover:bg-amber-600 text-white" onClick={() => setLocation("/app/quotations/new")}>
-          <Plus className="w-4 h-4 mr-2" /> New Quotation
+        <Button onClick={() => setShowCreate(true)} className="bg-amber-500 hover:bg-amber-600 text-white gap-2">
+          <Plus className="w-4 h-4" /> New Invoice
         </Button>
       </div>
 
-      {isLoading ? (
-        <div className="text-slate-500 py-12 text-center">Loading...</div>
-      ) : filtered.length === 0 ? (
-        <Card>
-          <CardContent className="py-12 text-center">
-            <p className="text-slate-500">No quotations yet</p>
-            <p className="text-sm text-slate-400 mt-1">Create your first quotation to get started</p>
-          </CardContent>
-        </Card>
-      ) : (
-        <Card>
-          <CardContent className="p-0">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="border-b border-slate-200 bg-slate-50">
-                  <th className="text-left px-4 py-3 font-medium text-slate-600">Reference</th>
-                  <th className="text-left px-4 py-3 font-medium text-slate-600">Client</th>
-                  <th className="text-left px-4 py-3 font-medium text-slate-600">Property</th>
-                  <th className="text-right px-4 py-3 font-medium text-slate-600">Total</th>
-                  <th className="text-center px-4 py-3 font-medium text-slate-600">Status</th>
-                  <th className="text-left px-4 py-3 font-medium text-slate-600">Date</th>
-                </tr>
-              </thead>
-              <tbody>
-                {filtered.map((q: any) => (
-                  <tr
-                    key={q.id}
-                    className="border-b border-slate-100 hover:bg-slate-50 cursor-pointer"
-                    onClick={() => setLocation(`/app/quotations/${q.id}`)}
-                  >
-                    <td className="px-4 py-3 font-medium text-slate-900">{q.referenceNo}</td>
-                    <td className="px-4 py-3 text-slate-600">{q.clientName}</td>
-                    <td className="px-4 py-3 text-slate-500 text-xs max-w-[200px] truncate">{q.propertyDescription || "-"}</td>
-                    <td className="px-4 py-3 text-right font-medium">{fmt(q.totalInclTax)}</td>
-                    <td className="px-4 py-3 text-center">
-                      <span className={`inline-block px-2 py-0.5 rounded text-xs font-medium capitalize ${statusColors[q.status] || statusColors.draft}`}>
-                        {q.status}
-                      </span>
-                    </td>
-                    <td className="px-4 py-3 text-slate-500 text-xs">
-                      {new Date(q.createdAt).toLocaleDateString("en-MY")}
-                    </td>
-                  </tr>
+      {showCreate && (
+        <Card className="border-amber-200 bg-amber-50">
+          <CardHeader><CardTitle className="text-base">Create Invoice from Quotation</CardTitle></CardHeader>
+          <CardContent className="space-y-4">
+            <div>
+              <label className="text-sm font-medium text-slate-700 block mb-1">Select Quotation</label>
+              <select className="w-full border border-slate-200 rounded-md px-3 py-2 text-sm bg-white"
+                value={selectedQuotationId} onChange={(e) => setSelectedQuotationId(e.target.value)}>
+                <option value="">— Select a quotation —</option>
+                {quotations.map((q: any) => (
+                  <option key={q.id} value={q.id}>
+                    {q.referenceNo} — {q.clientName} (RM {Number(q.totalInclTax ?? 0).toLocaleString("en-MY")})
+                  </option>
                 ))}
-              </tbody>
-            </table>
+              </select>
+            </div>
+            <div className="flex gap-2">
+              <Button onClick={() => createMut.mutate()} disabled={!selectedQuotationId || createMut.isPending}
+                className="bg-amber-500 hover:bg-amber-600 text-white">
+                {createMut.isPending ? "Creating…" : "Create Invoice"}
+              </Button>
+              <Button variant="outline" onClick={() => setShowCreate(false)}>Cancel</Button>
+            </div>
           </CardContent>
         </Card>
+      )}
+
+      {isLoading ? (
+        <div className="text-center py-12 text-slate-400">Loading…</div>
+      ) : filtered.length === 0 ? (
+        <div className="text-center py-16 text-slate-400">
+          <FileText className="w-10 h-10 mx-auto mb-3 opacity-30" />
+          <p>No invoices found</p>
+        </div>
+      ) : (
+        <div className="overflow-x-auto rounded-lg border border-slate-200 bg-white">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="bg-slate-50 border-b text-slate-500 text-xs uppercase tracking-wide">
+                <th className="px-4 py-3 text-left font-medium">Invoice No</th>
+                <th className="px-4 py-3 text-left font-medium">Issued</th>
+                <th className="px-4 py-3 text-left font-medium">Due</th>
+                <th className="px-4 py-3 text-left font-medium">Status</th>
+                <th className="px-4 py-3 text-right font-medium">Total</th>
+                <th className="px-4 py-3 text-right font-medium">Paid</th>
+                <th className="px-4 py-3 text-right font-medium">Due</th>
+                <th className="px-4 py-3" />
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-100">
+              {filtered.map((inv: any) => (
+                <tr key={inv.id} className="hover:bg-slate-50 transition-colors">
+                  <td className="px-4 py-3 font-medium text-slate-900">{inv.invoiceNo}</td>
+                  <td className="px-4 py-3 text-slate-500">{inv.issuedDate ?? "—"}</td>
+                  <td className="px-4 py-3 text-slate-500">{inv.dueDate ?? "—"}</td>
+                  <td className="px-4 py-3"><StatusBadge status={inv.status} /></td>
+                  <td className="px-4 py-3 text-right font-semibold text-slate-800">{fmt(inv.grandTotal)}</td>
+                  <td className="px-4 py-3 text-right text-green-600">{fmt(inv.amountPaid)}</td>
+                  <td className="px-4 py-3 text-right text-red-500">{fmt(inv.amountDue)}</td>
+                  <td className="px-4 py-3 text-right">
+                    <div className="flex items-center justify-end gap-2">
+                      {inv.status === "draft" && (
+                        <Button size="sm" variant="outline" className="text-xs h-7"
+                          onClick={() => issueMut.mutate(inv.id)}>Issue</Button>
+                      )}
+                      <Button size="sm" variant="ghost" className="h-7 w-7 p-0"
+                        onClick={() => setLocation(`/app/accounting/invoices/${inv.id}`)}>
+                        <ChevronRight className="w-4 h-4" />
+                      </Button>
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       )}
     </div>
   );
 }
+
+// ── RECEIPTS TAB ─────────────────────────────────────────────────────────────
+
+function ReceiptsTab() {
+  const [showCreate, setShowCreate] = useState(false);
+  const { toast } = useToast();
+  const qc = useQueryClient();
+  const [form, setForm] = useState({
+    invoiceId: "", paymentMethod: "bank_transfer", accountType: "client",
+    amount: "", receivedDate: new Date().toISOString().slice(0, 10), referenceNo: "", notes: "",
+  });
+
+  const { data, isLoading } = useQuery({ queryKey: ["receipts"], queryFn: () => apiFetch("/receipts") });
+  const receipts = (data ?? []) as any[];
+  const { data: invData } = useQuery({ queryKey: ["invoices-for-receipt"], queryFn: () => apiFetch("/invoices") });
+  const openInvoices = ((invData ?? []) as any[]).filter((i: any) => i.status !== "void" && i.status !== "paid");
+
+  const createMut = useMutation({
+    mutationFn: () => apiFetch("/receipts", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ...form, invoiceId: form.invoiceId || undefined, amount: parseFloat(form.amount) }),
+    }),
+    onSuccess: (rec: any) => {
+      qc.invalidateQueries({ queryKey: ["receipts"] });
+      qc.invalidateQueries({ queryKey: ["invoices"] });
+      qc.invalidateQueries({ queryKey: ["ledger-summary-overview"] });
+      setShowCreate(false);
+      setForm({ invoiceId: "", paymentMethod: "bank_transfer", accountType: "client", amount: "", receivedDate: new Date().toISOString().slice(0, 10), referenceNo: "", notes: "" });
+      toast({ title: "Receipt recorded", description: `${rec.receiptNo} saved` });
+    },
+    onError: (e: any) => toast({ variant: "destructive", title: "Error", description: e.message }),
+  });
+
+  const reverseMut = useMutation({
+    mutationFn: (id: number) => apiFetch(`/receipts/${id}/reverse`, { method: "POST" }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["receipts"] });
+      qc.invalidateQueries({ queryKey: ["invoices"] });
+      toast({ title: "Receipt reversed" });
+    },
+    onError: (e: any) => toast({ variant: "destructive", title: "Error", description: e.message }),
+  });
+
+  return (
+    <div className="space-y-4">
+      <div className="flex justify-end">
+        <Button onClick={() => setShowCreate(!showCreate)} className="bg-amber-500 hover:bg-amber-600 text-white gap-2">
+          <Plus className="w-4 h-4" /> Record Receipt
+        </Button>
+      </div>
+
+      {showCreate && (
+        <Card className="border-amber-200 bg-amber-50">
+          <CardHeader><CardTitle className="text-base">Record New Receipt</CardTitle></CardHeader>
+          <CardContent>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div>
+                <label className="text-sm font-medium text-slate-700 block mb-1">Allocate to Invoice</label>
+                <select className="w-full border border-slate-200 rounded-md px-3 py-2 text-sm bg-white"
+                  value={form.invoiceId} onChange={(e) => setForm((f) => ({ ...f, invoiceId: e.target.value }))}>
+                  <option value="">— General / Unallocated —</option>
+                  {openInvoices.map((i: any) => (
+                    <option key={i.id} value={i.id}>{i.invoiceNo} — Due {fmt(i.amountDue)}</option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className="text-sm font-medium text-slate-700 block mb-1">Payment Method</label>
+                <select className="w-full border border-slate-200 rounded-md px-3 py-2 text-sm bg-white"
+                  value={form.paymentMethod} onChange={(e) => setForm((f) => ({ ...f, paymentMethod: e.target.value }))}>
+                  <option value="bank_transfer">Bank Transfer</option>
+                  <option value="cheque">Cheque</option>
+                  <option value="cash">Cash</option>
+                  <option value="online">Online Banking</option>
+                </select>
+              </div>
+              <div>
+                <label className="text-sm font-medium text-slate-700 block mb-1">Account Type</label>
+                <select className="w-full border border-slate-200 rounded-md px-3 py-2 text-sm bg-white"
+                  value={form.accountType} onChange={(e) => setForm((f) => ({ ...f, accountType: e.target.value }))}>
+                  <option value="client">Client Account</option>
+                  <option value="office">Office Account</option>
+                  <option value="trust">Trust Account</option>
+                </select>
+              </div>
+              <div>
+                <label className="text-sm font-medium text-slate-700 block mb-1">Amount (RM)</label>
+                <Input type="number" step="0.01" placeholder="0.00" value={form.amount}
+                  onChange={(e) => setForm((f) => ({ ...f, amount: e.target.value }))} />
+              </div>
+              <div>
+                <label className="text-sm font-medium text-slate-700 block mb-1">Received Date</label>
+                <Input type="date" value={form.receivedDate} onChange={(e) => setForm((f) => ({ ...f, receivedDate: e.target.value }))} />
+              </div>
+              <div>
+                <label className="text-sm font-medium text-slate-700 block mb-1">Reference No</label>
+                <Input placeholder="Bank ref / cheque no." value={form.referenceNo}
+                  onChange={(e) => setForm((f) => ({ ...f, referenceNo: e.target.value }))} />
+              </div>
+              <div className="md:col-span-2">
+                <label className="text-sm font-medium text-slate-700 block mb-1">Notes</label>
+                <Input placeholder="Optional notes" value={form.notes} onChange={(e) => setForm((f) => ({ ...f, notes: e.target.value }))} />
+              </div>
+            </div>
+            <div className="flex gap-2 mt-4">
+              <Button onClick={() => createMut.mutate()} disabled={!form.amount || createMut.isPending}
+                className="bg-amber-500 hover:bg-amber-600 text-white">
+                {createMut.isPending ? "Recording…" : "Record Receipt"}
+              </Button>
+              <Button variant="outline" onClick={() => setShowCreate(false)}>Cancel</Button>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {isLoading ? (
+        <div className="text-center py-12 text-slate-400">Loading…</div>
+      ) : receipts.length === 0 ? (
+        <div className="text-center py-16 text-slate-400">
+          <Receipt className="w-10 h-10 mx-auto mb-3 opacity-30" />
+          <p>No receipts recorded yet</p>
+        </div>
+      ) : (
+        <div className="overflow-x-auto rounded-lg border border-slate-200 bg-white">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="bg-slate-50 border-b text-slate-500 text-xs uppercase tracking-wide">
+                <th className="px-4 py-3 text-left font-medium">Receipt No</th>
+                <th className="px-4 py-3 text-left font-medium">Date</th>
+                <th className="px-4 py-3 text-left font-medium">Method</th>
+                <th className="px-4 py-3 text-left font-medium">Account</th>
+                <th className="px-4 py-3 text-right font-medium">Amount</th>
+                <th className="px-4 py-3 text-left font-medium">Reference</th>
+                <th className="px-4 py-3 text-left font-medium">Status</th>
+                <th className="px-4 py-3" />
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-100">
+              {receipts.map((r: any) => (
+                <tr key={r.id} className={cn("hover:bg-slate-50 transition-colors", r.isReversed && "opacity-50")}>
+                  <td className="px-4 py-3 font-medium text-slate-900">{r.receiptNo}</td>
+                  <td className="px-4 py-3 text-slate-500">{r.receivedDate}</td>
+                  <td className="px-4 py-3 text-slate-600 capitalize">{r.paymentMethod?.replace(/_/g, " ")}</td>
+                  <td className="px-4 py-3">
+                    <span className="px-2 py-0.5 rounded-full text-xs bg-slate-100 text-slate-600 capitalize">{r.accountType}</span>
+                  </td>
+                  <td className="px-4 py-3 text-right font-semibold text-green-600">{fmt(r.amount)}</td>
+                  <td className="px-4 py-3 text-slate-400 text-xs">{r.referenceNo || "—"}</td>
+                  <td className="px-4 py-3">
+                    {r.isReversed
+                      ? <span className="px-2 py-0.5 rounded-full text-xs bg-red-100 text-red-600">Reversed</span>
+                      : <span className="px-2 py-0.5 rounded-full text-xs bg-green-100 text-green-700">Active</span>
+                    }
+                  </td>
+                  <td className="px-4 py-3 text-right">
+                    {!r.isReversed && (
+                      <Button size="sm" variant="ghost" className="h-7 w-7 p-0 text-slate-400 hover:text-red-500"
+                        title="Reverse receipt"
+                        onClick={() => { if (confirm("Reverse this receipt? This will update invoice payment status.")) reverseMut.mutate(r.id); }}>
+                        <RotateCcw className="w-3.5 h-3.5" />
+                      </Button>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── PAYMENT VOUCHERS TAB ──────────────────────────────────────────────────────
+
+const PV_ACTIONS: Record<string, { label: string; toStatus: string }[]> = {
+  draft: [{ label: "Submit for Approval", toStatus: "prepared" }],
+  prepared: [{ label: "Lawyer Approve", toStatus: "lawyer_approved" }, { label: "Return to Draft", toStatus: "draft" }],
+  lawyer_approved: [{ label: "Partner Approve", toStatus: "partner_approved" }, { label: "Return", toStatus: "prepared" }],
+  partner_approved: [{ label: "Submit to Finance", toStatus: "submitted" }, { label: "Return", toStatus: "lawyer_approved" }],
+  submitted: [{ label: "Mark Paid", toStatus: "paid" }, { label: "Return", toStatus: "returned" }],
+  returned: [{ label: "Resubmit", toStatus: "prepared" }],
+  paid: [],
+  locked: [],
+};
+
+function PaymentVouchersTab() {
+  const [showCreate, setShowCreate] = useState(false);
+  const { toast } = useToast();
+  const qc = useQueryClient();
+  const [form, setForm] = useState({
+    payeeName: "", payeeBank: "", payeeAccountNo: "",
+    paymentMethod: "bank_transfer", accountType: "office",
+    amount: "", purpose: "", notes: "",
+    items: [{ description: "", itemType: "disbursement", amount: "" }],
+  });
+
+  const { data, isLoading } = useQuery({ queryKey: ["payment-vouchers"], queryFn: () => apiFetch("/payment-vouchers") });
+  const vouchers = (data ?? []) as any[];
+
+  const createMut = useMutation({
+    mutationFn: () => apiFetch("/payment-vouchers", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        ...form,
+        amount: parseFloat(form.amount),
+        items: form.items.filter((i) => i.description && i.amount).map((i) => ({ ...i, amount: parseFloat(i.amount) })),
+      }),
+    }),
+    onSuccess: (pv: any) => {
+      qc.invalidateQueries({ queryKey: ["payment-vouchers"] });
+      setShowCreate(false);
+      setForm({ payeeName: "", payeeBank: "", payeeAccountNo: "", paymentMethod: "bank_transfer", accountType: "office", amount: "", purpose: "", notes: "", items: [{ description: "", itemType: "disbursement", amount: "" }] });
+      toast({ title: "Payment Voucher created", description: `${pv.voucherNo} created as draft` });
+    },
+    onError: (e: any) => toast({ variant: "destructive", title: "Error", description: e.message }),
+  });
+
+  const transitionMut = useMutation({
+    mutationFn: ({ id, toStatus }: { id: number; toStatus: string }) =>
+      apiFetch(`/payment-vouchers/${id}/transition`, {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ toStatus }),
+      }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["payment-vouchers"] });
+      qc.invalidateQueries({ queryKey: ["ledger-summary-overview"] });
+      toast({ title: "Status updated" });
+    },
+    onError: (e: any) => toast({ variant: "destructive", title: "Error", description: e.message }),
+  });
+
+  const updateItem = (idx: number, field: string, val: string) =>
+    setForm((f) => ({ ...f, items: f.items.map((it, i) => i === idx ? { ...it, [field]: val } : it) }));
+
+  const totalFromItems = form.items.reduce((s, i) => s + (parseFloat(i.amount) || 0), 0);
+
+  return (
+    <div className="space-y-4">
+      <div className="flex justify-end">
+        <Button onClick={() => setShowCreate(!showCreate)} className="bg-amber-500 hover:bg-amber-600 text-white gap-2">
+          <Plus className="w-4 h-4" /> New Payment Voucher
+        </Button>
+      </div>
+
+      {showCreate && (
+        <Card className="border-amber-200 bg-amber-50">
+          <CardHeader><CardTitle className="text-base">New Payment Voucher</CardTitle></CardHeader>
+          <CardContent className="space-y-4">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div>
+                <label className="text-sm font-medium text-slate-700 block mb-1">Payee Name</label>
+                <Input placeholder="Recipient name" value={form.payeeName}
+                  onChange={(e) => setForm((f) => ({ ...f, payeeName: e.target.value }))} />
+              </div>
+              <div>
+                <label className="text-sm font-medium text-slate-700 block mb-1">Payee Bank</label>
+                <Input placeholder="e.g. Maybank" value={form.payeeBank}
+                  onChange={(e) => setForm((f) => ({ ...f, payeeBank: e.target.value }))} />
+              </div>
+              <div>
+                <label className="text-sm font-medium text-slate-700 block mb-1">Account Number</label>
+                <Input placeholder="Bank account number" value={form.payeeAccountNo}
+                  onChange={(e) => setForm((f) => ({ ...f, payeeAccountNo: e.target.value }))} />
+              </div>
+              <div>
+                <label className="text-sm font-medium text-slate-700 block mb-1">Payment Method</label>
+                <select className="w-full border border-slate-200 rounded-md px-3 py-2 text-sm bg-white"
+                  value={form.paymentMethod} onChange={(e) => setForm((f) => ({ ...f, paymentMethod: e.target.value }))}>
+                  <option value="bank_transfer">Bank Transfer</option>
+                  <option value="cheque">Cheque</option>
+                  <option value="cash">Cash</option>
+                </select>
+              </div>
+              <div>
+                <label className="text-sm font-medium text-slate-700 block mb-1">Deduct From Account</label>
+                <select className="w-full border border-slate-200 rounded-md px-3 py-2 text-sm bg-white"
+                  value={form.accountType} onChange={(e) => setForm((f) => ({ ...f, accountType: e.target.value }))}>
+                  <option value="office">Office Account</option>
+                  <option value="client">Client Account</option>
+                  <option value="trust">Trust Account</option>
+                </select>
+              </div>
+              <div>
+                <label className="text-sm font-medium text-slate-700 block mb-1">Total Amount (RM)</label>
+                <Input type="number" step="0.01" placeholder="0.00" value={form.amount}
+                  onChange={(e) => setForm((f) => ({ ...f, amount: e.target.value }))} />
+                {totalFromItems > 0 && Math.abs(totalFromItems - parseFloat(form.amount || "0")) > 0.01 && (
+                  <p className="text-xs text-amber-600 mt-1">Items total: {fmt(totalFromItems)}</p>
+                )}
+              </div>
+              <div className="md:col-span-2">
+                <label className="text-sm font-medium text-slate-700 block mb-1">Purpose</label>
+                <Input placeholder="Brief purpose of payment" value={form.purpose}
+                  onChange={(e) => setForm((f) => ({ ...f, purpose: e.target.value }))} />
+              </div>
+            </div>
+
+            <div>
+              <div className="flex items-center justify-between mb-2">
+                <label className="text-sm font-medium text-slate-700">Line Items</label>
+                <Button type="button" variant="ghost" size="sm" className="text-xs h-7"
+                  onClick={() => setForm((f) => ({ ...f, items: [...f.items, { description: "", itemType: "disbursement", amount: "" }] }))}>
+                  + Add Item
+                </Button>
+              </div>
+              <div className="space-y-2">
+                {form.items.map((item, idx) => (
+                  <div key={idx} className="grid grid-cols-12 gap-2">
+                    <div className="col-span-6">
+                      <Input placeholder="Description" value={item.description}
+                        onChange={(e) => updateItem(idx, "description", e.target.value)} />
+                    </div>
+                    <div className="col-span-3">
+                      <select className="w-full border border-slate-200 rounded-md px-3 py-2 text-sm bg-white"
+                        value={item.itemType} onChange={(e) => updateItem(idx, "itemType", e.target.value)}>
+                        <option value="disbursement">Disbursement</option>
+                        <option value="professional_fee">Prof. Fee</option>
+                        <option value="trust_amount">Trust</option>
+                      </select>
+                    </div>
+                    <div className="col-span-3">
+                      <Input type="number" step="0.01" placeholder="Amount" value={item.amount}
+                        onChange={(e) => updateItem(idx, "amount", e.target.value)} />
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div className="flex gap-2">
+              <Button onClick={() => createMut.mutate()}
+                disabled={!form.payeeName || !form.amount || !form.purpose || createMut.isPending}
+                className="bg-amber-500 hover:bg-amber-600 text-white">
+                {createMut.isPending ? "Creating…" : "Create Voucher"}
+              </Button>
+              <Button variant="outline" onClick={() => setShowCreate(false)}>Cancel</Button>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {isLoading ? (
+        <div className="text-center py-12 text-slate-400">Loading…</div>
+      ) : vouchers.length === 0 ? (
+        <div className="text-center py-16 text-slate-400">
+          <CreditCard className="w-10 h-10 mx-auto mb-3 opacity-30" />
+          <p>No payment vouchers yet</p>
+        </div>
+      ) : (
+        <div className="overflow-x-auto rounded-lg border border-slate-200 bg-white">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="bg-slate-50 border-b text-slate-500 text-xs uppercase tracking-wide">
+                <th className="px-4 py-3 text-left font-medium">Voucher No</th>
+                <th className="px-4 py-3 text-left font-medium">Payee</th>
+                <th className="px-4 py-3 text-left font-medium">Purpose</th>
+                <th className="px-4 py-3 text-left font-medium">Account</th>
+                <th className="px-4 py-3 text-left font-medium">Status</th>
+                <th className="px-4 py-3 text-right font-medium">Amount</th>
+                <th className="px-4 py-3 text-right font-medium">Actions</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-100">
+              {vouchers.map((pv: any) => {
+                const actions = PV_ACTIONS[pv.status] ?? [];
+                return (
+                  <tr key={pv.id} className="hover:bg-slate-50 transition-colors">
+                    <td className="px-4 py-3 font-medium text-slate-900">{pv.voucherNo}</td>
+                    <td className="px-4 py-3 text-slate-700">{pv.payeeName}</td>
+                    <td className="px-4 py-3 text-slate-500 max-w-xs truncate">{pv.purpose}</td>
+                    <td className="px-4 py-3">
+                      <span className="px-2 py-0.5 rounded-full text-xs bg-slate-100 text-slate-600 capitalize">{pv.accountType}</span>
+                    </td>
+                    <td className="px-4 py-3"><StatusBadge status={pv.status} /></td>
+                    <td className="px-4 py-3 text-right font-semibold text-slate-800">{fmt(pv.amount)}</td>
+                    <td className="px-4 py-3 text-right">
+                      <div className="flex items-center justify-end gap-1.5 flex-wrap">
+                        {actions.map((a) => (
+                          <Button key={a.toStatus} size="sm" variant="outline" className="text-xs h-7"
+                            onClick={() => transitionMut.mutate({ id: pv.id, toStatus: a.toStatus })}>
+                            {a.label}
+                          </Button>
+                        ))}
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── LEDGER TAB ────────────────────────────────────────────────────────────────
+
+function LedgerTab() {
+  const [accountType, setAccountType] = useState("");
+  const { data, isLoading } = useQuery({
+    queryKey: ["ledger", accountType],
+    queryFn: () => apiFetch(`/ledger${accountType ? `?accountType=${accountType}` : ""}`),
+  });
+  const { data: sumData } = useQuery({ queryKey: ["ledger-summary"], queryFn: () => apiFetch("/ledger/summary") });
+  const entries = (data ?? []) as any[];
+  const summary = (sumData ?? []) as any[];
+
+  return (
+    <div className="space-y-4">
+      <div className="grid grid-cols-3 gap-4">
+        {["client", "office", "trust"].map((acct) => {
+          const s = summary.find((r: any) => r.accountType === acct) ?? { totalDebit: 0, totalCredit: 0, balance: 0 };
+          return (
+            <Card key={acct}
+              className={cn("cursor-pointer transition-all hover:shadow-md", accountType === acct && "ring-2 ring-amber-400")}
+              onClick={() => setAccountType(accountType === acct ? "" : acct)}>
+              <CardContent className="pt-4 pb-4">
+                <div className="text-xs text-slate-500 capitalize mb-1">{acct} Account</div>
+                <div className={cn("text-xl font-bold", Number(s.balance) >= 0 ? "text-green-600" : "text-red-500")}>
+                  {fmt(s.balance)}
+                </div>
+                <div className="text-xs text-slate-400 mt-1">Dr {fmt(s.totalDebit)} | Cr {fmt(s.totalCredit)}</div>
+              </CardContent>
+            </Card>
+          );
+        })}
+      </div>
+
+      {accountType && (
+        <div className="text-sm text-slate-500 flex items-center gap-2">
+          <ArrowUpDown className="w-3.5 h-3.5" />
+          Showing <span className="font-medium capitalize">{accountType}</span> account
+          <button className="text-amber-600 underline ml-1" onClick={() => setAccountType("")}>clear filter</button>
+        </div>
+      )}
+
+      {isLoading ? (
+        <div className="text-center py-12 text-slate-400">Loading…</div>
+      ) : entries.length === 0 ? (
+        <div className="text-center py-16 text-slate-400">
+          <BookOpen className="w-10 h-10 mx-auto mb-3 opacity-30" />
+          <p>No ledger entries yet — record receipts or mark payment vouchers as paid</p>
+        </div>
+      ) : (
+        <div className="overflow-x-auto rounded-lg border border-slate-200 bg-white">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="bg-slate-50 border-b text-slate-500 text-xs uppercase tracking-wide">
+                <th className="px-4 py-3 text-left font-medium">Date</th>
+                <th className="px-4 py-3 text-left font-medium">Type</th>
+                <th className="px-4 py-3 text-left font-medium">Account</th>
+                <th className="px-4 py-3 text-left font-medium">Description</th>
+                <th className="px-4 py-3 text-right font-medium text-green-600">Credit (In)</th>
+                <th className="px-4 py-3 text-right font-medium text-red-500">Debit (Out)</th>
+                <th className="px-4 py-3 text-right font-medium">Balance</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-100">
+              {entries.map((e: any) => (
+                <tr key={e.id} className="hover:bg-slate-50">
+                  <td className="px-4 py-2.5 text-slate-500 text-xs font-mono">{e.entryDate}</td>
+                  <td className="px-4 py-2.5 capitalize text-slate-600 text-xs">{e.entryType?.replace(/_/g, " ")}</td>
+                  <td className="px-4 py-2.5">
+                    <span className="px-1.5 py-0.5 rounded bg-slate-100 text-slate-600 text-xs capitalize">{e.accountType}</span>
+                  </td>
+                  <td className="px-4 py-2.5 text-slate-700 max-w-xs truncate text-xs">{e.description}</td>
+                  <td className="px-4 py-2.5 text-right text-green-600 font-mono text-xs">
+                    {Number(e.credit) > 0 ? fmt(e.credit) : "—"}
+                  </td>
+                  <td className="px-4 py-2.5 text-right text-red-500 font-mono text-xs">
+                    {Number(e.debit) > 0 ? fmt(e.debit) : "—"}
+                  </td>
+                  <td className={cn("px-4 py-2.5 text-right font-semibold font-mono text-xs",
+                    Number(e.balanceAfter) >= 0 ? "text-slate-800" : "text-red-500")}>
+                    {fmt(e.balanceAfter)}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── MAIN PAGE ─────────────────────────────────────────────────────────────────
 
 export default function Accounting() {
   const searchString = useSearch();
@@ -268,37 +799,47 @@ export default function Accounting() {
   const [activeTab, setActiveTab] = useState<Tab>(initialTab);
 
   useEffect(() => {
-    if (tabFromUrl && TAB_KEYS[tabFromUrl]) {
-      setActiveTab(TAB_KEYS[tabFromUrl]);
-    }
+    if (tabFromUrl && TAB_KEYS[tabFromUrl]) setActiveTab(TAB_KEYS[tabFromUrl]);
   }, [tabFromUrl]);
+
+  const TAB_ICONS: Record<Tab, React.ReactNode> = {
+    "Overview": <DollarSign className="w-4 h-4" />,
+    "Invoices": <FileText className="w-4 h-4" />,
+    "Receipts": <Receipt className="w-4 h-4" />,
+    "Payment Vouchers": <CreditCard className="w-4 h-4" />,
+    "Ledger": <BookOpen className="w-4 h-4" />,
+  };
 
   return (
     <div className="space-y-6">
       <div>
         <h1 className="text-3xl font-bold text-slate-900 tracking-tight">Accounting</h1>
-        <p className="text-slate-500 mt-1">Billing overview and fee quotations</p>
+        <p className="text-slate-500 mt-1">Invoices, receipts, payment vouchers and ledger</p>
       </div>
 
-      <div className="flex border-b border-gray-200">
-        {TABS.map(tab => (
+      <div className="flex gap-1 border-b border-gray-200 overflow-x-auto">
+        {TABS.map((tab) => (
           <button
             key={tab}
             onClick={() => setActiveTab(tab)}
             className={cn(
-              "px-4 py-2.5 text-sm font-medium border-b-2 transition-colors",
+              "flex items-center gap-2 px-4 py-2.5 text-sm font-medium border-b-2 transition-colors whitespace-nowrap",
               activeTab === tab
                 ? "border-amber-500 text-amber-600"
                 : "border-transparent text-slate-500 hover:text-slate-700"
             )}
           >
+            {TAB_ICONS[tab]}
             {tab}
           </button>
         ))}
       </div>
 
       {activeTab === "Overview" && <OverviewTab />}
-      {activeTab === "Quotations" && <QuotationsTab />}
+      {activeTab === "Invoices" && <InvoicesTab />}
+      {activeTab === "Receipts" && <ReceiptsTab />}
+      {activeTab === "Payment Vouchers" && <PaymentVouchersTab />}
+      {activeTab === "Ledger" && <LedgerTab />}
     </div>
   );
 }

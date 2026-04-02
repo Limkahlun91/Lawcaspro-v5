@@ -5,9 +5,16 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { ArrowLeft, Save, Copy, Trash2, Pencil, Printer, Plus } from "lucide-react";
-import { useQueryClient } from "@tanstack/react-query";
+import { ArrowLeft, Save, Copy, Trash2, Pencil, Printer, Plus, Calculator } from "lucide-react";
+import { useQueryClient, useMutation } from "@tanstack/react-query";
 import { useToast } from "@/hooks/use-toast";
+
+const API_BASE = import.meta.env.BASE_URL.replace(/\/$/, "").replace(/^\/lawcaspro/, "") + "/api";
+async function apiFetch(path: string, opts?: RequestInit) {
+  const res = await fetch(`${API_BASE}${path}`, { credentials: "include", ...opts });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
 
 const TAX_RATE = 8;
 
@@ -45,6 +52,15 @@ export default function QuotationDetail() {
   const updateMutation = useUpdateQuotation();
   const deleteMutation = useDeleteQuotation();
   const duplicateMutation = useDuplicateQuotation();
+
+  const autoCalcMutation = useMutation({
+    mutationFn: () => apiFetch(`/quotations/${quotationId}/auto-calculate`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({}) }),
+    onSuccess: (result: any) => {
+      queryClient.invalidateQueries({ queryKey: getGetQuotationQueryKey(quotationId) });
+      toast({ title: "Fees calculated", description: `Generated ${result.items?.filter((i: any) => i.isSystemGenerated).length ?? 0} system items from Malaysian SRO/stamp duty rules` });
+    },
+    onError: (e: any) => toast({ variant: "destructive", title: "Calculation failed", description: e.message }),
+  });
 
   const [isEditing, setIsEditing] = useState(false);
   const [editData, setEditData] = useState<any>(null);
@@ -359,6 +375,19 @@ export default function QuotationDetail() {
             </>
           ) : (
             <>
+              {((quotation as any)?.purchasePrice || (quotation as any)?.loanAmount) && (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="border-amber-300 text-amber-700 hover:bg-amber-50 gap-1.5"
+                  disabled={autoCalcMutation.isPending}
+                  onClick={() => autoCalcMutation.mutate()}
+                  title="Auto-calculate SRO fees, stamp duty and SST from Malaysian regulatory rules"
+                >
+                  <Calculator className="w-4 h-4" />
+                  {autoCalcMutation.isPending ? "Calculating…" : "Auto-Calculate Fees"}
+                </Button>
+              )}
               <Button variant="outline" size="sm" onClick={handlePrint}><Printer className="w-4 h-4 mr-1" /> Print</Button>
               <Button variant="outline" size="sm" onClick={handleDuplicate}><Copy className="w-4 h-4 mr-1" /> Duplicate</Button>
               <Button variant="outline" size="sm" onClick={startEditing}><Pencil className="w-4 h-4 mr-1" /> Edit</Button>

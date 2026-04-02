@@ -18,6 +18,10 @@ import auditRouter from "./audit";
 import hubRouter from "./hub";
 import quotationsRouter from "./quotations";
 import firmSettingsRouter from "./firm-settings";
+import regulatoryRouter from "./regulatory";
+import invoicesRouter from "./invoices";
+import receiptsRouter from "./receipts";
+import paymentVouchersRouter from "./payment-vouchers";
 
 const router: IRouter = Router();
 
@@ -40,5 +44,9 @@ router.use(auditRouter);
 router.use(hubRouter);
 router.use(quotationsRouter);
 router.use(firmSettingsRouter);
+router.use(regulatoryRouter);
+router.use(invoicesRouter);
+router.use(receiptsRouter);
+router.use(paymentVouchersRouter);
 
 export default router;

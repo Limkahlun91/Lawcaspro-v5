@@ -45,6 +45,7 @@ import AuditLogs from "@/pages/app/audit-logs";
 import Settings from "@/pages/app/settings";
 import DocumentsPage from "@/pages/app/documents";
 import Accounting from "@/pages/app/accounting";
+import InvoiceDetail from "@/pages/app/accounting/invoices/detail";
 import Reports from "@/pages/app/reports";
 import Hub from "@/pages/app/hub";
 import QuotationsList from "@/pages/app/quotations";
@@ -109,6 +110,7 @@ function AppRoutes() {
           
           <Route path="/app/settings/documents" component={() => <Redirect to="/app/documents" />} />
           <Route path="/app/documents" component={DocumentsPage} />
+          <Route path="/app/accounting/invoices/:id" component={InvoiceDetail} />
           <Route path="/app/accounting" component={Accounting} />
           <Route path="/app/reports" component={Reports} />
           <Route path="/app/audit-logs" component={AuditLogs} />

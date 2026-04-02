@@ -19,6 +19,35 @@ Communications follow a subject-based thread model: users create a "subject" (th
 
 Projects support full CRUD including edit via the PATCH endpoint. The edit page pre-fills all fields from the existing project and accepts all fields including phase, developerName, title metadata, location fields, and extraFields (property types).
 
+## Group A — Financial Foundation (Completed)
+
+### Regulatory Rules Engine
+- **Tables**: `regulatory_rule_sets`, `regulatory_rule_versions` — versioned rules with JSONB formula data
+- **Seeded Malaysian rates**: SRO SPA (sliding scale 1%→0.4%), SRO Loan (same scale), Stamp Duty MOT (1%→4%), Stamp Duty Loan (0.5% flat), SST 8% (from Mar 2024), SST 6% (historical)
+- **Drizzle schema**: `lib/db/src/schema/regulatory.ts` exported from schema index
+- **API routes** (`/api/regulatory/...`): list rule sets, get versions, get active version by date, calculate fee from any rule
+
+### Quotation Engine 2.0
+- **DB upgrades**: `rule_version_id`, `loan_amount_num`, `fee_override_reason`, `fee_override_approved_by`, `accepted_at`, `sent_at` on `quotations`; `is_system_generated`, `item_type` on `quotation_items`
+- **Auto-calculate endpoint** (`POST /api/quotations/:id/auto-calculate`): Applies SRO sliding scale + stamp duty tiers + 8% SST; generates system line items with tier breakdowns; preserves manual items
+- **Frontend**: "Auto-Calculate Fees" button on quotation detail page (shown when purchasePrice or loanAmount is set)
+
+### Legal Accounting Engine — Schema
+- **New DB tables**: `invoices`, `invoice_items`, `receipts`, `receipt_allocations`, `payment_vouchers`, `payment_voucher_items`, `ledger_entries`, `credit_notes`
+- **Account types**: client | office | trust (never mixed)
+- **Drizzle schema**: `lib/db/src/schema/accounting.ts` updated with all new tables
+
+### Legal Accounting Engine — API
+- **`/api/invoices`**: CRUD + generate from quotation + issue + void + auto payment status update
+- **`/api/receipts`**: record receipt + allocate to invoice + reverse + auto-post to ledger
+- **`/api/payment-vouchers`**: create + full approval workflow (draft→prepared→lawyer_approved→partner_approved→submitted→paid) + ledger posting on payment
+- **`/api/ledger`**: list entries (filterable by account type), summary (balance per account type)
+
+### Legal Accounting Engine — Frontend
+- **Accounting page** (`/app/accounting`): 5-tab layout — Overview, Invoices, Receipts, Payment Vouchers, Ledger
+- **Invoice detail page** (`/app/accounting/invoices/:id`): line items by category, record payment inline, issue/void actions
+- **Ledger tab**: 3-account balance cards (client/office/trust), filterable transaction history
+
 ## External Dependencies
 - **PostgreSQL**: Primary database for all application data, managed via Drizzle ORM.
 - **Replit Object Storage (GCS)**: Used for storing document templates and generated case documents.
