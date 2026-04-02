@@ -164,6 +164,15 @@ router.post("/cases", requireAuth, requireFirmUser, async (req: AuthRequest, res
     return;
   }
 
+  const { caseType, parcelNo, spaDetails, propertyDetails, loanDetails, companyDetails } = req.body as {
+    caseType?: string;
+    parcelNo?: string;
+    spaDetails?: object;
+    propertyDetails?: object;
+    loanDetails?: object;
+    companyDetails?: object;
+  };
+
   const refNo = `LCP-${req.firmId}-${Date.now()}`;
 
   const [newCase] = await db
@@ -177,6 +186,12 @@ router.post("/cases", requireAuth, requireFirmUser, async (req: AuthRequest, res
       titleType,
       spaPrice: spaPrice ? String(spaPrice) : null,
       status: "File Opened / SPA Pending Signing",
+      caseType: caseType ?? null,
+      parcelNo: parcelNo ?? null,
+      spaDetails: spaDetails ? JSON.stringify(spaDetails) : null,
+      propertyDetails: propertyDetails ? JSON.stringify(propertyDetails) : null,
+      loanDetails: loanDetails ? JSON.stringify(loanDetails) : null,
+      companyDetails: companyDetails ? JSON.stringify(companyDetails) : null,
       createdBy: req.userId,
     })
     .returning();
