@@ -5,10 +5,11 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Plus, Search, Save, Trash2, Building2 } from "lucide-react";
+import { Plus, Search, Save, Trash2, Building2, ShieldCheck, ShieldOff, Monitor, LogOut } from "lucide-react";
 import { Link, useSearch } from "wouter";
 import { cn } from "@/lib/utils";
 import { useToast } from "@/hooks/use-toast";
+import { useAuth } from "@/lib/auth-context";
 
 const API_BASE = import.meta.env.BASE_URL.replace(/\/$/, "").replace(/^\/lawcaspro/, "") + "/api";
 
@@ -18,14 +19,250 @@ async function apiFetch(path: string, opts?: RequestInit) {
   return res.json();
 }
 
-const TABS = ["Firm Info", "Users", "Roles & Permissions"] as const;
+const TABS = ["Firm Info", "Users", "Roles & Permissions", "Security"] as const;
 type Tab = typeof TABS[number];
 
 const TAB_KEYS: Record<string, Tab> = {
   firm: "Firm Info",
   users: "Users",
   roles: "Roles & Permissions",
+  security: "Security",
 };
+
+function SecurityTab() {
+  const { user } = useAuth();
+  const { toast } = useToast();
+  const queryClient = useQueryClient();
+
+  const [totpStep, setTotpStep] = useState<"idle" | "setup" | "confirm" | "disable">("idle");
+  const [qrCodeUrl, setQrCodeUrl] = useState("");
+  const [manualSecret, setManualSecret] = useState("");
+  const [confirmCode, setConfirmCode] = useState("");
+  const [disableCode, setDisableCode] = useState("");
+
+  const { data: sessionsData, isLoading: loadingSessions } = useQuery({
+    queryKey: ["auth-sessions"],
+    queryFn: () => apiFetch("/auth/sessions"),
+  });
+
+  const setupMutation = useMutation({
+    mutationFn: () => apiFetch("/auth/totp/setup", { method: "POST" }),
+    onSuccess: (data: any) => {
+      setQrCodeUrl(data.qrCodeDataUrl);
+      setManualSecret(data.secret);
+      setTotpStep("confirm");
+    },
+    onError: (e: any) => toast({ title: e.message || "Failed to start 2FA setup", variant: "destructive" }),
+  });
+
+  const confirmMutation = useMutation({
+    mutationFn: () => apiFetch("/auth/totp/confirm", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ code: confirmCode }),
+    }),
+    onSuccess: () => {
+      setTotpStep("idle");
+      setConfirmCode("");
+      queryClient.invalidateQueries({ queryKey: ["me"] });
+      toast({ title: "Two-factor authentication enabled" });
+      window.location.reload();
+    },
+    onError: (e: any) => toast({ title: e.message || "Invalid code", variant: "destructive" }),
+  });
+
+  const disableMutation = useMutation({
+    mutationFn: () => apiFetch("/auth/totp/disable", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ code: disableCode }),
+    }),
+    onSuccess: () => {
+      setTotpStep("idle");
+      setDisableCode("");
+      toast({ title: "Two-factor authentication disabled" });
+      window.location.reload();
+    },
+    onError: (e: any) => toast({ title: e.message || "Invalid code", variant: "destructive" }),
+  });
+
+  const revokeSessionMutation = useMutation({
+    mutationFn: (id: number) => apiFetch(`/auth/sessions/${id}`, { method: "DELETE" }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["auth-sessions"] });
+      toast({ title: "Session revoked" });
+    },
+    onError: () => toast({ title: "Failed to revoke session", variant: "destructive" }),
+  });
+
+  const totpEnabled = user?.totpEnabled ?? false;
+
+  return (
+    <div className="space-y-6">
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base flex items-center gap-2">
+            <ShieldCheck className="w-4 h-4" />
+            Two-Factor Authentication (2FA)
+          </CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          {totpEnabled ? (
+            <>
+              <div className="flex items-center gap-3 p-3 bg-green-50 rounded-lg border border-green-200">
+                <ShieldCheck className="w-5 h-5 text-green-600 shrink-0" />
+                <div>
+                  <p className="text-sm font-medium text-green-800">Two-factor authentication is enabled</p>
+                  <p className="text-xs text-green-600 mt-0.5">Your account is protected with an authenticator app.</p>
+                </div>
+              </div>
+
+              {totpStep === "disable" ? (
+                <div className="space-y-3 pt-2">
+                  <p className="text-sm text-slate-600">Enter the 6-digit code from your authenticator app to disable 2FA.</p>
+                  <div className="flex gap-3">
+                    <Input
+                      placeholder="000000"
+                      value={disableCode}
+                      onChange={e => setDisableCode(e.target.value.replace(/\D/g, "").slice(0, 6))}
+                      className="w-40 font-mono text-center text-lg tracking-widest"
+                      maxLength={6}
+                    />
+                    <Button
+                      onClick={() => disableMutation.mutate()}
+                      disabled={disableCode.length !== 6 || disableMutation.isPending}
+                      variant="destructive"
+                    >
+                      {disableMutation.isPending ? "Disabling..." : "Disable 2FA"}
+                    </Button>
+                    <Button variant="ghost" onClick={() => { setTotpStep("idle"); setDisableCode(""); }}>
+                      Cancel
+                    </Button>
+                  </div>
+                </div>
+              ) : (
+                <Button
+                  variant="outline"
+                  className="text-red-600 border-red-200 hover:bg-red-50"
+                  onClick={() => setTotpStep("disable")}
+                >
+                  <ShieldOff className="w-4 h-4 mr-2" />
+                  Disable 2FA
+                </Button>
+              )}
+            </>
+          ) : (
+            <>
+              <div className="flex items-center gap-3 p-3 bg-amber-50 rounded-lg border border-amber-200">
+                <ShieldOff className="w-5 h-5 text-amber-600 shrink-0" />
+                <div>
+                  <p className="text-sm font-medium text-amber-800">Two-factor authentication is not enabled</p>
+                  <p className="text-xs text-amber-600 mt-0.5">Add an extra layer of security to your account.</p>
+                </div>
+              </div>
+
+              {totpStep === "idle" && (
+                <Button
+                  className="bg-amber-500 hover:bg-amber-600 text-white"
+                  onClick={() => { setTotpStep("setup"); setupMutation.mutate(); }}
+                  disabled={setupMutation.isPending}
+                >
+                  <ShieldCheck className="w-4 h-4 mr-2" />
+                  {setupMutation.isPending ? "Generating..." : "Enable 2FA"}
+                </Button>
+              )}
+
+              {totpStep === "confirm" && qrCodeUrl && (
+                <div className="space-y-4 pt-2">
+                  <div>
+                    <p className="text-sm font-medium text-slate-700 mb-1">Step 1 — Scan this QR code with your authenticator app</p>
+                    <p className="text-xs text-slate-500 mb-3">Use Google Authenticator, Authy, or any TOTP-compatible app.</p>
+                    <div className="inline-block border border-slate-200 rounded-lg p-3 bg-white">
+                      <img src={qrCodeUrl} alt="TOTP QR Code" className="w-48 h-48" />
+                    </div>
+                  </div>
+                  <div>
+                    <p className="text-xs text-slate-500 mb-1">Or enter this key manually:</p>
+                    <code className="text-xs bg-slate-100 px-3 py-1.5 rounded font-mono break-all block">
+                      {manualSecret}
+                    </code>
+                  </div>
+                  <div className="space-y-2">
+                    <p className="text-sm font-medium text-slate-700">Step 2 — Enter the 6-digit code to confirm</p>
+                    <div className="flex gap-3">
+                      <Input
+                        placeholder="000000"
+                        value={confirmCode}
+                        onChange={e => setConfirmCode(e.target.value.replace(/\D/g, "").slice(0, 6))}
+                        className="w-40 font-mono text-center text-lg tracking-widest"
+                        maxLength={6}
+                      />
+                      <Button
+                        onClick={() => confirmMutation.mutate()}
+                        disabled={confirmCode.length !== 6 || confirmMutation.isPending}
+                        className="bg-amber-500 hover:bg-amber-600 text-white"
+                      >
+                        {confirmMutation.isPending ? "Verifying..." : "Confirm & Enable"}
+                      </Button>
+                      <Button variant="ghost" onClick={() => { setTotpStep("idle"); setQrCodeUrl(""); setManualSecret(""); setConfirmCode(""); }}>
+                        Cancel
+                      </Button>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </>
+          )}
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base flex items-center gap-2">
+            <Monitor className="w-4 h-4" />
+            Active Sessions
+          </CardTitle>
+        </CardHeader>
+        <CardContent>
+          {loadingSessions ? (
+            <div className="text-slate-500 text-sm">Loading sessions...</div>
+          ) : sessionsData?.data?.length === 0 ? (
+            <div className="text-slate-500 text-sm">No active sessions found.</div>
+          ) : (
+            <div className="space-y-2">
+              {sessionsData?.data?.map((session: any) => (
+                <div key={session.id} className="flex items-center justify-between p-3 bg-slate-50 rounded-lg border border-slate-200">
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm font-medium text-slate-800 truncate">
+                      {session.userAgent || "Unknown browser"}
+                    </p>
+                    <p className="text-xs text-slate-500 mt-0.5">
+                      {session.ipAddress ? `IP: ${session.ipAddress}` : "IP unknown"}
+                      {" · "}
+                      Started {new Date(session.createdAt).toLocaleDateString("en-MY", { day: "numeric", month: "short", year: "numeric" })}
+                      {" · "}
+                      Expires {new Date(session.expiresAt).toLocaleDateString("en-MY", { day: "numeric", month: "short" })}
+                    </p>
+                  </div>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => revokeSessionMutation.mutate(session.id)}
+                    disabled={revokeSessionMutation.isPending}
+                    className="text-red-500 hover:text-red-700 hover:bg-red-50 ml-3 shrink-0"
+                  >
+                    <LogOut className="w-4 h-4 mr-1" />
+                    Revoke
+                  </Button>
+                </div>
+              ))}
+            </div>
+          )}
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
 
 function FirmInfoTab() {
   const { toast } = useToast();
@@ -341,6 +578,8 @@ export default function Settings() {
           </Card>
         </div>
       )}
+
+      {activeTab === "Security" && <SecurityTab />}
 
       {activeTab === "Roles & Permissions" && (
         <div className="space-y-4">

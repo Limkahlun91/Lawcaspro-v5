@@ -4,11 +4,14 @@ import crypto from "crypto";
 import { eq } from "drizzle-orm";
 import { db, usersTable, sessionsTable, rolesTable, firmsTable } from "@workspace/db";
 import { LoginBody } from "@workspace/api-zod";
-import { requireAuth, type AuthRequest } from "../lib/auth";
+import { requireAuth, type AuthRequest, writeAuditLog } from "../lib/auth";
+import { authRateLimiter } from "../lib/rate-limit";
+import * as OTPAuth from "otpauth";
+import QRCode from "qrcode";
 
 const router: IRouter = Router();
 
-router.post("/auth/login", async (req, res): Promise<void> => {
+router.post("/auth/login", authRateLimiter, async (req, res): Promise<void> => {
   const parsed = LoginBody.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: parsed.error.message });
@@ -16,6 +19,8 @@ router.post("/auth/login", async (req, res): Promise<void> => {
   }
 
   const { email, password } = parsed.data;
+  const ip = req.ip;
+  const ua = req.headers["user-agent"];
 
   const [user] = await db
     .select()
@@ -23,19 +28,38 @@ router.post("/auth/login", async (req, res): Promise<void> => {
     .where(eq(usersTable.email, email.toLowerCase()));
 
   if (!user) {
+    await writeAuditLog({ action: "auth.login_failed", detail: `email=${email} reason=user_not_found`, ipAddress: ip, userAgent: ua });
     res.status(401).json({ error: "Invalid email or password" });
     return;
   }
 
   const passwordMatch = await bcrypt.compare(password, user.passwordHash);
   if (!passwordMatch) {
+    await writeAuditLog({ firmId: user.firmId, actorId: user.id, actorType: user.userType, action: "auth.login_failed", detail: "reason=wrong_password", ipAddress: ip, userAgent: ua });
     res.status(401).json({ error: "Invalid email or password" });
     return;
   }
 
   if (user.status !== "active") {
+    await writeAuditLog({ firmId: user.firmId, actorId: user.id, actorType: user.userType, action: "auth.login_failed", detail: "reason=inactive_account", ipAddress: ip, userAgent: ua });
     res.status(401).json({ error: "Account is inactive" });
     return;
+  }
+
+  if (user.totpEnabled) {
+    const totpCode = req.body.totpCode as string | undefined;
+    if (!totpCode) {
+      res.status(200).json({ needsTotp: true });
+      return;
+    }
+    const totp = new OTPAuth.TOTP({ secret: OTPAuth.Secret.fromBase32(user.totpSecret!), digits: 6, period: 30 });
+    const isValid = totp.validate({ token: totpCode, window: 1 }) !== null;
+    if (!isValid) {
+      await writeAuditLog({ firmId: user.firmId, actorId: user.id, actorType: user.userType, action: "auth.totp_failed", detail: "reason=invalid_totp_code", ipAddress: ip, userAgent: ua });
+      res.status(401).json({ error: "Invalid authenticator code" });
+      return;
+    }
+    await db.update(usersTable).set({ totpLastUsedAt: new Date() }).where(eq(usersTable.id, user.id));
   }
 
   const token = crypto.randomBytes(32).toString("hex");
@@ -46,12 +70,13 @@ router.post("/auth/login", async (req, res): Promise<void> => {
     userId: user.id,
     tokenHash,
     expiresAt,
+    userAgent: ua ?? null,
+    ipAddress: ip ?? null,
   });
 
-  await db
-    .update(usersTable)
-    .set({ lastLoginAt: new Date() })
-    .where(eq(usersTable.id, user.id));
+  await db.update(usersTable).set({ lastLoginAt: new Date() }).where(eq(usersTable.id, user.id));
+
+  await writeAuditLog({ firmId: user.firmId, actorId: user.id, actorType: user.userType, action: "auth.login_success", ipAddress: ip, userAgent: ua });
 
   let roleName: string | null = null;
   if (user.roleId) {
@@ -83,25 +108,29 @@ router.post("/auth/login", async (req, res): Promise<void> => {
     roleId: user.roleId,
     roleName,
     status: user.status,
+    totpEnabled: user.totpEnabled,
   });
 });
 
-router.post("/auth/logout", async (req, res): Promise<void> => {
-  const token = req.cookies?.["auth_token"] as string | undefined;
+router.post("/auth/logout", requireAuth, async (req: AuthRequest, res): Promise<void> => {
+  let token = req.cookies?.["auth_token"] as string | undefined;
+  if (!token) {
+    const authHeader = req.headers["authorization"];
+    if (typeof authHeader === "string" && authHeader.startsWith("Bearer ")) {
+      token = authHeader.slice(7);
+    }
+  }
   if (token) {
     const tokenHash = crypto.createHash("sha256").update(token).digest("hex");
     await db.delete(sessionsTable).where(eq(sessionsTable.tokenHash, tokenHash));
   }
+  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "auth.logout", ipAddress: req.ip, userAgent: req.headers["user-agent"] });
   res.clearCookie("auth_token");
   res.json({ success: true });
 });
 
 router.get("/auth/me", requireAuth, async (req: AuthRequest, res): Promise<void> => {
-  const [user] = await db
-    .select()
-    .from(usersTable)
-    .where(eq(usersTable.id, req.userId!));
-
+  const [user] = await db.select().from(usersTable).where(eq(usersTable.id, req.userId!));
   if (!user) {
     res.status(401).json({ error: "User not found" });
     return;
@@ -129,7 +158,77 @@ router.get("/auth/me", requireAuth, async (req: AuthRequest, res): Promise<void>
     roleId: user.roleId,
     roleName,
     status: user.status,
+    totpEnabled: user.totpEnabled,
   });
+});
+
+router.get("/auth/sessions", requireAuth, async (req: AuthRequest, res): Promise<void> => {
+  const sessions = await db.select({
+    id: sessionsTable.id,
+    createdAt: sessionsTable.createdAt,
+    expiresAt: sessionsTable.expiresAt,
+    userAgent: sessionsTable.userAgent,
+    ipAddress: sessionsTable.ipAddress,
+  }).from(sessionsTable).where(eq(sessionsTable.userId, req.userId!));
+  res.json({ data: sessions });
+});
+
+router.delete("/auth/sessions/:id", requireAuth, async (req: AuthRequest, res): Promise<void> => {
+  const sessionId = Number(req.params.id);
+  await db.delete(sessionsTable).where(eq(sessionsTable.id, sessionId));
+  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "auth.session_revoked", entityType: "session", entityId: sessionId, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+  res.json({ success: true });
+});
+
+router.post("/auth/totp/setup", requireAuth, async (req: AuthRequest, res): Promise<void> => {
+  const [user] = await db.select().from(usersTable).where(eq(usersTable.id, req.userId!));
+  if (!user) { res.status(404).json({ error: "User not found" }); return; }
+  if (user.totpEnabled) { res.status(400).json({ error: "TOTP is already enabled" }); return; }
+
+  const secretObj = new OTPAuth.Secret();
+  const secret = secretObj.base32;
+  await db.update(usersTable).set({ totpSecret: secret }).where(eq(usersTable.id, req.userId!));
+
+  const totpSetup = new OTPAuth.TOTP({ issuer: "Lawcaspro", label: user.email, secret: secretObj, digits: 6, period: 30 });
+  const otpAuthUrl = totpSetup.toString();
+  const qrCodeDataUrl = await QRCode.toDataURL(otpAuthUrl);
+
+  res.json({ secret, qrCodeDataUrl, otpAuthUrl });
+});
+
+router.post("/auth/totp/confirm", requireAuth, async (req: AuthRequest, res): Promise<void> => {
+  const { code } = req.body as { code: string };
+  if (!code) { res.status(400).json({ error: "Code is required" }); return; }
+
+  const [user] = await db.select().from(usersTable).where(eq(usersTable.id, req.userId!));
+  if (!user || !user.totpSecret) { res.status(400).json({ error: "TOTP setup not started" }); return; }
+  if (user.totpEnabled) { res.status(400).json({ error: "TOTP is already enabled" }); return; }
+
+  const confirmTotp = new OTPAuth.TOTP({ secret: OTPAuth.Secret.fromBase32(user.totpSecret), digits: 6, period: 30 });
+  const isValid = confirmTotp.validate({ token: code, window: 1 }) !== null;
+  if (!isValid) { res.status(400).json({ error: "Invalid code — check your authenticator app" }); return; }
+
+  await db.update(usersTable).set({ totpEnabled: true, totpLastUsedAt: new Date() }).where(eq(usersTable.id, req.userId!));
+  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "auth.totp_enabled", ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+
+  res.json({ success: true });
+});
+
+router.post("/auth/totp/disable", requireAuth, async (req: AuthRequest, res): Promise<void> => {
+  const { code } = req.body as { code: string };
+  if (!code) { res.status(400).json({ error: "Code is required to disable TOTP" }); return; }
+
+  const [user] = await db.select().from(usersTable).where(eq(usersTable.id, req.userId!));
+  if (!user || !user.totpEnabled || !user.totpSecret) { res.status(400).json({ error: "TOTP is not enabled" }); return; }
+
+  const disableTotp = new OTPAuth.TOTP({ secret: OTPAuth.Secret.fromBase32(user.totpSecret), digits: 6, period: 30 });
+  const isValid = disableTotp.validate({ token: code, window: 1 }) !== null;
+  if (!isValid) { res.status(400).json({ error: "Invalid code" }); return; }
+
+  await db.update(usersTable).set({ totpEnabled: false, totpSecret: null, totpLastUsedAt: null }).where(eq(usersTable.id, req.userId!));
+  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "auth.totp_disabled", ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+
+  res.json({ success: true });
 });
 
 export default router;

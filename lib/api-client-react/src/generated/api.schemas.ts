@@ -37,6 +37,7 @@ export interface AuthUser {
   /** @nullable */
   roleName: string | null;
   status: string;
+  totpEnabled?: boolean;
 }
 
 export interface Firm {

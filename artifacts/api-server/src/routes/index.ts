@@ -25,6 +25,7 @@ import paymentVouchersRouter from "./payment-vouchers";
 import timeEntriesRouter from "./time-entries";
 import caseTasksRouter from "./case-tasks";
 import complianceReportsRouter from "./compliance-reports";
+import supportSessionsRouter from "./support-sessions";
 
 const router: IRouter = Router();
 
@@ -54,5 +55,6 @@ router.use(paymentVouchersRouter);
 router.use(timeEntriesRouter);
 router.use(caseTasksRouter);
 router.use(complianceReportsRouter);
+router.use(supportSessionsRouter);
 
 export default router;

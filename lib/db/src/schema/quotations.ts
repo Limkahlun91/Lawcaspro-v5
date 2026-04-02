@@ -1,4 +1,4 @@
-import { pgTable, serial, text, integer, numeric, boolean, timestamp, jsonb } from "drizzle-orm/pg-core";
+import { pgTable, serial, text, integer, numeric, boolean, timestamp, index } from "drizzle-orm/pg-core";
 
 export const quotationsTable = pgTable("quotations", {
   id:                      serial("id").primaryKey(),
@@ -19,10 +19,15 @@ export const quotationsTable = pgTable("quotations", {
   feeOverrideApprovedBy:   integer("fee_override_approved_by"),
   acceptedAt:              timestamp("accepted_at", { withTimezone: true }),
   sentAt:                  timestamp("sent_at", { withTimezone: true }),
+  deletedAt:               timestamp("deleted_at", { withTimezone: true }),
   createdBy:               integer("created_by"),
   createdAt:               timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt:               timestamp("updated_at", { withTimezone: true }).notNull().defaultNow().$onUpdate(() => new Date()),
-});
+}, (t) => ({
+  firmStatusIdx: index("idx_quotations_firm_status").on(t.firmId, t.status),
+  caseIdx:       index("idx_quotations_case").on(t.caseId),
+  createdAtIdx:  index("idx_quotations_created_at").on(t.createdAt),
+}));
 
 export const quotationItemsTable = pgTable("quotation_items", {
   id:              serial("id").primaryKey(),
@@ -41,4 +46,6 @@ export const quotationItemsTable = pgTable("quotation_items", {
   itemType:        text("item_type").notNull().default("disbursement"),
   sortOrder:       integer("sort_order").notNull().default(0),
   createdAt:       timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-});
+}, (t) => ({
+  quotationIdIdx: index("idx_quotation_items_quotation").on(t.quotationId),
+}));

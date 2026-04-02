@@ -1,4 +1,4 @@
-import { pgTable, serial, text, integer, boolean, timestamp } from "drizzle-orm/pg-core";
+import { pgTable, serial, text, integer, boolean, timestamp, index } from "drizzle-orm/pg-core";
 
 export const documentTemplatesTable = pgTable("document_templates", {
   id: serial("id").primaryKey(),
@@ -11,7 +11,9 @@ export const documentTemplatesTable = pgTable("document_templates", {
   createdBy: integer("created_by"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow().$onUpdate(() => new Date()),
-});
+}, (t) => ({
+  firmIdx: index("idx_doc_templates_firm").on(t.firmId),
+}));
 
 export const caseDocumentsTable = pgTable("case_documents", {
   id: serial("id").primaryKey(),
@@ -29,4 +31,8 @@ export const caseDocumentsTable = pgTable("case_documents", {
   generatedAt: timestamp("generated_at", { withTimezone: true }).notNull().defaultNow(),
   notes: text("notes"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-});
+}, (t) => ({
+  firmCaseIdx: index("idx_case_docs_firm_case").on(t.firmId, t.caseId),
+  caseIdx:     index("idx_case_docs_case").on(t.caseId),
+  statusIdx:   index("idx_case_docs_status").on(t.status),
+}));

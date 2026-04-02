@@ -1,0 +1,171 @@
+You are no longer allowed to describe the system as “fully complete”.
+The audit shows that many critical enterprise modules are still PARTIAL or NOT STARTED, and the schema currently has no formal migration history.
+
+We must now enter a Foundation Correction Phase before any more scattered feature work.
+
+==================================================
+PHASE 0 — ENGINEERING FOUNDATION CORRECTION
+==================================================
+
+Goal:
+Convert the current ad-hoc schema and feature work into a properly governed, production-safe codebase.
+
+You must do all of the following first:
+
+1. Formal migration discipline
+- Create a proper ordered migration system for the current database schema
+- Capture the existing live schema into a baseline migration
+- Add follow-up migrations for all tables/columns introduced during this engagement
+- Stop relying on raw psql + db:push without migration history
+- Provide a migration index and execution order
+- Ensure the project can be recreated from scratch using migrations only
+
+2. Schema audit and correction
+- Verify all foreign keys, indexes, defaults, enum/text constraints, generated columns, and not-null rules
+- Add missing indexes for firm_id, case_id, created_at, due_date, status, and common reporting filters
+- Verify all firm-scoped tables are clearly identified
+- Document every table as one of:
+  a) global/platform-scoped
+  b) firm-scoped
+  c) mixed/special handling
+
+3. Data governance baseline
+- Add created_at / updated_at / deleted_at where missing
+- Add consistent status fields where lifecycle exists
+- Add optimistic locking/version field for sensitive records (invoices, vouchers, documents, workflow-sensitive records)
+- Add audit coverage map for every table that should be audited
+
+4. Delivery proof
+- Provide the exact list of migration files created
+- Provide the exact list of schema corrections made
+- Provide the exact list of tables/columns/indexes/fks added or changed
+- Provide commands to rebuild schema from zero in a fresh environment
+
+Do not start new large business modules until this foundation correction is done.
+
+==================================================
+PHASE 1 — TENANT SECURITY + SAFE SUPPORT ACCESS
+==================================================
+
+After Phase 0, implement this fully:
+
+1. Database-enforced tenant isolation
+- Add PostgreSQL RLS or an equivalent DB-enforced tenant isolation mechanism for all firm-scoped tables
+- Use a safe per-request tenant context
+- Prove that tenant isolation is not dependent on frontend logic or manual route discipline alone
+
+2. Server-side authorization hardening
+- action-level authorization
+- record-level authorization
+- field-level authorization where sensitive
+- assignment-level authorization for case access
+
+3. Founder support/debug sessions
+- founder may enter a firm workspace only through explicit support sessions
+- support session reason required
+- viewed / edited / downloaded / exported actions must be audited
+- session start/end must be tracked
+
+4. Security controls
+- rate limiting on auth and sensitive routes
+- optional 2FA / TOTP for firm users
+- permission-denied audit logging
+- login security event logging
+- force re-auth for sensitive financial/admin actions
+
+Required outputs:
+- migrations
+- middleware/services
+- backend routes
+- frontend settings/support-session UI if needed
+- automated tests for tenant isolation, auth hardening, and support-session audit
+
+==================================================
+PHASE 2 — AML / CDD / KYC + CONFLICT CHECK
+==================================================
+
+After Phase 1 is fully complete, implement:
+
+- parties
+- case_parties
+- compliance_profiles
+- cdd_checks
+- beneficial_owners
+- sanctions_screenings
+- pep_flags
+- risk_assessments
+- source_of_funds_records
+- source_of_wealth_records
+- suspicious_review_notes
+- compliance retention fields
+
+Conflict engine:
+- mandatory conflict checks during intake
+- purchaser / vendor / borrower / guarantor / developer / bank / company / beneficial owner matching
+- name + NRIC/passport + company reg no + fuzzy matching
+- partner override flow with audit
+- intake warning/block flow
+
+Required outputs:
+- schema
+- routes/services
+- intake UI
+- compliance UI
+- conflict results UI
+- automated tests
+
+==================================================
+PHASE 3 — WORKFLOW ENGINE 2.0
+==================================================
+
+After Phase 2 is fully complete, replace the current hardcoded workflow with a true engine:
+
+- case_workflow_templates
+- case_workflow_template_steps
+- workflow_rules
+- workflow_rule_versions
+- approval_requests
+- approval_actions
+- task reminders
+- notifications
+
+Support:
+- SUB_SALE
+- DEVELOPER_SCHEDULE_G
+- DEVELOPER_SCHEDULE_H
+
+Rules must support:
+- Master Title vs Individual/Strata Title
+- Form 14A / MOT
+- Deed of Assignment
+- Form 16N
+- Deed of Receipt and Reassignment
+- CKHT 2A
+- e-Tanah tracking references
+- due dates
+- overdue alerts
+- escalation
+- reopen / rollback
+- approvals
+
+Required outputs:
+- schema
+- engine logic
+- case workflow UI
+- approval UI
+- dashboard alerts
+- tests for branching and due-date logic
+
+==================================================
+STRICT DELIVERY RULES
+==================================================
+
+- Do not jump across phases
+- Do not call anything “complete” unless schema + backend + frontend + audit + tests are all present
+- Do not add placeholder modules
+- At the end of each phase, provide:
+  1. migration files
+  2. backend files changed
+  3. frontend files changed
+  4. tests added
+  5. exact remaining gaps

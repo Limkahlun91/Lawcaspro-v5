@@ -85,6 +85,68 @@ Projects support full CRUD including edit via the PATCH endpoint. The edit page 
 - **Tasks screen** (`/tasks`): Full tasks list with open/all filter, overdue/upcoming grouping, mark-done action, priority colour dots, registered in Expo Router Stack
 - **Case detail**: Added "Tasks" as 5th tab — shows per-case tasks with overdue highlighting, priority dots, done state
 
+## Phase 0 — Engineering Foundation (Completed)
+
+### Schema Corrections
+- **Unique index naming**: All unique constraints aligned to DB-native names (`firms_slug_key`, `users_email_key`, `sessions_token_hash_key`, `regulatory_rule_sets_code_key`) using `uniqueIndex()` in Drizzle schema
+- **55 new indexes**: Added across all major tables for query performance
+- **Soft delete**: `deleted_at timestamp` added to `cases`, `clients`, `invoices`, `quotations`
+- **Optimistic locking**: `version integer` added to `invoices` and `payment_vouchers`
+- **TOTP fields**: `totp_secret`, `totp_enabled`, `totp_last_used_at` added to `users`
+- **Session enrichment**: `user_agent`, `ip_address` added to `sessions`; `user_agent`, `ip_address` added to `audit_logs`
+- **New table**: `support_sessions` (founder debug access tracking) in `lib/db/src/schema/security.ts`
+- **Migration baseline**: `lib/db/migrations/0000_000_baseline.sql` — full from-scratch recreation SQL
+
+### Migration Infrastructure
+- `lib/db/drizzle.config.ts`: `out: "./migrations"` configured
+- `pnpm generate` in `lib/db` creates tracked migration files
+- `pnpm migrate` in `lib/db` applies unapplied migrations
+
+## Phase 1 — Tenant Security (Completed)
+
+### Rate Limiting (express-rate-limit + helmet)
+- `authRateLimiter`: 10 requests per 15-minute window on login endpoint
+- `sensitiveRateLimiter`: 30 requests per minute (exported from `lib/rate-limit.ts`)
+- `helmet`: Security headers on all responses; cross-origin resource policy set to cross-origin for API access
+- Rate limiting skipped in `NODE_ENV=test`
+
+### Audit Logging on Auth Events
+- `requireAuth` logs `auth.missing_token`, `auth.session_expired`, `auth.user_inactive`
+- `requireFounder` logs `auth.forbidden.founder_required` on 403
+- `requireFirmUser` logs `auth.forbidden.firm_user_required` on 403
+- Login logs `auth.login_success` / `auth.login_failed` / `auth.totp_failed`
+- Logout logs `auth.logout`
+- All logs include `ip_address` and `user_agent`
+
+### TOTP / 2FA Infrastructure
+- `POST /auth/totp/setup` — generates secret + QR code (otpauth library)
+- `POST /auth/totp/confirm` — verifies first code and enables TOTP
+- `POST /auth/totp/disable` — disables TOTP after code verification
+- Login flow: if `totp_enabled`, returns `{ needsTotp: true }`, then client submits `totpCode`
+- `requireReAuth` middleware exported for protecting sensitive operations
+
+### Support Sessions (Founder Debug Access)
+- `POST /support-sessions` — starts a support session (founder only)
+- `PATCH /support-sessions/:id/end` — ends a session
+- `GET /support-sessions` / `GET /support-sessions/active` — lists sessions
+- `POST /support-sessions/:id/log` — logs an action within a session
+- Every action creates an audit log entry
+- Routes in `artifacts/api-server/src/routes/support-sessions.ts`
+
+### Frontend — Settings Security Tab
+- Security tab added to `/app/settings` with `?tab=security`
+- TOTP enable flow: "Enable 2FA" → QR code display → manual secret → 6-digit confirm → enabled
+- TOTP disable flow: "Disable 2FA" → 6-digit confirm → disabled
+- Active sessions list with per-session revoke button
+- Login page updated to show TOTP step when `needsTotp: true` returned
+
+### Automated Tests (vitest + supertest)
+- 31 tests across 3 test files in `artifacts/api-server/src/__tests__/`
+- `auth.test.ts`: login success/failure, logout, /me, sessions, audit logs, TOTP endpoints
+- `tenant-isolation.test.ts`: firm user blocked from platform routes, DB-level isolation verified
+- `support-sessions.test.ts`: session lifecycle, audit log creation, error cases
+- Run with `pnpm --filter @workspace/api-server run test`
+
 ## External Dependencies
 - **PostgreSQL**: Primary database for all application data, managed via Drizzle ORM.
 - **Replit Object Storage (GCS)**: Used for storing document templates and generated case documents.

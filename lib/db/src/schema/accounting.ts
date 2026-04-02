@@ -1,4 +1,4 @@
-import { pgTable, serial, text, integer, numeric, boolean, date, timestamp } from "drizzle-orm/pg-core";
+import { pgTable, serial, text, integer, numeric, boolean, date, timestamp, index } from "drizzle-orm/pg-core";
 
 export const caseBillingEntriesTable = pgTable("case_billing_entries", {
   id:          serial("id").primaryKey(),
@@ -13,7 +13,10 @@ export const caseBillingEntriesTable = pgTable("case_billing_entries", {
   createdBy:   integer("created_by"),
   createdAt:   timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt:   timestamp("updated_at", { withTimezone: true }).notNull().defaultNow().$onUpdate(() => new Date()),
-});
+}, (t) => ({
+  firmCaseIdx: index("idx_billing_entries_firm_case").on(t.firmId, t.caseId),
+  caseIdx:     index("idx_billing_entries_case").on(t.caseId),
+}));
 
 export const invoicesTable = pgTable("invoices", {
   id:            serial("id").primaryKey(),
@@ -30,10 +33,16 @@ export const invoicesTable = pgTable("invoices", {
   issuedDate:    date("issued_date"),
   dueDate:       date("due_date"),
   notes:         text("notes"),
+  version:       integer("version").notNull().default(0),
+  deletedAt:     timestamp("deleted_at", { withTimezone: true }),
   createdBy:     integer("created_by"),
   createdAt:     timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt:     timestamp("updated_at", { withTimezone: true }).notNull().defaultNow().$onUpdate(() => new Date()),
-});
+}, (t) => ({
+  firmStatusIdx: index("idx_invoices_firm_status").on(t.firmId, t.status),
+  dueDateIdx:    index("idx_invoices_due_date").on(t.dueDate),
+  statusIdx:     index("idx_invoices_status").on(t.status),
+}));
 
 export const invoiceItemsTable = pgTable("invoice_items", {
   id:           serial("id").primaryKey(),
@@ -45,7 +54,9 @@ export const invoiceItemsTable = pgTable("invoice_items", {
   taxAmount:    numeric("tax_amount", { precision: 18, scale: 2 }).notNull().default("0"),
   amountInclTax: numeric("amount_incl_tax", { precision: 18, scale: 2 }).notNull().default("0"),
   sortOrder:    integer("sort_order").notNull().default(0),
-});
+}, (t) => ({
+  invoiceIdIdx: index("idx_invoice_items_invoice").on(t.invoiceId),
+}));
 
 export const receiptsTable = pgTable("receipts", {
   id:            serial("id").primaryKey(),
@@ -65,7 +76,10 @@ export const receiptsTable = pgTable("receipts", {
   reversedAt:    timestamp("reversed_at", { withTimezone: true }),
   createdBy:     integer("created_by"),
   createdAt:     timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-});
+}, (t) => ({
+  receivedDateIdx: index("idx_receipts_received_date").on(t.receivedDate),
+  accountTypeIdx:  index("idx_receipts_account_type").on(t.firmId, t.accountType),
+}));
 
 export const receiptAllocationsTable = pgTable("receipt_allocations", {
   id:          serial("id").primaryKey(),
@@ -74,7 +88,9 @@ export const receiptAllocationsTable = pgTable("receipt_allocations", {
   amount:      numeric("amount", { precision: 18, scale: 2 }).notNull(),
   notes:       text("notes"),
   createdAt:   timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-});
+}, (t) => ({
+  receiptIdx: index("idx_receipt_alloc_receipt").on(t.receiptId),
+}));
 
 export const paymentVouchersTable = pgTable("payment_vouchers", {
   id:                 serial("id").primaryKey(),
@@ -99,11 +115,14 @@ export const paymentVouchersTable = pgTable("payment_vouchers", {
   paidAt:             timestamp("paid_at", { withTimezone: true }),
   paidBy:             integer("paid_by"),
   notes:              text("notes"),
+  version:            integer("version").notNull().default(0),
   isReversed:         boolean("is_reversed").notNull().default(false),
   createdBy:          integer("created_by"),
   createdAt:          timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt:          timestamp("updated_at", { withTimezone: true }).notNull().defaultNow().$onUpdate(() => new Date()),
-});
+}, (t) => ({
+  firmStatusIdx: index("idx_pvouchers_firm_status").on(t.firmId, t.status),
+}));
 
 export const paymentVoucherItemsTable = pgTable("payment_voucher_items", {
   id:          serial("id").primaryKey(),
@@ -112,7 +131,9 @@ export const paymentVoucherItemsTable = pgTable("payment_voucher_items", {
   itemType:    text("item_type").notNull().default("disbursement"),
   amount:      numeric("amount", { precision: 18, scale: 2 }).notNull(),
   sortOrder:   integer("sort_order").notNull().default(0),
-});
+}, (t) => ({
+  voucherIdx: index("idx_pv_items_voucher").on(t.voucherId),
+}));
 
 export const ledgerEntriesTable = pgTable("ledger_entries", {
   id:           serial("id").primaryKey(),
@@ -130,7 +151,10 @@ export const ledgerEntriesTable = pgTable("ledger_entries", {
   sourceId:     integer("source_id"),
   createdBy:    integer("created_by"),
   createdAt:    timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-});
+}, (t) => ({
+  entryDateIdx:  index("idx_ledger_entry_date").on(t.firmId, t.entryDate),
+  accountTypeIdx: index("idx_ledger_account_type").on(t.firmId, t.accountType),
+}));
 
 export const creditNotesTable = pgTable("credit_notes", {
   id:           serial("id").primaryKey(),
@@ -144,4 +168,7 @@ export const creditNotesTable = pgTable("credit_notes", {
   notes:        text("notes"),
   createdBy:    integer("created_by"),
   createdAt:    timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-});
+}, (t) => ({
+  firmIdx:    index("idx_credit_notes_firm").on(t.firmId),
+  invoiceIdx: index("idx_credit_notes_invoice").on(t.invoiceId),
+}));

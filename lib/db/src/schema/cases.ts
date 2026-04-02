@@ -1,4 +1,4 @@
-import { pgTable, serial, text, integer, numeric, timestamp } from "drizzle-orm/pg-core";
+import { pgTable, serial, text, integer, numeric, timestamp, index } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod/v4";
 
@@ -19,9 +19,15 @@ export const casesTable = pgTable("cases", {
   loanDetails: text("loan_details"),
   companyDetails: text("company_details"),
   createdBy: integer("created_by"),
+  deletedAt: timestamp("deleted_at", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow().$onUpdate(() => new Date()),
-});
+}, (t) => ({
+  firmIdIdx: index("idx_cases_firm").on(t.firmId),
+  statusIdx: index("idx_cases_status").on(t.status),
+  createdAtIdx: index("idx_cases_created_at").on(t.createdAt),
+  firmStatusIdx: index("idx_cases_firm_status").on(t.firmId, t.status),
+}));
 
 export const casePurchasersTable = pgTable("case_purchasers", {
   id: serial("id").primaryKey(),
@@ -30,7 +36,9 @@ export const casePurchasersTable = pgTable("case_purchasers", {
   role: text("role").notNull().default("main"),
   orderNo: integer("order_no").notNull().default(1),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-});
+}, (t) => ({
+  caseIdIdx: index("idx_case_purchasers_case").on(t.caseId),
+}));
 
 export const caseAssignmentsTable = pgTable("case_assignments", {
   id: serial("id").primaryKey(),
@@ -40,7 +48,10 @@ export const caseAssignmentsTable = pgTable("case_assignments", {
   assignedBy: integer("assigned_by"),
   assignedAt: timestamp("assigned_at", { withTimezone: true }).notNull().defaultNow(),
   unassignedAt: timestamp("unassigned_at", { withTimezone: true }),
-});
+}, (t) => ({
+  caseIdIdx: index("idx_case_assignments_case").on(t.caseId),
+  userIdIdx: index("idx_case_assignments_user").on(t.userId),
+}));
 
 export const caseWorkflowStepsTable = pgTable("case_workflow_steps", {
   id: serial("id").primaryKey(),
@@ -55,7 +66,10 @@ export const caseWorkflowStepsTable = pgTable("case_workflow_steps", {
   notes: text("notes"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow().$onUpdate(() => new Date()),
-});
+}, (t) => ({
+  caseIdIdx: index("idx_workflow_steps_case").on(t.caseId),
+  caseStatusIdx: index("idx_workflow_steps_case_status").on(t.caseId, t.status),
+}));
 
 export const caseNotesTable = pgTable("case_notes", {
   id: serial("id").primaryKey(),
@@ -63,7 +77,9 @@ export const caseNotesTable = pgTable("case_notes", {
   authorId: integer("author_id").notNull(),
   content: text("content").notNull(),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-});
+}, (t) => ({
+  caseIdIdx: index("idx_case_notes_case").on(t.caseId),
+}));
 
 export const auditLogsTable = pgTable("audit_logs", {
   id: serial("id").primaryKey(),
@@ -75,8 +91,15 @@ export const auditLogsTable = pgTable("audit_logs", {
   entityId: integer("entity_id"),
   detail: text("detail"),
   ipAddress: text("ip_address"),
+  userAgent: text("user_agent"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-});
+}, (t) => ({
+  firmIdIdx: index("idx_audit_firm").on(t.firmId),
+  actorIdx: index("idx_audit_actor").on(t.actorId),
+  entityIdx: index("idx_audit_entity").on(t.entityType, t.entityId),
+  createdAtIdx: index("idx_audit_created_at").on(t.createdAt),
+  actionIdx: index("idx_audit_action").on(t.action),
+}));
 
 export const insertCaseSchema = createInsertSchema(casesTable).omit({ id: true, createdAt: true, updatedAt: true });
 export type InsertCase = z.infer<typeof insertCaseSchema>;
