@@ -149,7 +149,15 @@ async function buildCaseContext(caseId: number, firmId: number): Promise<Record<
     project_daerah: proj.daerah ?? "",
     project_negeri: proj.negeri ?? "",
     project_land_use: proj.land_use ?? "",
+    project_development_condition: proj.development_condition ?? "",
+    project_developer_name: proj.developer_name ?? "",
     unit_category: proj.unit_category ?? "",
+    project_property_types: (() => {
+      const ef = proj.extra_fields;
+      const parsed = typeof ef === "string" ? (() => { try { return JSON.parse(ef); } catch { return {}; } })() : (ef ?? {});
+      const pts = Array.isArray(parsed.propertyTypes) ? parsed.propertyTypes : [];
+      return pts.map((pt: any, i: number) => ({ index: i + 1, building_type: pt.buildingType ?? "" }));
+    })(),
 
     // Developer Details
     developer_name: dev.name ?? "",
@@ -497,7 +505,14 @@ router.get("/document-variables", requireAuth, requireFirmUser, async (_req: Aut
       { key: "project_daerah", label: "Daerah" },
       { key: "project_negeri", label: "Negeri" },
       { key: "project_land_use", label: "Land Use" },
+      { key: "project_development_condition", label: "Development Condition" },
+      { key: "project_developer_name", label: "Developer Name (on Project)" },
       { key: "unit_category", label: "Unit Category" },
+    ]},
+    { group: "Project Property Types (Loop)", vars: [
+      { key: "project_property_types", label: "Property Types List — use {#project_property_types}...{/project_property_types}" },
+      { key: "building_type", label: "Building Type (inside loop)" },
+      { key: "index", label: "Index (inside loop)" },
     ]},
     { group: "Developer", vars: [
       { key: "developer_name", label: "Developer Name" },
