@@ -16,10 +16,17 @@ async function enrichProject(proj: typeof projectsTable.$inferSelect) {
     id: proj.id,
     firmId: proj.firmId,
     developerId: proj.developerId,
-    developerName: devRow?.name ?? "Unknown",
+    developerName: proj.developerName || devRow?.name || "Unknown",
     name: proj.name,
+    phase: proj.phase ?? null,
     projectType: proj.projectType,
     titleType: proj.titleType,
+    titleSubtype: proj.titleSubtype ?? null,
+    masterTitleNumber: proj.masterTitleNumber ?? null,
+    masterTitleLandSize: proj.masterTitleLandSize ?? null,
+    mukim: proj.mukim ?? null,
+    daerah: proj.daerah ?? null,
+    negeri: proj.negeri ?? null,
     landUse: proj.landUse ?? null,
     developmentCondition: proj.developmentCondition ?? null,
     unitCategory: proj.unitCategory ?? null,
@@ -63,6 +70,7 @@ router.post("/projects", requireAuth, requireFirmUser, async (req: AuthRequest, 
   }
 
   const { developerId, name, projectType, titleType, landUse, developmentCondition, unitCategory, extraFields } = parsed.data;
+  const { phase, developerName, titleSubtype, masterTitleNumber, masterTitleLandSize, mukim, daerah, negeri } = req.body;
 
   const [dev] = await db.select().from(developersTable).where(eq(developersTable.id, developerId));
   if (!dev || dev.firmId !== req.firmId) {
@@ -76,8 +84,16 @@ router.post("/projects", requireAuth, requireFirmUser, async (req: AuthRequest, 
       firmId: req.firmId!,
       developerId,
       name,
+      phase: phase || null,
+      developerName: developerName || dev.name,
       projectType,
       titleType,
+      titleSubtype: titleSubtype || null,
+      masterTitleNumber: masterTitleNumber || null,
+      masterTitleLandSize: masterTitleLandSize || null,
+      mukim: mukim || null,
+      daerah: daerah || null,
+      negeri: negeri || null,
       landUse,
       developmentCondition,
       unitCategory,
