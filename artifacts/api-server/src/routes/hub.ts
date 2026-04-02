@@ -1,9 +1,10 @@
 import { Router, type IRouter } from "express";
-import { eq, or, desc } from "drizzle-orm";
+import { eq, or, desc, isNull, and, inArray } from "drizzle-orm";
 import {
   db,
   usersTable,
   firmsTable,
+  systemFoldersTable,
   platformMessagesTable,
   platformMessageAttachmentsTable,
   platformDocumentsTable,
@@ -81,36 +82,44 @@ router.patch("/hub/messages/:msgId/read", requireAuth, requireFirmUser, async (r
   res.json({ success: true });
 });
 
+// ─── System Folders (visible to firm, read-only) ────────────────────────────
+
+router.get("/hub/folders", requireAuth, requireFirmUser, async (_req: AuthRequest, res): Promise<void> => {
+  const folders = await db
+    .select()
+    .from(systemFoldersTable)
+    .where(eq(systemFoldersTable.isDisabled, false))
+    .orderBy(systemFoldersTable.sortOrder, systemFoldersTable.name);
+  res.json(folders);
+});
+
 // ─── System Documents (visible to firm) ──────────────────────────────────────
 
 router.get("/hub/documents", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
   const firmId = req.firmId!;
-  const docs = await db
+  const folderId = req.query.folderId ? parseInt(req.query.folderId as string, 10) : undefined;
+
+  const disabledFolders = await db
+    .select({ id: systemFoldersTable.id })
+    .from(systemFoldersTable)
+    .where(eq(systemFoldersTable.isDisabled, true));
+  const disabledIds = disabledFolders.map(f => f.id);
+
+  const allDocs = await db
     .select()
     .from(platformDocumentsTable)
-    .where(
-      or(eq(platformDocumentsTable.firmId, firmId), eq(platformDocumentsTable.firmId, 0))
-    )
+    .where(or(isNull(platformDocumentsTable.firmId), eq(platformDocumentsTable.firmId, firmId)))
     .orderBy(desc(platformDocumentsTable.createdAt));
 
-  // Also get docs with null firm_id (shared with all)
-  const sharedDocs = await db
-    .select()
-    .from(platformDocumentsTable)
-    .where(eq(platformDocumentsTable.firmId, null as unknown as number))
-    .orderBy(desc(platformDocumentsTable.createdAt));
+  const unique = allDocs.filter((d, i, arr) => arr.findIndex((x) => x.id === d.id) === i);
 
-  const firmDocs = await db
-    .select()
-    .from(platformDocumentsTable)
-    .where(eq(platformDocumentsTable.firmId, firmId))
-    .orderBy(desc(platformDocumentsTable.createdAt));
+  let filtered = unique.filter(d => !d.folderId || !disabledIds.includes(d.folderId));
 
-  const all = [...sharedDocs, ...firmDocs];
-  const unique = all.filter((d, i, arr) => arr.findIndex((x) => x.id === d.id) === i);
-  unique.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+  if (folderId !== undefined) {
+    filtered = filtered.filter(d => d.folderId === folderId);
+  }
 
-  res.json(unique);
+  res.json(filtered);
 });
 
 export default router;

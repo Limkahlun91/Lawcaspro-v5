@@ -1,6 +1,6 @@
-import { useState, useRef } from "react";
+import { useState, useRef, useEffect } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -10,8 +10,13 @@ import { Textarea } from "@/components/ui/textarea";
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
 } from "@/components/ui/dialog";
-import { FileText, Upload, Trash2, Download, Plus, File, Search, Building2 } from "lucide-react";
+import {
+  FileText, Upload, Trash2, Download, Plus, File, Search,
+  FolderOpen, Folder, ChevronUp, ChevronDown, Pencil, FolderPlus,
+  Eye, EyeOff, ChevronRight,
+} from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
+import { cn } from "@/lib/utils";
 
 const API_BASE = import.meta.env.BASE_URL + "api";
 
@@ -30,6 +35,15 @@ const ALLOWED_TYPES: Record<string, string> = {
 
 const CATEGORIES = ["general", "template", "guide", "announcement", "form", "policy", "other"];
 
+interface SystemFolder {
+  id: number;
+  name: string;
+  parentId: number | null;
+  sortOrder: number;
+  isDisabled: boolean;
+  createdAt: string;
+}
+
 interface PlatformDoc {
   id: number;
   name: string;
@@ -40,6 +54,7 @@ interface PlatformDoc {
   fileSize: number | null;
   objectPath: string;
   firmId: number | null;
+  folderId: number | null;
   uploadedBy: number;
   createdAt: string;
 }
@@ -55,26 +70,193 @@ function formatBytes(bytes: number | null) {
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }
 
+function FolderTreeItem({
+  folder,
+  folders,
+  selectedFolderId,
+  onSelect,
+  onEdit,
+  onToggleDisable,
+  onReorder,
+  onAddSub,
+  depth = 0,
+}: {
+  folder: SystemFolder;
+  folders: SystemFolder[];
+  selectedFolderId: number | null;
+  onSelect: (id: number) => void;
+  onEdit: (folder: SystemFolder) => void;
+  onToggleDisable: (folder: SystemFolder) => void;
+  onReorder: (folderId: number, direction: "up" | "down") => void;
+  onAddSub: (parentId: number) => void;
+  depth?: number;
+}) {
+  const children = folders
+    .filter(f => f.parentId === folder.id)
+    .sort((a, b) => a.sortOrder - b.sortOrder);
+  const isSelected = selectedFolderId === folder.id;
+  const [expanded, setExpanded] = useState(true);
+
+  return (
+    <div>
+      <div
+        className={cn(
+          "group flex items-center gap-1 py-2 px-2 rounded-md cursor-pointer text-sm transition-colors",
+          isSelected ? "bg-amber-50 border border-amber-200" : "hover:bg-slate-50 border border-transparent",
+          folder.isDisabled && "opacity-50"
+        )}
+        style={{ paddingLeft: `${depth * 16 + 8}px` }}
+        onClick={() => onSelect(folder.id)}
+      >
+        {children.length > 0 && (
+          <button
+            onClick={e => { e.stopPropagation(); setExpanded(!expanded); }}
+            className="p-0.5 hover:bg-slate-200 rounded shrink-0"
+          >
+            <ChevronRight className={cn("w-3 h-3 transition-transform", expanded && "rotate-90")} />
+          </button>
+        )}
+        {children.length === 0 && <span className="w-4" />}
+        {isSelected ? (
+          <FolderOpen className="w-4 h-4 text-amber-500 shrink-0" />
+        ) : (
+          <Folder className="w-4 h-4 text-slate-400 shrink-0" />
+        )}
+        <span className={cn("font-medium truncate flex-1", isSelected ? "text-amber-700" : "text-slate-700")}>
+          {folder.name}
+        </span>
+
+        <div className="hidden group-hover:flex items-center gap-0.5 shrink-0">
+          <button onClick={e => { e.stopPropagation(); onReorder(folder.id, "up"); }} className="p-0.5 hover:bg-slate-200 rounded" title="Move up">
+            <ChevronUp className="w-3 h-3 text-slate-400" />
+          </button>
+          <button onClick={e => { e.stopPropagation(); onReorder(folder.id, "down"); }} className="p-0.5 hover:bg-slate-200 rounded" title="Move down">
+            <ChevronDown className="w-3 h-3 text-slate-400" />
+          </button>
+          <button onClick={e => { e.stopPropagation(); onEdit(folder); }} className="p-0.5 hover:bg-slate-200 rounded" title="Edit">
+            <Pencil className="w-3 h-3 text-slate-400" />
+          </button>
+          <button onClick={e => { e.stopPropagation(); onToggleDisable(folder); }} className="p-0.5 hover:bg-slate-200 rounded" title={folder.isDisabled ? "Enable" : "Disable"}>
+            {folder.isDisabled ? <Eye className="w-3 h-3 text-green-500" /> : <EyeOff className="w-3 h-3 text-slate-400" />}
+          </button>
+          <button onClick={e => { e.stopPropagation(); onAddSub(folder.id); }} className="p-0.5 hover:bg-slate-200 rounded" title="Add subfolder">
+            <FolderPlus className="w-3 h-3 text-slate-400" />
+          </button>
+        </div>
+      </div>
+      {expanded && children.map(child => (
+        <FolderTreeItem
+          key={child.id}
+          folder={child}
+          folders={folders}
+          selectedFolderId={selectedFolderId}
+          onSelect={onSelect}
+          onEdit={onEdit}
+          onToggleDisable={onToggleDisable}
+          onReorder={onReorder}
+          onAddSub={onAddSub}
+          depth={depth + 1}
+        />
+      ))}
+    </div>
+  );
+}
+
 export default function PlatformDocuments() {
   const { toast } = useToast();
   const queryClient = useQueryClient();
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const [search, setSearch] = useState("");
-  const [categoryFilter, setCategoryFilter] = useState("all");
+  const [selectedFolderId, setSelectedFolderId] = useState<number | null>(null);
   const [showUpload, setShowUpload] = useState(false);
   const [uploading, setUploading] = useState(false);
-
   const [form, setForm] = useState({ name: "", description: "", category: "general" });
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
 
-  const { data: docs = [], isLoading } = useQuery<PlatformDoc[]>({
-    queryKey: ["platform-documents"],
+  const [showNewFolder, setShowNewFolder] = useState(false);
+  const [newFolderName, setNewFolderName] = useState("");
+  const [newFolderParentId, setNewFolderParentId] = useState<number | null>(null);
+
+  const [showEditFolder, setShowEditFolder] = useState(false);
+  const [editingFolder, setEditingFolder] = useState<SystemFolder | null>(null);
+  const [editFolderName, setEditFolderName] = useState("");
+
+  const { data: folders = [] } = useQuery<SystemFolder[]>({
+    queryKey: ["system-folders"],
     queryFn: async () => {
-      const res = await fetch(`${API_BASE}/platform/documents`, { credentials: "include" });
+      const res = await fetch(`${API_BASE}/platform/folders`, { credentials: "include" });
+      if (!res.ok) throw new Error("Failed to load folders");
+      return res.json();
+    },
+  });
+
+  const { data: docs = [], isLoading: docsLoading } = useQuery<PlatformDoc[]>({
+    queryKey: ["platform-documents", selectedFolderId],
+    queryFn: async () => {
+      const url = selectedFolderId !== null
+        ? `${API_BASE}/platform/documents?folderId=${selectedFolderId}`
+        : `${API_BASE}/platform/documents`;
+      const res = await fetch(url, { credentials: "include" });
       if (!res.ok) throw new Error("Failed to load documents");
       return res.json();
     },
+  });
+
+  const rootFolders = folders.filter(f => f.parentId === null).sort((a, b) => a.sortOrder - b.sortOrder);
+  const selectedFolder = folders.find(f => f.id === selectedFolderId);
+
+  const createFolderMutation = useMutation({
+    mutationFn: async ({ name, parentId }: { name: string; parentId: number | null }) => {
+      const res = await fetch(`${API_BASE}/platform/folders`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name, parentId }),
+        credentials: "include",
+      });
+      if (!res.ok) throw new Error("Failed to create folder");
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["system-folders"] });
+      toast({ title: "Folder created" });
+      setShowNewFolder(false);
+      setNewFolderName("");
+      setNewFolderParentId(null);
+    },
+    onError: () => toast({ title: "Failed to create folder", variant: "destructive" }),
+  });
+
+  const updateFolderMutation = useMutation({
+    mutationFn: async ({ id, name, isDisabled }: { id: number; name?: string; isDisabled?: boolean }) => {
+      const res = await fetch(`${API_BASE}/platform/folders/${id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name, isDisabled }),
+        credentials: "include",
+      });
+      if (!res.ok) throw new Error("Failed to update folder");
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["system-folders"] });
+      toast({ title: "Folder updated" });
+      setShowEditFolder(false);
+      setEditingFolder(null);
+    },
+    onError: () => toast({ title: "Failed to update folder", variant: "destructive" }),
+  });
+
+  const reorderMutation = useMutation({
+    mutationFn: async ({ folderId, direction }: { folderId: number; direction: "up" | "down" }) => {
+      const res = await fetch(`${API_BASE}/platform/folders/reorder`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ folderId, direction }),
+        credentials: "include",
+      });
+      if (!res.ok) throw new Error("Failed to reorder");
+    },
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["system-folders"] }),
   });
 
   const deleteMutation = useMutation({
@@ -89,7 +271,7 @@ export default function PlatformDocuments() {
       queryClient.invalidateQueries({ queryKey: ["platform-documents"] });
       toast({ title: "Document deleted" });
     },
-    onError: () => toast({ title: "Error", description: "Could not delete document", variant: "destructive" }),
+    onError: () => toast({ title: "Could not delete document", variant: "destructive" }),
   });
 
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -100,7 +282,7 @@ export default function PlatformDocuments() {
       return;
     }
     setSelectedFile(file);
-    if (!form.name) setForm((f) => ({ ...f, name: file.name.replace(/\.[^.]+$/, "") }));
+    if (!form.name) setForm(f => ({ ...f, name: file.name.replace(/\.[^.]+$/, "") }));
   };
 
   const handleUpload = async () => {
@@ -135,6 +317,7 @@ export default function PlatformDocuments() {
           fileSize: selectedFile.size,
           objectPath,
           firmId: null,
+          folderId: selectedFolderId,
         }),
         credentials: "include",
       });
@@ -169,112 +352,181 @@ export default function PlatformDocuments() {
     }
   };
 
-  const filtered = docs.filter((d) => {
-    const matchSearch = !search || d.name.toLowerCase().includes(search.toLowerCase()) || d.fileName.toLowerCase().includes(search.toLowerCase());
-    const matchCat = categoryFilter === "all" || d.category === categoryFilter;
-    return matchSearch && matchCat;
-  });
+  const handleStartAddSub = (parentId: number) => {
+    setNewFolderParentId(parentId);
+    setNewFolderName("");
+    setShowNewFolder(true);
+  };
+
+  const handleStartEdit = (folder: SystemFolder) => {
+    setEditingFolder(folder);
+    setEditFolderName(folder.name);
+    setShowEditFolder(true);
+  };
+
+  const handleToggleDisable = (folder: SystemFolder) => {
+    updateFolderMutation.mutate({ id: folder.id, isDisabled: !folder.isDisabled });
+  };
+
+  const folderPath = (): string => {
+    if (!selectedFolder) return "All Documents";
+    const parts: string[] = [];
+    let current: SystemFolder | undefined = selectedFolder;
+    while (current) {
+      parts.unshift(current.name);
+      current = folders.find(f => f.id === current!.parentId);
+    }
+    return parts.join(" / ");
+  };
 
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-3xl font-bold text-slate-900 tracking-tight">System Documents</h1>
-          <p className="text-slate-500 mt-1">Upload and manage documents shared with all firms</p>
+          <p className="text-slate-500 mt-1">Manage global system folders and master documents for all firms</p>
         </div>
-        <Button onClick={() => setShowUpload(true)} className="gap-2">
-          <Plus className="w-4 h-4" />
-          Upload Document
-        </Button>
       </div>
 
-      <div className="flex gap-3">
-        <div className="relative flex-1 max-w-sm">
-          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
-          <Input
-            placeholder="Search documents..."
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            className="pl-9"
-          />
-        </div>
-        <Select value={categoryFilter} onValueChange={setCategoryFilter}>
-          <SelectTrigger className="w-40">
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="all">All categories</SelectItem>
-            {CATEGORIES.map((c) => (
-              <SelectItem key={c} value={c}>{c.charAt(0).toUpperCase() + c.slice(1)}</SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-      </div>
+      <div className="flex gap-6 min-h-[500px]">
+        <div className="w-72 shrink-0">
+          <Card>
+            <CardContent className="p-4">
+              <div className="flex items-center justify-between mb-3">
+                <h3 className="text-sm font-semibold text-slate-700">Folders</h3>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-7 text-xs gap-1"
+                  onClick={() => { setNewFolderParentId(null); setNewFolderName(""); setShowNewFolder(true); }}
+                >
+                  New Folder
+                </Button>
+              </div>
+              <p className="text-xs text-slate-400 mb-3">System folder tree</p>
 
-      {isLoading ? (
-        <div className="text-slate-500 text-sm py-8 text-center">Loading documents...</div>
-      ) : filtered.length === 0 ? (
-        <div className="text-center py-16">
-          <FileText className="w-10 h-10 text-slate-300 mx-auto mb-3" />
-          <p className="text-slate-500 font-medium">No documents found</p>
-          <p className="text-slate-400 text-sm mt-1">Upload a document to share with firms</p>
+              <div
+                className={cn(
+                  "py-2 px-2 rounded-md cursor-pointer text-sm flex items-center gap-2 transition-colors mb-1",
+                  selectedFolderId === null ? "bg-amber-50 border border-amber-200 text-amber-700 font-medium" : "hover:bg-slate-50 text-slate-600 border border-transparent"
+                )}
+                onClick={() => setSelectedFolderId(null)}
+              >
+                <FolderOpen className="w-4 h-4" />
+                All Documents
+              </div>
+
+              <div className="space-y-0.5">
+                {rootFolders.map(folder => (
+                  <FolderTreeItem
+                    key={folder.id}
+                    folder={folder}
+                    folders={folders}
+                    selectedFolderId={selectedFolderId}
+                    onSelect={setSelectedFolderId}
+                    onEdit={handleStartEdit}
+                    onToggleDisable={handleToggleDisable}
+                    onReorder={(folderId, direction) => reorderMutation.mutate({ folderId, direction })}
+                    onAddSub={handleStartAddSub}
+                  />
+                ))}
+              </div>
+
+              {rootFolders.length === 0 && (
+                <p className="text-xs text-slate-400 text-center py-4">No folders yet</p>
+              )}
+            </CardContent>
+          </Card>
         </div>
-      ) : (
-        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
-          {filtered.map((doc) => (
-            <Card key={doc.id} className="group hover:shadow-md transition-shadow">
-              <CardContent className="p-4">
-                <div className="flex items-start gap-3">
-                  <div className="w-10 h-10 bg-amber-50 border border-amber-200 rounded-lg flex items-center justify-center shrink-0">
-                    <File className="w-5 h-5 text-amber-600" />
-                  </div>
-                  <div className="flex-1 min-w-0">
-                    <p className="font-semibold text-sm text-slate-900 truncate">{doc.name}</p>
-                    {doc.description && (
-                      <p className="text-xs text-slate-500 mt-0.5 line-clamp-2">{doc.description}</p>
-                    )}
-                    <div className="flex flex-wrap gap-1.5 mt-2">
-                      <Badge variant="outline" className="text-xs">{fileTypeLabel(doc.fileType)}</Badge>
-                      <Badge variant="secondary" className="text-xs capitalize">{doc.category}</Badge>
-                      {doc.firmId && (
-                        <Badge variant="outline" className="text-xs gap-1">
-                          <Building2 className="w-2.5 h-2.5" />
-                          Firm only
-                        </Badge>
-                      )}
-                    </div>
-                    <div className="flex items-center gap-2 mt-1">
-                      <span className="text-xs text-slate-400">{formatBytes(doc.fileSize)}</span>
-                      <span className="text-xs text-slate-300">·</span>
-                      <span className="text-xs text-slate-400">{new Date(doc.createdAt).toLocaleDateString()}</span>
-                    </div>
-                  </div>
+
+        <div className="flex-1 min-w-0">
+          <Card>
+            <CardContent className="p-4">
+              <div className="flex items-center justify-between mb-4">
+                <div>
+                  <h3 className="text-sm font-semibold text-slate-700">Documents</h3>
+                  <p className="text-xs text-slate-400 mt-0.5">
+                    {selectedFolder ? `Folder: ${folderPath()}` : "Showing all documents"}
+                  </p>
                 </div>
-                <div className="flex gap-2 mt-3 pt-3 border-t border-slate-100">
-                  <Button variant="outline" size="sm" className="flex-1 text-xs gap-1.5" onClick={() => handleDownload(doc)}>
-                    <Download className="w-3.5 h-3.5" />
-                    Download
-                  </Button>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    className="text-xs text-red-500 hover:text-red-600 hover:border-red-200"
-                    onClick={() => deleteMutation.mutate(doc.id)}
-                    disabled={deleteMutation.isPending}
-                  >
-                    <Trash2 className="w-3.5 h-3.5" />
-                  </Button>
+                <Button onClick={() => setShowUpload(true)} size="sm" className="gap-1.5">
+                  <Plus className="w-3.5 h-3.5" />
+                  Upload Document
+                </Button>
+              </div>
+
+              {docsLoading ? (
+                <div className="text-slate-500 text-sm py-12 text-center">Loading documents...</div>
+              ) : docs.length === 0 ? (
+                <div className="text-center py-12">
+                  <FileText className="w-10 h-10 text-slate-300 mx-auto mb-3" />
+                  <p className="text-slate-500 font-medium">No documents</p>
+                  <p className="text-slate-400 text-sm mt-1">
+                    {selectedFolder ? `Upload a document to "${selectedFolder.name}"` : "Upload a document to get started"}
+                  </p>
                 </div>
-              </CardContent>
-            </Card>
-          ))}
+              ) : (
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="border-b border-slate-200">
+                      <th className="text-left px-3 py-2 font-medium text-slate-600">Name</th>
+                      <th className="text-left px-3 py-2 font-medium text-slate-600 w-20">Type</th>
+                      <th className="text-left px-3 py-2 font-medium text-slate-600 w-20">Size</th>
+                      <th className="text-left px-3 py-2 font-medium text-slate-600 w-28">Category</th>
+                      <th className="text-right px-3 py-2 font-medium text-slate-600 w-24">Action</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {docs.map(doc => (
+                      <tr key={doc.id} className="border-b border-slate-100 hover:bg-slate-50/50">
+                        <td className="px-3 py-2.5">
+                          <div className="flex items-center gap-2">
+                            <File className="w-4 h-4 text-slate-400 shrink-0" />
+                            <div>
+                              <p className="font-medium text-slate-900">{doc.name}</p>
+                              {doc.description && <p className="text-xs text-slate-500">{doc.description}</p>}
+                              <p className="text-xs text-slate-400">{doc.fileName}</p>
+                            </div>
+                          </div>
+                        </td>
+                        <td className="px-3 py-2.5">
+                          <Badge variant="outline" className="text-xs">{fileTypeLabel(doc.fileType)}</Badge>
+                        </td>
+                        <td className="px-3 py-2.5 text-slate-500 text-xs">{formatBytes(doc.fileSize)}</td>
+                        <td className="px-3 py-2.5">
+                          <Badge variant="secondary" className="text-xs capitalize">{doc.category}</Badge>
+                        </td>
+                        <td className="px-3 py-2.5 text-right">
+                          <div className="flex items-center justify-end gap-1">
+                            <Button variant="ghost" size="sm" className="h-7 w-7 p-0" onClick={() => handleDownload(doc)} title="Download">
+                              <Download className="w-3.5 h-3.5" />
+                            </Button>
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              className="h-7 w-7 p-0 text-red-500 hover:text-red-600"
+                              onClick={() => deleteMutation.mutate(doc.id)}
+                              disabled={deleteMutation.isPending}
+                              title="Delete"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </Button>
+                          </div>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </CardContent>
+          </Card>
         </div>
-      )}
+      </div>
 
       <Dialog open={showUpload} onOpenChange={setShowUpload}>
         <DialogContent className="max-w-md">
           <DialogHeader>
-            <DialogTitle>Upload System Document</DialogTitle>
+            <DialogTitle>Upload Document{selectedFolder ? ` to "${selectedFolder.name}"` : ""}</DialogTitle>
           </DialogHeader>
           <div className="space-y-4 py-2">
             <div
@@ -310,7 +562,7 @@ export default function PlatformDocuments() {
               <Input
                 placeholder="e.g. Fee Schedule 2025"
                 value={form.name}
-                onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))}
+                onChange={e => setForm(f => ({ ...f, name: e.target.value }))}
               />
             </div>
             <div className="space-y-2">
@@ -318,16 +570,16 @@ export default function PlatformDocuments() {
               <Textarea
                 placeholder="Brief description of this document..."
                 value={form.description}
-                onChange={(e) => setForm((f) => ({ ...f, description: e.target.value }))}
+                onChange={e => setForm(f => ({ ...f, description: e.target.value }))}
                 rows={2}
               />
             </div>
             <div className="space-y-2">
               <Label>Category</Label>
-              <Select value={form.category} onValueChange={(v) => setForm((f) => ({ ...f, category: v }))}>
+              <Select value={form.category} onValueChange={v => setForm(f => ({ ...f, category: v }))}>
                 <SelectTrigger><SelectValue /></SelectTrigger>
                 <SelectContent>
-                  {CATEGORIES.map((c) => (
+                  {CATEGORIES.map(c => (
                     <SelectItem key={c} value={c}>{c.charAt(0).toUpperCase() + c.slice(1)}</SelectItem>
                   ))}
                 </SelectContent>
@@ -338,6 +590,76 @@ export default function PlatformDocuments() {
             <Button variant="outline" onClick={() => setShowUpload(false)}>Cancel</Button>
             <Button onClick={handleUpload} disabled={!selectedFile || !form.name || uploading}>
               {uploading ? "Uploading..." : "Upload"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={showNewFolder} onOpenChange={setShowNewFolder}>
+        <DialogContent className="max-w-sm">
+          <DialogHeader>
+            <DialogTitle>{newFolderParentId ? "New Subfolder" : "New Folder"}</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4 py-2">
+            {newFolderParentId && (
+              <p className="text-sm text-slate-500">
+                Adding subfolder under: <span className="font-medium text-slate-700">{folders.find(f => f.id === newFolderParentId)?.name}</span>
+              </p>
+            )}
+            <div className="space-y-2">
+              <Label>Folder Name</Label>
+              <Input
+                placeholder="e.g. LOAN AGREEMENT"
+                value={newFolderName}
+                onChange={e => setNewFolderName(e.target.value)}
+                onKeyDown={e => {
+                  if (e.key === "Enter" && newFolderName.trim()) {
+                    createFolderMutation.mutate({ name: newFolderName, parentId: newFolderParentId });
+                  }
+                }}
+                autoFocus
+              />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setShowNewFolder(false)}>Cancel</Button>
+            <Button
+              onClick={() => createFolderMutation.mutate({ name: newFolderName, parentId: newFolderParentId })}
+              disabled={!newFolderName.trim() || createFolderMutation.isPending}
+            >
+              {createFolderMutation.isPending ? "Creating..." : "Create"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={showEditFolder} onOpenChange={setShowEditFolder}>
+        <DialogContent className="max-w-sm">
+          <DialogHeader>
+            <DialogTitle>Edit Folder</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4 py-2">
+            <div className="space-y-2">
+              <Label>Folder Name</Label>
+              <Input
+                value={editFolderName}
+                onChange={e => setEditFolderName(e.target.value)}
+                onKeyDown={e => {
+                  if (e.key === "Enter" && editFolderName.trim() && editingFolder) {
+                    updateFolderMutation.mutate({ id: editingFolder.id, name: editFolderName });
+                  }
+                }}
+                autoFocus
+              />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setShowEditFolder(false)}>Cancel</Button>
+            <Button
+              onClick={() => editingFolder && updateFolderMutation.mutate({ id: editingFolder.id, name: editFolderName })}
+              disabled={!editFolderName.trim() || updateFolderMutation.isPending}
+            >
+              {updateFolderMutation.isPending ? "Saving..." : "Save"}
             </Button>
           </DialogFooter>
         </DialogContent>

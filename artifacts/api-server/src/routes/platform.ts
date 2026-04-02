@@ -6,6 +6,7 @@ import {
   usersTable,
   casesTable,
   rolesTable,
+  systemFoldersTable,
   platformDocumentsTable,
   platformMessagesTable,
   platformMessageAttachmentsTable,
@@ -188,20 +189,108 @@ router.get("/platform/stats", requireAuth, requireFounder, async (_req, res): Pr
   res.json({ totalFirms: Number(totalFirmsRes?.c ?? 0), activeFirms: Number(activeFirmsRes?.c ?? 0), totalUsers: Number(totalUsersRes?.c ?? 0), totalCases: Number(totalCasesRes?.c ?? 0), totalDocuments });
 });
 
+// ─── System Folders ───────────────────────────────────────────────────────────
+
+router.get("/platform/folders", requireAuth, requireFounder, async (_req: AuthRequest, res): Promise<void> => {
+  const folders = await db
+    .select()
+    .from(systemFoldersTable)
+    .orderBy(systemFoldersTable.sortOrder, systemFoldersTable.name);
+  res.json(folders);
+});
+
+router.post("/platform/folders", requireAuth, requireFounder, async (req: AuthRequest, res): Promise<void> => {
+  const { name, parentId } = req.body as { name: string; parentId?: number | null };
+  if (!name || !name.trim()) {
+    res.status(400).json({ error: "Folder name is required" });
+    return;
+  }
+  const maxSort = await db.execute(
+    sql`SELECT COALESCE(MAX(sort_order), -1) + 1 as next_sort FROM system_folders WHERE ${parentId ? sql`parent_id = ${parentId}` : sql`parent_id IS NULL`}`
+  );
+  const nextSort = Number((Array.isArray(maxSort) ? maxSort[0] : (maxSort as any).rows[0])?.next_sort ?? 0);
+  const [folder] = await db
+    .insert(systemFoldersTable)
+    .values({ name: name.trim(), parentId: parentId ?? null, sortOrder: nextSort })
+    .returning();
+  res.status(201).json(folder);
+});
+
+router.patch("/platform/folders/:folderId", requireAuth, requireFounder, async (req: AuthRequest, res): Promise<void> => {
+  const folderId = parseInt(req.params.folderId, 10);
+  if (isNaN(folderId)) { res.status(400).json({ error: "Invalid folder ID" }); return; }
+  const { name, isDisabled } = req.body as { name?: string; isDisabled?: boolean };
+  const updates: Record<string, unknown> = {};
+  if (name !== undefined) updates.name = name.trim();
+  if (isDisabled !== undefined) updates.isDisabled = isDisabled;
+  if (Object.keys(updates).length === 0) { res.status(400).json({ error: "No fields to update" }); return; }
+  const [folder] = await db.update(systemFoldersTable).set(updates).where(eq(systemFoldersTable.id, folderId)).returning();
+  if (!folder) { res.status(404).json({ error: "Folder not found" }); return; }
+  res.json(folder);
+});
+
+router.delete("/platform/folders/:folderId", requireAuth, requireFounder, async (req: AuthRequest, res): Promise<void> => {
+  const folderId = parseInt(req.params.folderId, 10);
+  if (isNaN(folderId)) { res.status(400).json({ error: "Invalid folder ID" }); return; }
+  const [folder] = await db.select().from(systemFoldersTable).where(eq(systemFoldersTable.id, folderId));
+  if (!folder) { res.status(404).json({ error: "Folder not found" }); return; }
+  const [childCount] = await db.select({ c: count() }).from(systemFoldersTable).where(eq(systemFoldersTable.parentId, folderId));
+  if (Number(childCount?.c ?? 0) > 0) {
+    res.status(400).json({ error: "Cannot delete folder with subfolders. Remove subfolders first." });
+    return;
+  }
+  const [docCount] = await db.select({ c: count() }).from(platformDocumentsTable).where(eq(platformDocumentsTable.folderId, folderId));
+  if (Number(docCount?.c ?? 0) > 0) {
+    res.status(400).json({ error: "Cannot delete folder with documents. Remove or move documents first." });
+    return;
+  }
+  await db.delete(systemFoldersTable).where(eq(systemFoldersTable.id, folderId));
+  res.json({ success: true });
+});
+
+router.post("/platform/folders/reorder", requireAuth, requireFounder, async (req: AuthRequest, res): Promise<void> => {
+  const { folderId, direction } = req.body as { folderId: number; direction: "up" | "down" };
+  if (!folderId || !direction) { res.status(400).json({ error: "folderId and direction required" }); return; }
+  const [folder] = await db.select().from(systemFoldersTable).where(eq(systemFoldersTable.id, folderId));
+  if (!folder) { res.status(404).json({ error: "Folder not found" }); return; }
+
+  const siblings = await db
+    .select()
+    .from(systemFoldersTable)
+    .where(folder.parentId ? eq(systemFoldersTable.parentId, folder.parentId) : isNull(systemFoldersTable.parentId))
+    .orderBy(systemFoldersTable.sortOrder);
+
+  const idx = siblings.findIndex(s => s.id === folderId);
+  const swapIdx = direction === "up" ? idx - 1 : idx + 1;
+  if (swapIdx < 0 || swapIdx >= siblings.length) { res.json({ success: true }); return; }
+
+  const swapFolder = siblings[swapIdx];
+  await db.update(systemFoldersTable).set({ sortOrder: swapFolder.sortOrder }).where(eq(systemFoldersTable.id, folder.id));
+  await db.update(systemFoldersTable).set({ sortOrder: folder.sortOrder }).where(eq(systemFoldersTable.id, swapFolder.id));
+  res.json({ success: true });
+});
+
 // ─── Platform Documents ───────────────────────────────────────────────────────
 
 router.get("/platform/documents", requireAuth, requireFounder, async (req: AuthRequest, res): Promise<void> => {
   const firmId = req.query.firmId ? parseInt(req.query.firmId as string, 10) : undefined;
+  const folderId = req.query.folderId ? parseInt(req.query.folderId as string, 10) : undefined;
+  let condition;
+  if (firmId) condition = eq(platformDocumentsTable.firmId, firmId);
+  if (folderId !== undefined) {
+    const folderCondition = eq(platformDocumentsTable.folderId, folderId);
+    condition = condition ? and(condition, folderCondition) : folderCondition;
+  }
   const docs = await db
     .select()
     .from(platformDocumentsTable)
-    .where(firmId ? eq(platformDocumentsTable.firmId, firmId) : undefined)
+    .where(condition)
     .orderBy(desc(platformDocumentsTable.createdAt));
   res.json(docs);
 });
 
 router.post("/platform/documents", requireAuth, requireFounder, async (req: AuthRequest, res): Promise<void> => {
-  const { name, description, category, fileName, fileType, fileSize, objectPath, firmId } = req.body as {
+  const { name, description, category, fileName, fileType, fileSize, objectPath, firmId, folderId } = req.body as {
     name: string;
     description?: string;
     category?: string;
@@ -210,6 +299,7 @@ router.post("/platform/documents", requireAuth, requireFounder, async (req: Auth
     fileSize?: number;
     objectPath: string;
     firmId?: number | null;
+    folderId?: number | null;
   };
   if (!name || !fileName || !fileType || !objectPath) {
     res.status(400).json({ error: "Missing required fields" });
@@ -226,6 +316,7 @@ router.post("/platform/documents", requireAuth, requireFounder, async (req: Auth
       fileSize: fileSize ?? null,
       objectPath,
       firmId: firmId ?? null,
+      folderId: folderId ?? null,
       uploadedBy: req.userId!,
     })
     .returning();

@@ -1,5 +1,14 @@
 import { pgTable, serial, text, integer, boolean, timestamp } from "drizzle-orm/pg-core";
 
+export const systemFoldersTable = pgTable("system_folders", {
+  id: serial("id").primaryKey(),
+  name: text("name").notNull(),
+  parentId: integer("parent_id"),
+  sortOrder: integer("sort_order").notNull().default(0),
+  isDisabled: boolean("is_disabled").notNull().default(false),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
 export const platformDocumentsTable = pgTable("platform_documents", {
   id: serial("id").primaryKey(),
   name: text("name").notNull(),
@@ -10,6 +19,7 @@ export const platformDocumentsTable = pgTable("platform_documents", {
   fileSize: integer("file_size"),
   objectPath: text("object_path").notNull(),
   firmId: integer("firm_id"),
+  folderId: integer("folder_id"),
   uploadedBy: integer("uploaded_by").notNull(),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
