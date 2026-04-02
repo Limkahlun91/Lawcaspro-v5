@@ -197,12 +197,13 @@ Step paths: `common` → `loan` (if loan) → `mot` (individual/strata) or `noa_
 - [x] **Upload Bug Fix**: All file upload endpoints now send `{ name, size, contentType }` (was missing `name` and `size`, causing validation failure).
 - [x] **System Folders**: `system_folders` table for hierarchical folder organization of platform documents. Founder can create/edit/reorder/disable folders and subfolders. Firm-side shows read-only folder tree. Disabled folders hide from firms. Safe delete (blocks if children/docs exist).
 - [x] **Document Generation Enhanced**: `buildCaseContext` expanded with ALL case fields — SPA details, property details, loan/financing, company/directors, project (mukim/daerah/negeri), firm info, bank accounts. New `generate-from-master` endpoint for generating from system/master DOCX templates. CaseDocumentsTab now has tabbed generate dialog with "Firm Templates" and "Master Templates" (folder tree browser). Variable reference API at `/api/document-variables`.
+- [x] **PDF Template Mapping**: Visual PDF mapping editor on founder platform documents page. Founder uploads PDF → clicks "Map" → opens full-screen editor with PDF preview, add text boxes at any position, type free text + `{{variables}}` in each box. Saved as JSONB `pdf_mappings` on `platform_documents`. PDF generation uses `pdf-lib` to overlay text at mapped positions with variable replacement. Firm users can select mapped PDF templates in generate dialog alongside DOCX templates.
 
 ## Design Decisions
 
 - **No Replit Auth** — custom email/password with bcrypt + session tokens
 - **No JWT** — server-side sessions in PostgreSQL for security
-- **DOCX primary** (docxtemplater) for document generation, PDF secondary
+- **DOCX** (docxtemplater) + **PDF** (pdf-lib with visual mapping) for document generation
 - **SameSite=None; Secure** on auth cookie for cross-origin Replit proxy compatibility
 - **No emojis** in UI per user preference
 - **Malaysia-specific**: IC numbers, Malaysian developer/project patterns

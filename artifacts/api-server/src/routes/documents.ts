@@ -5,6 +5,8 @@ import { requireAuth, requireFirmUser, type AuthRequest } from "../lib/auth";
 import { ObjectStorageService, ObjectNotFoundError } from "../lib/objectStorage";
 import Docxtemplater from "docxtemplater";
 import PizZip from "pizzip";
+import { PDFDocument, rgb, StandardFonts } from "pdf-lib";
+import fontkit from "@pdf-lib/fontkit";
 
 const router: IRouter = Router();
 const storage = new ObjectStorageService();
@@ -19,6 +21,25 @@ async function queryRows(query: ReturnType<typeof sql>): Promise<Record<string, 
 function safeJson(str: unknown): Record<string, unknown> {
   if (!str || typeof str !== "string") return {};
   try { return JSON.parse(str); } catch { return {}; }
+}
+
+function wrapText(text: string, font: any, fontSize: number, maxWidth: number): string[] {
+  const words = text.split(/\s+/);
+  const lines: string[] = [];
+  let currentLine = "";
+  for (const word of words) {
+    const testLine = currentLine ? `${currentLine} ${word}` : word;
+    const testWidth = font.widthOfTextAtSize(testLine, fontSize);
+    if (testWidth > maxWidth && currentLine) {
+      lines.push(currentLine);
+      currentLine = word;
+    } else {
+      currentLine = testLine;
+    }
+  }
+  if (currentLine) lines.push(currentLine);
+  if (lines.length === 0) lines.push("");
+  return lines;
 }
 
 function fmtRM(val: unknown): string {
@@ -378,6 +399,8 @@ router.post("/cases/:caseId/documents/generate-from-master", requireAuth, requir
     let outputMime: string;
     let outputExt: string;
 
+    const isPdf = masterFileName.toLowerCase().endsWith(".pdf");
+
     if (isDocx) {
       const zip = new PizZip(fileContents);
       const doc = new Docxtemplater(zip, { paragraphLoop: true, linebreaks: true });
@@ -385,6 +408,50 @@ router.post("/cases/:caseId/documents/generate-from-master", requireAuth, requir
       buffer = doc.getZip().generate({ type: "nodebuffer", compression: "DEFLATE" });
       outputMime = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
       outputExt = ".docx";
+    } else if (isPdf && masterDoc.pdf_mappings) {
+      const mappings = masterDoc.pdf_mappings as { pages: Array<{ pageIndex: number; textBoxes: Array<{ id: string; x: number; y: number; width: number; height: number; fontSize: number; content: string }> }> };
+      const pdfDoc = await PDFDocument.load(fileContents);
+      pdfDoc.registerFontkit(fontkit);
+      const helvetica = await pdfDoc.embedFont(StandardFonts.Helvetica);
+      const pages = pdfDoc.getPages();
+
+      for (const pageMapping of mappings.pages) {
+        const page = pages[pageMapping.pageIndex];
+        if (!page) continue;
+        const pageHeight = page.getHeight();
+
+        for (const tb of pageMapping.textBoxes) {
+          let text = tb.content || "";
+          text = text.replace(/\{\{(\w+)\}\}/g, (_m: string, key: string) => {
+            const val = (context as Record<string, unknown>)[key];
+            if (val === undefined || val === null) return "";
+            return String(val);
+          });
+
+          const fontSize = tb.fontSize || 10;
+          const pdfY = pageHeight - tb.y - fontSize;
+          const pdfYBottom = pageHeight - tb.y - tb.height;
+
+          const lines = wrapText(text, helvetica, fontSize, tb.width);
+          let currentY = pdfY;
+          for (const line of lines) {
+            if (currentY < pdfYBottom) break;
+            page.drawText(line, {
+              x: tb.x,
+              y: currentY,
+              size: fontSize,
+              font: helvetica,
+              color: rgb(0, 0, 0),
+            });
+            currentY -= fontSize * 1.3;
+          }
+        }
+      }
+
+      const pdfBytes = await pdfDoc.save();
+      buffer = Buffer.from(pdfBytes);
+      outputMime = "application/pdf";
+      outputExt = ".pdf";
     } else {
       buffer = Buffer.from(fileContents);
       outputMime = masterDoc.file_type as string;

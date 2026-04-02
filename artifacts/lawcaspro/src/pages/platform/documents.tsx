@@ -13,8 +13,10 @@ import {
 import {
   FileText, Upload, Trash2, Download, Plus, File, Search,
   FolderOpen, Folder, ChevronUp, ChevronDown, Pencil, FolderPlus,
-  Eye, EyeOff, ChevronRight, BookOpen, Copy, Check,
+  Eye, EyeOff, ChevronRight, BookOpen, Copy, Check, FileEdit,
 } from "lucide-react";
+import { lazy, Suspense } from "react";
+const PdfMappingEditor = lazy(() => import("@/components/PdfMappingEditor"));
 import { useToast } from "@/hooks/use-toast";
 import { cn } from "@/lib/utils";
 
@@ -184,6 +186,9 @@ export default function PlatformDocuments() {
   const [showVarRef, setShowVarRef] = useState(false);
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
   const [expandedGroups, setExpandedGroups] = useState<Record<string, boolean>>({});
+
+  const [editingPdfDoc, setEditingPdfDoc] = useState<PlatformDoc | null>(null);
+  const [editingPdfUrl, setEditingPdfUrl] = useState<string | null>(null);
 
   const { data: folders = [] } = useQuery<SystemFolder[]>({
     queryKey: ["system-folders"],
@@ -384,6 +389,20 @@ export default function PlatformDocuments() {
     }
   };
 
+  const handleEditPdfMappings = async (doc: PlatformDoc) => {
+    try {
+      const pathPart = doc.objectPath.replace(/^\/objects\//, "");
+      const res = await fetch(`${API_BASE}/storage/objects/${pathPart}`, { credentials: "include" });
+      if (!res.ok) throw new Error("Failed to load PDF");
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      setEditingPdfUrl(url);
+      setEditingPdfDoc(doc);
+    } catch (e: any) {
+      toast({ title: "Failed to load PDF", description: e.message, variant: "destructive" });
+    }
+  };
+
   const handleStartAddSub = (parentId: number) => {
     setNewFolderParentId(parentId);
     setNewFolderName("");
@@ -511,7 +530,7 @@ export default function PlatformDocuments() {
                       <th className="text-left px-3 py-2 font-medium text-slate-600 w-20">Type</th>
                       <th className="text-left px-3 py-2 font-medium text-slate-600 w-20">Size</th>
                       <th className="text-left px-3 py-2 font-medium text-slate-600 w-28">Category</th>
-                      <th className="text-right px-3 py-2 font-medium text-slate-600 w-24">Action</th>
+                      <th className="text-right px-3 py-2 font-medium text-slate-600 w-32">Action</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -536,6 +555,12 @@ export default function PlatformDocuments() {
                         </td>
                         <td className="px-3 py-2.5 text-right">
                           <div className="flex items-center justify-end gap-1">
+                            {doc.fileType === "application/pdf" && (
+                              <Button variant="ghost" size="sm" className="h-7 px-2 gap-1 text-blue-600 hover:text-blue-700" onClick={() => handleEditPdfMappings(doc)} title="Edit PDF mappings">
+                                <FileEdit className="w-3.5 h-3.5" />
+                                <span className="text-xs">Map</span>
+                              </Button>
+                            )}
                             <Button variant="ghost" size="sm" className="h-7 w-7 p-0" onClick={() => handleDownload(doc)} title="Download">
                               <Download className="w-3.5 h-3.5" />
                             </Button>
@@ -786,6 +811,21 @@ export default function PlatformDocuments() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {editingPdfDoc && editingPdfUrl && (
+        <Suspense fallback={<div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center"><div className="bg-white rounded-lg p-8">Loading editor...</div></div>}>
+          <PdfMappingEditor
+            docId={editingPdfDoc.id}
+            docName={editingPdfDoc.name}
+            pdfUrl={editingPdfUrl}
+            onClose={() => {
+              setEditingPdfDoc(null);
+              if (editingPdfUrl) URL.revokeObjectURL(editingPdfUrl);
+              setEditingPdfUrl(null);
+            }}
+          />
+        </Suspense>
+      )}
     </div>
   );
 }

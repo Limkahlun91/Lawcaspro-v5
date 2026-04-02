@@ -56,6 +56,7 @@ interface MasterDoc {
   fileSize: number | null;
   objectPath: string;
   folderId: number | null;
+  pdfMappings: unknown | null;
 }
 
 const DOCUMENT_TYPE_LABELS: Record<string, string> = {
@@ -188,9 +189,12 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
     enabled: generateDialogOpen && generateTab === "master",
   });
 
-  const docxMasterDocs = masterDocs.filter(d =>
-    d.fileName.toLowerCase().endsWith(".docx") || d.fileName.toLowerCase().endsWith(".doc")
-  );
+  const templateMasterDocs = masterDocs.filter(d => {
+    const fn = d.fileName.toLowerCase();
+    if (fn.endsWith(".docx") || fn.endsWith(".doc")) return true;
+    if (fn.endsWith(".pdf") && d.pdfMappings) return true;
+    return false;
+  });
 
   const deleteMutation = useMutation({
     mutationFn: (docId: number) => apiFetch(`/cases/${caseId}/documents/${docId}`, { method: "DELETE" }),
@@ -434,7 +438,7 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
             </TabsContent>
 
             <TabsContent value="master" className="space-y-4">
-              <p className="text-xs text-slate-500">Select a DOCX template from the system folder tree. Only Word documents (.docx) with {"{{variable}}"} placeholders will have variables replaced.</p>
+              <p className="text-xs text-slate-500">Select a template from the system folder tree. Word documents (.docx) use {"{{variable}}"} placeholders. PDF templates use mapped text boxes.</p>
               <div className="flex gap-4 min-h-[200px]">
                 <div className="w-48 shrink-0 border rounded-lg p-2 overflow-y-auto max-h-[300px]">
                   <MasterFolderTree
@@ -444,11 +448,11 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
                   />
                 </div>
                 <div className="flex-1 border rounded-lg p-3 overflow-y-auto max-h-[300px]">
-                  {docxMasterDocs.length === 0 ? (
-                    <p className="text-xs text-slate-400 text-center py-8">No DOCX templates in this folder</p>
+                  {templateMasterDocs.length === 0 ? (
+                    <p className="text-xs text-slate-400 text-center py-8">No templates in this folder</p>
                   ) : (
                     <div className="space-y-1">
-                      {docxMasterDocs.map(doc => (
+                      {templateMasterDocs.map(doc => (
                         <div
                           key={doc.id}
                           className={cn(

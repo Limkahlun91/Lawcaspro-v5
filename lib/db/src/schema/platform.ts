@@ -1,4 +1,4 @@
-import { pgTable, serial, text, integer, boolean, timestamp } from "drizzle-orm/pg-core";
+import { pgTable, serial, text, integer, boolean, timestamp, jsonb } from "drizzle-orm/pg-core";
 
 export const systemFoldersTable = pgTable("system_folders", {
   id: serial("id").primaryKey(),
@@ -20,6 +20,7 @@ export const platformDocumentsTable = pgTable("platform_documents", {
   objectPath: text("object_path").notNull(),
   firmId: integer("firm_id"),
   folderId: integer("folder_id"),
+  pdfMappings: jsonb("pdf_mappings"),
   uploadedBy: integer("uploaded_by").notNull(),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
