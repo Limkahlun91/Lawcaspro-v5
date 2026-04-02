@@ -1,0 +1,139 @@
+Stop adding new modules for now.
+
+Your previous summary claims that multiple groups are “fully complete”, but the reporting is internally inconsistent:
+- Group D was originally defined as security hardening, but later described as mobile app work
+- “full plan entirely done” does not match the actual feature coverage previously requested
+
+I need an evidence-based implementation audit, not a narrative summary.
+
+Produce a strict implementation audit in this exact format:
+
+==================================================
+PART 1 — FEATURE COVERAGE MATRIX
+==================================================
+
+For each of the original enterprise areas below, mark one of:
+- NOT STARTED
+- PARTIAL
+- COMPLETE
+
+Areas:
+1. Tenant security + RLS + 2FA + rate limiting
+2. Legal accounting engine
+3. MyInvois + SST + e-invoice
+4. AML / CDD / KYC compliance module
+5. Conflict check engine
+6. Workflow engine 2.0
+7. Regulatory rules engine
+8. Quotation engine 2.0
+9. Document engine 2.0
+10. File closure + retention SOP
+11. Communication hub 2.0
+12. Case / project / developer deepening
+13. Background jobs + queues
+14. Founder control center
+
+For each area, provide:
+- exact status
+- what is actually implemented
+- what is still missing
+- why it should not be considered complete if anything material is missing
+
+==================================================
+PART 2 — DATABASE EVIDENCE
+==================================================
+
+List every new table actually created.
+For each table provide:
+- table name
+- migration file name
+- key columns
+- foreign keys
+- whether it is already wired into backend routes/services
+- whether it is already wired into frontend UI
+
+Do not summarize vaguely. Be exact.
+
+==================================================
+PART 3 — BACKEND EVIDENCE
+==================================================
+
+List every new or modified backend file:
+- file path
+- purpose
+- key endpoints added/changed
+- whether the endpoint is fully working, partially working, or mock only
+
+Also list:
+- new validation files
+- new service files
+- new middleware files
+- new background job files if any
+
+==================================================
+PART 4 — FRONTEND EVIDENCE
+==================================================
+
+List every new or modified frontend file:
+- file path
+- route/page/component name
+- purpose
+- what user actions now work
+- what remains incomplete
+
+==================================================
+PART 5 — TEST EVIDENCE
+==================================================
+
+List every automated test added:
+- file path
+- what it tests
+- whether it passes
+- the exact command used
+
+If no test exists for a claimed feature, say so clearly.
+
+==================================================
+PART 6 — SECURITY AUDIT
+==================================================
+
+State clearly whether the following are actually implemented right now:
+- PostgreSQL RLS or equivalent DB-enforced tenant isolation
+- safe per-request tenant context
+- 2FA / TOTP
+- rate limiting
+- permission-denied audit logs
+- support sessions for founder debug access
+- force re-auth for sensitive actions
+
+If any is missing, state “NOT IMPLEMENTED”.
+
+==================================================
+PART 7 — QUEUE / RELIABILITY AUDIT
+==================================================
+
+State clearly whether these are actually implemented:
+- document generation queue
+- e-invoice queue
+- email send queue
+- WhatsApp send queue
+- retry logic
+- dead-letter handling
+- job progress endpoint
+- SSE / WebSocket updates
+
+If missing, state “NOT IMPLEMENTED”.
+
+==================================================
+PART 8 — FINAL TRUTH SUMMARY
+==================================================
+
+Give a final honest summary with:
+1. what is genuinely complete
+2. what is only partial
+3. what is not started
+4. the next highest-priority module to implement
+
+Do NOT continue building anything yet.
+Do NOT give a marketing summary.
+Do NOT say “all complete” unless every requested layer is fully implemented with schema, backend, frontend, audit, and tests.
