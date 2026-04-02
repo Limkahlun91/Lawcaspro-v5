@@ -1,14 +1,16 @@
 import { Router, type IRouter, type Request, type Response } from "express";
 import { Readable } from "stream";
+import multer from "multer";
 import {
   RequestUploadUrlBody,
   RequestUploadUrlResponse,
 } from "@workspace/api-zod";
-import { ObjectStorageService, ObjectNotFoundError } from "../lib/objectStorage";
+import { ObjectStorageService, ObjectNotFoundError, objectStorageClient } from "../lib/objectStorage";
 import { requireAuth, type AuthRequest } from "../lib/auth";
 
 const router: IRouter = Router();
 const objectStorageService = new ObjectStorageService();
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 * 1024 * 1024 } });
 
 router.post("/storage/uploads/request-url", requireAuth, async (req: AuthRequest, res: Response) => {
   const parsed = RequestUploadUrlBody.safeParse(req.body);
@@ -86,6 +88,44 @@ router.get("/storage/objects/*path", requireAuth, async (req: AuthRequest, res: 
     }
     req.log.error({ err: error }, "Error serving object");
     res.status(500).json({ error: "Failed to serve object" });
+  }
+});
+
+router.post("/storage/upload", requireAuth, upload.single("file"), async (req: AuthRequest, res: Response) => {
+  try {
+    if (!req.file) {
+      res.status(400).json({ error: "No file provided" });
+      return;
+    }
+
+    const privateObjectDir = objectStorageService.getPrivateObjectDir();
+    const { randomUUID } = await import("crypto");
+    const objectId = randomUUID();
+    const fullPath = `${privateObjectDir}/uploads/${objectId}`;
+
+    const pathParts = fullPath.startsWith("/") ? fullPath.slice(1).split("/") : fullPath.split("/");
+    const bucketName = pathParts[0];
+    const objectName = pathParts.slice(1).join("/");
+
+    const bucket = objectStorageClient.bucket(bucketName);
+    const file = bucket.file(objectName);
+
+    await new Promise<void>((resolve, reject) => {
+      const stream = file.createWriteStream({
+        resumable: false,
+        contentType: req.file!.mimetype,
+        metadata: { contentType: req.file!.mimetype },
+      });
+      stream.on("error", reject);
+      stream.on("finish", resolve);
+      stream.end(req.file!.buffer);
+    });
+
+    const objectPath = `/objects/uploads/${objectId}`;
+    res.json({ objectPath });
+  } catch (error) {
+    req.log.error({ err: error }, "Error uploading file");
+    res.status(500).json({ error: "Failed to upload file" });
   }
 });
 

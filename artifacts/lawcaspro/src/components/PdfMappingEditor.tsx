@@ -15,10 +15,7 @@ import {
 import { useToast } from "@/hooks/use-toast";
 import { cn } from "@/lib/utils";
 
-pdfjs.GlobalWorkerOptions.workerSrc = new URL(
-  "pdfjs-dist/build/pdf.worker.min.mjs",
-  import.meta.url,
-).toString();
+pdfjs.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjs.version}/build/pdf.worker.min.mjs`;
 
 const API_BASE = import.meta.env.BASE_URL + "api";
 
@@ -302,7 +299,7 @@ export default function PdfMappingEditor({ docId, docName, pdfUrl, onClose }: Pr
 
           <div ref={containerRef} className="flex-1 overflow-auto bg-slate-200 p-3 flex justify-center" onClick={handleCanvasClick}>
             <div className="relative inline-block" style={{ width: pdfDimensions.width * pdfScale, height: pdfDimensions.height * pdfScale }}>
-              <Document file={pdfUrl} onLoadSuccess={onDocLoad}>
+              <Document file={pdfUrl} onLoadSuccess={onDocLoad} onLoadError={(err) => { console.error("PDF load error:", err); toast({ title: "PDF load error", description: String(err?.message || err), variant: "destructive" }); }}>
                 <Page
                   pageIndex={currentPage}
                   onLoadSuccess={onPageLoad}

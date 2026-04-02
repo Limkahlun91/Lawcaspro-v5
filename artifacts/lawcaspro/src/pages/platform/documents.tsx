@@ -330,21 +330,19 @@ export default function PlatformDocuments() {
     if (!selectedFile || !form.name) return;
     setUploading(true);
     try {
-      const urlRes = await fetch(`${API_BASE}/storage/uploads/request-url`, {
+      const formData = new FormData();
+      formData.append("file", selectedFile);
+
+      const uploadRes = await fetch(`${API_BASE}/storage/upload`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: selectedFile.name, size: selectedFile.size, contentType: selectedFile.type }),
+        body: formData,
         credentials: "include",
       });
-      if (!urlRes.ok) throw new Error("Failed to get upload URL");
-      const { uploadURL, objectPath } = await urlRes.json();
-
-      const uploadRes = await fetch(uploadURL, {
-        method: "PUT",
-        body: selectedFile,
-        headers: { "Content-Type": selectedFile.type },
-      });
-      if (!uploadRes.ok) throw new Error("File upload failed");
+      if (!uploadRes.ok) {
+        const err = await uploadRes.json().catch(() => ({}));
+        throw new Error(err.error || "File upload failed");
+      }
+      const { objectPath } = await uploadRes.json();
 
       const saveRes = await fetch(`${API_BASE}/platform/documents`, {
         method: "POST",
@@ -362,7 +360,10 @@ export default function PlatformDocuments() {
         }),
         credentials: "include",
       });
-      if (!saveRes.ok) throw new Error("Failed to save document");
+      if (!saveRes.ok) {
+        const err = await saveRes.json().catch(() => ({}));
+        throw new Error(err.error || "Failed to save document");
+      }
 
       queryClient.invalidateQueries({ queryKey: ["platform-documents"] });
       toast({ title: "Document uploaded", description: `${form.name} has been added.` });

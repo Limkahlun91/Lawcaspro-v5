@@ -103,18 +103,15 @@ export default function DocumentTemplates() {
     if (!selectedFile || !templateName) return;
     setIsUploading(true);
     try {
-      const { uploadURL, objectPath } = await apiFetch("/storage/uploads/request-url", {
+      const formData = new FormData();
+      formData.append("file", selectedFile);
+      const uploadRes = await fetch(`${API_BASE}/storage/upload`, {
         method: "POST",
-        body: JSON.stringify({ name: selectedFile.name, size: selectedFile.size, contentType: selectedFile.type }),
+        body: formData,
+        credentials: "include",
       });
-
-      const uploadRes = await fetch(uploadURL, {
-        method: "PUT",
-        headers: { "Content-Type": selectedFile.type },
-        body: selectedFile,
-      });
-
       if (!uploadRes.ok) throw new Error("Upload to storage failed");
+      const { objectPath } = await uploadRes.json();
 
       await apiFetch("/document-templates", {
         method: "POST",

@@ -196,16 +196,15 @@ export default function PlatformMessages() {
       const uploadedAttachments: Array<{ fileName: string; fileType: string; fileSize: number; objectPath: string }> = [];
 
       for (const file of attachments) {
-        const urlRes = await fetch(`${API_BASE}/storage/uploads/request-url`, {
+        const formData = new FormData();
+        formData.append("file", file);
+        const uploadRes = await fetch(`${API_BASE}/storage/upload`, {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ name: file.name, size: file.size, contentType: file.type }),
+          body: formData,
           credentials: "include",
         });
-        if (!urlRes.ok) throw new Error("Failed to get upload URL");
-        const { uploadURL, objectPath } = await urlRes.json();
-        const uploadRes = await fetch(uploadURL, { method: "PUT", body: file, headers: { "Content-Type": file.type } });
         if (!uploadRes.ok) throw new Error("File upload failed");
+        const { objectPath } = await uploadRes.json();
         uploadedAttachments.push({ fileName: file.name, fileType: file.type, fileSize: file.size, objectPath });
       }
 

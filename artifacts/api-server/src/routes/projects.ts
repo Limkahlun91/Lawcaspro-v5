@@ -139,6 +139,16 @@ router.patch("/projects/:projectId", requireAuth, requireFirmUser, async (req: A
   const { name, developerId, projectType, titleType, titleSubtype, masterTitleNumber, masterTitleLandSize,
     mukim, daerah, negeri, phase, developerName, landUse, developmentCondition, unitCategory, extraFields } = req.body;
 
+  if (developerId !== undefined && developerId !== null) {
+    const [dev] = await db.select().from(developersTable).where(
+      and(eq(developersTable.id, developerId), eq(developersTable.firmId, req.firmId!))
+    );
+    if (!dev) {
+      res.status(400).json({ error: "Developer not found" });
+      return;
+    }
+  }
+
   const updateData: Record<string, unknown> = {};
   if (name !== undefined) updateData.name = name;
   if (developerId !== undefined) updateData.developerId = developerId;
