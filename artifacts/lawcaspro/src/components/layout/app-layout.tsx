@@ -12,7 +12,6 @@ import {
   ScrollText, 
   Settings,
   FileText,
-  Receipt,
   LogOut,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -31,7 +30,6 @@ export function AppLayout({ children }: { children: ReactNode }) {
     { label: "Projects", href: "/app/projects", icon: Building2 },
     { label: "Developers", href: "/app/developers", icon: HardHat },
     { label: "Documents", href: "/app/documents", icon: FileText },
-    { label: "Quotations", href: "/app/quotations", icon: Receipt },
     { label: "Communications", href: "/app/hub", icon: MessageSquare },
     { label: "Accounting", href: "/app/accounting", icon: Calculator },
     { label: "Reports", href: "/app/reports", icon: BarChart },
@@ -55,7 +53,7 @@ export function AppLayout({ children }: { children: ReactNode }) {
         
         <nav className="flex-1 py-4 px-3 space-y-1">
           {navItems.map((item) => {
-            const isActive = location === item.href || location.startsWith(`${item.href}/`);
+            const isActive = location === item.href || location.startsWith(`${item.href}/`) || (item.href === "/app/accounting" && location.startsWith("/app/quotations"));
             return (
               <Link key={item.href} href={item.href}>
                 <div className={`flex items-center gap-3 px-3 py-2.5 rounded-md text-sm font-medium transition-colors ${

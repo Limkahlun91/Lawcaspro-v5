@@ -50,6 +50,15 @@ async function formatCaseDetail(c: typeof casesTable.$inferSelect) {
     })
   );
 
+  let spaDetails: any = null;
+  let propertyDetails: any = null;
+  let loanDetails: any = null;
+  let companyDetails: any = null;
+  try { if (c.spaDetails) spaDetails = JSON.parse(c.spaDetails); } catch {}
+  try { if (c.propertyDetails) propertyDetails = JSON.parse(c.propertyDetails); } catch {}
+  try { if (c.loanDetails) loanDetails = JSON.parse(c.loanDetails); } catch {}
+  try { if (c.companyDetails) companyDetails = JSON.parse(c.companyDetails); } catch {}
+
   return {
     id: c.id,
     firmId: c.firmId,
@@ -62,6 +71,12 @@ async function formatCaseDetail(c: typeof casesTable.$inferSelect) {
     titleType: c.titleType,
     spaPrice: c.spaPrice ? Number(c.spaPrice) : null,
     status: c.status,
+    caseType: c.caseType,
+    parcelNo: c.parcelNo,
+    spaDetails,
+    propertyDetails,
+    loanDetails,
+    companyDetails,
     purchasers,
     assignments,
     createdBy: c.createdBy ?? null,
@@ -86,6 +101,7 @@ async function formatCaseSummary(c: typeof casesTable.$inferSelect) {
     developerName: dev?.name ?? "Unknown",
     purchaseMode: c.purchaseMode,
     titleType: c.titleType,
+    spaPrice: c.spaPrice ? Number(c.spaPrice) : null,
     status: c.status,
     assignedLawyerName: lawyerName,
     createdAt: c.createdAt.toISOString(),

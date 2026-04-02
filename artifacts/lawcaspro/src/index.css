@@ -175,3 +175,40 @@
     @apply font-sans antialiased bg-background text-foreground;
   }
 }
+
+@media print {
+  body {
+    background: white !important;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+
+  .print\:hidden {
+    display: none !important;
+  }
+
+  nav, .sidebar, [class*="w-64"], [class*="bg-slate-900"] {
+    display: none !important;
+  }
+
+  main {
+    margin: 0 !important;
+    padding: 0 !important;
+    width: 100% !important;
+    max-width: 100% !important;
+  }
+
+  .flex.min-h-screen {
+    display: block !important;
+  }
+
+  .max-w-6xl {
+    max-width: 100% !important;
+    padding: 0 !important;
+  }
+
+  .max-w-7xl {
+    max-width: 100% !important;
+    padding: 0 !important;
+  }
+}

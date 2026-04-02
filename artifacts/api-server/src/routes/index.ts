@@ -17,6 +17,7 @@ import reportsRouter from "./reports";
 import auditRouter from "./audit";
 import hubRouter from "./hub";
 import quotationsRouter from "./quotations";
+import firmSettingsRouter from "./firm-settings";
 
 const router: IRouter = Router();
 
@@ -38,5 +39,6 @@ router.use(reportsRouter);
 router.use(auditRouter);
 router.use(hubRouter);
 router.use(quotationsRouter);
+router.use(firmSettingsRouter);
 
 export default router;

@@ -1,12 +1,21 @@
 import { useState, useCallback, useEffect } from "react";
 import { useLocation, useSearch } from "wouter";
-import { useCreateQuotation } from "@workspace/api-client-react";
+import { useCreateQuotation, useListCases, useGetCase } from "@workspace/api-client-react";
+import { useQuery } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { ArrowLeft, Plus, Trash2, Save } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
+
+const API_BASE = import.meta.env.BASE_URL.replace(/\/$/, "").replace(/^\/lawcaspro/, "") + "/api";
+
+async function apiFetch(path: string) {
+  const res = await fetch(`${API_BASE}${path}`, { credentials: "include" });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
 
 interface LineItem {
   id: string;
@@ -78,25 +87,25 @@ const DEFAULT_FEES_ITEMS: Omit<LineItem, "id">[] = [
   { section: "fees", category: "fees", itemNo: "3", subItemNo: "", description: "Deed of Mutual Covenant", taxCode: "T", amountExclTax: 0, taxRate: TAX_RATE, taxAmount: 0, amountInclTax: 0 },
   { section: "fees", category: "fees", itemNo: "4", subItemNo: "", description: "Transfer Form 14A", taxCode: "T", amountExclTax: 0, taxRate: TAX_RATE, taxAmount: 0, amountInclTax: 0 },
   { section: "fees", category: "fees", itemNo: "5", subItemNo: "", description: "Charge Form 16A (Annexure)", taxCode: "T", amountExclTax: 0, taxRate: TAX_RATE, taxAmount: 0, amountInclTax: 0 },
-  { section: "fees", category: "fees", itemNo: "6", subItemNo: "", description: "Deed of Assignment (by way of Transfer)", taxCode: "T", amountExclTax: 0, taxRate: TAX_RATE, taxAmount: 0, amountInclTax: 0 },
-  { section: "fees", category: "fees", itemNo: "7", subItemNo: "", description: "Deed of Assignment (by way of Charge)", taxCode: "T", amountExclTax: 0, taxRate: TAX_RATE, taxAmount: 0, amountInclTax: 0 },
-  { section: "fees", category: "fees", itemNo: "8", subItemNo: "", description: "Discharge Form 16N/Deed of Receipt & Reassignment", taxCode: "T", amountExclTax: 0, taxRate: TAX_RATE, taxAmount: 0, amountInclTax: 0 },
-  { section: "fees", category: "fees", itemNo: "9", subItemNo: "", description: "Power of Attorney", taxCode: "T", amountExclTax: 0, taxRate: TAX_RATE, taxAmount: 0, amountInclTax: 0 },
-  { section: "fees", category: "fees", itemNo: "10", subItemNo: "", description: "Revocation of Power of Attorney", taxCode: "T", amountExclTax: 0, taxRate: TAX_RATE, taxAmount: 0, amountInclTax: 0 },
-  { section: "fees", category: "fees", itemNo: "11", subItemNo: "", description: "Letter of Consent", taxCode: "T", amountExclTax: 0, taxRate: TAX_RATE, taxAmount: 0, amountInclTax: 0 },
-  { section: "fees", category: "fees", itemNo: "12", subItemNo: "", description: "Letter of Guarantee & Indemnity", taxCode: "T", amountExclTax: 0, taxRate: TAX_RATE, taxAmount: 0, amountInclTax: 0 },
-  { section: "fees", category: "fees", itemNo: "13", subItemNo: "", description: "Letter of Undertaking", taxCode: "T", amountExclTax: 0, taxRate: TAX_RATE, taxAmount: 0, amountInclTax: 0 },
-  { section: "fees", category: "fees", itemNo: "14", subItemNo: "", description: "Personal Guarantee", taxCode: "T", amountExclTax: 0, taxRate: TAX_RATE, taxAmount: 0, amountInclTax: 0 },
-  { section: "fees", category: "fees", itemNo: "15", subItemNo: "", description: "Corporate Guarantee", taxCode: "T", amountExclTax: 0, taxRate: TAX_RATE, taxAmount: 0, amountInclTax: 0 },
-  { section: "fees", category: "fees", itemNo: "16", subItemNo: "", description: "Supplemental Letter Offer", taxCode: "T", amountExclTax: 0, taxRate: TAX_RATE, taxAmount: 0, amountInclTax: 0 },
-  { section: "fees", category: "fees", itemNo: "17", subItemNo: "", description: "Letter of Hibah", taxCode: "T", amountExclTax: 0, taxRate: TAX_RATE, taxAmount: 0, amountInclTax: 0 },
-  { section: "fees", category: "fees", itemNo: "18", subItemNo: "", description: "Tenancy Agreement", taxCode: "T", amountExclTax: 0, taxRate: TAX_RATE, taxAmount: 0, amountInclTax: 0 },
-  { section: "fees", category: "fees", itemNo: "19", subItemNo: "", description: "Deed of Revocation", taxCode: "T", amountExclTax: 0, taxRate: TAX_RATE, taxAmount: 0, amountInclTax: 0 },
-  { section: "fees", category: "fees", itemNo: "20", subItemNo: "", description: "Letter of Offer and SD", taxCode: "T", amountExclTax: 0, taxRate: TAX_RATE, taxAmount: 0, amountInclTax: 0 },
+  { section: "fees", category: "fees", itemNo: "6", subItemNo: "", description: "Deed of Assignment", taxCode: "T", amountExclTax: 0, taxRate: TAX_RATE, taxAmount: 0, amountInclTax: 0 },
+  { section: "fees", category: "fees", itemNo: "7", subItemNo: "", description: "Deed of Revocation", taxCode: "T", amountExclTax: 0, taxRate: TAX_RATE, taxAmount: 0, amountInclTax: 0 },
+  { section: "fees", category: "fees", itemNo: "8", subItemNo: "", description: "Memorandum of Transfer", taxCode: "T", amountExclTax: 0, taxRate: TAX_RATE, taxAmount: 0, amountInclTax: 0 },
+  { section: "fees", category: "fees", itemNo: "9", subItemNo: "", description: "Discharge Form 16N", taxCode: "T", amountExclTax: 0, taxRate: TAX_RATE, taxAmount: 0, amountInclTax: 0 },
+  { section: "fees", category: "fees", itemNo: "10", subItemNo: "", description: "Deed of Receipt and Reassignment", taxCode: "T", amountExclTax: 0, taxRate: TAX_RATE, taxAmount: 0, amountInclTax: 0 },
+  { section: "fees", category: "fees", itemNo: "11", subItemNo: "", description: "Personal Guarantee", taxCode: "T", amountExclTax: 0, taxRate: TAX_RATE, taxAmount: 0, amountInclTax: 0 },
+  { section: "fees", category: "fees", itemNo: "12", subItemNo: "", description: "Corporate Guarantee", taxCode: "T", amountExclTax: 0, taxRate: TAX_RATE, taxAmount: 0, amountInclTax: 0 },
+  { section: "fees", category: "fees", itemNo: "13", subItemNo: "", description: "Power of Attorney", taxCode: "T", amountExclTax: 0, taxRate: TAX_RATE, taxAmount: 0, amountInclTax: 0 },
+  { section: "fees", category: "fees", itemNo: "14", subItemNo: "", description: "Revocation of Power of Attorney", taxCode: "T", amountExclTax: 0, taxRate: TAX_RATE, taxAmount: 0, amountInclTax: 0 },
+  { section: "fees", category: "fees", itemNo: "15", subItemNo: "", description: "Supplemental Letter Offer", taxCode: "T", amountExclTax: 0, taxRate: TAX_RATE, taxAmount: 0, amountInclTax: 0 },
+  { section: "fees", category: "fees", itemNo: "16", subItemNo: "", description: "Memorandum of Deposit", taxCode: "T", amountExclTax: 0, taxRate: TAX_RATE, taxAmount: 0, amountInclTax: 0 },
+  { section: "fees", category: "fees", itemNo: "17", subItemNo: "", description: "Letter of Set-Off", taxCode: "T", amountExclTax: 0, taxRate: TAX_RATE, taxAmount: 0, amountInclTax: 0 },
+  { section: "fees", category: "fees", itemNo: "18", subItemNo: "", description: "Assignment of Rental Proceed", taxCode: "T", amountExclTax: 0, taxRate: TAX_RATE, taxAmount: 0, amountInclTax: 0 },
+  { section: "fees", category: "fees", itemNo: "19", subItemNo: "", description: "Tenancy Agreement", taxCode: "T", amountExclTax: 0, taxRate: TAX_RATE, taxAmount: 0, amountInclTax: 0 },
+  { section: "fees", category: "fees", itemNo: "20", subItemNo: "", description: "Notice of Assignment/Notice of Charge", taxCode: "T", amountExclTax: 0, taxRate: TAX_RATE, taxAmount: 0, amountInclTax: 0 },
   { section: "fees", category: "fees", itemNo: "21", subItemNo: "", description: "Property Purchase Agreement", taxCode: "T", amountExclTax: 0, taxRate: TAX_RATE, taxAmount: 0, amountInclTax: 0 },
-  { section: "fees", category: "fees", itemNo: "22", subItemNo: "", description: "Memorandum of Deposit", taxCode: "T", amountExclTax: 0, taxRate: TAX_RATE, taxAmount: 0, amountInclTax: 0 },
-  { section: "fees", category: "fees", itemNo: "23", subItemNo: "", description: "Letter of Set off", taxCode: "T", amountExclTax: 0, taxRate: TAX_RATE, taxAmount: 0, amountInclTax: 0 },
-  { section: "fees", category: "fees", itemNo: "24", subItemNo: "", description: "Assignment of Rental Proceed", taxCode: "T", amountExclTax: 0, taxRate: TAX_RATE, taxAmount: 0, amountInclTax: 0 },
+  { section: "fees", category: "fees", itemNo: "22", subItemNo: "", description: "Islamic Banking", taxCode: "T", amountExclTax: 0, taxRate: TAX_RATE, taxAmount: 0, amountInclTax: 0 },
+  { section: "fees", category: "fees", itemNo: "23", subItemNo: "", description: "Caveat", taxCode: "T", amountExclTax: 0, taxRate: TAX_RATE, taxAmount: 0, amountInclTax: 0 },
+  { section: "fees", category: "fees", itemNo: "24", subItemNo: "", description: "Withdrawal of Caveat", taxCode: "T", amountExclTax: 0, taxRate: TAX_RATE, taxAmount: 0, amountInclTax: 0 },
   { section: "fees", category: "fees", itemNo: "25", subItemNo: "", description: "Form I", taxCode: "T", amountExclTax: 0, taxRate: TAX_RATE, taxAmount: 0, amountInclTax: 0 },
   { section: "fees", category: "fees", itemNo: "26", subItemNo: "", description: "Statutory Declaration", taxCode: "T", amountExclTax: 0, taxRate: TAX_RATE, taxAmount: 0, amountInclTax: 0 },
   { section: "fees", category: "fees", itemNo: "27", subItemNo: "", description: "Other Agreement", taxCode: "T", amountExclTax: 0, taxRate: TAX_RATE, taxAmount: 0, amountInclTax: 0 },
@@ -125,13 +134,59 @@ export default function NewQuotation() {
   const params = new URLSearchParams(search);
   const prefillCaseId = params.get("caseId");
 
-  const [referenceNo, setReferenceNo] = useState(params.get("ref") || "");
+  const [selectedCaseId, setSelectedCaseId] = useState<string>(prefillCaseId || "");
+  const [referenceNo, setReferenceNo] = useState("");
   const [stNo, setStNo] = useState("");
-  const [clientName, setClientName] = useState(params.get("client") || "");
-  const [propertyDescription, setPropertyDescription] = useState(params.get("property") || "");
-  const [purchasePrice, setPurchasePrice] = useState(params.get("price") || "");
-  const [bankName, setBankName] = useState(params.get("bank") || "");
-  const [loanAmount, setLoanAmount] = useState(params.get("loan") || "");
+  const [clientName, setClientName] = useState("");
+  const [propertyDescription, setPropertyDescription] = useState("");
+  const [purchasePrice, setPurchasePrice] = useState("");
+  const [bankName, setBankName] = useState("");
+  const [loanAmount, setLoanAmount] = useState("");
+
+  const { data: casesRes } = useListCases({ limit: 100 });
+  const cases = (casesRes as any)?.data || [];
+
+  const { data: caseDetail } = useGetCase(
+    parseInt(selectedCaseId) || 0,
+    { query: { enabled: !!selectedCaseId && parseInt(selectedCaseId) > 0 } }
+  );
+
+  const { data: firmSettings } = useQuery({
+    queryKey: ["firm-settings"],
+    queryFn: () => apiFetch("/firm-settings"),
+  });
+
+  useEffect(() => {
+    if (firmSettings?.stNumber) {
+      setStNo(firmSettings.stNumber);
+    }
+  }, [firmSettings]);
+
+  useEffect(() => {
+    if (!caseDetail) return;
+    const cd = caseDetail as any;
+
+    const purchaserNames = (cd.purchasers || [])
+      .map((p: any) => p.clientName)
+      .filter(Boolean)
+      .join(" & ");
+    if (purchaserNames) setClientName(purchaserNames);
+
+    const projectName = cd.projectName || "";
+    const parcelNo = cd.parcelNo || "";
+    const propParts = [projectName, parcelNo].filter(Boolean).join(", ");
+    if (propParts) setPropertyDescription(propParts);
+
+    if (cd.spaPrice) setPurchasePrice(String(cd.spaPrice));
+
+    if (cd.loanDetails) {
+      const loan = cd.loanDetails;
+      if (loan.bankName) setBankName(loan.bankName);
+      if (loan.loanAmount) setLoanAmount(String(loan.loanAmount));
+    }
+
+    if (cd.referenceNo) setReferenceNo(cd.referenceNo);
+  }, [caseDetail]);
 
   const [disbursementItems, setDisbursementItems] = useState<LineItem[]>(() => initItems(DEFAULT_DISBURSEMENT_ITEMS));
   const [feesItems, setFeesItems] = useState<LineItem[]>(() => initItems(DEFAULT_FEES_ITEMS));
@@ -240,7 +295,7 @@ export default function NewQuotation() {
           referenceNo,
           stNo: stNo || undefined,
           clientName,
-          caseId: prefillCaseId ? parseInt(prefillCaseId) : undefined,
+          caseId: selectedCaseId ? parseInt(selectedCaseId) : undefined,
           propertyDescription: propertyDescription || undefined,
           purchasePrice: purchasePrice || undefined,
           bankName: bankName || undefined,
@@ -272,7 +327,7 @@ export default function NewQuotation() {
   return (
     <div className="p-6 max-w-7xl mx-auto">
       <div className="flex items-center gap-3 mb-6">
-        <Button variant="ghost" size="sm" onClick={() => setLocation("/app/quotations")}>
+        <Button variant="ghost" size="sm" onClick={() => setLocation("/app/accounting?tab=quotations")}>
           <ArrowLeft className="w-4 h-4" />
         </Button>
         <div>
@@ -287,6 +342,21 @@ export default function NewQuotation() {
         </CardHeader>
         <CardContent>
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            <div className="md:col-span-3">
+              <Label className="text-xs text-slate-500">Select Case</Label>
+              <select
+                value={selectedCaseId}
+                onChange={e => setSelectedCaseId(e.target.value)}
+                className="w-full h-9 border rounded-md px-3 text-sm bg-white"
+              >
+                <option value="">-- Select a case to auto-fill --</option>
+                {cases.map((c: any) => (
+                  <option key={c.id} value={c.id}>
+                    {c.referenceNo} - {c.projectName} ({c.status})
+                  </option>
+                ))}
+              </select>
+            </div>
             <div>
               <Label className="text-xs text-slate-500">Reference No. *</Label>
               <Input value={referenceNo} onChange={e => setReferenceNo(e.target.value)} placeholder="e.g. NYC/CON" />
@@ -456,7 +526,7 @@ export default function NewQuotation() {
                             </select>
                           )}
                         </td>
-                        <td className="px-3 py-1.5">
+                        <td className="px-3 py-1.5 text-right">
                           {!isHeader && (
                             <Input
                               type="number"
@@ -468,20 +538,18 @@ export default function NewQuotation() {
                           )}
                         </td>
                         <td className="px-3 py-1.5 text-right text-xs text-slate-500">
-                          {!isHeader && item.taxAmount > 0 ? item.taxAmount.toFixed(2) : !isHeader ? "0.00" : ""}
+                          {!isHeader ? item.taxAmount.toFixed(2) : ""}
                         </td>
                         <td className="px-3 py-1.5 text-right text-xs font-medium">
-                          {!isHeader && item.amountInclTax > 0 ? item.amountInclTax.toFixed(2) : !isHeader ? "0.00" : ""}
+                          {!isHeader ? item.amountInclTax.toFixed(2) : ""}
                         </td>
                       </tr>
                     );
                   })}
                 </tbody>
                 <tfoot>
-                  <tr className="bg-slate-50 font-medium text-sm">
-                    <td colSpan={3} className="px-3 py-2 text-right">
-                      Total {currentSection.label}
-                    </td>
+                  <tr className="bg-slate-50 font-medium">
+                    <td colSpan={3} className="px-3 py-2 text-right">Total {currentSection.label}</td>
                     <td className="px-3 py-2 text-right">{formatRM(currentSection.totals.totalExclTax)}</td>
                     <td className="px-3 py-2 text-right">{formatRM(currentSection.totals.totalTax)}</td>
                     <td className="px-3 py-2 text-right">{formatRM(currentSection.totals.totalInclTax)}</td>
@@ -493,7 +561,7 @@ export default function NewQuotation() {
         </CardContent>
       </Card>
 
-      <Card className="mb-6">
+      <Card>
         <CardContent className="pt-4">
           <div className="max-w-md ml-auto space-y-2">
             <div className="flex justify-between text-sm">
@@ -529,20 +597,20 @@ export default function NewQuotation() {
               <span>{formatRM(totalPayable)}</span>
             </div>
           </div>
+
+          <div className="flex justify-end mt-6 gap-3">
+            <Button variant="outline" onClick={() => setLocation("/app/accounting?tab=quotations")}>Cancel</Button>
+            <Button
+              onClick={handleSubmit}
+              disabled={createMutation.isPending}
+              className="bg-amber-500 hover:bg-amber-600 text-white"
+            >
+              <Save className="w-4 h-4 mr-2" />
+              {createMutation.isPending ? "Saving..." : "Save Quotation"}
+            </Button>
+          </div>
         </CardContent>
       </Card>
-
-      <div className="flex justify-end gap-3">
-        <Button variant="outline" onClick={() => setLocation("/app/quotations")}>Cancel</Button>
-        <Button
-          onClick={handleSubmit}
-          disabled={createMutation.isPending}
-          className="bg-amber-500 hover:bg-amber-600 text-white"
-        >
-          <Save className="w-4 h-4 mr-2" />
-          {createMutation.isPending ? "Saving..." : "Save Quotation"}
-        </Button>
-      </div>
     </div>
   );
 }

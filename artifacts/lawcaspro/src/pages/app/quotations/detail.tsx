@@ -167,7 +167,7 @@ export default function QuotationDetail() {
       {
         onSuccess: () => {
           toast({ title: "Quotation deleted" });
-          setLocation("/app/quotations");
+          setLocation("/app/accounting?tab=quotations");
         },
       }
     );
@@ -337,7 +337,7 @@ export default function QuotationDetail() {
     <div className="p-6 max-w-7xl mx-auto">
       <div className="flex items-center justify-between mb-6 print:hidden">
         <div className="flex items-center gap-3">
-          <Button variant="ghost" size="sm" onClick={() => setLocation("/app/quotations")}>
+          <Button variant="ghost" size="sm" onClick={() => setLocation("/app/accounting?tab=quotations")}>
             <ArrowLeft className="w-4 h-4" />
           </Button>
           <div>
