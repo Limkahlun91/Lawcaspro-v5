@@ -48,6 +48,43 @@ Projects support full CRUD including edit via the PATCH endpoint. The edit page 
 - **Invoice detail page** (`/app/accounting/invoices/:id`): line items by category, record payment inline, issue/void actions
 - **Ledger tab**: 3-account balance cards (client/office/trust), filterable transaction history
 
+## Group B — Time & Task Management (Completed)
+
+### Time Entries
+- **Table**: `time_entries` — per-case, per-user billable hours tracking (date, description, hours, rate/hr, is_billable, is_billed, invoice_id)
+- **Drizzle schema**: `lib/db/src/schema/time-tasks.ts`
+- **API routes**: `GET/POST/PUT/DELETE /api/time-entries`, `GET /api/time-entries/summary?caseId=`
+- **Frontend**: `CaseTimeTab` component on case detail (8th tab) — 4 summary cards (total/billable hours, total value, unbilled), log time dialog with billable switch
+
+### Case Tasks
+- **Table**: `case_tasks` — per-case task management (title, description, assigned_to, due_date, priority: low/normal/high/urgent, status: open/in_progress/done)
+- **API routes**: `GET/POST/PUT/DELETE /api/case-tasks`, `GET /api/case-tasks/upcoming` (for dashboard widgets)
+- **Frontend**: `CaseTasksTab` component on case detail (7th tab) — filter by status, priority badges, overdue highlighting, add task dialog, mark done with checkbox toggle
+
+## Group C — Compliance Reports (Completed)
+
+### Bills Delivered Book
+- **API**: `GET /api/reports/bills-delivered-book?from=&to=` — all issued invoices with totals, enriched with case ref and client name
+- **Page**: `/app/reports/bills-delivered-book` — date-range filter, summary KPI cards, full statutory table with tfoot totals, print button
+
+### Trust Account Statement
+- **API**: `GET /api/reports/trust-account-statement?caseId=` — all trust ledger entries with running balance
+- **Page**: `/app/reports/trust-account-statement` — optional case filter, running balance column, debit/credit columns (SAR 1990 r.7 compliant)
+
+### Matter Aging Report
+- **API**: `GET /api/reports/matter-aging` — outstanding invoices bucketed: current / 1-30 / 31-60 / 61-90 / 90+ days overdue
+- **Page**: `/app/reports/matter-aging` — visual progress bars per bucket, item-level detail tables, grand total
+
+### Reports Index
+- Updated `/app/reports` with a **Statutory Reports** section at the top — 3 clickable cards linking to each compliance report, then existing analytics charts below
+
+## Group D — Mobile App Enhancement (Completed)
+
+### Tasks on Mobile
+- **Dashboard** (`index.tsx`): Upcoming Tasks section showing next 5 open tasks across all cases, with overdue highlighting, taps through to case detail
+- **Tasks screen** (`/tasks`): Full tasks list with open/all filter, overdue/upcoming grouping, mark-done action, priority colour dots, registered in Expo Router Stack
+- **Case detail**: Added "Tasks" as 5th tab — shows per-case tasks with overdue highlighting, priority dots, done state
+
 ## External Dependencies
 - **PostgreSQL**: Primary database for all application data, managed via Drizzle ORM.
 - **Replit Object Storage (GCS)**: Used for storing document templates and generated case documents.

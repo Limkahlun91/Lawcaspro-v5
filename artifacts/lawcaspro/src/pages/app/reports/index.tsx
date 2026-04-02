@@ -1,10 +1,12 @@
 import { useQuery } from "@tanstack/react-query";
+import { useLocation } from "wouter";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
   PieChart, Pie, Cell, Legend, LineChart, Line,
 } from "recharts";
-import { TrendingUp, Briefcase, Users, MessageSquare } from "lucide-react";
+import { TrendingUp, Briefcase, Users, MessageSquare, BookOpen, Landmark, Clock, ArrowRight, AlertTriangle } from "lucide-react";
 
 const API_BASE = import.meta.env.BASE_URL.replace(/\/$/, "").replace(/^\/lawcaspro/, "") + "/api";
 
@@ -38,6 +40,7 @@ const COMM_COLORS: Record<string, string> = {
 };
 
 export default function Reports() {
+  const [, setLocation] = useLocation();
   const { data, isLoading } = useQuery({
     queryKey: ["reports-overview"],
     queryFn: () => apiFetch("/reports/overview"),
@@ -61,8 +64,54 @@ export default function Reports() {
     <div className="space-y-6">
       <div>
         <h1 className="text-3xl font-bold text-slate-900 tracking-tight">Reports</h1>
-        <p className="text-slate-500 mt-1">Firm performance and operational analytics</p>
+        <p className="text-slate-500 mt-1">Firm performance and compliance reports</p>
       </div>
+
+      {/* Compliance Reports — statutory Malaysian requirements */}
+      <div>
+        <h2 className="text-sm font-semibold text-slate-500 uppercase tracking-wide mb-3">Statutory Reports</h2>
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+          {[
+            {
+              title: "Bills Delivered Book",
+              description: "Statutory record of all bills rendered. Required under Solicitors' Accounts Rules 1990.",
+              icon: BookOpen,
+              href: "/app/reports/bills-delivered-book",
+              color: "text-blue-600 bg-blue-50",
+            },
+            {
+              title: "Trust Account Statement",
+              description: "Client trust money movements and running balance per case (SAR 1990 r.7).",
+              icon: Landmark,
+              href: "/app/reports/trust-account-statement",
+              color: "text-green-700 bg-green-50",
+            },
+            {
+              title: "Matter Aging Report",
+              description: "Outstanding invoices grouped by age bracket — 30, 60, 90+ days overdue.",
+              icon: AlertTriangle,
+              href: "/app/reports/matter-aging",
+              color: "text-red-600 bg-red-50",
+            },
+          ].map(({ title, description, icon: Icon, href, color }) => (
+            <Card key={title} className="border-slate-200 hover:border-slate-300 cursor-pointer transition-colors" onClick={() => setLocation(href)}>
+              <CardContent className="py-4 px-4 flex gap-3">
+                <div className={`p-2 rounded-lg ${color} flex-shrink-0 h-fit mt-0.5`}>
+                  <Icon className="h-4 w-4" />
+                </div>
+                <div>
+                  <p className="font-semibold text-sm text-slate-800">{title}</p>
+                  <p className="text-xs text-slate-500 mt-0.5 leading-relaxed">{description}</p>
+                </div>
+                <ArrowRight className="h-4 w-4 text-slate-300 ml-auto flex-shrink-0 mt-1" />
+              </CardContent>
+            </Card>
+          ))}
+        </div>
+      </div>
+
+      <div className="border-t border-slate-200" />
+      <h2 className="text-sm font-semibold text-slate-500 uppercase tracking-wide">Analytics</h2>
 
       {isLoading ? (
         <div className="text-slate-500 py-12 text-center">Loading reports...</div>

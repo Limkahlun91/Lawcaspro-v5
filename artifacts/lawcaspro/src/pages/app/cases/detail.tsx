@@ -17,6 +17,8 @@ import { Textarea } from "@/components/ui/textarea";
 import CaseDocumentsTab from "./components/CaseDocumentsTab";
 import CaseBillingTab from "./components/CaseBillingTab";
 import CaseCommunicationsTab from "./components/CaseCommunicationsTab";
+import CaseTasksTab from "./components/CaseTasksTab";
+import CaseTimeTab from "./components/CaseTimeTab";
 
 export default function CaseDetail() {
   const { id } = useParams<{ id: string }>();
@@ -123,12 +125,14 @@ export default function CaseDetail() {
       </div>
 
       <Tabs defaultValue="overview" className="w-full">
-        <TabsList className="grid w-full grid-cols-6 mb-6 bg-slate-100 p-1">
+        <TabsList className="grid w-full grid-cols-8 mb-6 bg-slate-100 p-1">
           <TabsTrigger value="overview">Overview</TabsTrigger>
           <TabsTrigger value="workflow">Workflow</TabsTrigger>
           <TabsTrigger value="documents">Documents</TabsTrigger>
           <TabsTrigger value="billing">Billing</TabsTrigger>
           <TabsTrigger value="communications">Comms</TabsTrigger>
+          <TabsTrigger value="tasks">Tasks</TabsTrigger>
+          <TabsTrigger value="time">Time</TabsTrigger>
           <TabsTrigger value="notes">Notes</TabsTrigger>
         </TabsList>
 
@@ -319,6 +323,14 @@ export default function CaseDetail() {
 
         <TabsContent value="communications">
           <CaseCommunicationsTab caseId={caseId} />
+        </TabsContent>
+
+        <TabsContent value="tasks">
+          <CaseTasksTab caseId={caseId} />
+        </TabsContent>
+
+        <TabsContent value="time">
+          <CaseTimeTab caseId={caseId} />
         </TabsContent>
 
         <TabsContent value="notes" className="space-y-6">

@@ -72,8 +72,17 @@ function fmt(val: number) {
   return `RM ${val.toLocaleString("en-MY", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
-const TABS = ["Overview", "Workflow", "Billing", "Comms"] as const;
+const TABS = ["Overview", "Workflow", "Billing", "Comms", "Tasks"] as const;
 type Tab = typeof TABS[number];
+
+interface CaseTask {
+  id: number;
+  title: string;
+  dueDate: string | null;
+  priority: string;
+  status: string;
+  description: string | null;
+}
 
 const TYPE_ICON: Record<string, keyof typeof Feather.glyphMap> = {
   email: "mail", letter: "file-text", call: "phone",
@@ -120,6 +129,12 @@ export default function CaseDetailScreen() {
   const { data: comms = [] } = useQuery<CommEntry[]>({
     queryKey: ["case-comms", id],
     queryFn: () => apiFetch<CommEntry[]>(`/cases/${id}/communications`),
+    enabled: !!id,
+  });
+
+  const { data: caseTasks = [] } = useQuery<CaseTask[]>({
+    queryKey: ["case-tasks-mobile", id],
+    queryFn: () => apiFetch<CaseTask[]>(`/case-tasks?caseId=${id}`),
     enabled: !!id,
   });
 
@@ -342,6 +357,41 @@ export default function CaseDetailScreen() {
         {activeTab === "Workflow" && renderWorkflow()}
         {activeTab === "Billing" && renderBilling()}
         {activeTab === "Comms" && renderComms()}
+        {activeTab === "Tasks" && (() => {
+          const today = new Date().toISOString().slice(0, 10);
+          const PRIORITY_COLOR: Record<string, string> = { urgent: "#ef4444", high: "#f59e0b", normal: "#3b82f6", low: "#94a3b8" };
+          return (
+            <FlatList
+              data={caseTasks}
+              keyExtractor={(t) => String(t.id)}
+              contentContainerStyle={{ paddingHorizontal: 16, paddingTop: 12, paddingBottom: bottomPad + 16 }}
+              showsVerticalScrollIndicator={false}
+              ListEmptyComponent={
+                <View style={styles.emptyBox}>
+                  <Feather name="check-square" size={28} color={colors.mutedForeground} />
+                  <Text style={[styles.emptyText, { color: colors.mutedForeground }]}>No tasks for this matter</Text>
+                </View>
+              }
+              renderItem={({ item: t }) => {
+                const overdue = t.dueDate && t.dueDate < today && t.status !== "done";
+                const pc = PRIORITY_COLOR[t.priority] ?? colors.mutedForeground;
+                return (
+                  <View style={[styles.commCard, { backgroundColor: overdue ? "#fff5f5" : colors.card, borderColor: overdue ? "#fca5a5" : colors.border }]}>
+                    <View style={{ flexDirection: "row", alignItems: "flex-start", gap: 10 }}>
+                      <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: pc, marginTop: 5 }} />
+                      <View style={{ flex: 1 }}>
+                        <Text style={{ fontSize: 14, fontFamily: "Inter_500Medium", color: t.status === "done" ? colors.mutedForeground : colors.foreground }}>{t.title}</Text>
+                        {t.description && <Text style={{ fontSize: 12, color: colors.mutedForeground, marginTop: 2 }}>{t.description}</Text>}
+                        {t.dueDate && <Text style={{ fontSize: 11, color: overdue ? "#ef4444" : colors.mutedForeground, marginTop: 4 }}>{overdue ? "Overdue · " : "Due "}{t.dueDate}</Text>}
+                      </View>
+                      {t.status === "done" && <Feather name="check-circle" size={16} color="#22c55e" />}
+                    </View>
+                  </View>
+                );
+              }}
+            />
+          );
+        })()}
       </View>
     </View>
   );

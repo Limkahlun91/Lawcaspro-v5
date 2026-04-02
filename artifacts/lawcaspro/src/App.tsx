@@ -47,6 +47,9 @@ import DocumentsPage from "@/pages/app/documents";
 import Accounting from "@/pages/app/accounting";
 import InvoiceDetail from "@/pages/app/accounting/invoices/detail";
 import Reports from "@/pages/app/reports";
+import BillsDeliveredBook from "@/pages/app/reports/bills-delivered-book";
+import MatterAging from "@/pages/app/reports/matter-aging";
+import TrustAccountStatement from "@/pages/app/reports/trust-account-statement";
 import Hub from "@/pages/app/hub";
 import QuotationsList from "@/pages/app/quotations";
 import NewQuotation from "@/pages/app/quotations/new";
@@ -112,6 +115,9 @@ function AppRoutes() {
           <Route path="/app/documents" component={DocumentsPage} />
           <Route path="/app/accounting/invoices/:id" component={InvoiceDetail} />
           <Route path="/app/accounting" component={Accounting} />
+          <Route path="/app/reports/bills-delivered-book" component={BillsDeliveredBook} />
+          <Route path="/app/reports/matter-aging" component={MatterAging} />
+          <Route path="/app/reports/trust-account-statement" component={TrustAccountStatement} />
           <Route path="/app/reports" component={Reports} />
           <Route path="/app/audit-logs" component={AuditLogs} />
           <Route path="/app/settings" component={Settings} />

@@ -22,6 +22,9 @@ import regulatoryRouter from "./regulatory";
 import invoicesRouter from "./invoices";
 import receiptsRouter from "./receipts";
 import paymentVouchersRouter from "./payment-vouchers";
+import timeEntriesRouter from "./time-entries";
+import caseTasksRouter from "./case-tasks";
+import complianceReportsRouter from "./compliance-reports";
 
 const router: IRouter = Router();
 
@@ -48,5 +51,8 @@ router.use(regulatoryRouter);
 router.use(invoicesRouter);
 router.use(receiptsRouter);
 router.use(paymentVouchersRouter);
+router.use(timeEntriesRouter);
+router.use(caseTasksRouter);
+router.use(complianceReportsRouter);
 
 export default router;

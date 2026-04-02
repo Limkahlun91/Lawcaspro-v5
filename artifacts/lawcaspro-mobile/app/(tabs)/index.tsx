@@ -39,6 +39,15 @@ interface DashboardData {
   }>;
 }
 
+interface Task {
+  id: number;
+  caseId: number;
+  title: string;
+  dueDate: string | null;
+  priority: string;
+  status: string;
+}
+
 const STATUS_COLOR: Record<string, string> = {
   Completed: "#22c55e",
   "MOT Registered": "#0d9488",
@@ -58,6 +67,11 @@ export default function DashboardScreen() {
   const { data, isLoading, refetch } = useQuery<DashboardData>({
     queryKey: ["dashboard"],
     queryFn: () => apiFetch<DashboardData>("/dashboard"),
+  });
+
+  const { data: tasks = [] } = useQuery<Task[]>({
+    queryKey: ["upcoming-tasks"],
+    queryFn: () => apiFetch<Task[]>("/case-tasks/upcoming?limit=5"),
   });
 
   const topPad = Platform.OS === "web" ? 67 : insets.top;
@@ -161,6 +175,44 @@ export default function DashboardScreen() {
           );
         })
       )}
+      {/* Upcoming Tasks */}
+      <View style={styles.sectionHeader}>
+        <Text style={[styles.sectionTitle, { color: colors.foreground }]}>Upcoming Tasks</Text>
+        <Pressable onPress={() => router.push("/tasks" as any)}>
+          <Text style={[styles.seeAll, { color: colors.amber }]}>See all</Text>
+        </Pressable>
+      </View>
+      {tasks.length === 0 ? (
+        <View style={[styles.emptyState, { backgroundColor: colors.card, borderColor: colors.border }]}>
+          <Feather name="check-square" size={24} color={colors.mutedForeground} />
+          <Text style={[styles.emptyText, { color: colors.mutedForeground }]}>No upcoming tasks</Text>
+        </View>
+      ) : (
+        tasks.map((t) => {
+          const overdue = t.dueDate && t.dueDate < new Date().toISOString().slice(0, 10);
+          const priorityColor = t.priority === "urgent" ? "#ef4444" : t.priority === "high" ? "#f59e0b" : colors.mutedForeground;
+          return (
+            <Pressable
+              key={t.id}
+              style={({ pressed }) => [styles.taskRow, { backgroundColor: colors.card, borderColor: overdue ? "#fca5a5" : colors.border }, pressed && { opacity: 0.75 }]}
+              onPress={() => router.push({ pathname: "/cases/[id]", params: { id: String(t.caseId) } })}
+            >
+              <View style={styles.taskLeft}>
+                <View style={[styles.taskDot, { backgroundColor: priorityColor }]} />
+                <View>
+                  <Text style={[styles.taskTitle, { color: colors.foreground }]} numberOfLines={1}>{t.title}</Text>
+                  {t.dueDate && (
+                    <Text style={[styles.taskDue, { color: overdue ? "#ef4444" : colors.mutedForeground }]}>
+                      Due {t.dueDate}{overdue ? " — Overdue" : ""}
+                    </Text>
+                  )}
+                </View>
+              </View>
+              <Feather name="chevron-right" size={16} color={colors.mutedForeground} />
+            </Pressable>
+          );
+        })
+      )}
     </ScrollView>
   );
 }
@@ -215,5 +267,13 @@ const styles = StyleSheet.create({
     borderRadius: 6, paddingHorizontal: 8, paddingVertical: 4,
     maxWidth: 110, alignItems: "center",
   },
+  taskRow: {
+    flexDirection: "row", alignItems: "center", justifyContent: "space-between",
+    borderRadius: 10, borderWidth: 1, padding: 12, marginBottom: 8,
+  },
+  taskLeft: { flex: 1, flexDirection: "row", alignItems: "flex-start", gap: 10, marginRight: 8 },
+  taskDot: { width: 8, height: 8, borderRadius: 4, marginTop: 5 },
+  taskTitle: { fontSize: 13, fontFamily: "Inter_500Medium", flex: 1 },
+  taskDue: { fontSize: 11, fontFamily: "Inter_400Regular", marginTop: 2 },
   badgeText: { fontSize: 10, fontFamily: "Inter_600SemiBold", textAlign: "center" },
 });
