@@ -199,7 +199,7 @@ export default function PlatformMessages() {
         const urlRes = await fetch(`${API_BASE}/storage/uploads/request-url`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ contentType: file.type }),
+          body: JSON.stringify({ name: file.name, size: file.size, contentType: file.type }),
           credentials: "include",
         });
         if (!urlRes.ok) throw new Error("Failed to get upload URL");

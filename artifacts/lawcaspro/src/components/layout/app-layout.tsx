@@ -7,15 +7,12 @@ import {
   Building2, 
   HardHat, 
   Users, 
-  UserCircle, 
-  ShieldCheck, 
   MessageSquare, 
   Calculator, 
   BarChart, 
   ScrollText, 
   Settings,
   LogOut,
-  Inbox,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
@@ -33,14 +30,11 @@ export function AppLayout({ children }: { children: ReactNode }) {
     { label: "Projects", href: "/app/projects", icon: Building2 },
     { label: "Developers", href: "/app/developers", icon: HardHat },
     { label: "Clients", href: "/app/clients", icon: Users },
-    { label: "Users", href: "/app/users", icon: UserCircle },
-    { label: "Roles & Permissions", href: "/app/roles", icon: ShieldCheck },
-    { label: "Communications", href: "/app/communications", icon: MessageSquare },
+    { label: "Communications", href: "/app/hub", icon: MessageSquare },
     { label: "Accounting", href: "/app/accounting", icon: Calculator },
     { label: "Reports", href: "/app/reports", icon: BarChart },
     { label: "Audit Logs", href: "/app/audit-logs", icon: ScrollText },
     { label: "Settings", href: "/app/settings", icon: Settings },
-    { label: "Communication Hub", href: "/app/hub", icon: Inbox },
   ];
 
   return (
@@ -69,11 +63,6 @@ export function AppLayout({ children }: { children: ReactNode }) {
                 }`}>
                   <item.icon className="w-4 h-4 shrink-0" />
                   <span className="truncate">{item.label}</span>
-                  {item.badge && (
-                    <span className="ml-auto text-[10px] bg-slate-800 text-slate-400 px-1.5 py-0.5 rounded border border-slate-700 shrink-0">
-                      {item.badge}
-                    </span>
-                  )}
                 </div>
               </Link>
             );

@@ -170,6 +170,10 @@ Step paths: `common` → `loan` (if loan) → `mot` (individual/strata) or `noa_
 - [x] **Phase 6**: Platform monitoring — enhanced with real metrics (Documents Generated), per-tenant breakdown (Users, Cases, Docs, Billing, Comms columns)
 - [x] **Founder Features**: Firm user management (list users per firm, reset any user's password), System Documents page (upload/download/delete platform docs shared with firms), Communication Hub (founder ↔ firm bidirectional messaging with multi-format file attachments)
 - [x] **Firm Hub**: `/app/hub` page with Messages tab (thread with Lawcaspro, compose/read, mark-as-read) and System Documents tab (view/download documents shared by platform)
+- [x] **Nav Restructure**: Consolidated sidebar — removed duplicate "Users", "Roles & Permissions", "Communication Hub" nav items. "Communications" now links to `/app/hub`. Settings page has tabbed layout with Users, Roles & Permissions, Documents sub-tabs. Old URLs redirect with tab awareness.
+- [x] **New Case Redesign**: Tabbed form (SPA Details, Property, Loan, Lawyer, Title, Company) with Basic Information section at top. Extended case columns: `case_type`, `parcel_no`, `spa_details` (JSON), `property_details` (JSON), `loan_details` (JSON), `company_details` (JSON).
+- [x] **Developer Enhancements**: Split address into Registered + Business Address, multi-contact support (up to 5, with Department/Phone/Ext/Email), inline edit mode on detail page.
+- [x] **Upload Bug Fix**: All file upload endpoints now send `{ name, size, contentType }` (was missing `name` and `size`, causing validation failure).
 
 ## Design Decisions
 

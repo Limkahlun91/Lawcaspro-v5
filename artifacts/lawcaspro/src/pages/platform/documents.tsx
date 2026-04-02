@@ -110,7 +110,7 @@ export default function PlatformDocuments() {
       const urlRes = await fetch(`${API_BASE}/storage/uploads/request-url`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ contentType: selectedFile.type }),
+        body: JSON.stringify({ name: selectedFile.name, size: selectedFile.size, contentType: selectedFile.type }),
         credentials: "include",
       });
       if (!urlRes.ok) throw new Error("Failed to get upload URL");

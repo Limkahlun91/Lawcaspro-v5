@@ -26,9 +26,7 @@ import CasesList from "@/pages/app/cases";
 import NewCase from "@/pages/app/cases/new";
 import CaseDetail from "@/pages/app/cases/detail";
 
-import UsersList from "@/pages/app/users";
 import NewUser from "@/pages/app/users/new";
-import RolesList from "@/pages/app/roles";
 
 import DevelopersList from "@/pages/app/developers";
 import NewDeveloper from "@/pages/app/developers/new";
@@ -44,7 +42,6 @@ import ClientDetail from "@/pages/app/clients/detail";
 
 import AuditLogs from "@/pages/app/audit-logs";
 import Settings from "@/pages/app/settings";
-import Communications from "@/pages/app/communications";
 import Accounting from "@/pages/app/accounting";
 import Reports from "@/pages/app/reports";
 import Hub from "@/pages/app/hub";
@@ -95,11 +92,11 @@ function AppRoutes() {
           <Route path="/app/clients" component={ClientsList} />
           
           <Route path="/app/users/new" component={NewUser} />
-          <Route path="/app/users" component={UsersList} />
+          <Route path="/app/users" component={() => <Redirect to="/app/settings?tab=users" />} />
           
-          <Route path="/app/roles" component={RolesList} />
+          <Route path="/app/roles" component={() => <Redirect to="/app/settings?tab=roles" />} />
           
-          <Route path="/app/communications" component={Communications} />
+          <Route path="/app/communications" component={() => <Redirect to="/app/hub" />} />
           <Route path="/app/accounting" component={Accounting} />
           <Route path="/app/reports" component={Reports} />
           <Route path="/app/audit-logs" component={AuditLogs} />
