@@ -1,15 +1,20 @@
 import { Feather } from "@expo/vector-icons";
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import React, { useState } from "react";
 import {
   ActivityIndicator,
+  Alert,
   FlatList,
+  KeyboardAvoidingView,
+  Modal,
   Platform,
   Pressable,
   ScrollView,
   StyleSheet,
+  Switch,
   Text,
+  TextInput,
   View,
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
@@ -72,7 +77,7 @@ function fmt(val: number) {
   return `RM ${val.toLocaleString("en-MY", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
-const TABS = ["Overview", "Workflow", "Billing", "Comms", "Tasks"] as const;
+const TABS = ["Overview", "Workflow", "Billing", "Comms", "Tasks", "Time"] as const;
 type Tab = typeof TABS[number];
 
 interface CaseTask {
@@ -136,6 +141,37 @@ export default function CaseDetailScreen() {
     queryKey: ["case-tasks-mobile", id],
     queryFn: () => apiFetch<CaseTask[]>(`/case-tasks?caseId=${id}`),
     enabled: !!id,
+  });
+
+  interface TimeEntry { id: number; entryDate: string; description: string; hours: string; ratePerHour: string; isBillable: boolean; isBilled: boolean; }
+  const qc = useQueryClient();
+  const { data: timeEntries = [] } = useQuery<TimeEntry[]>({
+    queryKey: ["case-time-mobile", id],
+    queryFn: () => apiFetch<TimeEntry[]>(`/time-entries?caseId=${id}`),
+    enabled: !!id,
+  });
+  const { data: timeSummary } = useQuery<{ totalHours: string; billableHours: string; totalAmount: string; unbilledAmount: string }>({
+    queryKey: ["case-time-summary-mobile", id],
+    queryFn: () => apiFetch<any>(`/time-entries/summary?caseId=${id}`),
+    enabled: !!id,
+  });
+
+  const [showLogTime, setShowLogTime] = useState(false);
+  const [logForm, setLogForm] = useState({ entryDate: new Date().toISOString().slice(0, 10), description: "", hours: "", ratePerHour: "500", isBillable: true });
+
+  const logTimeMutation = useMutation({
+    mutationFn: () => apiFetch<TimeEntry>("/time-entries", {
+      method: "POST",
+      body: JSON.stringify({ caseId: id, ...logForm }),
+    }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["case-time-mobile", id] });
+      qc.invalidateQueries({ queryKey: ["case-time-summary-mobile", id] });
+      setShowLogTime(false);
+      setLogForm({ entryDate: new Date().toISOString().slice(0, 10), description: "", hours: "", ratePerHour: "500", isBillable: true });
+      Alert.alert("Time logged", "Your time entry has been recorded.");
+    },
+    onError: (e: any) => Alert.alert("Error", e.message),
   });
 
   const topPad = Platform.OS === "web" ? 67 : insets.top;
@@ -357,6 +393,119 @@ export default function CaseDetailScreen() {
         {activeTab === "Workflow" && renderWorkflow()}
         {activeTab === "Billing" && renderBilling()}
         {activeTab === "Comms" && renderComms()}
+        {activeTab === "Time" && (() => {
+          const hrs = (v: string) => Number(v || 0).toFixed(1);
+          const summaryItems = [
+            { label: "Total Hours", value: `${hrs(timeSummary?.totalHours ?? "0")} hrs`, color: "#3b82f6" },
+            { label: "Billable", value: `${hrs(timeSummary?.billableHours ?? "0")} hrs`, color: "#22c55e" },
+            { label: "Value", value: `RM ${Number(timeSummary?.totalAmount ?? 0).toLocaleString("en-MY", { minimumFractionDigits: 2 })}`, color: "#f59e0b" },
+            { label: "Unbilled", value: `RM ${Number(timeSummary?.unbilledAmount ?? 0).toLocaleString("en-MY", { minimumFractionDigits: 2 })}`, color: "#ef4444" },
+          ];
+          return (
+            <View style={{ flex: 1 }}>
+              <ScrollView contentContainerStyle={{ paddingHorizontal: 16, paddingTop: 12, paddingBottom: bottomPad + 100 }} showsVerticalScrollIndicator={false}>
+                {/* Summary cards */}
+                <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8, marginBottom: 16 }}>
+                  {summaryItems.map(({ label, value, color }) => (
+                    <View key={label} style={[styles.timeSummaryCard, { backgroundColor: colors.card, borderColor: colors.border }]}>
+                      <Text style={{ fontSize: 10, fontFamily: "Inter_500Medium", color: colors.mutedForeground, marginBottom: 4 }}>{label}</Text>
+                      <Text style={{ fontSize: 14, fontFamily: "Inter_700Bold", color, letterSpacing: -0.3 }}>{value}</Text>
+                    </View>
+                  ))}
+                </View>
+
+                {timeEntries.length === 0 ? (
+                  <View style={styles.emptyBox}>
+                    <Feather name="clock" size={28} color={colors.mutedForeground} />
+                    <Text style={[styles.emptyText, { color: colors.mutedForeground }]}>No time entries yet</Text>
+                  </View>
+                ) : (
+                  timeEntries.map((e) => (
+                    <View key={e.id} style={[styles.commCard, { backgroundColor: colors.card, borderColor: colors.border, marginBottom: 8 }]}>
+                      <View style={{ flexDirection: "row", justifyContent: "space-between", marginBottom: 4 }}>
+                        <Text style={{ fontSize: 11, fontFamily: "Inter_400Regular", color: colors.mutedForeground }}>{e.entryDate}</Text>
+                        <View style={{ flexDirection: "row", gap: 6 }}>
+                          <View style={[styles.badge2, { backgroundColor: e.isBillable ? "#22c55e20" : "#94a3b820" }]}>
+                            <Text style={{ fontSize: 10, fontFamily: "Inter_600SemiBold", color: e.isBillable ? "#22c55e" : "#94a3b8" }}>{e.isBillable ? "Billable" : "Non-billable"}</Text>
+                          </View>
+                          {e.isBilled && <View style={[styles.badge2, { backgroundColor: "#3b82f620" }]}><Text style={{ fontSize: 10, fontFamily: "Inter_600SemiBold", color: "#3b82f6" }}>Billed</Text></View>}
+                        </View>
+                      </View>
+                      <Text style={{ fontSize: 13, fontFamily: "Inter_500Medium", color: colors.foreground, marginBottom: 6 }}>{e.description}</Text>
+                      <View style={{ flexDirection: "row", justifyContent: "space-between" }}>
+                        <Text style={{ fontSize: 12, fontFamily: "Inter_400Regular", color: colors.mutedForeground }}>{Number(e.hours).toFixed(1)} hrs @ RM {Number(e.ratePerHour).toFixed(0)}/hr</Text>
+                        <Text style={{ fontSize: 13, fontFamily: "Inter_700Bold", color: colors.foreground }}>RM {(Number(e.hours) * Number(e.ratePerHour)).toLocaleString("en-MY", { minimumFractionDigits: 2 })}</Text>
+                      </View>
+                    </View>
+                  ))
+                )}
+              </ScrollView>
+
+              {/* Floating Log Time button */}
+              <View style={[styles.fabContainer, { bottom: bottomPad + 16 }]}>
+                <Pressable style={[styles.fab, { backgroundColor: colors.amber }]} onPress={() => setShowLogTime(true)}>
+                  <Feather name="plus" size={18} color="#fff" />
+                  <Text style={styles.fabText}>Log Time</Text>
+                </Pressable>
+              </View>
+
+              {/* Log Time Modal */}
+              <Modal visible={showLogTime} animationType="slide" presentationStyle="pageSheet" onRequestClose={() => setShowLogTime(false)}>
+                <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : "height"} style={{ flex: 1, backgroundColor: colors.background }}>
+                  <View style={{ padding: 20, borderBottomWidth: 1, borderBottomColor: colors.border, flexDirection: "row", alignItems: "center", justifyContent: "space-between" }}>
+                    <Text style={{ fontSize: 17, fontFamily: "Inter_600SemiBold", color: colors.foreground }}>Log Time</Text>
+                    <Pressable onPress={() => setShowLogTime(false)}>
+                      <Feather name="x" size={22} color={colors.mutedForeground} />
+                    </Pressable>
+                  </View>
+                  <ScrollView contentContainerStyle={{ padding: 20, gap: 16 }}>
+                    {[
+                      { label: "Date", key: "entryDate", type: "default" as const, placeholder: "YYYY-MM-DD" },
+                      { label: "Description *", key: "description", type: "default" as const, placeholder: "e.g. Review of SPA documents" },
+                      { label: "Hours *", key: "hours", type: "numeric" as const, placeholder: "1.5" },
+                      { label: "Rate per hour (RM)", key: "ratePerHour", type: "numeric" as const, placeholder: "500" },
+                    ].map(({ label, key, type, placeholder }) => (
+                      <View key={key}>
+                        <Text style={{ fontSize: 12, fontFamily: "Inter_500Medium", color: colors.mutedForeground, marginBottom: 6 }}>{label}</Text>
+                        <TextInput
+                          style={[styles.input, { backgroundColor: colors.card, borderColor: colors.border, color: colors.foreground }]}
+                          value={(logForm as any)[key]}
+                          onChangeText={(v) => setLogForm(f => ({ ...f, [key]: v }))}
+                          keyboardType={type}
+                          placeholder={placeholder}
+                          placeholderTextColor={colors.mutedForeground}
+                        />
+                      </View>
+                    ))}
+                    <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between" }}>
+                      <Text style={{ fontSize: 14, fontFamily: "Inter_500Medium", color: colors.foreground }}>Billable</Text>
+                      <Switch
+                        value={logForm.isBillable}
+                        onValueChange={(v) => setLogForm(f => ({ ...f, isBillable: v }))}
+                        trackColor={{ false: colors.border, true: colors.amber }}
+                        thumbColor="#fff"
+                      />
+                    </View>
+                    {logForm.hours && Number(logForm.hours) > 0 && (
+                      <Text style={{ fontSize: 13, fontFamily: "Inter_400Regular", color: colors.mutedForeground }}>
+                        Amount: <Text style={{ fontFamily: "Inter_700Bold", color: colors.foreground }}>RM {(Number(logForm.hours) * Number(logForm.ratePerHour || 0)).toLocaleString("en-MY", { minimumFractionDigits: 2 })}</Text>
+                      </Text>
+                    )}
+                    <Pressable
+                      style={[styles.submitBtn, { backgroundColor: colors.amber, opacity: (!logForm.description || !logForm.hours || logTimeMutation.isPending) ? 0.6 : 1 }]}
+                      onPress={() => logTimeMutation.mutate()}
+                      disabled={!logForm.description || !logForm.hours || logTimeMutation.isPending}
+                    >
+                      <Text style={{ fontSize: 15, fontFamily: "Inter_600SemiBold", color: "#fff" }}>
+                        {logTimeMutation.isPending ? "Saving..." : "Log Time"}
+                      </Text>
+                    </Pressable>
+                  </ScrollView>
+                </KeyboardAvoidingView>
+              </Modal>
+            </View>
+          );
+        })()}
         {activeTab === "Tasks" && (() => {
           const today = new Date().toISOString().slice(0, 10);
           const PRIORITY_COLOR: Record<string, string> = { urgent: "#ef4444", high: "#f59e0b", normal: "#3b82f6", low: "#94a3b8" };
@@ -473,4 +622,27 @@ const styles = StyleSheet.create({
   commSubject: { fontSize: 13, fontFamily: "Inter_600SemiBold", marginBottom: 4 },
   commBody: { fontSize: 12, fontFamily: "Inter_400Regular", lineHeight: 18, marginBottom: 4 },
   commDate: { fontSize: 11, fontFamily: "Inter_400Regular" },
+  timeSummaryCard: {
+    flex: 1, minWidth: "45%", borderRadius: 10, borderWidth: 1,
+    padding: 12,
+  },
+  badge2: {
+    borderRadius: 5, paddingHorizontal: 6, paddingVertical: 2,
+  },
+  fabContainer: {
+    position: "absolute", left: 16, right: 16, alignItems: "center",
+  },
+  fab: {
+    flexDirection: "row", alignItems: "center", gap: 6,
+    borderRadius: 12, paddingHorizontal: 24, paddingVertical: 12,
+    shadowColor: "#000", shadowOpacity: 0.15, shadowOffset: { width: 0, height: 4 }, shadowRadius: 8, elevation: 4,
+  },
+  fabText: { fontSize: 14, fontFamily: "Inter_600SemiBold", color: "#fff" },
+  input: {
+    borderWidth: 1, borderRadius: 8, paddingHorizontal: 12, paddingVertical: 10,
+    fontSize: 14, fontFamily: "Inter_400Regular",
+  },
+  submitBtn: {
+    borderRadius: 10, paddingVertical: 14, alignItems: "center",
+  },
 });
