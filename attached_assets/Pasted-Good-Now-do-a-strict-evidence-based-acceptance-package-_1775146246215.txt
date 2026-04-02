@@ -1,0 +1,106 @@
+Good. Now do a strict evidence-based acceptance package for Phase 0 and Phase 1 only.
+
+Do NOT summarize.
+Do NOT give marketing language.
+Do NOT say “fully complete” without proof.
+
+I need exact implementation evidence in this format:
+
+==================================================
+PART A — PHASE 0 MIGRATION EVIDENCE
+==================================================
+
+1. List every migration file created for Phase 0
+For each file provide:
+- exact file name
+- purpose
+- execution order
+
+2. Show the migration baseline strategy
+- how the previous raw psql / db:push state was converted into formal migration history
+- exact commands to rebuild schema from zero using migrations only
+- whether raw db:push is still required anywhere
+
+3. List all schema corrections made in Phase 0
+- tables changed
+- columns added/changed
+- indexes added
+- foreign keys added/fixed
+- default values added
+- version/locking fields added
+- created_at / updated_at / deleted_at additions
+
+==================================================
+PART B — PHASE 1 SECURITY EVIDENCE
+==================================================
+
+1. RLS / DB tenant isolation
+- exact table list with RLS enabled
+- exact policy names for each table
+- exact SQL or schema definition used
+- exact tenant context mechanism
+- exact test cases proving cross-tenant denial
+
+2. Rate limiting
+- exact middleware file path
+- exact routes protected
+- exact threshold values
+- exact code location where middleware is mounted
+
+3. TOTP / 2FA
+- exact schema changes
+- exact backend file paths
+- exact frontend file paths
+- exact login flow behavior
+- exact tests covering setup / confirm / login / disable
+
+4. Support sessions
+- exact schema changes
+- exact backend route files
+- exact frontend files if any
+- exact audit log actions written
+- exact rules preventing firm users from using founder support endpoints
+
+5. Re-auth / security audit
+- exact middleware file path
+- exact actions protected by re-auth
+- exact audit log fields for 401 / 403 / login success / login failure / TOTP failure / logout
+
+==================================================
+PART C — FILE LIST
+==================================================
+
+List every file created or modified in Phase 0 and Phase 1:
+- file path
+- created or modified
+- purpose
+
+==================================================
+PART D — TEST EVIDENCE
+==================================================
+
+List every test file:
+- file path
+- what it verifies
+- whether it passed
+- exact command run
+
+Then paste the exact final test output summary.
+
+==================================================
+PART E — FINAL ACCEPTANCE SELF-CHECK
+==================================================
+
+Answer YES or NO for each:
+
+- Can a fresh environment rebuild the database from migration files only?
+- Is PostgreSQL RLS actually enabled?
+- Can a firm user ever query another firm’s rows if a route forgets firm_id?
+- Is TOTP fully usable in the real login flow?
+- Are support sessions fully audited?
+- Are 401/403 auth denials written to audit logs?
+- Is rate limiting active outside test environment?
+
+If any answer is NO, Phase 0/1 is not complete.
+
+Do not start Phase 2 yet.
