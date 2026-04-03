@@ -39,6 +39,11 @@ export default function NewCasePage() {
 
   const [activeTab, setActiveTab] = useState<Tab>("SPA Details");
   const [formError, setFormError] = useState<string | null>(null);
+  const [fieldErrors, setFieldErrors] = useState<{
+    project?: string;
+    purchaser?: string;
+    lawyer?: string;
+  }>({});
 
   // Basic Info
   const [projectId, setProjectId] = useState("");
@@ -143,25 +148,20 @@ export default function NewCasePage() {
 
   async function handleSubmit() {
     setFormError(null);
-    if (!projectId) {
-      setFormError("Please select a project.");
-      setActiveTab("SPA Details");
+
+    // Inline field validation — show errors beside each field, navigate to first failing tab
+    const nextFieldErrors: { project?: string; purchaser?: string; lawyer?: string } = {};
+    if (!projectId) nextFieldErrors.project = "Please select a project";
+    if (!purchasers[0]?.name.trim()) nextFieldErrors.purchaser = "At least one purchaser name is required";
+    if (!assignedLawyerId) nextFieldErrors.lawyer = "Please assign a lawyer";
+
+    if (Object.keys(nextFieldErrors).length > 0) {
+      setFieldErrors(nextFieldErrors);
+      if (nextFieldErrors.project || nextFieldErrors.purchaser) setActiveTab("SPA Details");
+      else if (nextFieldErrors.lawyer) setActiveTab("Lawyer");
       return;
     }
-    if (!purchasers[0]?.name.trim()) {
-      setFormError("Please enter at least one purchaser name in the SPA Details tab.");
-      setActiveTab("SPA Details");
-      return;
-    }
-    if (!assignedLawyerId) {
-      setFormError("Please assign a lawyer in the Lawyer tab.");
-      setActiveTab("Lawyer");
-      return;
-    }
-    if (!developerId) {
-      setFormError("The selected project has no linked developer. Please edit the project first.");
-      return;
-    }
+    setFieldErrors({});
 
     const validPurchasers = purchasers.filter(p => p.name.trim());
 
@@ -169,9 +169,9 @@ export default function NewCasePage() {
       ? Number(assignedClerkId)
       : undefined;
 
+    // developerId is intentionally omitted — server derives it from projectId
     const payload = {
       projectId: Number(projectId),
-      developerId: Number(developerId),
       purchaseMode,
       titleType: titleTypeApiMap[titleType] ?? "master",
       spaPrice: purchasePrice ? Number(purchasePrice) : undefined,
@@ -243,8 +243,13 @@ export default function NewCasePage() {
       toast({ title: "Case created successfully" });
       navigate("/app/cases");
     } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : "Failed to create case";
-      setFormError(msg);
+      // Extract a user-friendly message from the API error — never show raw JSON
+      const apiErr = e as { data?: { error?: string } | null; status?: number } | null;
+      const serverMsg = apiErr?.data?.error ?? null;
+      const fallback = e instanceof Error
+        ? e.message.replace(/^HTTP \d+ \S+: /, "")
+        : "Failed to create case";
+      setFormError(serverMsg ?? fallback);
     }
   }
 
@@ -271,6 +276,12 @@ export default function NewCasePage() {
           </div>
         )}
 
+        {Object.keys(fieldErrors).length > 0 && (
+          <div className="mb-4 p-3 bg-amber-50 border border-amber-200 rounded-lg text-amber-800 text-sm">
+            Please fix the highlighted fields before submitting.
+          </div>
+        )}
+
         {/* Basic Information */}
         <div className="bg-white border border-gray-200 rounded-lg p-5 mb-4">
           <div className="mb-4">
@@ -280,10 +291,10 @@ export default function NewCasePage() {
           <div className="grid grid-cols-2 gap-4">
             <div className="space-y-1">
               <Label className="text-xs font-medium text-gray-600">
-                Project
+                Project <span className="text-red-500">*</span>
               </Label>
-              <Select value={projectId} onValueChange={setProjectId}>
-                <SelectTrigger className="h-9 text-sm border-gray-300">
+              <Select value={projectId} onValueChange={v => { setProjectId(v); setFieldErrors(fe => ({ ...fe, project: undefined })); }}>
+                <SelectTrigger className={cn("h-9 text-sm", fieldErrors.project ? "border-red-400 focus:ring-red-300" : "border-gray-300")}>
                   <SelectValue placeholder="Select project" />
                 </SelectTrigger>
                 <SelectContent>
@@ -292,6 +303,7 @@ export default function NewCasePage() {
                   ))}
                 </SelectContent>
               </Select>
+              {fieldErrors.project && <p className="text-xs text-red-500">{fieldErrors.project}</p>}
             </div>
             <div className="space-y-1">
               <Label className="text-xs font-medium text-gray-600">Case Type</Label>
@@ -362,11 +374,15 @@ export default function NewCasePage() {
                           Purchaser {i + 1} Name {i === 0 && <span className="text-red-500">*</span>}
                         </Label>
                         <Input
-                          className="h-9 text-sm border-gray-300"
+                          className={cn("h-9 text-sm", i === 0 && fieldErrors.purchaser ? "border-red-400" : "border-gray-300")}
                           placeholder="Enter purchaser name"
                           value={p.name}
-                          onChange={e => updatePurchaser(i, "name", e.target.value)}
+                          onChange={e => {
+                            updatePurchaser(i, "name", e.target.value);
+                            if (i === 0) setFieldErrors(fe => ({ ...fe, purchaser: undefined }));
+                          }}
                         />
+                        {i === 0 && fieldErrors.purchaser && <p className="text-xs text-red-500">{fieldErrors.purchaser}</p>}
                       </div>
                       <div className="flex items-end gap-2">
                         <div className="space-y-1 flex-1">
@@ -635,8 +651,8 @@ export default function NewCasePage() {
                     <Label className="text-xs font-medium text-gray-600">
                       Select Lawyer <span className="text-red-500">*</span>
                     </Label>
-                    <Select value={assignedLawyerId} onValueChange={setAssignedLawyerId}>
-                      <SelectTrigger className="h-9 text-sm border-gray-300">
+                    <Select value={assignedLawyerId} onValueChange={v => { setAssignedLawyerId(v); setFieldErrors(fe => ({ ...fe, lawyer: undefined })); }}>
+                      <SelectTrigger className={cn("h-9 text-sm", fieldErrors.lawyer ? "border-red-400" : "border-gray-300")}>
                         <SelectValue placeholder="Choose a lawyer" />
                       </SelectTrigger>
                       <SelectContent>
@@ -645,7 +661,10 @@ export default function NewCasePage() {
                         ))}
                       </SelectContent>
                     </Select>
-                    <p className="text-xs text-gray-400">Select a lawyer to auto-fill their details</p>
+                    {fieldErrors.lawyer
+                      ? <p className="text-xs text-red-500">{fieldErrors.lawyer}</p>
+                      : <p className="text-xs text-gray-400">Select a lawyer to auto-fill their details</p>
+                    }
                   </div>
                   <div className="space-y-1">
                     <Label className="text-xs font-medium text-gray-600">Select Clerk Person in Charge</Label>

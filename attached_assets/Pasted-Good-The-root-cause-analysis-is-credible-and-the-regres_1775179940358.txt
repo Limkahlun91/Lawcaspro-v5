@@ -1,0 +1,56 @@
+Good. The root-cause analysis is credible and the regression appears mostly fixed.
+
+Do NOT treat Create Case as fully closed yet.
+We now need a P0.1 hardening pass so this does not become a future data-quality problem.
+
+==================================================
+P0.1 — CREATE CASE HARDENING
+==================================================
+
+1. Server-side source of truth
+- Do not trust frontend developerId if projectId is present
+- Backend must resolve developerId from projectId server-side
+- Reject inconsistent projectId/developerId combinations if both are sent
+
+2. Client dedupe / reuse
+Current inline purchaser auto-create is acceptable as an interim fix, but must not create uncontrolled duplicate clients.
+Implement:
+- if ic is present: first search existing client by firmId + icNo
+- if found, reuse existing client instead of inserting a new one
+- if no ic is present: apply cautious name matching and only auto-create when no confident match exists
+- record whether purchaser row reused an existing client or created a new client
+
+3. Payload contract normalization
+Unify and document the create-case contract clearly:
+- projectId
+- developerId (derived server-side when possible)
+- caseType
+- purchaseMode
+- titleType
+- assignedLawyerId or assignedLawyerIds
+- purchaserIds and/or purchasers inline
+Do not leave mixed legacy naming unexplained.
+
+4. UI validation hardening
+- Remove raw JSON error dump from normal validation flow
+- Show inline field-level validation for lawyer, purchaser, purchase mode, title type, project
+- Show a user-friendly top summary only
+- Prevent submit when required selections are obviously missing
+
+5. Create Case evidence package
+Provide:
+- exact final request payload from the fixed UI
+- exact final response
+- resulting case ID
+- screenshot of successful /app/cases/new submission
+- list of files changed in this hardening pass
+- tests added for dedupe/reuse behavior
+
+6. Regression tests
+Add tests for:
+- projectId present + backend derives developerId
+- mismatched projectId/developerId rejected
+- existing purchaser with same IC is reused, not duplicated
+- raw JSON validation dump no longer shown in normal UI flow
+
+Do not move to Phase 2 until this P0.1 hardening is finished.

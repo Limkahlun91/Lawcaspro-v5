@@ -8,7 +8,7 @@
 
 export interface CreateCaseBody {
   projectId: number;
-  developerId: number;
+  developerId?: number;
   purchaseMode: string;
   titleType: string;
   spaPrice?: number;

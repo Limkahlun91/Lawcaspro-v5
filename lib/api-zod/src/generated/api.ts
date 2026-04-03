@@ -934,7 +934,7 @@ export const ListCasesResponse = zod.object({
  */
 export const CreateCaseBody = zod.object({
   projectId: zod.number(),
-  developerId: zod.number(),
+  developerId: zod.number().optional(),
   purchaseMode: zod.string(),
   titleType: zod.string(),
   spaPrice: zod.number().optional(),

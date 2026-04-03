@@ -173,25 +173,84 @@ router.post("/cases", requireAuth, requireFirmUser, async (req: AuthRequest, res
     return;
   }
 
-  const { projectId, developerId, purchaseMode, titleType, spaPrice, assignedLawyerId, assignedClerkId, purchaserIds, purchasers } = parsed.data;
+  const { projectId, developerId: clientDeveloperId, purchaseMode, titleType, spaPrice, assignedLawyerId, assignedClerkId, purchaserIds, purchasers } = parsed.data;
 
-  // Resolve purchaser client IDs: either use provided IDs or create clients inline
+  // ── 1. Resolve developerId server-side from projectId ─────────────────────
+  const [project] = await db.select().from(projectsTable).where(eq(projectsTable.id, projectId));
+  if (!project) {
+    res.status(404).json({ error: "Project not found" });
+    return;
+  }
+  if (!project.developerId) {
+    res.status(422).json({ error: "The selected project has no linked developer. Please edit the project first." });
+    return;
+  }
+  // If caller sent developerId, validate it matches the project
+  if (clientDeveloperId !== undefined && clientDeveloperId !== project.developerId) {
+    res.status(409).json({
+      error: "developerId does not match the project's developer",
+      expected: project.developerId,
+      received: clientDeveloperId,
+    });
+    return;
+  }
+  const developerId = project.developerId;
+
+  // ── 2. Resolve purchaser client IDs with dedupe ───────────────────────────
   let resolvedPurchaserIds: number[] = purchaserIds ?? [];
+  let purchasersCreated = 0;
+  let purchasersReused = 0;
 
   if (resolvedPurchaserIds.length === 0 && purchasers && purchasers.length > 0) {
-    // Create client records from inline purchaser data
     for (const p of purchasers) {
-      if (!p.name.trim()) continue;
-      const [client] = await db
-        .insert(clientsTable)
-        .values({
-          firmId: req.firmId!,
-          name: p.name.trim(),
-          icNo: p.ic?.trim() || null,
-          createdBy: req.userId,
-        })
-        .returning();
-      resolvedPurchaserIds.push(client.id);
+      const trimmedName = p.name.trim();
+      if (!trimmedName) continue;
+      const trimmedIc = p.ic?.trim() || null;
+
+      let existingClientId: number | null = null;
+
+      if (trimmedIc) {
+        // IC is present — look up by firmId + icNo (most reliable match)
+        const [byIc] = await db
+          .select()
+          .from(clientsTable)
+          .where(and(eq(clientsTable.firmId, req.firmId!), eq(clientsTable.icNo, trimmedIc)));
+        if (byIc) {
+          existingClientId = byIc.id;
+        }
+      }
+
+      if (!existingClientId) {
+        // No IC or no IC match — try exact case-insensitive name match
+        const byName = await db
+          .select()
+          .from(clientsTable)
+          .where(and(
+            eq(clientsTable.firmId, req.firmId!),
+            sql`LOWER(${clientsTable.name}) = LOWER(${trimmedName})`
+          ));
+        // Only reuse if exactly one match (ambiguous → create new)
+        if (byName.length === 1) {
+          existingClientId = byName[0].id;
+        }
+      }
+
+      if (existingClientId) {
+        resolvedPurchaserIds.push(existingClientId);
+        purchasersReused++;
+      } else {
+        const [client] = await db
+          .insert(clientsTable)
+          .values({
+            firmId: req.firmId!,
+            name: trimmedName,
+            icNo: trimmedIc,
+            createdBy: req.userId,
+          })
+          .returning();
+        resolvedPurchaserIds.push(client.id);
+        purchasersCreated++;
+      }
     }
   }
 
@@ -200,6 +259,7 @@ router.post("/cases", requireAuth, requireFirmUser, async (req: AuthRequest, res
     return;
   }
 
+  // ── 3. Build extra fields from body (not in Zod schema) ───────────────────
   const { caseType, parcelNo, spaDetails, propertyDetails, loanDetails, companyDetails } = req.body as {
     caseType?: string;
     parcelNo?: string;
@@ -281,7 +341,8 @@ router.post("/cases", requireAuth, requireFirmUser, async (req: AuthRequest, res
     detail: `Case ${refNo} created`,
   });
 
-  res.status(201).json(await formatCaseDetail(newCase));
+  const detail = await formatCaseDetail(newCase);
+  res.status(201).json({ ...detail, purchasersCreated, purchasersReused });
 });
 
 router.get("/cases/:caseId", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
