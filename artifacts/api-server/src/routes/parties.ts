@@ -10,6 +10,8 @@ import { sensitiveRateLimiter } from "../lib/rate-limit";
 
 const router: IRouter = Router();
 
+function rdb(req: AuthRequest) { return req.rlsDb ?? db; }
+
 const CreatePartyBody = z.object({
   partyType: z.enum(["natural_person", "company", "trust"]).default("natural_person"),
   fullName: z.string().min(1),
@@ -85,7 +87,7 @@ router.post("/parties", sensitiveRateLimiter, requireAuth, requireFirmUser, asyn
   if (!parsed.success) { res.status(400).json({ error: parsed.error.issues }); return; }
 
   const data = parsed.data;
-  const [party] = await db.insert(partiesTable).values({
+  const [party] = await rdb(req).insert(partiesTable).values({
     firmId: req.firmId!,
     ...data,
     directors: data.directors ?? [],
@@ -93,7 +95,7 @@ router.post("/parties", sensitiveRateLimiter, requireAuth, requireFirmUser, asyn
   }).returning();
 
   // Auto-create compliance profile
-  await db.insert(complianceProfilesTable).values({
+  await rdb(req).insert(complianceProfilesTable).values({
     firmId: req.firmId!,
     partyId: party.id,
     cddStatus: "not_started",
@@ -118,17 +120,17 @@ router.post("/parties", sensitiveRateLimiter, requireAuth, requireFirmUser, asyn
 // ---------------------------------------------------------------------------
 router.get("/parties/:id", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
   const id = Number(req.params.id);
-  const [party] = await db.select().from(partiesTable)
+  const [party] = await rdb(req).select().from(partiesTable)
     .where(and(eq(partiesTable.id, id), eq(partiesTable.firmId, req.firmId!), isNull(partiesTable.deletedAt)));
   if (!party) { res.status(404).json({ error: "Party not found" }); return; }
 
-  const [profile] = await db.select().from(complianceProfilesTable)
+  const [profile] = await rdb(req).select().from(complianceProfilesTable)
     .where(and(eq(complianceProfilesTable.partyId, id), eq(complianceProfilesTable.firmId, req.firmId!)));
 
-  const bos = await db.select().from(beneficialOwnersTable)
+  const bos = await rdb(req).select().from(beneficialOwnersTable)
     .where(and(eq(beneficialOwnersTable.partyId, id), eq(beneficialOwnersTable.firmId, req.firmId!)));
 
-  const caseLinks = await db.select().from(casePartiesTable)
+  const caseLinks = await rdb(req).select().from(casePartiesTable)
     .where(and(eq(casePartiesTable.partyId, id), eq(casePartiesTable.firmId, req.firmId!)));
 
   res.json({ ...party, complianceProfile: profile ?? null, beneficialOwners: bos, caseLinks });
@@ -139,14 +141,14 @@ router.get("/parties/:id", requireAuth, requireFirmUser, async (req: AuthRequest
 // ---------------------------------------------------------------------------
 router.patch("/parties/:id", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
   const id = Number(req.params.id);
-  const [party] = await db.select().from(partiesTable)
+  const [party] = await rdb(req).select().from(partiesTable)
     .where(and(eq(partiesTable.id, id), eq(partiesTable.firmId, req.firmId!), isNull(partiesTable.deletedAt)));
   if (!party) { res.status(404).json({ error: "Party not found" }); return; }
 
   const parsed = UpdatePartyBody.safeParse(req.body);
   if (!parsed.success) { res.status(400).json({ error: parsed.error.issues }); return; }
 
-  const [updated] = await db.update(partiesTable).set(parsed.data).where(eq(partiesTable.id, id)).returning();
+  const [updated] = await rdb(req).update(partiesTable).set(parsed.data).where(eq(partiesTable.id, id)).returning();
 
   await writeAuditLog({
     actorId: req.userId, firmId: req.firmId, actorType: "firm_user",
@@ -162,11 +164,11 @@ router.patch("/parties/:id", requireAuth, requireFirmUser, async (req: AuthReque
 // ---------------------------------------------------------------------------
 router.delete("/parties/:id", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
   const id = Number(req.params.id);
-  const [party] = await db.select().from(partiesTable)
+  const [party] = await rdb(req).select().from(partiesTable)
     .where(and(eq(partiesTable.id, id), eq(partiesTable.firmId, req.firmId!), isNull(partiesTable.deletedAt)));
   if (!party) { res.status(404).json({ error: "Party not found" }); return; }
 
-  await db.update(partiesTable).set({ deletedAt: new Date() }).where(eq(partiesTable.id, id));
+  await rdb(req).update(partiesTable).set({ deletedAt: new Date() }).where(eq(partiesTable.id, id));
   await writeAuditLog({
     actorId: req.userId, firmId: req.firmId, actorType: "firm_user",
     action: "compliance.party_deleted", entityType: "party", entityId: id,
@@ -180,14 +182,14 @@ router.delete("/parties/:id", requireAuth, requireFirmUser, async (req: AuthRequ
 // ---------------------------------------------------------------------------
 router.post("/parties/:id/beneficial-owners", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
   const partyId = Number(req.params.id);
-  const [party] = await db.select().from(partiesTable)
+  const [party] = await rdb(req).select().from(partiesTable)
     .where(and(eq(partiesTable.id, partyId), eq(partiesTable.firmId, req.firmId!), isNull(partiesTable.deletedAt)));
   if (!party) { res.status(404).json({ error: "Party not found" }); return; }
 
   const parsed = CreateBeneficialOwnerBody.safeParse(req.body);
   if (!parsed.success) { res.status(400).json({ error: parsed.error.issues }); return; }
 
-  const [bo] = await db.insert(beneficialOwnersTable).values({
+  const [bo] = await rdb(req).insert(beneficialOwnersTable).values({
     firmId: req.firmId!,
     partyId,
     ...parsed.data,
@@ -207,7 +209,7 @@ router.post("/parties/:id/beneficial-owners", requireAuth, requireFirmUser, asyn
 // ---------------------------------------------------------------------------
 router.delete("/parties/:id/beneficial-owners/:boId", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
   const boId = Number(req.params.boId);
-  await db.delete(beneficialOwnersTable).where(
+  await rdb(req).delete(beneficialOwnersTable).where(
     and(eq(beneficialOwnersTable.id, boId), eq(beneficialOwnersTable.firmId, req.firmId!))
   );
   await writeAuditLog({
@@ -223,7 +225,7 @@ router.delete("/parties/:id/beneficial-owners/:boId", requireAuth, requireFirmUs
 // ---------------------------------------------------------------------------
 router.get("/cases/:caseId/parties", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
   const caseId = Number(req.params.caseId);
-  const links = await db.select({
+  const links = await rdb(req).select({
     id: casePartiesTable.id,
     partyId: casePartiesTable.partyId,
     partyRole: casePartiesTable.partyRole,
@@ -245,7 +247,7 @@ router.post("/cases/:caseId/parties", requireAuth, requireFirmUser, async (req: 
   if (!parsed.success) { res.status(400).json({ error: parsed.error.issues }); return; }
 
   // Check for duplicate
-  const [existing] = await db.select().from(casePartiesTable)
+  const [existing] = await rdb(req).select().from(casePartiesTable)
     .where(and(
       eq(casePartiesTable.caseId, caseId),
       eq(casePartiesTable.partyId, parsed.data.partyId),
@@ -253,7 +255,7 @@ router.post("/cases/:caseId/parties", requireAuth, requireFirmUser, async (req: 
     ));
   if (existing) { res.status(409).json({ error: "Party already linked to this case" }); return; }
 
-  const [link] = await db.insert(casePartiesTable).values({
+  const [link] = await rdb(req).insert(casePartiesTable).values({
     firmId: req.firmId!,
     caseId,
     partyId: parsed.data.partyId,
@@ -277,7 +279,7 @@ router.post("/cases/:caseId/parties", requireAuth, requireFirmUser, async (req: 
 router.delete("/cases/:caseId/parties/:partyId", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
   const caseId = Number(req.params.caseId);
   const partyId = Number(req.params.partyId);
-  await db.delete(casePartiesTable)
+  await rdb(req).delete(casePartiesTable)
     .where(and(
       eq(casePartiesTable.caseId, caseId),
       eq(casePartiesTable.partyId, partyId),

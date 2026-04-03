@@ -13,6 +13,8 @@ import { sensitiveRateLimiter } from "../lib/rate-limit";
 
 const router: IRouter = Router();
 
+function rdb(req: AuthRequest) { return req.rlsDb ?? db; }
+
 // ---------------------------------------------------------------------------
 // Name similarity engine
 //
@@ -91,6 +93,7 @@ interface ConflictMatchInput {
 }
 
 async function runConflictEngine(
+  rlsDb: ReturnType<typeof rdb>,
   firmId: number,
   checkId: number,
   caseIdToExclude: number,
@@ -100,7 +103,7 @@ async function runConflictEngine(
 
   // Gather all parties already on other cases in this firm.
   // We check case_purchasers (legacy) and case_parties (new).
-  const existingPurchasers = await db
+  const existingPurchasers = await rlsDb
     .select({
       caseId: casePurchasersTable.caseId,
       clientId: casePurchasersTable.clientId,
@@ -118,7 +121,7 @@ async function runConflictEngine(
       isNull(casesTable.deletedAt),
     ));
 
-  const existingCaseParties = await db
+  const existingCaseParties = await rlsDb
     .select({
       caseId: casePartiesTable.caseId,
       partyRole: casePartiesTable.partyRole,
@@ -253,11 +256,11 @@ router.post("/conflict/check", sensitiveRateLimiter, requireAuth, requireFirmUse
   if (!parsed.success) { res.status(400).json({ error: parsed.error.issues }); return; }
 
   // Verify case belongs to firm
-  const [c] = await db.select().from(casesTable)
+  const [c] = await rdb(req).select().from(casesTable)
     .where(and(eq(casesTable.id, parsed.data.caseId), eq(casesTable.firmId, req.firmId!)));
   if (!c) { res.status(404).json({ error: "Case not found" }); return; }
 
-  const [check] = await db.insert(conflictChecksTable).values({
+  const [check] = await rdb(req).insert(conflictChecksTable).values({
     firmId: req.firmId!,
     caseId: parsed.data.caseId,
     status: "running",
@@ -268,6 +271,7 @@ router.post("/conflict/check", sensitiveRateLimiter, requireAuth, requireFirmUse
 
   try {
     const rawMatches = await runConflictEngine(
+      rdb(req),
       req.firmId!, check.id, parsed.data.caseId, parsed.data.parties,
     );
 
@@ -288,7 +292,7 @@ router.post("/conflict/check", sensitiveRateLimiter, requireAuth, requireFirmUse
 
     let insertedMatches: (typeof conflictMatchesTable.$inferSelect)[] = [];
     if (deduped.length > 0) {
-      insertedMatches = await db.insert(conflictMatchesTable).values(deduped).returning();
+      insertedMatches = await rdb(req).insert(conflictMatchesTable).values(deduped).returning();
     }
 
     const overallResult = insertedMatches.length === 0
@@ -297,7 +301,7 @@ router.post("/conflict/check", sensitiveRateLimiter, requireAuth, requireFirmUse
         ? "blocked_pending_partner_override"
         : "warning";
 
-    const [updated] = await db.update(conflictChecksTable).set({
+    const [updated] = await rdb(req).update(conflictChecksTable).set({
       status: "completed",
       completedAt: new Date(),
       overallResult,
@@ -313,7 +317,7 @@ router.post("/conflict/check", sensitiveRateLimiter, requireAuth, requireFirmUse
 
     res.status(201).json({ check: updated, matches: insertedMatches });
   } catch (err) {
-    await db.update(conflictChecksTable).set({ status: "failed" }).where(eq(conflictChecksTable.id, check.id));
+    await rdb(req).update(conflictChecksTable).set({ status: "failed" }).where(eq(conflictChecksTable.id, check.id));
     throw err;
   }
 });
@@ -323,7 +327,7 @@ router.post("/conflict/check", sensitiveRateLimiter, requireAuth, requireFirmUse
 // ---------------------------------------------------------------------------
 router.get("/conflict/checks", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
   const { caseId } = req.query as Record<string, string>;
-  const checks = await db.select().from(conflictChecksTable)
+  const checks = await rdb(req).select().from(conflictChecksTable)
     .where(and(
       eq(conflictChecksTable.firmId, req.firmId!),
       caseId ? eq(conflictChecksTable.caseId, Number(caseId)) : undefined,
@@ -338,14 +342,14 @@ router.get("/conflict/checks", requireAuth, requireFirmUser, async (req: AuthReq
 // ---------------------------------------------------------------------------
 router.get("/conflict/checks/:id", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
   const id = Number(req.params.id);
-  const [check] = await db.select().from(conflictChecksTable)
+  const [check] = await rdb(req).select().from(conflictChecksTable)
     .where(and(eq(conflictChecksTable.id, id), eq(conflictChecksTable.firmId, req.firmId!)));
   if (!check) { res.status(404).json({ error: "Conflict check not found" }); return; }
 
-  const matches = await db.select().from(conflictMatchesTable)
+  const matches = await rdb(req).select().from(conflictMatchesTable)
     .where(and(eq(conflictMatchesTable.conflictCheckId, id), eq(conflictMatchesTable.firmId, req.firmId!)));
 
-  const overrides = await db.select().from(conflictOverridesTable)
+  const overrides = await rdb(req).select().from(conflictOverridesTable)
     .where(and(eq(conflictOverridesTable.conflictCheckId, id), eq(conflictOverridesTable.firmId, req.firmId!)));
 
   res.json({ check, matches, overrides });
@@ -370,11 +374,11 @@ router.post(
     }).safeParse(req.body);
     if (!parsed.success) { res.status(400).json({ error: parsed.error.issues }); return; }
 
-    const [check] = await db.select().from(conflictChecksTable)
+    const [check] = await rdb(req).select().from(conflictChecksTable)
       .where(and(eq(conflictChecksTable.id, checkId), eq(conflictChecksTable.firmId, req.firmId!)));
     if (!check) { res.status(404).json({ error: "Conflict check not found" }); return; }
 
-    const [match] = await db.select().from(conflictMatchesTable)
+    const [match] = await rdb(req).select().from(conflictMatchesTable)
       .where(and(
         eq(conflictMatchesTable.id, parsed.data.conflictMatchId),
         eq(conflictMatchesTable.conflictCheckId, checkId),
@@ -386,14 +390,14 @@ router.post(
     }
 
     // Check for duplicate override
-    const [existing] = await db.select().from(conflictOverridesTable)
+    const [existing] = await rdb(req).select().from(conflictOverridesTable)
       .where(and(
         eq(conflictOverridesTable.conflictMatchId, parsed.data.conflictMatchId),
         eq(conflictOverridesTable.firmId, req.firmId!),
       ));
     if (existing) { res.status(409).json({ error: "This match has already been overridden" }); return; }
 
-    const [override] = await db.insert(conflictOverridesTable).values({
+    const [override] = await rdb(req).insert(conflictOverridesTable).values({
       firmId: req.firmId!,
       conflictCheckId: checkId,
       conflictMatchId: parsed.data.conflictMatchId,
@@ -402,9 +406,9 @@ router.post(
     }).returning();
 
     // Check if all blocked matches are now overridden; if so, update check result
-    const allMatches = await db.select().from(conflictMatchesTable)
+    const allMatches = await rdb(req).select().from(conflictMatchesTable)
       .where(and(eq(conflictMatchesTable.conflictCheckId, checkId), eq(conflictMatchesTable.firmId, req.firmId!)));
-    const allOverrides = await db.select().from(conflictOverridesTable)
+    const allOverrides = await rdb(req).select().from(conflictOverridesTable)
       .where(and(eq(conflictOverridesTable.conflictCheckId, checkId), eq(conflictOverridesTable.firmId, req.firmId!)));
     const blockedMatchIds = new Set(allMatches.filter(m => m.result === "blocked").map(m => m.id));
     const overriddenIds = new Set(allOverrides.map(o => o.conflictMatchId));
@@ -412,7 +416,7 @@ router.post(
 
     if (allBlockedOverridden) {
       const newResult = allMatches.some(m => m.result === "warning") ? "warning" : "no_match";
-      await db.update(conflictChecksTable).set({ overallResult: newResult }).where(eq(conflictChecksTable.id, checkId));
+      await rdb(req).update(conflictChecksTable).set({ overallResult: newResult }).where(eq(conflictChecksTable.id, checkId));
     }
 
     await writeAuditLog({

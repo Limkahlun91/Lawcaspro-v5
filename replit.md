@@ -230,6 +230,27 @@ Projects support full CRUD including edit via the PATCH endpoint. The edit page 
 - `conflict.test.ts` — no match, NRIC blocked match, get results, access control (lawyer blocked), partner override flow, single-use re-auth token, duplicate override rejected, name fuzzy match, audit log, input validation
 - All 102 tests pass
 
+### Security Fix — RLS Enforcement Chain (PROD-RLS-001, 2026-04-03)
+
+Root cause analysis revealed 5 separate failures that collectively allowed the `postgres` superuser (BYPASSRLS=true) to bypass Row-Level Security entirely. All 5 have been fixed:
+
+**SQL Layer:**
+- `apply-rls.sql` rewritten: removed hardcoded `heliumdb` database name; switched all 38 tenant_isolation policies from `TO app_user` to `TO PUBLIC` (so policies apply even if app_user doesn't exist yet); added `FORCE ROW LEVEL SECURITY` to all Phase 2 tables
+- Migration `0002_correct_rls_policies.sql` created + registered in `_journal.json` + applied — idempotent repair that runs on every environment on first deploy
+
+**DB Client Layer (`lib/db/src/`):**
+- `tenant-context.ts`: exports `setTenantContextSession(client, firmId)` (session-level SET, no transaction required), `setTenantContext` (SET LOCAL, for explicit tx), `clearTenantContext`, `makeRlsDb(client)`, `RlsDb` type
+- `index.ts`: exports `pool`, `schema`, `AppDb` type; re-exports all tenant-context helpers
+
+**Auth Middleware (`lib/auth.ts`):**
+- `requireFirmUser` is now `async`; checks out a dedicated `PoolClient` from the pool, calls `setTenantContextSession` (SET ROLE app_user + SET app.current_firm_id = firmId), attaches `req.rlsDb = makeRlsDb(client)`, and resets/releases on `res.finish`/`res.close`
+- Session-level SET (not SET LOCAL) is used deliberately to avoid commit-before-read race condition in tests and under high concurrency
+
+**Route Handlers:**
+- `routes/parties.ts`, `routes/compliance.ts`, `routes/conflict.ts`: all 66 firm-scoped `db.` calls replaced with `rdb(req).` (= `req.rlsDb ?? db`); `runConflictEngine` now accepts `rlsDb` as first parameter
+
+**Result:** 102/102 tests pass; dev DB verified: all 38 tables have `tenant_isolation` policy set to `{public}`
+
 ### Build / Release Hardening (2026-04-03)
 - **`dev` script** changed to `tsx watch src/index.ts` — hot-reloads on every source save, eliminates stale-dist risk in development
 - **`start` script** now calls `node scripts/check-dist.mjs` first — fails with a clear error if `dist/index.mjs` is missing or older than any source `.ts` file

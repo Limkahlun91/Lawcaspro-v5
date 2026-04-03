@@ -14,6 +14,8 @@ import { sensitiveRateLimiter } from "../lib/rate-limit";
 
 const router: IRouter = Router();
 
+function rdb(req: AuthRequest) { return req.rlsDb ?? db; }
+
 // ---------------------------------------------------------------------------
 // Risk scoring helper
 // ---------------------------------------------------------------------------
@@ -63,7 +65,7 @@ function computeRiskScore(factors: {
 // ---------------------------------------------------------------------------
 router.get("/compliance/profiles", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
   const { status } = req.query as Record<string, string>;
-  const profiles = await db.select({
+  const profiles = await rdb(req).select({
     id: complianceProfilesTable.id,
     partyId: complianceProfilesTable.partyId,
     cddStatus: complianceProfilesTable.cddStatus,
@@ -90,27 +92,27 @@ router.get("/compliance/profiles", requireAuth, requireFirmUser, async (req: Aut
 // ---------------------------------------------------------------------------
 router.get("/compliance/profiles/:id", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
   const id = Number(req.params.id);
-  const [profile] = await db.select().from(complianceProfilesTable)
+  const [profile] = await rdb(req).select().from(complianceProfilesTable)
     .where(and(eq(complianceProfilesTable.id, id), eq(complianceProfilesTable.firmId, req.firmId!)));
   if (!profile) { res.status(404).json({ error: "Compliance profile not found" }); return; }
 
-  const [party] = await db.select().from(partiesTable).where(eq(partiesTable.id, profile.partyId));
-  const checks = await db.select().from(cddChecksTable)
+  const [party] = await rdb(req).select().from(partiesTable).where(eq(partiesTable.id, profile.partyId));
+  const checks = await rdb(req).select().from(cddChecksTable)
     .where(and(eq(cddChecksTable.complianceProfileId, id), eq(cddChecksTable.firmId, req.firmId!)));
-  const documents = await db.select().from(cddDocumentsTable)
+  const documents = await rdb(req).select().from(cddDocumentsTable)
     .where(and(eq(cddDocumentsTable.complianceProfileId, id), eq(cddDocumentsTable.firmId, req.firmId!)));
-  const screenings = await db.select().from(sanctionsScreeningsTable)
+  const screenings = await rdb(req).select().from(sanctionsScreeningsTable)
     .where(and(eq(sanctionsScreeningsTable.complianceProfileId, id), eq(sanctionsScreeningsTable.firmId, req.firmId!)));
-  const peps = await db.select().from(pepFlagsTable)
+  const peps = await rdb(req).select().from(pepFlagsTable)
     .where(and(eq(pepFlagsTable.partyId, profile.partyId), eq(pepFlagsTable.firmId, req.firmId!)));
-  const riskHistory = await db.select().from(riskAssessmentsTable)
+  const riskHistory = await rdb(req).select().from(riskAssessmentsTable)
     .where(and(eq(riskAssessmentsTable.complianceProfileId, id), eq(riskAssessmentsTable.firmId, req.firmId!)))
     .orderBy(desc(riskAssessmentsTable.createdAt));
-  const sof = await db.select().from(sourceOfFundsRecordsTable)
+  const sof = await rdb(req).select().from(sourceOfFundsRecordsTable)
     .where(and(eq(sourceOfFundsRecordsTable.complianceProfileId, id), eq(sourceOfFundsRecordsTable.firmId, req.firmId!)));
-  const sow = await db.select().from(sourceOfWealthRecordsTable)
+  const sow = await rdb(req).select().from(sourceOfWealthRecordsTable)
     .where(and(eq(sourceOfWealthRecordsTable.complianceProfileId, id), eq(sourceOfWealthRecordsTable.firmId, req.firmId!)));
-  const notes = await db.select().from(suspiciousReviewNotesTable)
+  const notes = await rdb(req).select().from(suspiciousReviewNotesTable)
     .where(and(eq(suspiciousReviewNotesTable.complianceProfileId, id), eq(suspiciousReviewNotesTable.firmId, req.firmId!)));
 
   res.json({
@@ -131,7 +133,7 @@ router.patch("/compliance/profiles/:id/status", requireAuth, requireFirmUser, as
   }).safeParse(req.body);
   if (!parsed.success) { res.status(400).json({ error: parsed.error.issues }); return; }
 
-  const [profile] = await db.select().from(complianceProfilesTable)
+  const [profile] = await rdb(req).select().from(complianceProfilesTable)
     .where(and(eq(complianceProfilesTable.id, id), eq(complianceProfilesTable.firmId, req.firmId!)));
   if (!profile) { res.status(404).json({ error: "Compliance profile not found" }); return; }
 
@@ -144,7 +146,7 @@ router.patch("/compliance/profiles/:id/status", requireAuth, requireFirmUser, as
   }
   if (parsed.data.notes) update.notes = parsed.data.notes;
 
-  const [updated] = await db.update(complianceProfilesTable).set(update).where(eq(complianceProfilesTable.id, id)).returning();
+  const [updated] = await rdb(req).update(complianceProfilesTable).set(update).where(eq(complianceProfilesTable.id, id)).returning();
 
   await writeAuditLog({
     actorId: req.userId, firmId: req.firmId, actorType: "firm_user",
@@ -170,11 +172,11 @@ router.post("/compliance/profiles/:id/cdd-checks", requireAuth, requireFirmUser,
   }).safeParse(req.body);
   if (!parsed.success) { res.status(400).json({ error: parsed.error.issues }); return; }
 
-  const [profile] = await db.select().from(complianceProfilesTable)
+  const [profile] = await rdb(req).select().from(complianceProfilesTable)
     .where(and(eq(complianceProfilesTable.id, profileId), eq(complianceProfilesTable.firmId, req.firmId!)));
   if (!profile) { res.status(404).json({ error: "Compliance profile not found" }); return; }
 
-  const [check] = await db.insert(cddChecksTable).values({
+  const [check] = await rdb(req).insert(cddChecksTable).values({
     firmId: req.firmId!,
     complianceProfileId: profileId,
     ...parsed.data,
@@ -209,13 +211,13 @@ router.post("/compliance/profiles/:id/risk-assessment", sensitiveRateLimiter, re
   }).safeParse(req.body);
   if (!parsed.success) { res.status(400).json({ error: parsed.error.issues }); return; }
 
-  const [profile] = await db.select().from(complianceProfilesTable)
+  const [profile] = await rdb(req).select().from(complianceProfilesTable)
     .where(and(eq(complianceProfilesTable.id, profileId), eq(complianceProfilesTable.firmId, req.firmId!)));
   if (!profile) { res.status(404).json({ error: "Compliance profile not found" }); return; }
 
   const scoring = computeRiskScore(parsed.data);
 
-  const [assessment] = await db.insert(riskAssessmentsTable).values({
+  const [assessment] = await rdb(req).insert(riskAssessmentsTable).values({
     firmId: req.firmId!,
     partyId: profile.partyId,
     complianceProfileId: profileId,
@@ -228,7 +230,7 @@ router.post("/compliance/profiles/:id/risk-assessment", sensitiveRateLimiter, re
 
   // Sync back to compliance profile
   const newStatus = scoring.eddTriggered ? "enhanced_due_diligence_required" : profile.cddStatus;
-  await db.update(complianceProfilesTable).set({
+  await rdb(req).update(complianceProfilesTable).set({
     riskScore: scoring.riskScore,
     riskLevel: scoring.riskLevel,
     eddTriggered: scoring.eddTriggered,
@@ -260,11 +262,11 @@ router.post("/compliance/profiles/:id/sanctions-screening", sensitiveRateLimiter
   }).safeParse(req.body);
   if (!parsed.success) { res.status(400).json({ error: parsed.error.issues }); return; }
 
-  const [profile] = await db.select().from(complianceProfilesTable)
+  const [profile] = await rdb(req).select().from(complianceProfilesTable)
     .where(and(eq(complianceProfilesTable.id, profileId), eq(complianceProfilesTable.firmId, req.firmId!)));
   if (!profile) { res.status(404).json({ error: "Compliance profile not found" }); return; }
 
-  const [screening] = await db.insert(sanctionsScreeningsTable).values({
+  const [screening] = await rdb(req).insert(sanctionsScreeningsTable).values({
     firmId: req.firmId!,
     partyId: profile.partyId,
     complianceProfileId: profileId,
@@ -301,11 +303,11 @@ router.post("/compliance/profiles/:id/pep-flags", requireAuth, requireFirmUser, 
   }).safeParse(req.body);
   if (!parsed.success) { res.status(400).json({ error: parsed.error.issues }); return; }
 
-  const [profile] = await db.select().from(complianceProfilesTable)
+  const [profile] = await rdb(req).select().from(complianceProfilesTable)
     .where(and(eq(complianceProfilesTable.id, profileId), eq(complianceProfilesTable.firmId, req.firmId!)));
   if (!profile) { res.status(404).json({ error: "Compliance profile not found" }); return; }
 
-  const [flag] = await db.insert(pepFlagsTable).values({
+  const [flag] = await rdb(req).insert(pepFlagsTable).values({
     firmId: req.firmId!,
     partyId: profile.partyId,
     flaggedBy: req.userId,
@@ -313,7 +315,7 @@ router.post("/compliance/profiles/:id/pep-flags", requireAuth, requireFirmUser, 
   }).returning();
 
   // Update party isPep flag
-  await db.update(partiesTable).set({ isPep: true, pepDetails: parsed.data.position }).where(eq(partiesTable.id, profile.partyId));
+  await rdb(req).update(partiesTable).set({ isPep: true, pepDetails: parsed.data.position }).where(eq(partiesTable.id, profile.partyId));
 
   await writeAuditLog({
     actorId: req.userId, firmId: req.firmId, actorType: "firm_user",
@@ -332,7 +334,7 @@ router.post("/compliance/profiles/:id/pep-flags", requireAuth, requireFirmUser, 
 router.delete("/compliance/profiles/:id/pep-flags/:flagId", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
   const flagId = Number(req.params.flagId);
   const profileId = Number(req.params.id);
-  await db.update(pepFlagsTable).set({ isActive: false }).where(
+  await rdb(req).update(pepFlagsTable).set({ isActive: false }).where(
     and(eq(pepFlagsTable.id, flagId), eq(pepFlagsTable.firmId, req.firmId!))
   );
   await writeAuditLog({
@@ -357,11 +359,11 @@ router.post("/compliance/profiles/:id/source-of-funds", requireAuth, requireFirm
   }).safeParse(req.body);
   if (!parsed.success) { res.status(400).json({ error: parsed.error.issues }); return; }
 
-  const [profile] = await db.select().from(complianceProfilesTable)
+  const [profile] = await rdb(req).select().from(complianceProfilesTable)
     .where(and(eq(complianceProfilesTable.id, profileId), eq(complianceProfilesTable.firmId, req.firmId!)));
   if (!profile) { res.status(404).json({ error: "Compliance profile not found" }); return; }
 
-  const [record] = await db.insert(sourceOfFundsRecordsTable).values({
+  const [record] = await rdb(req).insert(sourceOfFundsRecordsTable).values({
     firmId: req.firmId!,
     partyId: profile.partyId,
     complianceProfileId: profileId,
@@ -392,11 +394,11 @@ router.post("/compliance/profiles/:id/source-of-wealth", requireAuth, requireFir
   }).safeParse(req.body);
   if (!parsed.success) { res.status(400).json({ error: parsed.error.issues }); return; }
 
-  const [profile] = await db.select().from(complianceProfilesTable)
+  const [profile] = await rdb(req).select().from(complianceProfilesTable)
     .where(and(eq(complianceProfilesTable.id, profileId), eq(complianceProfilesTable.firmId, req.firmId!)));
   if (!profile) { res.status(404).json({ error: "Compliance profile not found" }); return; }
 
-  const [record] = await db.insert(sourceOfWealthRecordsTable).values({
+  const [record] = await rdb(req).insert(sourceOfWealthRecordsTable).values({
     firmId: req.firmId!,
     partyId: profile.partyId,
     complianceProfileId: profileId,
@@ -425,11 +427,11 @@ router.post("/compliance/profiles/:id/suspicious-notes", requireAuth, requireFir
   }).safeParse(req.body);
   if (!parsed.success) { res.status(400).json({ error: parsed.error.issues }); return; }
 
-  const [profile] = await db.select().from(complianceProfilesTable)
+  const [profile] = await rdb(req).select().from(complianceProfilesTable)
     .where(and(eq(complianceProfilesTable.id, profileId), eq(complianceProfilesTable.firmId, req.firmId!)));
   if (!profile) { res.status(404).json({ error: "Compliance profile not found" }); return; }
 
-  const [note] = await db.insert(suspiciousReviewNotesTable).values({
+  const [note] = await rdb(req).insert(suspiciousReviewNotesTable).values({
     firmId: req.firmId!,
     partyId: profile.partyId,
     complianceProfileId: profileId,
@@ -461,11 +463,11 @@ router.post("/compliance/profiles/:id/retention", requireAuth, requireFirmUser, 
   }).safeParse(req.body);
   if (!parsed.success) { res.status(400).json({ error: parsed.error.issues }); return; }
 
-  const [profile] = await db.select().from(complianceProfilesTable)
+  const [profile] = await rdb(req).select().from(complianceProfilesTable)
     .where(and(eq(complianceProfilesTable.id, profileId), eq(complianceProfilesTable.firmId, req.firmId!)));
   if (!profile) { res.status(404).json({ error: "Compliance profile not found" }); return; }
 
-  const [record] = await db.insert(complianceRetentionRecordsTable).values({
+  const [record] = await rdb(req).insert(complianceRetentionRecordsTable).values({
     firmId: req.firmId!,
     partyId: profile.partyId,
     caseId: parsed.data.caseId ?? null,

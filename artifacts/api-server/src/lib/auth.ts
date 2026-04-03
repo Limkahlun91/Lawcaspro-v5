@@ -1,5 +1,5 @@
 import { Request, Response, NextFunction } from "express";
-import { db, sessionsTable, usersTable, auditLogsTable } from "@workspace/db";
+import { db, pool, sessionsTable, usersTable, auditLogsTable, makeRlsDb, setTenantContextSession, clearTenantContext, RlsDb } from "@workspace/db";
 import { eq } from "drizzle-orm";
 import crypto from "crypto";
 
@@ -9,6 +9,13 @@ export interface AuthRequest extends Request {
   firmId?: number | null;
   roleId?: number | null;
   supportSessionId?: number | null;
+  /**
+   * Per-request RLS-enforced Drizzle instance.
+   * Set by requireFirmUser. Runs inside a transaction as app_user with
+   * app.current_firm_id set to req.firmId. All firm-scoped queries in
+   * Phase 2+ route handlers must use this instead of the global db.
+   */
+  rlsDb?: RlsDb;
 }
 
 export async function writeAuditLog(params: {
@@ -101,16 +108,58 @@ export async function requireFounder(
   next();
 }
 
-export function requireFirmUser(
+/**
+ * requireFirmUser — verifies the caller is an active firm user, then opens a
+ * per-request Postgres transaction as app_user with app.current_firm_id set.
+ *
+ * This is what actually enforces DB-level RLS:
+ *   1. A PoolClient is checked out from the pool.
+ *   2. BEGIN is issued.
+ *   3. SET LOCAL ROLE app_user — switches away from postgres (BYPASSRLS).
+ *   4. SET LOCAL app.current_firm_id = req.firmId — drives tenant_isolation policies.
+ *   5. req.rlsDb is set to a Drizzle instance bound to this client.
+ *   6. On res.finish (or close), the transaction is COMMITTED (or ROLLBACKed).
+ *
+ * Phase 2+ route handlers MUST use req.rlsDb (not global db) for any query
+ * that should be tenant-isolated at the DB layer.
+ */
+export async function requireFirmUser(
   req: AuthRequest,
   res: Response,
   next: NextFunction
-): void {
+): Promise<void> {
   if (req.userType !== "firm_user" || !req.firmId) {
     writeAuditLog({ actorId: req.userId, firmId: req.firmId, actorType: req.userType ?? "unknown", action: "auth.forbidden.firm_user_required", detail: `${req.method} ${req.path}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
     res.status(403).json({ error: "Firm user access required" });
     return;
   }
+
+  let released = false;
+  const client = await pool.connect();
+
+  const releaseClient = async (ok: boolean) => {
+    if (released) return;
+    released = true;
+    try {
+      await clearTenantContext(client);
+    } catch {
+    } finally {
+      client.release(!ok);
+    }
+  };
+
+  try {
+    await setTenantContextSession(client, req.firmId);
+    req.rlsDb = makeRlsDb(client);
+  } catch (err) {
+    client.release(true);
+    next(err);
+    return;
+  }
+
+  res.on("finish", () => { releaseClient(true); });
+  res.on("close", () => { releaseClient(false); });
+
   next();
 }
 
@@ -133,13 +182,6 @@ export function requirePartner(
 
 // ---------------------------------------------------------------------------
 // Short-lived in-memory re-auth token store
-//
-// Re-auth tokens are intentionally NOT stored in the database:
-//   • They expire in 5 minutes and are single-use — no persistence needed.
-//   • They never equal the main session token (separate namespace, separate
-//     random value), so there is no token confusion risk.
-//   • On server restart all pending tokens are invalidated — acceptable for
-//     a 5-minute UX confirmation window.
 // ---------------------------------------------------------------------------
 
 interface ReauthEntry {
@@ -150,7 +192,6 @@ interface ReauthEntry {
 
 const _reauthStore = new Map<string, ReauthEntry>();
 
-// Sweep expired entries every 5 minutes.
 setInterval(() => {
   const now = new Date();
   for (const [k, v] of _reauthStore) {
@@ -158,10 +199,6 @@ setInterval(() => {
   }
 }, 5 * 60 * 1000).unref();
 
-/**
- * Issue a short-lived (5 min, single-use) re-auth token for the given user.
- * Returns the plain token (to be sent to the client once).
- */
 export function issueReauthToken(userId: number): string {
   const plain = crypto.randomBytes(32).toString("hex");
   const hash = crypto.createHash("sha256").update(plain).digest("hex");
@@ -197,7 +234,6 @@ export async function requireReAuth(
     return;
   }
 
-  // Mark single-use immediately.
   entry.used = true;
   next();
 }

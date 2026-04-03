@@ -1,0 +1,69 @@
+Stop Phase 3 immediately.
+
+Production publishing is currently blocked by an RLS migration/design error.
+
+Observed production failure:
+CREATE POLICY "tenant_isolation" ON "communication_threads"
+AS PERMISSIVE FOR ALL TO "app_user";
+→ role "app_user" does not exist
+
+This means the current RLS implementation is not production-safe because it assumes a database role that does not exist in production.
+
+==================================================
+URGENT FIX — PRODUCTION RLS ROLE MISMATCH
+==================================================
+
+1. Root-cause audit
+Provide exact answers for all of these:
+- Does role "app_user" exist in development DB?
+- Does role "app_user" exist in production DB?
+- What are the results of:
+  - SELECT current_user, session_user;
+  - SELECT rolname FROM pg_roles WHERE rolname = 'app_user';
+- Which database role is actually used by:
+  - normal firm/app requests
+  - founder/platform requests
+  - support session requests
+
+2. Immediate production-safe fix
+Do NOT keep hard-coding RLS policies to TO app_user unless that role is guaranteed to exist in every environment and is actually the runtime role for tenant-scoped queries.
+
+Implement a production-safe fix by updating:
+- lib/db/scripts/apply-rls.sql
+- any migration file that creates policies inline
+- any helper scripts or docs that still assume roles = {app_user}
+
+Preferred fix:
+- use TO PUBLIC for tenant isolation policies
+- keep tenant protection inside USING / WITH CHECK via app.current_firm_id and app.is_founder
+- keep the NULLIF(current_setting(...), '')::integer pattern to avoid empty-string cast errors
+
+3. Idempotent repair migration
+Create a new migration that:
+- drops any broken tenant_isolation policies that reference app_user
+- recreates them safely
+- is idempotent
+- works on both existing environments and fresh deploys
+
+4. Production deploy verification
+Provide exact proof for:
+- migration name
+- SQL changed
+- publishing/deploy succeeds after the fix
+- pg_policies output after deploy
+- rowsecurity enabled table list after deploy
+
+5. Critical security verification
+Prove whether normal firm-scoped app queries actually run under a role that is subject to RLS.
+If normal app traffic still runs as postgres/superuser/BYPASSRLS, say so explicitly.
+If so, provide the corrective plan:
+- either use a non-bypass database role for tenant-scoped queries
+- or explicitly SET ROLE / use a separate DB client for app_user-like traffic
+
+6. Final answer required
+After the fix, answer clearly:
+- Was the publish failure caused by missing role app_user? YES/NO
+- Is the RLS policy now environment-safe? YES/NO
+- Are normal firm queries actually protected by RLS in production? YES/NO
+
+Do not resume Phase 3 until this production RLS issue is fully fixed and verified.

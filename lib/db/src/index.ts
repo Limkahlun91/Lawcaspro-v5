@@ -13,4 +13,8 @@ if (!process.env.DATABASE_URL) {
 export const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 export const db = drizzle(pool, { schema });
 
+export { schema };
+export type AppDb = typeof db;
+
 export * from "./schema";
+export * from "./tenant-context";
