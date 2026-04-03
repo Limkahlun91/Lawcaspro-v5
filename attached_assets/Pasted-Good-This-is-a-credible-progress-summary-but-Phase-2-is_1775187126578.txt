@@ -1,0 +1,98 @@
+Good. This is a credible progress summary, but Phase 2 is not accepted from summary text alone.
+
+Previously, AML / CDD / KYC and Conflict Check were explicitly audited as NOT STARTED, so this phase requires full evidence-based acceptance before Phase 3 can begin.
+
+Do NOT start Phase 3 yet.
+
+==================================================
+FINAL PHASE 2 ACCEPTANCE PACKAGE REQUIRED
+==================================================
+
+You said all evidence is in docs/phase2-acceptance.md.
+Now provide the actual evidence in structured form, not only a summary.
+
+PART 1 — DATABASE / MIGRATION EVIDENCE
+- exact migration file names for Phase 2
+- exact execution order
+- exact 16 table names created
+- key columns + foreign keys for each
+- whether RLS is enabled on each
+- whether audit logging applies on each
+
+PART 2 — BACKEND EVIDENCE
+- exact backend file list created/modified
+- exact routes added
+- exact route purposes
+- whether each route is fully working or partial
+
+PART 3 — FRONTEND EVIDENCE
+- exact frontend file list created/modified
+- exact pages/components added
+- where the compliance tab/panel exists
+- where the conflict results UI exists
+- where override UI exists
+- where party / beneficial owner forms exist
+
+PART 4 — BUSINESS RULE EVIDENCE
+Explain the actual implemented logic for:
+- CDD status lifecycle
+- EDD trigger rules
+- risk scoring
+- sanctions screening storage
+- PEP flag storage
+- source of funds / source of wealth capture
+- conflict result states
+- partner override rules
+- party dedupe behavior
+
+PART 5 — AUDIT EVIDENCE
+- exact new audit action strings
+- which actions write audit logs
+- which actions require partner / re-auth
+
+PART 6 — TEST EVIDENCE
+- exact 8 test file paths
+- what each test file verifies
+- exact final 102/102 output
+
+PART 7 — E2E EVIDENCE
+Show one real full flow for each:
+1. compliance record creation
+2. EDD-triggered risk case
+3. blocked conflict result
+4. partner override success
+5. non-partner override rejection
+
+For each, show:
+- request payload
+- response
+- resulting IDs / status transitions
+
+==================================================
+BUILD / RELEASE HARDENING PROOF
+==================================================
+
+You also claimed build hardening is complete.
+Provide exact evidence for that too:
+
+1. exact package.json / script changes
+2. exact start command changes
+3. exact dev command changes
+4. exact preview command changes
+5. exact stale-dist guard implementation
+6. exact file path of the fail-fast check
+7. explain precisely how stale compiled code is now prevented in:
+   - local dev
+   - test
+   - production start/deploy
+
+==================================================
+FINAL STATUS
+==================================================
+
+Answer only after evidence is shown:
+- Is Phase 2 complete? YES/NO
+- Is build/release hardening complete? YES/NO
+- Is Phase 3 allowed to start? YES/NO
+
+No Phase 3 until this package is accepted.
