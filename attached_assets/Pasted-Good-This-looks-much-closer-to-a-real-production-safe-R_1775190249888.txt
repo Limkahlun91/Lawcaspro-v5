@@ -1,0 +1,57 @@
+Good. This looks much closer to a real production-safe RLS implementation.
+
+But PROD-RLS-001 is not finally accepted until the runtime role path is proven clean.
+
+You changed policies from TO app_user to TO PUBLIC, which is correct.
+However, you also said setTenantContextSession(client, firmId) now switches to app_user role.
+
+That creates one final acceptance question:
+
+==================================================
+FINAL PROD-RLS-001 RUNTIME ACCEPTANCE
+==================================================
+
+Provide exact proof for all of the following:
+
+1. Does role app_user now exist in production DB?
+Show exact output of:
+- SELECT rolname FROM pg_roles WHERE rolname = 'app_user';
+
+2. If app_user exists, how is it created?
+Show:
+- migration file name, OR
+- bootstrap SQL / script path, OR
+- environment provisioning step
+
+3. If normal firm requests call SET ROLE app_user:
+- show exact code path where this happens
+- show exact code path where the role is reset/cleared before connection release
+- prove pooled connections cannot leak tenant context or role context between requests
+
+4. If app_user does NOT exist in production:
+- explain how setTenantContextSession can work without runtime failure
+- show the exact fallback logic
+
+5. Production runtime proof
+Show one real successful production-safe request path using the RLS db:
+- request type
+- code path
+- role/context set
+- query executed through req.rlsDb
+- response succeeded
+
+6. Connection hygiene proof
+Show how you guarantee all of these are reset before client release:
+- role
+- app.current_firm_id
+- app.is_founder
+- any session GUCs used for RLS
+
+7. Final answer
+Answer clearly:
+- Are policies environment-safe now? YES/NO
+- Does production runtime have the required DB role(s)? YES/NO
+- Can normal firm-scoped requests execute under RLS without runtime role errors? YES/NO
+- Can pooled connections leak prior tenant context after release? YES/NO
+
+Do not mark PROD-RLS-001 finally accepted until these runtime proofs are shown.
