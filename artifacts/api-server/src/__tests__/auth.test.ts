@@ -187,12 +187,16 @@ describe("TOTP endpoints", () => {
   });
 
   it("returns 400 on disable when TOTP not enabled (with reauth token)", async () => {
-    // requireReAuth is mounted on this route, so x-reauth-token is required
-    // before the TOTP-enabled check can run.
+    // requireReAuth is on this route — get a proper short-lived re-auth token first.
+    const reauthRes = await request(app)
+      .post("/api/auth/reauth-token")
+      .set("Authorization", `Bearer ${lawyerToken}`);
+    expect(reauthRes.status).toBe(200);
+
     const res = await request(app)
       .post("/api/auth/totp/disable")
       .set("Authorization", `Bearer ${lawyerToken}`)
-      .set("x-reauth-token", lawyerToken)
+      .set("x-reauth-token", reauthRes.body.reAuthToken)
       .send({ code: "000000" });
 
     expect(res.status).toBe(400);

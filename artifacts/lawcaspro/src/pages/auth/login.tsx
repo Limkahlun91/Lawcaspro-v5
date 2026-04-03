@@ -61,7 +61,7 @@ export default function Login() {
         return;
       }
 
-      setAuthUser(body, body.token);
+      setAuthUser(body);
       if (body.userType === "founder") {
         setLocation("/platform/dashboard");
       } else {

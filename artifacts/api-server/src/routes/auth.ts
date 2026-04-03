@@ -4,7 +4,7 @@ import crypto from "crypto";
 import { eq } from "drizzle-orm";
 import { db, usersTable, sessionsTable, rolesTable, firmsTable } from "@workspace/db";
 import { LoginBody } from "@workspace/api-zod";
-import { requireAuth, requireReAuth, type AuthRequest, writeAuditLog } from "../lib/auth";
+import { requireAuth, requireReAuth, issueReauthToken, type AuthRequest, writeAuditLog } from "../lib/auth";
 import { authRateLimiter, sensitiveRateLimiter } from "../lib/rate-limit";
 import * as OTPAuth from "otpauth";
 import QRCode from "qrcode";
@@ -178,6 +178,19 @@ router.delete("/auth/sessions/:id", requireAuth, async (req: AuthRequest, res): 
   await db.delete(sessionsTable).where(eq(sessionsTable.id, sessionId));
   await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "auth.session_revoked", entityType: "session", entityId: sessionId, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
   res.json({ success: true });
+});
+
+// Issue a short-lived (5 min, single-use) re-auth token.
+// The client calls this when the user initiates a sensitive action.
+// The returned token is stored in React state (memory only — never localStorage/sessionStorage).
+router.post("/auth/reauth-token", requireAuth, async (req: AuthRequest, res): Promise<void> => {
+  const token = issueReauthToken(req.userId!);
+  await writeAuditLog({
+    actorId: req.userId, firmId: req.firmId, actorType: req.userType ?? "firm_user",
+    action: "auth.reauth_token_issued", detail: req.path,
+    ipAddress: req.ip, userAgent: req.headers["user-agent"],
+  });
+  res.json({ reAuthToken: token });
 });
 
 router.post("/auth/totp/setup", sensitiveRateLimiter, requireAuth, async (req: AuthRequest, res): Promise<void> => {

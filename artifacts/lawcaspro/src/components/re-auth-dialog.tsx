@@ -1,9 +1,15 @@
 /**
  * re-auth-dialog.tsx
  *
- * Dialog shown to the user when a sensitive API action returns 403 REAUTH_REQUIRED.
- * The user must click "Confirm" to proceed, which re-sends the request with the
- * current session token as the x-reauth-token header.
+ * Dialog shown when a sensitive action requires confirmation.
+ *
+ * Security design:
+ *   - When the user clicks "Confirm", the dialog calls POST /auth/reauth-token
+ *     (authenticated via the existing httpOnly session cookie).
+ *   - The server returns a short-lived, single-use re-auth token (5 min TTL).
+ *   - That token is held in React component state (memory) — never written to
+ *     localStorage or sessionStorage — and discarded once the action completes.
+ *   - The main session token is never exposed to frontend JavaScript.
  *
  * Usage example:
  *
@@ -34,7 +40,7 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
-import { useAuth } from "@/lib/auth-context";
+import { getApiBaseUrl } from "@/lib/api";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -70,7 +76,6 @@ const ReAuthContext = createContext<ReAuthContextType | undefined>(undefined);
 // ---------------------------------------------------------------------------
 
 export function ReAuthProvider({ children }: { children: ReactNode }) {
-  const { token } = useAuth();
   const [pending, setPending] = useState<PendingState | null>(null);
   const resolverRef = useRef<((confirmed: boolean) => void) | null>(null);
 
@@ -88,12 +93,22 @@ export function ReAuthProvider({ children }: { children: ReactNode }) {
             return;
           }
 
-          const reAuthHeaders: ReAuthHeaders = token
-            ? { "x-reauth-token": token }
-            : {};
-
-          Promise.resolve()
-            .then(() => action(reAuthHeaders))
+          // Fetch a short-lived re-auth token from the server.
+          // Authentication is proved by the existing httpOnly session cookie.
+          // The token lives only in memory (local variable) — never persisted.
+          const base = getApiBaseUrl();
+          fetch(`${base}/auth/reauth-token`, {
+            method: "POST",
+            credentials: "include",
+          })
+            .then((r) => {
+              if (!r.ok) throw new Error("Failed to obtain re-auth token");
+              return r.json() as Promise<{ reAuthToken: string }>;
+            })
+            .then(({ reAuthToken }) => {
+              const headers: ReAuthHeaders = { "x-reauth-token": reAuthToken };
+              return action(headers);
+            })
             .then(resolveOuter)
             .catch(rejectOuter);
         };
@@ -102,7 +117,7 @@ export function ReAuthProvider({ children }: { children: ReactNode }) {
         setPending({ message: dialogMessage, resolve });
       });
     },
-    [token],
+    [],
   );
 
   return (

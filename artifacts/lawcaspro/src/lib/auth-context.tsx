@@ -4,9 +4,8 @@ import { useGetMe, useLogout } from "@workspace/api-client-react";
 
 interface AuthContextType {
   user: AuthUser | null;
-  token: string | null;
   isLoading: boolean;
-  login: (user: AuthUser, token?: string) => void;
+  login: (user: AuthUser) => void;
   logout: () => void;
 }
 
@@ -14,7 +13,6 @@ const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<AuthUser | null>(null);
-  const [token, setToken] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
 
   const { data: me, isLoading: isMeLoading } = useGetMe({
@@ -27,35 +25,25 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     if (!isMeLoading) {
-      if (me) {
-        setUser(me);
-        const stored = sessionStorage.getItem("_lcp_tok");
-        if (stored) setToken(stored);
-      }
+      if (me) setUser(me);
       setIsLoading(false);
     }
   }, [me, isMeLoading]);
 
-  const login = (newUser: AuthUser, newToken?: string) => {
+  const login = (newUser: AuthUser) => {
     setUser(newUser);
-    if (newToken) {
-      setToken(newToken);
-      sessionStorage.setItem("_lcp_tok", newToken);
-    }
   };
 
   const handleLogout = () => {
     logoutMutation.mutate(undefined, {
       onSuccess: () => {
         setUser(null);
-        setToken(null);
-        sessionStorage.removeItem("_lcp_tok");
       }
     });
   };
 
   return (
-    <AuthContext.Provider value={{ user, token, isLoading, login, logout: handleLogout }}>
+    <AuthContext.Provider value={{ user, isLoading, login, logout: handleLogout }}>
       {children}
     </AuthContext.Provider>
   );

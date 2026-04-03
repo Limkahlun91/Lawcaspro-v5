@@ -114,6 +114,48 @@ export function requireFirmUser(
   next();
 }
 
+// ---------------------------------------------------------------------------
+// Short-lived in-memory re-auth token store
+//
+// Re-auth tokens are intentionally NOT stored in the database:
+//   • They expire in 5 minutes and are single-use — no persistence needed.
+//   • They never equal the main session token (separate namespace, separate
+//     random value), so there is no token confusion risk.
+//   • On server restart all pending tokens are invalidated — acceptable for
+//     a 5-minute UX confirmation window.
+// ---------------------------------------------------------------------------
+
+interface ReauthEntry {
+  userId: number;
+  expiresAt: Date;
+  used: boolean;
+}
+
+const _reauthStore = new Map<string, ReauthEntry>();
+
+// Sweep expired entries every 5 minutes.
+setInterval(() => {
+  const now = new Date();
+  for (const [k, v] of _reauthStore) {
+    if (v.expiresAt < now) _reauthStore.delete(k);
+  }
+}, 5 * 60 * 1000).unref();
+
+/**
+ * Issue a short-lived (5 min, single-use) re-auth token for the given user.
+ * Returns the plain token (to be sent to the client once).
+ */
+export function issueReauthToken(userId: number): string {
+  const plain = crypto.randomBytes(32).toString("hex");
+  const hash = crypto.createHash("sha256").update(plain).digest("hex");
+  _reauthStore.set(hash, {
+    userId,
+    expiresAt: new Date(Date.now() + 5 * 60 * 1000),
+    used: false,
+  });
+  return plain;
+}
+
 export async function requireReAuth(
   req: AuthRequest,
   res: Response,
@@ -124,12 +166,21 @@ export async function requireReAuth(
     res.status(403).json({ error: "Re-authentication required for this action", code: "REAUTH_REQUIRED" });
     return;
   }
-  const tokenHash = crypto.createHash("sha256").update(reAuthToken).digest("hex");
-  const [session] = await db.select().from(sessionsTable).where(eq(sessionsTable.tokenHash, tokenHash));
-  if (!session || session.expiresAt < new Date() || session.userId !== req.userId) {
-    await writeAuditLog({ actorId: req.userId, firmId: req.firmId, actorType: req.userType ?? "firm_user", action: "auth.reauth_failed", detail: `${req.method} ${req.path}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+
+  const hash = crypto.createHash("sha256").update(reAuthToken).digest("hex");
+  const entry = _reauthStore.get(hash);
+
+  if (!entry || entry.used || entry.expiresAt < new Date() || entry.userId !== req.userId) {
+    await writeAuditLog({
+      actorId: req.userId, firmId: req.firmId, actorType: req.userType ?? "firm_user",
+      action: "auth.reauth_failed", detail: `${req.method} ${req.path}`,
+      ipAddress: req.ip, userAgent: req.headers["user-agent"],
+    });
     res.status(403).json({ error: "Re-authentication token invalid or expired", code: "REAUTH_FAILED" });
     return;
   }
+
+  // Mark single-use immediately.
+  entry.used = true;
   next();
 }

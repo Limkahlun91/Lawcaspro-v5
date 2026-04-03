@@ -1,0 +1,93 @@
+Good progress. Do NOT start Phase 2 yet.
+
+Current status:
+- Blocker 2/3/4 appear to be implemented in principle
+- Blocker 1 is still the biggest unresolved foundation risk
+- I need a strict acceptance package before moving on
+
+==================================================
+ACCEPTANCE PACKAGE — BLOCKER 1 + BLOCKERS 2/3/4 PROOF
+==================================================
+
+PART 1 — BLOCKER 1: LIVE MIGRATION CONTROL
+
+I need exact proof that the live database is now under proper migration control.
+
+Provide:
+1. exact migration files now present
+2. exact reconciliation procedure used for the existing live DB
+3. whether __drizzle_migrations now exists in the live DB
+4. whether the live DB now recognizes the baseline as already applied
+5. exact command output showing migrate succeeds on the live DB after reconciliation
+6. exact command output showing a fresh empty DB can be rebuilt from migrations only
+7. whether db:push is still required for any normal schema change workflow
+8. final recommended future workflow:
+   - generate
+   - migrate
+   - push
+   - when each is allowed / forbidden
+
+If live DB still cannot cleanly use migrate, Blocker 1 is NOT complete.
+
+==================================================
+PART 2 — BLOCKER 2: RLS PROOF
+==================================================
+
+Provide:
+1. exact list of firm-scoped tables with rowsecurity enabled
+2. exact policy names for each table
+3. exact SQL / migration file used to enable RLS and create policies
+4. exact pg_policies output
+5. exact test cases proving:
+   - firm A cannot read firm B rows at DB level
+   - empty tenant context sees nothing
+   - founder/support context behaves as designed
+6. explanation of how support sessions interact with RLS safely
+
+==================================================
+PART 3 — BLOCKER 3: SENSITIVE RATE LIMITING PROOF
+==================================================
+
+Provide:
+1. exact route list where sensitiveRateLimiter is mounted
+2. exact threshold values
+3. exact file paths changed
+4. tests or reproducible proof that limiter actually triggers on protected sensitive routes
+5. confirm whether limiter is active in non-test environments only
+
+==================================================
+PART 4 — BLOCKER 4: REQUIRE RE-AUTH PROOF
+==================================================
+
+Provide:
+1. exact protected routes
+2. exact backend files changed
+3. exact frontend files changed
+4. exact UX flow for re-auth prompt
+5. tests proving:
+   - protected route fails without re-auth token
+   - fails with wrong token
+   - succeeds with valid re-auth
+6. explain whether you are exposing the main session token to frontend JS
+7. if yes, explain why this is acceptable temporarily and propose a safer follow-up design using a short-lived reauth token or fresh password/TOTP challenge
+
+==================================================
+PART 5 — FINAL STATUS
+==================================================
+
+Answer clearly:
+- Is Blocker 1 complete? YES/NO
+- Is Blocker 2 complete? YES/NO
+- Is Blocker 3 complete? YES/NO
+- Is Blocker 4 complete? YES/NO
+
+Do not start Phase 2 unless all four answers are YES.
+
+Do not normalize storing the main session token in sessionStorage as the final security design. If that is currently used for re-auth, propose and implement a safer follow-up design.
+
+这轮我会这样看：
+
+Create Case 修复：基本过
+Blocker 2/3/4：看起来有希望过，但要证据
+Blocker 1：仍然最关键，没证据前不能算过
+Phase 2：先别开始
