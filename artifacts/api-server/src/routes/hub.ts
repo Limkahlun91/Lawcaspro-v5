@@ -11,6 +11,8 @@ import {
 } from "@workspace/db";
 import { requireAuth, requireFirmUser, type AuthRequest } from "../lib/auth";
 
+const one = (v: string | string[] | undefined): string | undefined => (Array.isArray(v) ? v[0] : v);
+
 const router: IRouter = Router();
 
 // ─── Firm → Founder messages ──────────────────────────────────────────────────
@@ -72,7 +74,9 @@ router.post("/hub/messages", requireAuth, requireFirmUser, async (req: AuthReque
 
 router.patch("/hub/messages/:msgId/read", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
   const firmId = req.firmId!;
-  const msgId = parseInt(req.params.msgId, 10);
+  const msgIdStr = one(req.params.msgId);
+  const msgId = msgIdStr ? parseInt(msgIdStr, 10) : NaN;
+  if (isNaN(msgId)) { res.status(400).json({ error: "Invalid message ID" }); return; }
   const [msg] = await db.select().from(platformMessagesTable).where(eq(platformMessagesTable.id, msgId));
   if (!msg || msg.toFirmId !== firmId) {
     res.status(404).json({ error: "Message not found" });
@@ -97,7 +101,8 @@ router.get("/hub/folders", requireAuth, requireFirmUser, async (_req: AuthReques
 
 router.get("/hub/documents", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
   const firmId = req.firmId!;
-  const folderId = req.query.folderId ? parseInt(req.query.folderId as string, 10) : undefined;
+  const folderIdStr = one(req.query.folderId as any);
+  const folderId = folderIdStr ? parseInt(folderIdStr, 10) : undefined;
 
   const disabledFolders = await db
     .select({ id: systemFoldersTable.id })

@@ -1,6 +1,6 @@
 import { Router, type IRouter } from "express";
 import { eq, and, desc, sql, gte, lte, lt, isNull } from "drizzle-orm";
-import { db, invoicesTable, invoiceItemsTable, receiptsTable, ledgerEntriesTable, casesTable, clientsTable, usersTable } from "@workspace/db";
+import { db, invoicesTable, invoiceItemsTable, receiptsTable, ledgerEntriesTable, casesTable, casePurchasersTable, clientsTable, usersTable } from "@workspace/db";
 import { requireAuth, requireFirmUser, type AuthRequest } from "../lib/auth";
 
 const router: IRouter = Router();
@@ -32,10 +32,13 @@ router.get("/reports/bills-delivered-book", requireAuth, requireFirmUser, async 
     let caseRef = null;
     let clientName = null;
     if (inv.caseId) {
-      const [c] = await db.select({ fileRef: casesTable.fileRef, clientName: sql<string>`(SELECT name FROM clients WHERE id = cases.client_id)` })
-        .from(casesTable).where(eq(casesTable.id, inv.caseId));
-      caseRef = c?.fileRef;
-      clientName = c?.clientName;
+      const [c] = await db.select({ caseRef: casesTable.referenceNo, clientName: clientsTable.name })
+        .from(casesTable)
+        .leftJoin(casePurchasersTable, eq(casePurchasersTable.caseId, casesTable.id))
+        .leftJoin(clientsTable, eq(clientsTable.id, casePurchasersTable.clientId))
+        .where(eq(casesTable.id, inv.caseId));
+      caseRef = c?.caseRef ?? null;
+      clientName = c?.clientName ?? null;
     }
     return { ...inv, caseRef, clientName };
   }));

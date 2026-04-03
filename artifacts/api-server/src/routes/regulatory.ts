@@ -3,6 +3,8 @@ import { eq, desc } from "drizzle-orm";
 import { db, regulatoryRuleSetsTable, regulatoryRuleVersionsTable } from "@workspace/db";
 import { requireAuth, requireFirmUser, requireFounder, type AuthRequest } from "../lib/auth";
 
+const one = (v: string | string[] | undefined): string | undefined => (Array.isArray(v) ? v[0] : v);
+
 const router: IRouter = Router();
 
 // ── Public read (any authenticated user) ────────────────────────────────────
@@ -13,7 +15,9 @@ router.get("/regulatory/rule-sets", requireAuth, async (req: AuthRequest, res): 
 });
 
 router.get("/regulatory/rule-sets/:code/versions", requireAuth, async (req: AuthRequest, res): Promise<void> => {
-  const [set] = await db.select().from(regulatoryRuleSetsTable).where(eq(regulatoryRuleSetsTable.code, req.params.code));
+  const code = one(req.params.code);
+  if (!code) { res.status(400).json({ error: "code required" }); return; }
+  const [set] = await db.select().from(regulatoryRuleSetsTable).where(eq(regulatoryRuleSetsTable.code, code));
   if (!set) { res.status(404).json({ error: "Rule set not found" }); return; }
   const versions = await db.select().from(regulatoryRuleVersionsTable)
     .where(eq(regulatoryRuleVersionsTable.ruleSetId, set.id))
@@ -23,8 +27,10 @@ router.get("/regulatory/rule-sets/:code/versions", requireAuth, async (req: Auth
 
 // Get active version for a code at a given date (defaults to today)
 router.get("/regulatory/rule-sets/:code/active", requireAuth, async (req: AuthRequest, res): Promise<void> => {
-  const asOf = (req.query.date as string) || new Date().toISOString().slice(0, 10);
-  const [set] = await db.select().from(regulatoryRuleSetsTable).where(eq(regulatoryRuleSetsTable.code, req.params.code));
+  const asOf = one(req.query.date as any) || new Date().toISOString().slice(0, 10);
+  const code = one(req.params.code);
+  if (!code) { res.status(400).json({ error: "code required" }); return; }
+  const [set] = await db.select().from(regulatoryRuleSetsTable).where(eq(regulatoryRuleSetsTable.code, code));
   if (!set) { res.status(404).json({ error: "Rule set not found" }); return; }
   const versions = await db.select().from(regulatoryRuleVersionsTable)
     .where(eq(regulatoryRuleVersionsTable.ruleSetId, set.id))
@@ -37,7 +43,10 @@ router.get("/regulatory/rule-sets/:code/active", requireAuth, async (req: AuthRe
 // ── Calculation helpers ────────────────────────────────────────────────────
 
 router.post("/regulatory/calculate", requireAuth, async (req: AuthRequest, res): Promise<void> => {
-  const { ruleSetCode, amount, date } = req.body as { ruleSetCode: string; amount: number; date?: string };
+  const body = req.body as { ruleSetCode?: string | string[]; amount: number; date?: string | string[] };
+  const ruleSetCode = one(body.ruleSetCode);
+  const amount = body.amount;
+  const date = one(body.date);
   if (!ruleSetCode || amount === undefined) { res.status(400).json({ error: "ruleSetCode and amount required" }); return; }
   const asOf = date || new Date().toISOString().slice(0, 10);
   const [set] = await db.select().from(regulatoryRuleSetsTable).where(eq(regulatoryRuleSetsTable.code, ruleSetCode));
@@ -54,7 +63,9 @@ router.post("/regulatory/calculate", requireAuth, async (req: AuthRequest, res):
 // ── Founder-only write ─────────────────────────────────────────────────────
 
 router.post("/regulatory/rule-sets/:code/versions", requireAuth, requireFounder, async (req: AuthRequest, res): Promise<void> => {
-  const [set] = await db.select().from(regulatoryRuleSetsTable).where(eq(regulatoryRuleSetsTable.code, req.params.code));
+  const code = one(req.params.code);
+  if (!code) { res.status(400).json({ error: "code required" }); return; }
+  const [set] = await db.select().from(regulatoryRuleSetsTable).where(eq(regulatoryRuleSetsTable.code, code));
   if (!set) { res.status(404).json({ error: "Rule set not found" }); return; }
   const { version, effectiveFrom, effectiveTo, rules, notes } = req.body;
   if (!version || !effectiveFrom || !rules) { res.status(400).json({ error: "version, effectiveFrom, rules required" }); return; }

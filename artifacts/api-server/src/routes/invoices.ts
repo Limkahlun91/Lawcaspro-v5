@@ -7,6 +7,8 @@ import {
 import { requireAuth, requireFirmUser, requireReAuth, type AuthRequest } from "../lib/auth";
 import { sensitiveRateLimiter } from "../lib/rate-limit";
 
+const one = (v: string | string[] | undefined): string | undefined => (Array.isArray(v) ? v[0] : v);
+
 const router: IRouter = Router();
 
 function firmGuard(req: AuthRequest, firmId: number): boolean {
@@ -22,7 +24,8 @@ async function nextInvoiceNo(firmId: number): Promise<string> {
 
 // List
 router.get("/invoices", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
-  const { caseId, status } = req.query as Record<string, string>;
+  const caseId = one((req.query as any).caseId);
+  const status = one((req.query as any).status);
   let query = db.select().from(invoicesTable).where(eq(invoicesTable.firmId, req.firmId!)).$dynamic();
   if (caseId) query = query.where(and(eq(invoicesTable.firmId, req.firmId!), eq(invoicesTable.caseId, parseInt(caseId))));
   if (status) query = query.where(and(eq(invoicesTable.firmId, req.firmId!), eq(invoicesTable.status, status)));
@@ -32,7 +35,9 @@ router.get("/invoices", requireAuth, requireFirmUser, async (req: AuthRequest, r
 
 // Detail
 router.get("/invoices/:id", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
-  const id = parseInt(req.params.id);
+  const idStr = one(req.params.id);
+  const id = idStr ? parseInt(idStr) : NaN;
+  if (isNaN(id)) { res.status(400).json({ error: "Invalid invoice ID" }); return; }
   const [inv] = await db.select().from(invoicesTable).where(and(eq(invoicesTable.id, id), eq(invoicesTable.firmId, req.firmId!)));
   if (!inv) { res.status(404).json({ error: "Invoice not found" }); return; }
   const items = await db.select().from(invoiceItemsTable).where(eq(invoiceItemsTable.invoiceId, id)).orderBy(invoiceItemsTable.sortOrder);
@@ -41,7 +46,9 @@ router.get("/invoices/:id", requireAuth, requireFirmUser, async (req: AuthReques
 
 // Create from quotation
 router.post("/invoices/from-quotation/:quotationId", sensitiveRateLimiter, requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
-  const quotationId = parseInt(req.params.quotationId);
+  const quotationIdStr = one(req.params.quotationId);
+  const quotationId = quotationIdStr ? parseInt(quotationIdStr) : NaN;
+  if (isNaN(quotationId)) { res.status(400).json({ error: "Invalid quotation ID" }); return; }
   const [q] = await db.select().from(quotationsTable).where(and(eq(quotationsTable.id, quotationId), eq(quotationsTable.firmId, req.firmId!)));
   if (!q) { res.status(404).json({ error: "Quotation not found" }); return; }
   const qItems = await db.select().from(quotationItemsTable).where(eq(quotationItemsTable.quotationId, quotationId)).orderBy(quotationItemsTable.sortOrder);
@@ -113,7 +120,9 @@ router.post("/invoices", sensitiveRateLimiter, requireAuth, requireFirmUser, asy
 
 // Issue invoice (draft → issued)
 router.post("/invoices/:id/issue", sensitiveRateLimiter, requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
-  const id = parseInt(req.params.id);
+  const idStr = one(req.params.id);
+  const id = idStr ? parseInt(idStr) : NaN;
+  if (isNaN(id)) { res.status(400).json({ error: "Invalid invoice ID" }); return; }
   const [inv] = await db.select().from(invoicesTable).where(and(eq(invoicesTable.id, id), eq(invoicesTable.firmId, req.firmId!)));
   if (!inv) { res.status(404).json({ error: "Invoice not found" }); return; }
   if (inv.status !== "draft") { res.status(400).json({ error: "Only draft invoices can be issued" }); return; }
@@ -124,7 +133,9 @@ router.post("/invoices/:id/issue", sensitiveRateLimiter, requireAuth, requireFir
 
 // Void invoice
 router.post("/invoices/:id/void", sensitiveRateLimiter, requireAuth, requireFirmUser, requireReAuth, async (req: AuthRequest, res): Promise<void> => {
-  const id = parseInt(req.params.id);
+  const idStr = one(req.params.id);
+  const id = idStr ? parseInt(idStr) : NaN;
+  if (isNaN(id)) { res.status(400).json({ error: "Invalid invoice ID" }); return; }
   const [inv] = await db.select().from(invoicesTable).where(and(eq(invoicesTable.id, id), eq(invoicesTable.firmId, req.firmId!)));
   if (!inv) { res.status(404).json({ error: "Invoice not found" }); return; }
   if (inv.status === "paid") { res.status(400).json({ error: "Cannot void a paid invoice. Issue a credit note." }); return; }

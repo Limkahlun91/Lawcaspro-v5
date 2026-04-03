@@ -4,6 +4,8 @@ import { db, quotationsTable, quotationItemsTable, regulatoryRuleSetsTable, regu
 import { requireAuth, requireFirmUser, type AuthRequest } from "../lib/auth";
 import { applyRule } from "./regulatory";
 
+const one = (v: string | string[] | undefined): string | undefined => (Array.isArray(v) ? v[0] : v);
+
 const router: IRouter = Router();
 
 const DEFAULT_TAX_RATE = 8;
@@ -38,7 +40,7 @@ function normalizeItem(item: any, quotationId: number, idx: number) {
   };
 }
 
-router.get("/quotations", requireAuth, requireFirmUser, async (req, res) => {
+router.get("/quotations", requireAuth, requireFirmUser, async (req, res): Promise<void> => {
   try {
     const firmId = (req as AuthRequest).firmId!;
     const rows = await db.select().from(quotationsTable)
@@ -69,12 +71,14 @@ router.get("/quotations", requireAuth, requireFirmUser, async (req, res) => {
     }));
 
     res.json(results);
+    return;
   } catch (err: any) {
     res.status(500).json({ error: err.message });
+    return;
   }
 });
 
-router.post("/quotations", requireAuth, requireFirmUser, async (req, res) => {
+router.post("/quotations", requireAuth, requireFirmUser, async (req, res): Promise<void> => {
   try {
     const firmId = (req as AuthRequest).firmId!;
     const userId = (req as AuthRequest).userId!;
@@ -106,20 +110,24 @@ router.post("/quotations", requireAuth, requireFirmUser, async (req, res) => {
     });
 
     res.status(201).json(result);
+    return;
   } catch (err: any) {
     res.status(500).json({ error: err.message });
+    return;
   }
 });
 
-router.get("/quotations/:id", requireAuth, requireFirmUser, async (req, res) => {
+router.get("/quotations/:id", requireAuth, requireFirmUser, async (req, res): Promise<void> => {
   try {
     const firmId = (req as AuthRequest).firmId!;
-    const id = parseInt(req.params.id, 10);
+    const idStr = one(req.params.id);
+    const id = idStr ? parseInt(idStr, 10) : NaN;
+    if (isNaN(id)) { res.status(400).json({ error: "Invalid quotation ID" }); return; }
 
     const [quotation] = await db.select().from(quotationsTable)
       .where(and(eq(quotationsTable.id, id), eq(quotationsTable.firmId, firmId)));
 
-    if (!quotation) return res.status(404).json({ error: "Quotation not found" });
+    if (!quotation) { res.status(404).json({ error: "Quotation not found" }); return; }
 
     const items = await db.select().from(quotationItemsTable)
       .where(eq(quotationItemsTable.quotationId, id))
@@ -132,21 +140,25 @@ router.get("/quotations/:id", requireAuth, requireFirmUser, async (req, res) => 
       createdAt: quotation.createdAt.toISOString(),
       updatedAt: quotation.updatedAt.toISOString(),
     });
+    return;
   } catch (err: any) {
     res.status(500).json({ error: err.message });
+    return;
   }
 });
 
-router.patch("/quotations/:id", requireAuth, requireFirmUser, async (req, res) => {
+router.patch("/quotations/:id", requireAuth, requireFirmUser, async (req, res): Promise<void> => {
   try {
     const firmId = (req as AuthRequest).firmId!;
-    const id = parseInt(req.params.id, 10);
+    const idStr = one(req.params.id);
+    const id = idStr ? parseInt(idStr, 10) : NaN;
+    if (isNaN(id)) { res.status(400).json({ error: "Invalid quotation ID" }); return; }
     const { items, ...quotationData } = req.body;
 
     const [existing] = await db.select().from(quotationsTable)
       .where(and(eq(quotationsTable.id, id), eq(quotationsTable.firmId, firmId)));
 
-    if (!existing) return res.status(404).json({ error: "Quotation not found" });
+    if (!existing) { res.status(404).json({ error: "Quotation not found" }); return; }
 
     const result = await db.transaction(async (tx) => {
       const [updated] = await tx.update(quotationsTable)
@@ -176,20 +188,24 @@ router.patch("/quotations/:id", requireAuth, requireFirmUser, async (req, res) =
     });
 
     res.json(result);
+    return;
   } catch (err: any) {
     res.status(500).json({ error: err.message });
+    return;
   }
 });
 
-router.delete("/quotations/:id", requireAuth, requireFirmUser, async (req, res) => {
+router.delete("/quotations/:id", requireAuth, requireFirmUser, async (req, res): Promise<void> => {
   try {
     const firmId = (req as AuthRequest).firmId!;
-    const id = parseInt(req.params.id, 10);
+    const idStr = one(req.params.id);
+    const id = idStr ? parseInt(idStr, 10) : NaN;
+    if (isNaN(id)) { res.status(400).json({ error: "Invalid quotation ID" }); return; }
 
     const [existing] = await db.select().from(quotationsTable)
       .where(and(eq(quotationsTable.id, id), eq(quotationsTable.firmId, firmId)));
 
-    if (!existing) return res.status(404).json({ error: "Quotation not found" });
+    if (!existing) { res.status(404).json({ error: "Quotation not found" }); return; }
 
     await db.transaction(async (tx) => {
       await tx.delete(quotationItemsTable).where(eq(quotationItemsTable.quotationId, id));
@@ -197,21 +213,25 @@ router.delete("/quotations/:id", requireAuth, requireFirmUser, async (req, res) 
     });
 
     res.json({ success: true });
+    return;
   } catch (err: any) {
     res.status(500).json({ error: err.message });
+    return;
   }
 });
 
-router.post("/quotations/:id/duplicate", requireAuth, requireFirmUser, async (req, res) => {
+router.post("/quotations/:id/duplicate", requireAuth, requireFirmUser, async (req, res): Promise<void> => {
   try {
     const firmId = (req as AuthRequest).firmId!;
     const userId = (req as AuthRequest).userId!;
-    const id = parseInt(req.params.id, 10);
+    const idStr = one(req.params.id);
+    const id = idStr ? parseInt(idStr, 10) : NaN;
+    if (isNaN(id)) { res.status(400).json({ error: "Invalid quotation ID" }); return; }
 
     const [original] = await db.select().from(quotationsTable)
       .where(and(eq(quotationsTable.id, id), eq(quotationsTable.firmId, firmId)));
 
-    if (!original) return res.status(404).json({ error: "Quotation not found" });
+    if (!original) { res.status(404).json({ error: "Quotation not found" }); return; }
 
     const result = await db.transaction(async (tx) => {
       const [newQuotation] = await tx.insert(quotationsTable).values({
@@ -265,8 +285,10 @@ router.post("/quotations/:id/duplicate", requireAuth, requireFirmUser, async (re
     });
 
     res.status(201).json(result);
+    return;
   } catch (err: any) {
     res.status(500).json({ error: err.message });
+    return;
   }
 });
 
@@ -282,7 +304,9 @@ async function getActiveRule(code: string, asOf: string) {
 
 router.post("/quotations/:id/auto-calculate", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
   try {
-    const quotationId = parseInt(req.params.id);
+    const quotationIdStr = one(req.params.id);
+    const quotationId = quotationIdStr ? parseInt(quotationIdStr) : NaN;
+    if (isNaN(quotationId)) { res.status(400).json({ error: "Invalid quotation ID" }); return; }
     const firmId = req.firmId!;
     const [q] = await db.select().from(quotationsTable).where(and(eq(quotationsTable.id, quotationId), eq(quotationsTable.firmId, firmId)));
     if (!q) { res.status(404).json({ error: "Quotation not found" }); return; }
@@ -407,8 +431,10 @@ router.post("/quotations/:id/auto-calculate", requireAuth, requireFirmUser, asyn
     };
 
     res.json({ items: allItems.map(formatItem), totals, breakdown: { purchasePrice, loanAmount } });
+    return;
   } catch (err: any) {
     res.status(500).json({ error: err.message });
+    return;
   }
 });
 

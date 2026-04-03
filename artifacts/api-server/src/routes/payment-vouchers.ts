@@ -4,6 +4,8 @@ import { db, paymentVouchersTable, paymentVoucherItemsTable, ledgerEntriesTable 
 import { requireAuth, requireFirmUser, requireReAuth, type AuthRequest } from "../lib/auth";
 import { sensitiveRateLimiter } from "../lib/rate-limit";
 
+const one = (v: string | string[] | undefined): string | undefined => (Array.isArray(v) ? v[0] : v);
+
 const router: IRouter = Router();
 
 const STATUS_FLOW: Record<string, string[]> = {
@@ -25,7 +27,8 @@ async function nextVoucherNo(firmId: number): Promise<string> {
 
 // List
 router.get("/payment-vouchers", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
-  const { caseId, status } = req.query as Record<string, string>;
+  const caseId = one((req.query as any).caseId);
+  const status = one((req.query as any).status);
   let cond = eq(paymentVouchersTable.firmId, req.firmId!);
   if (caseId) cond = and(cond, eq(paymentVouchersTable.caseId, parseInt(caseId))) as any;
   if (status) cond = and(cond, eq(paymentVouchersTable.status, status)) as any;
@@ -35,7 +38,9 @@ router.get("/payment-vouchers", requireAuth, requireFirmUser, async (req: AuthRe
 
 // Detail
 router.get("/payment-vouchers/:id", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
-  const id = parseInt(req.params.id);
+  const idStr = one(req.params.id);
+  const id = idStr ? parseInt(idStr) : NaN;
+  if (isNaN(id)) { res.status(400).json({ error: "Invalid voucher ID" }); return; }
   const [pv] = await db.select().from(paymentVouchersTable).where(and(eq(paymentVouchersTable.id, id), eq(paymentVouchersTable.firmId, req.firmId!)));
   if (!pv) { res.status(404).json({ error: "Payment voucher not found" }); return; }
   const items = await db.select().from(paymentVoucherItemsTable).where(eq(paymentVoucherItemsTable.voucherId, id)).orderBy(paymentVoucherItemsTable.sortOrder);
@@ -70,7 +75,9 @@ router.post("/payment-vouchers", sensitiveRateLimiter, requireAuth, requireFirmU
 
 // Status transition
 router.post("/payment-vouchers/:id/transition", sensitiveRateLimiter, requireAuth, requireFirmUser, requireReAuth, async (req: AuthRequest, res): Promise<void> => {
-  const id = parseInt(req.params.id);
+  const idStr = one(req.params.id);
+  const id = idStr ? parseInt(idStr) : NaN;
+  if (isNaN(id)) { res.status(400).json({ error: "Invalid voucher ID" }); return; }
   const { toStatus, notes } = req.body as { toStatus: string; notes?: string };
   const [pv] = await db.select().from(paymentVouchersTable).where(and(eq(paymentVouchersTable.id, id), eq(paymentVouchersTable.firmId, req.firmId!)));
   if (!pv) { res.status(404).json({ error: "Voucher not found" }); return; }
@@ -102,7 +109,8 @@ router.post("/payment-vouchers/:id/transition", sensitiveRateLimiter, requireAut
 
 // Ledger: view by case and account type
 router.get("/ledger", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
-  const { caseId, accountType } = req.query as Record<string, string>;
+  const caseId = one((req.query as any).caseId);
+  const accountType = one((req.query as any).accountType);
   let cond = eq(ledgerEntriesTable.firmId, req.firmId!);
   if (caseId) cond = and(cond, eq(ledgerEntriesTable.caseId, parseInt(caseId))) as any;
   if (accountType) cond = and(cond, eq(ledgerEntriesTable.accountType, accountType)) as any;
@@ -112,7 +120,7 @@ router.get("/ledger", requireAuth, requireFirmUser, async (req: AuthRequest, res
 
 // Ledger summary (balance per account type per case)
 router.get("/ledger/summary", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
-  const { caseId } = req.query as Record<string, string>;
+  const caseId = one((req.query as any).caseId);
   let cond = eq(ledgerEntriesTable.firmId, req.firmId!);
   if (caseId) cond = and(cond, eq(ledgerEntriesTable.caseId, parseInt(caseId))) as any;
   const rows = await db.select({

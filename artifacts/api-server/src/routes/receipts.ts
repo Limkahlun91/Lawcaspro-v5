@@ -4,6 +4,8 @@ import { db, receiptsTable, receiptAllocationsTable, invoicesTable, ledgerEntrie
 import { requireAuth, requireFirmUser, requireReAuth, type AuthRequest } from "../lib/auth";
 import { sensitiveRateLimiter } from "../lib/rate-limit";
 
+const one = (v: string | string[] | undefined): string | undefined => (Array.isArray(v) ? v[0] : v);
+
 const router: IRouter = Router();
 
 async function nextReceiptNo(firmId: number): Promise<string> {
@@ -53,7 +55,7 @@ async function postLedger(firmId: number, caseId: number | null, opts: {
 
 // List
 router.get("/receipts", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
-  const { caseId } = req.query as Record<string, string>;
+  const caseId = one((req.query as any).caseId);
   let cond = eq(receiptsTable.firmId, req.firmId!);
   if (caseId) cond = and(cond, eq(receiptsTable.caseId, parseInt(caseId))) as any;
   const rows = await db.select().from(receiptsTable).where(cond).orderBy(desc(receiptsTable.createdAt));
@@ -62,7 +64,9 @@ router.get("/receipts", requireAuth, requireFirmUser, async (req: AuthRequest, r
 
 // Detail
 router.get("/receipts/:id", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
-  const id = parseInt(req.params.id);
+  const idStr = one(req.params.id);
+  const id = idStr ? parseInt(idStr) : NaN;
+  if (isNaN(id)) { res.status(400).json({ error: "Invalid receipt ID" }); return; }
   const [rec] = await db.select().from(receiptsTable).where(and(eq(receiptsTable.id, id), eq(receiptsTable.firmId, req.firmId!)));
   if (!rec) { res.status(404).json({ error: "Receipt not found" }); return; }
   const allocs = await db.select().from(receiptAllocationsTable).where(eq(receiptAllocationsTable.receiptId, id));
@@ -110,7 +114,9 @@ router.post("/receipts", sensitiveRateLimiter, requireAuth, requireFirmUser, asy
 
 // Reverse receipt
 router.post("/receipts/:id/reverse", sensitiveRateLimiter, requireAuth, requireFirmUser, requireReAuth, async (req: AuthRequest, res): Promise<void> => {
-  const id = parseInt(req.params.id);
+  const idStr = one(req.params.id);
+  const id = idStr ? parseInt(idStr) : NaN;
+  if (isNaN(id)) { res.status(400).json({ error: "Invalid receipt ID" }); return; }
   const [rec] = await db.select().from(receiptsTable).where(and(eq(receiptsTable.id, id), eq(receiptsTable.firmId, req.firmId!)));
   if (!rec) { res.status(404).json({ error: "Receipt not found" }); return; }
   if (rec.isReversed) { res.status(400).json({ error: "Already reversed" }); return; }

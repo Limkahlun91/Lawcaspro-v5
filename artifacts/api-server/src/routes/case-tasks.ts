@@ -3,10 +3,13 @@ import { eq, and, desc, sql, lte } from "drizzle-orm";
 import { db, caseTasksTable } from "@workspace/db";
 import { requireAuth, requireFirmUser, type AuthRequest } from "../lib/auth";
 
+const one = (v: string | string[] | undefined): string | undefined => (Array.isArray(v) ? v[0] : v);
+
 const router: IRouter = Router();
 
 router.get("/case-tasks", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
-  const { caseId, status } = req.query as Record<string, string>;
+  const caseId = one((req.query as any).caseId);
+  const status = one((req.query as any).status);
   let cond = eq(caseTasksTable.firmId, req.firmId!);
   if (caseId) cond = and(cond, eq(caseTasksTable.caseId, parseInt(caseId))) as any;
   if (status) cond = and(cond, eq(caseTasksTable.status, status)) as any;
@@ -16,7 +19,7 @@ router.get("/case-tasks", requireAuth, requireFirmUser, async (req: AuthRequest,
 
 // Firm-wide upcoming tasks (for dashboard)
 router.get("/case-tasks/upcoming", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
-  const limit = parseInt((req.query.limit as string) ?? "20");
+  const limit = parseInt(one(req.query.limit as any) ?? "20");
   const rows = await db.select().from(caseTasksTable)
     .where(and(eq(caseTasksTable.firmId, req.firmId!), eq(caseTasksTable.status, "open")))
     .orderBy(caseTasksTable.dueDate)
@@ -40,7 +43,9 @@ router.post("/case-tasks", requireAuth, requireFirmUser, async (req: AuthRequest
 });
 
 router.put("/case-tasks/:id", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
-  const id = parseInt(req.params.id);
+  const idStr = one(req.params.id);
+  if (!idStr) { res.status(400).json({ error: "id required" }); return; }
+  const id = parseInt(idStr);
   const { title, description, assignedTo, dueDate, priority, status } = req.body;
   const updates: Record<string, any> = { updatedAt: new Date() };
   if (title !== undefined) updates.title = title;
@@ -60,7 +65,9 @@ router.put("/case-tasks/:id", requireAuth, requireFirmUser, async (req: AuthRequ
 });
 
 router.delete("/case-tasks/:id", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
-  const id = parseInt(req.params.id);
+  const idStr = one(req.params.id);
+  if (!idStr) { res.status(400).json({ error: "id required" }); return; }
+  const id = parseInt(idStr);
   await db.delete(caseTasksTable).where(and(eq(caseTasksTable.id, id), eq(caseTasksTable.firmId, req.firmId!)));
   res.json({ success: true });
 });

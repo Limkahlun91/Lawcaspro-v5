@@ -4,6 +4,8 @@ import { db, firmsTable, firmBankAccountsTable, rolesTable } from "@workspace/db
 import { requireAuth, requireFirmUser, type AuthRequest } from "../lib/auth";
 import type { Response, NextFunction } from "express";
 
+const one = (v: string | string[] | undefined): string | undefined => (Array.isArray(v) ? v[0] : v);
+
 const VALID_ACCOUNT_TYPES = ["office", "client"];
 
 async function requirePartnerRole(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
@@ -26,7 +28,7 @@ router.get("/firm-settings", requireAuth, requireFirmUser, async (req, res) => {
   try {
     const firmId = (req as AuthRequest).firmId!;
     const [firm] = await db.select().from(firmsTable).where(eq(firmsTable.id, firmId));
-    if (!firm) return res.status(404).json({ error: "Firm not found" });
+    if (!firm) { res.status(404).json({ error: "Firm not found" }); return; }
 
     const bankAccounts = await db.select().from(firmBankAccountsTable)
       .where(eq(firmBankAccountsTable.firmId, firmId));
@@ -46,12 +48,14 @@ router.get("/firm-settings", requireAuth, requireFirmUser, async (req, res) => {
         isDefault: b.isDefault,
       })),
     });
+    return;
   } catch (err: any) {
     res.status(500).json({ error: err.message });
+    return;
   }
 });
 
-router.patch("/firm-settings", requireAuth, requireFirmUser, requirePartnerRole, async (req, res) => {
+router.patch("/firm-settings", requireAuth, requireFirmUser, requirePartnerRole, async (req, res): Promise<void> => {
   try {
     const firmId = (req as AuthRequest).firmId!;
     const { name, address, stNumber, tinNumber } = req.body;
@@ -85,23 +89,27 @@ router.patch("/firm-settings", requireAuth, requireFirmUser, requirePartnerRole,
         isDefault: b.isDefault,
       })),
     });
+    return;
   } catch (err: any) {
     res.status(500).json({ error: err.message });
+    return;
   }
 });
 
-router.post("/firm-settings/bank-accounts", requireAuth, requireFirmUser, requirePartnerRole, async (req, res) => {
+router.post("/firm-settings/bank-accounts", requireAuth, requireFirmUser, requirePartnerRole, async (req, res): Promise<void> => {
   try {
     const firmId = (req as AuthRequest).firmId!;
     const { bankName, accountNo, accountType } = req.body;
 
     if (!bankName || !accountNo) {
-      return res.status(400).json({ error: "Bank name and account number are required" });
+      res.status(400).json({ error: "Bank name and account number are required" });
+      return;
     }
 
     const resolvedType = accountType || "office";
     if (!VALID_ACCOUNT_TYPES.includes(resolvedType)) {
-      return res.status(400).json({ error: "Account type must be 'office' or 'client'" });
+      res.status(400).json({ error: "Account type must be 'office' or 'client'" });
+      return;
     }
 
     const [account] = await db.insert(firmBankAccountsTable).values({
@@ -118,29 +126,35 @@ router.post("/firm-settings/bank-accounts", requireAuth, requireFirmUser, requir
       accountType: account.accountType,
       isDefault: account.isDefault,
     });
+    return;
   } catch (err: any) {
     res.status(500).json({ error: err.message });
+    return;
   }
 });
 
-router.delete("/firm-settings/bank-accounts/:id", requireAuth, requireFirmUser, requirePartnerRole, async (req, res) => {
+router.delete("/firm-settings/bank-accounts/:id", requireAuth, requireFirmUser, requirePartnerRole, async (req, res): Promise<void> => {
   try {
     const firmId = (req as AuthRequest).firmId!;
-    const id = parseInt(req.params.id, 10);
+    const idStr = one(req.params.id);
+    const id = idStr ? parseInt(idStr, 10) : NaN;
 
     if (isNaN(id)) {
-      return res.status(400).json({ error: "Invalid bank account ID" });
+      res.status(400).json({ error: "Invalid bank account ID" });
+      return;
     }
 
     const [existing] = await db.select().from(firmBankAccountsTable)
       .where(and(eq(firmBankAccountsTable.id, id), eq(firmBankAccountsTable.firmId, firmId)));
 
-    if (!existing) return res.status(404).json({ error: "Bank account not found" });
+    if (!existing) { res.status(404).json({ error: "Bank account not found" }); return; }
 
     await db.delete(firmBankAccountsTable).where(eq(firmBankAccountsTable.id, id));
     res.json({ success: true });
+    return;
   } catch (err: any) {
     res.status(500).json({ error: err.message });
+    return;
   }
 });
 

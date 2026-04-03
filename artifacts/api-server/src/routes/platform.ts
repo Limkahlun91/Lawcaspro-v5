@@ -16,6 +16,22 @@ import { requireAuth, requireFounder, type AuthRequest } from "../lib/auth";
 import bcrypt from "bcryptjs";
 import { ObjectStorageService } from "../lib/objectStorage";
 
+const one = (v: string | string[] | undefined): string | undefined => (Array.isArray(v) ? v[0] : v);
+const firstRow = (result: unknown): Record<string, unknown> | undefined => {
+  if (Array.isArray(result)) {
+    const row = result[0];
+    return row && typeof row === "object" ? (row as Record<string, unknown>) : undefined;
+  }
+  if (result && typeof result === "object" && "rows" in result) {
+    const rows = (result as { rows?: unknown }).rows;
+    if (Array.isArray(rows)) {
+      const row = rows[0];
+      return row && typeof row === "object" ? (row as Record<string, unknown>) : undefined;
+    }
+  }
+  return undefined;
+};
+
 const router: IRouter = Router();
 const storage = new ObjectStorageService();
 
@@ -43,11 +59,14 @@ router.get("/platform/firms", requireAuth, requireFounder, async (req: AuthReque
       const [partnerCountRes] = await db.select({ c: count() }).from(usersTable).where(sql`firm_id = ${firm.id} AND user_type = 'firm_user'`);
       const [caseCountRes] = await db.select({ c: count() }).from(casesTable).where(eq(casesTable.firmId, firm.id));
       const docRes = await db.execute(sql`SELECT COUNT(*) as c FROM case_documents WHERE firm_id = ${firm.id}`);
-      const docCount = Number((Array.isArray(docRes) ? docRes[0] : (docRes as {rows: {c: string}[]}).rows[0])?.c ?? 0);
+      const docC = firstRow(docRes)?.c;
+      const docCount = typeof docC === "string" || typeof docC === "number" ? Number(docC) : 0;
       const billingRes = await db.execute(sql`SELECT COUNT(*) as c FROM case_billing_entries WHERE firm_id = ${firm.id}`);
-      const billingCount = Number((Array.isArray(billingRes) ? billingRes[0] : (billingRes as {rows: {c: string}[]}).rows[0])?.c ?? 0);
+      const billingC = firstRow(billingRes)?.c;
+      const billingCount = typeof billingC === "string" || typeof billingC === "number" ? Number(billingC) : 0;
       const commRes = await db.execute(sql`SELECT COUNT(*) as c FROM case_communications WHERE firm_id = ${firm.id}`);
-      const commCount = Number((Array.isArray(commRes) ? commRes[0] : (commRes as {rows: {c: string}[]}).rows[0])?.c ?? 0);
+      const commC = firstRow(commRes)?.c;
+      const commCount = typeof commC === "string" || typeof commC === "number" ? Number(commC) : 0;
       return {
         ...firm,
         userCount: Number(userCountRes?.c ?? 0),
@@ -125,7 +144,8 @@ router.patch("/platform/firms/:firmId", requireAuth, requireFounder, async (req:
 // ─── Firm Users ───────────────────────────────────────────────────────────────
 
 router.get("/platform/firms/:firmId/users", requireAuth, requireFounder, async (req: AuthRequest, res): Promise<void> => {
-  const firmId = parseInt(req.params.firmId, 10);
+  const firmIdStr = one(req.params.firmId);
+  const firmId = firmIdStr ? parseInt(firmIdStr, 10) : NaN;
   if (isNaN(firmId)) {
     res.status(400).json({ error: "Invalid firm ID" });
     return;
@@ -160,8 +180,11 @@ router.get("/platform/firms/:firmId/users", requireAuth, requireFounder, async (
 });
 
 router.post("/platform/firms/:firmId/users/:userId/reset-password", requireAuth, requireFounder, async (req: AuthRequest, res): Promise<void> => {
-  const firmId = parseInt(req.params.firmId, 10);
-  const userId = parseInt(req.params.userId, 10);
+  const firmIdStr = one(req.params.firmId);
+  const userIdStr = one(req.params.userId);
+  const firmId = firmIdStr ? parseInt(firmIdStr, 10) : NaN;
+  const userId = userIdStr ? parseInt(userIdStr, 10) : NaN;
+  if (isNaN(firmId) || isNaN(userId)) { res.status(400).json({ error: "Invalid firm ID or user ID" }); return; }
   const { newPassword } = req.body as { newPassword?: string };
   if (!newPassword || newPassword.length < 6) {
     res.status(400).json({ error: "New password must be at least 6 characters" });
@@ -185,7 +208,8 @@ router.get("/platform/stats", requireAuth, requireFounder, async (_req, res): Pr
   const [totalUsersRes] = await db.select({ c: count() }).from(usersTable).where(eq(usersTable.userType, "firm_user"));
   const [totalCasesRes] = await db.select({ c: count() }).from(casesTable);
   const docsRes = await db.execute(sql`SELECT COUNT(*) as c FROM case_documents`);
-  const totalDocuments = Number((Array.isArray(docsRes) ? docsRes[0] : (docsRes as {rows: {c: string}[]}).rows[0])?.c ?? 0);
+  const docsC = firstRow(docsRes)?.c;
+  const totalDocuments = typeof docsC === "string" || typeof docsC === "number" ? Number(docsC) : 0;
   res.json({ totalFirms: Number(totalFirmsRes?.c ?? 0), activeFirms: Number(activeFirmsRes?.c ?? 0), totalUsers: Number(totalUsersRes?.c ?? 0), totalCases: Number(totalCasesRes?.c ?? 0), totalDocuments });
 });
 
@@ -208,7 +232,8 @@ router.post("/platform/folders", requireAuth, requireFounder, async (req: AuthRe
   const maxSort = await db.execute(
     sql`SELECT COALESCE(MAX(sort_order), -1) + 1 as next_sort FROM system_folders WHERE ${parentId ? sql`parent_id = ${parentId}` : sql`parent_id IS NULL`}`
   );
-  const nextSort = Number((Array.isArray(maxSort) ? maxSort[0] : (maxSort as any).rows[0])?.next_sort ?? 0);
+  const nextSortV = firstRow(maxSort)?.next_sort;
+  const nextSort = typeof nextSortV === "string" || typeof nextSortV === "number" ? Number(nextSortV) : 0;
   const [folder] = await db
     .insert(systemFoldersTable)
     .values({ name: name.trim(), parentId: parentId ?? null, sortOrder: nextSort })
@@ -217,7 +242,8 @@ router.post("/platform/folders", requireAuth, requireFounder, async (req: AuthRe
 });
 
 router.patch("/platform/folders/:folderId", requireAuth, requireFounder, async (req: AuthRequest, res): Promise<void> => {
-  const folderId = parseInt(req.params.folderId, 10);
+  const folderIdStr = one(req.params.folderId);
+  const folderId = folderIdStr ? parseInt(folderIdStr, 10) : NaN;
   if (isNaN(folderId)) { res.status(400).json({ error: "Invalid folder ID" }); return; }
   const { name, isDisabled } = req.body as { name?: string; isDisabled?: boolean };
   const updates: Record<string, unknown> = {};
@@ -230,7 +256,8 @@ router.patch("/platform/folders/:folderId", requireAuth, requireFounder, async (
 });
 
 router.delete("/platform/folders/:folderId", requireAuth, requireFounder, async (req: AuthRequest, res): Promise<void> => {
-  const folderId = parseInt(req.params.folderId, 10);
+  const folderIdStr = one(req.params.folderId);
+  const folderId = folderIdStr ? parseInt(folderIdStr, 10) : NaN;
   if (isNaN(folderId)) { res.status(400).json({ error: "Invalid folder ID" }); return; }
   const [folder] = await db.select().from(systemFoldersTable).where(eq(systemFoldersTable.id, folderId));
   if (!folder) { res.status(404).json({ error: "Folder not found" }); return; }
@@ -273,8 +300,10 @@ router.post("/platform/folders/reorder", requireAuth, requireFounder, async (req
 // ─── Platform Documents ───────────────────────────────────────────────────────
 
 router.get("/platform/documents", requireAuth, requireFounder, async (req: AuthRequest, res): Promise<void> => {
-  const firmId = req.query.firmId ? parseInt(req.query.firmId as string, 10) : undefined;
-  const folderId = req.query.folderId ? parseInt(req.query.folderId as string, 10) : undefined;
+  const firmIdStr = one(req.query.firmId as any);
+  const folderIdStr = one(req.query.folderId as any);
+  const firmId = firmIdStr ? parseInt(firmIdStr, 10) : undefined;
+  const folderId = folderIdStr ? parseInt(folderIdStr, 10) : undefined;
   let condition;
   if (firmId) condition = eq(platformDocumentsTable.firmId, firmId);
   if (folderId !== undefined) {
@@ -324,7 +353,9 @@ router.post("/platform/documents", requireAuth, requireFounder, async (req: Auth
 });
 
 router.delete("/platform/documents/:docId", requireAuth, requireFounder, async (req: AuthRequest, res): Promise<void> => {
-  const docId = parseInt(req.params.docId, 10);
+  const docIdStr = one(req.params.docId);
+  const docId = docIdStr ? parseInt(docIdStr, 10) : NaN;
+  if (isNaN(docId)) { res.status(400).json({ error: "Invalid document ID" }); return; }
   const [doc] = await db.select().from(platformDocumentsTable).where(eq(platformDocumentsTable.id, docId));
   if (!doc) {
     res.status(404).json({ error: "Document not found" });
@@ -337,7 +368,9 @@ router.delete("/platform/documents/:docId", requireAuth, requireFounder, async (
 // ─── PDF Mappings ─────────────────────────────────────────────────────────────
 
 router.get("/platform/documents/:docId/pdf-mappings", requireAuth, requireFounder, async (req: AuthRequest, res): Promise<void> => {
-  const docId = parseInt(req.params.docId, 10);
+  const docIdStr = one(req.params.docId);
+  const docId = docIdStr ? parseInt(docIdStr, 10) : NaN;
+  if (isNaN(docId)) { res.status(400).json({ error: "Invalid document ID" }); return; }
   const [doc] = await db.select().from(platformDocumentsTable).where(eq(platformDocumentsTable.id, docId));
   if (!doc) {
     res.status(404).json({ error: "Document not found" });
@@ -347,7 +380,9 @@ router.get("/platform/documents/:docId/pdf-mappings", requireAuth, requireFounde
 });
 
 router.put("/platform/documents/:docId/pdf-mappings", requireAuth, requireFounder, async (req: AuthRequest, res): Promise<void> => {
-  const docId = parseInt(req.params.docId, 10);
+  const docIdStr = one(req.params.docId);
+  const docId = docIdStr ? parseInt(docIdStr, 10) : NaN;
+  if (isNaN(docId)) { res.status(400).json({ error: "Invalid document ID" }); return; }
   const { mappings } = req.body as { mappings: any };
   const [doc] = await db.select().from(platformDocumentsTable).where(eq(platformDocumentsTable.id, docId));
   if (!doc) {
@@ -361,7 +396,8 @@ router.put("/platform/documents/:docId/pdf-mappings", requireAuth, requireFounde
 // ─── Platform Messages (Communication Hub) ───────────────────────────────────
 
 router.get("/platform/messages", requireAuth, requireFounder, async (req: AuthRequest, res): Promise<void> => {
-  const firmId = req.query.firmId ? parseInt(req.query.firmId as string, 10) : undefined;
+  const firmIdStr = one(req.query.firmId as any);
+  const firmId = firmIdStr ? parseInt(firmIdStr, 10) : undefined;
 
   const msgs = await db
     .select()
@@ -427,7 +463,9 @@ router.post("/platform/messages", requireAuth, requireFounder, async (req: AuthR
 });
 
 router.patch("/platform/messages/:msgId/read", requireAuth, requireFounder, async (req: AuthRequest, res): Promise<void> => {
-  const msgId = parseInt(req.params.msgId, 10);
+  const msgIdStr = one(req.params.msgId);
+  const msgId = msgIdStr ? parseInt(msgIdStr, 10) : NaN;
+  if (isNaN(msgId)) { res.status(400).json({ error: "Invalid message ID" }); return; }
   await db.update(platformMessagesTable).set({ readAt: new Date() }).where(eq(platformMessagesTable.id, msgId));
   res.json({ success: true });
 });

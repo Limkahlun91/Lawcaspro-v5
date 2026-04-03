@@ -3,10 +3,12 @@ import { eq, and, desc, sql } from "drizzle-orm";
 import { db, timeEntriesTable, usersTable } from "@workspace/db";
 import { requireAuth, requireFirmUser, type AuthRequest } from "../lib/auth";
 
+const one = (v: string | string[] | undefined): string | undefined => (Array.isArray(v) ? v[0] : v);
+
 const router: IRouter = Router();
 
 router.get("/time-entries", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
-  const { caseId } = req.query as Record<string, string>;
+  const caseId = one((req.query as any).caseId);
   let cond = eq(timeEntriesTable.firmId, req.firmId!);
   if (caseId) cond = and(cond, eq(timeEntriesTable.caseId, parseInt(caseId))) as any;
   const rows = await db.select().from(timeEntriesTable).where(cond).orderBy(desc(timeEntriesTable.entryDate));
@@ -14,7 +16,7 @@ router.get("/time-entries", requireAuth, requireFirmUser, async (req: AuthReques
 });
 
 router.get("/time-entries/summary", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
-  const { caseId } = req.query as Record<string, string>;
+  const caseId = one((req.query as any).caseId);
   let cond = eq(timeEntriesTable.firmId, req.firmId!);
   if (caseId) cond = and(cond, eq(timeEntriesTable.caseId, parseInt(caseId))) as any;
   const [row] = await db.select({
@@ -43,7 +45,9 @@ router.post("/time-entries", requireAuth, requireFirmUser, async (req: AuthReque
 });
 
 router.put("/time-entries/:id", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
-  const id = parseInt(req.params.id);
+  const idStr = one(req.params.id);
+  const id = idStr ? parseInt(idStr) : NaN;
+  if (isNaN(id)) { res.status(400).json({ error: "Invalid time entry ID" }); return; }
   const { description, hours, ratePerHour, isBillable, entryDate } = req.body;
   const [row] = await db.update(timeEntriesTable).set({
     ...(description !== undefined && { description }),
@@ -58,7 +62,9 @@ router.put("/time-entries/:id", requireAuth, requireFirmUser, async (req: AuthRe
 });
 
 router.delete("/time-entries/:id", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
-  const id = parseInt(req.params.id);
+  const idStr = one(req.params.id);
+  const id = idStr ? parseInt(idStr) : NaN;
+  if (isNaN(id)) { res.status(400).json({ error: "Invalid time entry ID" }); return; }
   await db.delete(timeEntriesTable).where(and(eq(timeEntriesTable.id, id), eq(timeEntriesTable.firmId, req.firmId!)));
   res.json({ success: true });
 });
