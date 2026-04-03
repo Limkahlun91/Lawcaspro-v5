@@ -230,6 +230,13 @@ Projects support full CRUD including edit via the PATCH endpoint. The edit page 
 - `conflict.test.ts` — no match, NRIC blocked match, get results, access control (lawyer blocked), partner override flow, single-use re-auth token, duplicate override rejected, name fuzzy match, audit log, input validation
 - All 102 tests pass
 
+### Build / Release Hardening (2026-04-03)
+- **`dev` script** changed to `tsx watch src/index.ts` — hot-reloads on every source save, eliminates stale-dist risk in development
+- **`start` script** now calls `node scripts/check-dist.mjs` first — fails with a clear error if `dist/index.mjs` is missing or older than any source `.ts` file
+- **`preview` script** added: `pnpm build && pnpm start` — tests the compiled bundle locally before deploying
+- **`test` script** unchanged: vitest reads source directly via tsx, no build step required
+- **`scripts/check-dist.mjs`** — compares mtime of newest `.ts` in `src/` against `dist/index.mjs`; exits 1 with actionable message on stale or missing dist
+
 ## External Dependencies
 - **PostgreSQL**: Primary database for all application data, managed via Drizzle ORM.
 - **Replit Object Storage (GCS)**: Used for storing document templates and generated case documents.

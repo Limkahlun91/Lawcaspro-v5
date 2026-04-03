@@ -1,0 +1,159 @@
+Good progress. The Phase 2 implementation sounds technically credible, and the dist/source mismatch root cause is important.
+
+Do NOT move to Phase 3 yet.
+
+We need two things before progression:
+1. a strict Phase 2 evidence-based acceptance package
+2. a small but mandatory Build/Release Hardening pass so source changes cannot silently fail to reach production
+
+==================================================
+PART A — PHASE 2 STRICT ACCEPTANCE PACKAGE
+==================================================
+
+Provide exact evidence for the AML / CDD / KYC + Conflict Check implementation.
+
+1. Database evidence
+List every migration file created for Phase 2.
+For each file provide:
+- exact file name
+- purpose
+- execution order
+
+List every new table actually created.
+For each table provide:
+- table name
+- key columns
+- foreign keys
+- whether RLS is enabled
+- whether audit logging applies
+- whether frontend UI is already wired
+
+Expected tables include at least:
+- parties
+- case_parties
+- compliance_profiles
+- cdd_checks
+- cdd_documents
+- beneficial_owners
+- sanctions_screenings
+- pep_flags
+- risk_assessments
+- source_of_funds_records
+- source_of_wealth_records
+- suspicious_review_notes
+- compliance_retention_records
+- conflict_checks
+- conflict_matches
+- conflict_overrides
+
+2. Backend evidence
+List every backend file created or modified:
+- exact file path
+- purpose
+- key endpoints
+- whether fully working / partial / mock
+
+Show the exact routes added for:
+- party creation/update
+- compliance profile
+- CDD workflow
+- sanctions / PEP flagging
+- conflict check run
+- conflict override
+- compliance review / approval / rejection
+
+3. Frontend evidence
+List every frontend file created or modified:
+- exact file path
+- route/page/component name
+- purpose
+- what user actions now work
+
+Show where in the UI the following now exist:
+- party profile form
+- beneficial owner form
+- compliance status view
+- conflict results panel
+- override flow UI
+- case intake integration
+- case detail compliance tab/panel
+
+4. Business-rule evidence
+Explain exactly how these work now:
+- CDD status lifecycle
+- EDD trigger rules
+- risk scoring model
+- PEP flag storage
+- sanctions screening storage
+- source of funds / source of wealth capture
+- conflict outcome states
+- partner override rule
+- dedupe behavior for party matching
+
+5. Audit evidence
+List every new audit action string introduced for Phase 2.
+State exactly which actions write audit logs.
+
+6. Testing evidence
+List every test file added or changed:
+- exact file path
+- what it verifies
+- pass count
+
+Paste the exact final test output summary for the 102/102 run.
+
+7. End-to-end evidence
+Show at least one full successful Phase 2 flow:
+- request payload
+- response
+- resulting IDs
+- one blocked conflict example
+- one override example
+- one compliance record example
+
+==================================================
+PART B — BUILD / RELEASE HARDENING
+==================================================
+
+The dist/source mismatch is now a formal engineering risk and must be fixed.
+
+Implement and document the following:
+
+1. Build truth enforcement
+- ensure production/start commands always run from a freshly built dist
+- prevent stale dist from serving after source changes
+- make the required build step explicit and unavoidable in normal deployment flow
+
+2. Release discipline
+Document exact commands for:
+- local dev
+- test
+- build
+- production start / deploy
+
+3. Fail-fast guard
+Add a safeguard so that deployment/start clearly fails or warns when dist is stale relative to source changes, if practical in the current environment.
+
+4. Evidence
+Provide:
+- exact package.json/script changes
+- exact server/startup changes
+- exact commands now required
+- explanation of how stale dist is prevented going forward
+
+==================================================
+PART C — FINAL STATUS
+==================================================
+
+Answer clearly:
+- Is Phase 2 complete? YES/NO
+- Is build/release hardening complete? YES/NO
+- Is Phase 3 allowed to start? YES/NO
+
+Do not start Phase 3 unless all three answers are YES.
+
+No Phase 2 acceptance without migration names, table list, route list, UI file list, audit action list, exact test files, and one real blocked-conflict + override flow example.
+
+上面的证据包交得完整，而且 build/release 也补好，那下一步才适合进入：
+
+Phase 3 = Workflow Engine 2.0
