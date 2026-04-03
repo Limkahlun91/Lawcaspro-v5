@@ -13,3 +13,5 @@ export * from "./quotations";
 export * from "./regulatory";
 export * from "./time-tasks";
 export * from "./security";
+export * from "./compliance";
+export * from "./conflict";

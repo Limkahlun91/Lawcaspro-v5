@@ -114,6 +114,23 @@ export function requireFirmUser(
   next();
 }
 
+/**
+ * Restricts access to users with the Partner role (role_id = 1).
+ * Must be used after requireAuth + requireFirmUser.
+ */
+export function requirePartner(
+  req: AuthRequest,
+  res: Response,
+  next: NextFunction
+): void {
+  if (req.roleId !== 1) {
+    writeAuditLog({ actorId: req.userId, firmId: req.firmId, actorType: req.userType ?? "unknown", action: "auth.forbidden.partner_required", detail: `${req.method} ${req.path}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+    res.status(403).json({ error: "Partner access required for this action", code: "PARTNER_REQUIRED" });
+    return;
+  }
+  next();
+}
+
 // ---------------------------------------------------------------------------
 // Short-lived in-memory re-auth token store
 //

@@ -194,3 +194,109 @@ WHERE schemaname = 'public'
     'quotations','receipts','roles','time_entries','users'
   )
 ORDER BY tablename;
+
+-- ---------------------------------------------------------------------------
+-- Phase 2 — Compliance + Conflict tables (idempotent)
+-- ---------------------------------------------------------------------------
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'app_user') THEN
+    CREATE ROLE app_user NOLOGIN;
+  END IF;
+END $$;
+
+ALTER TABLE parties          ENABLE ROW LEVEL SECURITY;
+ALTER TABLE case_parties     ENABLE ROW LEVEL SECURITY;
+ALTER TABLE compliance_profiles ENABLE ROW LEVEL SECURITY;
+ALTER TABLE cdd_checks       ENABLE ROW LEVEL SECURITY;
+ALTER TABLE cdd_documents    ENABLE ROW LEVEL SECURITY;
+ALTER TABLE beneficial_owners ENABLE ROW LEVEL SECURITY;
+ALTER TABLE sanctions_screenings ENABLE ROW LEVEL SECURITY;
+ALTER TABLE pep_flags        ENABLE ROW LEVEL SECURITY;
+ALTER TABLE risk_assessments ENABLE ROW LEVEL SECURITY;
+ALTER TABLE source_of_funds_records  ENABLE ROW LEVEL SECURITY;
+ALTER TABLE source_of_wealth_records ENABLE ROW LEVEL SECURITY;
+ALTER TABLE suspicious_review_notes  ENABLE ROW LEVEL SECURITY;
+ALTER TABLE compliance_retention_records ENABLE ROW LEVEL SECURITY;
+ALTER TABLE conflict_checks  ENABLE ROW LEVEL SECURITY;
+ALTER TABLE conflict_matches ENABLE ROW LEVEL SECURITY;
+ALTER TABLE conflict_overrides ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS tenant_isolation ON parties;
+CREATE POLICY tenant_isolation ON parties FOR ALL TO app_user
+  USING ((firm_id = NULLIF(current_setting('app.current_firm_id',true),'')::integer) OR current_setting('app.is_founder',true)='true')
+  WITH CHECK ((firm_id = NULLIF(current_setting('app.current_firm_id',true),'')::integer) OR current_setting('app.is_founder',true)='true');
+
+DROP POLICY IF EXISTS tenant_isolation ON case_parties;
+CREATE POLICY tenant_isolation ON case_parties FOR ALL TO app_user
+  USING ((firm_id = NULLIF(current_setting('app.current_firm_id',true),'')::integer) OR current_setting('app.is_founder',true)='true')
+  WITH CHECK ((firm_id = NULLIF(current_setting('app.current_firm_id',true),'')::integer) OR current_setting('app.is_founder',true)='true');
+
+DROP POLICY IF EXISTS tenant_isolation ON compliance_profiles;
+CREATE POLICY tenant_isolation ON compliance_profiles FOR ALL TO app_user
+  USING ((firm_id = NULLIF(current_setting('app.current_firm_id',true),'')::integer) OR current_setting('app.is_founder',true)='true')
+  WITH CHECK ((firm_id = NULLIF(current_setting('app.current_firm_id',true),'')::integer) OR current_setting('app.is_founder',true)='true');
+
+DROP POLICY IF EXISTS tenant_isolation ON cdd_checks;
+CREATE POLICY tenant_isolation ON cdd_checks FOR ALL TO app_user
+  USING ((firm_id = NULLIF(current_setting('app.current_firm_id',true),'')::integer) OR current_setting('app.is_founder',true)='true')
+  WITH CHECK ((firm_id = NULLIF(current_setting('app.current_firm_id',true),'')::integer) OR current_setting('app.is_founder',true)='true');
+
+DROP POLICY IF EXISTS tenant_isolation ON cdd_documents;
+CREATE POLICY tenant_isolation ON cdd_documents FOR ALL TO app_user
+  USING ((firm_id = NULLIF(current_setting('app.current_firm_id',true),'')::integer) OR current_setting('app.is_founder',true)='true')
+  WITH CHECK ((firm_id = NULLIF(current_setting('app.current_firm_id',true),'')::integer) OR current_setting('app.is_founder',true)='true');
+
+DROP POLICY IF EXISTS tenant_isolation ON beneficial_owners;
+CREATE POLICY tenant_isolation ON beneficial_owners FOR ALL TO app_user
+  USING ((firm_id = NULLIF(current_setting('app.current_firm_id',true),'')::integer) OR current_setting('app.is_founder',true)='true')
+  WITH CHECK ((firm_id = NULLIF(current_setting('app.current_firm_id',true),'')::integer) OR current_setting('app.is_founder',true)='true');
+
+DROP POLICY IF EXISTS tenant_isolation ON sanctions_screenings;
+CREATE POLICY tenant_isolation ON sanctions_screenings FOR ALL TO app_user
+  USING ((firm_id = NULLIF(current_setting('app.current_firm_id',true),'')::integer) OR current_setting('app.is_founder',true)='true')
+  WITH CHECK ((firm_id = NULLIF(current_setting('app.current_firm_id',true),'')::integer) OR current_setting('app.is_founder',true)='true');
+
+DROP POLICY IF EXISTS tenant_isolation ON pep_flags;
+CREATE POLICY tenant_isolation ON pep_flags FOR ALL TO app_user
+  USING ((firm_id = NULLIF(current_setting('app.current_firm_id',true),'')::integer) OR current_setting('app.is_founder',true)='true')
+  WITH CHECK ((firm_id = NULLIF(current_setting('app.current_firm_id',true),'')::integer) OR current_setting('app.is_founder',true)='true');
+
+DROP POLICY IF EXISTS tenant_isolation ON risk_assessments;
+CREATE POLICY tenant_isolation ON risk_assessments FOR ALL TO app_user
+  USING ((firm_id = NULLIF(current_setting('app.current_firm_id',true),'')::integer) OR current_setting('app.is_founder',true)='true')
+  WITH CHECK ((firm_id = NULLIF(current_setting('app.current_firm_id',true),'')::integer) OR current_setting('app.is_founder',true)='true');
+
+DROP POLICY IF EXISTS tenant_isolation ON source_of_funds_records;
+CREATE POLICY tenant_isolation ON source_of_funds_records FOR ALL TO app_user
+  USING ((firm_id = NULLIF(current_setting('app.current_firm_id',true),'')::integer) OR current_setting('app.is_founder',true)='true')
+  WITH CHECK ((firm_id = NULLIF(current_setting('app.current_firm_id',true),'')::integer) OR current_setting('app.is_founder',true)='true');
+
+DROP POLICY IF EXISTS tenant_isolation ON source_of_wealth_records;
+CREATE POLICY tenant_isolation ON source_of_wealth_records FOR ALL TO app_user
+  USING ((firm_id = NULLIF(current_setting('app.current_firm_id',true),'')::integer) OR current_setting('app.is_founder',true)='true')
+  WITH CHECK ((firm_id = NULLIF(current_setting('app.current_firm_id',true),'')::integer) OR current_setting('app.is_founder',true)='true');
+
+DROP POLICY IF EXISTS tenant_isolation ON suspicious_review_notes;
+CREATE POLICY tenant_isolation ON suspicious_review_notes FOR ALL TO app_user
+  USING ((firm_id = NULLIF(current_setting('app.current_firm_id',true),'')::integer) OR current_setting('app.is_founder',true)='true')
+  WITH CHECK ((firm_id = NULLIF(current_setting('app.current_firm_id',true),'')::integer) OR current_setting('app.is_founder',true)='true');
+
+DROP POLICY IF EXISTS tenant_isolation ON compliance_retention_records;
+CREATE POLICY tenant_isolation ON compliance_retention_records FOR ALL TO app_user
+  USING ((firm_id = NULLIF(current_setting('app.current_firm_id',true),'')::integer) OR current_setting('app.is_founder',true)='true')
+  WITH CHECK ((firm_id = NULLIF(current_setting('app.current_firm_id',true),'')::integer) OR current_setting('app.is_founder',true)='true');
+
+DROP POLICY IF EXISTS tenant_isolation ON conflict_checks;
+CREATE POLICY tenant_isolation ON conflict_checks FOR ALL TO app_user
+  USING ((firm_id = NULLIF(current_setting('app.current_firm_id',true),'')::integer) OR current_setting('app.is_founder',true)='true')
+  WITH CHECK ((firm_id = NULLIF(current_setting('app.current_firm_id',true),'')::integer) OR current_setting('app.is_founder',true)='true');
+
+DROP POLICY IF EXISTS tenant_isolation ON conflict_matches;
+CREATE POLICY tenant_isolation ON conflict_matches FOR ALL TO app_user
+  USING ((firm_id = NULLIF(current_setting('app.current_firm_id',true),'')::integer) OR current_setting('app.is_founder',true)='true')
+  WITH CHECK ((firm_id = NULLIF(current_setting('app.current_firm_id',true),'')::integer) OR current_setting('app.is_founder',true)='true');
+
+DROP POLICY IF EXISTS tenant_isolation ON conflict_overrides;
+CREATE POLICY tenant_isolation ON conflict_overrides FOR ALL TO app_user
+  USING ((firm_id = NULLIF(current_setting('app.current_firm_id',true),'')::integer) OR current_setting('app.is_founder',true)='true')
+  WITH CHECK ((firm_id = NULLIF(current_setting('app.current_firm_id',true),'')::integer) OR current_setting('app.is_founder',true)='true');

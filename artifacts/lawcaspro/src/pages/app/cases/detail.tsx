@@ -19,6 +19,7 @@ import CaseBillingTab from "./components/CaseBillingTab";
 import CaseCommunicationsTab from "./components/CaseCommunicationsTab";
 import CaseTasksTab from "./components/CaseTasksTab";
 import CaseTimeTab from "./components/CaseTimeTab";
+import CaseComplianceTab from "./components/CaseComplianceTab";
 
 export default function CaseDetail() {
   const { id } = useParams<{ id: string }>();
@@ -125,7 +126,7 @@ export default function CaseDetail() {
       </div>
 
       <Tabs defaultValue="overview" className="w-full">
-        <TabsList className="grid w-full grid-cols-8 mb-6 bg-slate-100 p-1">
+        <TabsList className="grid w-full grid-cols-9 mb-6 bg-slate-100 p-1">
           <TabsTrigger value="overview">Overview</TabsTrigger>
           <TabsTrigger value="workflow">Workflow</TabsTrigger>
           <TabsTrigger value="documents">Documents</TabsTrigger>
@@ -134,6 +135,7 @@ export default function CaseDetail() {
           <TabsTrigger value="tasks">Tasks</TabsTrigger>
           <TabsTrigger value="time">Time</TabsTrigger>
           <TabsTrigger value="notes">Notes</TabsTrigger>
+          <TabsTrigger value="compliance">Compliance</TabsTrigger>
         </TabsList>
 
         <TabsContent value="overview" className="space-y-6">
@@ -377,6 +379,10 @@ export default function CaseDetail() {
               </div>
             </CardContent>
           </Card>
+        </TabsContent>
+
+        <TabsContent value="compliance">
+          <CaseComplianceTab caseId={caseId} />
         </TabsContent>
       </Tabs>
     </div>

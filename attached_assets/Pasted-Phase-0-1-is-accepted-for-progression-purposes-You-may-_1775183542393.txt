@@ -1,0 +1,211 @@
+Phase 0/1 is accepted for progression purposes.
+
+You may now start Phase 2, but you must keep the following known technical debts recorded and visible:
+1. RLS setup is still applied through a separate apply-rls step, not fully embedded into the normal migration lifecycle
+2. Founder support access still depends on postgres/BYPASSRLS + application scoping
+3. Re-auth token storage is in-memory only and must be upgraded later for multi-instance deployments
+
+Do not work on these debts now unless they block Phase 2. Just record them clearly in technical debt notes.
+
+==================================================
+PHASE 2 — AML / CDD / KYC + CONFLICT CHECK
+==================================================
+
+Goal:
+Build a proper intake compliance and conflict-control layer for Malaysian legal practice operations before proceeding to workflow 2.0.
+
+Implement end-to-end across:
+- schema
+- migrations
+- backend routes/services
+- validation
+- frontend UI
+- audit
+- tests
+
+--------------------------------------
+A. PARTY / COMPLIANCE DATA MODEL
+--------------------------------------
+
+Create/upgrade the data model for parties and compliance.
+
+Required tables:
+- parties
+- case_parties
+- compliance_profiles
+- cdd_checks
+- cdd_documents
+- beneficial_owners
+- sanctions_screenings
+- pep_flags
+- risk_assessments
+- source_of_funds_records
+- source_of_wealth_records
+- suspicious_review_notes
+- compliance_retention_records
+
+Support party types:
+- natural person
+- company / legal person
+- trust / legal arrangement
+
+Minimum capture requirements:
+- full name / entity name
+- NRIC / passport / company reg no
+- DOB / incorporation date where relevant
+- nationality / jurisdiction
+- address
+- occupation / nature of business
+- transaction purpose
+- directors / controlling persons
+- beneficial owners
+- PEP status
+- high-risk jurisdiction flags
+- nominee / layered ownership indicators
+
+--------------------------------------
+B. CDD / AML WORKFLOW
+--------------------------------------
+
+Implement a real compliance workflow:
+
+1. CDD status model
+- not_started
+- in_progress
+- pending_review
+- approved
+- rejected
+- enhanced_due_diligence_required
+
+2. Risk scoring
+Support structured risk assessment using factors such as:
+- PEP
+- high-risk jurisdiction
+- complex ownership
+- nominee arrangements
+- missing source of funds
+- suspicious inconsistencies
+
+3. EDD trigger rules
+Automatically trigger enhanced due diligence when defined risk conditions are met.
+
+4. Source of funds / source of wealth
+Add structured capture and review.
+
+5. Retention
+Support post-file retention metadata for compliance records.
+
+--------------------------------------
+C. CONFLICT CHECK ENGINE
+--------------------------------------
+
+Conflict checks must be mandatory during intake.
+
+Required tables:
+- conflict_checks
+- conflict_matches
+- conflict_overrides
+
+Implement:
+1. Conflict checks across:
+- purchaser
+- vendor
+- borrower
+- guarantor
+- developer
+- bank
+- company
+- beneficial owner
+- prior adverse party where data exists
+
+2. Match dimensions:
+- name
+- NRIC
+- passport
+- company reg no
+- cautious fuzzy matching
+
+3. Conflict outcomes:
+- no_match
+- warning
+- blocked_pending_partner_override
+
+4. Override flow:
+- partner override required
+- reason required
+- full audit required
+
+5. UI:
+- conflict check panel during case intake
+- machine-readable results
+- clear warning/blocking states
+- override workflow UI for authorized users only
+
+--------------------------------------
+D. CASE INTAKE INTEGRATION
+--------------------------------------
+
+Integrate compliance + conflict into Create Case / intake flow.
+
+Rules:
+- new case intake must support party capture in a structured way
+- conflict check must run before final creation or before case activation
+- compliance profile must be linkable from case detail
+- do not silently create poor-quality duplicate parties
+- preserve current purchaser inline flow, but evolve it toward structured party records
+
+--------------------------------------
+E. AUDIT + SECURITY
+--------------------------------------
+
+Every important action must be audited:
+- compliance record creation/update
+- sanctions screening run
+- PEP flag add/remove
+- risk score decision
+- conflict warning/block result
+- partner override
+- compliance approval/rejection
+
+Do not weaken current RLS / tenant isolation / re-auth protections.
+
+--------------------------------------
+F. FRONTEND REQUIREMENTS
+--------------------------------------
+
+Add real usable UI, not placeholders:
+- compliance tab or panel in case detail or intake
+- party profile forms
+- beneficial owner forms
+- CDD review status UI
+- conflict result UI
+- override modal for authorized users
+- clear inline validation
+
+--------------------------------------
+G. TESTING
+--------------------------------------
+
+Add automated tests for:
+- compliance record creation
+- EDD trigger rules
+- sanctions/PEP flags stored and surfaced
+- conflict match detection
+- partner override flow
+- unauthorized user cannot override conflicts
+- tenant isolation preserved for all new tables/routes
+- audit logs written for compliance/conflict actions
+
+--------------------------------------
+H. DELIVERY FORMAT
+--------------------------------------
+
+When Phase 2 is done, provide:
+1. exact migration files
+2. exact new tables and relationships
+3. exact backend files changed
+4. exact frontend files changed
+5. exact tests added
+6. exact audit actions added
+7. what is fully complete
+8. what remains partial

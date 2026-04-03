@@ -26,6 +26,9 @@ import timeEntriesRouter from "./time-entries";
 import caseTasksRouter from "./case-tasks";
 import complianceReportsRouter from "./compliance-reports";
 import supportSessionsRouter from "./support-sessions";
+import partiesRouter from "./parties";
+import complianceRouter from "./compliance";
+import conflictRouter from "./conflict";
 
 const router: IRouter = Router();
 
@@ -56,5 +59,8 @@ router.use(timeEntriesRouter);
 router.use(caseTasksRouter);
 router.use(complianceReportsRouter);
 router.use(supportSessionsRouter);
+router.use(partiesRouter);
+router.use(complianceRouter);
+router.use(conflictRouter);
 
 export default router;

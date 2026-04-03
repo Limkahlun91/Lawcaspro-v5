@@ -181,6 +181,55 @@ Projects support full CRUD including edit via the PATCH endpoint. The edit page 
 - `reauth.test.ts`: requireReAuth on invoice void, receipt reverse, PV transition (403 without token, 403 on invalid, 200 with valid)
 - Run with `pnpm --filter @workspace/api-server run test`
 
+## Phase 2 — AML/CDD/KYC Compliance + Conflict Check Engine (Completed)
+
+### Database Schema (16 new tables)
+- **`lib/db/src/schema/compliance.ts`**: `parties`, `case_parties`, `compliance_profiles`, `cdd_checks`, `cdd_documents`, `beneficial_owners`, `sanctions_screenings`, `pep_flags`, `risk_assessments`, `source_of_funds_records`, `source_of_wealth_records`, `suspicious_review_notes`, `compliance_retention_records`
+- **`lib/db/src/schema/conflict.ts`**: `conflict_checks`, `conflict_matches`, `conflict_overrides`
+- All 16 tables have firm-scoped RLS (`tenant_isolation` policy)
+- Migration applied: `lib/db/migrations/0001_illegal_vapor.sql`
+
+### Backend — Parties Routes (`routes/parties.ts`)
+- `GET/POST /parties` — list/create parties (natural person, company, trust)
+- `GET/PUT/DELETE /parties/:id` — individual party CRUD
+- `GET /parties/search?q=` — name/NRIC/company reg search
+- `GET /cases/:caseId/parties` — list parties linked to a case
+- `POST /cases/:caseId/parties` — link a party to a case
+- `DELETE /cases/:caseId/parties/:partyId` — unlink party from case
+
+### Backend — Compliance Routes (`routes/compliance.ts`)
+- `GET/POST /parties/:id/compliance-profile` — create or fetch CDD profile
+- `POST /compliance/cdd-checks` — create a CDD check run
+- `GET/POST /parties/:id/risk-assessment` — RBIM risk scoring (PEP=30, high-risk jurisdiction=25, complex ownership=20, nominee=20, missing SOF=15, suspicious=25; ≥45=high, ≥70=very_high)
+- `POST /parties/:id/edd-trigger` — trigger enhanced due diligence
+- `GET/POST /parties/:id/sanctions` — OFAC/UN/BNM sanctions screening records
+- `GET/POST /parties/:id/pep-flags` — PEP (politically exposed person) flags
+- `GET/POST /parties/:id/source-of-funds` / `source-of-wealth` — SOF/SOW declarations
+- `GET/POST /parties/:id/suspicious-notes` — suspicious activity notes
+- `GET/POST /parties/:id/retention` — compliance retention records
+
+### Backend — Conflict Check Engine (`routes/conflict.ts`)
+- `POST /conflict/check` — run full conflict check: name fuzzy (≥75%=warning, ≥95%=blocked), NRIC/passport/company_reg exact match (=blocked)
+- `GET /conflict/checks?caseId=` — list checks for a case
+- `GET /conflict/checks/:id` — get check with matches and overrides
+- `POST /conflict/checks/:id/override` — partner-only override of a blocked match; requires `requirePartner` + `requireReAuth` (x-reauth-token header)
+- Deduplication: one match per (partyName, matchedCaseId); identifier matches take priority over name matches
+- Checks against both `case_purchasers` (legacy) and `case_parties` (new) tables
+- `requirePartner` middleware added to `lib/auth.ts` (checks `req.roleId === 1`)
+
+### Frontend — Compliance & Conflict UI
+- **`CaseComplianceTab.tsx`** — party list, CDD status badge, risk score, SOF/SOW section, suspicious notes per case
+- **`PartyForm.tsx`** — full party capture (natural person, company, trust) with PEP flag and identity fields
+- **`BeneficialOwnerForm.tsx`** — beneficial owner capture form
+- **`CaseConflictPanel.tsx`** — conflict check trigger, results table with override modal (uses `wrapWithReAuth`)
+- Case detail page updated to `grid-cols-9` with "Compliance" as 9th tab
+
+### Automated Tests — Phase 2
+- **102 tests** total (8 test files)
+- `compliance.test.ts` — profile creation, EDD trigger, PEP/sanctions, SOF/SOW, audit log, tenant isolation
+- `conflict.test.ts` — no match, NRIC blocked match, get results, access control (lawyer blocked), partner override flow, single-use re-auth token, duplicate override rejected, name fuzzy match, audit log, input validation
+- All 102 tests pass
+
 ## External Dependencies
 - **PostgreSQL**: Primary database for all application data, managed via Drizzle ORM.
 - **Replit Object Storage (GCS)**: Used for storing document templates and generated case documents.
