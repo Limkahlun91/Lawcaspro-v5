@@ -140,11 +140,45 @@ Projects support full CRUD including edit via the PATCH endpoint. The edit page 
 - Active sessions list with per-session revoke button
 - Login page updated to show TOTP step when `needsTotp: true` returned
 
+## Phase 0/1 Security Hardening (Completed)
+
+### BLOCKER 1 — Migration control
+- `lib/db/scripts/reconcile-live-db.mjs` seeds baseline hash into `__drizzle_migrations` for existing DBs
+- `pnpm --filter @workspace/db run reconcile` then `pnpm --filter @workspace/db run migrate` are the safe procedures
+- `lib/db/MIGRATION_GUIDE.md` documents fresh-DB and live-DB procedures
+
+### BLOCKER 2 — PostgreSQL Row-Level Security
+- `lib/db/scripts/apply-rls.sql` — idempotent RLS setup (run with `pnpm --filter @workspace/db run apply-rls`)
+- `app_user` PostgreSQL role created (NOLOGIN, no BYPASSRLS); RLS enforced when connection uses `SET ROLE app_user`
+- **22 firm-scoped tables** all have `ENABLE ROW LEVEL SECURITY` and `tenant_isolation` policies
+- Policy: `firm_id = NULLIF(current_setting('app.current_firm_id', true), '')::integer OR app.is_founder = 'true'`
+- `lib/db/src/tenant-context.ts` exports `setTenantContext(client, firmId)`, `setFounderContext(client)`, `clearTenantContext(client)`
+- App connects as `postgres` (superuser, BYPASSRLS) — RLS only active when explicitly SET ROLE app_user
+
+### BLOCKER 3 — sensitiveRateLimiter mounted
+- 30 req/min window; `skip: () => NODE_ENV === 'test'`
+- Mounted on: POST /invoices, /invoices/from-quotation/:id, /invoices/:id/issue, /invoices/:id/void
+- POST /receipts, /receipts/:id/reverse
+- POST /payment-vouchers, /payment-vouchers/:id/transition
+- POST /support-sessions, /support-sessions/:id/log
+- POST /auth/totp/setup, /auth/totp/confirm, /auth/totp/disable
+
+### BLOCKER 4 — requireReAuth + frontend ReAuthDialog
+- `requireReAuth` middleware checks `x-reauth-token` header matches current session → 403 REAUTH_REQUIRED if missing, 403 REAUTH_FAILED if invalid
+- Mounted on: POST /invoices/:id/void, /receipts/:id/reverse, /payment-vouchers/:id/transition, /auth/totp/disable
+- Frontend: `artifacts/lawcaspro/src/components/re-auth-dialog.tsx` — `ReAuthProvider` + `useReAuth()` hook
+- `wrapWithReAuth(action, message)` wraps any async action; shows confirmation dialog; retries with `x-reauth-token` on confirm
+- Auth context now stores token in sessionStorage (`_lcp_tok`) and exposes `token` field
+- `ReAuthProvider` wraps entire app in `App.tsx`
+
 ### Automated Tests (vitest + supertest)
-- 31 tests across 3 test files in `artifacts/api-server/src/__tests__/`
-- `auth.test.ts`: login success/failure, logout, /me, sessions, audit logs, TOTP endpoints
+- **53 tests** across 6 test files in `artifacts/api-server/src/__tests__/`
+- `auth.test.ts`: login success/failure, logout, /me, sessions, audit logs, TOTP endpoints (incl. re-auth on disable)
 - `tenant-isolation.test.ts`: firm user blocked from platform routes, DB-level isolation verified
 - `support-sessions.test.ts`: session lifecycle, audit log creation, error cases
+- `create-case.test.ts`: 40 tests covering all P0/1 case-creation features
+- `rls-isolation.test.ts`: DB-level RLS policy tests (firm B can't see firm A data, founder sees all, empty context sees nothing)
+- `reauth.test.ts`: requireReAuth on invoice void, receipt reverse, PV transition (403 without token, 403 on invalid, 200 with valid)
 - Run with `pnpm --filter @workspace/api-server run test`
 
 ## External Dependencies

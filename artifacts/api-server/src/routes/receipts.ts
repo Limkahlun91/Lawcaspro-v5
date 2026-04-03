@@ -1,7 +1,8 @@
 import { Router, type IRouter } from "express";
 import { eq, and, desc, sql } from "drizzle-orm";
 import { db, receiptsTable, receiptAllocationsTable, invoicesTable, ledgerEntriesTable, firmBankAccountsTable } from "@workspace/db";
-import { requireAuth, requireFirmUser, type AuthRequest } from "../lib/auth";
+import { requireAuth, requireFirmUser, requireReAuth, type AuthRequest } from "../lib/auth";
+import { sensitiveRateLimiter } from "../lib/rate-limit";
 
 const router: IRouter = Router();
 
@@ -69,7 +70,7 @@ router.get("/receipts/:id", requireAuth, requireFirmUser, async (req: AuthReques
 });
 
 // Create receipt
-router.post("/receipts", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+router.post("/receipts", sensitiveRateLimiter, requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
   const { caseId, invoiceId, paymentMethod, bankAccountId, accountType, amount,
     receivedDate, referenceNo, notes, allocations } = req.body;
   if (!amount || !receivedDate) { res.status(400).json({ error: "amount and receivedDate required" }); return; }
@@ -108,7 +109,7 @@ router.post("/receipts", requireAuth, requireFirmUser, async (req: AuthRequest, 
 });
 
 // Reverse receipt
-router.post("/receipts/:id/reverse", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+router.post("/receipts/:id/reverse", sensitiveRateLimiter, requireAuth, requireFirmUser, requireReAuth, async (req: AuthRequest, res): Promise<void> => {
   const id = parseInt(req.params.id);
   const [rec] = await db.select().from(receiptsTable).where(and(eq(receiptsTable.id, id), eq(receiptsTable.firmId, req.firmId!)));
   if (!rec) { res.status(404).json({ error: "Receipt not found" }); return; }

@@ -1,7 +1,8 @@
 import { Router, type IRouter } from "express";
 import { eq, and, desc, sql } from "drizzle-orm";
 import { db, paymentVouchersTable, paymentVoucherItemsTable, ledgerEntriesTable } from "@workspace/db";
-import { requireAuth, requireFirmUser, type AuthRequest } from "../lib/auth";
+import { requireAuth, requireFirmUser, requireReAuth, type AuthRequest } from "../lib/auth";
+import { sensitiveRateLimiter } from "../lib/rate-limit";
 
 const router: IRouter = Router();
 
@@ -42,7 +43,7 @@ router.get("/payment-vouchers/:id", requireAuth, requireFirmUser, async (req: Au
 });
 
 // Create
-router.post("/payment-vouchers", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+router.post("/payment-vouchers", sensitiveRateLimiter, requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
   const { caseId, payeeName, payeeBank, payeeAccountNo, paymentMethod, bankAccountId,
     accountType, amount, purpose, notes, items } = req.body;
   if (!payeeName || !amount || !purpose) { res.status(400).json({ error: "payeeName, amount, purpose required" }); return; }
@@ -68,7 +69,7 @@ router.post("/payment-vouchers", requireAuth, requireFirmUser, async (req: AuthR
 });
 
 // Status transition
-router.post("/payment-vouchers/:id/transition", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+router.post("/payment-vouchers/:id/transition", sensitiveRateLimiter, requireAuth, requireFirmUser, requireReAuth, async (req: AuthRequest, res): Promise<void> => {
   const id = parseInt(req.params.id);
   const { toStatus, notes } = req.body as { toStatus: string; notes?: string };
   const [pv] = await db.select().from(paymentVouchersTable).where(and(eq(paymentVouchersTable.id, id), eq(paymentVouchersTable.firmId, req.firmId!)));

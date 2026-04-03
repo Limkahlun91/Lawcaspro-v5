@@ -4,7 +4,8 @@ import {
   db, invoicesTable, invoiceItemsTable, quotationsTable, quotationItemsTable,
   casesTable, clientsTable, casePurchasersTable, ledgerEntriesTable,
 } from "@workspace/db";
-import { requireAuth, requireFirmUser, type AuthRequest } from "../lib/auth";
+import { requireAuth, requireFirmUser, requireReAuth, type AuthRequest } from "../lib/auth";
+import { sensitiveRateLimiter } from "../lib/rate-limit";
 
 const router: IRouter = Router();
 
@@ -39,7 +40,7 @@ router.get("/invoices/:id", requireAuth, requireFirmUser, async (req: AuthReques
 });
 
 // Create from quotation
-router.post("/invoices/from-quotation/:quotationId", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+router.post("/invoices/from-quotation/:quotationId", sensitiveRateLimiter, requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
   const quotationId = parseInt(req.params.quotationId);
   const [q] = await db.select().from(quotationsTable).where(and(eq(quotationsTable.id, quotationId), eq(quotationsTable.firmId, req.firmId!)));
   if (!q) { res.status(404).json({ error: "Quotation not found" }); return; }
@@ -78,7 +79,7 @@ router.post("/invoices/from-quotation/:quotationId", requireAuth, requireFirmUse
 });
 
 // Create manually
-router.post("/invoices", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+router.post("/invoices", sensitiveRateLimiter, requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
   const { caseId, quotationId, items, notes, issuedDate, dueDate } = req.body;
   const parsedItems = (items || []) as any[];
   const subtotal = parsedItems.reduce((s: number, i: any) => s + Number(i.amountExclTax || 0), 0);
@@ -111,7 +112,7 @@ router.post("/invoices", requireAuth, requireFirmUser, async (req: AuthRequest, 
 });
 
 // Issue invoice (draft → issued)
-router.post("/invoices/:id/issue", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+router.post("/invoices/:id/issue", sensitiveRateLimiter, requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
   const id = parseInt(req.params.id);
   const [inv] = await db.select().from(invoicesTable).where(and(eq(invoicesTable.id, id), eq(invoicesTable.firmId, req.firmId!)));
   if (!inv) { res.status(404).json({ error: "Invoice not found" }); return; }
@@ -122,7 +123,7 @@ router.post("/invoices/:id/issue", requireAuth, requireFirmUser, async (req: Aut
 });
 
 // Void invoice
-router.post("/invoices/:id/void", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+router.post("/invoices/:id/void", sensitiveRateLimiter, requireAuth, requireFirmUser, requireReAuth, async (req: AuthRequest, res): Promise<void> => {
   const id = parseInt(req.params.id);
   const [inv] = await db.select().from(invoicesTable).where(and(eq(invoicesTable.id, id), eq(invoicesTable.firmId, req.firmId!)));
   if (!inv) { res.status(404).json({ error: "Invoice not found" }); return; }

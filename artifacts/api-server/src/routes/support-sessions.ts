@@ -2,6 +2,7 @@ import { Router, type IRouter } from "express";
 import { db, supportSessionsTable, firmsTable } from "@workspace/db";
 import { eq, desc, isNull } from "drizzle-orm";
 import { requireAuth, requireFounder, writeAuditLog, type AuthRequest } from "../lib/auth";
+import { sensitiveRateLimiter } from "../lib/rate-limit";
 
 const router: IRouter = Router();
 
@@ -23,7 +24,7 @@ router.get("/support-sessions/active", requireAuth, requireFounder, async (req: 
   res.json({ data: sessions });
 });
 
-router.post("/support-sessions", requireAuth, requireFounder, async (req: AuthRequest, res): Promise<void> => {
+router.post("/support-sessions", sensitiveRateLimiter, requireAuth, requireFounder, async (req: AuthRequest, res): Promise<void> => {
   const { targetFirmId, reason } = req.body as { targetFirmId: number; reason: string };
 
   if (!targetFirmId || !reason?.trim()) {
@@ -105,7 +106,7 @@ router.patch("/support-sessions/:id/end", requireAuth, requireFounder, async (re
   res.json({ data: updated });
 });
 
-router.post("/support-sessions/:id/log", requireAuth, requireFounder, async (req: AuthRequest, res): Promise<void> => {
+router.post("/support-sessions/:id/log", sensitiveRateLimiter, requireAuth, requireFounder, async (req: AuthRequest, res): Promise<void> => {
   const sessionId = Number(req.params.id);
   const { action, detail } = req.body as { action: string; detail?: string };
 

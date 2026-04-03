@@ -4,8 +4,8 @@ import crypto from "crypto";
 import { eq } from "drizzle-orm";
 import { db, usersTable, sessionsTable, rolesTable, firmsTable } from "@workspace/db";
 import { LoginBody } from "@workspace/api-zod";
-import { requireAuth, type AuthRequest, writeAuditLog } from "../lib/auth";
-import { authRateLimiter } from "../lib/rate-limit";
+import { requireAuth, requireReAuth, type AuthRequest, writeAuditLog } from "../lib/auth";
+import { authRateLimiter, sensitiveRateLimiter } from "../lib/rate-limit";
 import * as OTPAuth from "otpauth";
 import QRCode from "qrcode";
 
@@ -180,7 +180,7 @@ router.delete("/auth/sessions/:id", requireAuth, async (req: AuthRequest, res): 
   res.json({ success: true });
 });
 
-router.post("/auth/totp/setup", requireAuth, async (req: AuthRequest, res): Promise<void> => {
+router.post("/auth/totp/setup", sensitiveRateLimiter, requireAuth, async (req: AuthRequest, res): Promise<void> => {
   const [user] = await db.select().from(usersTable).where(eq(usersTable.id, req.userId!));
   if (!user) { res.status(404).json({ error: "User not found" }); return; }
   if (user.totpEnabled) { res.status(400).json({ error: "TOTP is already enabled" }); return; }
@@ -196,7 +196,7 @@ router.post("/auth/totp/setup", requireAuth, async (req: AuthRequest, res): Prom
   res.json({ secret, qrCodeDataUrl, otpAuthUrl });
 });
 
-router.post("/auth/totp/confirm", requireAuth, async (req: AuthRequest, res): Promise<void> => {
+router.post("/auth/totp/confirm", sensitiveRateLimiter, requireAuth, async (req: AuthRequest, res): Promise<void> => {
   const { code } = req.body as { code: string };
   if (!code) { res.status(400).json({ error: "Code is required" }); return; }
 
@@ -214,7 +214,7 @@ router.post("/auth/totp/confirm", requireAuth, async (req: AuthRequest, res): Pr
   res.json({ success: true });
 });
 
-router.post("/auth/totp/disable", requireAuth, async (req: AuthRequest, res): Promise<void> => {
+router.post("/auth/totp/disable", sensitiveRateLimiter, requireAuth, requireReAuth, async (req: AuthRequest, res): Promise<void> => {
   const { code } = req.body as { code: string };
   if (!code) { res.status(400).json({ error: "Code is required to disable TOTP" }); return; }
 

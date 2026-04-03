@@ -1,0 +1,133 @@
+Good. P0.1 Create Case hardening is acceptable as a regression fix.
+
+However, Phase 0 and Phase 1 are still NOT complete based on your own evidence package.
+Do NOT start Phase 2 yet.
+
+We now need a strict Phase 0/1 Completion Pass.
+
+==================================================
+PHASE 0/1 COMPLETION PASS
+==================================================
+
+You must fix the 4 unresolved blockers before any AML/KYC, conflict engine, or workflow 2.0 work continues.
+
+--------------------------------------
+BLOCKER 1 — LIVE MIGRATION CONTROL
+--------------------------------------
+
+Current problem:
+- __drizzle_migrations does not exist in live DB
+- live DB was built via db:push
+- pnpm migrate fails on the live database
+- baseline migration exists, but live DB is not under formal migration control
+
+Required fix:
+1. Bring the live database under proper Drizzle migration control
+2. Seed or reconcile the migration journal safely so live DB recognizes the baseline
+3. Prove that future schema changes can be applied via ordered migrations instead of raw db:push
+4. Create any missing follow-up correction migration files instead of collapsing everything into one undocumented baseline
+5. Provide exact safe procedure for:
+   - fresh DB bootstrap
+   - existing live DB reconciliation
+   - future migration workflow
+
+Acceptance evidence required:
+- exact migration files
+- exact commands used
+- proof that migrate works on live DB after reconciliation
+- proof that fresh DB rebuild works from migrations only
+
+--------------------------------------
+BLOCKER 2 — DATABASE-LEVEL TENANT SECURITY
+--------------------------------------
+
+Current problem:
+- no PostgreSQL RLS
+- no policies in pg_policies
+- tenant isolation is still application-layer only
+
+Required fix:
+1. Enable RLS on all firm-scoped tables
+2. Create explicit policies for founder/platform vs firm-scoped access
+3. Implement a safe tenant context mechanism for DB queries
+4. Ensure founder support sessions work safely with controlled elevated access
+5. Add tests proving a missing firm_id filter in application logic cannot expose cross-tenant data
+
+Acceptance evidence required:
+- exact table list with RLS enabled
+- exact policy names
+- exact SQL/policy definitions
+- exact tests for DB-level tenant denial
+- final pg_policies output
+
+--------------------------------------
+BLOCKER 3 — SENSITIVE RATE LIMITING
+--------------------------------------
+
+Current problem:
+- sensitiveRateLimiter is defined but not mounted anywhere
+
+Required fix:
+1. Mount sensitiveRateLimiter on real sensitive routes, especially:
+   - accounting mutation routes
+   - security-related actions
+   - support-session actions
+2. Document exact thresholds and route coverage
+3. Add tests verifying limiter behavior outside test bypass logic where practical
+
+Acceptance evidence required:
+- file paths changed
+- mounted route list
+- thresholds
+- tests added
+
+--------------------------------------
+BLOCKER 4 — REQUIRE RE-AUTH ON SENSITIVE ACTIONS
+--------------------------------------
+
+Current problem:
+- requireReAuth exists but is not mounted on any financial route
+
+Required fix:
+1. Mount requireReAuth on actual sensitive actions, at minimum:
+   - payment voucher approval / payment actions
+   - receipt reversal / void
+   - invoice void
+   - TOTP disable
+   - founder support-session start if required by your security model
+2. Make re-auth behavior explicit in frontend UX
+3. Add tests for success/failure of re-auth protected actions
+
+Acceptance evidence required:
+- exact routes protected
+- backend files changed
+- frontend files changed
+- tests added
+
+--------------------------------------
+ADDITIONAL HARDENING
+--------------------------------------
+
+For purchaser dedupe:
+- IC-based match may auto-reuse
+- name-only match must be conservative
+- if name-only exact match is used, prefer suggest/confirm behavior over silent auto-reuse
+- do not silently bind a purchaser to the wrong existing client
+
+--------------------------------------
+DELIVERY FORMAT
+--------------------------------------
+
+When this completion pass is done, provide:
+
+1. exact migration files added/changed
+2. exact backend files added/changed
+3. exact frontend files added/changed
+4. exact tests added
+5. exact RLS tables + policy names
+6. exact protected routes for rate limiting
+7. exact protected routes for requireReAuth
+8. final proof that Phase 0 and Phase 1 are now truly complete
+
+Do not claim completion unless all 4 blockers are resolved with code and evidence.
+Do not start Phase 2 yet.
