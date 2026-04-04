@@ -1,0 +1,13 @@
+.git
+.github
+.trae
+.canvas
+**/node_modules
+**/dist
+**/.turbo
+**/.next
+**/.vercel
+**/.DS_Store
+npm-debug.log*
+pnpm-debug.log*
+
