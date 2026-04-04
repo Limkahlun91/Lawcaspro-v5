@@ -2,6 +2,7 @@
   "name": "workspace",
   "version": "0.0.0",
   "license": "MIT",
+  "packageManager": "pnpm@9.15.5",
   "scripts": {
     "preinstall": "node preinstall.mjs",
     "build": "pnpm run typecheck && pnpm -C artifacts/lawcaspro run build",
