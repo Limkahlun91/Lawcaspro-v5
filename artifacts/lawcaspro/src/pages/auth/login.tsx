@@ -10,8 +10,10 @@ import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from "
 import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Building2, Eye, EyeOff, ShieldCheck } from "lucide-react";
+import { apiUrl } from "@/lib/api-base";
+import type { AuthUser } from "@workspace/api-client-react";
 
-const API_BASE = import.meta.env.BASE_URL.replace(/\/$/, "").replace(/^\/lawcaspro/, "") + "/api";
+const LOGIN_URL = apiUrl("/api/auth/login");
 
 const loginSchema = z.object({
   email: z.string().email("Please enter a valid email address"),
@@ -19,6 +21,25 @@ const loginSchema = z.object({
 });
 
 type LoginFormValues = z.infer<typeof loginSchema>;
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object";
+}
+
+function isAuthUser(value: unknown): value is AuthUser {
+  if (!isRecord(value)) return false;
+  return (
+    typeof value.id === "number" &&
+    typeof value.email === "string" &&
+    typeof value.name === "string" &&
+    typeof value.userType === "string" &&
+    typeof value.status === "string"
+  );
+}
+
+function requiresTotp(value: unknown): boolean {
+  return isRecord(value) && value.needsTotp === true;
+}
 
 export default function Login() {
   const { login: setAuthUser } = useAuth();
@@ -39,25 +60,42 @@ export default function Login() {
   async function doLogin(data: LoginFormValues, code?: string) {
     setIsPending(true);
     try {
-      const res = await fetch(`${API_BASE}/auth/login`, {
+      const res = await fetch(LOGIN_URL, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         credentials: "include",
         body: JSON.stringify({ ...data, ...(code ? { totpCode: code } : {}) }),
       });
-      const body = await res.json();
+      const raw = await res.text();
+      let body: unknown = null;
+      try {
+        body = raw.trim() === "" ? null : JSON.parse(raw);
+      } catch {
+        body = raw;
+      }
 
       if (!res.ok) {
-        toast({ title: "Login failed", description: body.error || "Please check your credentials.", variant: "destructive" });
+        const description =
+          typeof body === "string"
+            ? body
+            : (isRecord(body) && typeof body.error === "string"
+                ? body.error
+                : "Please check your credentials.");
+        toast({ title: "Login failed", description, variant: "destructive" });
         setTotpStep(false);
         setSavedCredentials(null);
         setTotpCode("");
         return;
       }
 
-      if (body.needsTotp) {
+      if (requiresTotp(body)) {
         setSavedCredentials(data);
         setTotpStep(true);
+        return;
+      }
+
+      if (!isAuthUser(body)) {
+        toast({ title: "Login failed", description: "Unexpected response from server.", variant: "destructive" });
         return;
       }
 
