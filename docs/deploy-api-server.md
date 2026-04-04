@@ -1,10 +1,14 @@
-# Deploy api-server (Docker)
+# Deploy api-server on Render (Docker)
 
-This repo is a pnpm workspace monorepo. The most stable way to deploy `artifacts/api-server` on common Node platforms is to run it as a Docker container built from the repo root.
+This repo is a pnpm workspace monorepo. The most stable way to deploy `artifacts/api-server` is to run it on Render as a Docker-based Web Service built from the repo root.
 
-## Recommended target
+## Render service settings (summary)
 
-Run a Docker container on a platform that supports long-running services (Render / Railway / Fly.io / VPS). Avoid serverless for this API server.
+- Service type: Web Service
+- Environment: Docker
+- Root directory: repo root
+- Dockerfile path: `artifacts/api-server/Dockerfile`
+- Health check path: `/api/healthz`
 
 ## Build image (from repo root)
 
@@ -32,12 +36,16 @@ curl http://localhost:3000/api/healthz
 
 Minimum required to start:
 
-- `PORT`
-- `NODE_ENV` (use `production` in real deployments)
 - `DATABASE_URL` (Postgres connection string)
 
-Optional but recommended:
+Provided by Render automatically:
 
+- `PORT` (do not hardcode; the server reads `process.env.PORT`)
+
+Recommended:
+
+- `NODE_ENV` (set to `production`)
+- `DATABASE_URL` (Postgres connection string)
 - `LOG_LEVEL` (default: `info`)
 
 Object storage (required for document/object routes that use object storage):
@@ -49,7 +57,7 @@ Note: current object storage integration expects the Replit Object Storage sidec
 
 ## One-time DB setup
 
-Provision a Postgres database, then apply schema + migrations using the workspace DB package:
+Provision a Postgres database (Render Postgres is fine), then apply schema + migrations using the workspace DB package:
 
 ```bash
 pnpm install
@@ -65,4 +73,3 @@ By default, production deployments do NOT auto-seed. To seed only when the DB is
 - `SEED_FOUNDER_PASSWORD`, `SEED_PARTNER_PASSWORD`, `SEED_LAWYER_PASSWORD`, `SEED_CLERK_PASSWORD`
 
 You can also override emails/slugs via the other `SEED_*` variables in `artifacts/api-server/.env.example`.
-
