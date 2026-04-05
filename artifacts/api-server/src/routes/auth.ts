@@ -6,12 +6,14 @@ import { db, usersTable, sessionsTable, rolesTable, firmsTable } from "@workspac
 import { LoginBody } from "@workspace/api-zod";
 import { requireAuth, requireReAuth, issueReauthToken, type AuthRequest, writeAuditLog } from "../lib/auth";
 import { authRateLimiter, sensitiveRateLimiter } from "../lib/rate-limit";
+import { logger } from "../lib/logger";
 import * as OTPAuth from "otpauth";
 import QRCode from "qrcode";
 
 const router: IRouter = Router();
 
 router.post("/auth/login", authRateLimiter, async (req, res): Promise<void> => {
+  const startedAt = Date.now();
   const parsed = LoginBody.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: parsed.error.message });
@@ -19,28 +21,41 @@ router.post("/auth/login", authRateLimiter, async (req, res): Promise<void> => {
   }
 
   const { email, password } = parsed.data;
+  const emailNormalized = email.toLowerCase();
+  const emailHash = crypto
+    .createHash("sha256")
+    .update(emailNormalized)
+    .digest("hex")
+    .slice(0, 12);
   const ip = req.ip;
   const ua = req.headers["user-agent"];
 
+  logger.info({ emailHash }, "auth.login.start");
+
+  const userLookupStartedAt = Date.now();
   const [user] = await db
     .select()
     .from(usersTable)
-    .where(eq(usersTable.email, email.toLowerCase()));
+    .where(eq(usersTable.email, emailNormalized));
 
   if (!user) {
+    logger.info({ emailHash, ms: Date.now() - startedAt }, "auth.login.user_not_found");
     await writeAuditLog({ action: "auth.login_failed", detail: `email=${email} reason=user_not_found`, ipAddress: ip, userAgent: ua });
     res.status(401).json({ error: "Invalid email or password" });
     return;
   }
 
+  const userLookupMs = Date.now() - userLookupStartedAt;
   const passwordMatch = await bcrypt.compare(password, user.passwordHash);
   if (!passwordMatch) {
+    logger.info({ emailHash, userLookupMs, ms: Date.now() - startedAt }, "auth.login.wrong_password");
     await writeAuditLog({ firmId: user.firmId, actorId: user.id, actorType: user.userType, action: "auth.login_failed", detail: "reason=wrong_password", ipAddress: ip, userAgent: ua });
     res.status(401).json({ error: "Invalid email or password" });
     return;
   }
 
   if (user.status !== "active") {
+    logger.info({ emailHash, userId: user.id, ms: Date.now() - startedAt }, "auth.login.inactive");
     await writeAuditLog({ firmId: user.firmId, actorId: user.id, actorType: user.userType, action: "auth.login_failed", detail: "reason=inactive_account", ipAddress: ip, userAgent: ua });
     res.status(401).json({ error: "Account is inactive" });
     return;
@@ -49,12 +64,14 @@ router.post("/auth/login", authRateLimiter, async (req, res): Promise<void> => {
   if (user.totpEnabled) {
     const totpCode = req.body.totpCode as string | undefined;
     if (!totpCode) {
+      logger.info({ emailHash, userId: user.id, ms: Date.now() - startedAt }, "auth.login.totp_required");
       res.status(200).json({ needsTotp: true });
       return;
     }
     const totp = new OTPAuth.TOTP({ secret: OTPAuth.Secret.fromBase32(user.totpSecret!), digits: 6, period: 30 });
     const isValid = totp.validate({ token: totpCode, window: 1 }) !== null;
     if (!isValid) {
+      logger.info({ emailHash, userId: user.id, ms: Date.now() - startedAt }, "auth.login.totp_invalid");
       await writeAuditLog({ firmId: user.firmId, actorId: user.id, actorType: user.userType, action: "auth.totp_failed", detail: "reason=invalid_totp_code", ipAddress: ip, userAgent: ua });
       res.status(401).json({ error: "Invalid authenticator code" });
       return;
@@ -110,6 +127,8 @@ router.post("/auth/login", authRateLimiter, async (req, res): Promise<void> => {
     status: user.status,
     totpEnabled: user.totpEnabled,
   });
+
+  logger.info({ emailHash, userId: user.id, userLookupMs, ms: Date.now() - startedAt }, "auth.login.success");
 });
 
 router.post("/auth/logout", requireAuth, async (req: AuthRequest, res): Promise<void> => {
