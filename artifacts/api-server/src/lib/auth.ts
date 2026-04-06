@@ -2,6 +2,7 @@ import { Request, Response, NextFunction } from "express";
 import { db, pool, sessionsTable, usersTable, auditLogsTable, makeRlsDb, setTenantContextSession, clearTenantContext, RlsDb } from "@workspace/db";
 import { eq } from "drizzle-orm";
 import crypto from "crypto";
+import { logger } from "./logger";
 
 export interface AuthRequest extends Request {
   userId?: number;
@@ -152,8 +153,19 @@ export async function requireFirmUser(
     await setTenantContextSession(client, req.firmId);
     req.rlsDb = makeRlsDb(client);
   } catch (err) {
-    client.release(true);
-    next(err);
+    try {
+      await releaseClient(false);
+    } catch {
+    }
+    const message = err instanceof Error ? err.message : String(err);
+    logger.error({ err, message, userId: req.userId, firmId: req.firmId }, "auth.firm_context_error");
+    const code =
+      message.includes("must be member of role") || message.includes("permission denied")
+        ? "RLS_ROLE"
+        : message.includes("SET ROLE") || message.includes("RESET ROLE")
+          ? "RLS_CONTEXT"
+          : "DB";
+    res.status(500).json({ error: "Firm context initialization failed", code });
     return;
   }
 
