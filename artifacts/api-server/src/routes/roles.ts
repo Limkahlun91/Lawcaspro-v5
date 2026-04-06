@@ -5,7 +5,7 @@ import {
   CreateRoleBody, UpdateRoleBody,
   GetRoleParams, UpdateRoleParams, DeleteRoleParams
 } from "@workspace/api-zod";
-import { requireAuth, requireFirmUser, type AuthRequest } from "../lib/auth";
+import { requireAuth, requireFirmUser, requirePartner, type AuthRequest } from "../lib/auth";
 
 const router: IRouter = Router();
 
@@ -23,13 +23,13 @@ async function enrichRole(role: typeof rolesTable.$inferSelect) {
   };
 }
 
-router.get("/roles", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+router.get("/roles", requireAuth, requireFirmUser, requirePartner, async (req: AuthRequest, res): Promise<void> => {
   const roles = await db.select().from(rolesTable).where(eq(rolesTable.firmId, req.firmId!));
   const enriched = await Promise.all(roles.map(enrichRole));
   res.json(enriched);
 });
 
-router.post("/roles", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+router.post("/roles", requireAuth, requireFirmUser, requirePartner, async (req: AuthRequest, res): Promise<void> => {
   const parsed = CreateRoleBody.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: parsed.error.message });
@@ -55,7 +55,7 @@ router.post("/roles", requireAuth, requireFirmUser, async (req: AuthRequest, res
   res.status(201).json(await enrichRole(role));
 });
 
-router.get("/roles/:roleId", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+router.get("/roles/:roleId", requireAuth, requireFirmUser, requirePartner, async (req: AuthRequest, res): Promise<void> => {
   const params = GetRoleParams.safeParse(req.params);
   if (!params.success) {
     res.status(400).json({ error: params.error.message });
@@ -71,7 +71,7 @@ router.get("/roles/:roleId", requireAuth, requireFirmUser, async (req: AuthReque
   res.json(await enrichRole(role));
 });
 
-router.patch("/roles/:roleId", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+router.patch("/roles/:roleId", requireAuth, requireFirmUser, requirePartner, async (req: AuthRequest, res): Promise<void> => {
   const params = UpdateRoleParams.safeParse(req.params);
   if (!params.success) {
     res.status(400).json({ error: params.error.message });
@@ -115,7 +115,7 @@ router.patch("/roles/:roleId", requireAuth, requireFirmUser, async (req: AuthReq
   res.json(await enrichRole(role));
 });
 
-router.delete("/roles/:roleId", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+router.delete("/roles/:roleId", requireAuth, requireFirmUser, requirePartner, async (req: AuthRequest, res): Promise<void> => {
   const params = DeleteRoleParams.safeParse(req.params);
   if (!params.success) {
     res.status(400).json({ error: params.error.message });

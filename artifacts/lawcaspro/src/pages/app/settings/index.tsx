@@ -453,26 +453,35 @@ function FirmInfoTab() {
 }
 
 export default function Settings() {
+  const { user } = useAuth();
+  const isPartner = user?.roleName === "Partner";
+
   const searchString = useSearch();
   const params = new URLSearchParams(searchString);
   const tabFromUrl = params.get("tab");
-  const initialTab = (tabFromUrl && TAB_KEYS[tabFromUrl]) ? TAB_KEYS[tabFromUrl] : "Firm Info";
+  const visibleTabs = (isPartner ? TABS : (["Firm Info", "Security"] as const)) as readonly Tab[];
+  const resolvedTabFromUrl = (tabFromUrl && TAB_KEYS[tabFromUrl]) ? TAB_KEYS[tabFromUrl] : null;
+  const initialTab = (resolvedTabFromUrl && visibleTabs.includes(resolvedTabFromUrl)) ? resolvedTabFromUrl : "Firm Info";
   const [activeTab, setActiveTab] = useState<Tab>(initialTab);
 
   useEffect(() => {
-    if (tabFromUrl && TAB_KEYS[tabFromUrl]) {
-      setActiveTab(TAB_KEYS[tabFromUrl]);
+    if (resolvedTabFromUrl && visibleTabs.includes(resolvedTabFromUrl)) {
+      setActiveTab(resolvedTabFromUrl);
+      return;
     }
-  }, [tabFromUrl]);
+    if (!visibleTabs.includes(activeTab)) {
+      setActiveTab("Firm Info");
+    }
+  }, [resolvedTabFromUrl, visibleTabs, activeTab]);
   const [userSearch, setUserSearch] = useState("");
 
   const { data: usersRes, isLoading: loadingUsers } = useListUsers({
     page: 1,
     limit: 50,
     search: userSearch || undefined,
-  });
+  }, { query: { enabled: isPartner } });
 
-  const { data: rolesRes, isLoading: loadingRoles } = useListRoles();
+  const { data: rolesRes, isLoading: loadingRoles } = useListRoles(undefined, { query: { enabled: isPartner } });
 
   return (
     <div className="space-y-6">
@@ -482,7 +491,7 @@ export default function Settings() {
       </div>
 
       <div className="flex border-b border-gray-200">
-        {TABS.map(tab => (
+        {visibleTabs.map(tab => (
           <button
             key={tab}
             onClick={() => setActiveTab(tab)}
@@ -500,7 +509,7 @@ export default function Settings() {
 
       {activeTab === "Firm Info" && <FirmInfoTab />}
 
-      {activeTab === "Users" && (
+      {isPartner && activeTab === "Users" && (
         <div className="space-y-4">
           <div className="flex justify-between items-center">
             <div className="relative flex-1 max-w-sm">
@@ -581,7 +590,7 @@ export default function Settings() {
 
       {activeTab === "Security" && <SecurityTab />}
 
-      {activeTab === "Roles & Permissions" && (
+      {isPartner && activeTab === "Roles & Permissions" && (
         <div className="space-y-4">
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
             {loadingRoles ? (

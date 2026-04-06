@@ -1,6 +1,9 @@
 import { createContext, useContext, useEffect, useState, ReactNode } from "react";
-import { useGetMe, useLogout, getGetMeQueryKey } from "@workspace/api-client-react";
+import { useQuery } from "@tanstack/react-query";
+import { useLogout } from "@workspace/api-client-react";
 import type { AuthUser } from "@workspace/api-client-react";
+import { apiUrl } from "./api-base";
+import { fetchWithTimeout } from "./fetch-with-timeout";
 
 interface AuthContextType {
   user: AuthUser | null;
@@ -15,18 +18,22 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<AuthUser | null>(null);
   const [isLoading, setIsLoading] = useState(true);
 
-  const { data: me, isLoading: isMeLoading } = useGetMe({
-    query: {
-      queryKey: getGetMeQueryKey(),
-      retry: false,
-    }
+  const { data: me, isLoading: isMeLoading } = useQuery<AuthUser | null>({
+    queryKey: ["me"],
+    retry: false,
+    queryFn: async () => {
+      const res = await fetchWithTimeout(apiUrl("/api/auth/me"), { credentials: "include", timeoutMs: 15000 });
+      if (res.status === 401) return null;
+      if (!res.ok) throw new Error(await res.text());
+      return res.json();
+    },
   });
 
   const logoutMutation = useLogout();
 
   useEffect(() => {
     if (!isMeLoading) {
-      if (me) setUser(me);
+      setUser(me ?? null);
       setIsLoading(false);
     }
   }, [me, isMeLoading]);

@@ -1,5 +1,5 @@
 import { Request, Response, NextFunction } from "express";
-import { db, pool, sessionsTable, usersTable, auditLogsTable, makeRlsDb, setTenantContextSession, clearTenantContext, RlsDb } from "@workspace/db";
+import { db, pool, sessionsTable, usersTable, auditLogsTable, makeRlsDb, setTenantContextSession, clearTenantContext, RlsDb, rolesTable } from "@workspace/db";
 import { eq } from "drizzle-orm";
 import crypto from "crypto";
 import { logger } from "./logger";
@@ -179,16 +179,25 @@ export async function requireFirmUser(
  * Restricts access to users with the Partner role (role_id = 1).
  * Must be used after requireAuth + requireFirmUser.
  */
-export function requirePartner(
+export async function requirePartner(
   req: AuthRequest,
   res: Response,
   next: NextFunction
-): void {
-  if (req.roleId !== 1) {
+): Promise<void> {
+  if (req.userType !== "firm_user" || !req.firmId || !req.roleId) {
     writeAuditLog({ actorId: req.userId, firmId: req.firmId, actorType: req.userType ?? "unknown", action: "auth.forbidden.partner_required", detail: `${req.method} ${req.path}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
     res.status(403).json({ error: "Partner access required for this action", code: "PARTNER_REQUIRED" });
     return;
   }
+
+  const rlsDb = req.rlsDb ?? db;
+  const [role] = await rlsDb.select().from(rolesTable).where(eq(rolesTable.id, req.roleId));
+  if (!role || role.firmId !== req.firmId || role.name !== "Partner") {
+    writeAuditLog({ actorId: req.userId, firmId: req.firmId, actorType: req.userType ?? "unknown", action: "auth.forbidden.partner_required", detail: `${req.method} ${req.path}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+    res.status(403).json({ error: "Partner access required for this action", code: "PARTNER_REQUIRED" });
+    return;
+  }
+
   next();
 }
 

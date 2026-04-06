@@ -85,13 +85,13 @@ async function ensureUser(params: {
 }
 
 export async function seedIfEmpty() {
-  const isProduction = process.env.NODE_ENV === "production";
-  const shouldSeedInProduction = isTruthyEnv(process.env.SEED_DEMO_DATA);
-  if (isProduction && !shouldSeedInProduction) {
+  const shouldSeed = isTruthyEnv(process.env.SEED_DEMO_DATA);
+  if (!shouldSeed) {
     return;
   }
 
   const founderEmail = process.env.SEED_FOUNDER_EMAIL || "founder@lawcaspro.com";
+  const isProduction = process.env.NODE_ENV === "production";
   const founderPassword = isProduction ? requireEnv("SEED_FOUNDER_PASSWORD") : process.env.SEED_FOUNDER_PASSWORD || "founder123";
 
   const firmName = process.env.SEED_FIRM_NAME || "Messrs. Tan & Associates";

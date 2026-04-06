@@ -14,8 +14,9 @@ async function requirePartnerRole(req: AuthRequest, res: Response, next: NextFun
     res.status(403).json({ error: "Partner access required" });
     return;
   }
-  const [role] = await db.select().from(rolesTable).where(eq(rolesTable.id, roleId));
-  if (!role || role.name !== "Partner") {
+  const rlsDb = req.rlsDb ?? db;
+  const [role] = await rlsDb.select().from(rolesTable).where(eq(rolesTable.id, roleId));
+  if (!role || role.firmId !== req.firmId || role.name !== "Partner") {
     res.status(403).json({ error: "Partner access required" });
     return;
   }

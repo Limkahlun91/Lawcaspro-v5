@@ -6,7 +6,7 @@ import {
   CreateUserBody, UpdateUserBody, ListUsersQueryParams,
   GetUserParams, UpdateUserParams, DeleteUserParams
 } from "@workspace/api-zod";
-import { requireAuth, requireFirmUser, type AuthRequest } from "../lib/auth";
+import { requireAuth, requireFirmUser, requirePartner, type AuthRequest } from "../lib/auth";
 
 const router: IRouter = Router();
 
@@ -29,7 +29,7 @@ async function enrichUser(user: typeof usersTable.$inferSelect) {
   };
 }
 
-router.get("/users", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+router.get("/users", requireAuth, requireFirmUser, requirePartner, async (req: AuthRequest, res): Promise<void> => {
   const params = ListUsersQueryParams.safeParse(req.query);
   const search = params.success ? params.data.search : undefined;
   const roleId = params.success ? params.data.roleId : undefined;
@@ -57,7 +57,7 @@ router.get("/users", requireAuth, requireFirmUser, async (req: AuthRequest, res)
   res.json({ data: enriched, total: Number(totalRes?.c ?? 0), page, limit });
 });
 
-router.post("/users", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+router.post("/users", requireAuth, requireFirmUser, requirePartner, async (req: AuthRequest, res): Promise<void> => {
   const parsed = CreateUserBody.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: parsed.error.message });
@@ -89,7 +89,7 @@ router.post("/users", requireAuth, requireFirmUser, async (req: AuthRequest, res
   res.status(201).json(await enrichUser(user));
 });
 
-router.get("/users/:userId", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+router.get("/users/:userId", requireAuth, requireFirmUser, requirePartner, async (req: AuthRequest, res): Promise<void> => {
   const params = GetUserParams.safeParse(req.params);
   if (!params.success) {
     res.status(400).json({ error: params.error.message });
@@ -107,7 +107,7 @@ router.get("/users/:userId", requireAuth, requireFirmUser, async (req: AuthReque
   res.json(await enrichUser(user));
 });
 
-router.patch("/users/:userId", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+router.patch("/users/:userId", requireAuth, requireFirmUser, requirePartner, async (req: AuthRequest, res): Promise<void> => {
   const params = UpdateUserParams.safeParse(req.params);
   if (!params.success) {
     res.status(400).json({ error: params.error.message });
@@ -139,7 +139,7 @@ router.patch("/users/:userId", requireAuth, requireFirmUser, async (req: AuthReq
   res.json(await enrichUser(user));
 });
 
-router.delete("/users/:userId", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+router.delete("/users/:userId", requireAuth, requireFirmUser, requirePartner, async (req: AuthRequest, res): Promise<void> => {
   const params = DeleteUserParams.safeParse(req.params);
   if (!params.success) {
     res.status(400).json({ error: params.error.message });
