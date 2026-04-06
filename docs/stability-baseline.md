@@ -14,6 +14,7 @@ This document captures the current “known-good” baseline for Lawcaspro-v5 af
 - Auth/login: restored login flow and session creation; improved failure-stage visibility in logs.
 - Tenant context/RLS: eliminated firm-wide 500s caused by tenant context initialization failures.
 - Demo seed: made seed idempotent for missing demo accounts and default-off unless explicitly enabled.
+- RBAC (phase 1): introduced permissions-table-driven enforcement for key firm modules and sensitive operations, with audit logging on deny.
 
 ## Supported Login Identities
 
@@ -39,6 +40,7 @@ Verified after login as partner/clerk:
 Notes:
 - Some firm pages depend on optional backend endpoints; pages should still render with empty states when data is absent.
 - Founder is not allowed to enter firm workspace by design; platform-only access is enforced.
+- Frontend route/menu visibility is permission-driven with a safe fallback while production rolls out permissions seeding.
 
 ## Operational Baseline (Production)
 
@@ -53,6 +55,16 @@ Notes:
 - Seed only runs when `SEED_DEMO_DATA=true` is explicitly set on the API server runtime.
 - After seeding is complete, remove all seed-related environment variables from production.
 
+### RBAC baseline
+
+- Partner and Clerk roles use baseline permissions.
+- Apply the permissions baseline migration to ensure the permissions table is populated deterministically in production.
+
+## Known Gaps (Not In Baseline Yet)
+
+- Not all firm endpoints are permission-gated yet; remaining modules must be migrated incrementally.
+- Reports export-specific enforcement depends on the presence of dedicated export endpoints.
+
 ## Rollback
 
 If production becomes unstable after baseline changes:
@@ -63,5 +75,4 @@ If production becomes unstable after baseline changes:
 
 ## Suggested Tag Name (Do Not Create Automatically)
 
-- `stability-baseline-2026-04-06`
-
+- `stable-rbac-phase1`

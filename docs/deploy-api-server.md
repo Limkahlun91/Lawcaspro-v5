@@ -67,7 +67,7 @@ pnpm -C lib/db apply-rls
 
 ## Optional: seed demo accounts (production-safe)
 
-By default, production deployments do NOT auto-seed. To seed only when the DB is empty, set:
+By default, production deployments do NOT auto-seed. Seed runs only when explicitly enabled, and is idempotent (it ensures demo accounts exist rather than assuming an empty DB). To enable seeding, set:
 
 - `SEED_DEMO_DATA=true`
 - `SEED_FOUNDER_PASSWORD`, `SEED_PARTNER_PASSWORD`, `SEED_LAWYER_PASSWORD`, `SEED_CLERK_PASSWORD`
