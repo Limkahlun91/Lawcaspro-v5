@@ -1,7 +1,7 @@
 import { Router, type IRouter } from "express";
 import { sql } from "drizzle-orm";
 import { db } from "@workspace/db";
-import { requireAuth, requireFirmUser, requireFounder, type AuthRequest } from "../lib/auth";
+import { requireAuth, requireFirmUser, requireFounder, requirePermission, type AuthRequest } from "../lib/auth";
 
 const router: IRouter = Router();
 
@@ -12,7 +12,7 @@ async function queryRows(query: ReturnType<typeof sql>): Promise<Record<string, 
   return [];
 }
 
-router.get("/audit-logs", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+router.get("/audit-logs", requireAuth, requireFirmUser, requirePermission("audit", "read"), async (req: AuthRequest, res): Promise<void> => {
   const { action, entityType, actorId, limit = "100", offset = "0" } = req.query as Record<string, string>;
 
   const rows = await queryRows(sql`

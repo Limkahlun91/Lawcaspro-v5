@@ -10,6 +10,7 @@ import { Link, useSearch } from "wouter";
 import { cn } from "@/lib/utils";
 import { useToast } from "@/hooks/use-toast";
 import { useAuth } from "@/lib/auth-context";
+import { hasPermission } from "@/lib/permissions";
 
 const API_BASE = import.meta.env.BASE_URL.replace(/\/$/, "").replace(/^\/lawcaspro/, "") + "/api";
 
@@ -267,6 +268,8 @@ function SecurityTab() {
 function FirmInfoTab() {
   const { toast } = useToast();
   const queryClient = useQueryClient();
+  const { user } = useAuth();
+  const canUpdate = hasPermission(user, "settings", "update");
 
   const { data: settings, isLoading } = useQuery({
     queryKey: ["firm-settings"],
@@ -329,10 +332,18 @@ function FirmInfoTab() {
   });
 
   const handleSaveInfo = () => {
+    if (!canUpdate) {
+      toast({ title: "You don't have permission to update firm settings", variant: "destructive" });
+      return;
+    }
     updateMutation.mutate({ name, address, stNumber, tinNumber });
   };
 
   const handleAddBank = () => {
+    if (!canUpdate) {
+      toast({ title: "You don't have permission to update bank accounts", variant: "destructive" });
+      return;
+    }
     if (!newBankName.trim() || !newAccountNo.trim()) {
       toast({ title: "Bank name and account number are required", variant: "destructive" });
       return;
@@ -355,15 +366,15 @@ function FirmInfoTab() {
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div>
               <Label className="text-xs text-slate-500">Firm Name</Label>
-              <Input value={name} onChange={e => setName(e.target.value)} />
+              <Input value={name} onChange={e => setName(e.target.value)} disabled={!canUpdate} />
             </div>
             <div>
               <Label className="text-xs text-slate-500">ST Number (Service Tax)</Label>
-              <Input value={stNumber} onChange={e => setStNumber(e.target.value)} placeholder="e.g. W10-1234-56789012" />
+              <Input value={stNumber} onChange={e => setStNumber(e.target.value)} disabled={!canUpdate} placeholder="e.g. W10-1234-56789012" />
             </div>
             <div>
               <Label className="text-xs text-slate-500">TIN Number (Tax Identification)</Label>
-              <Input value={tinNumber} onChange={e => setTinNumber(e.target.value)} placeholder="e.g. C1234567890" />
+              <Input value={tinNumber} onChange={e => setTinNumber(e.target.value)} disabled={!canUpdate} placeholder="e.g. C1234567890" />
             </div>
             <div className="md:col-span-2">
               <Label className="text-xs text-slate-500">Address</Label>
@@ -372,11 +383,12 @@ function FirmInfoTab() {
                 onChange={e => setAddress(e.target.value)}
                 className="w-full h-20 border rounded-md px-3 py-2 text-sm resize-none"
                 placeholder="Firm address"
+                disabled={!canUpdate}
               />
             </div>
           </div>
           <div className="flex justify-end mt-4">
-            <Button onClick={handleSaveInfo} disabled={updateMutation.isPending} className="bg-amber-500 hover:bg-amber-600 text-white">
+            <Button onClick={handleSaveInfo} disabled={!canUpdate || updateMutation.isPending} className="bg-amber-500 hover:bg-amber-600 text-white">
               <Save className="w-4 h-4 mr-2" />
               {updateMutation.isPending ? "Saving..." : "Save Changes"}
             </Button>
@@ -412,7 +424,7 @@ function FirmInfoTab() {
                       </span>
                     </td>
                     <td className="px-4 py-3">
-                      <Button variant="ghost" size="sm" onClick={() => deleteBankMutation.mutate(acc.id)} className="text-red-500 h-7 w-7 p-0">
+                      <Button variant="ghost" size="sm" disabled={!canUpdate} onClick={() => deleteBankMutation.mutate(acc.id)} className="text-red-500 h-7 w-7 p-0">
                         <Trash2 className="w-3.5 h-3.5" />
                       </Button>
                     </td>
@@ -425,24 +437,25 @@ function FirmInfoTab() {
           <div className="flex gap-3 items-end">
             <div className="flex-1">
               <Label className="text-xs text-slate-500">Bank Name</Label>
-              <Input value={newBankName} onChange={e => setNewBankName(e.target.value)} placeholder="e.g. Maybank" />
+              <Input value={newBankName} onChange={e => setNewBankName(e.target.value)} disabled={!canUpdate} placeholder="e.g. Maybank" />
             </div>
             <div className="flex-1">
               <Label className="text-xs text-slate-500">Account No.</Label>
-              <Input value={newAccountNo} onChange={e => setNewAccountNo(e.target.value)} placeholder="e.g. 1234567890" />
+              <Input value={newAccountNo} onChange={e => setNewAccountNo(e.target.value)} disabled={!canUpdate} placeholder="e.g. 1234567890" />
             </div>
             <div className="w-32">
               <Label className="text-xs text-slate-500">Type</Label>
               <select
                 value={newAccountType}
                 onChange={e => setNewAccountType(e.target.value)}
+                disabled={!canUpdate}
                 className="w-full h-9 border rounded-md px-3 text-sm bg-white"
               >
                 <option value="office">Office</option>
                 <option value="client">Client</option>
               </select>
             </div>
-            <Button onClick={handleAddBank} disabled={addBankMutation.isPending} variant="outline" className="shrink-0">
+            <Button onClick={handleAddBank} disabled={!canUpdate || addBankMutation.isPending} variant="outline" className="shrink-0">
               <Plus className="w-4 h-4 mr-1" /> Add
             </Button>
           </div>
@@ -454,12 +467,19 @@ function FirmInfoTab() {
 
 export default function Settings() {
   const { user } = useAuth();
-  const isPartner = user?.roleName === "Partner";
+  const canManageUsers = hasPermission(user, "users", "create") || hasPermission(user, "users", "update") || hasPermission(user, "users", "delete");
+  const canManageRoles = hasPermission(user, "roles", "create") || hasPermission(user, "roles", "update") || hasPermission(user, "roles", "delete");
+  const canUpdateSettings = hasPermission(user, "settings", "update");
 
   const searchString = useSearch();
   const params = new URLSearchParams(searchString);
   const tabFromUrl = params.get("tab");
-  const visibleTabs = (isPartner ? TABS : (["Firm Info", "Security"] as const)) as readonly Tab[];
+  const visibleTabs = ([
+    "Firm Info",
+    ...(canManageUsers ? (["Users"] as const) : []),
+    ...(canManageRoles ? (["Roles & Permissions"] as const) : []),
+    "Security",
+  ] as const) as readonly Tab[];
   const resolvedTabFromUrl = (tabFromUrl && TAB_KEYS[tabFromUrl]) ? TAB_KEYS[tabFromUrl] : null;
   const initialTab = (resolvedTabFromUrl && visibleTabs.includes(resolvedTabFromUrl)) ? resolvedTabFromUrl : "Firm Info";
   const [activeTab, setActiveTab] = useState<Tab>(initialTab);
@@ -479,9 +499,9 @@ export default function Settings() {
     page: 1,
     limit: 50,
     search: userSearch || undefined,
-  }, { query: { enabled: isPartner } });
+  }, { query: { enabled: canManageUsers } });
 
-  const { data: rolesRes, isLoading: loadingRoles } = useListRoles(undefined, { query: { enabled: isPartner } });
+  const { data: rolesRes, isLoading: loadingRoles } = useListRoles(undefined, { query: { enabled: canManageRoles } });
 
   return (
     <div className="space-y-6">
@@ -509,7 +529,7 @@ export default function Settings() {
 
       {activeTab === "Firm Info" && <FirmInfoTab />}
 
-      {isPartner && activeTab === "Users" && (
+      {canManageUsers && activeTab === "Users" && (
         <div className="space-y-4">
           <div className="flex justify-between items-center">
             <div className="relative flex-1 max-w-sm">
@@ -590,7 +610,7 @@ export default function Settings() {
 
       {activeTab === "Security" && <SecurityTab />}
 
-      {isPartner && activeTab === "Roles & Permissions" && (
+      {canManageRoles && activeTab === "Roles & Permissions" && (
         <div className="space-y-4">
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
             {loadingRoles ? (

@@ -6,7 +6,7 @@ import {
   CreateUserBody, UpdateUserBody, ListUsersQueryParams,
   GetUserParams, UpdateUserParams, DeleteUserParams
 } from "@workspace/api-zod";
-import { requireAuth, requireFirmUser, requirePartner, type AuthRequest } from "../lib/auth";
+import { requireAuth, requireFirmUser, requirePermission, type AuthRequest, writeAuditLog } from "../lib/auth";
 
 const router: IRouter = Router();
 
@@ -29,7 +29,7 @@ async function enrichUser(user: typeof usersTable.$inferSelect) {
   };
 }
 
-router.get("/users", requireAuth, requireFirmUser, requirePartner, async (req: AuthRequest, res): Promise<void> => {
+router.get("/users", requireAuth, requireFirmUser, requirePermission("users", "read"), async (req: AuthRequest, res): Promise<void> => {
   const params = ListUsersQueryParams.safeParse(req.query);
   const search = params.success ? params.data.search : undefined;
   const roleId = params.success ? params.data.roleId : undefined;
@@ -57,7 +57,8 @@ router.get("/users", requireAuth, requireFirmUser, requirePartner, async (req: A
   res.json({ data: enriched, total: Number(totalRes?.c ?? 0), page, limit });
 });
 
-router.post("/users", requireAuth, requireFirmUser, requirePartner, async (req: AuthRequest, res): Promise<void> => {
+router.post("/users", requireAuth, requireFirmUser, requirePermission("users", "create"), async (req: AuthRequest, res): Promise<void> => {
+  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "users.create.attempt", detail: req.path, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
   const parsed = CreateUserBody.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: parsed.error.message });
@@ -86,10 +87,11 @@ router.post("/users", requireAuth, requireFirmUser, requirePartner, async (req: 
     })
     .returning();
 
+  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "users.create", entityType: "user", entityId: user.id, detail: `email=${user.email}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
   res.status(201).json(await enrichUser(user));
 });
 
-router.get("/users/:userId", requireAuth, requireFirmUser, requirePartner, async (req: AuthRequest, res): Promise<void> => {
+router.get("/users/:userId", requireAuth, requireFirmUser, requirePermission("users", "read"), async (req: AuthRequest, res): Promise<void> => {
   const params = GetUserParams.safeParse(req.params);
   if (!params.success) {
     res.status(400).json({ error: params.error.message });
@@ -107,7 +109,7 @@ router.get("/users/:userId", requireAuth, requireFirmUser, requirePartner, async
   res.json(await enrichUser(user));
 });
 
-router.patch("/users/:userId", requireAuth, requireFirmUser, requirePartner, async (req: AuthRequest, res): Promise<void> => {
+router.patch("/users/:userId", requireAuth, requireFirmUser, requirePermission("users", "update"), async (req: AuthRequest, res): Promise<void> => {
   const params = UpdateUserParams.safeParse(req.params);
   if (!params.success) {
     res.status(400).json({ error: params.error.message });
@@ -136,10 +138,11 @@ router.patch("/users/:userId", requireAuth, requireFirmUser, requirePartner, asy
     return;
   }
 
+  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "users.update", entityType: "user", entityId: user.id, detail: `fields=${Object.keys(updates).join(",")}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
   res.json(await enrichUser(user));
 });
 
-router.delete("/users/:userId", requireAuth, requireFirmUser, requirePartner, async (req: AuthRequest, res): Promise<void> => {
+router.delete("/users/:userId", requireAuth, requireFirmUser, requirePermission("users", "delete"), async (req: AuthRequest, res): Promise<void> => {
   const params = DeleteUserParams.safeParse(req.params);
   if (!params.success) {
     res.status(400).json({ error: params.error.message });
@@ -155,6 +158,7 @@ router.delete("/users/:userId", requireAuth, requireFirmUser, requirePartner, as
     return;
   }
 
+  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "users.delete", entityType: "user", entityId: user.id, detail: `email=${user.email}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
   res.sendStatus(204);
 });
 

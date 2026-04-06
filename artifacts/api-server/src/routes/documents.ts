@@ -1,7 +1,7 @@
 import { Router, type IRouter } from "express";
 import { sql } from "drizzle-orm";
 import { db, documentTemplatesTable, caseDocumentsTable } from "@workspace/db";
-import { requireAuth, requireFirmUser, type AuthRequest } from "../lib/auth";
+import { requireAuth, requireFirmUser, requirePermission, writeAuditLog, type AuthRequest } from "../lib/auth";
 import { ObjectStorageService, ObjectNotFoundError } from "../lib/objectStorage";
 import Docxtemplater from "docxtemplater";
 import PizZip from "pizzip";
@@ -241,14 +241,14 @@ async function buildCaseContext(caseId: number, firmId: number): Promise<Record<
   };
 }
 
-router.get("/document-templates", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+router.get("/document-templates", requireAuth, requireFirmUser, requirePermission("documents", "read"), async (req: AuthRequest, res): Promise<void> => {
   const rows = await queryRows(
     sql`SELECT * FROM document_templates WHERE firm_id = ${req.firmId!} ORDER BY created_at DESC`
   );
   res.json(rows);
 });
 
-router.post("/document-templates", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+router.post("/document-templates", requireAuth, requireFirmUser, requirePermission("documents", "create"), async (req: AuthRequest, res): Promise<void> => {
   const { name, documentType, description, objectPath, fileName } = req.body as {
     name: string;
     documentType?: string;
@@ -268,10 +268,15 @@ router.post("/document-templates", requireAuth, requireFirmUser, async (req: Aut
         RETURNING *`
   );
 
+  const created = rows[0];
+  const createdId = created && typeof created === "object" && "id" in created && typeof (created as { id?: unknown }).id === "number"
+    ? (created as { id: number }).id
+    : undefined;
+  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.template.create", entityType: "document_template", entityId: createdId, detail: `name=${name}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
   res.status(201).json(rows[0]);
 });
 
-router.delete("/document-templates/:templateId", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+router.delete("/document-templates/:templateId", requireAuth, requireFirmUser, requirePermission("documents", "delete"), async (req: AuthRequest, res): Promise<void> => {
   const templateId = Number(req.params.templateId);
   const rows = await queryRows(
     sql`DELETE FROM document_templates WHERE id = ${templateId} AND firm_id = ${req.firmId!} RETURNING *`
@@ -280,10 +285,16 @@ router.delete("/document-templates/:templateId", requireAuth, requireFirmUser, a
     res.status(404).json({ error: "Template not found" });
     return;
   }
+  const deleted = rows[0];
+  const deletedId = deleted && typeof deleted === "object" && "id" in deleted && typeof (deleted as { id?: unknown }).id === "number"
+    ? (deleted as { id: number }).id
+    : templateId;
+  const deletedName = deleted && typeof deleted === "object" && "name" in deleted ? String((deleted as { name?: unknown }).name) : undefined;
+  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.template.delete", entityType: "document_template", entityId: deletedId, detail: deletedName ? `name=${deletedName}` : undefined, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
   res.sendStatus(204);
 });
 
-router.get("/cases/:caseId/documents", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+router.get("/cases/:caseId/documents", requireAuth, requireFirmUser, requirePermission("documents", "read"), async (req: AuthRequest, res): Promise<void> => {
   const caseId = Number(req.params.caseId);
   const rows = await queryRows(sql`
     SELECT cd.*, dt.name as template_name, u.name as generated_by_name
@@ -296,7 +307,7 @@ router.get("/cases/:caseId/documents", requireAuth, requireFirmUser, async (req:
   res.json(rows);
 });
 
-router.post("/cases/:caseId/documents/generate", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+router.post("/cases/:caseId/documents/generate", requireAuth, requireFirmUser, requirePermission("documents", "create"), async (req: AuthRequest, res): Promise<void> => {
   const caseId = Number(req.params.caseId);
   const { templateId, documentName } = req.body as { templateId: number; documentName?: string };
 

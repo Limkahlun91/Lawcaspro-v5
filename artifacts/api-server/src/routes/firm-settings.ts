@@ -1,27 +1,11 @@
 import { Router, type IRouter } from "express";
 import { eq, and } from "drizzle-orm";
-import { db, firmsTable, firmBankAccountsTable, rolesTable } from "@workspace/db";
-import { requireAuth, requireFirmUser, type AuthRequest } from "../lib/auth";
-import type { Response, NextFunction } from "express";
+import { db, firmsTable, firmBankAccountsTable } from "@workspace/db";
+import { requireAuth, requireFirmUser, requirePermission, type AuthRequest, writeAuditLog } from "../lib/auth";
 
 const one = (v: string | string[] | undefined): string | undefined => (Array.isArray(v) ? v[0] : v);
 
 const VALID_ACCOUNT_TYPES = ["office", "client"];
-
-async function requirePartnerRole(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
-  const roleId = req.roleId;
-  if (!roleId) {
-    res.status(403).json({ error: "Partner access required" });
-    return;
-  }
-  const rlsDb = req.rlsDb ?? db;
-  const [role] = await rlsDb.select().from(rolesTable).where(eq(rolesTable.id, roleId));
-  if (!role || role.firmId !== req.firmId || role.name !== "Partner") {
-    res.status(403).json({ error: "Partner access required" });
-    return;
-  }
-  next();
-}
 
 const router: IRouter = Router();
 
@@ -56,7 +40,7 @@ router.get("/firm-settings", requireAuth, requireFirmUser, async (req, res) => {
   }
 });
 
-router.patch("/firm-settings", requireAuth, requireFirmUser, requirePartnerRole, async (req, res): Promise<void> => {
+router.patch("/firm-settings", requireAuth, requireFirmUser, requirePermission("settings", "update"), async (req, res): Promise<void> => {
   try {
     const firmId = (req as AuthRequest).firmId!;
     const { name, address, stNumber, tinNumber } = req.body;
@@ -90,6 +74,7 @@ router.patch("/firm-settings", requireAuth, requireFirmUser, requirePartnerRole,
         isDefault: b.isDefault,
       })),
     });
+    await writeAuditLog({ firmId, actorId: (req as AuthRequest).userId, actorType: (req as AuthRequest).userType, action: "settings.update", entityType: "firm", entityId: firmId, detail: `fields=${Object.keys(updates).join(",")}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
     return;
   } catch (err: any) {
     res.status(500).json({ error: err.message });
@@ -97,7 +82,7 @@ router.patch("/firm-settings", requireAuth, requireFirmUser, requirePartnerRole,
   }
 });
 
-router.post("/firm-settings/bank-accounts", requireAuth, requireFirmUser, requirePartnerRole, async (req, res): Promise<void> => {
+router.post("/firm-settings/bank-accounts", requireAuth, requireFirmUser, requirePermission("settings", "update"), async (req, res): Promise<void> => {
   try {
     const firmId = (req as AuthRequest).firmId!;
     const { bankName, accountNo, accountType } = req.body;
@@ -127,6 +112,7 @@ router.post("/firm-settings/bank-accounts", requireAuth, requireFirmUser, requir
       accountType: account.accountType,
       isDefault: account.isDefault,
     });
+    await writeAuditLog({ firmId, actorId: (req as AuthRequest).userId, actorType: (req as AuthRequest).userType, action: "settings.bank_account.create", entityType: "firm_bank_account", entityId: account.id, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
     return;
   } catch (err: any) {
     res.status(500).json({ error: err.message });
@@ -134,7 +120,7 @@ router.post("/firm-settings/bank-accounts", requireAuth, requireFirmUser, requir
   }
 });
 
-router.delete("/firm-settings/bank-accounts/:id", requireAuth, requireFirmUser, requirePartnerRole, async (req, res): Promise<void> => {
+router.delete("/firm-settings/bank-accounts/:id", requireAuth, requireFirmUser, requirePermission("settings", "update"), async (req, res): Promise<void> => {
   try {
     const firmId = (req as AuthRequest).firmId!;
     const idStr = one(req.params.id);
@@ -152,6 +138,7 @@ router.delete("/firm-settings/bank-accounts/:id", requireAuth, requireFirmUser, 
 
     await db.delete(firmBankAccountsTable).where(eq(firmBankAccountsTable.id, id));
     res.json({ success: true });
+    await writeAuditLog({ firmId, actorId: (req as AuthRequest).userId, actorType: (req as AuthRequest).userType, action: "settings.bank_account.delete", entityType: "firm_bank_account", entityId: id, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
     return;
   } catch (err: any) {
     res.status(500).json({ error: err.message });

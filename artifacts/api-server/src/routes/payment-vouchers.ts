@@ -1,7 +1,7 @@
 import { Router, type IRouter } from "express";
 import { eq, and, desc, sql } from "drizzle-orm";
 import { db, paymentVouchersTable, paymentVoucherItemsTable, ledgerEntriesTable } from "@workspace/db";
-import { requireAuth, requireFirmUser, requireReAuth, type AuthRequest } from "../lib/auth";
+import { requireAuth, requireFirmUser, requirePermission, requireReAuth, type AuthRequest, writeAuditLog } from "../lib/auth";
 import { sensitiveRateLimiter } from "../lib/rate-limit";
 
 const one = (v: string | string[] | undefined): string | undefined => (Array.isArray(v) ? v[0] : v);
@@ -26,7 +26,7 @@ async function nextVoucherNo(firmId: number): Promise<string> {
 }
 
 // List
-router.get("/payment-vouchers", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+router.get("/payment-vouchers", requireAuth, requireFirmUser, requirePermission("accounting", "read"), async (req: AuthRequest, res): Promise<void> => {
   const caseId = one((req.query as any).caseId);
   const status = one((req.query as any).status);
   let cond = eq(paymentVouchersTable.firmId, req.firmId!);
@@ -37,7 +37,7 @@ router.get("/payment-vouchers", requireAuth, requireFirmUser, async (req: AuthRe
 });
 
 // Detail
-router.get("/payment-vouchers/:id", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+router.get("/payment-vouchers/:id", requireAuth, requireFirmUser, requirePermission("accounting", "read"), async (req: AuthRequest, res): Promise<void> => {
   const idStr = one(req.params.id);
   const id = idStr ? parseInt(idStr) : NaN;
   if (isNaN(id)) { res.status(400).json({ error: "Invalid voucher ID" }); return; }
@@ -48,7 +48,7 @@ router.get("/payment-vouchers/:id", requireAuth, requireFirmUser, async (req: Au
 });
 
 // Create
-router.post("/payment-vouchers", sensitiveRateLimiter, requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+router.post("/payment-vouchers", sensitiveRateLimiter, requireAuth, requireFirmUser, requirePermission("accounting", "write"), async (req: AuthRequest, res): Promise<void> => {
   const { caseId, payeeName, payeeBank, payeeAccountNo, paymentMethod, bankAccountId,
     accountType, amount, purpose, notes, items } = req.body;
   if (!payeeName || !amount || !purpose) { res.status(400).json({ error: "payeeName, amount, purpose required" }); return; }
@@ -70,11 +70,12 @@ router.post("/payment-vouchers", sensitiveRateLimiter, requireAuth, requireFirmU
     })));
   }
 
+  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "accounting.payment_voucher.create", entityType: "payment_voucher", entityId: pv.id, detail: `voucherNo=${pv.voucherNo}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
   res.status(201).json(pv);
 });
 
 // Status transition
-router.post("/payment-vouchers/:id/transition", sensitiveRateLimiter, requireAuth, requireFirmUser, requireReAuth, async (req: AuthRequest, res): Promise<void> => {
+router.post("/payment-vouchers/:id/transition", sensitiveRateLimiter, requireAuth, requireFirmUser, requirePermission("accounting", "write"), requireReAuth, async (req: AuthRequest, res): Promise<void> => {
   const idStr = one(req.params.id);
   const id = idStr ? parseInt(idStr) : NaN;
   if (isNaN(id)) { res.status(400).json({ error: "Invalid voucher ID" }); return; }
@@ -104,11 +105,12 @@ router.post("/payment-vouchers/:id/transition", sensitiveRateLimiter, requireAut
   }
 
   const [updated] = await db.update(paymentVouchersTable).set(updateFields).where(eq(paymentVouchersTable.id, id)).returning();
+  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "accounting.payment_voucher.transition", entityType: "payment_voucher", entityId: id, detail: `from=${pv.status} to=${toStatus}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
   res.json(updated);
 });
 
 // Ledger: view by case and account type
-router.get("/ledger", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+router.get("/ledger", requireAuth, requireFirmUser, requirePermission("accounting", "read"), async (req: AuthRequest, res): Promise<void> => {
   const caseId = one((req.query as any).caseId);
   const accountType = one((req.query as any).accountType);
   let cond = eq(ledgerEntriesTable.firmId, req.firmId!);
@@ -119,7 +121,7 @@ router.get("/ledger", requireAuth, requireFirmUser, async (req: AuthRequest, res
 });
 
 // Ledger summary (balance per account type per case)
-router.get("/ledger/summary", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+router.get("/ledger/summary", requireAuth, requireFirmUser, requirePermission("accounting", "read"), async (req: AuthRequest, res): Promise<void> => {
   const caseId = one((req.query as any).caseId);
   let cond = eq(ledgerEntriesTable.firmId, req.firmId!);
   if (caseId) cond = and(cond, eq(ledgerEntriesTable.caseId, parseInt(caseId))) as any;

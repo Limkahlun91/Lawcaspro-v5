@@ -5,7 +5,7 @@ import {
   ListDevelopersQueryParams,
   GetDeveloperParams, UpdateDeveloperParams, DeleteDeveloperParams
 } from "@workspace/api-zod";
-import { requireAuth, requireFirmUser, type AuthRequest } from "../lib/auth";
+import { requireAuth, requireFirmUser, requirePermission, writeAuditLog, type AuthRequest } from "../lib/auth";
 
 const router: IRouter = Router();
 
@@ -45,7 +45,7 @@ async function enrichDeveloper(dev: typeof developersTable.$inferSelect) {
   };
 }
 
-router.get("/developers", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+router.get("/developers", requireAuth, requireFirmUser, requirePermission("developers", "read"), async (req: AuthRequest, res): Promise<void> => {
   const params = ListDevelopersQueryParams.safeParse(req.query);
   const search = params.success ? params.data.search : undefined;
   const page = params.success ? (params.data.page ?? 1) : 1;
@@ -76,7 +76,7 @@ router.get("/developers", requireAuth, requireFirmUser, async (req: AuthRequest,
   res.json({ data: enriched, total: Number(totalRes?.c ?? 0), page, limit });
 });
 
-router.post("/developers", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+router.post("/developers", requireAuth, requireFirmUser, requirePermission("developers", "create"), async (req: AuthRequest, res): Promise<void> => {
   const { name, companyRegNo, address, businessAddress, contacts, contactPerson, phone, email } = req.body as {
     name: string;
     companyRegNo?: string;
@@ -107,10 +107,11 @@ router.post("/developers", requireAuth, requireFirmUser, async (req: AuthRequest
     } as any)
     .returning();
 
+  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "developers.create", entityType: "developer", entityId: dev.id, detail: `name=${dev.name}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
   res.status(201).json(await enrichDeveloper(dev));
 });
 
-router.get("/developers/:developerId", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+router.get("/developers/:developerId", requireAuth, requireFirmUser, requirePermission("developers", "read"), async (req: AuthRequest, res): Promise<void> => {
   const params = GetDeveloperParams.safeParse(req.params);
   if (!params.success) {
     res.status(400).json({ error: params.error.message });
@@ -126,7 +127,7 @@ router.get("/developers/:developerId", requireAuth, requireFirmUser, async (req:
   res.json(await enrichDeveloper(dev));
 });
 
-router.patch("/developers/:developerId", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+router.patch("/developers/:developerId", requireAuth, requireFirmUser, requirePermission("developers", "update"), async (req: AuthRequest, res): Promise<void> => {
   const params = UpdateDeveloperParams.safeParse(req.params);
   if (!params.success) {
     res.status(400).json({ error: params.error.message });
@@ -165,10 +166,11 @@ router.patch("/developers/:developerId", requireAuth, requireFirmUser, async (re
     return;
   }
 
+  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "developers.update", entityType: "developer", entityId: dev.id, detail: `fields=${Object.keys(updateData).join(",")}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
   res.json(await enrichDeveloper(dev));
 });
 
-router.delete("/developers/:developerId", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+router.delete("/developers/:developerId", requireAuth, requireFirmUser, requirePermission("developers", "delete"), async (req: AuthRequest, res): Promise<void> => {
   const params = DeleteDeveloperParams.safeParse(req.params);
   if (!params.success) {
     res.status(400).json({ error: params.error.message });
@@ -181,6 +183,7 @@ router.delete("/developers/:developerId", requireAuth, requireFirmUser, async (r
     return;
   }
 
+  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "developers.delete", entityType: "developer", entityId: dev.id, detail: `name=${dev.name}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
   res.sendStatus(204);
 });
 

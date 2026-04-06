@@ -1,6 +1,6 @@
 import { Request, Response, NextFunction } from "express";
-import { db, pool, sessionsTable, usersTable, auditLogsTable, makeRlsDb, setTenantContextSession, clearTenantContext, RlsDb, rolesTable } from "@workspace/db";
-import { eq } from "drizzle-orm";
+import { db, pool, sessionsTable, usersTable, auditLogsTable, makeRlsDb, setTenantContextSession, clearTenantContext, RlsDb, rolesTable, permissionsTable } from "@workspace/db";
+import { and, eq, sql } from "drizzle-orm";
 import crypto from "crypto";
 import { logger } from "./logger";
 
@@ -175,6 +175,137 @@ export async function requireFirmUser(
   next();
 }
 
+export function requirePermission(moduleName: string, action: string) {
+  return async function permissionMiddleware(
+    req: AuthRequest,
+    res: Response,
+    next: NextFunction
+  ): Promise<void> {
+    if (req.userType !== "firm_user" || !req.firmId || !req.roleId) {
+      await writeAuditLog({
+        actorId: req.userId,
+        firmId: req.firmId,
+        actorType: req.userType ?? "unknown",
+        action: "auth.forbidden.permission",
+        detail: `${moduleName}:${action} ${req.method} ${req.path}`,
+        ipAddress: req.ip,
+        userAgent: req.headers["user-agent"],
+      });
+      res.status(403).json({ error: "Permission denied", code: "PERMISSION_DENIED" });
+      return;
+    }
+
+    const rlsDb = req.rlsDb ?? db;
+
+    const [role] = await rlsDb
+      .select()
+      .from(rolesTable)
+      .where(and(eq(rolesTable.id, req.roleId), eq(rolesTable.firmId, req.firmId)));
+
+    if (!role) {
+      await writeAuditLog({
+        actorId: req.userId,
+        firmId: req.firmId,
+        actorType: req.userType ?? "unknown",
+        action: "auth.forbidden.permission",
+        detail: `${moduleName}:${action} ${req.method} ${req.path} reason=role_not_found`,
+        ipAddress: req.ip,
+        userAgent: req.headers["user-agent"],
+      });
+      res.status(403).json({ error: "Permission denied", code: "PERMISSION_DENIED" });
+      return;
+    }
+
+    let [perm] = await rlsDb
+      .select()
+      .from(permissionsTable)
+      .where(and(
+        eq(permissionsTable.roleId, req.roleId),
+        eq(permissionsTable.module, moduleName),
+        eq(permissionsTable.action, action),
+      ));
+
+    if (!perm && role.isSystemRole && (role.name === "Partner" || role.name === "Clerk")) {
+      await ensureBaselinePermissions(rlsDb, role.id, role.name);
+      [perm] = await rlsDb
+        .select()
+        .from(permissionsTable)
+        .where(and(
+          eq(permissionsTable.roleId, req.roleId),
+          eq(permissionsTable.module, moduleName),
+          eq(permissionsTable.action, action),
+        ));
+    }
+
+    if (!perm || !perm.allowed) {
+      await writeAuditLog({
+        actorId: req.userId,
+        firmId: req.firmId,
+        actorType: req.userType ?? "unknown",
+        action: "auth.forbidden.permission",
+        detail: `${moduleName}:${action} ${req.method} ${req.path}`,
+        ipAddress: req.ip,
+        userAgent: req.headers["user-agent"],
+      });
+      res.status(403).json({ error: "Permission denied", code: "PERMISSION_DENIED" });
+      return;
+    }
+
+    next();
+  };
+}
+
+async function ensureBaselinePermissions(rlsDb: RlsDb | typeof db, roleId: number, roleName: "Partner" | "Clerk"): Promise<void> {
+  if (roleName === "Partner") {
+    await rlsDb.execute(sql`
+      INSERT INTO permissions (role_id, module, action, allowed)
+      SELECT ${roleId}, v.module, v.action, TRUE
+      FROM (
+        VALUES
+          ('dashboard','read'),
+          ('cases','read'),('cases','create'),('cases','update'),('cases','delete'),
+          ('projects','read'),('projects','create'),('projects','update'),('projects','delete'),
+          ('developers','read'),('developers','create'),('developers','update'),('developers','delete'),
+          ('documents','read'),('documents','create'),('documents','update'),('documents','delete'),
+          ('communications','read'),('communications','create'),('communications','update'),('communications','delete'),
+          ('accounting','read'),('accounting','write'),
+          ('reports','read'),('reports','export'),
+          ('audit','read'),
+          ('settings','read'),('settings','update'),
+          ('users','read'),('users','create'),('users','update'),('users','delete'),
+          ('roles','read'),('roles','create'),('roles','update'),('roles','delete')
+      ) AS v(module, action)
+      WHERE NOT EXISTS (
+        SELECT 1 FROM permissions p
+        WHERE p.role_id = ${roleId} AND p.module = v.module AND p.action = v.action
+      )
+    `);
+    return;
+  }
+
+  await rlsDb.execute(sql`
+    INSERT INTO permissions (role_id, module, action, allowed)
+    SELECT ${roleId}, v.module, v.action, TRUE
+    FROM (
+      VALUES
+        ('dashboard','read'),
+        ('cases','read'),('cases','create'),('cases','update'),
+        ('projects','read'),('projects','create'),('projects','update'),
+        ('developers','read'),('developers','create'),('developers','update'),
+        ('documents','read'),
+        ('communications','read'),('communications','create'),
+        ('accounting','read'),
+        ('reports','read'),
+        ('settings','read'),
+        ('users','read')
+    ) AS v(module, action)
+    WHERE NOT EXISTS (
+      SELECT 1 FROM permissions p
+      WHERE p.role_id = ${roleId} AND p.module = v.module AND p.action = v.action
+    )
+  `);
+}
+
 /**
  * Restricts access to users with the Partner role (role_id = 1).
  * Must be used after requireAuth + requireFirmUser.
@@ -184,21 +315,7 @@ export async function requirePartner(
   res: Response,
   next: NextFunction
 ): Promise<void> {
-  if (req.userType !== "firm_user" || !req.firmId || !req.roleId) {
-    writeAuditLog({ actorId: req.userId, firmId: req.firmId, actorType: req.userType ?? "unknown", action: "auth.forbidden.partner_required", detail: `${req.method} ${req.path}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
-    res.status(403).json({ error: "Partner access required for this action", code: "PARTNER_REQUIRED" });
-    return;
-  }
-
-  const rlsDb = req.rlsDb ?? db;
-  const [role] = await rlsDb.select().from(rolesTable).where(eq(rolesTable.id, req.roleId));
-  if (!role || role.firmId !== req.firmId || role.name !== "Partner") {
-    writeAuditLog({ actorId: req.userId, firmId: req.firmId, actorType: req.userType ?? "unknown", action: "auth.forbidden.partner_required", detail: `${req.method} ${req.path}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
-    res.status(403).json({ error: "Partner access required for this action", code: "PARTNER_REQUIRED" });
-    return;
-  }
-
-  next();
+  return requirePermission("roles", "manage")(req, res, next);
 }
 
 // ---------------------------------------------------------------------------

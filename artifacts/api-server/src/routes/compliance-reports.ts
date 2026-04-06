@@ -1,13 +1,13 @@
 import { Router, type IRouter } from "express";
 import { eq, and, desc, sql, gte, lte, lt, isNull } from "drizzle-orm";
 import { db, invoicesTable, invoiceItemsTable, receiptsTable, ledgerEntriesTable, casesTable, casePurchasersTable, clientsTable, usersTable } from "@workspace/db";
-import { requireAuth, requireFirmUser, type AuthRequest } from "../lib/auth";
+import { requireAuth, requireFirmUser, requirePermission, type AuthRequest } from "../lib/auth";
 
 const router: IRouter = Router();
 
 // ── Bills Delivered Book ──────────────────────────────────────────────────────
 // Malaysian Solicitors' Accounts Rules: firms must maintain a bills-delivered book
-router.get("/reports/bills-delivered-book", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+router.get("/reports/bills-delivered-book", requireAuth, requireFirmUser, requirePermission("reports", "read"), async (req: AuthRequest, res): Promise<void> => {
   const { from, to } = req.query as Record<string, string>;
   let dateCond = eq(invoicesTable.firmId, req.firmId!);
   if (from) dateCond = and(dateCond, sql`issued_date >= ${from}`) as any;
@@ -54,7 +54,7 @@ router.get("/reports/bills-delivered-book", requireAuth, requireFirmUser, async 
 });
 
 // ── Trust Account Statement (per case or firm-wide) ───────────────────────────
-router.get("/reports/trust-account-statement", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+router.get("/reports/trust-account-statement", requireAuth, requireFirmUser, requirePermission("reports", "read"), async (req: AuthRequest, res): Promise<void> => {
   const { caseId } = req.query as Record<string, string>;
   let cond = and(eq(ledgerEntriesTable.firmId, req.firmId!), eq(ledgerEntriesTable.accountType, "trust"));
   if (caseId) cond = and(cond, eq(ledgerEntriesTable.caseId, parseInt(caseId))) as any;
@@ -64,7 +64,7 @@ router.get("/reports/trust-account-statement", requireAuth, requireFirmUser, asy
 });
 
 // ── Client Account Statement ──────────────────────────────────────────────────
-router.get("/reports/client-account-statement", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+router.get("/reports/client-account-statement", requireAuth, requireFirmUser, requirePermission("reports", "read"), async (req: AuthRequest, res): Promise<void> => {
   const { caseId } = req.query as Record<string, string>;
   let cond = and(eq(ledgerEntriesTable.firmId, req.firmId!), eq(ledgerEntriesTable.accountType, "client"));
   if (caseId) cond = and(cond, eq(ledgerEntriesTable.caseId, parseInt(caseId))) as any;
@@ -74,7 +74,7 @@ router.get("/reports/client-account-statement", requireAuth, requireFirmUser, as
 });
 
 // ── Matter Aging Report ───────────────────────────────────────────────────────
-router.get("/reports/matter-aging", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+router.get("/reports/matter-aging", requireAuth, requireFirmUser, requirePermission("reports", "read"), async (req: AuthRequest, res): Promise<void> => {
   const today = new Date().toISOString().slice(0, 10);
   const invoices = await db.select({
     id: invoicesTable.id,
@@ -111,7 +111,7 @@ router.get("/reports/matter-aging", requireAuth, requireFirmUser, async (req: Au
 });
 
 // ── Time Summary Report ────────────────────────────────────────────────────────
-router.get("/reports/time-summary", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+router.get("/reports/time-summary", requireAuth, requireFirmUser, requirePermission("reports", "read"), async (req: AuthRequest, res): Promise<void> => {
   const { from, to } = req.query as Record<string, string>;
   const { timeEntriesTable } = await import("@workspace/db");
   let cond = eq(timeEntriesTable.firmId, req.firmId!);

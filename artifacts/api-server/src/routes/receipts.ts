@@ -1,7 +1,7 @@
 import { Router, type IRouter } from "express";
 import { eq, and, desc, sql } from "drizzle-orm";
 import { db, receiptsTable, receiptAllocationsTable, invoicesTable, ledgerEntriesTable, firmBankAccountsTable } from "@workspace/db";
-import { requireAuth, requireFirmUser, requireReAuth, type AuthRequest } from "../lib/auth";
+import { requireAuth, requireFirmUser, requirePermission, requireReAuth, type AuthRequest, writeAuditLog } from "../lib/auth";
 import { sensitiveRateLimiter } from "../lib/rate-limit";
 
 const one = (v: string | string[] | undefined): string | undefined => (Array.isArray(v) ? v[0] : v);
@@ -54,7 +54,7 @@ async function postLedger(firmId: number, caseId: number | null, opts: {
 }
 
 // List
-router.get("/receipts", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+router.get("/receipts", requireAuth, requireFirmUser, requirePermission("accounting", "read"), async (req: AuthRequest, res): Promise<void> => {
   const caseId = one((req.query as any).caseId);
   let cond = eq(receiptsTable.firmId, req.firmId!);
   if (caseId) cond = and(cond, eq(receiptsTable.caseId, parseInt(caseId))) as any;
@@ -63,7 +63,7 @@ router.get("/receipts", requireAuth, requireFirmUser, async (req: AuthRequest, r
 });
 
 // Detail
-router.get("/receipts/:id", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+router.get("/receipts/:id", requireAuth, requireFirmUser, requirePermission("accounting", "read"), async (req: AuthRequest, res): Promise<void> => {
   const idStr = one(req.params.id);
   const id = idStr ? parseInt(idStr) : NaN;
   if (isNaN(id)) { res.status(400).json({ error: "Invalid receipt ID" }); return; }
@@ -74,7 +74,7 @@ router.get("/receipts/:id", requireAuth, requireFirmUser, async (req: AuthReques
 });
 
 // Create receipt
-router.post("/receipts", sensitiveRateLimiter, requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+router.post("/receipts", sensitiveRateLimiter, requireAuth, requireFirmUser, requirePermission("accounting", "write"), async (req: AuthRequest, res): Promise<void> => {
   const { caseId, invoiceId, paymentMethod, bankAccountId, accountType, amount,
     receivedDate, referenceNo, notes, allocations } = req.body;
   if (!amount || !receivedDate) { res.status(400).json({ error: "amount and receivedDate required" }); return; }
@@ -109,11 +109,12 @@ router.post("/receipts", sensitiveRateLimiter, requireAuth, requireFirmUser, asy
     referenceNo: receiptNo, sourceType: "receipt", sourceId: rec.id, createdBy: req.userId!,
   });
 
+  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "accounting.receipt.create", entityType: "receipt", entityId: rec.id, detail: `receiptNo=${rec.receiptNo}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
   res.status(201).json(rec);
 });
 
 // Reverse receipt
-router.post("/receipts/:id/reverse", sensitiveRateLimiter, requireAuth, requireFirmUser, requireReAuth, async (req: AuthRequest, res): Promise<void> => {
+router.post("/receipts/:id/reverse", sensitiveRateLimiter, requireAuth, requireFirmUser, requirePermission("accounting", "write"), requireReAuth, async (req: AuthRequest, res): Promise<void> => {
   const idStr = one(req.params.id);
   const id = idStr ? parseInt(idStr) : NaN;
   if (isNaN(id)) { res.status(400).json({ error: "Invalid receipt ID" }); return; }
@@ -132,6 +133,7 @@ router.post("/receipts/:id/reverse", sensitiveRateLimiter, requireAuth, requireF
     referenceNo: rec.receiptNo, sourceType: "receipt", sourceId: id, createdBy: req.userId!,
   });
 
+  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "accounting.receipt.reverse", entityType: "receipt", entityId: id, detail: `receiptNo=${rec.receiptNo}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
   res.json({ success: true });
 });
 

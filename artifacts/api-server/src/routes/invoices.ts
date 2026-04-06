@@ -4,7 +4,7 @@ import {
   db, invoicesTable, invoiceItemsTable, quotationsTable, quotationItemsTable,
   casesTable, clientsTable, casePurchasersTable, ledgerEntriesTable,
 } from "@workspace/db";
-import { requireAuth, requireFirmUser, requireReAuth, type AuthRequest } from "../lib/auth";
+import { requireAuth, requireFirmUser, requirePermission, requireReAuth, type AuthRequest, writeAuditLog } from "../lib/auth";
 import { sensitiveRateLimiter } from "../lib/rate-limit";
 
 const one = (v: string | string[] | undefined): string | undefined => (Array.isArray(v) ? v[0] : v);
@@ -23,7 +23,7 @@ async function nextInvoiceNo(firmId: number): Promise<string> {
 }
 
 // List
-router.get("/invoices", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+router.get("/invoices", requireAuth, requireFirmUser, requirePermission("accounting", "read"), async (req: AuthRequest, res): Promise<void> => {
   const caseId = one((req.query as any).caseId);
   const status = one((req.query as any).status);
   let query = db.select().from(invoicesTable).where(eq(invoicesTable.firmId, req.firmId!)).$dynamic();
@@ -34,7 +34,7 @@ router.get("/invoices", requireAuth, requireFirmUser, async (req: AuthRequest, r
 });
 
 // Detail
-router.get("/invoices/:id", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+router.get("/invoices/:id", requireAuth, requireFirmUser, requirePermission("accounting", "read"), async (req: AuthRequest, res): Promise<void> => {
   const idStr = one(req.params.id);
   const id = idStr ? parseInt(idStr) : NaN;
   if (isNaN(id)) { res.status(400).json({ error: "Invalid invoice ID" }); return; }
@@ -45,7 +45,7 @@ router.get("/invoices/:id", requireAuth, requireFirmUser, async (req: AuthReques
 });
 
 // Create from quotation
-router.post("/invoices/from-quotation/:quotationId", sensitiveRateLimiter, requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+router.post("/invoices/from-quotation/:quotationId", sensitiveRateLimiter, requireAuth, requireFirmUser, requirePermission("accounting", "write"), async (req: AuthRequest, res): Promise<void> => {
   const quotationIdStr = one(req.params.quotationId);
   const quotationId = quotationIdStr ? parseInt(quotationIdStr) : NaN;
   if (isNaN(quotationId)) { res.status(400).json({ error: "Invalid quotation ID" }); return; }
@@ -82,11 +82,12 @@ router.post("/invoices/from-quotation/:quotationId", sensitiveRateLimiter, requi
     })));
   }
 
+  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "accounting.invoice.create", entityType: "invoice", entityId: inv.id, detail: `from=quotation quotationId=${quotationId}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
   res.status(201).json(inv);
 });
 
 // Create manually
-router.post("/invoices", sensitiveRateLimiter, requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+router.post("/invoices", sensitiveRateLimiter, requireAuth, requireFirmUser, requirePermission("accounting", "write"), async (req: AuthRequest, res): Promise<void> => {
   const { caseId, quotationId, items, notes, issuedDate, dueDate } = req.body;
   const parsedItems = (items || []) as any[];
   const subtotal = parsedItems.reduce((s: number, i: any) => s + Number(i.amountExclTax || 0), 0);
@@ -115,11 +116,12 @@ router.post("/invoices", sensitiveRateLimiter, requireAuth, requireFirmUser, asy
       sortOrder: idx,
     })));
   }
+  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "accounting.invoice.create", entityType: "invoice", entityId: inv.id, detail: "from=manual", ipAddress: req.ip, userAgent: req.headers["user-agent"] });
   res.status(201).json(inv);
 });
 
 // Issue invoice (draft → issued)
-router.post("/invoices/:id/issue", sensitiveRateLimiter, requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+router.post("/invoices/:id/issue", sensitiveRateLimiter, requireAuth, requireFirmUser, requirePermission("accounting", "write"), async (req: AuthRequest, res): Promise<void> => {
   const idStr = one(req.params.id);
   const id = idStr ? parseInt(idStr) : NaN;
   if (isNaN(id)) { res.status(400).json({ error: "Invalid invoice ID" }); return; }
@@ -128,11 +130,12 @@ router.post("/invoices/:id/issue", sensitiveRateLimiter, requireAuth, requireFir
   if (inv.status !== "draft") { res.status(400).json({ error: "Only draft invoices can be issued" }); return; }
   const [updated] = await db.update(invoicesTable).set({ status: "issued", updatedAt: new Date() })
     .where(eq(invoicesTable.id, id)).returning();
+  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "accounting.invoice.issue", entityType: "invoice", entityId: id, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
   res.json(updated);
 });
 
 // Void invoice
-router.post("/invoices/:id/void", sensitiveRateLimiter, requireAuth, requireFirmUser, requireReAuth, async (req: AuthRequest, res): Promise<void> => {
+router.post("/invoices/:id/void", sensitiveRateLimiter, requireAuth, requireFirmUser, requirePermission("accounting", "write"), requireReAuth, async (req: AuthRequest, res): Promise<void> => {
   const idStr = one(req.params.id);
   const id = idStr ? parseInt(idStr) : NaN;
   if (isNaN(id)) { res.status(400).json({ error: "Invalid invoice ID" }); return; }
@@ -140,6 +143,7 @@ router.post("/invoices/:id/void", sensitiveRateLimiter, requireAuth, requireFirm
   if (!inv) { res.status(404).json({ error: "Invoice not found" }); return; }
   if (inv.status === "paid") { res.status(400).json({ error: "Cannot void a paid invoice. Issue a credit note." }); return; }
   const [updated] = await db.update(invoicesTable).set({ status: "void", updatedAt: new Date() }).where(eq(invoicesTable.id, id)).returning();
+  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "accounting.invoice.void", entityType: "invoice", entityId: id, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
   res.json(updated);
 });
 

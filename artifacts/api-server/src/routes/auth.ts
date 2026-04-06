@@ -1,8 +1,8 @@
 import { Router, type IRouter } from "express";
 import bcrypt from "bcryptjs";
 import crypto from "crypto";
-import { eq } from "drizzle-orm";
-import { db, usersTable, sessionsTable, rolesTable, firmsTable } from "@workspace/db";
+import { and, eq, sql } from "drizzle-orm";
+import { db, usersTable, sessionsTable, rolesTable, permissionsTable, firmsTable } from "@workspace/db";
 import { LoginBody } from "@workspace/api-zod";
 import { requireAuth, requireReAuth, issueReauthToken, type AuthRequest, writeAuditLog } from "../lib/auth";
 import { authRateLimiter, sensitiveRateLimiter } from "../lib/rate-limit";
@@ -183,6 +183,70 @@ router.get("/auth/me", requireAuth, async (req: AuthRequest, res): Promise<void>
     firmName = firm?.name ?? null;
   }
 
+  let permissions =
+    user.userType === "firm_user" && user.roleId
+      ? await db
+          .select({ module: permissionsTable.module, action: permissionsTable.action })
+          .from(permissionsTable)
+          .where(and(eq(permissionsTable.roleId, user.roleId), eq(permissionsTable.allowed, true)))
+      : [];
+
+  if (user.userType === "firm_user" && user.roleId && permissions.length === 0 && (roleName === "Partner" || roleName === "Clerk")) {
+    const roleId = user.roleId;
+    if (roleName === "Partner") {
+      await db.execute(sql`
+        INSERT INTO permissions (role_id, module, action, allowed)
+        SELECT ${roleId}, v.module, v.action, TRUE
+        FROM (
+          VALUES
+            ('dashboard','read'),
+            ('cases','read'),('cases','create'),('cases','update'),('cases','delete'),
+            ('projects','read'),('projects','create'),('projects','update'),('projects','delete'),
+            ('developers','read'),('developers','create'),('developers','update'),('developers','delete'),
+            ('documents','read'),('documents','create'),('documents','update'),('documents','delete'),
+            ('communications','read'),('communications','create'),('communications','update'),('communications','delete'),
+            ('accounting','read'),('accounting','write'),
+            ('reports','read'),('reports','export'),
+            ('audit','read'),
+            ('settings','read'),('settings','update'),
+            ('users','read'),('users','create'),('users','update'),('users','delete'),
+            ('roles','read'),('roles','create'),('roles','update'),('roles','delete')
+        ) AS v(module, action)
+        WHERE NOT EXISTS (
+          SELECT 1 FROM permissions p
+          WHERE p.role_id = ${roleId} AND p.module = v.module AND p.action = v.action
+        )
+      `);
+    } else {
+      await db.execute(sql`
+        INSERT INTO permissions (role_id, module, action, allowed)
+        SELECT ${roleId}, v.module, v.action, TRUE
+        FROM (
+          VALUES
+            ('dashboard','read'),
+            ('cases','read'),('cases','create'),('cases','update'),
+            ('projects','read'),('projects','create'),('projects','update'),
+            ('developers','read'),('developers','create'),('developers','update'),
+            ('documents','read'),
+            ('communications','read'),('communications','create'),
+            ('accounting','read'),
+            ('reports','read'),
+            ('settings','read'),
+            ('users','read')
+        ) AS v(module, action)
+        WHERE NOT EXISTS (
+          SELECT 1 FROM permissions p
+          WHERE p.role_id = ${roleId} AND p.module = v.module AND p.action = v.action
+        )
+      `);
+    }
+
+    permissions = await db
+      .select({ module: permissionsTable.module, action: permissionsTable.action })
+      .from(permissionsTable)
+      .where(and(eq(permissionsTable.roleId, user.roleId), eq(permissionsTable.allowed, true)));
+  }
+
   res.json({
     id: user.id,
     email: user.email,
@@ -194,6 +258,7 @@ router.get("/auth/me", requireAuth, async (req: AuthRequest, res): Promise<void>
     roleName,
     status: user.status,
     totpEnabled: user.totpEnabled,
+    permissions,
   });
 });
 

@@ -11,7 +11,7 @@ import {
   GetCaseWorkflowParams, UpdateWorkflowStepParams, UpdateWorkflowStepBody,
   GetCaseNotesParams, CreateCaseNoteParams, CreateCaseNoteBody
 } from "@workspace/api-zod";
-import { requireAuth, requireFirmUser, type AuthRequest } from "../lib/auth";
+import { requireAuth, requireFirmUser, requirePermission, writeAuditLog, type AuthRequest } from "../lib/auth";
 import { buildWorkflowSteps } from "../lib/workflow";
 
 const router: IRouter = Router();
@@ -108,7 +108,7 @@ async function formatCaseSummary(c: typeof casesTable.$inferSelect) {
   };
 }
 
-router.get("/cases/stats/by-status", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+router.get("/cases/stats/by-status", requireAuth, requireFirmUser, requirePermission("cases", "read"), async (req: AuthRequest, res): Promise<void> => {
   const rows = await db
     .select({ status: casesTable.status, count: count() })
     .from(casesTable)
@@ -117,7 +117,7 @@ router.get("/cases/stats/by-status", requireAuth, requireFirmUser, async (req: A
   res.json(rows.map(r => ({ status: r.status, count: Number(r.count) })));
 });
 
-router.get("/cases/stats/by-type", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+router.get("/cases/stats/by-type", requireAuth, requireFirmUser, requirePermission("cases", "read"), async (req: AuthRequest, res): Promise<void> => {
   const rows = await db
     .select({ purchaseMode: casesTable.purchaseMode, count: count() })
     .from(casesTable)
@@ -126,7 +126,7 @@ router.get("/cases/stats/by-type", requireAuth, requireFirmUser, async (req: Aut
   res.json(rows.map(r => ({ purchaseMode: r.purchaseMode, count: Number(r.count) })));
 });
 
-router.get("/cases/recent", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+router.get("/cases/recent", requireAuth, requireFirmUser, requirePermission("cases", "read"), async (req: AuthRequest, res): Promise<void> => {
   const limitParam = req.query.limit ? Number(req.query.limit) : 5;
   const cases = await db.select().from(casesTable)
     .where(eq(casesTable.firmId, req.firmId!))
@@ -136,7 +136,7 @@ router.get("/cases/recent", requireAuth, requireFirmUser, async (req: AuthReques
   res.json(summaries);
 });
 
-router.get("/cases", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+router.get("/cases", requireAuth, requireFirmUser, requirePermission("cases", "read"), async (req: AuthRequest, res): Promise<void> => {
   const params = ListCasesQueryParams.safeParse(req.query);
   const search = params.success ? params.data.search : undefined;
   const status = params.success ? params.data.status : undefined;
@@ -166,7 +166,7 @@ router.get("/cases", requireAuth, requireFirmUser, async (req: AuthRequest, res)
   res.json({ data: summaries, total: Number(totalRes?.c ?? 0), page, limit });
 });
 
-router.post("/cases", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+router.post("/cases", requireAuth, requireFirmUser, requirePermission("cases", "create"), async (req: AuthRequest, res): Promise<void> => {
   const parsed = CreateCaseBody.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: "Validation failed", fields: parsed.error.flatten().fieldErrors });
@@ -331,21 +331,23 @@ router.post("/cases", requireAuth, requireFirmUser, async (req: AuthRequest, res
     );
   }
 
-  await db.insert(auditLogsTable).values({
+  await writeAuditLog({
     firmId: req.firmId,
     actorId: req.userId,
     actorType: "firm_user",
-    action: "case.created",
+    action: "cases.create",
     entityType: "case",
     entityId: newCase.id,
-    detail: `Case ${refNo} created`,
+    detail: `referenceNo=${refNo} purchasersCreated=${purchasersCreated} purchasersReused=${purchasersReused}`,
+    ipAddress: req.ip,
+    userAgent: req.headers["user-agent"],
   });
 
   const detail = await formatCaseDetail(newCase);
   res.status(201).json({ ...detail, purchasersCreated, purchasersReused });
 });
 
-router.get("/cases/:caseId", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+router.get("/cases/:caseId", requireAuth, requireFirmUser, requirePermission("cases", "read"), async (req: AuthRequest, res): Promise<void> => {
   const params = GetCaseParams.safeParse(req.params);
   if (!params.success) {
     res.status(400).json({ error: params.error.message });
@@ -361,7 +363,7 @@ router.get("/cases/:caseId", requireAuth, requireFirmUser, async (req: AuthReque
   res.json(await formatCaseDetail(c));
 });
 
-router.patch("/cases/:caseId", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+router.patch("/cases/:caseId", requireAuth, requireFirmUser, requirePermission("cases", "update"), async (req: AuthRequest, res): Promise<void> => {
   const params = UpdateCaseParams.safeParse(req.params);
   if (!params.success) {
     res.status(400).json({ error: params.error.message });
@@ -415,7 +417,7 @@ router.patch("/cases/:caseId", requireAuth, requireFirmUser, async (req: AuthReq
   res.json(await formatCaseDetail(c));
 });
 
-router.get("/cases/:caseId/workflow", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+router.get("/cases/:caseId/workflow", requireAuth, requireFirmUser, requirePermission("cases", "read"), async (req: AuthRequest, res): Promise<void> => {
   const params = GetCaseWorkflowParams.safeParse(req.params);
   if (!params.success) {
     res.status(400).json({ error: params.error.message });
@@ -452,7 +454,7 @@ router.get("/cases/:caseId/workflow", requireAuth, requireFirmUser, async (req: 
   res.json(enriched);
 });
 
-router.patch("/cases/:caseId/workflow/:stepId", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+router.patch("/cases/:caseId/workflow/:stepId", requireAuth, requireFirmUser, requirePermission("cases", "update"), async (req: AuthRequest, res): Promise<void> => {
   const params = UpdateWorkflowStepParams.safeParse(req.params);
   if (!params.success) {
     res.status(400).json({ error: params.error.message });
@@ -517,7 +519,7 @@ router.patch("/cases/:caseId/workflow/:stepId", requireAuth, requireFirmUser, as
   });
 });
 
-router.get("/cases/:caseId/notes", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+router.get("/cases/:caseId/notes", requireAuth, requireFirmUser, requirePermission("cases", "read"), async (req: AuthRequest, res): Promise<void> => {
   const params = GetCaseNotesParams.safeParse(req.params);
   if (!params.success) {
     res.status(400).json({ error: params.error.message });
@@ -545,7 +547,7 @@ router.get("/cases/:caseId/notes", requireAuth, requireFirmUser, async (req: Aut
   res.json(enriched);
 });
 
-router.post("/cases/:caseId/notes", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+router.post("/cases/:caseId/notes", requireAuth, requireFirmUser, requirePermission("cases", "update"), async (req: AuthRequest, res): Promise<void> => {
   const params = CreateCaseNoteParams.safeParse(req.params);
   if (!params.success) {
     res.status(400).json({ error: params.error.message });

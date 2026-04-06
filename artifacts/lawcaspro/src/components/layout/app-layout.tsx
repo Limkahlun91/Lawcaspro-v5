@@ -1,5 +1,6 @@
 import { ReactNode } from "react";
 import { useAuth } from "@/lib/auth-context";
+import { hasPermission } from "@/lib/permissions";
 import { useQuery } from "@tanstack/react-query";
 import { Link, useLocation } from "wouter";
 import { 
@@ -31,7 +32,7 @@ export function AppLayout({ children }: { children: ReactNode }) {
       return res.json();
     },
     refetchInterval: 30000,
-    enabled: !!user && user.userType === "firm_user",
+    enabled: !!user && user.userType === "firm_user" && hasPermission(user, "communications", "read"),
   });
   const unreadCount = unreadData?.count ?? 0;
 
@@ -40,17 +41,18 @@ export function AppLayout({ children }: { children: ReactNode }) {
   }
 
   const navItems = [
-    { label: "Dashboard", href: "/app/dashboard", icon: LayoutDashboard },
-    { label: "Cases", href: "/app/cases", icon: Briefcase },
-    { label: "Projects", href: "/app/projects", icon: Building2 },
-    { label: "Developers", href: "/app/developers", icon: HardHat },
-    { label: "Documents", href: "/app/documents", icon: FileText },
-    { label: "Communications", href: "/app/hub", icon: MessageSquare },
-    { label: "Accounting", href: "/app/accounting", icon: Calculator },
-    { label: "Reports", href: "/app/reports", icon: BarChart },
-    { label: "Audit Logs", href: "/app/audit-logs", icon: ScrollText },
-    { label: "Settings", href: "/app/settings", icon: Settings },
+    { label: "Dashboard", href: "/app/dashboard", icon: LayoutDashboard, perm: ["dashboard", "read"] as const },
+    { label: "Cases", href: "/app/cases", icon: Briefcase, perm: ["cases", "read"] as const },
+    { label: "Projects", href: "/app/projects", icon: Building2, perm: ["projects", "read"] as const },
+    { label: "Developers", href: "/app/developers", icon: HardHat, perm: ["developers", "read"] as const },
+    { label: "Documents", href: "/app/documents", icon: FileText, perm: ["documents", "read"] as const },
+    { label: "Communications", href: "/app/hub", icon: MessageSquare, perm: ["communications", "read"] as const },
+    { label: "Accounting", href: "/app/accounting", icon: Calculator, perm: ["accounting", "read"] as const },
+    { label: "Reports", href: "/app/reports", icon: BarChart, perm: ["reports", "read"] as const },
+    { label: "Audit Logs", href: "/app/audit-logs", icon: ScrollText, perm: ["audit", "read"] as const },
+    { label: "Settings", href: "/app/settings", icon: Settings, perm: ["settings", "read"] as const },
   ];
+  const visibleNavItems = navItems.filter((i) => hasPermission(user, i.perm[0], i.perm[1]));
 
   return (
     <div className="flex min-h-screen w-full bg-slate-50">
@@ -67,7 +69,7 @@ export function AppLayout({ children }: { children: ReactNode }) {
         </div>
         
         <nav className="flex-1 py-4 px-3 space-y-1">
-          {navItems.map((item) => {
+          {visibleNavItems.map((item) => {
             const isActive = location === item.href || location.startsWith(`${item.href}/`) || (item.href === "/app/accounting" && location.startsWith("/app/quotations"));
             return (
               <Link key={item.href} href={item.href}>

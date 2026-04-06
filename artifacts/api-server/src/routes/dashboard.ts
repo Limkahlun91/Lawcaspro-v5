@@ -1,7 +1,7 @@
 import { Router, type IRouter } from "express";
 import { eq, count, desc, sql } from "drizzle-orm";
 import { db, casesTable, clientsTable, developersTable, projectsTable, caseAssignmentsTable, usersTable } from "@workspace/db";
-import { requireAuth, requireFirmUser, type AuthRequest } from "../lib/auth";
+import { requireAuth, requireFirmUser, requirePermission, type AuthRequest } from "../lib/auth";
 
 async function queryRows(query: ReturnType<typeof sql>): Promise<Record<string, unknown>[]> {
   const result = await db.execute(query);
@@ -12,7 +12,7 @@ async function queryRows(query: ReturnType<typeof sql>): Promise<Record<string, 
 
 const router: IRouter = Router();
 
-router.get("/dashboard", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+router.get("/dashboard", requireAuth, requireFirmUser, requirePermission("dashboard", "read"), async (req: AuthRequest, res): Promise<void> => {
   const firmId = req.firmId!;
 
   const [totalCasesRes] = await db.select({ c: count() }).from(casesTable).where(eq(casesTable.firmId, firmId));

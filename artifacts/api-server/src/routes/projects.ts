@@ -5,7 +5,7 @@ import {
   CreateProjectBody, UpdateProjectBody, ListProjectsQueryParams,
   GetProjectParams, UpdateProjectParams, DeleteProjectParams
 } from "@workspace/api-zod";
-import { requireAuth, requireFirmUser, type AuthRequest } from "../lib/auth";
+import { requireAuth, requireFirmUser, requirePermission, writeAuditLog, type AuthRequest } from "../lib/auth";
 
 const router: IRouter = Router();
 
@@ -36,7 +36,7 @@ async function enrichProject(proj: typeof projectsTable.$inferSelect) {
   };
 }
 
-router.get("/projects", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+router.get("/projects", requireAuth, requireFirmUser, requirePermission("projects", "read"), async (req: AuthRequest, res): Promise<void> => {
   const params = ListProjectsQueryParams.safeParse(req.query);
   const search = params.success ? params.data.search : undefined;
   const developerId = params.success ? params.data.developerId : undefined;
@@ -62,7 +62,7 @@ router.get("/projects", requireAuth, requireFirmUser, async (req: AuthRequest, r
   res.json({ data: enriched, total: Number(totalRes?.c ?? 0), page, limit });
 });
 
-router.post("/projects", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+router.post("/projects", requireAuth, requireFirmUser, requirePermission("projects", "create"), async (req: AuthRequest, res): Promise<void> => {
   const parsed = CreateProjectBody.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: parsed.error.message });
@@ -102,10 +102,11 @@ router.post("/projects", requireAuth, requireFirmUser, async (req: AuthRequest, 
     })
     .returning();
 
+  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "projects.create", entityType: "project", entityId: proj.id, detail: `name=${proj.name}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
   res.status(201).json(await enrichProject(proj));
 });
 
-router.get("/projects/:projectId", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+router.get("/projects/:projectId", requireAuth, requireFirmUser, requirePermission("projects", "read"), async (req: AuthRequest, res): Promise<void> => {
   const params = GetProjectParams.safeParse(req.params);
   if (!params.success) {
     res.status(400).json({ error: params.error.message });
@@ -121,7 +122,7 @@ router.get("/projects/:projectId", requireAuth, requireFirmUser, async (req: Aut
   res.json(await enrichProject(proj));
 });
 
-router.patch("/projects/:projectId", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+router.patch("/projects/:projectId", requireAuth, requireFirmUser, requirePermission("projects", "update"), async (req: AuthRequest, res): Promise<void> => {
   const params = UpdateProjectParams.safeParse(req.params);
   if (!params.success) {
     res.status(400).json({ error: params.error.message });
@@ -174,10 +175,11 @@ router.patch("/projects/:projectId", requireAuth, requireFirmUser, async (req: A
     .where(and(eq(projectsTable.id, params.data.projectId), eq(projectsTable.firmId, req.firmId!)))
     .returning();
 
+  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "projects.update", entityType: "project", entityId: proj.id, detail: `fields=${Object.keys(updateData).join(",")}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
   res.json(await enrichProject(proj));
 });
 
-router.delete("/projects/:projectId", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+router.delete("/projects/:projectId", requireAuth, requireFirmUser, requirePermission("projects", "delete"), async (req: AuthRequest, res): Promise<void> => {
   const params = DeleteProjectParams.safeParse(req.params);
   if (!params.success) {
     res.status(400).json({ error: params.error.message });
@@ -190,6 +192,7 @@ router.delete("/projects/:projectId", requireAuth, requireFirmUser, async (req: 
     return;
   }
 
+  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "projects.delete", entityType: "project", entityId: proj.id, detail: `name=${proj.name}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
   res.sendStatus(204);
 });
 

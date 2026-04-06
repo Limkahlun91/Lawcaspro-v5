@@ -5,7 +5,7 @@ import {
   CreateRoleBody, UpdateRoleBody,
   GetRoleParams, UpdateRoleParams, DeleteRoleParams
 } from "@workspace/api-zod";
-import { requireAuth, requireFirmUser, requirePartner, type AuthRequest } from "../lib/auth";
+import { requireAuth, requireFirmUser, requirePermission, type AuthRequest, writeAuditLog } from "../lib/auth";
 
 const router: IRouter = Router();
 
@@ -23,13 +23,13 @@ async function enrichRole(role: typeof rolesTable.$inferSelect) {
   };
 }
 
-router.get("/roles", requireAuth, requireFirmUser, requirePartner, async (req: AuthRequest, res): Promise<void> => {
+router.get("/roles", requireAuth, requireFirmUser, requirePermission("roles", "read"), async (req: AuthRequest, res): Promise<void> => {
   const roles = await db.select().from(rolesTable).where(eq(rolesTable.firmId, req.firmId!));
   const enriched = await Promise.all(roles.map(enrichRole));
   res.json(enriched);
 });
 
-router.post("/roles", requireAuth, requireFirmUser, requirePartner, async (req: AuthRequest, res): Promise<void> => {
+router.post("/roles", requireAuth, requireFirmUser, requirePermission("roles", "create"), async (req: AuthRequest, res): Promise<void> => {
   const parsed = CreateRoleBody.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: parsed.error.message });
@@ -52,10 +52,11 @@ router.post("/roles", requireAuth, requireFirmUser, requirePartner, async (req: 
     );
   }
 
+  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "roles.create", entityType: "role", entityId: role.id, detail: `name=${role.name}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
   res.status(201).json(await enrichRole(role));
 });
 
-router.get("/roles/:roleId", requireAuth, requireFirmUser, requirePartner, async (req: AuthRequest, res): Promise<void> => {
+router.get("/roles/:roleId", requireAuth, requireFirmUser, requirePermission("roles", "read"), async (req: AuthRequest, res): Promise<void> => {
   const params = GetRoleParams.safeParse(req.params);
   if (!params.success) {
     res.status(400).json({ error: params.error.message });
@@ -71,7 +72,7 @@ router.get("/roles/:roleId", requireAuth, requireFirmUser, requirePartner, async
   res.json(await enrichRole(role));
 });
 
-router.patch("/roles/:roleId", requireAuth, requireFirmUser, requirePartner, async (req: AuthRequest, res): Promise<void> => {
+router.patch("/roles/:roleId", requireAuth, requireFirmUser, requirePermission("roles", "update"), async (req: AuthRequest, res): Promise<void> => {
   const params = UpdateRoleParams.safeParse(req.params);
   if (!params.success) {
     res.status(400).json({ error: params.error.message });
@@ -112,10 +113,11 @@ router.patch("/roles/:roleId", requireAuth, requireFirmUser, requirePartner, asy
     }
   }
 
+  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "roles.update", entityType: "role", entityId: role.id, detail: `fields=${Object.keys(updates).join(",")}${parsed.data.permissions ? " permissions=replaced" : ""}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
   res.json(await enrichRole(role));
 });
 
-router.delete("/roles/:roleId", requireAuth, requireFirmUser, requirePartner, async (req: AuthRequest, res): Promise<void> => {
+router.delete("/roles/:roleId", requireAuth, requireFirmUser, requirePermission("roles", "delete"), async (req: AuthRequest, res): Promise<void> => {
   const params = DeleteRoleParams.safeParse(req.params);
   if (!params.success) {
     res.status(400).json({ error: params.error.message });
@@ -130,6 +132,7 @@ router.delete("/roles/:roleId", requireAuth, requireFirmUser, requirePartner, as
     return;
   }
 
+  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "roles.delete", entityType: "role", entityId: role.id, detail: `name=${role.name}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
   res.sendStatus(204);
 });
 

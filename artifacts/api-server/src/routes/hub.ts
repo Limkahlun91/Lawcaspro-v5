@@ -9,7 +9,7 @@ import {
   platformMessageAttachmentsTable,
   platformDocumentsTable,
 } from "@workspace/db";
-import { requireAuth, requireFirmUser, type AuthRequest } from "../lib/auth";
+import { requireAuth, requireFirmUser, requirePermission, type AuthRequest } from "../lib/auth";
 
 const one = (v: string | string[] | undefined): string | undefined => (Array.isArray(v) ? v[0] : v);
 
@@ -17,7 +17,7 @@ const router: IRouter = Router();
 
 // ─── Firm → Founder messages ──────────────────────────────────────────────────
 
-router.get("/hub/messages", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+router.get("/hub/messages", requireAuth, requireFirmUser, requirePermission("communications", "read"), async (req: AuthRequest, res): Promise<void> => {
   const firmId = req.firmId!;
 
   const msgs = await db
@@ -39,7 +39,7 @@ router.get("/hub/messages", requireAuth, requireFirmUser, async (req: AuthReques
   res.json(enriched);
 });
 
-router.post("/hub/messages", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+router.post("/hub/messages", requireAuth, requireFirmUser, requirePermission("communications", "create"), async (req: AuthRequest, res): Promise<void> => {
   const firmId = req.firmId!;
   const { subject, body, parentId, attachments } = req.body as {
     subject: string;
@@ -72,7 +72,7 @@ router.post("/hub/messages", requireAuth, requireFirmUser, async (req: AuthReque
   res.status(201).json(msg);
 });
 
-router.patch("/hub/messages/:msgId/read", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+router.patch("/hub/messages/:msgId/read", requireAuth, requireFirmUser, requirePermission("communications", "update"), async (req: AuthRequest, res): Promise<void> => {
   const firmId = req.firmId!;
   const msgIdStr = one(req.params.msgId);
   const msgId = msgIdStr ? parseInt(msgIdStr, 10) : NaN;
@@ -99,7 +99,7 @@ router.get("/hub/folders", requireAuth, requireFirmUser, async (_req: AuthReques
 
 // ─── System Documents (visible to firm) ──────────────────────────────────────
 
-router.get("/hub/documents", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+router.get("/hub/documents", requireAuth, requireFirmUser, requirePermission("documents", "read"), async (req: AuthRequest, res): Promise<void> => {
   const firmId = req.firmId!;
   const folderIdStr = one(req.query.folderId as any);
   const folderId = folderIdStr ? parseInt(folderIdStr, 10) : undefined;

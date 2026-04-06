@@ -1,7 +1,7 @@
 import { Router, type IRouter } from "express";
 import { sql } from "drizzle-orm";
 import { db } from "@workspace/db";
-import { requireAuth, requireFirmUser, type AuthRequest } from "../lib/auth";
+import { requireAuth, requireFirmUser, requirePermission, writeAuditLog, type AuthRequest } from "../lib/auth";
 
 const router: IRouter = Router();
 
@@ -12,7 +12,7 @@ async function queryRows(query: ReturnType<typeof sql>): Promise<Record<string, 
   return [];
 }
 
-router.get("/cases/:caseId/threads", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+router.get("/cases/:caseId/threads", requireAuth, requireFirmUser, requirePermission("communications", "read"), async (req: AuthRequest, res): Promise<void> => {
   const caseId = Number(req.params.caseId);
   const firmId = req.firmId!;
   const rows = await queryRows(sql`
@@ -35,7 +35,7 @@ router.get("/cases/:caseId/threads", requireAuth, requireFirmUser, async (req: A
   res.json(rows);
 });
 
-router.post("/cases/:caseId/threads", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+router.post("/cases/:caseId/threads", requireAuth, requireFirmUser, requirePermission("communications", "create"), async (req: AuthRequest, res): Promise<void> => {
   const caseId = Number(req.params.caseId);
   const { subject } = req.body as { subject: string };
 
@@ -49,10 +49,15 @@ router.post("/cases/:caseId/threads", requireAuth, requireFirmUser, async (req: 
     VALUES (${caseId}, ${req.firmId!}, ${subject.trim()}, ${req.userId!})
     RETURNING *
   `);
+  const created = rows[0];
+  const createdId = created && typeof created === "object" && "id" in created && typeof (created as { id?: unknown }).id === "number"
+    ? (created as { id: number }).id
+    : undefined;
+  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "communications.thread.create", entityType: "communication_thread", entityId: createdId, detail: `caseId=${caseId}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
   res.status(201).json(rows[0]);
 });
 
-router.delete("/cases/:caseId/threads/:threadId", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+router.delete("/cases/:caseId/threads/:threadId", requireAuth, requireFirmUser, requirePermission("communications", "delete"), async (req: AuthRequest, res): Promise<void> => {
   const threadId = Number(req.params.threadId);
   const firmId = req.firmId!;
 
@@ -68,10 +73,11 @@ router.delete("/cases/:caseId/threads/:threadId", requireAuth, requireFirmUser, 
   await queryRows(sql`DELETE FROM communication_read_status WHERE thread_id = ${threadId}`);
   await queryRows(sql`DELETE FROM communication_threads WHERE id = ${threadId} AND firm_id = ${firmId}`);
 
+  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "communications.thread.delete", entityType: "communication_thread", entityId: threadId, detail: `caseId=${req.params.caseId}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
   res.sendStatus(204);
 });
 
-router.get("/cases/:caseId/threads/:threadId/messages", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+router.get("/cases/:caseId/threads/:threadId/messages", requireAuth, requireFirmUser, requirePermission("communications", "read"), async (req: AuthRequest, res): Promise<void> => {
   const threadId = Number(req.params.threadId);
   const rows = await queryRows(sql`
     SELECT cc.*, u.name as logged_by_name
@@ -83,7 +89,7 @@ router.get("/cases/:caseId/threads/:threadId/messages", requireAuth, requireFirm
   res.json(rows);
 });
 
-router.post("/cases/:caseId/threads/:threadId/messages", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+router.post("/cases/:caseId/threads/:threadId/messages", requireAuth, requireFirmUser, requirePermission("communications", "create"), async (req: AuthRequest, res): Promise<void> => {
   const caseId = Number(req.params.caseId);
   const threadId = Number(req.params.threadId);
   const { notes } = req.body as { notes: string };
@@ -109,10 +115,11 @@ router.post("/cases/:caseId/threads/:threadId/messages", requireAuth, requireFir
     ON CONFLICT (thread_id, user_id) DO UPDATE SET last_read_at = NOW()
   `);
 
+  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "communications.message.create", entityType: "communication_thread", entityId: threadId, detail: `caseId=${caseId}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
   res.status(201).json(rows[0]);
 });
 
-router.post("/cases/:caseId/threads/:threadId/read", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+router.post("/cases/:caseId/threads/:threadId/read", requireAuth, requireFirmUser, requirePermission("communications", "update"), async (req: AuthRequest, res): Promise<void> => {
   const threadId = Number(req.params.threadId);
 
   await queryRows(sql`
@@ -124,7 +131,7 @@ router.post("/cases/:caseId/threads/:threadId/read", requireAuth, requireFirmUse
   res.json({ success: true });
 });
 
-router.get("/communications/unread-count", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+router.get("/communications/unread-count", requireAuth, requireFirmUser, requirePermission("communications", "read"), async (req: AuthRequest, res): Promise<void> => {
   const firmId = req.firmId!;
   const userId = req.userId!;
   const rows = await queryRows(sql`
@@ -150,7 +157,7 @@ router.get("/communications/unread-count", requireAuth, requireFirmUser, async (
   res.json({ count: Number(rows[0]?.count ?? 0) });
 });
 
-router.get("/communications", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+router.get("/communications", requireAuth, requireFirmUser, requirePermission("communications", "read"), async (req: AuthRequest, res): Promise<void> => {
   const firmId = req.firmId!;
   const userId = req.userId!;
   const rows = await queryRows(sql`

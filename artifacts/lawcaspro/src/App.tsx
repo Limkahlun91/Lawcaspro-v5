@@ -6,6 +6,7 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { AuthProvider } from "@/lib/auth-context";
 import { ReAuthProvider } from "@/components/re-auth-dialog";
 import { AuthGuard } from "@/components/auth-guard";
+import { PermissionGuard } from "@/components/permission-guard";
 import { PlatformLayout } from "@/components/layout/platform-layout";
 import { AppLayout } from "@/components/layout/app-layout";
 import { getApiOrigin } from "@/lib/api-base";
@@ -88,46 +89,146 @@ function AppRoutes() {
     <AuthGuard requireRole="firm_user">
       <AppLayout>
         <Switch>
-          <Route path="/app/dashboard" component={AppDashboard} />
+          <Route path="/app/dashboard" component={() => (
+            <PermissionGuard module="dashboard" action="read">
+              <AppDashboard />
+            </PermissionGuard>
+          )} />
           
-          <Route path="/app/cases/new" component={NewCase} />
-          <Route path="/app/cases/:id" component={CaseDetail} />
-          <Route path="/app/cases" component={CasesList} />
+          <Route path="/app/cases/new" component={() => (
+            <PermissionGuard module="cases" action="create">
+              <NewCase />
+            </PermissionGuard>
+          )} />
+          <Route path="/app/cases/:id" component={() => (
+            <PermissionGuard module="cases" action="read">
+              <CaseDetail />
+            </PermissionGuard>
+          )} />
+          <Route path="/app/cases" component={() => (
+            <PermissionGuard module="cases" action="read">
+              <CasesList />
+            </PermissionGuard>
+          )} />
           
-          <Route path="/app/projects/new" component={NewProject} />
-          <Route path="/app/projects/:id/edit" component={EditProject} />
-          <Route path="/app/projects/:id" component={ProjectDetail} />
-          <Route path="/app/projects" component={ProjectsList} />
+          <Route path="/app/projects/new" component={() => (
+            <PermissionGuard module="projects" action="create">
+              <NewProject />
+            </PermissionGuard>
+          )} />
+          <Route path="/app/projects/:id/edit" component={() => (
+            <PermissionGuard module="projects" action="update">
+              <EditProject />
+            </PermissionGuard>
+          )} />
+          <Route path="/app/projects/:id" component={() => (
+            <PermissionGuard module="projects" action="read">
+              <ProjectDetail />
+            </PermissionGuard>
+          )} />
+          <Route path="/app/projects" component={() => (
+            <PermissionGuard module="projects" action="read">
+              <ProjectsList />
+            </PermissionGuard>
+          )} />
           
-          <Route path="/app/developers/new" component={NewDeveloper} />
-          <Route path="/app/developers/:id" component={DeveloperDetail} />
-          <Route path="/app/developers" component={DevelopersList} />
+          <Route path="/app/developers/new" component={() => (
+            <PermissionGuard module="developers" action="create">
+              <NewDeveloper />
+            </PermissionGuard>
+          )} />
+          <Route path="/app/developers/:id" component={() => (
+            <PermissionGuard module="developers" action="read">
+              <DeveloperDetail />
+            </PermissionGuard>
+          )} />
+          <Route path="/app/developers" component={() => (
+            <PermissionGuard module="developers" action="read">
+              <DevelopersList />
+            </PermissionGuard>
+          )} />
           
           <Route path="/app/clients/new" component={NewClient} />
           <Route path="/app/clients/:id" component={ClientDetail} />
           <Route path="/app/clients" component={ClientsList} />
           
-          <Route path="/app/users/new" component={NewUser} />
+          <Route path="/app/users/new" component={() => (
+            <PermissionGuard module="users" action="create">
+              <NewUser />
+            </PermissionGuard>
+          )} />
           <Route path="/app/users" component={() => <Redirect to="/app/settings?tab=users" />} />
           
           <Route path="/app/roles" component={() => <Redirect to="/app/settings?tab=roles" />} />
           
           <Route path="/app/communications" component={() => <Redirect to="/app/hub" />} />
-          <Route path="/app/quotations/new" component={NewQuotation} />
-          <Route path="/app/quotations/:id" component={QuotationDetail} />
-          <Route path="/app/quotations" component={QuotationsList} />
+          <Route path="/app/quotations/new" component={() => (
+            <PermissionGuard module="accounting" action="write">
+              <NewQuotation />
+            </PermissionGuard>
+          )} />
+          <Route path="/app/quotations/:id" component={() => (
+            <PermissionGuard module="accounting" action="read">
+              <QuotationDetail />
+            </PermissionGuard>
+          )} />
+          <Route path="/app/quotations" component={() => (
+            <PermissionGuard module="accounting" action="read">
+              <QuotationsList />
+            </PermissionGuard>
+          )} />
           
           <Route path="/app/settings/documents" component={() => <Redirect to="/app/documents" />} />
-          <Route path="/app/documents" component={DocumentsPage} />
-          <Route path="/app/accounting/invoices/:id" component={InvoiceDetail} />
-          <Route path="/app/accounting" component={Accounting} />
-          <Route path="/app/reports/bills-delivered-book" component={BillsDeliveredBook} />
-          <Route path="/app/reports/matter-aging" component={MatterAging} />
-          <Route path="/app/reports/trust-account-statement" component={TrustAccountStatement} />
-          <Route path="/app/reports" component={Reports} />
-          <Route path="/app/audit-logs" component={AuditLogs} />
-          <Route path="/app/settings" component={Settings} />
-          <Route path="/app/hub" component={Hub} />
+          <Route path="/app/documents" component={() => (
+            <PermissionGuard module="documents" action="read">
+              <DocumentsPage />
+            </PermissionGuard>
+          )} />
+          <Route path="/app/accounting/invoices/:id" component={() => (
+            <PermissionGuard module="accounting" action="read">
+              <InvoiceDetail />
+            </PermissionGuard>
+          )} />
+          <Route path="/app/accounting" component={() => (
+            <PermissionGuard module="accounting" action="read">
+              <Accounting />
+            </PermissionGuard>
+          )} />
+          <Route path="/app/reports/bills-delivered-book" component={() => (
+            <PermissionGuard module="reports" action="read">
+              <BillsDeliveredBook />
+            </PermissionGuard>
+          )} />
+          <Route path="/app/reports/matter-aging" component={() => (
+            <PermissionGuard module="reports" action="read">
+              <MatterAging />
+            </PermissionGuard>
+          )} />
+          <Route path="/app/reports/trust-account-statement" component={() => (
+            <PermissionGuard module="reports" action="read">
+              <TrustAccountStatement />
+            </PermissionGuard>
+          )} />
+          <Route path="/app/reports" component={() => (
+            <PermissionGuard module="reports" action="read">
+              <Reports />
+            </PermissionGuard>
+          )} />
+          <Route path="/app/audit-logs" component={() => (
+            <PermissionGuard module="audit" action="read">
+              <AuditLogs />
+            </PermissionGuard>
+          )} />
+          <Route path="/app/settings" component={() => (
+            <PermissionGuard module="settings" action="read">
+              <Settings />
+            </PermissionGuard>
+          )} />
+          <Route path="/app/hub" component={() => (
+            <PermissionGuard module="communications" action="read">
+              <Hub />
+            </PermissionGuard>
+          )} />
           
           <Route path="/app/*" component={NotFound} />
         </Switch>

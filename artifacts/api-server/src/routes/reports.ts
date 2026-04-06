@@ -1,7 +1,7 @@
 import { Router, type IRouter } from "express";
 import { sql } from "drizzle-orm";
 import { db } from "@workspace/db";
-import { requireAuth, requireFirmUser, type AuthRequest } from "../lib/auth";
+import { requireAuth, requireFirmUser, requirePermission, type AuthRequest } from "../lib/auth";
 
 const router: IRouter = Router();
 
@@ -12,7 +12,7 @@ async function queryRows(query: ReturnType<typeof sql>): Promise<Record<string, 
   return [];
 }
 
-router.get("/reports/overview", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+router.get("/reports/overview", requireAuth, requireFirmUser, requirePermission("reports", "read"), async (req: AuthRequest, res): Promise<void> => {
   const casesByStatus = await queryRows(sql`
     SELECT status, COUNT(*) as count
     FROM cases WHERE firm_id = ${req.firmId!}
