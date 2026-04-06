@@ -47,7 +47,10 @@ export async function setTenantContextSession(
   client: PoolClient,
   firmId: number
 ): Promise<void> {
-  await client.query("SET ROLE app_user");
+  try {
+    await client.query("SET ROLE app_user");
+  } catch {
+  }
   await client.query(`SET app.current_firm_id = '${firmId}'`);
   await client.query("SET app.is_founder = 'false'");
 }
@@ -61,7 +64,10 @@ export async function setTenantContext(
   client: PoolClient,
   firmId: number
 ): Promise<void> {
-  await client.query("SET LOCAL ROLE app_user");
+  try {
+    await client.query("SET LOCAL ROLE app_user");
+  } catch {
+  }
   await client.query(`SET LOCAL app.current_firm_id = '${firmId}'`);
   await client.query("SET LOCAL app.is_founder = 'false'");
 }
@@ -73,7 +79,10 @@ export async function setTenantContext(
 export async function setFounderContextSession(
   client: PoolClient
 ): Promise<void> {
-  await client.query("SET ROLE app_user");
+  try {
+    await client.query("SET ROLE app_user");
+  } catch {
+  }
   await client.query("SET app.is_founder = 'true'");
   await client.query("SET app.current_firm_id = ''");
 }
@@ -83,9 +92,18 @@ export async function setFounderContextSession(
  * Must be called before releasing a session-level context client to the pool.
  */
 export async function clearTenantContext(client: PoolClient): Promise<void> {
-  await client.query("RESET ROLE");
-  await client.query("RESET app.current_firm_id");
-  await client.query("RESET app.is_founder");
+  try {
+    await client.query("RESET ROLE");
+  } catch {
+  }
+  try {
+    await client.query("RESET app.current_firm_id");
+  } catch {
+  }
+  try {
+    await client.query("RESET app.is_founder");
+  } catch {
+  }
 }
 
 /**
