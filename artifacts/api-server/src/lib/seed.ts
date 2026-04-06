@@ -1,5 +1,5 @@
 import bcrypt from "bcryptjs";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { db, firmsTable, rolesTable, usersTable } from "@workspace/db";
 import { logger } from "./logger";
 
@@ -17,6 +17,73 @@ function requireEnv(name: string): string {
   return value.trim();
 }
 
+async function ensureFirm(params: { name: string; slug: string }) {
+  const [existing] = await db.select().from(firmsTable).where(eq(firmsTable.slug, params.slug));
+  if (existing) return existing;
+  const [created] = await db
+    .insert(firmsTable)
+    .values({
+      name: params.name,
+      slug: params.slug,
+      subscriptionPlan: "professional",
+      status: "active",
+    })
+    .returning();
+  return created;
+}
+
+async function ensureRole(params: { firmId: number; name: string }) {
+  const [existing] = await db
+    .select()
+    .from(rolesTable)
+    .where(and(eq(rolesTable.firmId, params.firmId), eq(rolesTable.name, params.name)));
+  if (existing) return existing;
+  const [created] = await db
+    .insert(rolesTable)
+    .values({ firmId: params.firmId, name: params.name, isSystemRole: true })
+    .returning();
+  return created;
+}
+
+async function ensureUser(params: {
+  email: string;
+  name: string;
+  password: string;
+  userType: "founder" | "firm_user";
+  firmId?: number | null;
+  roleId?: number | null;
+}) {
+  const email = params.email.trim().toLowerCase();
+  const [existing] = await db.select().from(usersTable).where(eq(usersTable.email, email));
+  if (existing) {
+    const updates: Partial<(typeof usersTable)["$inferInsert"]> = {};
+    if (existing.name !== params.name) updates.name = params.name;
+    if (existing.status !== "active") updates.status = "active";
+    if (existing.userType !== params.userType) updates.userType = params.userType;
+    if ((existing.firmId ?? null) !== (params.firmId ?? null)) updates.firmId = params.firmId ?? null;
+    if ((existing.roleId ?? null) !== (params.roleId ?? null)) updates.roleId = params.roleId ?? null;
+    if (Object.keys(updates).length > 0) {
+      await db.update(usersTable).set(updates).where(eq(usersTable.id, existing.id));
+    }
+    return { user: existing, created: false };
+  }
+
+  const passwordHash = await bcrypt.hash(params.password, 10);
+  const [created] = await db
+    .insert(usersTable)
+    .values({
+      email,
+      name: params.name,
+      passwordHash,
+      userType: params.userType,
+      firmId: params.firmId ?? null,
+      roleId: params.roleId ?? null,
+      status: "active",
+    })
+    .returning();
+  return { user: created, created: true };
+}
+
 export async function seedIfEmpty() {
   const isProduction = process.env.NODE_ENV === "production";
   const shouldSeedInProduction = isTruthyEnv(process.env.SEED_DEMO_DATA);
@@ -24,82 +91,57 @@ export async function seedIfEmpty() {
     return;
   }
 
-  const existingUsers = await db.select({ id: usersTable.id }).from(usersTable).limit(1);
-  if (existingUsers.length > 0) {
-    return;
-  }
+  const founderEmail = process.env.SEED_FOUNDER_EMAIL || "founder@lawcaspro.com";
+  const founderPassword = isProduction ? requireEnv("SEED_FOUNDER_PASSWORD") : process.env.SEED_FOUNDER_PASSWORD || "founder123";
 
-  logger.info("Database is empty — running initial seed");
+  const firmName = process.env.SEED_FIRM_NAME || "Messrs. Tan & Associates";
+  const firmSlug = process.env.SEED_FIRM_SLUG || "tan-associates";
 
-  const founderEmail = (process.env.SEED_FOUNDER_EMAIL || "founder@lawcaspro.com").trim();
-  const founderPassword = isProduction ? requireEnv("SEED_FOUNDER_PASSWORD") : (process.env.SEED_FOUNDER_PASSWORD || "founder123").trim();
-  const founderHash = await bcrypt.hash(founderPassword, 10);
-  const [founder] = await db
-    .insert(usersTable)
-    .values({
-      email: founderEmail,
-      name: "System Founder",
-      passwordHash: founderHash,
-      userType: "founder",
-      status: "active",
-    })
-    .returning();
-  logger.info({ userId: founder.id }, "Seeded founder user");
+  const partnerEmail = process.env.SEED_PARTNER_EMAIL || "partner@tan-associates.my";
+  const clerkEmail = process.env.SEED_CLERK_EMAIL || "clerk@tan-associates.my";
 
-  const firmName = (process.env.SEED_FIRM_NAME || "Messrs. Tan & Associates").trim();
-  const firmSlug = (process.env.SEED_FIRM_SLUG || "tan-associates").trim();
-  const [firm] = await db
-    .insert(firmsTable)
-    .values({
-      name: firmName,
-      slug: firmSlug,
-      subscriptionPlan: "professional",
-      status: "active",
-    })
-    .returning();
-  logger.info({ firmId: firm.id }, "Seeded demo firm");
+  const partnerPassword = isProduction ? requireEnv("SEED_PARTNER_PASSWORD") : process.env.SEED_PARTNER_PASSWORD || "partner123";
+  const clerkPassword = isProduction ? requireEnv("SEED_CLERK_PASSWORD") : process.env.SEED_CLERK_PASSWORD || "clerk123";
 
-  const [partnerRole] = await db.insert(rolesTable).values({ firmId: firm.id, name: "Partner", isSystemRole: true }).returning();
-  const [lawyerRole] = await db.insert(rolesTable).values({ firmId: firm.id, name: "Lawyer", isSystemRole: true }).returning();
-  const [clerkRole] = await db.insert(rolesTable).values({ firmId: firm.id, name: "Clerk", isSystemRole: true }).returning();
-  logger.info("Seeded roles");
+  logger.info("Ensuring demo accounts exist");
 
-  const partnerPassword = isProduction ? requireEnv("SEED_PARTNER_PASSWORD") : (process.env.SEED_PARTNER_PASSWORD || "partner123").trim();
-  const lawyerPassword = isProduction ? requireEnv("SEED_LAWYER_PASSWORD") : (process.env.SEED_LAWYER_PASSWORD || "lawyer123").trim();
-  const clerkPassword = isProduction ? requireEnv("SEED_CLERK_PASSWORD") : (process.env.SEED_CLERK_PASSWORD || "clerk123").trim();
+  const firm = await ensureFirm({ name: firmName.trim(), slug: firmSlug.trim() });
+  const partnerRole = await ensureRole({ firmId: firm.id, name: "Partner" });
+  await ensureRole({ firmId: firm.id, name: "Lawyer" });
+  const clerkRole = await ensureRole({ firmId: firm.id, name: "Clerk" });
 
-  const partnerHash = await bcrypt.hash(partnerPassword, 10);
-  const lawyerHash = await bcrypt.hash(lawyerPassword, 10);
-  const clerkHash = await bcrypt.hash(clerkPassword, 10);
+  const founderRes = await ensureUser({
+    email: founderEmail,
+    name: "System Founder",
+    password: founderPassword.trim(),
+    userType: "founder",
+    firmId: null,
+    roleId: null,
+  });
+  const partnerRes = await ensureUser({
+    email: partnerEmail,
+    name: "Ahmad Tan Wei Ming",
+    password: partnerPassword.trim(),
+    userType: "firm_user",
+    firmId: firm.id,
+    roleId: partnerRole.id,
+  });
+  const clerkRes = await ensureUser({
+    email: clerkEmail,
+    name: "Siti Nur Fatimah",
+    password: clerkPassword.trim(),
+    userType: "firm_user",
+    firmId: firm.id,
+    roleId: clerkRole.id,
+  });
 
-  await db.insert(usersTable).values([
+  logger.info(
     {
-      email: (process.env.SEED_PARTNER_EMAIL || "partner@tan-associates.my").trim(),
-      name: "Ahmad Tan Wei Ming",
-      passwordHash: partnerHash,
-      userType: "firm_user",
+      founderCreated: founderRes.created,
+      partnerCreated: partnerRes.created,
+      clerkCreated: clerkRes.created,
       firmId: firm.id,
-      roleId: partnerRole.id,
-      status: "active",
     },
-    {
-      email: (process.env.SEED_LAWYER_EMAIL || "lawyer@tan-associates.my").trim(),
-      name: "Sarah Lim Mei Ling",
-      passwordHash: lawyerHash,
-      userType: "firm_user",
-      firmId: firm.id,
-      roleId: lawyerRole.id,
-      status: "active",
-    },
-    {
-      email: (process.env.SEED_CLERK_EMAIL || "clerk@tan-associates.my").trim(),
-      name: "Siti Nur Fatimah",
-      passwordHash: clerkHash,
-      userType: "firm_user",
-      firmId: firm.id,
-      roleId: clerkRole.id,
-      status: "active",
-    },
-  ]);
-  logger.info("Seeded firm users");
+    "Ensured demo accounts"
+  );
 }
