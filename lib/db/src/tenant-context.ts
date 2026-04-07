@@ -110,7 +110,7 @@ export async function setFounderContextSession(
  * Must be called before releasing a session-level context client to the pool.
  */
 export async function clearTenantContext(client: PoolClient): Promise<void> {
-  await client.query("RESET ROLE");
+  // We no longer use SET ROLE app_user, so we do not issue RESET ROLE
   await client.query("RESET app.current_firm_id");
   await client.query("RESET app.is_founder");
 }
