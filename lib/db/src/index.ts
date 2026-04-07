@@ -16,36 +16,35 @@ const connectTimeoutMs =
     ? Number(rawConnectTimeoutMs)
     : 10_000;
 
-const shouldDisableTlsVerificationForDatabaseUrl = (databaseUrl: string): boolean => {
-  try {
-    const url = new URL(databaseUrl);
-    const hostname = url.hostname.toLowerCase();
-    if (hostname.endsWith("pooler.supabase.com")) return true;
-    if (url.searchParams.get("sslmode") === "require") return true;
-    return false;
-  } catch {
-    return false;
-  }
+const isSupabasePoolerDatabaseUrl = (databaseUrl: string): boolean =>
+  databaseUrl.toLowerCase().includes("pooler.supabase.com");
+
+const stripSslmodeFromDatabaseUrl = (databaseUrl: string): string => {
+  const [beforeHash, hash] = databaseUrl.split("#", 2);
+  const [base, query] = beforeHash.split("?", 2);
+  if (!query) return databaseUrl;
+
+  const filtered = query
+    .split("&")
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .filter((part) => {
+      const eq = part.indexOf("=");
+      const key = (eq === -1 ? part : part.slice(0, eq)).toLowerCase();
+      return key !== "sslmode";
+    });
+
+  const rebuilt = filtered.length ? `${base}?${filtered.join("&")}` : base;
+  return hash ? `${rebuilt}#${hash}` : rebuilt;
 };
 
-const connectionStringForPool = (databaseUrl: string): string => {
-  try {
-    const url = new URL(databaseUrl);
-    const hostname = url.hostname.toLowerCase();
-    if (!hostname.endsWith("pooler.supabase.com")) return databaseUrl;
-    url.searchParams.delete("sslmode");
-    return url.toString();
-  } catch {
-    return databaseUrl;
-  }
-};
+const databaseUrl = process.env.DATABASE_URL;
+const isPooler = isSupabasePoolerDatabaseUrl(databaseUrl);
 
 export const pool = new Pool({
-  connectionString: connectionStringForPool(process.env.DATABASE_URL),
+  connectionString: isPooler ? stripSslmodeFromDatabaseUrl(databaseUrl) : databaseUrl,
   connectionTimeoutMillis: connectTimeoutMs,
-  ...(shouldDisableTlsVerificationForDatabaseUrl(process.env.DATABASE_URL)
-    ? { ssl: { rejectUnauthorized: false } }
-    : {}),
+  ...(isPooler ? { ssl: { rejectUnauthorized: false } } : {}),
 });
 export const db = drizzle(pool, { schema });
 
