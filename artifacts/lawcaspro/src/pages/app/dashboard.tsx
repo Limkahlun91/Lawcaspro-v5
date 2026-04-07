@@ -2,11 +2,12 @@ import { useQuery } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Briefcase, Users, Building2, HardHat, DollarSign, TrendingUp, MessageSquare, ArrowRight } from "lucide-react";
 import { useLocation } from "wouter";
+import { fetchWithTimeout } from "@/lib/fetch-with-timeout";
 
 const API_BASE = import.meta.env.BASE_URL.replace(/\/$/, "").replace(/^\/lawcaspro/, "") + "/api";
 
 async function apiFetch(path: string) {
-  const res = await fetch(`${API_BASE}${path}`, { credentials: "include" });
+  const res = await fetchWithTimeout(`${API_BASE}${path}`, { credentials: "include", timeoutMs: 15000 });
   if (!res.ok) throw new Error(await res.text());
   return res.json();
 }
@@ -43,16 +44,46 @@ function StatusBadge({ status }: { status: string }) {
 export default function AppDashboard() {
   const [, setLocation] = useLocation();
 
-  const { data: stats, isLoading } = useQuery({
+  const { data: stats, isLoading, isError, error, refetch, isFetching } = useQuery({
     queryKey: ["dashboard"],
     queryFn: () => apiFetch("/dashboard"),
+    retry: false,
   });
 
   if (isLoading) {
     return <div className="text-slate-400 py-12 text-center text-sm">Loading dashboard...</div>;
   }
 
-  if (!stats) return null;
+  if (isError) {
+    const message = error instanceof Error ? error.message : "Failed to load dashboard";
+    return (
+      <div className="py-12 flex justify-center">
+        <div className="max-w-lg w-full px-4">
+          <div className="border rounded-lg bg-white p-5">
+            <div className="text-lg font-semibold text-slate-900">Dashboard unavailable</div>
+            <div className="text-sm text-slate-500 mt-2 break-words">{message}</div>
+            <div className="mt-4">
+              <button
+                className="px-3 py-2 text-sm rounded bg-slate-900 text-white hover:bg-slate-800 disabled:opacity-50"
+                onClick={() => refetch()}
+                disabled={isFetching}
+              >
+                {isFetching ? "Retrying..." : "Retry"}
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (!stats) {
+    return (
+      <div className="text-slate-400 py-12 text-center text-sm">
+        No dashboard data available
+      </div>
+    );
+  }
 
   const billing = (stats.billing ?? {}) as Record<string, number>;
 

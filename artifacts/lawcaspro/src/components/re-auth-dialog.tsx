@@ -124,7 +124,14 @@ export function ReAuthProvider({ children }: { children: ReactNode }) {
     <ReAuthContext.Provider value={{ wrapWithReAuth }}>
       {children}
 
-      <AlertDialog open={pending !== null}>
+      <AlertDialog
+        open={pending !== null}
+        onOpenChange={(open) => {
+          if (!open) {
+            resolverRef.current?.(false);
+          }
+        }}
+      >
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>Confirm sensitive action</AlertDialogTitle>
