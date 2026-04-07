@@ -47,19 +47,16 @@ export async function setTenantContextSession(
   client: PoolClient,
   firmId: number
 ): Promise<void> {
-  try {
-    await client.query("SET ROLE app_user");
-  } catch (err) {
-    const res = await client.query<{ rolbypassrls: boolean; rolsuper: boolean }>(
-      "SELECT rolbypassrls, rolsuper FROM pg_roles WHERE rolname = current_user"
+  const res = await client.query<{ rolbypassrls: boolean; rolsuper: boolean }>(
+    "SELECT rolbypassrls, rolsuper FROM pg_roles WHERE rolname = current_user"
+  );
+  const role = res.rows[0];
+  if (role?.rolbypassrls || role?.rolsuper) {
+    throw new Error(
+      "Cannot enforce RLS safely: database connection is using BYPASSRLS or superuser role. Current DATABASE_URL is not safe for firm-scoped RLS requests."
     );
-    const role = res.rows[0];
-    if (role?.rolbypassrls || role?.rolsuper) {
-      throw new Error(
-        "Cannot enforce RLS safely: database role has BYPASSRLS/superuser privileges and is not permitted to SET ROLE app_user. Grant membership (GRANT app_user TO <db_user>) or use a non-bypass DB user."
-      );
-    }
   }
+  
   await client.query(`SET app.current_firm_id = '${firmId}'`);
   await client.query("SET app.is_founder = 'false'");
 }
@@ -73,19 +70,16 @@ export async function setTenantContext(
   client: PoolClient,
   firmId: number
 ): Promise<void> {
-  try {
-    await client.query("SET LOCAL ROLE app_user");
-  } catch (err) {
-    const res = await client.query<{ rolbypassrls: boolean; rolsuper: boolean }>(
-      "SELECT rolbypassrls, rolsuper FROM pg_roles WHERE rolname = current_user"
+  const res = await client.query<{ rolbypassrls: boolean; rolsuper: boolean }>(
+    "SELECT rolbypassrls, rolsuper FROM pg_roles WHERE rolname = current_user"
+  );
+  const role = res.rows[0];
+  if (role?.rolbypassrls || role?.rolsuper) {
+    throw new Error(
+      "Cannot enforce RLS safely: database connection is using BYPASSRLS or superuser role. Current DATABASE_URL is not safe for firm-scoped RLS requests."
     );
-    const role = res.rows[0];
-    if (role?.rolbypassrls || role?.rolsuper) {
-      throw new Error(
-        "Cannot enforce RLS safely: database role has BYPASSRLS/superuser privileges and is not permitted to SET ROLE app_user. Grant membership (GRANT app_user TO <db_user>) or use a non-bypass DB user."
-      );
-    }
   }
+  
   await client.query(`SET LOCAL app.current_firm_id = '${firmId}'`);
   await client.query("SET LOCAL app.is_founder = 'false'");
 }
@@ -97,19 +91,16 @@ export async function setTenantContext(
 export async function setFounderContextSession(
   client: PoolClient
 ): Promise<void> {
-  try {
-    await client.query("SET ROLE app_user");
-  } catch (err) {
-    const res = await client.query<{ rolbypassrls: boolean; rolsuper: boolean }>(
-      "SELECT rolbypassrls, rolsuper FROM pg_roles WHERE rolname = current_user"
+  const res = await client.query<{ rolbypassrls: boolean; rolsuper: boolean }>(
+    "SELECT rolbypassrls, rolsuper FROM pg_roles WHERE rolname = current_user"
+  );
+  const role = res.rows[0];
+  if (role?.rolbypassrls || role?.rolsuper) {
+    throw new Error(
+      "Cannot enforce RLS safely: database connection is using BYPASSRLS or superuser role. Current DATABASE_URL is not safe for founder RLS requests."
     );
-    const role = res.rows[0];
-    if (role?.rolbypassrls || role?.rolsuper) {
-      throw new Error(
-        "Cannot enforce RLS safely: database role has BYPASSRLS/superuser privileges and is not permitted to SET ROLE app_user. Grant membership (GRANT app_user TO <db_user>) or use a non-bypass DB user."
-      );
-    }
   }
+  
   await client.query("SET app.is_founder = 'true'");
   await client.query("SET app.current_firm_id = ''");
 }
