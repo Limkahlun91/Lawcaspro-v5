@@ -4,6 +4,7 @@ import { useLogout } from "@workspace/api-client-react";
 import type { AuthUser } from "@workspace/api-client-react";
 import { apiUrl } from "./api-base";
 import { fetchWithTimeout } from "./fetch-with-timeout";
+import { clearStoredAuthToken, getStoredAuthToken } from "./auth-token";
 
 interface AuthContextType {
   user: AuthUser | null;
@@ -22,7 +23,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     queryKey: ["me"],
     retry: false,
     queryFn: async () => {
-      const res = await fetchWithTimeout(apiUrl("/api/auth/me"), { credentials: "include", timeoutMs: 15000 });
+      const token = getStoredAuthToken();
+      const res = await fetchWithTimeout(apiUrl("/api/auth/me"), {
+        credentials: "include",
+        timeoutMs: 15000,
+        headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+      });
       if (res.status === 401) return null;
       if (!res.ok) throw new Error(await res.text());
       return res.json();
@@ -45,6 +51,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const handleLogout = () => {
     logoutMutation.mutate(undefined, {
       onSuccess: () => {
+        clearStoredAuthToken();
         setUser(null);
       }
     });

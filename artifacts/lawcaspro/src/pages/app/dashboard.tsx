@@ -3,11 +3,17 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Briefcase, Users, Building2, HardHat, DollarSign, TrendingUp, MessageSquare, ArrowRight } from "lucide-react";
 import { useLocation } from "wouter";
 import { fetchWithTimeout } from "@/lib/fetch-with-timeout";
+import { getStoredAuthToken } from "@/lib/auth-token";
 
 const API_BASE = import.meta.env.BASE_URL.replace(/\/$/, "").replace(/^\/lawcaspro/, "") + "/api";
 
 async function apiFetch(path: string) {
-  const res = await fetchWithTimeout(`${API_BASE}${path}`, { credentials: "include", timeoutMs: 15000 });
+  const token = getStoredAuthToken();
+  const res = await fetchWithTimeout(`${API_BASE}${path}`, {
+    credentials: "include",
+    timeoutMs: 15000,
+    headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+  });
   if (!res.ok) throw new Error(await res.text());
   return res.json();
 }

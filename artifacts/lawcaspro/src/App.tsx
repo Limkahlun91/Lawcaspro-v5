@@ -1,6 +1,6 @@
 import { Switch, Route, Router as WouterRouter, Redirect } from "wouter";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { setBaseUrl } from "@workspace/api-client-react";
+import { setAuthTokenGetter, setBaseUrl } from "@workspace/api-client-react";
 import { Toaster } from "@/components/ui/toaster";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { AuthProvider } from "@/lib/auth-context";
@@ -10,6 +10,7 @@ import { PermissionGuard } from "@/components/permission-guard";
 import { PlatformLayout } from "@/components/layout/platform-layout";
 import { AppLayout } from "@/components/layout/app-layout";
 import { getApiOrigin } from "@/lib/api-base";
+import { getStoredAuthToken } from "@/lib/auth-token";
 
 import Login from "@/pages/auth/login";
 import NotFound from "@/pages/not-found";
@@ -61,6 +62,7 @@ import QuotationDetail from "@/pages/app/quotations/detail";
 
 const apiOrigin = getApiOrigin();
 if (apiOrigin) setBaseUrl(apiOrigin);
+setAuthTokenGetter(() => getStoredAuthToken());
 
 const queryClient = new QueryClient();
 

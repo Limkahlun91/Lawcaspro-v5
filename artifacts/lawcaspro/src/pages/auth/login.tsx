@@ -12,6 +12,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Building2, Eye, EyeOff, ShieldCheck } from "lucide-react";
 import { apiUrl } from "@/lib/api-base";
 import type { AuthUser } from "@workspace/api-client-react";
+import { setStoredAuthToken } from "@/lib/auth-token";
 
 const LOGIN_URL = apiUrl("/api/auth/login");
 
@@ -99,6 +100,9 @@ export default function Login() {
         return;
       }
 
+      if (isRecord(body) && typeof body.token === "string" && body.token.trim() !== "") {
+        setStoredAuthToken(body.token.trim());
+      }
       setAuthUser(body);
       if (body.userType === "founder") {
         setLocation("/platform/dashboard");
