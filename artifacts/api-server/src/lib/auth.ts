@@ -162,10 +162,10 @@ export async function requireFirmUser(
     const code =
       message.includes("must be member of role") || message.includes("permission denied")
         ? "RLS_ROLE"
-        : message.includes("SET ROLE") || message.includes("RESET ROLE")
+        : message.includes("SET ROLE") || message.includes("RESET ROLE") || message.includes("Cannot enforce RLS safely")
           ? "RLS_CONTEXT"
           : "DB";
-    res.status(500).json({ error: "Firm context initialization failed", code });
+    res.status(500).json({ error: "Firm context initialization failed", code, details: message });
     return;
   }
 
