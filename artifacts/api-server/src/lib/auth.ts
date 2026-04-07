@@ -3,6 +3,7 @@ import { db, pool, sessionsTable, usersTable, auditLogsTable, makeRlsDb, setTena
 import { and, eq, sql } from "drizzle-orm";
 import crypto from "crypto";
 import { logger } from "./logger";
+import { withAuthSafeDb } from "./auth-safe-db";
 
 export interface AuthRequest extends Request {
   userId?: number;
@@ -66,21 +67,34 @@ export async function requireAuth(
 
   const tokenHash = crypto.createHash("sha256").update(token).digest("hex");
 
-  const [session] = await db
-    .select()
-    .from(sessionsTable)
-    .where(eq(sessionsTable.tokenHash, tokenHash));
+  let session: typeof sessionsTable.$inferSelect | undefined;
+  let user: typeof usersTable.$inferSelect | undefined;
+  try {
+    const result = await withAuthSafeDb(async (authDb) => {
+      const [s] = await authDb
+        .select()
+        .from(sessionsTable)
+        .where(eq(sessionsTable.tokenHash, tokenHash));
+      if (!s) return { session: undefined, user: undefined };
+      const [u] = await authDb
+        .select()
+        .from(usersTable)
+        .where(eq(usersTable.id, s.userId));
+      return { session: s, user: u };
+    });
+    session = result.session;
+    user = result.user;
+  } catch (err) {
+    logger.error({ err }, "auth.require_auth.db_error");
+    res.status(500).json({ error: "Auth temporarily unavailable" });
+    return;
+  }
 
   if (!session || session.expiresAt < new Date()) {
     await writeAuditLog({ action: "auth.session_expired", detail: `${req.method} ${req.path}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
     res.status(401).json({ error: "Session expired" });
     return;
   }
-
-  const [user] = await db
-    .select()
-    .from(usersTable)
-    .where(eq(usersTable.id, session.userId));
 
   if (!user || user.status !== "active") {
     await writeAuditLog({ action: "auth.user_inactive", detail: `userId=${session.userId}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
