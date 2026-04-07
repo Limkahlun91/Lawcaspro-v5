@@ -28,8 +28,20 @@ const shouldDisableTlsVerificationForDatabaseUrl = (databaseUrl: string): boolea
   }
 };
 
+const connectionStringForPool = (databaseUrl: string): string => {
+  try {
+    const url = new URL(databaseUrl);
+    const hostname = url.hostname.toLowerCase();
+    if (!hostname.endsWith("pooler.supabase.com")) return databaseUrl;
+    url.searchParams.delete("sslmode");
+    return url.toString();
+  } catch {
+    return databaseUrl;
+  }
+};
+
 export const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
+  connectionString: connectionStringForPool(process.env.DATABASE_URL),
   connectionTimeoutMillis: connectTimeoutMs,
   ...(shouldDisableTlsVerificationForDatabaseUrl(process.env.DATABASE_URL)
     ? { ssl: { rejectUnauthorized: false } }
