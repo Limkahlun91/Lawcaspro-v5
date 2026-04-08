@@ -390,19 +390,26 @@ export default function PlatformDocuments() {
     if (!selectedFile || !form.name) return;
     setUploading(true);
     try {
-      const formData = new FormData();
-      formData.append("file", selectedFile);
-
-      const uploadRes = await fetch(`${API_BASE}/storage/upload`, {
+      const reqUrlRes = await fetch(`${API_BASE}/storage/uploads/request-url`, {
         method: "POST",
-        body: formData,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: selectedFile.name, size: selectedFile.size, contentType: selectedFile.type }),
         credentials: "include",
       });
-      if (!uploadRes.ok) {
-        const err = await uploadRes.json().catch(() => ({}));
-        throw new Error(err.error || "File upload failed");
+      if (!reqUrlRes.ok) {
+        const err = await reqUrlRes.json().catch(() => ({}));
+        throw new Error(err.error || "Failed to get upload URL");
       }
-      const { objectPath } = await uploadRes.json();
+      const { uploadURL, objectPath } = await reqUrlRes.json();
+
+      const putRes = await fetch(uploadURL, {
+        method: "PUT",
+        headers: { "Content-Type": selectedFile.type },
+        body: selectedFile,
+      });
+      if (!putRes.ok) {
+        throw new Error("File upload failed");
+      }
 
       const saveRes = await fetch(`${API_BASE}/platform/documents`, {
         method: "POST",
