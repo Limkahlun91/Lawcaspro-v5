@@ -103,7 +103,14 @@ router.post("/storage/upload", requireAuth, upload.single("file"), async (req: A
     const objectId = randomUUID();
     const fullPath = `${privateObjectDir}/uploads/${objectId}`;
 
-    const pathParts = fullPath.startsWith("/") ? fullPath.slice(1).split("/") : fullPath.split("/");
+    const normalizedFullPath = fullPath.startsWith("gs://")
+      ? `/${fullPath.slice("gs://".length).replace(/^\/+/, "")}`
+      : fullPath.startsWith("https://storage.googleapis.com/")
+        ? new URL(fullPath).pathname
+        : fullPath;
+    const pathParts = normalizedFullPath.startsWith("/")
+      ? normalizedFullPath.slice(1).split("/")
+      : normalizedFullPath.split("/");
     const bucketName = pathParts[0];
     const objectName = pathParts.slice(1).join("/");
 

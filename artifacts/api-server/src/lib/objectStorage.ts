@@ -11,6 +11,33 @@ import {
 
 const REPLIT_SIDECAR_ENDPOINT = process.env.REPLIT_SIDECAR_ENDPOINT || "http://127.0.0.1:1106";
 
+function stripWrappingQuotes(value: string): string {
+  const v = value.trim();
+  if ((v.startsWith("\"") && v.endsWith("\"")) || (v.startsWith("'") && v.endsWith("'"))) {
+    return v.slice(1, -1);
+  }
+  return v;
+}
+
+function decodeMaybeBase64(value: string): string {
+  const v = stripWrappingQuotes(value);
+  if (v.startsWith("{")) return v;
+  try {
+    const decoded = Buffer.from(v, "base64").toString("utf8").trim();
+    return decoded.startsWith("{") ? decoded : v;
+  } catch {
+    return v;
+  }
+}
+
+function normalizeServiceAccountCreds(creds: Record<string, unknown>): Record<string, unknown> {
+  const privateKey = creds.private_key;
+  if (typeof privateKey === "string" && privateKey.includes("\\n")) {
+    creds.private_key = privateKey.replace(/\\n/g, "\n");
+  }
+  return creds;
+}
+
 function createStorageClient(): Storage {
   const projectId =
     process.env.GOOGLE_CLOUD_PROJECT
@@ -21,7 +48,8 @@ function createStorageClient(): Storage {
   const saJson = process.env.GOOGLE_SERVICE_ACCOUNT_JSON || process.env.GCP_SERVICE_ACCOUNT_JSON;
   if (saJson) {
     try {
-      const creds = JSON.parse(saJson) as { project_id?: string };
+      const decoded = decodeMaybeBase64(saJson);
+      const creds = normalizeServiceAccountCreds(JSON.parse(decoded) as Record<string, unknown>) as { project_id?: string };
       return new Storage({ credentials: creds as any, projectId: creds.project_id || projectId });
     } catch {
       return new Storage({ projectId });
@@ -179,21 +207,19 @@ export class ObjectStorageService {
   }
 
   normalizeObjectEntityPath(rawPath: string): string {
-    if (!rawPath.startsWith("https://storage.googleapis.com/")) {
+    const rawObjectPath = (() => {
+      if (rawPath.startsWith("https://storage.googleapis.com/")) return new URL(rawPath).pathname;
+      if (rawPath.startsWith("gs://")) return normalizeObjectPath(rawPath);
+      if (rawPath.startsWith("/")) return rawPath;
       return rawPath;
-    }
+    })();
 
-    const url = new URL(rawPath);
-    const rawObjectPath = url.pathname;
+    if (!rawObjectPath.startsWith("/")) return rawObjectPath;
 
-    let objectEntityDir = this.getPrivateObjectDir();
-    if (!objectEntityDir.endsWith("/")) {
-      objectEntityDir = `${objectEntityDir}/`;
-    }
+    let objectEntityDir = normalizeObjectPath(this.getPrivateObjectDir());
+    if (!objectEntityDir.endsWith("/")) objectEntityDir = `${objectEntityDir}/`;
 
-    if (!rawObjectPath.startsWith(objectEntityDir)) {
-      return rawObjectPath;
-    }
+    if (!rawObjectPath.startsWith(objectEntityDir)) return rawObjectPath;
 
     const entityId = rawObjectPath.slice(objectEntityDir.length);
     return `/objects/${entityId}`;
@@ -234,9 +260,7 @@ function parseObjectPath(path: string): {
   bucketName: string;
   objectName: string;
 } {
-  if (!path.startsWith("/")) {
-    path = `/${path}`;
-  }
+  path = normalizeObjectPath(path);
   const pathParts = path.split("/");
   if (pathParts.length < 3) {
     throw new Error("Invalid path: must contain at least a bucket name");
@@ -249,6 +273,14 @@ function parseObjectPath(path: string): {
     bucketName,
     objectName,
   };
+}
+
+function normalizeObjectPath(path: string): string {
+  const p = path.trim();
+  if (p.startsWith("gs://")) return `/${p.slice("gs://".length).replace(/^\/+/, "")}`;
+  if (p.startsWith("https://storage.googleapis.com/")) return new URL(p).pathname;
+  if (!p.startsWith("/")) return `/${p}`;
+  return p;
 }
 
 async function signObjectURL({

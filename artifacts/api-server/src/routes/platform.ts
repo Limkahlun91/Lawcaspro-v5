@@ -292,7 +292,21 @@ router.post("/platform/folders/reorder", requireAuth, requireFounder, async (req
 
   const idx = siblings.findIndex(s => s.id === folderId);
   const swapIdx = direction === "up" ? idx - 1 : idx + 1;
-  if (swapIdx < 0 || swapIdx >= siblings.length) { res.json({ success: true }); return; }
+  if (swapIdx < 0 || swapIdx >= siblings.length) {
+    await writeAuditLog({
+      firmId: null,
+      actorId: req.userId,
+      actorType: req.userType,
+      action: "platform.system_folder.reorder",
+      entityType: "system_folder",
+      entityId: folderId,
+      detail: `direction=${direction} noop=true parentId=${folder.parentId ?? ""}`,
+      ipAddress: req.ip,
+      userAgent: req.headers["user-agent"],
+    });
+    res.json({ success: true });
+    return;
+  }
 
   const swapFolder = siblings[swapIdx];
   await db.update(systemFoldersTable).set({ sortOrder: swapFolder.sortOrder }).where(eq(systemFoldersTable.id, folder.id));

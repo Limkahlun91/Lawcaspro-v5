@@ -109,27 +109,34 @@ function FolderTreeItem({
           isSelected ? "bg-amber-50 border border-amber-200" : "hover:bg-slate-50 border border-transparent",
           folder.isDisabled && "opacity-50"
         )}
-        onClick={() => onSelect(folder.id)}
       >
         <div className="flex items-center gap-1.5 py-2 px-2" style={{ paddingLeft: `${depth * 16 + 8}px` }}>
           {children.length > 0 ? (
             <button
+              type="button"
               onClick={e => { e.stopPropagation(); setExpanded(!expanded); }}
               className="p-0.5 hover:bg-slate-200 rounded shrink-0"
+              aria-label={expanded ? "Collapse folder" : "Expand folder"}
             >
               <ChevronRight className={cn("w-3.5 h-3.5 transition-transform", expanded && "rotate-90")} />
             </button>
           ) : (
             <span className="w-[18px]" />
           )}
-          {isSelected ? (
-            <FolderOpen className="w-4 h-4 text-amber-500 shrink-0" />
-          ) : (
-            <Folder className="w-4 h-4 text-slate-400 shrink-0" />
-          )}
-          <span className={cn("font-medium flex-1 break-words leading-snug", isSelected ? "text-amber-700" : "text-slate-700")}>
-            {folder.name}
-          </span>
+          <button
+            type="button"
+            className="flex items-center gap-1.5 flex-1 text-left"
+            onClick={() => onSelect(folder.id)}
+          >
+            {isSelected ? (
+              <FolderOpen className="w-4 h-4 text-amber-500 shrink-0" />
+            ) : (
+              <Folder className="w-4 h-4 text-slate-400 shrink-0" />
+            )}
+            <span className={cn("font-medium flex-1 break-words leading-snug", isSelected ? "text-amber-700" : "text-slate-700")}>
+              {folder.name}
+            </span>
+          </button>
         </div>
         <div
           className="hidden group-hover:flex items-center gap-1 pb-1.5 px-2"
@@ -528,7 +535,8 @@ export default function PlatformDocuments() {
               </div>
               <p className="text-xs text-slate-400 mb-3">System folder tree</p>
 
-              <div
+              <button
+                type="button"
                 className={cn(
                   "py-2 px-2 rounded-md cursor-pointer text-sm flex items-center gap-2 transition-colors mb-1",
                   selectedFolderId === null ? "bg-amber-50 border border-amber-200 text-amber-700 font-medium" : "hover:bg-slate-50 text-slate-600 border border-transparent"
@@ -537,7 +545,7 @@ export default function PlatformDocuments() {
               >
                 <FolderOpen className="w-4 h-4" />
                 All Documents
-              </div>
+              </button>
 
               <div className="space-y-0.5">
                 {rootFolders.map(folder => (
