@@ -106,10 +106,47 @@ router.post("/developers", requireAuth, requireFirmUser, requirePermission("deve
     };
 
     let dev: Developer;
-    [dev] = await db
-      .insert(developersTable)
-      .values(insertBase)
-      .returning();
+    const getErrorMessage = (e: unknown): string => {
+      const err = e as { message?: unknown; cause?: unknown };
+      const msg =
+        (typeof err?.message === "string" ? err.message : undefined)
+        ?? (typeof (err?.cause as any)?.message === "string" ? (err?.cause as any)?.message : undefined)
+        ?? (typeof ((err?.cause as any)?.cause as any)?.message === "string" ? ((err?.cause as any)?.cause as any)?.message : undefined);
+      return msg ? String(msg) : "";
+    };
+
+    const missingColumnFromMessage = (msg: string): string | null => {
+      const m = msg.match(/column \"([^\"]+)\" of relation \"developers\" does not exist/i);
+      return m?.[1] ?? null;
+    };
+
+    const columnToKey: Record<string, keyof Omit<InsertDeveloper, "createdBy">> = {
+      company_reg_no: "companyRegNo",
+      address: "address",
+      business_address: "businessAddress",
+      contacts: "contacts",
+      contact_person: "contactPerson",
+      phone: "phone",
+      email: "email",
+    };
+
+    let insertValues: Record<string, unknown> = { ...insertBase };
+    for (;;) {
+      try {
+        [dev] = await db
+          .insert(developersTable)
+          .values(insertValues as any)
+          .returning();
+        break;
+      } catch (e) {
+        const col = missingColumnFromMessage(getErrorMessage(e));
+        if (!col) throw e;
+        const key = columnToKey[col];
+        if (!key) throw e;
+        if (!(key in insertValues)) throw e;
+        delete insertValues[key];
+      }
+    }
 
     try {
       await db
