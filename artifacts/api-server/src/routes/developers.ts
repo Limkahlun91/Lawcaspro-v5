@@ -91,21 +91,38 @@ router.post("/developers", requireAuth, requireFirmUser, requirePermission("deve
     res.status(400).json({ error: "Company name is required" });
     return;
   }
-  const [dev] = await db
-    .insert(developersTable)
-    .values({
-      firmId: req.firmId!,
-      name,
-      companyRegNo: companyRegNo ?? null,
-      address: address ?? null,
-      businessAddress: businessAddress ?? null,
-      contacts: contacts ? JSON.stringify(contacts) : null,
-      contactPerson: contactPerson ?? null,
-      phone: phone ?? null,
-      email: email ?? null,
-      createdBy: req.userId,
-    } as any)
-    .returning();
+  const isMissingCreatedByColumn = (e: unknown): boolean => {
+    const err = e as { code?: string; message?: string };
+    if (err?.code === "42703") return true;
+    const msg = String(err?.message ?? "");
+    return msg.includes("created_by") && msg.includes("does not exist");
+  };
+
+  const insertBase = {
+    firmId: req.firmId!,
+    name,
+    companyRegNo: companyRegNo ?? null,
+    address: address ?? null,
+    businessAddress: businessAddress ?? null,
+    contacts: contacts ? JSON.stringify(contacts) : null,
+    contactPerson: contactPerson ?? null,
+    phone: phone ?? null,
+    email: email ?? null,
+  };
+
+  let dev: typeof developersTable.$inferSelect;
+  try {
+    [dev] = await db
+      .insert(developersTable)
+      .values({ ...insertBase, createdBy: req.userId } as any)
+      .returning();
+  } catch (e) {
+    if (!isMissingCreatedByColumn(e)) throw e;
+    [dev] = await db
+      .insert(developersTable)
+      .values(insertBase as any)
+      .returning();
+  }
 
   await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "developers.create", entityType: "developer", entityId: dev.id, detail: `name=${dev.name}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
   res.status(201).json(await enrichDeveloper(dev));

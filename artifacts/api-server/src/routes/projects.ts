@@ -78,29 +78,46 @@ router.post("/projects", requireAuth, requireFirmUser, requirePermission("projec
     return;
   }
 
-  const [proj] = await db
-    .insert(projectsTable)
-    .values({
-      firmId: req.firmId!,
-      developerId,
-      name,
-      phase: phase || null,
-      developerName: developerName || dev.name,
-      projectType,
-      titleType,
-      titleSubtype: titleSubtype || null,
-      masterTitleNumber: masterTitleNumber || null,
-      masterTitleLandSize: masterTitleLandSize || null,
-      mukim: mukim || null,
-      daerah: daerah || null,
-      negeri: negeri || null,
-      landUse,
-      developmentCondition,
-      unitCategory,
-      extraFields: extraFields as Record<string, unknown> ?? {},
-      createdBy: req.userId,
-    })
-    .returning();
+  const isMissingCreatedByColumn = (e: unknown): boolean => {
+    const err = e as { code?: string; message?: string };
+    if (err?.code === "42703") return true;
+    const msg = String(err?.message ?? "");
+    return msg.includes("created_by") && msg.includes("does not exist");
+  };
+
+  const insertBase = {
+    firmId: req.firmId!,
+    developerId,
+    name,
+    phase: phase || null,
+    developerName: developerName || dev.name,
+    projectType,
+    titleType,
+    titleSubtype: titleSubtype || null,
+    masterTitleNumber: masterTitleNumber || null,
+    masterTitleLandSize: masterTitleLandSize || null,
+    mukim: mukim || null,
+    daerah: daerah || null,
+    negeri: negeri || null,
+    landUse,
+    developmentCondition,
+    unitCategory,
+    extraFields: extraFields as Record<string, unknown> ?? {},
+  };
+
+  let proj: typeof projectsTable.$inferSelect;
+  try {
+    [proj] = await db
+      .insert(projectsTable)
+      .values({ ...insertBase, createdBy: req.userId } as any)
+      .returning();
+  } catch (e) {
+    if (!isMissingCreatedByColumn(e)) throw e;
+    [proj] = await db
+      .insert(projectsTable)
+      .values(insertBase as any)
+      .returning();
+  }
 
   await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "projects.create", entityType: "project", entityId: proj.id, detail: `name=${proj.name}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
   res.status(201).json(await enrichProject(proj));

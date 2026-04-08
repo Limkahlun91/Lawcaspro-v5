@@ -174,6 +174,12 @@ router.post("/cases", requireAuth, requireFirmUser, requirePermission("cases", "
   }
 
   const { projectId, developerId: clientDeveloperId, purchaseMode, titleType, spaPrice, assignedLawyerId, assignedClerkId, purchaserIds, purchasers } = parsed.data;
+  const isMissingCreatedByColumn = (e: unknown): boolean => {
+    const err = e as { code?: string; message?: string };
+    if (err?.code === "42703") return true;
+    const msg = String(err?.message ?? "");
+    return msg.includes("created_by") && msg.includes("does not exist");
+  };
 
   // ── 1. Resolve developerId server-side from projectId ─────────────────────
   const [project] = await db.select().from(projectsTable).where(eq(projectsTable.id, projectId));
@@ -239,15 +245,25 @@ router.post("/cases", requireAuth, requireFirmUser, requirePermission("cases", "
         resolvedPurchaserIds.push(existingClientId);
         purchasersReused++;
       } else {
-        const [client] = await db
-          .insert(clientsTable)
-          .values({
-            firmId: req.firmId!,
-            name: trimmedName,
-            icNo: trimmedIc,
-            createdBy: req.userId,
-          })
-          .returning();
+        const insertBase = {
+          firmId: req.firmId!,
+          name: trimmedName,
+          icNo: trimmedIc,
+        };
+
+        let client: typeof clientsTable.$inferSelect;
+        try {
+          [client] = await db
+            .insert(clientsTable)
+            .values({ ...insertBase, createdBy: req.userId } as any)
+            .returning();
+        } catch (e) {
+          if (!isMissingCreatedByColumn(e)) throw e;
+          [client] = await db
+            .insert(clientsTable)
+            .values(insertBase as any)
+            .returning();
+        }
         resolvedPurchaserIds.push(client.id);
         purchasersCreated++;
       }
@@ -280,26 +296,36 @@ router.post("/cases", requireAuth, requireFirmUser, requirePermission("cases", "
 
   const refNo = requestedRef || `LCP-${req.firmId}-${Date.now()}`;
 
-  const [newCase] = await db
-    .insert(casesTable)
-    .values({
-      firmId: req.firmId!,
-      projectId,
-      developerId,
-      referenceNo: refNo,
-      purchaseMode,
-      titleType,
-      spaPrice: spaPrice ? String(spaPrice) : null,
-      status: "File Opened / SPA Pending Signing",
-      caseType: caseType ?? null,
-      parcelNo: parcelNo ?? null,
-      spaDetails: spaDetails ? JSON.stringify(spaDetails) : null,
-      propertyDetails: propertyDetails ? JSON.stringify(propertyDetails) : null,
-      loanDetails: loanDetails ? JSON.stringify(loanDetails) : null,
-      companyDetails: companyDetails ? JSON.stringify(companyDetails) : null,
-      createdBy: req.userId,
-    })
-    .returning();
+  const insertCaseBase = {
+    firmId: req.firmId!,
+    projectId,
+    developerId,
+    referenceNo: refNo,
+    purchaseMode,
+    titleType,
+    spaPrice: spaPrice ? String(spaPrice) : null,
+    status: "File Opened / SPA Pending Signing",
+    caseType: caseType ?? null,
+    parcelNo: parcelNo ?? null,
+    spaDetails: spaDetails ? JSON.stringify(spaDetails) : null,
+    propertyDetails: propertyDetails ? JSON.stringify(propertyDetails) : null,
+    loanDetails: loanDetails ? JSON.stringify(loanDetails) : null,
+    companyDetails: companyDetails ? JSON.stringify(companyDetails) : null,
+  };
+
+  let newCase: typeof casesTable.$inferSelect;
+  try {
+    [newCase] = await db
+      .insert(casesTable)
+      .values({ ...insertCaseBase, createdBy: req.userId } as any)
+      .returning();
+  } catch (e) {
+    if (!isMissingCreatedByColumn(e)) throw e;
+    [newCase] = await db
+      .insert(casesTable)
+      .values(insertCaseBase as any)
+      .returning();
+  }
 
   for (let i = 0; i < resolvedPurchaserIds.length; i++) {
     await db.insert(casePurchasersTable).values({
