@@ -1,6 +1,6 @@
 import { Router, type IRouter } from "express";
 import { eq, ilike, count, desc, and } from "drizzle-orm";
-import { db, projectsTable, developersTable, casesTable } from "@workspace/db";
+import { db, projectsTable, developersTable, casesTable, type Project, type InsertProject } from "@workspace/db";
 import {
   CreateProjectBody, UpdateProjectBody, ListProjectsQueryParams,
   GetProjectParams, UpdateProjectParams, DeleteProjectParams
@@ -9,7 +9,7 @@ import { requireAuth, requireFirmUser, requirePermission, writeAuditLog, type Au
 
 const router: IRouter = Router();
 
-async function enrichProject(proj: typeof projectsTable.$inferSelect) {
+async function enrichProject(proj: Project) {
   const [devRow] = await db.select().from(developersTable).where(eq(developersTable.id, proj.developerId));
   const [ccRes] = await db.select({ c: count() }).from(casesTable).where(eq(casesTable.projectId, proj.id));
   return {
@@ -30,7 +30,7 @@ async function enrichProject(proj: typeof projectsTable.$inferSelect) {
     landUse: proj.landUse ?? null,
     developmentCondition: proj.developmentCondition ?? null,
     unitCategory: proj.unitCategory ?? null,
-    extraFields: (proj.extraFields as Record<string, unknown>) ?? {},
+    extraFields: (proj.extraFields ?? {}) as Record<string, unknown>,
     caseCount: Number(ccRes?.c ?? 0),
     createdAt: proj.createdAt.toISOString(),
   };
@@ -63,64 +63,79 @@ router.get("/projects", requireAuth, requireFirmUser, requirePermission("project
 });
 
 router.post("/projects", requireAuth, requireFirmUser, requirePermission("projects", "create"), async (req: AuthRequest, res): Promise<void> => {
-  const parsed = CreateProjectBody.safeParse(req.body);
-  if (!parsed.success) {
-    res.status(400).json({ error: parsed.error.message });
-    return;
-  }
-
-  const { developerId, name, projectType, titleType, landUse, developmentCondition, unitCategory, extraFields } = parsed.data;
-  const { phase, developerName, titleSubtype, masterTitleNumber, masterTitleLandSize, mukim, daerah, negeri } = req.body;
-
-  const [dev] = await db.select().from(developersTable).where(eq(developersTable.id, developerId));
-  if (!dev || dev.firmId !== req.firmId) {
-    res.status(400).json({ error: "Developer not found in this firm" });
-    return;
-  }
-
-  const isMissingCreatedByColumn = (e: unknown): boolean => {
-    const err = e as { code?: string; message?: string };
-    if (err?.code === "42703") return true;
-    const msg = String(err?.message ?? "");
-    return msg.includes("created_by") && msg.includes("does not exist");
-  };
-
-  const insertBase = {
-    firmId: req.firmId!,
-    developerId,
-    name,
-    phase: phase || null,
-    developerName: developerName || dev.name,
-    projectType,
-    titleType,
-    titleSubtype: titleSubtype || null,
-    masterTitleNumber: masterTitleNumber || null,
-    masterTitleLandSize: masterTitleLandSize || null,
-    mukim: mukim || null,
-    daerah: daerah || null,
-    negeri: negeri || null,
-    landUse,
-    developmentCondition,
-    unitCategory,
-    extraFields: extraFields as Record<string, unknown> ?? {},
-  };
-
-  let proj: typeof projectsTable.$inferSelect;
   try {
-    [proj] = await db
-      .insert(projectsTable)
-      .values({ ...insertBase, createdBy: req.userId } as any)
-      .returning();
-  } catch (e) {
-    if (!isMissingCreatedByColumn(e)) throw e;
-    [proj] = await db
-      .insert(projectsTable)
-      .values(insertBase as any)
-      .returning();
-  }
+    const parsed = CreateProjectBody.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: parsed.error.message });
+      return;
+    }
 
-  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "projects.create", entityType: "project", entityId: proj.id, detail: `name=${proj.name}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
-  res.status(201).json(await enrichProject(proj));
+    const { developerId, name, projectType, titleType, landUse, developmentCondition, unitCategory, extraFields } = parsed.data;
+    const { phase, developerName, titleSubtype, masterTitleNumber, masterTitleLandSize, mukim, daerah, negeri } = req.body as Record<string, unknown>;
+
+    const [dev] = await db.select().from(developersTable).where(eq(developersTable.id, developerId));
+    if (!dev || dev.firmId !== req.firmId) {
+      res.status(400).json({ error: "Developer not found in this firm" });
+      return;
+    }
+
+    const isMissingCreatedByColumn = (e: unknown): boolean => {
+      const err = e as { code?: string; message?: string; cause?: unknown };
+      const code = err?.code
+        ?? (err?.cause as any)?.code
+        ?? ((err?.cause as any)?.cause as any)?.code;
+      if (code === "42703") return true;
+      const msg = String(
+        err?.message
+        ?? (err?.cause as any)?.message
+        ?? ((err?.cause as any)?.cause as any)?.message
+        ?? ""
+      );
+      return msg.includes("created_by") && msg.includes("does not exist");
+    };
+
+    const insertBase: Omit<InsertProject, "createdBy"> = {
+      firmId: req.firmId!,
+      developerId,
+      name,
+      phase: typeof phase === "string" && phase.trim() ? phase : null,
+      developerName: typeof developerName === "string" && developerName.trim() ? developerName : dev.name,
+      projectType,
+      titleType,
+      titleSubtype: typeof titleSubtype === "string" && titleSubtype.trim() ? titleSubtype : null,
+      masterTitleNumber: typeof masterTitleNumber === "string" && masterTitleNumber.trim() ? masterTitleNumber : null,
+      masterTitleLandSize: typeof masterTitleLandSize === "string" && masterTitleLandSize.trim() ? masterTitleLandSize : null,
+      mukim: typeof mukim === "string" && mukim.trim() ? mukim : null,
+      daerah: typeof daerah === "string" && daerah.trim() ? daerah : null,
+      negeri: typeof negeri === "string" && negeri.trim() ? negeri : null,
+      landUse,
+      developmentCondition,
+      unitCategory,
+      extraFields: extraFields ?? {},
+    };
+
+    let proj: Project;
+    try {
+      [proj] = await db
+        .insert(projectsTable)
+        .values({ ...insertBase, createdBy: req.userId })
+        .returning();
+    } catch (e) {
+      if (!isMissingCreatedByColumn(e)) throw e;
+      [proj] = await db
+        .insert(projectsTable)
+        .values(insertBase)
+        .returning();
+    }
+
+    await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "projects.create", entityType: "project", entityId: proj.id, detail: `name=${proj.name}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+    res.status(201).json(await enrichProject(proj));
+    return;
+  } catch (e) {
+    (req as any).log?.error?.({ err: e }, "projects.create failed");
+    res.status(500).json({ error: "Internal Server Error" });
+    return;
+  }
 });
 
 router.get("/projects/:projectId", requireAuth, requireFirmUser, requirePermission("projects", "read"), async (req: AuthRequest, res): Promise<void> => {

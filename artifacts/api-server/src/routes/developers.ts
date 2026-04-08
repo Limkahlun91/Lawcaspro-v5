@@ -1,6 +1,6 @@
 import { Router, type IRouter } from "express";
 import { eq, ilike, count, desc, and } from "drizzle-orm";
-import { db, developersTable, projectsTable } from "@workspace/db";
+import { db, developersTable, projectsTable, type Developer, type InsertDeveloper } from "@workspace/db";
 import {
   ListDevelopersQueryParams,
   GetDeveloperParams, UpdateDeveloperParams, DeleteDeveloperParams
@@ -27,7 +27,7 @@ function parseContacts(raw: string | null | undefined): DeveloperContact[] {
   }
 }
 
-async function enrichDeveloper(dev: typeof developersTable.$inferSelect) {
+async function enrichDeveloper(dev: Developer) {
   const [pcRes] = await db.select({ c: count() }).from(projectsTable).where(eq(projectsTable.developerId, dev.id));
   return {
     id: dev.id,
@@ -35,8 +35,8 @@ async function enrichDeveloper(dev: typeof developersTable.$inferSelect) {
     name: dev.name,
     companyRegNo: dev.companyRegNo ?? null,
     address: dev.address ?? null,
-    businessAddress: (dev as any).businessAddress ?? null,
-    contacts: parseContacts((dev as any).contacts),
+    businessAddress: dev.businessAddress ?? null,
+    contacts: parseContacts(dev.contacts),
     contactPerson: dev.contactPerson ?? null,
     phone: dev.phone ?? null,
     email: dev.email ?? null,
@@ -77,55 +77,71 @@ router.get("/developers", requireAuth, requireFirmUser, requirePermission("devel
 });
 
 router.post("/developers", requireAuth, requireFirmUser, requirePermission("developers", "create"), async (req: AuthRequest, res): Promise<void> => {
-  const { name, companyRegNo, address, businessAddress, contacts, contactPerson, phone, email } = req.body as {
-    name: string;
-    companyRegNo?: string;
-    address?: string;
-    businessAddress?: string;
-    contacts?: DeveloperContact[];
-    contactPerson?: string;
-    phone?: string;
-    email?: string;
-  };
-  if (!name) {
-    res.status(400).json({ error: "Company name is required" });
+  try {
+    const { name, companyRegNo, address, businessAddress, contacts, contactPerson, phone, email } = req.body as {
+      name: string;
+      companyRegNo?: string;
+      address?: string;
+      businessAddress?: string;
+      contacts?: DeveloperContact[];
+      contactPerson?: string;
+      phone?: string;
+      email?: string;
+    };
+    if (!name) {
+      res.status(400).json({ error: "Company name is required" });
+      return;
+    }
+
+    const isMissingCreatedByColumn = (e: unknown): boolean => {
+      const err = e as { code?: string; message?: string; cause?: unknown };
+      const code = err?.code
+        ?? (err?.cause as any)?.code
+        ?? ((err?.cause as any)?.cause as any)?.code;
+      if (code === "42703") return true;
+      const msg = String(
+        err?.message
+        ?? (err?.cause as any)?.message
+        ?? ((err?.cause as any)?.cause as any)?.message
+        ?? ""
+      );
+      return msg.includes("created_by") && msg.includes("does not exist");
+    };
+
+    const insertBase: Omit<InsertDeveloper, "createdBy"> = {
+      firmId: req.firmId!,
+      name,
+      companyRegNo: companyRegNo ?? null,
+      address: address ?? null,
+      businessAddress: businessAddress ?? null,
+      contacts: contacts ? JSON.stringify(contacts) : null,
+      contactPerson: contactPerson ?? null,
+      phone: phone ?? null,
+      email: email ?? null,
+    };
+
+    let dev: Developer;
+    try {
+      [dev] = await db
+        .insert(developersTable)
+        .values({ ...insertBase, createdBy: req.userId })
+        .returning();
+    } catch (e) {
+      if (!isMissingCreatedByColumn(e)) throw e;
+      [dev] = await db
+        .insert(developersTable)
+        .values(insertBase)
+        .returning();
+    }
+
+    await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "developers.create", entityType: "developer", entityId: dev.id, detail: `name=${dev.name}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+    res.status(201).json(await enrichDeveloper(dev));
+    return;
+  } catch (e) {
+    (req as any).log?.error?.({ err: e }, "developers.create failed");
+    res.status(500).json({ error: "Internal Server Error" });
     return;
   }
-  const isMissingCreatedByColumn = (e: unknown): boolean => {
-    const err = e as { code?: string; message?: string };
-    if (err?.code === "42703") return true;
-    const msg = String(err?.message ?? "");
-    return msg.includes("created_by") && msg.includes("does not exist");
-  };
-
-  const insertBase = {
-    firmId: req.firmId!,
-    name,
-    companyRegNo: companyRegNo ?? null,
-    address: address ?? null,
-    businessAddress: businessAddress ?? null,
-    contacts: contacts ? JSON.stringify(contacts) : null,
-    contactPerson: contactPerson ?? null,
-    phone: phone ?? null,
-    email: email ?? null,
-  };
-
-  let dev: typeof developersTable.$inferSelect;
-  try {
-    [dev] = await db
-      .insert(developersTable)
-      .values({ ...insertBase, createdBy: req.userId } as any)
-      .returning();
-  } catch (e) {
-    if (!isMissingCreatedByColumn(e)) throw e;
-    [dev] = await db
-      .insert(developersTable)
-      .values(insertBase as any)
-      .returning();
-  }
-
-  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "developers.create", entityType: "developer", entityId: dev.id, detail: `name=${dev.name}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
-  res.status(201).json(await enrichDeveloper(dev));
 });
 
 router.get("/developers/:developerId", requireAuth, requireFirmUser, requirePermission("developers", "read"), async (req: AuthRequest, res): Promise<void> => {

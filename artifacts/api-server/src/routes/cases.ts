@@ -167,219 +167,234 @@ router.get("/cases", requireAuth, requireFirmUser, requirePermission("cases", "r
 });
 
 router.post("/cases", requireAuth, requireFirmUser, requirePermission("cases", "create"), async (req: AuthRequest, res): Promise<void> => {
-  const parsed = CreateCaseBody.safeParse(req.body);
-  if (!parsed.success) {
-    res.status(400).json({ error: "Validation failed", fields: parsed.error.flatten().fieldErrors });
-    return;
-  }
+  try {
+    const parsed = CreateCaseBody.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: "Validation failed", fields: parsed.error.flatten().fieldErrors });
+      return;
+    }
 
-  const { projectId, developerId: clientDeveloperId, purchaseMode, titleType, spaPrice, assignedLawyerId, assignedClerkId, purchaserIds, purchasers } = parsed.data;
-  const isMissingCreatedByColumn = (e: unknown): boolean => {
-    const err = e as { code?: string; message?: string };
-    if (err?.code === "42703") return true;
-    const msg = String(err?.message ?? "");
-    return msg.includes("created_by") && msg.includes("does not exist");
-  };
+    const { projectId, developerId: clientDeveloperId, purchaseMode, titleType, spaPrice, assignedLawyerId, assignedClerkId, purchaserIds, purchasers } = parsed.data;
+    const isMissingCreatedByColumn = (e: unknown): boolean => {
+      const err = e as { code?: string; message?: string; cause?: unknown };
+      const code = err?.code
+        ?? (err?.cause as any)?.code
+        ?? ((err?.cause as any)?.cause as any)?.code;
+      if (code === "42703") return true;
+      const msg = String(
+        err?.message
+        ?? (err?.cause as any)?.message
+        ?? ((err?.cause as any)?.cause as any)?.message
+        ?? ""
+      );
+      return msg.includes("created_by") && msg.includes("does not exist");
+    };
 
-  // ── 1. Resolve developerId server-side from projectId ─────────────────────
-  const [project] = await db.select().from(projectsTable).where(eq(projectsTable.id, projectId));
-  if (!project) {
-    res.status(404).json({ error: "Project not found" });
-    return;
-  }
-  if (!project.developerId) {
-    res.status(422).json({ error: "The selected project has no linked developer. Please edit the project first." });
-    return;
-  }
-  // If caller sent developerId, validate it matches the project
-  if (clientDeveloperId !== undefined && clientDeveloperId !== project.developerId) {
-    res.status(409).json({
-      error: "developerId does not match the project's developer",
-      expected: project.developerId,
-      received: clientDeveloperId,
-    });
-    return;
-  }
-  const developerId = project.developerId;
+    // ── 1. Resolve developerId server-side from projectId ─────────────────────
+    const [project] = await db.select().from(projectsTable).where(eq(projectsTable.id, projectId));
+    if (!project) {
+      res.status(404).json({ error: "Project not found" });
+      return;
+    }
+    if (!project.developerId) {
+      res.status(422).json({ error: "The selected project has no linked developer. Please edit the project first." });
+      return;
+    }
+    // If caller sent developerId, validate it matches the project
+    if (clientDeveloperId !== undefined && clientDeveloperId !== project.developerId) {
+      res.status(409).json({
+        error: "developerId does not match the project's developer",
+        expected: project.developerId,
+        received: clientDeveloperId,
+      });
+      return;
+    }
+    const developerId = project.developerId;
 
-  // ── 2. Resolve purchaser client IDs with dedupe ───────────────────────────
-  let resolvedPurchaserIds: number[] = purchaserIds ?? [];
-  let purchasersCreated = 0;
-  let purchasersReused = 0;
+    // ── 2. Resolve purchaser client IDs with dedupe ───────────────────────────
+    let resolvedPurchaserIds: number[] = purchaserIds ?? [];
+    let purchasersCreated = 0;
+    let purchasersReused = 0;
 
-  if (resolvedPurchaserIds.length === 0 && purchasers && purchasers.length > 0) {
-    for (const p of purchasers) {
-      const trimmedName = p.name.trim();
-      if (!trimmedName) continue;
-      const trimmedIc = p.ic?.trim() || null;
+    if (resolvedPurchaserIds.length === 0 && purchasers && purchasers.length > 0) {
+      for (const p of purchasers) {
+        const trimmedName = p.name.trim();
+        if (!trimmedName) continue;
+        const trimmedIc = p.ic?.trim() || null;
 
-      let existingClientId: number | null = null;
+        let existingClientId: number | null = null;
 
-      if (trimmedIc) {
-        // IC is present — look up by firmId + icNo (most reliable match)
-        const [byIc] = await db
-          .select()
-          .from(clientsTable)
-          .where(and(eq(clientsTable.firmId, req.firmId!), eq(clientsTable.icNo, trimmedIc)));
-        if (byIc) {
-          existingClientId = byIc.id;
+        if (trimmedIc) {
+          // IC is present — look up by firmId + icNo (most reliable match)
+          const [byIc] = await db
+            .select()
+            .from(clientsTable)
+            .where(and(eq(clientsTable.firmId, req.firmId!), eq(clientsTable.icNo, trimmedIc)));
+          if (byIc) {
+            existingClientId = byIc.id;
+          }
         }
-      }
 
-      if (!existingClientId) {
-        // No IC or no IC match — try exact case-insensitive name match
-        const byName = await db
-          .select()
-          .from(clientsTable)
-          .where(and(
-            eq(clientsTable.firmId, req.firmId!),
-            sql`LOWER(${clientsTable.name}) = LOWER(${trimmedName})`
-          ));
-        // Only reuse if exactly one match (ambiguous → create new)
-        if (byName.length === 1) {
-          existingClientId = byName[0].id;
+        if (!existingClientId) {
+          // No IC or no IC match — try exact case-insensitive name match
+          const byName = await db
+            .select()
+            .from(clientsTable)
+            .where(and(
+              eq(clientsTable.firmId, req.firmId!),
+              sql`LOWER(${clientsTable.name}) = LOWER(${trimmedName})`
+            ));
+          // Only reuse if exactly one match (ambiguous → create new)
+          if (byName.length === 1) {
+            existingClientId = byName[0].id;
+          }
         }
-      }
 
-      if (existingClientId) {
-        resolvedPurchaserIds.push(existingClientId);
-        purchasersReused++;
-      } else {
-        const insertBase = {
-          firmId: req.firmId!,
-          name: trimmedName,
-          icNo: trimmedIc,
-        };
+        if (existingClientId) {
+          resolvedPurchaserIds.push(existingClientId);
+          purchasersReused++;
+        } else {
+          const insertBase = {
+            firmId: req.firmId!,
+            name: trimmedName,
+            icNo: trimmedIc,
+          };
 
-        let client: typeof clientsTable.$inferSelect;
-        try {
-          [client] = await db
-            .insert(clientsTable)
-            .values({ ...insertBase, createdBy: req.userId } as any)
-            .returning();
-        } catch (e) {
-          if (!isMissingCreatedByColumn(e)) throw e;
-          [client] = await db
-            .insert(clientsTable)
-            .values(insertBase as any)
-            .returning();
+          let client: typeof clientsTable.$inferSelect;
+          try {
+            [client] = await db
+              .insert(clientsTable)
+              .values({ ...insertBase, createdBy: req.userId } as any)
+              .returning();
+          } catch (e) {
+            if (!isMissingCreatedByColumn(e)) throw e;
+            [client] = await db
+              .insert(clientsTable)
+              .values(insertBase as any)
+              .returning();
+          }
+          resolvedPurchaserIds.push(client.id);
+          purchasersCreated++;
         }
-        resolvedPurchaserIds.push(client.id);
-        purchasersCreated++;
       }
     }
-  }
 
-  if (resolvedPurchaserIds.length === 0) {
-    res.status(400).json({ error: "At least one purchaser name is required" });
-    return;
-  }
+    if (resolvedPurchaserIds.length === 0) {
+      res.status(400).json({ error: "At least one purchaser name is required" });
+      return;
+    }
 
-  // ── 3. Build extra fields from body (not in Zod schema) ───────────────────
-  const { caseType, parcelNo, spaDetails, propertyDetails, loanDetails, companyDetails } = req.body as {
-    caseType?: string;
-    parcelNo?: string;
-    spaDetails?: object;
-    propertyDetails?: object;
-    loanDetails?: object;
-    companyDetails?: object;
-  };
+    // ── 3. Build extra fields from body (not in Zod schema) ───────────────────
+    const { caseType, parcelNo, spaDetails, propertyDetails, loanDetails, companyDetails } = req.body as {
+      caseType?: string;
+      parcelNo?: string;
+      spaDetails?: object;
+      propertyDetails?: object;
+      loanDetails?: object;
+      companyDetails?: object;
+    };
 
-  const requestedRef = typeof (req.body as any).referenceNo === "string"
-    ? String((req.body as any).referenceNo).trim()
-    : "";
+    const requestedRef = typeof (req.body as any).referenceNo === "string"
+      ? String((req.body as any).referenceNo).trim()
+      : "";
 
-  if (requestedRef.length > 80) {
-    res.status(400).json({ error: "Invalid referenceNo" });
-    return;
-  }
+    if (requestedRef.length > 80) {
+      res.status(400).json({ error: "Invalid referenceNo" });
+      return;
+    }
 
-  const refNo = requestedRef || `LCP-${req.firmId}-${Date.now()}`;
+    const refNo = requestedRef || `LCP-${req.firmId}-${Date.now()}`;
 
-  const insertCaseBase = {
-    firmId: req.firmId!,
-    projectId,
-    developerId,
-    referenceNo: refNo,
-    purchaseMode,
-    titleType,
-    spaPrice: spaPrice ? String(spaPrice) : null,
-    status: "File Opened / SPA Pending Signing",
-    caseType: caseType ?? null,
-    parcelNo: parcelNo ?? null,
-    spaDetails: spaDetails ? JSON.stringify(spaDetails) : null,
-    propertyDetails: propertyDetails ? JSON.stringify(propertyDetails) : null,
-    loanDetails: loanDetails ? JSON.stringify(loanDetails) : null,
-    companyDetails: companyDetails ? JSON.stringify(companyDetails) : null,
-  };
+    const insertCaseBase = {
+      firmId: req.firmId!,
+      projectId,
+      developerId,
+      referenceNo: refNo,
+      purchaseMode,
+      titleType,
+      spaPrice: spaPrice ? String(spaPrice) : null,
+      status: "File Opened / SPA Pending Signing",
+      caseType: caseType ?? null,
+      parcelNo: parcelNo ?? null,
+      spaDetails: spaDetails ? JSON.stringify(spaDetails) : null,
+      propertyDetails: propertyDetails ? JSON.stringify(propertyDetails) : null,
+      loanDetails: loanDetails ? JSON.stringify(loanDetails) : null,
+      companyDetails: companyDetails ? JSON.stringify(companyDetails) : null,
+    };
 
-  let newCase: typeof casesTable.$inferSelect;
-  try {
-    [newCase] = await db
-      .insert(casesTable)
-      .values({ ...insertCaseBase, createdBy: req.userId } as any)
-      .returning();
-  } catch (e) {
-    if (!isMissingCreatedByColumn(e)) throw e;
-    [newCase] = await db
-      .insert(casesTable)
-      .values(insertCaseBase as any)
-      .returning();
-  }
+    let newCase: typeof casesTable.$inferSelect;
+    try {
+      [newCase] = await db
+        .insert(casesTable)
+        .values({ ...insertCaseBase, createdBy: req.userId } as any)
+        .returning();
+    } catch (e) {
+      if (!isMissingCreatedByColumn(e)) throw e;
+      [newCase] = await db
+        .insert(casesTable)
+        .values(insertCaseBase as any)
+        .returning();
+    }
 
-  for (let i = 0; i < resolvedPurchaserIds.length; i++) {
-    await db.insert(casePurchasersTable).values({
-      caseId: newCase.id,
-      clientId: resolvedPurchaserIds[i],
-      role: i === 0 ? "main" : "joint",
-      orderNo: i + 1,
-    });
-  }
+    for (let i = 0; i < resolvedPurchaserIds.length; i++) {
+      await db.insert(casePurchasersTable).values({
+        caseId: newCase.id,
+        clientId: resolvedPurchaserIds[i],
+        role: i === 0 ? "main" : "joint",
+        orderNo: i + 1,
+      });
+    }
 
-  await db.insert(caseAssignmentsTable).values({
-    caseId: newCase.id,
-    userId: assignedLawyerId,
-    roleInCase: "lawyer",
-    assignedBy: req.userId,
-  });
-
-  if (assignedClerkId) {
     await db.insert(caseAssignmentsTable).values({
       caseId: newCase.id,
-      userId: assignedClerkId,
-      roleInCase: "clerk",
+      userId: assignedLawyerId,
+      roleInCase: "lawyer",
       assignedBy: req.userId,
     });
-  }
 
-  const workflowSteps = buildWorkflowSteps(purchaseMode, titleType);
-  if (workflowSteps.length > 0) {
-    await db.insert(caseWorkflowStepsTable).values(
-      workflowSteps.map((s) => ({
+    if (assignedClerkId) {
+      await db.insert(caseAssignmentsTable).values({
         caseId: newCase.id,
-        stepKey: s.stepKey,
-        stepName: s.stepName,
-        stepOrder: s.stepOrder,
-        pathType: s.pathType,
-        status: "pending",
-      }))
-    );
+        userId: assignedClerkId,
+        roleInCase: "clerk",
+        assignedBy: req.userId,
+      });
+    }
+
+    const workflowSteps = buildWorkflowSteps(purchaseMode, titleType);
+    if (workflowSteps.length > 0) {
+      await db.insert(caseWorkflowStepsTable).values(
+        workflowSteps.map((s) => ({
+          caseId: newCase.id,
+          stepKey: s.stepKey,
+          stepName: s.stepName,
+          stepOrder: s.stepOrder,
+          pathType: s.pathType,
+          status: "pending",
+        }))
+      );
+    }
+
+    await writeAuditLog({
+      firmId: req.firmId,
+      actorId: req.userId,
+      actorType: "firm_user",
+      action: "cases.create",
+      entityType: "case",
+      entityId: newCase.id,
+      detail: `referenceNo=${refNo} purchasersCreated=${purchasersCreated} purchasersReused=${purchasersReused}`,
+      ipAddress: req.ip,
+      userAgent: req.headers["user-agent"],
+    });
+
+    const detail = await formatCaseDetail(newCase);
+    res.status(201).json({ ...detail, purchasersCreated, purchasersReused });
+    return;
+  } catch (e) {
+    (req as any).log?.error?.({ err: e }, "cases.create failed");
+    res.status(500).json({ error: "Internal Server Error" });
+    return;
   }
-
-  await writeAuditLog({
-    firmId: req.firmId,
-    actorId: req.userId,
-    actorType: "firm_user",
-    action: "cases.create",
-    entityType: "case",
-    entityId: newCase.id,
-    detail: `referenceNo=${refNo} purchasersCreated=${purchasersCreated} purchasersReused=${purchasersReused}`,
-    ipAddress: req.ip,
-    userAgent: req.headers["user-agent"],
-  });
-
-  const detail = await formatCaseDetail(newCase);
-  res.status(201).json({ ...detail, purchasersCreated, purchasersReused });
 });
 
 router.get("/cases/:caseId", requireAuth, requireFirmUser, requirePermission("cases", "read"), async (req: AuthRequest, res): Promise<void> => {
