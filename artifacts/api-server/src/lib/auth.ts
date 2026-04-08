@@ -32,18 +32,32 @@ export async function writeAuditLog(params: {
   userAgent?: string;
 }) {
   try {
-    await db.insert(auditLogsTable).values({
-      firmId: params.firmId ?? null,
-      actorId: params.actorId ?? null,
-      actorType: params.actorType ?? "firm_user",
-      action: params.action,
-      entityType: params.entityType ?? null,
-      entityId: params.entityId ?? null,
-      detail: params.detail ?? null,
-      ipAddress: params.ipAddress ?? null,
-      userAgent: params.userAgent ?? null,
+    await withAuthSafeDb(async (authDb) => {
+      await authDb.insert(auditLogsTable).values({
+        firmId: params.firmId ?? null,
+        actorId: params.actorId ?? null,
+        actorType: params.actorType ?? "firm_user",
+        action: params.action,
+        entityType: params.entityType ?? null,
+        entityId: params.entityId ?? null,
+        detail: params.detail ?? null,
+        ipAddress: params.ipAddress ?? null,
+        userAgent: params.userAgent ?? null,
+      });
     });
-  } catch {
+  } catch (err) {
+    logger.error(
+      {
+        err,
+        action: params.action,
+        firmId: params.firmId ?? null,
+        actorId: params.actorId ?? null,
+        actorType: params.actorType ?? null,
+        entityType: params.entityType ?? null,
+        entityId: params.entityId ?? null,
+      },
+      "audit.write_failed",
+    );
   }
 }
 

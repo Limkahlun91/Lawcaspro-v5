@@ -1,4 +1,5 @@
 import { Router, type IRouter } from "express";
+import { Readable } from "stream";
 import { eq, ilike, count, sql, desc, and, isNull, or } from "drizzle-orm";
 import {
   db,
@@ -14,7 +15,7 @@ import {
 import { CreateFirmBody, UpdateFirmBody, ListFirmsQueryParams, GetFirmParams, UpdateFirmParams } from "@workspace/api-zod";
 import { requireAuth, requireFounder, writeAuditLog, type AuthRequest } from "../lib/auth";
 import bcrypt from "bcryptjs";
-import { ObjectStorageService } from "../lib/objectStorage";
+import { ObjectNotFoundError, ObjectStorageService } from "../lib/objectStorage";
 
 const one = (v: string | string[] | undefined): string | undefined => (Array.isArray(v) ? v[0] : v);
 const firstRow = (result: unknown): Record<string, unknown> | undefined => {
@@ -393,6 +394,37 @@ router.delete("/platform/documents/:docId", requireAuth, requireFounder, async (
   await db.delete(platformDocumentsTable).where(eq(platformDocumentsTable.id, docId));
   await writeAuditLog({ firmId: doc.firmId ?? null, actorId: req.userId, actorType: req.userType, action: "platform.document.delete", entityType: "platform_document", entityId: docId, detail: `name=${doc.name}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
   res.json({ success: true });
+});
+
+router.get("/platform/documents/:docId/download", requireAuth, requireFounder, async (req: AuthRequest, res): Promise<void> => {
+  const docIdStr = one(req.params.docId);
+  const docId = docIdStr ? parseInt(docIdStr, 10) : NaN;
+  if (isNaN(docId)) { res.status(400).json({ error: "Invalid document ID" }); return; }
+  const [doc] = await db.select().from(platformDocumentsTable).where(eq(platformDocumentsTable.id, docId));
+  if (!doc) { res.status(404).json({ error: "Document not found" }); return; }
+  try {
+    const objectFile = await storage.getObjectEntityFile(doc.objectPath);
+    const response = await storage.downloadObject(objectFile);
+    res.status(response.status);
+    response.headers.forEach((value, key) => res.setHeader(key, value));
+    const ascii = String(doc.fileName ?? "download").replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 120) || "download";
+    const encoded = encodeURIComponent(String(doc.fileName ?? ascii));
+    res.setHeader("Content-Disposition", `attachment; filename="${ascii}"; filename*=UTF-8''${encoded}`);
+
+    if (response.body) {
+      const nodeStream = Readable.fromWeb(response.body as ReadableStream<Uint8Array>);
+      nodeStream.pipe(res);
+    } else {
+      res.end();
+    }
+  } catch (error) {
+    if (error instanceof ObjectNotFoundError) {
+      res.status(404).json({ error: "Object not found" });
+      return;
+    }
+    req.log.error({ err: error, docId }, "platform.document.download_failed");
+    res.status(500).json({ error: "Failed to download document" });
+  }
 });
 
 // ─── PDF Mappings ─────────────────────────────────────────────────────────────

@@ -456,8 +456,7 @@ export default function PlatformDocuments() {
 
   const handleDownload = async (doc: PlatformDoc) => {
     try {
-      const pathPart = doc.objectPath.replace(/^\/objects\//, "");
-      const res = await fetch(`${API_BASE}/storage/objects/${pathPart}`, { credentials: "include" });
+      const res = await fetch(`${API_BASE}/platform/documents/${doc.id}/download`, { credentials: "include" });
       if (!res.ok) throw new Error("Download failed");
       const blob = await res.blob();
       const url = URL.createObjectURL(blob);
