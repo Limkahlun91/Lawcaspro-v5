@@ -175,20 +175,6 @@ router.post("/cases", requireAuth, requireFirmUser, requirePermission("cases", "
     }
 
     const { projectId, developerId: clientDeveloperId, purchaseMode, titleType, spaPrice, assignedLawyerId, assignedClerkId, purchaserIds, purchasers } = parsed.data;
-    const isMissingCreatedByColumn = (e: unknown): boolean => {
-      const err = e as { code?: string; message?: string; cause?: unknown };
-      const code = err?.code
-        ?? (err?.cause as any)?.code
-        ?? ((err?.cause as any)?.cause as any)?.code;
-      if (code === "42703") return true;
-      const msg = String(
-        err?.message
-        ?? (err?.cause as any)?.message
-        ?? ((err?.cause as any)?.cause as any)?.message
-        ?? ""
-      );
-      return msg.includes("created_by") && msg.includes("does not exist");
-    };
 
     // ── 1. Resolve developerId server-side from projectId ─────────────────────
     const [project] = await db.select().from(projectsTable).where(eq(projectsTable.id, projectId));
@@ -261,17 +247,17 @@ router.post("/cases", requireAuth, requireFirmUser, requirePermission("cases", "
           };
 
           let client: typeof clientsTable.$inferSelect;
+          [client] = await db
+            .insert(clientsTable)
+            .values(insertBase as any)
+            .returning();
+
           try {
-            [client] = await db
-              .insert(clientsTable)
-              .values({ ...insertBase, createdBy: req.userId } as any)
-              .returning();
-          } catch (e) {
-            if (!isMissingCreatedByColumn(e)) throw e;
-            [client] = await db
-              .insert(clientsTable)
-              .values(insertBase as any)
-              .returning();
+            await db
+              .update(clientsTable)
+              .set({ createdBy: req.userId } as any)
+              .where(and(eq(clientsTable.id, client.id), eq(clientsTable.firmId, req.firmId!)));
+          } catch {
           }
           resolvedPurchaserIds.push(client.id);
           purchasersCreated++;
@@ -323,17 +309,17 @@ router.post("/cases", requireAuth, requireFirmUser, requirePermission("cases", "
     };
 
     let newCase: typeof casesTable.$inferSelect;
+    [newCase] = await db
+      .insert(casesTable)
+      .values(insertCaseBase as any)
+      .returning();
+
     try {
-      [newCase] = await db
-        .insert(casesTable)
-        .values({ ...insertCaseBase, createdBy: req.userId } as any)
-        .returning();
-    } catch (e) {
-      if (!isMissingCreatedByColumn(e)) throw e;
-      [newCase] = await db
-        .insert(casesTable)
-        .values(insertCaseBase as any)
-        .returning();
+      await db
+        .update(casesTable)
+        .set({ createdBy: req.userId } as any)
+        .where(and(eq(casesTable.id, newCase.id), eq(casesTable.firmId, req.firmId!)));
+    } catch {
     }
 
     for (let i = 0; i < resolvedPurchaserIds.length; i++) {

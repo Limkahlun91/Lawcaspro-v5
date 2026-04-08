@@ -79,21 +79,6 @@ router.post("/projects", requireAuth, requireFirmUser, requirePermission("projec
       return;
     }
 
-    const isMissingCreatedByColumn = (e: unknown): boolean => {
-      const err = e as { code?: string; message?: string; cause?: unknown };
-      const code = err?.code
-        ?? (err?.cause as any)?.code
-        ?? ((err?.cause as any)?.cause as any)?.code;
-      if (code === "42703") return true;
-      const msg = String(
-        err?.message
-        ?? (err?.cause as any)?.message
-        ?? ((err?.cause as any)?.cause as any)?.message
-        ?? ""
-      );
-      return msg.includes("created_by") && msg.includes("does not exist");
-    };
-
     const insertBase: Omit<InsertProject, "createdBy"> = {
       firmId: req.firmId!,
       developerId,
@@ -115,17 +100,17 @@ router.post("/projects", requireAuth, requireFirmUser, requirePermission("projec
     };
 
     let proj: Project;
+    [proj] = await db
+      .insert(projectsTable)
+      .values(insertBase)
+      .returning();
+
     try {
-      [proj] = await db
-        .insert(projectsTable)
-        .values({ ...insertBase, createdBy: req.userId })
-        .returning();
-    } catch (e) {
-      if (!isMissingCreatedByColumn(e)) throw e;
-      [proj] = await db
-        .insert(projectsTable)
-        .values(insertBase)
-        .returning();
+      await db
+        .update(projectsTable)
+        .set({ createdBy: req.userId } as any)
+        .where(and(eq(projectsTable.id, proj.id), eq(projectsTable.firmId, req.firmId!)));
+    } catch {
     }
 
     await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "projects.create", entityType: "project", entityId: proj.id, detail: `name=${proj.name}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
