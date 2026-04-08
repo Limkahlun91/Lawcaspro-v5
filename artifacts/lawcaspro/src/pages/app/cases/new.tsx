@@ -46,6 +46,7 @@ export default function NewCasePage() {
   }>({});
 
   // Basic Info
+  const [ourReference, setOurReference] = useState("");
   const [projectId, setProjectId] = useState("");
   const [caseType, setCaseType] = useState("");
   const [parcelNo, setParcelNo] = useState("");
@@ -171,6 +172,7 @@ export default function NewCasePage() {
 
     // developerId is intentionally omitted — server derives it from projectId
     const payload = {
+      referenceNo: ourReference.trim() || undefined,
       projectId: Number(projectId),
       purchaseMode,
       titleType: titleTypeApiMap[titleType] ?? "master",
@@ -290,6 +292,15 @@ export default function NewCasePage() {
           </div>
           <div className="grid grid-cols-2 gap-4">
             <div className="space-y-1">
+              <Label className="text-xs font-medium text-gray-600">Our Reference</Label>
+              <Input
+                className="h-9 text-sm border-gray-300"
+                placeholder="e.g. TAN/CONV/2026/001"
+                value={ourReference}
+                onChange={(e) => setOurReference(e.target.value)}
+              />
+            </div>
+            <div className="space-y-1">
               <Label className="text-xs font-medium text-gray-600">
                 Project <span className="text-red-500">*</span>
               </Label>
@@ -326,12 +337,6 @@ export default function NewCasePage() {
                 value={parcelNo}
                 onChange={e => setParcelNo(e.target.value)}
               />
-            </div>
-            <div className="space-y-1">
-              <Label className="text-xs font-medium text-gray-600">Status</Label>
-              <div className="h-9 px-3 flex items-center border border-gray-200 rounded-md bg-gray-50 text-sm text-gray-500">
-                Draft
-              </div>
             </div>
           </div>
         </div>

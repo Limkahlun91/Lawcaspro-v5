@@ -11,8 +11,8 @@ import {
   ArrowLeft, Building2, Phone, Mail, User, MapPin, Pencil, X, Save, Plus, Trash2, Briefcase,
 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
-
-const API_BASE = import.meta.env.BASE_URL + "api";
+import { apiUrl } from "@/lib/api-base";
+import { getListDevelopersQueryKey } from "@workspace/api-client-react";
 
 interface Contact {
   name: string;
@@ -62,7 +62,7 @@ export default function DeveloperDetail() {
   const fetchDeveloper = async () => {
     setLoading(true);
     try {
-      const res = await fetch(`${API_BASE}/developers/${developerId}`, { credentials: "include" });
+      const res = await fetch(apiUrl(`/api/developers/${developerId}`), { credentials: "include" });
       if (!res.ok) throw new Error("Not found");
       const data: Developer = await res.json();
       setDeveloper(data);
@@ -113,7 +113,7 @@ export default function DeveloperDetail() {
     setSaving(true);
     try {
       const primaryContact = contacts[0];
-      const res = await fetch(`${API_BASE}/developers/${developerId}`, {
+      const res = await fetch(apiUrl(`/api/developers/${developerId}`), {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -128,10 +128,20 @@ export default function DeveloperDetail() {
         }),
         credentials: "include",
       });
-      if (!res.ok) throw new Error((await res.json()).error || "Failed to save");
+      if (!res.ok) {
+        const raw = await res.text();
+        let message = "Failed to save";
+        try {
+          const parsed = JSON.parse(raw) as { error?: string };
+          if (parsed?.error) message = parsed.error;
+        } catch {
+          if (raw.trim()) message = raw;
+        }
+        throw new Error(message);
+      }
       const updated: Developer = await res.json();
       setDeveloper(updated);
-      queryClient.invalidateQueries({ queryKey: ["developers"] });
+      queryClient.invalidateQueries({ queryKey: getListDevelopersQueryKey() });
       toast({ title: "Developer updated" });
       setEditing(false);
     } catch (e: any) {

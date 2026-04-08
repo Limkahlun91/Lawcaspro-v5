@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState } from "react";
 import { useCreateProject, useListDevelopers } from "@workspace/api-client-react";
 import { useLocation } from "wouter";
 import { useToast } from "@/hooks/use-toast";
@@ -26,7 +26,6 @@ export default function NewProject() {
   const [name, setName] = useState("");
   const [phase, setPhase] = useState("");
   const [selectedDevId, setSelectedDevId] = useState("");
-  const [developerName, setDeveloperName] = useState("");
   const [titleType, setTitleType] = useState("");
   const [titleSubtype, setTitleSubtype] = useState("");
   const [masterTitleNumber, setMasterTitleNumber] = useState("");
@@ -38,12 +37,10 @@ export default function NewProject() {
     { id: crypto.randomUUID(), buildingType: "" },
   ]);
 
-  useEffect(() => {
-    if (selectedDevId) {
-      const dev = developers.find((d: any) => d.id === parseInt(selectedDevId));
-      if (dev) setDeveloperName(dev.name);
-    }
-  }, [selectedDevId, developers]);
+  const selectedDeveloper = selectedDevId
+    ? developers.find((d: any) => d.id === parseInt(selectedDevId, 10))
+    : null;
+  const developerName = selectedDeveloper?.name ?? "";
 
   const addPropertyType = () => {
     setPropertyTypes(prev => [...prev, { id: crypto.randomUUID(), buildingType: "" }]);
@@ -62,10 +59,6 @@ export default function NewProject() {
       toast({ title: "Project name is required", variant: "destructive" });
       return;
     }
-    if (!developerName.trim()) {
-      toast({ title: "Developer name is required", variant: "destructive" });
-      return;
-    }
     if (!selectedDevId) {
       toast({ title: "Please select a developer from the list", variant: "destructive" });
       return;
@@ -79,7 +72,7 @@ export default function NewProject() {
       projectType: projectTypeValue,
       titleType: titleType || "master",
       phase,
-      developerName,
+      developerName: developerName || undefined,
       titleSubtype,
       masterTitleNumber,
       masterTitleLandSize,
@@ -159,11 +152,11 @@ export default function NewProject() {
               </select>
             </div>
             <div>
-              <Label className="text-sm font-semibold text-slate-700">Developer Name *</Label>
+              <Label className="text-sm font-semibold text-slate-700">Developer Name</Label>
               <Input
                 value={developerName}
-                onChange={e => setDeveloperName(e.target.value)}
-                placeholder="Enter developer name"
+                disabled
+                placeholder="Select a developer to auto-fill"
                 className="mt-1.5"
               />
             </div>

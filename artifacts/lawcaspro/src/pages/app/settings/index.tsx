@@ -11,13 +11,28 @@ import { cn } from "@/lib/utils";
 import { useToast } from "@/hooks/use-toast";
 import { useAuth } from "@/lib/auth-context";
 import { hasPermission } from "@/lib/permissions";
-
-const API_BASE = import.meta.env.BASE_URL.replace(/\/$/, "").replace(/^\/lawcaspro/, "") + "/api";
+import { apiUrl } from "@/lib/api-base";
 
 async function apiFetch(path: string, opts?: RequestInit) {
-  const res = await fetch(`${API_BASE}${path}`, { credentials: "include", ...opts });
-  if (!res.ok) throw new Error(await res.text());
-  return res.json();
+  const res = await fetch(apiUrl(`/api${path}`), { credentials: "include", ...opts });
+  const raw = await res.text();
+
+  if (!res.ok) {
+    let message = raw || "Request failed";
+    try {
+      const parsed = JSON.parse(raw) as { error?: string };
+      if (parsed?.error) message = parsed.error;
+    } catch {
+    }
+    throw new Error(message);
+  }
+
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return raw;
+  }
 }
 
 const TABS = ["Firm Info", "Users", "Roles & Permissions", "Security"] as const;
@@ -312,7 +327,12 @@ function FirmInfoTab() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(data),
     }),
-    onSuccess: () => {
+    onSuccess: (created: any) => {
+      queryClient.setQueryData(["firm-settings"], (prev: any) => {
+        if (!prev) return prev;
+        const existing = Array.isArray(prev.bankAccounts) ? prev.bankAccounts : [];
+        return { ...prev, bankAccounts: [...existing, created] };
+      });
       queryClient.invalidateQueries({ queryKey: ["firm-settings"] });
       setNewBankName("");
       setNewAccountNo("");
@@ -324,7 +344,12 @@ function FirmInfoTab() {
 
   const deleteBankMutation = useMutation({
     mutationFn: (id: number) => apiFetch(`/firm-settings/bank-accounts/${id}`, { method: "DELETE" }),
-    onSuccess: () => {
+    onSuccess: (_: any, id: number) => {
+      queryClient.setQueryData(["firm-settings"], (prev: any) => {
+        if (!prev) return prev;
+        const existing = Array.isArray(prev.bankAccounts) ? prev.bankAccounts : [];
+        return { ...prev, bankAccounts: existing.filter((a: any) => a?.id !== id) };
+      });
       queryClient.invalidateQueries({ queryKey: ["firm-settings"] });
       toast({ title: "Bank account removed" });
     },

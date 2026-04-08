@@ -269,7 +269,16 @@ router.post("/cases", requireAuth, requireFirmUser, requirePermission("cases", "
     companyDetails?: object;
   };
 
-  const refNo = `LCP-${req.firmId}-${Date.now()}`;
+  const requestedRef = typeof (req.body as any).referenceNo === "string"
+    ? String((req.body as any).referenceNo).trim()
+    : "";
+
+  if (requestedRef.length > 80) {
+    res.status(400).json({ error: "Invalid referenceNo" });
+    return;
+  }
+
+  const refNo = requestedRef || `LCP-${req.firmId}-${Date.now()}`;
 
   const [newCase] = await db
     .insert(casesTable)
