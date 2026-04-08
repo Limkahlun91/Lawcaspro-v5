@@ -377,7 +377,19 @@ router.post("/cases", requireAuth, requireFirmUser, requirePermission("cases", "
     res.status(201).json({ ...detail, purchasersCreated, purchasersReused });
     return;
   } catch (e) {
-    (req as any).log?.error?.({ err: e }, "cases.create failed");
+    const pg = (() => {
+      let cur: any = e;
+      for (let i = 0; i < 6 && cur; i++) {
+        if (typeof cur?.code === "string" || typeof cur?.message === "string") {
+          const code = typeof cur.code === "string" ? cur.code : undefined;
+          const message = typeof cur.message === "string" ? cur.message : undefined;
+          return { code, message };
+        }
+        cur = cur?.cause;
+      }
+      return {};
+    })();
+    (req as any).log?.error?.({ err: e, pg }, "cases.create failed");
     res.status(500).json({ error: "Internal Server Error" });
     return;
   }

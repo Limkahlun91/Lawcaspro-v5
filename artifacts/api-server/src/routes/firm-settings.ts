@@ -35,7 +35,20 @@ router.get("/firm-settings", requireAuth, requireFirmUser, async (req, res) => {
     });
     return;
   } catch (err: any) {
-    res.status(500).json({ error: err.message });
+    const pg = (() => {
+      let cur: any = err;
+      for (let i = 0; i < 6 && cur; i++) {
+        if (typeof cur?.code === "string" || typeof cur?.message === "string") {
+          const code = typeof cur.code === "string" ? cur.code : undefined;
+          const message = typeof cur.message === "string" ? cur.message : undefined;
+          return { code, message };
+        }
+        cur = cur?.cause;
+      }
+      return {};
+    })();
+    (req as any).log?.error?.({ err, pg }, "firm_settings.bank_accounts.create failed");
+    res.status(500).json({ error: "Internal Server Error" });
     return;
   }
 });
@@ -77,7 +90,20 @@ router.patch("/firm-settings", requireAuth, requireFirmUser, requirePermission("
     await writeAuditLog({ firmId, actorId: (req as AuthRequest).userId, actorType: (req as AuthRequest).userType, action: "settings.update", entityType: "firm", entityId: firmId, detail: `fields=${Object.keys(updates).join(",")}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
     return;
   } catch (err: any) {
-    res.status(500).json({ error: err.message });
+    const pg = (() => {
+      let cur: any = err;
+      for (let i = 0; i < 6 && cur; i++) {
+        if (typeof cur?.code === "string" || typeof cur?.message === "string") {
+          const code = typeof cur.code === "string" ? cur.code : undefined;
+          const message = typeof cur.message === "string" ? cur.message : undefined;
+          return { code, message };
+        }
+        cur = cur?.cause;
+      }
+      return {};
+    })();
+    (req as any).log?.error?.({ err, pg }, "firm_settings.bank_accounts.delete failed");
+    res.status(500).json({ error: "Internal Server Error" });
     return;
   }
 });
