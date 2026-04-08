@@ -438,15 +438,22 @@ router.post("/cases", requireAuth, requireFirmUser, requirePermission("cases", "
 });
 
 router.get("/cases/:caseId", requireAuth, requireFirmUser, requirePermission("cases", "read"), async (req: AuthRequest, res): Promise<void> => {
-  const r = rdb(req);
+  const r = req.rlsDb;
+  if (!r) {
+    res.status(500).json({ error: "Missing tenant database context" });
+    return;
+  }
   const params = GetCaseParams.safeParse(req.params);
   if (!params.success) {
     res.status(400).json({ error: params.error.message });
     return;
   }
 
-  const [c] = await r.select().from(casesTable).where(eq(casesTable.id, params.data.caseId));
-  if (!c || c.firmId !== req.firmId) {
+  const [c] = await r
+    .select()
+    .from(casesTable)
+    .where(and(eq(casesTable.id, params.data.caseId), eq(casesTable.firmId, req.firmId!)));
+  if (!c) {
     res.status(404).json({ error: "Case not found" });
     return;
   }
@@ -455,6 +462,11 @@ router.get("/cases/:caseId", requireAuth, requireFirmUser, requirePermission("ca
 });
 
 router.patch("/cases/:caseId", requireAuth, requireFirmUser, requirePermission("cases", "update"), async (req: AuthRequest, res): Promise<void> => {
+  const r = req.rlsDb;
+  if (!r) {
+    res.status(500).json({ error: "Missing tenant database context" });
+    return;
+  }
   const params = UpdateCaseParams.safeParse(req.params);
   if (!params.success) {
     res.status(400).json({ error: params.error.message });
@@ -472,11 +484,21 @@ router.patch("/cases/:caseId", requireAuth, requireFirmUser, requirePermission("
   if (parsed.data.purchaseMode !== undefined) updates.purchaseMode = parsed.data.purchaseMode;
   if (parsed.data.titleType !== undefined) updates.titleType = parsed.data.titleType;
   if (parsed.data.spaPrice !== undefined) updates.spaPrice = String(parsed.data.spaPrice);
+
+  const [caseRow] = await r
+    .select({ id: casesTable.id })
+    .from(casesTable)
+    .where(and(eq(casesTable.id, params.data.caseId), eq(casesTable.firmId, req.firmId!)));
+  if (!caseRow) {
+    res.status(404).json({ error: "Case not found" });
+    return;
+  }
+
   if (parsed.data.assignedLawyerId !== undefined) {
-    await db.update(caseAssignmentsTable)
+    await r.update(caseAssignmentsTable)
       .set({ unassignedAt: new Date() })
       .where(and(eq(caseAssignmentsTable.caseId, params.data.caseId), eq(caseAssignmentsTable.roleInCase, "lawyer"), sql`unassigned_at IS NULL`));
-    await db.insert(caseAssignmentsTable).values({
+    await r.insert(caseAssignmentsTable).values({
       caseId: params.data.caseId,
       userId: parsed.data.assignedLawyerId,
       roleInCase: "lawyer",
@@ -484,18 +506,18 @@ router.patch("/cases/:caseId", requireAuth, requireFirmUser, requirePermission("
     });
   }
 
-  const [c] = await db
+  const [c] = await r
     .update(casesTable)
     .set(updates)
-    .where(eq(casesTable.id, params.data.caseId))
+    .where(and(eq(casesTable.id, params.data.caseId), eq(casesTable.firmId, req.firmId!)))
     .returning();
 
-  if (!c || c.firmId !== req.firmId) {
+  if (!c) {
     res.status(404).json({ error: "Case not found" });
     return;
   }
 
-  await db.insert(auditLogsTable).values({
+  await r.insert(auditLogsTable).values({
     firmId: req.firmId,
     actorId: req.userId,
     actorType: "firm_user",
@@ -505,17 +527,31 @@ router.patch("/cases/:caseId", requireAuth, requireFirmUser, requirePermission("
     detail: JSON.stringify(updates),
   });
 
-  res.json(await formatCaseDetail(rdb(req), c));
+  res.json(await formatCaseDetail(r, c));
 });
 
 router.get("/cases/:caseId/workflow", requireAuth, requireFirmUser, requirePermission("cases", "read"), async (req: AuthRequest, res): Promise<void> => {
+  const r = req.rlsDb;
+  if (!r) {
+    res.status(500).json({ error: "Missing tenant database context" });
+    return;
+  }
   const params = GetCaseWorkflowParams.safeParse(req.params);
   if (!params.success) {
     res.status(400).json({ error: params.error.message });
     return;
   }
 
-  const steps = await db.select().from(caseWorkflowStepsTable)
+  const [caseRow] = await r
+    .select({ id: casesTable.id })
+    .from(casesTable)
+    .where(and(eq(casesTable.id, params.data.caseId), eq(casesTable.firmId, req.firmId!)));
+  if (!caseRow) {
+    res.status(404).json({ error: "Case not found" });
+    return;
+  }
+
+  const steps = await r.select().from(caseWorkflowStepsTable)
     .where(eq(caseWorkflowStepsTable.caseId, params.data.caseId))
     .orderBy(caseWorkflowStepsTable.stepOrder);
 
@@ -523,7 +559,7 @@ router.get("/cases/:caseId/workflow", requireAuth, requireFirmUser, requirePermi
     steps.map(async (s) => {
       let completedByName: string | null = null;
       if (s.completedBy) {
-        const [user] = await db.select().from(usersTable).where(eq(usersTable.id, s.completedBy));
+        const [user] = await r.select().from(usersTable).where(eq(usersTable.id, s.completedBy));
         completedByName = user?.name ?? null;
       }
       return {
@@ -546,6 +582,11 @@ router.get("/cases/:caseId/workflow", requireAuth, requireFirmUser, requirePermi
 });
 
 router.patch("/cases/:caseId/workflow/:stepId", requireAuth, requireFirmUser, requirePermission("cases", "update"), async (req: AuthRequest, res): Promise<void> => {
+  const r = req.rlsDb;
+  if (!r) {
+    res.status(500).json({ error: "Missing tenant database context" });
+    return;
+  }
   const params = UpdateWorkflowStepParams.safeParse(req.params);
   if (!params.success) {
     res.status(400).json({ error: params.error.message });
@@ -568,10 +609,19 @@ router.patch("/cases/:caseId/workflow/:stepId", requireAuth, requireFirmUser, re
   }
   if (parsed.data.notes !== undefined) updates.notes = parsed.data.notes;
 
-  const [step] = await db
+  const [caseRow] = await r
+    .select({ id: casesTable.id })
+    .from(casesTable)
+    .where(and(eq(casesTable.id, params.data.caseId), eq(casesTable.firmId, req.firmId!)));
+  if (!caseRow) {
+    res.status(404).json({ error: "Case not found" });
+    return;
+  }
+
+  const [step] = await r
     .update(caseWorkflowStepsTable)
     .set(updates)
-    .where(eq(caseWorkflowStepsTable.id, params.data.stepId))
+    .where(and(eq(caseWorkflowStepsTable.id, params.data.stepId), eq(caseWorkflowStepsTable.caseId, params.data.caseId)))
     .returning();
 
   if (!step) {
@@ -579,7 +629,7 @@ router.patch("/cases/:caseId/workflow/:stepId", requireAuth, requireFirmUser, re
     return;
   }
 
-  await db.insert(auditLogsTable).values({
+  await r.insert(auditLogsTable).values({
     firmId: req.firmId,
     actorId: req.userId,
     actorType: "firm_user",
@@ -591,7 +641,7 @@ router.patch("/cases/:caseId/workflow/:stepId", requireAuth, requireFirmUser, re
 
   let completedByName: string | null = null;
   if (step.completedBy) {
-    const [user] = await db.select().from(usersTable).where(eq(usersTable.id, step.completedBy));
+    const [user] = await r.select().from(usersTable).where(eq(usersTable.id, step.completedBy));
     completedByName = user?.name ?? null;
   }
 
@@ -611,19 +661,33 @@ router.patch("/cases/:caseId/workflow/:stepId", requireAuth, requireFirmUser, re
 });
 
 router.get("/cases/:caseId/notes", requireAuth, requireFirmUser, requirePermission("cases", "read"), async (req: AuthRequest, res): Promise<void> => {
+  const r = req.rlsDb;
+  if (!r) {
+    res.status(500).json({ error: "Missing tenant database context" });
+    return;
+  }
   const params = GetCaseNotesParams.safeParse(req.params);
   if (!params.success) {
     res.status(400).json({ error: params.error.message });
     return;
   }
 
-  const notes = await db.select().from(caseNotesTable)
+  const [caseRow] = await r
+    .select({ id: casesTable.id })
+    .from(casesTable)
+    .where(and(eq(casesTable.id, params.data.caseId), eq(casesTable.firmId, req.firmId!)));
+  if (!caseRow) {
+    res.status(404).json({ error: "Case not found" });
+    return;
+  }
+
+  const notes = await r.select().from(caseNotesTable)
     .where(eq(caseNotesTable.caseId, params.data.caseId))
     .orderBy(desc(caseNotesTable.createdAt));
 
   const enriched = await Promise.all(
     notes.map(async (n) => {
-      const [author] = await db.select().from(usersTable).where(eq(usersTable.id, n.authorId));
+      const [author] = await r.select().from(usersTable).where(eq(usersTable.id, n.authorId));
       return {
         id: n.id,
         caseId: n.caseId,
@@ -639,6 +703,11 @@ router.get("/cases/:caseId/notes", requireAuth, requireFirmUser, requirePermissi
 });
 
 router.post("/cases/:caseId/notes", requireAuth, requireFirmUser, requirePermission("cases", "update"), async (req: AuthRequest, res): Promise<void> => {
+  const r = req.rlsDb;
+  if (!r) {
+    res.status(500).json({ error: "Missing tenant database context" });
+    return;
+  }
   const params = CreateCaseNoteParams.safeParse(req.params);
   if (!params.success) {
     res.status(400).json({ error: params.error.message });
@@ -651,7 +720,16 @@ router.post("/cases/:caseId/notes", requireAuth, requireFirmUser, requirePermiss
     return;
   }
 
-  const [note] = await db
+  const [caseRow] = await r
+    .select({ id: casesTable.id })
+    .from(casesTable)
+    .where(and(eq(casesTable.id, params.data.caseId), eq(casesTable.firmId, req.firmId!)));
+  if (!caseRow) {
+    res.status(404).json({ error: "Case not found" });
+    return;
+  }
+
+  const [note] = await r
     .insert(caseNotesTable)
     .values({
       caseId: params.data.caseId,
@@ -660,7 +738,7 @@ router.post("/cases/:caseId/notes", requireAuth, requireFirmUser, requirePermiss
     })
     .returning();
 
-  const [author] = await db.select().from(usersTable).where(eq(usersTable.id, note.authorId));
+  const [author] = await r.select().from(usersTable).where(eq(usersTable.id, note.authorId));
 
   res.status(201).json({
     id: note.id,

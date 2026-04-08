@@ -56,6 +56,8 @@ import BillsDeliveredBook from "@/pages/app/reports/bills-delivered-book";
 import MatterAging from "@/pages/app/reports/matter-aging";
 import TrustAccountStatement from "@/pages/app/reports/trust-account-statement";
 import Hub from "@/pages/app/hub";
+import Communications from "@/pages/app/communications";
+import CommunicationThreadDetail from "@/pages/app/communications/thread-detail";
 import QuotationsList from "@/pages/app/quotations";
 import NewQuotation from "@/pages/app/quotations/new";
 import QuotationDetail from "@/pages/app/quotations/detail";
@@ -163,7 +165,16 @@ function AppRoutes() {
           
           <Route path="/app/roles" component={() => <Redirect to="/app/settings?tab=roles" />} />
           
-          <Route path="/app/communications" component={() => <Redirect to="/app/hub" />} />
+          <Route path="/app/communications/:threadId" component={() => (
+            <PermissionGuard module="communications" action="read">
+              <CommunicationThreadDetail />
+            </PermissionGuard>
+          )} />
+          <Route path="/app/communications" component={() => (
+            <PermissionGuard module="communications" action="read">
+              <Communications />
+            </PermissionGuard>
+          )} />
           <Route path="/app/quotations/new" component={() => (
             <PermissionGuard module="accounting" action="write">
               <NewQuotation />

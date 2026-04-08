@@ -42,6 +42,7 @@ export default function CasesList() {
         <div>
           <h1 className="text-3xl font-bold text-slate-900 tracking-tight">Cases</h1>
           <p className="text-slate-500 mt-1">Manage conveyancing cases</p>
+          <p className="text-xs text-slate-400 mt-1">Total: {response?.total ?? 0}</p>
         </div>
         <Link href="/app/cases/new">
           <Button className="bg-amber-500 hover:bg-amber-600 text-white">

@@ -12,7 +12,7 @@ import {
   platformMessageAttachmentsTable,
 } from "@workspace/db";
 import { CreateFirmBody, UpdateFirmBody, ListFirmsQueryParams, GetFirmParams, UpdateFirmParams } from "@workspace/api-zod";
-import { requireAuth, requireFounder, type AuthRequest } from "../lib/auth";
+import { requireAuth, requireFounder, writeAuditLog, type AuthRequest } from "../lib/auth";
 import bcrypt from "bcryptjs";
 import { ObjectStorageService } from "../lib/objectStorage";
 
@@ -238,6 +238,7 @@ router.post("/platform/folders", requireAuth, requireFounder, async (req: AuthRe
     .insert(systemFoldersTable)
     .values({ name: name.trim(), parentId: parentId ?? null, sortOrder: nextSort })
     .returning();
+  await writeAuditLog({ firmId: null, actorId: req.userId, actorType: req.userType, action: "platform.system_folder.create", entityType: "system_folder", entityId: folder.id, detail: `name=${folder.name} parentId=${folder.parentId ?? ""}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
   res.status(201).json(folder);
 });
 
@@ -252,6 +253,7 @@ router.patch("/platform/folders/:folderId", requireAuth, requireFounder, async (
   if (Object.keys(updates).length === 0) { res.status(400).json({ error: "No fields to update" }); return; }
   const [folder] = await db.update(systemFoldersTable).set(updates).where(eq(systemFoldersTable.id, folderId)).returning();
   if (!folder) { res.status(404).json({ error: "Folder not found" }); return; }
+  await writeAuditLog({ firmId: null, actorId: req.userId, actorType: req.userType, action: "platform.system_folder.update", entityType: "system_folder", entityId: folderId, detail: `fields=${Object.keys(updates).join(",")}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
   res.json(folder);
 });
 
@@ -272,6 +274,7 @@ router.delete("/platform/folders/:folderId", requireAuth, requireFounder, async 
     return;
   }
   await db.delete(systemFoldersTable).where(eq(systemFoldersTable.id, folderId));
+  await writeAuditLog({ firmId: null, actorId: req.userId, actorType: req.userType, action: "platform.system_folder.delete", entityType: "system_folder", entityId: folderId, detail: `name=${folder.name}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
   res.json({ success: true });
 });
 
@@ -294,6 +297,17 @@ router.post("/platform/folders/reorder", requireAuth, requireFounder, async (req
   const swapFolder = siblings[swapIdx];
   await db.update(systemFoldersTable).set({ sortOrder: swapFolder.sortOrder }).where(eq(systemFoldersTable.id, folder.id));
   await db.update(systemFoldersTable).set({ sortOrder: folder.sortOrder }).where(eq(systemFoldersTable.id, swapFolder.id));
+  await writeAuditLog({
+    firmId: null,
+    actorId: req.userId,
+    actorType: req.userType,
+    action: "platform.system_folder.reorder",
+    entityType: "system_folder",
+    entityId: folderId,
+    detail: `direction=${direction} swapWith=${swapFolder.id} parentId=${folder.parentId ?? ""}`,
+    ipAddress: req.ip,
+    userAgent: req.headers["user-agent"],
+  });
   res.json({ success: true });
 });
 
@@ -349,6 +363,7 @@ router.post("/platform/documents", requireAuth, requireFounder, async (req: Auth
       uploadedBy: req.userId!,
     })
     .returning();
+  await writeAuditLog({ firmId: doc.firmId ?? null, actorId: req.userId, actorType: req.userType, action: "platform.document.create", entityType: "platform_document", entityId: doc.id, detail: `name=${doc.name} category=${doc.category} folderId=${doc.folderId ?? ""}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
   res.status(201).json(doc);
 });
 
@@ -362,6 +377,7 @@ router.delete("/platform/documents/:docId", requireAuth, requireFounder, async (
     return;
   }
   await db.delete(platformDocumentsTable).where(eq(platformDocumentsTable.id, docId));
+  await writeAuditLog({ firmId: doc.firmId ?? null, actorId: req.userId, actorType: req.userType, action: "platform.document.delete", entityType: "platform_document", entityId: docId, detail: `name=${doc.name}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
   res.json({ success: true });
 });
 

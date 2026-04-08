@@ -4,10 +4,11 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
-import { ArrowLeft, Download, BookOpen } from "lucide-react";
+import { ArrowLeft, Download, BookOpen, Printer } from "lucide-react";
 import { useLocation } from "wouter";
-
-const API_BASE = import.meta.env.BASE_URL.replace(/\/$/, "").replace(/^\/lawcaspro/, "") + "/api";
+import { API_BASE } from "@/lib/api-base";
+import { downloadFromApi } from "@/lib/download";
+import { useToast } from "@/hooks/use-toast";
 
 const STATUS_BADGE: Record<string, string> = {
   draft: "bg-slate-100 text-slate-600",
@@ -22,11 +23,12 @@ function fmtAmt(v: unknown) { return `RM ${Number(v ?? 0).toLocaleString("en-MY"
 
 export default function BillsDeliveredBook() {
   const [, setLocation] = useLocation();
+  const { toast } = useToast();
   const [from, setFrom] = useState("");
   const [to, setTo] = useState("");
   const [applied, setApplied] = useState({ from: "", to: "" });
 
-  const { data, isLoading, refetch } = useQuery({
+  const { data, isLoading, isError, error } = useQuery({
     queryKey: ["bills-delivered-book", applied],
     queryFn: async () => {
       const params = new URLSearchParams();
@@ -42,6 +44,20 @@ export default function BillsDeliveredBook() {
   const totals: any = data?.totals ?? {};
 
   function printReport() { window.print(); }
+  async function downloadCsv() {
+    try {
+      const params = new URLSearchParams();
+      if (applied.from) params.set("from", applied.from);
+      if (applied.to) params.set("to", applied.to);
+      params.set("format", "csv");
+      await downloadFromApi(
+        `/reports/bills-delivered-book?${params.toString()}`,
+        `bills-delivered-book${applied.from ? `_${applied.from}` : ""}${applied.to ? `_${applied.to}` : ""}.csv`
+      );
+    } catch (e: any) {
+      toast({ title: "Download failed", description: e.message, variant: "destructive" });
+    }
+  }
 
   return (
     <div className="space-y-6">
@@ -76,9 +92,14 @@ export default function BillsDeliveredBook() {
               </Button>
             )}
             <div className="ml-auto">
-              <Button size="sm" variant="outline" className="h-8" onClick={printReport}>
-                <Download className="h-3.5 w-3.5 mr-1" /> Print
-              </Button>
+              <div className="flex gap-2">
+                <Button size="sm" variant="outline" className="h-8" onClick={() => downloadCsv()}>
+                  <Download className="h-3.5 w-3.5 mr-1" /> Download CSV
+                </Button>
+                <Button size="sm" variant="outline" className="h-8" onClick={printReport}>
+                  <Printer className="h-3.5 w-3.5 mr-1" /> Print
+                </Button>
+              </div>
             </div>
           </div>
         </CardContent>
@@ -111,6 +132,8 @@ export default function BillsDeliveredBook() {
         </CardHeader>
         {isLoading ? (
           <CardContent className="py-8 text-center text-sm text-slate-400">Loading...</CardContent>
+        ) : isError ? (
+          <CardContent className="py-8 text-center text-sm text-red-600 break-words">{String((error as any)?.message ?? error)}</CardContent>
         ) : invoices.length === 0 ? (
           <CardContent className="py-12 text-center text-sm text-slate-400">No bills found for this period.</CardContent>
         ) : (

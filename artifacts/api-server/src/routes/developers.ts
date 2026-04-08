@@ -283,7 +283,16 @@ router.delete("/developers/:developerId", requireAuth, requireFirmUser, requireP
     return;
   }
 
-  const [dev] = await db.delete(developersTable).where(eq(developersTable.id, params.data.developerId)).returning();
+  const r = req.rlsDb;
+  if (!r) {
+    res.status(500).json({ error: "Missing tenant database context" });
+    return;
+  }
+
+  const [dev] = await r
+    .delete(developersTable)
+    .where(and(eq(developersTable.id, params.data.developerId), eq(developersTable.firmId, req.firmId!)))
+    .returning();
   if (!dev || dev.firmId !== req.firmId) {
     res.status(404).json({ error: "Developer not found" });
     return;

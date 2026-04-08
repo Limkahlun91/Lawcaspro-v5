@@ -1,4 +1,4 @@
-import { useParams, useLocation } from "wouter";
+import { useParams, useLocation, useSearch } from "wouter";
 import { 
   useGetCase, getGetCaseQueryKey, 
   useGetCaseWorkflow, getGetCaseWorkflowQueryKey, 
@@ -12,7 +12,7 @@ import { ArrowLeft, CheckCircle2, Clock, User, Building2, MapPin, Tag, Receipt }
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useQueryClient } from "@tanstack/react-query";
 import { useToast } from "@/hooks/use-toast";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Textarea } from "@/components/ui/textarea";
 import CaseDocumentsTab from "./components/CaseDocumentsTab";
 import CaseBillingTab from "./components/CaseBillingTab";
@@ -25,6 +25,7 @@ export default function CaseDetail() {
   const { id } = useParams<{ id: string }>();
   const caseId = parseInt(id || "0", 10);
   const [, setLocation] = useLocation();
+  const searchString = useSearch();
   const queryClient = useQueryClient();
   const { toast } = useToast();
 
@@ -46,6 +47,16 @@ export default function CaseDetail() {
   const [noteContent, setNoteContent] = useState("");
   const [activeStepId, setActiveStepId] = useState<number | null>(null);
   const [stepNote, setStepNote] = useState("");
+  const params = new URLSearchParams(searchString);
+  const tabFromUrl = params.get("tab") ?? "overview";
+  const threadIdFromUrl = params.get("threadId");
+  const initialThreadIdRaw = threadIdFromUrl ? parseInt(threadIdFromUrl, 10) : NaN;
+  const initialThreadId = Number.isNaN(initialThreadIdRaw) ? null : initialThreadIdRaw;
+  const [activeTab, setActiveTab] = useState(tabFromUrl);
+
+  useEffect(() => {
+    setActiveTab(tabFromUrl);
+  }, [tabFromUrl]);
 
   if (isLoadingCase) return <div>Loading case details...</div>;
   if (!caseInfo) return <div>Case not found</div>;
@@ -125,7 +136,7 @@ export default function CaseDetail() {
         </Button>
       </div>
 
-      <Tabs defaultValue="overview" className="w-full">
+      <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">
         <TabsList className="grid w-full grid-cols-9 mb-6 bg-slate-100 p-1">
           <TabsTrigger value="overview">Overview</TabsTrigger>
           <TabsTrigger value="workflow">Workflow</TabsTrigger>
@@ -324,7 +335,7 @@ export default function CaseDetail() {
         </TabsContent>
 
         <TabsContent value="communications">
-          <CaseCommunicationsTab caseId={caseId} />
+          <CaseCommunicationsTab caseId={caseId} initialThreadId={initialThreadId} />
         </TabsContent>
 
         <TabsContent value="tasks">

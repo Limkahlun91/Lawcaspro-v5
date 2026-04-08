@@ -178,9 +178,117 @@ router.post("/firm-settings/bank-accounts", requireAuth, requireFirmUser, requir
   }
 });
 
+router.patch("/firm-settings/bank-accounts/:id", requireAuth, requireFirmUser, requirePermission("settings", "update"), async (req, res): Promise<void> => {
+  try {
+    const r = (req as AuthRequest).rlsDb;
+    if (!r) {
+      (req as any).log?.error?.({ route: "PATCH /api/firm-settings/bank-accounts/:id", userId: (req as AuthRequest).userId, firmId: (req as AuthRequest).firmId }, "missing req.rlsDb");
+      res.status(500).json({ error: "Internal Server Error" });
+      return;
+    }
+    const firmId = (req as AuthRequest).firmId!;
+    const idStr = one(req.params.id);
+    const id = idStr ? parseInt(idStr, 10) : NaN;
+
+    if (isNaN(id)) {
+      res.status(400).json({ error: "Invalid bank account ID" });
+      return;
+    }
+
+    const { bankName, accountNo, accountType, isDefault } = req.body as {
+      bankName?: string;
+      accountNo?: string;
+      accountType?: string;
+      isDefault?: boolean;
+    };
+
+    const updates: Record<string, unknown> = {};
+    if (bankName !== undefined) updates.bankName = bankName;
+    if (accountNo !== undefined) updates.accountNo = accountNo;
+    if (accountType !== undefined) {
+      if (!VALID_ACCOUNT_TYPES.includes(accountType)) {
+        res.status(400).json({ error: "Account type must be 'office' or 'client'" });
+        return;
+      }
+      updates.accountType = accountType;
+    }
+    if (isDefault !== undefined) updates.isDefault = !!isDefault;
+
+    if (Object.keys(updates).length === 0) {
+      res.status(400).json({ error: "No fields to update" });
+      return;
+    }
+
+    const [existing] = await r
+      .select()
+      .from(firmBankAccountsTable)
+      .where(and(eq(firmBankAccountsTable.id, id), eq(firmBankAccountsTable.firmId, firmId)));
+    if (!existing) {
+      res.status(404).json({ error: "Bank account not found" });
+      return;
+    }
+
+    if (updates.isDefault === true) {
+      await r
+        .update(firmBankAccountsTable)
+        .set({ isDefault: false })
+        .where(and(eq(firmBankAccountsTable.firmId, firmId), sql`${firmBankAccountsTable.id} <> ${id}`));
+    }
+
+    const [updated] = await r
+      .update(firmBankAccountsTable)
+      .set(updates)
+      .where(and(eq(firmBankAccountsTable.id, id), eq(firmBankAccountsTable.firmId, firmId)))
+      .returning();
+
+    if (!updated) {
+      res.status(404).json({ error: "Bank account not found" });
+      return;
+    }
+
+    res.json({
+      id: updated.id,
+      bankName: updated.bankName,
+      accountNo: updated.accountNo,
+      accountType: updated.accountType,
+      isDefault: updated.isDefault,
+    });
+    await writeAuditLog({ firmId, actorId: (req as AuthRequest).userId, actorType: (req as AuthRequest).userType, action: "settings.bank_account.update", entityType: "firm_bank_account", entityId: updated.id, detail: `fields=${Object.keys(updates).join(",")}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+    return;
+  } catch (err: any) {
+    const pg = (() => {
+      let cur: any = err;
+      for (let i = 0; i < 6 && cur; i++) {
+        if (
+          typeof cur?.code === "string"
+          || typeof cur?.message === "string"
+          || typeof cur?.detail === "string"
+          || typeof cur?.constraint === "string"
+        ) {
+          const code = typeof cur.code === "string" ? cur.code : undefined;
+          const message = typeof cur.message === "string" ? cur.message : undefined;
+          const detail = typeof cur.detail === "string" ? cur.detail : undefined;
+          const constraint = typeof cur.constraint === "string" ? cur.constraint : undefined;
+          return { code, message, detail, constraint };
+        }
+        cur = cur?.cause;
+      }
+      return {};
+    })();
+    (req as any).log?.error?.({ err, pg }, "firm_settings.bank_accounts.update failed");
+    res.status(500).json({ error: "Internal Server Error" });
+    return;
+  }
+});
+
 router.delete("/firm-settings/bank-accounts/:id", requireAuth, requireFirmUser, requirePermission("settings", "update"), async (req, res): Promise<void> => {
   try {
-    const r = rdb(req as AuthRequest);
+    const r = (req as AuthRequest).rlsDb;
+    if (!r) {
+      (req as any).log?.error?.({ route: "DELETE /api/firm-settings/bank-accounts/:id", userId: (req as AuthRequest).userId, firmId: (req as AuthRequest).firmId }, "missing req.rlsDb");
+      res.status(500).json({ error: "Internal Server Error" });
+      return;
+    }
     const firmId = (req as AuthRequest).firmId!;
     const idStr = one(req.params.id);
     const id = idStr ? parseInt(idStr, 10) : NaN;
@@ -195,7 +303,7 @@ router.delete("/firm-settings/bank-accounts/:id", requireAuth, requireFirmUser, 
 
     if (!existing) { res.status(404).json({ error: "Bank account not found" }); return; }
 
-    await r.delete(firmBankAccountsTable).where(eq(firmBankAccountsTable.id, id));
+    await r.delete(firmBankAccountsTable).where(and(eq(firmBankAccountsTable.id, id), eq(firmBankAccountsTable.firmId, firmId)));
     res.json({ success: true });
     await writeAuditLog({ firmId, actorId: (req as AuthRequest).userId, actorType: (req as AuthRequest).userType, action: "settings.bank_account.delete", entityType: "firm_bank_account", entityId: id, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
     return;

@@ -38,7 +38,7 @@ interface Message {
   created_at: string;
 }
 
-export default function CaseCommunicationsTab({ caseId }: { caseId: number }) {
+export default function CaseCommunicationsTab({ caseId, initialThreadId }: { caseId: number; initialThreadId?: number | null }) {
   const { toast } = useToast();
   const qc = useQueryClient();
   const [createOpen, setCreateOpen] = useState(false);
@@ -53,6 +53,14 @@ export default function CaseCommunicationsTab({ caseId }: { caseId: number }) {
   });
 
   const activeThread = threads.find(t => t.id === activeThreadId);
+
+  useEffect(() => {
+    if (!initialThreadId) return;
+    if (activeThreadId) return;
+    if (threads.some((t) => t.id === initialThreadId)) {
+      setActiveThreadId(initialThreadId);
+    }
+  }, [initialThreadId, threads, activeThreadId]);
 
   const { data: messages = [], isLoading: messagesLoading } = useQuery<Message[]>({
     queryKey: ["thread-messages", activeThreadId],

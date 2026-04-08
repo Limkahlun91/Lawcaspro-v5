@@ -1,14 +1,22 @@
 import { useParams, useLocation } from "wouter";
 import { Link } from "wouter";
-import { useGetProject, getGetProjectQueryKey } from "@workspace/api-client-react";
+import { useGetProject, getGetProjectQueryKey, getListProjectsQueryKey } from "@workspace/api-client-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { ArrowLeft, Building2, MapPin, Tag, Pencil } from "lucide-react";
+import { ArrowLeft, Building2, MapPin, Tag, Pencil, Trash2 } from "lucide-react";
+import { useToast } from "@/hooks/use-toast";
+import { useQueryClient } from "@tanstack/react-query";
+import { useState } from "react";
+
+const API_BASE = import.meta.env.BASE_URL.replace(/\/$/, "").replace(/^\/lawcaspro/, "") + "/api";
 
 export default function ProjectDetail() {
   const { id } = useParams<{ id: string }>();
   const projectId = parseInt(id || "0", 10);
   const [, setLocation] = useLocation();
+  const { toast } = useToast();
+  const qc = useQueryClient();
+  const [deleting, setDeleting] = useState(false);
 
   const { data: project, isLoading } = useGetProject(projectId, {
     query: {
@@ -19,6 +27,36 @@ export default function ProjectDetail() {
 
   if (isLoading) return <div>Loading project details...</div>;
   if (!project) return <div>Project not found</div>;
+
+  const handleDelete = async () => {
+    if (!projectId || deleting) return;
+    setDeleting(true);
+    try {
+      const res = await fetch(`${API_BASE}/projects/${projectId}`, {
+        method: "DELETE",
+        credentials: "include",
+      });
+      if (!(res.status === 204 || res.ok)) {
+        const raw = await res.text();
+        let message = "Failed to delete";
+        try {
+          const parsed = JSON.parse(raw) as { error?: string };
+          if (parsed?.error) message = parsed.error;
+        } catch {
+          if (raw.trim()) message = raw;
+        }
+        throw new Error(message);
+      }
+      qc.invalidateQueries({ queryKey: getListProjectsQueryKey() });
+      qc.invalidateQueries({ queryKey: getGetProjectQueryKey(projectId) });
+      toast({ title: "Project deleted" });
+      setLocation("/app/projects");
+    } catch (err: any) {
+      toast({ title: "Error", description: err.message, variant: "destructive" });
+    } finally {
+      setDeleting(false);
+    }
+  };
 
   const renderExtraFields = () => {
     if (!project.extraFields) return null;
@@ -52,12 +90,18 @@ export default function ProjectDetail() {
             <p className="text-slate-500 mt-1">Developer: {project.developerName}</p>
           </div>
         </div>
-        <Link href={`/app/projects/${projectId}/edit`}>
-          <Button variant="outline" className="gap-2">
-            <Pencil className="w-4 h-4" />
-            Edit Project
+        <div className="flex gap-2">
+          <Link href={`/app/projects/${projectId}/edit`}>
+            <Button variant="outline" className="gap-2">
+              <Pencil className="w-4 h-4" />
+              Edit Project
+            </Button>
+          </Link>
+          <Button variant="destructive" onClick={handleDelete} disabled={deleting} className="gap-2">
+            <Trash2 className="w-4 h-4" />
+            {deleting ? "Deleting..." : "Delete"}
           </Button>
-        </Link>
+        </div>
       </div>
 
       <div className="grid grid-cols-1 gap-6">

@@ -1,18 +1,15 @@
-function normalizeOrigin(origin: string): string {
-  return origin.replace(/\/+$/, "");
+function basePathWithoutLawcaspro(): string {
+  return import.meta.env.BASE_URL.replace(/\/$/, "").replace(/^\/lawcaspro/, "");
+}
+
+export const API_BASE = `${basePathWithoutLawcaspro()}/api`;
+
+export function apiUrl(path: string): string {
+  const p = path.startsWith("/") ? path : `/${path}`;
+  return `${basePathWithoutLawcaspro()}${p}`;
 }
 
 export function getApiOrigin(): string | null {
-  const raw = import.meta.env.VITE_API_BASE_URL;
-  if (typeof raw !== "string") return null;
-  const trimmed = normalizeOrigin(raw.trim());
-  return trimmed === "" ? null : trimmed;
+  if (typeof window === "undefined") return null;
+  return `${window.location.origin}${basePathWithoutLawcaspro()}`;
 }
-
-export function apiUrl(path: string): string {
-  const origin = getApiOrigin();
-  if (!origin) return path;
-  if (!path.startsWith("/")) return `${origin}/${path}`;
-  return `${origin}${path}`;
-}
-

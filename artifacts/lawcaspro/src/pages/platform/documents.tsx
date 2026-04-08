@@ -81,6 +81,7 @@ function FolderTreeItem({
   onToggleDisable,
   onReorder,
   onAddSub,
+  onDelete,
   depth = 0,
 }: {
   folder: SystemFolder;
@@ -91,6 +92,7 @@ function FolderTreeItem({
   onToggleDisable: (folder: SystemFolder) => void;
   onReorder: (folderId: number, direction: "up" | "down") => void;
   onAddSub: (parentId: number) => void;
+  onDelete: (folder: SystemFolder) => void;
   depth?: number;
 }) {
   const children = folders
@@ -148,6 +150,9 @@ function FolderTreeItem({
           <button onClick={e => { e.stopPropagation(); onAddSub(folder.id); }} className="p-1 hover:bg-slate-200 rounded" title="Add subfolder">
             <FolderPlus className="w-3.5 h-3.5 text-slate-400" />
           </button>
+          <button onClick={e => { e.stopPropagation(); onDelete(folder); }} className="p-1 hover:bg-slate-200 rounded" title="Delete">
+            <Trash2 className="w-3.5 h-3.5 text-slate-400" />
+          </button>
         </div>
       </div>
       {expanded && children.map(child => (
@@ -161,6 +166,7 @@ function FolderTreeItem({
           onToggleDisable={onToggleDisable}
           onReorder={onReorder}
           onAddSub={onAddSub}
+          onDelete={onDelete}
           depth={depth + 1}
         />
       ))}
@@ -254,17 +260,22 @@ export default function PlatformDocuments() {
         body: JSON.stringify({ name, parentId }),
         credentials: "include",
       });
-      if (!res.ok) throw new Error("Failed to create folder");
-      return res.json();
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(body.error || "Failed to create folder");
+      return body as SystemFolder;
     },
-    onSuccess: () => {
+    onSuccess: (folder) => {
+      queryClient.setQueryData<SystemFolder[]>(["system-folders"], (prev) => {
+        const list = Array.isArray(prev) ? prev : [];
+        return [...list.filter((f) => f.id !== folder.id), folder];
+      });
       queryClient.invalidateQueries({ queryKey: ["system-folders"] });
       toast({ title: "Folder created" });
       setShowNewFolder(false);
       setNewFolderName("");
       setNewFolderParentId(null);
     },
-    onError: () => toast({ title: "Failed to create folder", variant: "destructive" }),
+    onError: (e: any) => toast({ title: "Failed to create folder", description: e.message, variant: "destructive" }),
   });
 
   const updateFolderMutation = useMutation({
@@ -275,16 +286,21 @@ export default function PlatformDocuments() {
         body: JSON.stringify({ name, isDisabled }),
         credentials: "include",
       });
-      if (!res.ok) throw new Error("Failed to update folder");
-      return res.json();
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(body.error || "Failed to update folder");
+      return body as SystemFolder;
     },
-    onSuccess: () => {
+    onSuccess: (folder) => {
+      queryClient.setQueryData<SystemFolder[]>(["system-folders"], (prev) => {
+        const list = Array.isArray(prev) ? prev : [];
+        return list.map((f) => (f.id === folder.id ? folder : f));
+      });
       queryClient.invalidateQueries({ queryKey: ["system-folders"] });
       toast({ title: "Folder updated" });
       setShowEditFolder(false);
       setEditingFolder(null);
     },
-    onError: () => toast({ title: "Failed to update folder", variant: "destructive" }),
+    onError: (e: any) => toast({ title: "Failed to update folder", description: e.message, variant: "destructive" }),
   });
 
   const reorderMutation = useMutation({
@@ -295,9 +311,53 @@ export default function PlatformDocuments() {
         body: JSON.stringify({ folderId, direction }),
         credentials: "include",
       });
-      if (!res.ok) throw new Error("Failed to reorder");
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(body.error || "Failed to reorder");
+      return { folderId, direction };
     },
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["system-folders"] }),
+    onMutate: async ({ folderId, direction }) => {
+      await queryClient.cancelQueries({ queryKey: ["system-folders"] });
+      const prev = queryClient.getQueryData<SystemFolder[]>(["system-folders"]);
+      queryClient.setQueryData<SystemFolder[]>(["system-folders"], (cur) => {
+        const list = Array.isArray(cur) ? [...cur] : [];
+        const target = list.find((f) => f.id === folderId);
+        if (!target) return list;
+        const siblings = list
+          .filter((f) => f.parentId === target.parentId)
+          .sort((a, b) => a.sortOrder - b.sortOrder);
+        const idx = siblings.findIndex((s) => s.id === folderId);
+        const swapIdx = direction === "up" ? idx - 1 : idx + 1;
+        if (swapIdx < 0 || swapIdx >= siblings.length) return list;
+        const swap = siblings[swapIdx];
+        return list.map((f) => {
+          if (f.id === target.id) return { ...f, sortOrder: swap.sortOrder };
+          if (f.id === swap.id) return { ...f, sortOrder: target.sortOrder };
+          return f;
+        });
+      });
+      return { prev };
+    },
+    onError: (e: any, _vars, ctx) => {
+      if (ctx?.prev) queryClient.setQueryData(["system-folders"], ctx.prev);
+      toast({ title: "Failed to reorder", description: e.message, variant: "destructive" });
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["system-folders"] });
+    },
+  });
+
+  const deleteFolderMutation = useMutation({
+    mutationFn: async (folderId: number) => {
+      const res = await fetch(`${API_BASE}/platform/folders/${folderId}`, { method: "DELETE", credentials: "include" });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(body.error || "Failed to delete folder");
+    },
+    onSuccess: (_: any, folderId: number) => {
+      queryClient.invalidateQueries({ queryKey: ["system-folders"] });
+      if (selectedFolderId === folderId) setSelectedFolderId(null);
+      toast({ title: "Folder deleted" });
+    },
+    onError: (e: any) => toast({ title: "Failed to delete folder", description: e.message, variant: "destructive" }),
   });
 
   const deleteMutation = useMutation({
@@ -309,10 +369,10 @@ export default function PlatformDocuments() {
       if (!res.ok) throw new Error("Failed to delete");
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["platform-documents"] });
+      queryClient.invalidateQueries({ queryKey: ["platform-documents"], exact: false });
       toast({ title: "Document deleted" });
     },
-    onError: () => toast({ title: "Could not delete document", variant: "destructive" }),
+    onError: (e: any) => toast({ title: "Could not delete document", description: e.message, variant: "destructive" }),
   });
 
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -365,7 +425,7 @@ export default function PlatformDocuments() {
         throw new Error(err.error || "Failed to save document");
       }
 
-      queryClient.invalidateQueries({ queryKey: ["platform-documents"] });
+      queryClient.invalidateQueries({ queryKey: ["platform-documents"], exact: false });
       toast({ title: "Document uploaded", description: `${form.name} has been added.` });
       setShowUpload(false);
       setForm({ name: "", description: "", category: "general" });
@@ -484,6 +544,7 @@ export default function PlatformDocuments() {
                     onToggleDisable={handleToggleDisable}
                     onReorder={(folderId, direction) => reorderMutation.mutate({ folderId, direction })}
                     onAddSub={handleStartAddSub}
+                    onDelete={(f) => { if (confirm(`Delete folder "${f.name}"?`)) deleteFolderMutation.mutate(f.id); }}
                   />
                 ))}
               </div>

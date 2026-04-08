@@ -255,7 +255,16 @@ router.delete("/projects/:projectId", requireAuth, requireFirmUser, requirePermi
     return;
   }
 
-  const [proj] = await db.delete(projectsTable).where(eq(projectsTable.id, params.data.projectId)).returning();
+  const r = req.rlsDb;
+  if (!r) {
+    res.status(500).json({ error: "Missing tenant database context" });
+    return;
+  }
+
+  const [proj] = await r
+    .delete(projectsTable)
+    .where(and(eq(projectsTable.id, params.data.projectId), eq(projectsTable.firmId, req.firmId!)))
+    .returning();
   if (!proj || proj.firmId !== req.firmId) {
     res.status(404).json({ error: "Project not found" });
     return;

@@ -3,20 +3,22 @@ import { useQuery } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { ArrowLeft, Landmark } from "lucide-react";
+import { ArrowLeft, Landmark, Download } from "lucide-react";
 import { useLocation } from "wouter";
-
-const API_BASE = import.meta.env.BASE_URL.replace(/\/$/, "").replace(/^\/lawcaspro/, "") + "/api";
+import { API_BASE } from "@/lib/api-base";
+import { downloadFromApi } from "@/lib/download";
+import { useToast } from "@/hooks/use-toast";
 
 function fmtDate(d: string | null) { return d ? new Date(d).toLocaleDateString("en-MY") : "—"; }
 function fmtAmt(v: unknown) { return Number(v ?? 0).toLocaleString("en-MY", { minimumFractionDigits: 2 }); }
 
 export default function TrustAccountStatement() {
   const [, setLocation] = useLocation();
+  const { toast } = useToast();
   const [caseId, setCaseId] = useState("");
   const [applied, setApplied] = useState("");
 
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, isError, error } = useQuery({
     queryKey: ["trust-account-statement", applied],
     queryFn: async () => {
       const params = applied ? `?caseId=${applied}` : "";
@@ -45,6 +47,23 @@ export default function TrustAccountStatement() {
         <div>
           <h1 className="text-xl font-bold text-[#0f1729]">Trust Account Statement</h1>
           <p className="text-xs text-slate-500">Client trust money movements — Solicitors' Accounts Rules 1990 r.7</p>
+        </div>
+        <div className="ml-auto">
+          <Button
+            size="sm"
+            variant="outline"
+            className="h-8"
+            onClick={() => {
+              const params = new URLSearchParams();
+              if (applied) params.set("caseId", applied);
+              params.set("format", "csv");
+              downloadFromApi(`/reports/trust-account-statement?${params.toString()}`, `trust-account-statement${applied ? `_${applied}` : ""}.csv`).catch((e: any) => {
+                toast({ title: "Download failed", description: e.message, variant: "destructive" });
+              });
+            }}
+          >
+            <Download className="h-3.5 w-3.5 mr-1" /> Download CSV
+          </Button>
         </div>
       </div>
 
@@ -84,6 +103,8 @@ export default function TrustAccountStatement() {
         </CardHeader>
         {isLoading ? (
           <CardContent className="py-8 text-center text-sm text-slate-400">Loading...</CardContent>
+        ) : isError ? (
+          <CardContent className="py-8 text-center text-sm text-red-600 break-words">{String((error as any)?.message ?? error)}</CardContent>
         ) : entries.length === 0 ? (
           <CardContent className="py-12 text-center text-sm text-slate-400">No trust movements found.</CardContent>
         ) : (

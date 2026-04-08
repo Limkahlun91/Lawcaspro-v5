@@ -3,7 +3,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { useToast } from "@/hooks/use-toast";
-import { FileText, Trash2, Upload, Info } from "lucide-react";
+import { FileText, Trash2, Upload, Info, Download } from "lucide-react";
 import {
   Dialog,
   DialogContent,
@@ -23,6 +23,7 @@ interface DocumentTemplate {
   document_type: string;
   description: string | null;
   file_name: string;
+  object_path: string;
   created_at: string;
 }
 
@@ -79,6 +80,8 @@ export default function DocumentTemplates() {
   const uploadRef = useRef<HTMLInputElement>(null);
   const [uploadDialogOpen, setUploadDialogOpen] = useState(false);
   const [infoOpen, setInfoOpen] = useState(false);
+  const [detailOpen, setDetailOpen] = useState(false);
+  const [activeTemplate, setActiveTemplate] = useState<DocumentTemplate | null>(null);
   const [templateName, setTemplateName] = useState("");
   const [templateType, setTemplateType] = useState("other");
   const [templateDescription, setTemplateDescription] = useState("");
@@ -185,6 +188,10 @@ export default function DocumentTemplates() {
               <div
                 key={t.id}
                 className="flex items-center gap-3 p-4 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 transition-colors"
+                role="button"
+                tabIndex={0}
+                onClick={() => { setActiveTemplate(t); setDetailOpen(true); }}
+                onKeyDown={(e) => { if (e.key === "Enter") { setActiveTemplate(t); setDetailOpen(true); } }}
               >
                 <FileText className="w-5 h-5 text-amber-500 flex-shrink-0" />
                 <div className="flex-1 min-w-0">
@@ -206,7 +213,7 @@ export default function DocumentTemplates() {
                   size="icon"
                   variant="ghost"
                   className="h-8 w-8 text-slate-400 hover:text-red-600"
-                  onClick={() => deleteMutation.mutate(t.id)}
+                  onClick={(e) => { e.stopPropagation(); deleteMutation.mutate(t.id); }}
                 >
                   <Trash2 className="w-4 h-4" />
                 </Button>
@@ -215,6 +222,74 @@ export default function DocumentTemplates() {
           </div>
         )}
       </CardContent>
+
+      <Dialog open={detailOpen} onOpenChange={setDetailOpen}>
+        <DialogContent className="sm:max-w-lg">
+          <DialogHeader><DialogTitle>Template Details</DialogTitle></DialogHeader>
+          {activeTemplate && (
+            <div className="space-y-3">
+              <div>
+                <div className="text-xs text-slate-500">Name</div>
+                <div className="text-sm font-medium text-slate-900">{activeTemplate.name}</div>
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <div className="text-xs text-slate-500">Type</div>
+                  <div className="text-sm text-slate-900">{DOCUMENT_TYPE_LABELS[activeTemplate.document_type] ?? activeTemplate.document_type}</div>
+                </div>
+                <div>
+                  <div className="text-xs text-slate-500">Uploaded</div>
+                  <div className="text-sm text-slate-900">{new Date(activeTemplate.created_at).toLocaleString("en-MY")}</div>
+                </div>
+              </div>
+              <div>
+                <div className="text-xs text-slate-500">File</div>
+                <div className="text-sm text-slate-700 break-words">{activeTemplate.file_name}</div>
+              </div>
+              {activeTemplate.description ? (
+                <div>
+                  <div className="text-xs text-slate-500">Description</div>
+                  <div className="text-sm text-slate-700 whitespace-pre-wrap">{activeTemplate.description}</div>
+                </div>
+              ) : null}
+              <div className="pt-2 flex gap-2 justify-end">
+                <Button
+                  variant="outline"
+                  onClick={async () => {
+                    try {
+                      const pathPart = activeTemplate.object_path.replace(/^\/objects\//, "");
+                      const res = await fetch(`${API_BASE}/storage/objects/${pathPart}`, { credentials: "include" });
+                      if (!res.ok) throw new Error("Download failed");
+                      const blob = await res.blob();
+                      const url = URL.createObjectURL(blob);
+                      const a = document.createElement("a");
+                      a.href = url;
+                      a.download = activeTemplate.file_name;
+                      a.click();
+                      URL.revokeObjectURL(url);
+                    } catch (e: any) {
+                      toast({ title: "Download failed", description: e.message, variant: "destructive" });
+                    }
+                  }}
+                  className="gap-1.5"
+                >
+                  <Download className="w-4 h-4" /> Download
+                </Button>
+                <Button
+                  variant="destructive"
+                  onClick={() => {
+                    deleteMutation.mutate(activeTemplate.id);
+                    setDetailOpen(false);
+                  }}
+                  className="gap-1.5"
+                >
+                  <Trash2 className="w-4 h-4" /> Delete
+                </Button>
+              </div>
+            </div>
+          )}
+        </DialogContent>
+      </Dialog>
 
       {/* Upload Dialog */}
       <Dialog open={uploadDialogOpen} onOpenChange={setUploadDialogOpen}>

@@ -1,11 +1,12 @@
 import { useState, useEffect } from "react";
-import { useListUsers, useListRoles } from "@workspace/api-client-react";
+import { getListUsersQueryKey, useDeleteUser, useListRoles, useListUsers, useUpdateUser } from "@workspace/api-client-react";
 import { useQuery, useQueryClient, useMutation } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Plus, Search, Save, Trash2, Building2, ShieldCheck, ShieldOff, Monitor, LogOut } from "lucide-react";
+import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Plus, Search, Save, Trash2, Building2, ShieldCheck, ShieldOff, Monitor, LogOut, Pencil, X } from "lucide-react";
 import { Link, useSearch } from "wouter";
 import { cn } from "@/lib/utils";
 import { useToast } from "@/hooks/use-toast";
@@ -298,6 +299,10 @@ function FirmInfoTab() {
   const [newBankName, setNewBankName] = useState("");
   const [newAccountNo, setNewAccountNo] = useState("");
   const [newAccountType, setNewAccountType] = useState("office");
+  const [editingBankId, setEditingBankId] = useState<number | null>(null);
+  const [editBankName, setEditBankName] = useState("");
+  const [editAccountNo, setEditAccountNo] = useState("");
+  const [editAccountType, setEditAccountType] = useState("office");
 
   useEffect(() => {
     if (settings) {
@@ -354,6 +359,25 @@ function FirmInfoTab() {
       toast({ title: "Bank account removed" });
     },
     onError: () => toast({ title: "Failed to remove bank account", variant: "destructive" }),
+  });
+
+  const updateBankMutation = useMutation({
+    mutationFn: ({ id, data }: { id: number; data: any }) => apiFetch(`/firm-settings/bank-accounts/${id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(data),
+    }),
+    onSuccess: (updated: any) => {
+      queryClient.setQueryData(["firm-settings"], (prev: any) => {
+        if (!prev) return prev;
+        const existing = Array.isArray(prev.bankAccounts) ? prev.bankAccounts : [];
+        return { ...prev, bankAccounts: existing.map((a: any) => (a?.id === updated?.id ? { ...a, ...updated } : a)) };
+      });
+      queryClient.invalidateQueries({ queryKey: ["firm-settings"] });
+      setEditingBankId(null);
+      toast({ title: "Bank account updated" });
+    },
+    onError: (err: any) => toast({ title: "Failed to update bank account", description: String(err?.message ?? err), variant: "destructive" }),
   });
 
   const handleSaveInfo = () => {
@@ -433,26 +457,103 @@ function FirmInfoTab() {
                   <th className="text-left px-4 py-2 font-medium text-slate-600">Bank Name</th>
                   <th className="text-left px-4 py-2 font-medium text-slate-600">Account No.</th>
                   <th className="text-left px-4 py-2 font-medium text-slate-600">Type</th>
-                  <th className="w-10"></th>
+                  <th className="w-24"></th>
                 </tr>
               </thead>
               <tbody>
                 {settings.bankAccounts.map((acc: any) => (
                   <tr key={acc.id} className="border-b border-slate-100">
-                    <td className="px-4 py-3 font-medium">{acc.bankName}</td>
-                    <td className="px-4 py-3 text-slate-600">{acc.accountNo}</td>
-                    <td className="px-4 py-3">
-                      <span className={`inline-block px-2 py-0.5 rounded text-xs font-medium capitalize ${
-                        acc.accountType === "client" ? "bg-blue-100 text-blue-700" : "bg-green-100 text-green-700"
-                      }`}>
-                        {acc.accountType}
-                      </span>
-                    </td>
-                    <td className="px-4 py-3">
-                      <Button variant="ghost" size="sm" disabled={!canUpdate} onClick={() => deleteBankMutation.mutate(acc.id)} className="text-red-500 h-7 w-7 p-0">
-                        <Trash2 className="w-3.5 h-3.5" />
-                      </Button>
-                    </td>
+                    {editingBankId === acc.id ? (
+                      <>
+                        <td className="px-4 py-2">
+                          <Input value={editBankName} onChange={(e) => setEditBankName(e.target.value)} disabled={!canUpdate} />
+                        </td>
+                        <td className="px-4 py-2">
+                          <Input value={editAccountNo} onChange={(e) => setEditAccountNo(e.target.value)} disabled={!canUpdate} />
+                        </td>
+                        <td className="px-4 py-2">
+                          <select
+                            value={editAccountType}
+                            onChange={(e) => setEditAccountType(e.target.value)}
+                            disabled={!canUpdate}
+                            className="w-full h-9 border rounded-md px-3 text-sm bg-white"
+                          >
+                            <option value="office">Office</option>
+                            <option value="client">Client</option>
+                          </select>
+                        </td>
+                        <td className="px-4 py-2">
+                          <div className="flex justify-end gap-1">
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              disabled={!canUpdate || updateBankMutation.isPending}
+                              onClick={() => {
+                                if (!editBankName.trim() || !editAccountNo.trim()) {
+                                  toast({ title: "Bank name and account number are required", variant: "destructive" });
+                                  return;
+                                }
+                                updateBankMutation.mutate({
+                                  id: acc.id,
+                                  data: { bankName: editBankName, accountNo: editAccountNo, accountType: editAccountType },
+                                });
+                              }}
+                              className="h-7 w-7 p-0"
+                            >
+                              <Save className="w-3.5 h-3.5" />
+                            </Button>
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              disabled={!canUpdate || updateBankMutation.isPending}
+                              onClick={() => setEditingBankId(null)}
+                              className="h-7 w-7 p-0"
+                            >
+                              <X className="w-3.5 h-3.5" />
+                            </Button>
+                          </div>
+                        </td>
+                      </>
+                    ) : (
+                      <>
+                        <td className="px-4 py-3 font-medium">{acc.bankName}</td>
+                        <td className="px-4 py-3 text-slate-600">{acc.accountNo}</td>
+                        <td className="px-4 py-3">
+                          <span className={`inline-block px-2 py-0.5 rounded text-xs font-medium capitalize ${
+                            acc.accountType === "client" ? "bg-blue-100 text-blue-700" : "bg-green-100 text-green-700"
+                          }`}>
+                            {acc.accountType}
+                          </span>
+                        </td>
+                        <td className="px-4 py-3">
+                          <div className="flex justify-end gap-1">
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              disabled={!canUpdate}
+                              onClick={() => {
+                                setEditingBankId(acc.id);
+                                setEditBankName(acc.bankName || "");
+                                setEditAccountNo(acc.accountNo || "");
+                                setEditAccountType(acc.accountType || "office");
+                              }}
+                              className="h-7 w-7 p-0"
+                            >
+                              <Pencil className="w-3.5 h-3.5" />
+                            </Button>
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              disabled={!canUpdate || deleteBankMutation.isPending}
+                              onClick={() => deleteBankMutation.mutate(acc.id)}
+                              className="text-red-500 h-7 w-7 p-0"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </Button>
+                          </div>
+                        </td>
+                      </>
+                    )}
                   </tr>
                 ))}
               </tbody>
@@ -492,6 +593,8 @@ function FirmInfoTab() {
 
 export default function Settings() {
   const { user } = useAuth();
+  const { toast } = useToast();
+  const queryClient = useQueryClient();
   const canManageUsers = hasPermission(user, "users", "create") || hasPermission(user, "users", "update") || hasPermission(user, "users", "delete");
   const canManageRoles = hasPermission(user, "roles", "create") || hasPermission(user, "roles", "update") || hasPermission(user, "roles", "delete");
   const canUpdateSettings = hasPermission(user, "settings", "update");
@@ -527,6 +630,16 @@ export default function Settings() {
   }, { query: { enabled: canManageUsers } });
 
   const { data: rolesRes, isLoading: loadingRoles } = useListRoles(undefined, { query: { enabled: canManageRoles } });
+  const updateUserMutation = useUpdateUser();
+  const deleteUserMutation = useDeleteUser();
+
+  const [editUserOpen, setEditUserOpen] = useState(false);
+  const [editUser, setEditUser] = useState<any | null>(null);
+  const [editName, setEditName] = useState("");
+  const [editRoleId, setEditRoleId] = useState("");
+
+  const [deleteUserOpen, setDeleteUserOpen] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState<any | null>(null);
 
   return (
     <div className="space-y-6">
@@ -587,6 +700,7 @@ export default function Settings() {
                         <th className="px-6 py-3 font-semibold">Role</th>
                         <th className="px-6 py-3 font-semibold">Status</th>
                         <th className="px-6 py-3 font-semibold text-right">Last Login</th>
+                        <th className="px-6 py-3 font-semibold text-right">Actions</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-100">
@@ -615,11 +729,62 @@ export default function Settings() {
                               ? new Date(user.lastLoginAt).toLocaleDateString()
                               : "Never"}
                           </td>
+                          <td className="px-6 py-4 text-right">
+                            <div className="inline-flex gap-2">
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                onClick={() => {
+                                  setEditUser(user);
+                                  setEditName(user.name || "");
+                                  setEditRoleId(user.roleId ? String(user.roleId) : "");
+                                  setEditUserOpen(true);
+                                }}
+                              >
+                                Edit
+                              </Button>
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                onClick={() => {
+                                  const nextStatus = user.status === "active" ? "inactive" : "active";
+                                  updateUserMutation.mutate(
+                                    { userId: user.id, data: { status: nextStatus } },
+                                    {
+                                      onSuccess: () => {
+                                        queryClient.invalidateQueries({ queryKey: getListUsersQueryKey() });
+                                        toast({ title: `User ${nextStatus === "active" ? "activated" : "deactivated"}` });
+                                      },
+                                      onError: (e: any) => {
+                                        toast({ title: "Failed to update status", description: e?.error || "Please try again.", variant: "destructive" });
+                                      },
+                                    }
+                                  );
+                                }}
+                                disabled={updateUserMutation.isPending}
+                              >
+                                {user.status === "active" ? "Deactivate" : "Activate"}
+                              </Button>
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                className="text-red-600 hover:text-red-700"
+                                onClick={() => {
+                                  setDeleteTarget(user);
+                                  setDeleteUserOpen(true);
+                                }}
+                                disabled={deleteUserMutation.isPending}
+                              >
+                                <Trash2 className="w-4 h-4 mr-1" />
+                                Delete
+                              </Button>
+                            </div>
+                          </td>
                         </tr>
                       ))}
                       {usersRes?.data?.length === 0 && (
                         <tr>
-                          <td colSpan={4} className="px-6 py-8 text-center text-slate-500">
+                          <td colSpan={5} className="px-6 py-8 text-center text-slate-500">
                             No users found.
                           </td>
                         </tr>
@@ -630,6 +795,119 @@ export default function Settings() {
               )}
             </CardContent>
           </Card>
+
+          <Dialog open={editUserOpen} onOpenChange={(open) => {
+            setEditUserOpen(open);
+            if (!open) {
+              setEditUser(null);
+              setEditName("");
+              setEditRoleId("");
+            }
+          }}>
+            <DialogContent>
+              <DialogHeader>
+                <DialogTitle>Edit User</DialogTitle>
+              </DialogHeader>
+              <div className="space-y-4">
+                <div className="space-y-2">
+                  <Label>Name</Label>
+                  <Input value={editName} onChange={(e) => setEditName(e.target.value)} />
+                </div>
+                <div className="space-y-2">
+                  <Label>Role</Label>
+                  <select
+                    value={editRoleId}
+                    onChange={(e) => setEditRoleId(e.target.value)}
+                    className="w-full h-10 border border-slate-200 rounded-md px-3 text-sm bg-white"
+                    disabled={loadingRoles}
+                  >
+                    <option value="">(No change)</option>
+                    {(rolesRes?.data ?? []).map((r: any) => (
+                      <option key={r.id} value={String(r.id)}>{r.name}</option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+              <DialogFooter>
+                <Button
+                  variant="outline"
+                  onClick={() => setEditUserOpen(false)}
+                  disabled={updateUserMutation.isPending}
+                >
+                  Cancel
+                </Button>
+                <Button
+                  onClick={() => {
+                    if (!editUser?.id) return;
+                    const name = editName.trim();
+                    if (!name) {
+                      toast({ title: "Name is required", variant: "destructive" });
+                      return;
+                    }
+                    const payload: any = { name };
+                    if (editRoleId) payload.roleId = Number(editRoleId);
+                    updateUserMutation.mutate(
+                      { userId: editUser.id, data: payload },
+                      {
+                        onSuccess: () => {
+                          queryClient.invalidateQueries({ queryKey: getListUsersQueryKey() });
+                          toast({ title: "User updated" });
+                          setEditUserOpen(false);
+                        },
+                        onError: (e: any) => {
+                          toast({ title: "Failed to update user", description: e?.error || "Please try again.", variant: "destructive" });
+                        },
+                      }
+                    );
+                  }}
+                  disabled={updateUserMutation.isPending}
+                >
+                  Save
+                </Button>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
+
+          <Dialog open={deleteUserOpen} onOpenChange={(open) => {
+            setDeleteUserOpen(open);
+            if (!open) setDeleteTarget(null);
+          }}>
+            <DialogContent>
+              <DialogHeader>
+                <DialogTitle>Delete User</DialogTitle>
+              </DialogHeader>
+              <div className="text-sm text-slate-600">
+                This will permanently remove <span className="font-medium text-slate-900">{deleteTarget?.email}</span>.
+              </div>
+              <DialogFooter>
+                <Button variant="outline" onClick={() => setDeleteUserOpen(false)} disabled={deleteUserMutation.isPending}>
+                  Cancel
+                </Button>
+                <Button
+                  className="bg-red-600 hover:bg-red-700"
+                  onClick={() => {
+                    if (!deleteTarget?.id) return;
+                    deleteUserMutation.mutate(
+                      { userId: deleteTarget.id },
+                      {
+                        onSuccess: () => {
+                          queryClient.invalidateQueries({ queryKey: getListUsersQueryKey() });
+                          toast({ title: "User deleted" });
+                          setDeleteUserOpen(false);
+                        },
+                        onError: (e: any) => {
+                          toast({ title: "Failed to delete user", description: e?.error || "Please try again.", variant: "destructive" });
+                        },
+                      }
+                    );
+                  }}
+                  disabled={deleteUserMutation.isPending}
+                >
+                  Delete
+                </Button>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
         </div>
       )}
 

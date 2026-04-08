@@ -88,7 +88,7 @@ router.patch("/hub/messages/:msgId/read", requireAuth, requireFirmUser, requireP
 
 // ─── System Folders (visible to firm, read-only) ────────────────────────────
 
-router.get("/hub/folders", requireAuth, requireFirmUser, async (_req: AuthRequest, res): Promise<void> => {
+router.get("/hub/folders", requireAuth, requireFirmUser, requirePermission("documents", "read"), async (_req: AuthRequest, res): Promise<void> => {
   const folders = await db
     .select()
     .from(systemFoldersTable)

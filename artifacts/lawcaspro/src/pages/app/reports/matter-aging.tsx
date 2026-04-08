@@ -2,10 +2,11 @@ import { useQuery } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { ArrowLeft, AlertTriangle } from "lucide-react";
+import { ArrowLeft, AlertTriangle, Download } from "lucide-react";
 import { useLocation } from "wouter";
-
-const API_BASE = import.meta.env.BASE_URL.replace(/\/$/, "").replace(/^\/lawcaspro/, "") + "/api";
+import { API_BASE } from "@/lib/api-base";
+import { downloadFromApi } from "@/lib/download";
+import { useToast } from "@/hooks/use-toast";
 
 const BUCKET_CONFIG: Record<string, { label: string; color: string; barColor: string }> = {
   current:   { label: "Current (not yet due)",  color: "text-green-700",  barColor: "bg-green-500" },
@@ -19,8 +20,9 @@ function fmtDate(d: string | null) { return d ? new Date(d).toLocaleDateString("
 
 export default function MatterAging() {
   const [, setLocation] = useLocation();
+  const { toast } = useToast();
 
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, isError, error } = useQuery({
     queryKey: ["matter-aging"],
     queryFn: async () => {
       const r = await fetch(`${API_BASE}/reports/matter-aging`, { credentials: "include" });
@@ -43,6 +45,18 @@ export default function MatterAging() {
           <h1 className="text-xl font-bold text-[#0f1729]">Matter Aging Report</h1>
           <p className="text-xs text-slate-500">Outstanding invoices grouped by age — as at today</p>
         </div>
+        <div className="ml-auto">
+          <Button
+            size="sm"
+            variant="outline"
+            className="h-8"
+            onClick={() => downloadFromApi("/reports/matter-aging?format=csv", "matter-aging.csv").catch((e: any) => {
+              toast({ title: "Download failed", description: e.message, variant: "destructive" });
+            })}
+          >
+            <Download className="h-3.5 w-3.5 mr-1" /> Download CSV
+          </Button>
+        </div>
       </div>
 
       {/* Summary bar */}
@@ -56,6 +70,8 @@ export default function MatterAging() {
       {/* Buckets */}
       {isLoading ? (
         <Card><CardContent className="py-8 text-center text-sm text-slate-400">Loading...</CardContent></Card>
+      ) : isError ? (
+        <Card><CardContent className="py-8 text-center text-sm text-red-600 break-words">{String((error as any)?.message ?? error)}</CardContent></Card>
       ) : (
         <div className="space-y-4">
           {buckets.map((bucket: any) => {

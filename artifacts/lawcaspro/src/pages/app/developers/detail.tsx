@@ -49,6 +49,7 @@ export default function DeveloperDetail() {
   const [loading, setLoading] = useState(true);
   const [editing, setEditing] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [deleting, setDeleting] = useState(false);
 
   const [form, setForm] = useState({
     name: "",
@@ -151,6 +152,35 @@ export default function DeveloperDetail() {
     }
   };
 
+  const handleDelete = async () => {
+    if (!developerId || deleting) return;
+    setDeleting(true);
+    try {
+      const res = await fetch(apiUrl(`/api/developers/${developerId}`), {
+        method: "DELETE",
+        credentials: "include",
+      });
+      if (!(res.status === 204 || res.ok)) {
+        const raw = await res.text();
+        let message = "Failed to delete";
+        try {
+          const parsed = JSON.parse(raw) as { error?: string };
+          if (parsed?.error) message = parsed.error;
+        } catch {
+          if (raw.trim()) message = raw;
+        }
+        throw new Error(message);
+      }
+      queryClient.invalidateQueries({ queryKey: getListDevelopersQueryKey() });
+      toast({ title: "Developer deleted" });
+      setLocation("/app/developers");
+    } catch (e: any) {
+      toast({ title: "Error", description: e.message, variant: "destructive" });
+    } finally {
+      setDeleting(false);
+    }
+  };
+
   const handleCancelEdit = () => {
     if (!developer) return;
     setForm({
@@ -196,9 +226,14 @@ export default function DeveloperDetail() {
               </Button>
             </>
           ) : (
-            <Button variant="outline" onClick={() => setEditing(true)} className="gap-1.5">
-              <Pencil className="w-4 h-4" /> Edit Developer
-            </Button>
+            <>
+              <Button variant="outline" onClick={() => setEditing(true)} className="gap-1.5">
+                <Pencil className="w-4 h-4" /> Edit Developer
+              </Button>
+              <Button variant="destructive" onClick={handleDelete} disabled={deleting} className="gap-1.5">
+                <Trash2 className="w-4 h-4" /> {deleting ? "Deleting..." : "Delete"}
+              </Button>
+            </>
           )}
         </div>
       </div>

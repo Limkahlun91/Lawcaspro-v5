@@ -3,6 +3,7 @@ import { sql } from "drizzle-orm";
 import { db, documentTemplatesTable, caseDocumentsTable } from "@workspace/db";
 import { requireAuth, requireFirmUser, requirePermission, writeAuditLog, type AuthRequest } from "../lib/auth";
 import { ObjectStorageService, ObjectNotFoundError } from "../lib/objectStorage";
+import { Readable } from "stream";
 import Docxtemplater from "docxtemplater";
 import PizZip from "pizzip";
 import { PDFDocument, rgb, StandardFonts } from "pdf-lib";
@@ -11,8 +12,22 @@ import fontkit from "@pdf-lib/fontkit";
 const router: IRouter = Router();
 const storage = new ObjectStorageService();
 
-async function queryRows(query: ReturnType<typeof sql>): Promise<Record<string, unknown>[]> {
-  const result = await db.execute(query);
+type DbConn = typeof db | NonNullable<AuthRequest["rlsDb"]>;
+
+const one = (v: string | string[] | undefined): string | undefined => (Array.isArray(v) ? v[0] : v);
+
+const getRlsDb = (req: AuthRequest, res: any): NonNullable<AuthRequest["rlsDb"]> | null => {
+  const r = req.rlsDb;
+  if (!r) {
+    (req as any).log?.error?.({ route: req.originalUrl, userId: req.userId, firmId: req.firmId }, "missing req.rlsDb");
+    res.status(500).json({ error: "Internal Server Error" });
+    return null;
+  }
+  return r;
+};
+
+async function queryRows(r: DbConn, query: ReturnType<typeof sql>): Promise<Record<string, unknown>[]> {
+  const result = await r.execute(query);
   if (Array.isArray(result)) return result as Record<string, unknown>[];
   if ("rows" in result) return (result as { rows: Record<string, unknown>[] }).rows;
   return [];
@@ -49,25 +64,25 @@ function fmtRM(val: unknown): string {
   return `RM ${n.toLocaleString("en-MY", { minimumFractionDigits: 2 })}`;
 }
 
-async function buildCaseContext(caseId: number, firmId: number): Promise<Record<string, unknown> | null> {
-  const caseRows = await queryRows(sql`SELECT * FROM cases WHERE id = ${caseId} AND firm_id = ${firmId}`);
+async function buildCaseContext(r: DbConn, caseId: number, firmId: number): Promise<Record<string, unknown> | null> {
+  const caseRows = await queryRows(r, sql`SELECT * FROM cases WHERE id = ${caseId} AND firm_id = ${firmId}`);
   if (!caseRows[0]) return null;
   const c = caseRows[0];
 
-  const projectRows = await queryRows(sql`SELECT * FROM projects WHERE id = ${c.project_id}`);
-  const developerRows = await queryRows(sql`SELECT * FROM developers WHERE id = ${c.developer_id}`);
-  const firmRows = await queryRows(sql`SELECT * FROM firms WHERE id = ${firmId}`);
-  const bankRows = await queryRows(sql`SELECT * FROM firm_bank_accounts WHERE firm_id = ${firmId} ORDER BY is_default DESC`);
-  const purchaserRows = await queryRows(sql`
+  const projectRows = await queryRows(r, sql`SELECT * FROM projects WHERE id = ${c.project_id} AND firm_id = ${firmId}`);
+  const developerRows = await queryRows(r, sql`SELECT * FROM developers WHERE id = ${c.developer_id} AND firm_id = ${firmId}`);
+  const firmRows = await queryRows(r, sql`SELECT * FROM firms WHERE id = ${firmId}`);
+  const bankRows = await queryRows(r, sql`SELECT * FROM firm_bank_accounts WHERE firm_id = ${firmId} ORDER BY is_default DESC`);
+  const purchaserRows = await queryRows(r, sql`
     SELECT cp.*, cl.name, cl.ic_no, cl.nationality, cl.address, cl.phone, cl.email
     FROM case_purchasers cp JOIN clients cl ON cp.client_id = cl.id
-    WHERE cp.case_id = ${caseId} ORDER BY cp.order_no`);
-  const lawyerRows = await queryRows(sql`
+    WHERE cp.case_id = ${caseId} AND cl.firm_id = ${firmId} ORDER BY cp.order_no`);
+  const lawyerRows = await queryRows(r, sql`
     SELECT ca.*, u.name as user_name, u.email as user_email
     FROM case_assignments ca JOIN users u ON ca.user_id = u.id
     WHERE ca.case_id = ${caseId} AND ca.role_in_case = 'lawyer' AND ca.unassigned_at IS NULL
     LIMIT 1`);
-  const clerkRows = await queryRows(sql`
+  const clerkRows = await queryRows(r, sql`
     SELECT ca.*, u.name as user_name
     FROM case_assignments ca JOIN users u ON ca.user_id = u.id
     WHERE ca.case_id = ${caseId} AND ca.role_in_case = 'clerk' AND ca.unassigned_at IS NULL
@@ -242,13 +257,18 @@ async function buildCaseContext(caseId: number, firmId: number): Promise<Record<
 }
 
 router.get("/document-templates", requireAuth, requireFirmUser, requirePermission("documents", "read"), async (req: AuthRequest, res): Promise<void> => {
+  const r = getRlsDb(req, res);
+  if (!r) return;
   const rows = await queryRows(
+    r,
     sql`SELECT * FROM document_templates WHERE firm_id = ${req.firmId!} ORDER BY created_at DESC`
   );
   res.json(rows);
 });
 
 router.post("/document-templates", requireAuth, requireFirmUser, requirePermission("documents", "create"), async (req: AuthRequest, res): Promise<void> => {
+  const r = getRlsDb(req, res);
+  if (!r) return;
   const { name, documentType, description, objectPath, fileName } = req.body as {
     name: string;
     documentType?: string;
@@ -263,6 +283,7 @@ router.post("/document-templates", requireAuth, requireFirmUser, requirePermissi
   }
 
   const rows = await queryRows(
+    r,
     sql`INSERT INTO document_templates (firm_id, name, document_type, description, object_path, file_name, created_by)
         VALUES (${req.firmId!}, ${name}, ${documentType ?? "other"}, ${description ?? null}, ${objectPath}, ${fileName}, ${req.userId!})
         RETURNING *`
@@ -277,8 +298,16 @@ router.post("/document-templates", requireAuth, requireFirmUser, requirePermissi
 });
 
 router.delete("/document-templates/:templateId", requireAuth, requireFirmUser, requirePermission("documents", "delete"), async (req: AuthRequest, res): Promise<void> => {
-  const templateId = Number(req.params.templateId);
+  const r = getRlsDb(req, res);
+  if (!r) return;
+  const templateIdStr = one((req.params as any).templateId);
+  const templateId = templateIdStr ? parseInt(templateIdStr, 10) : NaN;
+  if (Number.isNaN(templateId)) {
+    res.status(400).json({ error: "Invalid template ID" });
+    return;
+  }
   const rows = await queryRows(
+    r,
     sql`DELETE FROM document_templates WHERE id = ${templateId} AND firm_id = ${req.firmId!} RETURNING *`
   );
   if (!rows[0]) {
@@ -295,8 +324,15 @@ router.delete("/document-templates/:templateId", requireAuth, requireFirmUser, r
 });
 
 router.get("/cases/:caseId/documents", requireAuth, requireFirmUser, requirePermission("documents", "read"), async (req: AuthRequest, res): Promise<void> => {
-  const caseId = Number(req.params.caseId);
-  const rows = await queryRows(sql`
+  const r = getRlsDb(req, res);
+  if (!r) return;
+  const caseIdStr = one((req.params as any).caseId);
+  const caseId = caseIdStr ? parseInt(caseIdStr, 10) : NaN;
+  if (Number.isNaN(caseId)) {
+    res.status(400).json({ error: "Invalid case ID" });
+    return;
+  }
+  const rows = await queryRows(r, sql`
     SELECT cd.*, dt.name as template_name, u.name as generated_by_name
     FROM case_documents cd
     LEFT JOIN document_templates dt ON cd.template_id = dt.id
@@ -308,7 +344,14 @@ router.get("/cases/:caseId/documents", requireAuth, requireFirmUser, requirePerm
 });
 
 router.post("/cases/:caseId/documents/generate", requireAuth, requireFirmUser, requirePermission("documents", "create"), async (req: AuthRequest, res): Promise<void> => {
-  const caseId = Number(req.params.caseId);
+  const r = getRlsDb(req, res);
+  if (!r) return;
+  const caseIdStr = one((req.params as any).caseId);
+  const caseId = caseIdStr ? parseInt(caseIdStr, 10) : NaN;
+  if (Number.isNaN(caseId)) {
+    res.status(400).json({ error: "Invalid case ID" });
+    return;
+  }
   const { templateId, documentName } = req.body as { templateId: number; documentName?: string };
 
   if (!templateId) {
@@ -317,6 +360,7 @@ router.post("/cases/:caseId/documents/generate", requireAuth, requireFirmUser, r
   }
 
   const templateRows = await queryRows(
+    r,
     sql`SELECT * FROM document_templates WHERE id = ${templateId} AND firm_id = ${req.firmId!}`
   );
   if (!templateRows[0]) {
@@ -325,7 +369,7 @@ router.post("/cases/:caseId/documents/generate", requireAuth, requireFirmUser, r
   }
   const template = templateRows[0];
 
-  const context = await buildCaseContext(caseId, req.firmId!);
+  const context = await buildCaseContext(r, caseId, req.firmId!);
   if (!context) {
     res.status(404).json({ error: "Case not found" });
     return;
@@ -360,12 +404,17 @@ router.post("/cases/:caseId/documents/generate", requireAuth, requireFirmUser, r
     const docName = documentName ?? `${template.name} - ${context.reference_no}`;
     const fileName = `${docName.replace(/[^a-zA-Z0-9 \-_]/g, "_")}.docx`;
 
-    const docRows = await queryRows(sql`
+    const docRows = await queryRows(r, sql`
       INSERT INTO case_documents (case_id, firm_id, template_id, name, document_type, status, object_path, file_name, generated_by)
       VALUES (${caseId}, ${req.firmId!}, ${templateId}, ${docName}, ${template.document_type as string}, 'generated', ${normalizedPath}, ${fileName}, ${req.userId!})
       RETURNING *`
     );
 
+    const created = docRows[0];
+    const createdId = created && typeof created === "object" && "id" in created && typeof (created as { id?: unknown }).id === "number"
+      ? (created as { id: number }).id
+      : undefined;
+    await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.case.generate", entityType: "case_document", entityId: createdId, detail: `caseId=${caseId} templateId=${templateId} name=${docName}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
     res.status(201).json(docRows[0]);
   } catch (err: unknown) {
     console.error("Document generation error:", err);
@@ -376,8 +425,15 @@ router.post("/cases/:caseId/documents/generate", requireAuth, requireFirmUser, r
   }
 });
 
-router.post("/cases/:caseId/documents/generate-from-master", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
-  const caseId = Number(req.params.caseId);
+router.post("/cases/:caseId/documents/generate-from-master", requireAuth, requireFirmUser, requirePermission("documents", "create"), async (req: AuthRequest, res): Promise<void> => {
+  const r = getRlsDb(req, res);
+  if (!r) return;
+  const caseIdStr = one((req.params as any).caseId);
+  const caseId = caseIdStr ? parseInt(caseIdStr, 10) : NaN;
+  if (Number.isNaN(caseId)) {
+    res.status(400).json({ error: "Invalid case ID" });
+    return;
+  }
   const { masterDocId, documentName } = req.body as { masterDocId: number; documentName?: string };
 
   if (!masterDocId) {
@@ -386,6 +442,7 @@ router.post("/cases/:caseId/documents/generate-from-master", requireAuth, requir
   }
 
   const docRows2 = await queryRows(
+    r,
     sql`SELECT * FROM platform_documents WHERE id = ${masterDocId} AND (firm_id IS NULL OR firm_id = ${req.firmId!})`
   );
   if (!docRows2[0]) {
@@ -396,7 +453,7 @@ router.post("/cases/:caseId/documents/generate-from-master", requireAuth, requir
   const masterFileName = masterDoc.file_name as string;
   const isDocx = masterFileName.toLowerCase().endsWith(".docx") || masterFileName.toLowerCase().endsWith(".doc");
 
-  const context = await buildCaseContext(caseId, req.firmId!);
+  const context = await buildCaseContext(r, caseId, req.firmId!);
   if (!context) {
     res.status(404).json({ error: "Case not found" });
     return;
@@ -487,12 +544,17 @@ router.post("/cases/:caseId/documents/generate-from-master", requireAuth, requir
     const docName = documentName ?? `${masterDoc.name} - ${context.reference_no}`;
     const fileName = `${docName.replace(/[^a-zA-Z0-9 \-_]/g, "_")}${outputExt}`;
 
-    const savedRows = await queryRows(sql`
+    const savedRows = await queryRows(r, sql`
       INSERT INTO case_documents (case_id, firm_id, name, document_type, status, object_path, file_name, generated_by)
       VALUES (${caseId}, ${req.firmId!}, ${docName}, ${(masterDoc.category as string) || "other"}, 'generated', ${normalizedPath}, ${fileName}, ${req.userId!})
       RETURNING *`
     );
 
+    const created = savedRows[0];
+    const createdId = created && typeof created === "object" && "id" in created && typeof (created as { id?: unknown }).id === "number"
+      ? (created as { id: number }).id
+      : undefined;
+    await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.case.generate_from_master", entityType: "case_document", entityId: createdId, detail: `caseId=${caseId} masterDocId=${masterDocId} name=${docName}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
     res.status(201).json(savedRows[0]);
   } catch (err: unknown) {
     console.error("Master document generation error:", err);
@@ -625,8 +687,15 @@ router.get("/document-variables", requireAuth, async (_req: AuthRequest, res): P
   res.json(variables);
 });
 
-router.post("/cases/:caseId/documents/upload", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
-  const caseId = Number(req.params.caseId);
+router.post("/cases/:caseId/documents/upload", requireAuth, requireFirmUser, requirePermission("documents", "create"), async (req: AuthRequest, res): Promise<void> => {
+  const r = getRlsDb(req, res);
+  if (!r) return;
+  const caseIdStr = one((req.params as any).caseId);
+  const caseId = caseIdStr ? parseInt(caseIdStr, 10) : NaN;
+  if (Number.isNaN(caseId)) {
+    res.status(400).json({ error: "Invalid case ID" });
+    return;
+  }
   const { name, documentType, objectPath, fileName, fileSize } = req.body as {
     name: string;
     documentType?: string;
@@ -640,20 +709,40 @@ router.post("/cases/:caseId/documents/upload", requireAuth, requireFirmUser, asy
     return;
   }
 
-  const rows = await queryRows(sql`
+  const caseGuard = await queryRows(r, sql`SELECT 1 FROM cases WHERE id = ${caseId} AND firm_id = ${req.firmId!}`);
+  if (!caseGuard[0]) {
+    res.status(404).json({ error: "Case not found" });
+    return;
+  }
+
+  const rows = await queryRows(r, sql`
     INSERT INTO case_documents (case_id, firm_id, name, document_type, status, object_path, file_name, file_size, is_uploaded, generated_by)
     VALUES (${caseId}, ${req.firmId!}, ${name}, ${documentType ?? "other"}, 'uploaded', ${objectPath}, ${fileName}, ${fileSize ?? null}, true, ${req.userId!})
     RETURNING *`
   );
 
+  const created = rows[0];
+  const createdId = created && typeof created === "object" && "id" in created && typeof (created as { id?: unknown }).id === "number"
+    ? (created as { id: number }).id
+    : undefined;
+  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.case.upload", entityType: "case_document", entityId: createdId, detail: `caseId=${caseId} name=${name} fileName=${fileName}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
   res.status(201).json(rows[0]);
 });
 
-router.get("/cases/:caseId/documents/:docId/download", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
-  const caseId = Number(req.params.caseId);
-  const docId = Number(req.params.docId);
+router.get("/cases/:caseId/documents/:docId/download", requireAuth, requireFirmUser, requirePermission("documents", "read"), async (req: AuthRequest, res): Promise<void> => {
+  const r = getRlsDb(req, res);
+  if (!r) return;
+  const caseIdStr = one((req.params as any).caseId);
+  const docIdStr = one((req.params as any).docId);
+  const caseId = caseIdStr ? parseInt(caseIdStr, 10) : NaN;
+  const docId = docIdStr ? parseInt(docIdStr, 10) : NaN;
+  if (Number.isNaN(caseId) || Number.isNaN(docId)) {
+    res.status(400).json({ error: "Invalid document ID" });
+    return;
+  }
 
   const rows = await queryRows(
+    r,
     sql`SELECT * FROM case_documents WHERE id = ${docId} AND case_id = ${caseId} AND firm_id = ${req.firmId!}`
   );
 
@@ -666,19 +755,21 @@ router.get("/cases/:caseId/documents/:docId/download", requireAuth, requireFirmU
 
   try {
     const objectFile = await storage.getObjectEntityFile(doc.object_path as string);
-    const nodeStream = objectFile.createReadStream();
-    const chunks: Buffer[] = [];
-
-    await new Promise<void>((resolve, reject) => {
-      nodeStream.on("data", (chunk: Buffer) => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
-      nodeStream.on("end", resolve);
-      nodeStream.on("error", reject);
+    const storageResp = await storage.downloadObject(objectFile);
+    storageResp.headers.forEach((value, key) => {
+      res.setHeader(key, value);
     });
-
-    const buffer = Buffer.concat(chunks);
     res.setHeader("Content-Disposition", `attachment; filename="${doc.file_name}"`);
-    res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.wordprocessingml.document");
-    res.send(buffer);
+    if (!storageResp.body) {
+      res.status(500).json({ error: "Failed to stream file" });
+      return;
+    }
+    const nodeStream = Readable.fromWeb(storageResp.body as any);
+    await new Promise<void>((resolve, reject) => {
+      nodeStream.on("error", reject);
+      res.on("finish", resolve);
+      nodeStream.pipe(res);
+    });
   } catch (err) {
     if (err instanceof ObjectNotFoundError) {
       res.status(404).json({ error: "File not found in storage" });
@@ -688,11 +779,20 @@ router.get("/cases/:caseId/documents/:docId/download", requireAuth, requireFirmU
   }
 });
 
-router.delete("/cases/:caseId/documents/:docId", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
-  const caseId = Number(req.params.caseId);
-  const docId = Number(req.params.docId);
+router.delete("/cases/:caseId/documents/:docId", requireAuth, requireFirmUser, requirePermission("documents", "delete"), async (req: AuthRequest, res): Promise<void> => {
+  const r = getRlsDb(req, res);
+  if (!r) return;
+  const caseIdStr = one((req.params as any).caseId);
+  const docIdStr = one((req.params as any).docId);
+  const caseId = caseIdStr ? parseInt(caseIdStr, 10) : NaN;
+  const docId = docIdStr ? parseInt(docIdStr, 10) : NaN;
+  if (Number.isNaN(caseId) || Number.isNaN(docId)) {
+    res.status(400).json({ error: "Invalid document ID" });
+    return;
+  }
 
   const rows = await queryRows(
+    r,
     sql`DELETE FROM case_documents WHERE id = ${docId} AND case_id = ${caseId} AND firm_id = ${req.firmId!} RETURNING *`
   );
 
@@ -701,6 +801,9 @@ router.delete("/cases/:caseId/documents/:docId", requireAuth, requireFirmUser, a
     return;
   }
 
+  const deleted = rows[0];
+  const deletedName = deleted && typeof deleted === "object" && "name" in deleted ? String((deleted as { name?: unknown }).name) : undefined;
+  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.case.delete", entityType: "case_document", entityId: docId, detail: deletedName ? `caseId=${caseId} name=${deletedName}` : `caseId=${caseId}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
   res.sendStatus(204);
 });
 
