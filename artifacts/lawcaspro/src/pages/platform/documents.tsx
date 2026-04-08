@@ -139,7 +139,10 @@ function FolderTreeItem({
           </button>
         </div>
         <div
-          className="hidden group-hover:flex items-center gap-1 pb-1.5 px-2"
+          className={cn(
+            "items-center gap-1 pb-1.5 px-2",
+            isSelected ? "flex" : "hidden group-hover:flex",
+          )}
           style={{ paddingLeft: `${depth * 16 + 34}px` }}
         >
           <button onClick={e => { e.stopPropagation(); onReorder(folder.id, "up"); }} className="p-1 hover:bg-slate-200 rounded" title="Move up">
