@@ -1,5 +1,5 @@
 import { Router, type IRouter } from "express";
-import { eq, ilike, count, desc, and } from "drizzle-orm";
+import { eq, ilike, count, desc, and, sql } from "drizzle-orm";
 import { db, projectsTable, developersTable, casesTable, type Project, type InsertProject } from "@workspace/db";
 import {
   CreateProjectBody, UpdateProjectBody, ListProjectsQueryParams,
@@ -9,9 +9,12 @@ import { requireAuth, requireFirmUser, requirePermission, writeAuditLog, type Au
 
 const router: IRouter = Router();
 
-async function enrichProject(proj: Project) {
-  const [devRow] = await db.select().from(developersTable).where(eq(developersTable.id, proj.developerId));
-  const [ccRes] = await db.select({ c: count() }).from(casesTable).where(eq(casesTable.projectId, proj.id));
+type DbConn = typeof db | NonNullable<AuthRequest["rlsDb"]>;
+const rdb = (req: AuthRequest): DbConn => req.rlsDb ?? db;
+
+async function enrichProject(r: DbConn, proj: Project) {
+  const [devRow] = await r.select().from(developersTable).where(eq(developersTable.id, proj.developerId));
+  const [ccRes] = await r.select({ c: count() }).from(casesTable).where(eq(casesTable.projectId, proj.id));
   return {
     id: proj.id,
     firmId: proj.firmId,
@@ -37,6 +40,7 @@ async function enrichProject(proj: Project) {
 }
 
 router.get("/projects", requireAuth, requireFirmUser, requirePermission("projects", "read"), async (req: AuthRequest, res): Promise<void> => {
+  const r = rdb(req);
   const params = ListProjectsQueryParams.safeParse(req.query);
   const search = params.success ? params.data.search : undefined;
   const developerId = params.success ? params.data.developerId : undefined;
@@ -50,20 +54,27 @@ router.get("/projects", requireAuth, requireFirmUser, requirePermission("project
   if (developerId) conditions.push(eq(projectsTable.developerId, developerId));
   if (projectType) conditions.push(eq(projectsTable.projectType, projectType));
   if (titleType) conditions.push(eq(projectsTable.titleType, titleType));
+  if (search) conditions.push(ilike(projectsTable.name, `%${search}%`));
 
-  const projs = await db.select().from(projectsTable)
+  const projs = await r.select().from(projectsTable)
     .where(and(...conditions))
     .orderBy(desc(projectsTable.createdAt))
     .limit(limit).offset(offset);
 
-  const [totalRes] = await db.select({ c: count() }).from(projectsTable).where(and(...conditions));
+  const [totalRes] = await r.select({ c: count() }).from(projectsTable).where(and(...conditions));
 
-  const enriched = await Promise.all(projs.map(enrichProject));
+  const enriched = await Promise.all(projs.map((p) => enrichProject(r, p)));
   res.json({ data: enriched, total: Number(totalRes?.c ?? 0), page, limit });
 });
 
 router.post("/projects", requireAuth, requireFirmUser, requirePermission("projects", "create"), async (req: AuthRequest, res): Promise<void> => {
   try {
+    const r = req.rlsDb;
+    if (!r) {
+      (req as any).log?.error?.({ route: "POST /api/projects", userId: req.userId, firmId: req.firmId }, "missing req.rlsDb");
+      res.status(500).json({ error: "Internal Server Error" });
+      return;
+    }
     const parsed = CreateProjectBody.safeParse(req.body);
     if (!parsed.success) {
       res.status(400).json({ error: parsed.error.message });
@@ -73,7 +84,7 @@ router.post("/projects", requireAuth, requireFirmUser, requirePermission("projec
     const { developerId, name, projectType, titleType, landUse, developmentCondition, unitCategory, extraFields } = parsed.data;
     const { phase, developerName, titleSubtype, masterTitleNumber, masterTitleLandSize, mukim, daerah, negeri } = req.body as Record<string, unknown>;
 
-    const [dev] = await db.select().from(developersTable).where(eq(developersTable.id, developerId));
+    const [dev] = await r.select().from(developersTable).where(eq(developersTable.id, developerId));
     if (!dev || dev.firmId !== req.firmId) {
       res.status(400).json({ error: "Developer not found in this firm" });
       return;
@@ -99,14 +110,39 @@ router.post("/projects", requireAuth, requireFirmUser, requirePermission("projec
       extraFields: extraFields ?? {},
     };
 
+    let ctxFirmId: string | null = null;
+    let ctxIsFounder: string | null = null;
+    try {
+      const result = await r.execute(sql`
+        select
+          current_setting('app.current_firm_id', true) as firm_id,
+          current_setting('app.is_founder', true) as is_founder
+      `);
+      const rows = Array.isArray(result)
+        ? result
+        : ("rows" in (result as any) ? (result as any).rows : []);
+      const row = rows?.[0] as any;
+      ctxFirmId = typeof row?.firm_id === "string" ? row.firm_id : null;
+      ctxIsFounder = typeof row?.is_founder === "string" ? row.is_founder : null;
+    } catch {
+    }
+    (req as any).log?.info?.({
+      route: "POST /api/projects",
+      userId: req.userId,
+      firmId: req.firmId,
+      insertFirmId: insertBase.firmId,
+      ctxFirmId,
+      ctxIsFounder,
+    }, "create route tenant context");
+
     let proj: Project;
-    [proj] = await db
+    [proj] = await r
       .insert(projectsTable)
       .values(insertBase)
       .returning();
 
     try {
-      await db
+      await r
         .update(projectsTable)
         .set({ createdBy: req.userId } as any)
         .where(and(eq(projectsTable.id, proj.id), eq(projectsTable.firmId, req.firmId!)));
@@ -114,16 +150,18 @@ router.post("/projects", requireAuth, requireFirmUser, requirePermission("projec
     }
 
     await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "projects.create", entityType: "project", entityId: proj.id, detail: `name=${proj.name}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
-    res.status(201).json(await enrichProject(proj));
+    res.status(201).json(await enrichProject(r, proj));
     return;
   } catch (e) {
     const pg = (() => {
       let cur: any = e;
       for (let i = 0; i < 6 && cur; i++) {
-        if (typeof cur?.code === "string" || typeof cur?.message === "string") {
+        if (typeof cur?.code === "string" || typeof cur?.message === "string" || typeof cur?.detail === "string" || typeof cur?.constraint === "string") {
           const code = typeof cur.code === "string" ? cur.code : undefined;
           const message = typeof cur.message === "string" ? cur.message : undefined;
-          return { code, message };
+          const detail = typeof cur.detail === "string" ? cur.detail : undefined;
+          const constraint = typeof cur.constraint === "string" ? cur.constraint : undefined;
+          return { code, message, detail, constraint };
         }
         cur = cur?.cause;
       }
@@ -136,29 +174,31 @@ router.post("/projects", requireAuth, requireFirmUser, requirePermission("projec
 });
 
 router.get("/projects/:projectId", requireAuth, requireFirmUser, requirePermission("projects", "read"), async (req: AuthRequest, res): Promise<void> => {
+  const r = rdb(req);
   const params = GetProjectParams.safeParse(req.params);
   if (!params.success) {
     res.status(400).json({ error: params.error.message });
     return;
   }
 
-  const [proj] = await db.select().from(projectsTable).where(eq(projectsTable.id, params.data.projectId));
+  const [proj] = await r.select().from(projectsTable).where(eq(projectsTable.id, params.data.projectId));
   if (!proj || proj.firmId !== req.firmId) {
     res.status(404).json({ error: "Project not found" });
     return;
   }
 
-  res.json(await enrichProject(proj));
+  res.json(await enrichProject(r, proj));
 });
 
 router.patch("/projects/:projectId", requireAuth, requireFirmUser, requirePermission("projects", "update"), async (req: AuthRequest, res): Promise<void> => {
+  const r = rdb(req);
   const params = UpdateProjectParams.safeParse(req.params);
   if (!params.success) {
     res.status(400).json({ error: params.error.message });
     return;
   }
 
-  const [existing] = await db.select().from(projectsTable).where(
+  const [existing] = await r.select().from(projectsTable).where(
     and(eq(projectsTable.id, params.data.projectId), eq(projectsTable.firmId, req.firmId!))
   );
   if (!existing) {
@@ -170,7 +210,7 @@ router.patch("/projects/:projectId", requireAuth, requireFirmUser, requirePermis
     mukim, daerah, negeri, phase, developerName, landUse, developmentCondition, unitCategory, extraFields } = req.body;
 
   if (developerId !== undefined && developerId !== null) {
-    const [dev] = await db.select().from(developersTable).where(
+    const [dev] = await r.select().from(developersTable).where(
       and(eq(developersTable.id, developerId), eq(developersTable.firmId, req.firmId!))
     );
     if (!dev) {
@@ -198,14 +238,14 @@ router.patch("/projects/:projectId", requireAuth, requireFirmUser, requirePermis
   if (extraFields !== undefined) updateData.extraFields = extraFields;
   updateData.updatedAt = new Date();
 
-  const [proj] = await db
+  const [proj] = await r
     .update(projectsTable)
     .set(updateData)
     .where(and(eq(projectsTable.id, params.data.projectId), eq(projectsTable.firmId, req.firmId!)))
     .returning();
 
   await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "projects.update", entityType: "project", entityId: proj.id, detail: `fields=${Object.keys(updateData).join(",")}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
-  res.json(await enrichProject(proj));
+  res.json(await enrichProject(r, proj));
 });
 
 router.delete("/projects/:projectId", requireAuth, requireFirmUser, requirePermission("projects", "delete"), async (req: AuthRequest, res): Promise<void> => {

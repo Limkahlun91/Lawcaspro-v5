@@ -1,5 +1,5 @@
 import { Router, type IRouter } from "express";
-import { eq, and } from "drizzle-orm";
+import { eq, and, sql } from "drizzle-orm";
 import { db, firmsTable, firmBankAccountsTable } from "@workspace/db";
 import { requireAuth, requireFirmUser, requirePermission, type AuthRequest, writeAuditLog } from "../lib/auth";
 
@@ -9,13 +9,17 @@ const VALID_ACCOUNT_TYPES = ["office", "client"];
 
 const router: IRouter = Router();
 
+type DbConn = typeof db | NonNullable<AuthRequest["rlsDb"]>;
+const rdb = (req: AuthRequest): DbConn => req.rlsDb ?? db;
+
 router.get("/firm-settings", requireAuth, requireFirmUser, async (req, res) => {
   try {
+    const r = rdb(req as AuthRequest);
     const firmId = (req as AuthRequest).firmId!;
-    const [firm] = await db.select().from(firmsTable).where(eq(firmsTable.id, firmId));
+    const [firm] = await r.select().from(firmsTable).where(eq(firmsTable.id, firmId));
     if (!firm) { res.status(404).json({ error: "Firm not found" }); return; }
 
-    const bankAccounts = await db.select().from(firmBankAccountsTable)
+    const bankAccounts = await r.select().from(firmBankAccountsTable)
       .where(eq(firmBankAccountsTable.firmId, firmId));
 
     res.json({
@@ -35,19 +39,7 @@ router.get("/firm-settings", requireAuth, requireFirmUser, async (req, res) => {
     });
     return;
   } catch (err: any) {
-    const pg = (() => {
-      let cur: any = err;
-      for (let i = 0; i < 6 && cur; i++) {
-        if (typeof cur?.code === "string" || typeof cur?.message === "string") {
-          const code = typeof cur.code === "string" ? cur.code : undefined;
-          const message = typeof cur.message === "string" ? cur.message : undefined;
-          return { code, message };
-        }
-        cur = cur?.cause;
-      }
-      return {};
-    })();
-    (req as any).log?.error?.({ err, pg }, "firm_settings.bank_accounts.create failed");
+    (req as any).log?.error?.({ err }, "firm_settings.get failed");
     res.status(500).json({ error: "Internal Server Error" });
     return;
   }
@@ -55,6 +47,7 @@ router.get("/firm-settings", requireAuth, requireFirmUser, async (req, res) => {
 
 router.patch("/firm-settings", requireAuth, requireFirmUser, requirePermission("settings", "update"), async (req, res): Promise<void> => {
   try {
+    const r = rdb(req as AuthRequest);
     const firmId = (req as AuthRequest).firmId!;
     const { name, address, stNumber, tinNumber } = req.body;
 
@@ -64,12 +57,12 @@ router.patch("/firm-settings", requireAuth, requireFirmUser, requirePermission("
     if (stNumber !== undefined) updates.stNumber = stNumber;
     if (tinNumber !== undefined) updates.tinNumber = tinNumber;
 
-    const [updated] = await db.update(firmsTable)
+    const [updated] = await r.update(firmsTable)
       .set(updates)
       .where(eq(firmsTable.id, firmId))
       .returning();
 
-    const bankAccounts = await db.select().from(firmBankAccountsTable)
+    const bankAccounts = await r.select().from(firmBankAccountsTable)
       .where(eq(firmBankAccountsTable.firmId, firmId));
 
     res.json({
@@ -90,19 +83,7 @@ router.patch("/firm-settings", requireAuth, requireFirmUser, requirePermission("
     await writeAuditLog({ firmId, actorId: (req as AuthRequest).userId, actorType: (req as AuthRequest).userType, action: "settings.update", entityType: "firm", entityId: firmId, detail: `fields=${Object.keys(updates).join(",")}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
     return;
   } catch (err: any) {
-    const pg = (() => {
-      let cur: any = err;
-      for (let i = 0; i < 6 && cur; i++) {
-        if (typeof cur?.code === "string" || typeof cur?.message === "string") {
-          const code = typeof cur.code === "string" ? cur.code : undefined;
-          const message = typeof cur.message === "string" ? cur.message : undefined;
-          return { code, message };
-        }
-        cur = cur?.cause;
-      }
-      return {};
-    })();
-    (req as any).log?.error?.({ err, pg }, "firm_settings.bank_accounts.delete failed");
+    (req as any).log?.error?.({ err }, "firm_settings.update failed");
     res.status(500).json({ error: "Internal Server Error" });
     return;
   }
@@ -110,6 +91,12 @@ router.patch("/firm-settings", requireAuth, requireFirmUser, requirePermission("
 
 router.post("/firm-settings/bank-accounts", requireAuth, requireFirmUser, requirePermission("settings", "update"), async (req, res): Promise<void> => {
   try {
+    const r = (req as AuthRequest).rlsDb;
+    if (!r) {
+      (req as any).log?.error?.({ route: "POST /api/firm-settings/bank-accounts", userId: (req as AuthRequest).userId, firmId: (req as AuthRequest).firmId }, "missing req.rlsDb");
+      res.status(500).json({ error: "Internal Server Error" });
+      return;
+    }
     const firmId = (req as AuthRequest).firmId!;
     const { bankName, accountNo, accountType } = req.body;
 
@@ -124,7 +111,32 @@ router.post("/firm-settings/bank-accounts", requireAuth, requireFirmUser, requir
       return;
     }
 
-    const [account] = await db.insert(firmBankAccountsTable).values({
+    let ctxFirmId: string | null = null;
+    let ctxIsFounder: string | null = null;
+    try {
+      const result = await r.execute(sql`
+        select
+          current_setting('app.current_firm_id', true) as firm_id,
+          current_setting('app.is_founder', true) as is_founder
+      `);
+      const rows = Array.isArray(result)
+        ? result
+        : ("rows" in (result as any) ? (result as any).rows : []);
+      const row = rows?.[0] as any;
+      ctxFirmId = typeof row?.firm_id === "string" ? row.firm_id : null;
+      ctxIsFounder = typeof row?.is_founder === "string" ? row.is_founder : null;
+    } catch {
+    }
+    (req as any).log?.info?.({
+      route: "POST /api/firm-settings/bank-accounts",
+      userId: (req as AuthRequest).userId,
+      firmId,
+      insertFirmId: firmId,
+      ctxFirmId,
+      ctxIsFounder,
+    }, "create route tenant context");
+
+    const [account] = await r.insert(firmBankAccountsTable).values({
       firmId,
       bankName,
       accountNo,
@@ -141,13 +153,34 @@ router.post("/firm-settings/bank-accounts", requireAuth, requireFirmUser, requir
     await writeAuditLog({ firmId, actorId: (req as AuthRequest).userId, actorType: (req as AuthRequest).userType, action: "settings.bank_account.create", entityType: "firm_bank_account", entityId: account.id, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
     return;
   } catch (err: any) {
-    res.status(500).json({ error: err.message });
+    const pg = (() => {
+      let cur: any = err;
+      for (let i = 0; i < 6 && cur; i++) {
+        if (
+          typeof cur?.code === "string"
+          || typeof cur?.message === "string"
+          || typeof cur?.detail === "string"
+          || typeof cur?.constraint === "string"
+        ) {
+          const code = typeof cur.code === "string" ? cur.code : undefined;
+          const message = typeof cur.message === "string" ? cur.message : undefined;
+          const detail = typeof cur.detail === "string" ? cur.detail : undefined;
+          const constraint = typeof cur.constraint === "string" ? cur.constraint : undefined;
+          return { code, message, detail, constraint };
+        }
+        cur = cur?.cause;
+      }
+      return {};
+    })();
+    (req as any).log?.error?.({ err, pg }, "firm_settings.bank_accounts.create failed");
+    res.status(500).json({ error: "Internal Server Error" });
     return;
   }
 });
 
 router.delete("/firm-settings/bank-accounts/:id", requireAuth, requireFirmUser, requirePermission("settings", "update"), async (req, res): Promise<void> => {
   try {
+    const r = rdb(req as AuthRequest);
     const firmId = (req as AuthRequest).firmId!;
     const idStr = one(req.params.id);
     const id = idStr ? parseInt(idStr, 10) : NaN;
@@ -157,17 +190,37 @@ router.delete("/firm-settings/bank-accounts/:id", requireAuth, requireFirmUser, 
       return;
     }
 
-    const [existing] = await db.select().from(firmBankAccountsTable)
+    const [existing] = await r.select().from(firmBankAccountsTable)
       .where(and(eq(firmBankAccountsTable.id, id), eq(firmBankAccountsTable.firmId, firmId)));
 
     if (!existing) { res.status(404).json({ error: "Bank account not found" }); return; }
 
-    await db.delete(firmBankAccountsTable).where(eq(firmBankAccountsTable.id, id));
+    await r.delete(firmBankAccountsTable).where(eq(firmBankAccountsTable.id, id));
     res.json({ success: true });
     await writeAuditLog({ firmId, actorId: (req as AuthRequest).userId, actorType: (req as AuthRequest).userType, action: "settings.bank_account.delete", entityType: "firm_bank_account", entityId: id, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
     return;
   } catch (err: any) {
-    res.status(500).json({ error: err.message });
+    const pg = (() => {
+      let cur: any = err;
+      for (let i = 0; i < 6 && cur; i++) {
+        if (
+          typeof cur?.code === "string"
+          || typeof cur?.message === "string"
+          || typeof cur?.detail === "string"
+          || typeof cur?.constraint === "string"
+        ) {
+          const code = typeof cur.code === "string" ? cur.code : undefined;
+          const message = typeof cur.message === "string" ? cur.message : undefined;
+          const detail = typeof cur.detail === "string" ? cur.detail : undefined;
+          const constraint = typeof cur.constraint === "string" ? cur.constraint : undefined;
+          return { code, message, detail, constraint };
+        }
+        cur = cur?.cause;
+      }
+      return {};
+    })();
+    (req as any).log?.error?.({ err, pg }, "firm_settings.bank_accounts.delete failed");
+    res.status(500).json({ error: "Internal Server Error" });
     return;
   }
 });

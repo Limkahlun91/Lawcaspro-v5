@@ -3,7 +3,7 @@ import { eq, ilike, count, desc, and, sql } from "drizzle-orm";
 import {
   db, casesTable, casePurchasersTable, caseAssignmentsTable,
   caseWorkflowStepsTable, caseNotesTable,
-  projectsTable, developersTable, clientsTable, usersTable, auditLogsTable
+  projectsTable, developersTable, clientsTable, usersTable, auditLogsTable,
 } from "@workspace/db";
 import {
   CreateCaseBody, UpdateCaseBody, ListCasesQueryParams,
@@ -16,14 +16,17 @@ import { buildWorkflowSteps } from "../lib/workflow";
 
 const router: IRouter = Router();
 
-async function formatCaseDetail(c: typeof casesTable.$inferSelect) {
-  const [proj] = await db.select().from(projectsTable).where(eq(projectsTable.id, c.projectId));
-  const [dev] = await db.select().from(developersTable).where(eq(developersTable.id, c.developerId));
+type DbConn = typeof db | NonNullable<AuthRequest["rlsDb"]>;
+const rdb = (req: AuthRequest): DbConn => req.rlsDb ?? db;
 
-  const purchaserRows = await db.select().from(casePurchasersTable).where(eq(casePurchasersTable.caseId, c.id));
+async function formatCaseDetail(r: DbConn, c: typeof casesTable.$inferSelect) {
+  const [proj] = await r.select().from(projectsTable).where(eq(projectsTable.id, c.projectId));
+  const [dev] = await r.select().from(developersTable).where(eq(developersTable.id, c.developerId));
+
+  const purchaserRows = await r.select().from(casePurchasersTable).where(eq(casePurchasersTable.caseId, c.id));
   const purchasers = await Promise.all(
     purchaserRows.map(async (p) => {
-      const [client] = await db.select().from(clientsTable).where(eq(clientsTable.id, p.clientId));
+      const [client] = await r.select().from(clientsTable).where(eq(clientsTable.id, p.clientId));
       return {
         id: p.id,
         clientId: p.clientId,
@@ -35,11 +38,11 @@ async function formatCaseDetail(c: typeof casesTable.$inferSelect) {
     })
   );
 
-  const assignRows = await db.select().from(caseAssignmentsTable)
+  const assignRows = await r.select().from(caseAssignmentsTable)
     .where(and(eq(caseAssignmentsTable.caseId, c.id), sql`unassigned_at IS NULL`));
   const assignments = await Promise.all(
     assignRows.map(async (a) => {
-      const [user] = await db.select().from(usersTable).where(eq(usersTable.id, a.userId));
+      const [user] = await r.select().from(usersTable).where(eq(usersTable.id, a.userId));
       return {
         id: a.id,
         userId: a.userId,
@@ -84,14 +87,14 @@ async function formatCaseDetail(c: typeof casesTable.$inferSelect) {
   };
 }
 
-async function formatCaseSummary(c: typeof casesTable.$inferSelect) {
-  const [proj] = await db.select().from(projectsTable).where(eq(projectsTable.id, c.projectId));
-  const [dev] = await db.select().from(developersTable).where(eq(developersTable.id, c.developerId));
-  const [lawyerAssign] = await db.select().from(caseAssignmentsTable)
+async function formatCaseSummary(r: DbConn, c: typeof casesTable.$inferSelect) {
+  const [proj] = await r.select().from(projectsTable).where(eq(projectsTable.id, c.projectId));
+  const [dev] = await r.select().from(developersTable).where(eq(developersTable.id, c.developerId));
+  const [lawyerAssign] = await r.select().from(caseAssignmentsTable)
     .where(and(eq(caseAssignmentsTable.caseId, c.id), eq(caseAssignmentsTable.roleInCase, "lawyer"), sql`unassigned_at IS NULL`));
   let lawyerName: string | null = null;
   if (lawyerAssign) {
-    const [lawyer] = await db.select().from(usersTable).where(eq(usersTable.id, lawyerAssign.userId));
+    const [lawyer] = await r.select().from(usersTable).where(eq(usersTable.id, lawyerAssign.userId));
     lawyerName = lawyer?.name ?? null;
   }
   return {
@@ -127,16 +130,18 @@ router.get("/cases/stats/by-type", requireAuth, requireFirmUser, requirePermissi
 });
 
 router.get("/cases/recent", requireAuth, requireFirmUser, requirePermission("cases", "read"), async (req: AuthRequest, res): Promise<void> => {
+  const r = rdb(req);
   const limitParam = req.query.limit ? Number(req.query.limit) : 5;
-  const cases = await db.select().from(casesTable)
+  const cases = await r.select().from(casesTable)
     .where(eq(casesTable.firmId, req.firmId!))
     .orderBy(desc(casesTable.updatedAt))
     .limit(limitParam);
-  const summaries = await Promise.all(cases.map(formatCaseSummary));
+  const summaries = await Promise.all(cases.map((c) => formatCaseSummary(r, c)));
   res.json(summaries);
 });
 
 router.get("/cases", requireAuth, requireFirmUser, requirePermission("cases", "read"), async (req: AuthRequest, res): Promise<void> => {
+  const r = rdb(req);
   const params = ListCasesQueryParams.safeParse(req.query);
   const search = params.success ? params.data.search : undefined;
   const status = params.success ? params.data.status : undefined;
@@ -155,19 +160,25 @@ router.get("/cases", requireAuth, requireFirmUser, requirePermission("cases", "r
   if (purchaseMode) conditions.push(eq(casesTable.purchaseMode, purchaseMode));
   if (titleType) conditions.push(eq(casesTable.titleType, titleType));
 
-  const cases = await db.select().from(casesTable)
+  const cases = await r.select().from(casesTable)
     .where(and(...conditions))
     .orderBy(desc(casesTable.updatedAt))
     .limit(limit).offset(offset);
 
-  const [totalRes] = await db.select({ c: count() }).from(casesTable).where(and(...conditions));
+  const [totalRes] = await r.select({ c: count() }).from(casesTable).where(and(...conditions));
 
-  const summaries = await Promise.all(cases.map(formatCaseSummary));
+  const summaries = await Promise.all(cases.map((c) => formatCaseSummary(r, c)));
   res.json({ data: summaries, total: Number(totalRes?.c ?? 0), page, limit });
 });
 
 router.post("/cases", requireAuth, requireFirmUser, requirePermission("cases", "create"), async (req: AuthRequest, res): Promise<void> => {
   try {
+    const r = req.rlsDb;
+    if (!r) {
+      (req as any).log?.error?.({ route: "POST /api/cases", userId: req.userId, firmId: req.firmId }, "missing req.rlsDb");
+      res.status(500).json({ error: "Internal Server Error" });
+      return;
+    }
     const parsed = CreateCaseBody.safeParse(req.body);
     if (!parsed.success) {
       res.status(400).json({ error: "Validation failed", fields: parsed.error.flatten().fieldErrors });
@@ -177,8 +188,12 @@ router.post("/cases", requireAuth, requireFirmUser, requirePermission("cases", "
     const { projectId, developerId: clientDeveloperId, purchaseMode, titleType, spaPrice, assignedLawyerId, assignedClerkId, purchaserIds, purchasers } = parsed.data;
 
     // ── 1. Resolve developerId server-side from projectId ─────────────────────
-    const [project] = await db.select().from(projectsTable).where(eq(projectsTable.id, projectId));
+    const [project] = await r.select().from(projectsTable).where(eq(projectsTable.id, projectId));
     if (!project) {
+      res.status(404).json({ error: "Project not found" });
+      return;
+    }
+    if (project.firmId !== req.firmId) {
       res.status(404).json({ error: "Project not found" });
       return;
     }
@@ -212,7 +227,7 @@ router.post("/cases", requireAuth, requireFirmUser, requirePermission("cases", "
 
         if (trimmedIc) {
           // IC is present — look up by firmId + icNo (most reliable match)
-          const [byIc] = await db
+          const [byIc] = await r
             .select()
             .from(clientsTable)
             .where(and(eq(clientsTable.firmId, req.firmId!), eq(clientsTable.icNo, trimmedIc)));
@@ -223,7 +238,7 @@ router.post("/cases", requireAuth, requireFirmUser, requirePermission("cases", "
 
         if (!existingClientId) {
           // No IC or no IC match — try exact case-insensitive name match
-          const byName = await db
+          const byName = await r
             .select()
             .from(clientsTable)
             .where(and(
@@ -247,13 +262,13 @@ router.post("/cases", requireAuth, requireFirmUser, requirePermission("cases", "
           };
 
           let client: typeof clientsTable.$inferSelect;
-          [client] = await db
+          [client] = await r
             .insert(clientsTable)
             .values(insertBase as any)
             .returning();
 
           try {
-            await db
+            await r
               .update(clientsTable)
               .set({ createdBy: req.userId } as any)
               .where(and(eq(clientsTable.id, client.id), eq(clientsTable.firmId, req.firmId!)));
@@ -308,14 +323,39 @@ router.post("/cases", requireAuth, requireFirmUser, requirePermission("cases", "
       companyDetails: companyDetails ? JSON.stringify(companyDetails) : null,
     };
 
+    let ctxFirmId: string | null = null;
+    let ctxIsFounder: string | null = null;
+    try {
+      const result = await r.execute(sql`
+        select
+          current_setting('app.current_firm_id', true) as firm_id,
+          current_setting('app.is_founder', true) as is_founder
+      `);
+      const rows = Array.isArray(result)
+        ? result
+        : ("rows" in (result as any) ? (result as any).rows : []);
+      const row = rows?.[0] as any;
+      ctxFirmId = typeof row?.firm_id === "string" ? row.firm_id : null;
+      ctxIsFounder = typeof row?.is_founder === "string" ? row.is_founder : null;
+    } catch {
+    }
+    (req as any).log?.info?.({
+      route: "POST /api/cases",
+      userId: req.userId,
+      firmId: req.firmId,
+      insertFirmId: insertCaseBase.firmId,
+      ctxFirmId,
+      ctxIsFounder,
+    }, "create route tenant context");
+
     let newCase: typeof casesTable.$inferSelect;
-    [newCase] = await db
+    [newCase] = await r
       .insert(casesTable)
       .values(insertCaseBase as any)
       .returning();
 
     try {
-      await db
+      await r
         .update(casesTable)
         .set({ createdBy: req.userId } as any)
         .where(and(eq(casesTable.id, newCase.id), eq(casesTable.firmId, req.firmId!)));
@@ -323,7 +363,7 @@ router.post("/cases", requireAuth, requireFirmUser, requirePermission("cases", "
     }
 
     for (let i = 0; i < resolvedPurchaserIds.length; i++) {
-      await db.insert(casePurchasersTable).values({
+      await r.insert(casePurchasersTable).values({
         caseId: newCase.id,
         clientId: resolvedPurchaserIds[i],
         role: i === 0 ? "main" : "joint",
@@ -331,7 +371,7 @@ router.post("/cases", requireAuth, requireFirmUser, requirePermission("cases", "
       });
     }
 
-    await db.insert(caseAssignmentsTable).values({
+    await r.insert(caseAssignmentsTable).values({
       caseId: newCase.id,
       userId: assignedLawyerId,
       roleInCase: "lawyer",
@@ -339,7 +379,7 @@ router.post("/cases", requireAuth, requireFirmUser, requirePermission("cases", "
     });
 
     if (assignedClerkId) {
-      await db.insert(caseAssignmentsTable).values({
+      await r.insert(caseAssignmentsTable).values({
         caseId: newCase.id,
         userId: assignedClerkId,
         roleInCase: "clerk",
@@ -349,7 +389,7 @@ router.post("/cases", requireAuth, requireFirmUser, requirePermission("cases", "
 
     const workflowSteps = buildWorkflowSteps(purchaseMode, titleType);
     if (workflowSteps.length > 0) {
-      await db.insert(caseWorkflowStepsTable).values(
+      await r.insert(caseWorkflowStepsTable).values(
         workflowSteps.map((s) => ({
           caseId: newCase.id,
           stepKey: s.stepKey,
@@ -373,17 +413,19 @@ router.post("/cases", requireAuth, requireFirmUser, requirePermission("cases", "
       userAgent: req.headers["user-agent"],
     });
 
-    const detail = await formatCaseDetail(newCase);
+    const detail = await formatCaseDetail(r, newCase);
     res.status(201).json({ ...detail, purchasersCreated, purchasersReused });
     return;
   } catch (e) {
     const pg = (() => {
       let cur: any = e;
       for (let i = 0; i < 6 && cur; i++) {
-        if (typeof cur?.code === "string" || typeof cur?.message === "string") {
+        if (typeof cur?.code === "string" || typeof cur?.message === "string" || typeof cur?.detail === "string" || typeof cur?.constraint === "string") {
           const code = typeof cur.code === "string" ? cur.code : undefined;
           const message = typeof cur.message === "string" ? cur.message : undefined;
-          return { code, message };
+          const detail = typeof cur.detail === "string" ? cur.detail : undefined;
+          const constraint = typeof cur.constraint === "string" ? cur.constraint : undefined;
+          return { code, message, detail, constraint };
         }
         cur = cur?.cause;
       }
@@ -396,19 +438,20 @@ router.post("/cases", requireAuth, requireFirmUser, requirePermission("cases", "
 });
 
 router.get("/cases/:caseId", requireAuth, requireFirmUser, requirePermission("cases", "read"), async (req: AuthRequest, res): Promise<void> => {
+  const r = rdb(req);
   const params = GetCaseParams.safeParse(req.params);
   if (!params.success) {
     res.status(400).json({ error: params.error.message });
     return;
   }
 
-  const [c] = await db.select().from(casesTable).where(eq(casesTable.id, params.data.caseId));
+  const [c] = await r.select().from(casesTable).where(eq(casesTable.id, params.data.caseId));
   if (!c || c.firmId !== req.firmId) {
     res.status(404).json({ error: "Case not found" });
     return;
   }
 
-  res.json(await formatCaseDetail(c));
+  res.json(await formatCaseDetail(r, c));
 });
 
 router.patch("/cases/:caseId", requireAuth, requireFirmUser, requirePermission("cases", "update"), async (req: AuthRequest, res): Promise<void> => {
@@ -462,7 +505,7 @@ router.patch("/cases/:caseId", requireAuth, requireFirmUser, requirePermission("
     detail: JSON.stringify(updates),
   });
 
-  res.json(await formatCaseDetail(c));
+  res.json(await formatCaseDetail(rdb(req), c));
 });
 
 router.get("/cases/:caseId/workflow", requireAuth, requireFirmUser, requirePermission("cases", "read"), async (req: AuthRequest, res): Promise<void> => {
