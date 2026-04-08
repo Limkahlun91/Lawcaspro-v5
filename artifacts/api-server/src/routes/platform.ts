@@ -1,6 +1,6 @@
 import { Router, type IRouter } from "express";
 import { Readable } from "stream";
-import { eq, ilike, count, sql, desc, and, isNull, or } from "drizzle-orm";
+import { eq, ilike, count, sql, desc, and, isNull, or, type SQL } from "drizzle-orm";
 import {
   db,
   firmsTable,
@@ -14,6 +14,7 @@ import {
 } from "@workspace/db";
 import { CreateFirmBody, UpdateFirmBody, ListFirmsQueryParams, GetFirmParams, UpdateFirmParams } from "@workspace/api-zod";
 import { requireAuth, requireFounder, writeAuditLog, type AuthRequest } from "../lib/auth";
+import { withAuthSafeDb } from "../lib/auth-safe-db";
 import bcrypt from "bcryptjs";
 import { ObjectNotFoundError, ObjectStorageService } from "../lib/objectStorage";
 
@@ -333,17 +334,17 @@ router.get("/platform/documents", requireAuth, requireFounder, async (req: AuthR
   const folderIdStr = one(req.query.folderId as any);
   const firmId = firmIdStr ? parseInt(firmIdStr, 10) : undefined;
   const folderId = folderIdStr ? parseInt(folderIdStr, 10) : undefined;
-  let condition;
+  let condition: SQL<unknown> | undefined;
   if (firmId) condition = eq(platformDocumentsTable.firmId, firmId);
   if (folderId !== undefined) {
     const folderCondition = eq(platformDocumentsTable.folderId, folderId);
     condition = condition ? and(condition, folderCondition) : folderCondition;
   }
-  const docs = await db
+  const docs = await withAuthSafeDb(async (authDb) => authDb
     .select()
     .from(platformDocumentsTable)
     .where(condition)
-    .orderBy(desc(platformDocumentsTable.createdAt));
+    .orderBy(desc(platformDocumentsTable.createdAt)));
   res.json(docs);
 });
 
@@ -363,7 +364,7 @@ router.post("/platform/documents", requireAuth, requireFounder, async (req: Auth
     res.status(400).json({ error: "Missing required fields" });
     return;
   }
-  const [doc] = await db
+  const [doc] = await withAuthSafeDb(async (authDb) => authDb
     .insert(platformDocumentsTable)
     .values({
       name,
@@ -377,7 +378,7 @@ router.post("/platform/documents", requireAuth, requireFounder, async (req: Auth
       folderId: folderId ?? null,
       uploadedBy: req.userId!,
     })
-    .returning();
+    .returning());
   await writeAuditLog({ firmId: doc.firmId ?? null, actorId: req.userId, actorType: req.userType, action: "platform.document.create", entityType: "platform_document", entityId: doc.id, detail: `name=${doc.name} category=${doc.category} folderId=${doc.folderId ?? ""}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
   res.status(201).json(doc);
 });
@@ -386,12 +387,12 @@ router.delete("/platform/documents/:docId", requireAuth, requireFounder, async (
   const docIdStr = one(req.params.docId);
   const docId = docIdStr ? parseInt(docIdStr, 10) : NaN;
   if (isNaN(docId)) { res.status(400).json({ error: "Invalid document ID" }); return; }
-  const [doc] = await db.select().from(platformDocumentsTable).where(eq(platformDocumentsTable.id, docId));
+  const [doc] = await withAuthSafeDb(async (authDb) => authDb.select().from(platformDocumentsTable).where(eq(platformDocumentsTable.id, docId)));
   if (!doc) {
     res.status(404).json({ error: "Document not found" });
     return;
   }
-  await db.delete(platformDocumentsTable).where(eq(platformDocumentsTable.id, docId));
+  await withAuthSafeDb(async (authDb) => authDb.delete(platformDocumentsTable).where(eq(platformDocumentsTable.id, docId)));
   await writeAuditLog({ firmId: doc.firmId ?? null, actorId: req.userId, actorType: req.userType, action: "platform.document.delete", entityType: "platform_document", entityId: docId, detail: `name=${doc.name}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
   res.json({ success: true });
 });
@@ -400,7 +401,7 @@ router.get("/platform/documents/:docId/download", requireAuth, requireFounder, a
   const docIdStr = one(req.params.docId);
   const docId = docIdStr ? parseInt(docIdStr, 10) : NaN;
   if (isNaN(docId)) { res.status(400).json({ error: "Invalid document ID" }); return; }
-  const [doc] = await db.select().from(platformDocumentsTable).where(eq(platformDocumentsTable.id, docId));
+  const [doc] = await withAuthSafeDb(async (authDb) => authDb.select().from(platformDocumentsTable).where(eq(platformDocumentsTable.id, docId)));
   if (!doc) { res.status(404).json({ error: "Document not found" }); return; }
   try {
     const objectFile = await storage.getObjectEntityFile(doc.objectPath);
