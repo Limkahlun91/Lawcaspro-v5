@@ -38,6 +38,25 @@ import { drizzle } from "drizzle-orm/node-postgres";
 import type { PoolClient } from "pg";
 import * as schema from "./schema";
 
+export async function assertSafeRlsRole(
+  client: PoolClient,
+  context: "firm" | "founder" | "auth"
+): Promise<void> {
+  const res = await client.query<{
+    rolbypassrls: boolean;
+    rolsuper: boolean;
+    rolname: string;
+  }>(
+    "SELECT rolname, rolbypassrls, rolsuper FROM pg_roles WHERE rolname = current_user"
+  );
+  const role = res.rows[0];
+  if (role?.rolbypassrls || role?.rolsuper) {
+    throw new Error(
+      `Cannot enforce RLS safely: database connection is using BYPASSRLS or superuser role (role=${role?.rolname ?? "unknown"}). Current DATABASE_URL is not safe for ${context}-scoped RLS requests.`
+    );
+  }
+}
+
 /**
  * Session-level tenant context (no transaction required).
  * Settings persist for the life of the connection — always call
@@ -47,15 +66,7 @@ export async function setTenantContextSession(
   client: PoolClient,
   firmId: number
 ): Promise<void> {
-  const res = await client.query<{ rolbypassrls: boolean; rolsuper: boolean }>(
-    "SELECT rolbypassrls, rolsuper FROM pg_roles WHERE rolname = current_user"
-  );
-  const role = res.rows[0];
-  if (role?.rolbypassrls || role?.rolsuper) {
-    throw new Error(
-      "Cannot enforce RLS safely: database connection is using BYPASSRLS or superuser role. Current DATABASE_URL is not safe for firm-scoped RLS requests."
-    );
-  }
+  await assertSafeRlsRole(client, "firm");
   
   await client.query(`SET app.current_firm_id = '${firmId}'`);
   await client.query("SET app.is_founder = 'false'");
@@ -70,18 +81,16 @@ export async function setTenantContext(
   client: PoolClient,
   firmId: number
 ): Promise<void> {
-  const res = await client.query<{ rolbypassrls: boolean; rolsuper: boolean }>(
-    "SELECT rolbypassrls, rolsuper FROM pg_roles WHERE rolname = current_user"
-  );
-  const role = res.rows[0];
-  if (role?.rolbypassrls || role?.rolsuper) {
-    throw new Error(
-      "Cannot enforce RLS safely: database connection is using BYPASSRLS or superuser role. Current DATABASE_URL is not safe for firm-scoped RLS requests."
-    );
-  }
+  await assertSafeRlsRole(client, "firm");
   
   await client.query(`SET LOCAL app.current_firm_id = '${firmId}'`);
   await client.query("SET LOCAL app.is_founder = 'false'");
+}
+
+export async function setFounderContext(client: PoolClient): Promise<void> {
+  await assertSafeRlsRole(client, "founder");
+  await client.query("SET LOCAL app.is_founder = 'true'");
+  await client.query("SET LOCAL app.current_firm_id = ''");
 }
 
 /**
@@ -91,15 +100,7 @@ export async function setTenantContext(
 export async function setFounderContextSession(
   client: PoolClient
 ): Promise<void> {
-  const res = await client.query<{ rolbypassrls: boolean; rolsuper: boolean }>(
-    "SELECT rolbypassrls, rolsuper FROM pg_roles WHERE rolname = current_user"
-  );
-  const role = res.rows[0];
-  if (role?.rolbypassrls || role?.rolsuper) {
-    throw new Error(
-      "Cannot enforce RLS safely: database connection is using BYPASSRLS or superuser role. Current DATABASE_URL is not safe for founder RLS requests."
-    );
-  }
+  await assertSafeRlsRole(client, "founder");
   
   await client.query("SET app.is_founder = 'true'");
   await client.query("SET app.current_firm_id = ''");

@@ -218,10 +218,12 @@ router.get("/platform/stats", requireAuth, requireFounder, async (_req, res): Pr
 // ─── System Folders ───────────────────────────────────────────────────────────
 
 router.get("/platform/folders", requireAuth, requireFounder, async (_req: AuthRequest, res): Promise<void> => {
-  const folders = await db
-    .select()
-    .from(systemFoldersTable)
-    .orderBy(systemFoldersTable.sortOrder, systemFoldersTable.name);
+  const folders = await withAuthSafeDb(async (authDb) =>
+    authDb
+      .select()
+      .from(systemFoldersTable)
+      .orderBy(systemFoldersTable.sortOrder, systemFoldersTable.name)
+  );
   res.json(folders);
 });
 
@@ -231,16 +233,32 @@ router.post("/platform/folders", requireAuth, requireFounder, async (req: AuthRe
     res.status(400).json({ error: "Folder name is required" });
     return;
   }
-  const maxSort = await db.execute(
-    sql`SELECT COALESCE(MAX(sort_order), -1) + 1 as next_sort FROM system_folders WHERE ${parentId ? sql`parent_id = ${parentId}` : sql`parent_id IS NULL`}`
-  );
-  const nextSortV = firstRow(maxSort)?.next_sort;
-  const nextSort = typeof nextSortV === "string" || typeof nextSortV === "number" ? Number(nextSortV) : 0;
-  const [folder] = await db
-    .insert(systemFoldersTable)
-    .values({ name: name.trim(), parentId: parentId ?? null, sortOrder: nextSort })
-    .returning();
-  await writeAuditLog({ firmId: null, actorId: req.userId, actorType: req.userType, action: "platform.system_folder.create", entityType: "system_folder", entityId: folder.id, detail: `name=${folder.name} parentId=${folder.parentId ?? ""}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+  const folder = await withAuthSafeDb(async (authDb) => {
+    const maxSort = await authDb.execute(
+      sql`SELECT COALESCE(MAX(sort_order), -1) + 1 as next_sort FROM system_folders WHERE ${parentId ? sql`parent_id = ${parentId}` : sql`parent_id IS NULL`}`
+    );
+    const nextSortV = firstRow(maxSort)?.next_sort;
+    const nextSort = typeof nextSortV === "string" || typeof nextSortV === "number" ? Number(nextSortV) : 0;
+    const [folder] = await authDb
+      .insert(systemFoldersTable)
+      .values({ name: name.trim(), parentId: parentId ?? null, sortOrder: nextSort })
+      .returning();
+    await writeAuditLog(
+      {
+        firmId: null,
+        actorId: req.userId,
+        actorType: req.userType,
+        action: "platform.system_folder.create",
+        entityType: "system_folder",
+        entityId: folder.id,
+        detail: `name=${folder.name} parentId=${folder.parentId ?? ""}`,
+        ipAddress: req.ip,
+        userAgent: req.headers["user-agent"],
+      },
+      { db: authDb, strict: true }
+    );
+    return folder;
+  });
   res.status(201).json(folder);
 });
 
@@ -249,81 +267,146 @@ router.patch("/platform/folders/:folderId", requireAuth, requireFounder, async (
   const folderId = folderIdStr ? parseInt(folderIdStr, 10) : NaN;
   if (isNaN(folderId)) { res.status(400).json({ error: "Invalid folder ID" }); return; }
   const { name, isDisabled } = req.body as { name?: string; isDisabled?: boolean };
-  const updates: Record<string, unknown> = {};
-  if (name !== undefined) updates.name = name.trim();
-  if (isDisabled !== undefined) updates.isDisabled = isDisabled;
-  if (Object.keys(updates).length === 0) { res.status(400).json({ error: "No fields to update" }); return; }
-  const [folder] = await db.update(systemFoldersTable).set(updates).where(eq(systemFoldersTable.id, folderId)).returning();
-  if (!folder) { res.status(404).json({ error: "Folder not found" }); return; }
-  await writeAuditLog({ firmId: null, actorId: req.userId, actorType: req.userType, action: "platform.system_folder.update", entityType: "system_folder", entityId: folderId, detail: `fields=${Object.keys(updates).join(",")}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
-  res.json(folder);
+  const wantName = name !== undefined;
+  const wantDisabled = isDisabled !== undefined;
+  if (!wantName && !wantDisabled) { res.status(400).json({ error: "No fields to update" }); return; }
+  if (wantName && !name?.trim()) { res.status(400).json({ error: "Folder name is required" }); return; }
+
+  const result = await withAuthSafeDb(async (authDb) => {
+    const [before] = await authDb.select().from(systemFoldersTable).where(eq(systemFoldersTable.id, folderId));
+    if (!before) return { kind: "not_found" as const };
+
+    const updates: Record<string, unknown> = {};
+    if (wantName) updates.name = name!.trim();
+    if (wantDisabled) updates.isDisabled = isDisabled!;
+
+    const [folder] = await authDb.update(systemFoldersTable).set(updates).where(eq(systemFoldersTable.id, folderId)).returning();
+    if (!folder) return { kind: "not_found" as const };
+
+    let action = "platform.system_folder.update";
+    if (wantName && !wantDisabled) action = "platform.system_folder.rename";
+    if (!wantName && wantDisabled) action = isDisabled ? "platform.system_folder.disable" : "platform.system_folder.enable";
+
+    const detailParts: string[] = [];
+    if (wantName) detailParts.push(`from=${before.name} to=${folder.name}`);
+    if (wantDisabled) detailParts.push(`isDisabled=${String(folder.isDisabled)}`);
+
+    await writeAuditLog(
+      {
+        firmId: null,
+        actorId: req.userId,
+        actorType: req.userType,
+        action,
+        entityType: "system_folder",
+        entityId: folderId,
+        detail: detailParts.join(" "),
+        ipAddress: req.ip,
+        userAgent: req.headers["user-agent"],
+      },
+      { db: authDb, strict: true }
+    );
+    return { kind: "ok" as const, folder };
+  });
+
+  if (result.kind === "not_found") { res.status(404).json({ error: "Folder not found" }); return; }
+  res.json(result.folder);
 });
 
 router.delete("/platform/folders/:folderId", requireAuth, requireFounder, async (req: AuthRequest, res): Promise<void> => {
   const folderIdStr = one(req.params.folderId);
   const folderId = folderIdStr ? parseInt(folderIdStr, 10) : NaN;
   if (isNaN(folderId)) { res.status(400).json({ error: "Invalid folder ID" }); return; }
-  const [folder] = await db.select().from(systemFoldersTable).where(eq(systemFoldersTable.id, folderId));
-  if (!folder) { res.status(404).json({ error: "Folder not found" }); return; }
-  const [childCount] = await db.select({ c: count() }).from(systemFoldersTable).where(eq(systemFoldersTable.parentId, folderId));
-  if (Number(childCount?.c ?? 0) > 0) {
-    res.status(400).json({ error: "Cannot delete folder with subfolders. Remove subfolders first." });
-    return;
-  }
-  const [docCount] = await db.select({ c: count() }).from(platformDocumentsTable).where(eq(platformDocumentsTable.folderId, folderId));
-  if (Number(docCount?.c ?? 0) > 0) {
-    res.status(400).json({ error: "Cannot delete folder with documents. Remove or move documents first." });
-    return;
-  }
-  await db.delete(systemFoldersTable).where(eq(systemFoldersTable.id, folderId));
-  await writeAuditLog({ firmId: null, actorId: req.userId, actorType: req.userType, action: "platform.system_folder.delete", entityType: "system_folder", entityId: folderId, detail: `name=${folder.name}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+  const result = await withAuthSafeDb(async (authDb) => {
+    const [folder] = await authDb.select().from(systemFoldersTable).where(eq(systemFoldersTable.id, folderId));
+    if (!folder) return { kind: "not_found" as const };
+
+    const [childCount] = await authDb.select({ c: count() }).from(systemFoldersTable).where(eq(systemFoldersTable.parentId, folderId));
+    if (Number(childCount?.c ?? 0) > 0) {
+      return { kind: "bad_request" as const, error: "Cannot delete folder with subfolders. Remove subfolders first." };
+    }
+
+    const [docCount] = await authDb.select({ c: count() }).from(platformDocumentsTable).where(eq(platformDocumentsTable.folderId, folderId));
+    if (Number(docCount?.c ?? 0) > 0) {
+      return { kind: "bad_request" as const, error: "Cannot delete folder with documents. Remove or move documents first." };
+    }
+
+    await authDb.delete(systemFoldersTable).where(eq(systemFoldersTable.id, folderId));
+    await writeAuditLog(
+      {
+        firmId: null,
+        actorId: req.userId,
+        actorType: req.userType,
+        action: "platform.system_folder.delete",
+        entityType: "system_folder",
+        entityId: folderId,
+        detail: `name=${folder.name}`,
+        ipAddress: req.ip,
+        userAgent: req.headers["user-agent"],
+      },
+      { db: authDb, strict: true }
+    );
+    return { kind: "ok" as const };
+  });
+
+  if (result.kind === "not_found") { res.status(404).json({ error: "Folder not found" }); return; }
+  if (result.kind === "bad_request") { res.status(400).json({ error: result.error }); return; }
   res.json({ success: true });
 });
 
 router.post("/platform/folders/reorder", requireAuth, requireFounder, async (req: AuthRequest, res): Promise<void> => {
   const { folderId, direction } = req.body as { folderId: number; direction: "up" | "down" };
   if (!folderId || !direction) { res.status(400).json({ error: "folderId and direction required" }); return; }
-  const [folder] = await db.select().from(systemFoldersTable).where(eq(systemFoldersTable.id, folderId));
-  if (!folder) { res.status(404).json({ error: "Folder not found" }); return; }
+  const result = await withAuthSafeDb(async (authDb) => {
+    const [folder] = await authDb.select().from(systemFoldersTable).where(eq(systemFoldersTable.id, folderId));
+    if (!folder) return { kind: "not_found" as const };
 
-  const siblings = await db
-    .select()
-    .from(systemFoldersTable)
-    .where(folder.parentId ? eq(systemFoldersTable.parentId, folder.parentId) : isNull(systemFoldersTable.parentId))
-    .orderBy(systemFoldersTable.sortOrder);
+    const siblings = await authDb
+      .select()
+      .from(systemFoldersTable)
+      .where(folder.parentId ? eq(systemFoldersTable.parentId, folder.parentId) : isNull(systemFoldersTable.parentId))
+      .orderBy(systemFoldersTable.sortOrder);
 
-  const idx = siblings.findIndex(s => s.id === folderId);
-  const swapIdx = direction === "up" ? idx - 1 : idx + 1;
-  if (swapIdx < 0 || swapIdx >= siblings.length) {
-    await writeAuditLog({
-      firmId: null,
-      actorId: req.userId,
-      actorType: req.userType,
-      action: "platform.system_folder.reorder",
-      entityType: "system_folder",
-      entityId: folderId,
-      detail: `direction=${direction} noop=true parentId=${folder.parentId ?? ""}`,
-      ipAddress: req.ip,
-      userAgent: req.headers["user-agent"],
-    });
-    res.json({ success: true });
-    return;
-  }
+    const idx = siblings.findIndex(s => s.id === folderId);
+    const swapIdx = direction === "up" ? idx - 1 : idx + 1;
+    if (swapIdx < 0 || swapIdx >= siblings.length) {
+      await writeAuditLog(
+        {
+          firmId: null,
+          actorId: req.userId,
+          actorType: req.userType,
+          action: "platform.system_folder.reorder",
+          entityType: "system_folder",
+          entityId: folderId,
+          detail: `direction=${direction} noop=true parentId=${folder.parentId ?? ""}`,
+          ipAddress: req.ip,
+          userAgent: req.headers["user-agent"],
+        },
+        { db: authDb, strict: true }
+      );
+      return { kind: "ok" as const };
+    }
 
-  const swapFolder = siblings[swapIdx];
-  await db.update(systemFoldersTable).set({ sortOrder: swapFolder.sortOrder }).where(eq(systemFoldersTable.id, folder.id));
-  await db.update(systemFoldersTable).set({ sortOrder: folder.sortOrder }).where(eq(systemFoldersTable.id, swapFolder.id));
-  await writeAuditLog({
-    firmId: null,
-    actorId: req.userId,
-    actorType: req.userType,
-    action: "platform.system_folder.reorder",
-    entityType: "system_folder",
-    entityId: folderId,
-    detail: `direction=${direction} swapWith=${swapFolder.id} parentId=${folder.parentId ?? ""}`,
-    ipAddress: req.ip,
-    userAgent: req.headers["user-agent"],
+    const swapFolder = siblings[swapIdx];
+    await authDb.update(systemFoldersTable).set({ sortOrder: swapFolder.sortOrder }).where(eq(systemFoldersTable.id, folder.id));
+    await authDb.update(systemFoldersTable).set({ sortOrder: folder.sortOrder }).where(eq(systemFoldersTable.id, swapFolder.id));
+    await writeAuditLog(
+      {
+        firmId: null,
+        actorId: req.userId,
+        actorType: req.userType,
+        action: "platform.system_folder.reorder",
+        entityType: "system_folder",
+        entityId: folderId,
+        detail: `direction=${direction} swapWith=${swapFolder.id} parentId=${folder.parentId ?? ""}`,
+        ipAddress: req.ip,
+        userAgent: req.headers["user-agent"],
+      },
+      { db: authDb, strict: true }
+    );
+    return { kind: "ok" as const };
   });
+
+  if (result.kind === "not_found") { res.status(404).json({ error: "Folder not found" }); return; }
   res.json({ success: true });
 });
 
@@ -364,22 +447,38 @@ router.post("/platform/documents", requireAuth, requireFounder, async (req: Auth
     res.status(400).json({ error: "Missing required fields" });
     return;
   }
-  const [doc] = await withAuthSafeDb(async (authDb) => authDb
-    .insert(platformDocumentsTable)
-    .values({
-      name,
-      description: description ?? null,
-      category: category ?? "general",
-      fileName,
-      fileType,
-      fileSize: fileSize ?? null,
-      objectPath,
-      firmId: firmId ?? null,
-      folderId: folderId ?? null,
-      uploadedBy: req.userId!,
-    })
-    .returning());
-  await writeAuditLog({ firmId: doc.firmId ?? null, actorId: req.userId, actorType: req.userType, action: "platform.document.create", entityType: "platform_document", entityId: doc.id, detail: `name=${doc.name} category=${doc.category} folderId=${doc.folderId ?? ""}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+  const doc = await withAuthSafeDb(async (authDb) => {
+    const [doc] = await authDb
+      .insert(platformDocumentsTable)
+      .values({
+        name,
+        description: description ?? null,
+        category: category ?? "general",
+        fileName,
+        fileType,
+        fileSize: fileSize ?? null,
+        objectPath,
+        firmId: firmId ?? null,
+        folderId: folderId ?? null,
+        uploadedBy: req.userId!,
+      })
+      .returning();
+    await writeAuditLog(
+      {
+        firmId: doc.firmId ?? null,
+        actorId: req.userId,
+        actorType: req.userType,
+        action: "platform.document.create",
+        entityType: "platform_document",
+        entityId: doc.id,
+        detail: `name=${doc.name} category=${doc.category} folderId=${doc.folderId ?? ""}`,
+        ipAddress: req.ip,
+        userAgent: req.headers["user-agent"],
+      },
+      { db: authDb, strict: true }
+    );
+    return doc;
+  });
   res.status(201).json(doc);
 });
 
@@ -387,13 +486,27 @@ router.delete("/platform/documents/:docId", requireAuth, requireFounder, async (
   const docIdStr = one(req.params.docId);
   const docId = docIdStr ? parseInt(docIdStr, 10) : NaN;
   if (isNaN(docId)) { res.status(400).json({ error: "Invalid document ID" }); return; }
-  const [doc] = await withAuthSafeDb(async (authDb) => authDb.select().from(platformDocumentsTable).where(eq(platformDocumentsTable.id, docId)));
-  if (!doc) {
-    res.status(404).json({ error: "Document not found" });
-    return;
-  }
-  await withAuthSafeDb(async (authDb) => authDb.delete(platformDocumentsTable).where(eq(platformDocumentsTable.id, docId)));
-  await writeAuditLog({ firmId: doc.firmId ?? null, actorId: req.userId, actorType: req.userType, action: "platform.document.delete", entityType: "platform_document", entityId: docId, detail: `name=${doc.name}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+  const result = await withAuthSafeDb(async (authDb) => {
+    const [doc] = await authDb.select().from(platformDocumentsTable).where(eq(platformDocumentsTable.id, docId));
+    if (!doc) return { kind: "not_found" as const };
+    await authDb.delete(platformDocumentsTable).where(eq(platformDocumentsTable.id, docId));
+    await writeAuditLog(
+      {
+        firmId: doc.firmId ?? null,
+        actorId: req.userId,
+        actorType: req.userType,
+        action: "platform.document.delete",
+        entityType: "platform_document",
+        entityId: docId,
+        detail: `name=${doc.name}`,
+        ipAddress: req.ip,
+        userAgent: req.headers["user-agent"],
+      },
+      { db: authDb, strict: true }
+    );
+    return { kind: "ok" as const, doc };
+  });
+  if (result.kind === "not_found") { res.status(404).json({ error: "Document not found" }); return; }
   res.json({ success: true });
 });
 
@@ -406,6 +519,20 @@ router.get("/platform/documents/:docId/download", requireAuth, requireFounder, a
   try {
     const objectFile = await storage.getObjectEntityFile(doc.objectPath);
     const response = await storage.downloadObject(objectFile);
+    await writeAuditLog(
+      {
+        firmId: doc.firmId ?? null,
+        actorId: req.userId,
+        actorType: req.userType,
+        action: "platform.document.download",
+        entityType: "platform_document",
+        entityId: docId,
+        detail: `name=${doc.name} fileName=${doc.fileName}`,
+        ipAddress: req.ip,
+        userAgent: req.headers["user-agent"],
+      },
+      { strict: true }
+    );
     res.status(response.status);
     response.headers.forEach((value, key) => res.setHeader(key, value));
     const ascii = String(doc.fileName ?? "download").replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 120) || "download";

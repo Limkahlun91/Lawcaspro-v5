@@ -1,4 +1,4 @@
-import { makeRlsDb, pool } from "@workspace/db";
+import { makeRlsDb, pool, setFounderContext } from "@workspace/db";
 
 export async function withAuthSafeDb<T>(
   fn: (db: ReturnType<typeof makeRlsDb>) => Promise<T>,
@@ -6,8 +6,7 @@ export async function withAuthSafeDb<T>(
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
-    await client.query("SET LOCAL app.is_founder = 'true'");
-    await client.query("SET LOCAL app.current_firm_id = ''");
+    await setFounderContext(client);
     const authDb = makeRlsDb(client);
     const result = await fn(authDb);
     await client.query("COMMIT");
@@ -22,4 +21,3 @@ export async function withAuthSafeDb<T>(
     client.release();
   }
 }
-

@@ -30,10 +30,12 @@ export async function writeAuditLog(params: {
   detail?: string;
   ipAddress?: string;
   userAgent?: string;
-}) {
+}, options?: { db?: RlsDb; strict?: boolean }) {
+  const targetDb = options?.db;
+  const strict = options?.strict ?? false;
   try {
-    await withAuthSafeDb(async (authDb) => {
-      await authDb.insert(auditLogsTable).values({
+    const insert = async (rlsDb: RlsDb) => {
+      await rlsDb.insert(auditLogsTable).values({
         firmId: params.firmId ?? null,
         actorId: params.actorId ?? null,
         actorType: params.actorType ?? "firm_user",
@@ -44,6 +46,15 @@ export async function writeAuditLog(params: {
         ipAddress: params.ipAddress ?? null,
         userAgent: params.userAgent ?? null,
       });
+    };
+
+    if (targetDb) {
+      await insert(targetDb);
+      return;
+    }
+
+    await withAuthSafeDb(async (authDb) => {
+      await insert(authDb);
     });
   } catch (err) {
     logger.error(
@@ -58,6 +69,7 @@ export async function writeAuditLog(params: {
       },
       "audit.write_failed",
     );
+    if (strict) throw err;
   }
 }
 

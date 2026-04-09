@@ -17,8 +17,9 @@ async function queryRows(executor: DbExec, query: ReturnType<typeof sql>): Promi
 
 router.get("/audit-logs", requireAuth, requireFirmUser, requirePermission("audit", "read"), async (req: AuthRequest, res): Promise<void> => {
   const { action, entityType, actorId, limit = "100", offset = "0" } = req.query as Record<string, string>;
+  const executor = req.rlsDb ?? db;
 
-  const rows = await queryRows(db, sql`
+  const rows = await queryRows(executor, sql`
     SELECT al.*, u.name as actor_name, u.email as actor_email
     FROM audit_logs al
     LEFT JOIN users u ON al.actor_id = u.id
@@ -31,7 +32,7 @@ router.get("/audit-logs", requireAuth, requireFirmUser, requirePermission("audit
     OFFSET ${Number(offset)}
   `);
 
-  const countRows = await queryRows(db, sql`
+  const countRows = await queryRows(executor, sql`
     SELECT COUNT(*) as total
     FROM audit_logs al
     WHERE al.firm_id = ${req.firmId!}
