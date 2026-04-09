@@ -194,6 +194,7 @@ export default function PlatformDocuments() {
   const [uploading, setUploading] = useState(false);
   const [form, setForm] = useState({ name: "", description: "", category: "general" });
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [textUploadContent, setTextUploadContent] = useState("");
 
   const [showNewFolder, setShowNewFolder] = useState(false);
   const [newFolderName, setNewFolderName] = useState("");
@@ -389,21 +390,33 @@ export default function PlatformDocuments() {
     const file = e.target.files?.[0];
     if (!file) return;
     if (!ALLOWED_TYPES[file.type]) {
-      toast({ title: "Unsupported file type", description: "Please upload a PDF, Word, Excel, or image file.", variant: "destructive" });
+      toast({ title: "Unsupported file type", description: "Please upload a PDF, Word, Excel, image, or TXT file.", variant: "destructive" });
       return;
     }
     setSelectedFile(file);
+    setTextUploadContent("");
     if (!form.name) setForm(f => ({ ...f, name: file.name.replace(/\.[^.]+$/, "") }));
   };
 
   const handleUpload = async () => {
-    if (!selectedFile || !form.name) return;
+    if (!form.name) return;
+    const file =
+      selectedFile ??
+      (textUploadContent.trim()
+        ? new globalThis.File(
+            [textUploadContent],
+            form.name.toLowerCase().endsWith(".txt") ? form.name : `${form.name}.txt`,
+            { type: "text/plain" },
+          )
+        : null);
+    if (!file) return;
+
     setUploading(true);
     try {
       const reqUrlRes = await fetch(`${API_BASE}/storage/uploads/request-url`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: selectedFile.name, size: selectedFile.size, contentType: selectedFile.type }),
+        body: JSON.stringify({ name: file.name, size: file.size, contentType: file.type }),
         credentials: "include",
       });
       if (!reqUrlRes.ok) {
@@ -414,8 +427,8 @@ export default function PlatformDocuments() {
 
       const putRes = await fetch(uploadURL, {
         method: "PUT",
-        headers: { "Content-Type": selectedFile.type },
-        body: selectedFile,
+        headers: { "Content-Type": file.type },
+        body: file,
       });
       if (!putRes.ok) {
         throw new Error("File upload failed");
@@ -428,9 +441,9 @@ export default function PlatformDocuments() {
           name: form.name,
           description: form.description || null,
           category: form.category,
-          fileName: selectedFile.name,
-          fileType: selectedFile.type,
-          fileSize: selectedFile.size,
+          fileName: file.name,
+          fileType: file.type,
+          fileSize: file.size,
           objectPath,
           firmId: null,
           folderId: selectedFolderId,
@@ -447,6 +460,7 @@ export default function PlatformDocuments() {
       setShowUpload(false);
       setForm({ name: "", description: "", category: "general" });
       setSelectedFile(null);
+      setTextUploadContent("");
     } catch (e: any) {
       toast({ title: "Upload failed", description: e.message, variant: "destructive" });
     } finally {
@@ -703,6 +717,18 @@ export default function PlatformDocuments() {
               )}
             </div>
 
+            {!selectedFile && (
+              <div className="space-y-2">
+                <Label>Quick TXT Upload</Label>
+                <Textarea
+                  placeholder="Paste text here to upload a .txt document (no file picker needed)..."
+                  value={textUploadContent}
+                  onChange={e => setTextUploadContent(e.target.value)}
+                  rows={3}
+                />
+              </div>
+            )}
+
             <div className="space-y-2">
               <Label>Document Name</Label>
               <Input
@@ -734,7 +760,7 @@ export default function PlatformDocuments() {
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setShowUpload(false)}>Cancel</Button>
-            <Button onClick={handleUpload} disabled={!selectedFile || !form.name || uploading}>
+            <Button onClick={handleUpload} disabled={!form.name || uploading || (!selectedFile && !textUploadContent.trim())}>
               {uploading ? "Uploading..." : "Upload"}
             </Button>
           </DialogFooter>
