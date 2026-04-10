@@ -676,11 +676,11 @@ export default function PlatformDocuments() {
       </div>
 
       <Dialog open={showUpload} onOpenChange={setShowUpload}>
-        <DialogContent className="max-w-md">
+        <DialogContent className="max-w-md max-h-[80vh] flex flex-col overflow-hidden">
           <DialogHeader>
             <DialogTitle>Upload Document{selectedFolder ? ` to "${selectedFolder.name}"` : ""}</DialogTitle>
           </DialogHeader>
-          <div className="space-y-4 py-2">
+          <div className="flex-1 overflow-y-auto space-y-4 py-2 pr-1">
             <div
               onClick={() => fileInputRef.current?.click()}
               className={`border-2 border-dashed rounded-lg p-6 text-center cursor-pointer transition-colors ${
@@ -750,7 +750,7 @@ export default function PlatformDocuments() {
               </Select>
             </div>
           </div>
-          <DialogFooter>
+          <DialogFooter className="pt-2 border-t">
             <Button variant="outline" onClick={() => setShowUpload(false)}>Cancel</Button>
             <Button onClick={handleUpload} disabled={!form.name || uploading || (!selectedFile && !textUploadContent.trim())}>
               {uploading ? "Uploading..." : "Upload"}
