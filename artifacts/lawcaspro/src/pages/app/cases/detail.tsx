@@ -10,16 +10,49 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { ArrowLeft, CheckCircle2, Clock, User, Building2, MapPin, Tag, Receipt } from "lucide-react";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useToast } from "@/hooks/use-toast";
 import { useEffect, useState } from "react";
 import { Textarea } from "@/components/ui/textarea";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import CaseDocumentsTab from "./components/CaseDocumentsTab";
 import CaseBillingTab from "./components/CaseBillingTab";
 import CaseCommunicationsTab from "./components/CaseCommunicationsTab";
 import CaseTasksTab from "./components/CaseTasksTab";
 import CaseTimeTab from "./components/CaseTimeTab";
 import CaseComplianceTab from "./components/CaseComplianceTab";
+
+const API_BASE = import.meta.env.BASE_URL.replace(/\/$/, "").replace(/^\/lawcaspro/, "") + "/api";
+
+async function apiFetch(path: string, init?: RequestInit) {
+  const res = await fetch(`${API_BASE}${path}`, {
+    credentials: "include",
+    ...init,
+    headers: { "Content-Type": "application/json", ...(init?.headers ?? {}) },
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    try {
+      const parsed = JSON.parse(text) as { error?: unknown; code?: unknown };
+      const msg = typeof parsed.error === "string" ? parsed.error : text;
+      const code = typeof parsed.code === "string" ? ` (${parsed.code})` : "";
+      throw new Error(`${msg}${code}`);
+    } catch {
+      throw new Error(text);
+    }
+  }
+  if (res.status === 204) return null;
+  return res.json();
+}
+
+function dateInputValue(v: unknown): string {
+  if (!v) return "";
+  const s = String(v);
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+  if (s.length >= 10 && /^\d{4}-\d{2}-\d{2}/.test(s)) return s.slice(0, 10);
+  return "";
+}
 
 export default function CaseDetail() {
   const { id } = useParams<{ id: string }>();
@@ -43,6 +76,23 @@ export default function CaseDetail() {
 
   const updateStepMutation = useUpdateWorkflowStep();
   const createNoteMutation = useCreateCaseNote();
+  const saveKeyDatesMutation = useMutation({
+    mutationFn: (payload: Record<string, unknown>) => apiFetch(`/cases/${caseId}/key-dates`, { method: "PATCH", body: JSON.stringify(payload) }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: getGetCaseQueryKey(caseId) });
+      queryClient.invalidateQueries({ queryKey: ["case-key-dates", caseId] });
+      toast({ title: "Key dates saved" });
+    },
+    onError: (err) => toast({ title: "Save failed", description: String(err), variant: "destructive" }),
+  });
+  const printMutation = useMutation({
+    mutationFn: (payload: { printKey: string }) => apiFetch(`/cases/${caseId}/documents/print`, { method: "POST", body: JSON.stringify(payload) }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["case-documents", caseId] });
+      toast({ title: "Document generated" });
+    },
+    onError: (err) => toast({ title: "Print failed", description: String(err), variant: "destructive" }),
+  });
 
   const [noteContent, setNoteContent] = useState("");
   const [activeStepId, setActiveStepId] = useState<number | null>(null);
@@ -53,6 +103,56 @@ export default function CaseDetail() {
   const initialThreadIdRaw = threadIdFromUrl ? parseInt(threadIdFromUrl, 10) : NaN;
   const initialThreadId = Number.isNaN(initialThreadIdRaw) ? null : initialThreadIdRaw;
   const [activeTab, setActiveTab] = useState(tabFromUrl);
+
+  const { data: keyDates = {} } = useQuery<Record<string, unknown>>({
+    queryKey: ["case-key-dates", caseId],
+    queryFn: () => apiFetch(`/cases/${caseId}/key-dates`),
+    enabled: !!caseId,
+  });
+  const [keyDatesDraft, setKeyDatesDraft] = useState<Record<string, string>>({});
+  useEffect(() => {
+    setKeyDatesDraft({
+      spa_signed_date: dateInputValue((keyDates as any).spa_signed_date),
+      spa_forward_to_developer_execution_on: dateInputValue((keyDates as any).spa_forward_to_developer_execution_on),
+      spa_date: dateInputValue((keyDates as any).spa_date),
+      spa_stamped_date: dateInputValue((keyDates as any).spa_stamped_date),
+      stamped_spa_send_to_developer_on: dateInputValue((keyDates as any).stamped_spa_send_to_developer_on),
+      stamped_spa_received_from_developer_on: dateInputValue((keyDates as any).stamped_spa_received_from_developer_on),
+      letter_of_offer_date: dateInputValue((keyDates as any).letter_of_offer_date),
+      letter_of_offer_stamped_date: dateInputValue((keyDates as any).letter_of_offer_stamped_date),
+      loan_docs_pending_date: dateInputValue((keyDates as any).loan_docs_pending_date),
+      loan_docs_signed_date: dateInputValue((keyDates as any).loan_docs_signed_date),
+      acting_letter_issued_date: dateInputValue((keyDates as any).acting_letter_issued_date),
+      developer_confirmation_received_on: dateInputValue((keyDates as any).developer_confirmation_received_on),
+      developer_confirmation_date: dateInputValue((keyDates as any).developer_confirmation_date),
+      loan_sent_bank_execution_date: dateInputValue((keyDates as any).loan_sent_bank_execution_date),
+      loan_bank_executed_date: dateInputValue((keyDates as any).loan_bank_executed_date),
+      bank_lu_received_date: dateInputValue((keyDates as any).bank_lu_received_date),
+      bank_lu_forward_to_developer_on: dateInputValue((keyDates as any).bank_lu_forward_to_developer_on),
+      developer_lu_received_on: dateInputValue((keyDates as any).developer_lu_received_on),
+      developer_lu_dated: dateInputValue((keyDates as any).developer_lu_dated),
+      letter_disclaimer_received_on: dateInputValue((keyDates as any).letter_disclaimer_received_on),
+      letter_disclaimer_dated: dateInputValue((keyDates as any).letter_disclaimer_dated),
+      letter_disclaimer_reference_nos: typeof (keyDates as any).letter_disclaimer_reference_nos === "string" ? String((keyDates as any).letter_disclaimer_reference_nos) : "",
+      redemption_sum: (keyDates as any).redemption_sum !== null && (keyDates as any).redemption_sum !== undefined ? String((keyDates as any).redemption_sum) : "",
+      loan_agreement_dated: dateInputValue((keyDates as any).loan_agreement_dated),
+      loan_agreement_submitted_stamping_date: dateInputValue((keyDates as any).loan_agreement_submitted_stamping_date),
+      loan_agreement_stamped_date: dateInputValue((keyDates as any).loan_agreement_stamped_date),
+      register_poa_on: dateInputValue((keyDates as any).register_poa_on),
+      registered_poa_registration_number: typeof (keyDates as any).registered_poa_registration_number === "string" ? String((keyDates as any).registered_poa_registration_number) : "",
+      noa_served_on: dateInputValue((keyDates as any).noa_served_on),
+      advice_to_bank_date: dateInputValue((keyDates as any).advice_to_bank_date),
+      bank_1st_release_on: dateInputValue((keyDates as any).bank_1st_release_on),
+      first_release_amount_rm: (keyDates as any).first_release_amount_rm !== null && (keyDates as any).first_release_amount_rm !== undefined ? String((keyDates as any).first_release_amount_rm) : "",
+      mot_received_date: dateInputValue((keyDates as any).mot_received_date),
+      mot_signed_date: dateInputValue((keyDates as any).mot_signed_date),
+      mot_stamped_date: dateInputValue((keyDates as any).mot_stamped_date),
+      mot_registered_date: dateInputValue((keyDates as any).mot_registered_date),
+      progressive_payment_date: dateInputValue((keyDates as any).progressive_payment_date),
+      full_settlement_date: dateInputValue((keyDates as any).full_settlement_date),
+      completion_date: dateInputValue((keyDates as any).completion_date),
+    });
+  }, [caseId, keyDates]);
 
   useEffect(() => {
     setActiveTab(tabFromUrl);
@@ -201,6 +301,264 @@ export default function CaseDetail() {
               </CardContent>
             </Card>
           </div>
+
+          <Card>
+            <CardHeader className="flex flex-row items-center justify-between">
+              <CardTitle>Key Dates & Milestones</CardTitle>
+              <Button
+                size="sm"
+                className="bg-amber-500 hover:bg-amber-600"
+                onClick={() => {
+                  const payload: Record<string, unknown> = {};
+                  const dateKeys = [
+                    "spa_signed_date",
+                    "spa_forward_to_developer_execution_on",
+                    "spa_date",
+                    "spa_stamped_date",
+                    "stamped_spa_send_to_developer_on",
+                    "stamped_spa_received_from_developer_on",
+                    "letter_of_offer_date",
+                    "letter_of_offer_stamped_date",
+                    "loan_docs_pending_date",
+                    "loan_docs_signed_date",
+                    "acting_letter_issued_date",
+                    "developer_confirmation_received_on",
+                    "developer_confirmation_date",
+                    "loan_sent_bank_execution_date",
+                    "loan_bank_executed_date",
+                    "bank_lu_received_date",
+                    "bank_lu_forward_to_developer_on",
+                    "developer_lu_received_on",
+                    "developer_lu_dated",
+                    "letter_disclaimer_received_on",
+                    "letter_disclaimer_dated",
+                    "loan_agreement_dated",
+                    "loan_agreement_submitted_stamping_date",
+                    "loan_agreement_stamped_date",
+                    "register_poa_on",
+                    "noa_served_on",
+                    "advice_to_bank_date",
+                    "bank_1st_release_on",
+                    "mot_received_date",
+                    "mot_signed_date",
+                    "mot_stamped_date",
+                    "mot_registered_date",
+                    "progressive_payment_date",
+                    "full_settlement_date",
+                    "completion_date",
+                  ];
+                  for (const k of dateKeys) {
+                    const v = keyDatesDraft[k] || "";
+                    payload[k] = v ? v : null;
+                  }
+                  payload.letter_disclaimer_reference_nos = keyDatesDraft.letter_disclaimer_reference_nos ? keyDatesDraft.letter_disclaimer_reference_nos : null;
+                  payload.registered_poa_registration_number = keyDatesDraft.registered_poa_registration_number ? keyDatesDraft.registered_poa_registration_number : null;
+                  payload.redemption_sum = keyDatesDraft.redemption_sum ? keyDatesDraft.redemption_sum : null;
+                  payload.first_release_amount_rm = keyDatesDraft.first_release_amount_rm ? keyDatesDraft.first_release_amount_rm : null;
+                  saveKeyDatesMutation.mutate(payload);
+                }}
+                disabled={saveKeyDatesMutation.isPending}
+              >
+                {saveKeyDatesMutation.isPending ? "Saving..." : "Save"}
+              </Button>
+            </CardHeader>
+            <CardContent className="space-y-6">
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                <div className="space-y-3">
+                  <div className="text-sm font-semibold text-slate-800">SPA</div>
+                  <div className="space-y-1.5">
+                    <Label>SPA Signed</Label>
+                    <Input type="date" value={keyDatesDraft.spa_signed_date || ""} onChange={(e) => setKeyDatesDraft((p) => ({ ...p, spa_signed_date: e.target.value }))} />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label>SPA Forward to Dev. Execution On</Label>
+                    <Input type="date" value={keyDatesDraft.spa_forward_to_developer_execution_on || ""} onChange={(e) => setKeyDatesDraft((p) => ({ ...p, spa_forward_to_developer_execution_on: e.target.value }))} />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label>SPA Date</Label>
+                    <Input type="date" value={keyDatesDraft.spa_date || ""} onChange={(e) => setKeyDatesDraft((p) => ({ ...p, spa_date: e.target.value }))} />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label>SPA Stamped</Label>
+                    <Input type="date" value={keyDatesDraft.spa_stamped_date || ""} onChange={(e) => setKeyDatesDraft((p) => ({ ...p, spa_stamped_date: e.target.value }))} />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label>Stamped SPA Send to Dev. On</Label>
+                    <Input type="date" value={keyDatesDraft.stamped_spa_send_to_developer_on || ""} onChange={(e) => setKeyDatesDraft((p) => ({ ...p, stamped_spa_send_to_developer_on: e.target.value }))} />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label>Stamped SPA Received from Dev. On</Label>
+                    <Input type="date" value={keyDatesDraft.stamped_spa_received_from_developer_on || ""} onChange={(e) => setKeyDatesDraft((p) => ({ ...p, stamped_spa_received_from_developer_on: e.target.value }))} />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label>Letter of Offer Date</Label>
+                    <Input type="date" value={keyDatesDraft.letter_of_offer_date || ""} onChange={(e) => setKeyDatesDraft((p) => ({ ...p, letter_of_offer_date: e.target.value }))} />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label>Letter of Offer Stamped</Label>
+                    <Input type="date" value={keyDatesDraft.letter_of_offer_stamped_date || ""} onChange={(e) => setKeyDatesDraft((p) => ({ ...p, letter_of_offer_stamped_date: e.target.value }))} />
+                  </div>
+                </div>
+
+                <div className="space-y-3">
+                  <div className="text-sm font-semibold text-slate-800">Loan</div>
+                  <div className="space-y-1.5">
+                    <Label>Loan Docs Pending Signing</Label>
+                    <Input type="date" value={keyDatesDraft.loan_docs_pending_date || ""} onChange={(e) => setKeyDatesDraft((p) => ({ ...p, loan_docs_pending_date: e.target.value }))} />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label>Loan Docs Signed</Label>
+                    <Input type="date" value={keyDatesDraft.loan_docs_signed_date || ""} onChange={(e) => setKeyDatesDraft((p) => ({ ...p, loan_docs_signed_date: e.target.value }))} />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label>Acting Letter Issued</Label>
+                    <div className="flex gap-2">
+                      <Input type="date" value={keyDatesDraft.acting_letter_issued_date || ""} onChange={(e) => setKeyDatesDraft((p) => ({ ...p, acting_letter_issued_date: e.target.value }))} />
+                      <Button size="sm" variant="outline" onClick={() => printMutation.mutate({ printKey: "acting_letter" })} disabled={printMutation.isPending}>
+                        Acting Letter
+                      </Button>
+                    </div>
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label>Developer Confirmation Received On</Label>
+                    <Input type="date" value={keyDatesDraft.developer_confirmation_received_on || ""} onChange={(e) => setKeyDatesDraft((p) => ({ ...p, developer_confirmation_received_on: e.target.value }))} />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label>Developer Confirmation Date</Label>
+                    <Input type="date" value={keyDatesDraft.developer_confirmation_date || ""} onChange={(e) => setKeyDatesDraft((p) => ({ ...p, developer_confirmation_date: e.target.value }))} />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label>Loan Sent for Bank Execution</Label>
+                    <div className="flex gap-2">
+                      <Input type="date" value={keyDatesDraft.loan_sent_bank_execution_date || ""} onChange={(e) => setKeyDatesDraft((p) => ({ ...p, loan_sent_bank_execution_date: e.target.value }))} />
+                      <Button size="sm" variant="outline" onClick={() => printMutation.mutate({ printKey: "letter_forward_bank_execution" })} disabled={printMutation.isPending}>
+                        Letter Forward Bank Execution
+                      </Button>
+                    </div>
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label>Loan Bank Executed</Label>
+                    <Input type="date" value={keyDatesDraft.loan_bank_executed_date || ""} onChange={(e) => setKeyDatesDraft((p) => ({ ...p, loan_bank_executed_date: e.target.value }))} />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label>Bank LU Received</Label>
+                    <Input type="date" value={keyDatesDraft.bank_lu_received_date || ""} onChange={(e) => setKeyDatesDraft((p) => ({ ...p, bank_lu_received_date: e.target.value }))} />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label>Bank LU Forward to Dev. On</Label>
+                    <div className="flex gap-2">
+                      <Input type="date" value={keyDatesDraft.bank_lu_forward_to_developer_on || ""} onChange={(e) => setKeyDatesDraft((p) => ({ ...p, bank_lu_forward_to_developer_on: e.target.value }))} />
+                      <Button size="sm" variant="outline" onClick={() => printMutation.mutate({ printKey: "letter_forward_bank_lu_to_dev" })} disabled={printMutation.isPending}>
+                        Letter Forward Bank’s LU to Dev.
+                      </Button>
+                    </div>
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label>Developer LU Received On</Label>
+                    <Input type="date" value={keyDatesDraft.developer_lu_received_on || ""} onChange={(e) => setKeyDatesDraft((p) => ({ ...p, developer_lu_received_on: e.target.value }))} />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label>Developer LU Dated</Label>
+                    <Input type="date" value={keyDatesDraft.developer_lu_dated || ""} onChange={(e) => setKeyDatesDraft((p) => ({ ...p, developer_lu_dated: e.target.value }))} />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label>Letter Disclaimer Received On</Label>
+                    <Input type="date" value={keyDatesDraft.letter_disclaimer_received_on || ""} onChange={(e) => setKeyDatesDraft((p) => ({ ...p, letter_disclaimer_received_on: e.target.value }))} />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label>Letter Disclaimer Dated</Label>
+                    <Input type="date" value={keyDatesDraft.letter_disclaimer_dated || ""} onChange={(e) => setKeyDatesDraft((p) => ({ ...p, letter_disclaimer_dated: e.target.value }))} />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label>Letter Disclaimer Reference Nos</Label>
+                    <Input value={keyDatesDraft.letter_disclaimer_reference_nos || ""} onChange={(e) => setKeyDatesDraft((p) => ({ ...p, letter_disclaimer_reference_nos: e.target.value }))} />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label>Redemption Sum (RM)</Label>
+                    <Input type="number" step="0.01" value={keyDatesDraft.redemption_sum || ""} onChange={(e) => setKeyDatesDraft((p) => ({ ...p, redemption_sum: e.target.value }))} />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label>Loan Agreement Dated</Label>
+                    <Input type="date" value={keyDatesDraft.loan_agreement_dated || ""} onChange={(e) => setKeyDatesDraft((p) => ({ ...p, loan_agreement_dated: e.target.value }))} />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label>Loan Agreement Submitted Stamping</Label>
+                    <Input type="date" value={keyDatesDraft.loan_agreement_submitted_stamping_date || ""} onChange={(e) => setKeyDatesDraft((p) => ({ ...p, loan_agreement_submitted_stamping_date: e.target.value }))} />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label>Loan Agreement Stamped</Label>
+                    <Input type="date" value={keyDatesDraft.loan_agreement_stamped_date || ""} onChange={(e) => setKeyDatesDraft((p) => ({ ...p, loan_agreement_stamped_date: e.target.value }))} />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label>Register POA On</Label>
+                    <Input type="date" value={keyDatesDraft.register_poa_on || ""} onChange={(e) => setKeyDatesDraft((p) => ({ ...p, register_poa_on: e.target.value }))} />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label>Registered POA Registration Number</Label>
+                    <Input value={keyDatesDraft.registered_poa_registration_number || ""} onChange={(e) => setKeyDatesDraft((p) => ({ ...p, registered_poa_registration_number: e.target.value }))} />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label>NOA Served On</Label>
+                    <div className="flex gap-2">
+                      <Input type="date" value={keyDatesDraft.noa_served_on || ""} onChange={(e) => setKeyDatesDraft((p) => ({ ...p, noa_served_on: e.target.value }))} />
+                      <Button size="sm" variant="outline" onClick={() => printMutation.mutate({ printKey: "noa" })} disabled={printMutation.isPending}>
+                        NOA
+                      </Button>
+                    </div>
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label>Advice to Bank Date</Label>
+                    <div className="flex gap-2">
+                      <Input type="date" value={keyDatesDraft.advice_to_bank_date || ""} onChange={(e) => setKeyDatesDraft((p) => ({ ...p, advice_to_bank_date: e.target.value }))} />
+                      <Button size="sm" variant="outline" onClick={() => printMutation.mutate({ printKey: "letter_advice_spa_sol_lu" })} disabled={printMutation.isPending}>
+                        Letter Advice & SPA Sol. LU
+                      </Button>
+                    </div>
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label>Bank 1st Release On</Label>
+                    <Input type="date" value={keyDatesDraft.bank_1st_release_on || ""} onChange={(e) => setKeyDatesDraft((p) => ({ ...p, bank_1st_release_on: e.target.value }))} />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label>First Release Amount (RM)</Label>
+                    <Input type="number" step="0.01" value={keyDatesDraft.first_release_amount_rm || ""} onChange={(e) => setKeyDatesDraft((p) => ({ ...p, first_release_amount_rm: e.target.value }))} />
+                  </div>
+                </div>
+
+                <div className="space-y-3">
+                  <div className="text-sm font-semibold text-slate-800">MOT / Completion</div>
+                  <div className="space-y-1.5">
+                    <Label>MOT Received</Label>
+                    <Input type="date" value={keyDatesDraft.mot_received_date || ""} onChange={(e) => setKeyDatesDraft((p) => ({ ...p, mot_received_date: e.target.value }))} />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label>MOT Signed</Label>
+                    <Input type="date" value={keyDatesDraft.mot_signed_date || ""} onChange={(e) => setKeyDatesDraft((p) => ({ ...p, mot_signed_date: e.target.value }))} />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label>MOT Stamped</Label>
+                    <Input type="date" value={keyDatesDraft.mot_stamped_date || ""} onChange={(e) => setKeyDatesDraft((p) => ({ ...p, mot_stamped_date: e.target.value }))} />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label>MOT Registered</Label>
+                    <Input type="date" value={keyDatesDraft.mot_registered_date || ""} onChange={(e) => setKeyDatesDraft((p) => ({ ...p, mot_registered_date: e.target.value }))} />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label>Progressive Payment Date</Label>
+                    <Input type="date" value={keyDatesDraft.progressive_payment_date || ""} onChange={(e) => setKeyDatesDraft((p) => ({ ...p, progressive_payment_date: e.target.value }))} />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label>Full Settlement Date</Label>
+                    <Input type="date" value={keyDatesDraft.full_settlement_date || ""} onChange={(e) => setKeyDatesDraft((p) => ({ ...p, full_settlement_date: e.target.value }))} />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label>Completion Date</Label>
+                    <Input type="date" value={keyDatesDraft.completion_date || ""} onChange={(e) => setKeyDatesDraft((p) => ({ ...p, completion_date: e.target.value }))} />
+                  </div>
+                </div>
+              </div>
+            </CardContent>
+          </Card>
         </TabsContent>
 
         <TabsContent value="workflow" className="space-y-6">

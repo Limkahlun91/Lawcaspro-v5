@@ -1,6 +1,13 @@
 export function isFirmDocumentTypeLetterLike(documentType: string | undefined): boolean {
   const dt = (documentType || "").toLowerCase();
-  return dt === "letter_of_offer" || dt === "acting_letter" || dt === "undertaking";
+  return (
+    dt === "letter_of_offer" ||
+    dt === "acting_letter" ||
+    dt === "undertaking" ||
+    dt === "letter_forward_bank_execution" ||
+    dt === "letter_forward_bank_lu_to_dev" ||
+    dt === "letter_advice_spa_sol_lu"
+  );
 }
 
 export function isMasterDocumentLetterLike(d: { name?: string; category?: string; fileName?: string } | undefined): boolean {

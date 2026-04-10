@@ -3,6 +3,7 @@ import { eq, ilike, count, desc, and, sql } from "drizzle-orm";
 import {
   db, casesTable, casePurchasersTable, caseAssignmentsTable,
   caseWorkflowStepsTable, caseNotesTable,
+  caseKeyDatesTable,
   projectsTable, developersTable, clientsTable, usersTable, auditLogsTable,
 } from "@workspace/db";
 import {
@@ -18,6 +19,31 @@ const router: IRouter = Router();
 
 type DbConn = typeof db | NonNullable<AuthRequest["rlsDb"]>;
 const rdb = (req: AuthRequest): DbConn => req.rlsDb ?? db;
+
+function parseDateOnlyInput(v: unknown): string | null | undefined {
+  if (v === undefined) return undefined;
+  if (v === null) return null;
+  if (typeof v !== "string") return undefined;
+  const s = v.trim();
+  if (!s) return null;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return undefined;
+  return s;
+}
+
+function parseMoneyInput(v: unknown): string | null | undefined {
+  if (v === undefined) return undefined;
+  if (v === null) return null;
+  if (typeof v === "number") {
+    if (!Number.isFinite(v)) return undefined;
+    return String(v);
+  }
+  if (typeof v !== "string") return undefined;
+  const s = v.trim();
+  if (!s) return null;
+  const n = Number(s);
+  if (!Number.isFinite(n)) return undefined;
+  return String(n);
+}
 
 async function formatCaseDetail(r: DbConn, c: typeof casesTable.$inferSelect) {
   const [proj] = await r.select().from(projectsTable).where(eq(projectsTable.id, c.projectId));
@@ -62,6 +88,11 @@ async function formatCaseDetail(r: DbConn, c: typeof casesTable.$inferSelect) {
   try { if (c.loanDetails) loanDetails = JSON.parse(c.loanDetails); } catch {}
   try { if (c.companyDetails) companyDetails = JSON.parse(c.companyDetails); } catch {}
 
+  const [kd] = await r
+    .select()
+    .from(caseKeyDatesTable)
+    .where(and(eq(caseKeyDatesTable.caseId, c.id), eq(caseKeyDatesTable.firmId, c.firmId)));
+
   return {
     id: c.id,
     firmId: c.firmId,
@@ -80,6 +111,47 @@ async function formatCaseDetail(r: DbConn, c: typeof casesTable.$inferSelect) {
     propertyDetails,
     loanDetails,
     companyDetails,
+    keyDates: kd ? {
+      spa_signed_date: kd.spaSignedDate ? String(kd.spaSignedDate) : null,
+      spa_forward_to_developer_execution_on: kd.spaForwardToDeveloperExecutionOn ? String(kd.spaForwardToDeveloperExecutionOn) : null,
+      spa_date: kd.spaDate ? String(kd.spaDate) : null,
+      spa_stamped_date: kd.spaStampedDate ? String(kd.spaStampedDate) : null,
+      stamped_spa_send_to_developer_on: kd.stampedSpaSendToDeveloperOn ? String(kd.stampedSpaSendToDeveloperOn) : null,
+      stamped_spa_received_from_developer_on: kd.stampedSpaReceivedFromDeveloperOn ? String(kd.stampedSpaReceivedFromDeveloperOn) : null,
+      letter_of_offer_date: kd.letterOfOfferDate ? String(kd.letterOfOfferDate) : null,
+      letter_of_offer_stamped_date: kd.letterOfOfferStampedDate ? String(kd.letterOfOfferStampedDate) : null,
+      loan_docs_pending_date: kd.loanDocsPendingDate ? String(kd.loanDocsPendingDate) : null,
+      loan_docs_signed_date: kd.loanDocsSignedDate ? String(kd.loanDocsSignedDate) : null,
+      acting_letter_issued_date: kd.actingLetterIssuedDate ? String(kd.actingLetterIssuedDate) : null,
+      developer_confirmation_received_on: kd.developerConfirmationReceivedOn ? String(kd.developerConfirmationReceivedOn) : null,
+      developer_confirmation_date: kd.developerConfirmationDate ? String(kd.developerConfirmationDate) : null,
+      loan_sent_bank_execution_date: kd.loanSentBankExecutionDate ? String(kd.loanSentBankExecutionDate) : null,
+      loan_bank_executed_date: kd.loanBankExecutedDate ? String(kd.loanBankExecutedDate) : null,
+      bank_lu_received_date: kd.bankLuReceivedDate ? String(kd.bankLuReceivedDate) : null,
+      bank_lu_forward_to_developer_on: kd.bankLuForwardToDeveloperOn ? String(kd.bankLuForwardToDeveloperOn) : null,
+      developer_lu_received_on: kd.developerLuReceivedOn ? String(kd.developerLuReceivedOn) : null,
+      developer_lu_dated: kd.developerLuDated ? String(kd.developerLuDated) : null,
+      letter_disclaimer_received_on: kd.letterDisclaimerReceivedOn ? String(kd.letterDisclaimerReceivedOn) : null,
+      letter_disclaimer_dated: kd.letterDisclaimerDated ? String(kd.letterDisclaimerDated) : null,
+      letter_disclaimer_reference_nos: kd.letterDisclaimerReferenceNos ?? null,
+      redemption_sum: kd.redemptionSum ? Number(kd.redemptionSum) : null,
+      loan_agreement_dated: kd.loanAgreementDated ? String(kd.loanAgreementDated) : null,
+      loan_agreement_submitted_stamping_date: kd.loanAgreementSubmittedStampingDate ? String(kd.loanAgreementSubmittedStampingDate) : null,
+      loan_agreement_stamped_date: kd.loanAgreementStampedDate ? String(kd.loanAgreementStampedDate) : null,
+      register_poa_on: kd.registerPoaOn ? String(kd.registerPoaOn) : null,
+      registered_poa_registration_number: kd.registeredPoaRegistrationNumber ?? null,
+      noa_served_on: kd.noaServedOn ? String(kd.noaServedOn) : null,
+      advice_to_bank_date: kd.adviceToBankDate ? String(kd.adviceToBankDate) : null,
+      bank_1st_release_on: kd.bank1stReleaseOn ? String(kd.bank1stReleaseOn) : null,
+      first_release_amount_rm: kd.firstReleaseAmountRm ? Number(kd.firstReleaseAmountRm) : null,
+      mot_received_date: kd.motReceivedDate ? String(kd.motReceivedDate) : null,
+      mot_signed_date: kd.motSignedDate ? String(kd.motSignedDate) : null,
+      mot_stamped_date: kd.motStampedDate ? String(kd.motStampedDate) : null,
+      mot_registered_date: kd.motRegisteredDate ? String(kd.motRegisteredDate) : null,
+      progressive_payment_date: kd.progressivePaymentDate ? String(kd.progressivePaymentDate) : null,
+      full_settlement_date: kd.fullSettlementDate ? String(kd.fullSettlementDate) : null,
+      completion_date: kd.completionDate ? String(kd.completionDate) : null,
+    } : null,
     purchasers,
     assignments,
     createdBy: c.createdBy ?? null,
@@ -459,6 +531,259 @@ router.get("/cases/:caseId", requireAuth, requireFirmUser, requirePermission("ca
   }
 
   res.json(await formatCaseDetail(r, c));
+});
+
+router.get("/cases/:caseId/key-dates", requireAuth, requireFirmUser, requirePermission("cases", "read"), async (req: AuthRequest, res): Promise<void> => {
+  const r = req.rlsDb;
+  if (!r) {
+    res.status(500).json({ error: "Missing tenant database context" });
+    return;
+  }
+  const params = GetCaseParams.safeParse(req.params);
+  if (!params.success) {
+    res.status(400).json({ error: params.error.message });
+    return;
+  }
+  const [caseRow] = await r
+    .select({ id: casesTable.id })
+    .from(casesTable)
+    .where(and(eq(casesTable.id, params.data.caseId), eq(casesTable.firmId, req.firmId!)));
+  if (!caseRow) {
+    res.status(404).json({ error: "Case not found" });
+    return;
+  }
+  const [kd] = await r
+    .select()
+    .from(caseKeyDatesTable)
+    .where(and(eq(caseKeyDatesTable.caseId, params.data.caseId), eq(caseKeyDatesTable.firmId, req.firmId!)));
+  res.json(kd ? {
+    spa_signed_date: kd.spaSignedDate ? String(kd.spaSignedDate) : null,
+    spa_forward_to_developer_execution_on: kd.spaForwardToDeveloperExecutionOn ? String(kd.spaForwardToDeveloperExecutionOn) : null,
+    spa_date: kd.spaDate ? String(kd.spaDate) : null,
+    spa_stamped_date: kd.spaStampedDate ? String(kd.spaStampedDate) : null,
+    stamped_spa_send_to_developer_on: kd.stampedSpaSendToDeveloperOn ? String(kd.stampedSpaSendToDeveloperOn) : null,
+    stamped_spa_received_from_developer_on: kd.stampedSpaReceivedFromDeveloperOn ? String(kd.stampedSpaReceivedFromDeveloperOn) : null,
+    letter_of_offer_date: kd.letterOfOfferDate ? String(kd.letterOfOfferDate) : null,
+    letter_of_offer_stamped_date: kd.letterOfOfferStampedDate ? String(kd.letterOfOfferStampedDate) : null,
+    loan_docs_pending_date: kd.loanDocsPendingDate ? String(kd.loanDocsPendingDate) : null,
+    loan_docs_signed_date: kd.loanDocsSignedDate ? String(kd.loanDocsSignedDate) : null,
+    acting_letter_issued_date: kd.actingLetterIssuedDate ? String(kd.actingLetterIssuedDate) : null,
+    developer_confirmation_received_on: kd.developerConfirmationReceivedOn ? String(kd.developerConfirmationReceivedOn) : null,
+    developer_confirmation_date: kd.developerConfirmationDate ? String(kd.developerConfirmationDate) : null,
+    loan_sent_bank_execution_date: kd.loanSentBankExecutionDate ? String(kd.loanSentBankExecutionDate) : null,
+    loan_bank_executed_date: kd.loanBankExecutedDate ? String(kd.loanBankExecutedDate) : null,
+    bank_lu_received_date: kd.bankLuReceivedDate ? String(kd.bankLuReceivedDate) : null,
+    bank_lu_forward_to_developer_on: kd.bankLuForwardToDeveloperOn ? String(kd.bankLuForwardToDeveloperOn) : null,
+    developer_lu_received_on: kd.developerLuReceivedOn ? String(kd.developerLuReceivedOn) : null,
+    developer_lu_dated: kd.developerLuDated ? String(kd.developerLuDated) : null,
+    letter_disclaimer_received_on: kd.letterDisclaimerReceivedOn ? String(kd.letterDisclaimerReceivedOn) : null,
+    letter_disclaimer_dated: kd.letterDisclaimerDated ? String(kd.letterDisclaimerDated) : null,
+    letter_disclaimer_reference_nos: kd.letterDisclaimerReferenceNos ?? null,
+    redemption_sum: kd.redemptionSum ? Number(kd.redemptionSum) : null,
+    loan_agreement_dated: kd.loanAgreementDated ? String(kd.loanAgreementDated) : null,
+    loan_agreement_submitted_stamping_date: kd.loanAgreementSubmittedStampingDate ? String(kd.loanAgreementSubmittedStampingDate) : null,
+    loan_agreement_stamped_date: kd.loanAgreementStampedDate ? String(kd.loanAgreementStampedDate) : null,
+    register_poa_on: kd.registerPoaOn ? String(kd.registerPoaOn) : null,
+    registered_poa_registration_number: kd.registeredPoaRegistrationNumber ?? null,
+    noa_served_on: kd.noaServedOn ? String(kd.noaServedOn) : null,
+    advice_to_bank_date: kd.adviceToBankDate ? String(kd.adviceToBankDate) : null,
+    bank_1st_release_on: kd.bank1stReleaseOn ? String(kd.bank1stReleaseOn) : null,
+    first_release_amount_rm: kd.firstReleaseAmountRm ? Number(kd.firstReleaseAmountRm) : null,
+    mot_received_date: kd.motReceivedDate ? String(kd.motReceivedDate) : null,
+    mot_signed_date: kd.motSignedDate ? String(kd.motSignedDate) : null,
+    mot_stamped_date: kd.motStampedDate ? String(kd.motStampedDate) : null,
+    mot_registered_date: kd.motRegisteredDate ? String(kd.motRegisteredDate) : null,
+    progressive_payment_date: kd.progressivePaymentDate ? String(kd.progressivePaymentDate) : null,
+    full_settlement_date: kd.fullSettlementDate ? String(kd.fullSettlementDate) : null,
+    completion_date: kd.completionDate ? String(kd.completionDate) : null,
+  } : {});
+});
+
+router.patch("/cases/:caseId/key-dates", requireAuth, requireFirmUser, requirePermission("cases", "update"), async (req: AuthRequest, res): Promise<void> => {
+  const r = req.rlsDb;
+  if (!r) {
+    res.status(500).json({ error: "Missing tenant database context" });
+    return;
+  }
+  const params = UpdateCaseParams.safeParse(req.params);
+  if (!params.success) {
+    res.status(400).json({ error: params.error.message });
+    return;
+  }
+  const [caseRow] = await r
+    .select({ id: casesTable.id })
+    .from(casesTable)
+    .where(and(eq(casesTable.id, params.data.caseId), eq(casesTable.firmId, req.firmId!)));
+  if (!caseRow) {
+    res.status(404).json({ error: "Case not found" });
+    return;
+  }
+  const body = req.body as Record<string, unknown>;
+
+  const dateFieldMap = {
+    spa_signed_date: "spaSignedDate",
+    spa_forward_to_developer_execution_on: "spaForwardToDeveloperExecutionOn",
+    spa_date: "spaDate",
+    spa_stamped_date: "spaStampedDate",
+    stamped_spa_send_to_developer_on: "stampedSpaSendToDeveloperOn",
+    stamped_spa_received_from_developer_on: "stampedSpaReceivedFromDeveloperOn",
+    letter_of_offer_date: "letterOfOfferDate",
+    letter_of_offer_stamped_date: "letterOfOfferStampedDate",
+    loan_docs_pending_date: "loanDocsPendingDate",
+    loan_docs_signed_date: "loanDocsSignedDate",
+    acting_letter_issued_date: "actingLetterIssuedDate",
+    developer_confirmation_received_on: "developerConfirmationReceivedOn",
+    developer_confirmation_date: "developerConfirmationDate",
+    loan_sent_bank_execution_date: "loanSentBankExecutionDate",
+    loan_bank_executed_date: "loanBankExecutedDate",
+    bank_lu_received_date: "bankLuReceivedDate",
+    bank_lu_forward_to_developer_on: "bankLuForwardToDeveloperOn",
+    developer_lu_received_on: "developerLuReceivedOn",
+    developer_lu_dated: "developerLuDated",
+    letter_disclaimer_received_on: "letterDisclaimerReceivedOn",
+    letter_disclaimer_dated: "letterDisclaimerDated",
+    loan_agreement_dated: "loanAgreementDated",
+    loan_agreement_submitted_stamping_date: "loanAgreementSubmittedStampingDate",
+    loan_agreement_stamped_date: "loanAgreementStampedDate",
+    register_poa_on: "registerPoaOn",
+    noa_served_on: "noaServedOn",
+    advice_to_bank_date: "adviceToBankDate",
+    bank_1st_release_on: "bank1stReleaseOn",
+    mot_received_date: "motReceivedDate",
+    mot_signed_date: "motSignedDate",
+    mot_stamped_date: "motStampedDate",
+    mot_registered_date: "motRegisteredDate",
+    progressive_payment_date: "progressivePaymentDate",
+    full_settlement_date: "fullSettlementDate",
+    completion_date: "completionDate",
+  } as const;
+
+  const set: Record<string, unknown> = { firmId: req.firmId!, caseId: params.data.caseId };
+  const changed: string[] = [];
+  for (const [apiKey, colKey] of Object.entries(dateFieldMap)) {
+    if (!Object.prototype.hasOwnProperty.call(body, apiKey)) continue;
+    const parsed = parseDateOnlyInput(body[apiKey]);
+    if (parsed === undefined) {
+      res.status(400).json({ error: `Invalid ${apiKey}` });
+      return;
+    }
+    set[colKey] = parsed;
+    changed.push(apiKey);
+  }
+
+  if (Object.prototype.hasOwnProperty.call(body, "letter_disclaimer_reference_nos")) {
+    const v = body.letter_disclaimer_reference_nos;
+    if (v === null) set.letterDisclaimerReferenceNos = null;
+    else if (typeof v === "string") set.letterDisclaimerReferenceNos = v.trim() || null;
+    else {
+      res.status(400).json({ error: "Invalid letter_disclaimer_reference_nos" });
+      return;
+    }
+    changed.push("letter_disclaimer_reference_nos");
+  }
+
+  const redemptionSum = parseMoneyInput(body.redemption_sum);
+  if (redemptionSum === undefined && Object.prototype.hasOwnProperty.call(body, "redemption_sum")) {
+    res.status(400).json({ error: "Invalid redemption_sum" });
+    return;
+  }
+  if (redemptionSum !== undefined) {
+    set.redemptionSum = redemptionSum;
+    changed.push("redemption_sum");
+  }
+  const firstRelease = parseMoneyInput(body.first_release_amount_rm);
+  if (firstRelease === undefined && Object.prototype.hasOwnProperty.call(body, "first_release_amount_rm")) {
+    res.status(400).json({ error: "Invalid first_release_amount_rm" });
+    return;
+  }
+  if (firstRelease !== undefined) {
+    set.firstReleaseAmountRm = firstRelease;
+    changed.push("first_release_amount_rm");
+  }
+
+  if (Object.prototype.hasOwnProperty.call(body, "registered_poa_registration_number")) {
+    const v = body.registered_poa_registration_number;
+    if (v === null) set.registeredPoaRegistrationNumber = null;
+    else if (typeof v === "string") set.registeredPoaRegistrationNumber = v.trim() || null;
+    else {
+      res.status(400).json({ error: "Invalid registered_poa_registration_number" });
+      return;
+    }
+    changed.push("registered_poa_registration_number");
+  }
+
+  const existing = await r
+    .select({ id: caseKeyDatesTable.id })
+    .from(caseKeyDatesTable)
+    .where(and(eq(caseKeyDatesTable.caseId, params.data.caseId), eq(caseKeyDatesTable.firmId, req.firmId!)));
+
+  let kd: any;
+  if (existing[0]) {
+    const [updated] = await r
+      .update(caseKeyDatesTable)
+      .set({ ...set, updatedAt: new Date() })
+      .where(and(eq(caseKeyDatesTable.caseId, params.data.caseId), eq(caseKeyDatesTable.firmId, req.firmId!)))
+      .returning();
+    kd = updated;
+  } else {
+    const [inserted] = await r
+      .insert(caseKeyDatesTable)
+      .values({ ...set })
+      .returning();
+    kd = inserted;
+  }
+
+  await r.insert(auditLogsTable).values({
+    firmId: req.firmId,
+    actorId: req.userId,
+    actorType: "firm_user",
+    action: "case.key_dates.updated",
+    entityType: "case",
+    entityId: params.data.caseId,
+    detail: JSON.stringify(changed),
+  });
+
+  res.json(kd ? {
+    spa_signed_date: kd.spaSignedDate ? String(kd.spaSignedDate) : null,
+    spa_forward_to_developer_execution_on: kd.spaForwardToDeveloperExecutionOn ? String(kd.spaForwardToDeveloperExecutionOn) : null,
+    spa_date: kd.spaDate ? String(kd.spaDate) : null,
+    spa_stamped_date: kd.spaStampedDate ? String(kd.spaStampedDate) : null,
+    stamped_spa_send_to_developer_on: kd.stampedSpaSendToDeveloperOn ? String(kd.stampedSpaSendToDeveloperOn) : null,
+    stamped_spa_received_from_developer_on: kd.stampedSpaReceivedFromDeveloperOn ? String(kd.stampedSpaReceivedFromDeveloperOn) : null,
+    letter_of_offer_date: kd.letterOfOfferDate ? String(kd.letterOfOfferDate) : null,
+    letter_of_offer_stamped_date: kd.letterOfOfferStampedDate ? String(kd.letterOfOfferStampedDate) : null,
+    loan_docs_pending_date: kd.loanDocsPendingDate ? String(kd.loanDocsPendingDate) : null,
+    loan_docs_signed_date: kd.loanDocsSignedDate ? String(kd.loanDocsSignedDate) : null,
+    acting_letter_issued_date: kd.actingLetterIssuedDate ? String(kd.actingLetterIssuedDate) : null,
+    developer_confirmation_received_on: kd.developerConfirmationReceivedOn ? String(kd.developerConfirmationReceivedOn) : null,
+    developer_confirmation_date: kd.developerConfirmationDate ? String(kd.developerConfirmationDate) : null,
+    loan_sent_bank_execution_date: kd.loanSentBankExecutionDate ? String(kd.loanSentBankExecutionDate) : null,
+    loan_bank_executed_date: kd.loanBankExecutedDate ? String(kd.loanBankExecutedDate) : null,
+    bank_lu_received_date: kd.bankLuReceivedDate ? String(kd.bankLuReceivedDate) : null,
+    bank_lu_forward_to_developer_on: kd.bankLuForwardToDeveloperOn ? String(kd.bankLuForwardToDeveloperOn) : null,
+    developer_lu_received_on: kd.developerLuReceivedOn ? String(kd.developerLuReceivedOn) : null,
+    developer_lu_dated: kd.developerLuDated ? String(kd.developerLuDated) : null,
+    letter_disclaimer_received_on: kd.letterDisclaimerReceivedOn ? String(kd.letterDisclaimerReceivedOn) : null,
+    letter_disclaimer_dated: kd.letterDisclaimerDated ? String(kd.letterDisclaimerDated) : null,
+    letter_disclaimer_reference_nos: kd.letterDisclaimerReferenceNos ?? null,
+    redemption_sum: kd.redemptionSum ? Number(kd.redemptionSum) : null,
+    loan_agreement_dated: kd.loanAgreementDated ? String(kd.loanAgreementDated) : null,
+    loan_agreement_submitted_stamping_date: kd.loanAgreementSubmittedStampingDate ? String(kd.loanAgreementSubmittedStampingDate) : null,
+    loan_agreement_stamped_date: kd.loanAgreementStampedDate ? String(kd.loanAgreementStampedDate) : null,
+    register_poa_on: kd.registerPoaOn ? String(kd.registerPoaOn) : null,
+    registered_poa_registration_number: kd.registeredPoaRegistrationNumber ?? null,
+    noa_served_on: kd.noaServedOn ? String(kd.noaServedOn) : null,
+    advice_to_bank_date: kd.adviceToBankDate ? String(kd.adviceToBankDate) : null,
+    bank_1st_release_on: kd.bank1stReleaseOn ? String(kd.bank1stReleaseOn) : null,
+    first_release_amount_rm: kd.firstReleaseAmountRm ? Number(kd.firstReleaseAmountRm) : null,
+    mot_received_date: kd.motReceivedDate ? String(kd.motReceivedDate) : null,
+    mot_signed_date: kd.motSignedDate ? String(kd.motSignedDate) : null,
+    mot_stamped_date: kd.motStampedDate ? String(kd.motStampedDate) : null,
+    mot_registered_date: kd.motRegisteredDate ? String(kd.motRegisteredDate) : null,
+    progressive_payment_date: kd.progressivePaymentDate ? String(kd.progressivePaymentDate) : null,
+    full_settlement_date: kd.fullSettlementDate ? String(kd.fullSettlementDate) : null,
+    completion_date: kd.completionDate ? String(kd.completionDate) : null,
+  } : {});
 });
 
 router.patch("/cases/:caseId", requireAuth, requireFirmUser, requirePermission("cases", "update"), async (req: AuthRequest, res): Promise<void> => {

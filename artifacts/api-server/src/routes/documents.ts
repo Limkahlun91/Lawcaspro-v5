@@ -117,9 +117,22 @@ function fmtDateIso(raw: unknown): string {
   return d.toISOString();
 }
 
+function fmtDateYMD(raw: unknown): string {
+  const d = formatDateValue(raw);
+  if (!d) return "";
+  return d.toISOString().slice(0, 10);
+}
+
 function isFirmDocumentTypeLetterLike(documentType: string): boolean {
   const dt = (documentType || "").toLowerCase();
-  return dt === "letter_of_offer" || dt === "acting_letter" || dt === "undertaking";
+  return (
+    dt === "letter_of_offer" ||
+    dt === "acting_letter" ||
+    dt === "undertaking" ||
+    dt === "letter_forward_bank_execution" ||
+    dt === "letter_forward_bank_lu_to_dev" ||
+    dt === "letter_advice_spa_sol_lu"
+  );
 }
 
 function isMasterDocLetterLike(meta: { name?: unknown; category?: unknown; fileName?: unknown }): boolean {
@@ -438,13 +451,89 @@ async function buildCaseContext(r: DbConn, caseId: number, firmId: number): Prom
     return "Pending";
   };
 
-  const workflowDateVars: Record<string, unknown> = {};
+  const workflowCompletedAtByKey = new Map<string, unknown>();
+  for (const s of workflowSteps) {
+    if (s.status !== "completed") continue;
+    workflowCompletedAtByKey.set(s.stepKey, s.completedAt);
+  }
+
+  const workflowDebugVars: Record<string, unknown> = {};
   for (const s of workflowSteps) {
     const key = s.stepKey;
-    workflowDateVars[`${key}_date_raw`] = fmtDateIso(s.completedAt);
-    workflowDateVars[`${key}_date`] = fmtDateDDMMYYYY(s.completedAt);
-    workflowDateVars[`${key}_date_long`] = fmtDateLong(s.completedAt);
+    workflowDebugVars[`workflow_${key}_date_raw`] = fmtDateYMD(s.completedAt);
+    workflowDebugVars[`workflow_${key}_date`] = fmtDateDDMMYYYY(s.completedAt);
+    workflowDebugVars[`workflow_${key}_date_long`] = fmtDateLong(s.completedAt);
   }
+
+  const kdRows = await queryRows(r, sql`SELECT * FROM case_key_dates WHERE firm_id = ${firmId} AND case_id = ${caseId} LIMIT 1`);
+  const kd = kdRows[0] ?? null;
+
+  const pickDate = (structured: unknown, fallback: unknown): unknown => {
+    const s = fmtDateYMD(structured);
+    if (s) return structured;
+    return fallback;
+  };
+
+  const keyDateVars: Record<string, unknown> = {};
+  const addDateTriplet = (base: string, structured: unknown, fallback: unknown) => {
+    const v = pickDate(structured, fallback);
+    keyDateVars[`${base}_raw`] = fmtDateYMD(v);
+    keyDateVars[base] = fmtDateDDMMYYYY(v);
+    keyDateVars[`${base}_long`] = fmtDateLong(v);
+  };
+
+  const wf = (stepKey: string): unknown => workflowCompletedAtByKey.get(stepKey) ?? null;
+  const kdVal = (col: string): unknown => (kd && typeof kd === "object" && col in kd ? (kd as any)[col] : null);
+
+  addDateTriplet("spa_signed_date", kdVal("spa_signed_date"), null);
+  addDateTriplet("spa_forward_to_developer_execution_on", kdVal("spa_forward_to_developer_execution_on"), null);
+  addDateTriplet("spa_date", kdVal("spa_date"), null);
+  addDateTriplet("spa_stamped_date", kdVal("spa_stamped_date"), wf("spa_stamped"));
+  addDateTriplet("stamped_spa_send_to_developer_on", kdVal("stamped_spa_send_to_developer_on"), null);
+  addDateTriplet("stamped_spa_received_from_developer_on", kdVal("stamped_spa_received_from_developer_on"), null);
+  addDateTriplet("letter_of_offer_date", kdVal("letter_of_offer_date"), null);
+  addDateTriplet("letter_of_offer_stamped_date", kdVal("letter_of_offer_stamped_date"), wf("lof_stamped"));
+
+  addDateTriplet("loan_docs_pending_date", kdVal("loan_docs_pending_date"), wf("loan_docs_pending"));
+  addDateTriplet("loan_docs_signed_date", kdVal("loan_docs_signed_date"), wf("loan_docs_signed"));
+  addDateTriplet("acting_letter_issued_date", kdVal("acting_letter_issued_date"), wf("acting_letter_issued"));
+  addDateTriplet("developer_confirmation_received_on", kdVal("developer_confirmation_received_on"), null);
+  addDateTriplet("developer_confirmation_date", kdVal("developer_confirmation_date"), null);
+  addDateTriplet("loan_sent_bank_execution_date", kdVal("loan_sent_bank_execution_date"), wf("loan_sent_bank_exec"));
+  addDateTriplet("loan_bank_executed_date", kdVal("loan_bank_executed_date"), wf("loan_bank_executed"));
+  addDateTriplet("bank_lu_received_date", kdVal("bank_lu_received_date"), wf("blu_received"));
+  addDateTriplet("bank_lu_forward_to_developer_on", kdVal("bank_lu_forward_to_developer_on"), null);
+  addDateTriplet("developer_lu_received_on", kdVal("developer_lu_received_on"), null);
+  addDateTriplet("developer_lu_dated", kdVal("developer_lu_dated"), null);
+  addDateTriplet("letter_disclaimer_received_on", kdVal("letter_disclaimer_received_on"), null);
+  addDateTriplet("letter_disclaimer_dated", kdVal("letter_disclaimer_dated"), null);
+  addDateTriplet("loan_agreement_dated", kdVal("loan_agreement_dated"), null);
+  addDateTriplet("loan_agreement_submitted_stamping_date", kdVal("loan_agreement_submitted_stamping_date"), null);
+  addDateTriplet("loan_agreement_stamped_date", kdVal("loan_agreement_stamped_date"), null);
+  addDateTriplet("register_poa_on", kdVal("register_poa_on"), wf("pa_registered"));
+  addDateTriplet("noa_served_on", kdVal("noa_served_on"), wf("noa_served"));
+  addDateTriplet("advice_to_bank_date", kdVal("advice_to_bank_date"), null);
+  addDateTriplet("bank_1st_release_on", kdVal("bank_1st_release_on"), null);
+
+  addDateTriplet("mot_received_date", kdVal("mot_received_date"), wf("mot_received"));
+  addDateTriplet("mot_signed_date", kdVal("mot_signed_date"), null);
+  addDateTriplet("mot_stamped_date", kdVal("mot_stamped_date"), wf("mot_stamp"));
+  addDateTriplet("mot_registered_date", kdVal("mot_registered_date"), null);
+
+  addDateTriplet("progressive_payment_date", kdVal("progressive_payment_date"), null);
+  addDateTriplet("full_settlement_date", kdVal("full_settlement_date"), null);
+  addDateTriplet("completion_date", kdVal("completion_date"), null);
+
+  keyDateVars.letter_disclaimer_reference_nos = typeof kdVal("letter_disclaimer_reference_nos") === "string" ? String(kdVal("letter_disclaimer_reference_nos")) : "";
+  keyDateVars.registered_poa_registration_number = typeof kdVal("registered_poa_registration_number") === "string" ? String(kdVal("registered_poa_registration_number")) : "";
+
+  const redemptionSumVal = kdVal("redemption_sum");
+  keyDateVars.redemption_sum_raw = redemptionSumVal ?? "";
+  keyDateVars.redemption_sum = fmtRM(redemptionSumVal);
+
+  const firstReleaseVal = kdVal("first_release_amount_rm");
+  keyDateVars.first_release_amount_rm_raw = firstReleaseVal ?? "";
+  keyDateVars.first_release_amount_rm = fmtRM(firstReleaseVal);
 
   const officeBanks = bankRows.filter((b) => b.account_type === "office");
   const clientBanks = bankRows.filter((b) => b.account_type === "client");
@@ -596,7 +685,8 @@ async function buildCaseContext(r: DbConn, caseId: number, firmId: number): Prom
       account_no: b.account_no ?? "",
       account_type: b.account_type ?? "",
     })),
-    ...workflowDateVars,
+    ...keyDateVars,
+    ...workflowDebugVars,
   };
 }
 
@@ -1737,6 +1827,140 @@ router.post("/cases/:caseId/documents/generate-from-master", requireAuth, requir
   }
 });
 
+const CASE_PRINT_CONFIG: Record<string, { documentType: string; defaultName: string }> = {
+  acting_letter: { documentType: "acting_letter", defaultName: "Acting Letter" },
+  letter_forward_bank_execution: { documentType: "letter_forward_bank_execution", defaultName: "Letter Forward Bank Execution" },
+  letter_forward_bank_lu_to_dev: { documentType: "letter_forward_bank_lu_to_dev", defaultName: "Letter Forward Bank’s LU to Dev." },
+  noa: { documentType: "noa", defaultName: "NOA" },
+  letter_advice_spa_sol_lu: { documentType: "letter_advice_spa_sol_lu", defaultName: "Letter Advice & SPA Sol. LU" },
+};
+
+router.post("/cases/:caseId/documents/print", requireAuth, requireFirmUser, requirePermission("documents", "create"), async (req: AuthRequest, res): Promise<void> => {
+  const r = getRlsDb(req, res);
+  if (!r) return;
+  const caseIdStr = one((req.params as any).caseId);
+  const caseId = caseIdStr ? parseInt(caseIdStr, 10) : NaN;
+  if (Number.isNaN(caseId)) {
+    res.status(400).json({ error: "Invalid case ID" });
+    return;
+  }
+
+  const body = req.body as Record<string, unknown>;
+  const printKey = typeof body.printKey === "string" ? body.printKey : "";
+  const cfg = CASE_PRINT_CONFIG[printKey];
+  if (!cfg) {
+    res.status(400).json({ error: "Invalid printKey", code: "INVALID_PRINT_KEY" });
+    return;
+  }
+
+  const documentName = typeof body.documentName === "string" ? body.documentName.trim() : "";
+  const letterheadId = typeof body.letterheadId === "number" ? body.letterheadId : null;
+
+  const templateRows = await queryRows(
+    r,
+    sql`SELECT * FROM document_templates
+        WHERE firm_id = ${req.firmId!}
+          AND kind = 'template'
+          AND is_template_capable = true
+          AND document_type = ${cfg.documentType}
+        ORDER BY created_at DESC
+        LIMIT 1`
+  );
+  const template = templateRows[0];
+  if (!template) {
+    res.status(404).json({ error: "No firm template configured for this print action", code: "TEMPLATE_NOT_CONFIGURED", documentType: cfg.documentType });
+    return;
+  }
+
+  const context = await buildCaseContext(r, caseId, req.firmId!);
+  if (!context) {
+    res.status(404).json({ error: "Case not found" });
+    return;
+  }
+
+  try {
+    const objectFile = await storage.getObjectEntityFile(template.object_path as string);
+    const [fileContents] = await objectFile.download();
+
+    const zip = new PizZip(fileContents);
+    const doc = new Docxtemplater(zip, { paragraphLoop: true, linebreaks: true });
+    doc.render(context);
+    let buffer = doc.getZip().generate({ type: "nodebuffer", compression: "DEFLATE" }) as Buffer;
+
+    const templateDocType = template && typeof template === "object" && "document_type" in template ? String((template as any).document_type) : "other";
+    const isLetterLike = isFirmDocumentTypeLetterLike(templateDocType);
+    let usedLetterheadId: number | null = null;
+    if (isLetterLike) {
+      const lhIdNum = letterheadId;
+      let lh: Record<string, unknown> | undefined;
+      if (lhIdNum !== null) {
+        const byId = await queryRows(r, sql`SELECT * FROM firm_letterheads WHERE id = ${lhIdNum} AND firm_id = ${req.firmId!}`);
+        const candidate = byId[0];
+        if (!candidate) {
+          res.status(404).json({ error: "Letterhead not found", code: "LETTERHEAD_NOT_FOUND" });
+          return;
+        }
+        if (String((candidate as any).status ?? "active") !== "active") {
+          res.status(409).json({ error: "Selected letterhead is inactive", code: "LETTERHEAD_INACTIVE" });
+          return;
+        }
+        lh = candidate;
+      } else {
+        const defaults = await queryRows(r, sql`SELECT * FROM firm_letterheads WHERE firm_id = ${req.firmId!} AND status = 'active' ORDER BY is_default DESC, created_at DESC LIMIT 1`);
+        lh = defaults[0];
+        if (!lh) {
+          res.status(422).json({ error: "No active firm letterhead configured", code: "NO_LETTERHEAD" });
+          return;
+        }
+      }
+      usedLetterheadId = typeof (lh as any).id === "number" ? Number((lh as any).id) : null;
+      const firstBytes = await downloadPrivateObjectBytes(String((lh as any).first_page_object_path));
+      const contBytes = await downloadPrivateObjectBytes(String((lh as any).continuation_header_object_path));
+      const footerPath = (lh as any).footer_object_path ? String((lh as any).footer_object_path) : null;
+      const footerBytes = footerPath ? await downloadPrivateObjectBytes(footerPath) : null;
+      const footerMode = (lh as any).footer_mode === "last_page_only" ? "last_page_only" : "every_page";
+      buffer = await applyLetterheadToDocxBuffer({
+        baseDocx: buffer,
+        firstPageTemplateDocx: firstBytes,
+        continuationHeaderTemplateDocx: contBytes,
+        footerTemplateDocx: footerBytes,
+        footerMode,
+      });
+    }
+
+    const uploadURL = await storage.getObjectEntityUploadURL();
+    const uploadRes = await fetch(uploadURL, {
+      method: "PUT",
+      headers: { "Content-Type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document" },
+      body: buffer,
+    });
+    if (!uploadRes.ok) {
+      const detail = await uploadRes.text();
+      res.status(500).json({ error: "Failed to upload generated document", detail });
+      return;
+    }
+
+    const normalizedPath = storage.normalizeObjectEntityPath(uploadURL.split("?")[0]);
+    const nameToUse = documentName || `${cfg.defaultName} - ${context.reference_no}`;
+    const fileName = `${nameToUse.replace(/[^a-zA-Z0-9 \-_]/g, "_")}.docx`;
+
+    const docRows = await queryRows(r, sql`
+      INSERT INTO case_documents (case_id, firm_id, template_id, name, document_type, status, object_path, file_name, generated_by)
+      VALUES (${caseId}, ${req.firmId!}, ${(template as any).id as number}, ${nameToUse}, ${cfg.documentType}, 'generated', ${normalizedPath}, ${fileName}, ${req.userId!})
+      RETURNING *`
+    );
+
+    const created = docRows[0];
+    const createdId = created && typeof created === "object" && "id" in created && typeof (created as { id?: unknown }).id === "number"
+      ? (created as { id: number }).id
+      : undefined;
+    await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.case.print", entityType: "case_document", entityId: createdId, detail: `caseId=${caseId} printKey=${printKey} templateId=${(template as any).id} name=${nameToUse} letterhead=${isLetterLike ? (usedLetterheadId ?? "default") : "n/a"}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+    res.status(201).json(docRows[0]);
+  } catch (err: unknown) {
+    res.status(500).json({ error: "Failed to generate document", detail: err instanceof Error ? err.message : String(err) });
+  }
+});
+
 router.get("/document-variables", requireAuth, async (_req: AuthRequest, res): Promise<void> => {
   const variables = [
     { group: "General", vars: [
@@ -1857,76 +2081,156 @@ router.get("/document-variables", requireAuth, async (_req: AuthRequest, res): P
       { key: "bank_accounts", label: "All Bank Accounts", type: "loop", fields: "index, bank_name, account_no, account_type" },
       { key: "developer_contacts", label: "Developer Contacts", type: "loop", fields: "index, department, phone, ext, email" },
     ]},
-    { group: "Workflow Dates", vars: [
-      { key: "file_opened_date", label: "File Opened Date (DD/MM/YYYY)" },
-      { key: "file_opened_date_long", label: "File Opened Date (long format)" },
-      { key: "file_opened_date_raw", label: "File Opened Date (raw ISO)" },
+    { group: "Case Key Dates (Structured; falls back to workflow)", vars: [
+      { key: "spa_signed_date_raw", label: "SPA Signed Date (raw)" },
+      { key: "spa_signed_date", label: "SPA Signed Date (DD/MM/YYYY)" },
+      { key: "spa_signed_date_long", label: "SPA Signed Date (long format)" },
+
+      { key: "spa_forward_to_developer_execution_on_raw", label: "SPA Forward to Developer Execution On (raw)" },
+      { key: "spa_forward_to_developer_execution_on", label: "SPA Forward to Developer Execution On (DD/MM/YYYY)" },
+      { key: "spa_forward_to_developer_execution_on_long", label: "SPA Forward to Developer Execution On (long format)" },
+
+      { key: "spa_date_raw", label: "SPA Date (raw)" },
+      { key: "spa_date", label: "SPA Date (DD/MM/YYYY)" },
+      { key: "spa_date_long", label: "SPA Date (long format)" },
+
+      { key: "spa_stamped_date_raw", label: "SPA Stamped Date (raw)" },
       { key: "spa_stamped_date", label: "SPA Stamped Date (DD/MM/YYYY)" },
       { key: "spa_stamped_date_long", label: "SPA Stamped Date (long format)" },
-      { key: "spa_stamped_date_raw", label: "SPA Stamped Date (raw ISO)" },
-      { key: "lof_stamped_date", label: "Letter of Offer Stamped Date (DD/MM/YYYY)" },
-      { key: "lof_stamped_date_long", label: "Letter of Offer Stamped Date (long format)" },
-      { key: "lof_stamped_date_raw", label: "Letter of Offer Stamped Date (raw ISO)" },
 
+      { key: "stamped_spa_send_to_developer_on_raw", label: "Stamped SPA Send to Developer On (raw)" },
+      { key: "stamped_spa_send_to_developer_on", label: "Stamped SPA Send to Developer On (DD/MM/YYYY)" },
+      { key: "stamped_spa_send_to_developer_on_long", label: "Stamped SPA Send to Developer On (long format)" },
+
+      { key: "stamped_spa_received_from_developer_on_raw", label: "Stamped SPA Received from Developer On (raw)" },
+      { key: "stamped_spa_received_from_developer_on", label: "Stamped SPA Received from Developer On (DD/MM/YYYY)" },
+      { key: "stamped_spa_received_from_developer_on_long", label: "Stamped SPA Received from Developer On (long format)" },
+
+      { key: "letter_of_offer_date_raw", label: "Letter of Offer Date (raw)" },
+      { key: "letter_of_offer_date", label: "Letter of Offer Date (DD/MM/YYYY)" },
+      { key: "letter_of_offer_date_long", label: "Letter of Offer Date (long format)" },
+
+      { key: "letter_of_offer_stamped_date_raw", label: "Letter of Offer Stamped Date (raw)" },
+      { key: "letter_of_offer_stamped_date", label: "Letter of Offer Stamped Date (DD/MM/YYYY)" },
+      { key: "letter_of_offer_stamped_date_long", label: "Letter of Offer Stamped Date (long format)" },
+
+      { key: "loan_docs_pending_date_raw", label: "Loan Docs Pending Signing Date (raw)" },
       { key: "loan_docs_pending_date", label: "Loan Docs Pending Signing Date (DD/MM/YYYY)" },
       { key: "loan_docs_pending_date_long", label: "Loan Docs Pending Signing Date (long format)" },
-      { key: "loan_docs_pending_date_raw", label: "Loan Docs Pending Signing Date (raw ISO)" },
+
+      { key: "loan_docs_signed_date_raw", label: "Loan Docs Signed Date (raw)" },
       { key: "loan_docs_signed_date", label: "Loan Docs Signed Date (DD/MM/YYYY)" },
       { key: "loan_docs_signed_date_long", label: "Loan Docs Signed Date (long format)" },
-      { key: "loan_docs_signed_date_raw", label: "Loan Docs Signed Date (raw ISO)" },
-      { key: "acting_letter_pending_date", label: "Acting Letter Pending Date (DD/MM/YYYY)" },
-      { key: "acting_letter_pending_date_long", label: "Acting Letter Pending Date (long format)" },
-      { key: "acting_letter_pending_date_raw", label: "Acting Letter Pending Date (raw ISO)" },
+
+      { key: "acting_letter_issued_date_raw", label: "Acting Letter Issued Date (raw)" },
       { key: "acting_letter_issued_date", label: "Acting Letter Issued Date (DD/MM/YYYY)" },
       { key: "acting_letter_issued_date_long", label: "Acting Letter Issued Date (long format)" },
-      { key: "acting_letter_issued_date_raw", label: "Acting Letter Issued Date (raw ISO)" },
-      { key: "loan_pending_bank_exec_date", label: "Loan Doc Pending Bank Execution Date (DD/MM/YYYY)" },
-      { key: "loan_pending_bank_exec_date_long", label: "Loan Doc Pending Bank Execution Date (long format)" },
-      { key: "loan_pending_bank_exec_date_raw", label: "Loan Doc Pending Bank Execution Date (raw ISO)" },
-      { key: "loan_sent_bank_exec_date", label: "Loan Doc Sent for Bank Execution Date (DD/MM/YYYY)" },
-      { key: "loan_sent_bank_exec_date_long", label: "Loan Doc Sent for Bank Execution Date (long format)" },
-      { key: "loan_sent_bank_exec_date_raw", label: "Loan Doc Sent for Bank Execution Date (raw ISO)" },
-      { key: "loan_bank_executed_date", label: "Loan Doc Bank Executed Date (DD/MM/YYYY)" },
-      { key: "loan_bank_executed_date_long", label: "Loan Doc Bank Executed Date (long format)" },
-      { key: "loan_bank_executed_date_raw", label: "Loan Doc Bank Executed Date (raw ISO)" },
-      { key: "blu_received_date", label: "Bank Letter of Undertaking Received Date (DD/MM/YYYY)" },
-      { key: "blu_received_date_long", label: "Bank Letter of Undertaking Received Date (long format)" },
-      { key: "blu_received_date_raw", label: "Bank Letter of Undertaking Received Date (raw ISO)" },
-      { key: "blu_confirmed_date", label: "Bank's Letter of Undertaking Confirmed Date (DD/MM/YYYY)" },
-      { key: "blu_confirmed_date_long", label: "Bank's Letter of Undertaking Confirmed Date (long format)" },
-      { key: "blu_confirmed_date_raw", label: "Bank's Letter of Undertaking Confirmed Date (raw ISO)" },
 
-      { key: "mot_pending_date", label: "MOT Pending Date (DD/MM/YYYY)" },
-      { key: "mot_pending_date_long", label: "MOT Pending Date (long format)" },
-      { key: "mot_pending_date_raw", label: "MOT Pending Date (raw ISO)" },
-      { key: "mot_received_date", label: "MOT Executed & Received Date (DD/MM/YYYY)" },
-      { key: "mot_received_date_long", label: "MOT Executed & Received Date (long format)" },
-      { key: "mot_received_date_raw", label: "MOT Executed & Received Date (raw ISO)" },
-      { key: "mot_invoice_prepare_date", label: "MOT Invoice Preparation Date (DD/MM/YYYY)" },
-      { key: "mot_invoice_prepare_date_long", label: "MOT Invoice Preparation Date (long format)" },
-      { key: "mot_invoice_prepare_date_raw", label: "MOT Invoice Preparation Date (raw ISO)" },
-      { key: "mot_stamp_received_date", label: "MOT Stamp Duty & Registration Received Date (DD/MM/YYYY)" },
-      { key: "mot_stamp_received_date_long", label: "MOT Stamp Duty & Registration Received Date (long format)" },
-      { key: "mot_stamp_received_date_raw", label: "MOT Stamp Duty & Registration Received Date (raw ISO)" },
-      { key: "mot_submitted_stamping_date", label: "MOT Dated & Submitted Stamping Date (DD/MM/YYYY)" },
-      { key: "mot_submitted_stamping_date_long", label: "MOT Dated & Submitted Stamping Date (long format)" },
-      { key: "mot_submitted_stamping_date_raw", label: "MOT Dated & Submitted Stamping Date (raw ISO)" },
-      { key: "mot_stamp_date", label: "MOT Stamp Date (DD/MM/YYYY)" },
-      { key: "mot_stamp_date_long", label: "MOT Stamp Date (long format)" },
-      { key: "mot_stamp_date_raw", label: "MOT Stamp Date (raw ISO)" },
+      { key: "developer_confirmation_received_on_raw", label: "Developer Confirmation Received On (raw)" },
+      { key: "developer_confirmation_received_on", label: "Developer Confirmation Received On (DD/MM/YYYY)" },
+      { key: "developer_confirmation_received_on_long", label: "Developer Confirmation Received On (long format)" },
 
-      { key: "noa_prepare_date", label: "NOA Preparation Date (DD/MM/YYYY)" },
-      { key: "noa_prepare_date_long", label: "NOA Preparation Date (long format)" },
-      { key: "noa_prepare_date_raw", label: "NOA Preparation Date (raw ISO)" },
-      { key: "noa_served_date", label: "NOA Served Date (DD/MM/YYYY)" },
-      { key: "noa_served_date_long", label: "NOA Served Date (long format)" },
-      { key: "noa_served_date_raw", label: "NOA Served Date (raw ISO)" },
-      { key: "pa_pending_date", label: "PA Pending Date (DD/MM/YYYY)" },
-      { key: "pa_pending_date_long", label: "PA Pending Date (long format)" },
-      { key: "pa_pending_date_raw", label: "PA Pending Date (raw ISO)" },
-      { key: "pa_registered_date", label: "PA Registered Date (DD/MM/YYYY)" },
-      { key: "pa_registered_date_long", label: "PA Registered Date (long format)" },
-      { key: "pa_registered_date_raw", label: "PA Registered Date (raw ISO)" },
+      { key: "developer_confirmation_date_raw", label: "Developer Confirmation Date (raw)" },
+      { key: "developer_confirmation_date", label: "Developer Confirmation Date (DD/MM/YYYY)" },
+      { key: "developer_confirmation_date_long", label: "Developer Confirmation Date (long format)" },
+
+      { key: "loan_sent_bank_execution_date_raw", label: "Loan Sent for Bank Execution Date (raw)" },
+      { key: "loan_sent_bank_execution_date", label: "Loan Sent for Bank Execution Date (DD/MM/YYYY)" },
+      { key: "loan_sent_bank_execution_date_long", label: "Loan Sent for Bank Execution Date (long format)" },
+
+      { key: "loan_bank_executed_date_raw", label: "Loan Bank Executed Date (raw)" },
+      { key: "loan_bank_executed_date", label: "Loan Bank Executed Date (DD/MM/YYYY)" },
+      { key: "loan_bank_executed_date_long", label: "Loan Bank Executed Date (long format)" },
+
+      { key: "bank_lu_received_date_raw", label: "Bank LU Received Date (raw)" },
+      { key: "bank_lu_received_date", label: "Bank LU Received Date (DD/MM/YYYY)" },
+      { key: "bank_lu_received_date_long", label: "Bank LU Received Date (long format)" },
+
+      { key: "bank_lu_forward_to_developer_on_raw", label: "Bank LU Forward to Developer On (raw)" },
+      { key: "bank_lu_forward_to_developer_on", label: "Bank LU Forward to Developer On (DD/MM/YYYY)" },
+      { key: "bank_lu_forward_to_developer_on_long", label: "Bank LU Forward to Developer On (long format)" },
+
+      { key: "developer_lu_received_on_raw", label: "Developer LU Received On (raw)" },
+      { key: "developer_lu_received_on", label: "Developer LU Received On (DD/MM/YYYY)" },
+      { key: "developer_lu_received_on_long", label: "Developer LU Received On (long format)" },
+
+      { key: "developer_lu_dated_raw", label: "Developer LU Dated (raw)" },
+      { key: "developer_lu_dated", label: "Developer LU Dated (DD/MM/YYYY)" },
+      { key: "developer_lu_dated_long", label: "Developer LU Dated (long format)" },
+
+      { key: "letter_disclaimer_received_on_raw", label: "Letter Disclaimer Received On (raw)" },
+      { key: "letter_disclaimer_received_on", label: "Letter Disclaimer Received On (DD/MM/YYYY)" },
+      { key: "letter_disclaimer_received_on_long", label: "Letter Disclaimer Received On (long format)" },
+
+      { key: "letter_disclaimer_dated_raw", label: "Letter Disclaimer Dated (raw)" },
+      { key: "letter_disclaimer_dated", label: "Letter Disclaimer Dated (DD/MM/YYYY)" },
+      { key: "letter_disclaimer_dated_long", label: "Letter Disclaimer Dated (long format)" },
+
+      { key: "letter_disclaimer_reference_nos", label: "Letter Disclaimer Reference Nos" },
+
+      { key: "redemption_sum_raw", label: "Redemption Sum (raw)" },
+      { key: "redemption_sum", label: "Redemption Sum (formatted RM)" },
+
+      { key: "loan_agreement_dated_raw", label: "Loan Agreement Dated (raw)" },
+      { key: "loan_agreement_dated", label: "Loan Agreement Dated (DD/MM/YYYY)" },
+      { key: "loan_agreement_dated_long", label: "Loan Agreement Dated (long format)" },
+
+      { key: "loan_agreement_submitted_stamping_date_raw", label: "Loan Agreement Submitted for Stamping Date (raw)" },
+      { key: "loan_agreement_submitted_stamping_date", label: "Loan Agreement Submitted for Stamping Date (DD/MM/YYYY)" },
+      { key: "loan_agreement_submitted_stamping_date_long", label: "Loan Agreement Submitted for Stamping Date (long format)" },
+
+      { key: "loan_agreement_stamped_date_raw", label: "Loan Agreement Stamped Date (raw)" },
+      { key: "loan_agreement_stamped_date", label: "Loan Agreement Stamped Date (DD/MM/YYYY)" },
+      { key: "loan_agreement_stamped_date_long", label: "Loan Agreement Stamped Date (long format)" },
+
+      { key: "register_poa_on_raw", label: "Register POA On (raw)" },
+      { key: "register_poa_on", label: "Register POA On (DD/MM/YYYY)" },
+      { key: "register_poa_on_long", label: "Register POA On (long format)" },
+
+      { key: "registered_poa_registration_number", label: "Registered POA Registration Number" },
+
+      { key: "noa_served_on_raw", label: "NOA Served On (raw)" },
+      { key: "noa_served_on", label: "NOA Served On (DD/MM/YYYY)" },
+      { key: "noa_served_on_long", label: "NOA Served On (long format)" },
+
+      { key: "advice_to_bank_date_raw", label: "Advice to Bank Date (raw)" },
+      { key: "advice_to_bank_date", label: "Advice to Bank Date (DD/MM/YYYY)" },
+      { key: "advice_to_bank_date_long", label: "Advice to Bank Date (long format)" },
+
+      { key: "bank_1st_release_on_raw", label: "Bank 1st Release On (raw)" },
+      { key: "bank_1st_release_on", label: "Bank 1st Release On (DD/MM/YYYY)" },
+      { key: "bank_1st_release_on_long", label: "Bank 1st Release On (long format)" },
+
+      { key: "first_release_amount_rm_raw", label: "First Release Amount (raw)" },
+      { key: "first_release_amount_rm", label: "First Release Amount (formatted RM)" },
+
+      { key: "mot_received_date_raw", label: "MOT Received Date (raw)" },
+      { key: "mot_received_date", label: "MOT Received Date (DD/MM/YYYY)" },
+      { key: "mot_received_date_long", label: "MOT Received Date (long format)" },
+
+      { key: "mot_signed_date_raw", label: "MOT Signed Date (raw)" },
+      { key: "mot_signed_date", label: "MOT Signed Date (DD/MM/YYYY)" },
+      { key: "mot_signed_date_long", label: "MOT Signed Date (long format)" },
+
+      { key: "mot_stamped_date_raw", label: "MOT Stamped Date (raw)" },
+      { key: "mot_stamped_date", label: "MOT Stamped Date (DD/MM/YYYY)" },
+      { key: "mot_stamped_date_long", label: "MOT Stamped Date (long format)" },
+
+      { key: "mot_registered_date_raw", label: "MOT Registered Date (raw)" },
+      { key: "mot_registered_date", label: "MOT Registered Date (DD/MM/YYYY)" },
+      { key: "mot_registered_date_long", label: "MOT Registered Date (long format)" },
+
+      { key: "progressive_payment_date_raw", label: "Progressive Payment Date (raw)" },
+      { key: "progressive_payment_date", label: "Progressive Payment Date (DD/MM/YYYY)" },
+      { key: "progressive_payment_date_long", label: "Progressive Payment Date (long format)" },
+
+      { key: "full_settlement_date_raw", label: "Full Settlement Date (raw)" },
+      { key: "full_settlement_date", label: "Full Settlement Date (DD/MM/YYYY)" },
+      { key: "full_settlement_date_long", label: "Full Settlement Date (long format)" },
+
+      { key: "completion_date_raw", label: "Completion Date (raw)" },
+      { key: "completion_date", label: "Completion Date (DD/MM/YYYY)" },
+      { key: "completion_date_long", label: "Completion Date (long format)" },
     ]},
   ];
   res.json(variables);
