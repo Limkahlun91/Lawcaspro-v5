@@ -10,6 +10,7 @@ import { Badge } from "@/components/ui/badge";
 import { useToast } from "@/hooks/use-toast";
 import { cn } from "@/lib/utils";
 import { ChevronRight, Download, FileText, Folder, FolderOpen, Pencil, Plus, Trash2, Upload } from "lucide-react";
+import { DOCUMENT_TYPE_LABELS } from "@workspace/documents-registry";
 
 const API_BASE = import.meta.env.BASE_URL.replace(/\/$/, "").replace(/^\/lawcaspro/, "") + "/api";
 
@@ -37,22 +38,6 @@ interface FirmDocument {
   file_size: number | null;
   is_template_capable: boolean;
 }
-
-const DOCUMENT_TYPE_LABELS: Record<string, string> = {
-  spa: "SPA",
-  loan_agreement: "Loan Agreement",
-  letter_of_offer: "Letter of Offer",
-  letter_forward_bank_execution: "Letter Forward Bank Execution",
-  letter_forward_bank_lu_to_dev: "Letter Forward Bank’s LU to Dev.",
-  letter_advice_spa_sol_lu: "Letter Advice & SPA Sol. LU",
-  mot: "MOT",
-  noa: "Notice of Assignment",
-  power_of_attorney: "Power of Attorney",
-  stamping_receipt: "Stamping Receipt",
-  acting_letter: "Acting Letter",
-  undertaking: "Undertaking",
-  other: "Other",
-};
 
 const ACCEPTED_EXTENSIONS = [
   ".docx", ".doc", ".pdf", ".xlsx", ".xls", ".csv", ".txt", ".jpg", ".jpeg", ".png",
@@ -96,6 +81,10 @@ function formatFileSize(bytes: number | null) {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function docTypeLabel(dt: string): string {
+  return (DOCUMENT_TYPE_LABELS as Record<string, string>)[dt] ?? dt;
 }
 
 function buildFolderPath(folders: FirmFolder[], folderId: number | null): string {
@@ -458,7 +447,7 @@ export default function FirmDocuments() {
                             </div>
                           </td>
                           <td className="px-4 py-3">
-                            <Badge variant="outline" className="text-xs">{DOCUMENT_TYPE_LABELS[doc.document_type] ?? doc.document_type}</Badge>
+                            <Badge variant="outline" className="text-xs">{docTypeLabel(doc.document_type)}</Badge>
                           </td>
                           <td className="px-4 py-3">
                             <Select

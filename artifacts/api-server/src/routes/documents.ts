@@ -1,6 +1,7 @@
 import { Router, type IRouter } from "express";
 import { sql } from "drizzle-orm";
 import { db, documentTemplatesTable, caseDocumentsTable } from "@workspace/db";
+import { PRINT_ACTIONS, isLetterheadApplicableDocumentType, isMasterDocumentLetterLike } from "@workspace/documents-registry";
 import { requireAuth, requireFirmUser, requirePermission, writeAuditLog, type AuthRequest } from "../lib/auth";
 import { ObjectStorageService, ObjectNotFoundError, SupabaseStorageService } from "../lib/objectStorage";
 import { Readable } from "stream";
@@ -121,31 +122,6 @@ function fmtDateYMD(raw: unknown): string {
   const d = formatDateValue(raw);
   if (!d) return "";
   return d.toISOString().slice(0, 10);
-}
-
-function isFirmDocumentTypeLetterLike(documentType: string): boolean {
-  const dt = (documentType || "").toLowerCase();
-  return (
-    dt === "letter_of_offer" ||
-    dt === "acting_letter" ||
-    dt === "undertaking" ||
-    dt === "letter_forward_bank_execution" ||
-    dt === "letter_forward_bank_lu_to_dev" ||
-    dt === "letter_advice_spa_sol_lu"
-  );
-}
-
-function isMasterDocLetterLike(meta: { name?: unknown; category?: unknown; fileName?: unknown }): boolean {
-  const name = String(meta.name ?? "").toLowerCase();
-  const category = String(meta.category ?? "").toLowerCase();
-  const fileName = String(meta.fileName ?? "").toLowerCase();
-  if (category === "letter") return true;
-  const parts = `${name} ${fileName}`;
-  if (/(^|[\s_\-])letter($|[\s_\-])/i.test(parts)) return true;
-  if (/(^|[\s_\-])acting[\s_\-]+letter($|[\s_\-])/i.test(parts)) return true;
-  if (/(^|[\s_\-])undertaking($|[\s_\-])/i.test(parts)) return true;
-  if (/(^|[\s_\-])letter[\s_\-]+of[\s_\-]+offer($|[\s_\-])/i.test(parts)) return true;
-  return false;
 }
 
 const DOCX_HEADER_XML_PREFIX =
@@ -1564,7 +1540,7 @@ router.post("/cases/:caseId/documents/generate", requireAuth, requireFirmUser, r
 
     let buffer = doc.getZip().generate({ type: "nodebuffer", compression: "DEFLATE" }) as Buffer;
 
-    const isLetterLike = isFirmDocumentTypeLetterLike(templateDocType);
+    const isLetterLike = isLetterheadApplicableDocumentType(templateDocType);
     let usedLetterheadId: number | null = null;
     if (isLetterLike) {
       const letterheadIdNum = typeof letterheadId === "number" ? letterheadId : null;
@@ -1750,7 +1726,7 @@ router.post("/cases/:caseId/documents/generate-from-master", requireAuth, requir
 
     if (isDocx) {
       const lhIdNum = typeof letterheadId === "number" ? letterheadId : null;
-      const shouldApply = lhIdNum !== null || isMasterDocLetterLike({ name: (masterDoc as any).name, category: (masterDoc as any).category, fileName: masterFileName });
+      const shouldApply = lhIdNum !== null || isMasterDocumentLetterLike({ name: (masterDoc as any).name, category: (masterDoc as any).category, fileName: masterFileName });
       if (shouldApply) {
         let lh: Record<string, unknown> | undefined;
         if (lhIdNum !== null) {
@@ -1827,13 +1803,79 @@ router.post("/cases/:caseId/documents/generate-from-master", requireAuth, requir
   }
 });
 
-const CASE_PRINT_CONFIG: Record<string, { documentType: string; defaultName: string }> = {
-  acting_letter: { documentType: "acting_letter", defaultName: "Acting Letter" },
-  letter_forward_bank_execution: { documentType: "letter_forward_bank_execution", defaultName: "Letter Forward Bank Execution" },
-  letter_forward_bank_lu_to_dev: { documentType: "letter_forward_bank_lu_to_dev", defaultName: "Letter Forward Bank’s LU to Dev." },
-  noa: { documentType: "noa", defaultName: "NOA" },
-  letter_advice_spa_sol_lu: { documentType: "letter_advice_spa_sol_lu", defaultName: "Letter Advice & SPA Sol. LU" },
-};
+router.get("/printable-config", requireAuth, requireFirmUser, requirePermission("documents", "read"), async (req: AuthRequest, res): Promise<void> => {
+  const r = getRlsDb(req, res);
+  if (!r) return;
+
+  const printKeys = Object.keys(PRINT_ACTIONS) as Array<keyof typeof PRINT_ACTIONS>;
+  const docTypes = Array.from(new Set(printKeys.map((k) => PRINT_ACTIONS[k].documentType)));
+  if (docTypes.length === 0) {
+    res.json([]);
+    return;
+  }
+
+  const rows = await queryRows(
+    r,
+    sql`SELECT id, name, document_type, kind, is_template_capable, file_name, created_at
+        FROM document_templates
+        WHERE firm_id = ${req.firmId!}
+          AND document_type IN (${sql.join(docTypes.map((t) => sql`${t}`), sql`, `)})
+        ORDER BY created_at DESC`
+  );
+
+  const latestByType = new Map<string, Record<string, unknown>>();
+  for (const row of rows) {
+    const dt = typeof row.document_type === "string" ? String(row.document_type) : "";
+    if (!dt) continue;
+    if (latestByType.has(dt)) continue;
+    latestByType.set(dt, row);
+  }
+
+  const result = printKeys.map((k) => {
+    const cfg = PRINT_ACTIONS[k];
+    const tpl = latestByType.get(cfg.documentType) ?? null;
+    if (!tpl) {
+      return {
+        printKey: k,
+        documentType: cfg.documentType,
+        label: cfg.label,
+        status: "not_configured",
+        hint: "Template not configured. Upload a DOCX template under Documents → Firm Documents (Template-like).",
+      };
+    }
+    const kind = typeof tpl.kind === "string" ? String(tpl.kind) : "";
+    const cap = Boolean(tpl.is_template_capable);
+    if (kind !== "template") {
+      return {
+        printKey: k,
+        documentType: cfg.documentType,
+        label: cfg.label,
+        status: "template_not_template_kind",
+        hint: "Configured record is not marked as Template-like. Edit it in Documents → Firm Documents.",
+        template: { id: tpl.id, name: tpl.name, kind: tpl.kind, isTemplateCapable: tpl.is_template_capable, fileName: tpl.file_name },
+      };
+    }
+    if (!cap) {
+      return {
+        printKey: k,
+        documentType: cfg.documentType,
+        label: cfg.label,
+        status: "template_not_capable",
+        hint: "Template is not template-capable (must be .docx). Re-upload or edit as DOCX template.",
+        template: { id: tpl.id, name: tpl.name, kind: tpl.kind, isTemplateCapable: tpl.is_template_capable, fileName: tpl.file_name },
+      };
+    }
+    return {
+      printKey: k,
+      documentType: cfg.documentType,
+      label: cfg.label,
+      status: "configured",
+      template: { id: tpl.id, name: tpl.name, kind: tpl.kind, isTemplateCapable: tpl.is_template_capable, fileName: tpl.file_name },
+    };
+  });
+
+  res.json(result);
+});
 
 router.post("/cases/:caseId/documents/print", requireAuth, requireFirmUser, requirePermission("documents", "create"), async (req: AuthRequest, res): Promise<void> => {
   const r = getRlsDb(req, res);
@@ -1847,7 +1889,7 @@ router.post("/cases/:caseId/documents/print", requireAuth, requireFirmUser, requ
 
   const body = req.body as Record<string, unknown>;
   const printKey = typeof body.printKey === "string" ? body.printKey : "";
-  const cfg = CASE_PRINT_CONFIG[printKey];
+  const cfg = (PRINT_ACTIONS as Record<string, { documentType: string; label: string }>)[printKey];
   if (!cfg) {
     res.status(400).json({ error: "Invalid printKey", code: "INVALID_PRINT_KEY" });
     return;
@@ -1888,7 +1930,7 @@ router.post("/cases/:caseId/documents/print", requireAuth, requireFirmUser, requ
     let buffer = doc.getZip().generate({ type: "nodebuffer", compression: "DEFLATE" }) as Buffer;
 
     const templateDocType = template && typeof template === "object" && "document_type" in template ? String((template as any).document_type) : "other";
-    const isLetterLike = isFirmDocumentTypeLetterLike(templateDocType);
+    const isLetterLike = isLetterheadApplicableDocumentType(templateDocType);
     let usedLetterheadId: number | null = null;
     if (isLetterLike) {
       const lhIdNum = letterheadId;
@@ -1941,7 +1983,7 @@ router.post("/cases/:caseId/documents/print", requireAuth, requireFirmUser, requ
     }
 
     const normalizedPath = storage.normalizeObjectEntityPath(uploadURL.split("?")[0]);
-    const nameToUse = documentName || `${cfg.defaultName} - ${context.reference_no}`;
+    const nameToUse = documentName || `${cfg.label} - ${context.reference_no}`;
     const fileName = `${nameToUse.replace(/[^a-zA-Z0-9 \-_]/g, "_")}.docx`;
 
     const docRows = await queryRows(r, sql`

@@ -14,6 +14,11 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
+import { DOCUMENT_TYPE_LABELS } from "@workspace/documents-registry";
+
+function docTypeLabel(dt: string): string {
+  return (DOCUMENT_TYPE_LABELS as Record<string, string>)[dt] ?? dt;
+}
 
 const API_BASE = import.meta.env.BASE_URL.replace(/\/$/, "").replace(/^\/lawcaspro/, "") + "/api";
 
@@ -26,22 +31,6 @@ interface DocumentTemplate {
   object_path: string;
   created_at: string;
 }
-
-const DOCUMENT_TYPE_LABELS: Record<string, string> = {
-  spa: "SPA",
-  loan_agreement: "Loan Agreement",
-  letter_of_offer: "Letter of Offer",
-  letter_forward_bank_execution: "Letter Forward Bank Execution",
-  letter_forward_bank_lu_to_dev: "Letter Forward Bank’s LU to Dev.",
-  letter_advice_spa_sol_lu: "Letter Advice & SPA Sol. LU",
-  mot: "MOT",
-  noa: "Notice of Assignment",
-  power_of_attorney: "Power of Attorney",
-  stamping_receipt: "Stamping Receipt",
-  acting_letter: "Acting Letter",
-  undertaking: "Undertaking",
-  other: "Other",
-};
 
 async function apiFetch(path: string, init?: RequestInit) {
   const res = await fetch(`${API_BASE}${path}`, {
@@ -201,7 +190,7 @@ export default function DocumentTemplates() {
                   <div className="font-medium text-slate-900 truncate">{t.name}</div>
                   <div className="flex items-center gap-2 mt-0.5">
                     <span className="text-xs px-1.5 py-0.5 rounded bg-slate-100 text-slate-600 font-medium">
-                      {DOCUMENT_TYPE_LABELS[t.document_type] ?? t.document_type}
+                      {docTypeLabel(t.document_type)}
                     </span>
                     <span className="text-xs text-slate-400">{t.file_name}</span>
                     {t.description && (

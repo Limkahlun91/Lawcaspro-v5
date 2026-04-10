@@ -16,6 +16,7 @@ import { useEffect, useState } from "react";
 import { Textarea } from "@/components/ui/textarea";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Badge } from "@/components/ui/badge";
 import CaseDocumentsTab from "./components/CaseDocumentsTab";
 import CaseBillingTab from "./components/CaseBillingTab";
 import CaseCommunicationsTab from "./components/CaseCommunicationsTab";
@@ -109,6 +110,19 @@ export default function CaseDetail() {
     queryFn: () => apiFetch(`/cases/${caseId}/key-dates`),
     enabled: !!caseId,
   });
+
+  const { data: printableConfig = [] } = useQuery<any[]>({
+    queryKey: ["printable-config"],
+    queryFn: () => apiFetch("/printable-config"),
+  });
+  const printState = (printKey: string) => (printableConfig || []).find((x) => x?.printKey === printKey) as any;
+  const printStatusLabel = (st: any): string => {
+    const s = st?.status;
+    if (s === "configured") return "Ready";
+    if (s === "template_not_template_kind") return "Template misclassified";
+    if (s === "template_not_capable") return "Not template-capable";
+    return "Template not configured";
+  };
   const [keyDatesDraft, setKeyDatesDraft] = useState<Record<string, string>>({});
   useEffect(() => {
     setKeyDatesDraft({
@@ -305,62 +319,71 @@ export default function CaseDetail() {
           <Card>
             <CardHeader className="flex flex-row items-center justify-between">
               <CardTitle>Key Dates & Milestones</CardTitle>
-              <Button
-                size="sm"
-                className="bg-amber-500 hover:bg-amber-600"
-                onClick={() => {
-                  const payload: Record<string, unknown> = {};
-                  const dateKeys = [
-                    "spa_signed_date",
-                    "spa_forward_to_developer_execution_on",
-                    "spa_date",
-                    "spa_stamped_date",
-                    "stamped_spa_send_to_developer_on",
-                    "stamped_spa_received_from_developer_on",
-                    "letter_of_offer_date",
-                    "letter_of_offer_stamped_date",
-                    "loan_docs_pending_date",
-                    "loan_docs_signed_date",
-                    "acting_letter_issued_date",
-                    "developer_confirmation_received_on",
-                    "developer_confirmation_date",
-                    "loan_sent_bank_execution_date",
-                    "loan_bank_executed_date",
-                    "bank_lu_received_date",
-                    "bank_lu_forward_to_developer_on",
-                    "developer_lu_received_on",
-                    "developer_lu_dated",
-                    "letter_disclaimer_received_on",
-                    "letter_disclaimer_dated",
-                    "loan_agreement_dated",
-                    "loan_agreement_submitted_stamping_date",
-                    "loan_agreement_stamped_date",
-                    "register_poa_on",
-                    "noa_served_on",
-                    "advice_to_bank_date",
-                    "bank_1st_release_on",
-                    "mot_received_date",
-                    "mot_signed_date",
-                    "mot_stamped_date",
-                    "mot_registered_date",
-                    "progressive_payment_date",
-                    "full_settlement_date",
-                    "completion_date",
-                  ];
-                  for (const k of dateKeys) {
-                    const v = keyDatesDraft[k] || "";
-                    payload[k] = v ? v : null;
-                  }
-                  payload.letter_disclaimer_reference_nos = keyDatesDraft.letter_disclaimer_reference_nos ? keyDatesDraft.letter_disclaimer_reference_nos : null;
-                  payload.registered_poa_registration_number = keyDatesDraft.registered_poa_registration_number ? keyDatesDraft.registered_poa_registration_number : null;
-                  payload.redemption_sum = keyDatesDraft.redemption_sum ? keyDatesDraft.redemption_sum : null;
-                  payload.first_release_amount_rm = keyDatesDraft.first_release_amount_rm ? keyDatesDraft.first_release_amount_rm : null;
-                  saveKeyDatesMutation.mutate(payload);
-                }}
-                disabled={saveKeyDatesMutation.isPending}
-              >
-                {saveKeyDatesMutation.isPending ? "Saving..." : "Save"}
-              </Button>
+              <div className="flex items-center gap-2">
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => setLocation("/app/documents?tab=firm")}
+                >
+                  Configure Templates
+                </Button>
+                <Button
+                  size="sm"
+                  className="bg-amber-500 hover:bg-amber-600"
+                  onClick={() => {
+                    const payload: Record<string, unknown> = {};
+                    const dateKeys = [
+                      "spa_signed_date",
+                      "spa_forward_to_developer_execution_on",
+                      "spa_date",
+                      "spa_stamped_date",
+                      "stamped_spa_send_to_developer_on",
+                      "stamped_spa_received_from_developer_on",
+                      "letter_of_offer_date",
+                      "letter_of_offer_stamped_date",
+                      "loan_docs_pending_date",
+                      "loan_docs_signed_date",
+                      "acting_letter_issued_date",
+                      "developer_confirmation_received_on",
+                      "developer_confirmation_date",
+                      "loan_sent_bank_execution_date",
+                      "loan_bank_executed_date",
+                      "bank_lu_received_date",
+                      "bank_lu_forward_to_developer_on",
+                      "developer_lu_received_on",
+                      "developer_lu_dated",
+                      "letter_disclaimer_received_on",
+                      "letter_disclaimer_dated",
+                      "loan_agreement_dated",
+                      "loan_agreement_submitted_stamping_date",
+                      "loan_agreement_stamped_date",
+                      "register_poa_on",
+                      "noa_served_on",
+                      "advice_to_bank_date",
+                      "bank_1st_release_on",
+                      "mot_received_date",
+                      "mot_signed_date",
+                      "mot_stamped_date",
+                      "mot_registered_date",
+                      "progressive_payment_date",
+                      "full_settlement_date",
+                      "completion_date",
+                    ];
+                    for (const k of dateKeys) {
+                      const v = keyDatesDraft[k] || "";
+                      payload[k] = v ? v : null;
+                    }
+                    payload.letter_disclaimer_reference_nos = keyDatesDraft.letter_disclaimer_reference_nos ? keyDatesDraft.letter_disclaimer_reference_nos : null;
+                    payload.registered_poa_registration_number = keyDatesDraft.registered_poa_registration_number ? keyDatesDraft.registered_poa_registration_number : null;
+                    payload.redemption_sum = keyDatesDraft.redemption_sum ? keyDatesDraft.redemption_sum : null;
+                    payload.first_release_amount_rm = keyDatesDraft.first_release_amount_rm ? keyDatesDraft.first_release_amount_rm : null;
+                    saveKeyDatesMutation.mutate(payload);
+                  }}
+                  disabled={saveKeyDatesMutation.isPending}
+                >
+                  {saveKeyDatesMutation.isPending ? "Saving..." : "Save"}
+                </Button>
+              </div>
             </CardHeader>
             <CardContent className="space-y-6">
               <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
@@ -414,9 +437,18 @@ export default function CaseDetail() {
                     <Label>Acting Letter Issued</Label>
                     <div className="flex gap-2">
                       <Input type="date" value={keyDatesDraft.acting_letter_issued_date || ""} onChange={(e) => setKeyDatesDraft((p) => ({ ...p, acting_letter_issued_date: e.target.value }))} />
-                      <Button size="sm" variant="outline" onClick={() => printMutation.mutate({ printKey: "acting_letter" })} disabled={printMutation.isPending}>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        title={printState("acting_letter")?.hint}
+                        onClick={() => printMutation.mutate({ printKey: "acting_letter" })}
+                        disabled={printMutation.isPending || printState("acting_letter")?.status !== "configured"}
+                      >
                         Acting Letter
                       </Button>
+                    </div>
+                    <div className="text-xs">
+                      <Badge variant={printState("acting_letter")?.status === "configured" ? "secondary" : "outline"}>{printStatusLabel(printState("acting_letter"))}</Badge>
                     </div>
                   </div>
                   <div className="space-y-1.5">
@@ -431,9 +463,18 @@ export default function CaseDetail() {
                     <Label>Loan Sent for Bank Execution</Label>
                     <div className="flex gap-2">
                       <Input type="date" value={keyDatesDraft.loan_sent_bank_execution_date || ""} onChange={(e) => setKeyDatesDraft((p) => ({ ...p, loan_sent_bank_execution_date: e.target.value }))} />
-                      <Button size="sm" variant="outline" onClick={() => printMutation.mutate({ printKey: "letter_forward_bank_execution" })} disabled={printMutation.isPending}>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        title={printState("letter_forward_bank_execution")?.hint}
+                        onClick={() => printMutation.mutate({ printKey: "letter_forward_bank_execution" })}
+                        disabled={printMutation.isPending || printState("letter_forward_bank_execution")?.status !== "configured"}
+                      >
                         Letter Forward Bank Execution
                       </Button>
+                    </div>
+                    <div className="text-xs">
+                      <Badge variant={printState("letter_forward_bank_execution")?.status === "configured" ? "secondary" : "outline"}>{printStatusLabel(printState("letter_forward_bank_execution"))}</Badge>
                     </div>
                   </div>
                   <div className="space-y-1.5">
@@ -448,9 +489,18 @@ export default function CaseDetail() {
                     <Label>Bank LU Forward to Dev. On</Label>
                     <div className="flex gap-2">
                       <Input type="date" value={keyDatesDraft.bank_lu_forward_to_developer_on || ""} onChange={(e) => setKeyDatesDraft((p) => ({ ...p, bank_lu_forward_to_developer_on: e.target.value }))} />
-                      <Button size="sm" variant="outline" onClick={() => printMutation.mutate({ printKey: "letter_forward_bank_lu_to_dev" })} disabled={printMutation.isPending}>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        title={printState("letter_forward_bank_lu_to_dev")?.hint}
+                        onClick={() => printMutation.mutate({ printKey: "letter_forward_bank_lu_to_dev" })}
+                        disabled={printMutation.isPending || printState("letter_forward_bank_lu_to_dev")?.status !== "configured"}
+                      >
                         Letter Forward Bank’s LU to Dev.
                       </Button>
+                    </div>
+                    <div className="text-xs">
+                      <Badge variant={printState("letter_forward_bank_lu_to_dev")?.status === "configured" ? "secondary" : "outline"}>{printStatusLabel(printState("letter_forward_bank_lu_to_dev"))}</Badge>
                     </div>
                   </div>
                   <div className="space-y-1.5">
@@ -501,18 +551,36 @@ export default function CaseDetail() {
                     <Label>NOA Served On</Label>
                     <div className="flex gap-2">
                       <Input type="date" value={keyDatesDraft.noa_served_on || ""} onChange={(e) => setKeyDatesDraft((p) => ({ ...p, noa_served_on: e.target.value }))} />
-                      <Button size="sm" variant="outline" onClick={() => printMutation.mutate({ printKey: "noa" })} disabled={printMutation.isPending}>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        title={printState("noa")?.hint}
+                        onClick={() => printMutation.mutate({ printKey: "noa" })}
+                        disabled={printMutation.isPending || printState("noa")?.status !== "configured"}
+                      >
                         NOA
                       </Button>
+                    </div>
+                    <div className="text-xs">
+                      <Badge variant={printState("noa")?.status === "configured" ? "secondary" : "outline"}>{printStatusLabel(printState("noa"))}</Badge>
                     </div>
                   </div>
                   <div className="space-y-1.5">
                     <Label>Advice to Bank Date</Label>
                     <div className="flex gap-2">
                       <Input type="date" value={keyDatesDraft.advice_to_bank_date || ""} onChange={(e) => setKeyDatesDraft((p) => ({ ...p, advice_to_bank_date: e.target.value }))} />
-                      <Button size="sm" variant="outline" onClick={() => printMutation.mutate({ printKey: "letter_advice_spa_sol_lu" })} disabled={printMutation.isPending}>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        title={printState("letter_advice_spa_sol_lu")?.hint}
+                        onClick={() => printMutation.mutate({ printKey: "letter_advice_spa_sol_lu" })}
+                        disabled={printMutation.isPending || printState("letter_advice_spa_sol_lu")?.status !== "configured"}
+                      >
                         Letter Advice & SPA Sol. LU
                       </Button>
+                    </div>
+                    <div className="text-xs">
+                      <Badge variant={printState("letter_advice_spa_sol_lu")?.status === "configured" ? "secondary" : "outline"}>{printStatusLabel(printState("letter_advice_spa_sol_lu"))}</Badge>
                     </div>
                   </div>
                   <div className="space-y-1.5">

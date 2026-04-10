@@ -11,6 +11,9 @@
       "path": "../../lib/db"
     },
     {
+      "path": "../../lib/documents-registry"
+    },
+    {
       "path": "../../lib/api-zod"
     }
   ]
