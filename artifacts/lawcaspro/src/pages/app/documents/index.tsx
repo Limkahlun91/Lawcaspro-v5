@@ -9,7 +9,8 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useToast } from "@/hooks/use-toast";
-import DocumentTemplates from "@/pages/app/settings/DocumentTemplates";
+import FirmDocuments from "@/pages/app/documents/FirmDocuments";
+import FirmLetterHead from "@/pages/app/documents/FirmLetterHead";
 
 const API_BASE = import.meta.env.BASE_URL.replace(/\/$/, "").replace(/^\/lawcaspro/, "") + "/api";
 
@@ -34,12 +35,13 @@ interface SystemFolder {
   isDisabled: boolean;
 }
 
-const TABS = ["Master Documents", "Firm Documents"] as const;
+const TABS = ["Master Documents", "Firm Documents", "Firm Letter Head"] as const;
 type Tab = typeof TABS[number];
 
 const TAB_KEYS: Record<string, Tab> = {
   master: "Master Documents",
   firm: "Firm Documents",
+  letterhead: "Firm Letter Head",
 };
 
 function formatFileSize(bytes: number | null): string {
@@ -303,7 +305,7 @@ export default function DocumentsPage() {
     <div className="space-y-6">
       <div>
         <h1 className="text-3xl font-bold text-slate-900 tracking-tight">Documents</h1>
-        <p className="text-slate-500 mt-1">Master documents and firm document templates</p>
+        <p className="text-slate-500 mt-1">Master documents, firm documents, and firm letterhead</p>
       </div>
 
       <div className="flex border-b border-gray-200">
@@ -324,7 +326,8 @@ export default function DocumentsPage() {
       </div>
 
       {activeTab === "Master Documents" && <MasterDocumentsTab />}
-      {activeTab === "Firm Documents" && <DocumentTemplates />}
+      {activeTab === "Firm Documents" && <FirmDocuments />}
+      {activeTab === "Firm Letter Head" && <FirmLetterHead />}
     </div>
   );
 }

@@ -59,6 +59,14 @@ interface MasterDoc {
   pdfMappings: unknown | null;
 }
 
+interface FirmLetterhead {
+  id: number;
+  name: string;
+  is_default: boolean;
+  status: string;
+  footer_mode: "every_page" | "last_page_only";
+}
+
 const DOCUMENT_TYPE_LABELS: Record<string, string> = {
   spa: "SPA",
   loan_agreement: "Loan Agreement",
@@ -149,6 +157,7 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
   const [selectedTemplateId, setSelectedTemplateId] = useState<string>("");
   const [selectedMasterDocId, setSelectedMasterDocId] = useState<number | null>(null);
   const [selectedMasterFolderId, setSelectedMasterFolderId] = useState<number | null>(null);
+  const [selectedLetterheadId, setSelectedLetterheadId] = useState<string>("");
   const [documentName, setDocumentName] = useState("");
   const [uploadDialogOpen, setUploadDialogOpen] = useState(false);
   const [uploadName, setUploadName] = useState("");
@@ -164,7 +173,12 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
 
   const { data: templates = [] } = useQuery<DocumentTemplate[]>({
     queryKey: ["document-templates"],
-    queryFn: () => apiFetch("/document-templates"),
+    queryFn: () => apiFetch("/document-templates?templateCapable=true"),
+  });
+
+  const { data: letterheads = [] } = useQuery<FirmLetterhead[]>({
+    queryKey: ["firm-letterheads"],
+    queryFn: () => apiFetch("/firm-letterheads"),
   });
 
   const { data: masterFolders = [] } = useQuery<SystemFolder[]>({
@@ -196,6 +210,22 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
     return false;
   });
 
+  const selectedTemplate = selectedTemplateId ? templates.find(t => t.id === Number(selectedTemplateId)) : undefined;
+  const selectedMasterDoc = selectedMasterDocId !== null ? templateMasterDocs.find(d => d.id === selectedMasterDocId) : undefined;
+  const isLetterLike = (v: string | undefined) => {
+    const s = (v || "").toLowerCase();
+    return s.includes("letter") || s === "acting_letter" || s === "undertaking";
+  };
+  const isLetterLikeMaster = (d: MasterDoc | undefined) => {
+    const name = (d?.name || "").toLowerCase();
+    const cat = (d?.category || "").toLowerCase();
+    const fn = (d?.fileName || "").toLowerCase();
+    return name.includes("letter") || cat.includes("letter") || fn.includes("letter");
+  };
+  const showLetterhead = generateTab === "firm" ? isLetterLike(selectedTemplate?.document_type) : isLetterLikeMaster(selectedMasterDoc);
+  const activeLetterheads = letterheads.filter(l => l.status === "active");
+  const defaultLetterhead = activeLetterheads.find(l => l.is_default) ?? activeLetterheads[0];
+
   const deleteMutation = useMutation({
     mutationFn: (docId: number) => apiFetch(`/cases/${caseId}/documents/${docId}`, { method: "DELETE" }),
     onSuccess: () => {
@@ -206,13 +236,21 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
   });
 
   async function handleGenerate() {
+    if (showLetterhead && activeLetterheads.length === 0) {
+      toast({ title: "Missing firm letterhead", description: "Please configure a Firm Letter Head before generating this document.", variant: "destructive" });
+      return;
+    }
+    const letterheadIdToSend = showLetterhead
+      ? (selectedLetterheadId ? Number(selectedLetterheadId) : defaultLetterhead?.id)
+      : undefined;
+
     if (generateTab === "firm") {
       if (!selectedTemplateId) return;
       setIsGenerating(true);
       try {
         await apiFetch(`/cases/${caseId}/documents/generate`, {
           method: "POST",
-          body: JSON.stringify({ templateId: Number(selectedTemplateId), documentName: documentName || undefined }),
+          body: JSON.stringify({ templateId: Number(selectedTemplateId), documentName: documentName || undefined, letterheadId: letterheadIdToSend }),
         });
         qc.invalidateQueries({ queryKey: ["case-documents", caseId] });
         toast({ title: "Document generated successfully" });
@@ -228,7 +266,7 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
       try {
         await apiFetch(`/cases/${caseId}/documents/generate-from-master`, {
           method: "POST",
-          body: JSON.stringify({ masterDocId: selectedMasterDocId, documentName: documentName || undefined }),
+          body: JSON.stringify({ masterDocId: selectedMasterDocId, documentName: documentName || undefined, letterheadId: letterheadIdToSend }),
         });
         qc.invalidateQueries({ queryKey: ["case-documents", caseId] });
         toast({ title: "Document generated from master template" });
@@ -246,6 +284,7 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
     setSelectedTemplateId("");
     setSelectedMasterDocId(null);
     setDocumentName("");
+    setSelectedLetterheadId("");
   }
 
   async function handleUpload() {
@@ -476,6 +515,27 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
               </div>
             </TabsContent>
           </Tabs>
+
+          {showLetterhead && (
+            <div className="space-y-1.5">
+              <Label>Firm Letter Head</Label>
+              {activeLetterheads.length === 0 ? (
+                <div className="text-xs text-slate-500">No firm letterhead configured</div>
+              ) : (
+                <Select value={selectedLetterheadId} onValueChange={setSelectedLetterheadId}>
+                  <SelectTrigger>
+                    <SelectValue placeholder={defaultLetterhead ? `Use default (${defaultLetterhead.name})` : "Use default"} />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="">Use default</SelectItem>
+                    {activeLetterheads.map(lh => (
+                      <SelectItem key={lh.id} value={String(lh.id)}>{lh.name}{lh.is_default ? " (default)" : ""}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              )}
+            </div>
+          )}
 
           <div className="space-y-1.5">
             <Label>Document Name <span className="text-slate-400 text-xs">(optional)</span></Label>

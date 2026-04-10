@@ -4,15 +4,24 @@ export const documentTemplatesTable = pgTable("document_templates", {
   id: serial("id").primaryKey(),
   firmId: integer("firm_id").notNull(),
   name: text("name").notNull(),
+  kind: text("kind").notNull().default("template"),
   documentType: text("document_type").notNull().default("other"),
   description: text("description"),
   objectPath: text("object_path").notNull(),
   fileName: text("file_name").notNull(),
+  folderId: integer("folder_id"),
+  mimeType: text("mime_type"),
+  extension: text("extension"),
+  fileSize: integer("file_size"),
+  isTemplateCapable: boolean("is_template_capable").notNull().default(true),
   createdBy: integer("created_by"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow().$onUpdate(() => new Date()),
 }, (t) => ({
   firmIdx: index("idx_doc_templates_firm").on(t.firmId),
+  firmFolderIdx: index("idx_document_templates_firm_folder").on(t.firmId, t.folderId),
+  firmKindIdx: index("idx_document_templates_firm_kind").on(t.firmId, t.kind),
+  firmTemplateCapableIdx: index("idx_document_templates_template_capable").on(t.firmId, t.isTemplateCapable),
 }));
 
 export const caseDocumentsTable = pgTable("case_documents", {

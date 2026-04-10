@@ -2,7 +2,7 @@ import { Router, type IRouter } from "express";
 import { sql } from "drizzle-orm";
 import { db, documentTemplatesTable, caseDocumentsTable } from "@workspace/db";
 import { requireAuth, requireFirmUser, requirePermission, writeAuditLog, type AuthRequest } from "../lib/auth";
-import { ObjectStorageService, ObjectNotFoundError } from "../lib/objectStorage";
+import { ObjectStorageService, ObjectNotFoundError, SupabaseStorageService } from "../lib/objectStorage";
 import { Readable } from "stream";
 import Docxtemplater from "docxtemplater";
 import PizZip from "pizzip";
@@ -11,10 +11,17 @@ import fontkit from "@pdf-lib/fontkit";
 
 const router: IRouter = Router();
 const storage = new ObjectStorageService();
+const supabaseStorage = new SupabaseStorageService();
 
 type DbConn = typeof db | NonNullable<AuthRequest["rlsDb"]>;
 
 const one = (v: string | string[] | undefined): string | undefined => (Array.isArray(v) ? v[0] : v);
+
+const truthy = (v: string | string[] | undefined): boolean => {
+  const s = one(v);
+  if (!s) return false;
+  return s === "1" || s.toLowerCase() === "true" || s.toLowerCase() === "yes";
+};
 
 const getRlsDb = (req: AuthRequest, res: any): NonNullable<AuthRequest["rlsDb"]> | null => {
   const r = req.rlsDb;
@@ -62,6 +69,240 @@ function fmtRM(val: unknown): string {
   const n = Number(val);
   if (isNaN(n)) return String(val);
   return `RM ${n.toLocaleString("en-MY", { minimumFractionDigits: 2 })}`;
+}
+
+const DOCX_HEADER_XML_PREFIX =
+  `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` +
+  `<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" ` +
+  `xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" ` +
+  `xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" ` +
+  `xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" ` +
+  `xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture" ` +
+  `xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape" ` +
+  `xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" mc:Ignorable="wps">`;
+
+const DOCX_FOOTER_XML_PREFIX =
+  `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` +
+  `<w:ftr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" ` +
+  `xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" ` +
+  `xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" ` +
+  `xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" ` +
+  `xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture" ` +
+  `xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape" ` +
+  `xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" mc:Ignorable="wps">`;
+
+function zipReadText(zip: PizZip, path: string): string {
+  const f = zip.file(path);
+  return f ? f.asText() : "";
+}
+
+function zipReadBytes(zip: PizZip, path: string): Buffer | null {
+  const f = zip.file(path);
+  if (!f) return null;
+  const u8 = f.asUint8Array();
+  return Buffer.from(u8);
+}
+
+function extractDocxBodyInnerXml(documentXml: string): string {
+  const m = documentXml.match(/<w:body[^>]*>([\s\S]*?)<\/w:body>/);
+  if (!m) return "";
+  const inner = m[1] ?? "";
+  return inner.replace(/<w:sectPr[\s\S]*?<\/w:sectPr>/g, "");
+}
+
+function collectRelationshipIdsFromXml(xml: string): Set<string> {
+  const ids = new Set<string>();
+  const re = /\sr:(?:embed|id)="([^"]+)"/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(xml))) {
+    if (m[1]) ids.add(m[1]);
+  }
+  return ids;
+}
+
+type RelationshipEntry = { id: string; xml: string; target: string; targetMode?: string };
+
+function pickRelationships(relsXml: string, ids: Set<string>): RelationshipEntry[] {
+  const entries: RelationshipEntry[] = [];
+  const re = /<Relationship\b[^>]*\/>/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(relsXml))) {
+    const xml = m[0];
+    const idMatch = xml.match(/\sId="([^"]+)"/);
+    const targetMatch = xml.match(/\sTarget="([^"]+)"/);
+    if (!idMatch || !targetMatch) continue;
+    const id = idMatch[1];
+    if (!ids.has(id)) continue;
+    const target = targetMatch[1];
+    const targetModeMatch = xml.match(/\sTargetMode="([^"]+)"/);
+    entries.push({ id, xml, target, targetMode: targetModeMatch?.[1] });
+  }
+  return entries;
+}
+
+function buildRelsXml(entries: RelationshipEntry[]): string {
+  const prefix =
+    `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` +
+    `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">`;
+  const body = entries.map((e) => e.xml).join("");
+  return `${prefix}${body}</Relationships>`;
+}
+
+function normalizeTargetToZipPath(target: string): string | null {
+  if (!target) return null;
+  if (target.startsWith("http://") || target.startsWith("https://")) return null;
+  if (target.startsWith("/")) return target.slice(1);
+  if (target.startsWith("../")) return `word/${target.replace(/^\.\.\//, "")}`;
+  return `word/${target}`;
+}
+
+function ensureContentTypeOverride(ctXml: string, partName: string, contentType: string): string {
+  if (ctXml.includes(`PartName="${partName}"`)) return ctXml;
+  const override = `<Override PartName="${partName}" ContentType="${contentType}"/>`;
+  return ctXml.replace(/<\/Types>\s*$/, `${override}</Types>`);
+}
+
+function nextRelationshipId(relsXml: string): string {
+  const re = /\sId="rId(\d+)"/g;
+  let max = 0;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(relsXml))) {
+    const n = Number(m[1]);
+    if (!Number.isNaN(n) && n > max) max = n;
+  }
+  return `rId${max + 1}`;
+}
+
+function addDocumentRelationship(relsXml: string, id: string, type: string, target: string): string {
+  if (relsXml.includes(`Id="${id}"`)) return relsXml;
+  const entry = `<Relationship Id="${id}" Type="${type}" Target="${target}"/>`;
+  return relsXml.replace(/<\/Relationships>\s*$/, `${entry}</Relationships>`);
+}
+
+function replaceOrInsertSectPr(documentXml: string, replace: (sectPrXml: string) => string): string {
+  const all = [...documentXml.matchAll(/<w:sectPr[\s\S]*?<\/w:sectPr>/g)];
+  if (all.length === 0) return documentXml;
+  const last = all[all.length - 1]!;
+  const sect = last[0];
+  const updated = replace(sect);
+  return documentXml.slice(0, last.index!) + updated + documentXml.slice(last.index! + sect.length);
+}
+
+function stripSectPrRefs(sectPrXml: string): string {
+  return sectPrXml
+    .replace(/<w:headerReference\b[^>]*\/>/g, "")
+    .replace(/<w:footerReference\b[^>]*\/>/g, "")
+    .replace(/<w:titlePg\b[^>]*\/>/g, "");
+}
+
+async function downloadPrivateObjectBytes(objectPath: string): Promise<Buffer> {
+  const response = await supabaseStorage.fetchPrivateObjectResponse(objectPath);
+  const ab = await response.arrayBuffer();
+  return Buffer.from(ab);
+}
+
+async function applyLetterheadToDocxBuffer({
+  baseDocx,
+  firstPageTemplateDocx,
+  continuationHeaderTemplateDocx,
+  footerTemplateDocx,
+  footerMode,
+}: {
+  baseDocx: Buffer;
+  firstPageTemplateDocx: Buffer;
+  continuationHeaderTemplateDocx: Buffer;
+  footerTemplateDocx: Buffer | null;
+  footerMode: "every_page" | "last_page_only";
+}): Promise<Buffer> {
+  const baseZip = new PizZip(baseDocx);
+  const baseDocXml = zipReadText(baseZip, "word/document.xml");
+  const baseDocRelsPath = "word/_rels/document.xml.rels";
+  let baseDocRels = zipReadText(baseZip, baseDocRelsPath);
+  let ctXml = zipReadText(baseZip, "[Content_Types].xml");
+
+  const firstZip = new PizZip(firstPageTemplateDocx);
+  const contZip = new PizZip(continuationHeaderTemplateDocx);
+  const footerZip = footerTemplateDocx ? new PizZip(footerTemplateDocx) : null;
+
+  const firstBody = extractDocxBodyInnerXml(zipReadText(firstZip, "word/document.xml"));
+  const contBody = extractDocxBodyInnerXml(zipReadText(contZip, "word/document.xml"));
+  const footerBody = footerZip ? extractDocxBodyInnerXml(zipReadText(footerZip, "word/document.xml")) : "";
+
+  const firstRelIds = collectRelationshipIdsFromXml(firstBody);
+  const contRelIds = collectRelationshipIdsFromXml(contBody);
+  const footerRelIds = footerZip ? collectRelationshipIdsFromXml(footerBody) : new Set<string>();
+
+  const firstDocRels = zipReadText(firstZip, "word/_rels/document.xml.rels");
+  const contDocRels = zipReadText(contZip, "word/_rels/document.xml.rels");
+  const footerDocRels = footerZip ? zipReadText(footerZip, "word/_rels/document.xml.rels") : "";
+
+  const firstPicked = pickRelationships(firstDocRels, firstRelIds);
+  const contPicked = pickRelationships(contDocRels, contRelIds);
+  const footerPicked = footerZip ? pickRelationships(footerDocRels, footerRelIds) : [];
+
+  for (const e of [...firstPicked, ...contPicked, ...footerPicked]) {
+    if (e.targetMode && e.targetMode.toLowerCase() === "external") continue;
+    const srcPath = normalizeTargetToZipPath(e.target);
+    if (!srcPath) continue;
+    if (baseZip.file(srcPath)) continue;
+    const srcZip = firstPicked.includes(e) ? firstZip : contPicked.includes(e) ? contZip : footerZip!;
+    const bytes = zipReadBytes(srcZip, srcPath);
+    if (bytes) baseZip.file(srcPath, bytes);
+  }
+
+  baseZip.file("word/header1.xml", `${DOCX_HEADER_XML_PREFIX}${firstBody}</w:hdr>`);
+  baseZip.file("word/header2.xml", `${DOCX_HEADER_XML_PREFIX}${contBody}</w:hdr>`);
+  baseZip.file("word/_rels/header1.xml.rels", buildRelsXml(firstPicked));
+  baseZip.file("word/_rels/header2.xml.rels", buildRelsXml(contPicked));
+
+  ctXml = ensureContentTypeOverride(ctXml, "/word/header1.xml", "application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml");
+  ctXml = ensureContentTypeOverride(ctXml, "/word/header2.xml", "application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml");
+
+  const headerType = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/header";
+  const footerType = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/footer";
+
+  const headerFirstRelId = nextRelationshipId(baseDocRels);
+  baseDocRels = addDocumentRelationship(baseDocRels, headerFirstRelId, headerType, "header1.xml");
+  const headerDefaultRelId = nextRelationshipId(baseDocRels);
+  baseDocRels = addDocumentRelationship(baseDocRels, headerDefaultRelId, headerType, "header2.xml");
+
+  let footerRelId: string | null = null;
+  if (footerZip && footerBody) {
+    baseZip.file("word/footer1.xml", `${DOCX_FOOTER_XML_PREFIX}${footerBody}</w:ftr>`);
+    baseZip.file("word/_rels/footer1.xml.rels", buildRelsXml(footerPicked));
+    ctXml = ensureContentTypeOverride(ctXml, "/word/footer1.xml", "application/vnd.openxmlformats-officedocument.wordprocessingml.footer+xml");
+    footerRelId = nextRelationshipId(baseDocRels);
+    baseDocRels = addDocumentRelationship(baseDocRels, footerRelId, footerType, "footer1.xml");
+  }
+
+  const updatedDocXml = replaceOrInsertSectPr(baseDocXml, (sectPrXml) => {
+    const stripped = stripSectPrRefs(sectPrXml);
+    const inner = stripped.replace(/^<w:sectPr[^>]*>/, "").replace(/<\/w:sectPr>$/, "");
+    const refs =
+      `<w:titlePg/>` +
+      `<w:headerReference w:type="first" r:id="${headerFirstRelId}"/>` +
+      `<w:headerReference w:type="default" r:id="${headerDefaultRelId}"/>` +
+      (footerMode === "every_page" && footerRelId ? `<w:footerReference w:type="first" r:id="${footerRelId}"/><w:footerReference w:type="default" r:id="${footerRelId}"/>` : "");
+    return `<w:sectPr>${refs}${inner}</w:sectPr>`;
+  });
+
+  let finalDocXml = updatedDocXml;
+  if (footerMode === "last_page_only" && footerRelId) {
+    const sectPr =
+      `<w:sectPr>` +
+      `<w:type w:val="continuous"/>` +
+      `<w:headerReference w:type="default" r:id="${headerDefaultRelId}"/>` +
+      `<w:footerReference w:type="default" r:id="${footerRelId}"/>` +
+      `</w:sectPr>`;
+    const breakPara = `<w:p><w:pPr>${sectPr}</w:pPr></w:p>`;
+    finalDocXml = finalDocXml.replace(/<\/w:body>/, `${breakPara}</w:body>`);
+  }
+
+  baseZip.file("word/document.xml", finalDocXml);
+  baseZip.file(baseDocRelsPath, baseDocRels);
+  baseZip.file("[Content_Types].xml", ctXml);
+
+  return baseZip.generate({ type: "nodebuffer", compression: "DEFLATE" });
 }
 
 async function buildCaseContext(r: DbConn, caseId: number, firmId: number): Promise<Record<string, unknown> | null> {
@@ -256,12 +497,152 @@ async function buildCaseContext(r: DbConn, caseId: number, firmId: number): Prom
   };
 }
 
-router.get("/document-templates", requireAuth, requireFirmUser, requirePermission("documents", "read"), async (req: AuthRequest, res): Promise<void> => {
+router.get("/firm-document-folders", requireAuth, requireFirmUser, requirePermission("documents", "read"), async (req: AuthRequest, res): Promise<void> => {
   const r = getRlsDb(req, res);
   if (!r) return;
   const rows = await queryRows(
     r,
-    sql`SELECT * FROM document_templates WHERE firm_id = ${req.firmId!} ORDER BY created_at DESC`
+    sql`SELECT * FROM firm_document_folders WHERE firm_id = ${req.firmId!} ORDER BY parent_id NULLS FIRST, sort_order ASC, name ASC`
+  );
+  res.json(rows);
+});
+
+router.post("/firm-document-folders", requireAuth, requireFirmUser, requirePermission("documents", "create"), async (req: AuthRequest, res): Promise<void> => {
+  const r = getRlsDb(req, res);
+  if (!r) return;
+  const { name, parentId } = req.body as { name: string; parentId?: number | null };
+  const folderName = typeof name === "string" ? name.trim() : "";
+  const pid = typeof parentId === "number" ? parentId : null;
+  if (!folderName) {
+    res.status(400).json({ error: "name is required" });
+    return;
+  }
+  if (pid !== null) {
+    const parentRows = await queryRows(
+      r,
+      sql`SELECT id FROM firm_document_folders WHERE id = ${pid} AND firm_id = ${req.firmId!}`
+    );
+    if (!parentRows[0]) {
+      res.status(400).json({ error: "Invalid parent folder" });
+      return;
+    }
+  }
+  try {
+    const rows = await queryRows(
+      r,
+      sql`INSERT INTO firm_document_folders (firm_id, name, parent_id, sort_order)
+          VALUES (${req.firmId!}, ${folderName}, ${pid}, 0)
+          RETURNING *`
+    );
+    const created = rows[0];
+    const createdId = created && typeof created === "object" && "id" in created ? Number((created as any).id) : undefined;
+    await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.firm_folder.create", entityType: "firm_document_folder", entityId: createdId, detail: `name=${folderName}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+    res.status(201).json(rows[0]);
+  } catch (err: any) {
+    if (err?.code === "23505") {
+      res.status(409).json({ error: "Folder name already exists", code: "DUPLICATE_FOLDER_NAME" });
+      return;
+    }
+    res.status(500).json({ error: "Failed to create folder" });
+  }
+});
+
+router.patch("/firm-document-folders/:folderId", requireAuth, requireFirmUser, requirePermission("documents", "update"), async (req: AuthRequest, res): Promise<void> => {
+  const r = getRlsDb(req, res);
+  if (!r) return;
+  const folderIdStr = one((req.params as any).folderId);
+  const folderId = folderIdStr ? parseInt(folderIdStr, 10) : NaN;
+  if (Number.isNaN(folderId)) {
+    res.status(400).json({ error: "Invalid folder ID" });
+    return;
+  }
+  const { name } = req.body as { name?: string };
+  const folderName = typeof name === "string" ? name.trim() : "";
+  if (!folderName) {
+    res.status(400).json({ error: "name is required" });
+    return;
+  }
+  try {
+    const rows = await queryRows(
+      r,
+      sql`UPDATE firm_document_folders
+          SET name = ${folderName}, updated_at = now()
+          WHERE id = ${folderId} AND firm_id = ${req.firmId!}
+          RETURNING *`
+    );
+    if (!rows[0]) {
+      res.status(404).json({ error: "Folder not found" });
+      return;
+    }
+    await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.firm_folder.rename", entityType: "firm_document_folder", entityId: folderId, detail: `name=${folderName}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+    res.json(rows[0]);
+  } catch (err: any) {
+    if (err?.code === "23505") {
+      res.status(409).json({ error: "Folder name already exists", code: "DUPLICATE_FOLDER_NAME" });
+      return;
+    }
+    res.status(500).json({ error: "Failed to rename folder" });
+  }
+});
+
+router.delete("/firm-document-folders/:folderId", requireAuth, requireFirmUser, requirePermission("documents", "delete"), async (req: AuthRequest, res): Promise<void> => {
+  const r = getRlsDb(req, res);
+  if (!r) return;
+  const folderIdStr = one((req.params as any).folderId);
+  const folderId = folderIdStr ? parseInt(folderIdStr, 10) : NaN;
+  if (Number.isNaN(folderId)) {
+    res.status(400).json({ error: "Invalid folder ID" });
+    return;
+  }
+  const childRows = await queryRows(
+    r,
+    sql`SELECT 1 FROM firm_document_folders WHERE firm_id = ${req.firmId!} AND parent_id = ${folderId} LIMIT 1`
+  );
+  if (childRows[0]) {
+    res.status(409).json({ error: "Folder has subfolders", code: "FOLDER_NOT_EMPTY" });
+    return;
+  }
+  const docRows = await queryRows(
+    r,
+    sql`SELECT 1 FROM document_templates WHERE firm_id = ${req.firmId!} AND folder_id = ${folderId} LIMIT 1`
+  );
+  if (docRows[0]) {
+    res.status(409).json({ error: "Folder has documents", code: "FOLDER_NOT_EMPTY" });
+    return;
+  }
+  const rows = await queryRows(
+    r,
+    sql`DELETE FROM firm_document_folders WHERE id = ${folderId} AND firm_id = ${req.firmId!} RETURNING *`
+  );
+  if (!rows[0]) {
+    res.status(404).json({ error: "Folder not found" });
+    return;
+  }
+  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.firm_folder.delete", entityType: "firm_document_folder", entityId: folderId, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+  res.sendStatus(204);
+});
+
+router.get("/document-templates", requireAuth, requireFirmUser, requirePermission("documents", "read"), async (req: AuthRequest, res): Promise<void> => {
+  const r = getRlsDb(req, res);
+  if (!r) return;
+  const folderIdStr = one((req.query as any).folderId);
+  const folderId = folderIdStr ? parseInt(folderIdStr, 10) : null;
+  const kind = one((req.query as any).kind);
+  const templateCapable = truthy((req.query as any).templateCapable);
+  const clauses: Array<ReturnType<typeof sql>> = [sql`firm_id = ${req.firmId!}`];
+  if (folderIdStr) {
+    if (folderId === null || Number.isNaN(folderId)) {
+      res.status(400).json({ error: "Invalid folderId" });
+      return;
+    }
+    clauses.push(sql`folder_id = ${folderId}`);
+  }
+  if (kind) clauses.push(sql`kind = ${kind}`);
+  if (templateCapable) clauses.push(sql`is_template_capable = true`);
+  const where = sql.join(clauses, sql` AND `);
+  const rows = await queryRows(
+    r,
+    sql`SELECT * FROM document_templates WHERE ${where} ORDER BY created_at DESC`
   );
   res.json(rows);
 });
@@ -269,18 +650,43 @@ router.get("/document-templates", requireAuth, requireFirmUser, requirePermissio
 router.post("/document-templates", requireAuth, requireFirmUser, requirePermission("documents", "create"), async (req: AuthRequest, res): Promise<void> => {
   const r = getRlsDb(req, res);
   if (!r) return;
-  const { name, documentType, description, objectPath, fileName } = req.body as {
+  const { name, documentType, description, objectPath, fileName, folderId, kind, mimeType, extension, fileSize } = req.body as {
     name: string;
     documentType?: string;
     description?: string;
     objectPath: string;
     fileName: string;
+    folderId?: number | null;
+    kind?: string;
+    mimeType?: string;
+    extension?: string;
+    fileSize?: number;
   };
 
   if (!name || !objectPath || !fileName) {
     res.status(400).json({ error: "name, objectPath, and fileName are required" });
     return;
   }
+
+  const folderIdNum = typeof folderId === "number" ? folderId : null;
+  const kindVal = typeof kind === "string" ? kind : "template";
+  if (kindVal !== "template" && kindVal !== "reference") {
+    res.status(400).json({ error: "Invalid kind" });
+    return;
+  }
+  if (folderIdNum !== null) {
+    const folderRows = await queryRows(
+      r,
+      sql`SELECT id FROM firm_document_folders WHERE id = ${folderIdNum} AND firm_id = ${req.firmId!}`
+    );
+    if (!folderRows[0]) {
+      res.status(400).json({ error: "Invalid folder" });
+      return;
+    }
+  }
+
+  const ext = (typeof extension === "string" ? extension : "").trim().toLowerCase() || (fileName.includes(".") ? fileName.split(".").pop()!.toLowerCase() : "");
+  const isTemplateCapable = kindVal === "template" && ext === "docx";
 
   const rows = await queryRows(
     r,
@@ -290,11 +696,71 @@ router.post("/document-templates", requireAuth, requireFirmUser, requirePermissi
   );
 
   const created = rows[0];
-  const createdId = created && typeof created === "object" && "id" in created && typeof (created as { id?: unknown }).id === "number"
-    ? (created as { id: number }).id
-    : undefined;
-  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.template.create", entityType: "document_template", entityId: createdId, detail: `name=${name}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
-  res.status(201).json(rows[0]);
+  const createdId = created && typeof created === "object" && "id" in created ? Number((created as any).id) : undefined;
+
+  const patched = await queryRows(
+    r,
+    sql`UPDATE document_templates
+        SET folder_id = ${folderIdNum},
+            kind = ${kindVal},
+            mime_type = ${mimeType ?? null},
+            extension = ${ext || null},
+            file_size = ${typeof fileSize === "number" ? fileSize : null},
+            is_template_capable = ${isTemplateCapable},
+            updated_at = now()
+        WHERE id = ${createdId ?? 0} AND firm_id = ${req.firmId!}
+        RETURNING *`
+  );
+
+  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.firm_document.upload", entityType: "firm_document", entityId: createdId, detail: `name=${name} kind=${kindVal} ext=${ext}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+  res.status(201).json(patched[0] ?? rows[0]);
+});
+
+router.patch("/document-templates/:templateId", requireAuth, requireFirmUser, requirePermission("documents", "update"), async (req: AuthRequest, res): Promise<void> => {
+  const r = getRlsDb(req, res);
+  if (!r) return;
+  const templateIdStr = one((req.params as any).templateId);
+  const templateId = templateIdStr ? parseInt(templateIdStr, 10) : NaN;
+  if (Number.isNaN(templateId)) {
+    res.status(400).json({ error: "Invalid template ID" });
+    return;
+  }
+  const { folderId, kind } = req.body as { folderId?: number | null; kind?: string };
+  const folderIdNum = typeof folderId === "number" ? folderId : null;
+  const kindVal = typeof kind === "string" ? kind : undefined;
+  if (kindVal && kindVal !== "template" && kindVal !== "reference") {
+    res.status(400).json({ error: "Invalid kind" });
+    return;
+  }
+  if (folderIdNum !== null) {
+    const folderRows = await queryRows(
+      r,
+      sql`SELECT id FROM firm_document_folders WHERE id = ${folderIdNum} AND firm_id = ${req.firmId!}`
+    );
+    if (!folderRows[0]) {
+      res.status(400).json({ error: "Invalid folder" });
+      return;
+    }
+  }
+  const rows = await queryRows(
+    r,
+    sql`UPDATE document_templates
+        SET folder_id = ${folderIdNum},
+            kind = COALESCE(${kindVal ?? null}, kind),
+            is_template_capable = (
+              COALESCE(${kindVal ?? null}, kind) = 'template'
+              AND LOWER(COALESCE(NULLIF(extension,''), split_part(file_name, '.', array_length(string_to_array(file_name, '.'), 1)))) = 'docx'
+            ),
+            updated_at = now()
+        WHERE id = ${templateId} AND firm_id = ${req.firmId!}
+        RETURNING *`
+  );
+  if (!rows[0]) {
+    res.status(404).json({ error: "Document not found" });
+    return;
+  }
+  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.firm_document.move", entityType: "firm_document", entityId: templateId, detail: `folderId=${folderIdNum ?? "null"}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+  res.json(rows[0]);
 });
 
 router.delete("/document-templates/:templateId", requireAuth, requireFirmUser, requirePermission("documents", "delete"), async (req: AuthRequest, res): Promise<void> => {
@@ -319,7 +785,213 @@ router.delete("/document-templates/:templateId", requireAuth, requireFirmUser, r
     ? (deleted as { id: number }).id
     : templateId;
   const deletedName = deleted && typeof deleted === "object" && "name" in deleted ? String((deleted as { name?: unknown }).name) : undefined;
-  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.template.delete", entityType: "document_template", entityId: deletedId, detail: deletedName ? `name=${deletedName}` : undefined, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+  const deletedObjectPath = deleted && typeof deleted === "object" && "object_path" in deleted ? String((deleted as any).object_path) : undefined;
+  if (deletedObjectPath) {
+    try {
+      await supabaseStorage.deletePrivateObject(deletedObjectPath);
+    } catch {}
+  }
+  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.firm_document.delete", entityType: "firm_document", entityId: deletedId, detail: deletedName ? `name=${deletedName}` : undefined, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+  res.sendStatus(204);
+});
+
+router.get("/firm-letterheads", requireAuth, requireFirmUser, requirePermission("documents", "read"), async (req: AuthRequest, res): Promise<void> => {
+  const r = getRlsDb(req, res);
+  if (!r) return;
+  const rows = await queryRows(
+    r,
+    sql`SELECT * FROM firm_letterheads WHERE firm_id = ${req.firmId!} ORDER BY is_default DESC, created_at DESC`
+  );
+  res.json(rows);
+});
+
+router.post("/firm-letterheads", requireAuth, requireFirmUser, requirePermission("documents", "create"), async (req: AuthRequest, res): Promise<void> => {
+  const r = getRlsDb(req, res);
+  if (!r) return;
+  const body = req.body as Record<string, unknown>;
+  const name = typeof body.name === "string" ? body.name.trim() : "";
+  const description = typeof body.description === "string" ? body.description.trim() : null;
+  const footerMode = typeof body.footerMode === "string" ? body.footerMode : "every_page";
+  const status = typeof body.status === "string" ? body.status : "active";
+  const isDefault = body.isDefault === true;
+
+  const firstPageObjectPath = typeof body.firstPageObjectPath === "string" ? body.firstPageObjectPath : "";
+  const firstPageFileName = typeof body.firstPageFileName === "string" ? body.firstPageFileName : "";
+  const firstPageMimeType = typeof body.firstPageMimeType === "string" ? body.firstPageMimeType : "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+  const firstPageExtension = typeof body.firstPageExtension === "string" ? body.firstPageExtension : "docx";
+  const firstPageFileSize = typeof body.firstPageFileSize === "number" ? body.firstPageFileSize : null;
+
+  const continuationHeaderObjectPath = typeof body.continuationHeaderObjectPath === "string" ? body.continuationHeaderObjectPath : "";
+  const continuationHeaderFileName = typeof body.continuationHeaderFileName === "string" ? body.continuationHeaderFileName : "";
+  const continuationHeaderMimeType = typeof body.continuationHeaderMimeType === "string" ? body.continuationHeaderMimeType : "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+  const continuationHeaderExtension = typeof body.continuationHeaderExtension === "string" ? body.continuationHeaderExtension : "docx";
+  const continuationHeaderFileSize = typeof body.continuationHeaderFileSize === "number" ? body.continuationHeaderFileSize : null;
+
+  const footerObjectPath = typeof body.footerObjectPath === "string" ? body.footerObjectPath : null;
+  const footerFileName = typeof body.footerFileName === "string" ? body.footerFileName : null;
+  const footerMimeType = typeof body.footerMimeType === "string" ? body.footerMimeType : null;
+  const footerExtension = typeof body.footerExtension === "string" ? body.footerExtension : null;
+  const footerFileSize = typeof body.footerFileSize === "number" ? body.footerFileSize : null;
+
+  if (!name) {
+    res.status(400).json({ error: "name is required" });
+    return;
+  }
+  if (!firstPageObjectPath || !firstPageFileName) {
+    res.status(400).json({ error: "firstPage template is required" });
+    return;
+  }
+  if (!continuationHeaderObjectPath || !continuationHeaderFileName) {
+    res.status(400).json({ error: "continuationHeader template is required" });
+    return;
+  }
+  if (firstPageExtension.toLowerCase() !== "docx" || continuationHeaderExtension.toLowerCase() !== "docx" || (footerExtension && footerExtension.toLowerCase() !== "docx")) {
+    res.status(400).json({ error: "Letterhead templates must be .docx" });
+    return;
+  }
+  if (footerMode !== "every_page" && footerMode !== "last_page_only") {
+    res.status(400).json({ error: "Invalid footerMode" });
+    return;
+  }
+  if (status !== "active" && status !== "inactive") {
+    res.status(400).json({ error: "Invalid status" });
+    return;
+  }
+
+  try {
+    if (isDefault) {
+      await queryRows(r, sql`UPDATE firm_letterheads SET is_default = false, updated_at = now() WHERE firm_id = ${req.firmId!}`);
+    }
+    const rows = await queryRows(
+      r,
+      sql`INSERT INTO firm_letterheads (
+            firm_id, name, description, is_default, status, footer_mode,
+            first_page_object_path, first_page_file_name, first_page_mime_type, first_page_extension, first_page_file_size,
+            continuation_header_object_path, continuation_header_file_name, continuation_header_mime_type, continuation_header_extension, continuation_header_file_size,
+            footer_object_path, footer_file_name, footer_mime_type, footer_extension, footer_file_size,
+            created_by
+          ) VALUES (
+            ${req.firmId!}, ${name}, ${description}, ${isDefault}, ${status}, ${footerMode},
+            ${firstPageObjectPath}, ${firstPageFileName}, ${firstPageMimeType}, ${firstPageExtension}, ${firstPageFileSize},
+            ${continuationHeaderObjectPath}, ${continuationHeaderFileName}, ${continuationHeaderMimeType}, ${continuationHeaderExtension}, ${continuationHeaderFileSize},
+            ${footerObjectPath}, ${footerFileName}, ${footerMimeType}, ${footerExtension}, ${footerFileSize},
+            ${req.userId!}
+          ) RETURNING *`
+    );
+    const created = rows[0];
+    const createdId = created && typeof created === "object" && "id" in created ? Number((created as any).id) : undefined;
+    await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.letterhead.create", entityType: "firm_letterhead", entityId: createdId, detail: `name=${name} default=${isDefault}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+    res.status(201).json(created);
+  } catch (err: any) {
+    if (err?.code === "23505") {
+      res.status(409).json({ error: "Default letterhead already exists", code: "DUPLICATE_DEFAULT" });
+      return;
+    }
+    res.status(500).json({ error: "Failed to create letterhead" });
+  }
+});
+
+router.patch("/firm-letterheads/:letterheadId", requireAuth, requireFirmUser, requirePermission("documents", "update"), async (req: AuthRequest, res): Promise<void> => {
+  const r = getRlsDb(req, res);
+  if (!r) return;
+  const letterheadIdStr = one((req.params as any).letterheadId);
+  const letterheadId = letterheadIdStr ? parseInt(letterheadIdStr, 10) : NaN;
+  if (Number.isNaN(letterheadId)) {
+    res.status(400).json({ error: "Invalid letterhead ID" });
+    return;
+  }
+  const body = req.body as Record<string, unknown>;
+  const name = typeof body.name === "string" ? body.name.trim() : undefined;
+  const description = typeof body.description === "string" ? body.description.trim() : undefined;
+  const status = typeof body.status === "string" ? body.status : undefined;
+  const footerMode = typeof body.footerMode === "string" ? body.footerMode : undefined;
+  if (status && status !== "active" && status !== "inactive") {
+    res.status(400).json({ error: "Invalid status" });
+    return;
+  }
+  if (footerMode && footerMode !== "every_page" && footerMode !== "last_page_only") {
+    res.status(400).json({ error: "Invalid footerMode" });
+    return;
+  }
+  const rows = await queryRows(
+    r,
+    sql`UPDATE firm_letterheads
+        SET name = COALESCE(${name ?? null}, name),
+            description = CASE WHEN ${description ?? null} IS NULL THEN description ELSE ${description ?? null} END,
+            status = COALESCE(${status ?? null}, status),
+            footer_mode = COALESCE(${footerMode ?? null}, footer_mode),
+            updated_at = now()
+        WHERE id = ${letterheadId} AND firm_id = ${req.firmId!}
+        RETURNING *`
+  );
+  if (!rows[0]) {
+    res.status(404).json({ error: "Letterhead not found" });
+    return;
+  }
+  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.letterhead.update", entityType: "firm_letterhead", entityId: letterheadId, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+  res.json(rows[0]);
+});
+
+router.post("/firm-letterheads/:letterheadId/set-default", requireAuth, requireFirmUser, requirePermission("documents", "update"), async (req: AuthRequest, res): Promise<void> => {
+  const r = getRlsDb(req, res);
+  if (!r) return;
+  const letterheadIdStr = one((req.params as any).letterheadId);
+  const letterheadId = letterheadIdStr ? parseInt(letterheadIdStr, 10) : NaN;
+  if (Number.isNaN(letterheadId)) {
+    res.status(400).json({ error: "Invalid letterhead ID" });
+    return;
+  }
+  const exists = await queryRows(
+    r,
+    sql`SELECT id FROM firm_letterheads WHERE id = ${letterheadId} AND firm_id = ${req.firmId!}`
+  );
+  if (!exists[0]) {
+    res.status(404).json({ error: "Letterhead not found" });
+    return;
+  }
+  await queryRows(r, sql`UPDATE firm_letterheads SET is_default = false, updated_at = now() WHERE firm_id = ${req.firmId!}`);
+  const rows = await queryRows(
+    r,
+    sql`UPDATE firm_letterheads SET is_default = true, updated_at = now() WHERE id = ${letterheadId} AND firm_id = ${req.firmId!} RETURNING *`
+  );
+  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.letterhead.set_default", entityType: "firm_letterhead", entityId: letterheadId, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+  res.json(rows[0]);
+});
+
+router.delete("/firm-letterheads/:letterheadId", requireAuth, requireFirmUser, requirePermission("documents", "delete"), async (req: AuthRequest, res): Promise<void> => {
+  const r = getRlsDb(req, res);
+  if (!r) return;
+  const letterheadIdStr = one((req.params as any).letterheadId);
+  const letterheadId = letterheadIdStr ? parseInt(letterheadIdStr, 10) : NaN;
+  if (Number.isNaN(letterheadId)) {
+    res.status(400).json({ error: "Invalid letterhead ID" });
+    return;
+  }
+  const existing = await queryRows(
+    r,
+    sql`SELECT * FROM firm_letterheads WHERE id = ${letterheadId} AND firm_id = ${req.firmId!}`
+  );
+  const row = existing[0];
+  if (!row) {
+    res.status(404).json({ error: "Letterhead not found" });
+    return;
+  }
+  const isDefault = row && typeof row === "object" && "is_default" in row ? Boolean((row as any).is_default) : false;
+  if (isDefault) {
+    res.status(409).json({ error: "Cannot delete default letterhead", code: "DEFAULT_DELETE_FORBIDDEN" });
+    return;
+  }
+  await queryRows(r, sql`DELETE FROM firm_letterheads WHERE id = ${letterheadId} AND firm_id = ${req.firmId!}`);
+  const paths: string[] = [];
+  if (row && typeof row === "object") {
+    if ((row as any).first_page_object_path) paths.push(String((row as any).first_page_object_path));
+    if ((row as any).continuation_header_object_path) paths.push(String((row as any).continuation_header_object_path));
+    if ((row as any).footer_object_path) paths.push(String((row as any).footer_object_path));
+  }
+  for (const p of paths) {
+    try { await supabaseStorage.deletePrivateObject(p); } catch {}
+  }
+  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.letterhead.delete", entityType: "firm_letterhead", entityId: letterheadId, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
   res.sendStatus(204);
 });
 
@@ -352,7 +1024,7 @@ router.post("/cases/:caseId/documents/generate", requireAuth, requireFirmUser, r
     res.status(400).json({ error: "Invalid case ID" });
     return;
   }
-  const { templateId, documentName } = req.body as { templateId: number; documentName?: string };
+  const { templateId, documentName, letterheadId } = req.body as { templateId: number; documentName?: string; letterheadId?: number | null };
 
   if (!templateId) {
     res.status(400).json({ error: "templateId is required" });
@@ -368,6 +1040,12 @@ router.post("/cases/:caseId/documents/generate", requireAuth, requireFirmUser, r
     return;
   }
   const template = templateRows[0];
+  const templateCapable = template && typeof template === "object" && "is_template_capable" in template ? Boolean((template as any).is_template_capable) : true;
+  const templateDocType = template && typeof template === "object" && "document_type" in template ? String((template as any).document_type) : "other";
+  if (!templateCapable) {
+    res.status(400).json({ error: "Selected document is not template-capable", code: "NOT_TEMPLATE_CAPABLE" });
+    return;
+  }
 
   const context = await buildCaseContext(r, caseId, req.firmId!);
   if (!context) {
@@ -384,7 +1062,36 @@ router.post("/cases/:caseId/documents/generate", requireAuth, requireFirmUser, r
 
     doc.render(context);
 
-    const buffer = doc.getZip().generate({ type: "nodebuffer", compression: "DEFLATE" });
+    let buffer = doc.getZip().generate({ type: "nodebuffer", compression: "DEFLATE" }) as Buffer;
+
+    const isLetterLike = templateDocType.includes("letter") || templateDocType === "acting_letter" || templateDocType === "undertaking";
+    if (isLetterLike) {
+      const letterheadIdNum = typeof letterheadId === "number" ? letterheadId : null;
+      const lhRows = letterheadIdNum !== null
+        ? await queryRows(r, sql`SELECT * FROM firm_letterheads WHERE id = ${letterheadIdNum} AND firm_id = ${req.firmId!} AND status = 'active'`)
+        : await queryRows(r, sql`SELECT * FROM firm_letterheads WHERE firm_id = ${req.firmId!} AND status = 'active' ORDER BY is_default DESC, created_at DESC LIMIT 1`);
+      const lh = lhRows[0];
+      if (!lh) {
+        res.status(400).json({ error: "No firm letterhead configured", code: "NO_LETTERHEAD" });
+        return;
+      }
+      const firstPath = String((lh as any).first_page_object_path);
+      const contPath = String((lh as any).continuation_header_object_path);
+      const footerPath = (lh as any).footer_object_path ? String((lh as any).footer_object_path) : null;
+      const footerMode = (lh as any).footer_mode === "last_page_only" ? "last_page_only" : "every_page";
+
+      const firstBytes = await downloadPrivateObjectBytes(firstPath);
+      const contBytes = await downloadPrivateObjectBytes(contPath);
+      const footerBytes = footerPath ? await downloadPrivateObjectBytes(footerPath) : null;
+
+      buffer = await applyLetterheadToDocxBuffer({
+        baseDocx: buffer,
+        firstPageTemplateDocx: firstBytes,
+        continuationHeaderTemplateDocx: contBytes,
+        footerTemplateDocx: footerBytes,
+        footerMode,
+      });
+    }
 
     const uploadURL = await storage.getObjectEntityUploadURL();
 
@@ -414,7 +1121,7 @@ router.post("/cases/:caseId/documents/generate", requireAuth, requireFirmUser, r
     const createdId = created && typeof created === "object" && "id" in created && typeof (created as { id?: unknown }).id === "number"
       ? (created as { id: number }).id
       : undefined;
-    await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.case.generate", entityType: "case_document", entityId: createdId, detail: `caseId=${caseId} templateId=${templateId} name=${docName}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+    await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.case.generate", entityType: "case_document", entityId: createdId, detail: `caseId=${caseId} templateId=${templateId} name=${docName} letterhead=${isLetterLike ? (typeof letterheadId === "number" ? letterheadId : "default") : "n/a"}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
     res.status(201).json(docRows[0]);
   } catch (err: unknown) {
     console.error("Document generation error:", err);
@@ -434,7 +1141,7 @@ router.post("/cases/:caseId/documents/generate-from-master", requireAuth, requir
     res.status(400).json({ error: "Invalid case ID" });
     return;
   }
-  const { masterDocId, documentName } = req.body as { masterDocId: number; documentName?: string };
+  const { masterDocId, documentName, letterheadId } = req.body as { masterDocId: number; documentName?: string; letterheadId?: number | null };
 
   if (!masterDocId) {
     res.status(400).json({ error: "masterDocId is required" });
@@ -473,7 +1180,7 @@ router.post("/cases/:caseId/documents/generate-from-master", requireAuth, requir
       const zip = new PizZip(fileContents);
       const doc = new Docxtemplater(zip, { paragraphLoop: true, linebreaks: true });
       doc.render(context);
-      buffer = doc.getZip().generate({ type: "nodebuffer", compression: "DEFLATE" });
+      buffer = doc.getZip().generate({ type: "nodebuffer", compression: "DEFLATE" }) as Buffer;
       outputMime = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
       outputExt = ".docx";
     } else if (isPdf && masterDoc.pdf_mappings) {
@@ -524,6 +1231,35 @@ router.post("/cases/:caseId/documents/generate-from-master", requireAuth, requir
       buffer = Buffer.from(fileContents);
       outputMime = masterDoc.file_type as string;
       outputExt = "." + masterFileName.split(".").pop();
+    }
+
+    if (isDocx) {
+      const lhIdNum = typeof letterheadId === "number" ? letterheadId : null;
+      const masterName = String((masterDoc as any).name ?? "").toLowerCase();
+      const masterCategory = String((masterDoc as any).category ?? "").toLowerCase();
+      const shouldApply = lhIdNum !== null || masterName.includes("letter") || masterCategory.includes("letter") || masterFileName.toLowerCase().includes("letter");
+      if (shouldApply) {
+        const lhRows = lhIdNum !== null
+          ? await queryRows(r, sql`SELECT * FROM firm_letterheads WHERE id = ${lhIdNum} AND firm_id = ${req.firmId!} AND status = 'active'`)
+          : await queryRows(r, sql`SELECT * FROM firm_letterheads WHERE firm_id = ${req.firmId!} AND status = 'active' ORDER BY is_default DESC, created_at DESC LIMIT 1`);
+        const lh = lhRows[0];
+        if (!lh) {
+          res.status(400).json({ error: "No firm letterhead configured", code: "NO_LETTERHEAD" });
+          return;
+        }
+        const firstBytes = await downloadPrivateObjectBytes(String((lh as any).first_page_object_path));
+        const contBytes = await downloadPrivateObjectBytes(String((lh as any).continuation_header_object_path));
+        const footerPath = (lh as any).footer_object_path ? String((lh as any).footer_object_path) : null;
+        const footerBytes = footerPath ? await downloadPrivateObjectBytes(footerPath) : null;
+        const footerMode = (lh as any).footer_mode === "last_page_only" ? "last_page_only" : "every_page";
+        buffer = await applyLetterheadToDocxBuffer({
+          baseDocx: buffer,
+          firstPageTemplateDocx: firstBytes,
+          continuationHeaderTemplateDocx: contBytes,
+          footerTemplateDocx: footerBytes,
+          footerMode,
+        });
+      }
     }
 
     const uploadURL = await storage.getObjectEntityUploadURL();
