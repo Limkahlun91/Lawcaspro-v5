@@ -15,6 +15,7 @@ import {
 import { CreateFirmBody, UpdateFirmBody, ListFirmsQueryParams, GetFirmParams, UpdateFirmParams } from "@workspace/api-zod";
 import { requireAuth, requireFounder, writeAuditLog, type AuthRequest } from "../lib/auth";
 import { withAuthSafeDb } from "../lib/auth-safe-db";
+import { logger } from "../lib/logger";
 import bcrypt from "bcryptjs";
 import {
   ObjectNotFoundError,
@@ -37,6 +38,51 @@ const firstRow = (result: unknown): Record<string, unknown> | undefined => {
   }
   return undefined;
 };
+
+type PgError = {
+  code?: string;
+  constraint?: string;
+  detail?: string;
+  message?: string;
+};
+
+const isPgError = (err: unknown): err is PgError =>
+  typeof err === "object" && err !== null && ("code" in err || "constraint" in err || "detail" in err);
+
+function mapCreateFirmError(err: unknown): { status: number; body: Record<string, unknown> } {
+  const message = err instanceof Error ? err.message : String(err);
+  const pg = isPgError(err) ? err : undefined;
+  const code = pg?.code;
+  const constraint = pg?.constraint;
+
+  if (code === "23505") {
+    if (constraint === "users_email_key") {
+      return { status: 409, body: { error: "Partner email already exists", code: "DUPLICATE_EMAIL" } };
+    }
+    if (constraint === "firms_slug_key") {
+      return { status: 409, body: { error: "Workspace slug already taken", code: "DUPLICATE_SLUG" } };
+    }
+    return { status: 409, body: { error: "Duplicate value", code: "DUPLICATE" } };
+  }
+
+  if (code === "23502") {
+    return { status: 400, body: { error: "Missing required field", code: "NOT_NULL" } };
+  }
+
+  if (code === "23503") {
+    return { status: 400, body: { error: "Invalid reference", code: "FK" } };
+  }
+
+  if (code === "42501" && message.toLowerCase().includes("row-level security")) {
+    return { status: 500, body: { error: "Database permission denied (RLS)", code: "RLS_DENIED" } };
+  }
+
+  if (code === "42501" || message.toLowerCase().includes("permission denied")) {
+    return { status: 500, body: { error: "Database permission denied", code: "DB_PERMISSION" } };
+  }
+
+  return { status: 500, body: { error: "Failed to create firm", code: "INTERNAL_ERROR" } };
+}
 
 const router: IRouter = Router();
 const storage = new SupabaseStorageService();
@@ -93,19 +139,83 @@ router.get("/platform/firms", requireAuth, requireFounder, async (req: AuthReque
 router.post("/platform/firms", requireAuth, requireFounder, async (req: AuthRequest, res): Promise<void> => {
   const parsed = CreateFirmBody.safeParse(req.body);
   if (!parsed.success) {
-    res.status(400).json({ error: parsed.error.message });
+    res.status(400).json({ error: parsed.error.message, code: "VALIDATION_ERROR" });
     return;
   }
   const { name, slug, subscriptionPlan, partnerName, partnerEmail, partnerPassword } = parsed.data;
-  const [existing] = await db.select().from(firmsTable).where(eq(firmsTable.slug, slug));
-  if (existing) {
-    res.status(400).json({ error: "Slug already taken" });
-    return;
+  const slugNormalized = slug.trim();
+  const emailNormalized = partnerEmail.trim().toLowerCase();
+  const nameNormalized = name.trim();
+  const partnerNameNormalized = partnerName.trim();
+
+  try {
+    const result = await withAuthSafeDb(async (authDb) => {
+      const [existingFirm] = await authDb
+        .select({ id: firmsTable.id })
+        .from(firmsTable)
+        .where(eq(firmsTable.slug, slugNormalized));
+      if (existingFirm) {
+        return { ok: false as const, status: 409, error: "Workspace slug already taken", code: "DUPLICATE_SLUG" };
+      }
+
+      const [existingUser] = await authDb
+        .select({ id: usersTable.id })
+        .from(usersTable)
+        .where(eq(usersTable.email, emailNormalized));
+      if (existingUser) {
+        return { ok: false as const, status: 409, error: "Partner email already exists", code: "DUPLICATE_EMAIL" };
+      }
+
+      const [firm] = await authDb
+        .insert(firmsTable)
+        .values({ name: nameNormalized, slug: slugNormalized, subscriptionPlan: subscriptionPlan ?? "starter", status: "active" })
+        .returning();
+
+      const [partnerRole] = await authDb
+        .insert(rolesTable)
+        .values({ firmId: firm.id, name: "Partner", isSystemRole: true })
+        .returning();
+
+      const passwordHash = await bcrypt.hash(partnerPassword, 10);
+      await authDb.insert(usersTable).values({
+        firmId: firm.id,
+        email: emailNormalized,
+        name: partnerNameNormalized,
+        passwordHash,
+        userType: "firm_user",
+        roleId: partnerRole.id,
+        status: "active",
+      });
+
+      await writeAuditLog(
+        {
+          firmId: null,
+          actorId: req.userId,
+          actorType: req.userType,
+          action: "platform.firm.create",
+          entityType: "firm",
+          entityId: firm.id,
+          detail: `slug=${firm.slug} partnerEmail=${emailNormalized}`,
+          ipAddress: req.ip,
+          userAgent: req.headers["user-agent"],
+        },
+        { db: authDb }
+      );
+
+      return { ok: true as const, firm };
+    });
+
+    if (!result.ok) {
+      res.status(result.status).json({ error: result.error, code: result.code });
+      return;
+    }
+
+    res.status(201).json({ ...result.firm, userCount: 1, partnerCount: 1, caseCount: 0 });
+  } catch (err) {
+    logger.error({ err, userId: req.userId }, "platform.create_firm.error");
+    const mapped = mapCreateFirmError(err);
+    res.status(mapped.status).json(mapped.body);
   }
-  const [firm] = await db.insert(firmsTable).values({ name, slug, subscriptionPlan: subscriptionPlan ?? "starter", status: "active" }).returning();
-  const passwordHash = await bcrypt.hash(partnerPassword, 10);
-  await db.insert(usersTable).values({ firmId: firm.id, email: partnerEmail.toLowerCase(), name: partnerName, passwordHash, userType: "firm_user", status: "active" });
-  res.status(201).json({ ...firm, userCount: 1, partnerCount: 1, caseCount: 0 });
 });
 
 router.get("/platform/firms/:firmId", requireAuth, requireFounder, async (req: AuthRequest, res): Promise<void> => {

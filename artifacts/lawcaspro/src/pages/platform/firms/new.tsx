@@ -56,9 +56,18 @@ export default function NewFirm() {
           setLocation("/platform/firms");
         },
         onError: (error) => {
+          const data = (error as { data?: unknown } | null | undefined)?.data;
+          const apiError =
+            data && typeof data === "object" && "error" in data && typeof (data as { error?: unknown }).error === "string"
+              ? (data as { error: string }).error
+              : null;
+          const message =
+            apiError ??
+            (error instanceof Error ? error.message : null) ??
+            "Please try again.";
           toast({
             title: "Error creating firm",
-            description: error.error || "Please try again.",
+            description: message,
             variant: "destructive",
           });
         },
