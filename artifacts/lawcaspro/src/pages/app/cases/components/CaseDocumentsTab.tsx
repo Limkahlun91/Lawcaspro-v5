@@ -15,6 +15,7 @@ import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { cn } from "@/lib/utils";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { isFirmDocumentTypeLetterLike, isMasterDocumentLetterLike } from "@/lib/documents/letterLike";
 
 const API_BASE = import.meta.env.BASE_URL.replace(/\/$/, "").replace(/^\/lawcaspro/, "") + "/api";
 
@@ -212,17 +213,9 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
 
   const selectedTemplate = selectedTemplateId ? templates.find(t => t.id === Number(selectedTemplateId)) : undefined;
   const selectedMasterDoc = selectedMasterDocId !== null ? templateMasterDocs.find(d => d.id === selectedMasterDocId) : undefined;
-  const isLetterLike = (v: string | undefined) => {
-    const s = (v || "").toLowerCase();
-    return s.includes("letter") || s === "acting_letter" || s === "undertaking";
-  };
-  const isLetterLikeMaster = (d: MasterDoc | undefined) => {
-    const name = (d?.name || "").toLowerCase();
-    const cat = (d?.category || "").toLowerCase();
-    const fn = (d?.fileName || "").toLowerCase();
-    return name.includes("letter") || cat.includes("letter") || fn.includes("letter");
-  };
-  const showLetterhead = generateTab === "firm" ? isLetterLike(selectedTemplate?.document_type) : isLetterLikeMaster(selectedMasterDoc);
+  const showLetterhead = generateTab === "firm"
+    ? isFirmDocumentTypeLetterLike(selectedTemplate?.document_type)
+    : isMasterDocumentLetterLike(selectedMasterDoc);
   const activeLetterheads = letterheads.filter(l => l.status === "active");
   const defaultLetterhead = activeLetterheads.find(l => l.is_default) ?? activeLetterheads[0];
 

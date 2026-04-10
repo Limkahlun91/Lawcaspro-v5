@@ -10,7 +10,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/u
 import { Checkbox } from "@/components/ui/checkbox";
 import { Badge } from "@/components/ui/badge";
 import { useToast } from "@/hooks/use-toast";
-import { Download, Trash2, Upload } from "lucide-react";
+import { Download, Pencil, Trash2, Upload } from "lucide-react";
 
 const API_BASE = import.meta.env.BASE_URL.replace(/\/$/, "").replace(/^\/lawcaspro/, "") + "/api";
 
@@ -37,7 +37,17 @@ async function apiFetch(path: string, init?: RequestInit) {
     ...init,
     headers: { "Content-Type": "application/json", ...(init?.headers ?? {}) },
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) {
+    const text = await res.text();
+    try {
+      const parsed = JSON.parse(text) as { error?: unknown; code?: unknown; detail?: unknown };
+      const msg = typeof parsed.error === "string" ? parsed.error : text;
+      const code = typeof parsed.code === "string" ? ` (${parsed.code})` : "";
+      throw new Error(`${msg}${code}`);
+    } catch {
+      throw new Error(text);
+    }
+  }
   if (res.status === 204) return null;
   return res.json();
 }
@@ -54,21 +64,20 @@ async function uploadDocx(file: File): Promise<{ objectPath: string }> {
   return uploadRes.json();
 }
 
-function objectPathToDownloadUrl(objectPath: string): string {
-  const pathPart = objectPath.replace(/^\/objects\//, "");
-  return `${API_BASE}/storage/objects/${pathPart}`;
-}
-
 export default function FirmLetterHead() {
   const { toast } = useToast();
   const qc = useQueryClient();
   const firstRef = useRef<HTMLInputElement>(null);
   const contRef = useRef<HTMLInputElement>(null);
   const footerRef = useRef<HTMLInputElement>(null);
+  const editFirstRef = useRef<HTMLInputElement>(null);
+  const editContRef = useRef<HTMLInputElement>(null);
+  const editFooterRef = useRef<HTMLInputElement>(null);
 
   const [createOpen, setCreateOpen] = useState(false);
   const [detailOpen, setDetailOpen] = useState(false);
   const [active, setActive] = useState<FirmLetterhead | null>(null);
+  const [editMode, setEditMode] = useState(false);
 
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
@@ -78,6 +87,16 @@ export default function FirmLetterHead() {
   const [contFile, setContFile] = useState<File | null>(null);
   const [footerFile, setFooterFile] = useState<File | null>(null);
   const [isCreating, setIsCreating] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
+
+  const [editName, setEditName] = useState("");
+  const [editDescription, setEditDescription] = useState("");
+  const [editStatus, setEditStatus] = useState<"active" | "inactive">("active");
+  const [editFooterMode, setEditFooterMode] = useState<"every_page" | "last_page_only">("every_page");
+  const [replaceFirstFile, setReplaceFirstFile] = useState<File | null>(null);
+  const [replaceContFile, setReplaceContFile] = useState<File | null>(null);
+  const [replaceFooterFile, setReplaceFooterFile] = useState<File | null>(null);
+  const [removeFooter, setRemoveFooter] = useState(false);
 
   const { data: letterheads = [], isLoading } = useQuery<FirmLetterhead[]>({
     queryKey: ["firm-letterheads"],
@@ -100,9 +119,70 @@ export default function FirmLetterHead() {
       toast({ title: "Letterhead deleted" });
       setDetailOpen(false);
       setActive(null);
+      setEditMode(false);
     },
     onError: (err) => toast({ title: "Error", description: String(err), variant: "destructive" }),
   });
+
+  async function handleSave() {
+    if (!active) return;
+    if (!editName.trim()) return;
+    setIsSaving(true);
+    try {
+      const patch: Record<string, unknown> = {
+        name: editName.trim(),
+        description: editDescription.trim() ? editDescription.trim() : null,
+        status: editStatus,
+        footerMode: editFooterMode,
+      };
+
+      if (replaceFirstFile) {
+        const up = await uploadDocx(replaceFirstFile);
+        patch.firstPageObjectPath = up.objectPath;
+        patch.firstPageFileName = replaceFirstFile.name;
+        patch.firstPageMimeType = replaceFirstFile.type || "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+        patch.firstPageExtension = "docx";
+        patch.firstPageFileSize = replaceFirstFile.size;
+      }
+      if (replaceContFile) {
+        const up = await uploadDocx(replaceContFile);
+        patch.continuationHeaderObjectPath = up.objectPath;
+        patch.continuationHeaderFileName = replaceContFile.name;
+        patch.continuationHeaderMimeType = replaceContFile.type || "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+        patch.continuationHeaderExtension = "docx";
+        patch.continuationHeaderFileSize = replaceContFile.size;
+      }
+      if (removeFooter) {
+        patch.footerObjectPath = null;
+        patch.footerFileName = null;
+        patch.footerMimeType = null;
+        patch.footerExtension = null;
+      } else if (replaceFooterFile) {
+        const up = await uploadDocx(replaceFooterFile);
+        patch.footerObjectPath = up.objectPath;
+        patch.footerFileName = replaceFooterFile.name;
+        patch.footerMimeType = replaceFooterFile.type || "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+        patch.footerExtension = "docx";
+        patch.footerFileSize = replaceFooterFile.size;
+      }
+
+      await apiFetch(`/firm-letterheads/${active.id}`, { method: "PATCH", body: JSON.stringify(patch) });
+      qc.invalidateQueries({ queryKey: ["firm-letterheads"] });
+      toast({ title: "Letterhead updated" });
+      setEditMode(false);
+      setReplaceFirstFile(null);
+      setReplaceContFile(null);
+      setReplaceFooterFile(null);
+      setRemoveFooter(false);
+      const refreshed = await apiFetch("/firm-letterheads");
+      const next = (refreshed as FirmLetterhead[]).find((l) => l.id === active.id) ?? null;
+      setActive(next);
+    } catch (err) {
+      toast({ title: "Update failed", description: String(err), variant: "destructive" });
+    } finally {
+      setIsSaving(false);
+    }
+  }
 
   async function handleCreate() {
     if (!name.trim() || !firstFile || !contFile) return;
@@ -155,8 +235,8 @@ export default function FirmLetterHead() {
     }
   }
 
-  async function downloadFile(objectPath: string, fileName: string) {
-    const res = await fetch(objectPathToDownloadUrl(objectPath), { credentials: "include" });
+  async function downloadTemplate(letterheadId: number, part: "first_page" | "continuation_header" | "footer", fileName: string) {
+    const res = await fetch(`${API_BASE}/firm-letterheads/${letterheadId}/templates/${part}/download`, { credentials: "include" });
     if (!res.ok) throw new Error("Download failed");
     const blob = await res.blob();
     const url = URL.createObjectURL(blob);
@@ -194,8 +274,34 @@ export default function FirmLetterHead() {
                 className="flex items-center gap-3 p-4 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 transition-colors cursor-pointer"
                 role="button"
                 tabIndex={0}
-                onClick={() => { setActive(lh); setDetailOpen(true); }}
-                onKeyDown={(e) => { if (e.key === "Enter") { setActive(lh); setDetailOpen(true); } }}
+                onClick={() => {
+                  setActive(lh);
+                  setEditName(lh.name);
+                  setEditDescription(lh.description ?? "");
+                  setEditStatus(lh.status);
+                  setEditFooterMode(lh.footer_mode);
+                  setEditMode(false);
+                  setReplaceFirstFile(null);
+                  setReplaceContFile(null);
+                  setReplaceFooterFile(null);
+                  setRemoveFooter(false);
+                  setDetailOpen(true);
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    setActive(lh);
+                    setEditName(lh.name);
+                    setEditDescription(lh.description ?? "");
+                    setEditStatus(lh.status);
+                    setEditFooterMode(lh.footer_mode);
+                    setEditMode(false);
+                    setReplaceFirstFile(null);
+                    setReplaceContFile(null);
+                    setReplaceFooterFile(null);
+                    setRemoveFooter(false);
+                    setDetailOpen(true);
+                  }
+                }}
               >
                 <div className="flex-1 min-w-0">
                   <div className="font-medium text-slate-900 truncate">{lh.name}</div>
@@ -287,47 +393,131 @@ export default function FirmLetterHead() {
           <DialogHeader><DialogTitle>Letterhead Details</DialogTitle></DialogHeader>
           {active && (
             <div className="space-y-4">
-              <div className="space-y-1">
-                <div className="text-xs text-slate-500">Name</div>
-                <div className="text-sm font-medium text-slate-900">{active.name}</div>
-              </div>
-              {active.description && (
-                <div className="space-y-1">
-                  <div className="text-xs text-slate-500">Description</div>
-                  <div className="text-sm text-slate-700 whitespace-pre-wrap">{active.description}</div>
+              {!editMode ? (
+                <>
+                  <div className="space-y-1">
+                    <div className="text-xs text-slate-500">Name</div>
+                    <div className="text-sm font-medium text-slate-900">{active.name}</div>
+                  </div>
+                  {active.description && (
+                    <div className="space-y-1">
+                      <div className="text-xs text-slate-500">Description</div>
+                      <div className="text-sm text-slate-700 whitespace-pre-wrap">{active.description}</div>
+                    </div>
+                  )}
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <div className="text-xs text-slate-500">Status</div>
+                      <div className="text-sm text-slate-700">{active.status}</div>
+                    </div>
+                    <div>
+                      <div className="text-xs text-slate-500">Footer Mode</div>
+                      <div className="text-sm text-slate-700">{active.footer_mode === "every_page" ? "Every page" : "Last page only"}</div>
+                    </div>
+                  </div>
+                </>
+              ) : (
+                <div className="space-y-3">
+                  <div className="space-y-1.5">
+                    <Label>Name</Label>
+                    <Input value={editName} onChange={(e) => setEditName(e.target.value)} />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label>Description <span className="text-slate-400 text-xs">(optional)</span></Label>
+                    <Textarea value={editDescription} onChange={(e) => setEditDescription(e.target.value)} rows={2} className="resize-none text-sm" />
+                  </div>
+                  <div className="grid grid-cols-2 gap-3">
+                    <div className="space-y-1.5">
+                      <Label>Status</Label>
+                      <Select value={editStatus} onValueChange={(v) => setEditStatus(v as any)}>
+                        <SelectTrigger><SelectValue /></SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="active">active</SelectItem>
+                          <SelectItem value="inactive">inactive</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    <div className="space-y-1.5">
+                      <Label>Footer Mode</Label>
+                      <Select value={editFooterMode} onValueChange={(v) => setEditFooterMode(v as any)}>
+                        <SelectTrigger><SelectValue /></SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="every_page">Every page</SelectItem>
+                          <SelectItem value="last_page_only">Last page only</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+                  </div>
                 </div>
               )}
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <div className="text-xs text-slate-500">Status</div>
-                  <div className="text-sm text-slate-700">{active.status}</div>
-                </div>
-                <div>
-                  <div className="text-xs text-slate-500">Footer Mode</div>
-                  <div className="text-sm text-slate-700">{active.footer_mode === "every_page" ? "Every page" : "Last page only"}</div>
-                </div>
-              </div>
 
               <div className="space-y-2">
                 <div className="text-xs text-slate-500">Templates</div>
                 <div className="flex flex-col gap-2">
-                  <Button variant="outline" className="justify-between" onClick={async () => { try { await downloadFile(active.first_page_object_path, active.first_page_file_name); } catch (e: any) { toast({ title: "Download failed", description: e.message, variant: "destructive" }); } }}>
+                  <Button variant="outline" className="justify-between" onClick={async () => { try { await downloadTemplate(active.id, "first_page", active.first_page_file_name); } catch (e: any) { toast({ title: "Download failed", description: e.message, variant: "destructive" }); } }}>
                     First page <Download className="w-4 h-4" />
                   </Button>
-                  <Button variant="outline" className="justify-between" onClick={async () => { try { await downloadFile(active.continuation_header_object_path, active.continuation_header_file_name); } catch (e: any) { toast({ title: "Download failed", description: e.message, variant: "destructive" }); } }}>
+                  <Button variant="outline" className="justify-between" onClick={async () => { try { await downloadTemplate(active.id, "continuation_header", active.continuation_header_file_name); } catch (e: any) { toast({ title: "Download failed", description: e.message, variant: "destructive" }); } }}>
                     Continuation header <Download className="w-4 h-4" />
                   </Button>
                   {active.footer_object_path && active.footer_file_name && (
-                    <Button variant="outline" className="justify-between" onClick={async () => { try { await downloadFile(active.footer_object_path!, active.footer_file_name!); } catch (e: any) { toast({ title: "Download failed", description: e.message, variant: "destructive" }); } }}>
+                    <Button variant="outline" className="justify-between" onClick={async () => { try { await downloadTemplate(active.id, "footer", active.footer_file_name!); } catch (e: any) { toast({ title: "Download failed", description: e.message, variant: "destructive" }); } }}>
                       Footer <Download className="w-4 h-4" />
                     </Button>
                   )}
                 </div>
               </div>
 
+              {editMode && (
+                <div className="space-y-3">
+                  <div className="space-y-1.5">
+                    <Label>Replace First Page Template (.docx) <span className="text-slate-400 text-xs">(optional)</span></Label>
+                    <div className="border-2 border-dashed border-slate-200 rounded-lg p-3 text-center cursor-pointer hover:border-amber-300 transition-colors" onClick={() => editFirstRef.current?.click()}>
+                      {replaceFirstFile ? <div className="text-sm text-slate-700 font-medium">{replaceFirstFile.name}</div> : <div className="text-sm text-slate-500">Click to select</div>}
+                    </div>
+                    <input type="file" ref={editFirstRef} className="hidden" accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document" onChange={(e) => setReplaceFirstFile(e.target.files?.[0] ?? null)} />
+                  </div>
+
+                  <div className="space-y-1.5">
+                    <Label>Replace Continuation Header Template (.docx) <span className="text-slate-400 text-xs">(optional)</span></Label>
+                    <div className="border-2 border-dashed border-slate-200 rounded-lg p-3 text-center cursor-pointer hover:border-amber-300 transition-colors" onClick={() => editContRef.current?.click()}>
+                      {replaceContFile ? <div className="text-sm text-slate-700 font-medium">{replaceContFile.name}</div> : <div className="text-sm text-slate-500">Click to select</div>}
+                    </div>
+                    <input type="file" ref={editContRef} className="hidden" accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document" onChange={(e) => setReplaceContFile(e.target.files?.[0] ?? null)} />
+                  </div>
+
+                  <div className="space-y-1.5">
+                    <div className="flex items-center justify-between">
+                      <Label>Footer Template (.docx) <span className="text-slate-400 text-xs">(optional)</span></Label>
+                      {active.footer_object_path && (
+                        <Button size="sm" variant="outline" onClick={() => { setRemoveFooter(true); setReplaceFooterFile(null); }}>
+                          Remove footer
+                        </Button>
+                      )}
+                    </div>
+                    <div className="border-2 border-dashed border-slate-200 rounded-lg p-3 text-center cursor-pointer hover:border-amber-300 transition-colors" onClick={() => editFooterRef.current?.click()}>
+                      {removeFooter ? <div className="text-sm text-slate-700 font-medium">Footer will be removed</div> : replaceFooterFile ? <div className="text-sm text-slate-700 font-medium">{replaceFooterFile.name}</div> : <div className="text-sm text-slate-500">Click to select</div>}
+                    </div>
+                    <input type="file" ref={editFooterRef} className="hidden" accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document" onChange={(e) => { setRemoveFooter(false); setReplaceFooterFile(e.target.files?.[0] ?? null); }} />
+                  </div>
+                </div>
+              )}
+
               <div className="pt-2 flex gap-2 justify-end">
+                <Button
+                  variant="outline"
+                  className="gap-1.5"
+                  onClick={() => setEditMode((v) => !v)}
+                >
+                  <Pencil className="w-4 h-4" /> {editMode ? "Cancel Edit" : "Edit"}
+                </Button>
                 {!active.is_default && (
                   <Button variant="outline" onClick={() => setDefaultMutation.mutate(active.id)}>Set Default</Button>
+                )}
+                {editMode && (
+                  <Button className="bg-amber-500 hover:bg-amber-600" onClick={handleSave} disabled={!editName.trim() || isSaving}>
+                    {isSaving ? "Saving..." : "Save"}
+                  </Button>
                 )}
                 <Button variant="destructive" className="gap-1.5" onClick={() => deleteMutation.mutate(active.id)}>
                   <Trash2 className="w-4 h-4" /> Delete

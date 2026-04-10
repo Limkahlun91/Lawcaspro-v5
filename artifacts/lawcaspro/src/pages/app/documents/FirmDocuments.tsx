@@ -9,7 +9,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/u
 import { Badge } from "@/components/ui/badge";
 import { useToast } from "@/hooks/use-toast";
 import { cn } from "@/lib/utils";
-import { ChevronRight, Download, FileText, Folder, FolderOpen, Plus, Trash2, Upload } from "lucide-react";
+import { ChevronRight, Download, FileText, Folder, FolderOpen, Pencil, Plus, Trash2, Upload } from "lucide-react";
 
 const API_BASE = import.meta.env.BASE_URL.replace(/\/$/, "").replace(/^\/lawcaspro/, "") + "/api";
 
@@ -52,7 +52,7 @@ const DOCUMENT_TYPE_LABELS: Record<string, string> = {
 };
 
 const ACCEPTED_EXTENSIONS = [
-  ".docx", ".doc", ".pdf", ".xlsx", ".xls", ".csv", ".pptx", ".txt", ".jpg", ".jpeg", ".png",
+  ".docx", ".doc", ".pdf", ".xlsx", ".xls", ".csv", ".txt", ".jpg", ".jpeg", ".png",
 ];
 
 async function apiFetch(path: string, init?: RequestInit) {
@@ -61,7 +61,17 @@ async function apiFetch(path: string, init?: RequestInit) {
     ...init,
     headers: { "Content-Type": "application/json", ...(init?.headers ?? {}) },
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) {
+    const text = await res.text();
+    try {
+      const parsed = JSON.parse(text) as { error?: unknown; code?: unknown; detail?: unknown };
+      const msg = typeof parsed.error === "string" ? parsed.error : text;
+      const code = typeof parsed.code === "string" ? ` (${parsed.code})` : "";
+      throw new Error(`${msg}${code}`);
+    } catch {
+      throw new Error(text);
+    }
+  }
   if (res.status === 204) return null;
   return res.json();
 }
@@ -76,11 +86,6 @@ async function uploadFile(file: File): Promise<{ objectPath: string }> {
   });
   if (!uploadRes.ok) throw new Error("Upload to storage failed");
   return uploadRes.json();
-}
-
-function objectPathToDownloadUrl(objectPath: string): string {
-  const pathPart = objectPath.replace(/^\/objects\//, "");
-  return `${API_BASE}/storage/objects/${pathPart}`;
 }
 
 function formatFileSize(bytes: number | null) {
@@ -168,15 +173,24 @@ export default function FirmDocuments() {
   const [createFolderOpen, setCreateFolderOpen] = useState(false);
   const [renameFolderOpen, setRenameFolderOpen] = useState(false);
   const [uploadOpen, setUploadOpen] = useState(false);
+  const [editOpen, setEditOpen] = useState(false);
   const [newFolderName, setNewFolderName] = useState("");
   const [newFolderParentId, setNewFolderParentId] = useState<number | null>(null);
   const [renameFolderName, setRenameFolderName] = useState("");
 
   const [docName, setDocName] = useState("");
+  const [docDescription, setDocDescription] = useState("");
   const [docKind, setDocKind] = useState<"template" | "reference">("template");
   const [docType, setDocType] = useState("other");
-  const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
   const [isUploading, setIsUploading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState<{ current: number; total: number } | null>(null);
+
+  const [activeDoc, setActiveDoc] = useState<FirmDocument | null>(null);
+  const [editName, setEditName] = useState("");
+  const [editDescription, setEditDescription] = useState("");
+  const [editKind, setEditKind] = useState<"template" | "reference">("template");
+  const [editType, setEditType] = useState("other");
 
   const { data: folders = [] } = useQuery<FirmFolder[]>({
     queryKey: ["firm-document-folders"],
@@ -240,6 +254,18 @@ export default function FirmDocuments() {
     onError: (err) => toast({ title: "Error", description: String(err), variant: "destructive" }),
   });
 
+  const updateDocMutation = useMutation({
+    mutationFn: (payload: { id: number; name: string; description: string; kind: "template" | "reference"; documentType: string }) =>
+      apiFetch(`/document-templates/${payload.id}`, { method: "PATCH", body: JSON.stringify({ name: payload.name, description: payload.description || null, kind: payload.kind, documentType: payload.documentType }) }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["firm-documents"] });
+      toast({ title: "Document updated" });
+      setEditOpen(false);
+      setActiveDoc(null);
+    },
+    onError: (err) => toast({ title: "Error", description: String(err), variant: "destructive" }),
+  });
+
   const filteredDocs = useMemo(() => {
     return selectedFolderId === null ? docs : docs.filter(d => d.folder_id === selectedFolderId);
   }, [docs, selectedFolderId]);
@@ -266,46 +292,62 @@ export default function FirmDocuments() {
     return out;
   }, [folders]);
 
-  async function handleUpload() {
-    if (!selectedFile || !docName.trim()) return;
-    setIsUploading(true);
-    try {
-      const ext = selectedFile.name.includes(".") ? selectedFile.name.split(".").pop()!.toLowerCase() : "";
-      const kind = ext === "docx" ? docKind : "reference";
-      const uploaded = await uploadFile(selectedFile);
+  function baseNameFromFileName(name: string): string {
+    const i = name.lastIndexOf(".");
+    if (i <= 0) return name;
+    return name.slice(0, i);
+  }
 
-      await apiFetch("/document-templates", {
-        method: "POST",
-        body: JSON.stringify({
-          name: docName.trim(),
-          documentType: kind === "template" ? docType : "other",
-          objectPath: uploaded.objectPath,
-          fileName: selectedFile.name,
-          folderId: selectedFolderId,
-          kind,
-          mimeType: selectedFile.type || "application/octet-stream",
-          extension: ext,
-          fileSize: selectedFile.size,
-        }),
-      });
+  async function handleUpload() {
+    if (selectedFiles.length === 0) return;
+    if (selectedFiles.length === 1 && !docName.trim()) return;
+    setIsUploading(true);
+    setUploadProgress({ current: 0, total: selectedFiles.length });
+    try {
+      for (let i = 0; i < selectedFiles.length; i++) {
+        const f = selectedFiles[i]!;
+        setUploadProgress({ current: i + 1, total: selectedFiles.length });
+        const ext = f.name.includes(".") ? f.name.split(".").pop()!.toLowerCase() : "";
+        const kind = ext === "docx" ? docKind : "reference";
+        const nameToUse = selectedFiles.length === 1 ? docName.trim() : baseNameFromFileName(f.name);
+        const uploaded = await uploadFile(f);
+
+        await apiFetch("/document-templates", {
+          method: "POST",
+          body: JSON.stringify({
+            name: nameToUse,
+            documentType: kind === "template" ? docType : "other",
+            description: docDescription.trim() || undefined,
+            objectPath: uploaded.objectPath,
+            fileName: f.name,
+            folderId: selectedFolderId,
+            kind,
+            mimeType: f.type || "application/octet-stream",
+            extension: ext,
+            fileSize: f.size,
+          }),
+        });
+      }
 
       qc.invalidateQueries({ queryKey: ["firm-documents"] });
       toast({ title: "Uploaded" });
       setUploadOpen(false);
       setDocName("");
+      setDocDescription("");
       setDocKind("template");
       setDocType("other");
-      setSelectedFile(null);
+      setSelectedFiles([]);
     } catch (err) {
       toast({ title: "Upload failed", description: String(err), variant: "destructive" });
     } finally {
       setIsUploading(false);
+      setUploadProgress(null);
     }
   }
 
   async function handleDownload(doc: FirmDocument) {
     try {
-      const res = await fetch(objectPathToDownloadUrl(doc.object_path), { credentials: "include" });
+      const res = await fetch(`${API_BASE}/document-templates/${doc.id}/download`, { credentials: "include" });
       if (!res.ok) throw new Error("Download failed");
       const blob = await res.blob();
       const url = URL.createObjectURL(blob);
@@ -437,6 +479,21 @@ export default function FirmDocuments() {
                               <Button size="icon" variant="ghost" className="h-8 w-8 text-slate-400 hover:text-slate-700" onClick={() => handleDownload(doc)}>
                                 <Download className="w-4 h-4" />
                               </Button>
+                              <Button
+                                size="icon"
+                                variant="ghost"
+                                className="h-8 w-8 text-slate-400 hover:text-slate-700"
+                                onClick={() => {
+                                  setActiveDoc(doc);
+                                  setEditName(doc.name);
+                                  setEditDescription(doc.description ?? "");
+                                  setEditKind(doc.kind);
+                                  setEditType(doc.document_type ?? "other");
+                                  setEditOpen(true);
+                                }}
+                              >
+                                <Pencil className="w-4 h-4" />
+                              </Button>
                               <Button size="icon" variant="ghost" className="h-8 w-8 text-slate-400 hover:text-red-600" onClick={() => deleteDocMutation.mutate(doc.id)}>
                                 <Trash2 className="w-4 h-4" />
                               </Button>
@@ -507,7 +564,11 @@ export default function FirmDocuments() {
           <div className="space-y-4 py-2">
             <div className="space-y-1.5">
               <Label>Name</Label>
-              <Input value={docName} onChange={(e) => setDocName(e.target.value)} placeholder="e.g. Standard SPA Template / Logo / Reference PDF" />
+              <Input value={docName} onChange={(e) => setDocName(e.target.value)} placeholder={selectedFiles.length > 1 ? "Multiple files selected (names will use file names)" : "e.g. Standard SPA Template / Logo / Reference PDF"} disabled={selectedFiles.length > 1} />
+            </div>
+            <div className="space-y-1.5">
+              <Label>Description <span className="text-slate-400 text-xs">(optional)</span></Label>
+              <Input value={docDescription} onChange={(e) => setDocDescription(e.target.value)} placeholder="Optional notes" disabled={selectedFiles.length > 1} />
             </div>
 
             <div className="grid grid-cols-2 gap-3">
@@ -537,8 +598,10 @@ export default function FirmDocuments() {
             <div className="space-y-1.5">
               <Label>File</Label>
               <div className="border-2 border-dashed border-slate-200 rounded-lg p-6 text-center cursor-pointer hover:border-amber-300 transition-colors" onClick={() => uploadRef.current?.click()}>
-                {selectedFile ? (
-                  <div className="text-sm text-slate-700 font-medium">{selectedFile.name}</div>
+                {selectedFiles.length > 0 ? (
+                  <div className="text-sm text-slate-700 font-medium">
+                    {selectedFiles.length === 1 ? selectedFiles[0]!.name : `${selectedFiles.length} files selected`}
+                  </div>
                 ) : (
                   <div>
                     <p className="text-sm text-slate-500 mb-1">Click to select a file</p>
@@ -550,18 +613,70 @@ export default function FirmDocuments() {
                 type="file"
                 ref={uploadRef}
                 className="hidden"
+                multiple
                 accept={ACCEPTED_EXTENSIONS.join(",")}
-                onChange={(e) => setSelectedFile(e.target.files?.[0] ?? null)}
+                onChange={(e) => setSelectedFiles(Array.from(e.target.files ?? []))}
               />
             </div>
 
             <div className="flex justify-end gap-2 pt-2">
               <Button variant="outline" onClick={() => setUploadOpen(false)}>Cancel</Button>
-              <Button className="bg-amber-500 hover:bg-amber-600" onClick={handleUpload} disabled={!selectedFile || !docName.trim() || isUploading}>
-                {isUploading ? "Uploading..." : "Upload"}
+              <Button className="bg-amber-500 hover:bg-amber-600" onClick={handleUpload} disabled={selectedFiles.length === 0 || (selectedFiles.length === 1 && !docName.trim()) || isUploading}>
+                {isUploading ? (uploadProgress ? `Uploading ${uploadProgress.current}/${uploadProgress.total}...` : "Uploading...") : "Upload"}
               </Button>
             </div>
           </div>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={editOpen} onOpenChange={setEditOpen}>
+        <DialogContent className="sm:max-w-lg">
+          <DialogHeader><DialogTitle>Edit Document</DialogTitle></DialogHeader>
+          {activeDoc && (
+            <div className="space-y-4 py-2">
+              <div className="space-y-1.5">
+                <Label>Name</Label>
+                <Input value={editName} onChange={(e) => setEditName(e.target.value)} />
+              </div>
+              <div className="space-y-1.5">
+                <Label>Description <span className="text-slate-400 text-xs">(optional)</span></Label>
+                <Input value={editDescription} onChange={(e) => setEditDescription(e.target.value)} />
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div className="space-y-1.5">
+                  <Label>Category</Label>
+                  <Select value={editKind} onValueChange={(v) => setEditKind(v as any)}>
+                    <SelectTrigger><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="template">Template-like</SelectItem>
+                      <SelectItem value="reference">Reference-only</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="space-y-1.5">
+                  <Label>Document Type</Label>
+                  <Select value={editType} onValueChange={setEditType}>
+                    <SelectTrigger><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      {Object.entries(DOCUMENT_TYPE_LABELS).map(([k, v]) => (
+                        <SelectItem key={k} value={k}>{v}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+              </div>
+              <div className="flex justify-end gap-2 pt-2">
+                <Button variant="outline" onClick={() => { setEditOpen(false); setActiveDoc(null); }}>Cancel</Button>
+                <Button
+                  className="bg-amber-500 hover:bg-amber-600"
+                  onClick={() => updateDocMutation.mutate({ id: activeDoc.id, name: editName.trim(), description: editDescription, kind: editKind, documentType: editType })}
+                  disabled={!editName.trim()}
+                >
+                  Save
+                </Button>
+              </div>
+            </div>
+          )}
         </DialogContent>
       </Dialog>
     </div>

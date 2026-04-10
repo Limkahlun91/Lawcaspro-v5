@@ -71,6 +71,70 @@ function fmtRM(val: unknown): string {
   return `RM ${n.toLocaleString("en-MY", { minimumFractionDigits: 2 })}`;
 }
 
+const FIRM_DOCUMENT_ALLOWED_EXTENSIONS = new Set([
+  "docx",
+  "doc",
+  "pdf",
+  "xlsx",
+  "xls",
+  "csv",
+  "txt",
+  "jpg",
+  "jpeg",
+  "png",
+]);
+
+function fileExtensionFromName(fileName: string): string {
+  const i = fileName.lastIndexOf(".");
+  if (i < 0) return "";
+  return fileName.slice(i + 1).trim().toLowerCase();
+}
+
+function formatDateValue(raw: unknown): Date | null {
+  if (!raw) return null;
+  if (raw instanceof Date) return Number.isNaN(raw.getTime()) ? null : raw;
+  const s = String(raw);
+  const d = new Date(s);
+  if (Number.isNaN(d.getTime())) return null;
+  return d;
+}
+
+function fmtDateDDMMYYYY(raw: unknown): string {
+  const d = formatDateValue(raw);
+  if (!d) return "";
+  return d.toLocaleDateString("en-MY", { day: "2-digit", month: "2-digit", year: "numeric" });
+}
+
+function fmtDateLong(raw: unknown): string {
+  const d = formatDateValue(raw);
+  if (!d) return "";
+  return d.toLocaleDateString("en-MY", { day: "2-digit", month: "long", year: "numeric" });
+}
+
+function fmtDateIso(raw: unknown): string {
+  const d = formatDateValue(raw);
+  if (!d) return "";
+  return d.toISOString();
+}
+
+function isFirmDocumentTypeLetterLike(documentType: string): boolean {
+  const dt = (documentType || "").toLowerCase();
+  return dt === "letter_of_offer" || dt === "acting_letter" || dt === "undertaking";
+}
+
+function isMasterDocLetterLike(meta: { name?: unknown; category?: unknown; fileName?: unknown }): boolean {
+  const name = String(meta.name ?? "").toLowerCase();
+  const category = String(meta.category ?? "").toLowerCase();
+  const fileName = String(meta.fileName ?? "").toLowerCase();
+  if (category === "letter") return true;
+  const parts = `${name} ${fileName}`;
+  if (/(^|[\s_\-])letter($|[\s_\-])/i.test(parts)) return true;
+  if (/(^|[\s_\-])acting[\s_\-]+letter($|[\s_\-])/i.test(parts)) return true;
+  if (/(^|[\s_\-])undertaking($|[\s_\-])/i.test(parts)) return true;
+  if (/(^|[\s_\-])letter[\s_\-]+of[\s_\-]+offer($|[\s_\-])/i.test(parts)) return true;
+  return false;
+}
+
 const DOCX_HEADER_XML_PREFIX =
   `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` +
   `<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" ` +
@@ -346,6 +410,42 @@ async function buildCaseContext(r: DbConn, caseId: number, firmId: number): Prom
   const dateStr = today.toLocaleDateString("en-MY", { day: "2-digit", month: "long", year: "numeric" });
   const dateShort = today.toLocaleDateString("en-MY", { day: "2-digit", month: "2-digit", year: "numeric" });
 
+  const workflowRows = await queryRows(r, sql`
+    SELECT ws.step_key, ws.step_name, ws.step_order, ws.path_type, ws.status, ws.completed_at
+    FROM case_workflow_steps ws
+    JOIN cases cc ON cc.id = ws.case_id
+    WHERE ws.case_id = ${caseId} AND cc.firm_id = ${firmId}
+    ORDER BY ws.step_order ASC
+  `);
+  const workflowSteps = workflowRows
+    .map((row) => {
+      const stepKey = typeof (row as any).step_key === "string" ? String((row as any).step_key) : "";
+      const stepName = typeof (row as any).step_name === "string" ? String((row as any).step_name) : "";
+      const stepOrder = typeof (row as any).step_order === "number" ? Number((row as any).step_order) : null;
+      const pathType = typeof (row as any).path_type === "string" ? String((row as any).path_type) : "";
+      const status = typeof (row as any).status === "string" ? String((row as any).status) : "";
+      const completedAt = (row as any).completed_at ?? null;
+      return { stepKey, stepName, stepOrder, pathType, status, completedAt };
+    })
+    .filter((s) => Boolean(s.stepKey));
+
+  const currentStepNameForPath = (pathType: string): string => {
+    const completed = workflowSteps
+      .filter((s) => s.pathType === pathType && s.status === "completed" && typeof s.stepOrder === "number")
+      .sort((a, b) => (b.stepOrder ?? 0) - (a.stepOrder ?? 0));
+    if (completed[0]?.stepName) return completed[0].stepName;
+    if (pathType === "loan" && (c.purchase_mode ?? "") !== "loan") return "";
+    return "Pending";
+  };
+
+  const workflowDateVars: Record<string, unknown> = {};
+  for (const s of workflowSteps) {
+    const key = s.stepKey;
+    workflowDateVars[`${key}_date_raw`] = fmtDateIso(s.completedAt);
+    workflowDateVars[`${key}_date`] = fmtDateDDMMYYYY(s.completedAt);
+    workflowDateVars[`${key}_date_long`] = fmtDateLong(s.completedAt);
+  }
+
   const officeBanks = bankRows.filter((b) => b.account_type === "office");
   const clientBanks = bankRows.filter((b) => b.account_type === "client");
 
@@ -361,6 +461,8 @@ async function buildCaseContext(r: DbConn, caseId: number, firmId: number): Prom
     purchase_mode: c.purchase_mode ?? "",
     title_type: c.title_type ?? "",
     status: c.status ?? "",
+    spa_status: currentStepNameForPath("common"),
+    loan_status: currentStepNameForPath("loan"),
 
     // SPA Details
     spa_purchaser1_name: (spa.purchasers as any)?.[0]?.name ?? "",
@@ -494,6 +596,7 @@ async function buildCaseContext(r: DbConn, caseId: number, firmId: number): Prom
       account_no: b.account_no ?? "",
       account_type: b.account_type ?? "",
     })),
+    ...workflowDateVars,
   };
 }
 
@@ -685,13 +788,22 @@ router.post("/document-templates", requireAuth, requireFirmUser, requirePermissi
     }
   }
 
-  const ext = (typeof extension === "string" ? extension : "").trim().toLowerCase() || (fileName.includes(".") ? fileName.split(".").pop()!.toLowerCase() : "");
-  const isTemplateCapable = kindVal === "template" && ext === "docx";
+  const ext = (typeof extension === "string" ? extension : "").trim().toLowerCase() || fileExtensionFromName(fileName);
+  if (!ext || !FIRM_DOCUMENT_ALLOWED_EXTENSIONS.has(ext)) {
+    res.status(400).json({ error: "Unsupported file type", code: "UNSUPPORTED_FILE_TYPE" });
+    return;
+  }
+  const effectiveKind: "template" | "reference" = ext === "docx" ? kindVal : "reference";
+  if (effectiveKind === "template" && ext !== "docx") {
+    res.status(400).json({ error: "Template must be a .docx file", code: "TEMPLATE_MUST_BE_DOCX" });
+    return;
+  }
+  const isTemplateCapable = effectiveKind === "template" && ext === "docx";
 
   const rows = await queryRows(
     r,
     sql`INSERT INTO document_templates (firm_id, name, document_type, description, object_path, file_name, created_by)
-        VALUES (${req.firmId!}, ${name}, ${documentType ?? "other"}, ${description ?? null}, ${objectPath}, ${fileName}, ${req.userId!})
+        VALUES (${req.firmId!}, ${name}, ${effectiveKind === "template" ? (documentType ?? "other") : "other"}, ${description ?? null}, ${objectPath}, ${fileName}, ${req.userId!})
         RETURNING *`
   );
 
@@ -702,7 +814,7 @@ router.post("/document-templates", requireAuth, requireFirmUser, requirePermissi
     r,
     sql`UPDATE document_templates
         SET folder_id = ${folderIdNum},
-            kind = ${kindVal},
+            kind = ${effectiveKind},
             mime_type = ${mimeType ?? null},
             extension = ${ext || null},
             file_size = ${typeof fileSize === "number" ? fileSize : null},
@@ -712,7 +824,7 @@ router.post("/document-templates", requireAuth, requireFirmUser, requirePermissi
         RETURNING *`
   );
 
-  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.firm_document.upload", entityType: "firm_document", entityId: createdId, detail: `name=${name} kind=${kindVal} ext=${ext}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.firm_document.upload", entityType: "firm_document", entityId: createdId, detail: `name=${name} kind=${effectiveKind} ext=${ext}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
   res.status(201).json(patched[0] ?? rows[0]);
 });
 
@@ -725,14 +837,51 @@ router.patch("/document-templates/:templateId", requireAuth, requireFirmUser, re
     res.status(400).json({ error: "Invalid template ID" });
     return;
   }
-  const { folderId, kind } = req.body as { folderId?: number | null; kind?: string };
-  const folderIdNum = typeof folderId === "number" ? folderId : null;
+  const body = req.body as Record<string, unknown>;
+  const hasFolderId = Object.prototype.hasOwnProperty.call(body, "folderId");
+  const hasName = Object.prototype.hasOwnProperty.call(body, "name");
+  const hasDescription = Object.prototype.hasOwnProperty.call(body, "description");
+  const hasDocumentType = Object.prototype.hasOwnProperty.call(body, "documentType");
+
+  const folderId = body.folderId;
+  const kind = body.kind;
+  const name = body.name;
+  const description = body.description;
+  const documentType = body.documentType;
+
+  const folderIdNum: number | null | undefined = hasFolderId ? (typeof folderId === "number" ? folderId : folderId === null ? null : undefined) : undefined;
+  if (hasFolderId && folderIdNum === undefined) {
+    res.status(400).json({ error: "Invalid folderId" });
+    return;
+  }
+
   const kindVal = typeof kind === "string" ? kind : undefined;
+  const nameVal = typeof name === "string" ? name.trim() : undefined;
+  if (hasName && !nameVal) {
+    res.status(400).json({ error: "name is required" });
+    return;
+  }
+  const descriptionVal: string | null | undefined =
+    hasDescription
+      ? (typeof description === "string" ? description.trim() : description === null ? null : undefined)
+      : undefined;
+  if (hasDescription && descriptionVal === undefined) {
+    res.status(400).json({ error: "Invalid description" });
+    return;
+  }
+  const docTypeVal: string | undefined =
+    hasDocumentType
+      ? (typeof documentType === "string" ? (documentType.trim() || "other") : undefined)
+      : undefined;
+  if (hasDocumentType && !docTypeVal) {
+    res.status(400).json({ error: "Invalid documentType" });
+    return;
+  }
   if (kindVal && kindVal !== "template" && kindVal !== "reference") {
     res.status(400).json({ error: "Invalid kind" });
     return;
   }
-  if (folderIdNum !== null) {
+  if (hasFolderId && folderIdNum !== null) {
     const folderRows = await queryRows(
       r,
       sql`SELECT id FROM firm_document_folders WHERE id = ${folderIdNum} AND firm_id = ${req.firmId!}`
@@ -742,13 +891,35 @@ router.patch("/document-templates/:templateId", requireAuth, requireFirmUser, re
       return;
     }
   }
+
+  const existingRows = await queryRows(
+    r,
+    sql`SELECT * FROM document_templates WHERE id = ${templateId} AND firm_id = ${req.firmId!}`
+  );
+  const existing = existingRows[0];
+  if (!existing) {
+    res.status(404).json({ error: "Document not found" });
+    return;
+  }
+  const existingExt = typeof (existing as any).extension === "string" ? String((existing as any).extension) : fileExtensionFromName(String((existing as any).file_name ?? ""));
+  const effectiveKind: "template" | "reference" = (existingExt || "").toLowerCase() === "docx"
+    ? ((kindVal as any) ?? (existing as any).kind ?? "template")
+    : "reference";
+  if (effectiveKind === "template" && String(existingExt || "").toLowerCase() !== "docx") {
+    res.status(400).json({ error: "Template must be a .docx file", code: "TEMPLATE_MUST_BE_DOCX" });
+    return;
+  }
+
   const rows = await queryRows(
     r,
     sql`UPDATE document_templates
-        SET folder_id = ${folderIdNum},
-            kind = COALESCE(${kindVal ?? null}, kind),
+        SET folder_id = CASE WHEN ${hasFolderId} THEN ${folderIdNum ?? null} ELSE folder_id END,
+            kind = ${effectiveKind},
+            name = CASE WHEN ${hasName} THEN ${nameVal ?? ""} ELSE name END,
+            description = CASE WHEN ${hasDescription} THEN ${descriptionVal ?? null} ELSE description END,
+            document_type = CASE WHEN ${hasDocumentType} THEN ${effectiveKind === "template" ? (docTypeVal ?? "other") : "other"} ELSE document_type END,
             is_template_capable = (
-              COALESCE(${kindVal ?? null}, kind) = 'template'
+              ${effectiveKind} = 'template'
               AND LOWER(COALESCE(NULLIF(extension,''), split_part(file_name, '.', array_length(string_to_array(file_name, '.'), 1)))) = 'docx'
             ),
             updated_at = now()
@@ -759,8 +930,61 @@ router.patch("/document-templates/:templateId", requireAuth, requireFirmUser, re
     res.status(404).json({ error: "Document not found" });
     return;
   }
-  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.firm_document.move", entityType: "firm_document", entityId: templateId, detail: `folderId=${folderIdNum ?? "null"}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+  const prevFolderId = (existing as any).folder_id ?? null;
+  const moved = hasFolderId ? prevFolderId !== folderIdNum : false;
+  const action = moved ? "documents.firm_document.move" : "documents.firm_document.update";
+  const detailParts: string[] = [];
+  if (moved) detailParts.push(`folderId=${folderIdNum ?? "null"}`);
+  if (nameVal !== undefined) detailParts.push(`name=${nameVal}`);
+  if (hasDescription) detailParts.push("description=updated");
+  if (docTypeVal !== undefined) detailParts.push(`documentType=${docTypeVal}`);
+  if (kindVal !== undefined) detailParts.push(`kind=${effectiveKind}`);
+  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action, entityType: "firm_document", entityId: templateId, detail: detailParts.length ? detailParts.join(" ") : undefined, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
   res.json(rows[0]);
+});
+
+router.get("/document-templates/:templateId/download", requireAuth, requireFirmUser, requirePermission("documents", "read"), async (req: AuthRequest, res): Promise<void> => {
+  const r = getRlsDb(req, res);
+  if (!r) return;
+  const templateIdStr = one((req.params as any).templateId);
+  const templateId = templateIdStr ? parseInt(templateIdStr, 10) : NaN;
+  if (Number.isNaN(templateId)) {
+    res.status(400).json({ error: "Invalid template ID" });
+    return;
+  }
+
+  const rows = await queryRows(
+    r,
+    sql`SELECT * FROM document_templates WHERE id = ${templateId} AND firm_id = ${req.firmId!}`
+  );
+  const doc = rows[0];
+  if (!doc) {
+    res.status(404).json({ error: "Document not found" });
+    return;
+  }
+
+  try {
+    const objectFile = await storage.getObjectEntityFile(doc.object_path as string);
+    const storageResp = await storage.downloadObject(objectFile);
+    storageResp.headers.forEach((value, key) => {
+      res.setHeader(key, value);
+    });
+    const fileName = typeof (doc as any).file_name === "string" ? String((doc as any).file_name) : `document-${templateId}`;
+    res.setHeader("Content-Disposition", `attachment; filename="${fileName}"`);
+    if (!storageResp.body) {
+      res.status(500).json({ error: "Failed to stream file" });
+      return;
+    }
+    const nodeStream = Readable.fromWeb(storageResp.body as any);
+    await new Promise<void>((resolve, reject) => {
+      nodeStream.on("error", reject);
+      res.on("finish", resolve);
+      nodeStream.pipe(res);
+    });
+    await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.firm_document.download", entityType: "firm_document", entityId: templateId, detail: `fileName=${fileName}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+  } catch (err) {
+    res.status(500).json({ error: "Failed to download document", detail: err instanceof Error ? err.message : String(err) });
+  }
 });
 
 router.delete("/document-templates/:templateId", requireAuth, requireFirmUser, requirePermission("documents", "delete"), async (req: AuthRequest, res): Promise<void> => {
@@ -901,10 +1125,54 @@ router.patch("/firm-letterheads/:letterheadId", requireAuth, requireFirmUser, re
     return;
   }
   const body = req.body as Record<string, unknown>;
+  const hasDescription = Object.prototype.hasOwnProperty.call(body, "description");
+  const hasFooterPatch =
+    Object.prototype.hasOwnProperty.call(body, "footerObjectPath") ||
+    Object.prototype.hasOwnProperty.call(body, "footerFileName") ||
+    Object.prototype.hasOwnProperty.call(body, "footerMimeType") ||
+    Object.prototype.hasOwnProperty.call(body, "footerExtension") ||
+    Object.prototype.hasOwnProperty.call(body, "footerFileSize");
+
   const name = typeof body.name === "string" ? body.name.trim() : undefined;
-  const description = typeof body.description === "string" ? body.description.trim() : undefined;
+  const descriptionVal: string | null | undefined =
+    hasDescription
+      ? (typeof body.description === "string" ? String(body.description).trim() : body.description === null ? null : undefined)
+      : undefined;
+  if (hasDescription && descriptionVal === undefined) {
+    res.status(400).json({ error: "Invalid description" });
+    return;
+  }
   const status = typeof body.status === "string" ? body.status : undefined;
   const footerMode = typeof body.footerMode === "string" ? body.footerMode : undefined;
+  const firstPageObjectPath = typeof body.firstPageObjectPath === "string" ? body.firstPageObjectPath : undefined;
+  const firstPageFileName = typeof body.firstPageFileName === "string" ? body.firstPageFileName : undefined;
+  const firstPageMimeType = typeof body.firstPageMimeType === "string" ? body.firstPageMimeType : undefined;
+  const firstPageExtension = typeof body.firstPageExtension === "string" ? body.firstPageExtension : undefined;
+  const firstPageFileSize = typeof body.firstPageFileSize === "number" ? body.firstPageFileSize : undefined;
+
+  const continuationHeaderObjectPath = typeof body.continuationHeaderObjectPath === "string" ? body.continuationHeaderObjectPath : undefined;
+  const continuationHeaderFileName = typeof body.continuationHeaderFileName === "string" ? body.continuationHeaderFileName : undefined;
+  const continuationHeaderMimeType = typeof body.continuationHeaderMimeType === "string" ? body.continuationHeaderMimeType : undefined;
+  const continuationHeaderExtension = typeof body.continuationHeaderExtension === "string" ? body.continuationHeaderExtension : undefined;
+  const continuationHeaderFileSize = typeof body.continuationHeaderFileSize === "number" ? body.continuationHeaderFileSize : undefined;
+
+  const footerObjectPath: string | null | undefined =
+    hasFooterPatch
+      ? (body.footerObjectPath === null ? null : typeof body.footerObjectPath === "string" ? String(body.footerObjectPath) : undefined)
+      : undefined;
+  const footerFileName: string | null | undefined =
+    hasFooterPatch
+      ? (body.footerFileName === null ? null : typeof body.footerFileName === "string" ? String(body.footerFileName) : undefined)
+      : undefined;
+  const footerMimeType: string | null | undefined =
+    hasFooterPatch
+      ? (body.footerMimeType === null ? null : typeof body.footerMimeType === "string" ? String(body.footerMimeType) : undefined)
+      : undefined;
+  const footerExtension: string | null | undefined =
+    hasFooterPatch
+      ? (body.footerExtension === null ? null : typeof body.footerExtension === "string" ? String(body.footerExtension) : undefined)
+      : undefined;
+  const footerFileSize = typeof body.footerFileSize === "number" ? body.footerFileSize : undefined;
   if (status && status !== "active" && status !== "inactive") {
     res.status(400).json({ error: "Invalid status" });
     return;
@@ -913,13 +1181,75 @@ router.patch("/firm-letterheads/:letterheadId", requireAuth, requireFirmUser, re
     res.status(400).json({ error: "Invalid footerMode" });
     return;
   }
+
+  const existingRows = await queryRows(
+    r,
+    sql`SELECT * FROM firm_letterheads WHERE id = ${letterheadId} AND firm_id = ${req.firmId!}`
+  );
+  const existing = existingRows[0];
+  if (!existing) {
+    res.status(404).json({ error: "Letterhead not found" });
+    return;
+  }
+  const isDefault = Boolean((existing as any).is_default);
+  if (isDefault && status === "inactive") {
+    res.status(409).json({ error: "Cannot set default letterhead to inactive. Set another default first.", code: "DEFAULT_INACTIVE_FORBIDDEN" });
+    return;
+  }
+  if ((firstPageObjectPath || firstPageFileName || firstPageExtension) && (!firstPageObjectPath || !firstPageFileName)) {
+    res.status(400).json({ error: "firstPageObjectPath and firstPageFileName are required to replace first page template" });
+    return;
+  }
+  if ((continuationHeaderObjectPath || continuationHeaderFileName || continuationHeaderExtension) && (!continuationHeaderObjectPath || !continuationHeaderFileName)) {
+    res.status(400).json({ error: "continuationHeaderObjectPath and continuationHeaderFileName are required to replace continuation header template" });
+    return;
+  }
+  if (hasFooterPatch) {
+    if (footerObjectPath === undefined) {
+      res.status(400).json({ error: "footerObjectPath must be provided when updating footer template (use null to remove)" });
+      return;
+    }
+    if (footerObjectPath !== null && !footerFileName) {
+      res.status(400).json({ error: "footerFileName is required to replace footer template" });
+      return;
+    }
+  }
+  const firstExt = (firstPageExtension ?? "docx").toLowerCase();
+  const contExt = (continuationHeaderExtension ?? "docx").toLowerCase();
+  const footerExt = footerExtension === null ? null : (footerExtension ?? undefined)?.toLowerCase();
+  if ((firstPageObjectPath && firstExt !== "docx") || (continuationHeaderObjectPath && contExt !== "docx") || (footerObjectPath && footerExt && footerExt !== "docx")) {
+    res.status(400).json({ error: "Letterhead templates must be .docx" });
+    return;
+  }
+
+  const footerObjectPathSql = footerObjectPath === undefined ? null : footerObjectPath;
+  const footerFileNameSql = footerObjectPath === null ? null : footerFileName === undefined ? null : footerFileName;
+  const footerMimeTypeSql = footerObjectPath === null ? null : footerMimeType === undefined ? null : footerMimeType;
+  const footerExtensionSql = footerObjectPath === null ? null : footerExtension === undefined ? null : footerExtension;
+  const footerFileSizeSql = footerObjectPath === null ? null : footerFileSize ?? null;
+
   const rows = await queryRows(
     r,
     sql`UPDATE firm_letterheads
         SET name = COALESCE(${name ?? null}, name),
-            description = CASE WHEN ${description ?? null} IS NULL THEN description ELSE ${description ?? null} END,
+            description = CASE WHEN ${hasDescription} THEN ${descriptionVal ?? null} ELSE description END,
             status = COALESCE(${status ?? null}, status),
             footer_mode = COALESCE(${footerMode ?? null}, footer_mode),
+            first_page_object_path = COALESCE(${firstPageObjectPath ?? null}, first_page_object_path),
+            first_page_file_name = COALESCE(${firstPageFileName ?? null}, first_page_file_name),
+            first_page_mime_type = COALESCE(${firstPageMimeType ?? null}, first_page_mime_type),
+            first_page_extension = COALESCE(${firstPageExtension ?? null}, first_page_extension),
+            first_page_file_size = COALESCE(${firstPageFileSize ?? null}, first_page_file_size),
+            continuation_header_object_path = COALESCE(${continuationHeaderObjectPath ?? null}, continuation_header_object_path),
+            continuation_header_file_name = COALESCE(${continuationHeaderFileName ?? null}, continuation_header_file_name),
+            continuation_header_mime_type = COALESCE(${continuationHeaderMimeType ?? null}, continuation_header_mime_type),
+            continuation_header_extension = COALESCE(${continuationHeaderExtension ?? null}, continuation_header_extension),
+            continuation_header_file_size = COALESCE(${continuationHeaderFileSize ?? null}, continuation_header_file_size),
+            footer_object_path = CASE WHEN ${hasFooterPatch} THEN ${footerObjectPathSql} ELSE footer_object_path END,
+            footer_file_name = CASE WHEN ${hasFooterPatch} THEN ${footerFileNameSql} ELSE footer_file_name END,
+            footer_mime_type = CASE WHEN ${hasFooterPatch} THEN ${footerMimeTypeSql} ELSE footer_mime_type END,
+            footer_extension = CASE WHEN ${hasFooterPatch} THEN ${footerExtensionSql} ELSE footer_extension END,
+            footer_file_size = CASE WHEN ${hasFooterPatch} THEN ${footerFileSizeSql} ELSE footer_file_size END,
             updated_at = now()
         WHERE id = ${letterheadId} AND firm_id = ${req.firmId!}
         RETURNING *`
@@ -927,6 +1257,14 @@ router.patch("/firm-letterheads/:letterheadId", requireAuth, requireFirmUser, re
   if (!rows[0]) {
     res.status(404).json({ error: "Letterhead not found" });
     return;
+  }
+  const oldPaths: string[] = [];
+  if (firstPageObjectPath && (existing as any).first_page_object_path) oldPaths.push(String((existing as any).first_page_object_path));
+  if (continuationHeaderObjectPath && (existing as any).continuation_header_object_path) oldPaths.push(String((existing as any).continuation_header_object_path));
+  if (footerObjectPath && (existing as any).footer_object_path) oldPaths.push(String((existing as any).footer_object_path));
+  if (footerObjectPath === null && (existing as any).footer_object_path) oldPaths.push(String((existing as any).footer_object_path));
+  for (const p of oldPaths) {
+    try { await supabaseStorage.deletePrivateObject(p); } catch {}
   }
   await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.letterhead.update", entityType: "firm_letterhead", entityId: letterheadId, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
   res.json(rows[0]);
@@ -943,10 +1281,15 @@ router.post("/firm-letterheads/:letterheadId/set-default", requireAuth, requireF
   }
   const exists = await queryRows(
     r,
-    sql`SELECT id FROM firm_letterheads WHERE id = ${letterheadId} AND firm_id = ${req.firmId!}`
+    sql`SELECT id, status FROM firm_letterheads WHERE id = ${letterheadId} AND firm_id = ${req.firmId!}`
   );
   if (!exists[0]) {
     res.status(404).json({ error: "Letterhead not found" });
+    return;
+  }
+  const st = typeof (exists[0] as any).status === "string" ? String((exists[0] as any).status) : "active";
+  if (st !== "active") {
+    res.status(409).json({ error: "Cannot set inactive letterhead as default", code: "LETTERHEAD_INACTIVE" });
     return;
   }
   await queryRows(r, sql`UPDATE firm_letterheads SET is_default = false, updated_at = now() WHERE firm_id = ${req.firmId!}`);
@@ -993,6 +1336,73 @@ router.delete("/firm-letterheads/:letterheadId", requireAuth, requireFirmUser, r
   }
   await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.letterhead.delete", entityType: "firm_letterhead", entityId: letterheadId, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
   res.sendStatus(204);
+});
+
+router.get("/firm-letterheads/:letterheadId/templates/:part/download", requireAuth, requireFirmUser, requirePermission("documents", "read"), async (req: AuthRequest, res): Promise<void> => {
+  const r = getRlsDb(req, res);
+  if (!r) return;
+  const letterheadIdStr = one((req.params as any).letterheadId);
+  const partStr = one((req.params as any).part);
+  const letterheadId = letterheadIdStr ? parseInt(letterheadIdStr, 10) : NaN;
+  if (Number.isNaN(letterheadId) || !partStr) {
+    res.status(400).json({ error: "Invalid letterhead template request" });
+    return;
+  }
+  const part = partStr === "first_page" || partStr === "continuation_header" || partStr === "footer" ? partStr : null;
+  if (!part) {
+    res.status(400).json({ error: "Invalid template part" });
+    return;
+  }
+  const rows = await queryRows(
+    r,
+    sql`SELECT * FROM firm_letterheads WHERE id = ${letterheadId} AND firm_id = ${req.firmId!}`
+  );
+  const lh = rows[0];
+  if (!lh) {
+    res.status(404).json({ error: "Letterhead not found" });
+    return;
+  }
+  const objectPath =
+    part === "first_page"
+      ? String((lh as any).first_page_object_path)
+      : part === "continuation_header"
+        ? String((lh as any).continuation_header_object_path)
+        : (lh as any).footer_object_path
+          ? String((lh as any).footer_object_path)
+          : "";
+  const fileName =
+    part === "first_page"
+      ? String((lh as any).first_page_file_name)
+      : part === "continuation_header"
+        ? String((lh as any).continuation_header_file_name)
+        : (lh as any).footer_file_name
+          ? String((lh as any).footer_file_name)
+          : "";
+  if (!objectPath || !fileName) {
+    res.status(404).json({ error: "Template not set", code: "TEMPLATE_NOT_SET" });
+    return;
+  }
+  try {
+    const objectFile = await storage.getObjectEntityFile(objectPath);
+    const storageResp = await storage.downloadObject(objectFile);
+    storageResp.headers.forEach((value, key) => {
+      res.setHeader(key, value);
+    });
+    res.setHeader("Content-Disposition", `attachment; filename="${fileName}"`);
+    if (!storageResp.body) {
+      res.status(500).json({ error: "Failed to stream file" });
+      return;
+    }
+    const nodeStream = Readable.fromWeb(storageResp.body as any);
+    await new Promise<void>((resolve, reject) => {
+      nodeStream.on("error", reject);
+      res.on("finish", resolve);
+      nodeStream.pipe(res);
+    });
+    await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.letterhead.download_template", entityType: "firm_letterhead", entityId: letterheadId, detail: `part=${part} fileName=${fileName}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+  } catch (err) {
+    res.status(500).json({ error: "Failed to download template", detail: err instanceof Error ? err.message : String(err) });
+  }
 });
 
 router.get("/cases/:caseId/documents", requireAuth, requireFirmUser, requirePermission("documents", "read"), async (req: AuthRequest, res): Promise<void> => {
@@ -1064,17 +1474,32 @@ router.post("/cases/:caseId/documents/generate", requireAuth, requireFirmUser, r
 
     let buffer = doc.getZip().generate({ type: "nodebuffer", compression: "DEFLATE" }) as Buffer;
 
-    const isLetterLike = templateDocType.includes("letter") || templateDocType === "acting_letter" || templateDocType === "undertaking";
+    const isLetterLike = isFirmDocumentTypeLetterLike(templateDocType);
+    let usedLetterheadId: number | null = null;
     if (isLetterLike) {
       const letterheadIdNum = typeof letterheadId === "number" ? letterheadId : null;
-      const lhRows = letterheadIdNum !== null
-        ? await queryRows(r, sql`SELECT * FROM firm_letterheads WHERE id = ${letterheadIdNum} AND firm_id = ${req.firmId!} AND status = 'active'`)
-        : await queryRows(r, sql`SELECT * FROM firm_letterheads WHERE firm_id = ${req.firmId!} AND status = 'active' ORDER BY is_default DESC, created_at DESC LIMIT 1`);
-      const lh = lhRows[0];
-      if (!lh) {
-        res.status(400).json({ error: "No firm letterhead configured", code: "NO_LETTERHEAD" });
-        return;
+      let lh: Record<string, unknown> | undefined;
+      if (letterheadIdNum !== null) {
+        const byId = await queryRows(r, sql`SELECT * FROM firm_letterheads WHERE id = ${letterheadIdNum} AND firm_id = ${req.firmId!}`);
+        const candidate = byId[0];
+        if (!candidate) {
+          res.status(404).json({ error: "Letterhead not found", code: "LETTERHEAD_NOT_FOUND" });
+          return;
+        }
+        if (String((candidate as any).status ?? "active") !== "active") {
+          res.status(409).json({ error: "Selected letterhead is inactive", code: "LETTERHEAD_INACTIVE" });
+          return;
+        }
+        lh = candidate;
+      } else {
+        const defaults = await queryRows(r, sql`SELECT * FROM firm_letterheads WHERE firm_id = ${req.firmId!} AND status = 'active' ORDER BY is_default DESC, created_at DESC LIMIT 1`);
+        lh = defaults[0];
+        if (!lh) {
+          res.status(422).json({ error: "No active firm letterhead configured", code: "NO_LETTERHEAD" });
+          return;
+        }
       }
+      usedLetterheadId = typeof (lh as any).id === "number" ? Number((lh as any).id) : null;
       const firstPath = String((lh as any).first_page_object_path);
       const contPath = String((lh as any).continuation_header_object_path);
       const footerPath = (lh as any).footer_object_path ? String((lh as any).footer_object_path) : null;
@@ -1121,7 +1546,7 @@ router.post("/cases/:caseId/documents/generate", requireAuth, requireFirmUser, r
     const createdId = created && typeof created === "object" && "id" in created && typeof (created as { id?: unknown }).id === "number"
       ? (created as { id: number }).id
       : undefined;
-    await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.case.generate", entityType: "case_document", entityId: createdId, detail: `caseId=${caseId} templateId=${templateId} name=${docName} letterhead=${isLetterLike ? (typeof letterheadId === "number" ? letterheadId : "default") : "n/a"}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+    await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.case.generate", entityType: "case_document", entityId: createdId, detail: `caseId=${caseId} templateId=${templateId} name=${docName} letterhead=${isLetterLike ? (usedLetterheadId ?? "default") : "n/a"}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
     res.status(201).json(docRows[0]);
   } catch (err: unknown) {
     console.error("Document generation error:", err);
@@ -1235,17 +1660,28 @@ router.post("/cases/:caseId/documents/generate-from-master", requireAuth, requir
 
     if (isDocx) {
       const lhIdNum = typeof letterheadId === "number" ? letterheadId : null;
-      const masterName = String((masterDoc as any).name ?? "").toLowerCase();
-      const masterCategory = String((masterDoc as any).category ?? "").toLowerCase();
-      const shouldApply = lhIdNum !== null || masterName.includes("letter") || masterCategory.includes("letter") || masterFileName.toLowerCase().includes("letter");
+      const shouldApply = lhIdNum !== null || isMasterDocLetterLike({ name: (masterDoc as any).name, category: (masterDoc as any).category, fileName: masterFileName });
       if (shouldApply) {
-        const lhRows = lhIdNum !== null
-          ? await queryRows(r, sql`SELECT * FROM firm_letterheads WHERE id = ${lhIdNum} AND firm_id = ${req.firmId!} AND status = 'active'`)
-          : await queryRows(r, sql`SELECT * FROM firm_letterheads WHERE firm_id = ${req.firmId!} AND status = 'active' ORDER BY is_default DESC, created_at DESC LIMIT 1`);
-        const lh = lhRows[0];
-        if (!lh) {
-          res.status(400).json({ error: "No firm letterhead configured", code: "NO_LETTERHEAD" });
-          return;
+        let lh: Record<string, unknown> | undefined;
+        if (lhIdNum !== null) {
+          const byId = await queryRows(r, sql`SELECT * FROM firm_letterheads WHERE id = ${lhIdNum} AND firm_id = ${req.firmId!}`);
+          const candidate = byId[0];
+          if (!candidate) {
+            res.status(404).json({ error: "Letterhead not found", code: "LETTERHEAD_NOT_FOUND" });
+            return;
+          }
+          if (String((candidate as any).status ?? "active") !== "active") {
+            res.status(409).json({ error: "Selected letterhead is inactive", code: "LETTERHEAD_INACTIVE" });
+            return;
+          }
+          lh = candidate;
+        } else {
+          const defaults = await queryRows(r, sql`SELECT * FROM firm_letterheads WHERE firm_id = ${req.firmId!} AND status = 'active' ORDER BY is_default DESC, created_at DESC LIMIT 1`);
+          lh = defaults[0];
+          if (!lh) {
+            res.status(422).json({ error: "No active firm letterhead configured", code: "NO_LETTERHEAD" });
+            return;
+          }
         }
         const firstBytes = await downloadPrivateObjectBytes(String((lh as any).first_page_object_path));
         const contBytes = await downloadPrivateObjectBytes(String((lh as any).continuation_header_object_path));
@@ -1314,6 +1750,8 @@ router.get("/document-variables", requireAuth, async (_req: AuthRequest, res): P
       { key: "purchase_mode", label: "Purchase Mode (cash/loan)" },
       { key: "title_type", label: "Title Type" },
       { key: "status", label: "Case Status" },
+      { key: "spa_status", label: "SPA Status (workflow-derived)" },
+      { key: "loan_status", label: "Loan Status (workflow-derived)" },
     ]},
     { group: "SPA Details", vars: [
       { key: "spa_purchaser1_name", label: "SPA Purchaser 1 Name" },
@@ -1418,6 +1856,77 @@ router.get("/document-variables", requireAuth, async (_req: AuthRequest, res): P
       { key: "purchasers", label: "All Purchasers", type: "loop", fields: "index, name, ic, nationality, address, phone, email, role" },
       { key: "bank_accounts", label: "All Bank Accounts", type: "loop", fields: "index, bank_name, account_no, account_type" },
       { key: "developer_contacts", label: "Developer Contacts", type: "loop", fields: "index, department, phone, ext, email" },
+    ]},
+    { group: "Workflow Dates", vars: [
+      { key: "file_opened_date", label: "File Opened Date (DD/MM/YYYY)" },
+      { key: "file_opened_date_long", label: "File Opened Date (long format)" },
+      { key: "file_opened_date_raw", label: "File Opened Date (raw ISO)" },
+      { key: "spa_stamped_date", label: "SPA Stamped Date (DD/MM/YYYY)" },
+      { key: "spa_stamped_date_long", label: "SPA Stamped Date (long format)" },
+      { key: "spa_stamped_date_raw", label: "SPA Stamped Date (raw ISO)" },
+      { key: "lof_stamped_date", label: "Letter of Offer Stamped Date (DD/MM/YYYY)" },
+      { key: "lof_stamped_date_long", label: "Letter of Offer Stamped Date (long format)" },
+      { key: "lof_stamped_date_raw", label: "Letter of Offer Stamped Date (raw ISO)" },
+
+      { key: "loan_docs_pending_date", label: "Loan Docs Pending Signing Date (DD/MM/YYYY)" },
+      { key: "loan_docs_pending_date_long", label: "Loan Docs Pending Signing Date (long format)" },
+      { key: "loan_docs_pending_date_raw", label: "Loan Docs Pending Signing Date (raw ISO)" },
+      { key: "loan_docs_signed_date", label: "Loan Docs Signed Date (DD/MM/YYYY)" },
+      { key: "loan_docs_signed_date_long", label: "Loan Docs Signed Date (long format)" },
+      { key: "loan_docs_signed_date_raw", label: "Loan Docs Signed Date (raw ISO)" },
+      { key: "acting_letter_pending_date", label: "Acting Letter Pending Date (DD/MM/YYYY)" },
+      { key: "acting_letter_pending_date_long", label: "Acting Letter Pending Date (long format)" },
+      { key: "acting_letter_pending_date_raw", label: "Acting Letter Pending Date (raw ISO)" },
+      { key: "acting_letter_issued_date", label: "Acting Letter Issued Date (DD/MM/YYYY)" },
+      { key: "acting_letter_issued_date_long", label: "Acting Letter Issued Date (long format)" },
+      { key: "acting_letter_issued_date_raw", label: "Acting Letter Issued Date (raw ISO)" },
+      { key: "loan_pending_bank_exec_date", label: "Loan Doc Pending Bank Execution Date (DD/MM/YYYY)" },
+      { key: "loan_pending_bank_exec_date_long", label: "Loan Doc Pending Bank Execution Date (long format)" },
+      { key: "loan_pending_bank_exec_date_raw", label: "Loan Doc Pending Bank Execution Date (raw ISO)" },
+      { key: "loan_sent_bank_exec_date", label: "Loan Doc Sent for Bank Execution Date (DD/MM/YYYY)" },
+      { key: "loan_sent_bank_exec_date_long", label: "Loan Doc Sent for Bank Execution Date (long format)" },
+      { key: "loan_sent_bank_exec_date_raw", label: "Loan Doc Sent for Bank Execution Date (raw ISO)" },
+      { key: "loan_bank_executed_date", label: "Loan Doc Bank Executed Date (DD/MM/YYYY)" },
+      { key: "loan_bank_executed_date_long", label: "Loan Doc Bank Executed Date (long format)" },
+      { key: "loan_bank_executed_date_raw", label: "Loan Doc Bank Executed Date (raw ISO)" },
+      { key: "blu_received_date", label: "Bank Letter of Undertaking Received Date (DD/MM/YYYY)" },
+      { key: "blu_received_date_long", label: "Bank Letter of Undertaking Received Date (long format)" },
+      { key: "blu_received_date_raw", label: "Bank Letter of Undertaking Received Date (raw ISO)" },
+      { key: "blu_confirmed_date", label: "Bank's Letter of Undertaking Confirmed Date (DD/MM/YYYY)" },
+      { key: "blu_confirmed_date_long", label: "Bank's Letter of Undertaking Confirmed Date (long format)" },
+      { key: "blu_confirmed_date_raw", label: "Bank's Letter of Undertaking Confirmed Date (raw ISO)" },
+
+      { key: "mot_pending_date", label: "MOT Pending Date (DD/MM/YYYY)" },
+      { key: "mot_pending_date_long", label: "MOT Pending Date (long format)" },
+      { key: "mot_pending_date_raw", label: "MOT Pending Date (raw ISO)" },
+      { key: "mot_received_date", label: "MOT Executed & Received Date (DD/MM/YYYY)" },
+      { key: "mot_received_date_long", label: "MOT Executed & Received Date (long format)" },
+      { key: "mot_received_date_raw", label: "MOT Executed & Received Date (raw ISO)" },
+      { key: "mot_invoice_prepare_date", label: "MOT Invoice Preparation Date (DD/MM/YYYY)" },
+      { key: "mot_invoice_prepare_date_long", label: "MOT Invoice Preparation Date (long format)" },
+      { key: "mot_invoice_prepare_date_raw", label: "MOT Invoice Preparation Date (raw ISO)" },
+      { key: "mot_stamp_received_date", label: "MOT Stamp Duty & Registration Received Date (DD/MM/YYYY)" },
+      { key: "mot_stamp_received_date_long", label: "MOT Stamp Duty & Registration Received Date (long format)" },
+      { key: "mot_stamp_received_date_raw", label: "MOT Stamp Duty & Registration Received Date (raw ISO)" },
+      { key: "mot_submitted_stamping_date", label: "MOT Dated & Submitted Stamping Date (DD/MM/YYYY)" },
+      { key: "mot_submitted_stamping_date_long", label: "MOT Dated & Submitted Stamping Date (long format)" },
+      { key: "mot_submitted_stamping_date_raw", label: "MOT Dated & Submitted Stamping Date (raw ISO)" },
+      { key: "mot_stamp_date", label: "MOT Stamp Date (DD/MM/YYYY)" },
+      { key: "mot_stamp_date_long", label: "MOT Stamp Date (long format)" },
+      { key: "mot_stamp_date_raw", label: "MOT Stamp Date (raw ISO)" },
+
+      { key: "noa_prepare_date", label: "NOA Preparation Date (DD/MM/YYYY)" },
+      { key: "noa_prepare_date_long", label: "NOA Preparation Date (long format)" },
+      { key: "noa_prepare_date_raw", label: "NOA Preparation Date (raw ISO)" },
+      { key: "noa_served_date", label: "NOA Served Date (DD/MM/YYYY)" },
+      { key: "noa_served_date_long", label: "NOA Served Date (long format)" },
+      { key: "noa_served_date_raw", label: "NOA Served Date (raw ISO)" },
+      { key: "pa_pending_date", label: "PA Pending Date (DD/MM/YYYY)" },
+      { key: "pa_pending_date_long", label: "PA Pending Date (long format)" },
+      { key: "pa_pending_date_raw", label: "PA Pending Date (raw ISO)" },
+      { key: "pa_registered_date", label: "PA Registered Date (DD/MM/YYYY)" },
+      { key: "pa_registered_date_long", label: "PA Registered Date (long format)" },
+      { key: "pa_registered_date_raw", label: "PA Registered Date (raw ISO)" },
     ]},
   ];
   res.json(variables);
