@@ -16,7 +16,11 @@ import { CreateFirmBody, UpdateFirmBody, ListFirmsQueryParams, GetFirmParams, Up
 import { requireAuth, requireFounder, writeAuditLog, type AuthRequest } from "../lib/auth";
 import { withAuthSafeDb } from "../lib/auth-safe-db";
 import bcrypt from "bcryptjs";
-import { ObjectNotFoundError, ObjectStorageService } from "../lib/objectStorage";
+import {
+  ObjectNotFoundError,
+  SupabaseStorageService,
+  getSupabaseStorageConfigError,
+} from "../lib/objectStorage";
 
 const one = (v: string | string[] | undefined): string | undefined => (Array.isArray(v) ? v[0] : v);
 const firstRow = (result: unknown): Record<string, unknown> | undefined => {
@@ -35,7 +39,7 @@ const firstRow = (result: unknown): Record<string, unknown> | undefined => {
 };
 
 const router: IRouter = Router();
-const storage = new ObjectStorageService();
+const storage = new SupabaseStorageService();
 
 // ─── Firms ────────────────────────────────────────────────────────────────────
 
@@ -486,27 +490,47 @@ router.delete("/platform/documents/:docId", requireAuth, requireFounder, async (
   const docIdStr = one(req.params.docId);
   const docId = docIdStr ? parseInt(docIdStr, 10) : NaN;
   if (isNaN(docId)) { res.status(400).json({ error: "Invalid document ID" }); return; }
-  const result = await withAuthSafeDb(async (authDb) => {
+  const fetched = await withAuthSafeDb(async (authDb) => {
     const [doc] = await authDb.select().from(platformDocumentsTable).where(eq(platformDocumentsTable.id, docId));
-    if (!doc) return { kind: "not_found" as const };
+    return doc ?? null;
+  });
+  if (!fetched) { res.status(404).json({ error: "Document not found" }); return; }
+
+  try {
+    await storage.deletePrivateObject(fetched.objectPath);
+  } catch (error) {
+    if (error instanceof ObjectNotFoundError) {
+      // proceed
+    } else {
+      const configErr = getSupabaseStorageConfigError(error);
+      if (configErr) {
+        res.status(configErr.statusCode).json({ error: configErr.error });
+        return;
+      }
+      req.log.error({ err: error, docId }, "platform.document.delete_failed_storage");
+      res.status(500).json({ error: "Failed to delete document object" });
+      return;
+    }
+  }
+
+  await withAuthSafeDb(async (authDb) => {
     await authDb.delete(platformDocumentsTable).where(eq(platformDocumentsTable.id, docId));
     await writeAuditLog(
       {
-        firmId: doc.firmId ?? null,
+        firmId: fetched.firmId ?? null,
         actorId: req.userId,
         actorType: req.userType,
         action: "platform.document.delete",
         entityType: "platform_document",
         entityId: docId,
-        detail: `name=${doc.name}`,
+        detail: `name=${fetched.name}`,
         ipAddress: req.ip,
         userAgent: req.headers["user-agent"],
       },
       { db: authDb, strict: true }
     );
-    return { kind: "ok" as const, doc };
   });
-  if (result.kind === "not_found") { res.status(404).json({ error: "Document not found" }); return; }
+
   res.json({ success: true });
 });
 
@@ -517,8 +541,7 @@ router.get("/platform/documents/:docId/download", requireAuth, requireFounder, a
   const [doc] = await withAuthSafeDb(async (authDb) => authDb.select().from(platformDocumentsTable).where(eq(platformDocumentsTable.id, docId)));
   if (!doc) { res.status(404).json({ error: "Document not found" }); return; }
   try {
-    const objectFile = await storage.getObjectEntityFile(doc.objectPath);
-    const response = await storage.downloadObject(objectFile);
+    const response = await storage.fetchPrivateObjectResponse(doc.objectPath);
     await writeAuditLog(
       {
         firmId: doc.firmId ?? null,
@@ -548,6 +571,11 @@ router.get("/platform/documents/:docId/download", requireAuth, requireFounder, a
   } catch (error) {
     if (error instanceof ObjectNotFoundError) {
       res.status(404).json({ error: "Object not found" });
+      return;
+    }
+    const configErr = getSupabaseStorageConfigError(error);
+    if (configErr) {
+      res.status(configErr.statusCode).json({ error: configErr.error });
       return;
     }
     req.log.error({ err: error, docId }, "platform.document.download_failed");

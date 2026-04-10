@@ -1,4 +1,5 @@
 import { Storage, File } from "@google-cloud/storage";
+import { StorageClient } from "@supabase/storage-js";
 import { Readable } from "stream";
 import { randomUUID } from "crypto";
 import {
@@ -86,6 +87,148 @@ export class ObjectNotFoundError extends Error {
     super("Object not found");
     this.name = "ObjectNotFoundError";
     Object.setPrototypeOf(this, ObjectNotFoundError.prototype);
+  }
+}
+
+type SupabaseStorageConfig = {
+  supabaseUrl: string;
+  serviceRoleKey: string;
+  bucketPrivate: string;
+  storageUrl: string;
+};
+
+function getSupabaseStorageConfig(): SupabaseStorageConfig {
+  const supabaseUrl = (process.env.SUPABASE_URL || "").trim();
+  if (!supabaseUrl) throw new Error("SUPABASE_URL not set");
+
+  const serviceRoleKey = (process.env.SUPABASE_SERVICE_ROLE_KEY || "").trim();
+  if (!serviceRoleKey) throw new Error("SUPABASE_SERVICE_ROLE_KEY not set");
+
+  const bucketPrivate = (process.env.SUPABASE_STORAGE_BUCKET_PRIVATE || "").trim();
+  if (!bucketPrivate) throw new Error("SUPABASE_STORAGE_BUCKET_PRIVATE not set");
+
+  const normalized = supabaseUrl.replace(/\/+$/, "");
+  const storageUrl = `${normalized}/storage/v1`;
+
+  return { supabaseUrl: normalized, serviceRoleKey, bucketPrivate, storageUrl };
+}
+
+export function getSupabaseStorageConfigError(
+  err: unknown
+): { statusCode: number; error: string } | null {
+  const message = err instanceof Error ? err.message : "";
+  if (!message) return null;
+
+  if (message.includes("SUPABASE_URL not set")) {
+    return { statusCode: 503, error: "Supabase storage not configured: SUPABASE_URL not set" };
+  }
+  if (message.includes("SUPABASE_SERVICE_ROLE_KEY not set")) {
+    return { statusCode: 503, error: "Supabase storage not configured: SUPABASE_SERVICE_ROLE_KEY not set" };
+  }
+  if (message.includes("SUPABASE_STORAGE_BUCKET_PRIVATE not set")) {
+    return { statusCode: 503, error: "Supabase storage not configured: SUPABASE_STORAGE_BUCKET_PRIVATE not set" };
+  }
+  return null;
+}
+
+function normalizeObjectKeyFromPath(objectPath: string): string {
+  const p = objectPath.trim();
+  if (!p) throw new Error("Invalid objectPath");
+  if (p.startsWith("gs://") || p.startsWith("https://storage.googleapis.com/")) {
+    throw new Error("Invalid objectPath: GCS URL not supported for Supabase storage");
+  }
+  const stripped = p.replace(/^\/+/, "");
+  if (stripped.startsWith("objects/")) return stripped.slice("objects/".length);
+  return stripped;
+}
+
+function createSupabaseStorageClient(): StorageClient {
+  const cfg = getSupabaseStorageConfig();
+  return new StorageClient(cfg.storageUrl, {
+    apikey: cfg.serviceRoleKey,
+    Authorization: `Bearer ${cfg.serviceRoleKey}`,
+  });
+}
+
+export class SupabaseStorageService {
+  private cached:
+    | { cacheKey: string; client: StorageClient; bucketPrivate: string }
+    | undefined;
+
+  assertConfigured(): void {
+    this.getClient();
+  }
+
+  private getClient(): { client: StorageClient; bucketPrivate: string } {
+    const cfg = getSupabaseStorageConfig();
+    const cacheKey = `${cfg.storageUrl}|${cfg.serviceRoleKey}|${cfg.bucketPrivate}`;
+    if (this.cached?.cacheKey === cacheKey) return this.cached;
+    const client = createSupabaseStorageClient();
+    this.cached = { cacheKey, client, bucketPrivate: cfg.bucketPrivate };
+    return this.cached;
+  }
+
+  async uploadPrivateObject({
+    objectPath,
+    fileBytes,
+    contentType,
+  }: {
+    objectPath: string;
+    fileBytes: Uint8Array;
+    contentType: string;
+  }): Promise<void> {
+    const key = normalizeObjectKeyFromPath(objectPath);
+    const { client, bucketPrivate } = this.getClient();
+    const body = Buffer.isBuffer(fileBytes) ? fileBytes : Buffer.from(fileBytes);
+    const { error } = await client.from(bucketPrivate).upload(key, body, {
+      contentType,
+      upsert: false,
+    });
+    if (error) throw new Error(error.message);
+  }
+
+  async deletePrivateObject(objectPath: string): Promise<void> {
+    const key = normalizeObjectKeyFromPath(objectPath);
+    const { client, bucketPrivate } = this.getClient();
+    const { error } = await client.from(bucketPrivate).remove([key]);
+    if (error) {
+      const message = error.message || "";
+      if (message.toLowerCase().includes("not found")) throw new ObjectNotFoundError();
+      throw new Error(message);
+    }
+  }
+
+  async createSignedDownloadUrl(objectPath: string, ttlSec: number): Promise<string> {
+    const key = normalizeObjectKeyFromPath(objectPath);
+    const { client, bucketPrivate } = this.getClient();
+    const { data, error } = await client.from(bucketPrivate).createSignedUrl(key, ttlSec);
+    if (error) {
+      const message = error.message || "";
+      if (message.toLowerCase().includes("not found")) throw new ObjectNotFoundError();
+      throw new Error(message);
+    }
+    const signedUrl = data?.signedUrl;
+    if (!signedUrl) throw new Error("Failed to create signed download URL");
+    return signedUrl;
+  }
+
+  async fetchPrivateObjectResponse(objectPath: string): Promise<Response> {
+    const cfg = getSupabaseStorageConfig();
+    const key = normalizeObjectKeyFromPath(objectPath);
+    const encodedKey = key.split("/").map(encodeURIComponent).join("/");
+    const url = `${cfg.storageUrl}/object/${encodeURIComponent(cfg.bucketPrivate)}/${encodedKey}`;
+    const response = await fetch(url, {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${cfg.serviceRoleKey}`,
+        apikey: cfg.serviceRoleKey,
+      },
+    });
+    if (response.status === 404) throw new ObjectNotFoundError();
+    if (!response.ok) {
+      throw new Error(`Supabase storage download failed (${response.status})`);
+    }
+    return response;
   }
 }
 

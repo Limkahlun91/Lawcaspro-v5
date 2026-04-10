@@ -48,12 +48,16 @@ Recommended:
 - `DATABASE_URL` (Postgres connection string)
 - `LOG_LEVEL` (default: `info`)
 
-Object storage (required for document/object routes that use object storage):
+Supabase Storage (required for private document/object routes):
+
+- `SUPABASE_URL`
+- `SUPABASE_SERVICE_ROLE_KEY`
+- `SUPABASE_STORAGE_BUCKET_PRIVATE`
+
+Legacy Object Storage (only used by endpoints that still rely on @google-cloud/storage / sidecar):
 
 - `PUBLIC_OBJECT_SEARCH_PATHS` (comma-separated object search roots)
 - `PRIVATE_OBJECT_DIR` (object directory root)
-
-Note: current object storage integration expects the Replit Object Storage sidecar at `127.0.0.1:1106`. For non-Replit deployments, object-storage-backed endpoints will require a future adapter (e.g. GCS service account / S3).
 
 ## One-time DB setup
 
