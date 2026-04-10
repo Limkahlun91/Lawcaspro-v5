@@ -166,6 +166,10 @@ DROP POLICY IF EXISTS tenant_isolation ON invoices;
 DROP POLICY IF EXISTS tenant_isolation ON ledger_entries;
 DROP POLICY IF EXISTS tenant_isolation ON payment_vouchers;
 DROP POLICY IF EXISTS tenant_isolation ON platform_documents;
+DROP POLICY IF EXISTS platform_documents_read ON platform_documents;
+DROP POLICY IF EXISTS platform_documents_insert ON platform_documents;
+DROP POLICY IF EXISTS platform_documents_update ON platform_documents;
+DROP POLICY IF EXISTS platform_documents_delete ON platform_documents;
 DROP POLICY IF EXISTS tenant_isolation ON projects;
 DROP POLICY IF EXISTS tenant_isolation ON quotations;
 DROP POLICY IF EXISTS tenant_isolation ON receipts;
@@ -256,9 +260,34 @@ CREATE POLICY tenant_isolation ON payment_vouchers FOR ALL TO PUBLIC
   USING ((firm_id = NULLIF(current_setting('app.current_firm_id',true),'')::integer) OR current_setting('app.is_founder',true)='true')
   WITH CHECK ((firm_id = NULLIF(current_setting('app.current_firm_id',true),'')::integer) OR current_setting('app.is_founder',true)='true');
 
-CREATE POLICY tenant_isolation ON platform_documents FOR ALL TO PUBLIC
-  USING ((firm_id = NULLIF(current_setting('app.current_firm_id',true),'')::integer) OR current_setting('app.is_founder',true)='true')
-  WITH CHECK ((firm_id = NULLIF(current_setting('app.current_firm_id',true),'')::integer) OR current_setting('app.is_founder',true)='true');
+CREATE POLICY platform_documents_read ON platform_documents FOR SELECT TO PUBLIC
+  USING (
+    current_setting('app.is_founder', true) = 'true'
+    OR firm_id IS NULL
+    OR firm_id = NULLIF(current_setting('app.current_firm_id', true), '')::integer
+  );
+
+CREATE POLICY platform_documents_insert ON platform_documents FOR INSERT TO PUBLIC
+  WITH CHECK (
+    current_setting('app.is_founder', true) = 'true'
+    OR firm_id = NULLIF(current_setting('app.current_firm_id', true), '')::integer
+  );
+
+CREATE POLICY platform_documents_update ON platform_documents FOR UPDATE TO PUBLIC
+  USING (
+    current_setting('app.is_founder', true) = 'true'
+    OR firm_id = NULLIF(current_setting('app.current_firm_id', true), '')::integer
+  )
+  WITH CHECK (
+    current_setting('app.is_founder', true) = 'true'
+    OR firm_id = NULLIF(current_setting('app.current_firm_id', true), '')::integer
+  );
+
+CREATE POLICY platform_documents_delete ON platform_documents FOR DELETE TO PUBLIC
+  USING (
+    current_setting('app.is_founder', true) = 'true'
+    OR firm_id = NULLIF(current_setting('app.current_firm_id', true), '')::integer
+  );
 
 CREATE POLICY tenant_isolation ON projects FOR ALL TO PUBLIC
   USING ((firm_id = NULLIF(current_setting('app.current_firm_id',true),'')::integer) OR current_setting('app.is_founder',true)='true')

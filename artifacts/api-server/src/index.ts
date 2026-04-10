@@ -1,6 +1,7 @@
 import app from "./app";
 import { logger } from "./lib/logger";
 import { seedIfEmpty } from "./lib/seed";
+import { ensurePlatformDocumentsGlobalVisibilityRls } from "./lib/rls-bootstrap";
 
 const rawPort = process.env["PORT"];
 
@@ -18,6 +19,10 @@ if (Number.isNaN(port) || port <= 0) {
 
 seedIfEmpty().catch((err) => {
   logger.error({ err }, "Seed failed — continuing anyway");
+});
+
+ensurePlatformDocumentsGlobalVisibilityRls().catch((err) => {
+  logger.error({ err }, "RLS bootstrap failed — continuing anyway");
 });
 
 app.listen(port, (err) => {
