@@ -620,6 +620,8 @@ router.patch("/cases/:caseId/key-dates", requireAuth, requireFirmUser, requirePe
   }
   const body = req.body as Record<string, unknown>;
 
+  type CaseKeyDatesInsert = typeof caseKeyDatesTable.$inferInsert;
+
   const dateFieldMap = {
     spa_signed_date: "spaSignedDate",
     spa_forward_to_developer_execution_on: "spaForwardToDeveloperExecutionOn",
@@ -658,23 +660,40 @@ router.patch("/cases/:caseId/key-dates", requireAuth, requireFirmUser, requirePe
     completion_date: "completionDate",
   } as const;
 
-  const set: Record<string, unknown> = { firmId: req.firmId!, caseId: params.data.caseId };
+  type DateColKey = (typeof dateFieldMap)[keyof typeof dateFieldMap];
+  type DateColValue = CaseKeyDatesInsert[DateColKey];
+  const setDateCol = (target: Partial<CaseKeyDatesInsert>, key: DateColKey, value: DateColValue) => {
+    (target as Partial<Record<DateColKey, DateColValue>>)[key] = value;
+  };
+
+  const insertValues: CaseKeyDatesInsert = { firmId: req.firmId!, caseId: params.data.caseId };
+  const updateValues: Partial<CaseKeyDatesInsert> & { updatedAt: Date } = { updatedAt: new Date() };
+
   const changed: string[] = [];
-  for (const [apiKey, colKey] of Object.entries(dateFieldMap)) {
+  const apiKeys = Object.keys(dateFieldMap) as Array<keyof typeof dateFieldMap>;
+  for (const apiKey of apiKeys) {
     if (!Object.prototype.hasOwnProperty.call(body, apiKey)) continue;
     const parsed = parseDateOnlyInput(body[apiKey]);
     if (parsed === undefined) {
       res.status(400).json({ error: `Invalid ${apiKey}` });
       return;
     }
-    set[colKey] = parsed;
-    changed.push(apiKey);
+    const colKey = dateFieldMap[apiKey] as DateColKey;
+    setDateCol(insertValues, colKey, parsed as DateColValue);
+    setDateCol(updateValues, colKey, parsed as DateColValue);
+    changed.push(String(apiKey));
   }
 
   if (Object.prototype.hasOwnProperty.call(body, "letter_disclaimer_reference_nos")) {
     const v = body.letter_disclaimer_reference_nos;
-    if (v === null) set.letterDisclaimerReferenceNos = null;
-    else if (typeof v === "string") set.letterDisclaimerReferenceNos = v.trim() || null;
+    if (v === null) {
+      insertValues.letterDisclaimerReferenceNos = null;
+      updateValues.letterDisclaimerReferenceNos = null;
+    } else if (typeof v === "string") {
+      const trimmed = v.trim() || null;
+      insertValues.letterDisclaimerReferenceNos = trimmed;
+      updateValues.letterDisclaimerReferenceNos = trimmed;
+    }
     else {
       res.status(400).json({ error: "Invalid letter_disclaimer_reference_nos" });
       return;
@@ -688,7 +707,8 @@ router.patch("/cases/:caseId/key-dates", requireAuth, requireFirmUser, requirePe
     return;
   }
   if (redemptionSum !== undefined) {
-    set.redemptionSum = redemptionSum;
+    insertValues.redemptionSum = redemptionSum;
+    updateValues.redemptionSum = redemptionSum;
     changed.push("redemption_sum");
   }
   const firstRelease = parseMoneyInput(body.first_release_amount_rm);
@@ -697,14 +717,21 @@ router.patch("/cases/:caseId/key-dates", requireAuth, requireFirmUser, requirePe
     return;
   }
   if (firstRelease !== undefined) {
-    set.firstReleaseAmountRm = firstRelease;
+    insertValues.firstReleaseAmountRm = firstRelease;
+    updateValues.firstReleaseAmountRm = firstRelease;
     changed.push("first_release_amount_rm");
   }
 
   if (Object.prototype.hasOwnProperty.call(body, "registered_poa_registration_number")) {
     const v = body.registered_poa_registration_number;
-    if (v === null) set.registeredPoaRegistrationNumber = null;
-    else if (typeof v === "string") set.registeredPoaRegistrationNumber = v.trim() || null;
+    if (v === null) {
+      insertValues.registeredPoaRegistrationNumber = null;
+      updateValues.registeredPoaRegistrationNumber = null;
+    } else if (typeof v === "string") {
+      const trimmed = v.trim() || null;
+      insertValues.registeredPoaRegistrationNumber = trimmed;
+      updateValues.registeredPoaRegistrationNumber = trimmed;
+    }
     else {
       res.status(400).json({ error: "Invalid registered_poa_registration_number" });
       return;
@@ -721,14 +748,14 @@ router.patch("/cases/:caseId/key-dates", requireAuth, requireFirmUser, requirePe
   if (existing[0]) {
     const [updated] = await r
       .update(caseKeyDatesTable)
-      .set({ ...set, updatedAt: new Date() })
+      .set(updateValues)
       .where(and(eq(caseKeyDatesTable.caseId, params.data.caseId), eq(caseKeyDatesTable.firmId, req.firmId!)))
       .returning();
     kd = updated;
   } else {
     const [inserted] = await r
       .insert(caseKeyDatesTable)
-      .values({ ...set })
+      .values(insertValues)
       .returning();
     kd = inserted;
   }

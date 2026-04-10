@@ -8,7 +8,7 @@ import {
 } from "@workspace/api-client-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { ArrowLeft, CheckCircle2, Clock, User, Building2, MapPin, Tag, Receipt } from "lucide-react";
+import { ArrowLeft, CheckCircle2, Clock, User, Building2, MapPin, Tag, Receipt, Printer } from "lucide-react";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useToast } from "@/hooks/use-toast";
@@ -123,6 +123,13 @@ export default function CaseDetail() {
     if (s === "template_not_capable") return "Not template-capable";
     return "Template not configured";
   };
+  const printTitle = (printKey: string, dateVal: string) => {
+    if (!dateVal) return "Enter date to enable printing";
+    const st = printState(printKey);
+    if (st?.status === "configured") return "Print";
+    return st?.hint || "Template not configured";
+  };
+  const canPrint = (printKey: string, dateVal: string) => Boolean(dateVal) && printState(printKey)?.status === "configured";
   const [keyDatesDraft, setKeyDatesDraft] = useState<Record<string, string>>({});
   useEffect(() => {
     setKeyDatesDraft({
@@ -438,13 +445,13 @@ export default function CaseDetail() {
                     <div className="flex gap-2">
                       <Input type="date" value={keyDatesDraft.acting_letter_issued_date || ""} onChange={(e) => setKeyDatesDraft((p) => ({ ...p, acting_letter_issued_date: e.target.value }))} />
                       <Button
-                        size="sm"
+                        size="icon"
                         variant="outline"
-                        title={printState("acting_letter")?.hint}
+                        title={printTitle("acting_letter", keyDatesDraft.acting_letter_issued_date || "")}
                         onClick={() => printMutation.mutate({ printKey: "acting_letter" })}
-                        disabled={printMutation.isPending || printState("acting_letter")?.status !== "configured"}
+                        disabled={printMutation.isPending || !canPrint("acting_letter", keyDatesDraft.acting_letter_issued_date || "")}
                       >
-                        Acting Letter
+                        <Printer className="w-4 h-4" />
                       </Button>
                     </div>
                     <div className="text-xs">
@@ -464,13 +471,13 @@ export default function CaseDetail() {
                     <div className="flex gap-2">
                       <Input type="date" value={keyDatesDraft.loan_sent_bank_execution_date || ""} onChange={(e) => setKeyDatesDraft((p) => ({ ...p, loan_sent_bank_execution_date: e.target.value }))} />
                       <Button
-                        size="sm"
+                        size="icon"
                         variant="outline"
-                        title={printState("letter_forward_bank_execution")?.hint}
+                        title={printTitle("letter_forward_bank_execution", keyDatesDraft.loan_sent_bank_execution_date || "")}
                         onClick={() => printMutation.mutate({ printKey: "letter_forward_bank_execution" })}
-                        disabled={printMutation.isPending || printState("letter_forward_bank_execution")?.status !== "configured"}
+                        disabled={printMutation.isPending || !canPrint("letter_forward_bank_execution", keyDatesDraft.loan_sent_bank_execution_date || "")}
                       >
-                        Letter Forward Bank Execution
+                        <Printer className="w-4 h-4" />
                       </Button>
                     </div>
                     <div className="text-xs">
@@ -490,13 +497,13 @@ export default function CaseDetail() {
                     <div className="flex gap-2">
                       <Input type="date" value={keyDatesDraft.bank_lu_forward_to_developer_on || ""} onChange={(e) => setKeyDatesDraft((p) => ({ ...p, bank_lu_forward_to_developer_on: e.target.value }))} />
                       <Button
-                        size="sm"
+                        size="icon"
                         variant="outline"
-                        title={printState("letter_forward_bank_lu_to_dev")?.hint}
+                        title={printTitle("letter_forward_bank_lu_to_dev", keyDatesDraft.bank_lu_forward_to_developer_on || "")}
                         onClick={() => printMutation.mutate({ printKey: "letter_forward_bank_lu_to_dev" })}
-                        disabled={printMutation.isPending || printState("letter_forward_bank_lu_to_dev")?.status !== "configured"}
+                        disabled={printMutation.isPending || !canPrint("letter_forward_bank_lu_to_dev", keyDatesDraft.bank_lu_forward_to_developer_on || "")}
                       >
-                        Letter Forward Bank’s LU to Dev.
+                        <Printer className="w-4 h-4" />
                       </Button>
                     </div>
                     <div className="text-xs">
@@ -552,13 +559,13 @@ export default function CaseDetail() {
                     <div className="flex gap-2">
                       <Input type="date" value={keyDatesDraft.noa_served_on || ""} onChange={(e) => setKeyDatesDraft((p) => ({ ...p, noa_served_on: e.target.value }))} />
                       <Button
-                        size="sm"
+                        size="icon"
                         variant="outline"
-                        title={printState("noa")?.hint}
+                        title={printTitle("noa", keyDatesDraft.noa_served_on || "")}
                         onClick={() => printMutation.mutate({ printKey: "noa" })}
-                        disabled={printMutation.isPending || printState("noa")?.status !== "configured"}
+                        disabled={printMutation.isPending || !canPrint("noa", keyDatesDraft.noa_served_on || "")}
                       >
-                        NOA
+                        <Printer className="w-4 h-4" />
                       </Button>
                     </div>
                     <div className="text-xs">
@@ -570,13 +577,13 @@ export default function CaseDetail() {
                     <div className="flex gap-2">
                       <Input type="date" value={keyDatesDraft.advice_to_bank_date || ""} onChange={(e) => setKeyDatesDraft((p) => ({ ...p, advice_to_bank_date: e.target.value }))} />
                       <Button
-                        size="sm"
+                        size="icon"
                         variant="outline"
-                        title={printState("letter_advice_spa_sol_lu")?.hint}
+                        title={printTitle("letter_advice_spa_sol_lu", keyDatesDraft.advice_to_bank_date || "")}
                         onClick={() => printMutation.mutate({ printKey: "letter_advice_spa_sol_lu" })}
-                        disabled={printMutation.isPending || printState("letter_advice_spa_sol_lu")?.status !== "configured"}
+                        disabled={printMutation.isPending || !canPrint("letter_advice_spa_sol_lu", keyDatesDraft.advice_to_bank_date || "")}
                       >
-                        Letter Advice & SPA Sol. LU
+                        <Printer className="w-4 h-4" />
                       </Button>
                     </div>
                     <div className="text-xs">
