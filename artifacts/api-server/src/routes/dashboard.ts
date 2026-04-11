@@ -4,8 +4,11 @@ import { db, casesTable, clientsTable, developersTable, projectsTable, caseAssig
 import { requireAuth, requireFirmUser, requirePermission, type AuthRequest } from "../lib/auth";
 import { milestonePresenceWhereSql, type CaseMilestoneKey, type MilestonePresence } from "../lib/caseListLogic";
 
-async function queryRows(query: ReturnType<typeof sql>): Promise<Record<string, unknown>[]> {
-  const result = await db.execute(query);
+type DbConn = typeof db | NonNullable<AuthRequest["rlsDb"]>;
+const rdb = (req: AuthRequest): DbConn => req.rlsDb ?? db;
+
+async function queryRows(r: DbConn, query: ReturnType<typeof sql>): Promise<Record<string, unknown>[]> {
+  const result = await r.execute(query);
   if (Array.isArray(result)) return result as Record<string, unknown>[];
   if ("rows" in result) return (result as { rows: Record<string, unknown>[] }).rows;
   return [];
@@ -15,15 +18,16 @@ const router: IRouter = Router();
 
 router.get("/dashboard", requireAuth, requireFirmUser, requirePermission("dashboard", "read"), async (req: AuthRequest, res): Promise<void> => {
   const firmId = req.firmId!;
+  const r = rdb(req);
 
-  const [totalCasesRes] = await db.select({ c: count() }).from(casesTable).where(eq(casesTable.firmId, firmId));
-  const [completedCasesRes] = await db.select({ c: count() }).from(casesTable)
+  const [totalCasesRes] = await r.select({ c: count() }).from(casesTable).where(eq(casesTable.firmId, firmId));
+  const [completedCasesRes] = await r.select({ c: count() }).from(casesTable)
     .where(eq(casesTable.firmId, firmId));
-  const [totalClientsRes] = await db.select({ c: count() }).from(clientsTable).where(eq(clientsTable.firmId, firmId));
-  const [totalDevsRes] = await db.select({ c: count() }).from(developersTable).where(eq(developersTable.firmId, firmId));
-  const [totalProjsRes] = await db.select({ c: count() }).from(projectsTable).where(eq(projectsTable.firmId, firmId));
+  const [totalClientsRes] = await r.select({ c: count() }).from(clientsTable).where(eq(clientsTable.firmId, firmId));
+  const [totalDevsRes] = await r.select({ c: count() }).from(developersTable).where(eq(developersTable.firmId, firmId));
+  const [totalProjsRes] = await r.select({ c: count() }).from(projectsTable).where(eq(projectsTable.firmId, firmId));
 
-  const allCases = await db.select().from(casesTable).where(eq(casesTable.firmId, firmId));
+  const allCases = await r.select().from(casesTable).where(eq(casesTable.firmId, firmId));
   const cashCases = allCases.filter(c => c.purchaseMode === "cash").length;
   const loanCases = allCases.filter(c => c.purchaseMode === "loan").length;
   const masterTitleCases = allCases.filter(c => c.titleType === "master").length;
@@ -32,16 +36,16 @@ router.get("/dashboard", requireAuth, requireFirmUser, requirePermission("dashbo
   const completedCases = allCases.filter(c => c.status.toLowerCase().includes("complet") || c.status.toLowerCase().includes("registered") || c.status.toLowerCase().includes("stamp")).length;
   const activeCases = allCases.length - completedCases;
 
-  const recentRows = await db.select().from(casesTable)
+  const recentRows = await r.select().from(casesTable)
     .where(eq(casesTable.firmId, firmId))
     .orderBy(desc(casesTable.updatedAt))
     .limit(5);
 
   const recentCases = await Promise.all(
     recentRows.map(async (c) => {
-      const [proj] = await db.select().from(projectsTable).where(eq(projectsTable.id, c.projectId));
-      const [dev] = await db.select().from(developersTable).where(eq(developersTable.id, c.developerId));
-      const [assignment] = await db
+      const [proj] = await r.select().from(projectsTable).where(eq(projectsTable.id, c.projectId));
+      const [dev] = await r.select().from(developersTable).where(eq(developersTable.id, c.developerId));
+      const [assignment] = await r
         .select({ userName: usersTable.name })
         .from(caseAssignmentsTable)
         .leftJoin(usersTable, eq(caseAssignmentsTable.userId, usersTable.id))
@@ -62,7 +66,7 @@ router.get("/dashboard", requireAuth, requireFirmUser, requirePermission("dashbo
   );
 
   // Billing summary
-  const billingRows = await queryRows(sql`
+  const billingRows = await queryRows(r, sql`
     SELECT
       SUM(amount * quantity) as total_billed,
       SUM(CASE WHEN is_paid THEN amount * quantity ELSE 0 END) as total_paid,
@@ -72,7 +76,7 @@ router.get("/dashboard", requireAuth, requireFirmUser, requirePermission("dashbo
   const billing = billingRows[0] ?? {};
 
   // Communications count this month
-  const commRows = await queryRows(sql`
+  const commRows = await queryRows(r, sql`
     SELECT COUNT(*) as total_this_month
     FROM case_communications
     WHERE firm_id = ${firmId}
@@ -86,7 +90,7 @@ router.get("/dashboard", requireAuth, requireFirmUser, requirePermission("dashbo
     return sql<number>`COUNT(*) FILTER (WHERE ${p})`;
   };
 
-  const [milestoneCounts] = await db
+  const [milestoneCounts] = await r
     .select({
       spaStamped: milestoneCountSql("spa_stamped_date", "filled", false),
       loanDocsSigned: milestoneCountSql("loan_docs_signed_date", "filled", true),

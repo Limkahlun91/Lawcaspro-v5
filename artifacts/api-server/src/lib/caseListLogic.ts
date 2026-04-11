@@ -76,6 +76,8 @@ export function milestoneDateYmdSql(milestone: CaseMilestoneKey): SQL<string | n
       return sql<string | null>`COALESCE(${caseKeyDatesTable.noaServedOn}, ${workflowCompletedDateYmdSql("noa_served")})`;
     case "completion_date":
       return sql<string | null>`(${caseKeyDatesTable.completionDate})`;
+    default:
+      return sql<string | null>`NULL`;
   }
 }
 
@@ -84,4 +86,3 @@ export function milestonePresenceWhereSql(milestone: CaseMilestoneKey, presence:
   if (presence === "filled") return sql`${expr} IS NOT NULL`;
   return sql`${expr} IS NULL`;
 }
-
