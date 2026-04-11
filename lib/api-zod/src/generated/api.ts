@@ -729,6 +729,10 @@ export const ListProjectsQueryParams = zod.object({
   developerId: zod.coerce.number().optional(),
   projectType: zod.coerce.string().optional(),
   titleType: zod.coerce.string().optional(),
+  sortBy: zod
+    .enum(["updatedAt", "createdAt", "referenceNo", "spaDate"])
+    .optional(),
+  sortDir: zod.enum(["asc", "desc"]).optional(),
   page: zod.coerce.number().optional(),
   limit: zod.coerce.number().optional(),
 });

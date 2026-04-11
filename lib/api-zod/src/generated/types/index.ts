@@ -48,6 +48,8 @@ export * from "./listClientsParams";
 export * from "./listDevelopersParams";
 export * from "./listFirmsParams";
 export * from "./listProjectsParams";
+export * from "./listProjectsSortBy";
+export * from "./listProjectsSortDir";
 export * from "./listUsersParams";
 export * from "./loginBody";
 export * from "./milestonePresence";

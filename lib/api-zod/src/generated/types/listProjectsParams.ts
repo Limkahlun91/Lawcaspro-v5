@@ -5,12 +5,16 @@
  * Lawcaspro Legal Operations System API
  * OpenAPI spec version: 1.0.0
  */
+import type { ListProjectsSortBy } from "./listProjectsSortBy";
+import type { ListProjectsSortDir } from "./listProjectsSortDir";
 
 export type ListProjectsParams = {
   search?: string;
   developerId?: number;
   projectType?: string;
   titleType?: string;
+  sortBy?: ListProjectsSortBy;
+  sortDir?: ListProjectsSortDir;
   page?: number;
   limit?: number;
 };

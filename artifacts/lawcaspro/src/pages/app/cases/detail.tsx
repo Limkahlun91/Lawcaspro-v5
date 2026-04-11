@@ -118,6 +118,11 @@ export default function CaseDetail() {
   const tabFromUrl = params.get("tab") ?? "overview";
   const threadIdFromUrl = params.get("threadId");
   const initialThreadIdRaw = threadIdFromUrl ? parseInt(threadIdFromUrl, 10) : NaN;
+  const returnToRaw = params.get("returnTo");
+  const returnTo =
+    returnToRaw && (returnToRaw.startsWith("/app/cases") || returnToRaw.startsWith("/app/dashboard"))
+      ? returnToRaw
+      : "/app/cases";
   const initialThreadId = Number.isNaN(initialThreadIdRaw) ? null : initialThreadIdRaw;
   const [activeTab, setActiveTab] = useState(tabFromUrl);
 
@@ -416,7 +421,7 @@ export default function CaseDetail() {
     <div className="space-y-6 pb-12">
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-4">
-          <Button variant="outline" size="icon" onClick={() => setLocation("/app/cases")}>
+          <Button variant="outline" size="icon" onClick={() => setLocation(returnTo)}>
             <ArrowLeft className="w-4 h-4" />
           </Button>
           <div>

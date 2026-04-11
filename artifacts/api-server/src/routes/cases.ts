@@ -1,5 +1,5 @@
 import { Router, type IRouter } from "express";
-import { eq, ilike, count, desc, and, or, sql } from "drizzle-orm";
+import { eq, count, desc, and, or, sql, asc } from "drizzle-orm";
 import {
   db, casesTable, casePurchasersTable, caseAssignmentsTable,
   caseWorkflowStepsTable, caseNotesTable,
@@ -315,6 +315,8 @@ router.get("/cases", requireAuth, requireFirmUser, requirePermission("cases", "r
   const loanStatus = one(req.query.loanStatus as any);
   const milestone = one(req.query.milestone as any) as CaseMilestoneKey | undefined;
   const milestonePresence = one(req.query.milestonePresence as any) as MilestonePresence | undefined;
+  const sortByRaw = one(req.query.sortBy as any);
+  const sortDirRaw = one(req.query.sortDir as any);
   const assignedLawyerId = params.success ? params.data.assignedLawyerId : parseIntOrUndef(req.query.assignedLawyerId as any);
   const assignedClerkId = parseIntOrUndef(req.query.assignedClerkId as any);
 
@@ -382,6 +384,23 @@ router.get("/cases", requireAuth, requireFirmUser, requirePermission("cases", "r
     );
     if (searchOr) conditions.push(searchOr);
   }
+
+  const sortBy = ((): "updatedAt" | "createdAt" | "referenceNo" | "spaDate" => {
+    if (sortByRaw === "createdAt") return "createdAt";
+    if (sortByRaw === "referenceNo") return "referenceNo";
+    if (sortByRaw === "spaDate") return "spaDate";
+    return "updatedAt";
+  })();
+  const sortDir = (sortDirRaw === "asc" || sortDirRaw === "desc") ? sortDirRaw : "desc";
+  const primaryOrder = (() => {
+    if (sortBy === "createdAt") return sortDir === "asc" ? asc(casesTable.createdAt) : desc(casesTable.createdAt);
+    if (sortBy === "referenceNo") return sortDir === "asc" ? asc(casesTable.referenceNo) : desc(casesTable.referenceNo);
+    if (sortBy === "spaDate") {
+      const expr = milestoneDateYmdSql("spa_date");
+      return sortDir === "asc" ? sql`${expr} ASC NULLS LAST` : sql`${expr} DESC NULLS LAST`;
+    }
+    return sortDir === "asc" ? asc(casesTable.updatedAt) : desc(casesTable.updatedAt);
+  })();
 
   const purchaserNameSql = sql<string | null>`(
     SELECT cl.name
@@ -468,7 +487,7 @@ router.get("/cases", requireAuth, requireFirmUser, requirePermission("cases", "r
     .leftJoin(developersTable, eq(developersTable.id, casesTable.developerId))
     .leftJoin(caseKeyDatesTable, and(eq(caseKeyDatesTable.caseId, casesTable.id), eq(caseKeyDatesTable.firmId, casesTable.firmId)))
     .where(and(...conditions))
-    .orderBy(desc(casesTable.updatedAt))
+    .orderBy(primaryOrder, desc(casesTable.updatedAt))
     .limit(limit)
     .offset(offset);
 

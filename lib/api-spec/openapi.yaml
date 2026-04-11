@@ -663,6 +663,16 @@ paths:
           in: query
           schema:
             type: string
+        - name: sortBy
+          in: query
+          schema:
+            type: string
+            enum: ["updatedAt", "createdAt", "referenceNo", "spaDate"]
+        - name: sortDir
+          in: query
+          schema:
+            type: string
+            enum: ["asc", "desc"]
         - name: page
           in: query
           schema:

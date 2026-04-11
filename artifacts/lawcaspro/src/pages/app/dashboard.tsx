@@ -295,7 +295,7 @@ export default function AppDashboard() {
                 <div
                   key={String(c.id)}
                   className="py-3 flex items-start justify-between gap-2 cursor-pointer hover:bg-slate-50 -mx-2 px-2 rounded"
-                  onClick={() => setLocation(`/app/cases/${c.id}`)}
+                  onClick={() => setLocation(`/app/cases/${c.id}?returnTo=${encodeURIComponent("/app/dashboard")}`)}
                 >
                   <div className="min-w-0">
                     <div className="font-medium text-amber-600 text-sm">{String(c.referenceNo)}</div>

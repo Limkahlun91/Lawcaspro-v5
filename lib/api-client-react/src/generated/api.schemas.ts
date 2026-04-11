@@ -681,9 +681,29 @@ export type ListProjectsParams = {
   developerId?: number;
   projectType?: string;
   titleType?: string;
+  sortBy?: ListProjectsSortBy;
+  sortDir?: ListProjectsSortDir;
   page?: number;
   limit?: number;
 };
+
+export type ListProjectsSortBy =
+  (typeof ListProjectsSortBy)[keyof typeof ListProjectsSortBy];
+
+export const ListProjectsSortBy = {
+  updatedAt: "updatedAt",
+  createdAt: "createdAt",
+  referenceNo: "referenceNo",
+  spaDate: "spaDate",
+} as const;
+
+export type ListProjectsSortDir =
+  (typeof ListProjectsSortDir)[keyof typeof ListProjectsSortDir];
+
+export const ListProjectsSortDir = {
+  asc: "asc",
+  desc: "desc",
+} as const;
 
 export type ListClientsParams = {
   search?: string;
