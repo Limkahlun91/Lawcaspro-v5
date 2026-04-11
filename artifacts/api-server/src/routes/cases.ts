@@ -5,7 +5,7 @@ import {
   caseWorkflowStepsTable, caseNotesTable,
   caseKeyDatesTable,
   caseListSavedViewsTable,
-  projectsTable, developersTable, clientsTable, usersTable, auditLogsTable,
+  projectsTable, developersTable, clientsTable, usersTable, rolesTable, auditLogsTable,
   permissionsTable,
 } from "@workspace/db";
 import {
@@ -878,8 +878,9 @@ router.get("/cases/workbench", requireAuth, requireFirmUser, requirePermission("
 
   const staffOptions = canViewUsers
     ? await r
-      .select({ id: usersTable.id, name: usersTable.name, roleName: usersTable.roleName })
+      .select({ id: usersTable.id, name: usersTable.name, roleName: rolesTable.name })
       .from(usersTable)
+      .leftJoin(rolesTable, and(eq(rolesTable.id, usersTable.roleId), eq(rolesTable.firmId, req.firmId!)))
       .where(eq(usersTable.firmId, req.firmId!))
       .orderBy(asc(usersTable.name))
     : [];
