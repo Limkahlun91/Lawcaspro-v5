@@ -19,6 +19,7 @@ import { buildWorkflowSteps } from "../lib/workflow";
 import { KEY_DATE_FIELD_TO_STEP_KEY, WORKFLOW_STEP_KEY_TO_KEY_DATE_FIELD, type KeyDateField } from "../lib/keyDatesWorkflow";
 import { loanStatusSql, milestoneDateSql, milestoneDateYmdSql, milestonePresenceWhereSql, spaStatusSql, type CaseMilestoneKey, type MilestonePresence } from "../lib/caseListLogic";
 import { daysAgoSql } from "../lib/dateSql";
+import { logger } from "../lib/logger";
 
 const router: IRouter = Router();
 
@@ -1201,12 +1202,7 @@ router.get("/cases/workbench", requireAuth, requireFirmUser, requirePermission("
       },
     });
   } catch (err) {
-    console.error("[cases-workbench] runtime error", {
-      path: req.path,
-      firmId: req.firmId,
-      userId: req.userId,
-      error: err instanceof Error ? { message: err.message, stack: err.stack } : String(err),
-    });
+    logger.error({ err, path: req.path, firmId: req.firmId, userId: req.userId }, "[cases-workbench]");
     res.status(500).json({ error: "Internal Server Error" });
   }
 });
@@ -1736,13 +1732,7 @@ router.get("/cases", requireAuth, requireFirmUser, requirePermission("cases", "r
 
     res.json({ data, total: Number(totalRes?.c ?? 0), page, limit });
   } catch (err) {
-    console.error("[cases] runtime error", {
-      path: req.path,
-      firmId: req.firmId,
-      userId: req.userId,
-      query: req.query,
-      error: err instanceof Error ? { message: err.message, stack: err.stack } : String(err),
-    });
+    logger.error({ err, path: req.path, firmId: req.firmId, userId: req.userId, query: req.query }, "[cases]");
     res.status(500).json({ error: "Internal Server Error" });
   }
 });
@@ -2016,7 +2006,7 @@ router.post("/cases", requireAuth, requireFirmUser, requirePermission("cases", "
 router.get("/cases/:caseId", requireAuth, requireFirmUser, requirePermission("cases", "read"), async (req: AuthRequest, res): Promise<void> => {
   const r = req.rlsDb;
   if (!r) {
-    console.error("[cases] missing tenant database context", { path: req.path, firmId: req.firmId, userId: req.userId });
+    logger.error({ path: req.path, firmId: req.firmId, userId: req.userId }, "[cases] missing tenant database context");
     res.status(500).json({ error: "Internal Server Error" });
     return;
   }
@@ -2041,7 +2031,7 @@ router.get("/cases/:caseId", requireAuth, requireFirmUser, requirePermission("ca
 router.get("/cases/:caseId/key-dates", requireAuth, requireFirmUser, requirePermission("cases", "read"), async (req: AuthRequest, res): Promise<void> => {
   const r = req.rlsDb;
   if (!r) {
-    console.error("[cases] missing tenant database context", { path: req.path, firmId: req.firmId, userId: req.userId });
+    logger.error({ path: req.path, firmId: req.firmId, userId: req.userId }, "[cases] missing tenant database context");
     res.status(500).json({ error: "Internal Server Error" });
     return;
   }
@@ -2128,7 +2118,7 @@ router.get("/cases/:caseId/key-dates", requireAuth, requireFirmUser, requirePerm
 router.patch("/cases/:caseId/key-dates", requireAuth, requireFirmUser, requirePermission("cases", "update"), async (req: AuthRequest, res): Promise<void> => {
   const r = req.rlsDb;
   if (!r) {
-    console.error("[cases] missing tenant database context", { path: req.path, firmId: req.firmId, userId: req.userId });
+    logger.error({ path: req.path, firmId: req.firmId, userId: req.userId }, "[cases] missing tenant database context");
     res.status(500).json({ error: "Internal Server Error" });
     return;
   }
@@ -2400,7 +2390,7 @@ router.patch("/cases/:caseId/key-dates", requireAuth, requireFirmUser, requirePe
 router.patch("/cases/:caseId", requireAuth, requireFirmUser, requirePermission("cases", "update"), async (req: AuthRequest, res): Promise<void> => {
   const r = req.rlsDb;
   if (!r) {
-    console.error("[cases] missing tenant database context", { path: req.path, firmId: req.firmId, userId: req.userId });
+    logger.error({ path: req.path, firmId: req.firmId, userId: req.userId }, "[cases] missing tenant database context");
     res.status(500).json({ error: "Internal Server Error" });
     return;
   }
@@ -2470,7 +2460,7 @@ router.patch("/cases/:caseId", requireAuth, requireFirmUser, requirePermission("
 router.get("/cases/:caseId/workflow", requireAuth, requireFirmUser, requirePermission("cases", "read"), async (req: AuthRequest, res): Promise<void> => {
   const r = req.rlsDb;
   if (!r) {
-    console.error("[cases] missing tenant database context", { path: req.path, firmId: req.firmId, userId: req.userId });
+    logger.error({ path: req.path, firmId: req.firmId, userId: req.userId }, "[cases] missing tenant database context");
     res.status(500).json({ error: "Internal Server Error" });
     return;
   }
@@ -2522,7 +2512,7 @@ router.get("/cases/:caseId/workflow", requireAuth, requireFirmUser, requirePermi
 router.patch("/cases/:caseId/workflow/:stepId", requireAuth, requireFirmUser, requirePermission("cases", "update"), async (req: AuthRequest, res): Promise<void> => {
   const r = req.rlsDb;
   if (!r) {
-    console.error("[cases] missing tenant database context", { path: req.path, firmId: req.firmId, userId: req.userId });
+    logger.error({ path: req.path, firmId: req.firmId, userId: req.userId }, "[cases] missing tenant database context");
     res.status(500).json({ error: "Internal Server Error" });
     return;
   }
@@ -2637,7 +2627,7 @@ router.patch("/cases/:caseId/workflow/:stepId", requireAuth, requireFirmUser, re
 router.get("/cases/:caseId/notes", requireAuth, requireFirmUser, requirePermission("cases", "read"), async (req: AuthRequest, res): Promise<void> => {
   const r = req.rlsDb;
   if (!r) {
-    console.error("[cases] missing tenant database context", { path: req.path, firmId: req.firmId, userId: req.userId });
+    logger.error({ path: req.path, firmId: req.firmId, userId: req.userId }, "[cases] missing tenant database context");
     res.status(500).json({ error: "Internal Server Error" });
     return;
   }
@@ -2680,7 +2670,7 @@ router.get("/cases/:caseId/notes", requireAuth, requireFirmUser, requirePermissi
 router.post("/cases/:caseId/notes", requireAuth, requireFirmUser, requirePermission("cases", "update"), async (req: AuthRequest, res): Promise<void> => {
   const r = req.rlsDb;
   if (!r) {
-    console.error("[cases] missing tenant database context", { path: req.path, firmId: req.firmId, userId: req.userId });
+    logger.error({ path: req.path, firmId: req.firmId, userId: req.userId }, "[cases] missing tenant database context");
     res.status(500).json({ error: "Internal Server Error" });
     return;
   }

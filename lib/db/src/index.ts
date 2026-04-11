@@ -4,7 +4,9 @@ import * as schema from "./schema";
 
 const { Pool } = pg;
 
-if (!process.env.DATABASE_URL) {
+const allowMissingDatabaseUrl =
+  process.env.NODE_ENV === "test" && process.env.VITEST_SKIP_DB === "1";
+if (!process.env.DATABASE_URL && !allowMissingDatabaseUrl) {
   throw new Error(
     "DATABASE_URL must be set. Did you forget to provision a database?",
   );
@@ -38,7 +40,7 @@ const stripSslmodeFromDatabaseUrl = (databaseUrl: string): string => {
   return hash ? `${rebuilt}#${hash}` : rebuilt;
 };
 
-const databaseUrl = process.env.DATABASE_URL;
+const databaseUrl = process.env.DATABASE_URL ?? "postgres://127.0.0.1:1/postgres";
 const isPooler = isSupabasePoolerDatabaseUrl(databaseUrl);
 
 export const pool = new Pool({

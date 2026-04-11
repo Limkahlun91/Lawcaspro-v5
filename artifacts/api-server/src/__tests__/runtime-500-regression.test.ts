@@ -3,8 +3,10 @@ import { beforeAll, describe, expect, it } from "vitest";
 import app from "../app";
 
 let token: string;
+const skipDb = process.env.VITEST_SKIP_DB === "1";
 
 beforeAll(async () => {
+  if (skipDb) return;
   const res = await request(app)
     .post("/api/auth/login")
     .send({ email: "partner@test.com", password: "password123" });
@@ -13,17 +15,25 @@ beforeAll(async () => {
   expect(typeof token).toBe("string");
 });
 
-describe("Runtime 500 regressions", () => {
+const suite = skipDb ? describe.skip : describe;
+
+suite("Runtime 500 regressions", () => {
   it("auth/me unauthenticated returns 401 (not 500)", async () => {
     const res = await request(app).get("/api/auth/me");
     expect(res.status).toBe(401);
     expect(res.body).toEqual({ error: "Not authenticated" });
+    expect(res.body).not.toHaveProperty("detail");
+    expect(res.body).not.toHaveProperty("stack");
+    expect(res.body).not.toHaveProperty("sql");
   });
 
   it("auth/login invalid body returns 400 (not 500)", async () => {
     const res = await request(app).post("/api/auth/login").send({});
     expect(res.status).toBe(400);
     expect(res.body).toHaveProperty("error");
+    expect(res.body).not.toHaveProperty("detail");
+    expect(res.body).not.toHaveProperty("stack");
+    expect(res.body).not.toHaveProperty("sql");
   });
 
   it("dashboard does not 500 for valid auth", async () => {
@@ -59,4 +69,3 @@ describe("Runtime 500 regressions", () => {
     expect(res.status).toBe(200);
   });
 });
-

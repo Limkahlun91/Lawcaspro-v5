@@ -3,6 +3,7 @@ import { eq, count, desc, sql } from "drizzle-orm";
 import { db, casesTable, clientsTable, developersTable, projectsTable, caseAssignmentsTable, usersTable, caseKeyDatesTable } from "@workspace/db";
 import { requireAuth, requireFirmUser, requirePermission, type AuthRequest } from "../lib/auth";
 import { milestonePresenceWhereSql, type CaseMilestoneKey, type MilestonePresence } from "../lib/caseListLogic";
+import { logger } from "../lib/logger";
 
 type DbConn = typeof db | NonNullable<AuthRequest["rlsDb"]>;
 const rdb = (req: AuthRequest): DbConn => req.rlsDb ?? db;
@@ -166,12 +167,7 @@ router.get("/dashboard", requireAuth, requireFirmUser, requirePermission("dashbo
       milestoneCards,
     });
   } catch (err) {
-    console.error("[dashboard] runtime error", {
-      path: req.path,
-      firmId: req.firmId,
-      userId: req.userId,
-      error: err instanceof Error ? { message: err.message, stack: err.stack } : String(err),
-    });
+    logger.error({ err, path: req.path, firmId: req.firmId, userId: req.userId }, "[dashboard]");
     res.status(500).json({ error: "Internal Server Error" });
   }
 });

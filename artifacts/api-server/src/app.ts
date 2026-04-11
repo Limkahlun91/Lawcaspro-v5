@@ -46,11 +46,11 @@ app.use((err: unknown, req: express.Request, res: express.Response, next: expres
     next(err);
     return;
   }
-  console.error("[unhandled] runtime error", {
+  logger.error({
+    err,
     path: req.path,
     method: req.method,
-    error: err instanceof Error ? { message: err.message, stack: err.stack } : String(err),
-  });
+  }, "[unhandled]");
   res.status(500).json({ error: "Internal Server Error" });
 });
 

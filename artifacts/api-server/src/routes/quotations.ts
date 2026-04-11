@@ -3,6 +3,7 @@ import { eq, desc, and, count, sql } from "drizzle-orm";
 import { db, quotationsTable, quotationItemsTable, regulatoryRuleSetsTable, regulatoryRuleVersionsTable } from "@workspace/db";
 import { requireAuth, requireFirmUser, type AuthRequest } from "../lib/auth";
 import { applyRule } from "./regulatory";
+import { logger } from "../lib/logger";
 
 const one = (v: string | string[] | undefined): string | undefined => (Array.isArray(v) ? v[0] : v);
 
@@ -73,7 +74,7 @@ router.get("/quotations", requireAuth, requireFirmUser, async (req, res): Promis
     res.json(results);
     return;
   } catch (err) {
-    console.error("[quotations] runtime error", { path: req.path, error: err instanceof Error ? { message: err.message, stack: err.stack } : String(err) });
+    logger.error({ err, path: req.path }, "[quotations]");
     res.status(500).json({ error: "Internal Server Error" });
     return;
   }
@@ -113,7 +114,7 @@ router.post("/quotations", requireAuth, requireFirmUser, async (req, res): Promi
     res.status(201).json(result);
     return;
   } catch (err) {
-    console.error("[quotations] runtime error", { path: req.path, error: err instanceof Error ? { message: err.message, stack: err.stack } : String(err) });
+    logger.error({ err, path: req.path }, "[quotations]");
     res.status(500).json({ error: "Internal Server Error" });
     return;
   }
@@ -144,7 +145,7 @@ router.get("/quotations/:id", requireAuth, requireFirmUser, async (req, res): Pr
     });
     return;
   } catch (err) {
-    console.error("[quotations] runtime error", { path: req.path, error: err instanceof Error ? { message: err.message, stack: err.stack } : String(err) });
+    logger.error({ err, path: req.path }, "[quotations]");
     res.status(500).json({ error: "Internal Server Error" });
     return;
   }
@@ -193,7 +194,7 @@ router.patch("/quotations/:id", requireAuth, requireFirmUser, async (req, res): 
     res.json(result);
     return;
   } catch (err) {
-    console.error("[quotations] runtime error", { path: req.path, error: err instanceof Error ? { message: err.message, stack: err.stack } : String(err) });
+    logger.error({ err, path: req.path }, "[quotations]");
     res.status(500).json({ error: "Internal Server Error" });
     return;
   }
@@ -219,7 +220,7 @@ router.delete("/quotations/:id", requireAuth, requireFirmUser, async (req, res):
     res.json({ success: true });
     return;
   } catch (err) {
-    console.error("[quotations] runtime error", { path: req.path, error: err instanceof Error ? { message: err.message, stack: err.stack } : String(err) });
+    logger.error({ err, path: req.path }, "[quotations]");
     res.status(500).json({ error: "Internal Server Error" });
     return;
   }
@@ -292,7 +293,7 @@ router.post("/quotations/:id/duplicate", requireAuth, requireFirmUser, async (re
     res.status(201).json(result);
     return;
   } catch (err) {
-    console.error("[quotations] runtime error", { path: req.path, error: err instanceof Error ? { message: err.message, stack: err.stack } : String(err) });
+    logger.error({ err, path: req.path }, "[quotations]");
     res.status(500).json({ error: "Internal Server Error" });
     return;
   }
@@ -439,7 +440,7 @@ router.post("/quotations/:id/auto-calculate", requireAuth, requireFirmUser, asyn
     res.json({ items: allItems.map(formatItem), totals, breakdown: { purchasePrice, loanAmount } });
     return;
   } catch (err) {
-    console.error("[quotations] runtime error", { path: req.path, error: err instanceof Error ? { message: err.message, stack: err.stack } : String(err) });
+    logger.error({ err, path: req.path }, "[quotations]");
     res.status(500).json({ error: "Internal Server Error" });
     return;
   }

@@ -3,6 +3,7 @@ import { sql } from "drizzle-orm";
 import { db, documentTemplatesTable, caseDocumentsTable } from "@workspace/db";
 import { PRINT_ACTIONS, isLetterheadApplicableDocumentType, isMasterDocumentLetterLike } from "@workspace/documents-registry";
 import { requireAuth, requireFirmUser, requirePermission, writeAuditLog, type AuthRequest } from "../lib/auth";
+import { logger } from "../lib/logger";
 import { ObjectStorageService, ObjectNotFoundError, SupabaseStorageService } from "../lib/objectStorage";
 import { Readable } from "stream";
 import Docxtemplater from "docxtemplater";
@@ -1049,7 +1050,7 @@ router.get("/document-templates/:templateId/download", requireAuth, requireFirmU
     });
     await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.firm_document.download", entityType: "firm_document", entityId: templateId, detail: `fileName=${fileName}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
   } catch (err) {
-    console.error("[documents] runtime error", { path: req.path, firmId: req.firmId, userId: req.userId, error: err instanceof Error ? { message: err.message, stack: err.stack } : String(err) });
+    logger.error({ err, path: req.path, firmId: req.firmId, userId: req.userId }, "[documents]");
     res.status(500).json({ error: "Internal Server Error" });
   }
 });
@@ -1468,7 +1469,7 @@ router.get("/firm-letterheads/:letterheadId/templates/:part/download", requireAu
     });
     await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.letterhead.download_template", entityType: "firm_letterhead", entityId: letterheadId, detail: `part=${part} fileName=${fileName}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
   } catch (err) {
-    console.error("[documents] runtime error", { path: req.path, firmId: req.firmId, userId: req.userId, error: err instanceof Error ? { message: err.message, stack: err.stack } : String(err) });
+    logger.error({ err, path: req.path, firmId: req.firmId, userId: req.userId }, "[documents]");
     res.status(500).json({ error: "Internal Server Error" });
   }
 });
@@ -1596,7 +1597,7 @@ router.post("/cases/:caseId/documents/generate", requireAuth, requireFirmUser, r
 
     if (!uploadRes.ok) {
       const detail = await uploadRes.text();
-      console.error("[documents] upload failed", { path: req.path, firmId: req.firmId, userId: req.userId, detail });
+      logger.error({ detail, path: req.path, firmId: req.firmId, userId: req.userId }, "[documents] upload failed");
       res.status(500).json({ error: "Internal Server Error" });
       return;
     }
@@ -1777,7 +1778,7 @@ router.post("/cases/:caseId/documents/generate-from-master", requireAuth, requir
 
     if (!uploadRes.ok) {
       const detail = await uploadRes.text();
-      console.error("[documents] upload failed", { path: req.path, firmId: req.firmId, userId: req.userId, detail });
+      logger.error({ detail, path: req.path, firmId: req.firmId, userId: req.userId }, "[documents] upload failed");
       res.status(500).json({ error: "Internal Server Error" });
       return;
     }
@@ -1982,7 +1983,7 @@ router.post("/cases/:caseId/documents/print", requireAuth, requireFirmUser, requ
     });
     if (!uploadRes.ok) {
       const detail = await uploadRes.text();
-      console.error("[documents] upload failed", { path: req.path, firmId: req.firmId, userId: req.userId, detail });
+      logger.error({ detail, path: req.path, firmId: req.firmId, userId: req.userId }, "[documents] upload failed");
       res.status(500).json({ error: "Internal Server Error" });
       return;
     }
@@ -2004,7 +2005,7 @@ router.post("/cases/:caseId/documents/print", requireAuth, requireFirmUser, requ
     await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.case.print", entityType: "case_document", entityId: createdId, detail: `caseId=${caseId} printKey=${printKey} templateId=${(template as any).id} name=${nameToUse} letterhead=${isLetterLike ? (usedLetterheadId ?? "default") : "n/a"}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
     res.status(201).json(docRows[0]);
   } catch (err: unknown) {
-    console.error("[documents] runtime error", { path: req.path, firmId: req.firmId, userId: req.userId, error: err instanceof Error ? { message: err.message, stack: err.stack } : String(err) });
+    logger.error({ err, path: req.path, firmId: req.firmId, userId: req.userId }, "[documents]");
     res.status(500).json({ error: "Internal Server Error" });
   }
 });

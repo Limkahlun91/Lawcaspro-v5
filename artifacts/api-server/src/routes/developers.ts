@@ -6,6 +6,7 @@ import {
   GetDeveloperParams, UpdateDeveloperParams, DeleteDeveloperParams
 } from "@workspace/api-zod";
 import { requireAuth, requireFirmUser, requirePermission, writeAuditLog, type AuthRequest } from "../lib/auth";
+import { logger } from "../lib/logger";
 
 const router: IRouter = Router();
 
@@ -80,7 +81,7 @@ router.get("/developers", requireAuth, requireFirmUser, requirePermission("devel
     const enriched = await Promise.all(devs.map((d) => enrichDeveloper(r, d)));
     res.json({ data: enriched, total: Number(totalRes?.c ?? 0), page, limit });
   } catch (err) {
-    console.error("[developers] runtime error", { path: req.path, firmId: req.firmId, userId: req.userId, error: err instanceof Error ? { message: err.message, stack: err.stack } : String(err) });
+    logger.error({ err, path: req.path, firmId: req.firmId, userId: req.userId }, "[developers]");
     res.status(500).json({ error: "Internal Server Error" });
   }
 });
@@ -290,7 +291,7 @@ router.delete("/developers/:developerId", requireAuth, requireFirmUser, requireP
 
   const r = req.rlsDb;
   if (!r) {
-    console.error("[developers] missing tenant database context", { path: req.path, firmId: req.firmId, userId: req.userId });
+    logger.error({ path: req.path, firmId: req.firmId, userId: req.userId }, "[developers] missing tenant database context");
     res.status(500).json({ error: "Internal Server Error" });
     return;
   }

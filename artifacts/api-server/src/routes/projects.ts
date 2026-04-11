@@ -6,6 +6,7 @@ import {
   GetProjectParams, UpdateProjectParams, DeleteProjectParams
 } from "@workspace/api-zod";
 import { requireAuth, requireFirmUser, requirePermission, writeAuditLog, type AuthRequest } from "../lib/auth";
+import { logger } from "../lib/logger";
 
 const router: IRouter = Router();
 
@@ -67,7 +68,7 @@ router.get("/projects", requireAuth, requireFirmUser, requirePermission("project
     const enriched = await Promise.all(projs.map((p) => enrichProject(r, p)));
     res.json({ data: enriched, total: Number(totalRes?.c ?? 0), page, limit });
   } catch (err) {
-    console.error("[projects] runtime error", { path: req.path, firmId: req.firmId, userId: req.userId, error: err instanceof Error ? { message: err.message, stack: err.stack } : String(err) });
+    logger.error({ err, path: req.path, firmId: req.firmId, userId: req.userId }, "[projects]");
     res.status(500).json({ error: "Internal Server Error" });
   }
 });
@@ -262,7 +263,7 @@ router.delete("/projects/:projectId", requireAuth, requireFirmUser, requirePermi
 
   const r = req.rlsDb;
   if (!r) {
-    console.error("[projects] missing tenant database context", { path: req.path, firmId: req.firmId, userId: req.userId });
+    logger.error({ path: req.path, firmId: req.firmId, userId: req.userId }, "[projects] missing tenant database context");
     res.status(500).json({ error: "Internal Server Error" });
     return;
   }
