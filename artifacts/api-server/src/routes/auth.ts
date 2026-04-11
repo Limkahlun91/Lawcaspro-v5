@@ -1,7 +1,7 @@
 import { Router, type IRouter } from "express";
 import bcrypt from "bcryptjs";
 import crypto from "crypto";
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq, sql, type SQL } from "drizzle-orm";
 import { db, usersTable, sessionsTable, rolesTable, permissionsTable, firmsTable, auditLogsTable } from "@workspace/db";
 import { LoginBody } from "@workspace/api-zod";
 import { requireAuth, requireReAuth, issueReauthToken, type AuthRequest, writeAuditLog } from "../lib/auth";
@@ -12,6 +12,17 @@ import * as OTPAuth from "otpauth";
 import QRCode from "qrcode";
 
 const router: IRouter = Router();
+
+async function tableExistsAuthDb(
+  authDb: { execute: (q: SQL<unknown>) => Promise<unknown> },
+  reg: string,
+): Promise<boolean> {
+  const result = await authDb.execute(sql`SELECT to_regclass(${reg}) AS reg`);
+  const rows = Array.isArray(result)
+    ? (result as Record<string, unknown>[])
+    : ("rows" in result ? (result as { rows: Record<string, unknown>[] }).rows : []);
+  return Boolean(rows[0]?.reg);
+}
 
 router.post("/auth/login", authRateLimiter, async (req, res): Promise<void> => {
   const startedAt = Date.now();
@@ -40,20 +51,27 @@ router.post("/auth/login", authRateLimiter, async (req, res): Promise<void> => {
     stage = "user_lookup";
     const userLookupStartedAt = Date.now();
     const user = await withAuthSafeDb(async (authDb) => {
+      const hasAuditLogs = await tableExistsAuthDb(authDb, "public.audit_logs");
       const [u] = await authDb
         .select()
         .from(usersTable)
         .where(eq(usersTable.email, emailNormalized));
       if (!u) {
-        await authDb.insert(auditLogsTable).values({
-          firmId: null,
-          actorId: null,
-          actorType: "firm_user",
-          action: "auth.login_failed",
-          detail: `email=${emailNormalized} reason=user_not_found`,
-          ipAddress: ip ?? null,
-          userAgent: ua ?? null,
-        });
+        if (hasAuditLogs) {
+          try {
+            await authDb.insert(auditLogsTable).values({
+              firmId: null,
+              actorId: null,
+              actorType: "firm_user",
+              action: "auth.login_failed",
+              detail: `email=${emailNormalized} reason=user_not_found`,
+              ipAddress: ip ?? null,
+              userAgent: ua ?? null,
+            });
+          } catch (err) {
+            logger.error({ emailHash, stage: "audit_log_user_not_found", err }, "auth.login.audit_log_error");
+          }
+        }
       }
       return u ?? null;
     });
@@ -72,15 +90,22 @@ router.post("/auth/login", authRateLimiter, async (req, res): Promise<void> => {
     if (!passwordMatch) {
       logger.info({ emailHash, userId: user.id, userLookupMs, ms: Date.now() - startedAt }, "auth.login.wrong_password");
       await withAuthSafeDb(async (authDb) => {
-        await authDb.insert(auditLogsTable).values({
-          firmId: user.firmId,
-          actorId: user.id,
-          actorType: user.userType,
-          action: "auth.login_failed",
-          detail: "reason=wrong_password",
-          ipAddress: ip ?? null,
-          userAgent: ua ?? null,
-        });
+        const hasAuditLogs = await tableExistsAuthDb(authDb, "public.audit_logs");
+        if (hasAuditLogs) {
+          try {
+            await authDb.insert(auditLogsTable).values({
+              firmId: user.firmId,
+              actorId: user.id,
+              actorType: user.userType,
+              action: "auth.login_failed",
+              detail: "reason=wrong_password",
+              ipAddress: ip ?? null,
+              userAgent: ua ?? null,
+            });
+          } catch (err) {
+            logger.error({ emailHash, userId: user.id, stage: "audit_log_wrong_password", err }, "auth.login.audit_log_error");
+          }
+        }
       });
       res.status(401).json({ error: "Invalid email or password" });
       return;
@@ -89,15 +114,22 @@ router.post("/auth/login", authRateLimiter, async (req, res): Promise<void> => {
     if (user.status !== "active") {
       logger.info({ emailHash, userId: user.id, ms: Date.now() - startedAt }, "auth.login.inactive");
       await withAuthSafeDb(async (authDb) => {
-        await authDb.insert(auditLogsTable).values({
-          firmId: user.firmId,
-          actorId: user.id,
-          actorType: user.userType,
-          action: "auth.login_failed",
-          detail: "reason=inactive_account",
-          ipAddress: ip ?? null,
-          userAgent: ua ?? null,
-        });
+        const hasAuditLogs = await tableExistsAuthDb(authDb, "public.audit_logs");
+        if (hasAuditLogs) {
+          try {
+            await authDb.insert(auditLogsTable).values({
+              firmId: user.firmId,
+              actorId: user.id,
+              actorType: user.userType,
+              action: "auth.login_failed",
+              detail: "reason=inactive_account",
+              ipAddress: ip ?? null,
+              userAgent: ua ?? null,
+            });
+          } catch (err) {
+            logger.error({ emailHash, userId: user.id, stage: "audit_log_inactive", err }, "auth.login.audit_log_error");
+          }
+        }
       });
       res.status(401).json({ error: "Account is inactive" });
       return;
@@ -117,15 +149,22 @@ router.post("/auth/login", authRateLimiter, async (req, res): Promise<void> => {
       if (!isValid) {
         logger.info({ emailHash, userId: user.id, ms: Date.now() - startedAt }, "auth.login.totp_invalid");
         await withAuthSafeDb(async (authDb) => {
-          await authDb.insert(auditLogsTable).values({
-            firmId: user.firmId,
-            actorId: user.id,
-            actorType: user.userType,
-            action: "auth.totp_failed",
-            detail: "reason=invalid_totp_code",
-            ipAddress: ip ?? null,
-            userAgent: ua ?? null,
-          });
+          const hasAuditLogs = await tableExistsAuthDb(authDb, "public.audit_logs");
+          if (hasAuditLogs) {
+            try {
+              await authDb.insert(auditLogsTable).values({
+                firmId: user.firmId,
+                actorId: user.id,
+                actorType: user.userType,
+                action: "auth.totp_failed",
+                detail: "reason=invalid_totp_code",
+                ipAddress: ip ?? null,
+                userAgent: ua ?? null,
+              });
+            } catch (err) {
+              logger.error({ emailHash, userId: user.id, stage: "audit_log_totp_failed", err }, "auth.login.audit_log_error");
+            }
+          }
         });
         res.status(401).json({ error: "Invalid authenticator code" });
         return;
@@ -140,6 +179,7 @@ router.post("/auth/login", authRateLimiter, async (req, res): Promise<void> => {
 
     stage = "persist";
     const { roleName, firmName } = await withAuthSafeDb(async (authDb) => {
+      const hasAuditLogs = await tableExistsAuthDb(authDb, "public.audit_logs");
       await authDb.insert(sessionsTable).values({
         userId: user.id,
         tokenHash,
@@ -152,15 +192,21 @@ router.post("/auth/login", authRateLimiter, async (req, res): Promise<void> => {
       if (didUseTotp) updateFields.totpLastUsedAt = new Date();
       await authDb.update(usersTable).set(updateFields).where(eq(usersTable.id, user.id));
 
-      await authDb.insert(auditLogsTable).values({
-        firmId: user.firmId,
-        actorId: user.id,
-        actorType: user.userType,
-        action: "auth.login_success",
-        detail: null,
-        ipAddress: ip ?? null,
-        userAgent: ua ?? null,
-      });
+      if (hasAuditLogs) {
+        try {
+          await authDb.insert(auditLogsTable).values({
+            firmId: user.firmId,
+            actorId: user.id,
+            actorType: user.userType,
+            action: "auth.login_success",
+            detail: null,
+            ipAddress: ip ?? null,
+            userAgent: ua ?? null,
+          });
+        } catch (err) {
+          logger.error({ emailHash, userId: user.id, stage: "audit_log_login_success", err }, "auth.login.audit_log_error");
+        }
+      }
 
       let roleName: string | null = null;
       if (user.roleId) {
