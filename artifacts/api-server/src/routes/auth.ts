@@ -17,10 +17,20 @@ async function tableExistsAuthDb(
   authDb: { execute: (q: SQL<unknown>) => Promise<unknown> },
   reg: string,
 ): Promise<boolean> {
-  const result = await authDb.execute(sql`SELECT to_regclass(${reg}) AS reg`);
-  const rows = Array.isArray(result)
-    ? (result as Record<string, unknown>[])
-    : ("rows" in result ? (result as { rows: Record<string, unknown>[] }).rows : []);
+  const result: unknown = await authDb.execute(sql`SELECT to_regclass(${reg}) AS reg`);
+  const rows: Record<string, unknown>[] = (() => {
+    if (Array.isArray(result)) return result as Record<string, unknown>[];
+    if (
+      result &&
+      typeof result === "object" &&
+      "rows" in result &&
+      Array.isArray((result as { rows?: unknown }).rows)
+    ) {
+      return (result as { rows: Record<string, unknown>[] }).rows;
+    }
+    return [];
+  })();
+
   return Boolean(rows[0]?.reg);
 }
 
