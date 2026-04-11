@@ -366,10 +366,10 @@ router.get("/cases", requireAuth, requireFirmUser, requirePermission("cases", "r
   }
   if (search && search.trim()) {
     const like = `%${search.trim()}%`;
-    conditions.push(or(
-      ilike(casesTable.referenceNo, like),
-      ilike(projectsTable.name, like),
-      ilike(developersTable.name, like),
+    const searchOr = or(
+      sql`${casesTable.referenceNo} ILIKE ${like}`,
+      sql`${projectsTable.name} ILIKE ${like}`,
+      sql`${developersTable.name} ILIKE ${like}`,
       sql`COALESCE(${casesTable.parcelNo}, '') ILIKE ${like}`,
       sql`EXISTS (
         SELECT 1
@@ -379,7 +379,8 @@ router.get("/cases", requireAuth, requireFirmUser, requirePermission("cases", "r
           AND cl.firm_id = ${casesTable.firmId}
           AND cl.name ILIKE ${like}
       )`
-    ));
+    );
+    if (searchOr) conditions.push(searchOr);
   }
 
   const purchaserNameSql = sql<string | null>`(
