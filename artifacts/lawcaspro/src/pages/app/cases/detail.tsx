@@ -84,11 +84,18 @@ export default function CaseDetail() {
   const updateStepMutation = useUpdateWorkflowStep();
   const createNoteMutation = useCreateCaseNote();
   const saveKeyDatesMutation = useMutation({
-    mutationFn: (payload: Record<string, unknown>) => apiFetch(`/cases/${caseId}/key-dates`, { method: "PATCH", body: JSON.stringify(payload) }),
-    onSuccess: () => {
+    mutationFn: (vars: { scope: string; payload: Record<string, unknown>; keys: string[] }) =>
+      apiFetch(`/cases/${caseId}/key-dates`, { method: "PATCH", body: JSON.stringify(vars.payload) }),
+    onSuccess: (_data, vars) => {
       queryClient.invalidateQueries({ queryKey: getGetCaseQueryKey(caseId) });
       queryClient.invalidateQueries({ queryKey: ["case-key-dates", caseId] });
-      toast({ title: savingScope ? `${savingScope} saved` : "Key dates saved" });
+      setKeyDatesBaseline((prev) => {
+        const next = { ...prev };
+        for (const k of vars.keys) next[k] = keyDatesDraft[k] ?? "";
+        return next;
+      });
+      setSavingScope("");
+      toast({ title: `${vars.scope} saved` });
     },
     onError: (err) => toast({ title: "Save failed", description: String(err), variant: "destructive" }),
   });
@@ -137,46 +144,134 @@ export default function CaseDetail() {
   };
   const canPrint = (printKey: string, dateVal: string) => Boolean(dateVal) && printState(printKey)?.status === "configured";
   const templateIssuesCount = (printableConfig || []).filter((x) => x?.status && x.status !== "configured").length;
-  const [keyDatesDraft, setKeyDatesDraft] = useState<Record<string, string>>({});
-  useEffect(() => {
   const [milestoneTab, setMilestoneTab] = useState<"spa" | "loan" | "bank" | "mot">("spa");
   const [savingScope, setSavingScope] = useState<string>("");
-    setKeyDatesDraft({
-      spa_signed_date: dateInputValue((keyDates as any).spa_signed_date),
-      spa_signed_date: dateInputValue((keyDates as any).spa_signed_date),
-      spa_forward_to_developer_execution_on: dateInputValue((keyDates as any).spa_forward_to_developer_execution_on),
-      spa_date: dateInputValue((keyDates as any).spa_date),
-      spa_stamped_date: dateInputValue((keyDates as any).spa_stamped_date),
-      stamped_spa_send_to_developer_on: dateInputValue((keyDates as any).stamped_spa_send_to_developer_on),
-      stamped_spa_received_from_developer_on: dateInputValue((keyDates as any).stamped_spa_received_from_developer_on),
-      letter_of_offer_date: dateInputValue((keyDates as any).letter_of_offer_date),
-      letter_of_offer_stamped_date: dateInputValue((keyDates as any).letter_of_offer_stamped_date),
-      loan_docs_pending_date: dateInputValue((keyDates as any).loan_docs_pending_date),
-      loan_docs_signed_date: dateInputValue((keyDates as any).loan_docs_signed_date),
-      acting_letter_issued_date: dateInputValue((keyDates as any).acting_letter_issued_date),
-      developer_confirmation_received_on: dateInputValue((keyDates as any).developer_confirmation_received_on),
-      developer_confirmation_date: dateInputValue((keyDates as any).developer_confirmation_date),
-      loan_sent_bank_execution_date: dateInputValue((keyDates as any).loan_sent_bank_execution_date),
-      loan_bank_executed_date: dateInputValue((keyDates as any).loan_bank_executed_date),
-      bank_lu_received_date: dateInputValue((keyDates as any).bank_lu_received_date),
-      bank_lu_forward_to_developer_on: dateInputValue((keyDates as any).bank_lu_forward_to_developer_on),
-      developer_lu_received_on: dateInputValue((keyDates as any).developer_lu_received_on),
-      developer_lu_dated: dateInputValue((keyDates as any).developer_lu_dated),
-      letter_disclaimer_received_on: dateInputValue((keyDates as any).letter_disclaimer_received_on),
-      letter_disclaimer_dated: dateInputValue((keyDates as any).letter_disclaimer_dated),
-      letter_disclaimer_reference_nos: typeof (keyDates as any).letter_disclaimer_reference_nos === "string" ? String((keyDates as any).letter_disclaimer_reference_nos) : "",
-      redemption_sum: (keyDates as any).redemption_sum !== null && (keyDates as any).redemption_sum !== undefined ? String((keyDates as any).redemption_sum) : "",
-      loan_agreement_dated: dateInputValue((keyDates as any).loan_agreement_dated),
-      loan_agreement_submitted_stamping_date: dateInputValue((keyDates as any).loan_agreement_submitted_stamping_date),
-      loan_agreement_stamped_date: dateInputValue((keyDates as any).loan_agreement_stamped_date),
-      register_poa_on: dateInputValue((keyDates as any).register_poa_on),
-      registered_poa_registration_number: typeof (keyDates as any).registered_poa_registration_number === "string" ? String((keyDates as any).registered_poa_registration_number) : "",
-      noa_served_on: dateInputValue((keyDates as any).noa_served_on),
-      advice_to_bank_date: dateInputValue((keyDates as any).advice_to_bank_date),
-      bank_1st_release_on: dateInputValue((keyDates as any).bank_1st_release_on),
-      first_release_amount_rm: (keyDates as any).first_release_amount_rm !== null && (keyDates as any).first_release_amount_rm !== undefined ? String((keyDates as any).first_release_amount_rm) : "",
-      mot_received_date: dateInputValue((keyDates as any).mot_received_date),
-      mot_signed_date: dateInputValue((keyDates as any).mot_signed_date),
+  const [keyDatesDraft, setKeyDatesDraft] = useState<Record<string, string>>({});
+  const [keyDatesBaseline, setKeyDatesBaseline] = useState<Record<string, string>>({});
+  const [keyDatesInitialized, setKeyDatesInitialized] = useState(false);
+
+  const parseKeyDates = (src: Record<string, unknown>) => ({
+    spa_signed_date: dateInputValue((src as any).spa_signed_date),
+    spa_forward_to_developer_execution_on: dateInputValue((src as any).spa_forward_to_developer_execution_on),
+    spa_date: dateInputValue((src as any).spa_date),
+    spa_stamped_date: dateInputValue((src as any).spa_stamped_date),
+    stamped_spa_send_to_developer_on: dateInputValue((src as any).stamped_spa_send_to_developer_on),
+    stamped_spa_received_from_developer_on: dateInputValue((src as any).stamped_spa_received_from_developer_on),
+    letter_of_offer_date: dateInputValue((src as any).letter_of_offer_date),
+    letter_of_offer_stamped_date: dateInputValue((src as any).letter_of_offer_stamped_date),
+    loan_docs_pending_date: dateInputValue((src as any).loan_docs_pending_date),
+    loan_docs_signed_date: dateInputValue((src as any).loan_docs_signed_date),
+    acting_letter_issued_date: dateInputValue((src as any).acting_letter_issued_date),
+    developer_confirmation_received_on: dateInputValue((src as any).developer_confirmation_received_on),
+    developer_confirmation_date: dateInputValue((src as any).developer_confirmation_date),
+    loan_sent_bank_execution_date: dateInputValue((src as any).loan_sent_bank_execution_date),
+    loan_bank_executed_date: dateInputValue((src as any).loan_bank_executed_date),
+    bank_lu_received_date: dateInputValue((src as any).bank_lu_received_date),
+    bank_lu_forward_to_developer_on: dateInputValue((src as any).bank_lu_forward_to_developer_on),
+    developer_lu_received_on: dateInputValue((src as any).developer_lu_received_on),
+    developer_lu_dated: dateInputValue((src as any).developer_lu_dated),
+    letter_disclaimer_received_on: dateInputValue((src as any).letter_disclaimer_received_on),
+    letter_disclaimer_dated: dateInputValue((src as any).letter_disclaimer_dated),
+    letter_disclaimer_reference_nos: typeof (src as any).letter_disclaimer_reference_nos === "string" ? String((src as any).letter_disclaimer_reference_nos) : "",
+    redemption_sum: (src as any).redemption_sum !== null && (src as any).redemption_sum !== undefined ? String((src as any).redemption_sum) : "",
+    loan_agreement_dated: dateInputValue((src as any).loan_agreement_dated),
+    loan_agreement_submitted_stamping_date: dateInputValue((src as any).loan_agreement_submitted_stamping_date),
+    loan_agreement_stamped_date: dateInputValue((src as any).loan_agreement_stamped_date),
+    register_poa_on: dateInputValue((src as any).register_poa_on),
+    registered_poa_registration_number: typeof (src as any).registered_poa_registration_number === "string" ? String((src as any).registered_poa_registration_number) : "",
+    noa_served_on: dateInputValue((src as any).noa_served_on),
+    advice_to_bank_date: dateInputValue((src as any).advice_to_bank_date),
+    bank_1st_release_on: dateInputValue((src as any).bank_1st_release_on),
+    first_release_amount_rm: (src as any).first_release_amount_rm !== null && (src as any).first_release_amount_rm !== undefined ? String((src as any).first_release_amount_rm) : "",
+    mot_received_date: dateInputValue((src as any).mot_received_date),
+    mot_signed_date: dateInputValue((src as any).mot_signed_date),
+    mot_stamped_date: dateInputValue((src as any).mot_stamped_date),
+    mot_registered_date: dateInputValue((src as any).mot_registered_date),
+    progressive_payment_date: dateInputValue((src as any).progressive_payment_date),
+    full_settlement_date: dateInputValue((src as any).full_settlement_date),
+    completion_date: dateInputValue((src as any).completion_date),
+  });
+
+  const scopeKeys = {
+    spa: [
+      "spa_date",
+      "spa_signed_date",
+      "spa_stamped_date",
+      "spa_forward_to_developer_execution_on",
+      "stamped_spa_send_to_developer_on",
+      "stamped_spa_received_from_developer_on",
+    ],
+    loan: [
+      "loan_docs_signed_date",
+      "letter_of_offer_date",
+      "acting_letter_issued_date",
+      "loan_sent_bank_execution_date",
+      "loan_bank_executed_date",
+      "letter_of_offer_stamped_date",
+      "loan_docs_pending_date",
+      "developer_confirmation_received_on",
+      "developer_confirmation_date",
+    ],
+    bank: [
+      "noa_served_on",
+      "bank_lu_forward_to_developer_on",
+      "advice_to_bank_date",
+      "bank_lu_received_date",
+      "developer_lu_received_on",
+      "developer_lu_dated",
+      "register_poa_on",
+      "registered_poa_registration_number",
+      "bank_1st_release_on",
+      "first_release_amount_rm",
+      "redemption_sum",
+      "letter_disclaimer_received_on",
+      "letter_disclaimer_dated",
+      "letter_disclaimer_reference_nos",
+    ],
+    mot: [
+      "completion_date",
+      "full_settlement_date",
+      "progressive_payment_date",
+      "mot_received_date",
+      "mot_signed_date",
+      "mot_stamped_date",
+      "mot_registered_date",
+    ],
+  } as const;
+
+  const isDirtyTab = (tab: keyof typeof scopeKeys) => {
+    for (const k of scopeKeys[tab]) {
+      if ((keyDatesDraft[k] ?? "") !== (keyDatesBaseline[k] ?? "")) return true;
+    }
+    return false;
+  };
+  const dirtySpa = isDirtyTab("spa");
+  const dirtyLoan = isDirtyTab("loan");
+  const dirtyBank = isDirtyTab("bank");
+  const dirtyMot = isDirtyTab("mot");
+  const anyDirty = dirtySpa || dirtyLoan || dirtyBank || dirtyMot;
+
+  useEffect(() => {
+    setKeyDatesInitialized(false);
+    setKeyDatesDraft({});
+    setKeyDatesBaseline({});
+    setSavingScope("");
+    setMilestoneTab("spa");
+  }, [caseId]);
+
+  useEffect(() => {
+    const parsed = parseKeyDates(keyDates);
+    if (!keyDatesInitialized) {
+      setKeyDatesDraft(parsed);
+      setKeyDatesBaseline(parsed);
+      setKeyDatesInitialized(true);
+      return;
+    }
+    if (!anyDirty) {
+      setKeyDatesDraft(parsed);
+      setKeyDatesBaseline(parsed);
+    }
+  }, [keyDates, keyDatesInitialized, anyDirty]);
       mot_stamped_date: dateInputValue((keyDates as any).mot_stamped_date),
       mot_registered_date: dateInputValue((keyDates as any).mot_registered_date),
       progressive_payment_date: dateInputValue((keyDates as any).progressive_payment_date),
@@ -237,64 +332,27 @@ export default function CaseDetail() {
   const workflowTotal = (workflow || []).length;
 
   const saveScope = (scope: "SPA" | "Loan" | "Bank / LU / NOA" | "MOT / Completion") => {
-    const dateKeysByScope: Record<string, string[]> = {
-      "SPA": [
-        "spa_signed_date",
-        "spa_forward_to_developer_execution_on",
-        "spa_date",
-        "spa_stamped_date",
-        "stamped_spa_send_to_developer_on",
-        "stamped_spa_received_from_developer_on",
-      ],
-      "Loan": [
-        "letter_of_offer_date",
-        "letter_of_offer_stamped_date",
-        "loan_docs_pending_date",
-        "loan_docs_signed_date",
-        "acting_letter_issued_date",
-        "developer_confirmation_received_on",
-        "developer_confirmation_date",
-        "loan_sent_bank_execution_date",
-        "loan_bank_executed_date",
-      ],
-      "Bank / LU / NOA": [
-        "bank_lu_received_date",
-        "bank_lu_forward_to_developer_on",
-        "developer_lu_received_on",
-        "developer_lu_dated",
-        "register_poa_on",
-        "noa_served_on",
-        "advice_to_bank_date",
-        "bank_1st_release_on",
-        "letter_disclaimer_received_on",
-        "letter_disclaimer_dated",
-      ],
-      "MOT / Completion": [
-        "mot_received_date",
-        "mot_signed_date",
-        "mot_stamped_date",
-        "mot_registered_date",
-        "progressive_payment_date",
-        "full_settlement_date",
-        "completion_date",
-      ],
-    };
+    const tab: keyof typeof scopeKeys =
+      scope === "SPA" ? "spa" :
+      scope === "Loan" ? "loan" :
+      scope === "Bank / LU / NOA" ? "bank" :
+      "mot";
+    const dirty =
+      tab === "spa" ? dirtySpa :
+      tab === "loan" ? dirtyLoan :
+      tab === "bank" ? dirtyBank :
+      dirtyMot;
+    if (!dirty) return;
 
+    const keys = scopeKeys[tab] as readonly string[];
     const payload: Record<string, unknown> = {};
-    for (const k of dateKeysByScope[scope] || []) {
+    for (const k of keys) {
       const v = keyDatesDraft[k] || "";
       payload[k] = v ? v : null;
     }
 
-    if (scope === "Bank / LU / NOA") {
-      payload.letter_disclaimer_reference_nos = keyDatesDraft.letter_disclaimer_reference_nos ? keyDatesDraft.letter_disclaimer_reference_nos : null;
-      payload.registered_poa_registration_number = keyDatesDraft.registered_poa_registration_number ? keyDatesDraft.registered_poa_registration_number : null;
-      payload.redemption_sum = keyDatesDraft.redemption_sum ? keyDatesDraft.redemption_sum : null;
-      payload.first_release_amount_rm = keyDatesDraft.first_release_amount_rm ? keyDatesDraft.first_release_amount_rm : null;
-    }
-
     setSavingScope(scope);
-    saveKeyDatesMutation.mutate(payload);
+    saveKeyDatesMutation.mutate({ scope, payload, keys: keys as string[] });
   };
 
   const FieldCard = (props: {
@@ -311,13 +369,14 @@ export default function CaseDetail() {
     const showPrinter = Boolean(props.printerKey);
     const printerKey = props.printerKey || "";
     const st = showPrinter ? printState(printerKey) : null;
-    const statusLabel = showPrinter ? printStatusLabel(st) : "";
+    const showStatus = showPrinter && st?.status !== "configured";
+    const statusLabel = showStatus ? printStatusLabel(st) : "";
 
     return (
       <div className="rounded-lg border border-slate-200 bg-white p-3">
         <div className="flex items-center justify-between gap-2">
           <Label className="text-xs text-slate-600">{props.label}</Label>
-          {showPrinter && (
+          {showStatus && (
             <Badge
               variant={st?.status === "configured" ? "secondary" : "outline"}
               className="text-[10px] whitespace-nowrap"
@@ -349,9 +408,8 @@ export default function CaseDetail() {
           )}
         </div>
         {isDate && (
-          <div className="mt-1 flex items-center justify-between text-[10px] text-slate-500">
-            <span>YYYY-MM-DD</span>
-            <span>{dmy ? `Display: ${dmy}` : ""}</span>
+          <div className="mt-1 text-[10px] text-slate-500">
+            {dmy ? `Display: ${dmy}` : "Format: YYYY-MM-DD"}
           </div>
         )}
       </div>
@@ -475,10 +533,19 @@ export default function CaseDetail() {
                   <Badge variant="outline" className="border-amber-200 text-amber-800">SPA: {spaStatus}</Badge>
                   <Badge variant="outline" className="border-slate-200 text-slate-700">Loan: {loanStatus}</Badge>
                   <Badge variant="outline" className={templateIssuesCount ? "border-red-200 text-red-700" : "border-emerald-200 text-emerald-700"}>
-                    Templates: {templateIssuesCount ? `${templateIssuesCount} issue(s)` : "All ready"}
+                    Print templates: {templateIssuesCount ? `${templateIssuesCount} issue(s)` : "All ready"}
                   </Badge>
                   <Badge variant="outline" className="border-slate-200 text-slate-700">
                     Workflow: {workflowDone}/{workflowTotal}
+                  </Badge>
+                  <Badge variant="outline" className="border-slate-200 text-slate-700">
+                    SPA Date: {keyDatesDraft.spa_date ? formatYmdToDmy(keyDatesDraft.spa_date) : "—"}
+                  </Badge>
+                  <Badge variant="outline" className="border-slate-200 text-slate-700">
+                    Loan Docs: {keyDatesDraft.loan_docs_signed_date ? formatYmdToDmy(keyDatesDraft.loan_docs_signed_date) : "—"}
+                  </Badge>
+                  <Badge variant="outline" className="border-slate-200 text-slate-700">
+                    Completion: {keyDatesDraft.completion_date ? formatYmdToDmy(keyDatesDraft.completion_date) : "—"}
                   </Badge>
                 </div>
               </div>
@@ -495,22 +562,36 @@ export default function CaseDetail() {
             <CardContent>
               <Tabs value={milestoneTab} onValueChange={(v) => setMilestoneTab(v as "spa" | "loan" | "bank" | "mot")} className="w-full">
                 <TabsList className="grid w-full grid-cols-2 md:grid-cols-4 bg-slate-100 p-1">
-                  <TabsTrigger value="spa">SPA</TabsTrigger>
-                  <TabsTrigger value="loan">Loan</TabsTrigger>
-                  <TabsTrigger value="bank">Bank / LU / NOA</TabsTrigger>
-                  <TabsTrigger value="mot">MOT / Completion</TabsTrigger>
+                  <TabsTrigger value="spa">
+                    <span className="flex items-center gap-1">SPA{dirtySpa && <span className="h-1.5 w-1.5 rounded-full bg-amber-500" />}</span>
+                  </TabsTrigger>
+                  <TabsTrigger value="loan">
+                    <span className="flex items-center gap-1">Loan{dirtyLoan && <span className="h-1.5 w-1.5 rounded-full bg-amber-500" />}</span>
+                  </TabsTrigger>
+                  <TabsTrigger value="bank">
+                    <span className="flex items-center gap-1">Bank / LU / NOA{dirtyBank && <span className="h-1.5 w-1.5 rounded-full bg-amber-500" />}</span>
+                  </TabsTrigger>
+                  <TabsTrigger value="mot">
+                    <span className="flex items-center gap-1">MOT / Completion{dirtyMot && <span className="h-1.5 w-1.5 rounded-full bg-amber-500" />}</span>
+                  </TabsTrigger>
                 </TabsList>
 
                 <TabsContent value="spa" className="pt-6 space-y-4">
                   <div className="flex items-center justify-between">
                     <div className="text-sm font-semibold text-slate-800">SPA Dates</div>
-                    <Button size="sm" className="bg-amber-500 hover:bg-amber-600" onClick={() => saveScope("SPA")} disabled={saveKeyDatesMutation.isPending}>
-                      {saveKeyDatesMutation.isPending && savingScope === "SPA" ? "Saving..." : "Save SPA"}
+                    <Button
+                      size="sm"
+                      variant={dirtySpa ? "default" : "outline"}
+                      className={dirtySpa ? "bg-amber-500 hover:bg-amber-600" : undefined}
+                      onClick={() => saveScope("SPA")}
+                      disabled={saveKeyDatesMutation.isPending || !dirtySpa}
+                    >
+                      {saveKeyDatesMutation.isPending && savingScope === "SPA" ? "Saving..." : dirtySpa ? "Save SPA" : "Saved"}
                     </Button>
                   </div>
                   <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
-                    <FieldCard label="SPA Signed" value={keyDatesDraft.spa_signed_date || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, spa_signed_date: v }))} />
                     <FieldCard label="SPA Date" value={keyDatesDraft.spa_date || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, spa_date: v }))} />
+                    <FieldCard label="SPA Signed" value={keyDatesDraft.spa_signed_date || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, spa_signed_date: v }))} />
                     <FieldCard label="SPA Stamped" value={keyDatesDraft.spa_stamped_date || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, spa_stamped_date: v }))} />
                     <FieldCard label="SPA Forward to Dev. Execution On" value={keyDatesDraft.spa_forward_to_developer_execution_on || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, spa_forward_to_developer_execution_on: v }))} />
                     <FieldCard label="Stamped SPA Send to Dev. On" value={keyDatesDraft.stamped_spa_send_to_developer_on || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, stamped_spa_send_to_developer_on: v }))} />
@@ -521,18 +602,24 @@ export default function CaseDetail() {
                 <TabsContent value="loan" className="pt-6 space-y-6">
                   <div className="flex items-center justify-between">
                     <div className="text-sm font-semibold text-slate-800">Loan Dates</div>
-                    <Button size="sm" className="bg-amber-500 hover:bg-amber-600" onClick={() => saveScope("Loan")} disabled={saveKeyDatesMutation.isPending}>
-                      {saveKeyDatesMutation.isPending && savingScope === "Loan" ? "Saving..." : "Save Loan"}
+                    <Button
+                      size="sm"
+                      variant={dirtyLoan ? "default" : "outline"}
+                      className={dirtyLoan ? "bg-amber-500 hover:bg-amber-600" : undefined}
+                      onClick={() => saveScope("Loan")}
+                      disabled={saveKeyDatesMutation.isPending || !dirtyLoan}
+                    >
+                      {saveKeyDatesMutation.isPending && savingScope === "Loan" ? "Saving..." : dirtyLoan ? "Save Loan" : "Saved"}
                     </Button>
                   </div>
                   <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
                     <div className="space-y-4">
                       <div className="text-sm font-semibold text-slate-800">Offer & Signing</div>
                       <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                        <FieldCard label="Letter of Offer Date" value={keyDatesDraft.letter_of_offer_date || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, letter_of_offer_date: v }))} />
-                        <FieldCard label="Letter of Offer Stamped" value={keyDatesDraft.letter_of_offer_stamped_date || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, letter_of_offer_stamped_date: v }))} />
-                        <FieldCard label="Loan Docs Pending Signing" value={keyDatesDraft.loan_docs_pending_date || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, loan_docs_pending_date: v }))} />
                         <FieldCard label="Loan Docs Signed" value={keyDatesDraft.loan_docs_signed_date || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, loan_docs_signed_date: v }))} />
+                        <FieldCard label="Letter of Offer Date" value={keyDatesDraft.letter_of_offer_date || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, letter_of_offer_date: v }))} />
+                        <FieldCard label="Loan Docs Pending Signing" value={keyDatesDraft.loan_docs_pending_date || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, loan_docs_pending_date: v }))} />
+                        <FieldCard label="Letter of Offer Stamped" value={keyDatesDraft.letter_of_offer_stamped_date || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, letter_of_offer_stamped_date: v }))} />
                       </div>
                     </div>
 
@@ -552,19 +639,25 @@ export default function CaseDetail() {
                 <TabsContent value="bank" className="pt-6 space-y-6">
                   <div className="flex items-center justify-between">
                     <div className="text-sm font-semibold text-slate-800">Bank / LU / NOA</div>
-                    <Button size="sm" className="bg-amber-500 hover:bg-amber-600" onClick={() => saveScope("Bank / LU / NOA")} disabled={saveKeyDatesMutation.isPending}>
-                      {saveKeyDatesMutation.isPending && savingScope === "Bank / LU / NOA" ? "Saving..." : "Save Bank"}
+                    <Button
+                      size="sm"
+                      variant={dirtyBank ? "default" : "outline"}
+                      className={dirtyBank ? "bg-amber-500 hover:bg-amber-600" : undefined}
+                      onClick={() => saveScope("Bank / LU / NOA")}
+                      disabled={saveKeyDatesMutation.isPending || !dirtyBank}
+                    >
+                      {saveKeyDatesMutation.isPending && savingScope === "Bank / LU / NOA" ? "Saving..." : dirtyBank ? "Save Bank" : "Saved"}
                     </Button>
                   </div>
                   <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
                     <div className="space-y-4">
                       <div className="text-sm font-semibold text-slate-800">Bank / LU</div>
                       <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                        <FieldCard label="Bank LU Received" value={keyDatesDraft.bank_lu_received_date || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, bank_lu_received_date: v }))} />
                         <FieldCard label="Bank LU Forward to Dev. On" value={keyDatesDraft.bank_lu_forward_to_developer_on || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, bank_lu_forward_to_developer_on: v }))} printerKey="letter_forward_bank_lu_to_dev" />
+                        <FieldCard label="Advice to Bank Date" value={keyDatesDraft.advice_to_bank_date || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, advice_to_bank_date: v }))} printerKey="letter_advice_spa_sol_lu" />
+                        <FieldCard label="Bank LU Received" value={keyDatesDraft.bank_lu_received_date || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, bank_lu_received_date: v }))} />
                         <FieldCard label="Developer LU Received On" value={keyDatesDraft.developer_lu_received_on || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, developer_lu_received_on: v }))} />
                         <FieldCard label="Developer LU Dated" value={keyDatesDraft.developer_lu_dated || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, developer_lu_dated: v }))} />
-                        <FieldCard label="Advice to Bank Date" value={keyDatesDraft.advice_to_bank_date || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, advice_to_bank_date: v }))} printerKey="letter_advice_spa_sol_lu" />
                       </div>
                     </div>
 
@@ -591,18 +684,24 @@ export default function CaseDetail() {
                 <TabsContent value="mot" className="pt-6 space-y-4">
                   <div className="flex items-center justify-between">
                     <div className="text-sm font-semibold text-slate-800">MOT / Completion</div>
-                    <Button size="sm" className="bg-amber-500 hover:bg-amber-600" onClick={() => saveScope("MOT / Completion")} disabled={saveKeyDatesMutation.isPending}>
-                      {saveKeyDatesMutation.isPending && savingScope === "MOT / Completion" ? "Saving..." : "Save MOT"}
+                    <Button
+                      size="sm"
+                      variant={dirtyMot ? "default" : "outline"}
+                      className={dirtyMot ? "bg-amber-500 hover:bg-amber-600" : undefined}
+                      onClick={() => saveScope("MOT / Completion")}
+                      disabled={saveKeyDatesMutation.isPending || !dirtyMot}
+                    >
+                      {saveKeyDatesMutation.isPending && savingScope === "MOT / Completion" ? "Saving..." : dirtyMot ? "Save MOT" : "Saved"}
                     </Button>
                   </div>
                   <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+                    <FieldCard label="Completion Date" value={keyDatesDraft.completion_date || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, completion_date: v }))} />
+                    <FieldCard label="Full Settlement Date" value={keyDatesDraft.full_settlement_date || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, full_settlement_date: v }))} />
+                    <FieldCard label="Progressive Payment Date" value={keyDatesDraft.progressive_payment_date || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, progressive_payment_date: v }))} />
                     <FieldCard label="MOT Received" value={keyDatesDraft.mot_received_date || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, mot_received_date: v }))} />
                     <FieldCard label="MOT Signed" value={keyDatesDraft.mot_signed_date || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, mot_signed_date: v }))} />
                     <FieldCard label="MOT Stamped" value={keyDatesDraft.mot_stamped_date || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, mot_stamped_date: v }))} />
                     <FieldCard label="MOT Registered" value={keyDatesDraft.mot_registered_date || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, mot_registered_date: v }))} />
-                    <FieldCard label="Progressive Payment Date" value={keyDatesDraft.progressive_payment_date || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, progressive_payment_date: v }))} />
-                    <FieldCard label="Full Settlement Date" value={keyDatesDraft.full_settlement_date || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, full_settlement_date: v }))} />
-                    <FieldCard label="Completion Date" value={keyDatesDraft.completion_date || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, completion_date: v }))} />
                   </div>
                 </TabsContent>
               </Tabs>
