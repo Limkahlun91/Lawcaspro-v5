@@ -5,15 +5,17 @@
  * Lawcaspro Legal Operations System API
  * OpenAPI spec version: 1.0.0
  */
+import type { InlinePurchaser } from "./inlinePurchaser";
 
 export interface CreateCaseBody {
   projectId: number;
-  developerId?: number;
+  developerId: number;
   purchaseMode: string;
   titleType: string;
   spaPrice?: number;
   assignedLawyerId: number;
   assignedClerkId?: number;
-  purchaserIds?: number[];
-  purchasers?: { name: string; ic?: string }[];
+  purchaserIds: number[];
+  /** Optional inline purchaser creation when purchaserIds is empty */
+  purchasers?: InlinePurchaser[];
 }

@@ -1,5 +1,5 @@
 import { Router, type IRouter } from "express";
-import { eq, ilike, count, desc, and, sql } from "drizzle-orm";
+import { eq, ilike, count, desc, and, or, sql } from "drizzle-orm";
 import {
   db, casesTable, casePurchasersTable, caseAssignmentsTable,
   caseWorkflowStepsTable, caseNotesTable,
@@ -15,6 +15,7 @@ import {
 import { requireAuth, requireFirmUser, requirePermission, writeAuditLog, type AuthRequest } from "../lib/auth";
 import { buildWorkflowSteps } from "../lib/workflow";
 import { KEY_DATE_FIELD_TO_STEP_KEY, WORKFLOW_STEP_KEY_TO_KEY_DATE_FIELD, type KeyDateField } from "../lib/keyDatesWorkflow";
+import { loanStatusSql, milestoneDateYmdSql, milestonePresenceWhereSql, spaStatusSql, type CaseMilestoneKey, type MilestonePresence } from "../lib/caseListLogic";
 
 const router: IRouter = Router();
 
@@ -252,6 +253,42 @@ router.get("/cases/recent", requireAuth, requireFirmUser, requirePermission("cas
   res.json(summaries);
 });
 
+router.get("/cases/filter-options", requireAuth, requireFirmUser, requirePermission("cases", "read"), async (req: AuthRequest, res): Promise<void> => {
+  const r = rdb(req);
+
+  const stepDefs = buildWorkflowSteps("loan", "individual");
+  const spaStatuses = ["Pending", ...stepDefs.filter(s => s.pathType === "common").sort((a, b) => a.stepOrder - b.stepOrder).map(s => s.stepName)];
+  const loanStatuses = ["Pending", ...stepDefs.filter(s => s.pathType === "loan").sort((a, b) => a.stepOrder - b.stepOrder).map(s => s.stepName)];
+
+  const assignmentRows = await r
+    .select({ userId: usersTable.id, userName: usersTable.name, roleInCase: caseAssignmentsTable.roleInCase })
+    .from(caseAssignmentsTable)
+    .innerJoin(usersTable, eq(caseAssignmentsTable.userId, usersTable.id))
+    .where(and(eq(usersTable.firmId, req.firmId!), sql`unassigned_at IS NULL`));
+
+  const lawyersMap = new Map<number, string>();
+  const clerksMap = new Map<number, string>();
+  for (const a of assignmentRows) {
+    if (a.roleInCase === "lawyer") lawyersMap.set(a.userId, a.userName);
+    if (a.roleInCase === "clerk") clerksMap.set(a.userId, a.userName);
+  }
+  const lawyers = Array.from(lawyersMap.entries()).map(([id, name]) => ({ id, name })).sort((a, b) => a.name.localeCompare(b.name));
+  const clerks = Array.from(clerksMap.entries()).map(([id, name]) => ({ id, name })).sort((a, b) => a.name.localeCompare(b.name));
+
+  res.json({
+    spaStatuses,
+    loanStatuses,
+    assignees: { lawyers, clerks },
+    milestones: [
+      { key: "spa_date", label: "SPA Date" },
+      { key: "spa_stamped_date", label: "SPA Stamped" },
+      { key: "letter_of_offer_date", label: "LOF Date" },
+      { key: "loan_docs_signed_date", label: "Loan Docs Signed" },
+      { key: "completion_date", label: "Completion Date" },
+    ],
+  });
+});
+
 router.get("/cases", requireAuth, requireFirmUser, requirePermission("cases", "read"), async (req: AuthRequest, res): Promise<void> => {
   const r = rdb(req);
   const params = ListCasesQueryParams.safeParse(req.query);
@@ -265,22 +302,216 @@ router.get("/cases", requireAuth, requireFirmUser, requirePermission("cases", "r
   const limit = params.success ? (params.data.limit ?? 20) : 20;
   const offset = (page - 1) * limit;
 
+  const one = (v: string | string[] | undefined): string | undefined => Array.isArray(v) ? v[0] : v;
+  const parseIntOrUndef = (v: string | string[] | undefined): number | undefined => {
+    const s = one(v);
+    if (s === undefined) return undefined;
+    const n = Number(s);
+    if (!Number.isInteger(n)) return undefined;
+    return n;
+  };
+
+  const spaStatus = one(req.query.spaStatus as any);
+  const loanStatus = one(req.query.loanStatus as any);
+  const milestone = one(req.query.milestone as any) as CaseMilestoneKey | undefined;
+  const milestonePresence = one(req.query.milestonePresence as any) as MilestonePresence | undefined;
+  const assignedLawyerId = params.success ? params.data.assignedLawyerId : parseIntOrUndef(req.query.assignedLawyerId as any);
+  const assignedClerkId = parseIntOrUndef(req.query.assignedClerkId as any);
+
+  const loanOnlyMilestones: Set<CaseMilestoneKey> = new Set([
+    "loan_docs_signed_date",
+    "acting_letter_issued_date",
+    "loan_sent_bank_execution_date",
+    "loan_bank_executed_date",
+    "bank_lu_received_date",
+  ]);
+
   const conditions = [eq(casesTable.firmId, req.firmId!)];
   if (status) conditions.push(eq(casesTable.status, status));
   if (projectId) conditions.push(eq(casesTable.projectId, projectId));
   if (developerId) conditions.push(eq(casesTable.developerId, developerId));
   if (purchaseMode) conditions.push(eq(casesTable.purchaseMode, purchaseMode));
   if (titleType) conditions.push(eq(casesTable.titleType, titleType));
+  if (assignedLawyerId) {
+    conditions.push(sql`EXISTS (
+      SELECT 1
+      FROM ${caseAssignmentsTable}
+      WHERE ${caseAssignmentsTable.caseId} = ${casesTable.id}
+        AND ${caseAssignmentsTable.roleInCase} = 'lawyer'
+        AND ${caseAssignmentsTable.userId} = ${assignedLawyerId}
+        AND ${sql`unassigned_at IS NULL`}
+    )`);
+  }
+  if (assignedClerkId) {
+    conditions.push(sql`EXISTS (
+      SELECT 1
+      FROM ${caseAssignmentsTable}
+      WHERE ${caseAssignmentsTable.caseId} = ${casesTable.id}
+        AND ${caseAssignmentsTable.roleInCase} = 'clerk'
+        AND ${caseAssignmentsTable.userId} = ${assignedClerkId}
+        AND ${sql`unassigned_at IS NULL`}
+    )`);
+  }
+  if (spaStatus) {
+    conditions.push(sql`${spaStatusSql()} = ${spaStatus}`);
+  }
+  if (loanStatus) {
+    conditions.push(sql`${loanStatusSql()} = ${loanStatus}`);
+  }
+  if (milestone && milestonePresence && (milestonePresence === "filled" || milestonePresence === "missing")) {
+    if (loanOnlyMilestones.has(milestone)) {
+      conditions.push(eq(casesTable.purchaseMode, "loan"));
+    }
+    conditions.push(milestonePresenceWhereSql(milestone, milestonePresence));
+  }
+  if (search && search.trim()) {
+    const like = `%${search.trim()}%`;
+    conditions.push(or(
+      ilike(casesTable.referenceNo, like),
+      ilike(projectsTable.name, like),
+      ilike(developersTable.name, like),
+      sql`COALESCE(${casesTable.parcelNo}, '') ILIKE ${like}`,
+      sql`EXISTS (
+        SELECT 1
+        FROM ${casePurchasersTable} cp
+        JOIN ${clientsTable} cl ON cp.client_id = cl.id
+        WHERE cp.case_id = ${casesTable.id}
+          AND cl.firm_id = ${casesTable.firmId}
+          AND cl.name ILIKE ${like}
+      )`
+    ));
+  }
 
-  const cases = await r.select().from(casesTable)
+  const purchaserNameSql = sql<string | null>`(
+    SELECT cl.name
+    FROM ${casePurchasersTable} cp
+    JOIN ${clientsTable} cl ON cp.client_id = cl.id
+    WHERE cp.case_id = ${casesTable.id}
+      AND cl.firm_id = ${casesTable.firmId}
+    ORDER BY cp.order_no ASC
+    LIMIT 1
+  )`;
+  const purchaserCountSql = sql<number>`(
+    SELECT COUNT(*)
+    FROM ${casePurchasersTable} cp
+    WHERE cp.case_id = ${casesTable.id}
+  )`;
+
+  const lawyerIdSql = sql<number | null>`(
+    SELECT ${caseAssignmentsTable.userId}
+    FROM ${caseAssignmentsTable}
+    WHERE ${caseAssignmentsTable.caseId} = ${casesTable.id}
+      AND ${caseAssignmentsTable.roleInCase} = 'lawyer'
+      AND ${sql`unassigned_at IS NULL`}
+    ORDER BY ${caseAssignmentsTable.assignedAt} DESC
+    LIMIT 1
+  )`;
+  const lawyerNameSql = sql<string | null>`(
+    SELECT ${usersTable.name}
+    FROM ${caseAssignmentsTable}
+    JOIN ${usersTable} ON ${caseAssignmentsTable.userId} = ${usersTable.id}
+    WHERE ${caseAssignmentsTable.caseId} = ${casesTable.id}
+      AND ${caseAssignmentsTable.roleInCase} = 'lawyer'
+      AND ${sql`unassigned_at IS NULL`}
+    ORDER BY ${caseAssignmentsTable.assignedAt} DESC
+    LIMIT 1
+  )`;
+  const clerkIdSql = sql<number | null>`(
+    SELECT ${caseAssignmentsTable.userId}
+    FROM ${caseAssignmentsTable}
+    WHERE ${caseAssignmentsTable.caseId} = ${casesTable.id}
+      AND ${caseAssignmentsTable.roleInCase} = 'clerk'
+      AND ${sql`unassigned_at IS NULL`}
+    ORDER BY ${caseAssignmentsTable.assignedAt} DESC
+    LIMIT 1
+  )`;
+  const clerkNameSql = sql<string | null>`(
+    SELECT ${usersTable.name}
+    FROM ${caseAssignmentsTable}
+    JOIN ${usersTable} ON ${caseAssignmentsTable.userId} = ${usersTable.id}
+    WHERE ${caseAssignmentsTable.caseId} = ${casesTable.id}
+      AND ${caseAssignmentsTable.roleInCase} = 'clerk'
+      AND ${sql`unassigned_at IS NULL`}
+    ORDER BY ${caseAssignmentsTable.assignedAt} DESC
+    LIMIT 1
+  )`;
+
+  const rows = await r
+    .select({
+      id: casesTable.id,
+      referenceNo: casesTable.referenceNo,
+      status: casesTable.status,
+      projectName: projectsTable.name,
+      developerName: developersTable.name,
+      purchaseMode: casesTable.purchaseMode,
+      titleType: casesTable.titleType,
+      parcelNo: casesTable.parcelNo,
+      createdAt: casesTable.createdAt,
+      updatedAt: casesTable.updatedAt,
+      clientName: purchaserNameSql,
+      purchaserCount: purchaserCountSql,
+      assignedLawyerId: lawyerIdSql,
+      assignedLawyerName: lawyerNameSql,
+      assignedClerkId: clerkIdSql,
+      assignedClerkName: clerkNameSql,
+      spaStatus: spaStatusSql(),
+      loanStatus: loanStatusSql(),
+      mSpaDate: milestoneDateYmdSql("spa_date"),
+      mSpaStampedDate: milestoneDateYmdSql("spa_stamped_date"),
+      mLetterOfOfferDate: milestoneDateYmdSql("letter_of_offer_date"),
+      mLoanDocsSignedDate: milestoneDateYmdSql("loan_docs_signed_date"),
+      mCompletionDate: milestoneDateYmdSql("completion_date"),
+    })
+    .from(casesTable)
+    .leftJoin(projectsTable, eq(projectsTable.id, casesTable.projectId))
+    .leftJoin(developersTable, eq(developersTable.id, casesTable.developerId))
+    .leftJoin(caseKeyDatesTable, and(eq(caseKeyDatesTable.caseId, casesTable.id), eq(caseKeyDatesTable.firmId, casesTable.firmId)))
     .where(and(...conditions))
     .orderBy(desc(casesTable.updatedAt))
-    .limit(limit).offset(offset);
+    .limit(limit)
+    .offset(offset);
 
-  const [totalRes] = await r.select({ c: count() }).from(casesTable).where(and(...conditions));
+  const [totalRes] = await r
+    .select({ c: sql<number>`COUNT(DISTINCT ${casesTable.id})` })
+    .from(casesTable)
+    .leftJoin(projectsTable, eq(projectsTable.id, casesTable.projectId))
+    .leftJoin(developersTable, eq(developersTable.id, casesTable.developerId))
+    .leftJoin(caseKeyDatesTable, and(eq(caseKeyDatesTable.caseId, casesTable.id), eq(caseKeyDatesTable.firmId, casesTable.firmId)))
+    .where(and(...conditions));
 
-  const summaries = await Promise.all(cases.map((c) => formatCaseSummary(r, c)));
-  res.json({ data: summaries, total: Number(totalRes?.c ?? 0), page, limit });
+  const data = rows.map((row) => {
+    const purchaserCount = Number(row.purchaserCount ?? 0);
+    const baseName = row.clientName ?? null;
+    const clientDisplayName = baseName && purchaserCount > 1 ? `${baseName} +${purchaserCount - 1}` : baseName;
+    return {
+      id: row.id,
+      referenceNo: row.referenceNo,
+      clientName: clientDisplayName,
+      projectName: row.projectName ?? "Unknown",
+      developerName: row.developerName ?? "Unknown",
+      property: row.parcelNo ?? null,
+      purchaseMode: row.purchaseMode,
+      titleType: row.titleType,
+      status: row.status,
+      assignedLawyerId: row.assignedLawyerId ?? null,
+      assignedLawyerName: row.assignedLawyerName ?? null,
+      assignedClerkId: row.assignedClerkId ?? null,
+      assignedClerkName: row.assignedClerkName ?? null,
+      spaStatus: row.spaStatus,
+      loanStatus: row.loanStatus ?? null,
+      milestones: {
+        spa_date: row.mSpaDate ?? null,
+        spa_stamped_date: row.mSpaStampedDate ?? null,
+        letter_of_offer_date: row.mLetterOfOfferDate ?? null,
+        loan_docs_signed_date: row.mLoanDocsSignedDate ?? null,
+        completion_date: row.mCompletionDate ?? null,
+      },
+      createdAt: row.createdAt.toISOString(),
+      updatedAt: row.updatedAt.toISOString(),
+    };
+  });
+
+  res.json({ data, total: Number(totalRes?.c ?? 0), page, limit });
 });
 
 router.post("/cases", requireAuth, requireFirmUser, requirePermission("cases", "create"), async (req: AuthRequest, res): Promise<void> => {

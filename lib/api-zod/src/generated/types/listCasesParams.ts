@@ -5,13 +5,23 @@
  * Lawcaspro Legal Operations System API
  * OpenAPI spec version: 1.0.0
  */
+import type { CaseMilestoneKey } from "./caseMilestoneKey";
+import type { MilestonePresence } from "./milestonePresence";
 
 export type ListCasesParams = {
+  /**
+   * Keyword search across reference, client/purchaser, project, and property
+   */
   search?: string;
   status?: string;
   projectId?: number;
   developerId?: number;
   assignedLawyerId?: number;
+  assignedClerkId?: number;
+  spaStatus?: string;
+  loanStatus?: string;
+  milestone?: CaseMilestoneKey;
+  milestonePresence?: MilestonePresence;
   purchaseMode?: string;
   titleType?: string;
   page?: number;

@@ -373,13 +373,57 @@ export const GetDashboardStatsResponse = zod.object({
     zod.object({
       id: zod.number(),
       referenceNo: zod.string(),
+      clientName: zod.string().nullable(),
       projectName: zod.string(),
       developerName: zod.string(),
+      property: zod.string().nullable(),
       purchaseMode: zod.string(),
       titleType: zod.string(),
       status: zod.string(),
+      assignedLawyerId: zod.number().nullable(),
       assignedLawyerName: zod.string().nullable(),
+      assignedClerkId: zod.number().nullable(),
+      assignedClerkName: zod.string().nullable(),
+      spaStatus: zod.string(),
+      loanStatus: zod.string().nullable(),
+      milestones: zod.object({
+        spa_date: zod.string().nullable().describe("YYYY-MM-DD"),
+        spa_stamped_date: zod.string().nullable().describe("YYYY-MM-DD"),
+        letter_of_offer_date: zod.string().nullable().describe("YYYY-MM-DD"),
+        loan_docs_signed_date: zod.string().nullable().describe("YYYY-MM-DD"),
+        completion_date: zod.string().nullable().describe("YYYY-MM-DD"),
+      }),
       createdAt: zod.coerce.date(),
+      updatedAt: zod.coerce.date(),
+    }),
+  ),
+  billing: zod.object({
+    totalBilled: zod.number(),
+    totalPaid: zod.number(),
+    totalOutstanding: zod.number(),
+  }),
+  commsThisMonth: zod.number(),
+  milestoneCards: zod.array(
+    zod.object({
+      key: zod.string(),
+      label: zod.string(),
+      count: zod.number(),
+      filter: zod.object({
+        milestone: zod.enum([
+          "spa_date",
+          "spa_stamped_date",
+          "letter_of_offer_date",
+          "loan_docs_signed_date",
+          "acting_letter_issued_date",
+          "loan_sent_bank_execution_date",
+          "loan_bank_executed_date",
+          "bank_lu_received_date",
+          "noa_served_on",
+          "completion_date",
+        ]),
+        milestonePresence: zod.enum(["filled", "missing"]),
+        purchaseMode: zod.string().optional(),
+      }),
     }),
   ),
 });
@@ -899,11 +943,34 @@ export const DeleteClientParams = zod.object({
  * @summary List cases
  */
 export const ListCasesQueryParams = zod.object({
-  search: zod.coerce.string().optional(),
+  search: zod.coerce
+    .string()
+    .optional()
+    .describe(
+      "Keyword search across reference, client\/purchaser, project, and property",
+    ),
   status: zod.coerce.string().optional(),
   projectId: zod.coerce.number().optional(),
   developerId: zod.coerce.number().optional(),
   assignedLawyerId: zod.coerce.number().optional(),
+  assignedClerkId: zod.coerce.number().optional(),
+  spaStatus: zod.coerce.string().optional(),
+  loanStatus: zod.coerce.string().optional(),
+  milestone: zod
+    .enum([
+      "spa_date",
+      "spa_stamped_date",
+      "letter_of_offer_date",
+      "loan_docs_signed_date",
+      "acting_letter_issued_date",
+      "loan_sent_bank_execution_date",
+      "loan_bank_executed_date",
+      "bank_lu_received_date",
+      "noa_served_on",
+      "completion_date",
+    ])
+    .optional(),
+  milestonePresence: zod.enum(["filled", "missing"]).optional(),
   purchaseMode: zod.coerce.string().optional(),
   titleType: zod.coerce.string().optional(),
   page: zod.coerce.number().optional(),
@@ -915,13 +982,28 @@ export const ListCasesResponse = zod.object({
     zod.object({
       id: zod.number(),
       referenceNo: zod.string(),
+      clientName: zod.string().nullable(),
       projectName: zod.string(),
       developerName: zod.string(),
+      property: zod.string().nullable(),
       purchaseMode: zod.string(),
       titleType: zod.string(),
       status: zod.string(),
+      assignedLawyerId: zod.number().nullable(),
       assignedLawyerName: zod.string().nullable(),
+      assignedClerkId: zod.number().nullable(),
+      assignedClerkName: zod.string().nullable(),
+      spaStatus: zod.string(),
+      loanStatus: zod.string().nullable(),
+      milestones: zod.object({
+        spa_date: zod.string().nullable().describe("YYYY-MM-DD"),
+        spa_stamped_date: zod.string().nullable().describe("YYYY-MM-DD"),
+        letter_of_offer_date: zod.string().nullable().describe("YYYY-MM-DD"),
+        loan_docs_signed_date: zod.string().nullable().describe("YYYY-MM-DD"),
+        completion_date: zod.string().nullable().describe("YYYY-MM-DD"),
+      }),
       createdAt: zod.coerce.date(),
+      updatedAt: zod.coerce.date(),
     }),
   ),
   total: zod.number(),
@@ -934,14 +1016,22 @@ export const ListCasesResponse = zod.object({
  */
 export const CreateCaseBody = zod.object({
   projectId: zod.number(),
-  developerId: zod.number().optional(),
+  developerId: zod.number(),
   purchaseMode: zod.string(),
   titleType: zod.string(),
   spaPrice: zod.number().optional(),
   assignedLawyerId: zod.number(),
   assignedClerkId: zod.number().optional(),
-  purchaserIds: zod.array(zod.number()).optional(),
-  purchasers: zod.array(zod.object({ name: zod.string(), ic: zod.string().optional() })).optional(),
+  purchaserIds: zod.array(zod.number()),
+  purchasers: zod
+    .array(
+      zod.object({
+        name: zod.string(),
+        ic: zod.string().nullish(),
+      }),
+    )
+    .optional()
+    .describe("Optional inline purchaser creation when purchaserIds is empty"),
 });
 
 /**
@@ -1146,12 +1236,27 @@ export const GetRecentCasesQueryParams = zod.object({
 export const GetRecentCasesResponseItem = zod.object({
   id: zod.number(),
   referenceNo: zod.string(),
+  clientName: zod.string().nullable(),
   projectName: zod.string(),
   developerName: zod.string(),
+  property: zod.string().nullable(),
   purchaseMode: zod.string(),
   titleType: zod.string(),
   status: zod.string(),
+  assignedLawyerId: zod.number().nullable(),
   assignedLawyerName: zod.string().nullable(),
+  assignedClerkId: zod.number().nullable(),
+  assignedClerkName: zod.string().nullable(),
+  spaStatus: zod.string(),
+  loanStatus: zod.string().nullable(),
+  milestones: zod.object({
+    spa_date: zod.string().nullable().describe("YYYY-MM-DD"),
+    spa_stamped_date: zod.string().nullable().describe("YYYY-MM-DD"),
+    letter_of_offer_date: zod.string().nullable().describe("YYYY-MM-DD"),
+    loan_docs_signed_date: zod.string().nullable().describe("YYYY-MM-DD"),
+    completion_date: zod.string().nullable().describe("YYYY-MM-DD"),
+  }),
   createdAt: zod.coerce.date(),
+  updatedAt: zod.coerce.date(),
 });
 export const GetRecentCasesResponse = zod.array(GetRecentCasesResponseItem);

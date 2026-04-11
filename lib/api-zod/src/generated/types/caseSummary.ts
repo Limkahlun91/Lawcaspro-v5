@@ -5,16 +5,32 @@
  * Lawcaspro Legal Operations System API
  * OpenAPI spec version: 1.0.0
  */
+import type { CaseMilestoneSummary } from "./caseMilestoneSummary";
 
 export interface CaseSummary {
   id: number;
   referenceNo: string;
+  /** @nullable */
+  clientName: string | null;
   projectName: string;
   developerName: string;
+  /** @nullable */
+  property: string | null;
   purchaseMode: string;
   titleType: string;
   status: string;
   /** @nullable */
+  assignedLawyerId: number | null;
+  /** @nullable */
   assignedLawyerName: string | null;
+  /** @nullable */
+  assignedClerkId: number | null;
+  /** @nullable */
+  assignedClerkName: string | null;
+  spaStatus: string;
+  /** @nullable */
+  loanStatus: string | null;
+  milestones: CaseMilestoneSummary;
   createdAt: Date;
+  updatedAt: Date;
 }

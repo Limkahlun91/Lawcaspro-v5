@@ -92,6 +92,15 @@ export default function AppDashboard() {
   }
 
   const billing = (stats.billing ?? {}) as Record<string, number>;
+  type MilestoneCard = {
+    key: string;
+    label: string;
+    count: number;
+    filter: { milestone: string; milestonePresence: string; purchaseMode?: string };
+  };
+  const milestoneCards: MilestoneCard[] = Array.isArray((stats as Record<string, unknown>).milestoneCards)
+    ? ((stats as Record<string, unknown>).milestoneCards as MilestoneCard[])
+    : [];
 
   return (
     <div className="space-y-6">
@@ -156,6 +165,36 @@ export default function AppDashboard() {
           </Card>
         ))}
       </div>
+
+      {milestoneCards.length > 0 && (
+        <Card>
+          <CardHeader className="pb-3">
+            <CardTitle>Milestones</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+              {milestoneCards.map((card) => {
+                const qs = new URLSearchParams();
+                qs.set("milestone", card.filter.milestone);
+                qs.set("milestonePresence", card.filter.milestonePresence);
+                if (card.filter.purchaseMode) qs.set("purchaseMode", card.filter.purchaseMode);
+                const href = `/app/cases?${qs.toString()}`;
+                return (
+                  <div
+                    key={card.key}
+                    className="border rounded-lg bg-white p-4 cursor-pointer hover:shadow-sm transition-shadow"
+                    onClick={() => setLocation(href)}
+                  >
+                    <div className="text-xs text-slate-500">{card.label}</div>
+                    <div className="text-2xl font-bold text-slate-900 leading-tight mt-1">{card.count}</div>
+                    <div className="text-xs text-amber-600 mt-2">View cases</div>
+                  </div>
+                );
+              })}
+            </div>
+          </CardContent>
+        </Card>
+      )}
 
       {/* Billing + Comms summary row */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">

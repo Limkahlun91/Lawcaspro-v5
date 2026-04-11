@@ -5,7 +5,9 @@
  * Lawcaspro Legal Operations System API
  * OpenAPI spec version: 1.0.0
  */
+import type { BillingSummary } from "./billingSummary";
 import type { CaseSummary } from "./caseSummary";
+import type { DashboardMilestoneCard } from "./dashboardMilestoneCard";
 
 export interface DashboardStats {
   totalCases: number;
@@ -20,4 +22,7 @@ export interface DashboardStats {
   individualTitleCases: number;
   strataTitleCases: number;
   recentCases: CaseSummary[];
+  billing: BillingSummary;
+  commsThisMonth: number;
+  milestoneCards: DashboardMilestoneCard[];
 }

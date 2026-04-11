@@ -37,7 +37,6 @@ export interface AuthUser {
   /** @nullable */
   roleName: string | null;
   status: string;
-  totpEnabled?: boolean;
 }
 
 export interface Firm {
@@ -82,17 +81,103 @@ export interface PlatformStats {
   recentFirms: Firm[];
 }
 
+export interface CaseMilestoneSummary {
+  /**
+   * YYYY-MM-DD
+   * @nullable
+   */
+  spa_date: string | null;
+  /**
+   * YYYY-MM-DD
+   * @nullable
+   */
+  spa_stamped_date: string | null;
+  /**
+   * YYYY-MM-DD
+   * @nullable
+   */
+  letter_of_offer_date: string | null;
+  /**
+   * YYYY-MM-DD
+   * @nullable
+   */
+  loan_docs_signed_date: string | null;
+  /**
+   * YYYY-MM-DD
+   * @nullable
+   */
+  completion_date: string | null;
+}
+
 export interface CaseSummary {
   id: number;
   referenceNo: string;
+  /** @nullable */
+  clientName: string | null;
   projectName: string;
   developerName: string;
+  /** @nullable */
+  property: string | null;
   purchaseMode: string;
   titleType: string;
   status: string;
   /** @nullable */
+  assignedLawyerId: number | null;
+  /** @nullable */
   assignedLawyerName: string | null;
+  /** @nullable */
+  assignedClerkId: number | null;
+  /** @nullable */
+  assignedClerkName: string | null;
+  spaStatus: string;
+  /** @nullable */
+  loanStatus: string | null;
+  milestones: CaseMilestoneSummary;
   createdAt: string;
+  updatedAt: string;
+}
+
+export interface BillingSummary {
+  totalBilled: number;
+  totalPaid: number;
+  totalOutstanding: number;
+}
+
+export type CaseMilestoneKey =
+  (typeof CaseMilestoneKey)[keyof typeof CaseMilestoneKey];
+
+export const CaseMilestoneKey = {
+  spa_date: "spa_date",
+  spa_stamped_date: "spa_stamped_date",
+  letter_of_offer_date: "letter_of_offer_date",
+  loan_docs_signed_date: "loan_docs_signed_date",
+  acting_letter_issued_date: "acting_letter_issued_date",
+  loan_sent_bank_execution_date: "loan_sent_bank_execution_date",
+  loan_bank_executed_date: "loan_bank_executed_date",
+  bank_lu_received_date: "bank_lu_received_date",
+  noa_served_on: "noa_served_on",
+  completion_date: "completion_date",
+} as const;
+
+export type MilestonePresence =
+  (typeof MilestonePresence)[keyof typeof MilestonePresence];
+
+export const MilestonePresence = {
+  filled: "filled",
+  missing: "missing",
+} as const;
+
+export type DashboardMilestoneCardFilter = {
+  milestone: CaseMilestoneKey;
+  milestonePresence: MilestonePresence;
+  purchaseMode?: string;
+};
+
+export interface DashboardMilestoneCard {
+  key: string;
+  label: string;
+  count: number;
+  filter: DashboardMilestoneCardFilter;
 }
 
 export interface DashboardStats {
@@ -108,6 +193,9 @@ export interface DashboardStats {
   individualTitleCases: number;
   strataTitleCases: number;
   recentCases: CaseSummary[];
+  billing: BillingSummary;
+  commsThisMonth: number;
+  milestoneCards: DashboardMilestoneCard[];
 }
 
 export interface User {
@@ -340,6 +428,12 @@ export interface CasePurchaser {
   orderNo: number;
 }
 
+export interface InlinePurchaser {
+  name: string;
+  /** @nullable */
+  ic?: string | null;
+}
+
 export interface CaseAssignment {
   id: number;
   userId: number;
@@ -380,14 +474,15 @@ export interface CaseListResponse {
 
 export interface CreateCaseBody {
   projectId: number;
-  developerId?: number;
+  developerId: number;
   purchaseMode: string;
   titleType: string;
   spaPrice?: number;
   assignedLawyerId: number;
   assignedClerkId?: number;
-  purchaserIds?: number[];
-  purchasers?: { name: string; ic?: string }[];
+  purchaserIds: number[];
+  /** Optional inline purchaser creation when purchaserIds is empty */
+  purchasers?: InlinePurchaser[];
 }
 
 export interface UpdateCaseBody {
@@ -597,11 +692,19 @@ export type ListClientsParams = {
 };
 
 export type ListCasesParams = {
+  /**
+   * Keyword search across reference, client/purchaser, project, and property
+   */
   search?: string;
   status?: string;
   projectId?: number;
   developerId?: number;
   assignedLawyerId?: number;
+  assignedClerkId?: number;
+  spaStatus?: string;
+  loanStatus?: string;
+  milestone?: CaseMilestoneKey;
+  milestonePresence?: MilestonePresence;
   purchaseMode?: string;
   titleType?: string;
   page?: number;

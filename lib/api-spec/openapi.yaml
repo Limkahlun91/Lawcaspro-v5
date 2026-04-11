@@ -873,6 +873,7 @@ paths:
           in: query
           schema:
             type: string
+          description: "Keyword search across reference, client/purchaser, project, and property"
         - name: status
           in: query
           schema:
@@ -889,6 +890,26 @@ paths:
           in: query
           schema:
             type: integer
+        - name: assignedClerkId
+          in: query
+          schema:
+            type: integer
+        - name: spaStatus
+          in: query
+          schema:
+            type: string
+        - name: loanStatus
+          in: query
+          schema:
+            type: string
+        - name: milestone
+          in: query
+          schema:
+            $ref: "#/components/schemas/CaseMilestoneKey"
+        - name: milestonePresence
+          in: query
+          schema:
+            $ref: "#/components/schemas/MilestonePresence"
         - name: purchaseMode
           in: query
           schema:
@@ -1331,6 +1352,14 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/CaseSummary"
+        billing:
+          $ref: "#/components/schemas/BillingSummary"
+        commsThisMonth:
+          type: integer
+        milestoneCards:
+          type: array
+          items:
+            $ref: "#/components/schemas/DashboardMilestoneCard"
       required:
         - totalCases
         - activeCases
@@ -1344,6 +1373,93 @@ components:
         - individualTitleCases
         - strataTitleCases
         - recentCases
+        - billing
+        - commsThisMonth
+        - milestoneCards
+
+    BillingSummary:
+      type: object
+      properties:
+        totalBilled:
+          type: number
+        totalPaid:
+          type: number
+        totalOutstanding:
+          type: number
+      required:
+        - totalBilled
+        - totalPaid
+        - totalOutstanding
+
+    DashboardMilestoneCard:
+      type: object
+      properties:
+        key:
+          type: string
+        label:
+          type: string
+        count:
+          type: integer
+        filter:
+          type: object
+          properties:
+            milestone:
+              $ref: "#/components/schemas/CaseMilestoneKey"
+            milestonePresence:
+              $ref: "#/components/schemas/MilestonePresence"
+            purchaseMode:
+              type: string
+          required:
+            - milestone
+            - milestonePresence
+      required:
+        - key
+        - label
+        - count
+        - filter
+
+    MilestonePresence:
+      type: string
+      enum: ["filled", "missing"]
+
+    CaseMilestoneKey:
+      type: string
+      enum:
+        - spa_date
+        - spa_stamped_date
+        - letter_of_offer_date
+        - loan_docs_signed_date
+        - acting_letter_issued_date
+        - loan_sent_bank_execution_date
+        - loan_bank_executed_date
+        - bank_lu_received_date
+        - noa_served_on
+        - completion_date
+
+    CaseMilestoneSummary:
+      type: object
+      properties:
+        spa_date:
+          type: ["string", "null"]
+          description: "YYYY-MM-DD"
+        spa_stamped_date:
+          type: ["string", "null"]
+          description: "YYYY-MM-DD"
+        letter_of_offer_date:
+          type: ["string", "null"]
+          description: "YYYY-MM-DD"
+        loan_docs_signed_date:
+          type: ["string", "null"]
+          description: "YYYY-MM-DD"
+        completion_date:
+          type: ["string", "null"]
+          description: "YYYY-MM-DD"
+      required:
+        - spa_date
+        - spa_stamped_date
+        - letter_of_offer_date
+        - loan_docs_signed_date
+        - completion_date
 
     # ── Users ───────────────────────────────────────────────────────────────
     User:
@@ -1833,6 +1949,16 @@ components:
         - role
         - orderNo
 
+    InlinePurchaser:
+      type: object
+      properties:
+        name:
+          type: string
+        ic:
+          type: ["string", "null"]
+      required:
+        - name
+
     CaseAssignment:
       type: object
       properties:
@@ -1862,31 +1988,59 @@ components:
           type: integer
         referenceNo:
           type: string
+        clientName:
+          type: ["string", "null"]
         projectName:
           type: string
         developerName:
           type: string
+        property:
+          type: ["string", "null"]
         purchaseMode:
           type: string
         titleType:
           type: string
         status:
           type: string
+        assignedLawyerId:
+          type: ["integer", "null"]
         assignedLawyerName:
           type: ["string", "null"]
+        assignedClerkId:
+          type: ["integer", "null"]
+        assignedClerkName:
+          type: ["string", "null"]
+        spaStatus:
+          type: string
+        loanStatus:
+          type: ["string", "null"]
+        milestones:
+          $ref: "#/components/schemas/CaseMilestoneSummary"
         createdAt:
+          type: string
+          format: date-time
+        updatedAt:
           type: string
           format: date-time
       required:
         - id
         - referenceNo
+        - clientName
         - projectName
         - developerName
+        - property
         - purchaseMode
         - titleType
         - status
+        - assignedLawyerId
         - assignedLawyerName
+        - assignedClerkId
+        - assignedClerkName
+        - spaStatus
+        - loanStatus
+        - milestones
         - createdAt
+        - updatedAt
 
     CaseDetail:
       type: object
@@ -1985,6 +2139,11 @@ components:
           type: array
           items:
             type: integer
+        purchasers:
+          type: array
+          description: "Optional inline purchaser creation when purchaserIds is empty"
+          items:
+            $ref: "#/components/schemas/InlinePurchaser"
       required:
         - projectId
         - developerId
