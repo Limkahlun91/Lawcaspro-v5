@@ -275,13 +275,6 @@ export default function CaseDetail() {
       setKeyDatesBaseline(parsed);
     }
   }, [keyDates, keyDatesInitialized, anyDirty]);
-      mot_stamped_date: dateInputValue((keyDates as any).mot_stamped_date),
-      mot_registered_date: dateInputValue((keyDates as any).mot_registered_date),
-      progressive_payment_date: dateInputValue((keyDates as any).progressive_payment_date),
-      full_settlement_date: dateInputValue((keyDates as any).full_settlement_date),
-      completion_date: dateInputValue((keyDates as any).completion_date),
-    });
-  }, [caseId, keyDates]);
 
   useEffect(() => {
     setActiveTab(tabFromUrl);
