@@ -55,6 +55,12 @@ function dateInputValue(v: unknown): string {
   return "";
 }
 
+function formatYmdToDmy(ymd: string): string {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(ymd)) return "";
+  const [y, m, d] = ymd.split("-");
+  return `${d}/${m}/${y}`;
+}
+
 export default function CaseDetail() {
   const { id } = useParams<{ id: string }>();
   const caseId = parseInt(id || "0", 10);
@@ -82,7 +88,7 @@ export default function CaseDetail() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: getGetCaseQueryKey(caseId) });
       queryClient.invalidateQueries({ queryKey: ["case-key-dates", caseId] });
-      toast({ title: "Key dates saved" });
+      toast({ title: savingScope ? `${savingScope} saved` : "Key dates saved" });
     },
     onError: (err) => toast({ title: "Save failed", description: String(err), variant: "destructive" }),
   });
@@ -130,9 +136,13 @@ export default function CaseDetail() {
     return st?.hint || "Template not configured";
   };
   const canPrint = (printKey: string, dateVal: string) => Boolean(dateVal) && printState(printKey)?.status === "configured";
+  const templateIssuesCount = (printableConfig || []).filter((x) => x?.status && x.status !== "configured").length;
   const [keyDatesDraft, setKeyDatesDraft] = useState<Record<string, string>>({});
   useEffect(() => {
+  const [milestoneTab, setMilestoneTab] = useState<"spa" | "loan" | "bank" | "mot">("spa");
+  const [savingScope, setSavingScope] = useState<string>("");
     setKeyDatesDraft({
+      spa_signed_date: dateInputValue((keyDates as any).spa_signed_date),
       spa_signed_date: dateInputValue((keyDates as any).spa_signed_date),
       spa_forward_to_developer_execution_on: dateInputValue((keyDates as any).spa_forward_to_developer_execution_on),
       spa_date: dateInputValue((keyDates as any).spa_date),
@@ -223,6 +233,130 @@ export default function CaseDetail() {
 
   const spaStatus = stageStatus(commonSteps);
   const loanStatus = loanSteps.length ? stageStatus(loanSteps) : "N/A";
+  const workflowDone = (workflow || []).filter((s) => s?.status === "completed").length;
+  const workflowTotal = (workflow || []).length;
+
+  const saveScope = (scope: "SPA" | "Loan" | "Bank / LU / NOA" | "MOT / Completion") => {
+    const dateKeysByScope: Record<string, string[]> = {
+      "SPA": [
+        "spa_signed_date",
+        "spa_forward_to_developer_execution_on",
+        "spa_date",
+        "spa_stamped_date",
+        "stamped_spa_send_to_developer_on",
+        "stamped_spa_received_from_developer_on",
+      ],
+      "Loan": [
+        "letter_of_offer_date",
+        "letter_of_offer_stamped_date",
+        "loan_docs_pending_date",
+        "loan_docs_signed_date",
+        "acting_letter_issued_date",
+        "developer_confirmation_received_on",
+        "developer_confirmation_date",
+        "loan_sent_bank_execution_date",
+        "loan_bank_executed_date",
+      ],
+      "Bank / LU / NOA": [
+        "bank_lu_received_date",
+        "bank_lu_forward_to_developer_on",
+        "developer_lu_received_on",
+        "developer_lu_dated",
+        "register_poa_on",
+        "noa_served_on",
+        "advice_to_bank_date",
+        "bank_1st_release_on",
+        "letter_disclaimer_received_on",
+        "letter_disclaimer_dated",
+      ],
+      "MOT / Completion": [
+        "mot_received_date",
+        "mot_signed_date",
+        "mot_stamped_date",
+        "mot_registered_date",
+        "progressive_payment_date",
+        "full_settlement_date",
+        "completion_date",
+      ],
+    };
+
+    const payload: Record<string, unknown> = {};
+    for (const k of dateKeysByScope[scope] || []) {
+      const v = keyDatesDraft[k] || "";
+      payload[k] = v ? v : null;
+    }
+
+    if (scope === "Bank / LU / NOA") {
+      payload.letter_disclaimer_reference_nos = keyDatesDraft.letter_disclaimer_reference_nos ? keyDatesDraft.letter_disclaimer_reference_nos : null;
+      payload.registered_poa_registration_number = keyDatesDraft.registered_poa_registration_number ? keyDatesDraft.registered_poa_registration_number : null;
+      payload.redemption_sum = keyDatesDraft.redemption_sum ? keyDatesDraft.redemption_sum : null;
+      payload.first_release_amount_rm = keyDatesDraft.first_release_amount_rm ? keyDatesDraft.first_release_amount_rm : null;
+    }
+
+    setSavingScope(scope);
+    saveKeyDatesMutation.mutate(payload);
+  };
+
+  const FieldCard = (props: {
+    label: string;
+    value: string;
+    onChange: (v: string) => void;
+    type?: "date" | "text" | "number";
+    printerKey?: string;
+  }) => {
+    const type = props.type ?? "date";
+    const isDate = type === "date";
+    const dateVal = props.value || "";
+    const dmy = isDate && dateVal ? formatYmdToDmy(dateVal) : "";
+    const showPrinter = Boolean(props.printerKey);
+    const printerKey = props.printerKey || "";
+    const st = showPrinter ? printState(printerKey) : null;
+    const statusLabel = showPrinter ? printStatusLabel(st) : "";
+
+    return (
+      <div className="rounded-lg border border-slate-200 bg-white p-3">
+        <div className="flex items-center justify-between gap-2">
+          <Label className="text-xs text-slate-600">{props.label}</Label>
+          {showPrinter && (
+            <Badge
+              variant={st?.status === "configured" ? "secondary" : "outline"}
+              className="text-[10px] whitespace-nowrap"
+              title={st?.hint}
+            >
+              {statusLabel}
+            </Badge>
+          )}
+        </div>
+        <div className="mt-2 flex items-center gap-2">
+          <Input
+            className="flex-1"
+            type={type}
+            value={props.value}
+            onChange={(e) => props.onChange(e.target.value)}
+            placeholder={isDate ? "YYYY-MM-DD" : undefined}
+          />
+          {showPrinter && (
+            <Button
+              size="icon"
+              variant={canPrint(printerKey, dateVal) ? "default" : "outline"}
+              className={canPrint(printerKey, dateVal) ? "bg-slate-900 hover:bg-slate-800" : undefined}
+              title={printTitle(printerKey, dateVal)}
+              onClick={() => printMutation.mutate({ printKey: printerKey })}
+              disabled={printMutation.isPending || !canPrint(printerKey, dateVal)}
+            >
+              <Printer className="w-4 h-4" />
+            </Button>
+          )}
+        </div>
+        {isDate && (
+          <div className="mt-1 flex items-center justify-between text-[10px] text-slate-500">
+            <span>YYYY-MM-DD</span>
+            <span>{dmy ? `Display: ${dmy}` : ""}</span>
+          </div>
+        )}
+      </div>
+    );
+  };
 
   return (
     <div className="space-y-6 pb-12">
@@ -337,9 +471,15 @@ export default function CaseDetail() {
             <CardHeader className="flex flex-row items-center justify-between">
               <div className="space-y-1">
                 <CardTitle>Key Dates & Milestones</CardTitle>
-                <div className="flex items-center gap-2 text-xs text-slate-600">
+                <div className="flex flex-wrap items-center gap-2 text-xs text-slate-600">
                   <Badge variant="outline" className="border-amber-200 text-amber-800">SPA: {spaStatus}</Badge>
                   <Badge variant="outline" className="border-slate-200 text-slate-700">Loan: {loanStatus}</Badge>
+                  <Badge variant="outline" className={templateIssuesCount ? "border-red-200 text-red-700" : "border-emerald-200 text-emerald-700"}>
+                    Templates: {templateIssuesCount ? `${templateIssuesCount} issue(s)` : "All ready"}
+                  </Badge>
+                  <Badge variant="outline" className="border-slate-200 text-slate-700">
+                    Workflow: {workflowDone}/{workflowTotal}
+                  </Badge>
                 </div>
               </div>
               <div className="flex items-center gap-2">
@@ -350,66 +490,10 @@ export default function CaseDetail() {
                 >
                   Configure Templates
                 </Button>
-                <Button
-                  size="sm"
-                  className="bg-amber-500 hover:bg-amber-600"
-                  onClick={() => {
-                    const payload: Record<string, unknown> = {};
-                    const dateKeys = [
-                      "spa_signed_date",
-                      "spa_forward_to_developer_execution_on",
-                      "spa_date",
-                      "spa_stamped_date",
-                      "stamped_spa_send_to_developer_on",
-                      "stamped_spa_received_from_developer_on",
-                      "letter_of_offer_date",
-                      "letter_of_offer_stamped_date",
-                      "loan_docs_pending_date",
-                      "loan_docs_signed_date",
-                      "acting_letter_issued_date",
-                      "developer_confirmation_received_on",
-                      "developer_confirmation_date",
-                      "loan_sent_bank_execution_date",
-                      "loan_bank_executed_date",
-                      "bank_lu_received_date",
-                      "bank_lu_forward_to_developer_on",
-                      "developer_lu_received_on",
-                      "developer_lu_dated",
-                      "letter_disclaimer_received_on",
-                      "letter_disclaimer_dated",
-                      "loan_agreement_dated",
-                      "loan_agreement_submitted_stamping_date",
-                      "loan_agreement_stamped_date",
-                      "register_poa_on",
-                      "noa_served_on",
-                      "advice_to_bank_date",
-                      "bank_1st_release_on",
-                      "mot_received_date",
-                      "mot_signed_date",
-                      "mot_stamped_date",
-                      "mot_registered_date",
-                      "progressive_payment_date",
-                      "full_settlement_date",
-                      "completion_date",
-                    ];
-                    for (const k of dateKeys) {
-                      const v = keyDatesDraft[k] || "";
-                      payload[k] = v ? v : null;
-                    }
-                    payload.letter_disclaimer_reference_nos = keyDatesDraft.letter_disclaimer_reference_nos ? keyDatesDraft.letter_disclaimer_reference_nos : null;
-                    payload.registered_poa_registration_number = keyDatesDraft.registered_poa_registration_number ? keyDatesDraft.registered_poa_registration_number : null;
-                    payload.redemption_sum = keyDatesDraft.redemption_sum ? keyDatesDraft.redemption_sum : null;
-                    payload.first_release_amount_rm = keyDatesDraft.first_release_amount_rm ? keyDatesDraft.first_release_amount_rm : null;
-                    saveKeyDatesMutation.mutate(payload);
-                  }}
-                  disabled={saveKeyDatesMutation.isPending}
-                >
-                  {saveKeyDatesMutation.isPending ? "Saving..." : "Save"}
-                </Button>
               </div>
             </CardHeader>
             <CardContent>
-              <Tabs defaultValue="spa" className="w-full">
+              <Tabs value={milestoneTab} onValueChange={(v) => setMilestoneTab(v as "spa" | "loan" | "bank" | "mot")} className="w-full">
                 <TabsList className="grid w-full grid-cols-2 md:grid-cols-4 bg-slate-100 p-1">
                   <TabsTrigger value="spa">SPA</TabsTrigger>
                   <TabsTrigger value="loan">Loan</TabsTrigger>
@@ -417,263 +501,108 @@ export default function CaseDetail() {
                   <TabsTrigger value="mot">MOT / Completion</TabsTrigger>
                 </TabsList>
 
-                <TabsContent value="spa" className="pt-6">
-                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                    <div className="space-y-1.5">
-                      <Label>SPA Signed</Label>
-                      <Input type="date" value={keyDatesDraft.spa_signed_date || ""} onChange={(e) => setKeyDatesDraft((p) => ({ ...p, spa_signed_date: e.target.value }))} />
-                    </div>
-                    <div className="space-y-1.5">
-                      <Label>SPA Date</Label>
-                      <Input type="date" value={keyDatesDraft.spa_date || ""} onChange={(e) => setKeyDatesDraft((p) => ({ ...p, spa_date: e.target.value }))} />
-                    </div>
-                    <div className="space-y-1.5">
-                      <Label>SPA Stamped</Label>
-                      <Input type="date" value={keyDatesDraft.spa_stamped_date || ""} onChange={(e) => setKeyDatesDraft((p) => ({ ...p, spa_stamped_date: e.target.value }))} />
-                    </div>
-
-                    <div className="space-y-1.5">
-                      <Label>SPA Forward to Dev. Execution On</Label>
-                      <Input type="date" value={keyDatesDraft.spa_forward_to_developer_execution_on || ""} onChange={(e) => setKeyDatesDraft((p) => ({ ...p, spa_forward_to_developer_execution_on: e.target.value }))} />
-                    </div>
-                    <div className="space-y-1.5">
-                      <Label>Stamped SPA Send to Dev. On</Label>
-                      <Input type="date" value={keyDatesDraft.stamped_spa_send_to_developer_on || ""} onChange={(e) => setKeyDatesDraft((p) => ({ ...p, stamped_spa_send_to_developer_on: e.target.value }))} />
-                    </div>
-                    <div className="space-y-1.5">
-                      <Label>Stamped SPA Received from Dev. On</Label>
-                      <Input type="date" value={keyDatesDraft.stamped_spa_received_from_developer_on || ""} onChange={(e) => setKeyDatesDraft((p) => ({ ...p, stamped_spa_received_from_developer_on: e.target.value }))} />
-                    </div>
+                <TabsContent value="spa" className="pt-6 space-y-4">
+                  <div className="flex items-center justify-between">
+                    <div className="text-sm font-semibold text-slate-800">SPA Dates</div>
+                    <Button size="sm" className="bg-amber-500 hover:bg-amber-600" onClick={() => saveScope("SPA")} disabled={saveKeyDatesMutation.isPending}>
+                      {saveKeyDatesMutation.isPending && savingScope === "SPA" ? "Saving..." : "Save SPA"}
+                    </Button>
+                  </div>
+                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+                    <FieldCard label="SPA Signed" value={keyDatesDraft.spa_signed_date || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, spa_signed_date: v }))} />
+                    <FieldCard label="SPA Date" value={keyDatesDraft.spa_date || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, spa_date: v }))} />
+                    <FieldCard label="SPA Stamped" value={keyDatesDraft.spa_stamped_date || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, spa_stamped_date: v }))} />
+                    <FieldCard label="SPA Forward to Dev. Execution On" value={keyDatesDraft.spa_forward_to_developer_execution_on || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, spa_forward_to_developer_execution_on: v }))} />
+                    <FieldCard label="Stamped SPA Send to Dev. On" value={keyDatesDraft.stamped_spa_send_to_developer_on || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, stamped_spa_send_to_developer_on: v }))} />
+                    <FieldCard label="Stamped SPA Received from Dev. On" value={keyDatesDraft.stamped_spa_received_from_developer_on || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, stamped_spa_received_from_developer_on: v }))} />
                   </div>
                 </TabsContent>
 
                 <TabsContent value="loan" className="pt-6 space-y-6">
+                  <div className="flex items-center justify-between">
+                    <div className="text-sm font-semibold text-slate-800">Loan Dates</div>
+                    <Button size="sm" className="bg-amber-500 hover:bg-amber-600" onClick={() => saveScope("Loan")} disabled={saveKeyDatesMutation.isPending}>
+                      {saveKeyDatesMutation.isPending && savingScope === "Loan" ? "Saving..." : "Save Loan"}
+                    </Button>
+                  </div>
                   <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
                     <div className="space-y-4">
                       <div className="text-sm font-semibold text-slate-800">Offer & Signing</div>
-                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                        <div className="space-y-1.5">
-                          <Label>Letter of Offer Date</Label>
-                          <Input type="date" value={keyDatesDraft.letter_of_offer_date || ""} onChange={(e) => setKeyDatesDraft((p) => ({ ...p, letter_of_offer_date: e.target.value }))} />
-                        </div>
-                        <div className="space-y-1.5">
-                          <Label>Letter of Offer Stamped</Label>
-                          <Input type="date" value={keyDatesDraft.letter_of_offer_stamped_date || ""} onChange={(e) => setKeyDatesDraft((p) => ({ ...p, letter_of_offer_stamped_date: e.target.value }))} />
-                        </div>
-                        <div className="space-y-1.5">
-                          <Label>Loan Docs Pending Signing</Label>
-                          <Input type="date" value={keyDatesDraft.loan_docs_pending_date || ""} onChange={(e) => setKeyDatesDraft((p) => ({ ...p, loan_docs_pending_date: e.target.value }))} />
-                        </div>
-                        <div className="space-y-1.5">
-                          <Label>Loan Docs Signed</Label>
-                          <Input type="date" value={keyDatesDraft.loan_docs_signed_date || ""} onChange={(e) => setKeyDatesDraft((p) => ({ ...p, loan_docs_signed_date: e.target.value }))} />
-                        </div>
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                        <FieldCard label="Letter of Offer Date" value={keyDatesDraft.letter_of_offer_date || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, letter_of_offer_date: v }))} />
+                        <FieldCard label="Letter of Offer Stamped" value={keyDatesDraft.letter_of_offer_stamped_date || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, letter_of_offer_stamped_date: v }))} />
+                        <FieldCard label="Loan Docs Pending Signing" value={keyDatesDraft.loan_docs_pending_date || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, loan_docs_pending_date: v }))} />
+                        <FieldCard label="Loan Docs Signed" value={keyDatesDraft.loan_docs_signed_date || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, loan_docs_signed_date: v }))} />
                       </div>
                     </div>
 
                     <div className="space-y-4">
                       <div className="text-sm font-semibold text-slate-800">Letters & Execution</div>
-                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                        <div className="space-y-1.5">
-                          <Label>Acting Letter Issued</Label>
-                          <div className="flex items-center gap-2">
-                            <Input className="flex-1" type="date" value={keyDatesDraft.acting_letter_issued_date || ""} onChange={(e) => setKeyDatesDraft((p) => ({ ...p, acting_letter_issued_date: e.target.value }))} />
-                            <Button
-                              size="icon"
-                              variant="outline"
-                              title={printTitle("acting_letter", keyDatesDraft.acting_letter_issued_date || "")}
-                              onClick={() => printMutation.mutate({ printKey: "acting_letter" })}
-                              disabled={printMutation.isPending || !canPrint("acting_letter", keyDatesDraft.acting_letter_issued_date || "")}
-                            >
-                              <Printer className="w-4 h-4" />
-                            </Button>
-                            <Badge variant={printState("acting_letter")?.status === "configured" ? "secondary" : "outline"} className="whitespace-nowrap">
-                              {printStatusLabel(printState("acting_letter"))}
-                            </Badge>
-                          </div>
-                        </div>
-                        <div className="space-y-1.5">
-                          <Label>Loan Sent for Bank Execution</Label>
-                          <div className="flex items-center gap-2">
-                            <Input className="flex-1" type="date" value={keyDatesDraft.loan_sent_bank_execution_date || ""} onChange={(e) => setKeyDatesDraft((p) => ({ ...p, loan_sent_bank_execution_date: e.target.value }))} />
-                            <Button
-                              size="icon"
-                              variant="outline"
-                              title={printTitle("letter_forward_bank_execution", keyDatesDraft.loan_sent_bank_execution_date || "")}
-                              onClick={() => printMutation.mutate({ printKey: "letter_forward_bank_execution" })}
-                              disabled={printMutation.isPending || !canPrint("letter_forward_bank_execution", keyDatesDraft.loan_sent_bank_execution_date || "")}
-                            >
-                              <Printer className="w-4 h-4" />
-                            </Button>
-                            <Badge variant={printState("letter_forward_bank_execution")?.status === "configured" ? "secondary" : "outline"} className="whitespace-nowrap">
-                              {printStatusLabel(printState("letter_forward_bank_execution"))}
-                            </Badge>
-                          </div>
-                        </div>
-                        <div className="space-y-1.5">
-                          <Label>Loan Bank Executed</Label>
-                          <Input type="date" value={keyDatesDraft.loan_bank_executed_date || ""} onChange={(e) => setKeyDatesDraft((p) => ({ ...p, loan_bank_executed_date: e.target.value }))} />
-                        </div>
-                        <div className="space-y-1.5">
-                          <Label>Developer Confirmation Received On</Label>
-                          <Input type="date" value={keyDatesDraft.developer_confirmation_received_on || ""} onChange={(e) => setKeyDatesDraft((p) => ({ ...p, developer_confirmation_received_on: e.target.value }))} />
-                        </div>
-                        <div className="space-y-1.5">
-                          <Label>Developer Confirmation Date</Label>
-                          <Input type="date" value={keyDatesDraft.developer_confirmation_date || ""} onChange={(e) => setKeyDatesDraft((p) => ({ ...p, developer_confirmation_date: e.target.value }))} />
-                        </div>
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                        <FieldCard label="Acting Letter Issued" value={keyDatesDraft.acting_letter_issued_date || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, acting_letter_issued_date: v }))} printerKey="acting_letter" />
+                        <FieldCard label="Loan Sent for Bank Execution" value={keyDatesDraft.loan_sent_bank_execution_date || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, loan_sent_bank_execution_date: v }))} printerKey="letter_forward_bank_execution" />
+                        <FieldCard label="Loan Bank Executed" value={keyDatesDraft.loan_bank_executed_date || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, loan_bank_executed_date: v }))} />
+                        <FieldCard label="Developer Confirmation Received On" value={keyDatesDraft.developer_confirmation_received_on || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, developer_confirmation_received_on: v }))} />
+                        <FieldCard label="Developer Confirmation Date" value={keyDatesDraft.developer_confirmation_date || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, developer_confirmation_date: v }))} />
                       </div>
                     </div>
                   </div>
                 </TabsContent>
 
                 <TabsContent value="bank" className="pt-6 space-y-6">
+                  <div className="flex items-center justify-between">
+                    <div className="text-sm font-semibold text-slate-800">Bank / LU / NOA</div>
+                    <Button size="sm" className="bg-amber-500 hover:bg-amber-600" onClick={() => saveScope("Bank / LU / NOA")} disabled={saveKeyDatesMutation.isPending}>
+                      {saveKeyDatesMutation.isPending && savingScope === "Bank / LU / NOA" ? "Saving..." : "Save Bank"}
+                    </Button>
+                  </div>
                   <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
                     <div className="space-y-4">
                       <div className="text-sm font-semibold text-slate-800">Bank / LU</div>
-                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                        <div className="space-y-1.5">
-                          <Label>Bank LU Received</Label>
-                          <Input type="date" value={keyDatesDraft.bank_lu_received_date || ""} onChange={(e) => setKeyDatesDraft((p) => ({ ...p, bank_lu_received_date: e.target.value }))} />
-                        </div>
-                        <div className="space-y-1.5">
-                          <Label>Bank LU Forward to Dev. On</Label>
-                          <div className="flex items-center gap-2">
-                            <Input className="flex-1" type="date" value={keyDatesDraft.bank_lu_forward_to_developer_on || ""} onChange={(e) => setKeyDatesDraft((p) => ({ ...p, bank_lu_forward_to_developer_on: e.target.value }))} />
-                            <Button
-                              size="icon"
-                              variant="outline"
-                              title={printTitle("letter_forward_bank_lu_to_dev", keyDatesDraft.bank_lu_forward_to_developer_on || "")}
-                              onClick={() => printMutation.mutate({ printKey: "letter_forward_bank_lu_to_dev" })}
-                              disabled={printMutation.isPending || !canPrint("letter_forward_bank_lu_to_dev", keyDatesDraft.bank_lu_forward_to_developer_on || "")}
-                            >
-                              <Printer className="w-4 h-4" />
-                            </Button>
-                            <Badge variant={printState("letter_forward_bank_lu_to_dev")?.status === "configured" ? "secondary" : "outline"} className="whitespace-nowrap">
-                              {printStatusLabel(printState("letter_forward_bank_lu_to_dev"))}
-                            </Badge>
-                          </div>
-                        </div>
-                        <div className="space-y-1.5">
-                          <Label>Developer LU Received On</Label>
-                          <Input type="date" value={keyDatesDraft.developer_lu_received_on || ""} onChange={(e) => setKeyDatesDraft((p) => ({ ...p, developer_lu_received_on: e.target.value }))} />
-                        </div>
-                        <div className="space-y-1.5">
-                          <Label>Developer LU Dated</Label>
-                          <Input type="date" value={keyDatesDraft.developer_lu_dated || ""} onChange={(e) => setKeyDatesDraft((p) => ({ ...p, developer_lu_dated: e.target.value }))} />
-                        </div>
-                        <div className="space-y-1.5">
-                          <Label>Advice to Bank Date</Label>
-                          <div className="flex items-center gap-2">
-                            <Input className="flex-1" type="date" value={keyDatesDraft.advice_to_bank_date || ""} onChange={(e) => setKeyDatesDraft((p) => ({ ...p, advice_to_bank_date: e.target.value }))} />
-                            <Button
-                              size="icon"
-                              variant="outline"
-                              title={printTitle("letter_advice_spa_sol_lu", keyDatesDraft.advice_to_bank_date || "")}
-                              onClick={() => printMutation.mutate({ printKey: "letter_advice_spa_sol_lu" })}
-                              disabled={printMutation.isPending || !canPrint("letter_advice_spa_sol_lu", keyDatesDraft.advice_to_bank_date || "")}
-                            >
-                              <Printer className="w-4 h-4" />
-                            </Button>
-                            <Badge variant={printState("letter_advice_spa_sol_lu")?.status === "configured" ? "secondary" : "outline"} className="whitespace-nowrap">
-                              {printStatusLabel(printState("letter_advice_spa_sol_lu"))}
-                            </Badge>
-                          </div>
-                        </div>
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                        <FieldCard label="Bank LU Received" value={keyDatesDraft.bank_lu_received_date || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, bank_lu_received_date: v }))} />
+                        <FieldCard label="Bank LU Forward to Dev. On" value={keyDatesDraft.bank_lu_forward_to_developer_on || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, bank_lu_forward_to_developer_on: v }))} printerKey="letter_forward_bank_lu_to_dev" />
+                        <FieldCard label="Developer LU Received On" value={keyDatesDraft.developer_lu_received_on || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, developer_lu_received_on: v }))} />
+                        <FieldCard label="Developer LU Dated" value={keyDatesDraft.developer_lu_dated || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, developer_lu_dated: v }))} />
+                        <FieldCard label="Advice to Bank Date" value={keyDatesDraft.advice_to_bank_date || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, advice_to_bank_date: v }))} printerKey="letter_advice_spa_sol_lu" />
                       </div>
                     </div>
 
                     <div className="space-y-4">
                       <div className="text-sm font-semibold text-slate-800">NOA / POA / Disclaimer</div>
-                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                        <div className="space-y-1.5">
-                          <Label>NOA Served On</Label>
-                          <div className="flex items-center gap-2">
-                            <Input className="flex-1" type="date" value={keyDatesDraft.noa_served_on || ""} onChange={(e) => setKeyDatesDraft((p) => ({ ...p, noa_served_on: e.target.value }))} />
-                            <Button
-                              size="icon"
-                              variant="outline"
-                              title={printTitle("noa", keyDatesDraft.noa_served_on || "")}
-                              onClick={() => printMutation.mutate({ printKey: "noa" })}
-                              disabled={printMutation.isPending || !canPrint("noa", keyDatesDraft.noa_served_on || "")}
-                            >
-                              <Printer className="w-4 h-4" />
-                            </Button>
-                            <Badge variant={printState("noa")?.status === "configured" ? "secondary" : "outline"} className="whitespace-nowrap">
-                              {printStatusLabel(printState("noa"))}
-                            </Badge>
-                          </div>
-                        </div>
-                        <div className="space-y-1.5">
-                          <Label>Register POA On</Label>
-                          <Input type="date" value={keyDatesDraft.register_poa_on || ""} onChange={(e) => setKeyDatesDraft((p) => ({ ...p, register_poa_on: e.target.value }))} />
-                        </div>
-                        <div className="space-y-1.5">
-                          <Label>Registered POA Registration Number</Label>
-                          <Input value={keyDatesDraft.registered_poa_registration_number || ""} onChange={(e) => setKeyDatesDraft((p) => ({ ...p, registered_poa_registration_number: e.target.value }))} />
-                        </div>
-                        <div className="space-y-1.5">
-                          <Label>Letter Disclaimer Received On</Label>
-                          <Input type="date" value={keyDatesDraft.letter_disclaimer_received_on || ""} onChange={(e) => setKeyDatesDraft((p) => ({ ...p, letter_disclaimer_received_on: e.target.value }))} />
-                        </div>
-                        <div className="space-y-1.5">
-                          <Label>Letter Disclaimer Dated</Label>
-                          <Input type="date" value={keyDatesDraft.letter_disclaimer_dated || ""} onChange={(e) => setKeyDatesDraft((p) => ({ ...p, letter_disclaimer_dated: e.target.value }))} />
-                        </div>
-                        <div className="space-y-1.5">
-                          <Label>Letter Disclaimer Reference Nos</Label>
-                          <Input value={keyDatesDraft.letter_disclaimer_reference_nos || ""} onChange={(e) => setKeyDatesDraft((p) => ({ ...p, letter_disclaimer_reference_nos: e.target.value }))} />
-                        </div>
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                        <FieldCard label="NOA Served On" value={keyDatesDraft.noa_served_on || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, noa_served_on: v }))} printerKey="noa" />
+                        <FieldCard label="Register POA On" value={keyDatesDraft.register_poa_on || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, register_poa_on: v }))} />
+                        <FieldCard label="Registered POA Registration Number" type="text" value={keyDatesDraft.registered_poa_registration_number || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, registered_poa_registration_number: v }))} />
+                        <FieldCard label="Letter Disclaimer Received On" value={keyDatesDraft.letter_disclaimer_received_on || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, letter_disclaimer_received_on: v }))} />
+                        <FieldCard label="Letter Disclaimer Dated" value={keyDatesDraft.letter_disclaimer_dated || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, letter_disclaimer_dated: v }))} />
+                        <FieldCard label="Letter Disclaimer Reference Nos" type="text" value={keyDatesDraft.letter_disclaimer_reference_nos || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, letter_disclaimer_reference_nos: v }))} />
                       </div>
 
-                      <div className="pt-2 grid grid-cols-1 md:grid-cols-2 gap-4">
-                        <div className="space-y-1.5">
-                          <Label>Redemption Sum (RM)</Label>
-                          <Input type="number" step="0.01" value={keyDatesDraft.redemption_sum || ""} onChange={(e) => setKeyDatesDraft((p) => ({ ...p, redemption_sum: e.target.value }))} />
-                        </div>
-                        <div className="space-y-1.5">
-                          <Label>Bank 1st Release On</Label>
-                          <Input type="date" value={keyDatesDraft.bank_1st_release_on || ""} onChange={(e) => setKeyDatesDraft((p) => ({ ...p, bank_1st_release_on: e.target.value }))} />
-                        </div>
-                        <div className="space-y-1.5">
-                          <Label>First Release Amount (RM)</Label>
-                          <Input type="number" step="0.01" value={keyDatesDraft.first_release_amount_rm || ""} onChange={(e) => setKeyDatesDraft((p) => ({ ...p, first_release_amount_rm: e.target.value }))} />
-                        </div>
+                      <div className="pt-3 grid grid-cols-1 md:grid-cols-2 gap-3">
+                        <FieldCard label="Redemption Sum (RM)" type="number" value={keyDatesDraft.redemption_sum || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, redemption_sum: v }))} />
+                        <FieldCard label="Bank 1st Release On" value={keyDatesDraft.bank_1st_release_on || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, bank_1st_release_on: v }))} />
+                        <FieldCard label="First Release Amount (RM)" type="number" value={keyDatesDraft.first_release_amount_rm || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, first_release_amount_rm: v }))} />
                       </div>
                     </div>
                   </div>
                 </TabsContent>
 
-                <TabsContent value="mot" className="pt-6">
-                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                    <div className="space-y-1.5">
-                      <Label>MOT Received</Label>
-                      <Input type="date" value={keyDatesDraft.mot_received_date || ""} onChange={(e) => setKeyDatesDraft((p) => ({ ...p, mot_received_date: e.target.value }))} />
-                    </div>
-                    <div className="space-y-1.5">
-                      <Label>MOT Signed</Label>
-                      <Input type="date" value={keyDatesDraft.mot_signed_date || ""} onChange={(e) => setKeyDatesDraft((p) => ({ ...p, mot_signed_date: e.target.value }))} />
-                    </div>
-                    <div className="space-y-1.5">
-                      <Label>MOT Stamped</Label>
-                      <Input type="date" value={keyDatesDraft.mot_stamped_date || ""} onChange={(e) => setKeyDatesDraft((p) => ({ ...p, mot_stamped_date: e.target.value }))} />
-                    </div>
-                    <div className="space-y-1.5">
-                      <Label>MOT Registered</Label>
-                      <Input type="date" value={keyDatesDraft.mot_registered_date || ""} onChange={(e) => setKeyDatesDraft((p) => ({ ...p, mot_registered_date: e.target.value }))} />
-                    </div>
-                    <div className="space-y-1.5">
-                      <Label>Progressive Payment Date</Label>
-                      <Input type="date" value={keyDatesDraft.progressive_payment_date || ""} onChange={(e) => setKeyDatesDraft((p) => ({ ...p, progressive_payment_date: e.target.value }))} />
-                    </div>
-                    <div className="space-y-1.5">
-                      <Label>Full Settlement Date</Label>
-                      <Input type="date" value={keyDatesDraft.full_settlement_date || ""} onChange={(e) => setKeyDatesDraft((p) => ({ ...p, full_settlement_date: e.target.value }))} />
-                    </div>
-                    <div className="space-y-1.5">
-                      <Label>Completion Date</Label>
-                      <Input type="date" value={keyDatesDraft.completion_date || ""} onChange={(e) => setKeyDatesDraft((p) => ({ ...p, completion_date: e.target.value }))} />
-                    </div>
+                <TabsContent value="mot" className="pt-6 space-y-4">
+                  <div className="flex items-center justify-between">
+                    <div className="text-sm font-semibold text-slate-800">MOT / Completion</div>
+                    <Button size="sm" className="bg-amber-500 hover:bg-amber-600" onClick={() => saveScope("MOT / Completion")} disabled={saveKeyDatesMutation.isPending}>
+                      {saveKeyDatesMutation.isPending && savingScope === "MOT / Completion" ? "Saving..." : "Save MOT"}
+                    </Button>
+                  </div>
+                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+                    <FieldCard label="MOT Received" value={keyDatesDraft.mot_received_date || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, mot_received_date: v }))} />
+                    <FieldCard label="MOT Signed" value={keyDatesDraft.mot_signed_date || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, mot_signed_date: v }))} />
+                    <FieldCard label="MOT Stamped" value={keyDatesDraft.mot_stamped_date || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, mot_stamped_date: v }))} />
+                    <FieldCard label="MOT Registered" value={keyDatesDraft.mot_registered_date || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, mot_registered_date: v }))} />
+                    <FieldCard label="Progressive Payment Date" value={keyDatesDraft.progressive_payment_date || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, progressive_payment_date: v }))} />
+                    <FieldCard label="Full Settlement Date" value={keyDatesDraft.full_settlement_date || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, full_settlement_date: v }))} />
+                    <FieldCard label="Completion Date" value={keyDatesDraft.completion_date || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, completion_date: v }))} />
                   </div>
                 </TabsContent>
               </Tabs>
