@@ -1,4 +1,4 @@
-import { pgTable, serial, text, integer, numeric, timestamp, index, date } from "drizzle-orm/pg-core";
+import { pgTable, serial, text, integer, numeric, timestamp, index, date, boolean, jsonb } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod/v4";
 
@@ -136,6 +136,19 @@ export const caseKeyDatesTable = pgTable("case_key_dates", {
   firmIdIdx: index("idx_case_key_dates_firm").on(t.firmId),
   caseIdIdx: index("idx_case_key_dates_case").on(t.caseId),
   firmCaseIdx: index("idx_case_key_dates_firm_case").on(t.firmId, t.caseId),
+}));
+
+export const caseListSavedViewsTable = pgTable("case_list_saved_views", {
+  id: serial("id").primaryKey(),
+  firmId: integer("firm_id").notNull(),
+  userId: integer("user_id").notNull(),
+  name: text("name").notNull(),
+  params: jsonb("params").notNull().default({}),
+  isDefault: boolean("is_default").notNull().default(false),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow().$onUpdate(() => new Date()),
+}, (t) => ({
+  firmUserIdx: index("idx_case_list_saved_views_firm_user").on(t.firmId, t.userId),
 }));
 
 export const auditLogsTable = pgTable("audit_logs", {

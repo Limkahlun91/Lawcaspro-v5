@@ -190,7 +190,7 @@ export async function requireFirmUser(
   };
 
   try {
-    await setTenantContextSession(client, req.firmId);
+    await setTenantContextSession(client, req.firmId, req.userId ?? undefined);
     req.rlsDb = makeRlsDb(client);
   } catch (err) {
     try {

@@ -1,9 +1,10 @@
 import { Router, type IRouter } from "express";
-import { eq, count, desc, and, or, sql, asc } from "drizzle-orm";
+import { eq, count, desc, and, or, sql, asc, inArray } from "drizzle-orm";
 import {
   db, casesTable, casePurchasersTable, caseAssignmentsTable,
   caseWorkflowStepsTable, caseNotesTable,
   caseKeyDatesTable,
+  caseListSavedViewsTable,
   projectsTable, developersTable, clientsTable, usersTable, auditLogsTable,
 } from "@workspace/db";
 import {
@@ -23,6 +24,29 @@ type DbConn = typeof db | NonNullable<AuthRequest["rlsDb"]>;
 const rdb = (req: AuthRequest): DbConn => req.rlsDb ?? db;
 
 type CaseKeyDatesInsert = typeof caseKeyDatesTable.$inferInsert;
+
+function asObject(v: unknown): Record<string, unknown> | null {
+  if (!v || typeof v !== "object") return null;
+  if (Array.isArray(v)) return null;
+  return v as Record<string, unknown>;
+}
+
+function asString(v: unknown): string | null {
+  return typeof v === "string" ? v : null;
+}
+
+function asBoolean(v: unknown): boolean | null {
+  return typeof v === "boolean" ? v : null;
+}
+
+function asNumber(v: unknown): number | null {
+  if (typeof v === "number" && Number.isFinite(v)) return v;
+  if (typeof v === "string" && v.trim()) {
+    const n = Number(v);
+    if (Number.isFinite(n)) return n;
+  }
+  return null;
+}
 
 function parseDateOnlyInput(v: unknown): string | null | undefined {
   if (v === undefined) return undefined;
@@ -287,6 +311,532 @@ router.get("/cases/filter-options", requireAuth, requireFirmUser, requirePermiss
       { key: "completion_date", label: "Completion Date" },
     ],
   });
+});
+
+router.get("/cases/views", requireAuth, requireFirmUser, requirePermission("cases", "read"), async (req: AuthRequest, res): Promise<void> => {
+  const r = rdb(req);
+  const rows = await r
+    .select()
+    .from(caseListSavedViewsTable)
+    .where(and(eq(caseListSavedViewsTable.firmId, req.firmId!), eq(caseListSavedViewsTable.userId, req.userId!)))
+    .orderBy(desc(caseListSavedViewsTable.isDefault), asc(caseListSavedViewsTable.name));
+
+  res.json(rows.map((v) => ({
+    id: v.id,
+    name: v.name,
+    isDefault: v.isDefault,
+    params: v.params ?? {},
+    createdAt: v.createdAt.toISOString(),
+    updatedAt: v.updatedAt.toISOString(),
+  })));
+});
+
+router.post("/cases/views", requireAuth, requireFirmUser, requirePermission("cases", "update"), async (req: AuthRequest, res): Promise<void> => {
+  const r = req.rlsDb;
+  if (!r) {
+    res.status(500).json({ error: "Internal Server Error" });
+    return;
+  }
+
+  const body = asObject(req.body);
+  const name = asString(body?.name)?.trim() ?? "";
+  const params = asObject(body?.params);
+  if (!name) {
+    res.status(400).json({ error: "name is required" });
+    return;
+  }
+  if (!params) {
+    res.status(400).json({ error: "params must be an object" });
+    return;
+  }
+
+  const isDefault = asBoolean(body?.isDefault) ?? false;
+  if (isDefault) {
+    await r
+      .update(caseListSavedViewsTable)
+      .set({ isDefault: false, updatedAt: new Date() })
+      .where(and(eq(caseListSavedViewsTable.firmId, req.firmId!), eq(caseListSavedViewsTable.userId, req.userId!)));
+  }
+
+  const [created] = await r
+    .insert(caseListSavedViewsTable)
+    .values({ firmId: req.firmId!, userId: req.userId!, name, params, isDefault, updatedAt: new Date() })
+    .returning();
+
+  await writeAuditLog({
+    firmId: req.firmId,
+    actorId: req.userId,
+    actorType: req.userType,
+    action: "cases.views.create",
+    entityType: "case_list_saved_view",
+    entityId: created.id,
+    detail: `name=${name} default=${isDefault}`,
+    ipAddress: req.ip,
+    userAgent: req.headers["user-agent"],
+  });
+
+  res.status(201).json({
+    id: created.id,
+    name: created.name,
+    isDefault: created.isDefault,
+    params: created.params ?? {},
+    createdAt: created.createdAt.toISOString(),
+    updatedAt: created.updatedAt.toISOString(),
+  });
+});
+
+router.patch("/cases/views/:viewId", requireAuth, requireFirmUser, requirePermission("cases", "update"), async (req: AuthRequest, res): Promise<void> => {
+  const r = req.rlsDb;
+  if (!r) {
+    res.status(500).json({ error: "Internal Server Error" });
+    return;
+  }
+  const viewId = Number((req.params as Record<string, unknown>)?.viewId);
+  if (!Number.isInteger(viewId)) {
+    res.status(400).json({ error: "Invalid viewId" });
+    return;
+  }
+
+  const body = asObject(req.body);
+  if (!body) {
+    res.status(400).json({ error: "Invalid body" });
+    return;
+  }
+
+  const updates: Partial<typeof caseListSavedViewsTable.$inferInsert> = { updatedAt: new Date() };
+  let changedDefault = false;
+  if ("name" in body) {
+    const nextName = asString(body.name)?.trim() ?? "";
+    if (!nextName) {
+      res.status(400).json({ error: "name cannot be empty" });
+      return;
+    }
+    updates.name = nextName;
+  }
+  if ("params" in body) {
+    const nextParams = asObject(body.params);
+    if (!nextParams) {
+      res.status(400).json({ error: "params must be an object" });
+      return;
+    }
+    updates.params = nextParams;
+  }
+  if ("isDefault" in body) {
+    const nextDefault = asBoolean(body.isDefault);
+    if (nextDefault === null) {
+      res.status(400).json({ error: "isDefault must be boolean" });
+      return;
+    }
+    updates.isDefault = nextDefault;
+    changedDefault = nextDefault;
+  }
+
+  if (changedDefault) {
+    await r
+      .update(caseListSavedViewsTable)
+      .set({ isDefault: false, updatedAt: new Date() })
+      .where(and(eq(caseListSavedViewsTable.firmId, req.firmId!), eq(caseListSavedViewsTable.userId, req.userId!)));
+  }
+
+  const [updated] = await r
+    .update(caseListSavedViewsTable)
+    .set(updates)
+    .where(and(
+      eq(caseListSavedViewsTable.id, viewId),
+      eq(caseListSavedViewsTable.firmId, req.firmId!),
+      eq(caseListSavedViewsTable.userId, req.userId!),
+    ))
+    .returning();
+
+  if (!updated) {
+    res.status(404).json({ error: "View not found" });
+    return;
+  }
+
+  await writeAuditLog({
+    firmId: req.firmId,
+    actorId: req.userId,
+    actorType: req.userType,
+    action: "cases.views.update",
+    entityType: "case_list_saved_view",
+    entityId: viewId,
+    detail: "updated",
+    ipAddress: req.ip,
+    userAgent: req.headers["user-agent"],
+  });
+
+  res.json({
+    id: updated.id,
+    name: updated.name,
+    isDefault: updated.isDefault,
+    params: updated.params ?? {},
+    createdAt: updated.createdAt.toISOString(),
+    updatedAt: updated.updatedAt.toISOString(),
+  });
+});
+
+router.delete("/cases/views/:viewId", requireAuth, requireFirmUser, requirePermission("cases", "update"), async (req: AuthRequest, res): Promise<void> => {
+  const r = req.rlsDb;
+  if (!r) {
+    res.status(500).json({ error: "Internal Server Error" });
+    return;
+  }
+  const viewId = Number((req.params as Record<string, unknown>)?.viewId);
+  if (!Number.isInteger(viewId)) {
+    res.status(400).json({ error: "Invalid viewId" });
+    return;
+  }
+
+  const [deleted] = await r
+    .delete(caseListSavedViewsTable)
+    .where(and(
+      eq(caseListSavedViewsTable.id, viewId),
+      eq(caseListSavedViewsTable.firmId, req.firmId!),
+      eq(caseListSavedViewsTable.userId, req.userId!),
+    ))
+    .returning();
+
+  if (!deleted) {
+    res.status(404).json({ error: "View not found" });
+    return;
+  }
+
+  await writeAuditLog({
+    firmId: req.firmId,
+    actorId: req.userId,
+    actorType: req.userType,
+    action: "cases.views.delete",
+    entityType: "case_list_saved_view",
+    entityId: viewId,
+    detail: `name=${deleted.name}`,
+    ipAddress: req.ip,
+    userAgent: req.headers["user-agent"],
+  });
+
+  res.status(204).end();
+});
+
+router.post("/cases/bulk/assign", requireAuth, requireFirmUser, requirePermission("cases", "update"), async (req: AuthRequest, res): Promise<void> => {
+  const r = req.rlsDb;
+  if (!r) {
+    res.status(500).json({ error: "Internal Server Error" });
+    return;
+  }
+
+  const body = asObject(req.body);
+  const rawCaseIds = Array.isArray(body?.caseIds) ? body!.caseIds : [];
+  const roleInCase = asString(body?.roleInCase);
+  const userId = asNumber(body?.userId);
+
+  const normalizedCaseIds = rawCaseIds
+    .map((x: unknown) => Number(x))
+    .filter((x: number) => Number.isInteger(x) && x > 0);
+
+  if (normalizedCaseIds.length === 0) {
+    res.status(400).json({ error: "caseIds is required" });
+    return;
+  }
+  if (roleInCase !== "lawyer" && roleInCase !== "clerk") {
+    res.status(400).json({ error: "roleInCase must be lawyer or clerk" });
+    return;
+  }
+  if (!userId || !Number.isInteger(userId)) {
+    res.status(400).json({ error: "userId is required" });
+    return;
+  }
+
+  const targetUserId = userId;
+  const now = new Date();
+
+  const cases = await r
+    .select({ id: casesTable.id })
+    .from(casesTable)
+    .where(and(eq(casesTable.firmId, req.firmId!), inArray(casesTable.id, normalizedCaseIds)));
+
+  const existingIds = new Set(cases.map((c) => c.id));
+  const missingIds = normalizedCaseIds.filter((id: number) => !existingIds.has(id));
+
+  const failures: Array<{ caseId: number; error: string }> = missingIds.map((id) => ({ caseId: id, error: "Case not found" }));
+  let succeeded = 0;
+
+  for (const { id: caseId } of cases) {
+    try {
+      await r
+        .update(caseAssignmentsTable)
+        .set({ unassignedAt: now })
+        .where(and(
+          eq(caseAssignmentsTable.caseId, caseId),
+          eq(caseAssignmentsTable.roleInCase, roleInCase),
+          sql`unassigned_at IS NULL`
+        ));
+
+      await r
+        .insert(caseAssignmentsTable)
+        .values({
+          caseId,
+          userId: targetUserId,
+          roleInCase,
+          assignedBy: req.userId ?? null,
+          assignedAt: now,
+        });
+
+      await writeAuditLog({
+        firmId: req.firmId,
+        actorId: req.userId,
+        actorType: req.userType,
+        action: "cases.bulk.assign",
+        entityType: "case",
+        entityId: caseId,
+        detail: `role=${roleInCase} userId=${targetUserId}`,
+        ipAddress: req.ip,
+        userAgent: req.headers["user-agent"],
+      });
+
+      succeeded += 1;
+    } catch (err) {
+      failures.push({ caseId, error: err instanceof Error ? err.message : String(err) });
+    }
+  }
+
+  await writeAuditLog({
+    firmId: req.firmId,
+    actorId: req.userId,
+    actorType: req.userType,
+    action: "cases.bulk.assign.summary",
+    entityType: "case_assignment",
+    detail: `role=${roleInCase} userId=${targetUserId} requested=${normalizedCaseIds.length} succeeded=${succeeded} failed=${failures.length}`,
+    ipAddress: req.ip,
+    userAgent: req.headers["user-agent"],
+  });
+
+  res.json({ requested: normalizedCaseIds.length, succeeded, failed: failures.length, failures });
+});
+
+function sanitizeCsvCell(v: unknown): string {
+  const s = v === null || v === undefined ? "" : String(v);
+  const trimmed = s.trimStart();
+  if (trimmed.startsWith("=") || trimmed.startsWith("+") || trimmed.startsWith("-") || trimmed.startsWith("@")) {
+    return `'${s}`;
+  }
+  return s;
+}
+
+router.get("/cases/export.csv", requireAuth, requireFirmUser, requirePermission("cases", "read"), async (req: AuthRequest, res): Promise<void> => {
+  const r = rdb(req);
+
+  const params = ListCasesQueryParams.safeParse(req.query);
+  const status = params.success ? params.data.status : undefined;
+  const projectId = params.success ? params.data.projectId : undefined;
+  const developerId = params.success ? params.data.developerId : undefined;
+  const purchaseMode = params.success ? params.data.purchaseMode : undefined;
+  const titleType = params.success ? params.data.titleType : undefined;
+
+  const one = (v: string | string[] | undefined): string | undefined => Array.isArray(v) ? v[0] : v;
+  const parseIntOrUndef = (v: string | string[] | undefined): number | undefined => {
+    const s = one(v);
+    if (s === undefined) return undefined;
+    const n = Number(s);
+    if (!Number.isInteger(n)) return undefined;
+    return n;
+  };
+
+  const search = one(req.query.search as any);
+  const spaStatus = one(req.query.spaStatus as any);
+  const loanStatus = one(req.query.loanStatus as any);
+  const milestone = one(req.query.milestone as any) as CaseMilestoneKey | undefined;
+  const milestonePresence = one(req.query.milestonePresence as any) as MilestonePresence | undefined;
+  const sortByRaw = one(req.query.sortBy as any);
+  const sortDirRaw = one(req.query.sortDir as any);
+  const assignedLawyerId = params.success ? params.data.assignedLawyerId : parseIntOrUndef(req.query.assignedLawyerId as any);
+  const assignedClerkId = parseIntOrUndef(req.query.assignedClerkId as any);
+
+  const loanOnlyMilestones: Set<CaseMilestoneKey> = new Set([
+    "loan_docs_signed_date",
+    "acting_letter_issued_date",
+    "loan_sent_bank_execution_date",
+    "loan_bank_executed_date",
+    "bank_lu_received_date",
+  ]);
+
+  const conditions = [eq(casesTable.firmId, req.firmId!)];
+  if (status) conditions.push(eq(casesTable.status, status));
+  if (projectId) conditions.push(eq(casesTable.projectId, projectId));
+  if (developerId) conditions.push(eq(casesTable.developerId, developerId));
+  if (purchaseMode) conditions.push(eq(casesTable.purchaseMode, purchaseMode));
+  if (titleType) conditions.push(eq(casesTable.titleType, titleType));
+  if (assignedLawyerId) {
+    conditions.push(sql`EXISTS (
+      SELECT 1
+      FROM ${caseAssignmentsTable}
+      WHERE ${caseAssignmentsTable.caseId} = ${casesTable.id}
+        AND ${caseAssignmentsTable.roleInCase} = 'lawyer'
+        AND ${caseAssignmentsTable.userId} = ${assignedLawyerId}
+        AND ${sql`unassigned_at IS NULL`}
+    )`);
+  }
+  if (assignedClerkId) {
+    conditions.push(sql`EXISTS (
+      SELECT 1
+      FROM ${caseAssignmentsTable}
+      WHERE ${caseAssignmentsTable.caseId} = ${casesTable.id}
+        AND ${caseAssignmentsTable.roleInCase} = 'clerk'
+        AND ${caseAssignmentsTable.userId} = ${assignedClerkId}
+        AND ${sql`unassigned_at IS NULL`}
+    )`);
+  }
+  if (spaStatus) {
+    conditions.push(sql`${spaStatusSql()} = ${spaStatus}`);
+  }
+  if (loanStatus) {
+    conditions.push(sql`${loanStatusSql()} = ${loanStatus}`);
+  }
+  if (milestone && milestonePresence && (milestonePresence === "filled" || milestonePresence === "missing")) {
+    if (loanOnlyMilestones.has(milestone)) {
+      conditions.push(eq(casesTable.purchaseMode, "loan"));
+    }
+    conditions.push(milestonePresenceWhereSql(milestone, milestonePresence));
+  }
+  if (search && search.trim()) {
+    const like = `%${search.trim()}%`;
+    const searchOr = or(
+      sql`${casesTable.referenceNo} ILIKE ${like}`,
+      sql`${projectsTable.name} ILIKE ${like}`,
+      sql`${developersTable.name} ILIKE ${like}`,
+      sql`COALESCE(${casesTable.parcelNo}, '') ILIKE ${like}`,
+      sql`EXISTS (
+        SELECT 1
+        FROM ${casePurchasersTable} cp
+        JOIN ${clientsTable} cl ON cp.client_id = cl.id
+        WHERE cp.case_id = ${casesTable.id}
+          AND cl.firm_id = ${casesTable.firmId}
+          AND cl.name ILIKE ${like}
+      )`
+    );
+    if (searchOr) conditions.push(searchOr);
+  }
+
+  const sortBy = ((): "updatedAt" | "createdAt" | "referenceNo" | "spaDate" => {
+    if (sortByRaw === "createdAt") return "createdAt";
+    if (sortByRaw === "referenceNo") return "referenceNo";
+    if (sortByRaw === "spaDate") return "spaDate";
+    return "updatedAt";
+  })();
+  const sortDir = (sortDirRaw === "asc" || sortDirRaw === "desc") ? sortDirRaw : "desc";
+  const primaryOrder = (() => {
+    if (sortBy === "createdAt") return sortDir === "asc" ? asc(casesTable.createdAt) : desc(casesTable.createdAt);
+    if (sortBy === "referenceNo") return sortDir === "asc" ? asc(casesTable.referenceNo) : desc(casesTable.referenceNo);
+    if (sortBy === "spaDate") {
+      const expr = milestoneDateYmdSql("spa_date");
+      return sortDir === "asc" ? sql`${expr} ASC NULLS LAST` : sql`${expr} DESC NULLS LAST`;
+    }
+    return sortDir === "asc" ? asc(casesTable.updatedAt) : desc(casesTable.updatedAt);
+  })();
+
+  const purchaserNameSql = sql<string | null>`(
+    SELECT cl.name
+    FROM ${casePurchasersTable} cp
+    JOIN ${clientsTable} cl ON cp.client_id = cl.id
+    WHERE cp.case_id = ${casesTable.id}
+      AND cl.firm_id = ${casesTable.firmId}
+    ORDER BY cp.order_no ASC
+    LIMIT 1
+  )`;
+  const purchaserCountSql = sql<number>`(
+    SELECT COUNT(*)
+    FROM ${casePurchasersTable} cp
+    WHERE cp.case_id = ${casesTable.id}
+  )`;
+  const lawyerNameSql = sql<string | null>`(
+    SELECT ${usersTable.name}
+    FROM ${caseAssignmentsTable}
+    JOIN ${usersTable} ON ${caseAssignmentsTable.userId} = ${usersTable.id}
+    WHERE ${caseAssignmentsTable.caseId} = ${casesTable.id}
+      AND ${caseAssignmentsTable.roleInCase} = 'lawyer'
+      AND ${sql`unassigned_at IS NULL`}
+    ORDER BY ${caseAssignmentsTable.assignedAt} DESC
+    LIMIT 1
+  )`;
+  const clerkNameSql = sql<string | null>`(
+    SELECT ${usersTable.name}
+    FROM ${caseAssignmentsTable}
+    JOIN ${usersTable} ON ${caseAssignmentsTable.userId} = ${usersTable.id}
+    WHERE ${caseAssignmentsTable.caseId} = ${casesTable.id}
+      AND ${caseAssignmentsTable.roleInCase} = 'clerk'
+      AND ${sql`unassigned_at IS NULL`}
+    ORDER BY ${caseAssignmentsTable.assignedAt} DESC
+    LIMIT 1
+  )`;
+
+  const rows = await r
+    .select({
+      referenceNo: casesTable.referenceNo,
+      projectName: projectsTable.name,
+      developerName: developersTable.name,
+      parcelNo: casesTable.parcelNo,
+      clientName: purchaserNameSql,
+      purchaserCount: purchaserCountSql,
+      assignedLawyerName: lawyerNameSql,
+      assignedClerkName: clerkNameSql,
+      spaStatus: spaStatusSql(),
+      loanStatus: loanStatusSql(),
+      mSpaDate: milestoneDateYmdSql("spa_date"),
+      mSpaStampedDate: milestoneDateYmdSql("spa_stamped_date"),
+      mLetterOfOfferDate: milestoneDateYmdSql("letter_of_offer_date"),
+      mLoanDocsSignedDate: milestoneDateYmdSql("loan_docs_signed_date"),
+      mCompletionDate: milestoneDateYmdSql("completion_date"),
+      updatedAt: casesTable.updatedAt,
+    })
+    .from(casesTable)
+    .leftJoin(projectsTable, eq(projectsTable.id, casesTable.projectId))
+    .leftJoin(developersTable, eq(developersTable.id, casesTable.developerId))
+    .leftJoin(caseKeyDatesTable, and(eq(caseKeyDatesTable.caseId, casesTable.id), eq(caseKeyDatesTable.firmId, casesTable.firmId)))
+    .where(and(...conditions))
+    .orderBy(primaryOrder, desc(casesTable.updatedAt));
+
+  res.setHeader("Content-Type", "text/csv; charset=utf-8");
+  res.setHeader("Content-Disposition", `attachment; filename="cases_export.csv"`);
+
+  const header = [
+    "Our Reference",
+    "Client / Purchaser",
+    "Project / Property",
+    "Assigned Lawyer",
+    "Assigned Clerk",
+    "SPA Status",
+    "Loan Status",
+    "SPA Date",
+    "SPA Stamped",
+    "LOF Date",
+    "Loan Docs Signed",
+    "Completion Date",
+    "Updated At",
+  ].join(",") + "\n";
+  res.write(header);
+
+  for (const row of rows) {
+    const purchaserCount = Number(row.purchaserCount ?? 0);
+    const baseName = row.clientName ?? "";
+    const clientDisplayName = baseName && purchaserCount > 1 ? `${baseName} +${purchaserCount - 1}` : baseName;
+    const projectProperty = [row.projectName ?? "", row.parcelNo ?? ""].filter(Boolean).join(" / ");
+
+    const line = [
+      sanitizeCsvCell(row.referenceNo),
+      sanitizeCsvCell(clientDisplayName),
+      sanitizeCsvCell(projectProperty),
+      sanitizeCsvCell(row.assignedLawyerName ?? ""),
+      sanitizeCsvCell(row.assignedClerkName ?? ""),
+      sanitizeCsvCell(row.spaStatus),
+      sanitizeCsvCell(row.loanStatus ?? ""),
+      sanitizeCsvCell(row.mSpaDate ?? ""),
+      sanitizeCsvCell(row.mSpaStampedDate ?? ""),
+      sanitizeCsvCell(row.mLetterOfOfferDate ?? ""),
+      sanitizeCsvCell(row.mLoanDocsSignedDate ?? ""),
+      sanitizeCsvCell(row.mCompletionDate ?? ""),
+      sanitizeCsvCell(row.updatedAt.toISOString()),
+    ].map((cell) => `"${String(cell).replace(/"/g, '""')}"`).join(",") + "\n";
+    res.write(line);
+  }
+  res.end();
 });
 
 router.get("/cases", requireAuth, requireFirmUser, requirePermission("cases", "read"), async (req: AuthRequest, res): Promise<void> => {

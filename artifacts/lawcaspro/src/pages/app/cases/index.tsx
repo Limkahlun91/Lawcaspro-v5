@@ -1,27 +1,47 @@
-import { CaseMilestoneKey, MilestonePresence, useListCases, useListDevelopers, useListProjects } from "@workspace/api-client-react";
+import { CaseMilestoneKey, MilestonePresence, getListCasesQueryKey, useListCases, useListDevelopers, useListProjects, useListUsers } from "@workspace/api-client-react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { Plus, Search } from "lucide-react";
+import { Download, Plus, Save, Search, Star, Trash2 } from "lucide-react";
 import { Link, useLocation } from "wouter";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useMemo, useState, useEffect, useRef } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { fetchWithTimeout } from "@/lib/fetch-with-timeout";
 import { getStoredAuthToken } from "@/lib/auth-token";
 import { Badge } from "@/components/ui/badge";
+import { Checkbox } from "@/components/ui/checkbox";
+import { useToast } from "@/hooks/use-toast";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 
 const API_BASE = import.meta.env.BASE_URL.replace(/\/$/, "").replace(/^\/lawcaspro/, "") + "/api";
 
-async function apiFetch(path: string) {
+async function apiFetch(path: string, init?: RequestInit) {
   const token = getStoredAuthToken();
+  const headers: Record<string, string> = {};
+  if (token) headers.Authorization = `Bearer ${token}`;
+  if (init?.body) headers["Content-Type"] = "application/json";
+
   const res = await fetchWithTimeout(`${API_BASE}${path}`, {
     credentials: "include",
     timeoutMs: 15000,
+    ...init,
+    headers: { ...headers, ...(init?.headers ?? {}) },
+  });
+  if (!res.ok) throw new Error(await res.text());
+  if (res.status === 204) return null;
+  return res.json();
+}
+
+async function apiFetchCsv(path: string): Promise<Blob> {
+  const token = getStoredAuthToken();
+  const res = await fetchWithTimeout(`${API_BASE}${path}`, {
+    credentials: "include",
+    timeoutMs: 60000,
     headers: token ? { Authorization: `Bearer ${token}` } : undefined,
   });
   if (!res.ok) throw new Error(await res.text());
-  return res.json();
+  return res.blob();
 }
 
 function fmtYmd(ymd: string | null | undefined): string {
@@ -36,6 +56,9 @@ export default function CasesList() {
   const [location, setLocation] = useLocation();
   const sp = useMemo(() => new URLSearchParams(location.split("?")[1] ?? ""), [location]);
   const isHydratingFromUrl = useRef(false);
+  const appliedDefaultViewRef = useRef(false);
+  const queryClient = useQueryClient();
+  const { toast } = useToast();
 
   const [search, setSearch] = useState("");
   const [purchaseMode, setPurchaseMode] = useState<string>("all");
@@ -93,6 +116,88 @@ export default function CasesList() {
 
     queueMicrotask(() => { isHydratingFromUrl.current = false; });
   }, [sp]);
+
+  const currentViewParams = useMemo(() => {
+    const params: Record<string, string> = {};
+    if (search.trim()) params.search = search.trim();
+    if (spaStatus !== "all") params.spaStatus = spaStatus;
+    if (loanStatus !== "all") params.loanStatus = loanStatus;
+    if (milestone !== "all") {
+      params.milestone = milestone;
+      params.milestonePresence = milestonePresence;
+    }
+    if (lawyerId !== "all") params.assignedLawyerId = lawyerId;
+    if (clerkId !== "all") params.assignedClerkId = clerkId;
+    if (purchaseMode !== "all") params.purchaseMode = purchaseMode;
+    if (projectId !== "all") params.projectId = projectId;
+    if (developerId !== "all") params.developerId = developerId;
+    if (titleType !== "all") params.titleType = titleType;
+    params.sortBy = sortBy;
+    params.sortDir = sortDir;
+    params.limit = String(limit);
+    return params;
+  }, [
+    search,
+    spaStatus,
+    loanStatus,
+    milestone,
+    milestonePresence,
+    lawyerId,
+    clerkId,
+    purchaseMode,
+    projectId,
+    developerId,
+    titleType,
+    sortBy,
+    sortDir,
+    limit,
+  ]);
+
+  const stableParamsKey = (p: Record<string, unknown>) => {
+    const keys = Object.keys(p).sort();
+    return keys.map((k) => `${k}=${String(p[k] ?? "")}`).join("&");
+  };
+
+  const buildQueryString = (p: Record<string, string>, pageOverride?: number) => {
+    const nextSp = new URLSearchParams();
+    for (const [k, v] of Object.entries(p)) nextSp.set(k, v);
+    nextSp.set("page", String(pageOverride ?? 1));
+    return nextSp.toString();
+  };
+
+  const { data: savedViews, refetch: refetchSavedViews } = useQuery({
+    queryKey: ["cases", "saved-views"],
+    queryFn: () => apiFetch("/cases/views"),
+    retry: false,
+  });
+
+  const savedViewsList: Array<{ id: number; name: string; isDefault: boolean; params: Record<string, unknown> }> =
+    Array.isArray(savedViews) ? savedViews : [];
+
+  const activeSavedView = useMemo(() => {
+    const currentKey = stableParamsKey(currentViewParams);
+    return savedViewsList.find((v) => stableParamsKey(v.params ?? {}) === currentKey) ?? null;
+  }, [savedViewsList, currentViewParams]);
+
+  useEffect(() => {
+    if (appliedDefaultViewRef.current) return;
+    if (!savedViewsList.length) return;
+
+    const baseKey = stableParamsKey({
+      sortBy: "updatedAt",
+      sortDir: "desc",
+      limit: "50",
+    });
+    const currentKey = stableParamsKey(currentViewParams);
+    const defaultView = savedViewsList.find((v) => v.isDefault);
+    if (defaultView && currentKey === baseKey) {
+      const qs = buildQueryString(defaultView.params as Record<string, string>, 1);
+      appliedDefaultViewRef.current = true;
+      setLocation(`/app/cases?${qs}`);
+      return;
+    }
+    appliedDefaultViewRef.current = true;
+  }, [savedViewsList, currentViewParams, setLocation]);
 
   useEffect(() => {
     if (isHydratingFromUrl.current) return;
@@ -172,6 +277,10 @@ export default function CasesList() {
 
   const { data: projectsRes } = useListProjects({ page: 1, limit: 200 });
   const { data: devsRes } = useListDevelopers({ page: 1, limit: 200 });
+  const { data: usersRes } = useListUsers({ page: 1, limit: 200 });
+  const allUsers = usersRes?.data ?? [];
+  const lawyerCandidates = allUsers.filter(u => (u.roleName ?? "").toLowerCase().includes("lawyer") || (u.roleName ?? "").toLowerCase().includes("partner"));
+  const clerkCandidates = allUsers.filter(u => (u.roleName ?? "").toLowerCase().includes("clerk"));
   const projects = projectsRes?.data ?? [];
   const developers = devsRes?.data ?? [];
   const total = response?.total ?? 0;
@@ -227,6 +336,128 @@ export default function CasesList() {
     developerNameById,
   ]);
 
+  const [selectedCaseIds, setSelectedCaseIds] = useState<Set<number>>(new Set());
+  const [bulkLawyerId, setBulkLawyerId] = useState<string>("all");
+  const [bulkClerkId, setBulkClerkId] = useState<string>("all");
+
+  useEffect(() => {
+    setSelectedCaseIds(new Set());
+    setBulkLawyerId("all");
+    setBulkClerkId("all");
+  }, [sp.toString()]);
+
+  const currentPageIds = (response?.data ?? []).map((c) => c.id);
+  const allOnPageSelected = currentPageIds.length > 0 && currentPageIds.every((id) => selectedCaseIds.has(id));
+  const someOnPageSelected = currentPageIds.some((id) => selectedCaseIds.has(id));
+
+  const toggleSelectAllPage = () => {
+    setSelectedCaseIds((prev) => {
+      const next = new Set(prev);
+      if (allOnPageSelected) {
+        for (const id of currentPageIds) next.delete(id);
+      } else {
+        for (const id of currentPageIds) next.add(id);
+      }
+      return next;
+    });
+  };
+
+  const toggleSelectOne = (id: number) => {
+    setSelectedCaseIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const bulkAssignMutation = useMutation({
+    mutationFn: async (vars: { roleInCase: "lawyer" | "clerk"; userId: number; caseIds: number[] }) => {
+      const res = await apiFetch("/cases/bulk/assign", { method: "POST", body: JSON.stringify(vars) });
+      return res as { requested: number; succeeded: number; failed: number; failures: Array<{ caseId: number; error: string }> };
+    },
+    onSuccess: (data) => {
+      queryClient.invalidateQueries({ queryKey: getListCasesQueryKey() });
+      setSelectedCaseIds(new Set());
+      setBulkLawyerId("all");
+      setBulkClerkId("all");
+      toast({ title: "Bulk update completed", description: `${data.succeeded} succeeded, ${data.failed} failed` });
+    },
+    onError: (err) => toast({ title: "Bulk update failed", description: String(err), variant: "destructive" }),
+  });
+
+  const downloadCsv = async () => {
+    const qs = sp.toString();
+    const blob = await apiFetchCsv(`/cases/export.csv?${qs}`);
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "cases_export.csv";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  };
+
+  type SavedView = { id: number; name: string; isDefault: boolean; params: Record<string, unknown> };
+  const [isSaveViewOpen, setIsSaveViewOpen] = useState(false);
+  const [isRenameViewOpen, setIsRenameViewOpen] = useState(false);
+  const [viewNameInput, setViewNameInput] = useState("");
+  const [saveAsDefault, setSaveAsDefault] = useState(false);
+
+  const createViewMutation = useMutation({
+    mutationFn: async (vars: { name: string; params: Record<string, string>; isDefault: boolean }) => {
+      const res = await apiFetch("/cases/views", { method: "POST", body: JSON.stringify(vars) });
+      return res as SavedView;
+    },
+    onSuccess: async () => {
+      setIsSaveViewOpen(false);
+      setViewNameInput("");
+      setSaveAsDefault(false);
+      await refetchSavedViews();
+      toast({ title: "View saved" });
+    },
+    onError: (err) => toast({ title: "Save view failed", description: String(err), variant: "destructive" }),
+  });
+
+  const renameViewMutation = useMutation({
+    mutationFn: async (vars: { id: number; name: string }) => {
+      const res = await apiFetch(`/cases/views/${vars.id}`, { method: "PATCH", body: JSON.stringify({ name: vars.name }) });
+      return res as SavedView;
+    },
+    onSuccess: async () => {
+      setIsRenameViewOpen(false);
+      setViewNameInput("");
+      await refetchSavedViews();
+      toast({ title: "View renamed" });
+    },
+    onError: (err) => toast({ title: "Rename failed", description: String(err), variant: "destructive" }),
+  });
+
+  const deleteViewMutation = useMutation({
+    mutationFn: async (id: number) => {
+      await apiFetch(`/cases/views/${id}`, { method: "DELETE" });
+      return id;
+    },
+    onSuccess: async () => {
+      await refetchSavedViews();
+      toast({ title: "View deleted" });
+    },
+    onError: (err) => toast({ title: "Delete failed", description: String(err), variant: "destructive" }),
+  });
+
+  const setDefaultViewMutation = useMutation({
+    mutationFn: async (id: number) => {
+      const res = await apiFetch(`/cases/views/${id}`, { method: "PATCH", body: JSON.stringify({ isDefault: true }) });
+      return res as SavedView;
+    },
+    onSuccess: async () => {
+      await refetchSavedViews();
+      toast({ title: "Default view set" });
+    },
+    onError: (err) => toast({ title: "Set default failed", description: String(err), variant: "destructive" }),
+  });
+
   return (
     <div className="space-y-6">
       <div className="flex justify-between items-center">
@@ -235,12 +466,95 @@ export default function CasesList() {
           <p className="text-slate-500 mt-1">Manage conveyancing cases</p>
           <p className="text-xs text-slate-400 mt-1">Total: {total}</p>
         </div>
-        <Link href="/app/cases/new">
-          <Button className="bg-amber-500 hover:bg-amber-600 text-white">
-            <Plus className="w-4 h-4 mr-2" />
-            New Case
+        <div className="flex items-center gap-2">
+          <Button
+            variant="outline"
+            onClick={() => {
+              downloadCsv().catch((err) => toast({ title: "Export failed", description: String(err), variant: "destructive" }));
+            }}
+          >
+            <Download className="w-4 h-4 mr-2" />
+            Export CSV
           </Button>
-        </Link>
+          <Button
+            variant="outline"
+            onClick={() => {
+              setViewNameInput(activeSavedView?.name ? `${activeSavedView.name} (copy)` : "");
+              setSaveAsDefault(false);
+              setIsSaveViewOpen(true);
+            }}
+          >
+            <Save className="w-4 h-4 mr-2" />
+            Save View
+          </Button>
+          <Link href="/app/cases/new">
+            <Button className="bg-amber-500 hover:bg-amber-600 text-white">
+              <Plus className="w-4 h-4 mr-2" />
+              New Case
+            </Button>
+          </Link>
+        </div>
+      </div>
+
+      <div className="flex items-center gap-2">
+        <Select
+          value={activeSavedView ? String(activeSavedView.id) : "custom"}
+          onValueChange={(v) => {
+            if (v === "custom") return;
+            const view = savedViewsList.find((x) => String(x.id) === v);
+            if (!view) return;
+            const qs = buildQueryString(view.params as Record<string, string>, 1);
+            setLocation(`/app/cases?${qs}`);
+          }}
+        >
+          <SelectTrigger className="w-[260px]">
+            <SelectValue placeholder="Saved Views" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="custom">Custom (current)</SelectItem>
+            {savedViewsList.map((v) => (
+              <SelectItem key={v.id} value={String(v.id)}>
+                {v.isDefault ? "★ " : ""}{v.name}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        <Button
+          variant="outline"
+          size="sm"
+          disabled={!activeSavedView}
+          onClick={() => {
+            if (!activeSavedView) return;
+            setDefaultViewMutation.mutate(activeSavedView.id);
+          }}
+        >
+          <Star className="w-4 h-4 mr-2" />
+          Set Default
+        </Button>
+        <Button
+          variant="outline"
+          size="sm"
+          disabled={!activeSavedView}
+          onClick={() => {
+            if (!activeSavedView) return;
+            setViewNameInput(activeSavedView.name);
+            setIsRenameViewOpen(true);
+          }}
+        >
+          Rename
+        </Button>
+        <Button
+          variant="outline"
+          size="sm"
+          disabled={!activeSavedView}
+          onClick={() => {
+            if (!activeSavedView) return;
+            deleteViewMutation.mutate(activeSavedView.id);
+          }}
+        >
+          <Trash2 className="w-4 h-4 mr-2" />
+          Delete
+        </Button>
       </div>
 
       {activeChips.length > 0 && (
@@ -456,6 +770,12 @@ export default function CasesList() {
               <table className="w-full text-sm text-left">
                 <thead className="text-xs text-slate-500 uppercase bg-slate-50 border-b border-slate-200">
                   <tr>
+                    <th className="px-4 py-3 font-semibold">
+                      <Checkbox
+                        checked={allOnPageSelected ? true : (someOnPageSelected ? "indeterminate" : false)}
+                        onCheckedChange={toggleSelectAllPage}
+                      />
+                    </th>
                     <th className="px-6 py-3 font-semibold">Our Reference</th>
                     <th className="px-6 py-3 font-semibold">Client / Purchaser</th>
                     <th className="px-6 py-3 font-semibold">Project / Property</th>
@@ -469,6 +789,12 @@ export default function CasesList() {
                 <tbody className="divide-y divide-slate-100">
                   {response?.data.map((c) => (
                     <tr key={c.id} className="hover:bg-slate-50/50">
+                      <td className="px-4 py-4">
+                        <Checkbox
+                          checked={selectedCaseIds.has(c.id)}
+                          onCheckedChange={() => toggleSelectOne(c.id)}
+                        />
+                      </td>
                       <td className="px-6 py-4">
                         <Link href={`/app/cases/${c.id}?returnTo=${encodeURIComponent(location)}`}>
                           <span className="font-medium text-slate-900 hover:text-amber-600 cursor-pointer transition-colors">
@@ -520,7 +846,7 @@ export default function CasesList() {
                   ))}
                   {response?.data.length === 0 && (
                     <tr>
-                      <td colSpan={8} className="px-6 py-8 text-center text-slate-500">
+                      <td colSpan={9} className="px-6 py-8 text-center text-slate-500">
                         No cases found.
                       </td>
                     </tr>
@@ -531,6 +857,122 @@ export default function CasesList() {
           )}
         </CardContent>
       </Card>
+
+      {selectedCaseIds.size > 0 && (
+        <Card>
+          <CardContent className="py-4 flex flex-col md:flex-row md:items-center md:justify-between gap-3">
+            <div className="text-sm text-slate-700">
+              {selectedCaseIds.size} case(s) selected
+            </div>
+            <div className="flex flex-col md:flex-row gap-2 md:items-center">
+              <Select value={bulkLawyerId} onValueChange={setBulkLawyerId}>
+                <SelectTrigger className="w-[220px]">
+                  <SelectValue placeholder="Assign Lawyer" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">Select lawyer…</SelectItem>
+                  {lawyerCandidates.map((u) => (
+                    <SelectItem key={u.id} value={String(u.id)}>{u.name}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <Button
+                variant="outline"
+                disabled={bulkLawyerId === "all" || bulkAssignMutation.isPending}
+                onClick={() => {
+                  const ids = Array.from(selectedCaseIds);
+                  bulkAssignMutation.mutate({ roleInCase: "lawyer", userId: Number(bulkLawyerId), caseIds: ids });
+                }}
+              >
+                Apply
+              </Button>
+
+              <Select value={bulkClerkId} onValueChange={setBulkClerkId}>
+                <SelectTrigger className="w-[220px]">
+                  <SelectValue placeholder="Assign Clerk" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">Select clerk…</SelectItem>
+                  {clerkCandidates.map((u) => (
+                    <SelectItem key={u.id} value={String(u.id)}>{u.name}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <Button
+                variant="outline"
+                disabled={bulkClerkId === "all" || bulkAssignMutation.isPending}
+                onClick={() => {
+                  const ids = Array.from(selectedCaseIds);
+                  bulkAssignMutation.mutate({ roleInCase: "clerk", userId: Number(bulkClerkId), caseIds: ids });
+                }}
+              >
+                Apply
+              </Button>
+
+              <Button variant="ghost" onClick={() => setSelectedCaseIds(new Set())}>
+                Clear selection
+              </Button>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      <Dialog open={isSaveViewOpen} onOpenChange={setIsSaveViewOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Save current view</DialogTitle>
+            <DialogDescription>Save the current filters/sort/limit as a named view.</DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3">
+            <div className="space-y-1">
+              <div className="text-sm font-medium">Name</div>
+              <Input value={viewNameInput} onChange={(e) => setViewNameInput(e.target.value)} placeholder="e.g. My urgent loan cases" />
+            </div>
+            <div className="flex items-center gap-2">
+              <Checkbox checked={saveAsDefault} onCheckedChange={(v) => setSaveAsDefault(Boolean(v))} />
+              <div className="text-sm text-slate-700">Set as default</div>
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setIsSaveViewOpen(false)}>Cancel</Button>
+            <Button
+              onClick={() => {
+                const name = viewNameInput.trim();
+                if (!name) return;
+                createViewMutation.mutate({ name, params: currentViewParams, isDefault: saveAsDefault });
+              }}
+              disabled={createViewMutation.isPending}
+            >
+              Save
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={isRenameViewOpen} onOpenChange={setIsRenameViewOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Rename view</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-1">
+            <div className="text-sm font-medium">Name</div>
+            <Input value={viewNameInput} onChange={(e) => setViewNameInput(e.target.value)} />
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setIsRenameViewOpen(false)}>Cancel</Button>
+            <Button
+              onClick={() => {
+                const name = viewNameInput.trim();
+                if (!name || !activeSavedView) return;
+                renameViewMutation.mutate({ id: activeSavedView.id, name });
+              }}
+              disabled={!activeSavedView || renameViewMutation.isPending}
+            >
+              Rename
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
