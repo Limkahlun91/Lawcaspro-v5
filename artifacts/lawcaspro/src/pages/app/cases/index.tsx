@@ -1,7 +1,7 @@
 import { CaseMilestoneKey, MilestonePresence, getListCasesQueryKey, useListCases, useListDevelopers, useListProjects, useListUsers } from "@workspace/api-client-react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { Download, Plus, Save, Search, Star, Trash2 } from "lucide-react";
+import { Download, Plus, Save, Search, Trash2 } from "lucide-react";
 import { Link, useLocation } from "wouter";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -56,7 +56,6 @@ export default function CasesList() {
   const [location, setLocation] = useLocation();
   const sp = useMemo(() => new URLSearchParams(location.split("?")[1] ?? ""), [location]);
   const isHydratingFromUrl = useRef(false);
-  const appliedDefaultViewRef = useRef(false);
   const queryClient = useQueryClient();
   const { toast } = useToast();
 
@@ -124,43 +123,16 @@ export default function CasesList() {
     queueMicrotask(() => { isHydratingFromUrl.current = false; });
   }, [sp]);
 
-  const currentViewParams = useMemo(() => {
-    const params: Record<string, string> = {};
-    if (search.trim()) params.search = search.trim();
-    if (spaStatus !== "all") params.spaStatus = spaStatus;
-    if (loanStatus !== "all") params.loanStatus = loanStatus;
-    if (milestone !== "all") {
-      params.milestone = milestone;
-      params.milestonePresence = milestonePresence;
+  const currentViewFilters = useMemo(() => {
+    const out: Record<string, string> = {};
+    for (const [k, v] of sp.entries()) {
+      if (k === "page" || k === "returnTo") continue;
+      out[k] = v;
     }
-    if (lawyerId !== "all") params.assignedLawyerId = lawyerId;
-    if (clerkId !== "all") params.assignedClerkId = clerkId;
-    if (purchaseMode !== "all") params.purchaseMode = purchaseMode;
-    if (projectId !== "all") params.projectId = projectId;
-    if (developerId !== "all") params.developerId = developerId;
-    if (titleType !== "all") params.titleType = titleType;
-    params.sortBy = sortBy;
-    params.sortDir = sortDir;
-    params.limit = String(limit);
-    return params;
-  }, [
-    search,
-    spaStatus,
-    loanStatus,
-    milestone,
-    milestonePresence,
-    lawyerId,
-    clerkId,
-    purchaseMode,
-    projectId,
-    developerId,
-    titleType,
-    sortBy,
-    sortDir,
-    limit,
-  ]);
+    return out;
+  }, [sp]);
 
-  const stableParamsKey = (p: Record<string, unknown>) => {
+  const stableParamsKey = (p: Record<string, string>) => {
     const keys = Object.keys(p).sort();
     return keys.map((k) => `${k}=${String(p[k] ?? "")}`).join("&");
   };
@@ -174,37 +146,17 @@ export default function CasesList() {
 
   const { data: savedViews, refetch: refetchSavedViews } = useQuery({
     queryKey: ["cases", "saved-views"],
-    queryFn: () => apiFetch("/cases/views"),
+    queryFn: () => apiFetch("/case-list-views"),
     retry: false,
   });
 
-  const savedViewsList: Array<{ id: number; name: string; isDefault: boolean; params: Record<string, unknown> }> =
+  const savedViewsList: Array<{ id: number; name: string; routeKey: string; filtersJson: Record<string, string> }> =
     Array.isArray(savedViews) ? savedViews : [];
 
   const activeSavedView = useMemo(() => {
-    const currentKey = stableParamsKey(currentViewParams);
-    return savedViewsList.find((v) => stableParamsKey(v.params ?? {}) === currentKey) ?? null;
-  }, [savedViewsList, currentViewParams]);
-
-  useEffect(() => {
-    if (appliedDefaultViewRef.current) return;
-    if (!savedViewsList.length) return;
-
-    const baseKey = stableParamsKey({
-      sortBy: "updatedAt",
-      sortDir: "desc",
-      limit: "50",
-    });
-    const currentKey = stableParamsKey(currentViewParams);
-    const defaultView = savedViewsList.find((v) => v.isDefault);
-    if (defaultView && currentKey === baseKey) {
-      const qs = buildQueryString(defaultView.params as Record<string, string>, 1);
-      appliedDefaultViewRef.current = true;
-      setLocation(`/app/cases?${qs}`);
-      return;
-    }
-    appliedDefaultViewRef.current = true;
-  }, [savedViewsList, currentViewParams, setLocation]);
+    const currentKey = stableParamsKey(currentViewFilters);
+    return savedViewsList.find((v) => stableParamsKey(v.filtersJson ?? {}) === currentKey) ?? null;
+  }, [savedViewsList, currentViewFilters]);
 
   useEffect(() => {
     if (isHydratingFromUrl.current) return;
@@ -418,21 +370,19 @@ export default function CasesList() {
     URL.revokeObjectURL(url);
   };
 
-  type SavedView = { id: number; name: string; isDefault: boolean; params: Record<string, unknown> };
+  type SavedView = { id: number; name: string; routeKey: string; filtersJson: Record<string, string> };
   const [isSaveViewOpen, setIsSaveViewOpen] = useState(false);
   const [isRenameViewOpen, setIsRenameViewOpen] = useState(false);
   const [viewNameInput, setViewNameInput] = useState("");
-  const [saveAsDefault, setSaveAsDefault] = useState(false);
 
   const createViewMutation = useMutation({
-    mutationFn: async (vars: { name: string; params: Record<string, string>; isDefault: boolean }) => {
-      const res = await apiFetch("/cases/views", { method: "POST", body: JSON.stringify(vars) });
+    mutationFn: async (vars: { name: string; routeKey: "cases"; filtersJson: Record<string, string> }) => {
+      const res = await apiFetch("/case-list-views", { method: "POST", body: JSON.stringify(vars) });
       return res as SavedView;
     },
     onSuccess: async () => {
       setIsSaveViewOpen(false);
       setViewNameInput("");
-      setSaveAsDefault(false);
       await refetchSavedViews();
       toast({ title: "View saved" });
     },
@@ -441,7 +391,7 @@ export default function CasesList() {
 
   const renameViewMutation = useMutation({
     mutationFn: async (vars: { id: number; name: string }) => {
-      const res = await apiFetch(`/cases/views/${vars.id}`, { method: "PATCH", body: JSON.stringify({ name: vars.name }) });
+      const res = await apiFetch(`/case-list-views/${vars.id}`, { method: "PATCH", body: JSON.stringify({ name: vars.name }) });
       return res as SavedView;
     },
     onSuccess: async () => {
@@ -455,7 +405,7 @@ export default function CasesList() {
 
   const deleteViewMutation = useMutation({
     mutationFn: async (id: number) => {
-      await apiFetch(`/cases/views/${id}`, { method: "DELETE" });
+      await apiFetch(`/case-list-views/${id}`, { method: "DELETE" });
       return id;
     },
     onSuccess: async () => {
@@ -463,18 +413,6 @@ export default function CasesList() {
       toast({ title: "View deleted" });
     },
     onError: (err) => toast({ title: "Delete failed", description: String(err), variant: "destructive" }),
-  });
-
-  const setDefaultViewMutation = useMutation({
-    mutationFn: async (id: number) => {
-      const res = await apiFetch(`/cases/views/${id}`, { method: "PATCH", body: JSON.stringify({ isDefault: true }) });
-      return res as SavedView;
-    },
-    onSuccess: async () => {
-      await refetchSavedViews();
-      toast({ title: "Default view set" });
-    },
-    onError: (err) => toast({ title: "Set default failed", description: String(err), variant: "destructive" }),
   });
 
   return (
@@ -499,7 +437,6 @@ export default function CasesList() {
             variant="outline"
             onClick={() => {
               setViewNameInput(activeSavedView?.name ? `${activeSavedView.name} (copy)` : "");
-              setSaveAsDefault(false);
               setIsSaveViewOpen(true);
             }}
           >
@@ -522,7 +459,7 @@ export default function CasesList() {
             if (v === "custom") return;
             const view = savedViewsList.find((x) => String(x.id) === v);
             if (!view) return;
-            const qs = buildQueryString(view.params as Record<string, string>, 1);
+            const qs = buildQueryString(view.filtersJson as Record<string, string>, 1);
             setLocation(`/app/cases?${qs}`);
           }}
         >
@@ -533,23 +470,11 @@ export default function CasesList() {
             <SelectItem value="custom">Custom (current)</SelectItem>
             {savedViewsList.map((v) => (
               <SelectItem key={v.id} value={String(v.id)}>
-                {v.isDefault ? "★ " : ""}{v.name}
+                {v.name}
               </SelectItem>
             ))}
           </SelectContent>
         </Select>
-        <Button
-          variant="outline"
-          size="sm"
-          disabled={!activeSavedView}
-          onClick={() => {
-            if (!activeSavedView) return;
-            setDefaultViewMutation.mutate(activeSavedView.id);
-          }}
-        >
-          <Star className="w-4 h-4 mr-2" />
-          Set Default
-        </Button>
         <Button
           variant="outline"
           size="sm"
@@ -949,10 +874,6 @@ export default function CasesList() {
               <div className="text-sm font-medium">Name</div>
               <Input value={viewNameInput} onChange={(e) => setViewNameInput(e.target.value)} placeholder="e.g. My urgent loan cases" />
             </div>
-            <div className="flex items-center gap-2">
-              <Checkbox checked={saveAsDefault} onCheckedChange={(v) => setSaveAsDefault(Boolean(v))} />
-              <div className="text-sm text-slate-700">Set as default</div>
-            </div>
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setIsSaveViewOpen(false)}>Cancel</Button>
@@ -960,7 +881,7 @@ export default function CasesList() {
               onClick={() => {
                 const name = viewNameInput.trim();
                 if (!name) return;
-                createViewMutation.mutate({ name, params: currentViewParams, isDefault: saveAsDefault });
+                createViewMutation.mutate({ name, routeKey: "cases", filtersJson: currentViewFilters });
               }}
               disabled={createViewMutation.isPending}
             >

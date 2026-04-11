@@ -49,6 +49,62 @@ function asNumber(v: unknown): number | null {
   return null;
 }
 
+const CASE_LIST_ROUTE_KEY = "cases" as const;
+const ALLOWED_CASE_LIST_FILTER_KEYS = new Set([
+  "search",
+  "status",
+  "projectId",
+  "developerId",
+  "assignedLawyerId",
+  "assignedClerkId",
+  "assignedToUserId",
+  "purchaseMode",
+  "titleType",
+  "milestone",
+  "milestonePresence",
+  "overdueDays",
+  "spaStatus",
+  "loanStatus",
+  "sortBy",
+  "sortDir",
+  "sortOrder",
+  "limit",
+  "pageSize",
+]);
+
+function sanitizeCaseListFiltersJson(raw: unknown): Record<string, string> {
+  const obj = asObject(raw);
+  if (!obj) return {};
+
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(obj)) {
+    if (k === "page" || k === "returnTo") continue;
+    if (!ALLOWED_CASE_LIST_FILTER_KEYS.has(k)) continue;
+    if (v === null || v === undefined) continue;
+    if (typeof v === "string") {
+      if (!v.trim()) continue;
+      out[k] = v;
+      continue;
+    }
+    if (typeof v === "number" && Number.isFinite(v)) {
+      out[k] = String(v);
+      continue;
+    }
+    if (typeof v === "boolean") {
+      out[k] = v ? "true" : "false";
+      continue;
+    }
+  }
+
+  if (out.pageSize && !out.limit) out.limit = out.pageSize;
+  if (out.sortOrder && !out.sortDir) out.sortDir = out.sortOrder;
+
+  delete out.pageSize;
+  delete out.sortOrder;
+
+  return out;
+}
+
 function parseDateOnlyInput(v: unknown): string | null | undefined {
   if (v === undefined) return undefined;
   if (v === null) return null;
@@ -314,12 +370,231 @@ router.get("/cases/filter-options", requireAuth, requireFirmUser, requirePermiss
   });
 });
 
+router.get("/case-list-views", requireAuth, requireFirmUser, requirePermission("cases", "read"), async (req: AuthRequest, res): Promise<void> => {
+  const r = rdb(req);
+
+  const rows = await r
+    .select()
+    .from(caseListSavedViewsTable)
+    .where(and(
+      eq(caseListSavedViewsTable.firmId, req.firmId!),
+      eq(caseListSavedViewsTable.userId, req.userId!),
+      eq(caseListSavedViewsTable.routeKey, CASE_LIST_ROUTE_KEY),
+    ))
+    .orderBy(asc(caseListSavedViewsTable.name));
+
+  res.json(rows.map((v) => ({
+    id: v.id,
+    firmId: v.firmId,
+    userId: v.userId,
+    routeKey: v.routeKey,
+    name: v.name,
+    filtersJson: v.params ?? {},
+    createdAt: v.createdAt.toISOString(),
+    updatedAt: v.updatedAt.toISOString(),
+  })));
+});
+
+router.post("/case-list-views", requireAuth, requireFirmUser, requirePermission("cases", "update"), async (req: AuthRequest, res): Promise<void> => {
+  const r = req.rlsDb;
+  if (!r) {
+    res.status(500).json({ error: "Internal Server Error" });
+    return;
+  }
+
+  const body = asObject(req.body);
+  const name = asString(body?.name)?.trim() ?? "";
+  const routeKey = asString(body?.routeKey) ?? CASE_LIST_ROUTE_KEY;
+  const filtersJson = sanitizeCaseListFiltersJson(body?.filtersJson);
+
+  if (!name) {
+    res.status(400).json({ error: "name is required" });
+    return;
+  }
+  if (routeKey !== CASE_LIST_ROUTE_KEY) {
+    res.status(400).json({ error: "routeKey must be cases" });
+    return;
+  }
+
+  try {
+    const [created] = await r
+      .insert(caseListSavedViewsTable)
+      .values({
+        firmId: req.firmId!,
+        userId: req.userId!,
+        routeKey: CASE_LIST_ROUTE_KEY,
+        name,
+        params: filtersJson,
+        updatedAt: new Date(),
+      })
+      .returning();
+
+    await writeAuditLog({
+      firmId: req.firmId,
+      actorId: req.userId,
+      actorType: req.userType,
+      action: "cases.list_views.create",
+      entityType: "case_list_view",
+      entityId: created.id,
+      detail: `name=${name}`,
+      ipAddress: req.ip,
+      userAgent: req.headers["user-agent"],
+    });
+
+    res.status(201).json({
+      id: created.id,
+      firmId: created.firmId,
+      userId: created.userId,
+      routeKey: created.routeKey,
+      name: created.name,
+      filtersJson: created.params ?? {},
+      createdAt: created.createdAt.toISOString(),
+      updatedAt: created.updatedAt.toISOString(),
+    });
+  } catch (err) {
+    const code = (err as any)?.code;
+    if (code === "23505") {
+      res.status(409).json({ error: "A view with this name already exists" });
+      return;
+    }
+    throw err;
+  }
+});
+
+router.patch("/case-list-views/:id", requireAuth, requireFirmUser, requirePermission("cases", "update"), async (req: AuthRequest, res): Promise<void> => {
+  const r = req.rlsDb;
+  if (!r) {
+    res.status(500).json({ error: "Internal Server Error" });
+    return;
+  }
+
+  const id = Number((req.params as Record<string, unknown>)?.id);
+  if (!Number.isInteger(id)) {
+    res.status(400).json({ error: "Invalid id" });
+    return;
+  }
+
+  const body = asObject(req.body);
+  if (!body) {
+    res.status(400).json({ error: "Invalid body" });
+    return;
+  }
+
+  const updates: Partial<typeof caseListSavedViewsTable.$inferInsert> = { updatedAt: new Date() };
+  if ("name" in body) {
+    const nextName = asString(body.name)?.trim() ?? "";
+    if (!nextName) {
+      res.status(400).json({ error: "name cannot be empty" });
+      return;
+    }
+    updates.name = nextName;
+  }
+  if ("filtersJson" in body) {
+    updates.params = sanitizeCaseListFiltersJson((body as Record<string, unknown>).filtersJson);
+  }
+
+  try {
+    const [updated] = await r
+      .update(caseListSavedViewsTable)
+      .set(updates)
+      .where(and(
+        eq(caseListSavedViewsTable.id, id),
+        eq(caseListSavedViewsTable.firmId, req.firmId!),
+        eq(caseListSavedViewsTable.userId, req.userId!),
+        eq(caseListSavedViewsTable.routeKey, CASE_LIST_ROUTE_KEY),
+      ))
+      .returning();
+
+    if (!updated) {
+      res.status(404).json({ error: "View not found" });
+      return;
+    }
+
+    await writeAuditLog({
+      firmId: req.firmId,
+      actorId: req.userId,
+      actorType: req.userType,
+      action: "cases.list_views.update",
+      entityType: "case_list_view",
+      entityId: id,
+      detail: "updated",
+      ipAddress: req.ip,
+      userAgent: req.headers["user-agent"],
+    });
+
+    res.json({
+      id: updated.id,
+      firmId: updated.firmId,
+      userId: updated.userId,
+      routeKey: updated.routeKey,
+      name: updated.name,
+      filtersJson: updated.params ?? {},
+      createdAt: updated.createdAt.toISOString(),
+      updatedAt: updated.updatedAt.toISOString(),
+    });
+  } catch (err) {
+    const code = (err as any)?.code;
+    if (code === "23505") {
+      res.status(409).json({ error: "A view with this name already exists" });
+      return;
+    }
+    throw err;
+  }
+});
+
+router.delete("/case-list-views/:id", requireAuth, requireFirmUser, requirePermission("cases", "update"), async (req: AuthRequest, res): Promise<void> => {
+  const r = req.rlsDb;
+  if (!r) {
+    res.status(500).json({ error: "Internal Server Error" });
+    return;
+  }
+
+  const id = Number((req.params as Record<string, unknown>)?.id);
+  if (!Number.isInteger(id)) {
+    res.status(400).json({ error: "Invalid id" });
+    return;
+  }
+
+  const [deleted] = await r
+    .delete(caseListSavedViewsTable)
+    .where(and(
+      eq(caseListSavedViewsTable.id, id),
+      eq(caseListSavedViewsTable.firmId, req.firmId!),
+      eq(caseListSavedViewsTable.userId, req.userId!),
+      eq(caseListSavedViewsTable.routeKey, CASE_LIST_ROUTE_KEY),
+    ))
+    .returning();
+
+  if (!deleted) {
+    res.status(404).json({ error: "View not found" });
+    return;
+  }
+
+  await writeAuditLog({
+    firmId: req.firmId,
+    actorId: req.userId,
+    actorType: req.userType,
+    action: "cases.list_views.delete",
+    entityType: "case_list_view",
+    entityId: id,
+    detail: `name=${deleted.name}`,
+    ipAddress: req.ip,
+    userAgent: req.headers["user-agent"],
+  });
+
+  res.status(204).end();
+});
+
 router.get("/cases/views", requireAuth, requireFirmUser, requirePermission("cases", "read"), async (req: AuthRequest, res): Promise<void> => {
   const r = rdb(req);
   const rows = await r
     .select()
     .from(caseListSavedViewsTable)
-    .where(and(eq(caseListSavedViewsTable.firmId, req.firmId!), eq(caseListSavedViewsTable.userId, req.userId!)))
+    .where(and(
+      eq(caseListSavedViewsTable.firmId, req.firmId!),
+      eq(caseListSavedViewsTable.userId, req.userId!),
+      eq(caseListSavedViewsTable.routeKey, CASE_LIST_ROUTE_KEY),
+    ))
     .orderBy(desc(caseListSavedViewsTable.isDefault), asc(caseListSavedViewsTable.name));
 
   res.json(rows.map((v) => ({
@@ -356,12 +631,16 @@ router.post("/cases/views", requireAuth, requireFirmUser, requirePermission("cas
     await r
       .update(caseListSavedViewsTable)
       .set({ isDefault: false, updatedAt: new Date() })
-      .where(and(eq(caseListSavedViewsTable.firmId, req.firmId!), eq(caseListSavedViewsTable.userId, req.userId!)));
+      .where(and(
+        eq(caseListSavedViewsTable.firmId, req.firmId!),
+        eq(caseListSavedViewsTable.userId, req.userId!),
+        eq(caseListSavedViewsTable.routeKey, CASE_LIST_ROUTE_KEY),
+      ));
   }
 
   const [created] = await r
     .insert(caseListSavedViewsTable)
-    .values({ firmId: req.firmId!, userId: req.userId!, name, params, isDefault, updatedAt: new Date() })
+    .values({ firmId: req.firmId!, userId: req.userId!, routeKey: CASE_LIST_ROUTE_KEY, name, params, isDefault, updatedAt: new Date() })
     .returning();
 
   await writeAuditLog({
@@ -436,7 +715,11 @@ router.patch("/cases/views/:viewId", requireAuth, requireFirmUser, requirePermis
     await r
       .update(caseListSavedViewsTable)
       .set({ isDefault: false, updatedAt: new Date() })
-      .where(and(eq(caseListSavedViewsTable.firmId, req.firmId!), eq(caseListSavedViewsTable.userId, req.userId!)));
+      .where(and(
+        eq(caseListSavedViewsTable.firmId, req.firmId!),
+        eq(caseListSavedViewsTable.userId, req.userId!),
+        eq(caseListSavedViewsTable.routeKey, CASE_LIST_ROUTE_KEY),
+      ));
   }
 
   const [updated] = await r
@@ -446,6 +729,7 @@ router.patch("/cases/views/:viewId", requireAuth, requireFirmUser, requirePermis
       eq(caseListSavedViewsTable.id, viewId),
       eq(caseListSavedViewsTable.firmId, req.firmId!),
       eq(caseListSavedViewsTable.userId, req.userId!),
+      eq(caseListSavedViewsTable.routeKey, CASE_LIST_ROUTE_KEY),
     ))
     .returning();
 
@@ -494,6 +778,7 @@ router.delete("/cases/views/:viewId", requireAuth, requireFirmUser, requirePermi
       eq(caseListSavedViewsTable.id, viewId),
       eq(caseListSavedViewsTable.firmId, req.firmId!),
       eq(caseListSavedViewsTable.userId, req.userId!),
+      eq(caseListSavedViewsTable.routeKey, CASE_LIST_ROUTE_KEY),
     ))
     .returning();
 

@@ -1,4 +1,4 @@
-import { pgTable, serial, text, integer, numeric, timestamp, index, date, boolean, jsonb } from "drizzle-orm/pg-core";
+import { pgTable, serial, text, integer, numeric, timestamp, index, uniqueIndex, date, boolean, jsonb } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod/v4";
 
@@ -142,6 +142,7 @@ export const caseListSavedViewsTable = pgTable("case_list_saved_views", {
   id: serial("id").primaryKey(),
   firmId: integer("firm_id").notNull(),
   userId: integer("user_id").notNull(),
+  routeKey: text("route_key").notNull().default("cases"),
   name: text("name").notNull(),
   params: jsonb("params").notNull().default({}),
   isDefault: boolean("is_default").notNull().default(false),
@@ -149,6 +150,7 @@ export const caseListSavedViewsTable = pgTable("case_list_saved_views", {
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow().$onUpdate(() => new Date()),
 }, (t) => ({
   firmUserIdx: index("idx_case_list_saved_views_firm_user").on(t.firmId, t.userId),
+  uniqueIdx: uniqueIndex("idx_case_list_saved_views_unique").on(t.firmId, t.userId, t.routeKey, t.name),
 }));
 
 export const auditLogsTable = pgTable("audit_logs", {
