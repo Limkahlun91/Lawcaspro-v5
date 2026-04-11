@@ -43,6 +43,7 @@ export * from "./firmListResponse";
 export * from "./getRecentCasesParams";
 export * from "./healthStatus";
 export * from "./inlinePurchaser";
+export * from "./listCasesOverdueDays";
 export * from "./listCasesParams";
 export * from "./listClientsParams";
 export * from "./listDevelopersParams";

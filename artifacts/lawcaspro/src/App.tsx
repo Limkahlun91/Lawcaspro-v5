@@ -30,6 +30,7 @@ import AppDashboard from "@/pages/app/dashboard";
 import CasesList from "@/pages/app/cases";
 import NewCase from "@/pages/app/cases/new";
 import CaseDetail from "@/pages/app/cases/detail";
+import Workbench from "@/pages/app/workbench";
 
 import NewUser from "@/pages/app/users/new";
 
@@ -96,6 +97,12 @@ function AppRoutes() {
           <Route path="/app/dashboard" component={() => (
             <PermissionGuard module="dashboard" action="read">
               <AppDashboard />
+            </PermissionGuard>
+          )} />
+
+          <Route path="/app/workbench" component={() => (
+            <PermissionGuard module="cases" action="read">
+              <Workbench />
             </PermissionGuard>
           )} />
           

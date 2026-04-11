@@ -6,6 +6,7 @@ import {
   caseKeyDatesTable,
   caseListSavedViewsTable,
   projectsTable, developersTable, clientsTable, usersTable, auditLogsTable,
+  permissionsTable,
 } from "@workspace/db";
 import {
   CreateCaseBody, UpdateCaseBody, ListCasesQueryParams,
@@ -612,6 +613,293 @@ router.post("/cases/bulk/assign", requireAuth, requireFirmUser, requirePermissio
   res.json({ requested: normalizedCaseIds.length, succeeded, failed: failures.length, failures });
 });
 
+function hasLoanOnlyMilestone(milestone: CaseMilestoneKey): boolean {
+  return (
+    milestone === "loan_docs_signed_date" ||
+    milestone === "acting_letter_issued_date" ||
+    milestone === "loan_sent_bank_execution_date" ||
+    milestone === "loan_bank_executed_date" ||
+    milestone === "bank_lu_received_date"
+  );
+}
+
+function daysAgoSql(days: number) {
+  return sql`(CURRENT_DATE - INTERVAL '${days} days')`;
+}
+
+function overdueAnySql(thresholdDays: number) {
+  const createdBefore = sql`${casesTable.createdAt}::date <= ${daysAgoSql(thresholdDays)}::date`;
+  const spaDateMissing = sql`${caseKeyDatesTable.spaDate} IS NULL AND ${createdBefore}`;
+
+  const lofDate = sql`${caseKeyDatesTable.letterOfOfferDate}`;
+  const loanDocsSigned = milestoneDateYmdSql("loan_docs_signed_date");
+  const actingLetterIssued = milestoneDateYmdSql("acting_letter_issued_date");
+  const loanSentBankExec = milestoneDateYmdSql("loan_sent_bank_execution_date");
+  const loanBankExecuted = milestoneDateYmdSql("loan_bank_executed_date");
+  const spaStamped = milestoneDateYmdSql("spa_stamped_date");
+
+  const loanDocsSignedMissingAfterLof = sql`
+    ${casesTable.purchaseMode} = 'loan'
+    AND ${lofDate} IS NOT NULL
+    AND ${loanDocsSigned} IS NULL
+    AND (${lofDate}::date <= ${daysAgoSql(thresholdDays)}::date)
+  `;
+
+  const actingLetterMissingAfterLoanDocs = sql`
+    ${casesTable.purchaseMode} = 'loan'
+    AND ${loanDocsSigned} IS NOT NULL
+    AND ${actingLetterIssued} IS NULL
+    AND (${loanDocsSigned}::date <= ${daysAgoSql(thresholdDays)}::date)
+  `;
+
+  const loanSentExecMissingAfterActing = sql`
+    ${casesTable.purchaseMode} = 'loan'
+    AND ${actingLetterIssued} IS NOT NULL
+    AND ${loanSentBankExec} IS NULL
+    AND (${actingLetterIssued}::date <= ${daysAgoSql(thresholdDays)}::date)
+  `;
+
+  const completionAfterLaterStage = sql`
+    ${caseKeyDatesTable.completionDate} IS NULL
+    AND (
+      (${casesTable.purchaseMode} = 'loan' AND ${loanBankExecuted} IS NOT NULL AND (${loanBankExecuted}::date <= ${daysAgoSql(thresholdDays)}::date))
+      OR
+      (${casesTable.purchaseMode} <> 'loan' AND ${spaStamped} IS NOT NULL AND (${spaStamped}::date <= ${daysAgoSql(thresholdDays)}::date))
+    )
+  `;
+
+  return or(
+    spaDateMissing,
+    loanDocsSignedMissingAfterLof,
+    actingLetterMissingAfterLoanDocs,
+    loanSentExecMissingAfterActing,
+    completionAfterLaterStage,
+  );
+}
+
+router.get("/cases/workbench", requireAuth, requireFirmUser, requirePermission("cases", "read"), async (req: AuthRequest, res): Promise<void> => {
+  const r = rdb(req);
+
+  const one = (v: string | string[] | undefined): string | undefined => Array.isArray(v) ? v[0] : v;
+  const staffUserIdRaw = one(req.query.userId as any);
+  const staffUserId = staffUserIdRaw ? Number(staffUserIdRaw) : req.userId!;
+  if (!Number.isInteger(staffUserId)) {
+    res.status(400).json({ error: "Invalid userId" });
+    return;
+  }
+
+  const wantsOtherUser = staffUserId !== req.userId;
+  let canViewUsers = false;
+  if (wantsOtherUser) {
+    if (!req.roleId) {
+      res.status(403).json({ error: "Permission denied" });
+      return;
+    }
+    const [perm] = await r
+      .select()
+      .from(permissionsTable)
+      .where(and(
+        eq(permissionsTable.roleId, req.roleId),
+        eq(permissionsTable.module, "users"),
+        eq(permissionsTable.action, "read"),
+      ));
+    canViewUsers = Boolean(perm?.allowed);
+    if (!canViewUsers) {
+      res.status(403).json({ error: "Permission denied" });
+      return;
+    }
+  }
+
+  const [staffUser] = await r
+    .select({ id: usersTable.id, name: usersTable.name })
+    .from(usersTable)
+    .where(and(eq(usersTable.id, staffUserId), eq(usersTable.firmId, req.firmId!)));
+  if (!staffUser) {
+    res.status(404).json({ error: "User not found" });
+    return;
+  }
+
+  if (!wantsOtherUser && req.roleId) {
+    const [perm] = await r
+      .select()
+      .from(permissionsTable)
+      .where(and(
+        eq(permissionsTable.roleId, req.roleId),
+        eq(permissionsTable.module, "users"),
+        eq(permissionsTable.action, "read"),
+      ));
+    canViewUsers = Boolean(perm?.allowed);
+  }
+
+  const baseConditions = [eq(casesTable.firmId, req.firmId!)];
+  const projectId = Number(one(req.query.projectId as any));
+  const developerId = Number(one(req.query.developerId as any));
+  const purchaseMode = one(req.query.purchaseMode as any);
+  const assignedLawyerId = Number(one(req.query.assignedLawyerId as any));
+  const assignedClerkId = Number(one(req.query.assignedClerkId as any));
+
+  if (Number.isInteger(projectId)) baseConditions.push(eq(casesTable.projectId, projectId));
+  if (Number.isInteger(developerId)) baseConditions.push(eq(casesTable.developerId, developerId));
+  if (purchaseMode === "cash" || purchaseMode === "loan") baseConditions.push(eq(casesTable.purchaseMode, purchaseMode));
+  if (Number.isInteger(assignedLawyerId)) {
+    baseConditions.push(sql`EXISTS (
+      SELECT 1
+      FROM ${caseAssignmentsTable}
+      WHERE ${caseAssignmentsTable.caseId} = ${casesTable.id}
+        AND ${caseAssignmentsTable.roleInCase} = 'lawyer'
+        AND ${caseAssignmentsTable.userId} = ${assignedLawyerId}
+        AND ${sql`unassigned_at IS NULL`}
+    )`);
+  }
+  if (Number.isInteger(assignedClerkId)) {
+    baseConditions.push(sql`EXISTS (
+      SELECT 1
+      FROM ${caseAssignmentsTable}
+      WHERE ${caseAssignmentsTable.caseId} = ${casesTable.id}
+        AND ${caseAssignmentsTable.roleInCase} = 'clerk'
+        AND ${caseAssignmentsTable.userId} = ${assignedClerkId}
+        AND ${sql`unassigned_at IS NULL`}
+    )`);
+  }
+
+  const staffAssignedAnySql = sql`EXISTS (
+    SELECT 1
+    FROM ${caseAssignmentsTable}
+    WHERE ${caseAssignmentsTable.caseId} = ${casesTable.id}
+      AND ${caseAssignmentsTable.userId} = ${staffUserId}
+      AND ${sql`unassigned_at IS NULL`}
+  )`;
+
+  const staffAssignedLawyerSql = sql`EXISTS (
+    SELECT 1
+    FROM ${caseAssignmentsTable}
+    WHERE ${caseAssignmentsTable.caseId} = ${casesTable.id}
+      AND ${caseAssignmentsTable.roleInCase} = 'lawyer'
+      AND ${caseAssignmentsTable.userId} = ${staffUserId}
+      AND ${sql`unassigned_at IS NULL`}
+  )`;
+  const staffAssignedClerkSql = sql`EXISTS (
+    SELECT 1
+    FROM ${caseAssignmentsTable}
+    WHERE ${caseAssignmentsTable.caseId} = ${casesTable.id}
+      AND ${caseAssignmentsTable.roleInCase} = 'clerk'
+      AND ${caseAssignmentsTable.userId} = ${staffUserId}
+      AND ${sql`unassigned_at IS NULL`}
+  )`;
+
+  const [{ c: assignedLawyerCount }] = await r
+    .select({ c: sql<number>`COUNT(*)` })
+    .from(casesTable)
+    .where(and(...baseConditions, staffAssignedLawyerSql));
+  const [{ c: assignedClerkCount }] = await r
+    .select({ c: sql<number>`COUNT(*)` })
+    .from(casesTable)
+    .where(and(...baseConditions, staffAssignedClerkSql));
+  const overdue7 = overdueAnySql(7) ?? sql`FALSE`;
+  const [{ c: needingActionCount }] = await r
+    .select({ c: sql<number>`COUNT(DISTINCT ${casesTable.id})` })
+    .from(casesTable)
+    .leftJoin(caseKeyDatesTable, and(eq(caseKeyDatesTable.caseId, casesTable.id), eq(caseKeyDatesTable.firmId, casesTable.firmId)))
+    .where(and(...baseConditions, staffAssignedAnySql, overdue7));
+
+  const recentRows = await r
+    .select({
+      id: casesTable.id,
+      referenceNo: casesTable.referenceNo,
+      projectName: projectsTable.name,
+      updatedAt: casesTable.updatedAt,
+    })
+    .from(casesTable)
+    .leftJoin(projectsTable, eq(projectsTable.id, casesTable.projectId))
+    .where(and(...baseConditions, staffAssignedAnySql))
+    .orderBy(desc(casesTable.updatedAt))
+    .limit(8);
+
+  const milestones: Array<{ key: CaseMilestoneKey; label: string }> = [
+    { key: "spa_date", label: "SPA Date Missing" },
+    { key: "spa_stamped_date", label: "SPA Stamped Missing" },
+    { key: "letter_of_offer_date", label: "LOF Date Missing" },
+    { key: "loan_docs_signed_date", label: "Loan Docs Signed Missing" },
+    { key: "completion_date", label: "Completion Date Missing" },
+  ];
+
+  const missingCards: Array<{ key: string; label: string; count: number; query: Record<string, string> }> = [];
+  for (const m of milestones) {
+    const loanOnly = hasLoanOnlyMilestone(m.key);
+
+    const [{ c }] = await r
+      .select({ c: sql<number>`COUNT(DISTINCT ${casesTable.id})` })
+      .from(casesTable)
+      .leftJoin(caseKeyDatesTable, and(eq(caseKeyDatesTable.caseId, casesTable.id), eq(caseKeyDatesTable.firmId, casesTable.firmId)))
+      .where(and(...baseConditions, ...(loanOnly ? [eq(casesTable.purchaseMode, "loan")] : []), milestonePresenceWhereSql(m.key, "missing")));
+
+    const query: Record<string, string> = { milestone: m.key, milestonePresence: "missing", page: "1", sortBy: "updatedAt", sortDir: "desc" };
+    if (purchaseMode === "cash" || purchaseMode === "loan") query.purchaseMode = purchaseMode;
+    if (Number.isInteger(projectId)) query.projectId = String(projectId);
+    if (Number.isInteger(developerId)) query.developerId = String(developerId);
+    if (Number.isInteger(assignedLawyerId)) query.assignedLawyerId = String(assignedLawyerId);
+    if (Number.isInteger(assignedClerkId)) query.assignedClerkId = String(assignedClerkId);
+
+    if (loanOnly) query.purchaseMode = "loan";
+
+    missingCards.push({ key: m.key, label: m.label, count: Number(c ?? 0), query });
+  }
+
+  const overdueThresholds = [7, 14, 30] as const;
+  const overdueCards = await Promise.all(overdueThresholds.map(async (days) => {
+    const overdue = overdueAnySql(days) ?? sql`FALSE`;
+    const [{ c }] = await r
+      .select({ c: sql<number>`COUNT(DISTINCT ${casesTable.id})` })
+      .from(casesTable)
+      .leftJoin(caseKeyDatesTable, and(eq(caseKeyDatesTable.caseId, casesTable.id), eq(caseKeyDatesTable.firmId, casesTable.firmId)))
+      .where(and(...baseConditions, overdue));
+
+    const query: Record<string, string> = {
+      overdueDays: String(days),
+      page: "1",
+      sortBy: "updatedAt",
+      sortDir: "desc",
+    };
+    if (purchaseMode === "cash" || purchaseMode === "loan") query.purchaseMode = purchaseMode;
+    if (Number.isInteger(projectId)) query.projectId = String(projectId);
+    if (Number.isInteger(developerId)) query.developerId = String(developerId);
+    if (Number.isInteger(assignedLawyerId)) query.assignedLawyerId = String(assignedLawyerId);
+    if (Number.isInteger(assignedClerkId)) query.assignedClerkId = String(assignedClerkId);
+
+    return { key: `overdue_${days}`, label: `Overdue > ${days} days`, count: Number(c ?? 0), query };
+  }));
+
+  const myWorkCards = [
+    { key: "assigned_lawyer", label: "Assigned to me (Lawyer)", count: Number(assignedLawyerCount ?? 0), query: { assignedLawyerId: String(staffUserId), page: "1", sortBy: "updatedAt", sortDir: "desc" } },
+    { key: "assigned_clerk", label: "Assigned to me (Clerk)", count: Number(assignedClerkCount ?? 0), query: { assignedClerkId: String(staffUserId), page: "1", sortBy: "updatedAt", sortDir: "desc" } },
+    { key: "recently_updated", label: "Recently updated (my cases)", count: Number(recentRows.length), query: { assignedToUserId: String(staffUserId), page: "1", sortBy: "updatedAt", sortDir: "desc" } },
+    { key: "needing_action", label: "Cases needing my action", count: Number(needingActionCount ?? 0), query: { assignedToUserId: String(staffUserId), overdueDays: "7", page: "1", sortBy: "updatedAt", sortDir: "desc" } },
+  ];
+
+  const staffOptions = canViewUsers
+    ? await r
+      .select({ id: usersTable.id, name: usersTable.name, roleName: usersTable.roleName })
+      .from(usersTable)
+      .where(eq(usersTable.firmId, req.firmId!))
+      .orderBy(asc(usersTable.name))
+    : [];
+
+  res.json({
+    staffUser,
+    staffOptions,
+    myWork: {
+      cards: myWorkCards,
+      recent: recentRows.map((c) => ({ id: c.id, referenceNo: c.referenceNo, projectName: c.projectName ?? "Unknown", updatedAt: c.updatedAt.toISOString(), query: { search: c.referenceNo, page: "1", sortBy: "updatedAt", sortDir: "desc" } })),
+    },
+    missingDates: {
+      cards: missingCards,
+    },
+    overdue: {
+      cards: overdueCards,
+    },
+  });
+});
+
 function sanitizeCsvCell(v: unknown): string {
   const s = v === null || v === undefined ? "" : String(v);
   const trimmed = s.trimStart();
@@ -647,8 +935,11 @@ router.get("/cases/export.csv", requireAuth, requireFirmUser, requirePermission(
   const milestonePresence = one(req.query.milestonePresence as any) as MilestonePresence | undefined;
   const sortByRaw = one(req.query.sortBy as any);
   const sortDirRaw = one(req.query.sortDir as any);
+  const overdueDaysRaw = one(req.query.overdueDays as any);
   const assignedLawyerId = params.success ? params.data.assignedLawyerId : parseIntOrUndef(req.query.assignedLawyerId as any);
   const assignedClerkId = parseIntOrUndef(req.query.assignedClerkId as any);
+  const assignedToUserId = parseIntOrUndef(req.query.assignedToUserId as any);
+  const overdueDays = overdueDaysRaw ? Number(overdueDaysRaw) : undefined;
 
   const loanOnlyMilestones: Set<CaseMilestoneKey> = new Set([
     "loan_docs_signed_date",
@@ -684,6 +975,15 @@ router.get("/cases/export.csv", requireAuth, requireFirmUser, requirePermission(
         AND ${sql`unassigned_at IS NULL`}
     )`);
   }
+  if (assignedToUserId) {
+    conditions.push(sql`EXISTS (
+      SELECT 1
+      FROM ${caseAssignmentsTable}
+      WHERE ${caseAssignmentsTable.caseId} = ${casesTable.id}
+        AND ${caseAssignmentsTable.userId} = ${assignedToUserId}
+        AND ${sql`unassigned_at IS NULL`}
+    )`);
+  }
   if (spaStatus) {
     conditions.push(sql`${spaStatusSql()} = ${spaStatus}`);
   }
@@ -713,6 +1013,11 @@ router.get("/cases/export.csv", requireAuth, requireFirmUser, requirePermission(
       )`
     );
     if (searchOr) conditions.push(searchOr);
+  }
+
+  if (overdueDays === 7 || overdueDays === 14 || overdueDays === 30) {
+    const overdue = overdueAnySql(overdueDays) ?? sql`FALSE`;
+    conditions.push(overdue);
   }
 
   const sortBy = ((): "updatedAt" | "createdAt" | "referenceNo" | "spaDate" => {
@@ -867,8 +1172,11 @@ router.get("/cases", requireAuth, requireFirmUser, requirePermission("cases", "r
   const milestonePresence = one(req.query.milestonePresence as any) as MilestonePresence | undefined;
   const sortByRaw = one(req.query.sortBy as any);
   const sortDirRaw = one(req.query.sortDir as any);
+  const overdueDaysRaw = one(req.query.overdueDays as any);
   const assignedLawyerId = params.success ? params.data.assignedLawyerId : parseIntOrUndef(req.query.assignedLawyerId as any);
   const assignedClerkId = parseIntOrUndef(req.query.assignedClerkId as any);
+  const assignedToUserId = parseIntOrUndef(req.query.assignedToUserId as any);
+  const overdueDays = overdueDaysRaw ? Number(overdueDaysRaw) : undefined;
 
   const loanOnlyMilestones: Set<CaseMilestoneKey> = new Set([
     "loan_docs_signed_date",
@@ -904,6 +1212,15 @@ router.get("/cases", requireAuth, requireFirmUser, requirePermission("cases", "r
         AND ${sql`unassigned_at IS NULL`}
     )`);
   }
+  if (assignedToUserId) {
+    conditions.push(sql`EXISTS (
+      SELECT 1
+      FROM ${caseAssignmentsTable}
+      WHERE ${caseAssignmentsTable.caseId} = ${casesTable.id}
+        AND ${caseAssignmentsTable.userId} = ${assignedToUserId}
+        AND ${sql`unassigned_at IS NULL`}
+    )`);
+  }
   if (spaStatus) {
     conditions.push(sql`${spaStatusSql()} = ${spaStatus}`);
   }
@@ -933,6 +1250,11 @@ router.get("/cases", requireAuth, requireFirmUser, requirePermission("cases", "r
       )`
     );
     if (searchOr) conditions.push(searchOr);
+  }
+
+  if (overdueDays === 7 || overdueDays === 14 || overdueDays === 30) {
+    const overdue = overdueAnySql(overdueDays) ?? sql`FALSE`;
+    conditions.push(overdue);
   }
 
   const sortBy = ((): "updatedAt" | "createdAt" | "referenceNo" | "spaDate" => {

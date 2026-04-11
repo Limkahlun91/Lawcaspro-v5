@@ -721,15 +721,26 @@ export type ListCasesParams = {
   developerId?: number;
   assignedLawyerId?: number;
   assignedClerkId?: number;
+  assignedToUserId?: number;
   spaStatus?: string;
   loanStatus?: string;
   milestone?: CaseMilestoneKey;
   milestonePresence?: MilestonePresence;
+  overdueDays?: ListCasesOverdueDays;
   purchaseMode?: string;
   titleType?: string;
   page?: number;
   limit?: number;
 };
+
+export type ListCasesOverdueDays =
+  (typeof ListCasesOverdueDays)[keyof typeof ListCasesOverdueDays];
+
+export const ListCasesOverdueDays = {
+  NUMBER_7: 7,
+  NUMBER_14: 14,
+  NUMBER_30: 30,
+} as const;
 
 export type GetRecentCasesParams = {
   limit?: number;

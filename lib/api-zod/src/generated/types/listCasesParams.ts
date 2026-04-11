@@ -6,6 +6,7 @@
  * OpenAPI spec version: 1.0.0
  */
 import type { CaseMilestoneKey } from "./caseMilestoneKey";
+import type { ListCasesOverdueDays } from "./listCasesOverdueDays";
 import type { MilestonePresence } from "./milestonePresence";
 
 export type ListCasesParams = {
@@ -18,10 +19,12 @@ export type ListCasesParams = {
   developerId?: number;
   assignedLawyerId?: number;
   assignedClerkId?: number;
+  assignedToUserId?: number;
   spaStatus?: string;
   loanStatus?: string;
   milestone?: CaseMilestoneKey;
   milestonePresence?: MilestonePresence;
+  overdueDays?: ListCasesOverdueDays;
   purchaseMode?: string;
   titleType?: string;
   page?: number;

@@ -958,6 +958,7 @@ export const ListCasesQueryParams = zod.object({
   developerId: zod.coerce.number().optional(),
   assignedLawyerId: zod.coerce.number().optional(),
   assignedClerkId: zod.coerce.number().optional(),
+  assignedToUserId: zod.coerce.number().optional(),
   spaStatus: zod.coerce.string().optional(),
   loanStatus: zod.coerce.string().optional(),
   milestone: zod
@@ -975,6 +976,9 @@ export const ListCasesQueryParams = zod.object({
     ])
     .optional(),
   milestonePresence: zod.enum(["filled", "missing"]).optional(),
+  overdueDays: zod
+    .union([zod.literal(7), zod.literal(14), zod.literal(30)])
+    .optional(),
   purchaseMode: zod.coerce.string().optional(),
   titleType: zod.coerce.string().optional(),
   page: zod.coerce.number().optional(),

@@ -5,6 +5,7 @@ import { useQuery } from "@tanstack/react-query";
 import { Link, useLocation } from "wouter";
 import { 
   LayoutDashboard, 
+  ListTodo,
   Briefcase, 
   Building2, 
   HardHat, 
@@ -42,6 +43,7 @@ export function AppLayout({ children }: { children: ReactNode }) {
 
   const navItems = [
     { label: "Dashboard", href: "/app/dashboard", icon: LayoutDashboard, perm: ["dashboard", "read"] as const },
+    { label: "My Work", href: "/app/workbench", icon: ListTodo, perm: ["cases", "read"] as const },
     { label: "Cases", href: "/app/cases", icon: Briefcase, perm: ["cases", "read"] as const },
     { label: "Projects", href: "/app/projects", icon: Building2, perm: ["projects", "read"] as const },
     { label: "Developers", href: "/app/developers", icon: HardHat, perm: ["developers", "read"] as const },

@@ -904,6 +904,10 @@ paths:
           in: query
           schema:
             type: integer
+        - name: assignedToUserId
+          in: query
+          schema:
+            type: integer
         - name: spaStatus
           in: query
           schema:
@@ -920,6 +924,11 @@ paths:
           in: query
           schema:
             $ref: "#/components/schemas/MilestonePresence"
+        - name: overdueDays
+          in: query
+          schema:
+            type: integer
+            enum: [7, 14, 30]
         - name: purchaseMode
           in: query
           schema:

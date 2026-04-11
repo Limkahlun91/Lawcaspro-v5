@@ -75,6 +75,8 @@ export default function CasesList() {
   const [limit, setLimit] = useState<number>(50);
   const [sortBy, setSortBy] = useState<"updatedAt" | "createdAt" | "referenceNo" | "spaDate">("updatedAt");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
+  const [assignedToUserId, setAssignedToUserId] = useState<string>("all");
+  const [overdueDays, setOverdueDays] = useState<string>("all");
 
   useEffect(() => {
     isHydratingFromUrl.current = true;
@@ -97,6 +99,9 @@ export default function CasesList() {
     const nextLimit = nextLimitRaw ? Number(nextLimitRaw) : 50;
     const nextSortBy = (nextSortByRaw === "createdAt" || nextSortByRaw === "referenceNo" || nextSortByRaw === "spaDate") ? nextSortByRaw : "updatedAt";
     const nextSortDir = (nextSortDirRaw === "asc" || nextSortDirRaw === "desc") ? nextSortDirRaw : "desc";
+    const nextAssignedToUserId = sp.get("assignedToUserId") ?? "all";
+    const nextOverdueDaysRaw = sp.get("overdueDays");
+    const nextOverdueDays = nextOverdueDaysRaw === "7" || nextOverdueDaysRaw === "14" || nextOverdueDaysRaw === "30" ? nextOverdueDaysRaw : "all";
 
     setSearch(sp.get("search") ?? "");
     setPurchaseMode(sp.get("purchaseMode") ?? "all");
@@ -113,6 +118,8 @@ export default function CasesList() {
     setLimit(Number.isInteger(nextLimit) && nextLimit > 0 ? nextLimit : 50);
     setSortBy(nextSortBy);
     setSortDir(nextSortDir);
+    setAssignedToUserId(nextAssignedToUserId);
+    setOverdueDays(nextOverdueDays);
 
     queueMicrotask(() => { isHydratingFromUrl.current = false; });
   }, [sp]);
@@ -215,9 +222,11 @@ export default function CasesList() {
     if (milestone !== "all") nextSp.set("milestonePresence", milestonePresence);
     setIf("assignedLawyerId", lawyerId);
     setIf("assignedClerkId", clerkId);
+    setIf("assignedToUserId", assignedToUserId);
     setIf("projectId", projectId);
     setIf("developerId", developerId);
     setIf("titleType", titleType);
+    setIf("overdueDays", overdueDays);
     nextSp.set("page", String(page));
     nextSp.set("limit", String(limit));
     nextSp.set("sortBy", sortBy);
@@ -235,9 +244,11 @@ export default function CasesList() {
     milestonePresence,
     lawyerId,
     clerkId,
+    assignedToUserId,
     projectId,
     developerId,
     titleType,
+    overdueDays,
     page,
     limit,
     sortBy,
@@ -256,12 +267,14 @@ export default function CasesList() {
     titleType: titleType !== "all" ? titleType : undefined,
     assignedLawyerId: lawyerId !== "all" ? parseInt(lawyerId) : undefined,
     assignedClerkId: clerkId !== "all" ? parseInt(clerkId) : undefined,
+    assignedToUserId: assignedToUserId !== "all" ? parseInt(assignedToUserId) : undefined,
     spaStatus: spaStatus !== "all" ? spaStatus : undefined,
     loanStatus: loanStatus !== "all" ? loanStatus : undefined,
     milestone: milestone !== "all" ? milestone : undefined,
     milestonePresence: milestone !== "all" ? milestonePresence : undefined,
     sortBy,
     sortDir,
+    overdueDays: overdueDays !== "all" ? (Number(overdueDays) as 7 | 14 | 30) : undefined,
   });
 
   const { data: filterOptions } = useQuery({
@@ -279,6 +292,7 @@ export default function CasesList() {
   const { data: devsRes } = useListDevelopers({ page: 1, limit: 200 });
   const { data: usersRes } = useListUsers({ page: 1, limit: 200 });
   const allUsers = usersRes?.data ?? [];
+  const userNameById = useMemo(() => new Map(allUsers.map(u => [String(u.id), u.name])), [allUsers]);
   const lawyerCandidates = allUsers.filter(u => (u.roleName ?? "").toLowerCase().includes("lawyer") || (u.roleName ?? "").toLowerCase().includes("partner"));
   const clerkCandidates = allUsers.filter(u => (u.roleName ?? "").toLowerCase().includes("clerk"));
   const projects = projectsRes?.data ?? [];
@@ -313,9 +327,11 @@ export default function CasesList() {
     }
     if (lawyerId !== "all") chips.push({ key: "assignedLawyerId", label: `Lawyer: ${lawyerNameById.get(lawyerId) ?? lawyerId}`, onClear: () => { setLawyerId("all"); setPage(1); } });
     if (clerkId !== "all") chips.push({ key: "assignedClerkId", label: `Clerk: ${clerkNameById.get(clerkId) ?? clerkId}`, onClear: () => { setClerkId("all"); setPage(1); } });
+    if (assignedToUserId !== "all") chips.push({ key: "assignedToUserId", label: `Assigned to: ${userNameById.get(assignedToUserId) ?? assignedToUserId}`, onClear: () => { setAssignedToUserId("all"); setPage(1); } });
     if (projectId !== "all") chips.push({ key: "projectId", label: `Project: ${projectNameById.get(projectId) ?? projectId}`, onClear: () => { setProjectId("all"); setPage(1); } });
     if (developerId !== "all") chips.push({ key: "developerId", label: `Developer: ${developerNameById.get(developerId) ?? developerId}`, onClear: () => { setDeveloperId("all"); setPage(1); } });
     if (titleType !== "all") chips.push({ key: "titleType", label: `Title: ${titleType}`, onClear: () => { setTitleType("all"); setPage(1); } });
+    if (overdueDays !== "all") chips.push({ key: "overdueDays", label: `Overdue: >${overdueDays}d`, onClear: () => { setOverdueDays("all"); setPage(1); } });
     return chips;
   }, [
     search,
@@ -326,14 +342,17 @@ export default function CasesList() {
     milestonePresence,
     lawyerId,
     clerkId,
+    assignedToUserId,
     projectId,
     developerId,
     titleType,
+    overdueDays,
     milestoneLabelByKey,
     lawyerNameById,
     clerkNameById,
     projectNameById,
     developerNameById,
+    userNameById,
   ]);
 
   const [selectedCaseIds, setSelectedCaseIds] = useState<Set<number>>(new Set());
@@ -578,9 +597,11 @@ export default function CasesList() {
               setMilestonePresence("filled");
               setLawyerId("all");
               setClerkId("all");
+              setAssignedToUserId("all");
               setProjectId("all");
               setDeveloperId("all");
               setTitleType("all");
+              setOverdueDays("all");
               setPage(1);
             }}
           >
