@@ -29,21 +29,30 @@ router.get("/dashboard", requireAuth, requireFirmUser, requirePermission("dashbo
     const hasBillingEntries = await tableExists(r, "public.case_billing_entries");
     const hasCommunications = await tableExists(r, "public.case_communications");
 
-  const [totalCasesRes] = await r.select({ c: count() }).from(casesTable).where(eq(casesTable.firmId, firmId));
-  const [completedCasesRes] = await r.select({ c: count() }).from(casesTable)
+  const [caseStats] = await r
+    .select({
+      total: count(),
+      cash: sql<number>`COUNT(*) FILTER (WHERE ${casesTable.purchaseMode} = 'cash')`,
+      loan: sql<number>`COUNT(*) FILTER (WHERE ${casesTable.purchaseMode} = 'loan')`,
+      masterTitle: sql<number>`COUNT(*) FILTER (WHERE ${casesTable.titleType} = 'master')`,
+      individualTitle: sql<number>`COUNT(*) FILTER (WHERE ${casesTable.titleType} = 'individual')`,
+      strataTitle: sql<number>`COUNT(*) FILTER (WHERE ${casesTable.titleType} = 'strata')`,
+      completed: sql<number>`COUNT(*) FILTER (WHERE LOWER(${casesTable.status}) LIKE '%complet%' OR LOWER(${casesTable.status}) LIKE '%registered%' OR LOWER(${casesTable.status}) LIKE '%stamp%')`,
+    })
+    .from(casesTable)
     .where(eq(casesTable.firmId, firmId));
   const [totalClientsRes] = await r.select({ c: count() }).from(clientsTable).where(eq(clientsTable.firmId, firmId));
   const [totalDevsRes] = await r.select({ c: count() }).from(developersTable).where(eq(developersTable.firmId, firmId));
   const [totalProjsRes] = await r.select({ c: count() }).from(projectsTable).where(eq(projectsTable.firmId, firmId));
 
-  const allCases = await r.select().from(casesTable).where(eq(casesTable.firmId, firmId));
-  const cashCases = allCases.filter(c => c.purchaseMode === "cash").length;
-  const loanCases = allCases.filter(c => c.purchaseMode === "loan").length;
-  const masterTitleCases = allCases.filter(c => c.titleType === "master").length;
-  const individualTitleCases = allCases.filter(c => c.titleType === "individual").length;
-  const strataTitleCases = allCases.filter(c => c.titleType === "strata").length;
-  const completedCases = allCases.filter(c => c.status.toLowerCase().includes("complet") || c.status.toLowerCase().includes("registered") || c.status.toLowerCase().includes("stamp")).length;
-  const activeCases = allCases.length - completedCases;
+  const totalCases = Number(caseStats?.total ?? 0);
+  const cashCases = Number(caseStats?.cash ?? 0);
+  const loanCases = Number(caseStats?.loan ?? 0);
+  const masterTitleCases = Number(caseStats?.masterTitle ?? 0);
+  const individualTitleCases = Number(caseStats?.individualTitle ?? 0);
+  const strataTitleCases = Number(caseStats?.strataTitle ?? 0);
+  const completedCases = Number(caseStats?.completed ?? 0);
+  const activeCases = totalCases - completedCases;
 
   const recentRows = await r.select().from(casesTable)
     .where(eq(casesTable.firmId, firmId))
@@ -69,7 +78,7 @@ router.get("/dashboard", requireAuth, requireFirmUser, requirePermission("dashbo
         titleType: c.titleType,
         status: c.status,
         assignedLawyerName: assignment?.userName ?? null,
-        createdAt: c.createdAt.toISOString(),
+        createdAt: (c.createdAt instanceof Date ? c.createdAt : new Date(c.createdAt)).toISOString(),
       };
     })
   );
@@ -136,7 +145,7 @@ router.get("/dashboard", requireAuth, requireFirmUser, requirePermission("dashbo
   ] : [];
 
     res.json({
-      totalCases: Number(totalCasesRes?.c ?? 0),
+      totalCases,
       activeCases,
       completedCases,
       totalClients: Number(totalClientsRes?.c ?? 0),
