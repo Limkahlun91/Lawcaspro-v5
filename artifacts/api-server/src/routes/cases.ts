@@ -187,7 +187,7 @@ async function formatCaseDetail(r: DbConn, c: typeof casesTable.$inferSelect) {
   );
 
   const assignRows = await r.select().from(caseAssignmentsTable)
-    .where(and(eq(caseAssignmentsTable.caseId, c.id), sql`unassigned_at IS NULL`));
+    .where(and(eq(caseAssignmentsTable.caseId, c.id), sql`${caseAssignmentsTable.unassignedAt} IS NULL`));
   const assignments = await Promise.all(
     assignRows.map(async (a) => {
       const [user] = await r.select().from(usersTable).where(eq(usersTable.id, a.userId));
@@ -285,7 +285,7 @@ async function formatCaseSummary(r: DbConn, c: typeof casesTable.$inferSelect) {
   const [proj] = await r.select().from(projectsTable).where(eq(projectsTable.id, c.projectId));
   const [dev] = await r.select().from(developersTable).where(eq(developersTable.id, c.developerId));
   const [lawyerAssign] = await r.select().from(caseAssignmentsTable)
-    .where(and(eq(caseAssignmentsTable.caseId, c.id), eq(caseAssignmentsTable.roleInCase, "lawyer"), sql`unassigned_at IS NULL`));
+    .where(and(eq(caseAssignmentsTable.caseId, c.id), eq(caseAssignmentsTable.roleInCase, "lawyer"), sql`${caseAssignmentsTable.unassignedAt} IS NULL`));
   let lawyerName: string | null = null;
   if (lawyerAssign) {
     const [lawyer] = await r.select().from(usersTable).where(eq(usersTable.id, lawyerAssign.userId));
@@ -345,7 +345,7 @@ router.get("/cases/filter-options", requireAuth, requireFirmUser, requirePermiss
     .select({ userId: usersTable.id, userName: usersTable.name, roleInCase: caseAssignmentsTable.roleInCase })
     .from(caseAssignmentsTable)
     .innerJoin(usersTable, eq(caseAssignmentsTable.userId, usersTable.id))
-    .where(and(eq(usersTable.firmId, req.firmId!), sql`unassigned_at IS NULL`));
+    .where(and(eq(usersTable.firmId, req.firmId!), sql`${caseAssignmentsTable.unassignedAt} IS NULL`));
 
   const lawyersMap = new Map<number, string>();
   const clerksMap = new Map<number, string>();
@@ -853,7 +853,7 @@ router.post("/cases/bulk/assign", requireAuth, requireFirmUser, requirePermissio
         .where(and(
           eq(caseAssignmentsTable.caseId, caseId),
           eq(caseAssignmentsTable.roleInCase, roleInCase),
-          sql`unassigned_at IS NULL`
+          sql`${caseAssignmentsTable.unassignedAt} IS NULL`
         ));
 
       await r
@@ -963,7 +963,8 @@ function overdueAnySql(thresholdDays: number) {
 }
 
 router.get("/cases/workbench", requireAuth, requireFirmUser, requirePermission("cases", "read"), async (req: AuthRequest, res): Promise<void> => {
-  const r = rdb(req);
+  try {
+    const r = rdb(req);
 
   const one = (v: string | string[] | undefined): string | undefined => Array.isArray(v) ? v[0] : v;
   const staffUserIdRaw = one(req.query.userId as any);
@@ -1033,7 +1034,7 @@ router.get("/cases/workbench", requireAuth, requireFirmUser, requirePermission("
       WHERE ${caseAssignmentsTable.caseId} = ${casesTable.id}
         AND ${caseAssignmentsTable.roleInCase} = 'lawyer'
         AND ${caseAssignmentsTable.userId} = ${assignedLawyerId}
-        AND ${sql`unassigned_at IS NULL`}
+        AND ${caseAssignmentsTable.unassignedAt} IS NULL
     )`);
   }
   if (Number.isInteger(assignedClerkId)) {
@@ -1043,7 +1044,7 @@ router.get("/cases/workbench", requireAuth, requireFirmUser, requirePermission("
       WHERE ${caseAssignmentsTable.caseId} = ${casesTable.id}
         AND ${caseAssignmentsTable.roleInCase} = 'clerk'
         AND ${caseAssignmentsTable.userId} = ${assignedClerkId}
-        AND ${sql`unassigned_at IS NULL`}
+        AND ${caseAssignmentsTable.unassignedAt} IS NULL
     )`);
   }
 
@@ -1052,7 +1053,7 @@ router.get("/cases/workbench", requireAuth, requireFirmUser, requirePermission("
     FROM ${caseAssignmentsTable}
     WHERE ${caseAssignmentsTable.caseId} = ${casesTable.id}
       AND ${caseAssignmentsTable.userId} = ${staffUserId}
-      AND ${sql`unassigned_at IS NULL`}
+      AND ${caseAssignmentsTable.unassignedAt} IS NULL
   )`;
 
   const staffAssignedLawyerSql = sql`EXISTS (
@@ -1061,7 +1062,7 @@ router.get("/cases/workbench", requireAuth, requireFirmUser, requirePermission("
     WHERE ${caseAssignmentsTable.caseId} = ${casesTable.id}
       AND ${caseAssignmentsTable.roleInCase} = 'lawyer'
       AND ${caseAssignmentsTable.userId} = ${staffUserId}
-      AND ${sql`unassigned_at IS NULL`}
+      AND ${caseAssignmentsTable.unassignedAt} IS NULL
   )`;
   const staffAssignedClerkSql = sql`EXISTS (
     SELECT 1
@@ -1069,7 +1070,7 @@ router.get("/cases/workbench", requireAuth, requireFirmUser, requirePermission("
     WHERE ${caseAssignmentsTable.caseId} = ${casesTable.id}
       AND ${caseAssignmentsTable.roleInCase} = 'clerk'
       AND ${caseAssignmentsTable.userId} = ${staffUserId}
-      AND ${sql`unassigned_at IS NULL`}
+      AND ${caseAssignmentsTable.unassignedAt} IS NULL
   )`;
 
   const [{ c: assignedLawyerCount }] = await r
@@ -1170,20 +1171,29 @@ router.get("/cases/workbench", requireAuth, requireFirmUser, requirePermission("
       .orderBy(asc(usersTable.name))
     : [];
 
-  res.json({
-    staffUser,
-    staffOptions,
-    myWork: {
-      cards: myWorkCards,
-      recent: recentRows.map((c) => ({ id: c.id, referenceNo: c.referenceNo, projectName: c.projectName ?? "Unknown", updatedAt: c.updatedAt.toISOString(), query: { search: c.referenceNo, page: "1", sortBy: "updatedAt", sortDir: "desc" } })),
-    },
-    missingDates: {
-      cards: missingCards,
-    },
-    overdue: {
-      cards: overdueCards,
-    },
-  });
+    res.json({
+      staffUser,
+      staffOptions,
+      myWork: {
+        cards: myWorkCards,
+        recent: recentRows.map((c) => ({ id: c.id, referenceNo: c.referenceNo, projectName: c.projectName ?? "Unknown", updatedAt: c.updatedAt.toISOString(), query: { search: c.referenceNo, page: "1", sortBy: "updatedAt", sortDir: "desc" } })),
+      },
+      missingDates: {
+        cards: missingCards,
+      },
+      overdue: {
+        cards: overdueCards,
+      },
+    });
+  } catch (err) {
+    console.error("[cases-workbench] runtime error", {
+      path: req.path,
+      firmId: req.firmId,
+      userId: req.userId,
+      error: err instanceof Error ? { message: err.message, stack: err.stack } : String(err),
+    });
+    res.status(500).json({ error: "Internal Server Error" });
+  }
 });
 
 function sanitizeCsvCell(v: unknown): string {
@@ -1248,7 +1258,7 @@ router.get("/cases/export.csv", requireAuth, requireFirmUser, requirePermission(
       WHERE ${caseAssignmentsTable.caseId} = ${casesTable.id}
         AND ${caseAssignmentsTable.roleInCase} = 'lawyer'
         AND ${caseAssignmentsTable.userId} = ${assignedLawyerId}
-        AND ${sql`unassigned_at IS NULL`}
+        AND ${caseAssignmentsTable.unassignedAt} IS NULL
     )`);
   }
   if (assignedClerkId) {
@@ -1258,7 +1268,7 @@ router.get("/cases/export.csv", requireAuth, requireFirmUser, requirePermission(
       WHERE ${caseAssignmentsTable.caseId} = ${casesTable.id}
         AND ${caseAssignmentsTable.roleInCase} = 'clerk'
         AND ${caseAssignmentsTable.userId} = ${assignedClerkId}
-        AND ${sql`unassigned_at IS NULL`}
+        AND ${caseAssignmentsTable.unassignedAt} IS NULL
     )`);
   }
   if (assignedToUserId) {
@@ -1267,7 +1277,7 @@ router.get("/cases/export.csv", requireAuth, requireFirmUser, requirePermission(
       FROM ${caseAssignmentsTable}
       WHERE ${caseAssignmentsTable.caseId} = ${casesTable.id}
         AND ${caseAssignmentsTable.userId} = ${assignedToUserId}
-        AND ${sql`unassigned_at IS NULL`}
+        AND ${caseAssignmentsTable.unassignedAt} IS NULL
     )`);
   }
   if (spaStatus) {
@@ -1343,7 +1353,7 @@ router.get("/cases/export.csv", requireAuth, requireFirmUser, requirePermission(
     JOIN ${usersTable} ON ${caseAssignmentsTable.userId} = ${usersTable.id}
     WHERE ${caseAssignmentsTable.caseId} = ${casesTable.id}
       AND ${caseAssignmentsTable.roleInCase} = 'lawyer'
-      AND ${sql`unassigned_at IS NULL`}
+      AND ${caseAssignmentsTable.unassignedAt} IS NULL
     ORDER BY ${caseAssignmentsTable.assignedAt} DESC
     LIMIT 1
   )`;
@@ -1353,7 +1363,7 @@ router.get("/cases/export.csv", requireAuth, requireFirmUser, requirePermission(
     JOIN ${usersTable} ON ${caseAssignmentsTable.userId} = ${usersTable.id}
     WHERE ${caseAssignmentsTable.caseId} = ${casesTable.id}
       AND ${caseAssignmentsTable.roleInCase} = 'clerk'
-      AND ${sql`unassigned_at IS NULL`}
+      AND ${caseAssignmentsTable.unassignedAt} IS NULL
     ORDER BY ${caseAssignmentsTable.assignedAt} DESC
     LIMIT 1
   )`;
@@ -1431,17 +1441,18 @@ router.get("/cases/export.csv", requireAuth, requireFirmUser, requirePermission(
 });
 
 router.get("/cases", requireAuth, requireFirmUser, requirePermission("cases", "read"), async (req: AuthRequest, res): Promise<void> => {
-  const r = rdb(req);
-  const params = ListCasesQueryParams.safeParse(req.query);
-  const search = params.success ? params.data.search : undefined;
-  const status = params.success ? params.data.status : undefined;
-  const projectId = params.success ? params.data.projectId : undefined;
-  const developerId = params.success ? params.data.developerId : undefined;
-  const purchaseMode = params.success ? params.data.purchaseMode : undefined;
-  const titleType = params.success ? params.data.titleType : undefined;
-  const page = params.success ? (params.data.page ?? 1) : 1;
-  const limit = params.success ? (params.data.limit ?? 20) : 20;
-  const offset = (page - 1) * limit;
+  try {
+    const r = rdb(req);
+    const params = ListCasesQueryParams.safeParse(req.query);
+    const search = params.success ? params.data.search : undefined;
+    const status = params.success ? params.data.status : undefined;
+    const projectId = params.success ? params.data.projectId : undefined;
+    const developerId = params.success ? params.data.developerId : undefined;
+    const purchaseMode = params.success ? params.data.purchaseMode : undefined;
+    const titleType = params.success ? params.data.titleType : undefined;
+    const page = params.success ? (params.data.page ?? 1) : 1;
+    const limit = params.success ? (params.data.limit ?? 20) : 20;
+    const offset = (page - 1) * limit;
 
   const one = (v: string | string[] | undefined): string | undefined => Array.isArray(v) ? v[0] : v;
   const parseIntOrUndef = (v: string | string[] | undefined): number | undefined => {
@@ -1485,7 +1496,7 @@ router.get("/cases", requireAuth, requireFirmUser, requirePermission("cases", "r
       WHERE ${caseAssignmentsTable.caseId} = ${casesTable.id}
         AND ${caseAssignmentsTable.roleInCase} = 'lawyer'
         AND ${caseAssignmentsTable.userId} = ${assignedLawyerId}
-        AND ${sql`unassigned_at IS NULL`}
+        AND ${caseAssignmentsTable.unassignedAt} IS NULL
     )`);
   }
   if (assignedClerkId) {
@@ -1495,7 +1506,7 @@ router.get("/cases", requireAuth, requireFirmUser, requirePermission("cases", "r
       WHERE ${caseAssignmentsTable.caseId} = ${casesTable.id}
         AND ${caseAssignmentsTable.roleInCase} = 'clerk'
         AND ${caseAssignmentsTable.userId} = ${assignedClerkId}
-        AND ${sql`unassigned_at IS NULL`}
+        AND ${caseAssignmentsTable.unassignedAt} IS NULL
     )`);
   }
   if (assignedToUserId) {
@@ -1504,7 +1515,7 @@ router.get("/cases", requireAuth, requireFirmUser, requirePermission("cases", "r
       FROM ${caseAssignmentsTable}
       WHERE ${caseAssignmentsTable.caseId} = ${casesTable.id}
         AND ${caseAssignmentsTable.userId} = ${assignedToUserId}
-        AND ${sql`unassigned_at IS NULL`}
+        AND ${caseAssignmentsTable.unassignedAt} IS NULL
     )`);
   }
   if (spaStatus) {
@@ -1580,7 +1591,7 @@ router.get("/cases", requireAuth, requireFirmUser, requirePermission("cases", "r
     FROM ${caseAssignmentsTable}
     WHERE ${caseAssignmentsTable.caseId} = ${casesTable.id}
       AND ${caseAssignmentsTable.roleInCase} = 'lawyer'
-      AND ${sql`unassigned_at IS NULL`}
+      AND ${caseAssignmentsTable.unassignedAt} IS NULL
     ORDER BY ${caseAssignmentsTable.assignedAt} DESC
     LIMIT 1
   )`;
@@ -1590,7 +1601,7 @@ router.get("/cases", requireAuth, requireFirmUser, requirePermission("cases", "r
     JOIN ${usersTable} ON ${caseAssignmentsTable.userId} = ${usersTable.id}
     WHERE ${caseAssignmentsTable.caseId} = ${casesTable.id}
       AND ${caseAssignmentsTable.roleInCase} = 'lawyer'
-      AND ${sql`unassigned_at IS NULL`}
+      AND ${caseAssignmentsTable.unassignedAt} IS NULL
     ORDER BY ${caseAssignmentsTable.assignedAt} DESC
     LIMIT 1
   )`;
@@ -1599,7 +1610,7 @@ router.get("/cases", requireAuth, requireFirmUser, requirePermission("cases", "r
     FROM ${caseAssignmentsTable}
     WHERE ${caseAssignmentsTable.caseId} = ${casesTable.id}
       AND ${caseAssignmentsTable.roleInCase} = 'clerk'
-      AND ${sql`unassigned_at IS NULL`}
+      AND ${caseAssignmentsTable.unassignedAt} IS NULL
     ORDER BY ${caseAssignmentsTable.assignedAt} DESC
     LIMIT 1
   )`;
@@ -1609,7 +1620,7 @@ router.get("/cases", requireAuth, requireFirmUser, requirePermission("cases", "r
     JOIN ${usersTable} ON ${caseAssignmentsTable.userId} = ${usersTable.id}
     WHERE ${caseAssignmentsTable.caseId} = ${casesTable.id}
       AND ${caseAssignmentsTable.roleInCase} = 'clerk'
-      AND ${sql`unassigned_at IS NULL`}
+      AND ${caseAssignmentsTable.unassignedAt} IS NULL
     ORDER BY ${caseAssignmentsTable.assignedAt} DESC
     LIMIT 1
   )`;
@@ -1689,7 +1700,17 @@ router.get("/cases", requireAuth, requireFirmUser, requirePermission("cases", "r
     };
   });
 
-  res.json({ data, total: Number(totalRes?.c ?? 0), page, limit });
+    res.json({ data, total: Number(totalRes?.c ?? 0), page, limit });
+  } catch (err) {
+    console.error("[cases] runtime error", {
+      path: req.path,
+      firmId: req.firmId,
+      userId: req.userId,
+      query: req.query,
+      error: err instanceof Error ? { message: err.message, stack: err.stack } : String(err),
+    });
+    res.status(500).json({ error: "Internal Server Error" });
+  }
 });
 
 router.post("/cases", requireAuth, requireFirmUser, requirePermission("cases", "create"), async (req: AuthRequest, res): Promise<void> => {
@@ -2375,7 +2396,7 @@ router.patch("/cases/:caseId", requireAuth, requireFirmUser, requirePermission("
   if (parsed.data.assignedLawyerId !== undefined) {
     await r.update(caseAssignmentsTable)
       .set({ unassignedAt: new Date() })
-      .where(and(eq(caseAssignmentsTable.caseId, params.data.caseId), eq(caseAssignmentsTable.roleInCase, "lawyer"), sql`unassigned_at IS NULL`));
+      .where(and(eq(caseAssignmentsTable.caseId, params.data.caseId), eq(caseAssignmentsTable.roleInCase, "lawyer"), sql`${caseAssignmentsTable.unassignedAt} IS NULL`));
     await r.insert(caseAssignmentsTable).values({
       caseId: params.data.caseId,
       userId: parsed.data.assignedLawyerId,

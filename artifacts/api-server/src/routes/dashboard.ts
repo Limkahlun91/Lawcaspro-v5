@@ -17,8 +17,9 @@ async function queryRows(r: DbConn, query: ReturnType<typeof sql>): Promise<Reco
 const router: IRouter = Router();
 
 router.get("/dashboard", requireAuth, requireFirmUser, requirePermission("dashboard", "read"), async (req: AuthRequest, res): Promise<void> => {
-  const firmId = req.firmId!;
-  const r = rdb(req);
+  try {
+    const firmId = req.firmId!;
+    const r = rdb(req);
 
   const [totalCasesRes] = await r.select({ c: count() }).from(casesTable).where(eq(casesTable.firmId, firmId));
   const [completedCasesRes] = await r.select({ c: count() }).from(casesTable)
@@ -126,27 +127,36 @@ router.get("/dashboard", requireAuth, requireFirmUser, requirePermission("dashbo
     { key: "completion_date_missing", label: "Completion Date Missing", count: Number(milestoneCounts?.completionDateMissing ?? 0), filter: { milestone: "completion_date", milestonePresence: "missing" } },
   ];
 
-  res.json({
-    totalCases: Number(totalCasesRes?.c ?? 0),
-    activeCases,
-    completedCases,
-    totalClients: Number(totalClientsRes?.c ?? 0),
-    totalDevelopers: Number(totalDevsRes?.c ?? 0),
-    totalProjects: Number(totalProjsRes?.c ?? 0),
-    cashCases,
-    loanCases,
-    masterTitleCases,
-    individualTitleCases,
-    strataTitleCases,
-    recentCases,
-    billing: {
-      totalBilled: Number(billing.total_billed ?? 0),
-      totalPaid: Number(billing.total_paid ?? 0),
-      totalOutstanding: Number(billing.total_outstanding ?? 0),
-    },
-    commsThisMonth,
-    milestoneCards,
-  });
+    res.json({
+      totalCases: Number(totalCasesRes?.c ?? 0),
+      activeCases,
+      completedCases,
+      totalClients: Number(totalClientsRes?.c ?? 0),
+      totalDevelopers: Number(totalDevsRes?.c ?? 0),
+      totalProjects: Number(totalProjsRes?.c ?? 0),
+      cashCases,
+      loanCases,
+      masterTitleCases,
+      individualTitleCases,
+      strataTitleCases,
+      recentCases,
+      billing: {
+        totalBilled: Number(billing.total_billed ?? 0),
+        totalPaid: Number(billing.total_paid ?? 0),
+        totalOutstanding: Number(billing.total_outstanding ?? 0),
+      },
+      commsThisMonth,
+      milestoneCards,
+    });
+  } catch (err) {
+    console.error("[dashboard] runtime error", {
+      path: req.path,
+      firmId: req.firmId,
+      userId: req.userId,
+      error: err instanceof Error ? { message: err.message, stack: err.stack } : String(err),
+    });
+    res.status(500).json({ error: "Internal Server Error" });
+  }
 });
 
 export default router;
