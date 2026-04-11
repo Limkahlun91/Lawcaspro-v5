@@ -17,7 +17,7 @@ import {
 import { requireAuth, requireFirmUser, requirePermission, writeAuditLog, type AuthRequest } from "../lib/auth";
 import { buildWorkflowSteps } from "../lib/workflow";
 import { KEY_DATE_FIELD_TO_STEP_KEY, WORKFLOW_STEP_KEY_TO_KEY_DATE_FIELD, type KeyDateField } from "../lib/keyDatesWorkflow";
-import { loanStatusSql, milestoneDateYmdSql, milestonePresenceWhereSql, spaStatusSql, type CaseMilestoneKey, type MilestonePresence } from "../lib/caseListLogic";
+import { loanStatusSql, milestoneDateSql, milestoneDateYmdSql, milestonePresenceWhereSql, spaStatusSql, type CaseMilestoneKey, type MilestonePresence } from "../lib/caseListLogic";
 
 const router: IRouter = Router();
 
@@ -915,47 +915,47 @@ function hasLoanOnlyMilestone(milestone: CaseMilestoneKey): boolean {
 }
 
 function daysAgoSql(days: number) {
-  return sql`(CURRENT_DATE - INTERVAL '${days} days')`;
+  return sql`(CURRENT_DATE - (${days} * INTERVAL '1 day'))::date`;
 }
 
 function overdueAnySql(thresholdDays: number) {
-  const createdBefore = sql`${casesTable.createdAt}::date <= ${daysAgoSql(thresholdDays)}::date`;
+  const createdBefore = sql`${casesTable.createdAt}::date <= ${daysAgoSql(thresholdDays)}`;
   const spaDateMissing = sql`${caseKeyDatesTable.spaDate} IS NULL AND ${createdBefore}`;
 
   const lofDate = sql`${caseKeyDatesTable.letterOfOfferDate}`;
-  const loanDocsSigned = milestoneDateYmdSql("loan_docs_signed_date");
-  const actingLetterIssued = milestoneDateYmdSql("acting_letter_issued_date");
-  const loanSentBankExec = milestoneDateYmdSql("loan_sent_bank_execution_date");
-  const loanBankExecuted = milestoneDateYmdSql("loan_bank_executed_date");
-  const spaStamped = milestoneDateYmdSql("spa_stamped_date");
+  const loanDocsSigned = milestoneDateSql("loan_docs_signed_date");
+  const actingLetterIssued = milestoneDateSql("acting_letter_issued_date");
+  const loanSentBankExec = milestoneDateSql("loan_sent_bank_execution_date");
+  const loanBankExecuted = milestoneDateSql("loan_bank_executed_date");
+  const spaStamped = milestoneDateSql("spa_stamped_date");
 
   const loanDocsSignedMissingAfterLof = sql`
     ${casesTable.purchaseMode} = 'loan'
     AND ${lofDate} IS NOT NULL
     AND ${loanDocsSigned} IS NULL
-    AND (${lofDate}::date <= ${daysAgoSql(thresholdDays)}::date)
+    AND (${lofDate}::date <= ${daysAgoSql(thresholdDays)})
   `;
 
   const actingLetterMissingAfterLoanDocs = sql`
     ${casesTable.purchaseMode} = 'loan'
     AND ${loanDocsSigned} IS NOT NULL
     AND ${actingLetterIssued} IS NULL
-    AND (${loanDocsSigned}::date <= ${daysAgoSql(thresholdDays)}::date)
+    AND (${loanDocsSigned} <= ${daysAgoSql(thresholdDays)})
   `;
 
   const loanSentExecMissingAfterActing = sql`
     ${casesTable.purchaseMode} = 'loan'
     AND ${actingLetterIssued} IS NOT NULL
     AND ${loanSentBankExec} IS NULL
-    AND (${actingLetterIssued}::date <= ${daysAgoSql(thresholdDays)}::date)
+    AND (${actingLetterIssued} <= ${daysAgoSql(thresholdDays)})
   `;
 
   const completionAfterLaterStage = sql`
     ${caseKeyDatesTable.completionDate} IS NULL
     AND (
-      (${casesTable.purchaseMode} = 'loan' AND ${loanBankExecuted} IS NOT NULL AND (${loanBankExecuted}::date <= ${daysAgoSql(thresholdDays)}::date))
+      (${casesTable.purchaseMode} = 'loan' AND ${loanBankExecuted} IS NOT NULL AND (${loanBankExecuted} <= ${daysAgoSql(thresholdDays)}))
       OR
-      (${casesTable.purchaseMode} <> 'loan' AND ${spaStamped} IS NOT NULL AND (${spaStamped}::date <= ${daysAgoSql(thresholdDays)}::date))
+      (${casesTable.purchaseMode} <> 'loan' AND ${spaStamped} IS NOT NULL AND (${spaStamped} <= ${daysAgoSql(thresholdDays)}))
     )
   `;
 

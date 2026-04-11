@@ -42,9 +42,9 @@ export function loanStatusSql(): SQL<string | null> {
   END`;
 }
 
-function workflowCompletedDateYmdSql(stepKey: string): SQL<string | null> {
-  return sql<string | null>`(
-    SELECT ((${caseWorkflowStepsTable.completedAt}::date)::text)
+function workflowCompletedDateSql(stepKey: string): SQL<Date | null> {
+  return sql<Date | null>`(
+    SELECT (${caseWorkflowStepsTable.completedAt}::date)
     FROM ${caseWorkflowStepsTable}
     WHERE ${caseWorkflowStepsTable.caseId} = ${casesTable.id}
       AND ${caseWorkflowStepsTable.stepKey} = ${stepKey}
@@ -54,35 +54,40 @@ function workflowCompletedDateYmdSql(stepKey: string): SQL<string | null> {
   )`;
 }
 
-export function milestoneDateYmdSql(milestone: CaseMilestoneKey): SQL<string | null> {
+export function milestoneDateSql(milestone: CaseMilestoneKey): SQL<Date | null> {
   switch (milestone) {
     case "spa_date":
-      return sql<string | null>`((${caseKeyDatesTable.spaDate})::text)`;
+      return sql<Date | null>`(${caseKeyDatesTable.spaDate})`;
     case "spa_stamped_date":
-      return sql<string | null>`COALESCE(((${caseKeyDatesTable.spaStampedDate})::text), ${workflowCompletedDateYmdSql("spa_stamped")})`;
+      return sql<Date | null>`COALESCE(${caseKeyDatesTable.spaStampedDate}, ${workflowCompletedDateSql("spa_stamped")})`;
     case "letter_of_offer_date":
-      return sql<string | null>`((${caseKeyDatesTable.letterOfOfferDate})::text)`;
+      return sql<Date | null>`(${caseKeyDatesTable.letterOfOfferDate})`;
     case "loan_docs_signed_date":
-      return sql<string | null>`COALESCE(((${caseKeyDatesTable.loanDocsSignedDate})::text), ${workflowCompletedDateYmdSql("loan_docs_signed")})`;
+      return sql<Date | null>`COALESCE(${caseKeyDatesTable.loanDocsSignedDate}, ${workflowCompletedDateSql("loan_docs_signed")})`;
     case "acting_letter_issued_date":
-      return sql<string | null>`COALESCE(((${caseKeyDatesTable.actingLetterIssuedDate})::text), ${workflowCompletedDateYmdSql("acting_letter_issued")})`;
+      return sql<Date | null>`COALESCE(${caseKeyDatesTable.actingLetterIssuedDate}, ${workflowCompletedDateSql("acting_letter_issued")})`;
     case "loan_sent_bank_execution_date":
-      return sql<string | null>`COALESCE(((${caseKeyDatesTable.loanSentBankExecutionDate})::text), ${workflowCompletedDateYmdSql("loan_sent_bank_exec")})`;
+      return sql<Date | null>`COALESCE(${caseKeyDatesTable.loanSentBankExecutionDate}, ${workflowCompletedDateSql("loan_sent_bank_exec")})`;
     case "loan_bank_executed_date":
-      return sql<string | null>`COALESCE(((${caseKeyDatesTable.loanBankExecutedDate})::text), ${workflowCompletedDateYmdSql("loan_bank_executed")})`;
+      return sql<Date | null>`COALESCE(${caseKeyDatesTable.loanBankExecutedDate}, ${workflowCompletedDateSql("loan_bank_executed")})`;
     case "bank_lu_received_date":
-      return sql<string | null>`COALESCE(((${caseKeyDatesTable.bankLuReceivedDate})::text), ${workflowCompletedDateYmdSql("blu_received")})`;
+      return sql<Date | null>`COALESCE(${caseKeyDatesTable.bankLuReceivedDate}, ${workflowCompletedDateSql("blu_received")})`;
     case "noa_served_on":
-      return sql<string | null>`COALESCE(((${caseKeyDatesTable.noaServedOn})::text), ${workflowCompletedDateYmdSql("noa_served")})`;
+      return sql<Date | null>`COALESCE(${caseKeyDatesTable.noaServedOn}, ${workflowCompletedDateSql("noa_served")})`;
     case "completion_date":
-      return sql<string | null>`((${caseKeyDatesTable.completionDate})::text)`;
+      return sql<Date | null>`(${caseKeyDatesTable.completionDate})`;
     default:
-      return sql<string | null>`NULL`;
+      return sql<Date | null>`NULL`;
   }
 }
 
+export function milestoneDateYmdSql(milestone: CaseMilestoneKey): SQL<string | null> {
+  const d = milestoneDateSql(milestone);
+  return sql<string | null>`(${d}::text)`;
+}
+
 export function milestonePresenceWhereSql(milestone: CaseMilestoneKey, presence: MilestonePresence): SQL<unknown> {
-  const expr = milestoneDateYmdSql(milestone);
+  const expr = milestoneDateSql(milestone);
   if (presence === "filled") return sql`${expr} IS NOT NULL`;
   return sql`${expr} IS NULL`;
 }
