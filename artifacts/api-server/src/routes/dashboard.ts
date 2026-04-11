@@ -14,12 +14,20 @@ async function queryRows(r: DbConn, query: ReturnType<typeof sql>): Promise<Reco
   return [];
 }
 
+async function tableExists(r: DbConn, reg: string): Promise<boolean> {
+  const rows = await queryRows(r, sql`SELECT to_regclass(${reg}) AS reg`);
+  return Boolean(rows[0]?.reg);
+}
+
 const router: IRouter = Router();
 
 router.get("/dashboard", requireAuth, requireFirmUser, requirePermission("dashboard", "read"), async (req: AuthRequest, res): Promise<void> => {
   try {
     const firmId = req.firmId!;
     const r = rdb(req);
+    const hasKeyDates = await tableExists(r, "public.case_key_dates");
+    const hasBillingEntries = await tableExists(r, "public.case_billing_entries");
+    const hasCommunications = await tableExists(r, "public.case_communications");
 
   const [totalCasesRes] = await r.select({ c: count() }).from(casesTable).where(eq(casesTable.firmId, firmId));
   const [completedCasesRes] = await r.select({ c: count() }).from(casesTable)
@@ -66,24 +74,22 @@ router.get("/dashboard", requireAuth, requireFirmUser, requirePermission("dashbo
     })
   );
 
-  // Billing summary
-  const billingRows = await queryRows(r, sql`
-    SELECT
-      SUM(amount * quantity) as total_billed,
-      SUM(CASE WHEN is_paid THEN amount * quantity ELSE 0 END) as total_paid,
-      SUM(CASE WHEN NOT is_paid THEN amount * quantity ELSE 0 END) as total_outstanding
-    FROM case_billing_entries WHERE firm_id = ${firmId}
-  `);
-  const billing = billingRows[0] ?? {};
+  const billing = hasBillingEntries ? (await queryRows(r, sql`
+      SELECT
+        SUM(amount * quantity) as total_billed,
+        SUM(CASE WHEN is_paid THEN amount * quantity ELSE 0 END) as total_paid,
+        SUM(CASE WHEN NOT is_paid THEN amount * quantity ELSE 0 END) as total_outstanding
+      FROM case_billing_entries WHERE firm_id = ${firmId}
+    `))[0] ?? {} : {};
 
-  // Communications count this month
-  const commRows = await queryRows(r, sql`
-    SELECT COUNT(*) as total_this_month
-    FROM case_communications
-    WHERE firm_id = ${firmId}
-    AND created_at >= date_trunc('month', NOW())
-  `);
-  const commsThisMonth = Number(commRows[0]?.total_this_month ?? 0);
+  const commsThisMonth = hasCommunications
+    ? Number((await queryRows(r, sql`
+        SELECT COUNT(*) as total_this_month
+        FROM case_communications
+        WHERE firm_id = ${firmId}
+        AND created_at >= date_trunc('month', NOW())
+      `))[0]?.total_this_month ?? 0)
+    : 0;
 
   const milestoneCountSql = (milestone: CaseMilestoneKey, presence: MilestonePresence, loanOnly: boolean): ReturnType<typeof sql<number>> => {
     const p = milestonePresenceWhereSql(milestone, presence);
@@ -91,27 +97,29 @@ router.get("/dashboard", requireAuth, requireFirmUser, requirePermission("dashbo
     return sql<number>`COUNT(*) FILTER (WHERE ${p})`;
   };
 
-  const [milestoneCounts] = await r
-    .select({
-      spaStamped: milestoneCountSql("spa_stamped_date", "filled", false),
-      loanDocsSigned: milestoneCountSql("loan_docs_signed_date", "filled", true),
-      actingLetterIssued: milestoneCountSql("acting_letter_issued_date", "filled", true),
-      loanSentBankExecution: milestoneCountSql("loan_sent_bank_execution_date", "filled", true),
-      loanBankExecuted: milestoneCountSql("loan_bank_executed_date", "filled", true),
-      bluReceived: milestoneCountSql("bank_lu_received_date", "filled", true),
-      noaServed: milestoneCountSql("noa_served_on", "filled", false),
-      completion: milestoneCountSql("completion_date", "filled", false),
+  const milestoneCounts = hasKeyDates
+    ? (await r
+      .select({
+        spaStamped: milestoneCountSql("spa_stamped_date", "filled", false),
+        loanDocsSigned: milestoneCountSql("loan_docs_signed_date", "filled", true),
+        actingLetterIssued: milestoneCountSql("acting_letter_issued_date", "filled", true),
+        loanSentBankExecution: milestoneCountSql("loan_sent_bank_execution_date", "filled", true),
+        loanBankExecuted: milestoneCountSql("loan_bank_executed_date", "filled", true),
+        bluReceived: milestoneCountSql("bank_lu_received_date", "filled", true),
+        noaServed: milestoneCountSql("noa_served_on", "filled", false),
+        completion: milestoneCountSql("completion_date", "filled", false),
 
-      spaDateMissing: milestoneCountSql("spa_date", "missing", false),
-      lofDateMissing: milestoneCountSql("letter_of_offer_date", "missing", false),
-      loanDocsSignedMissing: milestoneCountSql("loan_docs_signed_date", "missing", true),
-      completionDateMissing: milestoneCountSql("completion_date", "missing", false),
-    })
-    .from(casesTable)
-    .leftJoin(caseKeyDatesTable, sql`${caseKeyDatesTable.caseId} = ${casesTable.id} AND ${caseKeyDatesTable.firmId} = ${casesTable.firmId}`)
-    .where(eq(casesTable.firmId, firmId));
+        spaDateMissing: milestoneCountSql("spa_date", "missing", false),
+        lofDateMissing: milestoneCountSql("letter_of_offer_date", "missing", false),
+        loanDocsSignedMissing: milestoneCountSql("loan_docs_signed_date", "missing", true),
+        completionDateMissing: milestoneCountSql("completion_date", "missing", false),
+      })
+      .from(casesTable)
+      .leftJoin(caseKeyDatesTable, sql`${caseKeyDatesTable.caseId} = ${casesTable.id} AND ${caseKeyDatesTable.firmId} = ${casesTable.firmId}`)
+      .where(eq(casesTable.firmId, firmId)))[0]
+    : undefined;
 
-  const milestoneCards = [
+  const milestoneCards = hasKeyDates ? [
     { key: "spa_stamped", label: "SPA Stamped", count: Number(milestoneCounts?.spaStamped ?? 0), filter: { milestone: "spa_stamped_date", milestonePresence: "filled" } },
     { key: "loan_docs_signed", label: "Loan Docs Signed", count: Number(milestoneCounts?.loanDocsSigned ?? 0), filter: { milestone: "loan_docs_signed_date", milestonePresence: "filled", purchaseMode: "loan" } },
     { key: "acting_letter_issued", label: "Acting Letter Issued", count: Number(milestoneCounts?.actingLetterIssued ?? 0), filter: { milestone: "acting_letter_issued_date", milestonePresence: "filled", purchaseMode: "loan" } },
@@ -125,7 +133,7 @@ router.get("/dashboard", requireAuth, requireFirmUser, requirePermission("dashbo
     { key: "lof_date_missing", label: "LOF Date Missing", count: Number(milestoneCounts?.lofDateMissing ?? 0), filter: { milestone: "letter_of_offer_date", milestonePresence: "missing" } },
     { key: "loan_docs_signed_missing", label: "Loan Docs Signed Missing", count: Number(milestoneCounts?.loanDocsSignedMissing ?? 0), filter: { milestone: "loan_docs_signed_date", milestonePresence: "missing", purchaseMode: "loan" } },
     { key: "completion_date_missing", label: "Completion Date Missing", count: Number(milestoneCounts?.completionDateMissing ?? 0), filter: { milestone: "completion_date", milestonePresence: "missing" } },
-  ];
+  ] : [];
 
     res.json({
       totalCases: Number(totalCasesRes?.c ?? 0),
