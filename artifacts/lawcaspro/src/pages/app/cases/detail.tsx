@@ -86,16 +86,19 @@ export default function CaseDetail() {
   const saveKeyDatesMutation = useMutation({
     mutationFn: (vars: { scope: string; payload: Record<string, unknown>; keys: string[] }) =>
       apiFetch(`/cases/${caseId}/key-dates`, { method: "PATCH", body: JSON.stringify(vars.payload) }),
-    onSuccess: (_data, vars) => {
+    onSuccess: (data, vars) => {
       queryClient.invalidateQueries({ queryKey: getGetCaseQueryKey(caseId) });
       queryClient.invalidateQueries({ queryKey: ["case-key-dates", caseId] });
+      queryClient.invalidateQueries({ queryKey: getGetCaseWorkflowQueryKey(caseId) });
       setKeyDatesBaseline((prev) => {
         const next = { ...prev };
         for (const k of vars.keys) next[k] = keyDatesDraft[k] ?? "";
         return next;
       });
       setSavingScope("");
-      toast({ title: `${vars.scope} saved` });
+      const payload = (data && typeof data === "object") ? (data as Record<string, unknown>) : {};
+      const synced = Array.isArray(payload.synced_workflow_steps) ? payload.synced_workflow_steps.filter((x) => typeof x === "string") : [];
+      toast({ title: `${vars.scope} saved`, description: synced.length ? `${synced.length} milestone(s) synced to workflow` : undefined });
     },
     onError: (err) => toast({ title: "Save failed", description: String(err), variant: "destructive" }),
   });

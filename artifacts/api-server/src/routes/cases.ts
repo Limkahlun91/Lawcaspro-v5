@@ -14,11 +14,14 @@ import {
 } from "@workspace/api-zod";
 import { requireAuth, requireFirmUser, requirePermission, writeAuditLog, type AuthRequest } from "../lib/auth";
 import { buildWorkflowSteps } from "../lib/workflow";
+import { KEY_DATE_FIELD_TO_STEP_KEY, WORKFLOW_STEP_KEY_TO_KEY_DATE_FIELD, type KeyDateField } from "../lib/keyDatesWorkflow";
 
 const router: IRouter = Router();
 
 type DbConn = typeof db | NonNullable<AuthRequest["rlsDb"]>;
 const rdb = (req: AuthRequest): DbConn => req.rlsDb ?? db;
+
+type CaseKeyDatesInsert = typeof caseKeyDatesTable.$inferInsert;
 
 function parseDateOnlyInput(v: unknown): string | null | undefined {
   if (v === undefined) return undefined;
@@ -43,6 +46,43 @@ function parseMoneyInput(v: unknown): string | null | undefined {
   const n = Number(s);
   if (!Number.isFinite(n)) return undefined;
   return String(n);
+}
+
+function ymdToUtcDate(ymd: string): Date {
+  return new Date(`${ymd}T00:00:00.000Z`);
+}
+
+function dateToYmd(d: Date): string {
+  return d.toISOString().slice(0, 10);
+}
+
+function shouldBackfillKeyDate(field: KeyDateField, kd: typeof caseKeyDatesTable.$inferSelect | null): boolean {
+  if (!kd) return true;
+  switch (field) {
+    case "spa_signed_date": return !kd.spaSignedDate;
+    case "spa_stamped_date": return !kd.spaStampedDate;
+    case "letter_of_offer_stamped_date": return !kd.letterOfOfferStampedDate;
+    case "loan_docs_signed_date": return !kd.loanDocsSignedDate;
+    case "acting_letter_issued_date": return !kd.actingLetterIssuedDate;
+    case "loan_sent_bank_execution_date": return !kd.loanSentBankExecutionDate;
+    case "loan_bank_executed_date": return !kd.loanBankExecutedDate;
+    case "bank_lu_received_date": return !kd.bankLuReceivedDate;
+    case "noa_served_on": return !kd.noaServedOn;
+  }
+}
+
+function keyDatePatchFromWorkflow(field: KeyDateField, ymd: string): Partial<CaseKeyDatesInsert> {
+  switch (field) {
+    case "spa_signed_date": return { spaSignedDate: ymd };
+    case "spa_stamped_date": return { spaStampedDate: ymd };
+    case "letter_of_offer_stamped_date": return { letterOfOfferStampedDate: ymd };
+    case "loan_docs_signed_date": return { loanDocsSignedDate: ymd };
+    case "acting_letter_issued_date": return { actingLetterIssuedDate: ymd };
+    case "loan_sent_bank_execution_date": return { loanSentBankExecutionDate: ymd };
+    case "loan_bank_executed_date": return { loanBankExecutedDate: ymd };
+    case "bank_lu_received_date": return { bankLuReceivedDate: ymd };
+    case "noa_served_on": return { noaServedOn: ymd };
+  }
 }
 
 async function formatCaseDetail(r: DbConn, c: typeof casesTable.$inferSelect) {
@@ -556,7 +596,7 @@ router.get("/cases/:caseId/key-dates", requireAuth, requireFirmUser, requirePerm
     .select()
     .from(caseKeyDatesTable)
     .where(and(eq(caseKeyDatesTable.caseId, params.data.caseId), eq(caseKeyDatesTable.firmId, req.firmId!)));
-  res.json(kd ? {
+  const out: Record<string, unknown> = kd ? {
     spa_signed_date: kd.spaSignedDate ? String(kd.spaSignedDate) : null,
     spa_forward_to_developer_execution_on: kd.spaForwardToDeveloperExecutionOn ? String(kd.spaForwardToDeveloperExecutionOn) : null,
     spa_date: kd.spaDate ? String(kd.spaDate) : null,
@@ -596,7 +636,27 @@ router.get("/cases/:caseId/key-dates", requireAuth, requireFirmUser, requirePerm
     progressive_payment_date: kd.progressivePaymentDate ? String(kd.progressivePaymentDate) : null,
     full_settlement_date: kd.fullSettlementDate ? String(kd.fullSettlementDate) : null,
     completion_date: kd.completionDate ? String(kd.completionDate) : null,
-  } : {});
+  } : {};
+
+  const workflowSteps = await r
+    .select({ stepKey: caseWorkflowStepsTable.stepKey, status: caseWorkflowStepsTable.status, completedAt: caseWorkflowStepsTable.completedAt })
+    .from(caseWorkflowStepsTable)
+    .where(eq(caseWorkflowStepsTable.caseId, params.data.caseId));
+  const workflowCompletedAtByKey = new Map<string, Date>();
+  for (const s of workflowSteps) {
+    if (s.status === "completed" && s.completedAt) workflowCompletedAtByKey.set(s.stepKey, s.completedAt);
+  }
+
+  const keyDateFields = Object.keys(KEY_DATE_FIELD_TO_STEP_KEY) as KeyDateField[];
+  for (const f of keyDateFields) {
+    if (!Object.prototype.hasOwnProperty.call(out, f) || out[f] === null || out[f] === undefined || out[f] === "") {
+      const stepKey = KEY_DATE_FIELD_TO_STEP_KEY[f];
+      const d = workflowCompletedAtByKey.get(stepKey);
+      if (d) out[f] = dateToYmd(d);
+    }
+  }
+
+  res.json(out);
 });
 
 router.patch("/cases/:caseId/key-dates", requireAuth, requireFirmUser, requirePermission("cases", "update"), async (req: AuthRequest, res): Promise<void> => {
@@ -619,8 +679,6 @@ router.patch("/cases/:caseId/key-dates", requireAuth, requireFirmUser, requirePe
     return;
   }
   const body = req.body as Record<string, unknown>;
-
-  type CaseKeyDatesInsert = typeof caseKeyDatesTable.$inferInsert;
 
   const dateFieldMap = {
     spa_signed_date: "spaSignedDate",
@@ -670,6 +728,7 @@ router.patch("/cases/:caseId/key-dates", requireAuth, requireFirmUser, requirePe
   const updateValues: Partial<CaseKeyDatesInsert> & { updatedAt: Date } = { updatedAt: new Date() };
 
   const changed: string[] = [];
+  const providedKeyDateForWorkflowSync: Array<{ keyDateField: KeyDateField; ymd: string }> = [];
   const apiKeys = Object.keys(dateFieldMap) as Array<keyof typeof dateFieldMap>;
   for (const apiKey of apiKeys) {
     if (!Object.prototype.hasOwnProperty.call(body, apiKey)) continue;
@@ -681,6 +740,12 @@ router.patch("/cases/:caseId/key-dates", requireAuth, requireFirmUser, requirePe
     const colKey = dateFieldMap[apiKey] as DateColKey;
     setDateCol(insertValues, colKey, parsed as DateColValue);
     setDateCol(updateValues, colKey, parsed as DateColValue);
+    if (typeof parsed === "string") {
+      const k = String(apiKey);
+      if (Object.prototype.hasOwnProperty.call(KEY_DATE_FIELD_TO_STEP_KEY, k)) {
+        providedKeyDateForWorkflowSync.push({ keyDateField: k as KeyDateField, ymd: parsed });
+      }
+    }
     changed.push(String(apiKey));
   }
 
@@ -770,6 +835,56 @@ router.patch("/cases/:caseId/key-dates", requireAuth, requireFirmUser, requirePe
     detail: JSON.stringify(changed),
   });
 
+  const workflowRows = await r
+    .select({
+      id: caseWorkflowStepsTable.id,
+      stepKey: caseWorkflowStepsTable.stepKey,
+      stepName: caseWorkflowStepsTable.stepName,
+      status: caseWorkflowStepsTable.status,
+      completedAt: caseWorkflowStepsTable.completedAt,
+    })
+    .from(caseWorkflowStepsTable)
+    .where(eq(caseWorkflowStepsTable.caseId, params.data.caseId));
+  const workflowByKey = new Map<string, { id: number; stepKey: string; stepName: string; status: string; completedAt: Date | null }>();
+  for (const s of workflowRows) {
+    workflowByKey.set(s.stepKey, { id: s.id, stepKey: s.stepKey, stepName: s.stepName, status: s.status, completedAt: s.completedAt ?? null });
+  }
+
+  const syncedWorkflowSteps: string[] = [];
+  const missingWorkflowSteps: string[] = [];
+  for (const item of providedKeyDateForWorkflowSync) {
+    const stepKey = KEY_DATE_FIELD_TO_STEP_KEY[item.keyDateField];
+    const step = workflowByKey.get(stepKey);
+    if (!step) {
+      missingWorkflowSteps.push(stepKey);
+      continue;
+    }
+    if (step.status === "completed" && step.completedAt) continue;
+    const completedAt = ymdToUtcDate(item.ymd);
+    const [updatedStep] = await r
+      .update(caseWorkflowStepsTable)
+      .set({
+        status: "completed",
+        completedBy: req.userId,
+        completedAt: step.completedAt ?? completedAt,
+        updatedAt: new Date(),
+      })
+      .where(and(eq(caseWorkflowStepsTable.id, step.id), eq(caseWorkflowStepsTable.caseId, params.data.caseId)))
+      .returning();
+    if (updatedStep) {
+      syncedWorkflowSteps.push(stepKey);
+      await r.insert(auditLogsTable).values({
+        firmId: req.firmId,
+        actorId: req.userId,
+        actorType: "firm_user",
+        action: "workflow.step_synced_from_key_date",
+        entityType: "case_workflow_step",
+        entityId: updatedStep.id,
+        detail: JSON.stringify({ keyDateField: item.keyDateField, stepKey, ymd: item.ymd }),
+      });
+    }
+  }
+
   res.json(kd ? {
     spa_signed_date: kd.spaSignedDate ? String(kd.spaSignedDate) : null,
     spa_forward_to_developer_execution_on: kd.spaForwardToDeveloperExecutionOn ? String(kd.spaForwardToDeveloperExecutionOn) : null,
@@ -810,7 +925,9 @@ router.patch("/cases/:caseId/key-dates", requireAuth, requireFirmUser, requirePe
     progressive_payment_date: kd.progressivePaymentDate ? String(kd.progressivePaymentDate) : null,
     full_settlement_date: kd.fullSettlementDate ? String(kd.fullSettlementDate) : null,
     completion_date: kd.completionDate ? String(kd.completionDate) : null,
-  } : {});
+    synced_workflow_steps: syncedWorkflowSteps,
+    missing_workflow_steps: missingWorkflowSteps,
+  } : { synced_workflow_steps: syncedWorkflowSteps, missing_workflow_steps: missingWorkflowSteps });
 });
 
 router.patch("/cases/:caseId", requireAuth, requireFirmUser, requirePermission("cases", "update"), async (req: AuthRequest, res): Promise<void> => {
@@ -991,6 +1108,40 @@ router.patch("/cases/:caseId/workflow/:stepId", requireAuth, requireFirmUser, re
     detail: `Step ${step.stepName} -> ${step.status}`,
   });
 
+  let syncedKeyDateField: KeyDateField | null = null;
+  if (step.status === "completed" && step.completedAt) {
+    const mapped = WORKFLOW_STEP_KEY_TO_KEY_DATE_FIELD[step.stepKey];
+    if (mapped) {
+      const [existingKd] = await r
+        .select()
+        .from(caseKeyDatesTable)
+        .where(and(eq(caseKeyDatesTable.caseId, params.data.caseId), eq(caseKeyDatesTable.firmId, req.firmId!)));
+      if (shouldBackfillKeyDate(mapped, existingKd ?? null)) {
+        const ymd = dateToYmd(step.completedAt);
+        if (existingKd) {
+          await r
+            .update(caseKeyDatesTable)
+            .set({ ...keyDatePatchFromWorkflow(mapped, ymd), updatedAt: new Date() })
+            .where(and(eq(caseKeyDatesTable.caseId, params.data.caseId), eq(caseKeyDatesTable.firmId, req.firmId!)));
+        } else {
+          await r
+            .insert(caseKeyDatesTable)
+            .values({ firmId: req.firmId!, caseId: params.data.caseId, ...keyDatePatchFromWorkflow(mapped, ymd) });
+        }
+        syncedKeyDateField = mapped;
+        await r.insert(auditLogsTable).values({
+          firmId: req.firmId,
+          actorId: req.userId,
+          actorType: "firm_user",
+          action: "case.key_date_synced_from_workflow",
+          entityType: "case",
+          entityId: params.data.caseId,
+          detail: JSON.stringify({ stepKey: step.stepKey, keyDateField: mapped, ymd }),
+        });
+      }
+    }
+  }
+
   let completedByName: string | null = null;
   if (step.completedBy) {
     const [user] = await r.select().from(usersTable).where(eq(usersTable.id, step.completedBy));
@@ -1009,6 +1160,7 @@ router.patch("/cases/:caseId/workflow/:stepId", requireAuth, requireFirmUser, re
     completedByName,
     completedAt: step.completedAt?.toISOString() ?? null,
     notes: step.notes ?? null,
+    syncedKeyDateField,
   });
 });
 
