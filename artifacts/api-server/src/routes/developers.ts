@@ -49,35 +49,40 @@ async function enrichDeveloper(r: DbConn, dev: Developer) {
 }
 
 router.get("/developers", requireAuth, requireFirmUser, requirePermission("developers", "read"), async (req: AuthRequest, res): Promise<void> => {
-  const r = rdb(req);
-  const params = ListDevelopersQueryParams.safeParse(req.query);
-  const search = params.success ? params.data.search : undefined;
-  const page = params.success ? (params.data.page ?? 1) : 1;
-  const limit = params.success ? (params.data.limit ?? 20) : 20;
-  const offset = (page - 1) * limit;
+  try {
+    const r = rdb(req);
+    const params = ListDevelopersQueryParams.safeParse(req.query);
+    const search = params.success ? params.data.search : undefined;
+    const page = params.success ? (params.data.page ?? 1) : 1;
+    const limit = params.success ? (params.data.limit ?? 20) : 20;
+    const offset = (page - 1) * limit;
 
-  let devs;
-  let totalRes;
+    let devs;
+    let totalRes;
 
-  if (search) {
-    devs = await r.select().from(developersTable)
-      .where(and(eq(developersTable.firmId, req.firmId!), ilike(developersTable.name, `%${search}%`)))
-      .orderBy(desc(developersTable.createdAt))
-      .limit(limit).offset(offset);
-    const [t] = await r.select({ c: count() }).from(developersTable)
-      .where(and(eq(developersTable.firmId, req.firmId!), ilike(developersTable.name, `%${search}%`)));
-    totalRes = t;
-  } else {
-    devs = await r.select().from(developersTable)
-      .where(eq(developersTable.firmId, req.firmId!))
-      .orderBy(desc(developersTable.createdAt))
-      .limit(limit).offset(offset);
-    const [t] = await r.select({ c: count() }).from(developersTable).where(eq(developersTable.firmId, req.firmId!));
-    totalRes = t;
+    if (search) {
+      devs = await r.select().from(developersTable)
+        .where(and(eq(developersTable.firmId, req.firmId!), ilike(developersTable.name, `%${search}%`)))
+        .orderBy(desc(developersTable.createdAt))
+        .limit(limit).offset(offset);
+      const [t] = await r.select({ c: count() }).from(developersTable)
+        .where(and(eq(developersTable.firmId, req.firmId!), ilike(developersTable.name, `%${search}%`)));
+      totalRes = t;
+    } else {
+      devs = await r.select().from(developersTable)
+        .where(eq(developersTable.firmId, req.firmId!))
+        .orderBy(desc(developersTable.createdAt))
+        .limit(limit).offset(offset);
+      const [t] = await r.select({ c: count() }).from(developersTable).where(eq(developersTable.firmId, req.firmId!));
+      totalRes = t;
+    }
+
+    const enriched = await Promise.all(devs.map((d) => enrichDeveloper(r, d)));
+    res.json({ data: enriched, total: Number(totalRes?.c ?? 0), page, limit });
+  } catch (err) {
+    console.error("[developers] runtime error", { path: req.path, firmId: req.firmId, userId: req.userId, error: err instanceof Error ? { message: err.message, stack: err.stack } : String(err) });
+    res.status(500).json({ error: "Internal Server Error" });
   }
-
-  const enriched = await Promise.all(devs.map((d) => enrichDeveloper(r, d)));
-  res.json({ data: enriched, total: Number(totalRes?.c ?? 0), page, limit });
 });
 
 router.post("/developers", requireAuth, requireFirmUser, requirePermission("developers", "create"), async (req: AuthRequest, res): Promise<void> => {
@@ -285,7 +290,8 @@ router.delete("/developers/:developerId", requireAuth, requireFirmUser, requireP
 
   const r = req.rlsDb;
   if (!r) {
-    res.status(500).json({ error: "Missing tenant database context" });
+    console.error("[developers] missing tenant database context", { path: req.path, firmId: req.firmId, userId: req.userId });
+    res.status(500).json({ error: "Internal Server Error" });
     return;
   }
 

@@ -41,4 +41,17 @@ app.use(express.urlencoded({ extended: true }));
 
 app.use("/api", router);
 
+app.use((err: unknown, req: express.Request, res: express.Response, next: express.NextFunction) => {
+  if (res.headersSent) {
+    next(err);
+    return;
+  }
+  console.error("[unhandled] runtime error", {
+    path: req.path,
+    method: req.method,
+    error: err instanceof Error ? { message: err.message, stack: err.stack } : String(err),
+  });
+  res.status(500).json({ error: "Internal Server Error" });
+});
+
 export default app;

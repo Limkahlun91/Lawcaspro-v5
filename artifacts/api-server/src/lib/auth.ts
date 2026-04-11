@@ -205,7 +205,8 @@ export async function requireFirmUser(
         : message.includes("SET ROLE") || message.includes("RESET ROLE") || message.includes("Cannot enforce RLS safely")
           ? "RLS_CONTEXT"
           : "DB";
-    res.status(500).json({ error: "Firm context initialization failed", code, details: message });
+    logger.error({ code, userId: req.userId, firmId: req.firmId }, "[auth-firm-user]");
+    res.status(500).json({ error: "Internal Server Error" });
     return;
   }
 
@@ -231,7 +232,7 @@ export function requirePermission(moduleName: string, action: string) {
         ipAddress: req.ip,
         userAgent: req.headers["user-agent"],
       });
-      res.status(403).json({ error: "Permission denied", code: "PERMISSION_DENIED" });
+      res.status(403).json({ error: "Permission denied" });
       return;
     }
 
@@ -252,7 +253,7 @@ export function requirePermission(moduleName: string, action: string) {
         ipAddress: req.ip,
         userAgent: req.headers["user-agent"],
       });
-      res.status(403).json({ error: "Permission denied", code: "PERMISSION_DENIED" });
+      res.status(403).json({ error: "Permission denied" });
       return;
     }
 

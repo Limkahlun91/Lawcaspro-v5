@@ -20,6 +20,10 @@ router.get("/healthz/db", async (_req, res) => {
 });
 
 router.get("/healthz/schema", async (_req, res) => {
+  if (process.env.NODE_ENV === "production") {
+    res.status(404).json({ error: "Not found" });
+    return;
+  }
   const client = await pool.connect();
   try {
     await client.query("SET statement_timeout = '3000ms'");

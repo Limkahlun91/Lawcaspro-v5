@@ -1,0 +1,62 @@
+import request from "supertest";
+import { beforeAll, describe, expect, it } from "vitest";
+import app from "../app";
+
+let token: string;
+
+beforeAll(async () => {
+  const res = await request(app)
+    .post("/api/auth/login")
+    .send({ email: "partner@test.com", password: "password123" });
+  expect(res.status).toBe(200);
+  token = res.body?.token;
+  expect(typeof token).toBe("string");
+});
+
+describe("Runtime 500 regressions", () => {
+  it("auth/me unauthenticated returns 401 (not 500)", async () => {
+    const res = await request(app).get("/api/auth/me");
+    expect(res.status).toBe(401);
+    expect(res.body).toEqual({ error: "Not authenticated" });
+  });
+
+  it("auth/login invalid body returns 400 (not 500)", async () => {
+    const res = await request(app).post("/api/auth/login").send({});
+    expect(res.status).toBe(400);
+    expect(res.body).toHaveProperty("error");
+  });
+
+  it("dashboard does not 500 for valid auth", async () => {
+    const res = await request(app)
+      .get("/api/dashboard")
+      .set("Authorization", `Bearer ${token}`);
+    expect(res.status).not.toBe(500);
+    expect(res.status).toBe(200);
+  });
+
+  it("cases list does not 500 with milestone + overdue filters", async () => {
+    const res = await request(app)
+      .get("/api/cases")
+      .query({
+        page: 1,
+        limit: 50,
+        sortBy: "updatedAt",
+        sortDir: "desc",
+        milestone: "loan_docs_signed_date",
+        milestonePresence: "missing",
+        overdueDays: 7,
+      })
+      .set("Authorization", `Bearer ${token}`);
+    expect(res.status).not.toBe(500);
+    expect(res.status).toBe(200);
+  });
+
+  it("cases workbench does not 500 for valid auth", async () => {
+    const res = await request(app)
+      .get("/api/cases/workbench")
+      .set("Authorization", `Bearer ${token}`);
+    expect(res.status).not.toBe(500);
+    expect(res.status).toBe(200);
+  });
+});
+

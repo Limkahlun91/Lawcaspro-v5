@@ -42,7 +42,7 @@ router.post("/auth/login", authRateLimiter, async (req, res): Promise<void> => {
   try {
     const parsed = LoginBody.safeParse(req.body);
     if (!parsed.success) {
-      res.status(400).json({ error: parsed.error.message });
+      res.status(400).json({ error: "Invalid request" });
       return;
     }
 
@@ -256,7 +256,7 @@ router.post("/auth/login", authRateLimiter, async (req, res): Promise<void> => {
 
     logger.info({ emailHash, userId: user.id, userLookupMs, ms: Date.now() - startedAt }, "auth.login.success");
   } catch (err) {
-    logger.error({ emailHash, userId, stage, err }, "auth.login.error");
+    logger.error({ emailHash, userId, stage, err }, "[auth-login]");
     res.status(500).json({ error: "Login temporarily unavailable" });
   }
 });
@@ -382,7 +382,7 @@ router.get("/auth/me", requireAuth, async (req: AuthRequest, res): Promise<void>
 
     res.json(result);
   } catch (err) {
-    logger.error({ err, userId: req.userId }, "auth.me.error");
+    logger.error({ err, userId: req.userId }, "[auth-me]");
     res.status(500).json({ error: "Auth temporarily unavailable" });
   }
 });

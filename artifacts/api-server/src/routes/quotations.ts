@@ -72,8 +72,9 @@ router.get("/quotations", requireAuth, requireFirmUser, async (req, res): Promis
 
     res.json(results);
     return;
-  } catch (err: any) {
-    res.status(500).json({ error: err.message });
+  } catch (err) {
+    console.error("[quotations] runtime error", { path: req.path, error: err instanceof Error ? { message: err.message, stack: err.stack } : String(err) });
+    res.status(500).json({ error: "Internal Server Error" });
     return;
   }
 });
@@ -111,8 +112,9 @@ router.post("/quotations", requireAuth, requireFirmUser, async (req, res): Promi
 
     res.status(201).json(result);
     return;
-  } catch (err: any) {
-    res.status(500).json({ error: err.message });
+  } catch (err) {
+    console.error("[quotations] runtime error", { path: req.path, error: err instanceof Error ? { message: err.message, stack: err.stack } : String(err) });
+    res.status(500).json({ error: "Internal Server Error" });
     return;
   }
 });
@@ -141,8 +143,9 @@ router.get("/quotations/:id", requireAuth, requireFirmUser, async (req, res): Pr
       updatedAt: quotation.updatedAt.toISOString(),
     });
     return;
-  } catch (err: any) {
-    res.status(500).json({ error: err.message });
+  } catch (err) {
+    console.error("[quotations] runtime error", { path: req.path, error: err instanceof Error ? { message: err.message, stack: err.stack } : String(err) });
+    res.status(500).json({ error: "Internal Server Error" });
     return;
   }
 });
@@ -189,8 +192,9 @@ router.patch("/quotations/:id", requireAuth, requireFirmUser, async (req, res): 
 
     res.json(result);
     return;
-  } catch (err: any) {
-    res.status(500).json({ error: err.message });
+  } catch (err) {
+    console.error("[quotations] runtime error", { path: req.path, error: err instanceof Error ? { message: err.message, stack: err.stack } : String(err) });
+    res.status(500).json({ error: "Internal Server Error" });
     return;
   }
 });
@@ -214,8 +218,9 @@ router.delete("/quotations/:id", requireAuth, requireFirmUser, async (req, res):
 
     res.json({ success: true });
     return;
-  } catch (err: any) {
-    res.status(500).json({ error: err.message });
+  } catch (err) {
+    console.error("[quotations] runtime error", { path: req.path, error: err instanceof Error ? { message: err.message, stack: err.stack } : String(err) });
+    res.status(500).json({ error: "Internal Server Error" });
     return;
   }
 });
@@ -286,8 +291,9 @@ router.post("/quotations/:id/duplicate", requireAuth, requireFirmUser, async (re
 
     res.status(201).json(result);
     return;
-  } catch (err: any) {
-    res.status(500).json({ error: err.message });
+  } catch (err) {
+    console.error("[quotations] runtime error", { path: req.path, error: err instanceof Error ? { message: err.message, stack: err.stack } : String(err) });
+    res.status(500).json({ error: "Internal Server Error" });
     return;
   }
 });
@@ -432,8 +438,9 @@ router.post("/quotations/:id/auto-calculate", requireAuth, requireFirmUser, asyn
 
     res.json({ items: allItems.map(formatItem), totals, breakdown: { purchasePrice, loanAmount } });
     return;
-  } catch (err: any) {
-    res.status(500).json({ error: err.message });
+  } catch (err) {
+    console.error("[quotations] runtime error", { path: req.path, error: err instanceof Error ? { message: err.message, stack: err.stack } : String(err) });
+    res.status(500).json({ error: "Internal Server Error" });
     return;
   }
 });

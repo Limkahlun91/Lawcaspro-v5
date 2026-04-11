@@ -40,31 +40,36 @@ async function enrichProject(r: DbConn, proj: Project) {
 }
 
 router.get("/projects", requireAuth, requireFirmUser, requirePermission("projects", "read"), async (req: AuthRequest, res): Promise<void> => {
-  const r = rdb(req);
-  const params = ListProjectsQueryParams.safeParse(req.query);
-  const search = params.success ? params.data.search : undefined;
-  const developerId = params.success ? params.data.developerId : undefined;
-  const projectType = params.success ? params.data.projectType : undefined;
-  const titleType = params.success ? params.data.titleType : undefined;
-  const page = params.success ? (params.data.page ?? 1) : 1;
-  const limit = params.success ? (params.data.limit ?? 20) : 20;
-  const offset = (page - 1) * limit;
+  try {
+    const r = rdb(req);
+    const params = ListProjectsQueryParams.safeParse(req.query);
+    const search = params.success ? params.data.search : undefined;
+    const developerId = params.success ? params.data.developerId : undefined;
+    const projectType = params.success ? params.data.projectType : undefined;
+    const titleType = params.success ? params.data.titleType : undefined;
+    const page = params.success ? (params.data.page ?? 1) : 1;
+    const limit = params.success ? (params.data.limit ?? 20) : 20;
+    const offset = (page - 1) * limit;
 
-  const conditions = [eq(projectsTable.firmId, req.firmId!)];
-  if (developerId) conditions.push(eq(projectsTable.developerId, developerId));
-  if (projectType) conditions.push(eq(projectsTable.projectType, projectType));
-  if (titleType) conditions.push(eq(projectsTable.titleType, titleType));
-  if (search) conditions.push(ilike(projectsTable.name, `%${search}%`));
+    const conditions = [eq(projectsTable.firmId, req.firmId!)];
+    if (developerId) conditions.push(eq(projectsTable.developerId, developerId));
+    if (projectType) conditions.push(eq(projectsTable.projectType, projectType));
+    if (titleType) conditions.push(eq(projectsTable.titleType, titleType));
+    if (search) conditions.push(ilike(projectsTable.name, `%${search}%`));
 
-  const projs = await r.select().from(projectsTable)
-    .where(and(...conditions))
-    .orderBy(desc(projectsTable.createdAt))
-    .limit(limit).offset(offset);
+    const projs = await r.select().from(projectsTable)
+      .where(and(...conditions))
+      .orderBy(desc(projectsTable.createdAt))
+      .limit(limit).offset(offset);
 
-  const [totalRes] = await r.select({ c: count() }).from(projectsTable).where(and(...conditions));
+    const [totalRes] = await r.select({ c: count() }).from(projectsTable).where(and(...conditions));
 
-  const enriched = await Promise.all(projs.map((p) => enrichProject(r, p)));
-  res.json({ data: enriched, total: Number(totalRes?.c ?? 0), page, limit });
+    const enriched = await Promise.all(projs.map((p) => enrichProject(r, p)));
+    res.json({ data: enriched, total: Number(totalRes?.c ?? 0), page, limit });
+  } catch (err) {
+    console.error("[projects] runtime error", { path: req.path, firmId: req.firmId, userId: req.userId, error: err instanceof Error ? { message: err.message, stack: err.stack } : String(err) });
+    res.status(500).json({ error: "Internal Server Error" });
+  }
 });
 
 router.post("/projects", requireAuth, requireFirmUser, requirePermission("projects", "create"), async (req: AuthRequest, res): Promise<void> => {
@@ -257,7 +262,8 @@ router.delete("/projects/:projectId", requireAuth, requireFirmUser, requirePermi
 
   const r = req.rlsDb;
   if (!r) {
-    res.status(500).json({ error: "Missing tenant database context" });
+    console.error("[projects] missing tenant database context", { path: req.path, firmId: req.firmId, userId: req.userId });
+    res.status(500).json({ error: "Internal Server Error" });
     return;
   }
 
