@@ -20,37 +20,60 @@ router.get("/healthz/db", async (_req, res) => {
 });
 
 router.get("/healthz/schema", async (_req, res) => {
+  const client = await pool.connect();
   try {
-    const tables = [
-      "case_key_dates",
-      "case_workflow_steps",
-      "case_billing_entries",
-      "case_communications",
-    ] as const;
+    await client.query("SET statement_timeout = '3000ms'");
 
-    const results: Record<string, { exists: boolean; columns?: string[] }> = {};
-    for (const t of tables) {
-      const [{ reg }] = await pool.query<{ reg: string | null }>(
-        "SELECT to_regclass($1) AS reg",
-        [`public.${t}`],
-      ).then((r) => r.rows);
+    const existsRow = await client.query<{
+      case_key_dates: boolean;
+      case_workflow_steps: boolean;
+      case_billing_entries: boolean;
+      case_communications: boolean;
+    }>(`
+      SELECT
+        to_regclass('public.case_key_dates') IS NOT NULL AS case_key_dates,
+        to_regclass('public.case_workflow_steps') IS NOT NULL AS case_workflow_steps,
+        to_regclass('public.case_billing_entries') IS NOT NULL AS case_billing_entries,
+        to_regclass('public.case_communications') IS NOT NULL AS case_communications
+    `);
 
-      if (!reg) {
-        results[t] = { exists: false };
-        continue;
-      }
+    const exists = existsRow.rows[0] ?? {
+      case_key_dates: false,
+      case_workflow_steps: false,
+      case_billing_entries: false,
+      case_communications: false,
+    };
 
-      const cols = await pool.query<{ column_name: string }>(
-        "SELECT column_name FROM information_schema.columns WHERE table_schema = 'public' AND table_name = $1 ORDER BY ordinal_position",
-        [t],
-      );
-      results[t] = { exists: true, columns: cols.rows.map((c) => c.column_name) };
+    const results: Record<string, { exists: boolean; selectOk?: boolean; selectError?: string }> = {};
+    for (const [name, isPresent] of Object.entries(exists)) {
+      results[name] = { exists: Boolean(isPresent) };
     }
+
+    const trySelect = async (table: string) => {
+      try {
+        await client.query(`SELECT 1 FROM public.${table} LIMIT 1`);
+        results[table].selectOk = true;
+      } catch (err) {
+        results[table].selectOk = false;
+        results[table].selectError = err instanceof Error ? err.message : "Unknown error";
+      }
+    };
+
+    if (exists.case_key_dates) await trySelect("case_key_dates");
+    if (exists.case_workflow_steps) await trySelect("case_workflow_steps");
+    if (exists.case_billing_entries) await trySelect("case_billing_entries");
+    if (exists.case_communications) await trySelect("case_communications");
 
     res.json({ status: "ok", schema: results });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Schema check failed";
     res.status(500).json({ status: "error", schema: "error", error: message });
+  } finally {
+    try {
+      await client.query("RESET statement_timeout");
+    } catch {
+    }
+    client.release();
   }
 });
 
