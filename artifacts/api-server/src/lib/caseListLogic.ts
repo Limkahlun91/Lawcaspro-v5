@@ -57,25 +57,25 @@ function workflowCompletedDateYmdSql(stepKey: string): SQL<string | null> {
 export function milestoneDateYmdSql(milestone: CaseMilestoneKey): SQL<string | null> {
   switch (milestone) {
     case "spa_date":
-      return sql<string | null>`(${caseKeyDatesTable.spaDate})`;
+      return sql<string | null>`((${caseKeyDatesTable.spaDate})::text)`;
     case "spa_stamped_date":
-      return sql<string | null>`COALESCE(${caseKeyDatesTable.spaStampedDate}, ${workflowCompletedDateYmdSql("spa_stamped")})`;
+      return sql<string | null>`COALESCE(((${caseKeyDatesTable.spaStampedDate})::text), ${workflowCompletedDateYmdSql("spa_stamped")})`;
     case "letter_of_offer_date":
-      return sql<string | null>`(${caseKeyDatesTable.letterOfOfferDate})`;
+      return sql<string | null>`((${caseKeyDatesTable.letterOfOfferDate})::text)`;
     case "loan_docs_signed_date":
-      return sql<string | null>`COALESCE(${caseKeyDatesTable.loanDocsSignedDate}, ${workflowCompletedDateYmdSql("loan_docs_signed")})`;
+      return sql<string | null>`COALESCE(((${caseKeyDatesTable.loanDocsSignedDate})::text), ${workflowCompletedDateYmdSql("loan_docs_signed")})`;
     case "acting_letter_issued_date":
-      return sql<string | null>`COALESCE(${caseKeyDatesTable.actingLetterIssuedDate}, ${workflowCompletedDateYmdSql("acting_letter_issued")})`;
+      return sql<string | null>`COALESCE(((${caseKeyDatesTable.actingLetterIssuedDate})::text), ${workflowCompletedDateYmdSql("acting_letter_issued")})`;
     case "loan_sent_bank_execution_date":
-      return sql<string | null>`COALESCE(${caseKeyDatesTable.loanSentBankExecutionDate}, ${workflowCompletedDateYmdSql("loan_sent_bank_exec")})`;
+      return sql<string | null>`COALESCE(((${caseKeyDatesTable.loanSentBankExecutionDate})::text), ${workflowCompletedDateYmdSql("loan_sent_bank_exec")})`;
     case "loan_bank_executed_date":
-      return sql<string | null>`COALESCE(${caseKeyDatesTable.loanBankExecutedDate}, ${workflowCompletedDateYmdSql("loan_bank_executed")})`;
+      return sql<string | null>`COALESCE(((${caseKeyDatesTable.loanBankExecutedDate})::text), ${workflowCompletedDateYmdSql("loan_bank_executed")})`;
     case "bank_lu_received_date":
-      return sql<string | null>`COALESCE(${caseKeyDatesTable.bankLuReceivedDate}, ${workflowCompletedDateYmdSql("blu_received")})`;
+      return sql<string | null>`COALESCE(((${caseKeyDatesTable.bankLuReceivedDate})::text), ${workflowCompletedDateYmdSql("blu_received")})`;
     case "noa_served_on":
-      return sql<string | null>`COALESCE(${caseKeyDatesTable.noaServedOn}, ${workflowCompletedDateYmdSql("noa_served")})`;
+      return sql<string | null>`COALESCE(((${caseKeyDatesTable.noaServedOn})::text), ${workflowCompletedDateYmdSql("noa_served")})`;
     case "completion_date":
-      return sql<string | null>`(${caseKeyDatesTable.completionDate})`;
+      return sql<string | null>`((${caseKeyDatesTable.completionDate})::text)`;
     default:
       return sql<string | null>`NULL`;
   }
