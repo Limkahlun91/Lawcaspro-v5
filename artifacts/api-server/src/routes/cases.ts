@@ -1210,7 +1210,7 @@ router.get("/cases/workbench", requireAuth, requireFirmUser, requirePermission("
       userId: req.userId,
       error: err instanceof Error ? { message: err.message, stack: err.stack } : String(err),
     });
-    res.status(500).json({ error: "Internal Server Error" });
+    res.status(500).json({ error: "Internal Server Error", detail: err instanceof Error ? err.message : String(err) });
   }
 });
 
@@ -1746,7 +1746,7 @@ router.get("/cases", requireAuth, requireFirmUser, requirePermission("cases", "r
       query: req.query,
       error: err instanceof Error ? { message: err.message, stack: err.stack } : String(err),
     });
-    res.status(500).json({ error: "Internal Server Error" });
+    res.status(500).json({ error: "Internal Server Error", detail: err instanceof Error ? err.message : String(err) });
   }
 });
 

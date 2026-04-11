@@ -163,7 +163,7 @@ router.get("/dashboard", requireAuth, requireFirmUser, requirePermission("dashbo
       userId: req.userId,
       error: err instanceof Error ? { message: err.message, stack: err.stack } : String(err),
     });
-    res.status(500).json({ error: "Internal Server Error" });
+    res.status(500).json({ error: "Internal Server Error", detail: err instanceof Error ? err.message : String(err) });
   }
 });
 
