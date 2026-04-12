@@ -63,7 +63,18 @@ router.post("/auth/login", authRateLimiter, async (req, res): Promise<void> => {
     const user = await withAuthSafeDb(async (authDb) => {
       const hasAuditLogs = await tableExistsAuthDb(authDb, "public.audit_logs");
       const [u] = await authDb
-        .select()
+        .select({
+          id: usersTable.id,
+          firmId: usersTable.firmId,
+          email: usersTable.email,
+          name: usersTable.name,
+          passwordHash: usersTable.passwordHash,
+          userType: usersTable.userType,
+          roleId: usersTable.roleId,
+          status: usersTable.status,
+          totpSecret: usersTable.totpSecret,
+          totpEnabled: usersTable.totpEnabled,
+        })
         .from(usersTable)
         .where(eq(usersTable.email, emailNormalized));
       if (!u) {
@@ -281,7 +292,16 @@ router.post("/auth/logout", requireAuth, async (req: AuthRequest, res): Promise<
 router.get("/auth/me", requireAuth, async (req: AuthRequest, res): Promise<void> => {
   try {
     const result = await withAuthSafeDb(async (authDb) => {
-      const [user] = await authDb.select().from(usersTable).where(eq(usersTable.id, req.userId!));
+      const [user] = await authDb.select({
+        id: usersTable.id,
+        firmId: usersTable.firmId,
+        email: usersTable.email,
+        name: usersTable.name,
+        userType: usersTable.userType,
+        roleId: usersTable.roleId,
+        status: usersTable.status,
+        totpEnabled: usersTable.totpEnabled,
+      }).from(usersTable).where(eq(usersTable.id, req.userId!));
       if (!user) return null;
 
       let roleName: string | null = null;
@@ -419,7 +439,11 @@ router.post("/auth/reauth-token", requireAuth, async (req: AuthRequest, res): Pr
 });
 
 router.post("/auth/totp/setup", sensitiveRateLimiter, requireAuth, async (req: AuthRequest, res): Promise<void> => {
-  const [user] = await db.select().from(usersTable).where(eq(usersTable.id, req.userId!));
+  const [user] = await db.select({
+    id: usersTable.id,
+    email: usersTable.email,
+    totpEnabled: usersTable.totpEnabled,
+  }).from(usersTable).where(eq(usersTable.id, req.userId!));
   if (!user) { res.status(404).json({ error: "User not found" }); return; }
   if (user.totpEnabled) { res.status(400).json({ error: "TOTP is already enabled" }); return; }
 
@@ -438,7 +462,11 @@ router.post("/auth/totp/confirm", sensitiveRateLimiter, requireAuth, async (req:
   const { code } = req.body as { code: string };
   if (!code) { res.status(400).json({ error: "Code is required" }); return; }
 
-  const [user] = await db.select().from(usersTable).where(eq(usersTable.id, req.userId!));
+  const [user] = await db.select({
+    id: usersTable.id,
+    totpEnabled: usersTable.totpEnabled,
+    totpSecret: usersTable.totpSecret,
+  }).from(usersTable).where(eq(usersTable.id, req.userId!));
   if (!user || !user.totpSecret) { res.status(400).json({ error: "TOTP setup not started" }); return; }
   if (user.totpEnabled) { res.status(400).json({ error: "TOTP is already enabled" }); return; }
 
@@ -456,7 +484,11 @@ router.post("/auth/totp/disable", sensitiveRateLimiter, requireAuth, requireReAu
   const { code } = req.body as { code: string };
   if (!code) { res.status(400).json({ error: "Code is required to disable TOTP" }); return; }
 
-  const [user] = await db.select().from(usersTable).where(eq(usersTable.id, req.userId!));
+  const [user] = await db.select({
+    id: usersTable.id,
+    totpEnabled: usersTable.totpEnabled,
+    totpSecret: usersTable.totpSecret,
+  }).from(usersTable).where(eq(usersTable.id, req.userId!));
   if (!user || !user.totpEnabled || !user.totpSecret) { res.status(400).json({ error: "TOTP is not enabled" }); return; }
 
   const disableTotp = new OTPAuth.TOTP({ secret: OTPAuth.Secret.fromBase32(user.totpSecret), digits: 6, period: 30 });

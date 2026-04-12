@@ -94,7 +94,15 @@ export async function requireAuth(
   const tokenHash = crypto.createHash("sha256").update(token).digest("hex");
 
   let session: typeof sessionsTable.$inferSelect | undefined;
-  let user: typeof usersTable.$inferSelect | undefined;
+  let user:
+    | {
+        id: number;
+        userType: string;
+        firmId: number | null;
+        roleId: number | null;
+        status: string;
+      }
+    | undefined;
   try {
     const result = await withAuthSafeDb(async (authDb) => {
       const [s] = await authDb
@@ -103,7 +111,13 @@ export async function requireAuth(
         .where(eq(sessionsTable.tokenHash, tokenHash));
       if (!s) return { session: undefined, user: undefined };
       const [u] = await authDb
-        .select()
+        .select({
+          id: usersTable.id,
+          userType: usersTable.userType,
+          firmId: usersTable.firmId,
+          roleId: usersTable.roleId,
+          status: usersTable.status,
+        })
         .from(usersTable)
         .where(eq(usersTable.id, s.userId));
       return { session: s, user: u };
