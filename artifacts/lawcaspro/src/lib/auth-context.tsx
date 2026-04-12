@@ -54,6 +54,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const login = (newUser: AuthUser) => {
     setUser(newUser);
+    queryClient.setQueryData(ME_QUERY_KEY, newUser);
   };
 
   const handleLogout = () => {
@@ -61,6 +62,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       onSuccess: () => {
         clearStoredAuthToken();
         setUser(null);
+        queryClient.setQueryData(ME_QUERY_KEY, null);
       }
     });
   };

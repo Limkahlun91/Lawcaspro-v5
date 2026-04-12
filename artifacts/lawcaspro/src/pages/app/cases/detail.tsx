@@ -27,6 +27,8 @@ import { QueryFallback } from "@/components/query-fallback";
 import { toastError } from "@/lib/toast-error";
 import { apiFetchJson } from "@/lib/api-client";
 
+import { getListCasesQueryKey } from "@workspace/api-client-react";
+
 function dateInputValue(v: unknown): string {
   if (!v) return "";
   const s = String(v);
@@ -81,6 +83,7 @@ export default function CaseDetail() {
     mutationFn: (vars: { scope: string; payload: Record<string, unknown>; keys: string[] }) =>
       apiFetchJson(`/cases/${caseId}/key-dates`, { method: "PATCH", body: JSON.stringify(vars.payload) }),
     onSuccess: (data, vars) => {
+      queryClient.invalidateQueries({ queryKey: getListCasesQueryKey() });
       queryClient.invalidateQueries({ queryKey: getGetCaseQueryKey(caseId) });
       queryClient.invalidateQueries({ queryKey: ["case-key-dates", caseId] });
       queryClient.invalidateQueries({ queryKey: getGetCaseWorkflowQueryKey(caseId) });
@@ -295,6 +298,8 @@ export default function CaseDetail() {
       { caseId, stepId, data: { status: "completed", notes: stepNote } },
       {
         onSuccess: () => {
+          queryClient.invalidateQueries({ queryKey: getListCasesQueryKey() });
+          queryClient.invalidateQueries({ queryKey: getGetCaseQueryKey(caseId) });
           queryClient.invalidateQueries({ queryKey: getGetCaseWorkflowQueryKey(caseId) });
           toast({ title: "Step marked as completed" });
           setActiveStepId(null);

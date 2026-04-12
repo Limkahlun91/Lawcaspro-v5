@@ -7,6 +7,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { useToast } from "@/hooks/use-toast";
 import { QueryFallback } from "@/components/query-fallback";
 import { formatCurrencyMYR, formatDateMY } from "@/lib/format";
+import { toastError } from "@/lib/toast-error";
 
 export default function QuotationsList() {
   const { data: quotations, isLoading, isError, error, refetch, isFetching } = useListQuotations();
@@ -26,6 +27,7 @@ export default function QuotationsList() {
           queryClient.invalidateQueries({ queryKey: getListQuotationsQueryKey() });
           toast({ title: "Quotation deleted" });
         },
+        onError: (err) => toastError(toast, err, "Delete failed"),
       }
     );
   };
@@ -39,6 +41,7 @@ export default function QuotationsList() {
           queryClient.invalidateQueries({ queryKey: getListQuotationsQueryKey() });
           toast({ title: "Quotation duplicated" });
         },
+        onError: (err) => toastError(toast, err, "Duplicate failed"),
       }
     );
   };
@@ -129,6 +132,7 @@ export default function QuotationsList() {
                         size="sm"
                         onClick={(e) => handleDuplicate(q.id, e)}
                         title="Duplicate"
+                        disabled={duplicateMutation.isPending || deleteMutation.isPending}
                       >
                         <Copy className="w-4 h-4" />
                       </Button>
@@ -138,6 +142,7 @@ export default function QuotationsList() {
                         onClick={(e) => handleDelete(q.id, e)}
                         title="Delete"
                         className="text-red-500 hover:text-red-700"
+                        disabled={deleteMutation.isPending || duplicateMutation.isPending}
                       >
                         <Trash2 className="w-4 h-4" />
                       </Button>

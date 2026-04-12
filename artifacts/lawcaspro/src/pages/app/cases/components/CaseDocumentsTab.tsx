@@ -17,12 +17,13 @@ import { cn } from "@/lib/utils";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { isFirmDocumentTypeLetterLike, isMasterDocumentLetterLike } from "@/lib/documents/letterLike";
 import { DOCUMENT_TYPE_LABELS } from "@workspace/documents-registry";
+import { QueryFallback } from "@/components/query-fallback";
+import { apiFetchBlob, apiFetchJson } from "@/lib/api-client";
+import { toastError } from "@/lib/toast-error";
 
 function docTypeLabel(dt: string): string {
   return (DOCUMENT_TYPE_LABELS as Record<string, string>)[dt] ?? dt;
 }
-
-const API_BASE = import.meta.env.BASE_URL.replace(/\/$/, "").replace(/^\/lawcaspro/, "") + "/api";
 
 interface DocumentTemplate {
   id: number;
@@ -71,17 +72,6 @@ interface FirmLetterhead {
   is_default: boolean;
   status: string;
   footer_mode: "every_page" | "last_page_only";
-}
-
-async function apiFetch(path: string, init?: RequestInit) {
-  const res = await fetch(`${API_BASE}${path}`, {
-    credentials: "include",
-    ...init,
-    headers: { "Content-Type": "application/json", ...(init?.headers ?? {}) },
-  });
-  if (!res.ok) throw new Error(await res.text());
-  if (res.status === 204) return null;
-  return res.json();
 }
 
 function MasterFolderTree({
@@ -159,42 +149,44 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
   const [isUploading, setIsUploading] = useState(false);
   const [isGenerating, setIsGenerating] = useState(false);
 
-  const { data: documents = [], isLoading } = useQuery<CaseDocument[]>({
+  const documentsQuery = useQuery<CaseDocument[]>({
     queryKey: ["case-documents", caseId],
-    queryFn: () => apiFetch(`/cases/${caseId}/documents`),
+    queryFn: () => apiFetchJson(`/cases/${caseId}/documents`),
+    retry: false,
   });
+  const documents = documentsQuery.data ?? [];
 
   const { data: templates = [] } = useQuery<DocumentTemplate[]>({
     queryKey: ["document-templates"],
-    queryFn: () => apiFetch("/document-templates?templateCapable=true"),
+    queryFn: () => apiFetchJson("/document-templates?templateCapable=true"),
+    retry: false,
   });
 
   const { data: letterheads = [] } = useQuery<FirmLetterhead[]>({
     queryKey: ["firm-letterheads"],
-    queryFn: () => apiFetch("/firm-letterheads"),
+    queryFn: () => apiFetchJson("/firm-letterheads"),
+    retry: false,
   });
 
-  const { data: masterFolders = [] } = useQuery<SystemFolder[]>({
+  const masterFoldersQuery = useQuery<SystemFolder[]>({
     queryKey: ["hub-folders"],
-    queryFn: async () => {
-      const res = await fetch(`${API_BASE}/hub/folders`, { credentials: "include" });
-      if (!res.ok) return [];
-      return res.json();
-    },
+    queryFn: () => apiFetchJson("/hub/folders"),
+    retry: false,
   });
+  const masterFolders = masterFoldersQuery.data ?? [];
 
-  const { data: masterDocs = [] } = useQuery<MasterDoc[]>({
+  const masterDocsQuery = useQuery<MasterDoc[]>({
     queryKey: ["hub-documents", selectedMasterFolderId],
     queryFn: async () => {
       const url = selectedMasterFolderId !== null
-        ? `${API_BASE}/hub/documents?folderId=${selectedMasterFolderId}`
-        : `${API_BASE}/hub/documents`;
-      const res = await fetch(url, { credentials: "include" });
-      if (!res.ok) return [];
-      return res.json();
+        ? `/hub/documents?folderId=${selectedMasterFolderId}`
+        : "/hub/documents";
+      return await apiFetchJson(url);
     },
     enabled: generateDialogOpen && generateTab === "master",
+    retry: false,
   });
+  const masterDocs = masterDocsQuery.data ?? [];
 
   const templateMasterDocs = masterDocs.filter(d => {
     const fn = d.fileName.toLowerCase();
@@ -212,12 +204,12 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
   const defaultLetterhead = activeLetterheads.find(l => l.is_default) ?? activeLetterheads[0];
 
   const deleteMutation = useMutation({
-    mutationFn: (docId: number) => apiFetch(`/cases/${caseId}/documents/${docId}`, { method: "DELETE" }),
+    mutationFn: (docId: number) => apiFetchJson(`/cases/${caseId}/documents/${docId}`, { method: "DELETE" }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["case-documents", caseId] });
       toast({ title: "Document deleted" });
     },
-    onError: (err) => toast({ title: "Error", description: String(err), variant: "destructive" }),
+    onError: (err) => toastError(toast, err, "Delete failed"),
   });
 
   async function handleGenerate() {
@@ -233,7 +225,7 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
       if (!selectedTemplateId) return;
       setIsGenerating(true);
       try {
-        await apiFetch(`/cases/${caseId}/documents/generate`, {
+        await apiFetchJson(`/cases/${caseId}/documents/generate`, {
           method: "POST",
           body: JSON.stringify({ templateId: Number(selectedTemplateId), documentName: documentName || undefined, letterheadId: letterheadIdToSend }),
         });
@@ -241,7 +233,7 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
         toast({ title: "Document generated successfully" });
         closeGenerateDialog();
       } catch (err) {
-        toast({ title: "Generation failed", description: String(err), variant: "destructive" });
+        toastError(toast, err, "Generation failed");
       } finally {
         setIsGenerating(false);
       }
@@ -249,7 +241,7 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
       if (!selectedMasterDocId) return;
       setIsGenerating(true);
       try {
-        await apiFetch(`/cases/${caseId}/documents/generate-from-master`, {
+        await apiFetchJson(`/cases/${caseId}/documents/generate-from-master`, {
           method: "POST",
           body: JSON.stringify({ masterDocId: selectedMasterDocId, documentName: documentName || undefined, letterheadId: letterheadIdToSend }),
         });
@@ -257,7 +249,7 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
         toast({ title: "Document generated from master template" });
         closeGenerateDialog();
       } catch (err) {
-        toast({ title: "Generation failed", description: String(err), variant: "destructive" });
+        toastError(toast, err, "Generation failed");
       } finally {
         setIsGenerating(false);
       }
@@ -278,15 +270,9 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
     try {
       const formData = new FormData();
       formData.append("file", selectedFile);
-      const uploadRes = await fetch(`${API_BASE}/storage/upload`, {
-        method: "POST",
-        body: formData,
-        credentials: "include",
-      });
-      if (!uploadRes.ok) throw new Error("Upload to storage failed");
-      const { objectPath } = await uploadRes.json();
+      const { objectPath } = await apiFetchJson<{ objectPath: string }>("/storage/upload", { method: "POST", body: formData });
 
-      await apiFetch(`/cases/${caseId}/documents/upload`, {
+      await apiFetchJson(`/cases/${caseId}/documents/upload`, {
         method: "POST",
         body: JSON.stringify({
           name: uploadName,
@@ -304,7 +290,7 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
       setUploadType("other");
       setSelectedFile(null);
     } catch (err) {
-      toast({ title: "Upload failed", description: String(err), variant: "destructive" });
+      toastError(toast, err, "Upload failed");
     } finally {
       setIsUploading(false);
     }
@@ -312,19 +298,15 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
 
   async function handleDownload(doc: CaseDocument) {
     try {
-      const res = await fetch(`${API_BASE}/cases/${caseId}/documents/${doc.id}/download`, {
-        credentials: "include",
-      });
-      if (!res.ok) throw new Error("Download failed");
-      const blob = await res.blob();
+      const blob = await apiFetchBlob(`/cases/${caseId}/documents/${doc.id}/download`);
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = doc.file_name;
+      a.download = doc.file_name || "download";
       a.click();
       URL.revokeObjectURL(url);
     } catch (err) {
-      toast({ title: "Download failed", description: String(err), variant: "destructive" });
+      toastError(toast, err, "Download failed");
     }
   }
 
@@ -333,6 +315,15 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
     if (bytes < 1024) return `${bytes} B`;
     if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
     return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  }
+
+  if (documentsQuery.isLoading) return <div className="p-4 text-slate-500">Loading documents...</div>;
+  if (documentsQuery.isError) {
+    return (
+      <div className="p-4">
+        <QueryFallback title="Documents unavailable" error={documentsQuery.error} onRetry={() => documentsQuery.refetch()} isRetrying={documentsQuery.isFetching} />
+      </div>
+    );
   }
 
   const canGenerate = generateTab === "firm" ? !!selectedTemplateId : !!selectedMasterDocId;
@@ -363,9 +354,7 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
           </div>
         </CardHeader>
         <CardContent>
-          {isLoading ? (
-            <div className="text-slate-500 py-8 text-center">Loading documents...</div>
-          ) : documents.length === 0 ? (
+          {documents.length === 0 ? (
             <div className="text-center py-12 text-slate-500">
               <FileText className="w-10 h-10 text-slate-300 mx-auto mb-3" />
               <p className="font-medium text-slate-600 mb-1">No documents yet</p>

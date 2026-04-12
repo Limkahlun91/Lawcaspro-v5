@@ -9,14 +9,7 @@ import { Label } from "@/components/ui/label";
 import { ArrowLeft, Plus, Trash2, Save } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import { toastError } from "@/lib/toast-error";
-
-const API_BASE = import.meta.env.BASE_URL.replace(/\/$/, "").replace(/^\/lawcaspro/, "") + "/api";
-
-async function apiFetch(path: string) {
-  const res = await fetch(`${API_BASE}${path}`, { credentials: "include" });
-  if (!res.ok) throw new Error(await res.text());
-  return res.json();
-}
+import { apiFetchJson } from "@/lib/api-client";
 
 interface LineItem {
   id: string;
@@ -155,7 +148,8 @@ export default function NewQuotation() {
 
   const { data: firmSettings } = useQuery({
     queryKey: ["firm-settings"],
-    queryFn: () => apiFetch("/firm-settings"),
+    queryFn: () => apiFetchJson("/firm-settings"),
+    retry: false,
   });
 
   useEffect(() => {

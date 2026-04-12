@@ -11,14 +11,9 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
 import { useToast } from "@/hooks/use-toast";
-
-const API_BASE = import.meta.env.BASE_URL.replace(/\/$/, "").replace(/^\/lawcaspro/, "") + "/api";
-
-async function apiFetch(path: string, opts?: RequestInit) {
-  const res = await fetch(`${API_BASE}${path}`, { credentials: "include", ...opts });
-  if (!res.ok) throw new Error(await res.text());
-  return res.json();
-}
+import { apiFetchJson } from "@/lib/api-client";
+import { toastError } from "@/lib/toast-error";
+import { useListQuotations } from "@workspace/api-client-react";
 
 function fmt(val: unknown) {
   return `RM ${Number(val ?? 0).toLocaleString("en-MY", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
@@ -182,13 +177,12 @@ function InvoicesTab() {
   const qc = useQueryClient();
   const [selectedQuotationId, setSelectedQuotationId] = useState("");
 
-  const { data, isLoading } = useQuery({ queryKey: ["invoices"], queryFn: () => apiFetch("/invoices") });
+  const { data, isLoading } = useQuery({ queryKey: ["invoices"], queryFn: () => apiFetchJson("/invoices") });
   const invoices = (data ?? []) as any[];
-  const { data: quotData } = useQuery({ queryKey: ["quotations-for-invoice"], queryFn: () => apiFetch("/quotations") });
-  const quotations = (quotData ?? []) as any[];
+  const { data: quotations = [] } = useListQuotations();
 
   const createMut = useMutation({
-    mutationFn: () => apiFetch(`/invoices/from-quotation/${selectedQuotationId}`, {
+    mutationFn: () => apiFetchJson(`/invoices/from-quotation/${selectedQuotationId}`, {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({}),
     }),
     onSuccess: (inv: any) => {
@@ -197,13 +191,13 @@ function InvoicesTab() {
       toast({ title: "Invoice created", description: `${inv.invoiceNo} created as draft` });
       setLocation(`/app/accounting/invoices/${inv.id}`);
     },
-    onError: (e: any) => toast({ variant: "destructive", title: "Error", description: e.message }),
+    onError: (e) => toastError(toast, e, "Create failed"),
   });
 
   const issueMut = useMutation({
-    mutationFn: (id: number) => apiFetch(`/invoices/${id}/issue`, { method: "POST" }),
+    mutationFn: (id: number) => apiFetchJson(`/invoices/${id}/issue`, { method: "POST" }),
     onSuccess: () => { qc.invalidateQueries({ queryKey: ["invoices"] }); toast({ title: "Invoice issued" }); },
-    onError: (e: any) => toast({ variant: "destructive", title: "Error", description: e.message }),
+    onError: (e) => toastError(toast, e, "Action failed"),
   });
 
   const filtered = invoices.filter((i: any) =>
