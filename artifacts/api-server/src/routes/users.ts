@@ -1,6 +1,6 @@
 import { Router, type IRouter } from "express";
 import bcrypt from "bcryptjs";
-import { eq, ilike, count, desc } from "drizzle-orm";
+import { and, count, desc, eq, ilike, sql } from "drizzle-orm";
 import { db, usersTable, rolesTable } from "@workspace/db";
 import {
   CreateUserBody, UpdateUserBody, ListUsersQueryParams,
@@ -10,10 +10,54 @@ import { requireAuth, requireFirmUser, requirePermission, type AuthRequest, writ
 
 const router: IRouter = Router();
 
-async function enrichUser(user: typeof usersTable.$inferSelect) {
+type DbConn = typeof db | NonNullable<AuthRequest["rlsDb"]>;
+const rdb = (req: AuthRequest): DbConn => req.rlsDb ?? db;
+
+async function queryRows(r: DbConn, query: ReturnType<typeof sql>): Promise<Record<string, unknown>[]> {
+  const result = await r.execute(query);
+  if (Array.isArray(result)) return result as Record<string, unknown>[];
+  if ("rows" in result) return (result as { rows: Record<string, unknown>[] }).rows;
+  return [];
+}
+
+async function columnExists(r: DbConn, table: string, column: string): Promise<boolean> {
+  const rows = await queryRows(r, sql`
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_schema = 'public'
+      AND table_name = ${table}
+      AND column_name = ${column}
+    LIMIT 1
+  `);
+  return rows.length > 0;
+}
+
+let usersDepartmentExistsCache: boolean | null = null;
+async function usersDepartmentExists(r: DbConn): Promise<boolean> {
+  if (usersDepartmentExistsCache !== null) return usersDepartmentExistsCache;
+  usersDepartmentExistsCache = await columnExists(r, "users", "department");
+  return usersDepartmentExistsCache;
+}
+
+type UserRow = {
+  id: number;
+  firmId: number | null;
+  email: string;
+  name: string;
+  roleId: number | null;
+  department?: string | null;
+  status: string;
+  lastLoginAt: Date | null;
+  createdAt: Date;
+};
+
+async function enrichUser(r: DbConn, firmId: number, user: UserRow) {
   let roleName: string | null = null;
   if (user.roleId) {
-    const [role] = await db.select().from(rolesTable).where(eq(rolesTable.id, user.roleId));
+    const [role] = await r
+      .select()
+      .from(rolesTable)
+      .where(and(eq(rolesTable.id, user.roleId), eq(rolesTable.firmId, firmId)));
     roleName = role?.name ?? null;
   }
   return {
@@ -31,6 +75,7 @@ async function enrichUser(user: typeof usersTable.$inferSelect) {
 }
 
 router.get("/users", requireAuth, requireFirmUser, requirePermission("users", "read"), async (req: AuthRequest, res): Promise<void> => {
+  const r = rdb(req);
   const params = ListUsersQueryParams.safeParse(req.query);
   const search = params.success ? params.data.search : undefined;
   const roleId = params.success ? params.data.roleId : undefined;
@@ -39,26 +84,53 @@ router.get("/users", requireAuth, requireFirmUser, requirePermission("users", "r
   const limit = params.success ? (params.data.limit ?? 20) : 20;
   const offset = (page - 1) * limit;
 
-  let query = db.select().from(usersTable).where(eq(usersTable.firmId, req.firmId!));
+  const hasDepartment = await usersDepartmentExists(r);
 
-  if (search) {
-    query = db.select().from(usersTable)
-      .where(eq(usersTable.firmId, req.firmId!)) as typeof query;
-  }
+  const where = [
+    eq(usersTable.firmId, req.firmId!),
+    ...(status ? [eq(usersTable.status, status)] : []),
+    ...(roleId ? [eq(usersTable.roleId, roleId)] : []),
+    ...(search ? [ilike(usersTable.name, `%${search}%`)] : []),
+  ];
 
-  const users = await db.select().from(usersTable)
-    .where(eq(usersTable.firmId, req.firmId!))
-    .orderBy(desc(usersTable.createdAt))
-    .limit(limit)
-    .offset(offset);
+  const baseSelect = {
+    id: usersTable.id,
+    firmId: usersTable.firmId,
+    email: usersTable.email,
+    name: usersTable.name,
+    roleId: usersTable.roleId,
+    status: usersTable.status,
+    lastLoginAt: usersTable.lastLoginAt,
+    createdAt: usersTable.createdAt,
+  };
 
-  const [totalRes] = await db.select({ c: count() }).from(usersTable).where(eq(usersTable.firmId, req.firmId!));
+  const users = hasDepartment
+    ? await r
+        .select({ ...baseSelect, department: usersTable.department })
+        .from(usersTable)
+        .where(and(...where))
+        .orderBy(desc(usersTable.createdAt))
+        .limit(limit)
+        .offset(offset)
+    : await r
+        .select(baseSelect)
+        .from(usersTable)
+        .where(and(...where))
+        .orderBy(desc(usersTable.createdAt))
+        .limit(limit)
+        .offset(offset);
 
-  const enriched = await Promise.all(users.map(enrichUser));
+  const [totalRes] = await r
+    .select({ c: count() })
+    .from(usersTable)
+    .where(and(...where));
+
+  const enriched = await Promise.all(users.map((u) => enrichUser(r, req.firmId!, u)));
   res.json({ data: enriched, total: Number(totalRes?.c ?? 0), page, limit });
 });
 
 router.post("/users", requireAuth, requireFirmUser, requirePermission("users", "create"), async (req: AuthRequest, res): Promise<void> => {
+  const r = rdb(req);
   await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "users.create.attempt", detail: req.path, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
   const parsed = CreateUserBody.safeParse(req.body);
   if (!parsed.success) {
@@ -68,50 +140,75 @@ router.post("/users", requireAuth, requireFirmUser, requirePermission("users", "
 
   const { email, name, password, roleId, department } = parsed.data;
 
-  const [existing] = await db.select().from(usersTable).where(eq(usersTable.email, email.toLowerCase()));
+  const [existing] = await r.select().from(usersTable).where(eq(usersTable.email, email.toLowerCase()));
   if (existing) {
     res.status(400).json({ error: "Email already in use" });
     return;
   }
 
   const passwordHash = await bcrypt.hash(password, 10);
-  const [user] = await db
+  const hasDepartment = await usersDepartmentExists(r);
+  const values: typeof usersTable.$inferInsert = {
+    firmId: req.firmId!,
+    email: email.toLowerCase(),
+    name,
+    passwordHash,
+    roleId,
+    userType: "firm_user",
+    status: "active",
+  };
+  if (hasDepartment) {
+    values.department = department ?? null;
+  }
+
+  const [user] = await r
     .insert(usersTable)
-    .values({
-      firmId: req.firmId!,
-      email: email.toLowerCase(),
-      name,
-      passwordHash,
-      roleId,
-      department: department ?? null,
-      userType: "firm_user",
-      status: "active",
-    })
+    .values(values)
     .returning();
 
   await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "users.create", entityType: "user", entityId: user.id, detail: `email=${user.email}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
-  res.status(201).json(await enrichUser(user));
+  res.status(201).json(await enrichUser(r, req.firmId!, user));
 });
 
 router.get("/users/:userId", requireAuth, requireFirmUser, requirePermission("users", "read"), async (req: AuthRequest, res): Promise<void> => {
+  const r = rdb(req);
   const params = GetUserParams.safeParse(req.params);
   if (!params.success) {
     res.status(400).json({ error: params.error.message });
     return;
   }
 
-  const [user] = await db.select().from(usersTable)
-    .where(eq(usersTable.id, params.data.userId));
+  const hasDepartment = await usersDepartmentExists(r);
+  const baseSelect = {
+    id: usersTable.id,
+    firmId: usersTable.firmId,
+    email: usersTable.email,
+    name: usersTable.name,
+    roleId: usersTable.roleId,
+    status: usersTable.status,
+    lastLoginAt: usersTable.lastLoginAt,
+    createdAt: usersTable.createdAt,
+  };
+  const [user] = hasDepartment
+    ? await r
+        .select({ ...baseSelect, department: usersTable.department })
+        .from(usersTable)
+        .where(eq(usersTable.id, params.data.userId))
+    : await r
+        .select(baseSelect)
+        .from(usersTable)
+        .where(eq(usersTable.id, params.data.userId));
 
   if (!user || user.firmId !== req.firmId) {
     res.status(404).json({ error: "User not found" });
     return;
   }
 
-  res.json(await enrichUser(user));
+  res.json(await enrichUser(r, req.firmId!, user));
 });
 
 router.patch("/users/:userId", requireAuth, requireFirmUser, requirePermission("users", "update"), async (req: AuthRequest, res): Promise<void> => {
+  const r = rdb(req);
   const params = UpdateUserParams.safeParse(req.params);
   if (!params.success) {
     res.status(400).json({ error: params.error.message });
@@ -127,10 +224,10 @@ router.patch("/users/:userId", requireAuth, requireFirmUser, requirePermission("
   const updates: Record<string, unknown> = {};
   if (parsed.data.name !== undefined) updates.name = parsed.data.name;
   if (parsed.data.roleId !== undefined) updates.roleId = parsed.data.roleId;
-  if (parsed.data.department !== undefined) updates.department = parsed.data.department;
+  if (parsed.data.department !== undefined && await usersDepartmentExists(r)) updates.department = parsed.data.department;
   if (parsed.data.status !== undefined) updates.status = parsed.data.status;
 
-  const [user] = await db
+  const [user] = await r
     .update(usersTable)
     .set(updates)
     .where(eq(usersTable.id, params.data.userId))
@@ -142,17 +239,18 @@ router.patch("/users/:userId", requireAuth, requireFirmUser, requirePermission("
   }
 
   await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "users.update", entityType: "user", entityId: user.id, detail: `fields=${Object.keys(updates).join(",")}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
-  res.json(await enrichUser(user));
+  res.json(await enrichUser(r, req.firmId!, user));
 });
 
 router.delete("/users/:userId", requireAuth, requireFirmUser, requirePermission("users", "delete"), async (req: AuthRequest, res): Promise<void> => {
+  const r = rdb(req);
   const params = DeleteUserParams.safeParse(req.params);
   if (!params.success) {
     res.status(400).json({ error: params.error.message });
     return;
   }
 
-  const [user] = await db.delete(usersTable)
+  const [user] = await r.delete(usersTable)
     .where(eq(usersTable.id, params.data.userId))
     .returning();
 
