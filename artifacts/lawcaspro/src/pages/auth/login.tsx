@@ -10,11 +10,10 @@ import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from "
 import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Building2, Eye, EyeOff, ShieldCheck } from "lucide-react";
-import { apiUrl } from "@/lib/api-base";
 import type { AuthUser } from "@workspace/api-client-react";
 import { setStoredAuthToken } from "@/lib/auth-token";
-
-const LOGIN_URL = apiUrl("/api/auth/login");
+import { apiFetchJson } from "@/lib/api-client";
+import { toastError } from "@/lib/toast-error";
 
 const loginSchema = z.object({
   email: z.string().email("Please enter a valid email address"),
@@ -61,33 +60,11 @@ export default function Login() {
   async function doLogin(data: LoginFormValues, code?: string) {
     setIsPending(true);
     try {
-      const res = await fetch(LOGIN_URL, {
+      const body = await apiFetchJson<unknown>("/auth/login", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        credentials: "include",
         body: JSON.stringify({ ...data, ...(code ? { totpCode: code } : {}) }),
       });
-      const raw = await res.text();
-      let body: unknown = null;
-      try {
-        body = raw.trim() === "" ? null : JSON.parse(raw);
-      } catch {
-        body = raw;
-      }
-
-      if (!res.ok) {
-        const description =
-          typeof body === "string"
-            ? body
-            : (isRecord(body) && typeof body.error === "string"
-                ? body.error
-                : "Please check your credentials.");
-        toast({ title: "Login failed", description, variant: "destructive" });
-        setTotpStep(false);
-        setSavedCredentials(null);
-        setTotpCode("");
-        return;
-      }
 
       if (requiresTotp(body)) {
         setSavedCredentials(data);
@@ -109,8 +86,11 @@ export default function Login() {
       } else {
         setLocation("/app/dashboard");
       }
-    } catch {
-      toast({ title: "Login failed", description: "A network error occurred.", variant: "destructive" });
+    } catch (e) {
+      toastError(toast, e, "Login failed");
+      setTotpStep(false);
+      setSavedCredentials(null);
+      setTotpCode("");
     } finally {
       setIsPending(false);
     }

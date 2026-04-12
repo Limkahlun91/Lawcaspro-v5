@@ -14,8 +14,9 @@ import {
   MessageSquare, Send, Plus, Paperclip, X, File, Building2, ArrowRight, ArrowLeft, Download,
 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
-
-const API_BASE = import.meta.env.BASE_URL + "api";
+import { QueryFallback } from "@/components/query-fallback";
+import { apiFetchBlob, apiFetchJson } from "@/lib/api-client";
+import { toastError } from "@/lib/toast-error";
 
 const ALLOWED_TYPES: Record<string, string> = {
   "application/pdf": "PDF",
@@ -139,43 +140,41 @@ export default function PlatformMessages() {
 
   const [form, setForm] = useState({ subject: "", body: "", toFirmId: "" });
 
-  const { data: messages = [], isLoading } = useQuery<Message[]>({
+  const messagesQuery = useQuery<Message[]>({
     queryKey: ["platform-messages", firmFilter],
     queryFn: async () => {
       const url = firmFilter !== "all"
-        ? `${API_BASE}/platform/messages?firmId=${firmFilter}`
-        : `${API_BASE}/platform/messages`;
-      const res = await fetch(url, { credentials: "include" });
-      if (!res.ok) throw new Error("Failed to load messages");
-      return res.json();
+        ? `/platform/messages?firmId=${firmFilter}`
+        : "/platform/messages";
+      return await apiFetchJson(url);
     },
     refetchInterval: 15000,
+    retry: false,
   });
+  const { data: messages = [], isLoading } = messagesQuery;
 
-  const { data: firms = [] } = useQuery<Firm[]>({
+  const firmsQuery = useQuery<Firm[]>({
     queryKey: ["platform-firms-list"],
     queryFn: async () => {
-      const res = await fetch(`${API_BASE}/platform/firms?limit=100`, { credentials: "include" });
-      if (!res.ok) throw new Error("Failed to load firms");
-      const data = await res.json();
+      const data = await apiFetchJson<{ data?: Firm[] }>("/platform/firms?limit=100");
       return data.data ?? [];
     },
+    retry: false,
   });
+  const firms = firmsQuery.data ?? [];
 
   const handleDownloadAttachment = async (a: Attachment) => {
     try {
       const pathPart = a.objectPath.replace(/^\/objects\//, "");
-      const res = await fetch(`${API_BASE}/storage/objects/${pathPart}`, { credentials: "include" });
-      if (!res.ok) throw new Error("Download failed");
-      const blob = await res.blob();
+      const blob = await apiFetchBlob(`/storage/objects/${pathPart}`);
       const url = URL.createObjectURL(blob);
       const el = document.createElement("a");
       el.href = url;
-      el.download = a.fileName;
+      el.download = a.fileName || "download";
       el.click();
       URL.revokeObjectURL(url);
-    } catch {
-      toast({ title: "Download failed", variant: "destructive" });
+    } catch (e) {
+      toastError(toast, e, "Download failed");
     }
   };
 
@@ -198,17 +197,11 @@ export default function PlatformMessages() {
       for (const file of attachments) {
         const formData = new FormData();
         formData.append("file", file);
-        const uploadRes = await fetch(`${API_BASE}/storage/upload`, {
-          method: "POST",
-          body: formData,
-          credentials: "include",
-        });
-        if (!uploadRes.ok) throw new Error("File upload failed");
-        const { objectPath } = await uploadRes.json();
+        const { objectPath } = await apiFetchJson<{ objectPath: string }>("/storage/upload", { method: "POST", body: formData });
         uploadedAttachments.push({ fileName: file.name, fileType: file.type, fileSize: file.size, objectPath });
       }
 
-      const res = await fetch(`${API_BASE}/platform/messages`, {
+      await apiFetchJson(`/platform/messages`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -217,17 +210,15 @@ export default function PlatformMessages() {
           toFirmId: parseInt(form.toFirmId, 10),
           attachments: uploadedAttachments,
         }),
-        credentials: "include",
       });
-      if (!res.ok) throw new Error("Failed to send message");
 
       queryClient.invalidateQueries({ queryKey: ["platform-messages"] });
       toast({ title: "Message sent", description: `Sent to ${firms.find((f) => f.id === parseInt(form.toFirmId))?.name}` });
       setShowCompose(false);
       setForm({ subject: "", body: "", toFirmId: "" });
       setAttachments([]);
-    } catch (e: any) {
-      toast({ title: "Error", description: e.message, variant: "destructive" });
+    } catch (e) {
+      toastError(toast, e, "Send failed");
     } finally {
       setSending(false);
     }
@@ -247,7 +238,7 @@ export default function PlatformMessages() {
           </h1>
           <p className="text-slate-500 mt-1">Direct messaging between Lawcaspro and law firms</p>
         </div>
-        <Button onClick={() => setShowCompose(true)} className="gap-2">
+        <Button onClick={() => setShowCompose(true)} className="gap-2" disabled={sending}>
           <Plus className="w-4 h-4" />
           Compose Message
         </Button>
@@ -268,7 +259,9 @@ export default function PlatformMessages() {
         </Select>
       </div>
 
-      {isLoading ? (
+      {messagesQuery.isError ? (
+        <QueryFallback title="Messages unavailable" error={messagesQuery.error} onRetry={() => messagesQuery.refetch()} isRetrying={messagesQuery.isFetching} />
+      ) : isLoading ? (
         <div className="text-slate-500 text-sm py-8 text-center">Loading messages...</div>
       ) : messages.length === 0 ? (
         <div className="text-center py-16">
@@ -342,6 +335,7 @@ export default function PlatformMessages() {
                   size="sm"
                   className="gap-2"
                   onClick={() => fileInputRef.current?.click()}
+                  disabled={sending}
                 >
                   <Paperclip className="w-3.5 h-3.5" />
                   Attach Files
@@ -354,7 +348,7 @@ export default function PlatformMessages() {
                     <div key={i} className="flex items-center gap-2 px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-xs">
                       <File className="w-3.5 h-3.5 text-slate-400" />
                       <span className="max-w-32 truncate font-medium">{f.name}</span>
-                      <button onClick={() => setAttachments((prev) => prev.filter((_, j) => j !== i))}>
+                      <button onClick={() => setAttachments((prev) => prev.filter((_, j) => j !== i))} disabled={sending}>
                         <X className="w-3 h-3 text-slate-400 hover:text-red-500" />
                       </button>
                     </div>

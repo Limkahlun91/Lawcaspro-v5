@@ -15,9 +15,7 @@ beforeAll(async () => {
   expect(typeof token).toBe("string");
 });
 
-const suite = skipDb ? describe.skip : describe;
-
-suite("Runtime 500 regressions", () => {
+describe("Runtime 500 regressions (no-db)", () => {
   it("auth/me unauthenticated returns 401 (not 500)", async () => {
     const res = await request(app).get("/api/auth/me");
     expect(res.status).toBe(401);
@@ -35,7 +33,11 @@ suite("Runtime 500 regressions", () => {
     expect(res.body).not.toHaveProperty("stack");
     expect(res.body).not.toHaveProperty("sql");
   });
+});
 
+const suite = skipDb ? describe.skip : describe;
+
+suite("Runtime 500 regressions (with-db)", () => {
   it("dashboard does not 500 for valid auth", async () => {
     const res = await request(app)
       .get("/api/dashboard")

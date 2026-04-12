@@ -14,10 +14,10 @@ import {
 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import { cn } from "@/lib/utils";
+import { apiFetchJson } from "@/lib/api-client";
+import { toastError } from "@/lib/toast-error";
 
 pdfjs.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjs.version}/build/pdf.worker.min.mjs`;
-
-const API_BASE = import.meta.env.BASE_URL + "api";
 
 interface TextBox {
   id: string;
@@ -76,41 +76,30 @@ export default function PdfMappingEditor({ docId, docName, pdfUrl, onClose }: Pr
 
   const loadMappings = async () => {
     try {
-      const res = await fetch(`${API_BASE}/platform/documents/${docId}/pdf-mappings`, { credentials: "include" });
-      if (res.ok) {
-        const data = await res.json();
-        setMappings(data.mappings || { pages: [] });
-      }
+      const data = await apiFetchJson<{ mappings?: PdfMappings }>(`/platform/documents/${docId}/pdf-mappings`, { allowStatuses: [404] });
+      setMappings(data?.mappings || { pages: [] });
     } catch { /* ignore */ }
     setLoading(false);
   };
 
   const loadVarGroups = async () => {
     try {
-      const res = await fetch(`${API_BASE}/document-variables`, { credentials: "include" });
-      if (res.ok) {
-        const data = await res.json();
-        setVarGroups(data);
-      }
+      const data = await apiFetchJson<VarGroup[]>("/document-variables");
+      setVarGroups(data);
     } catch { /* ignore */ }
   };
 
   const saveMappings = async () => {
     setSaving(true);
     try {
-      const res = await fetch(`${API_BASE}/platform/documents/${docId}/pdf-mappings`, {
+      await apiFetchJson(`/platform/documents/${docId}/pdf-mappings`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ mappings }),
-        credentials: "include",
       });
-      if (res.ok) {
-        toast({ title: "Mappings saved" });
-      } else {
-        toast({ title: "Failed to save", variant: "destructive" });
-      }
-    } catch {
-      toast({ title: "Failed to save", variant: "destructive" });
+      toast({ title: "Mappings saved" });
+    } catch (e) {
+      toastError(toast, e, "Failed to save");
     }
     setSaving(false);
   };
@@ -299,7 +288,7 @@ export default function PdfMappingEditor({ docId, docName, pdfUrl, onClose }: Pr
 
           <div ref={containerRef} className="flex-1 overflow-auto bg-slate-200 p-3 flex justify-center" onClick={handleCanvasClick}>
             <div className="relative inline-block" style={{ width: pdfDimensions.width * pdfScale, height: pdfDimensions.height * pdfScale }}>
-              <Document file={pdfUrl} onLoadSuccess={onDocLoad} onLoadError={(err) => { console.error("PDF load error:", err); toast({ title: "PDF load error", description: String(err?.message || err), variant: "destructive" }); }}>
+              <Document file={pdfUrl} onLoadSuccess={onDocLoad} onLoadError={(err) => toastError(toast, err, "PDF load error")}>
                 <Page
                   pageIndex={currentPage}
                   onLoadSuccess={onPageLoad}

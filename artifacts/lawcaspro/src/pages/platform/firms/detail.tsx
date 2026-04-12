@@ -10,8 +10,9 @@ import { useState, useEffect } from "react";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
-
-const API_BASE = import.meta.env.BASE_URL + "api";
+import { QueryFallback } from "@/components/query-fallback";
+import { apiFetchJson } from "@/lib/api-client";
+import { toastError } from "@/lib/toast-error";
 
 interface FirmUser {
   id: number;
@@ -32,22 +33,18 @@ function ResetPasswordRow({ user, firmId }: { user: FirmUser; firmId: number }) 
 
   const resetMutation = useMutation({
     mutationFn: async () => {
-      const res = await fetch(`${API_BASE}/platform/firms/${firmId}/users/${user.id}/reset-password`, {
+      await apiFetchJson(`/platform/firms/${firmId}/users/${user.id}/reset-password`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ newPassword }),
-        credentials: "include",
       });
-      if (!res.ok) throw new Error((await res.json()).error || "Failed");
     },
     onSuccess: () => {
       toast({ title: "Password reset", description: `${user.name}'s password has been updated.` });
       setOpen(false);
       setNewPassword("");
     },
-    onError: (e: Error) => {
-      toast({ title: "Error", description: e.message, variant: "destructive" });
-    },
+    onError: (e) => toastError(toast, e, "Reset failed"),
   });
 
   return (
@@ -134,15 +131,13 @@ export default function FirmDetail() {
   const [status, setStatus] = useState<string>("");
   const [plan, setPlan] = useState<string>("");
 
-  const { data: users = [], isLoading: loadingUsers } = useQuery<FirmUser[]>({
+  const usersQuery = useQuery<FirmUser[]>({
     queryKey: ["platform-firm-users", firmId],
-    queryFn: async () => {
-      const res = await fetch(`${API_BASE}/platform/firms/${firmId}/users`, { credentials: "include" });
-      if (!res.ok) throw new Error("Failed to load users");
-      return res.json();
-    },
+    queryFn: () => apiFetchJson(`/platform/firms/${firmId}/users`),
     enabled: !!firmId && activeTab === "users",
+    retry: false,
   });
+  const { data: users = [], isLoading: loadingUsers } = usersQuery;
 
   useEffect(() => {
     if (firm) {
@@ -160,9 +155,7 @@ export default function FirmDetail() {
           queryClient.invalidateQueries({ queryKey: getGetFirmQueryKey(firmId) });
           queryClient.invalidateQueries({ queryKey: getListFirmsQueryKey() });
         },
-        onError: (error) => {
-          toast({ title: "Update failed", description: error.error || "An error occurred", variant: "destructive" });
-        }
+        onError: (error) => toastError(toast, error, "Update failed"),
       }
     );
   };
@@ -276,7 +269,9 @@ export default function FirmDetail() {
             </CardTitle>
           </CardHeader>
           <CardContent>
-            {loadingUsers ? (
+            {usersQuery.isError ? (
+              <QueryFallback title="Users unavailable" error={usersQuery.error} onRetry={() => usersQuery.refetch()} isRetrying={usersQuery.isFetching} />
+            ) : loadingUsers ? (
               <div className="text-sm text-slate-500 py-4 text-center">Loading users...</div>
             ) : users.length === 0 ? (
               <div className="text-sm text-slate-500 py-8 text-center">No users found in this firm.</div>

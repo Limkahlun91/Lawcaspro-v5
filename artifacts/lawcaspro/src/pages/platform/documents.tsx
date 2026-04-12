@@ -19,8 +19,9 @@ import { lazy, Suspense } from "react";
 const PdfMappingEditor = lazy(() => import("@/components/PdfMappingEditor"));
 import { useToast } from "@/hooks/use-toast";
 import { cn } from "@/lib/utils";
-
-const API_BASE = import.meta.env.BASE_URL + "api";
+import { QueryFallback } from "@/components/query-fallback";
+import { apiFetchBlob, apiFetchJson } from "@/lib/api-client";
+import { toastError } from "@/lib/toast-error";
 
 const ALLOWED_TYPES: Record<string, string> = {
   "application/pdf": "PDF",
@@ -211,36 +212,33 @@ export default function PlatformDocuments() {
   const [editingPdfDoc, setEditingPdfDoc] = useState<PlatformDoc | null>(null);
   const [editingPdfUrl, setEditingPdfUrl] = useState<string | null>(null);
 
-  const { data: folders = [] } = useQuery<SystemFolder[]>({
+  const foldersQuery = useQuery<SystemFolder[]>({
     queryKey: ["system-folders"],
-    queryFn: async () => {
-      const res = await fetch(`${API_BASE}/platform/folders`, { credentials: "include" });
-      if (!res.ok) throw new Error("Failed to load folders");
-      return res.json();
-    },
+    queryFn: () => apiFetchJson("/platform/folders"),
+    retry: false,
   });
+  const folders = foldersQuery.data ?? [];
 
-  const { data: docs = [], isLoading: docsLoading } = useQuery<PlatformDoc[]>({
+  const docsQuery = useQuery<PlatformDoc[]>({
     queryKey: ["platform-documents", selectedFolderId],
     queryFn: async () => {
       const url = selectedFolderId !== null
-        ? `${API_BASE}/platform/documents?folderId=${selectedFolderId}`
-        : `${API_BASE}/platform/documents`;
-      const res = await fetch(url, { credentials: "include" });
-      if (!res.ok) throw new Error("Failed to load documents");
-      return res.json();
+        ? `/platform/documents?folderId=${selectedFolderId}`
+        : "/platform/documents";
+      return await apiFetchJson(url);
     },
+    retry: false,
   });
+  const docs = docsQuery.data ?? [];
+  const docsLoading = docsQuery.isLoading;
 
-  const { data: varGroups = [] } = useQuery<{ group: string; vars: { key: string; label: string }[] }[]>({
+  const varGroupsQuery = useQuery<{ group: string; vars: { key: string; label: string }[] }[]>({
     queryKey: ["document-variables"],
-    queryFn: async () => {
-      const res = await fetch(`${API_BASE}/document-variables`, { credentials: "include" });
-      if (!res.ok) throw new Error("Failed to load variables");
-      return res.json();
-    },
+    queryFn: () => apiFetchJson("/document-variables"),
     enabled: showVarRef,
+    retry: false,
   });
+  const varGroups = varGroupsQuery.data ?? [];
 
   const handleCopyVar = (key: string, type?: string) => {
     let text: string;
@@ -265,15 +263,11 @@ export default function PlatformDocuments() {
 
   const createFolderMutation = useMutation({
     mutationFn: async ({ name, parentId }: { name: string; parentId: number | null }) => {
-      const res = await fetch(`${API_BASE}/platform/folders`, {
+      return await apiFetchJson<SystemFolder>("/platform/folders", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ name, parentId }),
-        credentials: "include",
       });
-      const body = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(body.error || "Failed to create folder");
-      return body as SystemFolder;
     },
     onSuccess: (folder) => {
       queryClient.setQueryData<SystemFolder[]>(["system-folders"], (prev) => {
@@ -286,20 +280,16 @@ export default function PlatformDocuments() {
       setNewFolderName("");
       setNewFolderParentId(null);
     },
-    onError: (e: any) => toast({ title: "Failed to create folder", description: e.message, variant: "destructive" }),
+    onError: (e) => toastError(toast, e, "Failed to create folder"),
   });
 
   const updateFolderMutation = useMutation({
     mutationFn: async ({ id, name, isDisabled }: { id: number; name?: string; isDisabled?: boolean }) => {
-      const res = await fetch(`${API_BASE}/platform/folders/${id}`, {
+      return await apiFetchJson<SystemFolder>(`/platform/folders/${id}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ name, isDisabled }),
-        credentials: "include",
       });
-      const body = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(body.error || "Failed to update folder");
-      return body as SystemFolder;
     },
     onSuccess: (folder) => {
       queryClient.setQueryData<SystemFolder[]>(["system-folders"], (prev) => {
@@ -311,19 +301,16 @@ export default function PlatformDocuments() {
       setShowEditFolder(false);
       setEditingFolder(null);
     },
-    onError: (e: any) => toast({ title: "Failed to update folder", description: e.message, variant: "destructive" }),
+    onError: (e) => toastError(toast, e, "Failed to update folder"),
   });
 
   const reorderMutation = useMutation({
     mutationFn: async ({ folderId, direction }: { folderId: number; direction: "up" | "down" }) => {
-      const res = await fetch(`${API_BASE}/platform/folders/reorder`, {
+      await apiFetchJson(`/platform/folders/reorder`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ folderId, direction }),
-        credentials: "include",
       });
-      const body = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(body.error || "Failed to reorder");
       return { folderId, direction };
     },
     onMutate: async ({ folderId, direction }) => {
@@ -350,7 +337,7 @@ export default function PlatformDocuments() {
     },
     onError: (e: any, _vars, ctx) => {
       if (ctx?.prev) queryClient.setQueryData(["system-folders"], ctx.prev);
-      toast({ title: "Failed to reorder", description: e.message, variant: "destructive" });
+      toastError(toast, e, "Failed to reorder");
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["system-folders"] });
@@ -359,31 +346,25 @@ export default function PlatformDocuments() {
 
   const deleteFolderMutation = useMutation({
     mutationFn: async (folderId: number) => {
-      const res = await fetch(`${API_BASE}/platform/folders/${folderId}`, { method: "DELETE", credentials: "include" });
-      const body = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(body.error || "Failed to delete folder");
+      await apiFetchJson(`/platform/folders/${folderId}`, { method: "DELETE" });
     },
     onSuccess: (_: any, folderId: number) => {
       queryClient.invalidateQueries({ queryKey: ["system-folders"] });
       if (selectedFolderId === folderId) setSelectedFolderId(null);
       toast({ title: "Folder deleted" });
     },
-    onError: (e: any) => toast({ title: "Failed to delete folder", description: e.message, variant: "destructive" }),
+    onError: (e) => toastError(toast, e, "Failed to delete folder"),
   });
 
   const deleteMutation = useMutation({
     mutationFn: async (docId: number) => {
-      const res = await fetch(`${API_BASE}/platform/documents/${docId}`, {
-        method: "DELETE",
-        credentials: "include",
-      });
-      if (!res.ok) throw new Error("Failed to delete");
+      await apiFetchJson(`/platform/documents/${docId}`, { method: "DELETE" });
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["platform-documents"], exact: false });
       toast({ title: "Document deleted" });
     },
-    onError: (e: any) => toast({ title: "Could not delete document", description: e.message, variant: "destructive" }),
+    onError: (e) => toastError(toast, e, "Could not delete document"),
   });
 
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -415,18 +396,9 @@ export default function PlatformDocuments() {
     try {
       const formData = new FormData();
       formData.append("file", file, file.name);
-      const uploadRes = await fetch(`${API_BASE}/storage/upload`, {
-        method: "POST",
-        body: formData,
-        credentials: "include",
-      });
-      if (!uploadRes.ok) {
-        const err = await uploadRes.json().catch(() => ({}));
-        throw new Error(err.error || "File upload failed");
-      }
-      const { objectPath } = await uploadRes.json();
+      const { objectPath } = await apiFetchJson<{ objectPath: string }>("/storage/upload", { method: "POST", body: formData });
 
-      const saveRes = await fetch(`${API_BASE}/platform/documents`, {
+      await apiFetchJson(`/platform/documents`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -440,12 +412,7 @@ export default function PlatformDocuments() {
           firmId: null,
           folderId: selectedFolderId,
         }),
-        credentials: "include",
       });
-      if (!saveRes.ok) {
-        const err = await saveRes.json().catch(() => ({}));
-        throw new Error(err.error || "Failed to save document");
-      }
 
       queryClient.invalidateQueries({ queryKey: ["platform-documents"], exact: false });
       toast({ title: "Document uploaded", description: `${form.name} has been added.` });
@@ -453,8 +420,8 @@ export default function PlatformDocuments() {
       setForm({ name: "", description: "", category: "general" });
       setSelectedFile(null);
       setTextUploadContent("");
-    } catch (e: any) {
-      toast({ title: "Upload failed", description: e.message, variant: "destructive" });
+    } catch (e) {
+      toastError(toast, e, "Upload failed");
     } finally {
       setUploading(false);
     }
@@ -462,31 +429,27 @@ export default function PlatformDocuments() {
 
   const handleDownload = async (doc: PlatformDoc) => {
     try {
-      const res = await fetch(`${API_BASE}/platform/documents/${doc.id}/download`, { credentials: "include" });
-      if (!res.ok) throw new Error("Download failed");
-      const blob = await res.blob();
+      const blob = await apiFetchBlob(`/platform/documents/${doc.id}/download`);
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = doc.fileName;
+      a.download = doc.fileName || "download";
       a.click();
       URL.revokeObjectURL(url);
-    } catch (e: any) {
-      toast({ title: "Download failed", description: e.message, variant: "destructive" });
+    } catch (e) {
+      toastError(toast, e, "Download failed");
     }
   };
 
   const handleEditPdfMappings = async (doc: PlatformDoc) => {
     try {
       const pathPart = doc.objectPath.replace(/^\/objects\//, "");
-      const res = await fetch(`${API_BASE}/storage/objects/${pathPart}`, { credentials: "include" });
-      if (!res.ok) throw new Error("Failed to load PDF");
-      const blob = await res.blob();
+      const blob = await apiFetchBlob(`/storage/objects/${pathPart}`);
       const url = URL.createObjectURL(blob);
       setEditingPdfUrl(url);
       setEditingPdfDoc(doc);
-    } catch (e: any) {
-      toast({ title: "Failed to load PDF", description: e.message, variant: "destructive" });
+    } catch (e) {
+      toastError(toast, e, "Failed to load PDF");
     }
   };
 
@@ -537,6 +500,7 @@ export default function PlatformDocuments() {
                   size="sm"
                   className="h-7 text-xs gap-1"
                   onClick={() => { setNewFolderParentId(null); setNewFolderName(""); setShowNewFolder(true); }}
+                  disabled={createFolderMutation.isPending || updateFolderMutation.isPending || deleteFolderMutation.isPending}
                 >
                   New Folder
                 </Button>
@@ -555,25 +519,33 @@ export default function PlatformDocuments() {
                 All Documents
               </button>
 
-              <div className="space-y-0.5">
-                {rootFolders.map(folder => (
-                  <FolderTreeItem
-                    key={folder.id}
-                    folder={folder}
-                    folders={folders}
-                    selectedFolderId={selectedFolderId}
-                    onSelect={setSelectedFolderId}
-                    onEdit={handleStartEdit}
-                    onToggleDisable={handleToggleDisable}
-                    onReorder={(folderId, direction) => reorderMutation.mutate({ folderId, direction })}
-                    onAddSub={handleStartAddSub}
-                    onDelete={(f) => { if (confirm(`Delete folder "${f.name}"?`)) deleteFolderMutation.mutate(f.id); }}
-                  />
-                ))}
-              </div>
+              {foldersQuery.isError ? (
+                <QueryFallback title="Folders unavailable" error={foldersQuery.error} onRetry={() => foldersQuery.refetch()} isRetrying={foldersQuery.isFetching} />
+              ) : foldersQuery.isLoading ? (
+                <div className="text-slate-500 text-sm py-6 text-center">Loading folders...</div>
+              ) : (
+                <>
+                  <div className="space-y-0.5">
+                    {rootFolders.map(folder => (
+                      <FolderTreeItem
+                        key={folder.id}
+                        folder={folder}
+                        folders={folders}
+                        selectedFolderId={selectedFolderId}
+                        onSelect={setSelectedFolderId}
+                        onEdit={handleStartEdit}
+                        onToggleDisable={handleToggleDisable}
+                        onReorder={(folderId, direction) => reorderMutation.mutate({ folderId, direction })}
+                        onAddSub={handleStartAddSub}
+                        onDelete={(f) => { if (confirm(`Delete folder "${f.name}"?`)) deleteFolderMutation.mutate(f.id); }}
+                      />
+                    ))}
+                  </div>
 
-              {rootFolders.length === 0 && (
-                <p className="text-xs text-slate-400 text-center py-4">No folders yet</p>
+                  {rootFolders.length === 0 && (
+                    <p className="text-xs text-slate-400 text-center py-4">No folders yet</p>
+                  )}
+                </>
               )}
             </CardContent>
           </Card>
@@ -601,7 +573,9 @@ export default function PlatformDocuments() {
                 </div>
               </div>
 
-              {docsLoading ? (
+              {docsQuery.isError ? (
+                <QueryFallback title="Documents unavailable" error={docsQuery.error} onRetry={() => docsQuery.refetch()} isRetrying={docsQuery.isFetching} />
+              ) : docsLoading ? (
                 <div className="text-slate-500 text-sm py-12 text-center">Loading documents...</div>
               ) : docs.length === 0 ? (
                 <div className="text-center py-12">
@@ -645,19 +619,36 @@ export default function PlatformDocuments() {
                         <td className="px-3 py-2.5 text-right">
                           <div className="flex items-center justify-end gap-1">
                             {doc.fileType === "application/pdf" && (
-                              <Button variant="ghost" size="sm" className="h-7 px-2 gap-1 text-blue-600 hover:text-blue-700" onClick={() => handleEditPdfMappings(doc)} title="Edit PDF mappings">
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                className="h-7 px-2 gap-1 text-blue-600 hover:text-blue-700"
+                                onClick={() => handleEditPdfMappings(doc)}
+                                title="Edit PDF mappings"
+                                disabled={deleteMutation.isPending}
+                              >
                                 <FileEdit className="w-3.5 h-3.5" />
                                 <span className="text-xs">Map</span>
                               </Button>
                             )}
-                            <Button variant="ghost" size="sm" className="h-7 w-7 p-0" onClick={() => handleDownload(doc)} title="Download">
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              className="h-7 w-7 p-0"
+                              onClick={() => handleDownload(doc)}
+                              title="Download"
+                              disabled={deleteMutation.isPending}
+                            >
                               <Download className="w-3.5 h-3.5" />
                             </Button>
                             <Button
                               variant="ghost"
                               size="sm"
                               className="h-7 w-7 p-0 text-red-500 hover:text-red-600"
-                              onClick={() => deleteMutation.mutate(doc.id)}
+                              onClick={() => {
+                                if (!confirm(`Delete "${doc.name}"?`)) return;
+                                deleteMutation.mutate(doc.id);
+                              }}
                               disabled={deleteMutation.isPending}
                               title="Delete"
                             >

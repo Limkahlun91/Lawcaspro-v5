@@ -4,20 +4,8 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Input } from "@/components/ui/input";
 import { ScrollText, Search } from "lucide-react";
-import { API_BASE } from "@/lib/api-base";
-import { getStoredAuthToken } from "@/lib/auth-token";
-import { fetchWithTimeout } from "@/lib/fetch-with-timeout";
-
-async function apiFetch(path: string) {
-  const token = getStoredAuthToken();
-  const res = await fetchWithTimeout(`${API_BASE}${path}`, {
-    credentials: "include",
-    timeoutMs: 15000,
-    headers: token ? { Authorization: `Bearer ${token}` } : undefined,
-  });
-  if (!res.ok) throw new Error(await res.text());
-  return res.json();
-}
+import { QueryFallback } from "@/components/query-fallback";
+import { apiFetchJson } from "@/lib/api-client";
 
 const ACTION_LABELS: Record<string, string> = {
   case_created: "Case Created",
@@ -45,19 +33,22 @@ export default function PlatformAuditLogs() {
   const [search, setSearch] = useState("");
   const [firmFilter, setFirmFilter] = useState("all");
 
-  const { data: firmsData } = useQuery<{ data: Record<string, unknown>[] }>({
+  const firmsQuery = useQuery<{ data: Record<string, unknown>[] }>({
     queryKey: ["platform-firms-audit"],
-    queryFn: () => apiFetch("/platform/firms?limit=100"),
+    queryFn: () => apiFetchJson("/platform/firms?limit=100"),
+    retry: false,
   });
-  const firms = firmsData?.data ?? [];
+  const firms = firmsQuery.data?.data ?? [];
 
   const params = new URLSearchParams({ limit: "150" });
   if (firmFilter !== "all") params.set("firmId", firmFilter);
 
-  const { data, isLoading, error } = useQuery<{ data: Record<string, unknown>[]; total: number }>({
+  const logsQuery = useQuery<{ data: Record<string, unknown>[]; total: number }>({
     queryKey: ["platform-audit-logs", firmFilter],
-    queryFn: () => apiFetch(`/platform/audit-logs?${params.toString()}`),
+    queryFn: () => apiFetchJson(`/platform/audit-logs?${params.toString()}`),
+    retry: false,
   });
+  const { data, isLoading } = logsQuery;
 
   const logs = (data?.data ?? []).filter((log) => {
     if (!search) return true;
@@ -109,14 +100,10 @@ export default function PlatformAuditLogs() {
           </CardTitle>
         </CardHeader>
         <CardContent>
-          {isLoading ? (
+          {logsQuery.isError ? (
+            <QueryFallback title="Audit logs unavailable" error={logsQuery.error} onRetry={() => logsQuery.refetch()} isRetrying={logsQuery.isFetching} />
+          ) : isLoading ? (
             <div className="text-slate-500 py-8 text-center">Loading audit logs...</div>
-          ) : error ? (
-            <div className="text-center py-12 text-slate-500">
-              <ScrollText className="w-10 h-10 text-slate-300 mx-auto mb-3" />
-              <p className="font-medium text-slate-600 mb-1">Failed to load audit logs</p>
-              <p className="text-sm break-words">{error instanceof Error ? error.message : String(error)}</p>
-            </div>
           ) : logs.length === 0 ? (
             <div className="text-center py-12 text-slate-500">
               <ScrollText className="w-10 h-10 text-slate-300 mx-auto mb-3" />

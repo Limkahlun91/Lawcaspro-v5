@@ -1,26 +1,24 @@
 import { useQuery } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Activity, Building2, Users, Briefcase, FileText } from "lucide-react";
-
-const API_BASE = import.meta.env.BASE_URL.replace(/\/$/, "").replace(/^\/lawcaspro/, "") + "/api";
-
-async function apiFetch(path: string) {
-  const res = await fetch(`${API_BASE}${path}`, { credentials: "include" });
-  if (!res.ok) throw new Error(await res.text());
-  return res.json();
-}
+import { QueryFallback } from "@/components/query-fallback";
+import { apiFetchJson } from "@/lib/api-client";
 
 export default function PlatformMonitoring() {
-  const { data: stats, isLoading: statsLoading } = useQuery({
+  const statsQuery = useQuery({
     queryKey: ["platform-stats"],
-    queryFn: () => apiFetch("/platform/stats"),
+    queryFn: () => apiFetchJson("/platform/stats"),
     refetchInterval: 30000,
+    retry: false,
   });
+  const { data: stats, isLoading: statsLoading } = statsQuery;
 
-  const { data: firmsData, isLoading: firmsLoading } = useQuery<{ data: Record<string, unknown>[] }>({
+  const firmsQuery = useQuery<{ data: Record<string, unknown>[] }>({
     queryKey: ["platform-firms-monitoring"],
-    queryFn: () => apiFetch("/platform/firms?limit=50"),
+    queryFn: () => apiFetchJson("/platform/firms?limit=50"),
+    retry: false,
   });
+  const { data: firmsData, isLoading: firmsLoading } = firmsQuery;
 
   const firms = firmsData?.data ?? [];
   const isLoading = statsLoading || firmsLoading;
@@ -34,6 +32,13 @@ export default function PlatformMonitoring() {
 
       {isLoading ? (
         <div className="text-slate-500 py-12 text-center">Loading platform data...</div>
+      ) : statsQuery.isError || firmsQuery.isError ? (
+        <QueryFallback
+          title="Platform monitoring unavailable"
+          error={statsQuery.error ?? firmsQuery.error}
+          onRetry={() => { statsQuery.refetch(); firmsQuery.refetch(); }}
+          isRetrying={statsQuery.isFetching || firmsQuery.isFetching}
+        />
       ) : (
         <>
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4">

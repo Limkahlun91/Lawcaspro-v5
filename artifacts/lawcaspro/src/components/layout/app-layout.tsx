@@ -18,8 +18,7 @@ import {
   LogOut,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
-
-const API_BASE = import.meta.env.BASE_URL.replace(/\/$/, "").replace(/^\/lawcaspro/, "") + "/api";
+import { apiFetchJson } from "@/lib/api-client";
 
 export function AppLayout({ children }: { children: ReactNode }) {
   const { user, logout } = useAuth();
@@ -27,13 +26,10 @@ export function AppLayout({ children }: { children: ReactNode }) {
 
   const { data: unreadData } = useQuery({
     queryKey: ["unread-count"],
-    queryFn: async () => {
-      const res = await fetch(`${API_BASE}/communications/unread-count`, { credentials: "include" });
-      if (!res.ok) return { count: 0 };
-      return res.json();
-    },
+    queryFn: () => apiFetchJson<{ count: number }>("/communications/unread-count").catch(() => ({ count: 0 })),
     refetchInterval: 30000,
     enabled: !!user && user.userType === "firm_user" && hasPermission(user, "communications", "read"),
+    retry: false,
   });
   const unreadCount = unreadData?.count ?? 0;
 

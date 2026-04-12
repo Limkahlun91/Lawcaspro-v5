@@ -41,6 +41,10 @@ app.use(express.urlencoded({ extended: true }));
 
 app.use("/api", router);
 
+app.use("/api", (_req, res) => {
+  res.status(404).json({ error: "Not Found", code: "NOT_FOUND" });
+});
+
 app.use((err: unknown, req: express.Request, res: express.Response, next: express.NextFunction) => {
   if (res.headersSent) {
     next(err);

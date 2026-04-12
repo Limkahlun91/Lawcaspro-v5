@@ -331,7 +331,7 @@ function FirmInfoTab() {
       setNewAccountType("office");
       toast({ title: "Bank account added" });
     },
-    onError: () => toast({ title: "Failed to add bank account", variant: "destructive" }),
+    onError: (e) => toastError(toast, e, "Failed to add bank account"),
   });
 
   const deleteBankMutation = useMutation({
@@ -345,7 +345,7 @@ function FirmInfoTab() {
       queryClient.invalidateQueries({ queryKey: ["firm-settings"] });
       toast({ title: "Bank account removed" });
     },
-    onError: () => toast({ title: "Failed to remove bank account", variant: "destructive" }),
+    onError: (e) => toastError(toast, e, "Failed to remove bank account"),
   });
 
   const updateBankMutation = useMutation({
@@ -364,7 +364,7 @@ function FirmInfoTab() {
       setEditingBankId(null);
       toast({ title: "Bank account updated" });
     },
-    onError: (err: any) => toast({ title: "Failed to update bank account", description: String(err?.message ?? err), variant: "destructive" }),
+    onError: (err) => toastError(toast, err, "Failed to update bank account"),
   });
 
   const handleSaveInfo = () => {
