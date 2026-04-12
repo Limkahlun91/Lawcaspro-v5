@@ -10,8 +10,9 @@ import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Plus, Trash2, Clock, DollarSign, TrendingUp } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
-
-const API_BASE = import.meta.env.BASE_URL.replace(/\/$/, "").replace(/^\/lawcaspro/, "") + "/api";
+import { QueryFallback } from "@/components/query-fallback";
+import { apiFetchJson } from "@/lib/api-client";
+import { toastError } from "@/lib/toast-error";
 
 function fmt(val: unknown) {
   return `RM ${Number(val ?? 0).toLocaleString("en-MY", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
@@ -29,34 +30,27 @@ export default function CaseTimeTab({ caseId }: { caseId: number }) {
     isBillable: true,
   });
 
-  const { data: entries = [], isLoading } = useQuery({
+  const entriesQuery = useQuery({
     queryKey: ["time-entries", caseId],
-    queryFn: async () => {
-      const r = await fetch(`${API_BASE}/time-entries?caseId=${caseId}`, { credentials: "include" });
-      if (!r.ok) throw new Error(await r.text());
-      return r.json();
-    },
+    queryFn: () => apiFetchJson(`/time-entries?caseId=${caseId}`),
+    retry: false,
   });
+  const entries = (entriesQuery.data ?? []) as any[];
 
-  const { data: summary } = useQuery({
+  const summaryQuery = useQuery({
     queryKey: ["time-summary", caseId],
-    queryFn: async () => {
-      const r = await fetch(`${API_BASE}/time-entries/summary?caseId=${caseId}`, { credentials: "include" });
-      if (!r.ok) throw new Error(await r.text());
-      return r.json();
-    },
+    queryFn: () => apiFetchJson(`/time-entries/summary?caseId=${caseId}`),
+    retry: false,
   });
+  const summary = summaryQuery.data as any;
 
   const createEntry = useMutation({
-    mutationFn: async (body: any) => {
-      const r = await fetch(`${API_BASE}/time-entries`, {
-        method: "POST", credentials: "include",
+    mutationFn: async (body: any) =>
+      apiFetchJson(`/time-entries`, {
+        method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ ...body, caseId }),
-      });
-      if (!r.ok) throw new Error(await r.text());
-      return r.json();
-    },
+      }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["time-entries", caseId] });
       qc.invalidateQueries({ queryKey: ["time-summary", caseId] });
@@ -64,20 +58,17 @@ export default function CaseTimeTab({ caseId }: { caseId: number }) {
       setForm({ entryDate: new Date().toISOString().slice(0, 10), description: "", hours: "", ratePerHour: "500", isBillable: true });
       toast({ title: "Time entry recorded" });
     },
-    onError: (e: any) => toast({ title: "Error", description: e.message, variant: "destructive" }),
+    onError: (e) => toastError(toast, e, "Save failed"),
   });
 
   const deleteEntry = useMutation({
-    mutationFn: async (id: number) => {
-      const r = await fetch(`${API_BASE}/time-entries/${id}`, { method: "DELETE", credentials: "include" });
-      if (!r.ok) throw new Error(await r.text());
-    },
+    mutationFn: async (id: number) => apiFetchJson(`/time-entries/${id}`, { method: "DELETE" }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["time-entries", caseId] });
       qc.invalidateQueries({ queryKey: ["time-summary", caseId] });
       toast({ title: "Entry deleted" });
     },
-    onError: (e: any) => toast({ title: "Error", description: e.message, variant: "destructive" }),
+    onError: (e) => toastError(toast, e, "Delete failed"),
   });
 
   const amount = (Number(form.hours) || 0) * (Number(form.ratePerHour) || 0);
@@ -110,7 +101,9 @@ export default function CaseTimeTab({ caseId }: { caseId: number }) {
         </Button>
       </div>
 
-      {isLoading ? (
+      {entriesQuery.isError ? (
+        <QueryFallback title="Time entries unavailable" error={entriesQuery.error} onRetry={() => { entriesQuery.refetch(); summaryQuery.refetch(); }} isRetrying={entriesQuery.isFetching || summaryQuery.isFetching} />
+      ) : entriesQuery.isLoading ? (
         <div className="text-sm text-slate-400 py-8 text-center">Loading time entries...</div>
       ) : entries.length === 0 ? (
         <Card><CardContent className="py-12 text-center text-slate-400 text-sm">
@@ -138,7 +131,13 @@ export default function CaseTimeTab({ caseId }: { caseId: number }) {
                   <p className="text-xs text-slate-500">{fmt(Number(e.hours) * Number(e.ratePerHour))}</p>
                   <p className="text-xs text-slate-400">@ RM {Number(e.ratePerHour).toFixed(0)}/hr</p>
                 </div>
-                <Button size="sm" variant="ghost" className="h-7 w-7 p-0 text-slate-400 hover:text-red-500 flex-shrink-0" onClick={() => deleteEntry.mutate(e.id)}>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  className="h-7 w-7 p-0 text-slate-400 hover:text-red-500 flex-shrink-0"
+                  onClick={() => { if (!confirm("Delete this time entry?")) return; deleteEntry.mutate(e.id); }}
+                  disabled={deleteEntry.isPending}
+                >
                   <Trash2 className="h-3.5 w-3.5" />
                 </Button>
               </div>

@@ -9,12 +9,12 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Textarea } from "@/components/ui/textarea";
 import { useToast } from "@/hooks/use-toast";
 import { AlertTriangle, CheckCircle, Clock, Plus, User, Building2, ChevronDown, ChevronUp } from "lucide-react";
-import { getApiBaseUrl } from "@/lib/api";
+import { QueryFallback } from "@/components/query-fallback";
+import { apiFetchJson } from "@/lib/api-client";
+import { toastError } from "@/lib/toast-error";
 import PartyForm from "./PartyForm";
 import BeneficialOwnerForm from "./BeneficialOwnerForm";
 import CaseConflictPanel from "./CaseConflictPanel";
-
-const API_BASE = getApiBaseUrl();
 
 const CDD_STATUS_CONFIG: Record<string, { label: string; color: string; icon: any }> = {
   not_started:                        { label: "Not Started",    color: "bg-slate-100 text-slate-600",  icon: Clock },
@@ -64,18 +64,16 @@ function PartyCard({ party, onRefresh }: { party: any; onRefresh: () => void }) 
     if (!newStatus || !profile) return;
     setStatusLoading(true);
     try {
-      const res = await fetch(`${API_BASE}/compliance/profiles/${profile.id}/status`, {
+      await apiFetchJson(`/compliance/profiles/${profile.id}/status`, {
         method: "PATCH",
-        credentials: "include",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ cddStatus: newStatus, notes: statusNotes }),
       });
-      if (!res.ok) throw new Error((await res.json()).error ?? "Failed to update status");
       toast({ title: "CDD status updated" });
       setShowStatusDialog(false);
       onRefresh();
-    } catch (err: any) {
-      toast({ title: "Error", description: err.message, variant: "destructive" });
+    } catch (err) {
+      toastError(toast, err, "Update failed");
     } finally {
       setStatusLoading(false);
     }
@@ -92,18 +90,15 @@ function PartyCard({ party, onRefresh }: { party: any; onRefresh: () => void }) 
       factorSuspiciousInconsistencies: false,
     };
     try {
-      const res = await fetch(`${API_BASE}/compliance/profiles/${profile.id}/risk-assessment`, {
+      const data = await apiFetchJson<any>(`/compliance/profiles/${profile.id}/risk-assessment`, {
         method: "POST",
-        credentials: "include",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(factors),
       });
-      if (!res.ok) throw new Error((await res.json()).error ?? "Failed to run assessment");
-      const data = await res.json();
       toast({ title: `Risk assessed: ${data.profile.riskLevel} (score ${data.profile.riskScore})` });
       onRefresh();
-    } catch (err: any) {
-      toast({ title: "Error", description: err.message, variant: "destructive" });
+    } catch (err) {
+      toastError(toast, err, "Assessment failed");
     }
   }
 
@@ -250,34 +245,37 @@ export default function CaseComplianceTab({ caseId }: CaseComplianceTabProps) {
   const [showPartyForm, setShowPartyForm] = useState(false);
   const queryClient = useQueryClient();
 
-  const { data: parties, isLoading, refetch } = useQuery({
+  const partiesQuery = useQuery({
     queryKey: ["case-compliance-parties", caseId],
     queryFn: async () => {
-      const res = await fetch(`${API_BASE}/cases/${caseId}/parties`, { credentials: "include" });
-      if (!res.ok) throw new Error("Failed to load parties");
-      const links = await res.json();
+      const links = await apiFetchJson<any[]>(`/cases/${caseId}/parties`);
       if (!Array.isArray(links) || links.length === 0) return [];
 
       // Fetch full party data for each linked party
       const details = await Promise.all(
         links.map(async (link: any) => {
-          const r = await fetch(`${API_BASE}/parties/${link.partyId}`, { credentials: "include" });
-          return r.ok ? r.json() : null;
+          try {
+            return await apiFetchJson(`/parties/${link.partyId}`);
+          } catch {
+            return null;
+          }
         })
       );
       return details.filter(Boolean);
     },
+    retry: false,
   });
+  const parties = (partiesQuery.data ?? []) as any[];
 
   function handleRefresh() {
-    refetch();
+    partiesQuery.refetch();
     queryClient.invalidateQueries({ queryKey: ["case-compliance-parties", caseId] });
   }
 
-  const totalParties = parties?.length ?? 0;
-  const approvedCount = parties?.filter((p: any) => p.complianceProfile?.cddStatus === "approved").length ?? 0;
-  const eddCount = parties?.filter((p: any) => p.complianceProfile?.eddTriggered).length ?? 0;
-  const highRiskCount = parties?.filter((p: any) => ["high", "very_high"].includes(p.complianceProfile?.riskLevel)).length ?? 0;
+  const totalParties = parties.length;
+  const approvedCount = parties.filter((p: any) => p.complianceProfile?.cddStatus === "approved").length;
+  const eddCount = parties.filter((p: any) => p.complianceProfile?.eddTriggered).length;
+  const highRiskCount = parties.filter((p: any) => ["high", "very_high"].includes(p.complianceProfile?.riskLevel)).length;
 
   return (
     <div className="space-y-6">
@@ -321,9 +319,11 @@ export default function CaseComplianceTab({ caseId }: CaseComplianceTabProps) {
           </Button>
         </div>
 
-        {isLoading ? (
+        {partiesQuery.isError ? (
+          <QueryFallback title="Compliance parties unavailable" error={partiesQuery.error} onRetry={() => partiesQuery.refetch()} isRetrying={partiesQuery.isFetching} />
+        ) : partiesQuery.isLoading ? (
           <div className="text-sm text-slate-500 py-8 text-center">Loading parties...</div>
-        ) : parties?.length === 0 ? (
+        ) : parties.length === 0 ? (
           <div className="text-center py-12 border-2 border-dashed border-slate-200 rounded-lg">
             <User className="w-8 h-8 text-slate-300 mx-auto mb-3" />
             <p className="text-sm text-slate-500">No parties added yet.</p>
@@ -334,7 +334,7 @@ export default function CaseComplianceTab({ caseId }: CaseComplianceTabProps) {
           </div>
         ) : (
           <div className="space-y-3">
-            {parties?.map((party: any) => (
+            {parties.map((party: any) => (
               <PartyCard key={party.id} party={party} onRefresh={handleRefresh} />
             ))}
           </div>

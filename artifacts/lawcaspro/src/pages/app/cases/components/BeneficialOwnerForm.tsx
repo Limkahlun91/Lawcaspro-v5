@@ -6,9 +6,8 @@ import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Checkbox } from "@/components/ui/checkbox";
 import { useToast } from "@/hooks/use-toast";
-import { getApiBaseUrl } from "@/lib/api";
-
-const API_BASE = getApiBaseUrl();
+import { apiFetchJson } from "@/lib/api-client";
+import { toastError } from "@/lib/toast-error";
 
 interface BeneficialOwnerFormProps {
   open: boolean;
@@ -45,20 +44,17 @@ export default function BeneficialOwnerForm({ open, onOpenChange, onCreated, par
     }
     setLoading(true);
     try {
-      const res = await fetch(`${API_BASE}/parties/${partyId}/beneficial-owners`, {
+      const bo = await apiFetchJson(`/parties/${partyId}/beneficial-owners`, {
         method: "POST",
-        credentials: "include",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(form),
       });
-      if (!res.ok) throw new Error((await res.json()).error ?? "Failed to add beneficial owner");
-      const bo = await res.json();
       toast({ title: "Beneficial owner added" });
       onCreated(bo);
       onOpenChange(false);
       setForm({ ownerName: "", ownerType: "natural_person", ownershipPercentage: "", nric: "", passportNo: "", nationality: "", address: "", isPep: false, isUltimateBeneficialOwner: false, throughEntityName: "" });
-    } catch (err: any) {
-      toast({ title: "Error", description: err.message, variant: "destructive" });
+    } catch (err) {
+      toastError(toast, err, "Create failed");
     } finally {
       setLoading(false);
     }

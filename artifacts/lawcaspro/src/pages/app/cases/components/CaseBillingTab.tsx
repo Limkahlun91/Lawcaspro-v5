@@ -8,19 +8,9 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { useToast } from "@/hooks/use-toast";
 import { Plus, Trash2, CheckCircle2, Circle, DollarSign } from "lucide-react";
-
-const API_BASE = import.meta.env.BASE_URL.replace(/\/$/, "").replace(/^\/lawcaspro/, "") + "/api";
-
-async function apiFetch(path: string, init?: RequestInit) {
-  const res = await fetch(`${API_BASE}${path}`, {
-    credentials: "include",
-    ...init,
-    headers: { "Content-Type": "application/json", ...(init?.headers ?? {}) },
-  });
-  if (!res.ok) throw new Error(await res.text());
-  if (res.status === 204) return null;
-  return res.json();
-}
+import { QueryFallback } from "@/components/query-fallback";
+import { apiFetchJson } from "@/lib/api-client";
+import { toastError } from "@/lib/toast-error";
 
 function fmt(val: unknown) {
   return `RM ${Number(val ?? 0).toLocaleString("en-MY", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
@@ -48,18 +38,22 @@ export default function CaseBillingTab({ caseId }: { caseId: number }) {
   const [addOpen, setAddOpen] = useState(false);
   const [form, setForm] = useState({ category: "disbursement", description: "", amount: "", quantity: "1" });
 
-  const { data: entries = [], isLoading } = useQuery<Record<string, unknown>[]>({
+  const entriesQuery = useQuery<Record<string, unknown>[]>({
     queryKey: ["case-billing", caseId],
-    queryFn: () => apiFetch(`/cases/${caseId}/billing`),
+    queryFn: () => apiFetchJson(`/cases/${caseId}/billing`),
+    retry: false,
   });
+  const entries = entriesQuery.data ?? [];
 
-  const { data: summary } = useQuery<{ byCategory: Record<string, unknown>[]; overall: Record<string, unknown> }>({
+  const summaryQuery = useQuery<{ byCategory: Record<string, unknown>[]; overall: Record<string, unknown> }>({
     queryKey: ["case-billing-summary", caseId],
-    queryFn: () => apiFetch(`/cases/${caseId}/billing/summary`),
+    queryFn: () => apiFetchJson(`/cases/${caseId}/billing/summary`),
+    retry: false,
   });
+  const summary = summaryQuery.data;
 
   const addMutation = useMutation({
-    mutationFn: (data: object) => apiFetch(`/cases/${caseId}/billing`, { method: "POST", body: JSON.stringify(data) }),
+    mutationFn: (data: object) => apiFetchJson(`/cases/${caseId}/billing`, { method: "POST", body: JSON.stringify(data) }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["case-billing", caseId] });
       qc.invalidateQueries({ queryKey: ["case-billing-summary", caseId] });
@@ -68,26 +62,28 @@ export default function CaseBillingTab({ caseId }: { caseId: number }) {
       setForm({ category: "disbursement", description: "", amount: "", quantity: "1" });
       toast({ title: "Billing entry added" });
     },
-    onError: (err) => toast({ title: "Error", description: String(err), variant: "destructive" }),
+    onError: (err) => toastError(toast, err, "Create failed"),
   });
 
   const togglePaidMutation = useMutation({
     mutationFn: ({ entryId, isPaid }: { entryId: number; isPaid: boolean }) =>
-      apiFetch(`/cases/${caseId}/billing/${entryId}`, { method: "PATCH", body: JSON.stringify({ isPaid }) }),
+      apiFetchJson(`/cases/${caseId}/billing/${entryId}`, { method: "PATCH", body: JSON.stringify({ isPaid }) }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["case-billing", caseId] });
       qc.invalidateQueries({ queryKey: ["case-billing-summary", caseId] });
     },
+    onError: (err) => toastError(toast, err, "Update failed"),
   });
 
   const deleteMutation = useMutation({
-    mutationFn: (entryId: number) => apiFetch(`/cases/${caseId}/billing/${entryId}`, { method: "DELETE" }),
+    mutationFn: (entryId: number) => apiFetchJson(`/cases/${caseId}/billing/${entryId}`, { method: "DELETE" }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["case-billing", caseId] });
       qc.invalidateQueries({ queryKey: ["case-billing-summary", caseId] });
       qc.invalidateQueries({ queryKey: ["accounting-summary"] });
       toast({ title: "Entry deleted" });
     },
+    onError: (err) => toastError(toast, err, "Delete failed"),
   });
 
   const overall = summary?.overall ?? {};
@@ -129,7 +125,9 @@ export default function CaseBillingTab({ caseId }: { caseId: number }) {
           </Button>
         </CardHeader>
         <CardContent>
-          {isLoading ? (
+          {entriesQuery.isError ? (
+            <QueryFallback title="Billing unavailable" error={entriesQuery.error} onRetry={() => { entriesQuery.refetch(); summaryQuery.refetch(); }} isRetrying={entriesQuery.isFetching || summaryQuery.isFetching} />
+          ) : entriesQuery.isLoading ? (
             <div className="text-slate-500 py-8 text-center">Loading...</div>
           ) : entries.length === 0 ? (
             <div className="text-center py-10 text-slate-500">
@@ -169,7 +167,10 @@ export default function CaseBillingTab({ caseId }: { caseId: number }) {
                       <td className="py-3 text-right text-slate-700">{fmt(entry.amount)}</td>
                       <td className="py-3 text-right font-semibold text-slate-900">{fmt(total)}</td>
                       <td className="py-3 text-center">
-                        <button onClick={() => togglePaidMutation.mutate({ entryId: Number(entry.id), isPaid: !isPaid })}>
+                        <button
+                          onClick={() => togglePaidMutation.mutate({ entryId: Number(entry.id), isPaid: !isPaid })}
+                          disabled={togglePaidMutation.isPending || deleteMutation.isPending}
+                        >
                           {isPaid
                             ? <CheckCircle2 className="w-5 h-5 text-green-500" />
                             : <Circle className="w-5 h-5 text-slate-300 hover:text-green-400" />
@@ -177,7 +178,16 @@ export default function CaseBillingTab({ caseId }: { caseId: number }) {
                         </button>
                       </td>
                       <td className="py-3">
-                        <Button size="icon" variant="ghost" className="h-7 w-7 text-slate-300 hover:text-red-500" onClick={() => deleteMutation.mutate(Number(entry.id))}>
+                        <Button
+                          size="icon"
+                          variant="ghost"
+                          className="h-7 w-7 text-slate-300 hover:text-red-500"
+                          onClick={() => {
+                            if (!confirm("Delete this billing entry?")) return;
+                            deleteMutation.mutate(Number(entry.id));
+                          }}
+                          disabled={deleteMutation.isPending || togglePaidMutation.isPending}
+                        >
                           <Trash2 className="w-3.5 h-3.5" />
                         </Button>
                       </td>

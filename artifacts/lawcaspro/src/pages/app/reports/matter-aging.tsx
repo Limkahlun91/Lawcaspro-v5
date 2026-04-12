@@ -4,9 +4,11 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { ArrowLeft, AlertTriangle, Download } from "lucide-react";
 import { useLocation } from "wouter";
-import { API_BASE } from "@/lib/api-base";
 import { downloadFromApi } from "@/lib/download";
 import { useToast } from "@/hooks/use-toast";
+import { QueryFallback } from "@/components/query-fallback";
+import { apiFetchJson } from "@/lib/api-client";
+import { toastError } from "@/lib/toast-error";
 
 const BUCKET_CONFIG: Record<string, { label: string; color: string; barColor: string }> = {
   current:   { label: "Current (not yet due)",  color: "text-green-700",  barColor: "bg-green-500" },
@@ -22,14 +24,12 @@ export default function MatterAging() {
   const [, setLocation] = useLocation();
   const { toast } = useToast();
 
-  const { data, isLoading, isError, error } = useQuery({
+  const agingQuery = useQuery({
     queryKey: ["matter-aging"],
-    queryFn: async () => {
-      const r = await fetch(`${API_BASE}/reports/matter-aging`, { credentials: "include" });
-      if (!r.ok) throw new Error(await r.text());
-      return r.json();
-    },
+    queryFn: () => apiFetchJson("/reports/matter-aging"),
+    retry: false,
   });
+  const { data, isLoading, isError, error } = agingQuery;
 
   const buckets: any[] = data?.buckets ?? [];
   const grandTotal = Number(data?.grandTotal ?? 0);
@@ -51,7 +51,7 @@ export default function MatterAging() {
             variant="outline"
             className="h-8"
             onClick={() => downloadFromApi("/reports/matter-aging?format=csv", "matter-aging.csv").catch((e: any) => {
-              toast({ title: "Download failed", description: e.message, variant: "destructive" });
+              toastError(toast, e, "Download failed");
             })}
           >
             <Download className="h-3.5 w-3.5 mr-1" /> Download CSV
@@ -71,7 +71,7 @@ export default function MatterAging() {
       {isLoading ? (
         <Card><CardContent className="py-8 text-center text-sm text-slate-400">Loading...</CardContent></Card>
       ) : isError ? (
-        <Card><CardContent className="py-8 text-center text-sm text-red-600 break-words">{String((error as any)?.message ?? error)}</CardContent></Card>
+        <QueryFallback title="Report unavailable" error={error} onRetry={() => agingQuery.refetch()} isRetrying={agingQuery.isFetching} />
       ) : (
         <div className="space-y-4">
           {buckets.map((bucket: any) => {

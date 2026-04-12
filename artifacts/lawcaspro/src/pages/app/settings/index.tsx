@@ -12,30 +12,12 @@ import { cn } from "@/lib/utils";
 import { useToast } from "@/hooks/use-toast";
 import { useAuth } from "@/lib/auth-context";
 import { hasPermission } from "@/lib/permissions";
-import { apiUrl } from "@/lib/api-base";
 import { ME_QUERY_KEY } from "@/lib/query-keys";
+import { apiFetchJson } from "@/lib/api-client";
+import { toastError } from "@/lib/toast-error";
+import { QueryFallback } from "@/components/query-fallback";
 
-async function apiFetch(path: string, opts?: RequestInit) {
-  const res = await fetch(apiUrl(`/api${path}`), { credentials: "include", ...opts });
-  const raw = await res.text();
-
-  if (!res.ok) {
-    let message = raw || "Request failed";
-    try {
-      const parsed = JSON.parse(raw) as { error?: string };
-      if (parsed?.error) message = parsed.error;
-    } catch {
-    }
-    throw new Error(message);
-  }
-
-  if (!raw) return null;
-  try {
-    return JSON.parse(raw);
-  } catch {
-    return raw;
-  }
-}
+const apiFetch = apiFetchJson;
 
 const TABS = ["Firm Info", "Users", "Roles & Permissions", "Security"] as const;
 type Tab = typeof TABS[number];
@@ -58,10 +40,12 @@ function SecurityTab() {
   const [confirmCode, setConfirmCode] = useState("");
   const [disableCode, setDisableCode] = useState("");
 
-  const { data: sessionsData, isLoading: loadingSessions } = useQuery({
+  const sessionsQuery = useQuery({
     queryKey: ["auth-sessions"],
     queryFn: () => apiFetch("/auth/sessions"),
+    retry: false,
   });
+  const { data: sessionsData, isLoading: loadingSessions } = sessionsQuery;
 
   const setupMutation = useMutation({
     mutationFn: () => apiFetch("/auth/totp/setup", { method: "POST" }),
@@ -70,7 +54,7 @@ function SecurityTab() {
       setManualSecret(data.secret);
       setTotpStep("confirm");
     },
-    onError: (e: any) => toast({ title: e.message || "Failed to start 2FA setup", variant: "destructive" }),
+    onError: (e) => toastError(toast, e, "Setup failed"),
   });
 
   const confirmMutation = useMutation({
@@ -86,7 +70,7 @@ function SecurityTab() {
       toast({ title: "Two-factor authentication enabled" });
       window.location.reload();
     },
-    onError: (e: any) => toast({ title: e.message || "Invalid code", variant: "destructive" }),
+    onError: (e) => toastError(toast, e, "Invalid code"),
   });
 
   const disableMutation = useMutation({
@@ -101,7 +85,7 @@ function SecurityTab() {
       toast({ title: "Two-factor authentication disabled" });
       window.location.reload();
     },
-    onError: (e: any) => toast({ title: e.message || "Invalid code", variant: "destructive" }),
+    onError: (e) => toastError(toast, e, "Invalid code"),
   });
 
   const revokeSessionMutation = useMutation({
@@ -110,7 +94,7 @@ function SecurityTab() {
       queryClient.invalidateQueries({ queryKey: ["auth-sessions"] });
       toast({ title: "Session revoked" });
     },
-    onError: () => toast({ title: "Failed to revoke session", variant: "destructive" }),
+    onError: (e) => toastError(toast, e, "Action failed"),
   });
 
   const totpEnabled = user?.totpEnabled ?? false;
@@ -242,7 +226,9 @@ function SecurityTab() {
           </CardTitle>
         </CardHeader>
         <CardContent>
-          {loadingSessions ? (
+          {sessionsQuery.isError ? (
+            <QueryFallback title="Sessions unavailable" error={sessionsQuery.error} onRetry={() => sessionsQuery.refetch()} isRetrying={sessionsQuery.isFetching} />
+          ) : loadingSessions ? (
             <div className="text-slate-500 text-sm">Loading sessions...</div>
           ) : sessionsData?.data?.length === 0 ? (
             <div className="text-slate-500 text-sm">No active sessions found.</div>

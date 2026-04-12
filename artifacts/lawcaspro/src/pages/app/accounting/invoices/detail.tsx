@@ -7,14 +7,9 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
 import { useToast } from "@/hooks/use-toast";
-
-const API_BASE = import.meta.env.BASE_URL.replace(/\/$/, "").replace(/^\/lawcaspro/, "") + "/api";
-
-async function apiFetch(path: string, opts?: RequestInit) {
-  const res = await fetch(`${API_BASE}${path}`, { credentials: "include", ...opts });
-  if (!res.ok) throw new Error(await res.text());
-  return res.json();
-}
+import { QueryFallback } from "@/components/query-fallback";
+import { apiFetchJson } from "@/lib/api-client";
+import { toastError } from "@/lib/toast-error";
 
 function fmt(val: unknown) {
   return `RM ${Number(val ?? 0).toLocaleString("en-MY", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
@@ -46,31 +41,35 @@ export default function InvoiceDetail() {
     amount: "", paymentMethod: "bank_transfer", receivedDate: new Date().toISOString().slice(0, 10), referenceNo: "",
   });
 
-  const { data: inv, isLoading } = useQuery({
+  const invQuery = useQuery({
     queryKey: ["invoice", id],
-    queryFn: () => apiFetch(`/invoices/${id}`),
+    queryFn: () => apiFetchJson(`/invoices/${id}`),
+    retry: false,
   });
+  const { data: inv, isLoading } = invQuery;
 
-  const { data: receiptsData } = useQuery({
+  const receiptsQuery = useQuery({
     queryKey: ["receipts-for-invoice", id],
-    queryFn: () => apiFetch(`/receipts?caseId=${inv?.caseId}`),
+    queryFn: () => apiFetchJson(`/receipts?caseId=${inv?.caseId}`),
     enabled: !!inv?.caseId,
+    retry: false,
   });
+  const { data: receiptsData } = receiptsQuery;
 
   const issueMut = useMutation({
-    mutationFn: () => apiFetch(`/invoices/${id}/issue`, { method: "POST" }),
+    mutationFn: () => apiFetchJson(`/invoices/${id}/issue`, { method: "POST" }),
     onSuccess: () => { qc.invalidateQueries({ queryKey: ["invoice", id] }); toast({ title: "Invoice issued" }); },
-    onError: (e: any) => toast({ variant: "destructive", title: "Error", description: e.message }),
+    onError: (e) => toastError(toast, e, "Action failed"),
   });
 
   const voidMut = useMutation({
-    mutationFn: () => apiFetch(`/invoices/${id}/void`, { method: "POST" }),
+    mutationFn: () => apiFetchJson(`/invoices/${id}/void`, { method: "POST" }),
     onSuccess: () => { qc.invalidateQueries({ queryKey: ["invoice", id] }); toast({ title: "Invoice voided" }); },
-    onError: (e: any) => toast({ variant: "destructive", title: "Error", description: e.message }),
+    onError: (e) => toastError(toast, e, "Action failed"),
   });
 
   const receiptMut = useMutation({
-    mutationFn: () => apiFetch("/receipts", {
+    mutationFn: () => apiFetchJson("/receipts", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         invoiceId: parseInt(id!), caseId: inv?.caseId,
@@ -89,10 +88,11 @@ export default function InvoiceDetail() {
       setReceiptForm({ amount: "", paymentMethod: "bank_transfer", receivedDate: new Date().toISOString().slice(0, 10), referenceNo: "" });
       toast({ title: "Payment recorded", description: `${rec.receiptNo} saved` });
     },
-    onError: (e: any) => toast({ variant: "destructive", title: "Error", description: e.message }),
+    onError: (e) => toastError(toast, e, "Save failed"),
   });
 
   if (isLoading) return <div className="py-16 text-center text-slate-400">Loading invoice…</div>;
+  if (invQuery.isError) return <div className="p-6"><QueryFallback title="Invoice unavailable" error={invQuery.error} onRetry={() => invQuery.refetch()} isRetrying={invQuery.isFetching} /></div>;
   if (!inv) return <div className="py-16 text-center text-slate-400">Invoice not found</div>;
 
   const items = (inv.items ?? []) as any[];
@@ -126,7 +126,7 @@ export default function InvoiceDetail() {
             <Printer className="w-4 h-4" /> Print
           </Button>
           {issuable && (
-            <Button size="sm" className="bg-blue-600 hover:bg-blue-700 text-white gap-1.5" onClick={() => issueMut.mutate()}>
+            <Button size="sm" className="bg-blue-600 hover:bg-blue-700 text-white gap-1.5" onClick={() => issueMut.mutate()} disabled={issueMut.isPending || voidMut.isPending}>
               <CheckCircle className="w-4 h-4" /> Issue
             </Button>
           )}
@@ -137,7 +137,9 @@ export default function InvoiceDetail() {
           )}
           {voidable && (
             <Button size="sm" variant="outline" className="text-red-500 border-red-200 hover:bg-red-50 gap-1.5"
-              onClick={() => { if (confirm("Void this invoice?")) voidMut.mutate(); }}>
+              onClick={() => { if (confirm("Void this invoice?")) voidMut.mutate(); }}
+              disabled={voidMut.isPending || issueMut.isPending}
+            >
               <XCircle className="w-4 h-4" /> Void
             </Button>
           )}

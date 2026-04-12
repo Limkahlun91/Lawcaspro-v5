@@ -10,8 +10,9 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "
 import { Label } from "@/components/ui/label";
 import { CheckCircle2, Circle, Clock, AlertTriangle, Plus, Trash2, CheckSquare } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
-
-const API_BASE = import.meta.env.BASE_URL.replace(/\/$/, "").replace(/^\/lawcaspro/, "") + "/api";
+import { QueryFallback } from "@/components/query-fallback";
+import { apiFetchJson } from "@/lib/api-client";
+import { toastError } from "@/lib/toast-error";
 
 const PRIORITY_CONFIG: Record<string, { label: string; color: string; icon: any }> = {
   low:    { label: "Low",    color: "bg-slate-100 text-slate-600", icon: Circle },
@@ -38,50 +39,39 @@ export default function CaseTasksTab({ caseId }: { caseId: number }) {
   const [form, setForm] = useState({ title: "", description: "", dueDate: "", priority: "normal" });
   const [filterStatus, setFilterStatus] = useState("all");
 
-  const { data: tasks = [], isLoading } = useQuery({
+  const tasksQuery = useQuery({
     queryKey: ["case-tasks", caseId],
-    queryFn: async () => {
-      const r = await fetch(`${API_BASE}/case-tasks?caseId=${caseId}`, { credentials: "include" });
-      if (!r.ok) throw new Error(await r.text());
-      return r.json();
-    },
+    queryFn: () => apiFetchJson(`/case-tasks?caseId=${caseId}`),
+    retry: false,
   });
+  const tasks = (tasksQuery.data ?? []) as any[];
 
   const createTask = useMutation({
-    mutationFn: async (body: any) => {
-      const r = await fetch(`${API_BASE}/case-tasks`, {
-        method: "POST", credentials: "include",
+    mutationFn: async (body: any) =>
+      apiFetchJson(`/case-tasks`, {
+        method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ ...body, caseId }),
-      });
-      if (!r.ok) throw new Error(await r.text());
-      return r.json();
-    },
+      }),
     onSuccess: () => { qc.invalidateQueries({ queryKey: ["case-tasks", caseId] }); setShowAdd(false); setForm({ title: "", description: "", dueDate: "", priority: "normal" }); toast({ title: "Task added" }); },
-    onError: (e: any) => toast({ title: "Error", description: e.message, variant: "destructive" }),
+    onError: (e) => toastError(toast, e, "Create failed"),
   });
 
   const updateTask = useMutation({
-    mutationFn: async ({ id, ...body }: any) => {
-      const r = await fetch(`${API_BASE}/case-tasks/${id}`, {
-        method: "PUT", credentials: "include",
+    mutationFn: async ({ id, ...body }: any) =>
+      apiFetchJson(`/case-tasks/${id}`, {
+        method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
-      });
-      if (!r.ok) throw new Error(await r.text());
-      return r.json();
-    },
+      }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["case-tasks", caseId] }),
-    onError: (e: any) => toast({ title: "Error", description: e.message, variant: "destructive" }),
+    onError: (e) => toastError(toast, e, "Update failed"),
   });
 
   const deleteTask = useMutation({
-    mutationFn: async (id: number) => {
-      const r = await fetch(`${API_BASE}/case-tasks/${id}`, { method: "DELETE", credentials: "include" });
-      if (!r.ok) throw new Error(await r.text());
-    },
+    mutationFn: async (id: number) => apiFetchJson(`/case-tasks/${id}`, { method: "DELETE" }),
     onSuccess: () => { qc.invalidateQueries({ queryKey: ["case-tasks", caseId] }); toast({ title: "Task deleted" }); },
-    onError: (e: any) => toast({ title: "Error", description: e.message, variant: "destructive" }),
+    onError: (e) => toastError(toast, e, "Delete failed"),
   });
 
   const filtered = tasks.filter((t: any) => filterStatus === "all" || t.status === filterStatus);
@@ -111,7 +101,9 @@ export default function CaseTasksTab({ caseId }: { caseId: number }) {
         </div>
       </div>
 
-      {isLoading ? (
+      {tasksQuery.isError ? (
+        <QueryFallback title="Tasks unavailable" error={tasksQuery.error} onRetry={() => tasksQuery.refetch()} isRetrying={tasksQuery.isFetching} />
+      ) : tasksQuery.isLoading ? (
         <div className="text-sm text-slate-400 py-8 text-center">Loading tasks...</div>
       ) : filtered.length === 0 ? (
         <Card><CardContent className="py-12 text-center text-slate-400 text-sm">
@@ -129,6 +121,7 @@ export default function CaseTasksTab({ caseId }: { caseId: number }) {
                   <button
                     className="mt-0.5 flex-shrink-0"
                     onClick={() => updateTask.mutate({ id: task.id, status: task.status === "done" ? "open" : "done" })}
+                    disabled={updateTask.isPending || deleteTask.isPending}
                   >
                     {task.status === "done"
                       ? <CheckCircle2 className="h-5 w-5 text-green-500" />
@@ -152,9 +145,15 @@ export default function CaseTasksTab({ caseId }: { caseId: number }) {
                   </div>
                   <div className="flex gap-1">
                     {task.status === "open" && (
-                      <Button size="sm" variant="ghost" className="h-7 text-xs" onClick={() => updateTask.mutate({ id: task.id, status: "in_progress" })}>Start</Button>
+                      <Button size="sm" variant="ghost" className="h-7 text-xs" onClick={() => updateTask.mutate({ id: task.id, status: "in_progress" })} disabled={updateTask.isPending || deleteTask.isPending}>Start</Button>
                     )}
-                    <Button size="sm" variant="ghost" className="h-7 w-7 p-0 text-slate-400 hover:text-red-500" onClick={() => deleteTask.mutate(task.id)}>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      className="h-7 w-7 p-0 text-slate-400 hover:text-red-500"
+                      onClick={() => { if (!confirm("Delete this task?")) return; deleteTask.mutate(task.id); }}
+                      disabled={deleteTask.isPending || updateTask.isPending}
+                    >
                       <Trash2 className="h-3.5 w-3.5" />
                     </Button>
                   </div>

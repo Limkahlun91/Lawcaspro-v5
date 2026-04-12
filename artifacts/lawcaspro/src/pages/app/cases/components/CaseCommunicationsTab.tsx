@@ -6,19 +6,9 @@ import { Input } from "@/components/ui/input";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { useToast } from "@/hooks/use-toast";
 import { Plus, ArrowLeft, Send, Trash2, MessageCircle } from "lucide-react";
-
-const API_BASE = import.meta.env.BASE_URL.replace(/\/$/, "").replace(/^\/lawcaspro/, "") + "/api";
-
-async function apiFetch(path: string, init?: RequestInit) {
-  const res = await fetch(`${API_BASE}${path}`, {
-    credentials: "include",
-    ...init,
-    headers: { "Content-Type": "application/json", ...(init?.headers ?? {}) },
-  });
-  if (!res.ok) throw new Error(await res.text());
-  if (res.status === 204) return null;
-  return res.json();
-}
+import { QueryFallback } from "@/components/query-fallback";
+import { apiFetchJson } from "@/lib/api-client";
+import { toastError } from "@/lib/toast-error";
 
 interface Thread {
   id: number;
@@ -47,10 +37,19 @@ export default function CaseCommunicationsTab({ caseId, initialThreadId }: { cas
   const [messageInput, setMessageInput] = useState("");
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
-  const { data: threads = [], isLoading } = useQuery<Thread[]>({
+  useEffect(() => {
+    setActiveThreadId(null);
+    setMessageInput("");
+    setCreateOpen(false);
+    setNewSubject("");
+  }, [caseId]);
+
+  const threadsQuery = useQuery<Thread[]>({
     queryKey: ["case-threads", caseId],
-    queryFn: () => apiFetch(`/cases/${caseId}/threads`),
+    queryFn: () => apiFetchJson(`/cases/${caseId}/threads`),
+    retry: false,
   });
+  const threads = threadsQuery.data ?? [];
 
   const activeThread = threads.find(t => t.id === activeThreadId);
 
@@ -62,11 +61,13 @@ export default function CaseCommunicationsTab({ caseId, initialThreadId }: { cas
     }
   }, [initialThreadId, threads, activeThreadId]);
 
-  const { data: messages = [], isLoading: messagesLoading } = useQuery<Message[]>({
-    queryKey: ["thread-messages", activeThreadId],
-    queryFn: () => apiFetch(`/cases/${caseId}/threads/${activeThreadId}/messages`),
+  const messagesQuery = useQuery<Message[]>({
+    queryKey: ["thread-messages", caseId, activeThreadId],
+    queryFn: () => apiFetchJson(`/cases/${caseId}/threads/${activeThreadId}/messages`),
     enabled: !!activeThreadId,
+    retry: false,
   });
+  const messages = messagesQuery.data ?? [];
 
   useEffect(() => {
     if (activeThreadId && messages.length > 0) {
@@ -76,15 +77,17 @@ export default function CaseCommunicationsTab({ caseId, initialThreadId }: { cas
 
   useEffect(() => {
     if (activeThreadId) {
-      apiFetch(`/cases/${caseId}/threads/${activeThreadId}/read`, { method: "POST" }).then(() => {
-        qc.invalidateQueries({ queryKey: ["case-threads", caseId] });
-        qc.invalidateQueries({ queryKey: ["unread-count"] });
-      });
+      apiFetchJson(`/cases/${caseId}/threads/${activeThreadId}/read`, { method: "POST" })
+        .then(() => {
+          qc.invalidateQueries({ queryKey: ["case-threads", caseId] });
+          qc.invalidateQueries({ queryKey: ["unread-count"] });
+        })
+        .catch(() => {});
     }
   }, [activeThreadId, caseId, qc]);
 
   const createThread = useMutation({
-    mutationFn: (subject: string) => apiFetch(`/cases/${caseId}/threads`, { method: "POST", body: JSON.stringify({ subject }) }),
+    mutationFn: (subject: string) => apiFetchJson(`/cases/${caseId}/threads`, { method: "POST", body: JSON.stringify({ subject }) }),
     onSuccess: (thread) => {
       qc.invalidateQueries({ queryKey: ["case-threads", caseId] });
       setCreateOpen(false);
@@ -92,28 +95,29 @@ export default function CaseCommunicationsTab({ caseId, initialThreadId }: { cas
       setActiveThreadId(thread.id);
       toast({ title: "Subject created" });
     },
-    onError: (err) => toast({ title: "Error", description: String(err), variant: "destructive" }),
+    onError: (err) => toastError(toast, err, "Create failed"),
   });
 
   const sendMessage = useMutation({
-    mutationFn: (notes: string) => apiFetch(`/cases/${caseId}/threads/${activeThreadId}/messages`, { method: "POST", body: JSON.stringify({ notes }) }),
+    mutationFn: (notes: string) => apiFetchJson(`/cases/${caseId}/threads/${activeThreadId}/messages`, { method: "POST", body: JSON.stringify({ notes }) }),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["thread-messages", activeThreadId] });
+      qc.invalidateQueries({ queryKey: ["thread-messages", caseId, activeThreadId] });
       qc.invalidateQueries({ queryKey: ["case-threads", caseId] });
       qc.invalidateQueries({ queryKey: ["unread-count"] });
       setMessageInput("");
     },
-    onError: (err) => toast({ title: "Error", description: String(err), variant: "destructive" }),
+    onError: (err) => toastError(toast, err, "Send failed"),
   });
 
   const deleteThread = useMutation({
-    mutationFn: (threadId: number) => apiFetch(`/cases/${caseId}/threads/${threadId}`, { method: "DELETE" }),
+    mutationFn: (threadId: number) => apiFetchJson(`/cases/${caseId}/threads/${threadId}`, { method: "DELETE" }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["case-threads", caseId] });
       qc.invalidateQueries({ queryKey: ["unread-count"] });
       setActiveThreadId(null);
       toast({ title: "Subject deleted" });
     },
+    onError: (err) => toastError(toast, err, "Delete failed"),
   });
 
   const handleSend = () => {
@@ -153,13 +157,16 @@ export default function CaseCommunicationsTab({ caseId, initialThreadId }: { cas
               size="sm"
               className="h-8 w-8 p-0 text-slate-400 hover:text-red-500"
               onClick={() => { if (confirm("Delete this subject and all its messages?")) deleteThread.mutate(activeThreadId); }}
+              disabled={deleteThread.isPending || sendMessage.isPending}
             >
               <Trash2 className="w-3.5 h-3.5" />
             </Button>
           </div>
 
           <div className="flex-1 overflow-y-auto px-4 py-4 space-y-3">
-            {messagesLoading ? (
+            {messagesQuery.isError ? (
+              <QueryFallback title="Messages unavailable" error={messagesQuery.error} onRetry={() => messagesQuery.refetch()} isRetrying={messagesQuery.isFetching} />
+            ) : messagesQuery.isLoading ? (
               <div className="text-center py-8 text-slate-500">Loading...</div>
             ) : messages.length === 0 ? (
               <div className="text-center py-8 text-slate-500 text-sm">No messages yet. Start the conversation below.</div>
@@ -195,7 +202,7 @@ export default function CaseCommunicationsTab({ caseId, initialThreadId }: { cas
                 size="sm"
                 className="bg-amber-500 hover:bg-amber-600 h-10 px-4"
                 onClick={handleSend}
-                disabled={!messageInput.trim() || sendMessage.isPending}
+                disabled={!messageInput.trim() || sendMessage.isPending || deleteThread.isPending}
               >
                 <Send className="w-4 h-4" />
               </Button>
@@ -217,7 +224,11 @@ export default function CaseCommunicationsTab({ caseId, initialThreadId }: { cas
           </Button>
         </div>
         <CardContent className="p-0">
-          {isLoading ? (
+          {threadsQuery.isError ? (
+            <div className="p-6">
+              <QueryFallback title="Communications unavailable" error={threadsQuery.error} onRetry={() => threadsQuery.refetch()} isRetrying={threadsQuery.isFetching} />
+            </div>
+          ) : threadsQuery.isLoading ? (
             <div className="text-slate-500 py-8 text-center">Loading...</div>
           ) : threads.length === 0 ? (
             <div className="text-center py-12 text-slate-500">
@@ -271,7 +282,11 @@ export default function CaseCommunicationsTab({ caseId, initialThreadId }: { cas
                 placeholder="e.g., SPA Stamping Discussion, Title Transfer Follow-up"
                 value={newSubject}
                 onChange={(e) => setNewSubject(e.target.value)}
-                onKeyDown={(e) => { if (e.key === "Enter") createThread.mutate(newSubject); }}
+                onKeyDown={(e) => {
+                  if (e.key !== "Enter") return;
+                  if (!newSubject.trim() || createThread.isPending) return;
+                  createThread.mutate(newSubject);
+                }}
               />
             </div>
             <div className="flex justify-end gap-2 pt-2">

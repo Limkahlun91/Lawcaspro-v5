@@ -4,14 +4,8 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Input } from "@/components/ui/input";
 import { ScrollText, Search } from "lucide-react";
-
-const API_BASE = import.meta.env.BASE_URL.replace(/\/$/, "").replace(/^\/lawcaspro/, "") + "/api";
-
-async function apiFetch(path: string) {
-  const res = await fetch(`${API_BASE}${path}`, { credentials: "include" });
-  if (!res.ok) throw new Error(await res.text());
-  return res.json();
-}
+import { QueryFallback } from "@/components/query-fallback";
+import { apiFetchJson } from "@/lib/api-client";
 
 const ACTION_LABELS: Record<string, string> = {
   case_created: "Case Created",
@@ -54,10 +48,12 @@ export default function AuditLogs() {
   if (entityFilter !== "all") params.set("entityType", entityFilter);
   params.set("limit", "100");
 
-  const { data, isLoading } = useQuery<{ data: Record<string, unknown>[]; total: number }>({
+  const auditQuery = useQuery<{ data: Record<string, unknown>[]; total: number }>({
     queryKey: ["audit-logs", actionFilter, entityFilter],
-    queryFn: () => apiFetch(`/audit-logs?${params.toString()}`),
+    queryFn: () => apiFetchJson(`/audit-logs?${params.toString()}`),
+    retry: false,
   });
+  const { data, isLoading } = auditQuery;
 
   const logs = (data?.data ?? []).filter((log) => {
     if (!search) return true;
@@ -124,7 +120,9 @@ export default function AuditLogs() {
           </CardTitle>
         </CardHeader>
         <CardContent>
-          {isLoading ? (
+          {auditQuery.isError ? (
+            <QueryFallback title="Audit logs unavailable" error={auditQuery.error} onRetry={() => auditQuery.refetch()} isRetrying={auditQuery.isFetching} />
+          ) : isLoading ? (
             <div className="text-slate-500 py-8 text-center">Loading audit logs...</div>
           ) : logs.length === 0 ? (
             <div className="text-center py-12 text-slate-500">

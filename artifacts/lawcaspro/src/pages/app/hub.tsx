@@ -15,8 +15,9 @@ import {
 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import { Input as SearchInput } from "@/components/ui/input";
-
-const API_BASE = import.meta.env.BASE_URL + "api";
+import { QueryFallback } from "@/components/query-fallback";
+import { apiFetchBlob, apiFetchJson } from "@/lib/api-client";
+import { toastError } from "@/lib/toast-error";
 
 const ALLOWED_TYPES: Record<string, string> = {
   "application/pdf": "PDF",
@@ -103,61 +104,54 @@ export default function HubPage() {
 
   const [form, setForm] = useState({ subject: "", body: "" });
 
-  const { data: messages = [], isLoading: loadingMessages } = useQuery<Message[]>({
+  const messagesQuery = useQuery<Message[]>({
     queryKey: ["hub-messages"],
-    queryFn: async () => {
-      const res = await fetch(`${API_BASE}/hub/messages`, { credentials: "include" });
-      if (!res.ok) throw new Error("Failed to load messages");
-      return res.json();
-    },
+    queryFn: () => apiFetchJson("/hub/messages"),
     refetchInterval: 15000,
     enabled: activeTab === "messages",
+    retry: false,
   });
+  const messages = messagesQuery.data ?? [];
+  const loadingMessages = messagesQuery.isLoading;
 
-  const { data: docs = [], isLoading: loadingDocs } = useQuery<SystemDoc[]>({
+  const docsQuery = useQuery<SystemDoc[]>({
     queryKey: ["hub-documents"],
-    queryFn: async () => {
-      const res = await fetch(`${API_BASE}/hub/documents`, { credentials: "include" });
-      if (!res.ok) throw new Error("Failed to load documents");
-      return res.json();
-    },
+    queryFn: () => apiFetchJson("/hub/documents"),
     enabled: activeTab === "documents",
+    retry: false,
   });
+  const docs = docsQuery.data ?? [];
+  const loadingDocs = docsQuery.isLoading;
 
   const markReadMutation = useMutation({
-    mutationFn: async (msgId: number) => {
-      await fetch(`${API_BASE}/hub/messages/${msgId}/read`, { method: "PATCH", credentials: "include" });
-    },
+    mutationFn: async (msgId: number) => apiFetchJson(`/hub/messages/${msgId}/read`, { method: "PATCH" }),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["hub-messages"] }),
+    onError: (e) => toastError(toast, e, "Update failed"),
   });
 
   const handleDownloadAttachment = async (a: Attachment) => {
     try {
       const pathPart = a.objectPath.replace(/^\/objects\//, "");
-      const res = await fetch(`${API_BASE}/storage/objects/${pathPart}`, { credentials: "include" });
-      if (!res.ok) throw new Error("Download failed");
-      const blob = await res.blob();
+      const blob = await apiFetchBlob(`/storage/objects/${pathPart}`);
       const url = URL.createObjectURL(blob);
       const el = document.createElement("a");
       el.href = url;
-      el.download = a.fileName;
+      el.download = a.fileName || "download";
       el.click();
       URL.revokeObjectURL(url);
-    } catch {
-      toast({ title: "Download failed", variant: "destructive" });
+    } catch (e) {
+      toastError(toast, e, "Download failed");
     }
   };
 
   const handleDownloadDoc = async (doc: SystemDoc) => {
     try {
       const pathPart = doc.objectPath.replace(/^\/objects\//, "");
-      const res = await fetch(`${API_BASE}/storage/objects/${pathPart}`, { credentials: "include" });
-      if (!res.ok) throw new Error("Download failed");
-      const blob = await res.blob();
+      const blob = await apiFetchBlob(`/storage/objects/${pathPart}`);
       const url = URL.createObjectURL(blob);
       const el = document.createElement("a");
       el.href = url;
-      el.download = doc.fileName;
+      el.download = doc.fileName || "download";
       el.click();
       URL.revokeObjectURL(url);
     } catch {
@@ -184,17 +178,11 @@ export default function HubPage() {
       for (const file of attachments) {
         const formData = new FormData();
         formData.append("file", file);
-        const uploadRes = await fetch(`${API_BASE}/storage/upload`, {
-          method: "POST",
-          body: formData,
-          credentials: "include",
-        });
-        if (!uploadRes.ok) throw new Error("File upload failed");
-        const { objectPath } = await uploadRes.json();
+        const { objectPath } = await apiFetchJson<{ objectPath: string }>("/storage/upload", { method: "POST", body: formData });
         uploadedAttachments.push({ fileName: file.name, fileType: file.type, fileSize: file.size, objectPath });
       }
 
-      const res = await fetch(`${API_BASE}/hub/messages`, {
+      await apiFetchJson("/hub/messages", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -202,17 +190,15 @@ export default function HubPage() {
           body: form.body,
           attachments: uploadedAttachments,
         }),
-        credentials: "include",
       });
-      if (!res.ok) throw new Error("Failed to send message");
 
       queryClient.invalidateQueries({ queryKey: ["hub-messages"] });
       toast({ title: "Message sent", description: "Your message has been sent to Lawcaspro." });
       setShowCompose(false);
       setForm({ subject: "", body: "" });
       setAttachments([]);
-    } catch (e: any) {
-      toast({ title: "Error", description: e.message, variant: "destructive" });
+    } catch (e) {
+      toastError(toast, e, "Send failed");
     } finally {
       setSending(false);
     }
@@ -262,7 +248,9 @@ export default function HubPage() {
             </Button>
           </div>
 
-          {loadingMessages ? (
+          {messagesQuery.isError ? (
+            <QueryFallback title="Messages unavailable" error={messagesQuery.error} onRetry={() => messagesQuery.refetch()} isRetrying={messagesQuery.isFetching} />
+          ) : loadingMessages ? (
             <div className="text-slate-500 text-sm py-8 text-center">Loading messages...</div>
           ) : messages.length === 0 ? (
             <div className="text-center py-16">
@@ -337,7 +325,9 @@ export default function HubPage() {
             />
           </div>
 
-          {loadingDocs ? (
+          {docsQuery.isError ? (
+            <QueryFallback title="Documents unavailable" error={docsQuery.error} onRetry={() => docsQuery.refetch()} isRetrying={docsQuery.isFetching} />
+          ) : loadingDocs ? (
             <div className="text-slate-500 text-sm py-8 text-center">Loading documents...</div>
           ) : filteredDocs.length === 0 ? (
             <div className="text-center py-16">

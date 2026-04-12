@@ -15,12 +15,13 @@ import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { DOCUMENT_TYPE_LABELS } from "@workspace/documents-registry";
+import { QueryFallback } from "@/components/query-fallback";
+import { apiFetchBlob, apiFetchJson } from "@/lib/api-client";
+import { toastError } from "@/lib/toast-error";
 
 function docTypeLabel(dt: string): string {
   return (DOCUMENT_TYPE_LABELS as Record<string, string>)[dt] ?? dt;
 }
-
-const API_BASE = import.meta.env.BASE_URL.replace(/\/$/, "").replace(/^\/lawcaspro/, "") + "/api";
 
 interface DocumentTemplate {
   id: number;
@@ -30,17 +31,6 @@ interface DocumentTemplate {
   file_name: string;
   object_path: string;
   created_at: string;
-}
-
-async function apiFetch(path: string, init?: RequestInit) {
-  const res = await fetch(`${API_BASE}${path}`, {
-    credentials: "include",
-    ...init,
-    headers: { "Content-Type": "application/json", ...(init?.headers ?? {}) },
-  });
-  if (!res.ok) throw new Error(await res.text());
-  if (res.status === 204) return null;
-  return res.json();
 }
 
 const TEMPLATE_FIELDS = [
@@ -80,18 +70,21 @@ export default function DocumentTemplates() {
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [isUploading, setIsUploading] = useState(false);
 
-  const { data: templates = [], isLoading } = useQuery<DocumentTemplate[]>({
+  const templatesQuery = useQuery<DocumentTemplate[]>({
     queryKey: ["document-templates"],
-    queryFn: () => apiFetch("/document-templates"),
+    queryFn: () => apiFetchJson("/document-templates"),
+    retry: false,
   });
+  const templates = templatesQuery.data ?? [];
+  const isLoading = templatesQuery.isLoading;
 
   const deleteMutation = useMutation({
-    mutationFn: (id: number) => apiFetch(`/document-templates/${id}`, { method: "DELETE" }),
+    mutationFn: (id: number) => apiFetchJson(`/document-templates/${id}`, { method: "DELETE" }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["document-templates"] });
       toast({ title: "Template deleted" });
     },
-    onError: (err) => toast({ title: "Error", description: String(err), variant: "destructive" }),
+    onError: (err) => toastError(toast, err, "Delete failed"),
   });
 
   async function handleUpload() {
@@ -100,15 +93,9 @@ export default function DocumentTemplates() {
     try {
       const formData = new FormData();
       formData.append("file", selectedFile);
-      const uploadRes = await fetch(`${API_BASE}/storage/upload`, {
-        method: "POST",
-        body: formData,
-        credentials: "include",
-      });
-      if (!uploadRes.ok) throw new Error("Upload to storage failed");
-      const { objectPath } = await uploadRes.json();
+      const { objectPath } = await apiFetchJson<{ objectPath: string }>("/storage/upload", { method: "POST", body: formData });
 
-      await apiFetch("/document-templates", {
+      await apiFetchJson("/document-templates", {
         method: "POST",
         body: JSON.stringify({
           name: templateName,
@@ -127,7 +114,7 @@ export default function DocumentTemplates() {
       setTemplateDescription("");
       setSelectedFile(null);
     } catch (err) {
-      toast({ title: "Upload failed", description: String(err), variant: "destructive" });
+      toastError(toast, err, "Upload failed");
     } finally {
       setIsUploading(false);
     }
@@ -163,7 +150,9 @@ export default function DocumentTemplates() {
         </div>
       </CardHeader>
       <CardContent>
-        {isLoading ? (
+        {templatesQuery.isError ? (
+          <QueryFallback title="Templates unavailable" error={templatesQuery.error} onRetry={() => templatesQuery.refetch()} isRetrying={templatesQuery.isFetching} />
+        ) : isLoading ? (
           <div className="text-slate-500 py-8 text-center">Loading templates...</div>
         ) : templates.length === 0 ? (
           <div className="text-center py-12 text-slate-500">
@@ -205,7 +194,8 @@ export default function DocumentTemplates() {
                   size="icon"
                   variant="ghost"
                   className="h-8 w-8 text-slate-400 hover:text-red-600"
-                  onClick={(e) => { e.stopPropagation(); deleteMutation.mutate(t.id); }}
+                  onClick={(e) => { e.stopPropagation(); if (!confirm("Delete this template?")) return; deleteMutation.mutate(t.id); }}
+                  disabled={deleteMutation.isPending}
                 >
                   <Trash2 className="w-4 h-4" />
                 </Button>
@@ -250,17 +240,15 @@ export default function DocumentTemplates() {
                   onClick={async () => {
                     try {
                       const pathPart = activeTemplate.object_path.replace(/^\/objects\//, "");
-                      const res = await fetch(`${API_BASE}/storage/objects/${pathPart}`, { credentials: "include" });
-                      if (!res.ok) throw new Error("Download failed");
-                      const blob = await res.blob();
+                      const blob = await apiFetchBlob(`/storage/objects/${pathPart}`);
                       const url = URL.createObjectURL(blob);
                       const a = document.createElement("a");
                       a.href = url;
-                      a.download = activeTemplate.file_name;
+                      a.download = activeTemplate.file_name || "download";
                       a.click();
                       URL.revokeObjectURL(url);
-                    } catch (e: any) {
-                      toast({ title: "Download failed", description: e.message, variant: "destructive" });
+                    } catch (e) {
+                      toastError(toast, e, "Download failed");
                     }
                   }}
                   className="gap-1.5"
@@ -270,10 +258,12 @@ export default function DocumentTemplates() {
                 <Button
                   variant="destructive"
                   onClick={() => {
+                    if (!confirm("Delete this template?")) return;
                     deleteMutation.mutate(activeTemplate.id);
                     setDetailOpen(false);
                   }}
                   className="gap-1.5"
+                  disabled={deleteMutation.isPending}
                 >
                   <Trash2 className="w-4 h-4" /> Delete
                 </Button>

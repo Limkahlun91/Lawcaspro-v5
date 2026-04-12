@@ -8,10 +8,10 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { useToast } from "@/hooks/use-toast";
 import { AlertTriangle, CheckCircle, ShieldAlert, Search, Lock } from "lucide-react";
-import { getApiBaseUrl } from "@/lib/api";
 import { useReAuth } from "@/components/re-auth-dialog";
-
-const API_BASE = getApiBaseUrl();
+import { QueryFallback } from "@/components/query-fallback";
+import { apiFetchJson } from "@/lib/api-client";
+import { toastError } from "@/lib/toast-error";
 
 const RESULT_CONFIG: Record<string, { label: string; color: string; icon: any }> = {
   no_match:                       { label: "Clear",            color: "bg-green-100 text-green-700",   icon: CheckCircle },
@@ -34,27 +34,25 @@ export default function CaseConflictPanel({ caseId, parties }: ConflictPanelProp
   const [overrideReason, setOverrideReason] = useState("");
   const [overrideLoading, setOverrideLoading] = useState(false);
 
-  const { data: checksData, refetch } = useQuery({
+  const checksQuery = useQuery({
     queryKey: ["conflict-checks", caseId],
-    queryFn: async () => {
-      const res = await fetch(`${API_BASE}/conflict/checks?caseId=${caseId}`, { credentials: "include" });
-      if (!res.ok) return { data: [] };
-      return res.json();
-    },
+    queryFn: () => apiFetchJson(`/conflict/checks?caseId=${caseId}`),
+    retry: false,
   });
+  const checksData = checksQuery.data as any;
 
   const latestCheck = checksData?.data?.[0];
 
-  const { data: checkDetail } = useQuery({
+  const checkDetailQuery = useQuery({
     queryKey: ["conflict-check-detail", latestCheck?.id],
     queryFn: async () => {
       if (!latestCheck?.id) return null;
-      const res = await fetch(`${API_BASE}/conflict/checks/${latestCheck.id}`, { credentials: "include" });
-      if (!res.ok) return null;
-      return res.json();
+      return await apiFetchJson(`/conflict/checks/${latestCheck.id}`);
     },
     enabled: !!latestCheck?.id,
+    retry: false,
   });
+  const checkDetail = checkDetailQuery.data as any;
 
   async function runCheck() {
     if (parties.length === 0) {
@@ -71,23 +69,20 @@ export default function CaseConflictPanel({ caseId, parties }: ConflictPanelProp
 
     setRunning(true);
     try {
-      const res = await fetch(`${API_BASE}/conflict/check`, {
+      const data = await apiFetchJson<any>(`/conflict/check`, {
         method: "POST",
-        credentials: "include",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ caseId, parties: partyList }),
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error ?? "Failed to run conflict check");
       const result = data.check?.overallResult ?? "unknown";
       toast({
         title: `Conflict check complete`,
         description: result === "no_match" ? "No conflicts found" : `Result: ${RESULT_CONFIG[result]?.label ?? result}`,
       });
-      refetch();
+      checksQuery.refetch();
       queryClient.invalidateQueries({ queryKey: ["conflict-check-detail"] });
-    } catch (err: any) {
-      toast({ title: "Error", description: err.message, variant: "destructive" });
+    } catch (err) {
+      toastError(toast, err, "Conflict check failed");
     } finally {
       setRunning(false);
     }
@@ -102,27 +97,22 @@ export default function CaseConflictPanel({ caseId, parties }: ConflictPanelProp
     setOverrideLoading(true);
     try {
       await wrapWithReAuth(async (authHeaders) => {
-        const res = await fetch(`${API_BASE}/conflict/checks/${overrideTarget.checkId}/override`, {
+        return await apiFetchJson(`/conflict/checks/${overrideTarget.checkId}/override`, {
           method: "POST",
-          credentials: "include",
           headers: { "Content-Type": "application/json", ...authHeaders },
           body: JSON.stringify({ conflictMatchId: overrideTarget.matchId, overrideReason }),
         });
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.error ?? "Override failed");
-        return data;
       }, "Confirm partner override for conflict match");
 
       toast({ title: "Conflict override applied successfully" });
       setOverrideDialogOpen(false);
       setOverrideReason("");
       setOverrideTarget(null);
-      refetch();
+      checksQuery.refetch();
       queryClient.invalidateQueries({ queryKey: ["conflict-check-detail"] });
-    } catch (err: any) {
-      if (err.message !== "Re-authentication cancelled") {
-        toast({ title: "Override failed", description: err.message, variant: "destructive" });
-      }
+    } catch (err) {
+      if (err instanceof Error && err.message === "Re-authentication cancelled") return;
+      toastError(toast, err, "Override failed");
     } finally {
       setOverrideLoading(false);
     }
@@ -161,7 +151,17 @@ export default function CaseConflictPanel({ caseId, parties }: ConflictPanelProp
         )}
       </CardHeader>
 
-      {checkDetail?.matches?.length > 0 && (
+      {checksQuery.isError ? (
+        <CardContent className="pt-0">
+          <QueryFallback title="Conflict check unavailable" error={checksQuery.error} onRetry={() => checksQuery.refetch()} isRetrying={checksQuery.isFetching} />
+        </CardContent>
+      ) : null}
+
+      {checkDetailQuery.isError ? (
+        <CardContent className="pt-0">
+          <QueryFallback title="Conflict details unavailable" error={checkDetailQuery.error} onRetry={() => checkDetailQuery.refetch()} isRetrying={checkDetailQuery.isFetching} />
+        </CardContent>
+      ) : checkDetail?.matches?.length > 0 ? (
         <CardContent className="pt-0 space-y-2">
           <div className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-2">
             Matches ({checkDetail.matches.length})
@@ -216,7 +216,7 @@ export default function CaseConflictPanel({ caseId, parties }: ConflictPanelProp
             );
           })}
         </CardContent>
-      )}
+      ) : null}
 
       {checkDetail?.matches?.length === 0 && latestCheck?.status === "completed" && (
         <CardContent className="pt-0">

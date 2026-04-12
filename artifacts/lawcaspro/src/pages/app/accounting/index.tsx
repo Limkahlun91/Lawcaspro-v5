@@ -14,6 +14,7 @@ import { useToast } from "@/hooks/use-toast";
 import { apiFetchJson } from "@/lib/api-client";
 import { toastError } from "@/lib/toast-error";
 import { useListQuotations } from "@workspace/api-client-react";
+import { QueryFallback } from "@/components/query-fallback";
 
 function fmt(val: unknown) {
   return `RM ${Number(val ?? 0).toLocaleString("en-MY", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
@@ -57,7 +58,7 @@ function StatusBadge({ status }: { status: string }) {
 // ── OVERVIEW TAB ─────────────────────────────────────────────────────────────
 
 function LedgerSummaryInline() {
-  const { data } = useQuery({ queryKey: ["ledger-summary-overview"], queryFn: () => apiFetch("/ledger/summary") });
+  const { data } = useQuery({ queryKey: ["ledger-summary"], queryFn: () => apiFetchJson("/ledger/summary"), retry: false });
   const rows = (data ?? []) as any[];
   if (!rows.length) return <div className="text-slate-400 text-sm py-4 text-center">No ledger entries yet</div>;
   return (
@@ -78,7 +79,7 @@ function LedgerSummaryInline() {
 }
 
 function OverviewTab() {
-  const { data: invData } = useQuery({ queryKey: ["invoices"], queryFn: () => apiFetch("/invoices") });
+  const { data: invData } = useQuery({ queryKey: ["invoices"], queryFn: () => apiFetchJson("/invoices"), retry: false });
   const invoices = (invData ?? []) as any[];
   const invTotals = invoices.reduce((acc, inv) => ({
     total: acc.total + Number(inv.grandTotal),
@@ -88,7 +89,8 @@ function OverviewTab() {
 
   const { data: accData } = useQuery({
     queryKey: ["accounting-summary"],
-    queryFn: () => apiFetch("/accounting/summary"),
+    queryFn: () => apiFetchJson("/accounting/summary"),
+    retry: false,
   });
   const monthly = ((accData?.monthly ?? []) as any[]);
 
@@ -177,7 +179,8 @@ function InvoicesTab() {
   const qc = useQueryClient();
   const [selectedQuotationId, setSelectedQuotationId] = useState("");
 
-  const { data, isLoading } = useQuery({ queryKey: ["invoices"], queryFn: () => apiFetchJson("/invoices") });
+  const invoicesQuery = useQuery({ queryKey: ["invoices"], queryFn: () => apiFetchJson("/invoices"), retry: false });
+  const { data, isLoading } = invoicesQuery;
   const invoices = (data ?? []) as any[];
   const { data: quotations = [] } = useListQuotations();
 
@@ -245,6 +248,8 @@ function InvoicesTab() {
 
       {isLoading ? (
         <div className="text-center py-12 text-slate-400">Loading…</div>
+      ) : invoicesQuery.isError ? (
+        <QueryFallback title="Invoices unavailable" error={invoicesQuery.error} onRetry={() => invoicesQuery.refetch()} isRetrying={invoicesQuery.isFetching} />
       ) : filtered.length === 0 ? (
         <div className="text-center py-16 text-slate-400">
           <FileText className="w-10 h-10 mx-auto mb-3 opacity-30" />
@@ -279,7 +284,9 @@ function InvoicesTab() {
                     <div className="flex items-center justify-end gap-2">
                       {inv.status === "draft" && (
                         <Button size="sm" variant="outline" className="text-xs h-7"
-                          onClick={() => issueMut.mutate(inv.id)}>Issue</Button>
+                          onClick={() => issueMut.mutate(inv.id)}
+                          disabled={issueMut.isPending}
+                        >Issue</Button>
                       )}
                       <Button size="sm" variant="ghost" className="h-7 w-7 p-0"
                         onClick={() => setLocation(`/app/accounting/invoices/${inv.id}`)}>
@@ -308,35 +315,37 @@ function ReceiptsTab() {
     amount: "", receivedDate: new Date().toISOString().slice(0, 10), referenceNo: "", notes: "",
   });
 
-  const { data, isLoading } = useQuery({ queryKey: ["receipts"], queryFn: () => apiFetch("/receipts") });
+  const receiptsQuery = useQuery({ queryKey: ["receipts"], queryFn: () => apiFetchJson("/receipts"), retry: false });
+  const { data, isLoading } = receiptsQuery;
   const receipts = (data ?? []) as any[];
-  const { data: invData } = useQuery({ queryKey: ["invoices-for-receipt"], queryFn: () => apiFetch("/invoices") });
-  const openInvoices = ((invData ?? []) as any[]).filter((i: any) => i.status !== "void" && i.status !== "paid");
+  const invoicesQuery = useQuery({ queryKey: ["invoices"], queryFn: () => apiFetchJson("/invoices"), retry: false });
+  const openInvoices = (((invoicesQuery.data ?? []) as any[]).filter((i: any) => i.status !== "void" && i.status !== "paid"));
 
   const createMut = useMutation({
-    mutationFn: () => apiFetch("/receipts", {
+    mutationFn: () => apiFetchJson("/receipts", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ ...form, invoiceId: form.invoiceId || undefined, amount: parseFloat(form.amount) }),
     }),
     onSuccess: (rec: any) => {
       qc.invalidateQueries({ queryKey: ["receipts"] });
       qc.invalidateQueries({ queryKey: ["invoices"] });
-      qc.invalidateQueries({ queryKey: ["ledger-summary-overview"] });
+      qc.invalidateQueries({ queryKey: ["ledger-summary"] });
       setShowCreate(false);
       setForm({ invoiceId: "", paymentMethod: "bank_transfer", accountType: "client", amount: "", receivedDate: new Date().toISOString().slice(0, 10), referenceNo: "", notes: "" });
       toast({ title: "Receipt recorded", description: `${rec.receiptNo} saved` });
     },
-    onError: (e: any) => toast({ variant: "destructive", title: "Error", description: e.message }),
+    onError: (e) => toastError(toast, e, "Create failed"),
   });
 
   const reverseMut = useMutation({
-    mutationFn: (id: number) => apiFetch(`/receipts/${id}/reverse`, { method: "POST" }),
+    mutationFn: (id: number) => apiFetchJson(`/receipts/${id}/reverse`, { method: "POST" }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["receipts"] });
       qc.invalidateQueries({ queryKey: ["invoices"] });
+      qc.invalidateQueries({ queryKey: ["ledger-summary"] });
       toast({ title: "Receipt reversed" });
     },
-    onError: (e: any) => toast({ variant: "destructive", title: "Error", description: e.message }),
+    onError: (e) => toastError(toast, e, "Action failed"),
   });
 
   return (
@@ -411,7 +420,9 @@ function ReceiptsTab() {
         </Card>
       )}
 
-      {isLoading ? (
+      {receiptsQuery.isError ? (
+        <QueryFallback title="Receipts unavailable" error={receiptsQuery.error} onRetry={() => { receiptsQuery.refetch(); invoicesQuery.refetch(); }} isRetrying={receiptsQuery.isFetching || invoicesQuery.isFetching} />
+      ) : isLoading ? (
         <div className="text-center py-12 text-slate-400">Loading…</div>
       ) : receipts.length === 0 ? (
         <div className="text-center py-16 text-slate-400">
@@ -454,7 +465,9 @@ function ReceiptsTab() {
                     {!r.isReversed && (
                       <Button size="sm" variant="ghost" className="h-7 w-7 p-0 text-slate-400 hover:text-red-500"
                         title="Reverse receipt"
-                        onClick={() => { if (confirm("Reverse this receipt? This will update invoice payment status.")) reverseMut.mutate(r.id); }}>
+                        onClick={() => { if (confirm("Reverse this receipt? This will update invoice payment status.")) reverseMut.mutate(r.id); }}
+                        disabled={reverseMut.isPending}
+                      >
                         <RotateCcw className="w-3.5 h-3.5" />
                       </Button>
                     )}
@@ -493,11 +506,12 @@ function PaymentVouchersTab() {
     items: [{ description: "", itemType: "disbursement", amount: "" }],
   });
 
-  const { data, isLoading } = useQuery({ queryKey: ["payment-vouchers"], queryFn: () => apiFetch("/payment-vouchers") });
+  const vouchersQuery = useQuery({ queryKey: ["payment-vouchers"], queryFn: () => apiFetchJson("/payment-vouchers"), retry: false });
+  const { data, isLoading } = vouchersQuery;
   const vouchers = (data ?? []) as any[];
 
   const createMut = useMutation({
-    mutationFn: () => apiFetch("/payment-vouchers", {
+    mutationFn: () => apiFetchJson("/payment-vouchers", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         ...form,
@@ -511,20 +525,20 @@ function PaymentVouchersTab() {
       setForm({ payeeName: "", payeeBank: "", payeeAccountNo: "", paymentMethod: "bank_transfer", accountType: "office", amount: "", purpose: "", notes: "", items: [{ description: "", itemType: "disbursement", amount: "" }] });
       toast({ title: "Payment Voucher created", description: `${pv.voucherNo} created as draft` });
     },
-    onError: (e: any) => toast({ variant: "destructive", title: "Error", description: e.message }),
+    onError: (e) => toastError(toast, e, "Create failed"),
   });
 
   const transitionMut = useMutation({
     mutationFn: ({ id, toStatus }: { id: number; toStatus: string }) =>
-      apiFetch(`/payment-vouchers/${id}/transition`, {
+      apiFetchJson(`/payment-vouchers/${id}/transition`, {
         method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ toStatus }),
       }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["payment-vouchers"] });
-      qc.invalidateQueries({ queryKey: ["ledger-summary-overview"] });
+      qc.invalidateQueries({ queryKey: ["ledger-summary"] });
       toast({ title: "Status updated" });
     },
-    onError: (e: any) => toast({ variant: "destructive", title: "Error", description: e.message }),
+    onError: (e) => toastError(toast, e, "Update failed"),
   });
 
   const updateItem = (idx: number, field: string, val: string) =>
@@ -637,7 +651,9 @@ function PaymentVouchersTab() {
         </Card>
       )}
 
-      {isLoading ? (
+      {vouchersQuery.isError ? (
+        <QueryFallback title="Payment vouchers unavailable" error={vouchersQuery.error} onRetry={() => vouchersQuery.refetch()} isRetrying={vouchersQuery.isFetching} />
+      ) : isLoading ? (
         <div className="text-center py-12 text-slate-400">Loading…</div>
       ) : vouchers.length === 0 ? (
         <div className="text-center py-16 text-slate-400">
@@ -675,7 +691,9 @@ function PaymentVouchersTab() {
                       <div className="flex items-center justify-end gap-1.5 flex-wrap">
                         {actions.map((a) => (
                           <Button key={a.toStatus} size="sm" variant="outline" className="text-xs h-7"
-                            onClick={() => transitionMut.mutate({ id: pv.id, toStatus: a.toStatus })}>
+                            onClick={() => transitionMut.mutate({ id: pv.id, toStatus: a.toStatus })}
+                            disabled={transitionMut.isPending}
+                          >
                             {a.label}
                           </Button>
                         ))}
@@ -696,13 +714,14 @@ function PaymentVouchersTab() {
 
 function LedgerTab() {
   const [accountType, setAccountType] = useState("");
-  const { data, isLoading } = useQuery({
+  const ledgerQuery = useQuery({
     queryKey: ["ledger", accountType],
-    queryFn: () => apiFetch(`/ledger${accountType ? `?accountType=${accountType}` : ""}`),
+    queryFn: () => apiFetchJson(`/ledger${accountType ? `?accountType=${accountType}` : ""}`),
+    retry: false,
   });
-  const { data: sumData } = useQuery({ queryKey: ["ledger-summary"], queryFn: () => apiFetch("/ledger/summary") });
-  const entries = (data ?? []) as any[];
-  const summary = (sumData ?? []) as any[];
+  const sumQuery = useQuery({ queryKey: ["ledger-summary"], queryFn: () => apiFetchJson("/ledger/summary"), retry: false });
+  const entries = ((ledgerQuery.data ?? []) as any[]);
+  const summary = ((sumQuery.data ?? []) as any[]);
 
   return (
     <div className="space-y-4">
@@ -724,6 +743,15 @@ function LedgerTab() {
           );
         })}
       </div>
+
+      {ledgerQuery.isError || sumQuery.isError ? (
+        <QueryFallback
+          title="Ledger unavailable"
+          error={ledgerQuery.error ?? sumQuery.error}
+          onRetry={() => { ledgerQuery.refetch(); sumQuery.refetch(); }}
+          isRetrying={ledgerQuery.isFetching || sumQuery.isFetching}
+        />
+      ) : null}
 
       {accountType && (
         <div className="text-sm text-slate-500 flex items-center gap-2">

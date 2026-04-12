@@ -7,14 +7,8 @@ import {
   PieChart, Pie, Cell, Legend, LineChart, Line,
 } from "recharts";
 import { TrendingUp, Briefcase, Users, MessageSquare, BookOpen, Landmark, Clock, ArrowRight, AlertTriangle } from "lucide-react";
-
-const API_BASE = import.meta.env.BASE_URL.replace(/\/$/, "").replace(/^\/lawcaspro/, "") + "/api";
-
-async function apiFetch(path: string) {
-  const res = await fetch(`${API_BASE}${path}`, { credentials: "include" });
-  if (!res.ok) throw new Error(await res.text());
-  return res.json();
-}
+import { QueryFallback } from "@/components/query-fallback";
+import { apiFetchJson } from "@/lib/api-client";
 
 function fmt(val: unknown) {
   return `RM ${Number(val ?? 0).toLocaleString("en-MY", { minimumFractionDigits: 0, maximumFractionDigits: 0 })}`;
@@ -41,10 +35,12 @@ const COMM_COLORS: Record<string, string> = {
 
 export default function Reports() {
   const [, setLocation] = useLocation();
-  const { data, isLoading } = useQuery({
+  const reportsQuery = useQuery({
     queryKey: ["reports-overview"],
-    queryFn: () => apiFetch("/reports/overview"),
+    queryFn: () => apiFetchJson("/reports/overview"),
+    retry: false,
   });
+  const { data, isLoading } = reportsQuery;
 
   const casesByStatus = (data?.casesByStatus ?? []) as Record<string, unknown>[];
   const casesByMonth = (data?.casesByMonth ?? []) as Record<string, unknown>[];
@@ -113,7 +109,9 @@ export default function Reports() {
       <div className="border-t border-slate-200" />
       <h2 className="text-sm font-semibold text-slate-500 uppercase tracking-wide">Analytics</h2>
 
-      {isLoading ? (
+      {reportsQuery.isError ? (
+        <QueryFallback title="Reports unavailable" error={reportsQuery.error} onRetry={() => reportsQuery.refetch()} isRetrying={reportsQuery.isFetching} />
+      ) : isLoading ? (
         <div className="text-slate-500 py-12 text-center">Loading reports...</div>
       ) : (
         <>

@@ -6,9 +6,11 @@ import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { ArrowLeft, Download, BookOpen, Printer } from "lucide-react";
 import { useLocation } from "wouter";
-import { API_BASE } from "@/lib/api-base";
 import { downloadFromApi } from "@/lib/download";
 import { useToast } from "@/hooks/use-toast";
+import { QueryFallback } from "@/components/query-fallback";
+import { apiFetchJson } from "@/lib/api-client";
+import { toastError } from "@/lib/toast-error";
 
 const STATUS_BADGE: Record<string, string> = {
   draft: "bg-slate-100 text-slate-600",
@@ -28,17 +30,17 @@ export default function BillsDeliveredBook() {
   const [to, setTo] = useState("");
   const [applied, setApplied] = useState({ from: "", to: "" });
 
-  const { data, isLoading, isError, error } = useQuery({
+  const reportQuery = useQuery({
     queryKey: ["bills-delivered-book", applied],
     queryFn: async () => {
       const params = new URLSearchParams();
       if (applied.from) params.set("from", applied.from);
       if (applied.to) params.set("to", applied.to);
-      const r = await fetch(`${API_BASE}/reports/bills-delivered-book?${params}`, { credentials: "include" });
-      if (!r.ok) throw new Error(await r.text());
-      return r.json();
+      return await apiFetchJson(`/reports/bills-delivered-book?${params}`);
     },
+    retry: false,
   });
+  const { data, isLoading, isError, error } = reportQuery;
 
   const invoices: any[] = data?.invoices ?? [];
   const totals: any = data?.totals ?? {};
@@ -55,7 +57,7 @@ export default function BillsDeliveredBook() {
         `bills-delivered-book${applied.from ? `_${applied.from}` : ""}${applied.to ? `_${applied.to}` : ""}.csv`
       );
     } catch (e: any) {
-      toast({ title: "Download failed", description: e.message, variant: "destructive" });
+      toastError(toast, e, "Download failed");
     }
   }
 
@@ -133,7 +135,9 @@ export default function BillsDeliveredBook() {
         {isLoading ? (
           <CardContent className="py-8 text-center text-sm text-slate-400">Loading...</CardContent>
         ) : isError ? (
-          <CardContent className="py-8 text-center text-sm text-red-600 break-words">{String((error as any)?.message ?? error)}</CardContent>
+          <CardContent className="py-4">
+            <QueryFallback title="Report unavailable" error={error} onRetry={() => reportQuery.refetch()} isRetrying={reportQuery.isFetching} />
+          </CardContent>
         ) : invoices.length === 0 ? (
           <CardContent className="py-12 text-center text-sm text-slate-400">No bills found for this period.</CardContent>
         ) : (

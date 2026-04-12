@@ -6,19 +6,9 @@ import { MessageCircle, ChevronRight, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useToast } from "@/hooks/use-toast";
-
-const API_BASE = import.meta.env.BASE_URL.replace(/\/$/, "").replace(/^\/lawcaspro/, "") + "/api";
-
-async function apiFetch(path: string, init?: RequestInit) {
-  const res = await fetch(`${API_BASE}${path}`, {
-    credentials: "include",
-    ...init,
-    headers: { "Content-Type": "application/json", ...(init?.headers ?? {}) },
-  });
-  if (!res.ok) throw new Error(await res.text());
-  if (res.status === 204) return null;
-  return res.json();
-}
+import { QueryFallback } from "@/components/query-fallback";
+import { apiFetchJson } from "@/lib/api-client";
+import { toastError } from "@/lib/toast-error";
 
 const TYPE_LABELS: Record<string, string> = {
   email: "Email",
@@ -46,31 +36,33 @@ export default function Communications() {
 
   const { data: unread } = useQuery<{ count: number }>({
     queryKey: ["communications-unread-count"],
-    queryFn: () => apiFetch("/communications/unread-count"),
+    queryFn: () => apiFetchJson("/communications/unread-count"),
     retry: false,
   });
 
-  const { data: comms = [], isLoading } = useQuery<Record<string, unknown>[]>({
+  const commsQuery = useQuery<Record<string, unknown>[]>({
     queryKey: ["communications", typeFilter, since],
     queryFn: () => {
       const qs = new URLSearchParams();
       if (typeFilter !== "all") qs.set("type", typeFilter);
       if (since) qs.set("since", since);
       const suffix = qs.toString() ? `?${qs.toString()}` : "";
-      return apiFetch(`/communications${suffix}`);
+      return apiFetchJson(`/communications${suffix}`);
     },
+    retry: false,
   });
+  const comms = commsQuery.data ?? [];
+  const isLoading = commsQuery.isLoading;
 
   const deleteMutation = useMutation({
     mutationFn: ({ caseId, threadId }: { caseId: number; threadId: number }) =>
-      apiFetch(`/cases/${caseId}/threads/${threadId}`, { method: "DELETE" }),
+      apiFetchJson(`/cases/${caseId}/threads/${threadId}`, { method: "DELETE" }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["communications"] });
+      qc.invalidateQueries({ queryKey: ["communications-unread-count"] });
       toast({ title: "Record deleted" });
     },
-    onError: (e: any) => {
-      toast({ title: "Error", description: String(e?.message ?? e), variant: "destructive" });
-    },
+    onError: (e) => toastError(toast, e, "Delete failed"),
   });
 
   return (
@@ -105,7 +97,9 @@ export default function Communications() {
 
       <Card>
         <CardContent className="pt-6">
-          {isLoading ? (
+          {commsQuery.isError ? (
+            <QueryFallback title="Communications unavailable" error={commsQuery.error} onRetry={() => commsQuery.refetch()} isRetrying={commsQuery.isFetching} />
+          ) : isLoading ? (
             <div className="text-slate-500 py-8 text-center">Loading...</div>
           ) : comms.length === 0 ? (
             <div className="text-center py-12 text-slate-500">
@@ -158,7 +152,12 @@ export default function Communications() {
                       size="icon"
                       variant="ghost"
                       className="h-7 w-7 text-slate-300 hover:text-red-500 shrink-0"
-                      onClick={(e) => { e.stopPropagation(); deleteMutation.mutate({ caseId: Number(t.case_id), threadId: Number(t.id) }); }}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        if (!confirm("Delete this communication record?")) return;
+                        deleteMutation.mutate({ caseId: Number(t.case_id), threadId: Number(t.id) });
+                      }}
+                      disabled={deleteMutation.isPending}
                     >
                       <Trash2 className="w-3.5 h-3.5" />
                     </Button>

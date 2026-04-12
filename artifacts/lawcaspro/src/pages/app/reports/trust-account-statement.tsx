@@ -5,9 +5,11 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { ArrowLeft, Landmark, Download } from "lucide-react";
 import { useLocation } from "wouter";
-import { API_BASE } from "@/lib/api-base";
 import { downloadFromApi } from "@/lib/download";
 import { useToast } from "@/hooks/use-toast";
+import { QueryFallback } from "@/components/query-fallback";
+import { apiFetchJson } from "@/lib/api-client";
+import { toastError } from "@/lib/toast-error";
 
 function fmtDate(d: string | null) { return d ? new Date(d).toLocaleDateString("en-MY") : "—"; }
 function fmtAmt(v: unknown) { return Number(v ?? 0).toLocaleString("en-MY", { minimumFractionDigits: 2 }); }
@@ -18,15 +20,15 @@ export default function TrustAccountStatement() {
   const [caseId, setCaseId] = useState("");
   const [applied, setApplied] = useState("");
 
-  const { data, isLoading, isError, error } = useQuery({
+  const stmtQuery = useQuery({
     queryKey: ["trust-account-statement", applied],
     queryFn: async () => {
       const params = applied ? `?caseId=${applied}` : "";
-      const r = await fetch(`${API_BASE}/reports/trust-account-statement${params}`, { credentials: "include" });
-      if (!r.ok) throw new Error(await r.text());
-      return r.json();
+      return await apiFetchJson(`/reports/trust-account-statement${params}`);
     },
+    retry: false,
   });
+  const { data, isLoading, isError, error } = stmtQuery;
 
   const entries: any[] = data?.entries ?? [];
   const balance = Number(data?.balance ?? 0);
@@ -58,7 +60,7 @@ export default function TrustAccountStatement() {
               if (applied) params.set("caseId", applied);
               params.set("format", "csv");
               downloadFromApi(`/reports/trust-account-statement?${params.toString()}`, `trust-account-statement${applied ? `_${applied}` : ""}.csv`).catch((e: any) => {
-                toast({ title: "Download failed", description: e.message, variant: "destructive" });
+                toastError(toast, e, "Download failed");
               });
             }}
           >
@@ -104,7 +106,9 @@ export default function TrustAccountStatement() {
         {isLoading ? (
           <CardContent className="py-8 text-center text-sm text-slate-400">Loading...</CardContent>
         ) : isError ? (
-          <CardContent className="py-8 text-center text-sm text-red-600 break-words">{String((error as any)?.message ?? error)}</CardContent>
+          <CardContent className="py-4">
+            <QueryFallback title="Report unavailable" error={error} onRetry={() => stmtQuery.refetch()} isRetrying={stmtQuery.isFetching} />
+          </CardContent>
         ) : entries.length === 0 ? (
           <CardContent className="py-12 text-center text-sm text-slate-400">No trust movements found.</CardContent>
         ) : (

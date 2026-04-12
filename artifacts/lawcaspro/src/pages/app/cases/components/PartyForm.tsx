@@ -8,9 +8,8 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Checkbox } from "@/components/ui/checkbox";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useToast } from "@/hooks/use-toast";
-import { getApiBaseUrl } from "@/lib/api";
-
-const API_BASE = getApiBaseUrl();
+import { apiFetchJson } from "@/lib/api-client";
+import { toastError } from "@/lib/toast-error";
 
 interface PartyFormProps {
   open: boolean;
@@ -57,19 +56,15 @@ export default function PartyForm({ open, onOpenChange, onCreated, caseId }: Par
     setLoading(true);
     try {
       // 1. Create party
-      const partyRes = await fetch(`${API_BASE}/parties`, {
+      const party = await apiFetchJson<any>("/parties", {
         method: "POST",
-        credentials: "include",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ ...form, partyType }),
       });
-      if (!partyRes.ok) throw new Error((await partyRes.json()).error ?? "Failed to create party");
-      const party = await partyRes.json();
 
       // 2. Link to case
-      await fetch(`${API_BASE}/cases/${caseId}/parties`, {
+      await apiFetchJson(`/cases/${caseId}/parties`, {
         method: "POST",
-        credentials: "include",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ partyId: party.id, partyRole: "client" }),
       });
@@ -84,8 +79,8 @@ export default function PartyForm({ open, onOpenChange, onCreated, caseId }: Par
         transactionPurpose: "", isPep: false, pepDetails: "",
         isHighRiskJurisdiction: false, hasNomineeArrangement: false, hasLayeredOwnership: false,
       });
-    } catch (err: any) {
-      toast({ title: "Error", description: err.message, variant: "destructive" });
+    } catch (err) {
+      toastError(toast, err, "Create failed");
     } finally {
       setLoading(false);
     }

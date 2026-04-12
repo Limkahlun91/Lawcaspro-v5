@@ -3,41 +3,35 @@ import { useLocation, useParams } from "wouter";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { ChevronLeft, ChevronRight, MessageCircle } from "lucide-react";
-import { API_BASE } from "@/lib/api-base";
+import { QueryFallback } from "@/components/query-fallback";
+import { apiFetchJson } from "@/lib/api-client";
 
 type Thread = Record<string, unknown> & { id: number; case_id: number };
-
-async function apiFetch(path: string, init?: RequestInit) {
-  const res = await fetch(`${API_BASE}${path}`, {
-    credentials: "include",
-    ...init,
-    headers: { "Content-Type": "application/json", ...(init?.headers ?? {}) },
-  });
-  if (!res.ok) throw new Error(await res.text());
-  if (res.status === 204) return null;
-  return res.json();
-}
 
 export default function CommunicationThreadDetail() {
   const { threadId } = useParams<{ threadId: string }>();
   const [, setLocation] = useLocation();
   const id = threadId ? parseInt(threadId, 10) : NaN;
 
-  const { data: thread, isLoading: threadLoading, isError: threadError, error: threadErrObj } = useQuery<Thread>({
+  const threadQuery = useQuery<Thread>({
     queryKey: ["communication-thread", id],
-    queryFn: () => apiFetch(`/communications/threads/${id}`),
+    queryFn: () => apiFetchJson(`/communications/threads/${id}`),
     enabled: Number.isFinite(id),
+    retry: false,
   });
+  const { data: thread, isLoading: threadLoading } = threadQuery;
 
-  const { data: messages = [], isLoading: msgLoading, isError: msgError, error: msgErrObj } = useQuery<Record<string, unknown>[]>({
+  const messagesQuery = useQuery<Record<string, unknown>[]>({
     queryKey: ["communication-thread-messages", id],
-    queryFn: () => apiFetch(`/communications/threads/${id}/messages`),
+    queryFn: () => apiFetchJson(`/communications/threads/${id}/messages`),
     enabled: Number.isFinite(id),
+    retry: false,
   });
+  const { data: messages = [], isLoading: msgLoading } = messagesQuery;
 
   if (!Number.isFinite(id)) return <div>Invalid thread</div>;
   if (threadLoading) return <div>Loading thread...</div>;
-  if (threadError) return <div>{String((threadErrObj as any)?.message ?? threadErrObj)}</div>;
+  if (threadQuery.isError) return <div className="p-6"><QueryFallback title="Thread unavailable" error={threadQuery.error} onRetry={() => threadQuery.refetch()} isRetrying={threadQuery.isFetching} /></div>;
   if (!thread) return <div>Thread not found</div>;
 
   const subject = String(thread.subject ?? "Untitled thread");
@@ -78,8 +72,8 @@ export default function CommunicationThreadDetail() {
         <CardContent>
           {msgLoading ? (
             <div className="text-sm text-slate-500">Loading messages...</div>
-          ) : msgError ? (
-            <div className="text-sm text-red-600">{String((msgErrObj as any)?.message ?? msgErrObj)}</div>
+          ) : messagesQuery.isError ? (
+            <QueryFallback title="Messages unavailable" error={messagesQuery.error} onRetry={() => messagesQuery.refetch()} isRetrying={messagesQuery.isFetching} />
           ) : messages.length === 0 ? (
             <div className="text-sm text-slate-500">No messages yet.</div>
           ) : (
