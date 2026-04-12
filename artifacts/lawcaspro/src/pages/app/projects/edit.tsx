@@ -8,6 +8,9 @@ import { Label } from "@/components/ui/label";
 import { X, Plus, Trash2 } from "lucide-react";
 import { useQueryClient } from "@tanstack/react-query";
 import { getListProjectsQueryKey } from "@workspace/api-client-react";
+import { QueryFallback } from "@/components/query-fallback";
+import { apiErrorFromResponse } from "@/lib/http-error";
+import { toastError } from "@/lib/toast-error";
 
 const API_BASE = import.meta.env.BASE_URL.replace(/\/$/, "").replace(/^\/lawcaspro/, "") + "/api";
 
@@ -23,7 +26,7 @@ export default function EditProject() {
   const { toast } = useToast();
   const queryClient = useQueryClient();
 
-  const { data: project, isLoading: projectLoading } = useGetProject(projectId, {
+  const { data: project, isLoading: projectLoading, isError: projectError, error, refetch, isFetching } = useGetProject(projectId, {
     query: { enabled: !!projectId, queryKey: getGetProjectQueryKey(projectId) },
   });
 
@@ -122,16 +125,15 @@ export default function EditProject() {
       });
 
       if (!res.ok) {
-        const err = await res.json();
-        throw new Error(err.error || "Failed to update project");
+        throw await apiErrorFromResponse(res);
       }
 
       queryClient.invalidateQueries({ queryKey: getListProjectsQueryKey() });
       queryClient.invalidateQueries({ queryKey: getGetProjectQueryKey(projectId) });
       toast({ title: "Project updated successfully" });
       setLocation(`/app/projects/${projectId}`);
-    } catch (err: any) {
-      toast({ title: "Error", description: err.message, variant: "destructive" });
+    } catch (err) {
+      toastError(toast, err, "Save failed");
     } finally {
       setSaving(false);
     }
@@ -141,6 +143,16 @@ export default function EditProject() {
     return (
       <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center">
         <div className="bg-white rounded-lg p-8 text-slate-500">Loading project...</div>
+      </div>
+    );
+  }
+
+  if (projectError) {
+    return (
+      <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-6">
+        <div className="bg-white rounded-lg p-6 w-full max-w-lg">
+          <QueryFallback title="Project unavailable" error={error} onRetry={() => refetch()} isRetrying={isFetching} />
+        </div>
       </div>
     );
   }

@@ -13,6 +13,9 @@ import {
 import { useToast } from "@/hooks/use-toast";
 import { apiUrl } from "@/lib/api-base";
 import { getListDevelopersQueryKey } from "@workspace/api-client-react";
+import { QueryFallback } from "@/components/query-fallback";
+import { apiErrorFromResponse } from "@/lib/http-error";
+import { toastError } from "@/lib/toast-error";
 
 interface Contact {
   name: string;
@@ -47,6 +50,7 @@ export default function DeveloperDetail() {
 
   const [developer, setDeveloper] = useState<Developer | null>(null);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<unknown | null>(null);
   const [editing, setEditing] = useState(false);
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState(false);
@@ -62,9 +66,10 @@ export default function DeveloperDetail() {
 
   const fetchDeveloper = async () => {
     setLoading(true);
+    setLoadError(null);
     try {
       const res = await fetch(apiUrl(`/api/developers/${developerId}`), { credentials: "include" });
-      if (!res.ok) throw new Error("Not found");
+      if (!res.ok) throw await apiErrorFromResponse(res);
       const data: Developer = await res.json();
       setDeveloper(data);
       setForm({
@@ -79,8 +84,8 @@ export default function DeveloperDetail() {
           ? data.contacts
           : [{ name: data.contactPerson ?? "", department: "", phone: data.phone ?? "", phoneExt: "", email: data.email ?? "" }]
       );
-    } catch {
-      toast({ title: "Failed to load developer", variant: "destructive" });
+    } catch (err) {
+      setLoadError(err);
     } finally {
       setLoading(false);
     }
@@ -130,23 +135,15 @@ export default function DeveloperDetail() {
         credentials: "include",
       });
       if (!res.ok) {
-        const raw = await res.text();
-        let message = "Failed to save";
-        try {
-          const parsed = JSON.parse(raw) as { error?: string };
-          if (parsed?.error) message = parsed.error;
-        } catch {
-          if (raw.trim()) message = raw;
-        }
-        throw new Error(message);
+        throw await apiErrorFromResponse(res);
       }
       const updated: Developer = await res.json();
       setDeveloper(updated);
       queryClient.invalidateQueries({ queryKey: getListDevelopersQueryKey() });
       toast({ title: "Developer updated" });
       setEditing(false);
-    } catch (e: any) {
-      toast({ title: "Error", description: e.message, variant: "destructive" });
+    } catch (e) {
+      toastError(toast, e, "Save failed");
     } finally {
       setSaving(false);
     }
@@ -161,21 +158,13 @@ export default function DeveloperDetail() {
         credentials: "include",
       });
       if (!(res.status === 204 || res.ok)) {
-        const raw = await res.text();
-        let message = "Failed to delete";
-        try {
-          const parsed = JSON.parse(raw) as { error?: string };
-          if (parsed?.error) message = parsed.error;
-        } catch {
-          if (raw.trim()) message = raw;
-        }
-        throw new Error(message);
+        throw await apiErrorFromResponse(res);
       }
       queryClient.invalidateQueries({ queryKey: getListDevelopersQueryKey() });
       toast({ title: "Developer deleted" });
       setLocation("/app/developers");
-    } catch (e: any) {
-      toast({ title: "Error", description: e.message, variant: "destructive" });
+    } catch (e) {
+      toastError(toast, e, "Delete failed");
     } finally {
       setDeleting(false);
     }
@@ -199,6 +188,7 @@ export default function DeveloperDetail() {
   };
 
   if (loading) return <div className="p-8 text-slate-500">Loading developer details...</div>;
+  if (loadError) return <div className="p-6"><QueryFallback title="Developer unavailable" error={loadError} onRetry={fetchDeveloper} isRetrying={loading} /></div>;
   if (!developer) return <div className="p-8 text-slate-500">Developer not found.</div>;
 
   return (

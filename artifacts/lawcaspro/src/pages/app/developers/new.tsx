@@ -10,6 +10,8 @@ import { ArrowLeft, Plus, Trash2 } from "lucide-react";
 import { useQueryClient } from "@tanstack/react-query";
 import { getListDevelopersQueryKey } from "@workspace/api-client-react";
 import { apiUrl } from "@/lib/api-base";
+import { apiErrorFromResponse } from "@/lib/http-error";
+import { toastError } from "@/lib/toast-error";
 
 interface Contact {
   name: string;
@@ -77,21 +79,13 @@ export default function NewDeveloper() {
         credentials: "include",
       });
       if (!res.ok) {
-        const raw = await res.text();
-        let message = "Failed to save";
-        try {
-          const parsed = JSON.parse(raw) as { error?: string };
-          if (parsed?.error) message = parsed.error;
-        } catch {
-          if (raw.trim()) message = raw;
-        }
-        throw new Error(message);
+        throw await apiErrorFromResponse(res);
       }
       queryClient.invalidateQueries({ queryKey: getListDevelopersQueryKey() });
       toast({ title: "Developer created successfully" });
       setLocation("/app/developers");
-    } catch (e: any) {
-      toast({ title: "Error", description: e.message, variant: "destructive" });
+    } catch (e) {
+      toastError(toast, e, "Create failed");
     } finally {
       setSaving(false);
     }

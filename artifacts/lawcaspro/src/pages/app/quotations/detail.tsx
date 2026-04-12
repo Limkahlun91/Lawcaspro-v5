@@ -1,6 +1,6 @@
 import { useState, useCallback } from "react";
 import { useParams, useLocation } from "wouter";
-import { useGetQuotation, getGetQuotationQueryKey, useUpdateQuotation, useDeleteQuotation, useDuplicateQuotation } from "@workspace/api-client-react";
+import { useGetQuotation, getGetQuotationQueryKey, getListQuotationsQueryKey, useUpdateQuotation, useDeleteQuotation, useDuplicateQuotation } from "@workspace/api-client-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -8,11 +8,14 @@ import { Label } from "@/components/ui/label";
 import { ArrowLeft, Save, Copy, Trash2, Pencil, Printer, Plus, Calculator } from "lucide-react";
 import { useQueryClient, useMutation } from "@tanstack/react-query";
 import { useToast } from "@/hooks/use-toast";
+import { QueryFallback } from "@/components/query-fallback";
+import { apiErrorFromResponse } from "@/lib/http-error";
+import { toastError } from "@/lib/toast-error";
 
 const API_BASE = import.meta.env.BASE_URL.replace(/\/$/, "").replace(/^\/lawcaspro/, "") + "/api";
 async function apiFetch(path: string, opts?: RequestInit) {
   const res = await fetch(`${API_BASE}${path}`, { credentials: "include", ...opts });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw await apiErrorFromResponse(res);
   return res.json();
 }
 
@@ -45,7 +48,7 @@ export default function QuotationDetail() {
   const queryClient = useQueryClient();
   const { toast } = useToast();
 
-  const { data: quotation, isLoading } = useGetQuotation(quotationId, {
+  const { data: quotation, isLoading, isError, error, refetch, isFetching } = useGetQuotation(quotationId, {
     query: { enabled: !!quotationId, queryKey: getGetQuotationQueryKey(quotationId) }
   });
 
@@ -59,7 +62,7 @@ export default function QuotationDetail() {
       queryClient.invalidateQueries({ queryKey: getGetQuotationQueryKey(quotationId) });
       toast({ title: "Fees calculated", description: `Generated ${result.items?.filter((i: any) => i.isSystemGenerated).length ?? 0} system items from Malaysian SRO/stamp duty rules` });
     },
-    onError: (e: any) => toast({ variant: "destructive", title: "Calculation failed", description: e.message }),
+    onError: (e) => toastError(toast, e, "Calculation failed"),
   });
 
   const [isEditing, setIsEditing] = useState(false);
@@ -166,12 +169,11 @@ export default function QuotationDetail() {
       {
         onSuccess: () => {
           queryClient.invalidateQueries({ queryKey: getGetQuotationQueryKey(quotationId) });
+          queryClient.invalidateQueries({ queryKey: getListQuotationsQueryKey() });
           setIsEditing(false);
           toast({ title: "Quotation updated" });
         },
-        onError: () => {
-          toast({ title: "Failed to update quotation", variant: "destructive" });
-        },
+        onError: (e) => toastError(toast, e, "Update failed"),
       }
     );
   };
@@ -182,9 +184,11 @@ export default function QuotationDetail() {
       { id: quotationId },
       {
         onSuccess: () => {
+          queryClient.invalidateQueries({ queryKey: getListQuotationsQueryKey() });
           toast({ title: "Quotation deleted" });
           setLocation("/app/accounting?tab=quotations");
         },
+        onError: (e) => toastError(toast, e, "Delete failed"),
       }
     );
   };
@@ -194,9 +198,11 @@ export default function QuotationDetail() {
       { id: quotationId },
       {
         onSuccess: (data) => {
+          queryClient.invalidateQueries({ queryKey: getListQuotationsQueryKey() });
           toast({ title: "Quotation duplicated" });
           setLocation(`/app/quotations/${data.id}`);
         },
+        onError: (e) => toastError(toast, e, "Duplicate failed"),
       }
     );
   };
@@ -206,6 +212,7 @@ export default function QuotationDetail() {
   };
 
   if (isLoading) return <div className="p-6">Loading quotation...</div>;
+  if (isError) return <div className="p-6"><QueryFallback title="Quotation unavailable" error={error} onRetry={() => refetch()} isRetrying={isFetching} /></div>;
   if (!quotation) return <div className="p-6">Quotation not found</div>;
 
   const items = isEditing ? editItems : (quotation.items || []).map((item: any, idx: number) => ({
@@ -389,9 +396,11 @@ export default function QuotationDetail() {
                 </Button>
               )}
               <Button variant="outline" size="sm" onClick={handlePrint}><Printer className="w-4 h-4 mr-1" /> Print</Button>
-              <Button variant="outline" size="sm" onClick={handleDuplicate}><Copy className="w-4 h-4 mr-1" /> Duplicate</Button>
-              <Button variant="outline" size="sm" onClick={startEditing}><Pencil className="w-4 h-4 mr-1" /> Edit</Button>
-              <Button variant="outline" size="sm" onClick={handleDelete} className="text-red-500 hover:text-red-700">
+              <Button variant="outline" size="sm" onClick={handleDuplicate} disabled={duplicateMutation.isPending || deleteMutation.isPending}>
+                <Copy className="w-4 h-4 mr-1" /> {duplicateMutation.isPending ? "Duplicating..." : "Duplicate"}
+              </Button>
+              <Button variant="outline" size="sm" onClick={startEditing} disabled={duplicateMutation.isPending || deleteMutation.isPending}><Pencil className="w-4 h-4 mr-1" /> Edit</Button>
+              <Button variant="outline" size="sm" onClick={handleDelete} disabled={deleteMutation.isPending || duplicateMutation.isPending} className="text-red-500 hover:text-red-700">
                 <Trash2 className="w-4 h-4 mr-1" /> Delete
               </Button>
             </>

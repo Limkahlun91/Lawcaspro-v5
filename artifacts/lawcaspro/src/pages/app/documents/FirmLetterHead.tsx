@@ -11,6 +11,8 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Badge } from "@/components/ui/badge";
 import { useToast } from "@/hooks/use-toast";
 import { Download, Pencil, Trash2, Upload } from "lucide-react";
+import { apiErrorFromResponse } from "@/lib/http-error";
+import { toastError } from "@/lib/toast-error";
 
 const API_BASE = import.meta.env.BASE_URL.replace(/\/$/, "").replace(/^\/lawcaspro/, "") + "/api";
 
@@ -37,17 +39,7 @@ async function apiFetch(path: string, init?: RequestInit) {
     ...init,
     headers: { "Content-Type": "application/json", ...(init?.headers ?? {}) },
   });
-  if (!res.ok) {
-    const text = await res.text();
-    try {
-      const parsed = JSON.parse(text) as { error?: unknown; code?: unknown; detail?: unknown };
-      const msg = typeof parsed.error === "string" ? parsed.error : text;
-      const code = typeof parsed.code === "string" ? ` (${parsed.code})` : "";
-      throw new Error(`${msg}${code}`);
-    } catch {
-      throw new Error(text);
-    }
-  }
+  if (!res.ok) throw await apiErrorFromResponse(res);
   if (res.status === 204) return null;
   return res.json();
 }
@@ -60,7 +52,7 @@ async function uploadDocx(file: File): Promise<{ objectPath: string }> {
     body: formData,
     credentials: "include",
   });
-  if (!uploadRes.ok) throw new Error("Upload to storage failed");
+  if (!uploadRes.ok) throw await apiErrorFromResponse(uploadRes);
   return uploadRes.json();
 }
 
@@ -109,7 +101,7 @@ export default function FirmLetterHead() {
       qc.invalidateQueries({ queryKey: ["firm-letterheads"] });
       toast({ title: "Default letterhead updated" });
     },
-    onError: (err) => toast({ title: "Error", description: String(err), variant: "destructive" }),
+    onError: (err) => toastError(toast, err, "Update failed"),
   });
 
   const deleteMutation = useMutation({
@@ -121,7 +113,7 @@ export default function FirmLetterHead() {
       setActive(null);
       setEditMode(false);
     },
-    onError: (err) => toast({ title: "Error", description: String(err), variant: "destructive" }),
+    onError: (err) => toastError(toast, err, "Delete failed"),
   });
 
   async function handleSave() {
@@ -178,7 +170,7 @@ export default function FirmLetterHead() {
       const next = (refreshed as FirmLetterhead[]).find((l) => l.id === active.id) ?? null;
       setActive(next);
     } catch (err) {
-      toast({ title: "Update failed", description: String(err), variant: "destructive" });
+      toastError(toast, err, "Update failed");
     } finally {
       setIsSaving(false);
     }
@@ -229,7 +221,7 @@ export default function FirmLetterHead() {
       setContFile(null);
       setFooterFile(null);
     } catch (err) {
-      toast({ title: "Create failed", description: String(err), variant: "destructive" });
+      toastError(toast, err, "Create failed");
     } finally {
       setIsCreating(false);
     }
@@ -237,12 +229,12 @@ export default function FirmLetterHead() {
 
   async function downloadTemplate(letterheadId: number, part: "first_page" | "continuation_header" | "footer", fileName: string) {
     const res = await fetch(`${API_BASE}/firm-letterheads/${letterheadId}/templates/${part}/download`, { credentials: "include" });
-    if (!res.ok) throw new Error("Download failed");
+    if (!res.ok) throw await apiErrorFromResponse(res);
     const blob = await res.blob();
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = fileName;
+    a.download = fileName || "download";
     a.click();
     URL.revokeObjectURL(url);
   }
@@ -454,14 +446,14 @@ export default function FirmLetterHead() {
               <div className="space-y-2">
                 <div className="text-xs text-slate-500">Templates</div>
                 <div className="flex flex-col gap-2">
-                  <Button variant="outline" className="justify-between" onClick={async () => { try { await downloadTemplate(active.id, "first_page", active.first_page_file_name); } catch (e: any) { toast({ title: "Download failed", description: e.message, variant: "destructive" }); } }}>
+                  <Button variant="outline" className="justify-between" onClick={async () => { try { await downloadTemplate(active.id, "first_page", active.first_page_file_name); } catch (e) { toastError(toast, e, "Download failed"); } }}>
                     First page <Download className="w-4 h-4" />
                   </Button>
-                  <Button variant="outline" className="justify-between" onClick={async () => { try { await downloadTemplate(active.id, "continuation_header", active.continuation_header_file_name); } catch (e: any) { toast({ title: "Download failed", description: e.message, variant: "destructive" }); } }}>
+                  <Button variant="outline" className="justify-between" onClick={async () => { try { await downloadTemplate(active.id, "continuation_header", active.continuation_header_file_name); } catch (e) { toastError(toast, e, "Download failed"); } }}>
                     Continuation header <Download className="w-4 h-4" />
                   </Button>
                   {active.footer_object_path && active.footer_file_name && (
-                    <Button variant="outline" className="justify-between" onClick={async () => { try { await downloadTemplate(active.id, "footer", active.footer_file_name!); } catch (e: any) { toast({ title: "Download failed", description: e.message, variant: "destructive" }); } }}>
+                    <Button variant="outline" className="justify-between" onClick={async () => { try { await downloadTemplate(active.id, "footer", active.footer_file_name!); } catch (e) { toastError(toast, e, "Download failed"); } }}>
                       Footer <Download className="w-4 h-4" />
                     </Button>
                   )}

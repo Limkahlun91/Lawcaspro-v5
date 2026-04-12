@@ -23,6 +23,9 @@ import CaseCommunicationsTab from "./components/CaseCommunicationsTab";
 import CaseTasksTab from "./components/CaseTasksTab";
 import CaseTimeTab from "./components/CaseTimeTab";
 import CaseComplianceTab from "./components/CaseComplianceTab";
+import { QueryFallback } from "@/components/query-fallback";
+import { apiErrorFromResponse } from "@/lib/http-error";
+import { toastError } from "@/lib/toast-error";
 
 const API_BASE = import.meta.env.BASE_URL.replace(/\/$/, "").replace(/^\/lawcaspro/, "") + "/api";
 
@@ -32,17 +35,7 @@ async function apiFetch(path: string, init?: RequestInit) {
     ...init,
     headers: { "Content-Type": "application/json", ...(init?.headers ?? {}) },
   });
-  if (!res.ok) {
-    const text = await res.text();
-    try {
-      const parsed = JSON.parse(text) as { error?: unknown; code?: unknown };
-      const msg = typeof parsed.error === "string" ? parsed.error : text;
-      const code = typeof parsed.code === "string" ? ` (${parsed.code})` : "";
-      throw new Error(`${msg}${code}`);
-    } catch {
-      throw new Error(text);
-    }
-  }
+  if (!res.ok) throw await apiErrorFromResponse(res);
   if (res.status === 204) return null;
   return res.json();
 }
@@ -69,11 +62,25 @@ export default function CaseDetail() {
   const queryClient = useQueryClient();
   const { toast } = useToast();
 
-  const { data: caseInfo, isLoading: isLoadingCase } = useGetCase(caseId, {
+  const {
+    data: caseInfo,
+    isLoading: isLoadingCase,
+    isError: isCaseError,
+    error: caseError,
+    refetch: refetchCase,
+    isFetching: isFetchingCase,
+  } = useGetCase(caseId, {
     query: { enabled: !!caseId, queryKey: getGetCaseQueryKey(caseId) }
   });
 
-  const { data: workflow, isLoading: isLoadingWorkflow } = useGetCaseWorkflow(caseId, {
+  const {
+    data: workflow,
+    isLoading: isLoadingWorkflow,
+    isError: isWorkflowError,
+    error: workflowError,
+    refetch: refetchWorkflow,
+    isFetching: isFetchingWorkflow,
+  } = useGetCaseWorkflow(caseId, {
     query: { enabled: !!caseId, queryKey: getGetCaseWorkflowQueryKey(caseId) }
   });
 
@@ -100,7 +107,7 @@ export default function CaseDetail() {
       const synced = Array.isArray(payload.synced_workflow_steps) ? payload.synced_workflow_steps.filter((x) => typeof x === "string") : [];
       toast({ title: `${vars.scope} saved`, description: synced.length ? `${synced.length} milestone(s) synced to workflow` : undefined });
     },
-    onError: (err) => toast({ title: "Save failed", description: String(err), variant: "destructive" }),
+    onError: (err) => toastError(toast, err, "Save failed"),
   });
   const printMutation = useMutation({
     mutationFn: (payload: { printKey: string }) => apiFetch(`/cases/${caseId}/documents/print`, { method: "POST", body: JSON.stringify(payload) }),
@@ -108,7 +115,7 @@ export default function CaseDetail() {
       queryClient.invalidateQueries({ queryKey: ["case-documents", caseId] });
       toast({ title: "Document generated" });
     },
-    onError: (err) => toast({ title: "Print failed", description: String(err), variant: "destructive" }),
+    onError: (err) => toastError(toast, err, "Print failed"),
   });
 
   const [noteContent, setNoteContent] = useState("");
@@ -126,16 +133,20 @@ export default function CaseDetail() {
   const initialThreadId = Number.isNaN(initialThreadIdRaw) ? null : initialThreadIdRaw;
   const [activeTab, setActiveTab] = useState(tabFromUrl);
 
-  const { data: keyDates = {} } = useQuery<Record<string, unknown>>({
+  const keyDatesQuery = useQuery<Record<string, unknown>>({
     queryKey: ["case-key-dates", caseId],
     queryFn: () => apiFetch(`/cases/${caseId}/key-dates`),
     enabled: !!caseId,
+    retry: false,
   });
+  const keyDates = (keyDatesQuery.data && typeof keyDatesQuery.data === "object") ? keyDatesQuery.data : {};
 
-  const { data: printableConfig = [] } = useQuery<any[]>({
+  const printableQuery = useQuery<any[]>({
     queryKey: ["printable-config"],
     queryFn: () => apiFetch("/printable-config"),
+    retry: false,
   });
+  const printableConfig = Array.isArray(printableQuery.data) ? printableQuery.data : [];
   const printState = (printKey: string) => (printableConfig || []).find((x) => x?.printKey === printKey) as any;
   const printStatusLabel = (st: any): string => {
     const s = st?.status;
@@ -146,11 +157,12 @@ export default function CaseDetail() {
   };
   const printTitle = (printKey: string, dateVal: string) => {
     if (!dateVal) return "Enter date to enable printing";
+    if (printableQuery.isError) return "Template config unavailable";
     const st = printState(printKey);
     if (st?.status === "configured") return "Print";
     return st?.hint || "Template not configured";
   };
-  const canPrint = (printKey: string, dateVal: string) => Boolean(dateVal) && printState(printKey)?.status === "configured";
+  const canPrint = (printKey: string, dateVal: string) => !printableQuery.isError && Boolean(dateVal) && printState(printKey)?.status === "configured";
   const templateIssuesCount = (printableConfig || []).filter((x) => x?.status && x.status !== "configured").length;
   const [milestoneTab, setMilestoneTab] = useState<"spa" | "loan" | "bank" | "mot">("spa");
   const [savingScope, setSavingScope] = useState<string>("");
@@ -285,8 +297,11 @@ export default function CaseDetail() {
     setActiveTab(tabFromUrl);
   }, [tabFromUrl]);
 
-  if (isLoadingCase) return <div>Loading case details...</div>;
-  if (!caseInfo) return <div>Case not found</div>;
+  if (!caseId) return <div className="p-6 text-slate-500">Case not found</div>;
+  if (isLoadingCase || isLoadingWorkflow) return <div className="p-6 text-slate-500">Loading case details...</div>;
+  if (isCaseError) return <div className="p-6"><QueryFallback title="Case unavailable" error={caseError} onRetry={() => refetchCase()} isRetrying={isFetchingCase} /></div>;
+  if (isWorkflowError) return <div className="p-6"><QueryFallback title="Workflow unavailable" error={workflowError} onRetry={() => refetchWorkflow()} isRetrying={isFetchingWorkflow} /></div>;
+  if (!caseInfo) return <div className="p-6 text-slate-500">Case not found</div>;
 
   const handleCompleteStep = (stepId: number) => {
     updateStepMutation.mutate(
@@ -297,7 +312,8 @@ export default function CaseDetail() {
           toast({ title: "Step marked as completed" });
           setActiveStepId(null);
           setStepNote("");
-        }
+        },
+        onError: (err) => toastError(toast, err, "Update failed"),
       }
     );
   };
@@ -311,15 +327,17 @@ export default function CaseDetail() {
           queryClient.invalidateQueries({ queryKey: getGetCaseNotesQueryKey(caseId) });
           setNoteContent("");
           toast({ title: "Note added" });
-        }
+        },
+        onError: (err) => toastError(toast, err, "Save failed"),
       }
     );
   };
 
-  const commonSteps = workflow?.filter(s => s.pathType === "common") || [];
-  const loanSteps = workflow?.filter(s => s.pathType === "loan") || [];
-  const motSteps = workflow?.filter(s => s.pathType === "mot") || [];
-  const noaPoaSteps = workflow?.filter(s => s.pathType === "noa_pa") || [];
+  const safeWorkflow = Array.isArray(workflow) ? workflow : [];
+  const commonSteps = safeWorkflow.filter(s => s?.pathType === "common");
+  const loanSteps = safeWorkflow.filter(s => s?.pathType === "loan");
+  const motSteps = safeWorkflow.filter(s => s?.pathType === "mot");
+  const noaPoaSteps = safeWorkflow.filter(s => s?.pathType === "noa_pa");
 
   const stageStatus = (steps: any[]) => {
     const completed = (steps || []).filter((s) => s?.status === "completed");
@@ -329,8 +347,8 @@ export default function CaseDetail() {
 
   const spaStatus = stageStatus(commonSteps);
   const loanStatus = loanSteps.length ? stageStatus(loanSteps) : "N/A";
-  const workflowDone = (workflow || []).filter((s) => s?.status === "completed").length;
-  const workflowTotal = (workflow || []).length;
+  const workflowDone = safeWorkflow.filter((s) => s?.status === "completed").length;
+  const workflowTotal = safeWorkflow.length;
 
   const saveScope = (scope: "SPA" | "Loan" | "Bank / LU / NOA" | "MOT / Completion") => {
     const tab: keyof typeof scopeKeys =
@@ -509,7 +527,7 @@ export default function CaseDetail() {
               </CardHeader>
               <CardContent>
                 <div className="space-y-4">
-                  {caseInfo.purchasers.map((p) => (
+                  {(Array.isArray(caseInfo.purchasers) ? caseInfo.purchasers : []).map((p) => (
                     <div key={p.id} className="flex items-start gap-3 p-3 bg-slate-50 rounded-lg border border-slate-100">
                       <User className="w-5 h-5 text-slate-400 mt-0.5" />
                       <div>
@@ -521,6 +539,9 @@ export default function CaseDetail() {
                       </div>
                     </div>
                   ))}
+                  {!Array.isArray(caseInfo.purchasers) || caseInfo.purchasers.length === 0 ? (
+                    <div className="text-sm text-slate-500">No purchasers.</div>
+                  ) : null}
                 </div>
               </CardContent>
             </Card>
@@ -561,6 +582,9 @@ export default function CaseDetail() {
               </div>
             </CardHeader>
             <CardContent>
+              {keyDatesQuery.isError ? (
+                <QueryFallback title="Key dates unavailable" error={keyDatesQuery.error} onRetry={() => keyDatesQuery.refetch()} isRetrying={keyDatesQuery.isFetching} />
+              ) : (
               <Tabs value={milestoneTab} onValueChange={(v) => setMilestoneTab(v as "spa" | "loan" | "bank" | "mot")} className="w-full">
                 <TabsList className="grid w-full grid-cols-2 md:grid-cols-4 bg-slate-100 p-1">
                   <TabsTrigger value="spa">
@@ -706,6 +730,7 @@ export default function CaseDetail() {
                   </div>
                 </TabsContent>
               </Tabs>
+              )}
             </CardContent>
           </Card>
         </TabsContent>

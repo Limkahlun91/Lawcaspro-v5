@@ -7,6 +7,9 @@ import { ArrowLeft, Building2, MapPin, Tag, Pencil, Trash2 } from "lucide-react"
 import { useToast } from "@/hooks/use-toast";
 import { useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
+import { QueryFallback } from "@/components/query-fallback";
+import { apiErrorFromResponse } from "@/lib/http-error";
+import { toastError } from "@/lib/toast-error";
 
 const API_BASE = import.meta.env.BASE_URL.replace(/\/$/, "").replace(/^\/lawcaspro/, "") + "/api";
 
@@ -18,7 +21,7 @@ export default function ProjectDetail() {
   const qc = useQueryClient();
   const [deleting, setDeleting] = useState(false);
 
-  const { data: project, isLoading } = useGetProject(projectId, {
+  const { data: project, isLoading, isError, error, refetch, isFetching } = useGetProject(projectId, {
     query: {
       enabled: !!projectId,
       queryKey: getGetProjectQueryKey(projectId),
@@ -26,6 +29,7 @@ export default function ProjectDetail() {
   });
 
   if (isLoading) return <div>Loading project details...</div>;
+  if (isError) return <div className="p-6"><QueryFallback title="Project unavailable" error={error} onRetry={() => refetch()} isRetrying={isFetching} /></div>;
   if (!project) return <div>Project not found</div>;
 
   const handleDelete = async () => {
@@ -37,22 +41,14 @@ export default function ProjectDetail() {
         credentials: "include",
       });
       if (!(res.status === 204 || res.ok)) {
-        const raw = await res.text();
-        let message = "Failed to delete";
-        try {
-          const parsed = JSON.parse(raw) as { error?: string };
-          if (parsed?.error) message = parsed.error;
-        } catch {
-          if (raw.trim()) message = raw;
-        }
-        throw new Error(message);
+        throw await apiErrorFromResponse(res);
       }
       qc.invalidateQueries({ queryKey: getListProjectsQueryKey() });
       qc.invalidateQueries({ queryKey: getGetProjectQueryKey(projectId) });
       toast({ title: "Project deleted" });
       setLocation("/app/projects");
-    } catch (err: any) {
-      toast({ title: "Error", description: err.message, variant: "destructive" });
+    } catch (err) {
+      toastError(toast, err, "Delete failed");
     } finally {
       setDeleting(false);
     }

@@ -8,6 +8,7 @@ import { Label } from "@/components/ui/label";
 import { X, Plus, Trash2 } from "lucide-react";
 import { useQueryClient } from "@tanstack/react-query";
 import { getListProjectsQueryKey } from "@workspace/api-client-react";
+import { toastError } from "@/lib/toast-error";
 
 interface PropertyType {
   id: string;
@@ -93,11 +94,7 @@ export default function NewProject() {
           setLocation("/app/projects");
         },
         onError: (error: any) => {
-          toast({
-            title: "Error",
-            description: error.error || "Please try again.",
-            variant: "destructive",
-          });
+          toastError(toast, error, "Create failed");
         },
       }
     );

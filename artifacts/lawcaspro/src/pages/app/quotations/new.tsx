@@ -1,13 +1,14 @@
 import { useState, useCallback, useEffect } from "react";
 import { useLocation, useSearch } from "wouter";
-import { useCreateQuotation, useListCases, useGetCase } from "@workspace/api-client-react";
-import { useQuery } from "@tanstack/react-query";
+import { useCreateQuotation, getListQuotationsQueryKey, useListCases, useGetCase } from "@workspace/api-client-react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { ArrowLeft, Plus, Trash2, Save } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
+import { toastError } from "@/lib/toast-error";
 
 const API_BASE = import.meta.env.BASE_URL.replace(/\/$/, "").replace(/^\/lawcaspro/, "") + "/api";
 
@@ -129,6 +130,7 @@ export default function NewQuotation() {
   const [, setLocation] = useLocation();
   const search = useSearch();
   const { toast } = useToast();
+  const queryClient = useQueryClient();
   const createMutation = useCreateQuotation();
 
   const params = new URLSearchParams(search);
@@ -305,12 +307,11 @@ export default function NewQuotation() {
       },
       {
         onSuccess: (data) => {
+          queryClient.invalidateQueries({ queryKey: getListQuotationsQueryKey() });
           toast({ title: "Quotation created" });
           setLocation(`/app/quotations/${data.id}`);
         },
-        onError: () => {
-          toast({ title: "Failed to create quotation", variant: "destructive" });
-        },
+        onError: (e) => toastError(toast, e, "Create failed"),
       }
     );
   };

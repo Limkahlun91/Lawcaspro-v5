@@ -11,6 +11,9 @@ import { useToast } from "@/hooks/use-toast";
 import { cn } from "@/lib/utils";
 import { ChevronRight, Download, FileText, Folder, FolderOpen, Pencil, Plus, Trash2, Upload } from "lucide-react";
 import { DOCUMENT_TYPE_LABELS } from "@workspace/documents-registry";
+import { QueryFallback } from "@/components/query-fallback";
+import { toastError } from "@/lib/toast-error";
+import { apiErrorFromResponse } from "@/lib/http-error";
 
 const API_BASE = import.meta.env.BASE_URL.replace(/\/$/, "").replace(/^\/lawcaspro/, "") + "/api";
 
@@ -184,15 +187,20 @@ export default function FirmDocuments() {
   const [editKind, setEditKind] = useState<"template" | "reference">("template");
   const [editType, setEditType] = useState("other");
 
-  const { data: folders = [] } = useQuery<FirmFolder[]>({
+  const foldersQuery = useQuery<FirmFolder[]>({
     queryKey: ["firm-document-folders"],
     queryFn: () => apiFetch("/firm-document-folders"),
+    retry: false,
   });
 
-  const { data: docs = [], isLoading } = useQuery<FirmDocument[]>({
+  const docsQuery = useQuery<FirmDocument[]>({
     queryKey: ["firm-documents"],
     queryFn: () => apiFetch("/document-templates"),
+    retry: false,
   });
+  const folders = foldersQuery.data ?? [];
+  const docs = docsQuery.data ?? [];
+  const isLoading = foldersQuery.isLoading || docsQuery.isLoading;
 
   const createFolderMutation = useMutation({
     mutationFn: (payload: { name: string; parentId: number | null }) =>
@@ -203,7 +211,7 @@ export default function FirmDocuments() {
       setCreateFolderOpen(false);
       setNewFolderName("");
     },
-    onError: (err) => toast({ title: "Error", description: String(err), variant: "destructive" }),
+    onError: (err) => toastError(toast, err, "Create failed"),
   });
 
   const renameFolderMutation = useMutation({
@@ -214,7 +222,7 @@ export default function FirmDocuments() {
       toast({ title: "Folder renamed" });
       setRenameFolderOpen(false);
     },
-    onError: (err) => toast({ title: "Error", description: String(err), variant: "destructive" }),
+    onError: (err) => toastError(toast, err, "Rename failed"),
   });
 
   const deleteFolderMutation = useMutation({
@@ -224,7 +232,7 @@ export default function FirmDocuments() {
       toast({ title: "Folder deleted" });
       setSelectedFolderId(null);
     },
-    onError: (err) => toast({ title: "Error", description: String(err), variant: "destructive" }),
+    onError: (err) => toastError(toast, err, "Delete failed"),
   });
 
   const deleteDocMutation = useMutation({
@@ -233,7 +241,7 @@ export default function FirmDocuments() {
       qc.invalidateQueries({ queryKey: ["firm-documents"] });
       toast({ title: "Document deleted" });
     },
-    onError: (err) => toast({ title: "Error", description: String(err), variant: "destructive" }),
+    onError: (err) => toastError(toast, err, "Delete failed"),
   });
 
   const moveDocMutation = useMutation({
@@ -243,7 +251,7 @@ export default function FirmDocuments() {
       qc.invalidateQueries({ queryKey: ["firm-documents"] });
       toast({ title: "Document updated" });
     },
-    onError: (err) => toast({ title: "Error", description: String(err), variant: "destructive" }),
+    onError: (err) => toastError(toast, err, "Update failed"),
   });
 
   const updateDocMutation = useMutation({
@@ -255,7 +263,7 @@ export default function FirmDocuments() {
       setEditOpen(false);
       setActiveDoc(null);
     },
-    onError: (err) => toast({ title: "Error", description: String(err), variant: "destructive" }),
+    onError: (err) => toastError(toast, err, "Update failed"),
   });
 
   const filteredDocs = useMemo(() => {
@@ -330,7 +338,7 @@ export default function FirmDocuments() {
       setDocType("other");
       setSelectedFiles([]);
     } catch (err) {
-      toast({ title: "Upload failed", description: String(err), variant: "destructive" });
+      toastError(toast, err, "Upload failed");
     } finally {
       setIsUploading(false);
       setUploadProgress(null);
@@ -340,16 +348,16 @@ export default function FirmDocuments() {
   async function handleDownload(doc: FirmDocument) {
     try {
       const res = await fetch(`${API_BASE}/document-templates/${doc.id}/download`, { credentials: "include" });
-      if (!res.ok) throw new Error("Download failed");
+      if (!res.ok) throw await apiErrorFromResponse(res);
       const blob = await res.blob();
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = doc.file_name;
+      a.download = doc.file_name || "download";
       a.click();
       URL.revokeObjectURL(url);
     } catch (err) {
-      toast({ title: "Download failed", description: String(err), variant: "destructive" });
+      toastError(toast, err, "Download failed");
     }
   }
 
@@ -408,6 +416,13 @@ export default function FirmDocuments() {
 
               {isLoading ? (
                 <div className="text-slate-500 py-8 text-center">Loading...</div>
+              ) : docsQuery.isError || foldersQuery.isError ? (
+                <QueryFallback
+                  title="Documents unavailable"
+                  error={docsQuery.error ?? foldersQuery.error}
+                  onRetry={() => { foldersQuery.refetch(); docsQuery.refetch(); }}
+                  isRetrying={docsQuery.isFetching || foldersQuery.isFetching}
+                />
               ) : filteredDocs.length === 0 ? (
                 <div className="text-center py-10 text-slate-500">
                   <FileText className="w-10 h-10 text-slate-300 mx-auto mb-3" />
@@ -433,10 +448,10 @@ export default function FirmDocuments() {
                             <div className="flex items-center gap-2">
                               <FileText className="w-4 h-4 text-slate-400 shrink-0" />
                               <div className="min-w-0">
-                                <div className="font-medium text-slate-900 truncate">{doc.name}</div>
+                                <div className="font-medium text-slate-900 truncate">{doc.name || "-"}</div>
                                 <div className="flex items-center gap-2 mt-0.5">
-                                  <span className="text-xs text-slate-400 truncate">{doc.file_name}</span>
-                                  <Badge variant="outline" className="text-[10px]">{(doc.extension || doc.file_name.split(".").pop() || "").toUpperCase()}</Badge>
+                                  <span className="text-xs text-slate-400 truncate">{doc.file_name || "-"}</span>
+                                  <Badge variant="outline" className="text-[10px]">{String(doc.extension || String(doc.file_name ?? "").split(".").pop() || "").toUpperCase()}</Badge>
                                   {doc.is_template_capable ? (
                                     <Badge className="bg-emerald-50 text-emerald-700 hover:bg-emerald-50 text-[10px]">Template-capable</Badge>
                                   ) : (
