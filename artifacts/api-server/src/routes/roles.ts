@@ -9,9 +9,12 @@ import { requireAuth, requireFirmUser, requirePermission, type AuthRequest, writ
 
 const router: IRouter = Router();
 
-async function enrichRole(role: typeof rolesTable.$inferSelect) {
-  const perms = await db.select().from(permissionsTable).where(eq(permissionsTable.roleId, role.id));
-  const [userCountRes] = await db.select({ c: count() }).from(usersTable).where(eq(usersTable.roleId, role.id));
+type DbConn = typeof db | NonNullable<AuthRequest["rlsDb"]>;
+const rdb = (req: AuthRequest): DbConn => req.rlsDb ?? db;
+
+async function enrichRole(r: DbConn, role: typeof rolesTable.$inferSelect) {
+  const perms = await r.select().from(permissionsTable).where(eq(permissionsTable.roleId, role.id));
+  const [userCountRes] = await r.select({ c: count() }).from(usersTable).where(eq(usersTable.roleId, role.id));
   return {
     id: role.id,
     firmId: role.firmId,
@@ -24,8 +27,9 @@ async function enrichRole(role: typeof rolesTable.$inferSelect) {
 }
 
 router.get("/roles", requireAuth, requireFirmUser, requirePermission("roles", "read"), async (req: AuthRequest, res): Promise<void> => {
-  const roles = await db.select().from(rolesTable).where(eq(rolesTable.firmId, req.firmId!));
-  const enriched = await Promise.all(roles.map(enrichRole));
+  const r = rdb(req);
+  const roles = await r.select().from(rolesTable).where(eq(rolesTable.firmId, req.firmId!));
+  const enriched = await Promise.all(roles.map((role) => enrichRole(r, role)));
   res.json(enriched);
 });
 
@@ -36,13 +40,14 @@ router.post("/roles", requireAuth, requireFirmUser, requirePermission("roles", "
     return;
   }
 
-  const [role] = await db
+  const r = rdb(req);
+  const [role] = await r
     .insert(rolesTable)
     .values({ firmId: req.firmId!, name: parsed.data.name })
     .returning();
 
   if (parsed.data.permissions?.length) {
-    await db.insert(permissionsTable).values(
+    await r.insert(permissionsTable).values(
       parsed.data.permissions.map((p) => ({
         roleId: role.id,
         module: p.module,
@@ -53,7 +58,7 @@ router.post("/roles", requireAuth, requireFirmUser, requirePermission("roles", "
   }
 
   await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "roles.create", entityType: "role", entityId: role.id, detail: `name=${role.name}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
-  res.status(201).json(await enrichRole(role));
+  res.status(201).json(await enrichRole(r, role));
 });
 
 router.get("/roles/:roleId", requireAuth, requireFirmUser, requirePermission("roles", "read"), async (req: AuthRequest, res): Promise<void> => {
@@ -63,13 +68,14 @@ router.get("/roles/:roleId", requireAuth, requireFirmUser, requirePermission("ro
     return;
   }
 
-  const [role] = await db.select().from(rolesTable).where(eq(rolesTable.id, params.data.roleId));
+  const r = rdb(req);
+  const [role] = await r.select().from(rolesTable).where(eq(rolesTable.id, params.data.roleId));
   if (!role || role.firmId !== req.firmId) {
     res.status(404).json({ error: "Role not found" });
     return;
   }
 
-  res.json(await enrichRole(role));
+  res.json(await enrichRole(r, role));
 });
 
 router.patch("/roles/:roleId", requireAuth, requireFirmUser, requirePermission("roles", "update"), async (req: AuthRequest, res): Promise<void> => {
@@ -88,7 +94,8 @@ router.patch("/roles/:roleId", requireAuth, requireFirmUser, requirePermission("
   const updates: Record<string, unknown> = {};
   if (parsed.data.name !== undefined) updates.name = parsed.data.name;
 
-  const [role] = await db
+  const r = rdb(req);
+  const [role] = await r
     .update(rolesTable)
     .set(updates)
     .where(eq(rolesTable.id, params.data.roleId))
@@ -100,9 +107,9 @@ router.patch("/roles/:roleId", requireAuth, requireFirmUser, requirePermission("
   }
 
   if (parsed.data.permissions) {
-    await db.delete(permissionsTable).where(eq(permissionsTable.roleId, role.id));
+    await r.delete(permissionsTable).where(eq(permissionsTable.roleId, role.id));
     if (parsed.data.permissions.length > 0) {
-      await db.insert(permissionsTable).values(
+      await r.insert(permissionsTable).values(
         parsed.data.permissions.map((p) => ({
           roleId: role.id,
           module: p.module,
@@ -114,7 +121,7 @@ router.patch("/roles/:roleId", requireAuth, requireFirmUser, requirePermission("
   }
 
   await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "roles.update", entityType: "role", entityId: role.id, detail: `fields=${Object.keys(updates).join(",")}${parsed.data.permissions ? " permissions=replaced" : ""}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
-  res.json(await enrichRole(role));
+  res.json(await enrichRole(r, role));
 });
 
 router.delete("/roles/:roleId", requireAuth, requireFirmUser, requirePermission("roles", "delete"), async (req: AuthRequest, res): Promise<void> => {
@@ -124,8 +131,9 @@ router.delete("/roles/:roleId", requireAuth, requireFirmUser, requirePermission(
     return;
   }
 
-  await db.delete(permissionsTable).where(eq(permissionsTable.roleId, params.data.roleId));
-  const [role] = await db.delete(rolesTable).where(eq(rolesTable.id, params.data.roleId)).returning();
+  const r = rdb(req);
+  await r.delete(permissionsTable).where(eq(permissionsTable.roleId, params.data.roleId));
+  const [role] = await r.delete(rolesTable).where(eq(rolesTable.id, params.data.roleId)).returning();
 
   if (!role || role.firmId !== req.firmId) {
     res.status(404).json({ error: "Role not found" });

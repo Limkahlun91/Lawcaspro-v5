@@ -2,6 +2,7 @@ import { Router } from "express";
 import { z } from "zod/v4";
 import { and, desc, eq, inArray, sql } from "drizzle-orm";
 import {
+  db,
   caseAssignmentsTable,
   casePartiesTable,
   casePurchasersTable,
@@ -24,6 +25,28 @@ const listQuerySchema = z.object({
 
 type ListingStatus = "new" | "ongoing" | "closed" | "kiv" | "hold";
 const listingStatusSchema = z.enum(["new", "ongoing", "closed", "kiv", "hold"]);
+
+type DbConn = typeof db | NonNullable<AuthRequest["rlsDb"]>;
+const rdb = (req: AuthRequest): DbConn => req.rlsDb ?? db;
+
+async function queryRows(r: DbConn, query: ReturnType<typeof sql>): Promise<Record<string, unknown>[]> {
+  const result = await r.execute(query);
+  if (Array.isArray(result)) return result as Record<string, unknown>[];
+  if ("rows" in result) return (result as { rows: Record<string, unknown>[] }).rows;
+  return [];
+}
+
+async function columnExists(r: DbConn, table: string, column: string): Promise<boolean> {
+  const rows = await queryRows(r, sql`
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_schema = 'public'
+      AND table_name = ${table}
+      AND column_name = ${column}
+    LIMIT 1
+  `);
+  return rows.length > 0;
+}
 
 function parseJsonObject(s: string | null): Record<string, unknown> | null {
   if (!s) return null;
@@ -52,7 +75,7 @@ function firstNumber(...vals: unknown[]): number | null {
 }
 
 router.get("/case-files", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
-  const r = req.rlsDb!;
+  const r = rdb(req);
   const parsed = listQuerySchema.safeParse(req.query);
   if (!parsed.success) {
     res.status(400).json({ error: "Invalid query" });
@@ -63,6 +86,8 @@ router.get("/case-files", requireAuth, requireFirmUser, async (req: AuthRequest,
   const q = rawQ.trim();
   const offset = (page - 1) * limit;
   const like = `%${q}%`;
+  const hasListingStatus = await columnExists(r, "cases", "file_listing_status");
+  const hasListingReason = await columnExists(r, "cases", "file_listing_reason");
 
   const whereBase = and(
     eq(casesTable.firmId, req.firmId!),
@@ -77,8 +102,8 @@ router.get("/case-files", requireAuth, requireFirmUser, async (req: AuthRequest,
       OR COALESCE(${casesTable.parcelNo}, '') ILIKE ${like}
       OR COALESCE(${casesTable.loanDetails}, '') ILIKE ${like}
       OR COALESCE(${casesTable.propertyDetails}, '') ILIKE ${like}
-      OR COALESCE(${casesTable.fileListingStatus}, '') ILIKE ${like}
-      OR COALESCE(${casesTable.fileListingReason}, '') ILIKE ${like}
+      ${hasListingStatus ? sql`OR COALESCE(${casesTable.fileListingStatus}, '') ILIKE ${like}` : sql``}
+      ${hasListingReason ? sql`OR COALESCE(${casesTable.fileListingReason}, '') ILIKE ${like}` : sql``}
       OR EXISTS (
         SELECT 1
         FROM ${casePurchasersTable} cp
@@ -154,8 +179,8 @@ router.get("/case-files", requireAuth, requireFirmUser, async (req: AuthRequest,
       developerName: developersTable.name,
       lawyerName: lawyerNameSql,
       clerkName: clerkNameSql,
-      fileListingStatus: casesTable.fileListingStatus,
-      fileListingReason: casesTable.fileListingReason,
+      fileListingStatus: hasListingStatus ? casesTable.fileListingStatus : sql<ListingStatus>`'new'`,
+      fileListingReason: hasListingReason ? casesTable.fileListingReason : sql<string | null>`NULL`,
       updatedAt: casesTable.updatedAt,
     })
     .from(casesTable)
@@ -309,7 +334,13 @@ router.patch("/case-files/:id/status", requireAuth, requireFirmUser, async (req:
     return;
   }
 
-  const r = req.rlsDb!;
+  const r = rdb(req);
+  const hasListingStatus = await columnExists(r, "cases", "file_listing_status");
+  const hasListingReason = await columnExists(r, "cases", "file_listing_reason");
+  if (!hasListingStatus || !hasListingReason) {
+    res.status(409).json({ error: "Case file listing status is not available. Please apply database migrations." });
+    return;
+  }
   const reason = needsReason ? reasonRaw : null;
 
   const [updated] = await r
@@ -347,4 +378,3 @@ router.patch("/case-files/:id/status", requireAuth, requireFirmUser, async (req:
 });
 
 export default router;
-

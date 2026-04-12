@@ -55,7 +55,19 @@ router.get("/dashboard", requireAuth, requireFirmUser, requirePermission("dashbo
   const completedCases = Number(caseStats?.completed ?? 0);
   const activeCases = totalCases - completedCases;
 
-  const recentRows = await r.select().from(casesTable)
+  const recentRows = await r
+    .select({
+      id: casesTable.id,
+      referenceNo: casesTable.referenceNo,
+      projectId: casesTable.projectId,
+      developerId: casesTable.developerId,
+      purchaseMode: casesTable.purchaseMode,
+      titleType: casesTable.titleType,
+      status: casesTable.status,
+      createdAt: casesTable.createdAt,
+      updatedAt: casesTable.updatedAt,
+    })
+    .from(casesTable)
     .where(eq(casesTable.firmId, firmId))
     .orderBy(desc(casesTable.updatedAt))
     .limit(5);
