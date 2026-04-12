@@ -13,6 +13,7 @@ import { Badge } from "@/components/ui/badge";
 import { Checkbox } from "@/components/ui/checkbox";
 import { useToast } from "@/hooks/use-toast";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { QueryFallback } from "@/components/query-fallback";
 
 const API_BASE = import.meta.env.BASE_URL.replace(/\/$/, "").replace(/^\/lawcaspro/, "") + "/api";
 
@@ -209,7 +210,7 @@ export default function CasesList() {
     setLocation,
   ]);
 
-  const { data: response, isLoading } = useListCases({ 
+  const { data: response, isLoading, isError, error, refetch, isFetching } = useListCases({ 
     page,
     limit,
     search: search || undefined,
@@ -249,6 +250,7 @@ export default function CasesList() {
   const clerkCandidates = allUsers.filter(u => (u.roleName ?? "").toLowerCase().includes("clerk"));
   const projects = projectsRes?.data ?? [];
   const developers = devsRes?.data ?? [];
+  const cases = response?.data ?? [];
   const total = response?.total ?? 0;
   const pageCount = Math.max(1, Math.ceil(total / limit));
   const safePage = Math.min(page, pageCount);
@@ -711,6 +713,10 @@ export default function CasesList() {
         <CardContent className="p-0">
           {isLoading ? (
             <div className="p-8 text-center text-slate-500">Loading cases...</div>
+          ) : isError ? (
+            <div className="p-6">
+              <QueryFallback title="Cases unavailable" error={error} onRetry={() => refetch()} isRetrying={isFetching} />
+            </div>
           ) : (
             <div className="overflow-x-auto">
               <table className="w-full text-sm text-left">
@@ -733,7 +739,7 @@ export default function CasesList() {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
-                  {response?.data.map((c) => (
+                  {cases.map((c) => (
                     <tr key={c.id} className="hover:bg-slate-50/50">
                       <td className="px-4 py-4">
                         <Checkbox
@@ -790,7 +796,7 @@ export default function CasesList() {
                       </td>
                     </tr>
                   ))}
-                  {response?.data.length === 0 && (
+                  {cases.length === 0 && (
                     <tr>
                       <td colSpan={9} className="px-6 py-8 text-center text-slate-500">
                         No cases found.

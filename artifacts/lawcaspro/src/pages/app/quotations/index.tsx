@@ -5,9 +5,11 @@ import { Link, useLocation } from "wouter";
 import { Plus, FileText, Copy, Trash2, Eye } from "lucide-react";
 import { useQueryClient } from "@tanstack/react-query";
 import { useToast } from "@/hooks/use-toast";
+import { QueryFallback } from "@/components/query-fallback";
+import { formatCurrencyMYR, formatDateMY } from "@/lib/format";
 
 export default function QuotationsList() {
-  const { data: quotations, isLoading } = useListQuotations();
+  const { data: quotations, isLoading, isError, error, refetch, isFetching } = useListQuotations();
   const [, setLocation] = useLocation();
   const queryClient = useQueryClient();
   const { toast } = useToast();
@@ -48,10 +50,6 @@ export default function QuotationsList() {
     rejected: "bg-red-100 text-red-700",
   };
 
-  const formatCurrency = (amount: number) => {
-    return new Intl.NumberFormat("en-MY", { style: "currency", currency: "MYR" }).format(amount);
-  };
-
   return (
     <div className="p-6 max-w-7xl mx-auto">
       <div className="flex items-center justify-between mb-6">
@@ -69,6 +67,8 @@ export default function QuotationsList() {
 
       {isLoading ? (
         <div className="text-sm text-slate-500">Loading quotations...</div>
+      ) : isError ? (
+        <QueryFallback title="Quotations unavailable" error={error} onRetry={() => refetch()} isRetrying={isFetching} />
       ) : !quotations || quotations.length === 0 ? (
         <Card>
           <CardContent className="py-12 text-center">
@@ -104,7 +104,7 @@ export default function QuotationsList() {
                     {q.propertyDescription || "-"}
                   </td>
                   <td className="px-4 py-3 text-right font-medium text-slate-900">
-                    {formatCurrency(q.totalInclTax)}
+                    {formatCurrencyMYR(q.totalInclTax)}
                   </td>
                   <td className="px-4 py-3">
                     <span className={`inline-block px-2 py-0.5 rounded text-xs font-medium capitalize ${statusColors[q.status] || statusColors.draft}`}>
@@ -112,7 +112,7 @@ export default function QuotationsList() {
                     </span>
                   </td>
                   <td className="px-4 py-3 text-slate-500">
-                    {new Date(q.createdAt).toLocaleDateString("en-MY")}
+                    {formatDateMY(q.createdAt)}
                   </td>
                   <td className="px-4 py-3 text-right">
                     <div className="flex items-center justify-end gap-1">

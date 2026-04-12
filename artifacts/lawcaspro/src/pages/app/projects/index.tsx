@@ -6,6 +6,7 @@ import { Link } from "wouter";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useState } from "react";
+import { QueryFallback } from "@/components/query-fallback";
 
 export default function ProjectsList() {
   const [search, setSearch] = useState("");
@@ -13,7 +14,7 @@ export default function ProjectsList() {
   const [projectType, setProjectType] = useState<string>("all");
   const [titleType, setTitleType] = useState<string>("all");
   
-  const { data: response, isLoading } = useListProjects({ 
+  const { data: response, isLoading, isError, error, refetch, isFetching } = useListProjects({ 
     page: 1, 
     limit: 50,
     search: search || undefined,
@@ -24,6 +25,7 @@ export default function ProjectsList() {
 
   const { data: devsRes } = useListDevelopers({ limit: 100 });
   const developers = devsRes?.data || [];
+  const projects = response?.data ?? [];
 
   return (
     <div className="space-y-6">
@@ -89,6 +91,10 @@ export default function ProjectsList() {
         <CardContent className="p-0">
           {isLoading ? (
             <div className="p-8 text-center text-slate-500">Loading projects...</div>
+          ) : isError ? (
+            <div className="p-6">
+              <QueryFallback title="Projects unavailable" error={error} onRetry={() => refetch()} isRetrying={isFetching} />
+            </div>
           ) : (
             <div className="overflow-x-auto">
               <table className="w-full text-sm text-left">
@@ -103,7 +109,7 @@ export default function ProjectsList() {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
-                  {response?.data.map((proj) => (
+                  {projects.map((proj) => (
                     <tr key={proj.id} className="hover:bg-slate-50/50 group">
                       <td className="px-6 py-4">
                         <Link href={`/app/projects/${proj.id}`}>
@@ -135,7 +141,7 @@ export default function ProjectsList() {
                       </td>
                     </tr>
                   ))}
-                  {response?.data.length === 0 && (
+                  {projects.length === 0 && (
                     <tr>
                       <td colSpan={5} className="px-6 py-8 text-center text-slate-500">
                         No projects found.

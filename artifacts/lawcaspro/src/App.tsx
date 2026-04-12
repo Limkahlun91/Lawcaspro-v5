@@ -3,6 +3,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { setAuthTokenGetter, setBaseUrl } from "@workspace/api-client-react";
 import { Toaster } from "@/components/ui/toaster";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import { AppErrorBoundary } from "@/components/app-error-boundary";
 import { AuthProvider } from "@/lib/auth-context";
 import { ReAuthProvider } from "@/components/re-auth-dialog";
 import { AuthGuard } from "@/components/auth-guard";
@@ -281,7 +282,9 @@ function App() {
         <ReAuthProvider>
           <TooltipProvider>
             <WouterRouter base={import.meta.env.BASE_URL.replace(/\/$/, "")}>
-              <Router />
+              <AppErrorBoundary>
+                <Router />
+              </AppErrorBoundary>
             </WouterRouter>
             <Toaster />
           </TooltipProvider>

@@ -5,15 +5,17 @@ import { Plus, Search } from "lucide-react";
 import { Link } from "wouter";
 import { Input } from "@/components/ui/input";
 import { useState } from "react";
+import { QueryFallback } from "@/components/query-fallback";
 
 export default function DevelopersList() {
   const [search, setSearch] = useState("");
   
-  const { data: response, isLoading } = useListDevelopers({ 
+  const { data: response, isLoading, isError, error, refetch, isFetching } = useListDevelopers({ 
     page: 1, 
     limit: 50,
     search: search || undefined
   });
+  const developers = response?.data ?? [];
 
   return (
     <div className="space-y-6">
@@ -46,6 +48,10 @@ export default function DevelopersList() {
         <CardContent className="p-0">
           {isLoading ? (
             <div className="p-8 text-center text-slate-500">Loading developers...</div>
+          ) : isError ? (
+            <div className="p-6">
+              <QueryFallback title="Developers unavailable" error={error} onRetry={() => refetch()} isRetrying={isFetching} />
+            </div>
           ) : (
             <div className="overflow-x-auto">
               <table className="w-full text-sm text-left">
@@ -58,7 +64,7 @@ export default function DevelopersList() {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
-                  {response?.data.map((dev) => (
+                  {developers.map((dev) => (
                     <tr key={dev.id} className="hover:bg-slate-50/50">
                       <td className="px-6 py-4">
                         <Link href={`/app/developers/${dev.id}`}>
@@ -81,7 +87,7 @@ export default function DevelopersList() {
                       </td>
                     </tr>
                   ))}
-                  {response?.data.length === 0 && (
+                  {developers.length === 0 && (
                     <tr>
                       <td colSpan={4} className="px-6 py-8 text-center text-slate-500">
                         No developers found.

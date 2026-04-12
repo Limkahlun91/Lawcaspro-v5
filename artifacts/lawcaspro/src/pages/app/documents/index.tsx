@@ -11,6 +11,7 @@ import { cn } from "@/lib/utils";
 import { useToast } from "@/hooks/use-toast";
 import FirmDocuments from "@/pages/app/documents/FirmDocuments";
 import FirmLetterHead from "@/pages/app/documents/FirmLetterHead";
+import { QueryFallback } from "@/components/query-fallback";
 
 const API_BASE = import.meta.env.BASE_URL.replace(/\/$/, "").replace(/^\/lawcaspro/, "") + "/api";
 
@@ -52,7 +53,9 @@ function formatFileSize(bytes: number | null): string {
 }
 
 function formatDate(dateStr: string): string {
-  return new Date(dateStr).toLocaleDateString("en-MY", { day: "2-digit", month: "short", year: "numeric" });
+  const d = new Date(dateStr);
+  if (Number.isNaN(d.getTime())) return "-";
+  return d.toLocaleDateString("en-MY", { day: "2-digit", month: "short", year: "numeric" });
 }
 
 function getFileExtension(fileName: string): string {
@@ -126,7 +129,7 @@ function MasterDocumentsTab() {
   const { toast } = useToast();
   const [selectedFolderId, setSelectedFolderId] = useState<number | null>(null);
 
-  const { data: folders = [] } = useQuery<SystemFolder[]>({
+  const foldersQuery = useQuery<SystemFolder[]>({
     queryKey: ["hub-folders"],
     queryFn: async () => {
       const res = await fetch(`${API_BASE}/hub/folders`, { credentials: "include" });
@@ -135,7 +138,7 @@ function MasterDocumentsTab() {
     },
   });
 
-  const { data: docs = [], isLoading } = useQuery<SystemDoc[]>({
+  const docsQuery = useQuery<SystemDoc[]>({
     queryKey: ["hub-documents", selectedFolderId],
     queryFn: async () => {
       const url = selectedFolderId !== null
@@ -146,6 +149,14 @@ function MasterDocumentsTab() {
       return res.json();
     },
   });
+
+  if (foldersQuery.isError) {
+    return <QueryFallback title="Documents unavailable" error={foldersQuery.error} onRetry={() => foldersQuery.refetch()} isRetrying={foldersQuery.isFetching} />;
+  }
+
+  const folders = foldersQuery.data ?? [];
+  const docs = docsQuery.data ?? [];
+  const isLoading = foldersQuery.isLoading || docsQuery.isLoading;
 
   const rootFolders = folders.filter(f => f.parentId === null).sort((a, b) => a.sortOrder - b.sortOrder);
   const selectedFolder = folders.find(f => f.id === selectedFolderId);
@@ -163,7 +174,8 @@ function MasterDocumentsTab() {
 
   const handleDownload = async (doc: SystemDoc) => {
     try {
-      const pathPart = doc.objectPath.replace(/^\/objects\//, "");
+      const pathPart = String(doc.objectPath ?? "").replace(/^\/objects\//, "");
+      if (!pathPart) throw new Error("Missing document path");
       const res = await fetch(`${API_BASE}/storage/objects/${pathPart}`, { credentials: "include" });
       if (!res.ok) throw new Error("Download failed");
       const blob = await res.blob();
@@ -235,6 +247,8 @@ function MasterDocumentsTab() {
 
               {isLoading ? (
                 <div className="py-12 text-center text-slate-500">Loading...</div>
+              ) : docsQuery.isError ? (
+                <QueryFallback title="Documents unavailable" error={docsQuery.error} onRetry={() => docsQuery.refetch()} isRetrying={docsQuery.isFetching} />
               ) : docs.length === 0 ? (
                 <div className="text-center py-12">
                   <FileText className="w-10 h-10 text-slate-300 mx-auto mb-3" />
@@ -258,14 +272,14 @@ function MasterDocumentsTab() {
                           <div className="flex items-center gap-3">
                             <FileText className="w-4 h-4 text-slate-400 shrink-0" />
                             <div>
-                              <div className="font-medium text-slate-900">{doc.name}</div>
+                              <div className="font-medium text-slate-900">{doc.name || "-"}</div>
                               {doc.description && <div className="text-xs text-slate-500 mt-0.5">{doc.description}</div>}
                             </div>
                           </div>
                         </td>
                         <td className="px-4 py-3">
                           <span className="inline-block px-2 py-0.5 rounded text-xs font-medium bg-slate-100 text-slate-600">
-                            {getFileExtension(doc.fileName)}
+                            {getFileExtension(String(doc.fileName ?? ""))}
                           </span>
                         </td>
                         <td className="px-4 py-3 text-slate-500 text-xs">{formatFileSize(doc.fileSize)}</td>

@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button";
 import { fetchWithTimeout } from "@/lib/fetch-with-timeout";
 import { getStoredAuthToken } from "@/lib/auth-token";
 import { useListProjects } from "@workspace/api-client-react";
+import { QueryFallback } from "@/components/query-fallback";
 
 const API_BASE = import.meta.env.BASE_URL.replace(/\/$/, "").replace(/^\/lawcaspro/, "") + "/api";
 
@@ -79,7 +80,7 @@ export default function Workbench() {
     return q.toString();
   }, [userId, projectId, purchaseMode, assignedLawyerId, assignedClerkId]);
 
-  const { data, isLoading, error } = useQuery<WorkbenchResponse>({
+  const { data, isLoading, error, refetch, isFetching } = useQuery<WorkbenchResponse>({
     queryKey: ["cases", "workbench", workbenchQuery],
     queryFn: () => apiFetch(`/cases/workbench${workbenchQuery ? `?${workbenchQuery}` : ""}`),
     retry: false,
@@ -96,7 +97,11 @@ export default function Workbench() {
     return <div className="text-slate-500">Loading…</div>;
   }
   if (error || !data) {
-    return <div className="text-slate-500">Failed to load workbench.</div>;
+    return (
+      <div className="p-6">
+        <QueryFallback title="Workbench unavailable" error={error} onRetry={() => refetch()} isRetrying={isFetching} />
+      </div>
+    );
   }
 
   const staffOptions = data.staffOptions ?? [];
@@ -347,4 +352,3 @@ export default function Workbench() {
     </div>
   );
 }
-
