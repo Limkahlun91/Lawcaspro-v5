@@ -1,5 +1,5 @@
 import { Router, type IRouter } from "express";
-import { eq, count } from "drizzle-orm";
+import { and, count, eq, or, sql } from "drizzle-orm";
 import { db, rolesTable, permissionsTable, usersTable } from "@workspace/db";
 import {
   CreateRoleBody, UpdateRoleBody,
@@ -11,6 +11,39 @@ const router: IRouter = Router();
 
 type DbConn = typeof db | NonNullable<AuthRequest["rlsDb"]>;
 const rdb = (req: AuthRequest): DbConn => req.rlsDb ?? db;
+
+const standardRoleNames = ["Partner", "Senior Lawyer", "Lawyer", "Senior Clerk", "Clerk", "Manager", "Admin", "Viewer"] as const;
+
+async function canBackfillStandardRoles(r: DbConn, req: AuthRequest): Promise<boolean> {
+  if (!req.roleId) return false;
+  const perms = await r
+    .select({ allowed: permissionsTable.allowed })
+    .from(permissionsTable)
+    .where(and(
+      eq(permissionsTable.roleId, req.roleId),
+      eq(permissionsTable.allowed, true),
+      or(
+        and(eq(permissionsTable.module, "roles"), eq(permissionsTable.action, "create")),
+        and(eq(permissionsTable.module, "users"), eq(permissionsTable.action, "create")),
+      ),
+    ));
+  return perms.length > 0;
+}
+
+async function backfillStandardRoles(r: DbConn, firmId: number): Promise<string[]> {
+  return r.transaction(async (tx) => {
+    await tx.execute(sql`SELECT pg_advisory_xact_lock(${firmId})`);
+    const existing = await tx
+      .select({ name: rolesTable.name })
+      .from(rolesTable)
+      .where(eq(rolesTable.firmId, firmId));
+    const existingNames = new Set(existing.map((x) => x.name));
+    const missing = standardRoleNames.filter((name) => !existingNames.has(name));
+    if (missing.length === 0) return [];
+    await tx.insert(rolesTable).values(missing.map((name) => ({ firmId, name })));
+    return [...missing];
+  });
+}
 
 async function enrichRole(r: DbConn, role: typeof rolesTable.$inferSelect) {
   const perms = await r.select().from(permissionsTable).where(eq(permissionsTable.roleId, role.id));
@@ -28,6 +61,23 @@ async function enrichRole(r: DbConn, role: typeof rolesTable.$inferSelect) {
 
 router.get("/roles", requireAuth, requireFirmUser, requirePermission("roles", "read"), async (req: AuthRequest, res): Promise<void> => {
   const r = rdb(req);
+  if (req.firmId) {
+    const allowed = await canBackfillStandardRoles(r, req);
+    if (allowed) {
+      const created = await backfillStandardRoles(r, req.firmId);
+      if (created.length > 0) {
+        await writeAuditLog({
+          firmId: req.firmId,
+          actorId: req.userId,
+          actorType: req.userType,
+          action: "roles.standard_roles_backfilled",
+          detail: `created=${created.join(",")}`,
+          ipAddress: req.ip,
+          userAgent: req.headers["user-agent"],
+        }, { db: req.rlsDb });
+      }
+    }
+  }
   const roles = await r.select().from(rolesTable).where(eq(rolesTable.firmId, req.firmId!));
   const enriched = await Promise.all(roles.map((role) => enrichRole(r, role)));
   res.json(enriched);
@@ -146,34 +196,19 @@ router.delete("/roles/:roleId", requireAuth, requireFirmUser, requirePermission(
 
 router.post("/roles/bootstrap", requireAuth, requireFirmUser, requirePermission("roles", "create"), async (req: AuthRequest, res): Promise<void> => {
   const r = rdb(req);
-  const existingRoles = await r.select().from(rolesTable).where(eq(rolesTable.firmId, req.firmId!));
-  const existingNames = new Set(existingRoles.map(role => role.name));
-
-  const standardRoles = ["Partner", "Senior Lawyer", "Lawyer", "Senior Clerk", "Clerk", "Manager", "Admin", "Viewer"];
-  const rolesToCreate = standardRoles.filter(name => !existingNames.has(name));
-
-  if (rolesToCreate.length > 0) {
-    const newRoles = await r.insert(rolesTable).values(
-      rolesToCreate.map(name => ({
-        firmId: req.firmId!,
-        name,
-      }))
-    ).returning();
-
-    // Default permissions logic can be added here if needed
-
+  const created = await backfillStandardRoles(r, req.firmId!);
+  if (created.length > 0) {
     await writeAuditLog({
       firmId: req.firmId,
       actorId: req.userId,
       actorType: req.userType,
       action: "roles.bootstrap",
-      detail: `Created ${rolesToCreate.length} standard roles`,
+      detail: `created=${created.join(",")}`,
       ipAddress: req.ip,
-      userAgent: req.headers["user-agent"]
+      userAgent: req.headers["user-agent"],
     }, { db: req.rlsDb });
   }
-
-  res.json({ message: `Bootstrapped ${rolesToCreate.length} roles` });
+  res.json({ message: `Bootstrapped ${created.length} roles` });
 });
 
 export default router;
