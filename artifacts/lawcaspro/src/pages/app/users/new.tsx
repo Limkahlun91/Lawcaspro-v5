@@ -27,8 +27,8 @@ export default function NewUser() {
   const { toast } = useToast();
   const queryClient = useQueryClient();
   
-  const { data: rolesResponse } = useListRoles({ page: 1, limit: 100 });
-  const roles = rolesResponse?.data || [];
+  const rolesQuery = useListRoles();
+  const roles = rolesQuery.data ?? [];
 
   const form = useForm<FormValues>({
     resolver: zodResolver(createUserSchema),
@@ -133,7 +133,13 @@ export default function NewUser() {
                         </SelectTrigger>
                       </FormControl>
                       <SelectContent>
-                        {roles.map(role => (
+                        {rolesQuery.isLoading ? (
+                          <div className="px-3 py-2 text-sm text-slate-500">Loading roles...</div>
+                        ) : rolesQuery.isError ? (
+                          <div className="px-3 py-2 text-sm text-red-600">Failed to load roles</div>
+                        ) : roles.length === 0 ? (
+                          <div className="px-3 py-2 text-sm text-slate-500">No roles available</div>
+                        ) : roles.map(role => (
                           <SelectItem key={role.id} value={role.id.toString()}>{role.name}</SelectItem>
                         ))}
                       </SelectContent>

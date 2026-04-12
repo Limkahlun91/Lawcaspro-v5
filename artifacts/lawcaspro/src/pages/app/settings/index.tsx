@@ -809,7 +809,7 @@ export default function Settings() {
                     disabled={loadingRoles}
                   >
                     <option value="">(No change)</option>
-                    {(rolesRes?.data ?? []).map((r: any) => (
+                    {(rolesRes ?? []).map((r: any) => (
                       <option key={r.id} value={String(r.id)}>{r.name}</option>
                     ))}
                   </select>
@@ -906,7 +906,7 @@ export default function Settings() {
             {loadingRoles ? (
               <div className="col-span-2 p-8 text-center text-slate-500">Loading roles...</div>
             ) : (
-              rolesRes?.data?.map((role: any) => (
+              (rolesRes ?? []).map((role: any) => (
                 <Card key={role.id}>
                   <CardContent className="p-6">
                     <div className="flex justify-between items-start mb-4">

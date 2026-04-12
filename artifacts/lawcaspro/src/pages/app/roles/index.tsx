@@ -2,7 +2,7 @@ import { useListRoles } from "@workspace/api-client-react";
 import { Card, CardContent } from "@/components/ui/card";
 
 export default function RolesList() {
-  const { data: response, isLoading } = useListRoles();
+  const { data: roles, isLoading } = useListRoles();
 
   return (
     <div className="space-y-6">
@@ -15,7 +15,7 @@ export default function RolesList() {
         {isLoading ? (
           <div>Loading roles...</div>
         ) : (
-          response?.data.map(role => (
+          (roles ?? []).map(role => (
             <Card key={role.id}>
               <CardContent className="p-6">
                 <div className="flex justify-between items-start mb-4">
