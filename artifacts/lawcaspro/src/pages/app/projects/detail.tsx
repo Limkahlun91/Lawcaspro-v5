@@ -8,10 +8,8 @@ import { useToast } from "@/hooks/use-toast";
 import { useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { QueryFallback } from "@/components/query-fallback";
-import { apiErrorFromResponse } from "@/lib/http-error";
 import { toastError } from "@/lib/toast-error";
-
-const API_BASE = import.meta.env.BASE_URL.replace(/\/$/, "").replace(/^\/lawcaspro/, "") + "/api";
+import { apiRequest } from "@/lib/api-client";
 
 export default function ProjectDetail() {
   const { id } = useParams<{ id: string }>();
@@ -36,13 +34,7 @@ export default function ProjectDetail() {
     if (!projectId || deleting) return;
     setDeleting(true);
     try {
-      const res = await fetch(`${API_BASE}/projects/${projectId}`, {
-        method: "DELETE",
-        credentials: "include",
-      });
-      if (!(res.status === 204 || res.ok)) {
-        throw await apiErrorFromResponse(res);
-      }
+      await apiRequest(`/projects/${projectId}`, { method: "DELETE" });
       qc.invalidateQueries({ queryKey: getListProjectsQueryKey() });
       qc.invalidateQueries({ queryKey: getGetProjectQueryKey(projectId) });
       toast({ title: "Project deleted" });

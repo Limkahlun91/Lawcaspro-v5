@@ -13,6 +13,7 @@ import { useToast } from "@/hooks/use-toast";
 import { useAuth } from "@/lib/auth-context";
 import { hasPermission } from "@/lib/permissions";
 import { apiUrl } from "@/lib/api-base";
+import { ME_QUERY_KEY } from "@/lib/query-keys";
 
 async function apiFetch(path: string, opts?: RequestInit) {
   const res = await fetch(apiUrl(`/api${path}`), { credentials: "include", ...opts });
@@ -81,7 +82,7 @@ function SecurityTab() {
     onSuccess: () => {
       setTotpStep("idle");
       setConfirmCode("");
-      queryClient.invalidateQueries({ queryKey: ["me"] });
+      queryClient.invalidateQueries({ queryKey: ME_QUERY_KEY });
       toast({ title: "Two-factor authentication enabled" });
       window.location.reload();
     },

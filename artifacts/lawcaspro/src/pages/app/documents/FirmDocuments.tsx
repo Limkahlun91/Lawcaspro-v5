@@ -13,9 +13,7 @@ import { ChevronRight, Download, FileText, Folder, FolderOpen, Pencil, Plus, Tra
 import { DOCUMENT_TYPE_LABELS } from "@workspace/documents-registry";
 import { QueryFallback } from "@/components/query-fallback";
 import { toastError } from "@/lib/toast-error";
-import { apiErrorFromResponse } from "@/lib/http-error";
-
-const API_BASE = import.meta.env.BASE_URL.replace(/\/$/, "").replace(/^\/lawcaspro/, "") + "/api";
+import { apiFetchBlob, apiFetchJson } from "@/lib/api-client";
 
 interface FirmFolder {
   id: number;
@@ -46,37 +44,10 @@ const ACCEPTED_EXTENSIONS = [
   ".docx", ".doc", ".pdf", ".xlsx", ".xls", ".csv", ".txt", ".jpg", ".jpeg", ".png",
 ];
 
-async function apiFetch(path: string, init?: RequestInit) {
-  const res = await fetch(`${API_BASE}${path}`, {
-    credentials: "include",
-    ...init,
-    headers: { "Content-Type": "application/json", ...(init?.headers ?? {}) },
-  });
-  if (!res.ok) {
-    const text = await res.text();
-    try {
-      const parsed = JSON.parse(text) as { error?: unknown; code?: unknown; detail?: unknown };
-      const msg = typeof parsed.error === "string" ? parsed.error : text;
-      const code = typeof parsed.code === "string" ? ` (${parsed.code})` : "";
-      throw new Error(`${msg}${code}`);
-    } catch {
-      throw new Error(text);
-    }
-  }
-  if (res.status === 204) return null;
-  return res.json();
-}
-
 async function uploadFile(file: File): Promise<{ objectPath: string }> {
   const formData = new FormData();
   formData.append("file", file);
-  const uploadRes = await fetch(`${API_BASE}/storage/upload`, {
-    method: "POST",
-    body: formData,
-    credentials: "include",
-  });
-  if (!uploadRes.ok) throw new Error("Upload to storage failed");
-  return uploadRes.json();
+  return await apiFetchJson("/storage/upload", { method: "POST", body: formData });
 }
 
 function formatFileSize(bytes: number | null) {
@@ -189,13 +160,13 @@ export default function FirmDocuments() {
 
   const foldersQuery = useQuery<FirmFolder[]>({
     queryKey: ["firm-document-folders"],
-    queryFn: () => apiFetch("/firm-document-folders"),
+    queryFn: () => apiFetchJson("/firm-document-folders"),
     retry: false,
   });
 
   const docsQuery = useQuery<FirmDocument[]>({
     queryKey: ["firm-documents"],
-    queryFn: () => apiFetch("/document-templates"),
+    queryFn: () => apiFetchJson("/document-templates"),
     retry: false,
   });
   const folders = foldersQuery.data ?? [];
@@ -204,7 +175,7 @@ export default function FirmDocuments() {
 
   const createFolderMutation = useMutation({
     mutationFn: (payload: { name: string; parentId: number | null }) =>
-      apiFetch("/firm-document-folders", { method: "POST", body: JSON.stringify(payload) }),
+      apiFetchJson("/firm-document-folders", { method: "POST", body: JSON.stringify(payload) }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["firm-document-folders"] });
       toast({ title: "Folder created" });
@@ -216,7 +187,7 @@ export default function FirmDocuments() {
 
   const renameFolderMutation = useMutation({
     mutationFn: (payload: { folderId: number; name: string }) =>
-      apiFetch(`/firm-document-folders/${payload.folderId}`, { method: "PATCH", body: JSON.stringify({ name: payload.name }) }),
+      apiFetchJson(`/firm-document-folders/${payload.folderId}`, { method: "PATCH", body: JSON.stringify({ name: payload.name }) }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["firm-document-folders"] });
       toast({ title: "Folder renamed" });
@@ -226,7 +197,7 @@ export default function FirmDocuments() {
   });
 
   const deleteFolderMutation = useMutation({
-    mutationFn: (folderId: number) => apiFetch(`/firm-document-folders/${folderId}`, { method: "DELETE" }),
+    mutationFn: (folderId: number) => apiFetchJson(`/firm-document-folders/${folderId}`, { method: "DELETE" }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["firm-document-folders"] });
       toast({ title: "Folder deleted" });
@@ -236,7 +207,7 @@ export default function FirmDocuments() {
   });
 
   const deleteDocMutation = useMutation({
-    mutationFn: (id: number) => apiFetch(`/document-templates/${id}`, { method: "DELETE" }),
+    mutationFn: (id: number) => apiFetchJson(`/document-templates/${id}`, { method: "DELETE" }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["firm-documents"] });
       toast({ title: "Document deleted" });
@@ -246,7 +217,7 @@ export default function FirmDocuments() {
 
   const moveDocMutation = useMutation({
     mutationFn: (payload: { id: number; folderId: number | null; kind?: "template" | "reference" }) =>
-      apiFetch(`/document-templates/${payload.id}`, { method: "PATCH", body: JSON.stringify({ folderId: payload.folderId, kind: payload.kind }) }),
+      apiFetchJson(`/document-templates/${payload.id}`, { method: "PATCH", body: JSON.stringify({ folderId: payload.folderId, kind: payload.kind }) }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["firm-documents"] });
       toast({ title: "Document updated" });
@@ -256,7 +227,7 @@ export default function FirmDocuments() {
 
   const updateDocMutation = useMutation({
     mutationFn: (payload: { id: number; name: string; description: string; kind: "template" | "reference"; documentType: string }) =>
-      apiFetch(`/document-templates/${payload.id}`, { method: "PATCH", body: JSON.stringify({ name: payload.name, description: payload.description || null, kind: payload.kind, documentType: payload.documentType }) }),
+      apiFetchJson(`/document-templates/${payload.id}`, { method: "PATCH", body: JSON.stringify({ name: payload.name, description: payload.description || null, kind: payload.kind, documentType: payload.documentType }) }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["firm-documents"] });
       toast({ title: "Document updated" });
@@ -312,7 +283,7 @@ export default function FirmDocuments() {
         const nameToUse = selectedFiles.length === 1 ? docName.trim() : baseNameFromFileName(f.name);
         const uploaded = await uploadFile(f);
 
-        await apiFetch("/document-templates", {
+        await apiFetchJson("/document-templates", {
           method: "POST",
           body: JSON.stringify({
             name: nameToUse,
@@ -347,9 +318,7 @@ export default function FirmDocuments() {
 
   async function handleDownload(doc: FirmDocument) {
     try {
-      const res = await fetch(`${API_BASE}/document-templates/${doc.id}/download`, { credentials: "include" });
-      if (!res.ok) throw await apiErrorFromResponse(res);
-      const blob = await res.blob();
+      const blob = await apiFetchBlob(`/document-templates/${doc.id}/download`);
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;

@@ -9,10 +9,8 @@ import { X, Plus, Trash2 } from "lucide-react";
 import { useQueryClient } from "@tanstack/react-query";
 import { getListProjectsQueryKey } from "@workspace/api-client-react";
 import { QueryFallback } from "@/components/query-fallback";
-import { apiErrorFromResponse } from "@/lib/http-error";
 import { toastError } from "@/lib/toast-error";
-
-const API_BASE = import.meta.env.BASE_URL.replace(/\/$/, "").replace(/^\/lawcaspro/, "") + "/api";
+import { apiRequest } from "@/lib/api-client";
 
 interface PropertyType {
   id: string;
@@ -101,9 +99,8 @@ export default function EditProject() {
     setSaving(true);
     try {
       const projectTypeValue = titleType === "strata" ? "highrise" : "landed";
-      const res = await fetch(`${API_BASE}/projects/${projectId}`, {
+      await apiRequest(`/projects/${projectId}`, {
         method: "PATCH",
-        credentials: "include",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           name,
@@ -123,10 +120,6 @@ export default function EditProject() {
           },
         }),
       });
-
-      if (!res.ok) {
-        throw await apiErrorFromResponse(res);
-      }
 
       queryClient.invalidateQueries({ queryKey: getListProjectsQueryKey() });
       queryClient.invalidateQueries({ queryKey: getGetProjectQueryKey(projectId) });

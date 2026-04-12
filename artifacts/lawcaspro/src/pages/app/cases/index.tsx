@@ -7,42 +7,16 @@ import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useMemo, useState, useEffect, useRef } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { fetchWithTimeout } from "@/lib/fetch-with-timeout";
-import { getStoredAuthToken } from "@/lib/auth-token";
+import { apiFetchBlob, apiFetchJson } from "@/lib/api-client";
 import { Badge } from "@/components/ui/badge";
 import { Checkbox } from "@/components/ui/checkbox";
 import { useToast } from "@/hooks/use-toast";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { QueryFallback } from "@/components/query-fallback";
-
-const API_BASE = import.meta.env.BASE_URL.replace(/\/$/, "").replace(/^\/lawcaspro/, "") + "/api";
-
-async function apiFetch(path: string, init?: RequestInit) {
-  const token = getStoredAuthToken();
-  const headers: Record<string, string> = {};
-  if (token) headers.Authorization = `Bearer ${token}`;
-  if (init?.body) headers["Content-Type"] = "application/json";
-
-  const res = await fetchWithTimeout(`${API_BASE}${path}`, {
-    credentials: "include",
-    timeoutMs: 15000,
-    ...init,
-    headers: { ...headers, ...(init?.headers ?? {}) },
-  });
-  if (!res.ok) throw new Error(await res.text());
-  if (res.status === 204) return null;
-  return res.json();
-}
+import { toastError } from "@/lib/toast-error";
 
 async function apiFetchCsv(path: string): Promise<Blob> {
-  const token = getStoredAuthToken();
-  const res = await fetchWithTimeout(`${API_BASE}${path}`, {
-    credentials: "include",
-    timeoutMs: 60000,
-    headers: token ? { Authorization: `Bearer ${token}` } : undefined,
-  });
-  if (!res.ok) throw new Error(await res.text());
-  return res.blob();
+  return await apiFetchBlob(path, { timeoutMs: 60000, headers: { accept: "text/csv" } });
 }
 
 function fmtYmd(ymd: string | null | undefined): string {
@@ -147,7 +121,7 @@ export default function CasesList() {
 
   const { data: savedViews, refetch: refetchSavedViews } = useQuery({
     queryKey: ["cases", "saved-views"],
-    queryFn: () => apiFetch("/case-list-views"),
+    queryFn: () => apiFetchJson("/case-list-views"),
     retry: false,
   });
 
@@ -232,7 +206,7 @@ export default function CasesList() {
 
   const { data: filterOptions } = useQuery({
     queryKey: ["cases", "filter-options"],
-    queryFn: () => apiFetch("/cases/filter-options"),
+    queryFn: () => apiFetchJson("/cases/filter-options"),
     retry: false,
   });
   const spaStatuses: string[] = Array.isArray(filterOptions?.spaStatuses) ? filterOptions.spaStatuses : ["Pending"];
@@ -346,7 +320,7 @@ export default function CasesList() {
 
   const bulkAssignMutation = useMutation({
     mutationFn: async (vars: { roleInCase: "lawyer" | "clerk"; userId: number; caseIds: number[] }) => {
-      const res = await apiFetch("/cases/bulk/assign", { method: "POST", body: JSON.stringify(vars) });
+      const res = await apiFetchJson("/cases/bulk/assign", { method: "POST", body: JSON.stringify(vars) });
       return res as { requested: number; succeeded: number; failed: number; failures: Array<{ caseId: number; error: string }> };
     },
     onSuccess: (data) => {
@@ -356,7 +330,7 @@ export default function CasesList() {
       setBulkClerkId("all");
       toast({ title: "Bulk update completed", description: `${data.succeeded} succeeded, ${data.failed} failed` });
     },
-    onError: (err) => toast({ title: "Bulk update failed", description: String(err), variant: "destructive" }),
+    onError: (err) => toastError(toast, err, "Bulk update failed"),
   });
 
   const downloadCsv = async () => {
@@ -379,7 +353,7 @@ export default function CasesList() {
 
   const createViewMutation = useMutation({
     mutationFn: async (vars: { name: string; routeKey: "cases"; filtersJson: Record<string, string> }) => {
-      const res = await apiFetch("/case-list-views", { method: "POST", body: JSON.stringify(vars) });
+      const res = await apiFetchJson("/case-list-views", { method: "POST", body: JSON.stringify(vars) });
       return res as SavedView;
     },
     onSuccess: async () => {
@@ -388,12 +362,12 @@ export default function CasesList() {
       await refetchSavedViews();
       toast({ title: "View saved" });
     },
-    onError: (err) => toast({ title: "Save view failed", description: String(err), variant: "destructive" }),
+    onError: (err) => toastError(toast, err, "Save view failed"),
   });
 
   const renameViewMutation = useMutation({
     mutationFn: async (vars: { id: number; name: string }) => {
-      const res = await apiFetch(`/case-list-views/${vars.id}`, { method: "PATCH", body: JSON.stringify({ name: vars.name }) });
+      const res = await apiFetchJson(`/case-list-views/${vars.id}`, { method: "PATCH", body: JSON.stringify({ name: vars.name }) });
       return res as SavedView;
     },
     onSuccess: async () => {
@@ -402,19 +376,19 @@ export default function CasesList() {
       await refetchSavedViews();
       toast({ title: "View renamed" });
     },
-    onError: (err) => toast({ title: "Rename failed", description: String(err), variant: "destructive" }),
+    onError: (err) => toastError(toast, err, "Rename failed"),
   });
 
   const deleteViewMutation = useMutation({
     mutationFn: async (id: number) => {
-      await apiFetch(`/case-list-views/${id}`, { method: "DELETE" });
+      await apiFetchJson(`/case-list-views/${id}`, { method: "DELETE" });
       return id;
     },
     onSuccess: async () => {
       await refetchSavedViews();
       toast({ title: "View deleted" });
     },
-    onError: (err) => toast({ title: "Delete failed", description: String(err), variant: "destructive" }),
+    onError: (err) => toastError(toast, err, "Delete failed"),
   });
 
   return (
@@ -429,7 +403,7 @@ export default function CasesList() {
           <Button
             variant="outline"
             onClick={() => {
-              downloadCsv().catch((err) => toast({ title: "Export failed", description: String(err), variant: "destructive" }));
+              downloadCsv().catch((err) => toastError(toast, err, "Export failed"));
             }}
           >
             <Download className="w-4 h-4 mr-2" />

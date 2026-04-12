@@ -24,21 +24,8 @@ import CaseTasksTab from "./components/CaseTasksTab";
 import CaseTimeTab from "./components/CaseTimeTab";
 import CaseComplianceTab from "./components/CaseComplianceTab";
 import { QueryFallback } from "@/components/query-fallback";
-import { apiErrorFromResponse } from "@/lib/http-error";
 import { toastError } from "@/lib/toast-error";
-
-const API_BASE = import.meta.env.BASE_URL.replace(/\/$/, "").replace(/^\/lawcaspro/, "") + "/api";
-
-async function apiFetch(path: string, init?: RequestInit) {
-  const res = await fetch(`${API_BASE}${path}`, {
-    credentials: "include",
-    ...init,
-    headers: { "Content-Type": "application/json", ...(init?.headers ?? {}) },
-  });
-  if (!res.ok) throw await apiErrorFromResponse(res);
-  if (res.status === 204) return null;
-  return res.json();
-}
+import { apiFetchJson } from "@/lib/api-client";
 
 function dateInputValue(v: unknown): string {
   if (!v) return "";
@@ -92,7 +79,7 @@ export default function CaseDetail() {
   const createNoteMutation = useCreateCaseNote();
   const saveKeyDatesMutation = useMutation({
     mutationFn: (vars: { scope: string; payload: Record<string, unknown>; keys: string[] }) =>
-      apiFetch(`/cases/${caseId}/key-dates`, { method: "PATCH", body: JSON.stringify(vars.payload) }),
+      apiFetchJson(`/cases/${caseId}/key-dates`, { method: "PATCH", body: JSON.stringify(vars.payload) }),
     onSuccess: (data, vars) => {
       queryClient.invalidateQueries({ queryKey: getGetCaseQueryKey(caseId) });
       queryClient.invalidateQueries({ queryKey: ["case-key-dates", caseId] });
@@ -110,7 +97,7 @@ export default function CaseDetail() {
     onError: (err) => toastError(toast, err, "Save failed"),
   });
   const printMutation = useMutation({
-    mutationFn: (payload: { printKey: string }) => apiFetch(`/cases/${caseId}/documents/print`, { method: "POST", body: JSON.stringify(payload) }),
+    mutationFn: (payload: { printKey: string }) => apiFetchJson(`/cases/${caseId}/documents/print`, { method: "POST", body: JSON.stringify(payload) }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["case-documents", caseId] });
       toast({ title: "Document generated" });
@@ -135,7 +122,7 @@ export default function CaseDetail() {
 
   const keyDatesQuery = useQuery<Record<string, unknown>>({
     queryKey: ["case-key-dates", caseId],
-    queryFn: () => apiFetch(`/cases/${caseId}/key-dates`),
+    queryFn: () => apiFetchJson(`/cases/${caseId}/key-dates`),
     enabled: !!caseId,
     retry: false,
   });
@@ -143,7 +130,7 @@ export default function CaseDetail() {
 
   const printableQuery = useQuery<any[]>({
     queryKey: ["printable-config"],
-    queryFn: () => apiFetch("/printable-config"),
+    queryFn: () => apiFetchJson("/printable-config"),
     retry: false,
   });
   const printableConfig = Array.isArray(printableQuery.data) ? printableQuery.data : [];

@@ -4,6 +4,7 @@ import { setAuthTokenGetter, setBaseUrl } from "@workspace/api-client-react";
 import { Toaster } from "@/components/ui/toaster";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { AppErrorBoundary } from "@/components/app-error-boundary";
+import { getHttpStatus } from "@/lib/error-message";
 import { AuthProvider } from "@/lib/auth-context";
 import { ReAuthProvider } from "@/components/re-auth-dialog";
 import { AuthGuard } from "@/components/auth-guard";
@@ -68,7 +69,21 @@ const apiOrigin = getApiOrigin();
 if (apiOrigin) setBaseUrl(apiOrigin);
 setAuthTokenGetter(() => getStoredAuthToken());
 
-const queryClient = new QueryClient();
+const queryClient = new QueryClient({
+  defaultOptions: {
+    queries: {
+      retry: (failureCount, err) => {
+        const status = getHttpStatus(err);
+        if (status === 401 || status === 403 || status === 404) return false;
+        return failureCount < 2;
+      },
+      refetchOnWindowFocus: false,
+    },
+    mutations: {
+      retry: false,
+    },
+  },
+});
 
 function PlatformRoutes() {
   return (

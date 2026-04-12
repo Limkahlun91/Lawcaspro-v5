@@ -2,21 +2,8 @@ import { useQuery } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Briefcase, Users, Building2, HardHat, DollarSign, TrendingUp, MessageSquare, ArrowRight } from "lucide-react";
 import { useLocation } from "wouter";
-import { fetchWithTimeout } from "@/lib/fetch-with-timeout";
-import { getStoredAuthToken } from "@/lib/auth-token";
-
-const API_BASE = import.meta.env.BASE_URL.replace(/\/$/, "").replace(/^\/lawcaspro/, "") + "/api";
-
-async function apiFetch(path: string) {
-  const token = getStoredAuthToken();
-  const res = await fetchWithTimeout(`${API_BASE}${path}`, {
-    credentials: "include",
-    timeoutMs: 15000,
-    headers: token ? { Authorization: `Bearer ${token}` } : undefined,
-  });
-  if (!res.ok) throw new Error(await res.text());
-  return res.json();
-}
+import { apiFetchJson } from "@/lib/api-client";
+import { QueryFallback } from "@/components/query-fallback";
 
 function fmt(val: unknown) {
   return `RM ${Number(val ?? 0).toLocaleString("en-MY", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
@@ -52,7 +39,7 @@ export default function AppDashboard() {
 
   const { data: stats, isLoading, isError, error, refetch, isFetching } = useQuery({
     queryKey: ["dashboard"],
-    queryFn: () => apiFetch("/dashboard"),
+    queryFn: () => apiFetchJson("/dashboard"),
     retry: false,
   });
 
@@ -61,23 +48,10 @@ export default function AppDashboard() {
   }
 
   if (isError) {
-    const message = error instanceof Error ? error.message : "Failed to load dashboard";
     return (
       <div className="py-12 flex justify-center">
         <div className="max-w-lg w-full px-4">
-          <div className="border rounded-lg bg-white p-5">
-            <div className="text-lg font-semibold text-slate-900">Dashboard unavailable</div>
-            <div className="text-sm text-slate-500 mt-2 break-words">{message}</div>
-            <div className="mt-4">
-              <button
-                className="px-3 py-2 text-sm rounded bg-slate-900 text-white hover:bg-slate-800 disabled:opacity-50"
-                onClick={() => refetch()}
-                disabled={isFetching}
-              >
-                {isFetching ? "Retrying..." : "Retry"}
-              </button>
-            </div>
-          </div>
+          <QueryFallback title="Dashboard unavailable" error={error} onRetry={() => refetch()} isRetrying={isFetching} />
         </div>
       </div>
     );

@@ -11,11 +11,10 @@ import {
   ArrowLeft, Building2, Phone, Mail, User, MapPin, Pencil, X, Save, Plus, Trash2, Briefcase,
 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
-import { apiUrl } from "@/lib/api-base";
 import { getListDevelopersQueryKey } from "@workspace/api-client-react";
 import { QueryFallback } from "@/components/query-fallback";
-import { apiErrorFromResponse } from "@/lib/http-error";
 import { toastError } from "@/lib/toast-error";
+import { apiFetchJson, apiRequest } from "@/lib/api-client";
 
 interface Contact {
   name: string;
@@ -68,9 +67,7 @@ export default function DeveloperDetail() {
     setLoading(true);
     setLoadError(null);
     try {
-      const res = await fetch(apiUrl(`/api/developers/${developerId}`), { credentials: "include" });
-      if (!res.ok) throw await apiErrorFromResponse(res);
-      const data: Developer = await res.json();
+      const data = await apiFetchJson<Developer>(`/developers/${developerId}`);
       setDeveloper(data);
       setForm({
         name: data.name,
@@ -118,8 +115,7 @@ export default function DeveloperDetail() {
     }
     setSaving(true);
     try {
-      const primaryContact = contacts[0];
-      const res = await fetch(apiUrl(`/api/developers/${developerId}`), {
+      const updated = await apiFetchJson<Developer>(`/developers/${developerId}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -132,16 +128,11 @@ export default function DeveloperDetail() {
           phone: primaryContact.phone || null,
           email: form.email || primaryContact.email || null,
         }),
-        credentials: "include",
       });
-      if (!res.ok) {
-        throw await apiErrorFromResponse(res);
-      }
       const updated: Developer = await res.json();
       setDeveloper(updated);
       queryClient.invalidateQueries({ queryKey: getListDevelopersQueryKey() });
       toast({ title: "Developer updated" });
-      setEditing(false);
     } catch (e) {
       toastError(toast, e, "Save failed");
     } finally {
@@ -153,13 +144,7 @@ export default function DeveloperDetail() {
     if (!developerId || deleting) return;
     setDeleting(true);
     try {
-      const res = await fetch(apiUrl(`/api/developers/${developerId}`), {
-        method: "DELETE",
-        credentials: "include",
-      });
-      if (!(res.status === 204 || res.ok)) {
-        throw await apiErrorFromResponse(res);
-      }
+      await apiRequest(`/developers/${developerId}`, { method: "DELETE" });
       queryClient.invalidateQueries({ queryKey: getListDevelopersQueryKey() });
       toast({ title: "Developer deleted" });
       setLocation("/app/developers");

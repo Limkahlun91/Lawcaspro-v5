@@ -12,8 +12,8 @@ import { useToast } from "@/hooks/use-toast";
 import FirmDocuments from "@/pages/app/documents/FirmDocuments";
 import FirmLetterHead from "@/pages/app/documents/FirmLetterHead";
 import { QueryFallback } from "@/components/query-fallback";
-
-const API_BASE = import.meta.env.BASE_URL.replace(/\/$/, "").replace(/^\/lawcaspro/, "") + "/api";
+import { apiFetchBlob, apiFetchJson } from "@/lib/api-client";
+import { toastError } from "@/lib/toast-error";
 
 interface SystemDoc {
   id: number;
@@ -131,22 +131,16 @@ function MasterDocumentsTab() {
 
   const foldersQuery = useQuery<SystemFolder[]>({
     queryKey: ["hub-folders"],
-    queryFn: async () => {
-      const res = await fetch(`${API_BASE}/hub/folders`, { credentials: "include" });
-      if (!res.ok) throw new Error("Failed to load");
-      return res.json();
-    },
+    queryFn: () => apiFetchJson("/hub/folders"),
   });
 
   const docsQuery = useQuery<SystemDoc[]>({
     queryKey: ["hub-documents", selectedFolderId],
     queryFn: async () => {
       const url = selectedFolderId !== null
-        ? `${API_BASE}/hub/documents?folderId=${selectedFolderId}`
-        : `${API_BASE}/hub/documents`;
-      const res = await fetch(url, { credentials: "include" });
-      if (!res.ok) throw new Error("Failed to load");
-      return res.json();
+        ? `/hub/documents?folderId=${selectedFolderId}`
+        : "/hub/documents";
+      return await apiFetchJson(url);
     },
   });
 
@@ -176,17 +170,15 @@ function MasterDocumentsTab() {
     try {
       const pathPart = String(doc.objectPath ?? "").replace(/^\/objects\//, "");
       if (!pathPart) throw new Error("Missing document path");
-      const res = await fetch(`${API_BASE}/storage/objects/${pathPart}`, { credentials: "include" });
-      if (!res.ok) throw new Error("Download failed");
-      const blob = await res.blob();
+      const blob = await apiFetchBlob(`/storage/objects/${pathPart}`);
       const url = URL.createObjectURL(blob);
       const el = document.createElement("a");
       el.href = url;
       el.download = doc.fileName;
       el.click();
       URL.revokeObjectURL(url);
-    } catch {
-      toast({ title: "Failed to download document", variant: "destructive" });
+    } catch (err) {
+      toastError(toast, err, "Download failed");
     }
   };
 

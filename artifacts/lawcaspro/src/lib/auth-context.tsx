@@ -1,10 +1,11 @@
 import { createContext, useContext, useEffect, useState, ReactNode } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useLogout } from "@workspace/api-client-react";
 import type { AuthUser } from "@workspace/api-client-react";
-import { apiUrl } from "./api-base";
-import { fetchWithTimeout } from "./fetch-with-timeout";
+import { apiRequest } from "./api-client";
 import { clearStoredAuthToken, getStoredAuthToken } from "./auth-token";
+import { onAuthUnauthorized } from "./auth-events";
+import { ME_QUERY_KEY } from "./query-keys";
 
 interface AuthContextType {
   user: AuthUser | null;
@@ -18,19 +19,18 @@ const AuthContext = createContext<AuthContextType | undefined>(undefined);
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<AuthUser | null>(null);
   const [isLoading, setIsLoading] = useState(true);
+  const queryClient = useQueryClient();
 
   const { data: me, isLoading: isMeLoading } = useQuery<AuthUser | null>({
-    queryKey: ["me"],
+    queryKey: ME_QUERY_KEY,
     retry: false,
     queryFn: async () => {
       const token = getStoredAuthToken();
-      const res = await fetchWithTimeout(apiUrl("/api/auth/me"), {
-        credentials: "include",
-        timeoutMs: 15000,
+      const res = await apiRequest("/api/auth/me", {
+        allowStatuses: [401],
         headers: token ? { Authorization: `Bearer ${token}` } : undefined,
       });
       if (res.status === 401) return null;
-      if (!res.ok) throw new Error(await res.text());
       return res.json();
     },
   });
@@ -43,6 +43,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       setIsLoading(false);
     }
   }, [me, isMeLoading]);
+
+  useEffect(() => {
+    return onAuthUnauthorized(() => {
+      clearStoredAuthToken();
+      setUser(null);
+      queryClient.setQueryData(ME_QUERY_KEY, null);
+    });
+  }, [queryClient]);
 
   const login = (newUser: AuthUser) => {
     setUser(newUser);

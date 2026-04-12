@@ -9,9 +9,8 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { ArrowLeft, Plus, Trash2 } from "lucide-react";
 import { useQueryClient } from "@tanstack/react-query";
 import { getListDevelopersQueryKey } from "@workspace/api-client-react";
-import { apiUrl } from "@/lib/api-base";
-import { apiErrorFromResponse } from "@/lib/http-error";
 import { toastError } from "@/lib/toast-error";
+import { apiRequest } from "@/lib/api-client";
 
 interface Contact {
   name: string;
@@ -63,7 +62,7 @@ export default function NewDeveloper() {
     setSaving(true);
     try {
       const primaryContact = contacts[0];
-      const res = await fetch(apiUrl("/api/developers"), {
+      await apiRequest("/developers", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -76,11 +75,7 @@ export default function NewDeveloper() {
           phone: primaryContact.phone || null,
           email: form.email || primaryContact.email || null,
         }),
-        credentials: "include",
       });
-      if (!res.ok) {
-        throw await apiErrorFromResponse(res);
-      }
       queryClient.invalidateQueries({ queryKey: getListDevelopersQueryKey() });
       toast({ title: "Developer created successfully" });
       setLocation("/app/developers");

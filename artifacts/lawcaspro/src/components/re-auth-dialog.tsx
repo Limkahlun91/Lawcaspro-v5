@@ -40,7 +40,7 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
-import { getApiBaseUrl } from "@/lib/api";
+import { apiFetchJson } from "@/lib/api-client";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -96,19 +96,8 @@ export function ReAuthProvider({ children }: { children: ReactNode }) {
           // Fetch a short-lived re-auth token from the server.
           // Authentication is proved by the existing httpOnly session cookie.
           // The token lives only in memory (local variable) — never persisted.
-          const base = getApiBaseUrl();
-          fetch(`${base}/auth/reauth-token`, {
-            method: "POST",
-            credentials: "include",
-          })
-            .then((r) => {
-              if (!r.ok) throw new Error("Failed to obtain re-auth token");
-              return r.json() as Promise<{ reAuthToken: string }>;
-            })
-            .then(({ reAuthToken }) => {
-              const headers: ReAuthHeaders = { "x-reauth-token": reAuthToken };
-              return action(headers);
-            })
+          apiFetchJson<{ reAuthToken: string }>("/auth/reauth-token", { method: "POST" })
+            .then(({ reAuthToken }) => action({ "x-reauth-token": reAuthToken }))
             .then(resolveOuter)
             .catch(rejectOuter);
         };

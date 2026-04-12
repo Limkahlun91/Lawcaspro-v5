@@ -11,10 +11,8 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Badge } from "@/components/ui/badge";
 import { useToast } from "@/hooks/use-toast";
 import { Download, Pencil, Trash2, Upload } from "lucide-react";
-import { apiErrorFromResponse } from "@/lib/http-error";
 import { toastError } from "@/lib/toast-error";
-
-const API_BASE = import.meta.env.BASE_URL.replace(/\/$/, "").replace(/^\/lawcaspro/, "") + "/api";
+import { apiFetchBlob, apiFetchJson } from "@/lib/api-client";
 
 interface FirmLetterhead {
   id: number;
@@ -33,27 +31,10 @@ interface FirmLetterhead {
   created_at: string;
 }
 
-async function apiFetch(path: string, init?: RequestInit) {
-  const res = await fetch(`${API_BASE}${path}`, {
-    credentials: "include",
-    ...init,
-    headers: { "Content-Type": "application/json", ...(init?.headers ?? {}) },
-  });
-  if (!res.ok) throw await apiErrorFromResponse(res);
-  if (res.status === 204) return null;
-  return res.json();
-}
-
 async function uploadDocx(file: File): Promise<{ objectPath: string }> {
   const formData = new FormData();
   formData.append("file", file);
-  const uploadRes = await fetch(`${API_BASE}/storage/upload`, {
-    method: "POST",
-    body: formData,
-    credentials: "include",
-  });
-  if (!uploadRes.ok) throw await apiErrorFromResponse(uploadRes);
-  return uploadRes.json();
+  return await apiFetchJson("/storage/upload", { method: "POST", body: formData });
 }
 
 export default function FirmLetterHead() {
@@ -92,11 +73,11 @@ export default function FirmLetterHead() {
 
   const { data: letterheads = [], isLoading } = useQuery<FirmLetterhead[]>({
     queryKey: ["firm-letterheads"],
-    queryFn: () => apiFetch("/firm-letterheads"),
+    queryFn: () => apiFetchJson("/firm-letterheads"),
   });
 
   const setDefaultMutation = useMutation({
-    mutationFn: (id: number) => apiFetch(`/firm-letterheads/${id}/set-default`, { method: "POST" }),
+    mutationFn: (id: number) => apiFetchJson(`/firm-letterheads/${id}/set-default`, { method: "POST" }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["firm-letterheads"] });
       toast({ title: "Default letterhead updated" });
@@ -105,7 +86,7 @@ export default function FirmLetterHead() {
   });
 
   const deleteMutation = useMutation({
-    mutationFn: (id: number) => apiFetch(`/firm-letterheads/${id}`, { method: "DELETE" }),
+    mutationFn: (id: number) => apiFetchJson(`/firm-letterheads/${id}`, { method: "DELETE" }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["firm-letterheads"] });
       toast({ title: "Letterhead deleted" });
@@ -158,7 +139,7 @@ export default function FirmLetterHead() {
         patch.footerFileSize = replaceFooterFile.size;
       }
 
-      await apiFetch(`/firm-letterheads/${active.id}`, { method: "PATCH", body: JSON.stringify(patch) });
+      await apiFetchJson(`/firm-letterheads/${active.id}`, { method: "PATCH", body: JSON.stringify(patch) });
       qc.invalidateQueries({ queryKey: ["firm-letterheads"] });
       toast({ title: "Letterhead updated" });
       setEditMode(false);
@@ -166,7 +147,7 @@ export default function FirmLetterHead() {
       setReplaceContFile(null);
       setReplaceFooterFile(null);
       setRemoveFooter(false);
-      const refreshed = await apiFetch("/firm-letterheads");
+      const refreshed = await apiFetchJson<FirmLetterhead[]>("/firm-letterheads");
       const next = (refreshed as FirmLetterhead[]).find((l) => l.id === active.id) ?? null;
       setActive(next);
     } catch (err) {
@@ -184,7 +165,7 @@ export default function FirmLetterHead() {
       const contUp = await uploadDocx(contFile);
       const footerUp = footerFile ? await uploadDocx(footerFile) : null;
 
-      await apiFetch("/firm-letterheads", {
+      await apiFetchJson("/firm-letterheads", {
         method: "POST",
         body: JSON.stringify({
           name: name.trim(),
@@ -228,9 +209,7 @@ export default function FirmLetterHead() {
   }
 
   async function downloadTemplate(letterheadId: number, part: "first_page" | "continuation_header" | "footer", fileName: string) {
-    const res = await fetch(`${API_BASE}/firm-letterheads/${letterheadId}/templates/${part}/download`, { credentials: "include" });
-    if (!res.ok) throw await apiErrorFromResponse(res);
-    const blob = await res.blob();
+    const blob = await apiFetchBlob(`/firm-letterheads/${letterheadId}/templates/${part}/download`);
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;

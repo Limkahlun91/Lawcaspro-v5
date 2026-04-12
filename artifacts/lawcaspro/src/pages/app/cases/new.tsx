@@ -1,7 +1,7 @@
 import { useState, useEffect } from "react";
 import { useLocation } from "wouter";
 import { useQueryClient } from "@tanstack/react-query";
-import { useCreateCase, useListProjects, useListUsers } from "@workspace/api-client-react";
+import { getListCasesQueryKey, useCreateCase, useListProjects, useListUsers } from "@workspace/api-client-react";
 import { useToast } from "@/hooks/use-toast";
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
@@ -241,7 +241,7 @@ export default function NewCasePage() {
 
     try {
       await createCase.mutateAsync({ data: payload });
-      queryClient.invalidateQueries({ queryKey: ["cases"] });
+      queryClient.invalidateQueries({ queryKey: getListCasesQueryKey() });
       toast({ title: "Case created successfully" });
       navigate("/app/cases");
     } catch (e: unknown) {

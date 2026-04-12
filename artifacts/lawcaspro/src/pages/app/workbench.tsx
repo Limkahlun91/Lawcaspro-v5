@@ -5,23 +5,9 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Button } from "@/components/ui/button";
-import { fetchWithTimeout } from "@/lib/fetch-with-timeout";
-import { getStoredAuthToken } from "@/lib/auth-token";
+import { apiFetchJson } from "@/lib/api-client";
 import { useListProjects } from "@workspace/api-client-react";
 import { QueryFallback } from "@/components/query-fallback";
-
-const API_BASE = import.meta.env.BASE_URL.replace(/\/$/, "").replace(/^\/lawcaspro/, "") + "/api";
-
-async function apiFetch(path: string) {
-  const token = getStoredAuthToken();
-  const res = await fetchWithTimeout(`${API_BASE}${path}`, {
-    credentials: "include",
-    timeoutMs: 15000,
-    headers: token ? { Authorization: `Bearer ${token}` } : undefined,
-  });
-  if (!res.ok) throw new Error(await res.text());
-  return res.json();
-}
 
 type WorkbenchCard = { key: string; label: string; count: number; query: Record<string, string> };
 type WorkbenchResponse = {
@@ -61,7 +47,7 @@ export default function Workbench() {
 
   const { data: filterOptions } = useQuery({
     queryKey: ["cases", "filter-options"],
-    queryFn: () => apiFetch("/cases/filter-options"),
+    queryFn: () => apiFetchJson("/cases/filter-options"),
     retry: false,
   });
   const lawyers: Array<{ id: number; name: string }> = Array.isArray(filterOptions?.assignees?.lawyers) ? filterOptions.assignees.lawyers : [];
@@ -82,7 +68,7 @@ export default function Workbench() {
 
   const { data, isLoading, error, refetch, isFetching } = useQuery<WorkbenchResponse>({
     queryKey: ["cases", "workbench", workbenchQuery],
-    queryFn: () => apiFetch(`/cases/workbench${workbenchQuery ? `?${workbenchQuery}` : ""}`),
+    queryFn: () => apiFetchJson(`/cases/workbench${workbenchQuery ? `?${workbenchQuery}` : ""}`),
     retry: false,
   });
 

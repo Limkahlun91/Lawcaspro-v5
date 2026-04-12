@@ -9,15 +9,8 @@ import { ArrowLeft, Save, Copy, Trash2, Pencil, Printer, Plus, Calculator } from
 import { useQueryClient, useMutation } from "@tanstack/react-query";
 import { useToast } from "@/hooks/use-toast";
 import { QueryFallback } from "@/components/query-fallback";
-import { apiErrorFromResponse } from "@/lib/http-error";
 import { toastError } from "@/lib/toast-error";
-
-const API_BASE = import.meta.env.BASE_URL.replace(/\/$/, "").replace(/^\/lawcaspro/, "") + "/api";
-async function apiFetch(path: string, opts?: RequestInit) {
-  const res = await fetch(`${API_BASE}${path}`, { credentials: "include", ...opts });
-  if (!res.ok) throw await apiErrorFromResponse(res);
-  return res.json();
-}
+import { apiFetchJson } from "@/lib/api-client";
 
 const TAX_RATE = 8;
 
@@ -57,7 +50,7 @@ export default function QuotationDetail() {
   const duplicateMutation = useDuplicateQuotation();
 
   const autoCalcMutation = useMutation({
-    mutationFn: () => apiFetch(`/quotations/${quotationId}/auto-calculate`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({}) }),
+    mutationFn: () => apiFetchJson(`/quotations/${quotationId}/auto-calculate`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({}) }),
     onSuccess: (result: any) => {
       queryClient.invalidateQueries({ queryKey: getGetQuotationQueryKey(quotationId) });
       toast({ title: "Fees calculated", description: `Generated ${result.items?.filter((i: any) => i.isSystemGenerated).length ?? 0} system items from Malaysian SRO/stamp duty rules` });
