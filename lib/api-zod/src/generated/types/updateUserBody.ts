@@ -9,5 +9,6 @@
 export interface UpdateUserBody {
   name?: string;
   roleId?: number;
+  department?: string;
   status?: string;
 }

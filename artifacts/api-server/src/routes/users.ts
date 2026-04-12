@@ -23,6 +23,7 @@ async function enrichUser(user: typeof usersTable.$inferSelect) {
     name: user.name,
     roleId: user.roleId ?? null,
     roleName,
+    department: user.department ?? null,
     status: user.status,
     lastLoginAt: user.lastLoginAt?.toISOString() ?? null,
     createdAt: user.createdAt.toISOString(),
@@ -65,7 +66,7 @@ router.post("/users", requireAuth, requireFirmUser, requirePermission("users", "
     return;
   }
 
-  const { email, name, password, roleId } = parsed.data;
+  const { email, name, password, roleId, department } = parsed.data;
 
   const [existing] = await db.select().from(usersTable).where(eq(usersTable.email, email.toLowerCase()));
   if (existing) {
@@ -82,6 +83,7 @@ router.post("/users", requireAuth, requireFirmUser, requirePermission("users", "
       name,
       passwordHash,
       roleId,
+      department: department ?? null,
       userType: "firm_user",
       status: "active",
     })
@@ -125,6 +127,7 @@ router.patch("/users/:userId", requireAuth, requireFirmUser, requirePermission("
   const updates: Record<string, unknown> = {};
   if (parsed.data.name !== undefined) updates.name = parsed.data.name;
   if (parsed.data.roleId !== undefined) updates.roleId = parsed.data.roleId;
+  if (parsed.data.department !== undefined) updates.department = parsed.data.department;
   if (parsed.data.status !== undefined) updates.status = parsed.data.status;
 
   const [user] = await db

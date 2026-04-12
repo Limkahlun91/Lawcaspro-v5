@@ -18,6 +18,7 @@ import type {
 
 import type {
   AuthUser,
+  BootstrapRoles200,
   CaseDetail,
   CaseListResponse,
   CaseNote,
@@ -2207,6 +2208,87 @@ export const useDeleteRole = <
   TContext
 > => {
   return useMutation(getDeleteRoleMutationOptions(options));
+};
+
+/**
+ * @summary Bootstrap standard roles for the firm
+ */
+export const getBootstrapRolesUrl = () => {
+  return `/api/roles/bootstrap`;
+};
+
+export const bootstrapRoles = async (
+  options?: RequestInit,
+): Promise<BootstrapRoles200> => {
+  return customFetch<BootstrapRoles200>(getBootstrapRolesUrl(), {
+    ...options,
+    method: "POST",
+  });
+};
+
+export const getBootstrapRolesMutationOptions = <
+  TError = ErrorType<unknown>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof bootstrapRoles>>,
+    TError,
+    void,
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationOptions<
+  Awaited<ReturnType<typeof bootstrapRoles>>,
+  TError,
+  void,
+  TContext
+> => {
+  const mutationKey = ["bootstrapRoles"];
+  const { mutation: mutationOptions, request: requestOptions } = options
+    ? options.mutation &&
+      "mutationKey" in options.mutation &&
+      options.mutation.mutationKey
+      ? options
+      : { ...options, mutation: { ...options.mutation, mutationKey } }
+    : { mutation: { mutationKey }, request: undefined };
+
+  const mutationFn: MutationFunction<
+    Awaited<ReturnType<typeof bootstrapRoles>>,
+    void
+  > = () => {
+    return bootstrapRoles(requestOptions);
+  };
+
+  return { mutationFn, ...mutationOptions };
+};
+
+export type BootstrapRolesMutationResult = NonNullable<
+  Awaited<ReturnType<typeof bootstrapRoles>>
+>;
+
+export type BootstrapRolesMutationError = ErrorType<unknown>;
+
+/**
+ * @summary Bootstrap standard roles for the firm
+ */
+export const useBootstrapRoles = <
+  TError = ErrorType<unknown>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof bootstrapRoles>>,
+    TError,
+    void,
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationResult<
+  Awaited<ReturnType<typeof bootstrapRoles>>,
+  TError,
+  void,
+  TContext
+> => {
+  return useMutation(getBootstrapRolesMutationOptions(options));
 };
 
 /**

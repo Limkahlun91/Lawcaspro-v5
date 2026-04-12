@@ -36,6 +36,8 @@ export interface AuthUser {
   roleId: number | null;
   /** @nullable */
   roleName: string | null;
+  /** @nullable */
+  department?: string | null;
   status: string;
 }
 
@@ -207,6 +209,8 @@ export interface User {
   roleId: number | null;
   /** @nullable */
   roleName: string | null;
+  /** @nullable */
+  department?: string | null;
   status: string;
   /** @nullable */
   lastLoginAt: string | null;
@@ -225,11 +229,13 @@ export interface CreateUserBody {
   name: string;
   password: string;
   roleId: number;
+  department?: string;
 }
 
 export interface UpdateUserBody {
   name?: string;
   roleId?: number;
+  department?: string;
   status?: string;
 }
 
@@ -668,6 +674,10 @@ export type ListUsersParams = {
   status?: string;
   page?: number;
   limit?: number;
+};
+
+export type BootstrapRoles200 = {
+  message?: string;
 };
 
 export type ListDevelopersParams = {

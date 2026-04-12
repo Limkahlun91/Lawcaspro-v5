@@ -18,6 +18,7 @@ const createUserSchema = z.object({
   email: z.string().email("Valid email is required"),
   password: z.string().min(8, "Password must be at least 8 characters"),
   roleId: z.coerce.number().min(1, "Role is required"),
+  department: z.string().optional(),
 });
 
 type FormValues = z.infer<typeof createUserSchema>;
@@ -37,8 +38,13 @@ export default function NewUser() {
       email: "",
       password: "",
       roleId: 0,
+      department: "",
     },
   });
+
+  const selectedRoleId = form.watch("roleId");
+  const selectedRole = roles.find((r) => r.id === selectedRoleId);
+  const showDepartment = selectedRole && (selectedRole.name === "Manager" || selectedRole.name === "Admin");
 
   const createUserMutation = useCreateUser();
 
@@ -148,6 +154,21 @@ export default function NewUser() {
                   </FormItem>
                 )}
               />
+              {showDepartment && (
+                <FormField
+                  control={form.control}
+                  name="department"
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormLabel>Department</FormLabel>
+                      <FormControl>
+                        <Input placeholder="e.g. IT, HR, Finance" {...field} />
+                      </FormControl>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
+              )}
               <div className="pt-4 flex justify-end gap-4">
                 <Button type="button" variant="outline" onClick={() => setLocation("/app/users")}>
                   Cancel

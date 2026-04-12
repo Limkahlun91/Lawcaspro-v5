@@ -15,6 +15,8 @@ export interface User {
   roleId: number | null;
   /** @nullable */
   roleName: string | null;
+  /** @nullable */
+  department?: string | null;
   status: string;
   /** @nullable */
   lastLoginAt: Date | null;

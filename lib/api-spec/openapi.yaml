@@ -535,6 +535,22 @@ paths:
         "204":
           description: Deleted
 
+  /roles/bootstrap:
+    post:
+      operationId: bootstrapRoles
+      tags: [roles]
+      summary: Bootstrap standard roles for the firm
+      responses:
+        "200":
+          description: Bootstrapped successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+
   # ── Developers ──────────────────────────────────────────────────────────
   /developers:
     get:
@@ -1221,6 +1237,8 @@ components:
           type: ["integer", "null"]
         roleName:
           type: ["string", "null"]
+        department:
+          type: ["string", "null"]
         status:
           type: string
       required:
@@ -1496,6 +1514,8 @@ components:
           type: ["integer", "null"]
         roleName:
           type: ["string", "null"]
+        department:
+          type: ["string", "null"]
         status:
           type: string
         lastLoginAt:
@@ -1545,6 +1565,8 @@ components:
           type: string
         roleId:
           type: integer
+        department:
+          type: string
       required:
         - email
         - name
@@ -1558,6 +1580,8 @@ components:
           type: string
         roleId:
           type: integer
+        department:
+          type: string
         status:
           type: string
 

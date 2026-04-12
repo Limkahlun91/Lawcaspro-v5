@@ -368,7 +368,7 @@ router.patch("/case-files/:id/status", requireAuth, requireFirmUser, async (req:
     detail: `${status}${reason ? `: ${reason}` : ""}`,
     ipAddress: req.ip,
     userAgent: req.headers["user-agent"],
-  }, { db: r });
+  }, { db: req.rlsDb });
 
   res.json({
     id: updated.id,

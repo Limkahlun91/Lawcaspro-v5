@@ -31,6 +31,7 @@ export const LoginResponse = zod.object({
   firmName: zod.string().nullable(),
   roleId: zod.number().nullable(),
   roleName: zod.string().nullable(),
+  department: zod.string().nullish(),
   status: zod.string(),
 });
 
@@ -53,6 +54,7 @@ export const GetMeResponse = zod.object({
   firmName: zod.string().nullable(),
   roleId: zod.number().nullable(),
   roleName: zod.string().nullable(),
+  department: zod.string().nullish(),
   status: zod.string(),
 });
 
@@ -448,6 +450,7 @@ export const ListUsersResponse = zod.object({
       name: zod.string(),
       roleId: zod.number().nullable(),
       roleName: zod.string().nullable(),
+      department: zod.string().nullish(),
       status: zod.string(),
       lastLoginAt: zod.coerce.date().nullable(),
       createdAt: zod.coerce.date(),
@@ -466,6 +469,7 @@ export const CreateUserBody = zod.object({
   name: zod.string(),
   password: zod.string(),
   roleId: zod.number(),
+  department: zod.string().optional(),
 });
 
 /**
@@ -482,6 +486,7 @@ export const GetUserResponse = zod.object({
   name: zod.string(),
   roleId: zod.number().nullable(),
   roleName: zod.string().nullable(),
+  department: zod.string().nullish(),
   status: zod.string(),
   lastLoginAt: zod.coerce.date().nullable(),
   createdAt: zod.coerce.date(),
@@ -497,6 +502,7 @@ export const UpdateUserParams = zod.object({
 export const UpdateUserBody = zod.object({
   name: zod.string().optional(),
   roleId: zod.number().optional(),
+  department: zod.string().optional(),
   status: zod.string().optional(),
 });
 
@@ -507,6 +513,7 @@ export const UpdateUserResponse = zod.object({
   name: zod.string(),
   roleId: zod.number().nullable(),
   roleName: zod.string().nullable(),
+  department: zod.string().nullish(),
   status: zod.string(),
   lastLoginAt: zod.coerce.date().nullable(),
   createdAt: zod.coerce.date(),
@@ -622,6 +629,13 @@ export const UpdateRoleResponse = zod.object({
  */
 export const DeleteRoleParams = zod.object({
   roleId: zod.coerce.number(),
+});
+
+/**
+ * @summary Bootstrap standard roles for the firm
+ */
+export const BootstrapRolesResponse = zod.object({
+  message: zod.string().optional(),
 });
 
 /**

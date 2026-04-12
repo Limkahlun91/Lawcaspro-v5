@@ -8,6 +8,7 @@
 
 export * from "./authUser";
 export * from "./billingSummary";
+export * from "./bootstrapRoles200";
 export * from "./caseAssignment";
 export * from "./caseDetail";
 export * from "./caseListResponse";

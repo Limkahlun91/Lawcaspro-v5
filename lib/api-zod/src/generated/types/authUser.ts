@@ -20,5 +20,7 @@ export interface AuthUser {
   roleId: number | null;
   /** @nullable */
   roleName: string | null;
+  /** @nullable */
+  department?: string | null;
   status: string;
 }

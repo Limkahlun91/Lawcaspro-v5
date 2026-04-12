@@ -6,10 +6,6 @@
  * OpenAPI spec version: 1.0.0
  */
 
-export interface CreateUserBody {
-  email: string;
-  name: string;
-  password: string;
-  roleId: number;
-  department?: string;
-}
+export type BootstrapRoles200 = {
+  message?: string;
+};

@@ -32,10 +32,14 @@ export default function NewCasePage() {
   const projects = projectsRes?.data || [];
   const { data: usersRes } = useListUsers({ limit: 100 });
   const users = usersRes?.data || [];
-  const lawyers = users.filter(u =>
-    u.roleName?.toLowerCase().includes("lawyer") || u.roleName?.toLowerCase().includes("partner")
-  );
-  const clerks = users.filter(u => u.roleName?.toLowerCase().includes("clerk"));
+  const lawyers = users.filter(u => {
+    const role = u.roleName?.trim() || "";
+    return ["Partner", "Senior Lawyer", "Lawyer"].includes(role);
+  });
+  const clerks = users.filter(u => {
+    const role = u.roleName?.trim() || "";
+    return ["Senior Clerk", "Clerk"].includes(role);
+  });
 
   const [activeTab, setActiveTab] = useState<Tab>("SPA Details");
   const [formError, setFormError] = useState<string | null>(null);

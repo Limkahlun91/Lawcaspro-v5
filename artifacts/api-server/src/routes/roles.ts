@@ -144,4 +144,36 @@ router.delete("/roles/:roleId", requireAuth, requireFirmUser, requirePermission(
   res.sendStatus(204);
 });
 
+router.post("/roles/bootstrap", requireAuth, requireFirmUser, requirePermission("roles", "create"), async (req: AuthRequest, res): Promise<void> => {
+  const r = rdb(req);
+  const existingRoles = await r.select().from(rolesTable).where(eq(rolesTable.firmId, req.firmId!));
+  const existingNames = new Set(existingRoles.map(role => role.name));
+
+  const standardRoles = ["Partner", "Senior Lawyer", "Lawyer", "Senior Clerk", "Clerk", "Manager", "Admin", "Viewer"];
+  const rolesToCreate = standardRoles.filter(name => !existingNames.has(name));
+
+  if (rolesToCreate.length > 0) {
+    const newRoles = await r.insert(rolesTable).values(
+      rolesToCreate.map(name => ({
+        firmId: req.firmId!,
+        name,
+      }))
+    ).returning();
+
+    // Default permissions logic can be added here if needed
+
+    await writeAuditLog({
+      firmId: req.firmId,
+      actorId: req.userId,
+      actorType: req.userType,
+      action: "roles.bootstrap",
+      detail: `Created ${rolesToCreate.length} standard roles`,
+      ipAddress: req.ip,
+      userAgent: req.headers["user-agent"]
+    }, { db: req.rlsDb });
+  }
+
+  res.json({ message: `Bootstrapped ${rolesToCreate.length} roles` });
+});
+
 export default router;
