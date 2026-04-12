@@ -129,7 +129,6 @@ export default function DeveloperDetail() {
           email: form.email || primaryContact.email || null,
         }),
       });
-      const updated: Developer = await res.json();
       setDeveloper(updated);
       queryClient.invalidateQueries({ queryKey: getListDevelopersQueryKey() });
       toast({ title: "Developer updated" });
