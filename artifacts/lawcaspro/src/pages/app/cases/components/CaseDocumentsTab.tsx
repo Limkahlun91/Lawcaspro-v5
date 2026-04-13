@@ -148,6 +148,7 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [isUploading, setIsUploading] = useState(false);
   const [isGenerating, setIsGenerating] = useState(false);
+  const [downloadingDocId, setDownloadingDocId] = useState<number | null>(null);
 
   const documentsQuery = useQuery<CaseDocument[]>({
     queryKey: ["case-documents", caseId],
@@ -205,8 +206,8 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
 
   const deleteMutation = useMutation({
     mutationFn: (docId: number) => apiFetchJson(`/cases/${caseId}/documents/${docId}`, { method: "DELETE" }),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["case-documents", caseId] });
+    onSuccess: async () => {
+      await qc.invalidateQueries({ queryKey: ["case-documents", caseId] });
       toast({ title: "Document deleted" });
     },
     onError: (err) => toastError(toast, err, "Delete failed"),
@@ -229,7 +230,7 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
           method: "POST",
           body: JSON.stringify({ templateId: Number(selectedTemplateId), documentName: documentName || undefined, letterheadId: letterheadIdToSend }),
         });
-        qc.invalidateQueries({ queryKey: ["case-documents", caseId] });
+        await qc.invalidateQueries({ queryKey: ["case-documents", caseId] });
         toast({ title: "Document generated successfully" });
         closeGenerateDialog();
       } catch (err) {
@@ -245,7 +246,7 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
           method: "POST",
           body: JSON.stringify({ masterDocId: selectedMasterDocId, documentName: documentName || undefined, letterheadId: letterheadIdToSend }),
         });
-        qc.invalidateQueries({ queryKey: ["case-documents", caseId] });
+        await qc.invalidateQueries({ queryKey: ["case-documents", caseId] });
         toast({ title: "Document generated from master template" });
         closeGenerateDialog();
       } catch (err) {
@@ -283,7 +284,7 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
         }),
       });
 
-      qc.invalidateQueries({ queryKey: ["case-documents", caseId] });
+      await qc.invalidateQueries({ queryKey: ["case-documents", caseId] });
       toast({ title: "Document uploaded successfully" });
       setUploadDialogOpen(false);
       setUploadName("");
@@ -297,6 +298,8 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
   }
 
   async function handleDownload(doc: CaseDocument) {
+    if (downloadingDocId === doc.id) return;
+    setDownloadingDocId(doc.id);
     try {
       const blob = await apiFetchBlob(`/cases/${caseId}/documents/${doc.id}/download`);
       const url = URL.createObjectURL(blob);
@@ -307,6 +310,8 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
       URL.revokeObjectURL(url);
     } catch (err) {
       toastError(toast, err, "Download failed");
+    } finally {
+      setDownloadingDocId(null);
     }
   }
 
@@ -393,8 +398,9 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
                     variant="ghost"
                     className="h-8 w-8 text-slate-400 hover:text-slate-700"
                     onClick={() => handleDownload(doc)}
+                    disabled={downloadingDocId === doc.id}
                   >
-                    <Download className="w-4 h-4" />
+                    <Download className={cn("w-4 h-4", downloadingDocId === doc.id && "animate-bounce")} />
                   </Button>
                   <Button
                     size="icon"

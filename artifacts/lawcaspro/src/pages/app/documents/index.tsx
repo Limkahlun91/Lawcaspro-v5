@@ -128,6 +128,7 @@ function FolderTreeItem({
 function MasterDocumentsTab() {
   const { toast } = useToast();
   const [selectedFolderId, setSelectedFolderId] = useState<number | null>(null);
+  const [downloadingDocId, setDownloadingDocId] = useState<number | null>(null);
 
   const foldersQuery = useQuery<SystemFolder[]>({
     queryKey: ["hub-folders"],
@@ -167,6 +168,8 @@ function MasterDocumentsTab() {
   };
 
   const handleDownload = async (doc: SystemDoc) => {
+    if (downloadingDocId === doc.id) return;
+    setDownloadingDocId(doc.id);
     try {
       const pathPart = String(doc.objectPath ?? "").replace(/^\/objects\//, "");
       if (!pathPart) throw new Error("Missing document path");
@@ -179,6 +182,8 @@ function MasterDocumentsTab() {
       URL.revokeObjectURL(url);
     } catch (err) {
       toastError(toast, err, "Download failed");
+    } finally {
+      setDownloadingDocId(null);
     }
   };
 
@@ -277,8 +282,8 @@ function MasterDocumentsTab() {
                         <td className="px-4 py-3 text-slate-500 text-xs">{formatFileSize(doc.fileSize)}</td>
                         <td className="px-4 py-3 text-slate-500 text-xs">{formatDate(doc.createdAt)}</td>
                         <td className="px-4 py-3 text-right">
-                          <Button variant="ghost" size="sm" onClick={() => handleDownload(doc)} title="Download" className="h-8 w-8 p-0">
-                            <Download className="w-4 h-4" />
+                          <Button variant="ghost" size="sm" onClick={() => handleDownload(doc)} title="Download" className="h-8 w-8 p-0" disabled={downloadingDocId === doc.id}>
+                            <Download className={cn("w-4 h-4", downloadingDocId === doc.id && "animate-bounce")} />
                           </Button>
                         </td>
                       </tr>

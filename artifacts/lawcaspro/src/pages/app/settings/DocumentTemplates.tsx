@@ -70,6 +70,8 @@ export default function DocumentTemplates() {
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [isUploading, setIsUploading] = useState(false);
 
+  const [isDownloading, setIsDownloading] = useState(false);
+
   const templatesQuery = useQuery<DocumentTemplate[]>({
     queryKey: ["document-templates"],
     queryFn: () => apiFetchJson("/document-templates"),
@@ -80,8 +82,8 @@ export default function DocumentTemplates() {
 
   const deleteMutation = useMutation({
     mutationFn: (id: number) => apiFetchJson(`/document-templates/${id}`, { method: "DELETE" }),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["document-templates"] });
+    onSuccess: async () => {
+      await qc.invalidateQueries({ queryKey: ["document-templates"] });
       toast({ title: "Template deleted" });
     },
     onError: (err) => toastError(toast, err, "Delete failed"),
@@ -106,7 +108,7 @@ export default function DocumentTemplates() {
         }),
       });
 
-      qc.invalidateQueries({ queryKey: ["document-templates"] });
+      await qc.invalidateQueries({ queryKey: ["document-templates"] });
       toast({ title: "Template uploaded successfully" });
       setUploadDialogOpen(false);
       setTemplateName("");
@@ -244,7 +246,9 @@ export default function DocumentTemplates() {
               <div className="pt-2 flex gap-2 justify-end">
                 <Button
                   variant="outline"
+                  disabled={isDownloading}
                   onClick={async () => {
+                    setIsDownloading(true);
                     try {
                       const pathPart = activeTemplate.object_path.replace(/^\/objects\//, "");
                       const blob = await apiFetchBlob(`/storage/objects/${pathPart}`);
@@ -256,11 +260,13 @@ export default function DocumentTemplates() {
                       URL.revokeObjectURL(url);
                     } catch (e) {
                       toastError(toast, e, "Download failed");
+                    } finally {
+                      setIsDownloading(false);
                     }
                   }}
                   className="gap-1.5"
                 >
-                  <Download className="w-4 h-4" /> Download
+                  <Download className="w-4 h-4" /> {isDownloading ? "Downloading..." : "Download"}
                 </Button>
                 <Button
                   variant="destructive"

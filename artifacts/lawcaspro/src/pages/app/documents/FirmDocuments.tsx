@@ -157,6 +157,7 @@ export default function FirmDocuments() {
   const [editDescription, setEditDescription] = useState("");
   const [editKind, setEditKind] = useState<"template" | "reference">("template");
   const [editType, setEditType] = useState("other");
+  const [downloadingDocId, setDownloadingDocId] = useState<number | null>(null);
 
   const foldersQuery = useQuery<FirmFolder[]>({
     queryKey: ["firm-document-folders"],
@@ -176,8 +177,8 @@ export default function FirmDocuments() {
   const createFolderMutation = useMutation({
     mutationFn: (payload: { name: string; parentId: number | null }) =>
       apiFetchJson("/firm-document-folders", { method: "POST", body: JSON.stringify(payload) }),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["firm-document-folders"] });
+    onSuccess: async () => {
+      await qc.invalidateQueries({ queryKey: ["firm-document-folders"] });
       toast({ title: "Folder created" });
       setCreateFolderOpen(false);
       setNewFolderName("");
@@ -188,8 +189,8 @@ export default function FirmDocuments() {
   const renameFolderMutation = useMutation({
     mutationFn: (payload: { folderId: number; name: string }) =>
       apiFetchJson(`/firm-document-folders/${payload.folderId}`, { method: "PATCH", body: JSON.stringify({ name: payload.name }) }),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["firm-document-folders"] });
+    onSuccess: async () => {
+      await qc.invalidateQueries({ queryKey: ["firm-document-folders"] });
       toast({ title: "Folder renamed" });
       setRenameFolderOpen(false);
     },
@@ -198,8 +199,8 @@ export default function FirmDocuments() {
 
   const deleteFolderMutation = useMutation({
     mutationFn: (folderId: number) => apiFetchJson(`/firm-document-folders/${folderId}`, { method: "DELETE" }),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["firm-document-folders"] });
+    onSuccess: async () => {
+      await qc.invalidateQueries({ queryKey: ["firm-document-folders"] });
       toast({ title: "Folder deleted" });
       setSelectedFolderId(null);
     },
@@ -208,8 +209,8 @@ export default function FirmDocuments() {
 
   const deleteDocMutation = useMutation({
     mutationFn: (id: number) => apiFetchJson(`/document-templates/${id}`, { method: "DELETE" }),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["firm-documents"] });
+    onSuccess: async () => {
+      await qc.invalidateQueries({ queryKey: ["firm-documents"] });
       toast({ title: "Document deleted" });
     },
     onError: (err) => toastError(toast, err, "Delete failed"),
@@ -218,8 +219,8 @@ export default function FirmDocuments() {
   const moveDocMutation = useMutation({
     mutationFn: (payload: { id: number; folderId: number | null; kind?: "template" | "reference" }) =>
       apiFetchJson(`/document-templates/${payload.id}`, { method: "PATCH", body: JSON.stringify({ folderId: payload.folderId, kind: payload.kind }) }),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["firm-documents"] });
+    onSuccess: async () => {
+      await qc.invalidateQueries({ queryKey: ["firm-documents"] });
       toast({ title: "Document updated" });
     },
     onError: (err) => toastError(toast, err, "Update failed"),
@@ -228,8 +229,8 @@ export default function FirmDocuments() {
   const updateDocMutation = useMutation({
     mutationFn: (payload: { id: number; name: string; description: string; kind: "template" | "reference"; documentType: string }) =>
       apiFetchJson(`/document-templates/${payload.id}`, { method: "PATCH", body: JSON.stringify({ name: payload.name, description: payload.description || null, kind: payload.kind, documentType: payload.documentType }) }),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["firm-documents"] });
+    onSuccess: async () => {
+      await qc.invalidateQueries({ queryKey: ["firm-documents"] });
       toast({ title: "Document updated" });
       setEditOpen(false);
       setActiveDoc(null);
@@ -317,6 +318,8 @@ export default function FirmDocuments() {
   }
 
   async function handleDownload(doc: FirmDocument) {
+    if (downloadingDocId === doc.id) return;
+    setDownloadingDocId(doc.id);
     try {
       const blob = await apiFetchBlob(`/document-templates/${doc.id}/download`);
       const url = URL.createObjectURL(blob);
@@ -327,6 +330,8 @@ export default function FirmDocuments() {
       URL.revokeObjectURL(url);
     } catch (err) {
       toastError(toast, err, "Download failed");
+    } finally {
+      setDownloadingDocId(null);
     }
   }
 
@@ -452,8 +457,8 @@ export default function FirmDocuments() {
                           <td className="px-4 py-3 text-slate-500 text-xs">{formatFileSize(doc.file_size)}</td>
                           <td className="px-4 py-3 text-right">
                             <div className="flex justify-end gap-1">
-                              <Button size="icon" variant="ghost" className="h-8 w-8 text-slate-400 hover:text-slate-700" onClick={() => handleDownload(doc)}>
-                                <Download className="w-4 h-4" />
+                              <Button size="icon" variant="ghost" className="h-8 w-8 text-slate-400 hover:text-slate-700" onClick={() => handleDownload(doc)} disabled={downloadingDocId === doc.id}>
+                                <Download className={cn("w-4 h-4", downloadingDocId === doc.id && "animate-bounce")} />
                               </Button>
                               <Button
                                 size="icon"

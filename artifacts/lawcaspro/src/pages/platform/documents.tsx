@@ -211,6 +211,7 @@ export default function PlatformDocuments() {
 
   const [editingPdfDoc, setEditingPdfDoc] = useState<PlatformDoc | null>(null);
   const [editingPdfUrl, setEditingPdfUrl] = useState<string | null>(null);
+  const [downloadingDocId, setDownloadingDocId] = useState<number | null>(null);
 
   const foldersQuery = useQuery<SystemFolder[]>({
     queryKey: ["system-folders"],
@@ -428,6 +429,8 @@ export default function PlatformDocuments() {
   };
 
   const handleDownload = async (doc: PlatformDoc) => {
+    if (downloadingDocId === doc.id) return;
+    setDownloadingDocId(doc.id);
     try {
       const blob = await apiFetchBlob(`/platform/documents/${doc.id}/download`);
       const url = URL.createObjectURL(blob);
@@ -438,6 +441,8 @@ export default function PlatformDocuments() {
       URL.revokeObjectURL(url);
     } catch (e) {
       toastError(toast, e, "Download failed");
+    } finally {
+      setDownloadingDocId(null);
     }
   };
 
@@ -637,9 +642,9 @@ export default function PlatformDocuments() {
                               className="h-7 w-7 p-0"
                               onClick={() => handleDownload(doc)}
                               title="Download"
-                              disabled={deleteMutation.isPending}
+                              disabled={deleteMutation.isPending || downloadingDocId === doc.id}
                             >
-                              <Download className="w-3.5 h-3.5" />
+                              <Download className={cn("w-3.5 h-3.5", downloadingDocId === doc.id && "animate-bounce")} />
                             </Button>
                             <Button
                               variant="ghost"
