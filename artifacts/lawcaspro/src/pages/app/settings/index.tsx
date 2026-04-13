@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { getListUsersQueryKey, useDeleteUser, useListRoles, useListUsers, useUpdateUser } from "@workspace/api-client-react";
+import { getListRolesQueryKey, getListUsersQueryKey, useDeleteUser, useListRoles, useListUsers, useUpdateUser } from "@workspace/api-client-react";
 import { useQuery, useQueryClient, useMutation } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -29,6 +29,35 @@ const TAB_KEYS: Record<string, Tab> = {
   security: "Security",
 };
 
+type AuthSession = {
+  id: number;
+  createdAt: string;
+  expiresAt?: string | null;
+  lastSeenAt?: string | null;
+  ipAddress?: string | null;
+  userAgent?: string | null;
+  isCurrent?: boolean;
+};
+
+type AuthSessionsResponse = { data: AuthSession[] };
+
+type TotpFlagUser = { totpEnabled?: boolean };
+
+type FirmBankAccount = {
+  id: number;
+  bankName: string;
+  accountNo: string;
+  accountType: string;
+};
+
+type FirmSettings = {
+  name?: string | null;
+  address?: string | null;
+  stNumber?: string | null;
+  tinNumber?: string | null;
+  bankAccounts?: FirmBankAccount[];
+};
+
 function SecurityTab() {
   const { user } = useAuth();
   const { toast } = useToast();
@@ -40,18 +69,19 @@ function SecurityTab() {
   const [confirmCode, setConfirmCode] = useState("");
   const [disableCode, setDisableCode] = useState("");
 
-  const sessionsQuery = useQuery({
+  const sessionsQuery = useQuery<AuthSessionsResponse>({
     queryKey: ["auth-sessions"],
-    queryFn: () => apiFetch("/auth/sessions"),
+    queryFn: () => apiFetch<AuthSessionsResponse>("/auth/sessions"),
     retry: false,
   });
   const { data: sessionsData, isLoading: loadingSessions } = sessionsQuery;
 
+  type TotpSetupResponse = { qrCodeDataUrl: string; secret: string };
   const setupMutation = useMutation({
     mutationFn: () => apiFetch("/auth/totp/setup", { method: "POST" }),
-    onSuccess: (data: any) => {
-      setQrCodeUrl(data.qrCodeDataUrl);
-      setManualSecret(data.secret);
+    onSuccess: (data: TotpSetupResponse) => {
+      setQrCodeUrl(data.qrCodeDataUrl ?? "");
+      setManualSecret(data.secret ?? "");
       setTotpStep("confirm");
     },
     onError: (e) => toastError(toast, e, "Setup failed"),
@@ -97,7 +127,10 @@ function SecurityTab() {
     onError: (e) => toastError(toast, e, "Action failed"),
   });
 
-  const totpEnabled = (user as any)?.totpEnabled ?? false;
+  const totpEnabled =
+    user && typeof (user as TotpFlagUser).totpEnabled === "boolean"
+      ? Boolean((user as TotpFlagUser).totpEnabled)
+      : false;
 
   return (
     <div className="space-y-6">
@@ -234,7 +267,7 @@ function SecurityTab() {
             <div className="text-slate-500 text-sm">No active sessions found.</div>
           ) : (
             <div className="space-y-2">
-              {sessionsData?.data?.map((session: any) => (
+              {sessionsData?.data?.map((session: AuthSession) => (
                 <div key={session.id} className="flex items-center justify-between p-3 bg-slate-50 rounded-lg border border-slate-200">
                   <div className="flex-1 min-w-0">
                     <p className="text-sm font-medium text-slate-800 truncate">
@@ -245,7 +278,9 @@ function SecurityTab() {
                       {" · "}
                       Started {new Date(session.createdAt).toLocaleDateString("en-MY", { day: "numeric", month: "short", year: "numeric" })}
                       {" · "}
-                      Expires {new Date(session.expiresAt).toLocaleDateString("en-MY", { day: "numeric", month: "short" })}
+                      {session.expiresAt
+                        ? `Expires ${new Date(session.expiresAt).toLocaleDateString("en-MY", { day: "numeric", month: "short" })}`
+                        : "Expires —"}
                     </p>
                   </div>
                   <Button
@@ -274,9 +309,9 @@ function FirmInfoTab() {
   const { user } = useAuth();
   const canUpdate = hasPermission(user, "settings", "update");
 
-  const { data: settings, isLoading } = useQuery({
+  const { data: settings, isLoading } = useQuery<FirmSettings>({
     queryKey: ["firm-settings"],
-    queryFn: () => apiFetch("/firm-settings"),
+    queryFn: () => apiFetch<FirmSettings>("/firm-settings"),
   });
 
   const [name, setName] = useState("");
@@ -293,15 +328,15 @@ function FirmInfoTab() {
 
   useEffect(() => {
     if (settings) {
-      setName(settings.name || "");
-      setAddress(settings.address || "");
-      setStNumber(settings.stNumber || "");
-      setTinNumber(settings.tinNumber || "");
+      setName(settings.name ?? "");
+      setAddress(settings.address ?? "");
+      setStNumber(settings.stNumber ?? "");
+      setTinNumber(settings.tinNumber ?? "");
     }
   }, [settings]);
 
   const updateMutation = useMutation({
-    mutationFn: (data: any) => apiFetch("/firm-settings", {
+    mutationFn: (data: Record<string, unknown>) => apiFetch("/firm-settings", {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(data),
@@ -314,13 +349,13 @@ function FirmInfoTab() {
   });
 
   const addBankMutation = useMutation({
-    mutationFn: (data: any) => apiFetch("/firm-settings/bank-accounts", {
+    mutationFn: (data: Record<string, unknown>) => apiFetch("/firm-settings/bank-accounts", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(data),
     }),
-    onSuccess: (created: any) => {
-      queryClient.setQueryData(["firm-settings"], (prev: any) => {
+    onSuccess: (created: FirmBankAccount) => {
+      queryClient.setQueryData<FirmSettings>(["firm-settings"], (prev) => {
         if (!prev) return prev;
         const existing = Array.isArray(prev.bankAccounts) ? prev.bankAccounts : [];
         return { ...prev, bankAccounts: [...existing, created] };
@@ -336,11 +371,11 @@ function FirmInfoTab() {
 
   const deleteBankMutation = useMutation({
     mutationFn: (id: number) => apiFetch(`/firm-settings/bank-accounts/${id}`, { method: "DELETE" }),
-    onSuccess: (_: any, id: number) => {
-      queryClient.setQueryData(["firm-settings"], (prev: any) => {
+    onSuccess: (_: unknown, id: number) => {
+      queryClient.setQueryData<FirmSettings>(["firm-settings"], (prev) => {
         if (!prev) return prev;
         const existing = Array.isArray(prev.bankAccounts) ? prev.bankAccounts : [];
-        return { ...prev, bankAccounts: existing.filter((a: any) => a?.id !== id) };
+        return { ...prev, bankAccounts: existing.filter((a) => a?.id !== id) };
       });
       queryClient.invalidateQueries({ queryKey: ["firm-settings"] });
       toast({ title: "Bank account removed" });
@@ -349,16 +384,16 @@ function FirmInfoTab() {
   });
 
   const updateBankMutation = useMutation({
-    mutationFn: ({ id, data }: { id: number; data: any }) => apiFetch(`/firm-settings/bank-accounts/${id}`, {
+    mutationFn: ({ id, data }: { id: number; data: Record<string, unknown> }) => apiFetch(`/firm-settings/bank-accounts/${id}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(data),
     }),
-    onSuccess: (updated: any) => {
-      queryClient.setQueryData(["firm-settings"], (prev: any) => {
+    onSuccess: (updated: FirmBankAccount) => {
+      queryClient.setQueryData<FirmSettings>(["firm-settings"], (prev) => {
         if (!prev) return prev;
         const existing = Array.isArray(prev.bankAccounts) ? prev.bankAccounts : [];
-        return { ...prev, bankAccounts: existing.map((a: any) => (a?.id === updated?.id ? { ...a, ...updated } : a)) };
+        return { ...prev, bankAccounts: existing.map((a) => (a?.id === updated?.id ? { ...a, ...updated } : a)) };
       });
       queryClient.invalidateQueries({ queryKey: ["firm-settings"] });
       setEditingBankId(null);
@@ -437,7 +472,7 @@ function FirmInfoTab() {
           <CardTitle className="text-base">Bank Accounts</CardTitle>
         </CardHeader>
         <CardContent>
-          {settings?.bankAccounts?.length > 0 && (
+          {(settings?.bankAccounts ?? []).length > 0 && (
             <table className="w-full text-sm mb-4">
               <thead>
                 <tr className="border-b border-slate-200 bg-slate-50">
@@ -448,7 +483,7 @@ function FirmInfoTab() {
                 </tr>
               </thead>
               <tbody>
-                {settings.bankAccounts.map((acc: any) => (
+                {(settings?.bankAccounts ?? []).map((acc: FirmBankAccount) => (
                   <tr key={acc.id} className="border-b border-slate-100">
                     {editingBankId === acc.id ? (
                       <>
@@ -610,13 +645,25 @@ export default function Settings() {
   }, [resolvedTabFromUrl, visibleTabs, activeTab]);
   const [userSearch, setUserSearch] = useState("");
 
-  const { data: usersRes, isLoading: loadingUsers } = useListUsers({
+  const userParams = {
     page: 1,
     limit: 50,
     search: userSearch || undefined,
-  }, { query: { enabled: canManageUsers } });
+  };
 
-  const { data: rolesRes, isLoading: loadingRoles } = useListRoles(undefined, { query: { enabled: canManageRoles } });
+  const { data: usersRes, isLoading: loadingUsers } = useListUsers(
+    userParams,
+    {
+      query: {
+        queryKey: getListUsersQueryKey(userParams),
+        enabled: canManageUsers,
+      },
+    }
+  );
+
+  const { data: rolesRes, isLoading: loadingRoles } = useListRoles({
+    query: { queryKey: getListRolesQueryKey(), enabled: canManageRoles },
+  });
   const updateUserMutation = useUpdateUser();
   const deleteUserMutation = useDeleteUser();
 

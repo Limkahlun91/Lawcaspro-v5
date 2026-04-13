@@ -30,20 +30,30 @@ export default function BillsDeliveredBook() {
   const [to, setTo] = useState("");
   const [applied, setApplied] = useState({ from: "", to: "" });
 
-  const reportQuery = useQuery({
+  type BillsDeliveredInvoice = Record<string, unknown>;
+  type BillsDeliveredBookReport = {
+    invoices?: BillsDeliveredInvoice[];
+    totals?: Record<string, unknown>;
+  };
+
+  const reportQuery = useQuery<BillsDeliveredBookReport>({
     queryKey: ["bills-delivered-book", applied],
     queryFn: async () => {
       const params = new URLSearchParams();
       if (applied.from) params.set("from", applied.from);
       if (applied.to) params.set("to", applied.to);
-      return await apiFetchJson(`/reports/bills-delivered-book?${params}`);
+      return await apiFetchJson<BillsDeliveredBookReport>(`/reports/bills-delivered-book?${params}`);
     },
     retry: false,
   });
   const { data, isLoading, isError, error } = reportQuery;
 
-  const invoices: any[] = data?.invoices ?? [];
-  const totals: any = data?.totals ?? {};
+  const invoices = data?.invoices ?? [];
+  const totals = data?.totals ?? {};
+  const totalsCount = Number(totals.count ?? 0);
+  const totalsBilled = Number(totals.totalBilled ?? 0);
+  const totalsPaid = Number(totals.totalPaid ?? 0);
+  const totalsOutstanding = Number(totals.totalOutstanding ?? 0);
 
   function printReport() { window.print(); }
   async function downloadCsv() {
@@ -56,7 +66,7 @@ export default function BillsDeliveredBook() {
         `/reports/bills-delivered-book?${params.toString()}`,
         `bills-delivered-book${applied.from ? `_${applied.from}` : ""}${applied.to ? `_${applied.to}` : ""}.csv`
       );
-    } catch (e: any) {
+    } catch (e: unknown) {
       toastError(toast, e, "Download failed");
     }
   }
@@ -110,10 +120,10 @@ export default function BillsDeliveredBook() {
       {/* Summary */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
         {[
-          { label: "Bills Rendered", value: totals.count ?? 0, sub: "invoices" },
-          { label: "Total Billed", value: totals.totalBilled ? `RM ${Number(totals.totalBilled).toLocaleString("en-MY")}` : "RM 0", sub: "gross" },
-          { label: "Total Collected", value: totals.totalPaid ? `RM ${Number(totals.totalPaid).toLocaleString("en-MY")}` : "RM 0", sub: "received" },
-          { label: "Outstanding", value: totals.totalOutstanding ? `RM ${Number(totals.totalOutstanding).toLocaleString("en-MY")}` : "RM 0", sub: "unpaid" },
+          { label: "Bills Rendered", value: totalsCount, sub: "invoices" },
+          { label: "Total Billed", value: `RM ${totalsBilled.toLocaleString("en-MY")}`, sub: "gross" },
+          { label: "Total Collected", value: `RM ${totalsPaid.toLocaleString("en-MY")}`, sub: "received" },
+          { label: "Outstanding", value: `RM ${totalsOutstanding.toLocaleString("en-MY")}`, sub: "unpaid" },
         ].map(({ label, value, sub }) => (
           <Card key={label} className="border-slate-200">
             <CardContent className="py-3 px-4">
@@ -168,10 +178,10 @@ export default function BillsDeliveredBook() {
               </tbody>
               <tfoot className="bg-slate-50 border-t font-medium">
                 <tr>
-                  <td colSpan={4} className="px-4 py-2.5 text-slate-700">Totals ({totals.count} bills)</td>
-                  <td className="px-4 py-2.5 text-right tabular-nums">{Number(totals.totalBilled ?? 0).toLocaleString("en-MY", { minimumFractionDigits: 2 })}</td>
-                  <td className="px-4 py-2.5 text-right tabular-nums text-green-700">{Number(totals.totalPaid ?? 0).toLocaleString("en-MY", { minimumFractionDigits: 2 })}</td>
-                  <td className="px-4 py-2.5 text-right tabular-nums text-red-600">{Number(totals.totalOutstanding ?? 0).toLocaleString("en-MY", { minimumFractionDigits: 2 })}</td>
+                  <td colSpan={4} className="px-4 py-2.5 text-slate-700">Totals ({totalsCount} bills)</td>
+                  <td className="px-4 py-2.5 text-right tabular-nums">{totalsBilled.toLocaleString("en-MY", { minimumFractionDigits: 2 })}</td>
+                  <td className="px-4 py-2.5 text-right tabular-nums text-green-700">{totalsPaid.toLocaleString("en-MY", { minimumFractionDigits: 2 })}</td>
+                  <td className="px-4 py-2.5 text-right tabular-nums text-red-600">{totalsOutstanding.toLocaleString("en-MY", { minimumFractionDigits: 2 })}</td>
                   <td />
                 </tr>
               </tfoot>

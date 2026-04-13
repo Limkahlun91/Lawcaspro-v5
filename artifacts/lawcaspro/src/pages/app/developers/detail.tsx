@@ -113,6 +113,7 @@ export default function DeveloperDetail() {
       toast({ title: "Company name is required", variant: "destructive" });
       return;
     }
+    const primaryContact = contacts.find((c) => c.name.trim()) ?? emptyContact();
     setSaving(true);
     try {
       const updated = await apiFetchJson<Developer>(`/developers/${developerId}`, {

@@ -51,18 +51,18 @@ export default function EditProject() {
   useEffect(() => {
     if (project && !initialized) {
       setName(project.name || "");
-      setPhase(project.phase || "");
       setSelectedDevId(project.developerId?.toString() || "");
-      setDeveloperName(project.developerName || "");
       setTitleType(project.titleType || "");
-      setTitleSubtype(project.titleSubtype || "");
-      setMasterTitleNumber(project.masterTitleNumber || "");
-      setMasterTitleLandSize(project.masterTitleLandSize || "");
-      setMukim(project.mukim || "");
-      setDaerah(project.daerah || "");
-      setNegeri(project.negeri || "");
 
       const extra = project.extraFields as Record<string, unknown> | undefined;
+      setPhase(typeof extra?.phase === "string" ? extra.phase : "");
+      setDeveloperName(typeof extra?.developerName === "string" ? extra.developerName : "");
+      setTitleSubtype(typeof extra?.titleSubtype === "string" ? extra.titleSubtype : "");
+      setMasterTitleNumber(typeof extra?.masterTitleNumber === "string" ? extra.masterTitleNumber : "");
+      setMasterTitleLandSize(typeof extra?.masterTitleLandSize === "string" ? extra.masterTitleLandSize : "");
+      setMukim(typeof extra?.mukim === "string" ? extra.mukim : "");
+      setDaerah(typeof extra?.daerah === "string" ? extra.daerah : "");
+      setNegeri(typeof extra?.negeri === "string" ? extra.negeri : "");
       const pts = (extra?.propertyTypes as PropertyType[]) || [];
       if (pts.length > 0) {
         setPropertyTypes(pts.map(p => ({ id: p.id || crypto.randomUUID(), buildingType: p.buildingType || "" })));
@@ -107,16 +107,16 @@ export default function EditProject() {
           developerId: selectedDevId ? parseInt(selectedDevId) : undefined,
           projectType: projectTypeValue,
           titleType: titleType || "master",
-          phase,
-          developerName,
-          titleSubtype,
-          masterTitleNumber,
-          masterTitleLandSize,
-          mukim,
-          daerah,
-          negeri,
           extraFields: {
             propertyTypes: propertyTypes.filter(p => p.buildingType.trim()),
+            phase,
+            developerName,
+            titleSubtype,
+            masterTitleNumber,
+            masterTitleLandSize,
+            mukim,
+            daerah,
+            negeri,
           },
         }),
       });

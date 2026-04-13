@@ -217,7 +217,14 @@ export default function DocumentTemplates() {
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <div className="text-xs text-slate-500">Type</div>
-                  <div className="text-sm text-slate-900">{DOCUMENT_TYPE_LABELS[activeTemplate.document_type] ?? activeTemplate.document_type}</div>
+                  <div className="text-sm text-slate-900">
+                    {(() => {
+                      const dt = activeTemplate.document_type;
+                      return Object.prototype.hasOwnProperty.call(DOCUMENT_TYPE_LABELS, dt)
+                        ? DOCUMENT_TYPE_LABELS[dt as keyof typeof DOCUMENT_TYPE_LABELS]
+                        : dt;
+                    })()}
+                  </div>
                 </div>
                 <div>
                   <div className="text-xs text-slate-500">Uploaded</div>

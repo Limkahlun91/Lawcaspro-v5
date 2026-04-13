@@ -199,14 +199,22 @@ export default function CasesList() {
     loanStatus: loanStatus !== "all" ? loanStatus : undefined,
     milestone: milestone !== "all" ? milestone : undefined,
     milestonePresence: milestone !== "all" ? milestonePresence : undefined,
-    sortBy,
-    sortDir,
     overdueDays: overdueDays !== "all" ? (Number(overdueDays) as 7 | 14 | 30) : undefined,
   });
 
-  const { data: filterOptions } = useQuery({
+  type CaseFilterOptionsResponse = {
+    spaStatuses?: string[];
+    loanStatuses?: string[];
+    assignees?: {
+      lawyers?: Array<{ id: number; name: string }>;
+      clerks?: Array<{ id: number; name: string }>;
+    };
+    milestones?: Array<{ key: CaseMilestoneKey; label: string }>;
+  };
+
+  const { data: filterOptions } = useQuery<CaseFilterOptionsResponse>({
     queryKey: ["cases", "filter-options"],
-    queryFn: () => apiFetchJson("/cases/filter-options"),
+    queryFn: () => apiFetchJson<CaseFilterOptionsResponse>("/cases/filter-options"),
     retry: false,
   });
   const spaStatuses: string[] = Array.isArray(filterOptions?.spaStatuses) ? filterOptions.spaStatuses : ["Pending"];
@@ -573,7 +581,11 @@ export default function CasesList() {
           </SelectContent>
         </Select>
 
-        <Select value={milestonePresence} onValueChange={(v) => { setMilestonePresence(v); setPage(1); }} disabled={milestone === "all"}>
+        <Select
+          value={milestonePresence}
+          onValueChange={(v: "filled" | "missing") => { setMilestonePresence(v); setPage(1); }}
+          disabled={milestone === "all"}
+        >
           <SelectTrigger>
             <SelectValue placeholder="Filled / Missing" />
           </SelectTrigger>

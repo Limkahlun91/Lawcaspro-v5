@@ -52,9 +52,16 @@ export default function NewClient() {
           setLocation("/app/clients");
         },
         onError: (error) => {
+          const data = error && typeof error === "object" && "data" in error ? (error as { data?: unknown }).data : null;
+          let msg: string | null = null;
+          if (data && typeof data === "object") {
+            const rec = data as Record<string, unknown>;
+            if (typeof rec.error === "string" && rec.error.trim()) msg = rec.error.trim();
+          }
+          if (!msg && error instanceof Error) msg = error.message;
           toast({
             title: "Error",
-            description: error.error || "Please try again.",
+            description: msg || "Please try again.",
             variant: "destructive",
           });
         },

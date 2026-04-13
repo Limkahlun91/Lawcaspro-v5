@@ -87,8 +87,9 @@ export default function CaseCommunicationsTab({ caseId, initialThreadId }: { cas
   }, [activeThreadId, caseId, qc]);
 
   const createThread = useMutation({
-    mutationFn: (subject: string) => apiFetchJson(`/cases/${caseId}/threads`, { method: "POST", body: JSON.stringify({ subject }) }),
-    onSuccess: (thread) => {
+    mutationFn: (subject: string) =>
+      apiFetchJson<Thread>(`/cases/${caseId}/threads`, { method: "POST", body: JSON.stringify({ subject }) }),
+    onSuccess: (thread: Thread) => {
       qc.invalidateQueries({ queryKey: ["case-threads", caseId] });
       setCreateOpen(false);
       setNewSubject("");

@@ -1,6 +1,6 @@
 import { useState, useCallback, useEffect } from "react";
 import { useLocation, useSearch } from "wouter";
-import { useCreateQuotation, getListQuotationsQueryKey, useListCases, useGetCase } from "@workspace/api-client-react";
+import { useCreateQuotation, getListQuotationsQueryKey, useListCases, useGetCase, getGetCaseQueryKey } from "@workspace/api-client-react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -139,16 +139,22 @@ export default function NewQuotation() {
   const [loanAmount, setLoanAmount] = useState("");
 
   const { data: casesRes } = useListCases({ limit: 100 });
-  const cases = (casesRes as any)?.data || [];
+  const cases = casesRes?.data ?? [];
 
   const { data: caseDetail } = useGetCase(
     parseInt(selectedCaseId) || 0,
-    { query: { enabled: !!selectedCaseId && parseInt(selectedCaseId) > 0 } }
+    {
+      query: {
+        queryKey: getGetCaseQueryKey(parseInt(selectedCaseId) || 0),
+        enabled: !!selectedCaseId && parseInt(selectedCaseId) > 0,
+      },
+    }
   );
 
-  const { data: firmSettings } = useQuery({
+  type FirmSettings = { stNumber?: string | null };
+  const { data: firmSettings } = useQuery<FirmSettings>({
     queryKey: ["firm-settings"],
-    queryFn: () => apiFetchJson("/firm-settings"),
+    queryFn: () => apiFetchJson<FirmSettings>("/firm-settings"),
     retry: false,
   });
 
@@ -160,28 +166,17 @@ export default function NewQuotation() {
 
   useEffect(() => {
     if (!caseDetail) return;
-    const cd = caseDetail as any;
-
-    const purchaserNames = (cd.purchasers || [])
-      .map((p: any) => p.clientName)
+    const purchaserNames = (caseDetail.purchasers || [])
+      .map((p) => p.clientName)
       .filter(Boolean)
       .join(" & ");
     if (purchaserNames) setClientName(purchaserNames);
 
-    const projectName = cd.projectName || "";
-    const parcelNo = cd.parcelNo || "";
-    const propParts = [projectName, parcelNo].filter(Boolean).join(", ");
+    const propParts = [caseDetail.projectName].filter(Boolean).join(", ");
     if (propParts) setPropertyDescription(propParts);
 
-    if (cd.spaPrice) setPurchasePrice(String(cd.spaPrice));
-
-    if (cd.loanDetails) {
-      const loan = cd.loanDetails;
-      if (loan.bankName) setBankName(loan.bankName);
-      if (loan.loanAmount) setLoanAmount(String(loan.loanAmount));
-    }
-
-    if (cd.referenceNo) setReferenceNo(cd.referenceNo);
+    if (caseDetail.spaPrice) setPurchasePrice(String(caseDetail.spaPrice));
+    if (caseDetail.referenceNo) setReferenceNo(caseDetail.referenceNo);
   }, [caseDetail]);
 
   const [disbursementItems, setDisbursementItems] = useState<LineItem[]>(() => initItems(DEFAULT_DISBURSEMENT_ITEMS));

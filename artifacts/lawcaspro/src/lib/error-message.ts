@@ -5,7 +5,9 @@ export type ApiErrorLike = {
 };
 
 export function isApiErrorLike(err: unknown): err is ApiErrorLike {
-  return Boolean(err) && typeof err === "object" && ("status" in err || "data" in err);
+  if (!err || typeof err !== "object") return false;
+  const rec = err as Record<string, unknown>;
+  return "status" in rec || "data" in rec;
 }
 
 export function getErrorMessage(err: unknown): string {

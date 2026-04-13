@@ -37,7 +37,7 @@ afterAll(async () => {
 });
 
 describe("Case file listing (regression)", () => {
-  it("lists and searches across reference/client/bank/status and supports KIV reason", async () => {
+  it("lists and searches across reference/client/bank and is read-only with status sourced from cases", async () => {
     const createRes = await request(app)
       .post("/api/cases")
       .set("Authorization", `Bearer ${token}`)
@@ -54,6 +54,18 @@ describe("Case file listing (regression)", () => {
     expect(createRes.status).toBe(201);
     createdCaseId = createRes.body.id;
     const ref = createRes.body.referenceNo;
+
+    const detailRes = await request(app)
+      .get(`/api/cases/${createdCaseId}`)
+      .set("Authorization", `Bearer ${token}`);
+    expect(detailRes.status).toBe(200);
+    expect(detailRes.body.id).toBe(createdCaseId);
+
+    const wfRes = await request(app)
+      .get(`/api/cases/${createdCaseId}/workflow`)
+      .set("Authorization", `Bearer ${token}`);
+    expect(wfRes.status).toBe(200);
+    expect(Array.isArray(wfRes.body.steps)).toBe(true);
 
     const listRes = await request(app)
       .get("/api/case-files")
@@ -82,21 +94,13 @@ describe("Case file listing (regression)", () => {
     expect(byBank.status).toBe(200);
     expect(byBank.body.data.some((r: any) => r.id === createdCaseId)).toBe(true);
 
-    const statusRes = await request(app)
-      .patch(`/api/case-files/${createdCaseId}/status`)
-      .set("Authorization", `Bearer ${token}`)
-      .send({ status: "kiv", reason: "Awaiting client response" });
-    expect(statusRes.status).toBe(200);
-    expect(statusRes.body.fileListingStatus).toBe("kiv");
-    expect(statusRes.body.fileListingReason).toBe("Awaiting client response");
-
-    const byStatus = await request(app)
-      .get("/api/case-files")
-      .query({ q: "kiv" })
-      .set("Authorization", `Bearer ${token}`);
-    expect(byStatus.status).toBe(200);
-    const row = byStatus.body.data.find((r: any) => r.id === createdCaseId);
+    const row = listRes.body.data.find((r: any) => r.id === createdCaseId);
     expect(row).toBeTruthy();
-    expect(row.fileListingReason).toBe("Awaiting client response");
+    expect(typeof row.status).toBe("string");
+    expect(row.status).toBe("File Opened / SPA Pending Signing");
+    expect(typeof row.openFileDate).toBe("string");
+    expect(row.closedFileDate).toBeNull();
+    expect("fileListingStatus" in row).toBe(false);
+    expect("fileListingReason" in row).toBe(false);
   });
 });

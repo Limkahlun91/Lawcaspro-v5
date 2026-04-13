@@ -152,11 +152,15 @@ export default function CaseBillingTab({ caseId }: { caseId: number }) {
                 {entries.map((entry) => {
                   const total = Number(entry.amount ?? 0) * Number(entry.quantity ?? 1);
                   const isPaid = Boolean(entry.is_paid);
+                  const createdByName =
+                    typeof entry.created_by_name === "string" && entry.created_by_name.trim()
+                      ? entry.created_by_name.trim()
+                      : null;
                   return (
                     <tr key={String(entry.id)} className={`border-b border-slate-50 ${isPaid ? "opacity-60" : ""}`}>
                       <td className="py-3">
                         <div className={`font-medium text-slate-900 ${isPaid ? "line-through" : ""}`}>{String(entry.description)}</div>
-                        {entry.created_by_name && <div className="text-xs text-slate-400">{String(entry.created_by_name)}</div>}
+                        {createdByName && <div className="text-xs text-slate-400">{createdByName}</div>}
                       </td>
                       <td className="py-3">
                         <span className={`text-xs px-1.5 py-0.5 rounded font-medium ${CATEGORY_COLORS[entry.category as string] ?? "bg-slate-100 text-slate-600"}`}>

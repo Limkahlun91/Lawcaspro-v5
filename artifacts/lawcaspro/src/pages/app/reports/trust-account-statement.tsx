@@ -20,17 +20,23 @@ export default function TrustAccountStatement() {
   const [caseId, setCaseId] = useState("");
   const [applied, setApplied] = useState("");
 
-  const stmtQuery = useQuery({
+  type TrustStatementEntry = Record<string, unknown>;
+  type TrustStatementResponse = {
+    entries?: TrustStatementEntry[];
+    balance?: number;
+  };
+
+  const stmtQuery = useQuery<TrustStatementResponse>({
     queryKey: ["trust-account-statement", applied],
     queryFn: async () => {
       const params = applied ? `?caseId=${applied}` : "";
-      return await apiFetchJson(`/reports/trust-account-statement${params}`);
+      return await apiFetchJson<TrustStatementResponse>(`/reports/trust-account-statement${params}`);
     },
     retry: false,
   });
   const { data, isLoading, isError, error } = stmtQuery;
 
-  const entries: any[] = data?.entries ?? [];
+  const entries = data?.entries ?? [];
   const balance = Number(data?.balance ?? 0);
 
   // Running balance

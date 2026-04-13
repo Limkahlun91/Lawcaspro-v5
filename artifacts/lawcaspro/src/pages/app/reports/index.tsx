@@ -35,19 +35,28 @@ const COMM_COLORS: Record<string, string> = {
 
 export default function Reports() {
   const [, setLocation] = useLocation();
-  const reportsQuery = useQuery({
+  type ReportsOverviewResponse = {
+    casesByStatus?: Array<Record<string, unknown>>;
+    casesByMonth?: Array<Record<string, unknown>>;
+    lawyerWorkload?: Array<Record<string, unknown>>;
+    workflowCompletion?: Array<Record<string, unknown>>;
+    billingTotals?: Record<string, unknown>;
+    communicationStats?: Array<Record<string, unknown>>;
+  };
+
+  const reportsQuery = useQuery<ReportsOverviewResponse>({
     queryKey: ["reports-overview"],
-    queryFn: () => apiFetchJson("/reports/overview"),
+    queryFn: () => apiFetchJson<ReportsOverviewResponse>("/reports/overview"),
     retry: false,
   });
   const { data, isLoading } = reportsQuery;
 
-  const casesByStatus = (data?.casesByStatus ?? []) as Record<string, unknown>[];
-  const casesByMonth = (data?.casesByMonth ?? []) as Record<string, unknown>[];
-  const lawyerWorkload = (data?.lawyerWorkload ?? []) as Record<string, unknown>[];
-  const workflowCompletion = (data?.workflowCompletion ?? []) as Record<string, unknown>[];
-  const billing = (data?.billingTotals ?? {}) as Record<string, unknown>;
-  const commStats = (data?.communicationStats ?? []) as Record<string, unknown>[];
+  const casesByStatus = data?.casesByStatus ?? [];
+  const casesByMonth = data?.casesByMonth ?? [];
+  const lawyerWorkload = data?.lawyerWorkload ?? [];
+  const workflowCompletion = data?.workflowCompletion ?? [];
+  const billing = data?.billingTotals ?? {};
+  const commStats = data?.communicationStats ?? [];
 
   const commByType = commStats.reduce<Record<string, number>>((acc, row) => {
     const t = row.type as string;

@@ -1,7 +1,7 @@
 import { useState, useEffect } from "react";
 import { useLocation } from "wouter";
 import { useQueryClient } from "@tanstack/react-query";
-import { getListCasesQueryKey, useCreateCase, useListProjects, useListUsers } from "@workspace/api-client-react";
+import { getListCasesQueryKey, useListProjects, useListUsers } from "@workspace/api-client-react";
 import { useToast } from "@/hooks/use-toast";
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
@@ -12,6 +12,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import { cn } from "@/lib/utils";
 import { Plus, X } from "lucide-react";
+import { apiFetchJson } from "@/lib/api-client";
 
 const TABS = ["SPA Details", "Property", "Loan", "Lawyer", "Title", "Company"] as const;
 type Tab = typeof TABS[number];
@@ -26,7 +27,7 @@ export default function NewCasePage() {
   const [, navigate] = useLocation();
   const queryClient = useQueryClient();
   const { toast } = useToast();
-  const createCase = useCreateCase();
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
   const { data: projectsRes } = useListProjects({ limit: 100 });
   const projects = projectsRes?.data || [];
@@ -243,8 +244,13 @@ export default function NewCasePage() {
       },
     };
 
+    setIsSubmitting(true);
     try {
-      await createCase.mutateAsync({ data: payload });
+      await apiFetchJson("/cases", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
       queryClient.invalidateQueries({ queryKey: getListCasesQueryKey() });
       toast({ title: "Case created successfully" });
       navigate("/app/cases");
@@ -256,6 +262,8 @@ export default function NewCasePage() {
         ? e.message.replace(/^HTTP \d+ \S+: /, "")
         : "Failed to create case";
       setFormError(serverMsg ?? fallback);
+    } finally {
+      setIsSubmitting(false);
     }
   }
 
@@ -828,10 +836,10 @@ export default function NewCasePage() {
               </Button>
               <Button
                 onClick={handleSubmit}
-                disabled={createCase.isPending}
+                disabled={isSubmitting}
                 className="bg-[#f5a623] hover:bg-[#e09000] text-white px-6"
               >
-                {createCase.isPending ? "Creating..." : "Create Case File"}
+                {isSubmitting ? "Creating..." : "Create Case File"} 
               </Button>
             </div>
           </div>

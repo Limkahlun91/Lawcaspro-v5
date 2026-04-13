@@ -21,6 +21,48 @@ function fmt(val: unknown) {
   return `RM ${Number(val ?? 0).toLocaleString("en-MY", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
+type InvoiceRow = {
+  id: number;
+  invoiceNo: string;
+  status: string;
+  issuedDate?: string | null;
+  dueDate?: string | null;
+  grandTotal: number | string;
+  amountPaid: number | string;
+  amountDue: number | string;
+  caseId?: number | null;
+};
+
+type AccountingSummaryResponse = {
+  monthly?: Array<{ month: string; total: number }>;
+};
+
+type CaseFileParty = { role: string; name: string; idNo: string | null };
+type CaseFileQuotation = { id: number; date: string; billedTo: string; amount: number | string | null };
+type CaseFileInvoice = { id: number; date: string; invoiceNo: string; amount: number | string | null };
+type CaseFileRow = {
+  id: number;
+  referenceNo: string;
+  clientParties: CaseFileParty[];
+  propertyInfo: string;
+  lawyerInCharge: string | null;
+  clerkInCharge: string | null;
+  status: string;
+  openFileDate: string;
+  closedFileDate: string | null;
+  daysToClose: number | null;
+  daysSinceOpen: number | null;
+  latestQuotation: CaseFileQuotation | null;
+  latestInvoice: CaseFileInvoice | null;
+};
+
+type CaseFilesListResponse = {
+  data: CaseFileRow[];
+  page: number;
+  limit: number;
+  total: number;
+};
+
 const TABS = ["Overview", "File Listing", "Invoices", "Receipts", "Payment Vouchers", "Ledger"] as const;
 type Tab = typeof TABS[number];
 
@@ -81,20 +123,24 @@ function LedgerSummaryInline() {
 }
 
 function OverviewTab() {
-  const { data: invData } = useQuery({ queryKey: ["invoices"], queryFn: () => apiFetchJson("/invoices"), retry: false });
-  const invoices = (invData ?? []) as any[];
+  const { data: invData } = useQuery({
+    queryKey: ["invoices"],
+    queryFn: () => apiFetchJson<InvoiceRow[]>("/invoices"),
+    retry: false,
+  });
+  const invoices = invData ?? [];
   const invTotals = invoices.reduce((acc, inv) => ({
     total: acc.total + Number(inv.grandTotal),
     paid: acc.paid + Number(inv.amountPaid),
     due: acc.due + Number(inv.amountDue),
   }), { total: 0, paid: 0, due: 0 });
 
-  const { data: accData } = useQuery({
+  const { data: accData } = useQuery<AccountingSummaryResponse>({
     queryKey: ["accounting-summary"],
-    queryFn: () => apiFetchJson("/accounting/summary"),
+    queryFn: () => apiFetchJson<AccountingSummaryResponse>("/accounting/summary"),
     retry: false,
   });
-  const monthly = ((accData?.monthly ?? []) as any[]);
+  const monthly = accData?.monthly ?? [];
 
   return (
     <>
@@ -188,7 +234,7 @@ function FileListingTab() {
     setPage(1);
   }, [debounced]);
 
-  const listQuery = useQuery({
+  const listQuery = useQuery<CaseFilesListResponse>({
     queryKey: ["case-files", debounced, page, limit],
     queryFn: async () => {
       const params = new URLSearchParams();
@@ -196,17 +242,16 @@ function FileListingTab() {
       params.set("page", String(page));
       params.set("limit", String(limit));
       const suffix = params.toString() ? `?${params.toString()}` : "";
-      return await apiFetchJson(`/case-files${suffix}`);
+      return await apiFetchJson<CaseFilesListResponse>(`/case-files${suffix}`);
     },
     retry: false,
   });
 
-  const data = listQuery.data as any;
-  const rows = data?.data ?? [];
-  const total = data?.total ?? 0;
+  const rows = listQuery.data?.data ?? [];
+  const total = listQuery.data?.total ?? 0;
   const totalPages = Math.max(1, Math.ceil(total / limit));
 
-  function renderParties(parties: any[]) {
+  function renderParties(parties: CaseFileParty[]) {
     if (!parties?.length) return <span className="text-slate-400">—</span>;
     const shown = parties.slice(0, 2);
     const more = parties.length - shown.length;
@@ -223,7 +268,7 @@ function FileListingTab() {
     );
   }
 
-  function renderInvoiceInfo(inv: any) {
+  function renderInvoiceInfo(inv: CaseFileInvoice | null) {
     if (!inv) return <span className="text-slate-400">—</span>;
     return (
       <div className="text-xs">
@@ -234,7 +279,7 @@ function FileListingTab() {
     );
   }
 
-  function renderQuotationInfo(quo: any) {
+  function renderQuotationInfo(quo: CaseFileQuotation | null) {
     if (!quo) return <span className="text-slate-400">—</span>;
     return (
       <div className="text-xs">
@@ -287,7 +332,7 @@ function FileListingTab() {
                   </tr>
                 </thead>
                 <tbody>
-                  {rows.map((r: any) => (
+                  {rows.map((r) => (
                     <tr key={r.id} className="border-b last:border-b-0 hover:bg-slate-50 align-top">
                       <td className="py-3 pr-4 font-medium">
                         <Link href={`/app/cases/${r.id}`}>
@@ -931,7 +976,7 @@ function LedgerTab() {
         </div>
       )}
 
-      {isLoading ? (
+      {ledgerQuery.isLoading || sumQuery.isLoading ? (
         <div className="text-center py-12 text-slate-400">Loading…</div>
       ) : entries.length === 0 ? (
         <div className="text-center py-16 text-slate-400">

@@ -139,6 +139,12 @@ export default function AuditLogs() {
                 try {
                   detail = typeof log.detail === "string" ? JSON.parse(log.detail) : ((log.detail as Record<string, unknown>) ?? {});
                 } catch { detail = {}; }
+                const entityType = typeof log.entity_type === "string" ? log.entity_type : null;
+                const entityId = typeof log.entity_id === "number" || typeof log.entity_id === "string" ? String(log.entity_id) : null;
+                const actorEmail = typeof log.actor_email === "string" && log.actor_email.trim() ? log.actor_email.trim() : null;
+                const ipAddress = typeof log.ip_address === "string" && log.ip_address.trim() ? log.ip_address.trim() : null;
+                const referenceNo = typeof detail.referenceNo === "string" && detail.referenceNo.trim() ? detail.referenceNo.trim() : null;
+                const stepName = typeof detail.stepName === "string" && detail.stepName.trim() ? detail.stepName.trim() : null;
 
                 return (
                   <div key={String(log.id)} className="py-3 flex items-start gap-3">
@@ -148,23 +154,23 @@ export default function AuditLogs() {
                         <span className={`text-xs px-1.5 py-0.5 rounded font-medium ${ACTION_COLORS[action] ?? "bg-slate-100 text-slate-600"}`}>
                           {ACTION_LABELS[action] ?? action}
                         </span>
-                        {log.entity_type && (
+                        {entityType && (
                           <span className="text-xs text-slate-500">
-                            {ENTITY_LABELS[String(log.entity_type)] ?? String(log.entity_type)}
-                            {log.entity_id ? ` #${log.entity_id}` : ""}
+                            {ENTITY_LABELS[entityType] ?? entityType}
+                            {entityId ? ` #${entityId}` : ""}
                           </span>
                         )}
-                        {detail.referenceNo && (
-                          <span className="text-xs font-medium text-amber-600">{String(detail.referenceNo)}</span>
+                        {referenceNo && (
+                          <span className="text-xs font-medium text-amber-600">{referenceNo}</span>
                         )}
-                        {detail.stepName && (
-                          <span className="text-xs text-slate-500 italic">"{String(detail.stepName)}"</span>
+                        {stepName && (
+                          <span className="text-xs text-slate-500 italic">"{stepName}"</span>
                         )}
                       </div>
                       <div className="flex items-center gap-2 mt-0.5 text-xs text-slate-400">
                         <span className="font-medium text-slate-600">{String(log.actor_name ?? "System")}</span>
-                        {log.actor_email && <span>{String(log.actor_email)}</span>}
-                        {log.ip_address && <span>from {String(log.ip_address)}</span>}
+                        {actorEmail && <span>{actorEmail}</span>}
+                        {ipAddress && <span>from {ipAddress}</span>}
                       </div>
                     </div>
                     <div className="text-right text-xs text-slate-400 shrink-0">

@@ -448,18 +448,16 @@ export default function CaseDetail() {
           variant="outline"
           size="sm"
           onClick={() => {
-            const spaDetails = caseInfo.spaDetails ? JSON.parse(caseInfo.spaDetails) : {};
-            const loanDetails = caseInfo.loanDetails ? JSON.parse(caseInfo.loanDetails) : {};
-            const propertyDetails = caseInfo.propertyDetails ? JSON.parse(caseInfo.propertyDetails) : {};
-            const purchaserNames = (spaDetails.purchasers || []).map((p: any) => p.name).filter(Boolean).join(", ");
+            const purchaserNames = (Array.isArray(caseInfo.purchasers) ? caseInfo.purchasers : [])
+              .map((p) => p.clientName)
+              .filter(Boolean)
+              .join(", ");
             const params = new URLSearchParams();
             params.set("caseId", String(caseInfo.id));
             params.set("ref", caseInfo.referenceNo);
             if (purchaserNames) params.set("client", purchaserNames);
             if (caseInfo.spaPrice) params.set("price", String(caseInfo.spaPrice));
-            if (loanDetails.bankName) params.set("bank", loanDetails.bankName);
-            if (loanDetails.loanAmount) params.set("loan", `RM ${loanDetails.loanAmount}`);
-            const propDesc = [propertyDetails.address, propertyDetails.propertyType, caseInfo.parcelNo].filter(Boolean).join(", ");
+            const propDesc = [caseInfo.projectName, caseInfo.developerName].filter(Boolean).join(" • ");
             if (propDesc) params.set("property", propDesc);
             setLocation(`/app/quotations/new?${params.toString()}`);
           }}
@@ -507,7 +505,9 @@ export default function CaseDetail() {
                   </div>
                   <div>
                     <div className="text-sm font-medium text-slate-500">Assigned Lawyer</div>
-                    <div className="text-slate-900 font-medium">{caseInfo.assignedLawyerName || 'Unassigned'}</div>
+                    <div className="text-slate-900 font-medium">
+                      {caseInfo.assignments.find((a) => a.roleInCase === "lawyer")?.userName ?? "Unassigned"}
+                    </div>
                   </div>
                 </div>
               </CardContent>

@@ -15,6 +15,42 @@ function fmt(val: unknown) {
   return `RM ${Number(val ?? 0).toLocaleString("en-MY", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
+type InvoiceItem = {
+  id: number;
+  description: string;
+  itemType: string;
+  amountExclTax?: number | string;
+  taxRate?: number | string;
+  taxAmount?: number | string;
+  amountInclTax?: number | string;
+};
+
+type InvoiceDetailResponse = {
+  id: number;
+  caseId?: number | null;
+  invoiceNo: string;
+  status: string;
+  subtotal?: number | string;
+  taxTotal?: number | string;
+  grandTotal: number | string;
+  amountPaid: number | string;
+  amountDue: number | string;
+  issuedDate?: string | null;
+  dueDate?: string | null;
+  notes?: string | null;
+  items?: InvoiceItem[];
+};
+
+type ReceiptRow = {
+  id: number;
+  receiptNo: string;
+  receivedDate: string;
+  amount: number | string;
+  isReversed?: boolean;
+  invoiceId?: number | null;
+  caseId?: number | null;
+};
+
 const STATUS_COLORS: Record<string, string> = {
   draft: "bg-slate-100 text-slate-600",
   issued: "bg-blue-100 text-blue-700",
@@ -41,16 +77,16 @@ export default function InvoiceDetail() {
     amount: "", paymentMethod: "bank_transfer", receivedDate: new Date().toISOString().slice(0, 10), referenceNo: "",
   });
 
-  const invQuery = useQuery({
+  const invQuery = useQuery<InvoiceDetailResponse>({
     queryKey: ["invoice", id],
-    queryFn: () => apiFetchJson(`/invoices/${id}`),
+    queryFn: () => apiFetchJson<InvoiceDetailResponse>(`/invoices/${id}`),
     retry: false,
   });
   const { data: inv, isLoading } = invQuery;
 
-  const receiptsQuery = useQuery({
+  const receiptsQuery = useQuery<ReceiptRow[]>({
     queryKey: ["receipts-for-invoice", id],
-    queryFn: () => apiFetchJson(`/receipts?caseId=${inv?.caseId}`),
+    queryFn: () => apiFetchJson<ReceiptRow[]>(`/receipts?caseId=${inv?.caseId}`),
     enabled: !!inv?.caseId,
     retry: false,
   });
@@ -80,7 +116,7 @@ export default function InvoiceDetail() {
         accountType: "client",
       }),
     }),
-    onSuccess: (rec: any) => {
+    onSuccess: (rec: ReceiptRow) => {
       qc.invalidateQueries({ queryKey: ["invoice", id] });
       qc.invalidateQueries({ queryKey: ["receipts-for-invoice", id] });
       qc.invalidateQueries({ queryKey: ["invoices"] });
@@ -95,11 +131,11 @@ export default function InvoiceDetail() {
   if (invQuery.isError) return <div className="p-6"><QueryFallback title="Invoice unavailable" error={invQuery.error} onRetry={() => invQuery.refetch()} isRetrying={invQuery.isFetching} /></div>;
   if (!inv) return <div className="py-16 text-center text-slate-400">Invoice not found</div>;
 
-  const items = (inv.items ?? []) as any[];
-  const profFees = items.filter((i: any) => i.itemType === "professional_fee" || i.itemType === "taxable_service");
-  const disbursements = items.filter((i: any) => i.itemType === "disbursement");
-  const trustItems = items.filter((i: any) => i.itemType === "trust_amount" || i.itemType === "pass_through");
-  const otherItems = items.filter((i: any) => !profFees.includes(i) && !disbursements.includes(i) && !trustItems.includes(i));
+  const items = inv.items ?? [];
+  const profFees = items.filter((i) => i.itemType === "professional_fee" || i.itemType === "taxable_service");
+  const disbursements = items.filter((i) => i.itemType === "disbursement");
+  const trustItems = items.filter((i) => i.itemType === "trust_amount" || i.itemType === "pass_through");
+  const otherItems = items.filter((i) => !profFees.includes(i) && !disbursements.includes(i) && !trustItems.includes(i));
 
   const issuable = inv.status === "draft";
   const voidable = inv.status !== "paid" && inv.status !== "void";
@@ -239,7 +275,7 @@ export default function InvoiceDetail() {
                   </tr>
                 </thead>
                 <tbody>
-                  {group.items.map((item: any) => (
+                  {group.items.map((item: InvoiceItem) => (
                     <tr key={item.id} className="border-t border-slate-100 hover:bg-slate-50">
                       <td className="px-4 py-2.5 text-slate-800">{item.description}</td>
                       <td className="px-4 py-2.5">

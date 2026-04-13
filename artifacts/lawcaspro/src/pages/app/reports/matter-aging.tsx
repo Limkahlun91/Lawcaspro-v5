@@ -24,16 +24,22 @@ export default function MatterAging() {
   const [, setLocation] = useLocation();
   const { toast } = useToast();
 
-  const agingQuery = useQuery({
+  type MatterAgingBucket = Record<string, unknown>;
+  type MatterAgingResponse = {
+    buckets?: MatterAgingBucket[];
+    grandTotal?: number;
+  };
+
+  const agingQuery = useQuery<MatterAgingResponse>({
     queryKey: ["matter-aging"],
-    queryFn: () => apiFetchJson("/reports/matter-aging"),
+    queryFn: () => apiFetchJson<MatterAgingResponse>("/reports/matter-aging"),
     retry: false,
   });
   const { data, isLoading, isError, error } = agingQuery;
 
-  const buckets: any[] = data?.buckets ?? [];
+  const buckets = data?.buckets ?? [];
   const grandTotal = Number(data?.grandTotal ?? 0);
-  const maxBucketTotal = Math.max(...buckets.map((b: any) => Number(b.total)), 1);
+  const maxBucketTotal = Math.max(...buckets.map((b) => Number(b.total ?? 0)), 1);
 
   return (
     <div className="space-y-6">
@@ -50,7 +56,7 @@ export default function MatterAging() {
             size="sm"
             variant="outline"
             className="h-8"
-            onClick={() => downloadFromApi("/reports/matter-aging?format=csv", "matter-aging.csv").catch((e: any) => {
+            onClick={() => downloadFromApi("/reports/matter-aging?format=csv", "matter-aging.csv").catch((e: unknown) => {
               toastError(toast, e, "Download failed");
             })}
           >
