@@ -57,6 +57,22 @@ function asNumber(v: unknown): number | null {
   return null;
 }
 
+function toIsoStringSafe(v: unknown): string {
+  if (v instanceof Date) return v.toISOString();
+  if (typeof v === "string" || typeof v === "number") {
+    const d = new Date(v);
+    if (!Number.isNaN(d.getTime())) return d.toISOString();
+    return typeof v === "string" ? v : String(v);
+  }
+  return String(v ?? "");
+}
+
+function toIsoStringSafeOrNull(v: unknown): string | null {
+  if (v === null || v === undefined) return null;
+  const s = toIsoStringSafe(v);
+  return s ? s : null;
+}
+
 const CASE_LIST_ROUTE_KEY = "cases" as const;
 const ALLOWED_CASE_LIST_FILTER_KEYS = new Set([
   "search",
@@ -204,7 +220,7 @@ async function formatCaseDetail(r: DbConn, c: typeof casesTable.$inferSelect) {
         userId: a.userId,
         userName: user?.name ?? "Unknown",
         roleInCase: a.roleInCase,
-        assignedAt: a.assignedAt instanceof Date ? a.assignedAt.toISOString() : new Date(a.assignedAt).toISOString(),
+        assignedAt: toIsoStringSafe(a.assignedAt),
       };
     })
   );
@@ -218,10 +234,13 @@ async function formatCaseDetail(r: DbConn, c: typeof casesTable.$inferSelect) {
   try { if (c.loanDetails) loanDetails = JSON.parse(c.loanDetails); } catch {}
   try { if (c.companyDetails) companyDetails = JSON.parse(c.companyDetails); } catch {}
 
-  const [kd] = await r
-    .select()
-    .from(caseKeyDatesTable)
-    .where(and(eq(caseKeyDatesTable.caseId, c.id), eq(caseKeyDatesTable.firmId, c.firmId)));
+  const kdExists = await tableExists(r, "public.case_key_dates");
+  const [kd] = kdExists
+    ? await r
+        .select()
+        .from(caseKeyDatesTable)
+        .where(and(eq(caseKeyDatesTable.caseId, c.id), eq(caseKeyDatesTable.firmId, c.firmId)))
+    : [];
 
   return {
     id: c.id,
@@ -285,7 +304,7 @@ async function formatCaseDetail(r: DbConn, c: typeof casesTable.$inferSelect) {
     purchasers,
     assignments,
     createdBy: c.createdBy ?? null,
-    createdAt: c.createdAt instanceof Date ? c.createdAt.toISOString() : new Date(c.createdAt).toISOString(),
+    createdAt: toIsoStringSafe(c.createdAt),
   };
 }
 
@@ -309,7 +328,7 @@ async function formatCaseSummary(r: DbConn, c: typeof casesTable.$inferSelect) {
     spaPrice: c.spaPrice ? Number(c.spaPrice) : null,
     status: c.status,
     assignedLawyerName: lawyerName,
-    createdAt: c.createdAt instanceof Date ? c.createdAt.toISOString() : new Date(c.createdAt).toISOString(),
+    createdAt: toIsoStringSafe(c.createdAt),
   };
 }
 
@@ -2016,16 +2035,21 @@ router.get("/cases/:caseId", requireAuth, requireFirmUser, requirePermission("ca
     return;
   }
 
-  const [c] = await r
-    .select()
-    .from(casesTable)
-    .where(and(eq(casesTable.id, params.data.caseId), eq(casesTable.firmId, req.firmId!)));
-  if (!c) {
-    res.status(404).json({ error: "Case not found" });
-    return;
-  }
+  try {
+    const [c] = await r
+      .select()
+      .from(casesTable)
+      .where(and(eq(casesTable.id, params.data.caseId), eq(casesTable.firmId, req.firmId!)));
+    if (!c) {
+      res.status(404).json({ error: "Case not found" });
+      return;
+    }
 
-  res.json(await formatCaseDetail(r, c));
+    res.json(await formatCaseDetail(r, c));
+  } catch (e) {
+    logger.error({ err: e, firmId: req.firmId, userId: req.userId, caseId: params.data.caseId }, "[cases] get case failed");
+    res.status(500).json({ error: "Internal Server Error" });
+  }
 });
 
 router.get("/cases/:caseId/key-dates", requireAuth, requireFirmUser, requirePermission("cases", "read"), async (req: AuthRequest, res): Promise<void> => {
@@ -2038,6 +2062,11 @@ router.get("/cases/:caseId/key-dates", requireAuth, requireFirmUser, requirePerm
   const params = GetCaseParams.safeParse(req.params);
   if (!params.success) {
     res.status(400).json({ error: params.error.message });
+    return;
+  }
+  const kdExists = await tableExists(r, "public.case_key_dates");
+  if (!kdExists) {
+    res.json({});
     return;
   }
   const [caseRow] = await r
@@ -2470,43 +2499,54 @@ router.get("/cases/:caseId/workflow", requireAuth, requireFirmUser, requirePermi
     return;
   }
 
-  const [caseRow] = await r
-    .select({ id: casesTable.id })
-    .from(casesTable)
-    .where(and(eq(casesTable.id, params.data.caseId), eq(casesTable.firmId, req.firmId!)));
-  if (!caseRow) {
-    res.status(404).json({ error: "Case not found" });
-    return;
+  try {
+    const [caseRow] = await r
+      .select({ id: casesTable.id })
+      .from(casesTable)
+      .where(and(eq(casesTable.id, params.data.caseId), eq(casesTable.firmId, req.firmId!)));
+    if (!caseRow) {
+      res.status(404).json({ error: "Case not found" });
+      return;
+    }
+
+    const wfExists = await tableExists(r, "public.case_workflow_steps");
+    if (!wfExists) {
+      res.json([]);
+      return;
+    }
+
+    const steps = await r.select().from(caseWorkflowStepsTable)
+      .where(eq(caseWorkflowStepsTable.caseId, params.data.caseId))
+      .orderBy(caseWorkflowStepsTable.stepOrder);
+
+    const enriched = await Promise.all(
+      steps.map(async (s) => {
+        let completedByName: string | null = null;
+        if (s.completedBy) {
+          const [user] = await r.select().from(usersTable).where(eq(usersTable.id, s.completedBy));
+          completedByName = user?.name ?? null;
+        }
+        return {
+          id: s.id,
+          caseId: s.caseId,
+          stepKey: s.stepKey,
+          stepName: s.stepName,
+          stepOrder: s.stepOrder,
+          status: s.status,
+          pathType: s.pathType,
+          completedBy: s.completedBy ?? null,
+          completedByName,
+          completedAt: toIsoStringSafeOrNull(s.completedAt),
+          notes: s.notes ?? null,
+        };
+      })
+    );
+
+    res.json(enriched);
+  } catch (e) {
+    logger.error({ err: e, firmId: req.firmId, userId: req.userId, caseId: params.data.caseId }, "[cases] get workflow failed");
+    res.status(500).json({ error: "Internal Server Error" });
   }
-
-  const steps = await r.select().from(caseWorkflowStepsTable)
-    .where(eq(caseWorkflowStepsTable.caseId, params.data.caseId))
-    .orderBy(caseWorkflowStepsTable.stepOrder);
-
-  const enriched = await Promise.all(
-    steps.map(async (s) => {
-      let completedByName: string | null = null;
-      if (s.completedBy) {
-        const [user] = await r.select().from(usersTable).where(eq(usersTable.id, s.completedBy));
-        completedByName = user?.name ?? null;
-      }
-      return {
-        id: s.id,
-        caseId: s.caseId,
-        stepKey: s.stepKey,
-        stepName: s.stepName,
-        stepOrder: s.stepOrder,
-        status: s.status,
-        pathType: s.pathType,
-        completedBy: s.completedBy ?? null,
-        completedByName,
-        completedAt: s.completedAt ? (s.completedAt instanceof Date ? s.completedAt.toISOString() : new Date(s.completedAt).toISOString()) : null,
-        notes: s.notes ?? null,
-      };
-    })
-  );
-
-  res.json(enriched);
 });
 
 router.patch("/cases/:caseId/workflow/:stepId", requireAuth, requireFirmUser, requirePermission("cases", "update"), async (req: AuthRequest, res): Promise<void> => {
@@ -2572,32 +2612,35 @@ router.patch("/cases/:caseId/workflow/:stepId", requireAuth, requireFirmUser, re
   if (step.status === "completed" && step.completedAt) {
     const mapped = WORKFLOW_STEP_KEY_TO_KEY_DATE_FIELD[step.stepKey];
     if (mapped) {
-      const [existingKd] = await r
-        .select()
-        .from(caseKeyDatesTable)
-        .where(and(eq(caseKeyDatesTable.caseId, params.data.caseId), eq(caseKeyDatesTable.firmId, req.firmId!)));
-      if (shouldBackfillKeyDate(mapped, existingKd ?? null)) {
-        const ymd = dateToYmd(step.completedAt);
-        if (existingKd) {
-          await r
-            .update(caseKeyDatesTable)
-            .set({ ...keyDatePatchFromWorkflow(mapped, ymd), updatedAt: new Date() })
-            .where(and(eq(caseKeyDatesTable.caseId, params.data.caseId), eq(caseKeyDatesTable.firmId, req.firmId!)));
-        } else {
-          await r
-            .insert(caseKeyDatesTable)
-            .values({ firmId: req.firmId!, caseId: params.data.caseId, ...keyDatePatchFromWorkflow(mapped, ymd) });
+      const kdExists = await tableExists(r, "public.case_key_dates");
+      if (kdExists) {
+        const [existingKd] = await r
+          .select()
+          .from(caseKeyDatesTable)
+          .where(and(eq(caseKeyDatesTable.caseId, params.data.caseId), eq(caseKeyDatesTable.firmId, req.firmId!)));
+        if (shouldBackfillKeyDate(mapped, existingKd ?? null)) {
+          const ymd = dateToYmd(step.completedAt);
+          if (existingKd) {
+            await r
+              .update(caseKeyDatesTable)
+              .set({ ...keyDatePatchFromWorkflow(mapped, ymd), updatedAt: new Date() })
+              .where(and(eq(caseKeyDatesTable.caseId, params.data.caseId), eq(caseKeyDatesTable.firmId, req.firmId!)));
+          } else {
+            await r
+              .insert(caseKeyDatesTable)
+              .values({ firmId: req.firmId!, caseId: params.data.caseId, ...keyDatePatchFromWorkflow(mapped, ymd) });
+          }
+          syncedKeyDateField = mapped;
+          await r.insert(auditLogsTable).values({
+            firmId: req.firmId,
+            actorId: req.userId,
+            actorType: "firm_user",
+            action: "case.key_date_synced_from_workflow",
+            entityType: "case",
+            entityId: params.data.caseId,
+            detail: JSON.stringify({ stepKey: step.stepKey, keyDateField: mapped, ymd }),
+          });
         }
-        syncedKeyDateField = mapped;
-        await r.insert(auditLogsTable).values({
-          firmId: req.firmId,
-          actorId: req.userId,
-          actorType: "firm_user",
-          action: "case.key_date_synced_from_workflow",
-          entityType: "case",
-          entityId: params.data.caseId,
-          detail: JSON.stringify({ stepKey: step.stepKey, keyDateField: mapped, ymd }),
-        });
       }
     }
   }
@@ -2618,7 +2661,7 @@ router.patch("/cases/:caseId/workflow/:stepId", requireAuth, requireFirmUser, re
     pathType: step.pathType,
     completedBy: step.completedBy ?? null,
     completedByName,
-    completedAt: step.completedAt ? (step.completedAt instanceof Date ? step.completedAt.toISOString() : new Date(step.completedAt).toISOString()) : null,
+    completedAt: toIsoStringSafeOrNull(step.completedAt),
     notes: step.notes ?? null,
     syncedKeyDateField,
   });
@@ -2659,7 +2702,7 @@ router.get("/cases/:caseId/notes", requireAuth, requireFirmUser, requirePermissi
         authorId: n.authorId,
         authorName: author?.name ?? "Unknown",
         content: n.content,
-        createdAt: n.createdAt instanceof Date ? n.createdAt.toISOString() : new Date(n.createdAt).toISOString(),
+        createdAt: toIsoStringSafe(n.createdAt),
       };
     })
   );

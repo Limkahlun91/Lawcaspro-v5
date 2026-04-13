@@ -65,7 +65,7 @@ describe("Case file listing (regression)", () => {
       .get(`/api/cases/${createdCaseId}/workflow`)
       .set("Authorization", `Bearer ${token}`);
     expect(wfRes.status).toBe(200);
-    expect(Array.isArray(wfRes.body.steps)).toBe(true);
+    expect(Array.isArray(wfRes.body)).toBe(true);
 
     const listRes = await request(app)
       .get("/api/case-files")

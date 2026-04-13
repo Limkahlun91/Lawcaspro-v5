@@ -470,6 +470,8 @@ export const CreateUserBody = zod.object({
   password: zod.string(),
   roleId: zod.number(),
   department: zod.string().optional(),
+  barCouncilNo: zod.string().optional(),
+  nricNo: zod.string().optional(),
 });
 
 /**

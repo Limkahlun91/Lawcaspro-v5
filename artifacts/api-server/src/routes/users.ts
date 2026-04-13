@@ -39,6 +39,20 @@ async function usersDepartmentExists(r: DbConn): Promise<boolean> {
   return usersDepartmentExistsCache;
 }
 
+let usersBarCouncilNoExistsCache: boolean | null = null;
+async function usersBarCouncilNoExists(r: DbConn): Promise<boolean> {
+  if (usersBarCouncilNoExistsCache !== null) return usersBarCouncilNoExistsCache;
+  usersBarCouncilNoExistsCache = await columnExists(r, "users", "bar_council_no");
+  return usersBarCouncilNoExistsCache;
+}
+
+let usersNricNoExistsCache: boolean | null = null;
+async function usersNricNoExists(r: DbConn): Promise<boolean> {
+  if (usersNricNoExistsCache !== null) return usersNricNoExistsCache;
+  usersNricNoExistsCache = await columnExists(r, "users", "nric_no");
+  return usersNricNoExistsCache;
+}
+
 type UserRow = {
   id: number;
   firmId: number | null;
@@ -138,7 +152,7 @@ router.post("/users", requireAuth, requireFirmUser, requirePermission("users", "
     return;
   }
 
-  const { email, name, password, roleId, department } = parsed.data;
+  const { email, name, password, roleId, department, barCouncilNo, nricNo } = parsed.data;
 
   const [existing] = await r.select().from(usersTable).where(eq(usersTable.email, email.toLowerCase()));
   if (existing) {
@@ -148,6 +162,8 @@ router.post("/users", requireAuth, requireFirmUser, requirePermission("users", "
 
   const passwordHash = await bcrypt.hash(password, 10);
   const hasDepartment = await usersDepartmentExists(r);
+  const hasBarCouncilNo = await usersBarCouncilNoExists(r);
+  const hasNricNo = await usersNricNoExists(r);
   const values: typeof usersTable.$inferInsert = {
     firmId: req.firmId!,
     email: email.toLowerCase(),
@@ -159,6 +175,12 @@ router.post("/users", requireAuth, requireFirmUser, requirePermission("users", "
   };
   if (hasDepartment) {
     values.department = department ?? null;
+  }
+  if (hasBarCouncilNo) {
+    values.barCouncilNo = barCouncilNo?.trim() ? barCouncilNo.trim() : null;
+  }
+  if (hasNricNo) {
+    values.nricNo = nricNo?.trim() ? nricNo.trim() : null;
   }
 
   const [user] = await r

@@ -322,11 +322,11 @@ function FileListingTab() {
                 <thead>
                   <tr className="text-left text-slate-500 border-b">
                     <th className="py-3 pr-4 min-w-[120px]">File Reference</th>
-                    <th className="py-3 pr-4 min-w-[200px]">Client / Parties</th>
+                    <th className="py-3 pr-4 min-w-[140px]">Date</th>
+                    <th className="py-3 pr-4 min-w-[220px]">Client / Parties</th>
                     <th className="py-3 pr-4 min-w-[200px]">Property / Project</th>
                     <th className="py-3 pr-4 min-w-[120px]">Lawyer / Clerk</th>
                     <th className="py-3 pr-4 min-w-[140px]">Status</th>
-                    <th className="py-3 pr-4 min-w-[120px]">Dates</th>
                     <th className="py-3 pr-4 min-w-[120px]">Latest Quotation</th>
                     <th className="py-3 pr-4 min-w-[120px]">Latest Invoice</th>
                   </tr>
@@ -339,16 +339,7 @@ function FileListingTab() {
                           <span className="text-amber-700 hover:underline cursor-pointer">{r.referenceNo}</span>
                         </Link>
                       </td>
-                      <td className="py-3 pr-4">{renderParties(r.clientParties)}</td>
-                      <td className="py-3 pr-4 text-slate-700">{r.propertyInfo || "—"}</td>
-                      <td className="py-3 pr-4 text-xs space-y-1">
-                        <div><span className="text-slate-400">L:</span> {r.lawyerInCharge || "—"}</div>
-                        <div><span className="text-slate-400">C:</span> {r.clerkInCharge || "—"}</div>
-                      </td>
-                      <td className="py-3 pr-4">
-                        <div className="text-xs font-medium text-slate-800 break-words">{r.status}</div>
-                      </td>
-                      <td className="py-3 pr-4 text-xs space-y-1">
+                      <td className="py-3 pr-4 text-xs space-y-1 whitespace-nowrap">
                         <div><span className="text-slate-400">Open:</span> {new Date(r.openFileDate).toLocaleDateString()}</div>
                         {r.closedFileDate ? (
                           <>
@@ -358,6 +349,15 @@ function FileListingTab() {
                         ) : (
                           <div className="text-slate-500 italic">{r.daysSinceOpen} days open</div>
                         )}
+                      </td>
+                      <td className="py-3 pr-4">{renderParties(r.clientParties)}</td>
+                      <td className="py-3 pr-4 text-slate-700">{r.propertyInfo || "—"}</td>
+                      <td className="py-3 pr-4 text-xs space-y-1">
+                        <div><span className="text-slate-400">L:</span> {r.lawyerInCharge || "—"}</div>
+                        <div><span className="text-slate-400">C:</span> {r.clerkInCharge || "—"}</div>
+                      </td>
+                      <td className="py-3 pr-4">
+                        <div className="text-xs font-medium text-slate-800 break-words">{r.status}</div>
                       </td>
                       <td className="py-3 pr-4">{renderQuotationInfo(r.latestQuotation)}</td>
                       <td className="py-3 pr-4">{renderInvoiceInfo(r.latestInvoice)}</td>

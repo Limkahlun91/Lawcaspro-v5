@@ -11,6 +11,8 @@ export const usersTable = pgTable("users", {
   userType: text("user_type").notNull().default("firm_user"),
   roleId: integer("role_id"),
   department: text("department"),
+  barCouncilNo: text("bar_council_no"),
+  nricNo: text("nric_no"),
   status: text("status").notNull().default("active"),
   totpSecret: text("totp_secret"),
   totpEnabled: boolean("totp_enabled").notNull().default(false),

@@ -19,6 +19,8 @@ const createUserSchema = z.object({
   password: z.string().min(8, "Password must be at least 8 characters"),
   roleId: z.coerce.number().min(1, "Role is required"),
   department: z.string().optional(),
+  barCouncilNo: z.string().optional(),
+  nricNo: z.string().optional(),
 });
 
 type FormValues = z.infer<typeof createUserSchema>;
@@ -39,18 +41,24 @@ export default function NewUser() {
       password: "",
       roleId: 0,
       department: "",
+      barCouncilNo: "",
+      nricNo: "",
     },
   });
 
   const selectedRoleId = form.watch("roleId");
   const selectedRole = roles.find((r) => r.id === selectedRoleId);
   const showDepartment = selectedRole && (selectedRole.name === "Manager" || selectedRole.name === "Admin");
+  const showProfessionalFields = selectedRole && (selectedRole.name === "Partner" || selectedRole.name === "Lawyer" || selectedRole.name === "Senior Lawyer");
 
   const createUserMutation = useCreateUser();
 
   const onSubmit = (data: FormValues) => {
+    const payload: FormValues = showProfessionalFields
+      ? data
+      : { ...data, barCouncilNo: undefined, nricNo: undefined };
     createUserMutation.mutate(
-      { data },
+      { data: payload },
       {
         onSuccess: () => {
           queryClient.invalidateQueries({ queryKey: getListUsersQueryKey() });
@@ -168,6 +176,36 @@ export default function NewUser() {
                     </FormItem>
                   )}
                 />
+              )}
+              {showProfessionalFields && (
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <FormField
+                    control={form.control}
+                    name="barCouncilNo"
+                    render={({ field }) => (
+                      <FormItem>
+                        <FormLabel>Bar Council No.</FormLabel>
+                        <FormControl>
+                          <Input placeholder="e.g. BC/XXXX/2026" {...field} />
+                        </FormControl>
+                        <FormMessage />
+                      </FormItem>
+                    )}
+                  />
+                  <FormField
+                    control={form.control}
+                    name="nricNo"
+                    render={({ field }) => (
+                      <FormItem>
+                        <FormLabel>NRIC No.</FormLabel>
+                        <FormControl>
+                          <Input placeholder="e.g. 900101-14-5678" {...field} />
+                        </FormControl>
+                        <FormMessage />
+                      </FormItem>
+                    )}
+                  />
+                </div>
               )}
               <div className="pt-4 flex justify-end gap-4">
                 <Button type="button" variant="outline" onClick={() => setLocation("/app/users")}>
