@@ -46,7 +46,7 @@ export default function NewUser() {
     },
   });
 
-  const selectedRoleId = form.watch("roleId");
+  const selectedRoleId = Number(form.watch("roleId") || 0);
   const selectedRole = roles.find((r) => r.id === selectedRoleId);
   const showDepartment = selectedRole && (selectedRole.name === "Manager" || selectedRole.name === "Admin");
   const showProfessionalFields = selectedRole && (selectedRole.name === "Partner" || selectedRole.name === "Lawyer" || selectedRole.name === "Senior Lawyer");
@@ -140,7 +140,10 @@ export default function NewUser() {
                 render={({ field }) => (
                   <FormItem>
                     <FormLabel>Role</FormLabel>
-                    <Select onValueChange={field.onChange} defaultValue={field.value ? field.value.toString() : ""}>
+                    <Select
+                      value={field.value ? String(field.value) : ""}
+                      onValueChange={(v) => field.onChange(Number(v))}
+                    >
                       <FormControl>
                         <SelectTrigger>
                           <SelectValue placeholder="Select a role" />
