@@ -214,7 +214,10 @@ async function formatCaseDetail(r: DbConn, c: typeof casesTable.$inferSelect) {
     .where(and(eq(caseAssignmentsTable.caseId, c.id), sql`${caseAssignmentsTable.unassignedAt} IS NULL`));
   const assignments = await Promise.all(
     assignRows.map(async (a) => {
-      const [user] = await r.select().from(usersTable).where(eq(usersTable.id, a.userId));
+      const [user] = await r
+        .select({ id: usersTable.id, name: usersTable.name })
+        .from(usersTable)
+        .where(eq(usersTable.id, a.userId));
       return {
         id: a.id,
         userId: a.userId,
@@ -315,7 +318,10 @@ async function formatCaseSummary(r: DbConn, c: typeof casesTable.$inferSelect) {
     .where(and(eq(caseAssignmentsTable.caseId, c.id), eq(caseAssignmentsTable.roleInCase, "lawyer"), sql`${caseAssignmentsTable.unassignedAt} IS NULL`));
   let lawyerName: string | null = null;
   if (lawyerAssign) {
-    const [lawyer] = await r.select().from(usersTable).where(eq(usersTable.id, lawyerAssign.userId));
+    const [lawyer] = await r
+      .select({ id: usersTable.id, name: usersTable.name })
+      .from(usersTable)
+      .where(eq(usersTable.id, lawyerAssign.userId));
     lawyerName = lawyer?.name ?? null;
   }
   return {
@@ -2523,7 +2529,10 @@ router.get("/cases/:caseId/workflow", requireAuth, requireFirmUser, requirePermi
       steps.map(async (s) => {
         let completedByName: string | null = null;
         if (s.completedBy) {
-          const [user] = await r.select().from(usersTable).where(eq(usersTable.id, s.completedBy));
+          const [user] = await r
+            .select({ name: usersTable.name })
+            .from(usersTable)
+            .where(eq(usersTable.id, s.completedBy));
           completedByName = user?.name ?? null;
         }
         return {
@@ -2647,7 +2656,10 @@ router.patch("/cases/:caseId/workflow/:stepId", requireAuth, requireFirmUser, re
 
   let completedByName: string | null = null;
   if (step.completedBy) {
-    const [user] = await r.select().from(usersTable).where(eq(usersTable.id, step.completedBy));
+    const [user] = await r
+      .select({ name: usersTable.name })
+      .from(usersTable)
+      .where(eq(usersTable.id, step.completedBy));
     completedByName = user?.name ?? null;
   }
 
@@ -2695,7 +2707,10 @@ router.get("/cases/:caseId/notes", requireAuth, requireFirmUser, requirePermissi
 
   const enriched = await Promise.all(
     notes.map(async (n) => {
-      const [author] = await r.select().from(usersTable).where(eq(usersTable.id, n.authorId));
+      const [author] = await r
+        .select({ name: usersTable.name })
+        .from(usersTable)
+        .where(eq(usersTable.id, n.authorId));
       return {
         id: n.id,
         caseId: n.caseId,
@@ -2747,7 +2762,10 @@ router.post("/cases/:caseId/notes", requireAuth, requireFirmUser, requirePermiss
     })
     .returning();
 
-  const [author] = await r.select().from(usersTable).where(eq(usersTable.id, note.authorId));
+  const [author] = await r
+    .select({ name: usersTable.name })
+    .from(usersTable)
+    .where(eq(usersTable.id, note.authorId));
 
   res.status(201).json({
     id: note.id,
