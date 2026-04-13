@@ -1,0 +1,1 @@
+src/pages/platform/monitoring/index.tsx(49,68): error TS2339: Property 'totalDocuments' does not exist on type '{}'.

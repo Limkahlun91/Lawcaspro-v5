@@ -97,7 +97,7 @@ function SecurityTab() {
     onError: (e) => toastError(toast, e, "Action failed"),
   });
 
-  const totpEnabled = user?.totpEnabled ?? false;
+  const totpEnabled = (user as any)?.totpEnabled ?? false;
 
   return (
     <div className="space-y-6">

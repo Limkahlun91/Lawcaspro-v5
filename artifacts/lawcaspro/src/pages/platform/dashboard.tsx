@@ -63,7 +63,7 @@ export default function PlatformDashboard() {
             </div>
             <div className="p-3 bg-slate-50 rounded-lg">
               <div className="text-slate-500 text-xs">Documents Generated</div>
-              <div className="font-bold text-lg text-slate-900">{stats.totalDocuments ?? 0}</div>
+              <div className="font-bold text-lg text-slate-900">{(stats as any).totalDocuments ?? 0}</div>
             </div>
           </div>
         </CardContent>

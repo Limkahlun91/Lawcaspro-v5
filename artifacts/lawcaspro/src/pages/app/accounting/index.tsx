@@ -5,8 +5,9 @@ import { useLocation, useSearch } from "wouter";
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from "recharts";
 import {
   DollarSign, TrendingUp, Clock, Briefcase, Plus, Search, FileText,
-  Receipt, CreditCard, BookOpen, ChevronRight, RotateCcw, ArrowUpDown,
+  Receipt, CreditCard, BookOpen, ChevronRight, RotateCcw, ArrowUpDown, ListOrdered
 } from "lucide-react";
+import { Link } from "wouter";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
@@ -20,11 +21,12 @@ function fmt(val: unknown) {
   return `RM ${Number(val ?? 0).toLocaleString("en-MY", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
-const TABS = ["Overview", "Invoices", "Receipts", "Payment Vouchers", "Ledger"] as const;
+const TABS = ["Overview", "File Listing", "Invoices", "Receipts", "Payment Vouchers", "Ledger"] as const;
 type Tab = typeof TABS[number];
 
 const TAB_KEYS: Record<string, Tab> = {
   overview: "Overview",
+  "file-listing": "File Listing",
   invoices: "Invoices",
   receipts: "Receipts",
   "payment-vouchers": "Payment Vouchers",
@@ -166,6 +168,174 @@ function OverviewTab() {
         </Card>
       </div>
     </>
+  );
+}
+
+// ── FILE LISTING TAB ─────────────────────────────────────────────────────────
+
+function FileListingTab() {
+  const [search, setSearch] = useState("");
+  const [debounced, setDebounced] = useState("");
+  const [page, setPage] = useState(1);
+  const limit = 50;
+
+  useEffect(() => {
+    const t = setTimeout(() => setDebounced(search.trim()), 250);
+    return () => clearTimeout(t);
+  }, [search]);
+
+  useEffect(() => {
+    setPage(1);
+  }, [debounced]);
+
+  const listQuery = useQuery({
+    queryKey: ["case-files", debounced, page, limit],
+    queryFn: async () => {
+      const params = new URLSearchParams();
+      if (debounced) params.set("q", debounced);
+      params.set("page", String(page));
+      params.set("limit", String(limit));
+      const suffix = params.toString() ? `?${params.toString()}` : "";
+      return await apiFetchJson(`/case-files${suffix}`);
+    },
+    retry: false,
+  });
+
+  const data = listQuery.data as any;
+  const rows = data?.data ?? [];
+  const total = data?.total ?? 0;
+  const totalPages = Math.max(1, Math.ceil(total / limit));
+
+  function renderParties(parties: any[]) {
+    if (!parties?.length) return <span className="text-slate-400">—</span>;
+    const shown = parties.slice(0, 2);
+    const more = parties.length - shown.length;
+    return (
+      <div className="space-y-1">
+        {shown.map((p, idx) => (
+          <div key={`${p.role}-${p.name}-${idx}`} className="flex items-center gap-2">
+            <span className="px-1.5 py-0.5 rounded border border-slate-200 text-[10px] capitalize text-slate-500">{p.role}</span>
+            <span className="text-sm text-slate-900 truncate">{p.name}</span>
+          </div>
+        ))}
+        {more > 0 ? <div className="text-xs text-slate-500">+{more} more</div> : null}
+      </div>
+    );
+  }
+
+  function renderInvoiceInfo(inv: any) {
+    if (!inv) return <span className="text-slate-400">—</span>;
+    return (
+      <div className="text-xs">
+        <div className="font-medium text-slate-800">{inv.invoiceNo}</div>
+        <div className="text-slate-500">{new Date(inv.date).toLocaleDateString()}</div>
+        <div className="text-amber-600 font-semibold">{fmt(inv.amount)}</div>
+      </div>
+    );
+  }
+
+  function renderQuotationInfo(quo: any) {
+    if (!quo) return <span className="text-slate-400">—</span>;
+    return (
+      <div className="text-xs">
+        <div className="font-medium text-slate-800 truncate max-w-[120px]" title={quo.billedTo}>{quo.billedTo}</div>
+        <div className="text-slate-500">{new Date(quo.date).toLocaleDateString()}</div>
+        <div className="text-amber-600 font-semibold">{fmt(quo.amount)}</div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-4">
+      <Card>
+        <CardHeader className="pb-3">
+          <CardTitle className="flex items-center justify-between gap-3">
+            <span>Case Files</span>
+            <div className="relative w-full max-w-md">
+              <Search className="absolute left-3 top-2.5 h-4 w-4 text-slate-400" />
+              <Input
+                className="pl-9"
+                placeholder="Search file ref, client, project, status…"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+              />
+            </div>
+          </CardTitle>
+        </CardHeader>
+        <CardContent>
+          {listQuery.isError ? (
+            <QueryFallback title="Listing unavailable" error={listQuery.error} onRetry={() => listQuery.refetch()} isRetrying={listQuery.isFetching} />
+          ) : listQuery.isLoading ? (
+            <div className="text-slate-500 py-10 text-center">Loading…</div>
+          ) : rows.length === 0 ? (
+            <div className="text-center py-14 text-slate-500">
+              <p className="font-medium text-slate-700">No files found</p>
+            </div>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="text-left text-slate-500 border-b">
+                    <th className="py-3 pr-4 min-w-[120px]">File Reference</th>
+                    <th className="py-3 pr-4 min-w-[200px]">Client / Parties</th>
+                    <th className="py-3 pr-4 min-w-[200px]">Property / Project</th>
+                    <th className="py-3 pr-4 min-w-[120px]">Lawyer / Clerk</th>
+                    <th className="py-3 pr-4 min-w-[140px]">Status</th>
+                    <th className="py-3 pr-4 min-w-[120px]">Dates</th>
+                    <th className="py-3 pr-4 min-w-[120px]">Latest Quotation</th>
+                    <th className="py-3 pr-4 min-w-[120px]">Latest Invoice</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {rows.map((r: any) => (
+                    <tr key={r.id} className="border-b last:border-b-0 hover:bg-slate-50 align-top">
+                      <td className="py-3 pr-4 font-medium">
+                        <Link href={`/app/cases/${r.id}`}>
+                          <span className="text-amber-700 hover:underline cursor-pointer">{r.referenceNo}</span>
+                        </Link>
+                      </td>
+                      <td className="py-3 pr-4">{renderParties(r.clientParties)}</td>
+                      <td className="py-3 pr-4 text-slate-700">{r.propertyInfo || "—"}</td>
+                      <td className="py-3 pr-4 text-xs space-y-1">
+                        <div><span className="text-slate-400">L:</span> {r.lawyerInCharge || "—"}</div>
+                        <div><span className="text-slate-400">C:</span> {r.clerkInCharge || "—"}</div>
+                      </td>
+                      <td className="py-3 pr-4">
+                        <div className="text-xs font-medium text-slate-800 break-words">{r.status}</div>
+                      </td>
+                      <td className="py-3 pr-4 text-xs space-y-1">
+                        <div><span className="text-slate-400">Open:</span> {new Date(r.openFileDate).toLocaleDateString()}</div>
+                        {r.closedFileDate ? (
+                          <>
+                            <div><span className="text-slate-400">Closed:</span> {new Date(r.closedFileDate).toLocaleDateString()}</div>
+                            <div className="text-slate-600 font-medium">{r.daysToClose} days</div>
+                          </>
+                        ) : (
+                          <div className="text-slate-500 italic">{r.daysSinceOpen} days open</div>
+                        )}
+                      </td>
+                      <td className="py-3 pr-4">{renderQuotationInfo(r.latestQuotation)}</td>
+                      <td className="py-3 pr-4">{renderInvoiceInfo(r.latestInvoice)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+
+          <div className="flex items-center justify-between pt-4 border-t mt-4">
+            <div className="text-xs text-slate-500">
+              {total ? `Showing ${(page - 1) * limit + 1}–${Math.min(page * limit, total)} of ${total}` : "—"}
+            </div>
+            <div className="flex items-center gap-2">
+              <Button variant="outline" size="sm" onClick={() => setPage((p) => Math.max(1, p - 1))} disabled={page <= 1 || listQuery.isFetching}>Prev</Button>
+              <div className="text-xs text-slate-500">Page {page} / {totalPages}</div>
+              <Button variant="outline" size="sm" onClick={() => setPage((p) => Math.min(totalPages, p + 1))} disabled={page >= totalPages || listQuery.isFetching}>Next</Button>
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+    </div>
   );
 }
 
@@ -826,6 +996,7 @@ export default function Accounting() {
 
   const TAB_ICONS: Record<Tab, React.ReactNode> = {
     "Overview": <DollarSign className="w-4 h-4" />,
+    "File Listing": <ListOrdered className="w-4 h-4" />,
     "Invoices": <FileText className="w-4 h-4" />,
     "Receipts": <Receipt className="w-4 h-4" />,
     "Payment Vouchers": <CreditCard className="w-4 h-4" />,
@@ -836,7 +1007,7 @@ export default function Accounting() {
     <div className="space-y-6">
       <div>
         <h1 className="text-3xl font-bold text-slate-900 tracking-tight">Accounting</h1>
-        <p className="text-slate-500 mt-1">Invoices, receipts, payment vouchers and ledger</p>
+        <p className="text-slate-500 mt-1">Invoices, receipts, payment vouchers, ledger and case files</p>
       </div>
 
       <div className="flex gap-1 border-b border-gray-200 overflow-x-auto">
@@ -858,6 +1029,7 @@ export default function Accounting() {
       </div>
 
       {activeTab === "Overview" && <OverviewTab />}
+      {activeTab === "File Listing" && <FileListingTab />}
       {activeTab === "Invoices" && <InvoicesTab />}
       {activeTab === "Receipts" && <ReceiptsTab />}
       {activeTab === "Payment Vouchers" && <PaymentVouchersTab />}

@@ -43,10 +43,10 @@ export default function PlatformMonitoring() {
         <>
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
             {[
-              { label: "Total Firms", value: String(stats?.totalFirms ?? 0), icon: Building2, color: "bg-blue-50 text-blue-600" },
-              { label: "Total Users", value: String(stats?.totalUsers ?? 0), icon: Users, color: "bg-amber-50 text-amber-600" },
-              { label: "Total Cases", value: String(stats?.totalCases ?? 0), icon: Briefcase, color: "bg-green-50 text-green-600" },
-              { label: "Documents Generated", value: String(stats?.totalDocuments ?? 0), icon: FileText, color: "bg-purple-50 text-purple-600" },
+              { label: "Total Firms", value: String((stats as any)?.totalFirms ?? 0), icon: Building2, color: "bg-blue-50 text-blue-600" },
+              { label: "Total Users", value: String((stats as any)?.totalUsers ?? 0), icon: Users, color: "bg-amber-50 text-amber-600" },
+              { label: "Total Cases", value: String((stats as any)?.totalCases ?? 0), icon: Briefcase, color: "bg-green-50 text-green-600" },
+              { label: "Documents Generated", value: String((stats as any)?.totalDocuments ?? 0), icon: FileText, color: "bg-purple-50 text-purple-600" },
             ].map((item) => (
               <Card key={item.label}>
                 <CardContent className="pt-6">

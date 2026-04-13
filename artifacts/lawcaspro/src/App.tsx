@@ -33,7 +33,6 @@ import CasesList from "@/pages/app/cases";
 import NewCase from "@/pages/app/cases/new";
 import CaseDetail from "@/pages/app/cases/detail";
 import Workbench from "@/pages/app/workbench";
-import CaseFileListing from "@/pages/app/case-files";
 
 import NewUser from "@/pages/app/users/new";
 
@@ -120,12 +119,6 @@ function AppRoutes() {
           <Route path="/app/workbench" component={() => (
             <PermissionGuard module="cases" action="read">
               <Workbench />
-            </PermissionGuard>
-          )} />
-          
-          <Route path="/app/case-files" component={() => (
-            <PermissionGuard module="cases" action="read">
-              <CaseFileListing />
             </PermissionGuard>
           )} />
           

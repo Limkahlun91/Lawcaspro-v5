@@ -45,11 +45,12 @@ export default function Workbench() {
     setLocation(`/app/workbench?${next.toString()}`);
   };
 
-  const { data: filterOptions } = useQuery({
+  const { data: _filterOptions } = useQuery({
     queryKey: ["cases", "filter-options"],
     queryFn: () => apiFetchJson("/cases/filter-options"),
     retry: false,
   });
+  const filterOptions = _filterOptions as any;
   const lawyers: Array<{ id: number; name: string }> = Array.isArray(filterOptions?.assignees?.lawyers) ? filterOptions.assignees.lawyers : [];
   const clerks: Array<{ id: number; name: string }> = Array.isArray(filterOptions?.assignees?.clerks) ? filterOptions.assignees.clerks : [];
 

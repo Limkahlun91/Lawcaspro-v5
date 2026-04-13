@@ -12,8 +12,6 @@ export const casesTable = pgTable("cases", {
   titleType: text("title_type").notNull().default("master"),
   spaPrice: numeric("spa_price", { precision: 15, scale: 2 }),
   status: text("status").notNull().default("File Opened / SPA Pending Signing"),
-  fileListingStatus: text("file_listing_status").notNull().default("new"),
-  fileListingReason: text("file_listing_reason"),
   caseType: text("case_type"),
   parcelNo: text("parcel_no"),
   spaDetails: text("spa_details"),
@@ -29,7 +27,6 @@ export const casesTable = pgTable("cases", {
   statusIdx: index("idx_cases_status").on(t.status),
   createdAtIdx: index("idx_cases_created_at").on(t.createdAt),
   firmStatusIdx: index("idx_cases_firm_status").on(t.firmId, t.status),
-  firmFileListingStatusIdx: index("idx_cases_firm_file_listing_status").on(t.firmId, t.fileListingStatus),
 }));
 
 export const casePurchasersTable = pgTable("case_purchasers", {

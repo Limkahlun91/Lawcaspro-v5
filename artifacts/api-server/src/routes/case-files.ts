@@ -12,6 +12,9 @@ import {
   partiesTable,
   projectsTable,
   usersTable,
+  caseKeyDatesTable,
+  quotationsTable,
+  invoicesTable,
 } from "@workspace/db";
 import { requireAuth, requireFirmUser, type AuthRequest, writeAuditLog } from "../lib/auth";
 
@@ -23,30 +26,8 @@ const listQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(200).default(50),
 });
 
-type ListingStatus = "new" | "ongoing" | "closed" | "kiv" | "hold";
-const listingStatusSchema = z.enum(["new", "ongoing", "closed", "kiv", "hold"]);
-
 type DbConn = typeof db | NonNullable<AuthRequest["rlsDb"]>;
 const rdb = (req: AuthRequest): DbConn => req.rlsDb ?? db;
-
-async function queryRows(r: DbConn, query: ReturnType<typeof sql>): Promise<Record<string, unknown>[]> {
-  const result = await r.execute(query);
-  if (Array.isArray(result)) return result as Record<string, unknown>[];
-  if ("rows" in result) return (result as { rows: Record<string, unknown>[] }).rows;
-  return [];
-}
-
-async function columnExists(r: DbConn, table: string, column: string): Promise<boolean> {
-  const rows = await queryRows(r, sql`
-    SELECT 1
-    FROM information_schema.columns
-    WHERE table_schema = 'public'
-      AND table_name = ${table}
-      AND column_name = ${column}
-    LIMIT 1
-  `);
-  return rows.length > 0;
-}
 
 function parseJsonObject(s: string | null): Record<string, unknown> | null {
   if (!s) return null;
@@ -86,8 +67,6 @@ router.get("/case-files", requireAuth, requireFirmUser, async (req: AuthRequest,
   const q = rawQ.trim();
   const offset = (page - 1) * limit;
   const like = `%${q}%`;
-  const hasListingStatus = await columnExists(r, "cases", "file_listing_status");
-  const hasListingReason = await columnExists(r, "cases", "file_listing_reason");
 
   const whereBase = and(
     eq(casesTable.firmId, req.firmId!),
@@ -102,8 +81,6 @@ router.get("/case-files", requireAuth, requireFirmUser, async (req: AuthRequest,
       OR COALESCE(${casesTable.parcelNo}, '') ILIKE ${like}
       OR COALESCE(${casesTable.loanDetails}, '') ILIKE ${like}
       OR COALESCE(${casesTable.propertyDetails}, '') ILIKE ${like}
-      ${hasListingStatus ? sql`OR COALESCE(${casesTable.fileListingStatus}, '') ILIKE ${like}` : sql``}
-      ${hasListingReason ? sql`OR COALESCE(${casesTable.fileListingReason}, '') ILIKE ${like}` : sql``}
       OR EXISTS (
         SELECT 1
         FROM ${casePurchasersTable} cp
@@ -159,6 +136,36 @@ router.get("/case-files", requireAuth, requireFirmUser, async (req: AuthRequest,
     LIMIT 1
   )`;
 
+  const latestQuotationSql = sql<string | null>`(
+    SELECT json_build_object(
+      'id', q.id,
+      'date', q.created_at,
+      'billedTo', q.client_name,
+      'amount', q.purchase_price
+    )::text
+    FROM ${quotationsTable} q
+    WHERE q.case_id = ${casesTable.id}
+      AND q.firm_id = ${casesTable.firmId}
+      AND q.deleted_at IS NULL
+    ORDER BY q.created_at DESC
+    LIMIT 1
+  )`;
+
+  const latestInvoiceSql = sql<string | null>`(
+    SELECT json_build_object(
+      'id', i.id,
+      'date', i.created_at,
+      'amount', i.grand_total,
+      'invoiceNo', i.invoice_no
+    )::text
+    FROM ${invoicesTable} i
+    WHERE i.case_id = ${casesTable.id}
+      AND i.firm_id = ${casesTable.firmId}
+      AND i.deleted_at IS NULL
+    ORDER BY i.created_at DESC
+    LIMIT 1
+  )`;
+
   const [{ count }] = await r
     .select({ count: sql<number>`COUNT(*)` })
     .from(casesTable)
@@ -175,17 +182,21 @@ router.get("/case-files", requireAuth, requireFirmUser, async (req: AuthRequest,
       parcelNo: casesTable.parcelNo,
       loanDetails: casesTable.loanDetails,
       propertyDetails: casesTable.propertyDetails,
+      status: casesTable.status,
       projectName: projectsTable.name,
       developerName: developersTable.name,
       lawyerName: lawyerNameSql,
       clerkName: clerkNameSql,
-      fileListingStatus: hasListingStatus ? casesTable.fileListingStatus : sql<ListingStatus>`'new'`,
-      fileListingReason: hasListingReason ? casesTable.fileListingReason : sql<string | null>`NULL`,
+      createdAt: casesTable.createdAt,
       updatedAt: casesTable.updatedAt,
+      completionDate: caseKeyDatesTable.completionDate,
+      latestQuotation: latestQuotationSql,
+      latestInvoice: latestInvoiceSql,
     })
     .from(casesTable)
     .innerJoin(projectsTable, eq(projectsTable.id, casesTable.projectId))
     .innerJoin(developersTable, eq(developersTable.id, casesTable.developerId))
+    .leftJoin(caseKeyDatesTable, and(eq(caseKeyDatesTable.caseId, casesTable.id), eq(caseKeyDatesTable.firmId, casesTable.firmId)))
     .where(where)
     .orderBy(desc(casesTable.updatedAt))
     .limit(limit)
@@ -288,6 +299,26 @@ router.get("/case-files", requireAuth, requireFirmUser, async (req: AuthRequest,
       partiesList.push({ role, name: p.name, idNo: idNo ?? null });
     }
 
+    const openDate = row.createdAt instanceof Date ? row.createdAt : new Date(row.createdAt);
+    let closedDate: Date | null = null;
+    if (row.completionDate) {
+      closedDate = new Date(row.completionDate);
+    } else if (row.status.toLowerCase().includes("closed")) {
+      closedDate = row.updatedAt instanceof Date ? row.updatedAt : new Date(row.updatedAt);
+    }
+    
+    let daysToClose: number | null = null;
+    let daysSinceOpen: number | null = null;
+    const today = new Date();
+    
+    if (closedDate) {
+      const diffTime = Math.abs(closedDate.getTime() - openDate.getTime());
+      daysToClose = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+    } else {
+      const diffTime = Math.abs(today.getTime() - openDate.getTime());
+      daysSinceOpen = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+    }
+
     return {
       id: row.id,
       referenceNo: row.referenceNo,
@@ -299,82 +330,18 @@ router.get("/case-files", requireAuth, requireFirmUser, async (req: AuthRequest,
       propertyInfo: propertySummary || row.projectName,
       lawyerInCharge: row.lawyerName,
       clerkInCharge: row.clerkName,
-      fileListingStatus: (row.fileListingStatus ?? "new") as ListingStatus,
-      fileListingReason: row.fileListingReason ?? null,
-      updatedAt: row.updatedAt.toISOString(),
+      status: row.status,
+      openFileDate: openDate.toISOString(),
+      closedFileDate: closedDate ? closedDate.toISOString() : null,
+      daysToClose,
+      daysSinceOpen,
+      latestQuotation: parseJsonObject(row.latestQuotation),
+      latestInvoice: parseJsonObject(row.latestInvoice),
+      updatedAt: row.updatedAt instanceof Date ? row.updatedAt.toISOString() : new Date(row.updatedAt).toISOString(),
     };
   });
 
   res.json({ data, page, limit, total: Number(count) });
-});
-
-router.patch("/case-files/:id/status", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
-  const parsedId = z.coerce.number().int().safeParse(req.params.id);
-  if (!parsedId.success) {
-    res.status(400).json({ error: "Invalid case id" });
-    return;
-  }
-  const id = parsedId.data;
-
-  const bodySchema = z.object({
-    status: listingStatusSchema,
-    reason: z.string().trim().optional(),
-  });
-  const parsedBody = bodySchema.safeParse(req.body);
-  if (!parsedBody.success) {
-    res.status(400).json({ error: "Invalid body" });
-    return;
-  }
-
-  const status = parsedBody.data.status;
-  const reasonRaw = (parsedBody.data.reason ?? "").trim();
-  const needsReason = status === "kiv" || status === "hold";
-  if (needsReason && !reasonRaw) {
-    res.status(400).json({ error: "Reason required" });
-    return;
-  }
-
-  const r = rdb(req);
-  const hasListingStatus = await columnExists(r, "cases", "file_listing_status");
-  const hasListingReason = await columnExists(r, "cases", "file_listing_reason");
-  if (!hasListingStatus || !hasListingReason) {
-    res.status(409).json({ error: "Case file listing status is not available. Please apply database migrations." });
-    return;
-  }
-  const reason = needsReason ? reasonRaw : null;
-
-  const [updated] = await r
-    .update(casesTable)
-    .set({
-      fileListingStatus: status,
-      fileListingReason: reason,
-      updatedAt: new Date(),
-    } as any)
-    .where(and(eq(casesTable.id, id), eq(casesTable.firmId, req.firmId!)))
-    .returning();
-
-  if (!updated) {
-    res.status(404).json({ error: "Case not found" });
-    return;
-  }
-
-  await writeAuditLog({
-    firmId: req.firmId,
-    actorId: req.userId,
-    actorType: req.userType,
-    action: "cases.file_listing_status_updated",
-    entityType: "case",
-    entityId: id,
-    detail: `${status}${reason ? `: ${reason}` : ""}`,
-    ipAddress: req.ip,
-    userAgent: req.headers["user-agent"],
-  }, { db: req.rlsDb });
-
-  res.json({
-    id: updated.id,
-    fileListingStatus: (updated as any).fileListingStatus ?? status,
-    fileListingReason: (updated as any).fileListingReason ?? reason,
-  });
 });
 
 export default router;

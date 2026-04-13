@@ -112,7 +112,7 @@ export default function PlatformAuditLogs() {
             </div>
           ) : (
             <div className="divide-y divide-slate-50">
-              {logs.map((log) => {
+              {logs.map((log: any) => {
                 const action = String(log.action ?? "");
                 const createdAt = new Date(log.created_at as string);
                 let detail: Record<string, unknown> = {};

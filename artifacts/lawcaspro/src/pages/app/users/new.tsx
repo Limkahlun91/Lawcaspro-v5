@@ -60,7 +60,7 @@ export default function NewUser() {
         onError: (error) => {
           toast({
             title: "Error creating user",
-            description: error.error || "Please try again.",
+            description: (error as any).error || "Please try again.",
             variant: "destructive",
           });
         },

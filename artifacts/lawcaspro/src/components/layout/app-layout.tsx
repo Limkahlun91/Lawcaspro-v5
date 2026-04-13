@@ -42,7 +42,6 @@ export function AppLayout({ children }: { children: ReactNode }) {
     { label: "Dashboard", href: "/app/dashboard", icon: LayoutDashboard, perm: ["dashboard", "read"] as const },
     { label: "My Work", href: "/app/workbench", icon: ListTodo, perm: ["cases", "read"] as const },
     { label: "Cases", href: "/app/cases", icon: Briefcase, perm: ["cases", "read"] as const },
-    { label: "File Listing", href: "/app/case-files", icon: ListOrdered, perm: ["cases", "read"] as const },
     { label: "Projects", href: "/app/projects", icon: Building2, perm: ["projects", "read"] as const },
     { label: "Developers", href: "/app/developers", icon: HardHat, perm: ["developers", "read"] as const },
     { label: "Documents", href: "/app/documents", icon: FileText, perm: ["documents", "read"] as const },

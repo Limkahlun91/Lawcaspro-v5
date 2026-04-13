@@ -39,7 +39,7 @@ export default function AppDashboard() {
 
   const { data: stats, isLoading, isError, error, refetch, isFetching } = useQuery({
     queryKey: ["dashboard"],
-    queryFn: () => apiFetchJson("/dashboard"),
+    queryFn: () => apiFetchJson("/dashboard") as Promise<Record<string, any>>,
     retry: false,
   });
 
@@ -72,8 +72,8 @@ export default function AppDashboard() {
     count: number;
     filter: { milestone: string; milestonePresence: string; purchaseMode?: string };
   };
-  const milestoneCards: MilestoneCard[] = Array.isArray((stats as Record<string, unknown>).milestoneCards)
-    ? ((stats as Record<string, unknown>).milestoneCards as MilestoneCard[])
+  const milestoneCards: MilestoneCard[] = Array.isArray((stats as Record<string, any>).milestoneCards)
+    ? ((stats as Record<string, any>).milestoneCards as MilestoneCard[])
     : [];
 
   return (
@@ -265,7 +265,7 @@ export default function AppDashboard() {
           </CardHeader>
           <CardContent>
             <div className="divide-y divide-slate-50">
-              {(stats.recentCases ?? []).map((c: Record<string, unknown>) => (
+              {(stats.recentCases ?? []).map((c: Record<string, any>) => (
                 <div
                   key={String(c.id)}
                   className="py-3 flex items-start justify-between gap-2 cursor-pointer hover:bg-slate-50 -mx-2 px-2 rounded"

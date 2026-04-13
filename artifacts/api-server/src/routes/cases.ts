@@ -204,7 +204,7 @@ async function formatCaseDetail(r: DbConn, c: typeof casesTable.$inferSelect) {
         userId: a.userId,
         userName: user?.name ?? "Unknown",
         roleInCase: a.roleInCase,
-        assignedAt: a.assignedAt.toISOString(),
+        assignedAt: a.assignedAt instanceof Date ? a.assignedAt.toISOString() : new Date(a.assignedAt).toISOString(),
       };
     })
   );
@@ -287,7 +287,7 @@ async function formatCaseDetail(r: DbConn, c: typeof casesTable.$inferSelect) {
     purchasers,
     assignments,
     createdBy: c.createdBy ?? null,
-    createdAt: c.createdAt.toISOString(),
+    createdAt: c.createdAt instanceof Date ? c.createdAt.toISOString() : new Date(c.createdAt).toISOString(),
   };
 }
 
@@ -311,7 +311,7 @@ async function formatCaseSummary(r: DbConn, c: typeof casesTable.$inferSelect) {
     spaPrice: c.spaPrice ? Number(c.spaPrice) : null,
     status: c.status,
     assignedLawyerName: lawyerName,
-    createdAt: c.createdAt.toISOString(),
+    createdAt: c.createdAt instanceof Date ? c.createdAt.toISOString() : new Date(c.createdAt).toISOString(),
   };
 }
 
@@ -2504,7 +2504,7 @@ router.get("/cases/:caseId/workflow", requireAuth, requireFirmUser, requirePermi
         pathType: s.pathType,
         completedBy: s.completedBy ?? null,
         completedByName,
-        completedAt: s.completedAt?.toISOString() ?? null,
+        completedAt: s.completedAt ? (s.completedAt instanceof Date ? s.completedAt.toISOString() : new Date(s.completedAt).toISOString()) : null,
         notes: s.notes ?? null,
       };
     })
@@ -2622,7 +2622,7 @@ router.patch("/cases/:caseId/workflow/:stepId", requireAuth, requireFirmUser, re
     pathType: step.pathType,
     completedBy: step.completedBy ?? null,
     completedByName,
-    completedAt: step.completedAt?.toISOString() ?? null,
+    completedAt: step.completedAt ? (step.completedAt instanceof Date ? step.completedAt.toISOString() : new Date(step.completedAt).toISOString()) : null,
     notes: step.notes ?? null,
     syncedKeyDateField,
   });
@@ -2663,7 +2663,7 @@ router.get("/cases/:caseId/notes", requireAuth, requireFirmUser, requirePermissi
         authorId: n.authorId,
         authorName: author?.name ?? "Unknown",
         content: n.content,
-        createdAt: n.createdAt.toISOString(),
+        createdAt: n.createdAt instanceof Date ? n.createdAt.toISOString() : new Date(n.createdAt).toISOString(),
       };
     })
   );
@@ -2716,7 +2716,7 @@ router.post("/cases/:caseId/notes", requireAuth, requireFirmUser, requirePermiss
     authorId: note.authorId,
     authorName: author?.name ?? "Unknown",
     content: note.content,
-    createdAt: note.createdAt.toISOString(),
+    createdAt: note.createdAt instanceof Date ? note.createdAt.toISOString() : new Date(note.createdAt).toISOString(),
   });
 });
 
