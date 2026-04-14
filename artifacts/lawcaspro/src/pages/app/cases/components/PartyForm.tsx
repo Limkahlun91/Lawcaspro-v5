@@ -10,6 +10,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useToast } from "@/hooks/use-toast";
 import { apiFetchJson } from "@/lib/api-client";
 import { toastError } from "@/lib/toast-error";
+import { DateOnlyInput } from "@/components/date-only-input";
 
 interface PartyFormProps {
   open: boolean;
@@ -136,7 +137,7 @@ export default function PartyForm({ open, onOpenChange, onCreated, caseId }: Par
                   <div className="grid grid-cols-2 gap-3">
                     <div>
                       <Label>Date of Birth</Label>
-                      <Input type="date" value={form.dob} onChange={e => setField("dob", e.target.value)} />
+                      <DateOnlyInput valueYmd={form.dob} onChangeYmd={(v) => setField("dob", v)} />
                     </div>
                     <div>
                       <Label>Nationality</Label>
@@ -159,7 +160,7 @@ export default function PartyForm({ open, onOpenChange, onCreated, caseId }: Par
                     </div>
                     <div>
                       <Label>Date of Incorporation</Label>
-                      <Input type="date" value={form.incorporationDate} onChange={e => setField("incorporationDate", e.target.value)} />
+                      <DateOnlyInput valueYmd={form.incorporationDate} onChangeYmd={(v) => setField("incorporationDate", v)} />
                     </div>
                   </div>
                   <div className="grid grid-cols-2 gap-3">

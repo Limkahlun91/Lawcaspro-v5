@@ -13,6 +13,7 @@ import { useToast } from "@/hooks/use-toast";
 import { QueryFallback } from "@/components/query-fallback";
 import { apiFetchJson } from "@/lib/api-client";
 import { toastError } from "@/lib/toast-error";
+import { DateOnlyInput, formatYmdToDmy } from "@/components/date-only-input";
 
 const PRIORITY_CONFIG: Record<string, { label: string; color: string; icon: any }> = {
   low:    { label: "Low",    color: "bg-slate-100 text-slate-600", icon: Circle },
@@ -138,7 +139,7 @@ export default function CaseTasksTab({ caseId }: { caseId: number }) {
                       )}
                       {task.dueDate && (
                         <span className={`text-xs flex items-center gap-0.5 ${overdue ? "text-red-600 font-medium" : "text-slate-500"}`}>
-                          <Clock className="h-3 w-3" />{task.dueDate}{overdue ? " — Overdue" : ""}
+                          <Clock className="h-3 w-3" />{formatYmdToDmy(String(task.dueDate ?? "")) || String(task.dueDate ?? "")}{overdue ? " — Overdue" : ""}
                         </span>
                       )}
                     </div>
@@ -179,7 +180,7 @@ export default function CaseTasksTab({ caseId }: { caseId: number }) {
             <div className="grid grid-cols-2 gap-3">
               <div>
                 <Label className="text-xs">Due Date</Label>
-                <Input type="date" value={form.dueDate} onChange={e => setForm(f => ({ ...f, dueDate: e.target.value }))} className="mt-1 text-sm" />
+                <DateOnlyInput valueYmd={form.dueDate} onChangeYmd={(v) => setForm((f) => ({ ...f, dueDate: v }))} className="mt-1 text-sm" />
               </div>
               <div>
                 <Label className="text-xs">Priority</Label>

@@ -13,6 +13,7 @@ import { useToast } from "@/hooks/use-toast";
 import { QueryFallback } from "@/components/query-fallback";
 import { apiFetchJson } from "@/lib/api-client";
 import { toastError } from "@/lib/toast-error";
+import { DateOnlyInput, formatYmdToDmy } from "@/components/date-only-input";
 
 function fmt(val: unknown) {
   return `RM ${Number(val ?? 0).toLocaleString("en-MY", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
@@ -118,7 +119,7 @@ export default function CaseTimeTab({ caseId }: { caseId: number }) {
               <div key={e.id} className="flex items-start gap-3 px-4 py-3">
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center gap-2 mb-0.5">
-                    <span className="text-xs text-slate-500">{e.entryDate}</span>
+                    <span className="text-xs text-slate-500">{formatYmdToDmy(String(e.entryDate ?? "")) || String(e.entryDate ?? "")}</span>
                     <Badge variant="outline" className={`text-xs border-0 ${e.isBillable ? "bg-green-100 text-green-700" : "bg-slate-100 text-slate-600"}`}>
                       {e.isBillable ? "Billable" : "Non-billable"}
                     </Badge>
@@ -152,7 +153,7 @@ export default function CaseTimeTab({ caseId }: { caseId: number }) {
           <div className="space-y-3 py-2">
             <div>
               <Label className="text-xs">Date *</Label>
-              <Input type="date" value={form.entryDate} onChange={e => setForm(f => ({ ...f, entryDate: e.target.value }))} className="mt-1 text-sm" />
+              <DateOnlyInput valueYmd={form.entryDate} onChangeYmd={(v) => setForm((f) => ({ ...f, entryDate: v }))} className="mt-1 text-sm" />
             </div>
             <div>
               <Label className="text-xs">Description *</Label>

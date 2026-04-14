@@ -7,7 +7,9 @@ import {
   platformMessageAttachmentsTable,
   platformDocumentsTable,
 } from "@workspace/db";
-import { requireAuth, requireFirmUser, requirePermission, type AuthRequest } from "../lib/auth";
+import { requireAuth, requireFirmUser, requirePermission, writeAuditLog, type AuthRequest } from "../lib/auth";
+import { Readable } from "stream";
+import { getSupabaseStorageConfigError, ObjectNotFoundError, SupabaseStorageService } from "../lib/objectStorage";
 
 const one = (v: unknown): string | undefined => {
   if (typeof v === "string") return v;
@@ -26,6 +28,26 @@ const getRlsDb = (req: AuthRequest, res: any): NonNullable<AuthRequest["rlsDb"]>
 };
 
 const router: IRouter = Router();
+const supabaseStorage = new SupabaseStorageService();
+
+function safeFilenameAscii(filename: string): string {
+  const base = filename.replace(/[\r\n"]/g, "").trim();
+  if (!base) return "download";
+  return base.replace(/[^\x20-\x7E]/g, "_");
+}
+
+function encodeRFC5987ValueChars(str: string): string {
+  return encodeURIComponent(str)
+    .replace(/['()]/g, escape)
+    .replace(/\*/g, "%2A")
+    .replace(/%(7C|60|5E)/g, (m) => m.toLowerCase());
+}
+
+function contentDispositionAttachment(filename: string): string {
+  const ascii = safeFilenameAscii(filename);
+  const encoded = encodeRFC5987ValueChars(filename);
+  return `attachment; filename="${ascii}"; filename*=UTF-8''${encoded}`;
+}
 
 // ─── Firm → Founder messages ──────────────────────────────────────────────────
 
@@ -147,6 +169,67 @@ router.get("/hub/documents", requireAuth, requireFirmUser, requirePermission("do
   }
 
   res.json(filtered);
+});
+
+router.get("/hub/documents/:docId/download", requireAuth, requireFirmUser, requirePermission("documents", "read"), async (req: AuthRequest, res): Promise<void> => {
+  const r = getRlsDb(req, res);
+  if (!r) return;
+  const firmId = req.firmId!;
+
+  const docIdStr = one(req.params.docId);
+  const docId = docIdStr ? parseInt(docIdStr, 10) : NaN;
+  if (!Number.isFinite(docId)) {
+    res.status(400).json({ error: "Invalid document ID" });
+    return;
+  }
+
+  const [doc] = await r
+    .select()
+    .from(platformDocumentsTable)
+    .where(and(eq(platformDocumentsTable.id, docId), or(isNull(platformDocumentsTable.firmId), eq(platformDocumentsTable.firmId, firmId))));
+
+  if (!doc) {
+    res.status(404).json({ error: "Document not found" });
+    return;
+  }
+
+  try {
+    const response = await supabaseStorage.fetchPrivateObjectResponse(doc.objectPath);
+
+    await writeAuditLog({
+      firmId: doc.firmId ?? firmId,
+      actorId: req.userId,
+      actorType: req.userType,
+      action: "hub.document.download",
+      entityType: "platform_document",
+      entityId: docId,
+      detail: `name=${doc.name} fileName=${doc.fileName}`,
+      ipAddress: req.ip,
+      userAgent: req.headers["user-agent"],
+    });
+
+    res.status(response.status);
+    response.headers.forEach((value, key) => res.setHeader(key, value));
+    res.setHeader("Content-Disposition", contentDispositionAttachment(String(doc.fileName ?? "download")));
+
+    if (response.body) {
+      const nodeStream = Readable.fromWeb(response.body as ReadableStream<Uint8Array>);
+      nodeStream.pipe(res);
+    } else {
+      res.end();
+    }
+  } catch (err) {
+    if (err instanceof ObjectNotFoundError) {
+      res.status(404).json({ error: "File not found" });
+      return;
+    }
+    const cfgErr = getSupabaseStorageConfigError(err);
+    if (cfgErr) {
+      res.status(cfgErr.statusCode).json({ error: cfgErr.error });
+      return;
+    }
+    res.status(500).json({ error: "Failed to download document" });
+  }
 });
 
 export default router;

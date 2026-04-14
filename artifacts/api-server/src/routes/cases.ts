@@ -4,6 +4,8 @@ import {
   db, casesTable, casePurchasersTable, caseAssignmentsTable,
   caseWorkflowStepsTable, caseNotesTable,
   caseKeyDatesTable,
+  caseWorkflowDocumentsTable,
+  caseLoanStampingItemsTable,
   caseListSavedViewsTable,
   projectsTable, developersTable, clientsTable, usersTable, rolesTable, auditLogsTable,
   permissionsTable,
@@ -21,8 +23,11 @@ import { loanStatusSql, milestoneDateSql, milestoneDateYmdSql, milestonePresence
 import { daysAgoSql } from "../lib/dateSql";
 import { logger } from "../lib/logger";
 import { isTransientDbConnectionError } from "../lib/auth-safe-db";
+import { Readable } from "stream";
+import { ObjectNotFoundError, SupabaseStorageService, getSupabaseStorageConfigError } from "../lib/objectStorage";
 
 const router: IRouter = Router();
+const supabaseStorage = new SupabaseStorageService();
 
 type DbConn = typeof db | NonNullable<AuthRequest["rlsDb"]>;
 const rdb = (req: AuthRequest): DbConn => req.rlsDb ?? db;
@@ -33,6 +38,57 @@ async function tableExists(r: DbConn, reg: string): Promise<boolean> {
   const result = await r.execute(sql`SELECT to_regclass(${reg}) AS reg`);
   const rows = Array.isArray(result) ? (result as Record<string, unknown>[]) : ("rows" in result ? (result as { rows: Record<string, unknown>[] }).rows : []);
   return Boolean(rows[0]?.reg);
+}
+
+const one = (v: unknown): string | undefined => {
+  if (typeof v === "string") return v;
+  if (Array.isArray(v)) return typeof v[0] === "string" ? v[0] : undefined;
+  return undefined;
+};
+
+function safeFilenameAscii(filename: string): string {
+  const base = filename.replace(/[\r\n"]/g, "").trim();
+  if (!base) return "download";
+  return base.replace(/[^\x20-\x7E]/g, "_");
+}
+
+function encodeRFC5987ValueChars(str: string): string {
+  return encodeURIComponent(str)
+    .replace(/['()]/g, escape)
+    .replace(/\*/g, "%2A")
+    .replace(/%(7C|60|5E)/g, (m) => m.toLowerCase());
+}
+
+function contentDispositionAttachment(filename: string): string {
+  const ascii = safeFilenameAscii(filename);
+  const encoded = encodeRFC5987ValueChars(filename);
+  return `attachment; filename="${ascii}"; filename*=UTF-8''${encoded}`;
+}
+
+async function streamSupabasePrivateObjectToResponse({
+  objectPath,
+  res,
+  fileName,
+  fallbackContentType,
+}: {
+  objectPath: string;
+  res: any;
+  fileName: string;
+  fallbackContentType: string;
+}): Promise<void> {
+  const response = await supabaseStorage.fetchPrivateObjectResponse(objectPath);
+  const ct = response.headers.get("content-type") || fallbackContentType;
+  const cl = response.headers.get("content-length");
+  if (ct) res.setHeader("Content-Type", ct);
+  if (cl) res.setHeader("Content-Length", cl);
+  res.setHeader("Content-Disposition", contentDispositionAttachment(fileName));
+  if (!response.body) throw new Error("Failed to stream file");
+  const nodeStream = Readable.fromWeb(response.body as any);
+  await new Promise<void>((resolve, reject) => {
+    nodeStream.on("error", reject);
+    res.on("finish", resolve);
+    nodeStream.pipe(res);
+  });
 }
 
 function asObject(v: unknown): Record<string, unknown> | null {
@@ -2491,6 +2547,843 @@ router.patch("/cases/:caseId", requireAuth, requireFirmUser, requirePermission("
   });
 
   res.json(await formatCaseDetail(r, c));
+});
+
+const ALLOWED_WORKFLOW_DOC_KEYS = new Set([
+  "spa_stamped_date",
+  "letter_of_offer_stamped_date",
+  "register_poa_on",
+  "letter_disclaimer_dated",
+]);
+
+const ALLOWED_CASE_ATTACHMENT_EXTENSIONS = new Set([
+  "pdf",
+  "doc",
+  "docx",
+  "jpg",
+  "jpeg",
+  "png",
+]);
+
+function fileExtLower(fileName: string): string {
+  const base = fileName.trim();
+  const idx = base.lastIndexOf(".");
+  if (idx < 0) return "";
+  return base.slice(idx + 1).toLowerCase();
+}
+
+router.get("/cases/:caseId/workflow-documents", requireAuth, requireFirmUser, requirePermission("documents", "read"), async (req: AuthRequest, res): Promise<void> => {
+  const r = req.rlsDb;
+  if (!r) {
+    logger.error({ path: req.path, firmId: req.firmId, userId: req.userId }, "[cases] missing tenant database context");
+    res.status(500).json({ error: "Internal Server Error" });
+    return;
+  }
+  const caseIdStr = one((req.params as any).caseId);
+  const caseId = caseIdStr ? Number(caseIdStr) : NaN;
+  if (!Number.isFinite(caseId)) {
+    res.status(400).json({ error: "Invalid caseId" });
+    return;
+  }
+  const milestoneKey = one((req.query as any).milestoneKey);
+  if (milestoneKey && !ALLOWED_WORKFLOW_DOC_KEYS.has(milestoneKey)) {
+    res.status(400).json({ error: "Invalid milestoneKey" });
+    return;
+  }
+  const exists = await tableExists(r, "public.case_workflow_documents");
+  if (!exists) {
+    res.json([]);
+    return;
+  }
+  const whereBase = and(
+    eq(caseWorkflowDocumentsTable.firmId, req.firmId!),
+    eq(caseWorkflowDocumentsTable.caseId, caseId),
+    sql`${caseWorkflowDocumentsTable.deletedAt} IS NULL`,
+  );
+  const rows = await r
+    .select({
+      id: caseWorkflowDocumentsTable.id,
+      caseId: caseWorkflowDocumentsTable.caseId,
+      milestoneKey: caseWorkflowDocumentsTable.milestoneKey,
+      label: caseWorkflowDocumentsTable.label,
+      dateValue: caseWorkflowDocumentsTable.dateValue,
+      fileName: caseWorkflowDocumentsTable.fileName,
+      mimeType: caseWorkflowDocumentsTable.mimeType,
+      fileSize: caseWorkflowDocumentsTable.fileSize,
+      createdAt: caseWorkflowDocumentsTable.createdAt,
+      updatedAt: caseWorkflowDocumentsTable.updatedAt,
+    })
+    .from(caseWorkflowDocumentsTable)
+    .where(milestoneKey ? and(whereBase, eq(caseWorkflowDocumentsTable.milestoneKey, milestoneKey)) : whereBase)
+    .orderBy(desc(caseWorkflowDocumentsTable.updatedAt));
+  res.json(rows.map((x) => ({
+    ...x,
+    dateValue: x.dateValue ? String(x.dateValue) : null,
+    createdAt: x.createdAt ? toIsoStringSafeOrNull(x.createdAt) : null,
+    updatedAt: x.updatedAt ? toIsoStringSafeOrNull(x.updatedAt) : null,
+  })));
+});
+
+router.post("/cases/:caseId/workflow-documents", requireAuth, requireFirmUser, requirePermission("documents", "create"), async (req: AuthRequest, res): Promise<void> => {
+  const r = req.rlsDb;
+  if (!r) {
+    logger.error({ path: req.path, firmId: req.firmId, userId: req.userId }, "[cases] missing tenant database context");
+    res.status(500).json({ error: "Internal Server Error" });
+    return;
+  }
+  const caseIdStr = one((req.params as any).caseId);
+  const caseId = caseIdStr ? Number(caseIdStr) : NaN;
+  if (!Number.isFinite(caseId)) {
+    res.status(400).json({ error: "Invalid caseId" });
+    return;
+  }
+  const body = asObject(req.body) ?? {};
+  const milestoneKey = asString(body.milestoneKey);
+  const label = asString(body.label);
+  const objectPath = asString(body.objectPath);
+  const fileName = asString(body.fileName);
+  const mimeType = asString(body.mimeType);
+  const fileSize = asNumber(body.fileSize);
+  const dateYmd = body.dateYmd;
+
+  if (!milestoneKey || !ALLOWED_WORKFLOW_DOC_KEYS.has(milestoneKey)) {
+    res.status(400).json({ error: "Invalid milestoneKey" });
+    return;
+  }
+  if (!label?.trim()) {
+    res.status(400).json({ error: "Missing label" });
+    return;
+  }
+  if (!objectPath || !objectPath.startsWith(`/objects/cases/${req.firmId}/case-${caseId}/workflow/${milestoneKey}/`)) {
+    res.status(400).json({ error: "Invalid objectPath" });
+    return;
+  }
+  if (!fileName?.trim()) {
+    res.status(400).json({ error: "Missing fileName" });
+    return;
+  }
+  const ext = fileExtLower(fileName);
+  if (!ALLOWED_CASE_ATTACHMENT_EXTENSIONS.has(ext)) {
+    res.status(422).json({ error: "Unsupported file type. Allowed: pdf, doc, docx, jpg, jpeg, png" });
+    return;
+  }
+  const parsedDate = Object.prototype.hasOwnProperty.call(body, "dateYmd") ? parseDateOnlyInput(dateYmd) : undefined;
+  if (parsedDate === undefined && Object.prototype.hasOwnProperty.call(body, "dateYmd")) {
+    res.status(422).json({ error: "Invalid dateYmd" });
+    return;
+  }
+
+  const [caseRow] = await r
+    .select({ id: casesTable.id })
+    .from(casesTable)
+    .where(and(eq(casesTable.id, caseId), eq(casesTable.firmId, req.firmId!)));
+  if (!caseRow) {
+    res.status(404).json({ error: "Case not found" });
+    return;
+  }
+
+  const exists = await tableExists(r, "public.case_workflow_documents");
+  if (!exists) {
+    res.status(503).json({ error: "Workflow documents not available" });
+    return;
+  }
+
+  const now = new Date();
+  const [existing] = await r
+    .select({ id: caseWorkflowDocumentsTable.id, objectPath: caseWorkflowDocumentsTable.objectPath })
+    .from(caseWorkflowDocumentsTable)
+    .where(and(
+      eq(caseWorkflowDocumentsTable.firmId, req.firmId!),
+      eq(caseWorkflowDocumentsTable.caseId, caseId),
+      eq(caseWorkflowDocumentsTable.milestoneKey, milestoneKey),
+      sql`${caseWorkflowDocumentsTable.deletedAt} IS NULL`,
+    ))
+    .limit(1);
+
+  const baseUpdate: Partial<typeof caseWorkflowDocumentsTable.$inferInsert> = {
+    label: label.trim(),
+    dateValue: typeof parsedDate === "string" ? parsedDate : null,
+    objectPath,
+    fileName: fileName.trim(),
+    mimeType: mimeType ?? null,
+    fileSize: fileSize ?? null,
+    uploadedBy: req.userId ?? null,
+    updatedAt: now,
+  };
+
+  const row = existing
+    ? (await r.update(caseWorkflowDocumentsTable)
+        .set(baseUpdate)
+        .where(and(eq(caseWorkflowDocumentsTable.id, existing.id), eq(caseWorkflowDocumentsTable.firmId, req.firmId!), eq(caseWorkflowDocumentsTable.caseId, caseId)))
+        .returning())[0]
+    : (await r.insert(caseWorkflowDocumentsTable).values({
+        firmId: req.firmId!,
+        caseId,
+        milestoneKey,
+        label: label.trim(),
+        dateValue: typeof parsedDate === "string" ? parsedDate : null,
+        objectPath,
+        fileName: fileName.trim(),
+        mimeType: mimeType ?? null,
+        fileSize: fileSize ?? null,
+        uploadedBy: req.userId ?? null,
+        createdAt: now,
+        updatedAt: now,
+      }).returning())[0];
+
+  if (existing?.objectPath && existing.objectPath !== objectPath) {
+    try {
+      await supabaseStorage.deletePrivateObject(existing.objectPath);
+    } catch (err) {
+      if (!(err instanceof ObjectNotFoundError) && !getSupabaseStorageConfigError(err)) {
+        logger.warn({ err, firmId: req.firmId, userId: req.userId, caseId, milestoneKey }, "[cases] workflow_document_old_object_delete_failed");
+      }
+    }
+  }
+
+  await writeAuditLog({
+    firmId: req.firmId,
+    actorId: req.userId,
+    actorType: req.userType,
+    action: "cases.workflow_document.upsert",
+    entityType: "case",
+    entityId: caseId,
+    detail: `milestoneKey=${milestoneKey} fileName=${fileName.trim()}`,
+    ipAddress: req.ip,
+    userAgent: req.headers["user-agent"],
+  });
+
+  res.status(existing ? 200 : 201).json({
+    id: row.id,
+    caseId: row.caseId,
+    milestoneKey: row.milestoneKey,
+    label: row.label,
+    dateValue: row.dateValue ? String(row.dateValue) : null,
+    fileName: row.fileName,
+    mimeType: row.mimeType ?? null,
+    fileSize: row.fileSize ?? null,
+    createdAt: toIsoStringSafeOrNull(row.createdAt),
+    updatedAt: toIsoStringSafeOrNull(row.updatedAt),
+  });
+});
+
+router.delete("/cases/:caseId/workflow-documents/:id", requireAuth, requireFirmUser, requirePermission("documents", "delete"), async (req: AuthRequest, res): Promise<void> => {
+  const r = req.rlsDb;
+  if (!r) {
+    logger.error({ path: req.path, firmId: req.firmId, userId: req.userId }, "[cases] missing tenant database context");
+    res.status(500).json({ error: "Internal Server Error" });
+    return;
+  }
+  const caseIdStr = one((req.params as any).caseId);
+  const idStr = one((req.params as any).id);
+  const caseId = caseIdStr ? Number(caseIdStr) : NaN;
+  const id = idStr ? Number(idStr) : NaN;
+  if (!Number.isFinite(caseId) || !Number.isFinite(id)) {
+    res.status(400).json({ error: "Invalid params" });
+    return;
+  }
+  const exists = await tableExists(r, "public.case_workflow_documents");
+  if (!exists) {
+    res.status(404).json({ error: "Not found" });
+    return;
+  }
+  const [existing] = await r
+    .select({ objectPath: caseWorkflowDocumentsTable.objectPath })
+    .from(caseWorkflowDocumentsTable)
+    .where(and(
+      eq(caseWorkflowDocumentsTable.id, id),
+      eq(caseWorkflowDocumentsTable.firmId, req.firmId!),
+      eq(caseWorkflowDocumentsTable.caseId, caseId),
+      sql`${caseWorkflowDocumentsTable.deletedAt} IS NULL`,
+    ));
+  if (!existing) {
+    res.status(404).json({ error: "Not found" });
+    return;
+  }
+  if (existing.objectPath) {
+    try {
+      await supabaseStorage.deletePrivateObject(existing.objectPath);
+    } catch (err) {
+      if (err instanceof ObjectNotFoundError) {
+        void err;
+      } else {
+        const cfgErr = getSupabaseStorageConfigError(err);
+        if (cfgErr) {
+          res.status(cfgErr.statusCode).json({ error: cfgErr.error });
+          return;
+        }
+        logger.error({ err, path: req.path, firmId: req.firmId, userId: req.userId, caseId, id }, "[cases] workflow_document_delete_object_failed");
+      }
+    }
+  }
+  const [row] = await r
+    .update(caseWorkflowDocumentsTable)
+    .set({ deletedAt: new Date(), updatedAt: new Date() })
+    .where(and(
+      eq(caseWorkflowDocumentsTable.id, id),
+      eq(caseWorkflowDocumentsTable.firmId, req.firmId!),
+      eq(caseWorkflowDocumentsTable.caseId, caseId),
+      sql`${caseWorkflowDocumentsTable.deletedAt} IS NULL`,
+    ))
+    .returning({ id: caseWorkflowDocumentsTable.id });
+  if (!row) {
+    res.status(404).json({ error: "Not found" });
+    return;
+  }
+  await writeAuditLog({
+    firmId: req.firmId,
+    actorId: req.userId,
+    actorType: req.userType,
+    action: "cases.workflow_document.delete",
+    entityType: "case",
+    entityId: caseId,
+    detail: `workflowDocumentId=${id}`,
+    ipAddress: req.ip,
+    userAgent: req.headers["user-agent"],
+  });
+  res.status(204).end();
+});
+
+router.get("/cases/:caseId/workflow-documents/:id/download", requireAuth, requireFirmUser, requirePermission("documents", "read"), async (req: AuthRequest, res): Promise<void> => {
+  const r = req.rlsDb;
+  if (!r) {
+    logger.error({ path: req.path, firmId: req.firmId, userId: req.userId }, "[cases] missing tenant database context");
+    res.status(500).json({ error: "Internal Server Error" });
+    return;
+  }
+  const caseIdStr = one((req.params as any).caseId);
+  const idStr = one((req.params as any).id);
+  const caseId = caseIdStr ? Number(caseIdStr) : NaN;
+  const id = idStr ? Number(idStr) : NaN;
+  if (!Number.isFinite(caseId) || !Number.isFinite(id)) {
+    res.status(400).json({ error: "Invalid params" });
+    return;
+  }
+  const exists = await tableExists(r, "public.case_workflow_documents");
+  if (!exists) {
+    res.status(404).json({ error: "Not found" });
+    return;
+  }
+  const [row] = await r
+    .select({
+      objectPath: caseWorkflowDocumentsTable.objectPath,
+      fileName: caseWorkflowDocumentsTable.fileName,
+      mimeType: caseWorkflowDocumentsTable.mimeType,
+    })
+    .from(caseWorkflowDocumentsTable)
+    .where(and(
+      eq(caseWorkflowDocumentsTable.id, id),
+      eq(caseWorkflowDocumentsTable.firmId, req.firmId!),
+      eq(caseWorkflowDocumentsTable.caseId, caseId),
+      sql`${caseWorkflowDocumentsTable.deletedAt} IS NULL`,
+    ));
+  if (!row) {
+    res.status(404).json({ error: "Not found" });
+    return;
+  }
+  await writeAuditLog({
+    firmId: req.firmId,
+    actorId: req.userId,
+    actorType: req.userType,
+    action: "cases.workflow_document.download",
+    entityType: "case",
+    entityId: caseId,
+    detail: `workflowDocumentId=${id} fileName=${row.fileName}`,
+    ipAddress: req.ip,
+    userAgent: req.headers["user-agent"],
+  });
+  try {
+    await streamSupabasePrivateObjectToResponse({
+      objectPath: row.objectPath,
+      res,
+      fileName: row.fileName,
+      fallbackContentType: row.mimeType ?? "application/octet-stream",
+    });
+  } catch (err) {
+    if (err instanceof ObjectNotFoundError) {
+      res.status(404).json({ error: "File not found" });
+      return;
+    }
+    const cfgErr = getSupabaseStorageConfigError(err);
+    if (cfgErr) {
+      res.status(cfgErr.statusCode).json({ error: cfgErr.error });
+      return;
+    }
+    logger.error({ err, path: req.path, firmId: req.firmId, userId: req.userId, caseId, id }, "[cases] workflow_document_download_failed");
+    res.status(500).json({ error: "Failed to download file" });
+  }
+});
+
+const ALLOWED_LOAN_STAMPING_ITEM_KEYS = new Set([
+  "facility_agreement",
+  "deed_of_assignment",
+  "power_of_attorney",
+  "charge_annexure",
+  "other",
+]);
+
+router.get("/cases/:caseId/loan-stamping", requireAuth, requireFirmUser, requirePermission("documents", "read"), async (req: AuthRequest, res): Promise<void> => {
+  const r = req.rlsDb;
+  if (!r) {
+    logger.error({ path: req.path, firmId: req.firmId, userId: req.userId }, "[cases] missing tenant database context");
+    res.status(500).json({ error: "Internal Server Error" });
+    return;
+  }
+  const caseIdStr = one((req.params as any).caseId);
+  const caseId = caseIdStr ? Number(caseIdStr) : NaN;
+  if (!Number.isFinite(caseId)) {
+    res.status(400).json({ error: "Invalid caseId" });
+    return;
+  }
+  const exists = await tableExists(r, "public.case_loan_stamping_items");
+  if (!exists) {
+    res.json([]);
+    return;
+  }
+  const rows = await r
+    .select({
+      id: caseLoanStampingItemsTable.id,
+      itemKey: caseLoanStampingItemsTable.itemKey,
+      customName: caseLoanStampingItemsTable.customName,
+      datedOn: caseLoanStampingItemsTable.datedOn,
+      stampedOn: caseLoanStampingItemsTable.stampedOn,
+      fileName: caseLoanStampingItemsTable.fileName,
+      mimeType: caseLoanStampingItemsTable.mimeType,
+      fileSize: caseLoanStampingItemsTable.fileSize,
+      sortOrder: caseLoanStampingItemsTable.sortOrder,
+      createdAt: caseLoanStampingItemsTable.createdAt,
+      updatedAt: caseLoanStampingItemsTable.updatedAt,
+    })
+    .from(caseLoanStampingItemsTable)
+    .where(and(
+      eq(caseLoanStampingItemsTable.firmId, req.firmId!),
+      eq(caseLoanStampingItemsTable.caseId, caseId),
+      sql`${caseLoanStampingItemsTable.deletedAt} IS NULL`,
+    ))
+    .orderBy(asc(caseLoanStampingItemsTable.sortOrder), asc(caseLoanStampingItemsTable.id));
+  res.json(rows.map((x) => ({
+    ...x,
+    datedOn: x.datedOn ? String(x.datedOn) : null,
+    stampedOn: x.stampedOn ? String(x.stampedOn) : null,
+    createdAt: toIsoStringSafeOrNull(x.createdAt),
+    updatedAt: toIsoStringSafeOrNull(x.updatedAt),
+  })));
+});
+
+router.put("/cases/:caseId/loan-stamping", requireAuth, requireFirmUser, requirePermission("documents", "update"), async (req: AuthRequest, res): Promise<void> => {
+  const r = req.rlsDb;
+  if (!r) {
+    logger.error({ path: req.path, firmId: req.firmId, userId: req.userId }, "[cases] missing tenant database context");
+    res.status(500).json({ error: "Internal Server Error" });
+    return;
+  }
+  const caseIdStr = one((req.params as any).caseId);
+  const caseId = caseIdStr ? Number(caseIdStr) : NaN;
+  if (!Number.isFinite(caseId)) {
+    res.status(400).json({ error: "Invalid caseId" });
+    return;
+  }
+  const exists = await tableExists(r, "public.case_loan_stamping_items");
+  if (!exists) {
+    res.status(503).json({ error: "Loan stamping not available" });
+    return;
+  }
+  const itemsRaw = (asObject(req.body)?.items ?? null);
+  if (!Array.isArray(itemsRaw)) {
+    res.status(400).json({ error: "Invalid items" });
+    return;
+  }
+
+  const now = new Date();
+  const results: any[] = [];
+  for (let i = 0; i < itemsRaw.length; i++) {
+    const it = asObject(itemsRaw[i]) ?? {};
+    const id = asNumber(it.id);
+    const itemKey = asString(it.itemKey);
+    const customName = asString(it.customName);
+    const sortOrder = asNumber(it.sortOrder) ?? i;
+    const datedOnRaw = it.datedOn;
+    const stampedOnRaw = it.stampedOn;
+
+    if (!itemKey || !ALLOWED_LOAN_STAMPING_ITEM_KEYS.has(itemKey)) {
+      res.status(422).json({ error: `Invalid itemKey at index ${i}` });
+      return;
+    }
+    if (itemKey === "other" && !customName?.trim()) {
+      res.status(422).json({ error: `Missing customName at index ${i}` });
+      return;
+    }
+    const datedOn = Object.prototype.hasOwnProperty.call(it, "datedOn") ? parseDateOnlyInput(datedOnRaw) : undefined;
+    const stampedOn = Object.prototype.hasOwnProperty.call(it, "stampedOn") ? parseDateOnlyInput(stampedOnRaw) : undefined;
+    if (datedOn === undefined && Object.prototype.hasOwnProperty.call(it, "datedOn")) {
+      res.status(422).json({ error: `Invalid datedOn at index ${i}` });
+      return;
+    }
+    if (stampedOn === undefined && Object.prototype.hasOwnProperty.call(it, "stampedOn")) {
+      res.status(422).json({ error: `Invalid stampedOn at index ${i}` });
+      return;
+    }
+
+    if (id) {
+      const [updated] = await r
+        .update(caseLoanStampingItemsTable)
+        .set({
+          itemKey,
+          customName: itemKey === "other" ? customName!.trim() : null,
+          datedOn: typeof datedOn === "string" ? datedOn : null,
+          stampedOn: typeof stampedOn === "string" ? stampedOn : null,
+          sortOrder,
+          updatedAt: now,
+        })
+        .where(and(eq(caseLoanStampingItemsTable.id, id), eq(caseLoanStampingItemsTable.firmId, req.firmId!), eq(caseLoanStampingItemsTable.caseId, caseId), sql`${caseLoanStampingItemsTable.deletedAt} IS NULL`))
+        .returning();
+      if (updated) results.push(updated);
+      continue;
+    }
+
+    const [inserted] = await r
+      .insert(caseLoanStampingItemsTable)
+      .values({
+        firmId: req.firmId!,
+        caseId,
+        itemKey,
+        customName: itemKey === "other" ? customName!.trim() : null,
+        datedOn: typeof datedOn === "string" ? datedOn : null,
+        stampedOn: typeof stampedOn === "string" ? stampedOn : null,
+        sortOrder,
+        uploadedBy: req.userId ?? null,
+        createdAt: now,
+        updatedAt: now,
+      })
+      .returning();
+    if (inserted) results.push(inserted);
+  }
+
+  await writeAuditLog({
+    firmId: req.firmId,
+    actorId: req.userId,
+    actorType: req.userType,
+    action: "cases.loan_stamping.save",
+    entityType: "case",
+    entityId: caseId,
+    detail: `items=${itemsRaw.length}`,
+    ipAddress: req.ip,
+    userAgent: req.headers["user-agent"],
+  });
+
+  res.json(results.map((x) => ({
+    id: x.id,
+    itemKey: x.itemKey,
+    customName: x.customName ?? null,
+    datedOn: x.datedOn ? String(x.datedOn) : null,
+    stampedOn: x.stampedOn ? String(x.stampedOn) : null,
+    fileName: x.fileName ?? null,
+    mimeType: x.mimeType ?? null,
+    fileSize: x.fileSize ?? null,
+    sortOrder: x.sortOrder ?? 0,
+    createdAt: toIsoStringSafeOrNull(x.createdAt),
+    updatedAt: toIsoStringSafeOrNull(x.updatedAt),
+  })));
+});
+
+router.delete("/cases/:caseId/loan-stamping/:id", requireAuth, requireFirmUser, requirePermission("documents", "delete"), async (req: AuthRequest, res): Promise<void> => {
+  const r = req.rlsDb;
+  if (!r) {
+    logger.error({ path: req.path, firmId: req.firmId, userId: req.userId }, "[cases] missing tenant database context");
+    res.status(500).json({ error: "Internal Server Error" });
+    return;
+  }
+  const caseIdStr = one((req.params as any).caseId);
+  const idStr = one((req.params as any).id);
+  const caseId = caseIdStr ? Number(caseIdStr) : NaN;
+  const id = idStr ? Number(idStr) : NaN;
+  if (!Number.isFinite(caseId) || !Number.isFinite(id)) {
+    res.status(400).json({ error: "Invalid params" });
+    return;
+  }
+  const exists = await tableExists(r, "public.case_loan_stamping_items");
+  if (!exists) {
+    res.status(404).json({ error: "Not found" });
+    return;
+  }
+  const [existing] = await r
+    .select({ objectPath: caseLoanStampingItemsTable.objectPath })
+    .from(caseLoanStampingItemsTable)
+    .where(and(
+      eq(caseLoanStampingItemsTable.id, id),
+      eq(caseLoanStampingItemsTable.firmId, req.firmId!),
+      eq(caseLoanStampingItemsTable.caseId, caseId),
+      sql`${caseLoanStampingItemsTable.deletedAt} IS NULL`,
+    ));
+  if (!existing) {
+    res.status(404).json({ error: "Not found" });
+    return;
+  }
+  if (existing.objectPath) {
+    try {
+      await supabaseStorage.deletePrivateObject(existing.objectPath);
+    } catch (err) {
+      if (err instanceof ObjectNotFoundError) {
+        void err;
+      } else {
+        const cfgErr = getSupabaseStorageConfigError(err);
+        if (cfgErr) {
+          res.status(cfgErr.statusCode).json({ error: cfgErr.error });
+          return;
+        }
+        logger.error({ err, path: req.path, firmId: req.firmId, userId: req.userId, caseId, id }, "[cases] loan_stamping_delete_object_failed");
+      }
+    }
+  }
+  const [row] = await r
+    .update(caseLoanStampingItemsTable)
+    .set({ deletedAt: new Date(), updatedAt: new Date() })
+    .where(and(eq(caseLoanStampingItemsTable.id, id), eq(caseLoanStampingItemsTable.firmId, req.firmId!), eq(caseLoanStampingItemsTable.caseId, caseId), sql`${caseLoanStampingItemsTable.deletedAt} IS NULL`))
+    .returning({ id: caseLoanStampingItemsTable.id });
+  if (!row) {
+    res.status(404).json({ error: "Not found" });
+    return;
+  }
+  await writeAuditLog({
+    firmId: req.firmId,
+    actorId: req.userId,
+    actorType: req.userType,
+    action: "cases.loan_stamping.delete",
+    entityType: "case",
+    entityId: caseId,
+    detail: `loanStampingItemId=${id}`,
+    ipAddress: req.ip,
+    userAgent: req.headers["user-agent"],
+  });
+  res.status(204).end();
+});
+
+router.post("/cases/:caseId/loan-stamping/:id/file", requireAuth, requireFirmUser, requirePermission("documents", "update"), async (req: AuthRequest, res): Promise<void> => {
+  const r = req.rlsDb;
+  if (!r) {
+    logger.error({ path: req.path, firmId: req.firmId, userId: req.userId }, "[cases] missing tenant database context");
+    res.status(500).json({ error: "Internal Server Error" });
+    return;
+  }
+  const caseIdStr = one((req.params as any).caseId);
+  const idStr = one((req.params as any).id);
+  const caseId = caseIdStr ? Number(caseIdStr) : NaN;
+  const id = idStr ? Number(idStr) : NaN;
+  if (!Number.isFinite(caseId) || !Number.isFinite(id)) {
+    res.status(400).json({ error: "Invalid params" });
+    return;
+  }
+  const body = asObject(req.body) ?? {};
+  const objectPath = asString(body.objectPath);
+  const fileName = asString(body.fileName);
+  const mimeType = asString(body.mimeType);
+  const fileSize = asNumber(body.fileSize);
+  if (!objectPath || !objectPath.startsWith(`/objects/cases/${req.firmId}/case-${caseId}/loan-stamping/`)) {
+    res.status(400).json({ error: "Invalid objectPath" });
+    return;
+  }
+  if (!fileName?.trim()) {
+    res.status(400).json({ error: "Missing fileName" });
+    return;
+  }
+  const ext = fileExtLower(fileName);
+  if (!ALLOWED_CASE_ATTACHMENT_EXTENSIONS.has(ext)) {
+    res.status(422).json({ error: "Unsupported file type. Allowed: pdf, doc, docx, jpg, jpeg, png" });
+    return;
+  }
+  const exists = await tableExists(r, "public.case_loan_stamping_items");
+  if (!exists) {
+    res.status(404).json({ error: "Not found" });
+    return;
+  }
+  const [existing] = await r
+    .select({ objectPath: caseLoanStampingItemsTable.objectPath })
+    .from(caseLoanStampingItemsTable)
+    .where(and(
+      eq(caseLoanStampingItemsTable.id, id),
+      eq(caseLoanStampingItemsTable.firmId, req.firmId!),
+      eq(caseLoanStampingItemsTable.caseId, caseId),
+      sql`${caseLoanStampingItemsTable.deletedAt} IS NULL`,
+    ))
+    .limit(1);
+  if (!existing) {
+    res.status(404).json({ error: "Not found" });
+    return;
+  }
+  const [row] = await r
+    .update(caseLoanStampingItemsTable)
+    .set({
+      objectPath,
+      fileName: fileName.trim(),
+      mimeType: mimeType ?? null,
+      fileSize: fileSize ?? null,
+      uploadedBy: req.userId ?? null,
+      updatedAt: new Date(),
+    })
+    .where(and(eq(caseLoanStampingItemsTable.id, id), eq(caseLoanStampingItemsTable.firmId, req.firmId!), eq(caseLoanStampingItemsTable.caseId, caseId), sql`${caseLoanStampingItemsTable.deletedAt} IS NULL`))
+    .returning({ id: caseLoanStampingItemsTable.id });
+  if (!row) {
+    res.status(404).json({ error: "Not found" });
+    return;
+  }
+  if (existing.objectPath && existing.objectPath !== objectPath) {
+    try {
+      await supabaseStorage.deletePrivateObject(existing.objectPath);
+    } catch (err) {
+      if (!(err instanceof ObjectNotFoundError)) {
+        const cfgErr = getSupabaseStorageConfigError(err);
+        if (cfgErr) {
+          res.status(cfgErr.statusCode).json({ error: cfgErr.error });
+          return;
+        }
+        logger.warn({ err, path: req.path, firmId: req.firmId, userId: req.userId, caseId, id }, "[cases] loan_stamping_old_object_delete_failed");
+      }
+    }
+  }
+  await writeAuditLog({
+    firmId: req.firmId,
+    actorId: req.userId,
+    actorType: req.userType,
+    action: "cases.loan_stamping.file_bind",
+    entityType: "case",
+    entityId: caseId,
+    detail: `loanStampingItemId=${id} fileName=${fileName.trim()}`,
+    ipAddress: req.ip,
+    userAgent: req.headers["user-agent"],
+  });
+  res.json({ ok: true });
+});
+
+router.delete("/cases/:caseId/loan-stamping/:id/file", requireAuth, requireFirmUser, requirePermission("documents", "update"), async (req: AuthRequest, res): Promise<void> => {
+  const r = req.rlsDb;
+  if (!r) {
+    logger.error({ path: req.path, firmId: req.firmId, userId: req.userId }, "[cases] missing tenant database context");
+    res.status(500).json({ error: "Internal Server Error" });
+    return;
+  }
+  const caseIdStr = one((req.params as any).caseId);
+  const idStr = one((req.params as any).id);
+  const caseId = caseIdStr ? Number(caseIdStr) : NaN;
+  const id = idStr ? Number(idStr) : NaN;
+  if (!Number.isFinite(caseId) || !Number.isFinite(id)) {
+    res.status(400).json({ error: "Invalid params" });
+    return;
+  }
+  const exists = await tableExists(r, "public.case_loan_stamping_items");
+  if (!exists) {
+    res.status(404).json({ error: "Not found" });
+    return;
+  }
+  const [existing] = await r
+    .select({ objectPath: caseLoanStampingItemsTable.objectPath })
+    .from(caseLoanStampingItemsTable)
+    .where(and(eq(caseLoanStampingItemsTable.id, id), eq(caseLoanStampingItemsTable.firmId, req.firmId!), eq(caseLoanStampingItemsTable.caseId, caseId), sql`${caseLoanStampingItemsTable.deletedAt} IS NULL`));
+  if (!existing) {
+    res.status(404).json({ error: "Not found" });
+    return;
+  }
+  if (existing.objectPath) {
+    try {
+      await supabaseStorage.deletePrivateObject(existing.objectPath);
+    } catch (err) {
+      if (err instanceof ObjectNotFoundError) {
+        void err;
+      } else {
+        const cfgErr = getSupabaseStorageConfigError(err);
+        if (cfgErr) {
+          res.status(cfgErr.statusCode).json({ error: cfgErr.error });
+          return;
+        }
+        logger.error({ err, path: req.path, firmId: req.firmId, userId: req.userId, caseId, id }, "[cases] loan_stamping_clear_file_object_failed");
+      }
+    }
+  }
+  const [row] = await r
+    .update(caseLoanStampingItemsTable)
+    .set({ objectPath: null, fileName: null, mimeType: null, fileSize: null, updatedAt: new Date() })
+    .where(and(eq(caseLoanStampingItemsTable.id, id), eq(caseLoanStampingItemsTable.firmId, req.firmId!), eq(caseLoanStampingItemsTable.caseId, caseId), sql`${caseLoanStampingItemsTable.deletedAt} IS NULL`))
+    .returning({ id: caseLoanStampingItemsTable.id });
+  if (!row) {
+    res.status(404).json({ error: "Not found" });
+    return;
+  }
+  await writeAuditLog({
+    firmId: req.firmId,
+    actorId: req.userId,
+    actorType: req.userType,
+    action: "cases.loan_stamping.file_cleared",
+    entityType: "case",
+    entityId: caseId,
+    detail: `loanStampingItemId=${id}`,
+    ipAddress: req.ip,
+    userAgent: req.headers["user-agent"],
+  });
+  res.status(204).end();
+});
+
+router.get("/cases/:caseId/loan-stamping/:id/download", requireAuth, requireFirmUser, requirePermission("documents", "read"), async (req: AuthRequest, res): Promise<void> => {
+  const r = req.rlsDb;
+  if (!r) {
+    logger.error({ path: req.path, firmId: req.firmId, userId: req.userId }, "[cases] missing tenant database context");
+    res.status(500).json({ error: "Internal Server Error" });
+    return;
+  }
+  const caseIdStr = one((req.params as any).caseId);
+  const idStr = one((req.params as any).id);
+  const caseId = caseIdStr ? Number(caseIdStr) : NaN;
+  const id = idStr ? Number(idStr) : NaN;
+  if (!Number.isFinite(caseId) || !Number.isFinite(id)) {
+    res.status(400).json({ error: "Invalid params" });
+    return;
+  }
+  const exists = await tableExists(r, "public.case_loan_stamping_items");
+  if (!exists) {
+    res.status(404).json({ error: "Not found" });
+    return;
+  }
+  const [row] = await r
+    .select({
+      objectPath: caseLoanStampingItemsTable.objectPath,
+      fileName: caseLoanStampingItemsTable.fileName,
+      mimeType: caseLoanStampingItemsTable.mimeType,
+    })
+    .from(caseLoanStampingItemsTable)
+    .where(and(eq(caseLoanStampingItemsTable.id, id), eq(caseLoanStampingItemsTable.firmId, req.firmId!), eq(caseLoanStampingItemsTable.caseId, caseId), sql`${caseLoanStampingItemsTable.deletedAt} IS NULL`));
+  if (!row || !row.objectPath || !row.fileName) {
+    res.status(404).json({ error: "File not found" });
+    return;
+  }
+  await writeAuditLog({
+    firmId: req.firmId,
+    actorId: req.userId,
+    actorType: req.userType,
+    action: "cases.loan_stamping.download",
+    entityType: "case",
+    entityId: caseId,
+    detail: `loanStampingItemId=${id} fileName=${row.fileName}`,
+    ipAddress: req.ip,
+    userAgent: req.headers["user-agent"],
+  });
+  try {
+    await streamSupabasePrivateObjectToResponse({
+      objectPath: row.objectPath,
+      res,
+      fileName: row.fileName,
+      fallbackContentType: row.mimeType ?? "application/octet-stream",
+    });
+  } catch (err) {
+    if (err instanceof ObjectNotFoundError) {
+      res.status(404).json({ error: "File not found" });
+      return;
+    }
+    const cfgErr = getSupabaseStorageConfigError(err);
+    if (cfgErr) {
+      res.status(cfgErr.statusCode).json({ error: cfgErr.error });
+      return;
+    }
+    logger.error({ err, path: req.path, firmId: req.firmId, userId: req.userId, caseId, id }, "[cases] loan_stamping_download_failed");
+    res.status(500).json({ error: "Failed to download file" });
+  }
 });
 
 router.get("/cases/:caseId/workflow", requireAuth, requireFirmUser, requirePermission("cases", "read"), async (req: AuthRequest, res): Promise<void> => {

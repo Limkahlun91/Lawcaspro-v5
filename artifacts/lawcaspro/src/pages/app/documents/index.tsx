@@ -172,12 +172,14 @@ function MasterDocumentsTab() {
     if (downloadingDocId === doc.id) return;
     setDownloadingDocId(doc.id);
     try {
-      const pathPart = String(doc.objectPath ?? "").replace(/^\/objects\//, "");
-      if (!pathPart) throw new Error("Missing document path");
-      const blob = await apiFetchBlob(`/storage/objects/${pathPart}`);
+      const blob = await apiFetchBlob(`/hub/documents/${doc.id}/download`);
       downloadBlob(blob, doc.fileName);
     } catch (err) {
-      toastError(toast, err, "Download failed");
+      const status = (err as any)?.status;
+      if (status === 404) toastError(toast, err, "File not found");
+      else if (status === 403) toastError(toast, err, "Permission denied");
+      else if (status === 503) toastError(toast, err, "Storage unavailable");
+      else toastError(toast, err, "Download failed");
     } finally {
       setDownloadingDocId(null);
     }

@@ -1,4 +1,4 @@
-import { pgTable, serial, text, integer, boolean, timestamp, index } from "drizzle-orm/pg-core";
+import { pgTable, serial, text, integer, boolean, timestamp, index, date } from "drizzle-orm/pg-core";
 
 export const documentTemplatesTable = pgTable("document_templates", {
   id: serial("id").primaryKey(),
@@ -44,4 +44,49 @@ export const caseDocumentsTable = pgTable("case_documents", {
   firmCaseIdx: index("idx_case_docs_firm_case").on(t.firmId, t.caseId),
   caseIdx:     index("idx_case_docs_case").on(t.caseId),
   statusIdx:   index("idx_case_docs_status").on(t.status),
+}));
+
+export const caseWorkflowDocumentsTable = pgTable("case_workflow_documents", {
+  id: serial("id").primaryKey(),
+  firmId: integer("firm_id").notNull(),
+  caseId: integer("case_id").notNull(),
+  milestoneKey: text("milestone_key").notNull(),
+  label: text("label").notNull(),
+  dateValue: date("date_value"),
+  objectPath: text("object_path").notNull(),
+  fileName: text("file_name").notNull(),
+  mimeType: text("mime_type"),
+  fileSize: integer("file_size"),
+  uploadedBy: integer("uploaded_by"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow().$onUpdate(() => new Date()),
+  deletedAt: timestamp("deleted_at", { withTimezone: true }),
+}, (t) => ({
+  firmCaseIdx: index("idx_case_workflow_documents_firm_case").on(t.firmId, t.caseId),
+  caseIdx: index("idx_case_workflow_documents_case").on(t.caseId),
+  firmKeyIdx: index("idx_case_workflow_documents_firm_key").on(t.firmId, t.milestoneKey),
+}));
+
+export const caseLoanStampingItemsTable = pgTable("case_loan_stamping_items", {
+  id: serial("id").primaryKey(),
+  firmId: integer("firm_id").notNull(),
+  caseId: integer("case_id").notNull(),
+  itemKey: text("item_key").notNull(),
+  customName: text("custom_name"),
+  datedOn: date("dated_on"),
+  stampedOn: date("stamped_on"),
+  objectPath: text("object_path"),
+  fileName: text("file_name"),
+  mimeType: text("mime_type"),
+  fileSize: integer("file_size"),
+  uploadedBy: integer("uploaded_by"),
+  sortOrder: integer("sort_order").notNull().default(0),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow().$onUpdate(() => new Date()),
+  deletedAt: timestamp("deleted_at", { withTimezone: true }),
+}, (t) => ({
+  firmCaseIdx: index("idx_case_loan_stamping_items_firm_case").on(t.firmId, t.caseId),
+  caseIdx: index("idx_case_loan_stamping_items_case").on(t.caseId),
+  firmKeyIdx: index("idx_case_loan_stamping_items_firm_key").on(t.firmId, t.itemKey),
+  sortIdx: index("idx_case_loan_stamping_items_sort").on(t.firmId, t.caseId, t.sortOrder),
 }));

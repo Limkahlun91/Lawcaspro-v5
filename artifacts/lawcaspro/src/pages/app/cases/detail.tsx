@@ -8,11 +8,11 @@ import {
 } from "@workspace/api-client-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { ArrowLeft, CheckCircle2, Clock, User, Building2, MapPin, Tag, Receipt, Printer } from "lucide-react";
+import { ArrowLeft, CheckCircle2, Clock, User, Building2, MapPin, Tag, Receipt, Printer, Upload, Download, Trash2, Plus, X } from "lucide-react";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useToast } from "@/hooks/use-toast";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Textarea } from "@/components/ui/textarea";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -25,7 +25,10 @@ import CaseTimeTab from "./components/CaseTimeTab";
 import CaseComplianceTab from "./components/CaseComplianceTab";
 import { QueryFallback } from "@/components/query-fallback";
 import { toastError } from "@/lib/toast-error";
-import { apiFetchJson } from "@/lib/api-client";
+import { apiFetchBlob, apiFetchJson } from "@/lib/api-client";
+import { DateOnlyInput, formatYmdToDmy } from "@/components/date-only-input";
+import { downloadBlob } from "@/lib/download";
+import { useAuth } from "@/lib/auth-context";
 
 import { getListCasesQueryKey } from "@workspace/api-client-react";
 
@@ -37,10 +40,47 @@ function dateInputValue(v: unknown): string {
   return "";
 }
 
-function formatYmdToDmy(ymd: string): string {
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(ymd)) return "";
-  const [y, m, d] = ymd.split("-");
-  return `${d}/${m}/${y}`;
+type WorkflowDocKey =
+  | "spa_stamped_date"
+  | "letter_of_offer_stamped_date"
+  | "register_poa_on"
+  | "letter_disclaimer_dated";
+
+type WorkflowDocument = {
+  id: number;
+  caseId: number;
+  milestoneKey: WorkflowDocKey;
+  label: string;
+  dateValue: string | null;
+  fileName: string;
+  mimeType: string | null;
+  fileSize: number | null;
+  createdAt: string | null;
+  updatedAt: string | null;
+};
+
+type LoanStampingItemKey = "facility_agreement" | "deed_of_assignment" | "power_of_attorney" | "charge_annexure" | "other";
+
+type LoanStampingItem = {
+  id?: number;
+  itemKey: LoanStampingItemKey;
+  customName: string | null;
+  datedOn: string | null;
+  stampedOn: string | null;
+  fileName: string | null;
+  mimeType: string | null;
+  fileSize: number | null;
+  sortOrder: number;
+};
+
+type LoanStampingSaveItem = Pick<
+  LoanStampingItem,
+  "id" | "itemKey" | "customName" | "datedOn" | "stampedOn" | "sortOrder"
+>;
+
+function safeFileNamePart(name: string): string {
+  const base = name.trim().replace(/\s+/g, "_");
+  return base.replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 80) || "file";
 }
 
 export default function CaseDetail() {
@@ -50,6 +90,7 @@ export default function CaseDetail() {
   const searchString = useSearch();
   const queryClient = useQueryClient();
   const { toast } = useToast();
+  const { user } = useAuth();
 
   const {
     data: caseInfo,
@@ -131,6 +172,20 @@ export default function CaseDetail() {
   });
   const keyDates = (keyDatesQuery.data && typeof keyDatesQuery.data === "object") ? keyDatesQuery.data : {};
 
+  const workflowDocsQuery = useQuery<WorkflowDocument[]>({
+    queryKey: ["case-workflow-documents", caseId],
+    queryFn: ({ signal }) => apiFetchJson(`/cases/${caseId}/workflow-documents`, { signal }),
+    enabled: !!caseId,
+    retry: false,
+  });
+
+  const loanStampingQuery = useQuery<LoanStampingItem[]>({
+    queryKey: ["case-loan-stamping", caseId],
+    queryFn: ({ signal }) => apiFetchJson(`/cases/${caseId}/loan-stamping`, { signal }),
+    enabled: !!caseId,
+    retry: false,
+  });
+
   const printableQuery = useQuery<any[]>({
     queryKey: ["printable-config"],
     queryFn: ({ signal }) => apiFetchJson("/printable-config", { signal }),
@@ -159,6 +214,18 @@ export default function CaseDetail() {
   const [keyDatesDraft, setKeyDatesDraft] = useState<Record<string, string>>({});
   const [keyDatesBaseline, setKeyDatesBaseline] = useState<Record<string, string>>({});
   const [keyDatesInitialized, setKeyDatesInitialized] = useState(false);
+
+  const workflowFileInputRef = useRef<HTMLInputElement>(null);
+  const workflowUploadKeyRef = useRef<WorkflowDocKey | null>(null);
+  const [workflowUploadingKey, setWorkflowUploadingKey] = useState<WorkflowDocKey | null>(null);
+  const [workflowDownloadingId, setWorkflowDownloadingId] = useState<number | null>(null);
+
+  const stampingFileInputRef = useRef<HTMLInputElement>(null);
+  const stampingUploadIdRef = useRef<number | null>(null);
+  const [stampingUploadingId, setStampingUploadingId] = useState<number | null>(null);
+  const [stampingDownloadingId, setStampingDownloadingId] = useState<number | null>(null);
+  const [stampingDraft, setStampingDraft] = useState<LoanStampingItem[]>([]);
+  const [stampingDirty, setStampingDirty] = useState(false);
 
   const parseKeyDates = (src: Record<string, unknown>) => ({
     spa_signed_date: dateInputValue((src as any).spa_signed_date),
@@ -284,6 +351,22 @@ export default function CaseDetail() {
   }, [keyDates, keyDatesInitialized, anyDirty]);
 
   useEffect(() => {
+    if (stampingDirty) return;
+    const rows = Array.isArray(loanStampingQuery.data) ? loanStampingQuery.data : [];
+    setStampingDraft(rows.map((x, idx) => ({
+      id: x.id,
+      itemKey: x.itemKey,
+      customName: x.customName ?? null,
+      datedOn: x.datedOn ?? null,
+      stampedOn: x.stampedOn ?? null,
+      fileName: x.fileName ?? null,
+      mimeType: x.mimeType ?? null,
+      fileSize: x.fileSize ?? null,
+      sortOrder: Number.isFinite(x.sortOrder) ? x.sortOrder : idx,
+    })));
+  }, [loanStampingQuery.data, stampingDirty]);
+
+  useEffect(() => {
     setActiveTab(tabFromUrl);
   }, [tabFromUrl]);
 
@@ -366,6 +449,225 @@ export default function CaseDetail() {
     saveKeyDatesMutation.mutate({ scope, payload, keys: keys as string[] });
   };
 
+  const workflowDocsByKey = useMemo(() => {
+    const rows = Array.isArray(workflowDocsQuery.data) ? workflowDocsQuery.data : [];
+    const map = new Map<WorkflowDocKey, WorkflowDocument>();
+    for (const r of rows) {
+      if (r && (r.milestoneKey as any)) map.set(r.milestoneKey as WorkflowDocKey, r);
+    }
+    return map;
+  }, [workflowDocsQuery.data]);
+
+  const allowedFileExt = (name: string): boolean => {
+    const idx = name.lastIndexOf(".");
+    const ext = idx >= 0 ? name.slice(idx + 1).toLowerCase() : "";
+    return ext === "pdf" || ext === "doc" || ext === "docx" || ext === "jpg" || ext === "jpeg" || ext === "png";
+  };
+
+  const toastDownloadError = (err: unknown) => {
+    const status = (err as any)?.status;
+    if (status === 404) toastError(toast, err, "File not found");
+    else if (status === 403) toastError(toast, err, "Permission denied");
+    else if (status === 503) toastError(toast, err, "Storage unavailable");
+    else toastError(toast, err, "Download failed");
+  };
+
+  const uploadWorkflowDocMutation = useMutation({
+    mutationFn: (vars: { milestoneKey: WorkflowDocKey; label: string; objectPath: string; file: File; dateYmd: string }) =>
+      apiFetchJson(`/cases/${caseId}/workflow-documents`, {
+        method: "POST",
+        body: JSON.stringify({
+          milestoneKey: vars.milestoneKey,
+          label: vars.label,
+          objectPath: vars.objectPath,
+          fileName: vars.file.name,
+          mimeType: vars.file.type || null,
+          fileSize: vars.file.size,
+          dateYmd: vars.dateYmd || null,
+        }),
+      }),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ["case-workflow-documents", caseId] });
+    },
+    onError: (err) => toastError(toast, err, "Upload failed"),
+  });
+
+  const deleteWorkflowDocMutation = useMutation({
+    mutationFn: (id: number) => apiFetchJson(`/cases/${caseId}/workflow-documents/${id}`, { method: "DELETE", allowStatuses: [204] }),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ["case-workflow-documents", caseId] });
+      toast({ title: "Deleted" });
+    },
+    onError: (err) => toastError(toast, err, "Delete failed"),
+  });
+
+  async function uploadToPrivateCasePath(objectPath: string, file: File) {
+    const fd = new FormData();
+    fd.append("file", file);
+    return await apiFetchJson<{ objectPath: string }>(`/storage/upload?objectPath=${encodeURIComponent(objectPath)}`, { method: "POST", body: fd });
+  }
+
+  function workflowObjectPath(milestoneKey: WorkflowDocKey, file: File): string {
+    const firmId = user?.firmId;
+    return `/objects/cases/${firmId}/case-${caseId}/workflow/${milestoneKey}/${crypto.randomUUID()}-${safeFileNamePart(file.name)}`;
+  }
+
+  function openWorkflowUpload(milestoneKey: WorkflowDocKey) {
+    workflowUploadKeyRef.current = milestoneKey;
+    workflowFileInputRef.current?.click();
+  }
+
+  async function handleWorkflowFileSelected(file: File | null) {
+    const milestoneKey = workflowUploadKeyRef.current;
+    if (!file || !milestoneKey) return;
+    if (!allowedFileExt(file.name)) {
+      toast({ title: "Unsupported file type", description: "Allowed: pdf, doc, docx, jpg, jpeg, png", variant: "destructive" });
+      return;
+    }
+    const dateYmd = keyDatesDraft[milestoneKey] || "";
+    if (!dateYmd) {
+      toast({ title: "Select date first", description: "Please enter the date before uploading the file." });
+      return;
+    }
+    if (!user?.firmId) {
+      toast({ title: "No firm context", description: "Please sign in again." });
+      return;
+    }
+    setWorkflowUploadingKey(milestoneKey);
+    try {
+      const existed = Boolean(workflowDocsByKey.get(milestoneKey));
+      const objectPath = workflowObjectPath(milestoneKey, file);
+      const uploaded = await uploadToPrivateCasePath(objectPath, file);
+      await uploadWorkflowDocMutation.mutateAsync({
+        milestoneKey,
+        label:
+          milestoneKey === "spa_stamped_date" ? "SPA Stamped" :
+          milestoneKey === "letter_of_offer_stamped_date" ? "LO Stamped" :
+          milestoneKey === "register_poa_on" ? "Register POA" :
+          "Letter Disclaimer Dated",
+        objectPath: uploaded.objectPath,
+        file,
+        dateYmd,
+      });
+      toast({ title: existed ? "Replace success" : "Upload success" });
+    } finally {
+      setWorkflowUploadingKey(null);
+      workflowUploadKeyRef.current = null;
+      if (workflowFileInputRef.current) workflowFileInputRef.current.value = "";
+    }
+  }
+
+  async function downloadWorkflowDoc(doc: WorkflowDocument) {
+    if (workflowDownloadingId === doc.id) return;
+    setWorkflowDownloadingId(doc.id);
+    try {
+      const blob = await apiFetchBlob(`/cases/${caseId}/workflow-documents/${doc.id}/download`);
+      downloadBlob(blob, doc.fileName);
+    } catch (err) {
+      toastDownloadError(err);
+    } finally {
+      setWorkflowDownloadingId(null);
+    }
+  }
+
+  const saveStampingMutation = useMutation({
+    mutationFn: (items: LoanStampingSaveItem[]) =>
+      apiFetchJson(`/cases/${caseId}/loan-stamping`, { method: "PUT", body: JSON.stringify({ items }) }),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ["case-loan-stamping", caseId] });
+      setStampingDirty(false);
+      toast({ title: "Stamping saved" });
+    },
+    onError: (err) => toastError(toast, err, "Save failed"),
+  });
+
+  const deleteStampingRowMutation = useMutation({
+    mutationFn: (id: number) => apiFetchJson(`/cases/${caseId}/loan-stamping/${id}`, { method: "DELETE", allowStatuses: [204] }),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ["case-loan-stamping", caseId] });
+      setStampingDirty(false);
+      toast({ title: "Deleted" });
+    },
+    onError: (err) => toastError(toast, err, "Delete failed"),
+  });
+
+  const bindStampingFileMutation = useMutation({
+    mutationFn: (vars: { id: number; objectPath: string; file: File }) =>
+      apiFetchJson(`/cases/${caseId}/loan-stamping/${vars.id}/file`, {
+        method: "POST",
+        body: JSON.stringify({
+          objectPath: vars.objectPath,
+          fileName: vars.file.name,
+          mimeType: vars.file.type || null,
+          fileSize: vars.file.size,
+        }),
+      }),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ["case-loan-stamping", caseId] });
+      setStampingDirty(false);
+    },
+    onError: (err) => toastError(toast, err, "Upload failed"),
+  });
+
+  const clearStampingFileMutation = useMutation({
+    mutationFn: (id: number) => apiFetchJson(`/cases/${caseId}/loan-stamping/${id}/file`, { method: "DELETE", allowStatuses: [204] }),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ["case-loan-stamping", caseId] });
+      setStampingDirty(false);
+      toast({ title: "Deleted" });
+    },
+    onError: (err) => toastError(toast, err, "Delete failed"),
+  });
+
+  function stampingObjectPath(file: File): string {
+    const firmId = user?.firmId;
+    return `/objects/cases/${firmId}/case-${caseId}/loan-stamping/${crypto.randomUUID()}-${safeFileNamePart(file.name)}`;
+  }
+
+  function openStampingUpload(id: number) {
+    stampingUploadIdRef.current = id;
+    stampingFileInputRef.current?.click();
+  }
+
+  async function handleStampingFileSelected(file: File | null) {
+    const id = stampingUploadIdRef.current;
+    if (!file || !id) return;
+    if (!allowedFileExt(file.name)) {
+      toast({ title: "Unsupported file type", description: "Allowed: pdf, doc, docx, jpg, jpeg, png", variant: "destructive" });
+      return;
+    }
+    if (!user?.firmId) {
+      toast({ title: "No firm context", description: "Please sign in again." });
+      return;
+    }
+    setStampingUploadingId(id);
+    try {
+      const existed = Boolean(stampingDraft.find((x) => x.id === id)?.fileName);
+      const objectPath = stampingObjectPath(file);
+      const uploaded = await uploadToPrivateCasePath(objectPath, file);
+      await bindStampingFileMutation.mutateAsync({ id, objectPath: uploaded.objectPath, file });
+      toast({ title: existed ? "Replace success" : "Upload success" });
+    } finally {
+      setStampingUploadingId(null);
+      stampingUploadIdRef.current = null;
+      if (stampingFileInputRef.current) stampingFileInputRef.current.value = "";
+    }
+  }
+
+  async function downloadStampingFile(item: LoanStampingItem) {
+    if (!item.id) return;
+    if (stampingDownloadingId === item.id) return;
+    setStampingDownloadingId(item.id);
+    try {
+      const blob = await apiFetchBlob(`/cases/${caseId}/loan-stamping/${item.id}/download`);
+      downloadBlob(blob, item.fileName || "download");
+    } catch (err) {
+      toastDownloadError(err);
+    } finally {
+      setStampingDownloadingId(null);
+    }
+  }
+
   const FieldCard = (props: {
     label: string;
     value: string;
@@ -376,7 +678,6 @@ export default function CaseDetail() {
     const type = props.type ?? "date";
     const isDate = type === "date";
     const dateVal = props.value || "";
-    const dmy = isDate && dateVal ? formatYmdToDmy(dateVal) : "";
     const showPrinter = Boolean(props.printerKey);
     const printerKey = props.printerKey || "";
     const st = showPrinter ? printState(printerKey) : null;
@@ -398,13 +699,16 @@ export default function CaseDetail() {
           )}
         </div>
         <div className="mt-2 flex items-center gap-2">
-          <Input
-            className="flex-1"
-            type={type}
-            value={props.value}
-            onChange={(e) => props.onChange(e.target.value)}
-            placeholder={isDate ? "YYYY-MM-DD" : undefined}
-          />
+          {isDate ? (
+            <DateOnlyInput className="flex-1" valueYmd={props.value} onChangeYmd={props.onChange} />
+          ) : (
+            <Input
+              className="flex-1"
+              type={type}
+              value={props.value}
+              onChange={(e) => props.onChange(e.target.value)}
+            />
+          )}
           {showPrinter && (
             <Button
               size="icon"
@@ -418,17 +722,205 @@ export default function CaseDetail() {
             </Button>
           )}
         </div>
-        {isDate && (
-          <div className="mt-1 text-[10px] text-slate-500">
-            {dmy ? `Display: ${dmy}` : "Format: YYYY-MM-DD"}
-          </div>
-        )}
       </div>
     );
   };
 
+  const WorkflowFileCard = (props: { label: string; fieldKey: WorkflowDocKey; printerKey?: string }) => {
+    const value = keyDatesDraft[props.fieldKey] ?? "";
+    const doc = workflowDocsByKey.get(props.fieldKey);
+    const uploading = workflowUploadingKey === props.fieldKey || uploadWorkflowDocMutation.isPending;
+    const canUpload = Boolean(value) && !uploading && !deleteWorkflowDocMutation.isPending;
+    const showPrinter = Boolean(props.printerKey);
+    const printerKey = props.printerKey || "";
+    const st = showPrinter ? printState(printerKey) : null;
+    const showStatus = showPrinter && st?.status !== "configured";
+    const statusLabel = showStatus ? printStatusLabel(st) : "";
+
+    return (
+      <div className="rounded-lg border border-slate-200 bg-white p-3">
+        <div className="flex items-center justify-between gap-2">
+          <Label className="text-xs text-slate-600">{props.label}</Label>
+          {showStatus && (
+            <Badge
+              variant={st?.status === "configured" ? "secondary" : "outline"}
+              className="text-[10px] whitespace-nowrap"
+              title={st?.hint}
+            >
+              {statusLabel}
+            </Badge>
+          )}
+        </div>
+        <div className="mt-2 flex items-center gap-2">
+          <DateOnlyInput
+            className="flex-1"
+            valueYmd={value}
+            onChangeYmd={(v) => setKeyDatesDraft((d) => ({ ...d, [props.fieldKey]: v }))}
+          />
+          {showPrinter && (
+            <Button
+              size="icon"
+              variant={canPrint(printerKey, value) ? "default" : "outline"}
+              className={canPrint(printerKey, value) ? "bg-slate-900 hover:bg-slate-800" : undefined}
+              title={printTitle(printerKey, value)}
+              onClick={() => printMutation.mutate({ printKey: printerKey })}
+              disabled={printMutation.isPending || !canPrint(printerKey, value)}
+            >
+              <Printer className="w-4 h-4" />
+            </Button>
+          )}
+        </div>
+        <div className="mt-2 flex items-center justify-between gap-2 min-w-0">
+          <div className="text-xs text-slate-600 truncate min-w-0">
+            {doc ? doc.fileName : "No file uploaded"}
+          </div>
+          <div className="flex items-center gap-1 shrink-0">
+            {doc ? (
+              <>
+                <Button
+                  size="icon"
+                  variant="ghost"
+                  className="h-8 w-8"
+                  title="Download"
+                  onClick={() => downloadWorkflowDoc(doc)}
+                  disabled={workflowDownloadingId === doc.id}
+                >
+                  <Download className="w-4 h-4" />
+                </Button>
+                <Button
+                  size="icon"
+                  variant="ghost"
+                  className="h-8 w-8"
+                  title="Replace"
+                  onClick={() => openWorkflowUpload(props.fieldKey)}
+                  disabled={!canUpload}
+                >
+                  <Upload className="w-4 h-4" />
+                </Button>
+                <Button
+                  size="icon"
+                  variant="ghost"
+                  className="h-8 w-8 text-red-600"
+                  title="Delete"
+                  onClick={() => deleteWorkflowDocMutation.mutate(doc.id)}
+                  disabled={deleteWorkflowDocMutation.isPending}
+                >
+                  <Trash2 className="w-4 h-4" />
+                </Button>
+              </>
+            ) : (
+              <Button
+                size="sm"
+                variant="outline"
+                className="gap-1.5"
+                onClick={() => openWorkflowUpload(props.fieldKey)}
+                disabled={!canUpload}
+                title={value ? "Upload file" : "Enter date to enable upload"}
+              >
+                <Upload className="w-4 h-4" />
+                Upload
+              </Button>
+            )}
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  const normalizeTitleType = (raw: string): "master" | "strata" | "individual" | "unknown" => {
+    const s = (raw || "").trim().toLowerCase();
+    if (!s) return "unknown";
+    if (s === "master" || s === "master title" || s === "master_title") return "master";
+    if (s === "strata" || s === "strata title" || s === "strata_title") return "strata";
+    if (s === "individual" || s === "individual title" || s === "individual_title") return "individual";
+    return "unknown";
+  };
+  const titleType = normalizeTitleType(String(caseInfo.titleType ?? ""));
+  const isMasterTitle = titleType === "master";
+  const isStrataOrIndividual = titleType === "strata" || titleType === "individual";
+
+  const fixedStampingKeys: Array<{ key: LoanStampingItemKey; label: string; visible: boolean }> = [
+    { key: "facility_agreement", label: "Facility Agreement", visible: true },
+    { key: "deed_of_assignment", label: "Deed of Assignment", visible: isMasterTitle },
+    { key: "power_of_attorney", label: "Power of Attorney", visible: isMasterTitle },
+    { key: "charge_annexure", label: "Charge Annexure", visible: isStrataOrIndividual },
+  ];
+
+  const visibleStampingItems = useMemo(() => {
+    const existing = stampingDraft.slice().sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0));
+    const fixed: LoanStampingItem[] = [];
+    let order = 0;
+    for (const k of fixedStampingKeys) {
+      if (!k.visible) continue;
+      const row = existing.find((x) => x.itemKey === k.key && x.customName == null);
+      fixed.push({
+        id: row?.id,
+        itemKey: k.key,
+        customName: null,
+        datedOn: row?.datedOn ?? null,
+        stampedOn: row?.stampedOn ?? null,
+        fileName: row?.fileName ?? null,
+        mimeType: row?.mimeType ?? null,
+        fileSize: row?.fileSize ?? null,
+        sortOrder: row?.sortOrder ?? order,
+      });
+      order += 10;
+    }
+    const others = existing.filter((x) => x.itemKey === "other").map((x, idx) => ({
+      ...x,
+      sortOrder: Number.isFinite(x.sortOrder) ? x.sortOrder : 1000 + idx,
+    }));
+    return { fixed, others };
+  }, [stampingDraft, fixedStampingKeys.map((x) => x.visible).join("|")]);
+
+  const upsertStampingItem = (next: LoanStampingItem) => {
+    setStampingDirty(true);
+    setStampingDraft((prev) => {
+      const idx = next.id
+        ? prev.findIndex((x) => x.id === next.id)
+        : prev.findIndex((x) => x.id == null && x.itemKey === next.itemKey && (x.customName ?? null) === (next.customName ?? null));
+      if (idx >= 0) {
+        const copy = prev.slice();
+        copy[idx] = { ...copy[idx], ...next };
+        return copy;
+      }
+      return prev.concat(next);
+    });
+  };
+
+  const removeUnsavedStampingOther = (sortOrder: number) => {
+    setStampingDirty(true);
+    setStampingDraft((prev) => prev.filter((x) => !(x.id == null && x.itemKey === "other" && x.sortOrder === sortOrder)));
+  };
+
+  const saveStamping = () => {
+    const items: LoanStampingSaveItem[] = [...visibleStampingItems.fixed, ...visibleStampingItems.others].map((x, idx) => ({
+      id: x.id,
+      itemKey: x.itemKey,
+      customName: x.customName,
+      datedOn: x.datedOn,
+      stampedOn: x.stampedOn,
+      sortOrder: Number.isFinite(x.sortOrder) ? x.sortOrder : idx * 10,
+    }));
+    saveStampingMutation.mutate(items);
+  };
+
   return (
     <div className="space-y-6 pb-12">
+      <input
+        ref={workflowFileInputRef}
+        type="file"
+        accept=".pdf,.doc,.docx,.jpg,.jpeg,.png"
+        className="hidden"
+        onChange={(e) => handleWorkflowFileSelected(e.target.files?.[0] ?? null)}
+      />
+      <input
+        ref={stampingFileInputRef}
+        type="file"
+        accept=".pdf,.doc,.docx,.jpg,.jpeg,.png"
+        className="hidden"
+        onChange={(e) => handleStampingFileSelected(e.target.files?.[0] ?? null)}
+      />
       <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4 min-w-0">
         <div className="flex items-start gap-4 min-w-0">
           <Button variant="outline" size="icon" onClick={() => setLocation(returnTo)}>
@@ -436,12 +928,12 @@ export default function CaseDetail() {
           </Button>
           <div className="min-w-0">
             <div className="flex flex-wrap items-center gap-3">
-              <h1 className="text-3xl font-bold text-slate-900 tracking-tight truncate">{caseInfo.referenceNo}</h1>
+              <h1 className="text-3xl font-bold text-slate-900 tracking-tight break-words">{caseInfo.referenceNo}</h1>
               <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-bold uppercase tracking-wider bg-amber-100 text-amber-800">
                 {caseInfo.status.replace(/_/g, ' ')}
               </span>
             </div>
-            <p className="text-slate-500 mt-1 truncate">{caseInfo.projectName} • {caseInfo.developerName}</p>
+            <p className="text-slate-500 mt-1 break-words">{caseInfo.projectName} • {caseInfo.developerName}</p>
           </div>
         </div>
         <Button
@@ -609,7 +1101,7 @@ export default function CaseDetail() {
                   <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
                     <FieldCard label="SPA Date" value={keyDatesDraft.spa_date || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, spa_date: v }))} />
                     <FieldCard label="SPA Signed" value={keyDatesDraft.spa_signed_date || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, spa_signed_date: v }))} />
-                    <FieldCard label="SPA Stamped" value={keyDatesDraft.spa_stamped_date || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, spa_stamped_date: v }))} />
+                    <WorkflowFileCard label="SPA Stamped" fieldKey="spa_stamped_date" />
                     <FieldCard label="SPA Forward to Dev. Execution On" value={keyDatesDraft.spa_forward_to_developer_execution_on || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, spa_forward_to_developer_execution_on: v }))} />
                     <FieldCard label="Stamped SPA Send to Dev. On" value={keyDatesDraft.stamped_spa_send_to_developer_on || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, stamped_spa_send_to_developer_on: v }))} />
                     <FieldCard label="Stamped SPA Received from Dev. On" value={keyDatesDraft.stamped_spa_received_from_developer_on || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, stamped_spa_received_from_developer_on: v }))} />
@@ -636,7 +1128,7 @@ export default function CaseDetail() {
                         <FieldCard label="Loan Docs Signed" value={keyDatesDraft.loan_docs_signed_date || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, loan_docs_signed_date: v }))} />
                         <FieldCard label="Letter of Offer Date" value={keyDatesDraft.letter_of_offer_date || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, letter_of_offer_date: v }))} />
                         <FieldCard label="Loan Docs Pending Signing" value={keyDatesDraft.loan_docs_pending_date || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, loan_docs_pending_date: v }))} />
-                        <FieldCard label="Letter of Offer Stamped" value={keyDatesDraft.letter_of_offer_stamped_date || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, letter_of_offer_stamped_date: v }))} />
+                        <WorkflowFileCard label="LO Stamped" fieldKey="letter_of_offer_stamped_date" />
                       </div>
                     </div>
 
@@ -651,6 +1143,168 @@ export default function CaseDetail() {
                       </div>
                     </div>
                   </div>
+
+                  <Card>
+                    <CardHeader className="flex flex-row items-center justify-between gap-3">
+                      <CardTitle className="text-sm">Stamping</CardTitle>
+                      <div className="flex items-center gap-2">
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          className="gap-1.5"
+                          onClick={() => {
+                            const nextOrder = 1000 + visibleStampingItems.others.length;
+                            upsertStampingItem({ itemKey: "other", customName: "", datedOn: null, stampedOn: null, fileName: null, mimeType: null, fileSize: null, sortOrder: nextOrder });
+                          }}
+                        >
+                          <Plus className="w-4 h-4" />
+                          Add Another Document
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant={stampingDirty ? "default" : "outline"}
+                          className={stampingDirty ? "bg-amber-500 hover:bg-amber-600" : undefined}
+                          onClick={saveStamping}
+                          disabled={saveStampingMutation.isPending || !stampingDirty}
+                        >
+                          {saveStampingMutation.isPending ? "Saving..." : stampingDirty ? "Save Stamping" : "Saved"}
+                        </Button>
+                      </div>
+                    </CardHeader>
+                    <CardContent>
+                      {loanStampingQuery.isError ? (
+                        <QueryFallback title="Stamping unavailable" error={loanStampingQuery.error} onRetry={() => loanStampingQuery.refetch()} isRetrying={loanStampingQuery.isFetching} />
+                      ) : (
+                        <div className="overflow-x-auto">
+                          <table className="w-full min-w-[980px] text-sm">
+                            <thead className="bg-slate-50 border-b">
+                              <tr>
+                                <th className="text-left px-3 py-2 font-medium text-slate-600 w-[320px]">Document</th>
+                                <th className="text-left px-3 py-2 font-medium text-slate-600 w-[180px]">Dated</th>
+                                <th className="text-left px-3 py-2 font-medium text-slate-600 w-[180px]">Stamped On</th>
+                                <th className="text-left px-3 py-2 font-medium text-slate-600">File</th>
+                                <th className="text-right px-3 py-2 font-medium text-slate-600 w-[140px]">Actions</th>
+                              </tr>
+                            </thead>
+                            <tbody className="divide-y">
+                              {visibleStampingItems.fixed.map((row) => (
+                                <tr key={`fixed-${row.itemKey}`}>
+                                  <td className="px-3 py-2 font-medium text-slate-800">{fixedStampingKeys.find((x) => x.key === row.itemKey)?.label}</td>
+                                  <td className="px-3 py-2">
+                                    <DateOnlyInput valueYmd={row.datedOn || ""} onChangeYmd={(v) => upsertStampingItem({ ...row, datedOn: v || null })} />
+                                  </td>
+                                  <td className="px-3 py-2">
+                                    <DateOnlyInput valueYmd={row.stampedOn || ""} onChangeYmd={(v) => upsertStampingItem({ ...row, stampedOn: v || null })} />
+                                  </td>
+                                  <td className="px-3 py-2">
+                                    <div className="truncate text-slate-600">{row.fileName || "No file uploaded"}</div>
+                                  </td>
+                                  <td className="px-3 py-2 text-right">
+                                    <div className="inline-flex items-center gap-1">
+                                      <Button
+                                        size="icon"
+                                        variant="ghost"
+                                        className="h-8 w-8"
+                                        title="Download"
+                                        disabled={!row.id || !row.fileName || stampingDownloadingId === row.id}
+                                        onClick={() => downloadStampingFile(row)}
+                                      >
+                                        <Download className="w-4 h-4" />
+                                      </Button>
+                                      <Button
+                                        size="icon"
+                                        variant="ghost"
+                                        className="h-8 w-8"
+                                        title={row.id ? "Upload/Replace" : "Save to enable upload"}
+                                        disabled={!row.id || stampingUploadingId === row.id}
+                                        onClick={() => row.id && openStampingUpload(row.id)}
+                                      >
+                                        <Upload className="w-4 h-4" />
+                                      </Button>
+                                      <Button
+                                        size="icon"
+                                        variant="ghost"
+                                        className="h-8 w-8 text-red-600"
+                                        title="Remove file"
+                                        disabled={!row.id || !row.fileName || clearStampingFileMutation.isPending}
+                                        onClick={() => row.id && clearStampingFileMutation.mutate(row.id)}
+                                      >
+                                        <X className="w-4 h-4" />
+                                      </Button>
+                                    </div>
+                                  </td>
+                                </tr>
+                              ))}
+                              {visibleStampingItems.others.map((row) => (
+                                <tr key={`other-${row.id ?? row.sortOrder}`}>
+                                  <td className="px-3 py-2">
+                                    <Input
+                                      value={row.customName ?? ""}
+                                      placeholder="Other document name"
+                                      onChange={(e) => upsertStampingItem({ ...row, customName: e.target.value })}
+                                    />
+                                  </td>
+                                  <td className="px-3 py-2">
+                                    <DateOnlyInput valueYmd={row.datedOn || ""} onChangeYmd={(v) => upsertStampingItem({ ...row, datedOn: v || null })} />
+                                  </td>
+                                  <td className="px-3 py-2">
+                                    <DateOnlyInput valueYmd={row.stampedOn || ""} onChangeYmd={(v) => upsertStampingItem({ ...row, stampedOn: v || null })} />
+                                  </td>
+                                  <td className="px-3 py-2">
+                                    <div className="truncate text-slate-600">{row.fileName || "No file uploaded"}</div>
+                                  </td>
+                                  <td className="px-3 py-2 text-right">
+                                    <div className="inline-flex items-center gap-1">
+                                      <Button
+                                        size="icon"
+                                        variant="ghost"
+                                        className="h-8 w-8"
+                                        title="Download"
+                                        disabled={!row.id || !row.fileName || stampingDownloadingId === row.id}
+                                        onClick={() => downloadStampingFile(row)}
+                                      >
+                                        <Download className="w-4 h-4" />
+                                      </Button>
+                                      <Button
+                                        size="icon"
+                                        variant="ghost"
+                                        className="h-8 w-8"
+                                        title={row.id ? "Upload/Replace" : "Save to enable upload"}
+                                        disabled={!row.id || stampingUploadingId === row.id}
+                                        onClick={() => row.id && openStampingUpload(row.id)}
+                                      >
+                                        <Upload className="w-4 h-4" />
+                                      </Button>
+                                      <Button
+                                        size="icon"
+                                        variant="ghost"
+                                        className="h-8 w-8 text-red-600"
+                                        title={row.fileName ? "Remove file" : "Remove row"}
+                                        disabled={clearStampingFileMutation.isPending || deleteStampingRowMutation.isPending}
+                                        onClick={() => {
+                                          if (row.fileName && row.id) {
+                                            clearStampingFileMutation.mutate(row.id);
+                                            return;
+                                          }
+                                          if (row.id) {
+                                            deleteStampingRowMutation.mutate(row.id);
+                                            return;
+                                          }
+                                          removeUnsavedStampingOther(row.sortOrder);
+                                        }}
+                                      >
+                                        <X className="w-4 h-4" />
+                                      </Button>
+                                    </div>
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      )}
+                    </CardContent>
+                  </Card>
                 </TabsContent>
 
                 <TabsContent value="bank" className="pt-6 space-y-6">
@@ -682,10 +1336,10 @@ export default function CaseDetail() {
                       <div className="text-sm font-semibold text-slate-800">NOA / POA / Disclaimer</div>
                       <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                         <FieldCard label="NOA Served On" value={keyDatesDraft.noa_served_on || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, noa_served_on: v }))} printerKey="noa" />
-                        <FieldCard label="Register POA On" value={keyDatesDraft.register_poa_on || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, register_poa_on: v }))} />
+                        <WorkflowFileCard label="Register POA" fieldKey="register_poa_on" />
                         <FieldCard label="Registered POA Registration Number" type="text" value={keyDatesDraft.registered_poa_registration_number || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, registered_poa_registration_number: v }))} />
                         <FieldCard label="Letter Disclaimer Received On" value={keyDatesDraft.letter_disclaimer_received_on || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, letter_disclaimer_received_on: v }))} />
-                        <FieldCard label="Letter Disclaimer Dated" value={keyDatesDraft.letter_disclaimer_dated || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, letter_disclaimer_dated: v }))} />
+                        <WorkflowFileCard label="Letter Disclaimer Dated" fieldKey="letter_disclaimer_dated" />
                         <FieldCard label="Letter Disclaimer Reference Nos" type="text" value={keyDatesDraft.letter_disclaimer_reference_nos || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, letter_disclaimer_reference_nos: v }))} />
                       </div>
 
@@ -728,6 +1382,19 @@ export default function CaseDetail() {
         </TabsContent>
 
         <TabsContent value="workflow" className="space-y-6">
+          <Card>
+            <CardHeader>
+              <CardTitle>Workflow Attachments</CardTitle>
+            </CardHeader>
+            <CardContent className="min-w-0">
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3 min-w-0">
+                <WorkflowFileCard label="SPA Stamped" fieldKey="spa_stamped_date" />
+                <WorkflowFileCard label="Letter of Offer Stamped" fieldKey="letter_of_offer_stamped_date" />
+                <WorkflowFileCard label="Register POA On" fieldKey="register_poa_on" />
+                <WorkflowFileCard label="Letter Disclaimer Dated" fieldKey="letter_disclaimer_dated" />
+              </div>
+            </CardContent>
+          </Card>
           <Card>
             <CardHeader>
               <CardTitle>Conveyancing Workflow</CardTitle>
