@@ -53,6 +53,12 @@ interface PlatformDoc {
   name: string;
   description: string | null;
   category: string;
+  isActive: boolean;
+  appliesToPurchaseMode: string | null;
+  appliesToTitleType: string | null;
+  appliesToCaseType: string | null;
+  documentGroup: string | null;
+  sortOrder: number | null;
   fileName: string;
   fileType: string;
   fileSize: number | null;
@@ -213,6 +219,27 @@ export default function PlatformDocuments() {
   const [editingPdfDoc, setEditingPdfDoc] = useState<PlatformDoc | null>(null);
   const [editingPdfUrl, setEditingPdfUrl] = useState<string | null>(null);
   const [downloadingDocId, setDownloadingDocId] = useState<number | null>(null);
+
+  const [editDocOpen, setEditDocOpen] = useState(false);
+  const [editingDoc, setEditingDoc] = useState<PlatformDoc | null>(null);
+  const [editIsActive, setEditIsActive] = useState(true);
+  const [editPurchaseMode, setEditPurchaseMode] = useState<string>("both");
+  const [editTitleType, setEditTitleType] = useState<string>("any");
+  const [editCaseType, setEditCaseType] = useState<string>("");
+  const [editGroup, setEditGroup] = useState<string>("Others");
+  const [editSortOrder, setEditSortOrder] = useState<number>(0);
+  const [editCategory, setEditCategory] = useState<string>("general");
+
+  useEffect(() => {
+    if (!editingDoc) return;
+    setEditIsActive(editingDoc.isActive ?? true);
+    setEditPurchaseMode(editingDoc.appliesToPurchaseMode ?? "both");
+    setEditTitleType(editingDoc.appliesToTitleType ?? "any");
+    setEditCaseType(editingDoc.appliesToCaseType ?? "");
+    setEditGroup(editingDoc.documentGroup ?? "Others");
+    setEditSortOrder(typeof editingDoc.sortOrder === "number" ? editingDoc.sortOrder : 0);
+    setEditCategory(editingDoc.category ?? "general");
+  }, [editingDoc]);
 
   const foldersQuery = useQuery<SystemFolder[]>({
     queryKey: ["system-folders"],
@@ -454,6 +481,16 @@ export default function PlatformDocuments() {
     }
   };
 
+  const updateDocMutation = useMutation({
+    mutationFn: (payload: { id: number; patch: Record<string, unknown> }) =>
+      apiFetchJson(`/platform/documents/${payload.id}`, { method: "PATCH", body: JSON.stringify(payload.patch) }),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ["platform-documents"], exact: false });
+      toast({ title: "Document updated" });
+    },
+    onError: (e) => toastError(toast, e, "Update failed"),
+  });
+
   const handleStartAddSub = (parentId: number) => {
     setNewFolderParentId(parentId);
     setNewFolderName("");
@@ -604,9 +641,14 @@ export default function PlatformDocuments() {
                           <div className="flex items-center gap-2">
                             <File className="w-4 h-4 text-slate-400 shrink-0" />
                             <div>
-                              <p className="font-medium text-slate-900">{doc.name}</p>
+                              <div className="flex items-center gap-2 min-w-0">
+                                <p className="font-medium text-slate-900 truncate" title={doc.name}>{doc.name}</p>
+                                <Badge variant="outline" className={cn("text-[10px]", doc.isActive ? "text-emerald-700 border-emerald-200" : "text-slate-500 border-slate-200")}>
+                                  {doc.isActive ? "Active" : "Inactive"}
+                                </Badge>
+                              </div>
                               {doc.description && <p className="text-xs text-slate-500">{doc.description}</p>}
-                              <p className="text-xs text-slate-400">{doc.fileName}</p>
+                              <p className="text-xs text-slate-400 truncate max-w-[520px]" title={doc.fileName}>{doc.fileName}</p>
                             </div>
                           </div>
                         </td>
@@ -619,6 +661,17 @@ export default function PlatformDocuments() {
                         </td>
                         <td className="px-3 py-2.5 text-right">
                           <div className="flex items-center justify-end gap-1">
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              className="h-7 px-2 gap-1 text-slate-600 hover:text-slate-700"
+                              onClick={() => { setEditingDoc(doc); setEditDocOpen(true); }}
+                              title="Edit applicability rules"
+                              disabled={deleteMutation.isPending}
+                            >
+                              <Pencil className="w-3.5 h-3.5" />
+                              <span className="text-xs">Rules</span>
+                            </Button>
                             {doc.fileType === "application/pdf" && (
                               <Button
                                 variant="ghost"
@@ -748,6 +801,116 @@ export default function PlatformDocuments() {
               {uploading ? "Uploading..." : "Upload"}
             </Button>
           </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={editDocOpen} onOpenChange={(v) => { if (!v) setEditingDoc(null); setEditDocOpen(v); }}>
+        <DialogContent className="max-w-lg">
+          <DialogHeader>
+            <DialogTitle>Document Rules</DialogTitle>
+          </DialogHeader>
+          {editingDoc && (
+            <div className="space-y-4 py-1">
+              <div>
+                <div className="text-xs text-slate-500">Name</div>
+                <div className="text-sm font-medium text-slate-900">{editingDoc.name}</div>
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div className="space-y-1.5">
+                  <Label>Active</Label>
+                  <Select value={String(editIsActive)} onValueChange={(v) => setEditIsActive(v === "true")}>
+                    <SelectTrigger><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="true">Active</SelectItem>
+                      <SelectItem value="false">Inactive</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="space-y-1.5">
+                  <Label>Group</Label>
+                  <Select value={editGroup} onValueChange={setEditGroup}>
+                    <SelectTrigger><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="SPA">SPA</SelectItem>
+                      <SelectItem value="Loan">Loan</SelectItem>
+                      <SelectItem value="MOT / Transfer">MOT / Transfer</SelectItem>
+                      <SelectItem value="Completion">Completion</SelectItem>
+                      <SelectItem value="Others">Others</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div className="space-y-1.5">
+                  <Label>Applies to Purchase Mode</Label>
+                  <Select value={editPurchaseMode} onValueChange={setEditPurchaseMode}>
+                    <SelectTrigger><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="both">Both</SelectItem>
+                      <SelectItem value="cash">Cash</SelectItem>
+                      <SelectItem value="loan">Loan</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="space-y-1.5">
+                  <Label>Applies to Title Type</Label>
+                  <Select value={editTitleType} onValueChange={setEditTitleType}>
+                    <SelectTrigger><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="any">Any</SelectItem>
+                      <SelectItem value="master">Master</SelectItem>
+                      <SelectItem value="strata">Strata</SelectItem>
+                      <SelectItem value="individual">Individual</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div className="space-y-1.5">
+                  <Label>Applies to Case Type (optional)</Label>
+                  <Input value={editCaseType} onChange={(e) => setEditCaseType(e.target.value)} placeholder="e.g. Primary Market" />
+                </div>
+                <div className="space-y-1.5">
+                  <Label>Sort order</Label>
+                  <Input inputMode="numeric" value={String(editSortOrder)} onChange={(e) => setEditSortOrder(Number(e.target.value || "0"))} />
+                </div>
+              </div>
+              <div className="space-y-1.5">
+                <Label>Category</Label>
+                <Select value={editCategory} onValueChange={setEditCategory}>
+                  <SelectTrigger><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    {CATEGORIES.map((c) => (
+                      <SelectItem key={c} value={c}>{c.charAt(0).toUpperCase() + c.slice(1)}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="flex justify-end gap-2 pt-2">
+                <Button variant="outline" onClick={() => setEditDocOpen(false)} disabled={updateDocMutation.isPending}>Cancel</Button>
+                <Button
+                  onClick={() => {
+                    updateDocMutation.mutate({
+                      id: editingDoc.id,
+                      patch: {
+                        isActive: editIsActive,
+                        appliesToPurchaseMode: editPurchaseMode,
+                        appliesToTitleType: editTitleType,
+                        appliesToCaseType: editCaseType ? editCaseType : null,
+                        documentGroup: editGroup,
+                        sortOrder: editSortOrder,
+                        category: editCategory,
+                      },
+                    });
+                    setEditDocOpen(false);
+                  }}
+                  disabled={updateDocMutation.isPending}
+                >
+                  Save
+                </Button>
+              </div>
+            </div>
+          )}
         </DialogContent>
       </Dialog>
 

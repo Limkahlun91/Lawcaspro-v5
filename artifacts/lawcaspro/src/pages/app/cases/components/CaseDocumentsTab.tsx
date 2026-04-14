@@ -3,9 +3,9 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { useToast } from "@/hooks/use-toast";
-import { Badge } from "@/components/ui/badge";
+import { ToastAction } from "@/components/ui/toast";
 import {
-  FileText, Upload, Trash2, Download, Plus, Folder, FolderOpen, ChevronRight,
+  FileText, Upload, Trash2, Download, Plus,
 } from "lucide-react";
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle,
@@ -26,15 +26,6 @@ function docTypeLabel(dt: string): string {
   return (DOCUMENT_TYPE_LABELS as Record<string, string>)[dt] ?? dt;
 }
 
-interface DocumentTemplate {
-  id: number;
-  name: string;
-  document_type: string;
-  description: string | null;
-  file_name: string;
-  created_at: string;
-}
-
 interface CaseDocument {
   id: number;
   name: string;
@@ -44,28 +35,35 @@ interface CaseDocument {
   object_path: string;
   file_size: number | null;
   template_name: string | null;
+  template_source?: string | null;
+  template_snapshot_name?: string | null;
   generated_by_name: string | null;
   created_at: string;
 }
 
-interface SystemFolder {
-  id: number;
-  name: string;
-  parentId: number | null;
-  sortOrder: number;
-}
+type ApplicabilityStatus = "applicable" | "not_applicable";
+type ReadinessStatus = "ready" | "missing_data" | "missing_file" | "incomplete";
 
-interface MasterDoc {
-  id: number;
+type ChecklistItem = {
+  source: "firm" | "master";
+  templateId: number;
   name: string;
-  category: string;
-  fileName: string;
-  fileType: string;
-  fileSize: number | null;
-  objectPath: string;
-  folderId: number | null;
-  pdfMappings: unknown | null;
-}
+  documentType: string;
+  documentGroup: string;
+  sortOrder: number;
+  fileName: string | null;
+  fileType: string | null;
+  pdfMappings: unknown;
+  applicability: { status: ApplicabilityStatus; reasons: string[] };
+  readiness: { status: ReadinessStatus; missing: Array<{ code: string; message: string }> };
+  latestDocument: { id: number } | null;
+};
+
+type ChecklistSection = { section: string; items: ChecklistItem[] };
+type ChecklistResponse = {
+  case: { caseId: number; referenceNo: string | null; purchaseMode: string | null; titleType: string | null; caseType: string | null; projectName: string | null };
+  sections: ChecklistSection[];
+};
 
 interface FirmLetterhead {
   id: number;
@@ -75,72 +73,15 @@ interface FirmLetterhead {
   footer_mode: "every_page" | "last_page_only";
 }
 
-function MasterFolderTree({
-  folders,
-  selectedId,
-  onSelect,
-}: {
-  folders: SystemFolder[];
-  selectedId: number | null;
-  onSelect: (id: number | null) => void;
-}) {
-  function FolderItem({ folder, depth = 0 }: { folder: SystemFolder; depth?: number }) {
-    const children = folders.filter(f => f.parentId === folder.id).sort((a, b) => a.sortOrder - b.sortOrder);
-    const isSelected = selectedId === folder.id;
-    const [expanded, setExpanded] = useState(true);
-
-    return (
-      <div>
-        <div
-          className={cn(
-            "flex items-center gap-1.5 py-1.5 px-2 rounded cursor-pointer text-xs transition-colors",
-            isSelected ? "bg-amber-50 text-amber-700 font-medium" : "hover:bg-slate-50 text-slate-600"
-          )}
-          style={{ paddingLeft: `${depth * 14 + 6}px` }}
-          onClick={() => onSelect(folder.id)}
-        >
-          {children.length > 0 ? (
-            <button onClick={e => { e.stopPropagation(); setExpanded(!expanded); }} className="p-0.5">
-              <ChevronRight className={cn("w-3 h-3 transition-transform", expanded && "rotate-90")} />
-            </button>
-          ) : <span className="w-4" />}
-          {isSelected ? <FolderOpen className="w-3.5 h-3.5 shrink-0" /> : <Folder className="w-3.5 h-3.5 shrink-0" />}
-          <span className="truncate">{folder.name}</span>
-        </div>
-        {expanded && children.map(c => <FolderItem key={c.id} folder={c} depth={depth + 1} />)}
-      </div>
-    );
-  }
-
-  const roots = folders.filter(f => f.parentId === null).sort((a, b) => a.sortOrder - b.sortOrder);
-
-  return (
-    <div className="space-y-0.5">
-      <div
-        className={cn(
-          "flex items-center gap-1.5 py-1.5 px-2 rounded cursor-pointer text-xs transition-colors",
-          selectedId === null ? "bg-amber-50 text-amber-700 font-medium" : "hover:bg-slate-50 text-slate-600"
-        )}
-        onClick={() => onSelect(null)}
-      >
-        <FolderOpen className="w-3.5 h-3.5" />
-        <span>All Templates</span>
-      </div>
-      {roots.map(f => <FolderItem key={f.id} folder={f} />)}
-    </div>
-  );
-}
-
 export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
   const { toast } = useToast();
   const qc = useQueryClient();
   const uploadRef = useRef<HTMLInputElement>(null);
 
+  const [viewTab, setViewTab] = useState<"list" | "checklist">("list");
   const [generateDialogOpen, setGenerateDialogOpen] = useState(false);
-  const [generateTab, setGenerateTab] = useState<string>("firm");
-  const [selectedTemplateId, setSelectedTemplateId] = useState<string>("");
-  const [selectedMasterDocId, setSelectedMasterDocId] = useState<number | null>(null);
-  const [selectedMasterFolderId, setSelectedMasterFolderId] = useState<number | null>(null);
+  const [showAllTemplates, setShowAllTemplates] = useState(false);
+  const [templateSourceFilter, setTemplateSourceFilter] = useState<"all" | "firm" | "master">("all");
   const [selectedLetterheadId, setSelectedLetterheadId] = useState<string>("");
   const [documentName, setDocumentName] = useState("");
   const [uploadDialogOpen, setUploadDialogOpen] = useState(false);
@@ -158,9 +99,10 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
   });
   const documents = documentsQuery.data ?? [];
 
-  const { data: templates = [] } = useQuery<DocumentTemplate[]>({
-    queryKey: ["document-templates"],
-    queryFn: () => apiFetchJson("/document-templates?templateCapable=true"),
+  const checklistQuery = useQuery<ChecklistResponse>({
+    queryKey: ["case-documents-checklist", caseId, showAllTemplates],
+    queryFn: ({ signal }) => apiFetchJson(`/cases/${caseId}/documents/checklist${showAllTemplates ? "?includeAll=1" : ""}`, { signal }),
+    enabled: viewTab === "checklist" || generateDialogOpen,
     retry: false,
   });
 
@@ -170,38 +112,6 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
     retry: false,
   });
 
-  const masterFoldersQuery = useQuery<SystemFolder[]>({
-    queryKey: ["hub-folders"],
-    queryFn: () => apiFetchJson("/hub/folders"),
-    retry: false,
-  });
-  const masterFolders = masterFoldersQuery.data ?? [];
-
-  const masterDocsQuery = useQuery<MasterDoc[]>({
-    queryKey: ["hub-documents", selectedMasterFolderId],
-    queryFn: async () => {
-      const url = selectedMasterFolderId !== null
-        ? `/hub/documents?folderId=${selectedMasterFolderId}`
-        : "/hub/documents";
-      return await apiFetchJson(url);
-    },
-    enabled: generateDialogOpen && generateTab === "master",
-    retry: false,
-  });
-  const masterDocs = masterDocsQuery.data ?? [];
-
-  const templateMasterDocs = masterDocs.filter(d => {
-    const fn = d.fileName.toLowerCase();
-    if (fn.endsWith(".docx") || fn.endsWith(".doc")) return true;
-    if (fn.endsWith(".pdf") && d.pdfMappings) return true;
-    return false;
-  });
-
-  const selectedTemplate = selectedTemplateId ? templates.find(t => t.id === Number(selectedTemplateId)) : undefined;
-  const selectedMasterDoc = selectedMasterDocId !== null ? templateMasterDocs.find(d => d.id === selectedMasterDocId) : undefined;
-  const showLetterhead = generateTab === "firm"
-    ? isFirmDocumentTypeLetterLike(selectedTemplate?.document_type)
-    : isMasterDocumentLetterLike(selectedMasterDoc);
   const activeLetterheads = letterheads.filter(l => l.status === "active");
   const defaultLetterhead = activeLetterheads.find(l => l.is_default) ?? activeLetterheads[0];
 
@@ -214,56 +124,78 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
     onError: (err) => toastError(toast, err, "Delete failed"),
   });
 
-  async function handleGenerate() {
-    if (showLetterhead && activeLetterheads.length === 0) {
+  function asRecord(v: unknown): Record<string, unknown> | null {
+    return v && typeof v === "object" ? (v as Record<string, unknown>) : null;
+  }
+
+  async function handleGenerate(item: ChecklistItem) {
+    const isLetterLike = item.source === "firm"
+      ? isFirmDocumentTypeLetterLike(item.documentType)
+      : isMasterDocumentLetterLike({ name: item.name, category: item.documentType, fileName: item.fileName ?? undefined });
+
+    if (isLetterLike && activeLetterheads.length === 0) {
       toast({ title: "Missing firm letterhead", description: "Please configure a Firm Letter Head before generating this document.", variant: "destructive" });
       return;
     }
-    const letterheadIdToSend = showLetterhead
+    const letterheadIdToSend = isLetterLike
       ? (selectedLetterheadId ? Number(selectedLetterheadId) : defaultLetterhead?.id)
       : undefined;
 
-    if (generateTab === "firm") {
-      if (!selectedTemplateId) return;
-      setIsGenerating(true);
-      try {
-        await apiFetchJson(`/cases/${caseId}/documents/generate`, {
+    setIsGenerating(true);
+    try {
+      let created: CaseDocument;
+      if (item.source === "firm") {
+        created = await apiFetchJson(`/cases/${caseId}/documents/generate`, {
           method: "POST",
-          body: JSON.stringify({ templateId: Number(selectedTemplateId), documentName: documentName || undefined, letterheadId: letterheadIdToSend }),
+          body: JSON.stringify({ templateId: Number(item.templateId), documentName: documentName || undefined, letterheadId: letterheadIdToSend }),
         });
-        await qc.invalidateQueries({ queryKey: ["case-documents", caseId] });
-        toast({ title: "Document generated successfully" });
-        closeGenerateDialog();
-      } catch (err) {
-        toastError(toast, err, "Generation failed");
-      } finally {
-        setIsGenerating(false);
-      }
-    } else {
-      if (!selectedMasterDocId) return;
-      setIsGenerating(true);
-      try {
-        await apiFetchJson(`/cases/${caseId}/documents/generate-from-master`, {
+      } else {
+        created = await apiFetchJson(`/cases/${caseId}/documents/generate-from-master`, {
           method: "POST",
-          body: JSON.stringify({ masterDocId: selectedMasterDocId, documentName: documentName || undefined, letterheadId: letterheadIdToSend }),
+          body: JSON.stringify({ masterDocId: Number(item.templateId), documentName: documentName || undefined, letterheadId: letterheadIdToSend }),
         });
-        await qc.invalidateQueries({ queryKey: ["case-documents", caseId] });
-        toast({ title: "Document generated from master template" });
-        closeGenerateDialog();
-      } catch (err) {
-        toastError(toast, err, "Generation failed");
-      } finally {
-        setIsGenerating(false);
       }
+      await qc.invalidateQueries({ queryKey: ["case-documents", caseId] });
+      await qc.invalidateQueries({ queryKey: ["case-documents-checklist", caseId] });
+      toast({
+        title: "Document generated successfully",
+        description: created?.name ? String(created.name) : undefined,
+        action: (
+          <ToastAction altText="Download" onClick={() => handleDownload(created)}>
+            Download
+          </ToastAction>
+        ),
+      });
+      setViewTab("list");
+      closeGenerateDialog();
+    } catch (err: unknown) {
+      const errRec = asRecord(err);
+      const data = asRecord(errRec?.data);
+      const code = typeof data?.code === "string" ? String(data.code) : "";
+      const missingRaw = Array.isArray(data?.missing) ? data?.missing : null;
+      const reasonsRaw = Array.isArray(data?.reasons) ? data?.reasons : null;
+      if (code === "TEMPLATE_NOT_READY" && missingRaw) {
+        const missingMsgs = missingRaw
+          .map((m) => asRecord(m)?.message)
+          .filter((m): m is string => typeof m === "string" && Boolean(m.trim()));
+        toast({ title: "Template not ready", description: missingMsgs.join(", "), variant: "destructive" });
+      } else if (code === "TEMPLATE_NOT_APPLICABLE") {
+        const reasons = reasonsRaw?.filter((x): x is string => typeof x === "string" && Boolean(x.trim()));
+        toast({ title: "Template not applicable", description: reasons?.length ? reasons.join(", ") : undefined, variant: "destructive" });
+      } else {
+        toastError(toast, err, "Generation failed");
+      }
+    } finally {
+      setIsGenerating(false);
     }
   }
 
   function closeGenerateDialog() {
     setGenerateDialogOpen(false);
-    setSelectedTemplateId("");
-    setSelectedMasterDocId(null);
     setDocumentName("");
     setSelectedLetterheadId("");
+    setShowAllTemplates(false);
+    setTemplateSourceFilter("all");
   }
 
   async function handleUpload() {
@@ -327,8 +259,6 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
     );
   }
 
-  const canGenerate = generateTab === "firm" ? !!selectedTemplateId : !!selectedMasterDocId;
-
   return (
     <div className="space-y-6">
       <Card>
@@ -355,61 +285,140 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
           </div>
         </CardHeader>
         <CardContent>
-          {documents.length === 0 ? (
-            <div className="text-center py-12 text-slate-500">
-              <FileText className="w-10 h-10 text-slate-300 mx-auto mb-3" />
-              <p className="font-medium text-slate-600 mb-1">No documents yet</p>
-              <p className="text-sm">Upload documents or generate them from templates.</p>
-            </div>
-          ) : (
-            <div className="space-y-2">
-              {documents.map((doc) => (
-                <div
-                  key={doc.id}
-                  className="flex items-center gap-3 p-4 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 transition-colors"
-                >
-                  <FileText className="w-5 h-5 text-amber-500 flex-shrink-0" />
-                  <div className="flex-1 min-w-0">
-                    <div className="font-medium text-slate-900 truncate">{doc.name}</div>
-                    <div className="flex items-center gap-2 mt-0.5">
-                      <span className="text-xs px-1.5 py-0.5 rounded bg-slate-100 text-slate-600 font-medium">
-                        {docTypeLabel(doc.document_type)}
-                      </span>
-                      <span className="text-xs px-1.5 py-0.5 rounded bg-blue-50 text-blue-700 font-medium capitalize">
-                        {doc.status}
-                      </span>
-                      {doc.template_name && (
-                        <span className="text-xs text-slate-500">from: {doc.template_name}</span>
-                      )}
-                      {doc.file_size && (
-                        <span className="text-xs text-slate-400">{formatFileSize(doc.file_size)}</span>
-                      )}
-                    </div>
-                  </div>
-                  <div className="flex items-center gap-1 text-xs text-slate-400">
-                    {new Date(doc.created_at).toLocaleDateString("en-MY")}
-                  </div>
-                  <Button
-                    size="icon"
-                    variant="ghost"
-                    className="h-8 w-8 text-slate-400 hover:text-slate-700"
-                    onClick={() => handleDownload(doc)}
-                    disabled={downloadingDocId === doc.id}
-                  >
-                    <Download className={cn("w-4 h-4", downloadingDocId === doc.id && "animate-bounce")} />
-                  </Button>
-                  <Button
-                    size="icon"
-                    variant="ghost"
-                    className="h-8 w-8 text-slate-400 hover:text-red-600"
-                    onClick={() => deleteMutation.mutate(doc.id)}
-                  >
-                    <Trash2 className="w-4 h-4" />
-                  </Button>
+          <Tabs value={viewTab} onValueChange={(v) => setViewTab(v === "checklist" ? "checklist" : "list")}>
+            <TabsList className="mb-4">
+              <TabsTrigger value="list">List</TabsTrigger>
+              <TabsTrigger value="checklist">Checklist</TabsTrigger>
+            </TabsList>
+
+            <TabsContent value="list">
+              {documents.length === 0 ? (
+                <div className="text-center py-12 text-slate-500">
+                  <FileText className="w-10 h-10 text-slate-300 mx-auto mb-3" />
+                  <p className="font-medium text-slate-600 mb-1">No documents yet</p>
+                  <p className="text-sm">Upload documents or generate them from templates.</p>
                 </div>
-              ))}
-            </div>
-          )}
+              ) : (
+                <div className="space-y-2">
+                  {documents.map((doc) => (
+                    <div
+                      key={doc.id}
+                      className="flex items-center gap-3 p-4 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 transition-colors"
+                    >
+                      <FileText className="w-5 h-5 text-amber-500 flex-shrink-0" />
+                      <div className="flex-1 min-w-0">
+                        <div className="font-medium text-slate-900 truncate" title={doc.name}>{doc.name}</div>
+                        <div className="flex items-center gap-2 mt-0.5 flex-wrap">
+                          <span className="text-xs px-1.5 py-0.5 rounded bg-slate-100 text-slate-600 font-medium">
+                            {docTypeLabel(doc.document_type)}
+                          </span>
+                          <span className="text-xs px-1.5 py-0.5 rounded bg-blue-50 text-blue-700 font-medium capitalize">
+                            {doc.status}
+                          </span>
+                          {doc.template_source && (
+                            <span className="text-xs px-1.5 py-0.5 rounded bg-emerald-50 text-emerald-700 font-medium capitalize">
+                              {String(doc.template_source)}
+                            </span>
+                          )}
+                          {doc.template_name && (
+                            <span className="text-xs text-slate-500">from: {doc.template_name}</span>
+                          )}
+                          {doc.template_snapshot_name && !doc.template_name && (
+                            <span className="text-xs text-slate-500">from: {doc.template_snapshot_name}</span>
+                          )}
+                          {doc.file_size && (
+                            <span className="text-xs text-slate-400">{formatFileSize(doc.file_size)}</span>
+                          )}
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-1 text-xs text-slate-400">
+                        {new Date(doc.created_at).toLocaleDateString("en-MY")}
+                      </div>
+                      <Button
+                        size="icon"
+                        variant="ghost"
+                        className="h-8 w-8 text-slate-400 hover:text-slate-700"
+                        onClick={() => handleDownload(doc)}
+                        disabled={downloadingDocId === doc.id}
+                      >
+                        <Download className={cn("w-4 h-4", downloadingDocId === doc.id && "animate-bounce")} />
+                      </Button>
+                      <Button
+                        size="icon"
+                        variant="ghost"
+                        className="h-8 w-8 text-slate-400 hover:text-red-600"
+                        onClick={() => deleteMutation.mutate(doc.id)}
+                      >
+                        <Trash2 className="w-4 h-4" />
+                      </Button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </TabsContent>
+
+            <TabsContent value="checklist">
+              {checklistQuery.isLoading ? (
+                <div className="p-4 text-slate-500">Loading checklist...</div>
+              ) : checklistQuery.isError ? (
+                <QueryFallback title="Checklist unavailable" error={checklistQuery.error} onRetry={() => checklistQuery.refetch()} isRetrying={checklistQuery.isFetching} />
+              ) : (
+                <div className="space-y-6">
+                  {(checklistQuery.data?.sections ?? []).map((sec) => (
+                    <div key={sec.section} className="space-y-2">
+                      <div className="text-sm font-semibold text-slate-900">{sec.section}</div>
+                      <div className="space-y-2">
+                        {(sec.items ?? []).map((it) => {
+                          const applicable = it.applicability?.status === "applicable";
+                          const ready = it.readiness?.status === "ready";
+                          const latestId = it.latestDocument?.id;
+                          const latestDoc = latestId ? documents.find((d) => d.id === latestId) : null;
+                          const reason = !applicable
+                            ? (it.applicability?.reasons ?? []).join(", ")
+                            : !ready
+                              ? (it.readiness?.missing ?? []).map((m) => m.message).filter(Boolean).slice(0, 3).join(", ")
+                              : "";
+                          return (
+                            <div key={`${it.source}-${it.templateId}`} className="flex items-start justify-between gap-3 rounded-lg border border-slate-200 bg-white p-3 min-w-0">
+                              <div className="min-w-0">
+                                <div className="font-medium text-slate-900 truncate" title={it.name}>{it.name}</div>
+                                <div className="mt-1 flex items-center gap-2 flex-wrap">
+                                  <span className={cn("text-[10px] px-1.5 py-0.5 rounded font-medium", it.source === "firm" ? "bg-slate-100 text-slate-700" : "bg-purple-50 text-purple-700")}>
+                                    {it.source}
+                                  </span>
+                                  <span className={cn("text-[10px] px-1.5 py-0.5 rounded font-medium", applicable ? "bg-emerald-50 text-emerald-700" : "bg-slate-100 text-slate-500")}>
+                                    {applicable ? "Applicable" : "Not applicable"}
+                                  </span>
+                                  <span className={cn("text-[10px] px-1.5 py-0.5 rounded font-medium", ready ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-800")}>
+                                    {ready ? "Ready" : (it.readiness?.status || "Incomplete")}
+                                  </span>
+                                  <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-50 text-blue-700 font-medium">
+                                    {it.documentGroup}
+                                  </span>
+                                </div>
+                                {reason && <div className="mt-1 text-xs text-slate-600 break-words">{reason}</div>}
+                              </div>
+                              <div className="shrink-0 flex items-center gap-2">
+                                {latestDoc ? (
+                                  <Button size="sm" variant="outline" onClick={() => handleDownload(latestDoc)} disabled={downloadingDocId === latestDoc.id}>
+                                    Download
+                                  </Button>
+                                ) : (
+                                  <Button size="sm" onClick={() => handleGenerate(it)} disabled={!applicable || !ready || isGenerating}>
+                                    Generate
+                                  </Button>
+                                )}
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </TabsContent>
+          </Tabs>
         </CardContent>
       </Card>
 
@@ -418,118 +427,117 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
           <DialogHeader>
             <DialogTitle>Generate Document from Template</DialogTitle>
           </DialogHeader>
-          <Tabs value={generateTab} onValueChange={setGenerateTab}>
-            <TabsList className="mb-4">
-              <TabsTrigger value="firm">Firm Templates</TabsTrigger>
-              <TabsTrigger value="master">Master Templates</TabsTrigger>
-            </TabsList>
-
-            <TabsContent value="firm" className="space-y-4">
-              <div className="space-y-1.5">
-                <Label>Template</Label>
-                {templates.length === 0 ? (
-                  <p className="text-sm text-slate-500 py-4">No firm templates uploaded yet. Go to Settings &gt; Documents to upload DOCX templates.</p>
-                ) : (
-                  <Select value={selectedTemplateId} onValueChange={setSelectedTemplateId}>
-                    <SelectTrigger>
-                      <SelectValue placeholder="Select a template..." />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {templates.map((t) => (
-                        <SelectItem key={t.id} value={String(t.id)}>
-                          {t.name}
-                          {t.document_type && t.document_type !== "other" && (
-                            <span className="ml-2 text-slate-400 text-xs">({docTypeLabel(t.document_type)})</span>
-                          )}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                )}
+          <div className="space-y-4">
+            <div className="flex items-center justify-between gap-3">
+              <div className="flex items-center gap-2">
+                <Button size="sm" variant={showAllTemplates ? "outline" : "default"} onClick={() => setShowAllTemplates(false)}>
+                  Applicable
+                </Button>
+                <Button size="sm" variant={showAllTemplates ? "default" : "outline"} onClick={() => setShowAllTemplates(true)}>
+                  All templates
+                </Button>
               </div>
-            </TabsContent>
+              <Select
+                value={templateSourceFilter}
+                onValueChange={(v) => setTemplateSourceFilter(v === "firm" ? "firm" : v === "master" ? "master" : "all")}
+              >
+                <SelectTrigger className="w-40">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">All sources</SelectItem>
+                  <SelectItem value="firm">Firm</SelectItem>
+                  <SelectItem value="master">Master</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
 
-            <TabsContent value="master" className="space-y-4">
-              <p className="text-xs text-slate-500">Select a template from the system folder tree. Word documents (.docx) use {"{{variable}}"} placeholders. PDF templates use mapped text boxes.</p>
-              <div className="flex gap-4 min-h-[200px]">
-                <div className="w-48 shrink-0 border rounded-lg p-2 overflow-y-auto max-h-[300px]">
-                  <MasterFolderTree
-                    folders={masterFolders}
-                    selectedId={selectedMasterFolderId}
-                    onSelect={setSelectedMasterFolderId}
-                  />
-                </div>
-                <div className="flex-1 border rounded-lg p-3 overflow-y-auto max-h-[300px]">
-                  {templateMasterDocs.length === 0 ? (
-                    <p className="text-xs text-slate-400 text-center py-8">No templates in this folder</p>
-                  ) : (
-                    <div className="space-y-1">
-                      {templateMasterDocs.map(doc => (
-                        <div
-                          key={doc.id}
-                          className={cn(
-                            "flex items-center gap-2 p-2 rounded cursor-pointer text-sm transition-colors",
-                            selectedMasterDocId === doc.id
-                              ? "bg-amber-50 border border-amber-200"
-                              : "hover:bg-slate-50 border border-transparent"
-                          )}
-                          onClick={() => setSelectedMasterDocId(doc.id)}
-                        >
-                          <FileText className="w-4 h-4 text-slate-400 shrink-0" />
-                          <div className="flex-1 min-w-0">
-                            <p className="font-medium text-slate-700 truncate">{doc.name}</p>
-                            <p className="text-xs text-slate-400">{doc.fileName}</p>
-                          </div>
-                          <Badge variant="outline" className="text-xs shrink-0">
-                            {doc.fileName.split(".").pop()?.toUpperCase()}
-                          </Badge>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              </div>
-            </TabsContent>
-          </Tabs>
-
-          {showLetterhead && (
             <div className="space-y-1.5">
-              <Label>Firm Letter Head</Label>
-              {activeLetterheads.length === 0 ? (
-                <div className="text-xs text-slate-500">No firm letterhead configured</div>
-              ) : (
+              <Label>Document name (optional)</Label>
+              <Input value={documentName} onChange={(e) => setDocumentName(e.target.value)} placeholder="Leave empty to use template name" />
+            </div>
+
+            {activeLetterheads.length > 0 && (
+              <div className="space-y-1.5">
+                <Label>Letterhead (for letter-like templates)</Label>
                 <Select value={selectedLetterheadId} onValueChange={setSelectedLetterheadId}>
                   <SelectTrigger>
-                    <SelectValue placeholder={defaultLetterhead ? `Use default (${defaultLetterhead.name})` : "Use default"} />
+                    <SelectValue placeholder={defaultLetterhead ? `Default: ${defaultLetterhead.name}` : "Select letterhead..."} />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="">Use default</SelectItem>
-                    {activeLetterheads.map(lh => (
-                      <SelectItem key={lh.id} value={String(lh.id)}>{lh.name}{lh.is_default ? " (default)" : ""}</SelectItem>
+                    {activeLetterheads.map((l) => (
+                      <SelectItem key={l.id} value={String(l.id)}>{l.name}</SelectItem>
                     ))}
                   </SelectContent>
                 </Select>
+              </div>
+            )}
+
+            <div className="border rounded-lg p-3 max-h-[340px] overflow-y-auto">
+              {checklistQuery.isLoading ? (
+                <div className="text-sm text-slate-500 py-6 text-center">Loading templates…</div>
+              ) : checklistQuery.isError ? (
+                <QueryFallback title="Templates unavailable" error={checklistQuery.error} onRetry={() => checklistQuery.refetch()} isRetrying={checklistQuery.isFetching} />
+              ) : (
+                <div className="space-y-4">
+                  {(checklistQuery.data?.sections ?? []).map((sec) => {
+                    const filtered = (sec.items ?? []).filter((it) => {
+                      if (!showAllTemplates && it.applicability?.status !== "applicable") return false;
+                      if (templateSourceFilter !== "all" && it.source !== templateSourceFilter) return false;
+                      return true;
+                    });
+                    if (filtered.length === 0) return null;
+                    return (
+                      <div key={sec.section} className="space-y-2">
+                        <div className="text-xs font-semibold text-slate-700">{sec.section}</div>
+                        <div className="space-y-2">
+                          {filtered.map((it) => {
+                            const applicable = it.applicability?.status === "applicable";
+                            const ready = it.readiness?.status === "ready";
+                            const reason = !applicable
+                              ? (it.applicability?.reasons ?? []).join(", ")
+                              : !ready
+                                ? (it.readiness?.missing ?? []).map((m) => m.message).filter(Boolean).slice(0, 3).join(", ")
+                                : "";
+                            return (
+                              <div key={`${it.source}-${it.templateId}`} className="flex items-start justify-between gap-3 rounded-md border border-slate-200 bg-white p-2">
+                                <div className="min-w-0">
+                                  <div className="text-sm font-medium text-slate-900 truncate" title={it.name}>{it.name}</div>
+                                  <div className="mt-1 flex items-center gap-2 flex-wrap">
+                                    <span className={cn("text-[10px] px-1.5 py-0.5 rounded font-medium", it.source === "firm" ? "bg-slate-100 text-slate-700" : "bg-purple-50 text-purple-700")}>
+                                      {it.source}
+                                    </span>
+                                    <span className={cn("text-[10px] px-1.5 py-0.5 rounded font-medium", applicable ? "bg-emerald-50 text-emerald-700" : "bg-slate-100 text-slate-500")}>
+                                      {applicable ? "Applicable" : "Not applicable"}
+                                    </span>
+                                    <span className={cn("text-[10px] px-1.5 py-0.5 rounded font-medium", ready ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-800")}>
+                                      {ready ? "Ready" : (it.readiness?.status || "Incomplete")}
+                                    </span>
+                                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-50 text-blue-700 font-medium">
+                                      {it.documentGroup}
+                                    </span>
+                                  </div>
+                                  {reason && <div className="mt-1 text-xs text-slate-600 break-words">{reason}</div>}
+                                </div>
+                                <div className="shrink-0">
+                                  <Button size="sm" onClick={() => handleGenerate(it)} disabled={!applicable || !ready || isGenerating}>
+                                    Generate
+                                  </Button>
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
               )}
             </div>
-          )}
 
-          <div className="space-y-1.5">
-            <Label>Document Name <span className="text-slate-400 text-xs">(optional)</span></Label>
-            <Input
-              placeholder="Leave blank to use template name + reference"
-              value={documentName}
-              onChange={(e) => setDocumentName(e.target.value)}
-            />
-          </div>
-          <div className="flex justify-end gap-2 pt-2">
-            <Button variant="outline" onClick={closeGenerateDialog}>Cancel</Button>
-            <Button
-              className="bg-amber-500 hover:bg-amber-600"
-              onClick={handleGenerate}
-              disabled={!canGenerate || isGenerating}
-            >
-              {isGenerating ? "Generating..." : "Generate"}
-            </Button>
+            <div className="flex justify-end gap-2 pt-2">
+              <Button variant="outline" onClick={closeGenerateDialog} disabled={isGenerating}>Close</Button>
+            </div>
           </div>
         </DialogContent>
       </Dialog>

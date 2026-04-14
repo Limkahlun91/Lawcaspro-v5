@@ -11,6 +11,11 @@ import Docxtemplater from "docxtemplater";
 import PizZip from "pizzip";
 import { PDFDocument, rgb, StandardFonts } from "pdf-lib";
 import fontkit from "@pdf-lib/fontkit";
+import { evaluateTemplateApplicability, normalizePurchaseMode, normalizeTitleType } from "../lib/documentApplicability";
+import { evaluateTemplateReadiness, type TemplateReadinessInputs } from "../lib/documentReadiness";
+import { buildGeneratedDownloadFileName } from "../lib/documentNaming";
+import { normalizeWorkflowDocumentKeyFromDb } from "../lib/caseWorkflowDocuments";
+import { LOAN_STAMPING_ITEM_KEYS, type LoanStampingItemKey } from "../lib/loanStamping";
 
 const router: IRouter = Router();
 const storage = new ObjectStorageService();
@@ -41,6 +46,11 @@ async function queryRows(r: DbConn, query: ReturnType<typeof sql>): Promise<Reco
   if (Array.isArray(result)) return result as Record<string, unknown>[];
   if ("rows" in result) return (result as { rows: Record<string, unknown>[] }).rows;
   return [];
+}
+
+async function tableExists(r: DbConn, fullName: string): Promise<boolean> {
+  const rows = await queryRows(r, sql`SELECT to_regclass(${fullName}) AS reg`);
+  return Boolean(rows[0]?.reg);
 }
 
 function safeJson(str: unknown): Record<string, unknown> {
@@ -78,6 +88,10 @@ function isDocxTemplateRenderError(err: unknown): boolean {
 function newGeneratedDocObjectPath(firmId: number, caseId: number, extension: string): string {
   const ext = extension.replace(/^\./, "").toLowerCase() || "docx";
   return `/objects/cases/${firmId}/case-${caseId}/generated/${randomUUID()}.${ext}`;
+}
+
+function isLoanStampingItemKey(v: string): v is LoanStampingItemKey {
+  return (LOAN_STAMPING_ITEM_KEYS as readonly string[]).includes(v);
 }
 
 async function streamSupabasePrivateObjectToResponse({
@@ -968,12 +982,24 @@ router.patch("/document-templates/:templateId", requireAuth, requireFirmUser, re
   const hasName = Object.prototype.hasOwnProperty.call(body, "name");
   const hasDescription = Object.prototype.hasOwnProperty.call(body, "description");
   const hasDocumentType = Object.prototype.hasOwnProperty.call(body, "documentType");
+  const hasIsActive = Object.prototype.hasOwnProperty.call(body, "isActive");
+  const hasAppliesToPurchaseMode = Object.prototype.hasOwnProperty.call(body, "appliesToPurchaseMode");
+  const hasAppliesToTitleType = Object.prototype.hasOwnProperty.call(body, "appliesToTitleType");
+  const hasAppliesToCaseType = Object.prototype.hasOwnProperty.call(body, "appliesToCaseType");
+  const hasDocumentGroup = Object.prototype.hasOwnProperty.call(body, "documentGroup");
+  const hasSortOrder = Object.prototype.hasOwnProperty.call(body, "sortOrder");
 
   const folderId = body.folderId;
   const kind = body.kind;
   const name = body.name;
   const description = body.description;
   const documentType = body.documentType;
+  const isActive = body.isActive;
+  const appliesToPurchaseMode = body.appliesToPurchaseMode;
+  const appliesToTitleType = body.appliesToTitleType;
+  const appliesToCaseType = body.appliesToCaseType;
+  const documentGroup = body.documentGroup;
+  const sortOrder = body.sortOrder;
 
   const folderIdNum: number | null | undefined = hasFolderId ? (typeof folderId === "number" ? folderId : folderId === null ? null : undefined) : undefined;
   if (hasFolderId && folderIdNum === undefined) {
@@ -1003,6 +1029,49 @@ router.patch("/document-templates/:templateId", requireAuth, requireFirmUser, re
     res.status(400).json({ error: "Invalid documentType" });
     return;
   }
+
+  const isActiveVal: boolean | undefined = hasIsActive ? (typeof isActive === "boolean" ? isActive : undefined) : undefined;
+  if (hasIsActive && isActiveVal === undefined) {
+    res.status(400).json({ error: "Invalid isActive" });
+    return;
+  }
+  const purchaseModeVal: string | null | undefined =
+    hasAppliesToPurchaseMode
+      ? (typeof appliesToPurchaseMode === "string" ? (appliesToPurchaseMode.trim() || null) : appliesToPurchaseMode === null ? null : undefined)
+      : undefined;
+  if (hasAppliesToPurchaseMode && purchaseModeVal === undefined) {
+    res.status(400).json({ error: "Invalid appliesToPurchaseMode" });
+    return;
+  }
+  const titleTypeVal: string | undefined =
+    hasAppliesToTitleType
+      ? (typeof appliesToTitleType === "string" ? (appliesToTitleType.trim() || "any") : undefined)
+      : undefined;
+  if (hasAppliesToTitleType && !titleTypeVal) {
+    res.status(400).json({ error: "Invalid appliesToTitleType" });
+    return;
+  }
+  const caseTypeVal: string | null | undefined =
+    hasAppliesToCaseType
+      ? (typeof appliesToCaseType === "string" ? (appliesToCaseType.trim() || null) : appliesToCaseType === null ? null : undefined)
+      : undefined;
+  if (hasAppliesToCaseType && caseTypeVal === undefined) {
+    res.status(400).json({ error: "Invalid appliesToCaseType" });
+    return;
+  }
+  const groupVal: string | undefined =
+    hasDocumentGroup
+      ? (typeof documentGroup === "string" ? (documentGroup.trim() || "Others") : undefined)
+      : undefined;
+  if (hasDocumentGroup && !groupVal) {
+    res.status(400).json({ error: "Invalid documentGroup" });
+    return;
+  }
+  const sortOrderVal: number | undefined = hasSortOrder ? (typeof sortOrder === "number" && Number.isFinite(sortOrder) ? sortOrder : undefined) : undefined;
+  if (hasSortOrder && sortOrderVal === undefined) {
+    res.status(400).json({ error: "Invalid sortOrder" });
+    return;
+  }
   if (kindVal && kindVal !== "template" && kindVal !== "reference") {
     res.status(400).json({ error: "Invalid kind" });
     return;
@@ -1028,9 +1097,10 @@ router.patch("/document-templates/:templateId", requireAuth, requireFirmUser, re
     return;
   }
   const existingExt = typeof (existing as any).extension === "string" ? String((existing as any).extension) : fileExtensionFromName(String((existing as any).file_name ?? ""));
-  const effectiveKind: "template" | "reference" = (existingExt || "").toLowerCase() === "docx"
-    ? ((kindVal as any) ?? (existing as any).kind ?? "template")
-    : "reference";
+  const existingKindRaw = typeof (existing as any).kind === "string" ? String((existing as any).kind) : "template";
+  const requestedKindRaw = kindVal ?? existingKindRaw;
+  const requestedKind: "template" | "reference" = requestedKindRaw === "reference" ? "reference" : "template";
+  const effectiveKind: "template" | "reference" = (existingExt || "").toLowerCase() === "docx" ? requestedKind : "reference";
   if (effectiveKind === "template" && String(existingExt || "").toLowerCase() !== "docx") {
     res.status(400).json({ error: "Template must be a .docx file", code: "TEMPLATE_MUST_BE_DOCX" });
     return;
@@ -1044,6 +1114,12 @@ router.patch("/document-templates/:templateId", requireAuth, requireFirmUser, re
             name = CASE WHEN ${hasName} THEN ${nameVal ?? ""} ELSE name END,
             description = CASE WHEN ${hasDescription} THEN ${descriptionVal ?? null} ELSE description END,
             document_type = CASE WHEN ${hasDocumentType} THEN ${effectiveKind === "template" ? (docTypeVal ?? "other") : "other"} ELSE document_type END,
+            is_active = CASE WHEN ${hasIsActive} THEN ${isActiveVal ?? true} ELSE is_active END,
+            applies_to_purchase_mode = CASE WHEN ${hasAppliesToPurchaseMode} THEN ${purchaseModeVal ?? null} ELSE applies_to_purchase_mode END,
+            applies_to_title_type = CASE WHEN ${hasAppliesToTitleType} THEN ${titleTypeVal ?? "any"} ELSE applies_to_title_type END,
+            applies_to_case_type = CASE WHEN ${hasAppliesToCaseType} THEN ${caseTypeVal ?? null} ELSE applies_to_case_type END,
+            document_group = CASE WHEN ${hasDocumentGroup} THEN ${groupVal ?? "Others"} ELSE document_group END,
+            sort_order = CASE WHEN ${hasSortOrder} THEN ${sortOrderVal ?? 0} ELSE sort_order END,
             is_template_capable = (
               ${effectiveKind} = 'template'
               AND LOWER(COALESCE(NULLIF(extension,''), split_part(file_name, '.', array_length(string_to_array(file_name, '.'), 1)))) = 'docx'
@@ -1549,11 +1625,219 @@ router.get("/cases/:caseId/documents", requireAuth, requireFirmUser, requirePerm
     SELECT cd.*, dt.name as template_name, u.name as generated_by_name
     FROM case_documents cd
     LEFT JOIN document_templates dt ON cd.template_id = dt.id
+    LEFT JOIN platform_documents pd ON cd.platform_document_id = pd.id
     LEFT JOIN users u ON cd.generated_by = u.id
     WHERE cd.case_id = ${caseId} AND cd.firm_id = ${req.firmId!}
     ORDER BY cd.created_at DESC`
   );
   res.json(rows);
+});
+
+router.get("/cases/:caseId/documents/checklist", requireAuth, requireFirmUser, requirePermission("documents", "read"), async (req: AuthRequest, res): Promise<void> => {
+  const r = getRlsDb(req, res);
+  if (!r) return;
+  const caseIdStr = one((req.params as any).caseId);
+  const caseId = caseIdStr ? parseInt(caseIdStr, 10) : NaN;
+  if (Number.isNaN(caseId)) {
+    res.status(400).json({ error: "Invalid case ID" });
+    return;
+  }
+
+  const includeAll = truthy((req.query as any).includeAll);
+
+  const context = await buildCaseContext(r, caseId, req.firmId!);
+  if (!context) {
+    res.status(404).json({ error: "Case not found" });
+    return;
+  }
+
+  const wfDocs = (await tableExists(r, "public.case_workflow_documents"))
+    ? await queryRows(r, sql`
+      SELECT milestone_key, object_path, file_name, updated_at
+      FROM case_workflow_documents
+      WHERE firm_id = ${req.firmId!} AND case_id = ${caseId} AND deleted_at IS NULL
+      ORDER BY updated_at DESC
+    `)
+    : [];
+  const workflowDocs: Record<string, { hasFile: boolean }> = {};
+  for (const d of wfDocs) {
+    const k = normalizeWorkflowDocumentKeyFromDb(String(d.milestone_key ?? ""));
+    if (!k) continue;
+    if (workflowDocs[k]) continue;
+    workflowDocs[k] = { hasFile: Boolean(d.object_path && d.file_name) };
+  }
+
+  const stampingRows = (await tableExists(r, "public.case_loan_stamping_items"))
+    ? await queryRows(r, sql`
+      SELECT item_key, custom_name, dated_on, stamped_on, object_path, file_name, sort_order
+      FROM case_loan_stamping_items
+      WHERE firm_id = ${req.firmId!} AND case_id = ${caseId} AND deleted_at IS NULL
+      ORDER BY sort_order ASC, id ASC
+    `)
+    : [];
+
+  const caseDocuments = await queryRows(r, sql`
+    SELECT id, template_id, platform_document_id, name, file_name, created_at, generated_by
+    FROM case_documents
+    WHERE firm_id = ${req.firmId!} AND case_id = ${caseId}
+    ORDER BY created_at DESC
+  `);
+
+  const latestByFirmTemplateId = new Map<number, Record<string, unknown>>();
+  const latestByPlatformDocId = new Map<number, Record<string, unknown>>();
+  for (const cd of caseDocuments) {
+    const tid = typeof cd.template_id === "number" ? Number(cd.template_id) : null;
+    const pid = typeof cd.platform_document_id === "number" ? Number(cd.platform_document_id) : null;
+    if (tid && !latestByFirmTemplateId.has(tid)) latestByFirmTemplateId.set(tid, cd);
+    if (pid && !latestByPlatformDocId.has(pid)) latestByPlatformDocId.set(pid, cd);
+  }
+
+  const firmTemplates = await queryRows(r, sql`
+    SELECT *
+    FROM document_templates
+    WHERE firm_id = ${req.firmId!}
+      AND kind = 'template'
+      AND is_template_capable = true
+      AND (${includeAll} OR is_active = true)
+    ORDER BY document_group ASC, sort_order ASC, name ASC
+  `);
+
+  const masterTemplates = await queryRows(r, sql`
+    SELECT *
+    FROM platform_documents
+    WHERE (firm_id IS NULL OR firm_id = ${req.firmId!})
+      AND (LOWER(file_name) LIKE '%.docx' OR LOWER(file_name) LIKE '%.doc' OR LOWER(file_name) LIKE '%.pdf')
+      AND (${includeAll} OR is_active = true)
+    ORDER BY document_group ASC, sort_order ASC, name ASC
+  `);
+
+  const purchaseMode = normalizePurchaseMode(String((context as any).purchase_mode ?? "")) ?? null;
+  const titleType = normalizeTitleType(String((context as any).title_type ?? "")) ?? null;
+  const caseType = typeof (context as any).case_type === "string" ? String((context as any).case_type) : null;
+  const referenceNo = typeof (context as any).reference_no === "string" ? String((context as any).reference_no) : null;
+  const projectName = typeof (context as any).project_name === "string" ? String((context as any).project_name) : null;
+  const purchaser1Name = typeof (context as any).spa_purchaser1_name === "string" ? String((context as any).spa_purchaser1_name) : null;
+  const purchaser1Ic = typeof (context as any).spa_purchaser1_ic === "string" ? String((context as any).spa_purchaser1_ic) : null;
+  const loanTotal = typeof (context as any).total_loan_raw === "string" ? String((context as any).total_loan_raw) : (typeof (context as any).total_loan === "string" ? String((context as any).total_loan) : null);
+  const loanEndFinancier = typeof (context as any).end_financier === "string" ? String((context as any).end_financier) : null;
+
+  const keyDates = Object.fromEntries(
+    Object.entries(context as Record<string, unknown>)
+      .filter(([k]) => k.endsWith("_ymd"))
+      .map(([k, v]) => [k.replace(/_ymd$/, ""), typeof v === "string" ? v : null])
+  );
+
+  const readinessInput: TemplateReadinessInputs = {
+    purchaseMode,
+    titleType,
+    caseType,
+    referenceNo,
+    projectName,
+    purchaser1Name,
+    purchaser1Ic,
+    loanTotal,
+    loanEndFinancier,
+    keyDates,
+    workflowDocs,
+    stampingItems: stampingRows.map((x) => ({
+      itemKey: (() => {
+        const raw = String(x.item_key ?? "");
+        return isLoanStampingItemKey(raw) ? raw : "other";
+      })(),
+      customName: typeof x.custom_name === "string" ? String(x.custom_name) : null,
+      datedOn: x.dated_on ? String(x.dated_on) : null,
+      stampedOn: x.stamped_on ? String(x.stamped_on) : null,
+      hasFile: Boolean(x.object_path && x.file_name),
+      sortOrder: typeof x.sort_order === "number" ? Number(x.sort_order) : 0,
+    })),
+  };
+
+  type ChecklistItem = {
+    source: "firm" | "master";
+    templateId: number;
+    name: string;
+    documentType: string;
+    documentGroup: string;
+    sortOrder: number;
+    fileName: string | null;
+    fileType: string | null;
+    pdfMappings: unknown;
+    applicability: { status: "applicable" | "not_applicable"; reasons: string[] };
+    readiness: { status: string; missing: Array<{ code: string; message: string }> };
+    latestDocument: Record<string, unknown> | null;
+  };
+
+  const items: ChecklistItem[] = [];
+
+  for (const t of firmTemplates) {
+    const templateId = Number((t as any).id);
+    const documentGroup = String((t as any).document_group ?? "Others");
+    const app = evaluateTemplateApplicability({
+      isActive: Boolean((t as any).is_active ?? true),
+      appliesToPurchaseMode: (t as any).applies_to_purchase_mode ? String((t as any).applies_to_purchase_mode) : null,
+      appliesToTitleType: (t as any).applies_to_title_type ? String((t as any).applies_to_title_type) : null,
+      appliesToCaseType: (t as any).applies_to_case_type ? String((t as any).applies_to_case_type) : null,
+    }, { purchaseMode: (context as any).purchase_mode ?? null, titleType: (context as any).title_type ?? null, caseType });
+    const ready = app.applicable ? evaluateTemplateReadiness({ documentGroup, input: readinessInput }) : { status: "ready", missing: [] };
+    items.push({
+      source: "firm",
+      templateId,
+      name: String((t as any).name ?? ""),
+      documentType: String((t as any).document_type ?? "other"),
+      documentGroup,
+      sortOrder: Number((t as any).sort_order ?? 0),
+      fileName: (t as any).file_name ? String((t as any).file_name) : null,
+      fileType: "docx",
+      pdfMappings: null,
+      applicability: { status: app.applicable ? "applicable" : "not_applicable", reasons: app.reasons },
+      readiness: ready,
+      latestDocument: latestByFirmTemplateId.get(templateId) ?? null,
+    });
+  }
+
+  for (const t of masterTemplates) {
+    const templateId = Number((t as any).id);
+    const documentGroup = String((t as any).document_group ?? (t as any).category ?? "Others");
+    const app = evaluateTemplateApplicability({
+      isActive: Boolean((t as any).is_active ?? true),
+      appliesToPurchaseMode: (t as any).applies_to_purchase_mode ? String((t as any).applies_to_purchase_mode) : null,
+      appliesToTitleType: (t as any).applies_to_title_type ? String((t as any).applies_to_title_type) : null,
+      appliesToCaseType: (t as any).applies_to_case_type ? String((t as any).applies_to_case_type) : null,
+    }, { purchaseMode: (context as any).purchase_mode ?? null, titleType: (context as any).title_type ?? null, caseType });
+    const ready = app.applicable ? evaluateTemplateReadiness({ documentGroup, input: readinessInput }) : { status: "ready", missing: [] };
+    items.push({
+      source: "master",
+      templateId,
+      name: String((t as any).name ?? ""),
+      documentType: String((t as any).category ?? "other"),
+      documentGroup,
+      sortOrder: Number((t as any).sort_order ?? 0),
+      fileName: (t as any).file_name ? String((t as any).file_name) : null,
+      fileType: (t as any).file_type ? String((t as any).file_type) : null,
+      pdfMappings: (t as any).pdf_mappings ?? null,
+      applicability: { status: app.applicable ? "applicable" : "not_applicable", reasons: app.reasons },
+      readiness: ready,
+      latestDocument: latestByPlatformDocId.get(templateId) ?? null,
+    });
+  }
+
+  const sections = new Map<string, ChecklistItem[]>();
+  for (const it of items) {
+    const key = it.documentGroup || "Others";
+    if (!sections.has(key)) sections.set(key, []);
+    sections.get(key)!.push(it);
+  }
+  const sectionList = Array.from(sections.entries())
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([k, arr]) => ({
+      section: k,
+      items: arr.sort((x, y) => (x.sortOrder - y.sortOrder) || x.name.localeCompare(y.name)),
+    }));
+
+  res.json({
+    case: { caseId, referenceNo, purchaseMode, titleType, caseType, projectName },
+    sections: sectionList,
+  });
 });
 
 router.post("/cases/:caseId/documents/generate", requireAuth, requireFirmUser, requirePermission("documents", "create"), async (req: AuthRequest, res): Promise<void> => {
@@ -1591,6 +1875,82 @@ router.post("/cases/:caseId/documents/generate", requireAuth, requireFirmUser, r
   const context = await buildCaseContext(r, caseId, req.firmId!);
   if (!context) {
     res.status(404).json({ error: "Case not found" });
+    return;
+  }
+
+  const applicability = evaluateTemplateApplicability({
+    isActive: Boolean((template as any).is_active ?? true),
+    appliesToPurchaseMode: (template as any).applies_to_purchase_mode ? String((template as any).applies_to_purchase_mode) : null,
+    appliesToTitleType: (template as any).applies_to_title_type ? String((template as any).applies_to_title_type) : null,
+    appliesToCaseType: (template as any).applies_to_case_type ? String((template as any).applies_to_case_type) : null,
+  }, {
+    purchaseMode: (context as any).purchase_mode ?? null,
+    titleType: (context as any).title_type ?? null,
+    caseType: (context as any).case_type ?? null,
+  });
+  if (!applicability.applicable) {
+    res.status(409).json({ error: "Template not applicable", code: "TEMPLATE_NOT_APPLICABLE", reasons: applicability.reasons });
+    return;
+  }
+
+  const wfDocs = (await tableExists(r, "public.case_workflow_documents"))
+    ? await queryRows(r, sql`
+      SELECT milestone_key, object_path, file_name, updated_at
+      FROM case_workflow_documents
+      WHERE firm_id = ${req.firmId!} AND case_id = ${caseId} AND deleted_at IS NULL
+      ORDER BY updated_at DESC
+    `)
+    : [];
+  const workflowDocs: Record<string, { hasFile: boolean }> = {};
+  for (const d of wfDocs) {
+    const k = normalizeWorkflowDocumentKeyFromDb(String(d.milestone_key ?? ""));
+    if (!k) continue;
+    if (workflowDocs[k]) continue;
+    workflowDocs[k] = { hasFile: Boolean(d.object_path && d.file_name) };
+  }
+  const stampingRows = (await tableExists(r, "public.case_loan_stamping_items"))
+    ? await queryRows(r, sql`
+      SELECT item_key, custom_name, dated_on, stamped_on, object_path, file_name, sort_order
+      FROM case_loan_stamping_items
+      WHERE firm_id = ${req.firmId!} AND case_id = ${caseId} AND deleted_at IS NULL
+      ORDER BY sort_order ASC, id ASC
+    `)
+    : [];
+  const keyDates = Object.fromEntries(
+    Object.entries(context as Record<string, unknown>)
+      .filter(([k]) => k.endsWith("_ymd"))
+      .map(([k, v]) => [k.replace(/_ymd$/, ""), typeof v === "string" ? v : null])
+  );
+  const readinessInput: TemplateReadinessInputs = {
+    purchaseMode: normalizePurchaseMode(String((context as any).purchase_mode ?? "")) ?? null,
+    titleType: normalizeTitleType(String((context as any).title_type ?? "")) ?? null,
+    caseType: typeof (context as any).case_type === "string" ? String((context as any).case_type) : null,
+    referenceNo: typeof (context as any).reference_no === "string" ? String((context as any).reference_no) : null,
+    projectName: typeof (context as any).project_name === "string" ? String((context as any).project_name) : null,
+    purchaser1Name: typeof (context as any).spa_purchaser1_name === "string" ? String((context as any).spa_purchaser1_name) : null,
+    purchaser1Ic: typeof (context as any).spa_purchaser1_ic === "string" ? String((context as any).spa_purchaser1_ic) : null,
+    loanTotal: typeof (context as any).total_loan_raw === "string" ? String((context as any).total_loan_raw) : null,
+    loanEndFinancier: typeof (context as any).end_financier === "string" ? String((context as any).end_financier) : null,
+    keyDates,
+    workflowDocs,
+    stampingItems: stampingRows.map((x) => ({
+      itemKey: (() => {
+        const raw = String(x.item_key ?? "");
+        return isLoanStampingItemKey(raw) ? raw : "other";
+      })(),
+      customName: typeof x.custom_name === "string" ? String(x.custom_name) : null,
+      datedOn: x.dated_on ? String(x.dated_on) : null,
+      stampedOn: x.stamped_on ? String(x.stamped_on) : null,
+      hasFile: Boolean(x.object_path && x.file_name),
+      sortOrder: typeof x.sort_order === "number" ? Number(x.sort_order) : 0,
+    })),
+  };
+  const readiness = evaluateTemplateReadiness({
+    documentGroup: String((template as any).document_group ?? "Others"),
+    input: readinessInput,
+  });
+  if (readiness.status !== "ready") {
+    res.status(422).json({ error: "Template not ready", code: "TEMPLATE_NOT_READY", status: readiness.status, missing: readiness.missing });
     return;
   }
 
@@ -1665,12 +2025,19 @@ router.post("/cases/:caseId/documents/generate", requireAuth, requireFirmUser, r
       fileBytes: buffer,
       contentType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     });
-    const docName = documentName ?? `${template.name} - ${context.reference_no}`;
-    const fileName = `${docName.replace(/[^a-zA-Z0-9 \-_]/g, "_")}.docx`;
+    const docName = documentName ?? String((template as any).name ?? "Generated document");
+    const templateCode = String((template as any).document_type ?? "DOC");
+    const fileName = buildGeneratedDownloadFileName({
+      referenceNo: String((context as any).reference_no ?? ""),
+      templateCode,
+      purchaserName: String((context as any).spa_purchaser1_name ?? (context as any).borrower1_name ?? ""),
+      projectName: String((context as any).project_name ?? ""),
+      extension: "docx",
+    });
 
     const docRows = await queryRows(r, sql`
-      INSERT INTO case_documents (case_id, firm_id, template_id, name, document_type, status, object_path, file_name, generated_by)
-      VALUES (${caseId}, ${req.firmId!}, ${templateId}, ${docName}, ${template.document_type as string}, 'generated', ${normalizedPath}, ${fileName}, ${req.userId!})
+      INSERT INTO case_documents (case_id, firm_id, template_id, template_source, template_snapshot_name, template_snapshot_updated_at, name, document_type, status, object_path, file_name, generated_by)
+      VALUES (${caseId}, ${req.firmId!}, ${templateId}, 'firm', ${String((template as any).name ?? "")}, ${(template as any).updated_at ?? null}, ${docName}, ${template.document_type as string}, 'generated', ${normalizedPath}, ${fileName}, ${req.userId!})
       RETURNING *`
     );
 
@@ -1731,6 +2098,82 @@ router.post("/cases/:caseId/documents/generate-from-master", requireAuth, requir
   const context = await buildCaseContext(r, caseId, req.firmId!);
   if (!context) {
     res.status(404).json({ error: "Case not found" });
+    return;
+  }
+
+  const applicability = evaluateTemplateApplicability({
+    isActive: Boolean((masterDoc as any).is_active ?? true),
+    appliesToPurchaseMode: (masterDoc as any).applies_to_purchase_mode ? String((masterDoc as any).applies_to_purchase_mode) : null,
+    appliesToTitleType: (masterDoc as any).applies_to_title_type ? String((masterDoc as any).applies_to_title_type) : null,
+    appliesToCaseType: (masterDoc as any).applies_to_case_type ? String((masterDoc as any).applies_to_case_type) : null,
+  }, {
+    purchaseMode: (context as any).purchase_mode ?? null,
+    titleType: (context as any).title_type ?? null,
+    caseType: (context as any).case_type ?? null,
+  });
+  if (!applicability.applicable) {
+    res.status(409).json({ error: "Template not applicable", code: "TEMPLATE_NOT_APPLICABLE", reasons: applicability.reasons });
+    return;
+  }
+
+  const wfDocs = (await tableExists(r, "public.case_workflow_documents"))
+    ? await queryRows(r, sql`
+      SELECT milestone_key, object_path, file_name, updated_at
+      FROM case_workflow_documents
+      WHERE firm_id = ${req.firmId!} AND case_id = ${caseId} AND deleted_at IS NULL
+      ORDER BY updated_at DESC
+    `)
+    : [];
+  const workflowDocs: Record<string, { hasFile: boolean }> = {};
+  for (const d of wfDocs) {
+    const k = normalizeWorkflowDocumentKeyFromDb(String(d.milestone_key ?? ""));
+    if (!k) continue;
+    if (workflowDocs[k]) continue;
+    workflowDocs[k] = { hasFile: Boolean(d.object_path && d.file_name) };
+  }
+  const stampingRows = (await tableExists(r, "public.case_loan_stamping_items"))
+    ? await queryRows(r, sql`
+      SELECT item_key, custom_name, dated_on, stamped_on, object_path, file_name, sort_order
+      FROM case_loan_stamping_items
+      WHERE firm_id = ${req.firmId!} AND case_id = ${caseId} AND deleted_at IS NULL
+      ORDER BY sort_order ASC, id ASC
+    `)
+    : [];
+  const keyDates = Object.fromEntries(
+    Object.entries(context as Record<string, unknown>)
+      .filter(([k]) => k.endsWith("_ymd"))
+      .map(([k, v]) => [k.replace(/_ymd$/, ""), typeof v === "string" ? v : null])
+  );
+  const readinessInput2: TemplateReadinessInputs = {
+    purchaseMode: normalizePurchaseMode(String((context as any).purchase_mode ?? "")) ?? null,
+    titleType: normalizeTitleType(String((context as any).title_type ?? "")) ?? null,
+    caseType: typeof (context as any).case_type === "string" ? String((context as any).case_type) : null,
+    referenceNo: typeof (context as any).reference_no === "string" ? String((context as any).reference_no) : null,
+    projectName: typeof (context as any).project_name === "string" ? String((context as any).project_name) : null,
+    purchaser1Name: typeof (context as any).spa_purchaser1_name === "string" ? String((context as any).spa_purchaser1_name) : null,
+    purchaser1Ic: typeof (context as any).spa_purchaser1_ic === "string" ? String((context as any).spa_purchaser1_ic) : null,
+    loanTotal: typeof (context as any).total_loan_raw === "string" ? String((context as any).total_loan_raw) : null,
+    loanEndFinancier: typeof (context as any).end_financier === "string" ? String((context as any).end_financier) : null,
+    keyDates,
+    workflowDocs,
+    stampingItems: stampingRows.map((x) => ({
+      itemKey: (() => {
+        const raw = String(x.item_key ?? "");
+        return isLoanStampingItemKey(raw) ? raw : "other";
+      })(),
+      customName: typeof x.custom_name === "string" ? String(x.custom_name) : null,
+      datedOn: x.dated_on ? String(x.dated_on) : null,
+      stampedOn: x.stamped_on ? String(x.stamped_on) : null,
+      hasFile: Boolean(x.object_path && x.file_name),
+      sortOrder: typeof x.sort_order === "number" ? Number(x.sort_order) : 0,
+    })),
+  };
+  const readiness = evaluateTemplateReadiness({
+    documentGroup: String((masterDoc as any).document_group ?? (masterDoc as any).category ?? "Others"),
+    input: readinessInput2,
+  });
+  if (readiness.status !== "ready") {
+    res.status(422).json({ error: "Template not ready", code: "TEMPLATE_NOT_READY", status: readiness.status, missing: readiness.missing });
     return;
   }
 
@@ -1857,12 +2300,19 @@ router.post("/cases/:caseId/documents/generate-from-master", requireAuth, requir
       fileBytes: buffer,
       contentType: outputMime,
     });
-    const docName = documentName ?? `${masterDoc.name} - ${context.reference_no}`;
-    const fileName = `${docName.replace(/[^a-zA-Z0-9 \-_]/g, "_")}${outputExt}`;
+    const docName = documentName ?? String((masterDoc as any).name ?? "Generated document");
+    const templateCode = String((masterDoc as any).category ?? (masterDoc as any).name ?? "DOC");
+    const fileName = buildGeneratedDownloadFileName({
+      referenceNo: String((context as any).reference_no ?? ""),
+      templateCode,
+      purchaserName: String((context as any).spa_purchaser1_name ?? (context as any).borrower1_name ?? ""),
+      projectName: String((context as any).project_name ?? ""),
+      extension: outputExt,
+    });
 
     const savedRows = await queryRows(r, sql`
-      INSERT INTO case_documents (case_id, firm_id, name, document_type, status, object_path, file_name, generated_by)
-      VALUES (${caseId}, ${req.firmId!}, ${docName}, ${(masterDoc.category as string) || "other"}, 'generated', ${normalizedPath}, ${fileName}, ${req.userId!})
+      INSERT INTO case_documents (case_id, firm_id, template_source, platform_document_id, template_snapshot_name, template_snapshot_updated_at, name, document_type, status, object_path, file_name, generated_by)
+      VALUES (${caseId}, ${req.firmId!}, 'master', ${masterDocId}, ${String((masterDoc as any).name ?? "")}, ${(masterDoc as any).created_at ?? null}, ${docName}, ${(masterDoc.category as string) || "other"}, 'generated', ${normalizedPath}, ${fileName}, ${req.userId!})
       RETURNING *`
     );
 
@@ -2463,6 +2913,7 @@ router.get("/cases/:caseId/documents/:docId/download", requireAuth, requireFirmU
         ? String((doc as any).mime_type)
         : "application/octet-stream";
     await streamSupabasePrivateObjectToResponse({ objectPath, res, fileName, fallbackContentType });
+    await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.case.download", entityType: "case_document", entityId: docId, detail: `caseId=${caseId} fileName=${fileName}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
   } catch (err) {
     const cfgErr = getSupabaseStorageConfigError(err);
     if (cfgErr) {

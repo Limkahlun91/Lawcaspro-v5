@@ -596,6 +596,108 @@ router.post("/platform/documents", requireAuth, requireFounder, async (req: Auth
   res.status(201).json(doc);
 });
 
+router.patch("/platform/documents/:docId", requireAuth, requireFounder, async (req: AuthRequest, res): Promise<void> => {
+  const docIdStr = one(req.params.docId);
+  const docId = docIdStr ? parseInt(docIdStr, 10) : NaN;
+  if (isNaN(docId)) { res.status(400).json({ error: "Invalid document ID" }); return; }
+
+  const body = req.body as Record<string, unknown>;
+  const hasIsActive = Object.prototype.hasOwnProperty.call(body, "isActive");
+  const hasAppliesToPurchaseMode = Object.prototype.hasOwnProperty.call(body, "appliesToPurchaseMode");
+  const hasAppliesToTitleType = Object.prototype.hasOwnProperty.call(body, "appliesToTitleType");
+  const hasAppliesToCaseType = Object.prototype.hasOwnProperty.call(body, "appliesToCaseType");
+  const hasDocumentGroup = Object.prototype.hasOwnProperty.call(body, "documentGroup");
+  const hasSortOrder = Object.prototype.hasOwnProperty.call(body, "sortOrder");
+  const hasCategory = Object.prototype.hasOwnProperty.call(body, "category");
+
+  const isActiveVal: boolean | undefined = hasIsActive ? (typeof body.isActive === "boolean" ? body.isActive : undefined) : undefined;
+  if (hasIsActive && isActiveVal === undefined) { res.status(400).json({ error: "Invalid isActive" }); return; }
+
+  const purchaseModeVal: string | null | undefined =
+    hasAppliesToPurchaseMode
+      ? (typeof body.appliesToPurchaseMode === "string" ? (String(body.appliesToPurchaseMode).trim() || null) : body.appliesToPurchaseMode === null ? null : undefined)
+      : undefined;
+  if (hasAppliesToPurchaseMode && purchaseModeVal === undefined) { res.status(400).json({ error: "Invalid appliesToPurchaseMode" }); return; }
+
+  const titleTypeVal: string | undefined =
+    hasAppliesToTitleType
+      ? (typeof body.appliesToTitleType === "string" ? (String(body.appliesToTitleType).trim() || "any") : undefined)
+      : undefined;
+  if (hasAppliesToTitleType && !titleTypeVal) { res.status(400).json({ error: "Invalid appliesToTitleType" }); return; }
+
+  const caseTypeVal: string | null | undefined =
+    hasAppliesToCaseType
+      ? (typeof body.appliesToCaseType === "string" ? (String(body.appliesToCaseType).trim() || null) : body.appliesToCaseType === null ? null : undefined)
+      : undefined;
+  if (hasAppliesToCaseType && caseTypeVal === undefined) { res.status(400).json({ error: "Invalid appliesToCaseType" }); return; }
+
+  const groupVal: string | undefined =
+    hasDocumentGroup
+      ? (typeof body.documentGroup === "string" ? (String(body.documentGroup).trim() || "Others") : undefined)
+      : undefined;
+  if (hasDocumentGroup && !groupVal) { res.status(400).json({ error: "Invalid documentGroup" }); return; }
+
+  const sortOrderVal: number | undefined =
+    hasSortOrder
+      ? (typeof body.sortOrder === "number" && Number.isFinite(body.sortOrder) ? body.sortOrder : undefined)
+      : undefined;
+  if (hasSortOrder && sortOrderVal === undefined) { res.status(400).json({ error: "Invalid sortOrder" }); return; }
+
+  const categoryVal: string | undefined =
+    hasCategory
+      ? (typeof body.category === "string" ? (String(body.category).trim() || "general") : undefined)
+      : undefined;
+  if (hasCategory && !categoryVal) { res.status(400).json({ error: "Invalid category" }); return; }
+
+  const updated = await withAuthSafeDb(async (authDb) => {
+    const [existing] = await authDb.select().from(platformDocumentsTable).where(eq(platformDocumentsTable.id, docId));
+    if (!existing) return null;
+
+    const [row] = await authDb
+      .update(platformDocumentsTable)
+      .set({
+        ...(hasIsActive ? { isActive: isActiveVal! } : {}),
+        ...(hasAppliesToPurchaseMode ? { appliesToPurchaseMode: purchaseModeVal ?? null } : {}),
+        ...(hasAppliesToTitleType ? { appliesToTitleType: titleTypeVal ?? "any" } : {}),
+        ...(hasAppliesToCaseType ? { appliesToCaseType: caseTypeVal ?? null } : {}),
+        ...(hasDocumentGroup ? { documentGroup: groupVal ?? "Others" } : {}),
+        ...(hasSortOrder ? { sortOrder: sortOrderVal ?? 0 } : {}),
+        ...(hasCategory ? { category: categoryVal ?? "general" } : {}),
+      })
+      .where(eq(platformDocumentsTable.id, docId))
+      .returning();
+
+    const changed: string[] = [];
+    if (hasIsActive) changed.push(`isActive=${String(isActiveVal)}`);
+    if (hasAppliesToPurchaseMode) changed.push(`purchaseMode=${purchaseModeVal ?? "null"}`);
+    if (hasAppliesToTitleType) changed.push(`titleType=${titleTypeVal ?? "any"}`);
+    if (hasAppliesToCaseType) changed.push(`caseType=${caseTypeVal ?? "null"}`);
+    if (hasDocumentGroup) changed.push(`group=${groupVal ?? "Others"}`);
+    if (hasSortOrder) changed.push(`sortOrder=${String(sortOrderVal ?? 0)}`);
+    if (hasCategory) changed.push(`category=${categoryVal ?? "general"}`);
+
+    await writeAuditLog(
+      {
+        firmId: existing.firmId ?? null,
+        actorId: req.userId,
+        actorType: req.userType,
+        action: "platform.document.update",
+        entityType: "platform_document",
+        entityId: docId,
+        detail: changed.length ? changed.join(" ") : undefined,
+        ipAddress: req.ip,
+        userAgent: req.headers["user-agent"],
+      },
+      { db: authDb, strict: true }
+    );
+
+    return row;
+  });
+
+  if (!updated) { res.status(404).json({ error: "Document not found" }); return; }
+  res.json(updated);
+});
+
 router.delete("/platform/documents/:docId", requireAuth, requireFounder, async (req: AuthRequest, res): Promise<void> => {
   const docIdStr = one(req.params.docId);
   const docId = docIdStr ? parseInt(docIdStr, 10) : NaN;
@@ -711,13 +813,31 @@ router.put("/platform/documents/:docId/pdf-mappings", requireAuth, requireFounde
   const docIdStr = one(req.params.docId);
   const docId = docIdStr ? parseInt(docIdStr, 10) : NaN;
   if (isNaN(docId)) { res.status(400).json({ error: "Invalid document ID" }); return; }
-  const { mappings } = req.body as { mappings: any };
-  const [doc] = await db.select().from(platformDocumentsTable).where(eq(platformDocumentsTable.id, docId));
-  if (!doc) {
-    res.status(404).json({ error: "Document not found" });
-    return;
-  }
-  await db.update(platformDocumentsTable).set({ pdfMappings: mappings }).where(eq(platformDocumentsTable.id, docId));
+  const mappings = (req.body as { mappings?: unknown }).mappings;
+  if (!mappings || typeof mappings !== "object") { res.status(400).json({ error: "Invalid mappings" }); return; }
+
+  const result = await withAuthSafeDb(async (authDb) => {
+    const [doc] = await authDb.select().from(platformDocumentsTable).where(eq(platformDocumentsTable.id, docId));
+    if (!doc) return { kind: "not_found" as const };
+    await authDb.update(platformDocumentsTable).set({ pdfMappings: mappings }).where(eq(platformDocumentsTable.id, docId));
+    await writeAuditLog(
+      {
+        firmId: doc.firmId ?? null,
+        actorId: req.userId,
+        actorType: req.userType,
+        action: "platform.document.update_pdf_mappings",
+        entityType: "platform_document",
+        entityId: docId,
+        detail: `name=${doc.name}`,
+        ipAddress: req.ip,
+        userAgent: req.headers["user-agent"],
+      },
+      { db: authDb, strict: true }
+    );
+    return { kind: "ok" as const };
+  });
+
+  if (result.kind === "not_found") { res.status(404).json({ error: "Document not found" }); return; }
   res.json({ success: true });
 });
 

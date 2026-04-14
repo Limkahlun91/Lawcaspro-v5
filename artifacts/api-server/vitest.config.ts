@@ -18,6 +18,9 @@ export default defineConfig({
         "src/__tests__/caseWorkflowDocuments.unit.test.ts",
         "src/__tests__/loanStamping.unit.test.ts",
         "src/__tests__/workflowAutomation.unit.test.ts",
+        "src/__tests__/documentApplicability.unit.test.ts",
+        "src/__tests__/documentReadiness.unit.test.ts",
+        "src/__tests__/documentNaming.unit.test.ts",
       ],
     pool: "forks",
     poolOptions: {

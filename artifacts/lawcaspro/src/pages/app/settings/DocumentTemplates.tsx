@@ -1,4 +1,4 @@
-import { useState, useRef } from "react";
+import { useState, useRef, useEffect } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -34,6 +34,12 @@ interface DocumentTemplate {
   file_name: string;
   object_path: string;
   created_at: string;
+  is_active?: boolean;
+  applies_to_purchase_mode?: string | null;
+  applies_to_title_type?: string | null;
+  applies_to_case_type?: string | null;
+  document_group?: string | null;
+  sort_order?: number | null;
 }
 
 const TEMPLATE_FIELDS = [
@@ -78,7 +84,25 @@ export default function DocumentTemplates() {
 
   const canRead = hasPermission(user, "documents", "read");
   const canCreate = hasPermission(user, "documents", "create");
+  const canUpdate = hasPermission(user, "documents", "update");
   const canDelete = hasPermission(user, "documents", "delete");
+
+  const [editIsActive, setEditIsActive] = useState(true);
+  const [editPurchaseMode, setEditPurchaseMode] = useState<string>("both");
+  const [editTitleType, setEditTitleType] = useState<string>("any");
+  const [editCaseType, setEditCaseType] = useState<string>("");
+  const [editGroup, setEditGroup] = useState<string>("Others");
+  const [editSortOrder, setEditSortOrder] = useState<number>(0);
+
+  useEffect(() => {
+    if (!activeTemplate) return;
+    setEditIsActive(activeTemplate.is_active ?? true);
+    setEditPurchaseMode(activeTemplate.applies_to_purchase_mode ?? "both");
+    setEditTitleType(activeTemplate.applies_to_title_type ?? "any");
+    setEditCaseType(activeTemplate.applies_to_case_type ?? "");
+    setEditGroup(activeTemplate.document_group ?? "Others");
+    setEditSortOrder(typeof activeTemplate.sort_order === "number" ? activeTemplate.sort_order : 0);
+  }, [activeTemplate]);
 
   const templatesQuery = useQuery<DocumentTemplate[]>({
     queryKey: ["document-templates"],
@@ -96,6 +120,16 @@ export default function DocumentTemplates() {
       toast({ title: "Template deleted" });
     },
     onError: (err) => toastError(toast, err, "Delete failed"),
+  });
+
+  const updateMutation = useMutation({
+    mutationFn: (payload: { id: number; patch: Record<string, unknown> }) =>
+      apiFetchJson(`/document-templates/${payload.id}`, { method: "PATCH", body: JSON.stringify(payload.patch) }),
+    onSuccess: async () => {
+      await qc.invalidateQueries({ queryKey: ["document-templates"] });
+      toast({ title: "Template updated" });
+    },
+    onError: (err) => toastError(toast, err, "Update failed"),
   });
 
   async function handleUpload() {
@@ -195,7 +229,7 @@ export default function DocumentTemplates() {
                     <span className="text-xs px-1.5 py-0.5 rounded bg-slate-100 text-slate-600 font-medium">
                       {docTypeLabel(t.document_type)}
                     </span>
-                    <span className="text-xs text-slate-400">{t.file_name}</span>
+                  <span className="text-xs text-slate-400 truncate" title={t.file_name}>{t.file_name}</span>
                     {t.description && (
                       <span className="text-xs text-slate-500 truncate">{t.description}</span>
                     )}
@@ -245,6 +279,78 @@ export default function DocumentTemplates() {
                   <div className="text-sm text-slate-900">{new Date(activeTemplate.created_at).toLocaleString("en-MY")}</div>
                 </div>
               </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div className="space-y-1.5">
+                  <Label>Active</Label>
+                  <Select value={String(editIsActive)} onValueChange={(v) => setEditIsActive(v === "true")}>
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="true">Active</SelectItem>
+                      <SelectItem value="false">Inactive</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="space-y-1.5">
+                  <Label>Group</Label>
+                  <Select value={editGroup} onValueChange={setEditGroup}>
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="SPA">SPA</SelectItem>
+                      <SelectItem value="Loan">Loan</SelectItem>
+                      <SelectItem value="MOT / Transfer">MOT / Transfer</SelectItem>
+                      <SelectItem value="Completion">Completion</SelectItem>
+                      <SelectItem value="Others">Others</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div className="space-y-1.5">
+                  <Label>Applies to Purchase Mode</Label>
+                  <Select value={editPurchaseMode} onValueChange={setEditPurchaseMode}>
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="both">Both</SelectItem>
+                      <SelectItem value="cash">Cash</SelectItem>
+                      <SelectItem value="loan">Loan</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="space-y-1.5">
+                  <Label>Applies to Title Type</Label>
+                  <Select value={editTitleType} onValueChange={setEditTitleType}>
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="any">Any</SelectItem>
+                      <SelectItem value="master">Master</SelectItem>
+                      <SelectItem value="strata">Strata</SelectItem>
+                      <SelectItem value="individual">Individual</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div className="space-y-1.5">
+                  <Label>Applies to Case Type (optional)</Label>
+                  <Input value={editCaseType} onChange={(e) => setEditCaseType(e.target.value)} placeholder="e.g. Primary Market" />
+                </div>
+                <div className="space-y-1.5">
+                  <Label>Sort order</Label>
+                  <Input
+                    inputMode="numeric"
+                    value={String(editSortOrder)}
+                    onChange={(e) => setEditSortOrder(Number(e.target.value || "0"))}
+                  />
+                </div>
+              </div>
               <div>
                 <div className="text-xs text-slate-500">File</div>
                 <div className="text-sm text-slate-700 break-words">{activeTemplate.file_name}</div>
@@ -258,12 +364,31 @@ export default function DocumentTemplates() {
               <div className="pt-2 flex gap-2 justify-end">
                 <Button
                   variant="outline"
+                  onClick={() => {
+                    if (!canUpdate) return;
+                    updateMutation.mutate({
+                      id: activeTemplate.id,
+                      patch: {
+                        isActive: editIsActive,
+                        appliesToPurchaseMode: editPurchaseMode,
+                        appliesToTitleType: editTitleType,
+                        appliesToCaseType: editCaseType ? editCaseType : null,
+                        documentGroup: editGroup,
+                        sortOrder: editSortOrder,
+                      },
+                    });
+                  }}
+                  disabled={!canUpdate || updateMutation.isPending}
+                >
+                  Save
+                </Button>
+                <Button
+                  variant="outline"
                   disabled={isDownloading}
                   onClick={async () => {
                     setIsDownloading(true);
                     try {
-                      const pathPart = activeTemplate.object_path.replace(/^\/objects\//, "");
-                      const blob = await apiFetchBlob(`/storage/objects/${pathPart}`);
+                      const blob = await apiFetchBlob(`/document-templates/${activeTemplate.id}/download`);
                       downloadBlob(blob, activeTemplate.file_name || "download");
                     } catch (e) {
                       toastError(toast, e, "Download failed");
