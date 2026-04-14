@@ -28,6 +28,9 @@ import { Readable } from "stream";
 import { ObjectNotFoundError, SupabaseStorageService, getSupabaseStorageConfigError } from "../lib/objectStorage";
 import { CASE_ATTACHMENT_ALLOWED_EXTENSIONS, WORKFLOW_DOCUMENT_ALLOWED_KEYS, fileExtLower, workflowDocumentLabel, workflowDocumentLegacyKeys, normalizeWorkflowDocumentKeyFromDb, type WorkflowDocumentMilestoneKey } from "../lib/caseWorkflowDocuments";
 import { LOAN_STAMPING_ITEM_KEYS, type LoanStampingItemKey, isLoanStampingItemKeyAllowedForTitleType, normalizeTitleType } from "../lib/loanStamping";
+import { ensureCaseWorkflowSteps, syncWorkflowStepsFromCaseState } from "../lib/workflowAutomationService";
+import { WORKFLOW_AUTOMATION_RULE_BY_STEP_KEY, deriveStatusFromRequirement } from "../lib/workflowAutomation";
+import { computeStampingSummary, deriveStampingItemStatus, type StampingItemInput } from "../lib/stampingProgress";
 
 const router: IRouter = Router();
 const supabaseStorage = new SupabaseStorageService();
@@ -218,12 +221,16 @@ function shouldBackfillKeyDate(field: KeyDateField, kd: typeof caseKeyDatesTable
     case "spa_signed_date": return !kd.spaSignedDate;
     case "spa_stamped_date": return !kd.spaStampedDate;
     case "letter_of_offer_stamped_date": return !kd.letterOfOfferStampedDate;
+    case "loan_docs_pending_date": return !kd.loanDocsPendingDate;
     case "loan_docs_signed_date": return !kd.loanDocsSignedDate;
     case "acting_letter_issued_date": return !kd.actingLetterIssuedDate;
     case "loan_sent_bank_execution_date": return !kd.loanSentBankExecutionDate;
     case "loan_bank_executed_date": return !kd.loanBankExecutedDate;
     case "bank_lu_received_date": return !kd.bankLuReceivedDate;
     case "noa_served_on": return !kd.noaServedOn;
+    case "register_poa_on": return !kd.registerPoaOn;
+    case "letter_disclaimer_dated": return !kd.letterDisclaimerDated;
+    default: return false;
   }
 }
 
@@ -232,12 +239,16 @@ function keyDatePatchFromWorkflow(field: KeyDateField, ymd: string): Partial<Cas
     case "spa_signed_date": return { spaSignedDate: ymd };
     case "spa_stamped_date": return { spaStampedDate: ymd };
     case "letter_of_offer_stamped_date": return { letterOfOfferStampedDate: ymd };
+    case "loan_docs_pending_date": return { loanDocsPendingDate: ymd };
     case "loan_docs_signed_date": return { loanDocsSignedDate: ymd };
     case "acting_letter_issued_date": return { actingLetterIssuedDate: ymd };
     case "loan_sent_bank_execution_date": return { loanSentBankExecutionDate: ymd };
     case "loan_bank_executed_date": return { loanBankExecutedDate: ymd };
     case "bank_lu_received_date": return { bankLuReceivedDate: ymd };
     case "noa_served_on": return { noaServedOn: ymd };
+    case "register_poa_on": return { registerPoaOn: ymd };
+    case "letter_disclaimer_dated": return { letterDisclaimerDated: ymd };
+    default: return {};
   }
 }
 
@@ -2200,6 +2211,220 @@ router.get("/cases/:caseId/key-dates", requireAuth, requireFirmUser, requirePerm
   res.json(out);
 });
 
+router.get("/cases/:caseId/progress", requireAuth, requireFirmUser, requirePermission("cases", "read"), async (req: AuthRequest, res): Promise<void> => {
+  const r = req.rlsDb;
+  if (!r) {
+    logger.error({ path: req.path, firmId: req.firmId, userId: req.userId }, "[cases] missing tenant database context");
+    res.status(500).json({ error: "Internal Server Error" });
+    return;
+  }
+  const caseIdStr = one((req.params as any).caseId);
+  const caseId = caseIdStr ? Number(caseIdStr) : NaN;
+  if (!Number.isFinite(caseId)) {
+    res.status(400).json({ error: "Invalid caseId" });
+    return;
+  }
+
+  const [caseRow] = await r
+    .select({ purchaseMode: casesTable.purchaseMode, titleType: casesTable.titleType })
+    .from(casesTable)
+    .where(and(eq(casesTable.id, caseId), eq(casesTable.firmId, req.firmId!)));
+  if (!caseRow) {
+    res.status(404).json({ error: "Case not found" });
+    return;
+  }
+
+  await ensureCaseWorkflowSteps(r, req.firmId!, caseId);
+
+  const [kd] = await r
+    .select()
+    .from(caseKeyDatesTable)
+    .where(and(eq(caseKeyDatesTable.caseId, caseId), eq(caseKeyDatesTable.firmId, req.firmId!)));
+
+  const docsExists = await tableExists(r, "public.case_workflow_documents");
+  const workflowDocsRows = docsExists
+    ? await r
+        .select({
+          milestoneKey: caseWorkflowDocumentsTable.milestoneKey,
+          objectPath: caseWorkflowDocumentsTable.objectPath,
+          fileName: caseWorkflowDocumentsTable.fileName,
+          updatedAt: caseWorkflowDocumentsTable.updatedAt,
+        })
+        .from(caseWorkflowDocumentsTable)
+        .where(and(
+          eq(caseWorkflowDocumentsTable.firmId, req.firmId!),
+          eq(caseWorkflowDocumentsTable.caseId, caseId),
+          sql`${caseWorkflowDocumentsTable.deletedAt} IS NULL`,
+        ))
+        .orderBy(desc(caseWorkflowDocumentsTable.updatedAt))
+    : [];
+  const workflowDocsByKey = new Map<string, { hasFile: boolean }>();
+  for (const d of workflowDocsRows) {
+    const normalized = normalizeWorkflowDocumentKeyFromDb(String(d.milestoneKey));
+    if (!normalized) continue;
+    if (workflowDocsByKey.has(normalized)) continue;
+    workflowDocsByKey.set(normalized, { hasFile: Boolean(d.objectPath && d.fileName) });
+  }
+
+  const inputs = {
+    keyDates: {
+      spa_signed_date: kd?.spaSignedDate ? String(kd.spaSignedDate) : null,
+      spa_stamped_date: kd?.spaStampedDate ? String(kd.spaStampedDate) : null,
+      letter_of_offer_stamped_date: kd?.letterOfOfferStampedDate ? String(kd.letterOfOfferStampedDate) : null,
+      loan_docs_signed_date: kd?.loanDocsSignedDate ? String(kd.loanDocsSignedDate) : null,
+      acting_letter_issued_date: kd?.actingLetterIssuedDate ? String(kd.actingLetterIssuedDate) : null,
+      loan_sent_bank_execution_date: kd?.loanSentBankExecutionDate ? String(kd.loanSentBankExecutionDate) : null,
+      loan_bank_executed_date: kd?.loanBankExecutedDate ? String(kd.loanBankExecutedDate) : null,
+      bank_lu_received_date: kd?.bankLuReceivedDate ? String(kd.bankLuReceivedDate) : null,
+      noa_served_on: kd?.noaServedOn ? String(kd.noaServedOn) : null,
+      register_poa_on: kd?.registerPoaOn ? String(kd.registerPoaOn) : null,
+      letter_disclaimer_dated: kd?.letterDisclaimerDated ? String(kd.letterDisclaimerDated) : null,
+      completion_date: kd?.completionDate ? String(kd.completionDate) : null,
+    },
+    workflowDocs: {
+      spa_stamped: workflowDocsByKey.get("spa_stamped"),
+      lo_stamped: workflowDocsByKey.get("lo_stamped"),
+      register_poa: workflowDocsByKey.get("register_poa"),
+      letter_disclaimer: workflowDocsByKey.get("letter_disclaimer"),
+    } as any,
+  };
+
+  const wfExists = await tableExists(r, "public.case_workflow_steps");
+  const steps = wfExists
+    ? await r
+        .select({
+          stepKey: caseWorkflowStepsTable.stepKey,
+          status: caseWorkflowStepsTable.status,
+          pathType: caseWorkflowStepsTable.pathType,
+          stepOrder: caseWorkflowStepsTable.stepOrder,
+        })
+        .from(caseWorkflowStepsTable)
+        .where(eq(caseWorkflowStepsTable.caseId, caseId))
+    : [];
+  const stepStatusByKey = new Map<string, { status: string; pathType: string; stepOrder: number }>();
+  for (const s of steps) stepStatusByKey.set(String(s.stepKey), { status: String(s.status), pathType: String(s.pathType), stepOrder: Number(s.stepOrder) });
+
+  const derivedSteps = Array.from(stepStatusByKey.entries()).map(([stepKey, v]) => {
+    const reqRule = WORKFLOW_AUTOMATION_RULE_BY_STEP_KEY[stepKey];
+    const derived = reqRule ? deriveStatusFromRequirement(reqRule, inputs) : null;
+    return {
+      stepKey,
+      status: v.status,
+      pathType: v.pathType,
+      stepOrder: v.stepOrder,
+      derivedStatus: derived,
+    };
+  });
+
+  const purchaseMode = String(caseRow.purchaseMode || "").trim().toLowerCase();
+  const titleType = normalizeTitleType(caseRow.titleType);
+
+  const stampingExists = await tableExists(r, "public.case_loan_stamping_items");
+  const stampingRows = stampingExists
+    ? await r
+        .select({
+          id: caseLoanStampingItemsTable.id,
+          itemKey: caseLoanStampingItemsTable.itemKey,
+          customName: caseLoanStampingItemsTable.customName,
+          datedOn: caseLoanStampingItemsTable.datedOn,
+          stampedOn: caseLoanStampingItemsTable.stampedOn,
+          objectPath: caseLoanStampingItemsTable.objectPath,
+          fileName: caseLoanStampingItemsTable.fileName,
+          sortOrder: caseLoanStampingItemsTable.sortOrder,
+        })
+        .from(caseLoanStampingItemsTable)
+        .where(and(
+          eq(caseLoanStampingItemsTable.firmId, req.firmId!),
+          eq(caseLoanStampingItemsTable.caseId, caseId),
+          sql`${caseLoanStampingItemsTable.deletedAt} IS NULL`,
+        ))
+        .orderBy(asc(caseLoanStampingItemsTable.sortOrder), asc(caseLoanStampingItemsTable.id))
+    : [];
+
+  const fixedKeys: LoanStampingItemKey[] = ["facility_agreement", "deed_of_assignment", "power_of_attorney", "charge_annexure"];
+  const fixed: StampingItemInput[] = [];
+  for (const k of fixedKeys) {
+    if (!isLoanStampingItemKeyAllowedForTitleType(titleType, k)) continue;
+    const row = stampingRows.find((x) => String(x.itemKey) === k);
+    fixed.push({
+      id: row?.id ?? null,
+      itemKey: k,
+      customName: null,
+      datedOn: row?.datedOn ? String(row.datedOn) : null,
+      stampedOn: row?.stampedOn ? String(row.stampedOn) : null,
+      hasFile: Boolean(row?.objectPath && row?.fileName),
+      sortOrder: row?.sortOrder ?? 0,
+    });
+  }
+  const others: StampingItemInput[] = stampingRows
+    .filter((x) => String(x.itemKey) === "other")
+    .map((x) => ({
+      id: x.id,
+      itemKey: "other",
+      customName: x.customName ?? null,
+      datedOn: x.datedOn ? String(x.datedOn) : null,
+      stampedOn: x.stampedOn ? String(x.stampedOn) : null,
+      hasFile: Boolean(x.objectPath && x.fileName),
+      sortOrder: x.sortOrder ?? 0,
+    }));
+  const stampingSummary = purchaseMode === "loan"
+    ? computeStampingSummary(titleType, [...fixed, ...others])
+    : { completed: 0, total: 0, missing: [] as any[] };
+
+  const section = (key: string, label: string, milestoneTab: "spa" | "loan" | "bank" | "mot", stepKeys: string[], extra?: { completed: number; total: number }) => {
+    let completed = 0;
+    let total = 0;
+    for (const k of stepKeys) {
+      const s = stepStatusByKey.get(k);
+      if (!s) continue;
+      total++;
+      if (s.status === "completed") completed++;
+    }
+    if (extra) {
+      completed += extra.completed;
+      total += extra.total;
+    }
+    return { key, label, completed, total, target: { tab: "overview", milestoneTab } };
+  };
+
+  const spaStepKeys = ["file_opened", "spa_stamped", "lof_stamped"];
+  const loanStepKeys = purchaseMode === "loan"
+    ? ["loan_docs_pending", "loan_docs_signed", "acting_letter_pending", "acting_letter_issued", "loan_pending_bank_exec", "loan_sent_bank_exec", "loan_bank_executed"]
+    : [];
+  const bankStepKeys = purchaseMode === "loan"
+    ? (titleType === "master"
+        ? ["blu_received", "blu_confirmed", "noa_prepare", "noa_served", "pa_pending", "pa_registered", "letter_disclaimer"]
+        : ["blu_received", "blu_confirmed"])
+    : (titleType === "master" ? ["noa_prepare", "noa_served", "pa_pending", "pa_registered", "letter_disclaimer"] : []);
+  const motStepKeys = titleType === "strata" || titleType === "individual"
+    ? ["mot_pending", "mot_received", "mot_invoice_prepare", "mot_stamp_received", "mot_submitted_stamping", "mot_stamp"]
+    : [];
+  const completionCompleted = inputs.keyDates.completion_date ? 1 : 0;
+  const completionTotal = 1;
+
+  const sections = [
+    section("spa", "SPA progress", "spa", spaStepKeys),
+    section("loan", "Loan progress", "loan", loanStepKeys, purchaseMode === "loan" ? stampingSummary : undefined),
+    section("bank", "Bank / LU / NOA progress", "bank", bankStepKeys),
+    { ...section("mot", "MOT / Completion progress", "mot", motStepKeys, { completed: completionCompleted, total: completionTotal }), completionDate: inputs.keyDates.completion_date ? "completed" : "missing_date" },
+  ];
+
+  res.json({
+    sections,
+    workflowSteps: derivedSteps.sort((a, b) => a.stepOrder - b.stepOrder),
+    attachments: [
+      { docKey: "spa_stamped", label: "SPA Stamped", status: deriveStatusFromRequirement(WORKFLOW_AUTOMATION_RULE_BY_STEP_KEY["spa_stamped"], inputs) },
+      { docKey: "lo_stamped", label: "LO Stamped", status: deriveStatusFromRequirement(WORKFLOW_AUTOMATION_RULE_BY_STEP_KEY["lof_stamped"], inputs) },
+      { docKey: "register_poa", label: "Register POA", status: deriveStatusFromRequirement(WORKFLOW_AUTOMATION_RULE_BY_STEP_KEY["pa_registered"], inputs) },
+      { docKey: "letter_disclaimer", label: "Letter Disclaimer", status: deriveStatusFromRequirement(WORKFLOW_AUTOMATION_RULE_BY_STEP_KEY["letter_disclaimer"], inputs) },
+    ],
+    stamping: stampingSummary,
+    stampingItems: purchaseMode === "loan"
+      ? [...fixed, ...others].map((x) => ({ id: x.id, itemKey: x.itemKey, sortOrder: x.sortOrder, status: deriveStampingItemStatus(x) }))
+      : [],
+  });
+});
+
 router.patch("/cases/:caseId/key-dates", requireAuth, requireFirmUser, requirePermission("cases", "update"), async (req: AuthRequest, res): Promise<void> => {
   const r = req.rlsDb;
   if (!r) {
@@ -2270,7 +2495,6 @@ router.patch("/cases/:caseId/key-dates", requireAuth, requireFirmUser, requirePe
   const updateValues: Partial<CaseKeyDatesInsert> & { updatedAt: Date } = { updatedAt: new Date() };
 
   const changed: string[] = [];
-  const providedKeyDateForWorkflowSync: Array<{ keyDateField: KeyDateField; ymd: string }> = [];
   const apiKeys = Object.keys(dateFieldMap) as Array<keyof typeof dateFieldMap>;
   for (const apiKey of apiKeys) {
     if (!Object.prototype.hasOwnProperty.call(body, apiKey)) continue;
@@ -2282,12 +2506,6 @@ router.patch("/cases/:caseId/key-dates", requireAuth, requireFirmUser, requirePe
     const colKey = dateFieldMap[apiKey] as DateColKey;
     setDateCol(insertValues, colKey, parsed as DateColValue);
     setDateCol(updateValues, colKey, parsed as DateColValue);
-    if (typeof parsed === "string") {
-      const k = String(apiKey);
-      if (Object.prototype.hasOwnProperty.call(KEY_DATE_FIELD_TO_STEP_KEY, k)) {
-        providedKeyDateForWorkflowSync.push({ keyDateField: k as KeyDateField, ymd: parsed });
-      }
-    }
     changed.push(String(apiKey));
   }
 
@@ -2376,56 +2594,13 @@ router.patch("/cases/:caseId/key-dates", requireAuth, requireFirmUser, requirePe
     entityId: params.data.caseId,
     detail: JSON.stringify(changed),
   });
-
-  const workflowRows = await r
-    .select({
-      id: caseWorkflowStepsTable.id,
-      stepKey: caseWorkflowStepsTable.stepKey,
-      stepName: caseWorkflowStepsTable.stepName,
-      status: caseWorkflowStepsTable.status,
-      completedAt: caseWorkflowStepsTable.completedAt,
-    })
-    .from(caseWorkflowStepsTable)
-    .where(eq(caseWorkflowStepsTable.caseId, params.data.caseId));
-  const workflowByKey = new Map<string, { id: number; stepKey: string; stepName: string; status: string; completedAt: Date | null }>();
-  for (const s of workflowRows) {
-    workflowByKey.set(s.stepKey, { id: s.id, stepKey: s.stepKey, stepName: s.stepName, status: s.status, completedAt: s.completedAt ?? null });
-  }
-
-  const syncedWorkflowSteps: string[] = [];
-  const missingWorkflowSteps: string[] = [];
-  for (const item of providedKeyDateForWorkflowSync) {
-    const stepKey = KEY_DATE_FIELD_TO_STEP_KEY[item.keyDateField];
-    const step = workflowByKey.get(stepKey);
-    if (!step) {
-      missingWorkflowSteps.push(stepKey);
-      continue;
-    }
-    if (step.status === "completed" && step.completedAt) continue;
-    const completedAt = ymdToUtcDate(item.ymd);
-    const [updatedStep] = await r
-      .update(caseWorkflowStepsTable)
-      .set({
-        status: "completed",
-        completedBy: req.userId,
-        completedAt: step.completedAt ?? completedAt,
-        updatedAt: new Date(),
-      })
-      .where(and(eq(caseWorkflowStepsTable.id, step.id), eq(caseWorkflowStepsTable.caseId, params.data.caseId)))
-      .returning();
-    if (updatedStep) {
-      syncedWorkflowSteps.push(stepKey);
-      await r.insert(auditLogsTable).values({
-        firmId: req.firmId,
-        actorId: req.userId,
-        actorType: "firm_user",
-        action: "workflow.step_synced_from_key_date",
-        entityType: "case_workflow_step",
-        entityId: updatedStep.id,
-        detail: JSON.stringify({ keyDateField: item.keyDateField, stepKey, ymd: item.ymd }),
-      });
-    }
-  }
+  await syncWorkflowStepsFromCaseState(r, params.data.caseId, {
+    firmId: req.firmId!,
+    actorId: req.userId,
+    actorType: req.userType ?? "firm_user",
+    ipAddress: req.ip,
+    userAgent: req.headers["user-agent"],
+  });
 
   res.json(kd ? {
     spa_signed_date: kd.spaSignedDate ? String(kd.spaSignedDate) : null,
@@ -2467,9 +2642,7 @@ router.patch("/cases/:caseId/key-dates", requireAuth, requireFirmUser, requirePe
     progressive_payment_date: kd.progressivePaymentDate ? String(kd.progressivePaymentDate) : null,
     full_settlement_date: kd.fullSettlementDate ? String(kd.fullSettlementDate) : null,
     completion_date: kd.completionDate ? String(kd.completionDate) : null,
-    synced_workflow_steps: syncedWorkflowSteps,
-    missing_workflow_steps: missingWorkflowSteps,
-  } : { synced_workflow_steps: syncedWorkflowSteps, missing_workflow_steps: missingWorkflowSteps });
+  } : {});
 });
 
 router.patch("/cases/:caseId", requireAuth, requireFirmUser, requirePermission("cases", "update"), async (req: AuthRequest, res): Promise<void> => {
@@ -2748,6 +2921,14 @@ router.post("/cases/:caseId/workflow-documents", requireAuth, requireFirmUser, r
     userAgent: req.headers["user-agent"],
   });
 
+  await syncWorkflowStepsFromCaseState(r, caseId, {
+    firmId: req.firmId!,
+    actorId: req.userId,
+    actorType: req.userType ?? "firm_user",
+    ipAddress: req.ip,
+    userAgent: req.headers["user-agent"],
+  });
+
   res.status(existing ? 200 : 201).json({
     id: row.id,
     caseId: row.caseId,
@@ -2837,6 +3018,14 @@ router.delete("/cases/:caseId/workflow-documents/:id", requireAuth, requireFirmU
     entityType: "case",
     entityId: caseId,
     detail: `workflowDocumentId=${id} milestoneKey=${existing.milestoneKey} fileName=${existing.fileName}`,
+    ipAddress: req.ip,
+    userAgent: req.headers["user-agent"],
+  });
+
+  await syncWorkflowStepsFromCaseState(r, caseId, {
+    firmId: req.firmId!,
+    actorId: req.userId,
+    actorType: req.userType ?? "firm_user",
     ipAddress: req.ip,
     userAgent: req.headers["user-agent"],
   });
@@ -2970,6 +3159,146 @@ router.get("/cases/:caseId/loan-stamping", requireAuth, requireFirmUser, require
     createdAt: toIsoStringSafeOrNull(x.createdAt),
     updatedAt: toIsoStringSafeOrNull(x.updatedAt),
   })));
+});
+
+router.post("/cases/:caseId/loan-stamping/ensure", requireAuth, requireFirmUser, requirePermission("documents", "update"), async (req: AuthRequest, res): Promise<void> => {
+  const r = req.rlsDb;
+  if (!r) {
+    logger.error({ path: req.path, firmId: req.firmId, userId: req.userId }, "[cases] missing tenant database context");
+    res.status(500).json({ error: "Internal Server Error" });
+    return;
+  }
+  const caseIdStr = one((req.params as any).caseId);
+  const caseId = caseIdStr ? Number(caseIdStr) : NaN;
+  if (!Number.isFinite(caseId)) {
+    res.status(400).json({ error: "Invalid caseId" });
+    return;
+  }
+  const exists = await tableExists(r, "public.case_loan_stamping_items");
+  if (!exists) {
+    res.status(503).json({ error: "Loan stamping not available" });
+    return;
+  }
+  const [caseRow] = await r
+    .select({ titleType: casesTable.titleType })
+    .from(casesTable)
+    .where(and(eq(casesTable.id, caseId), eq(casesTable.firmId, req.firmId!)));
+  if (!caseRow) {
+    res.status(404).json({ error: "Case not found" });
+    return;
+  }
+  const titleType = normalizeTitleType(caseRow.titleType);
+
+  const body = asObject(req.body) ?? {};
+  const itemKey = asString(body.itemKey);
+  const customName = asString(body.customName);
+  const sortOrder = asNumber(body.sortOrder);
+  const datedOnRaw = body.datedOn;
+  const stampedOnRaw = body.stampedOn;
+  if (!itemKey || !ALLOWED_LOAN_STAMPING_ITEM_KEYS.has(itemKey)) {
+    res.status(422).json({ error: "Invalid itemKey" });
+    return;
+  }
+  if (!isLoanStampingItemKeyAllowedForTitleType(titleType, itemKey as LoanStampingItemKey)) {
+    res.status(422).json({ error: "itemKey not allowed for title type" });
+    return;
+  }
+  const datedOn = Object.prototype.hasOwnProperty.call(body, "datedOn") ? parseDateOnlyInput(datedOnRaw) : undefined;
+  const stampedOn = Object.prototype.hasOwnProperty.call(body, "stampedOn") ? parseDateOnlyInput(stampedOnRaw) : undefined;
+  if (datedOn === undefined && Object.prototype.hasOwnProperty.call(body, "datedOn")) {
+    res.status(422).json({ error: "Invalid datedOn" });
+    return;
+  }
+  if (stampedOn === undefined && Object.prototype.hasOwnProperty.call(body, "stampedOn")) {
+    res.status(422).json({ error: "Invalid stampedOn" });
+    return;
+  }
+
+  const now = new Date();
+  let row: any;
+  if (itemKey !== "other") {
+    const [existing] = await r
+      .select({ id: caseLoanStampingItemsTable.id })
+      .from(caseLoanStampingItemsTable)
+      .where(and(
+        eq(caseLoanStampingItemsTable.firmId, req.firmId!),
+        eq(caseLoanStampingItemsTable.caseId, caseId),
+        eq(caseLoanStampingItemsTable.itemKey, itemKey),
+        sql`${caseLoanStampingItemsTable.deletedAt} IS NULL`,
+      ))
+      .limit(1);
+    if (existing) {
+      const setValues: Record<string, unknown> = { sortOrder: 0, updatedAt: now };
+      if (datedOn !== undefined) setValues.datedOn = typeof datedOn === "string" ? datedOn : null;
+      if (stampedOn !== undefined) setValues.stampedOn = typeof stampedOn === "string" ? stampedOn : null;
+      const [updated] = await r
+        .update(caseLoanStampingItemsTable)
+        .set(setValues)
+        .where(and(eq(caseLoanStampingItemsTable.id, existing.id), eq(caseLoanStampingItemsTable.firmId, req.firmId!), eq(caseLoanStampingItemsTable.caseId, caseId)))
+        .returning();
+      row = updated;
+    } else {
+      const [inserted] = await r
+        .insert(caseLoanStampingItemsTable)
+        .values({
+          firmId: req.firmId!,
+          caseId,
+          itemKey,
+          customName: null,
+          datedOn: typeof datedOn === "string" ? datedOn : null,
+          stampedOn: typeof stampedOn === "string" ? stampedOn : null,
+          sortOrder: 0,
+          uploadedBy: req.userId ?? null,
+          createdAt: now,
+          updatedAt: now,
+        })
+        .returning();
+      row = inserted;
+    }
+  } else {
+    const [inserted] = await r
+      .insert(caseLoanStampingItemsTable)
+      .values({
+        firmId: req.firmId!,
+        caseId,
+        itemKey,
+        customName: customName?.trim() || null,
+        datedOn: typeof datedOn === "string" ? datedOn : null,
+        stampedOn: typeof stampedOn === "string" ? stampedOn : null,
+        sortOrder: Number.isFinite(sortOrder ?? NaN) ? (sortOrder as number) : 1000,
+        uploadedBy: req.userId ?? null,
+        createdAt: now,
+        updatedAt: now,
+      })
+      .returning();
+    row = inserted;
+  }
+
+  await writeAuditLog({
+    firmId: req.firmId,
+    actorId: req.userId,
+    actorType: req.userType,
+    action: "cases.loan_stamping.ensure",
+    entityType: "case",
+    entityId: caseId,
+    detail: `loanStampingItemId=${row?.id ?? ""} itemKey=${itemKey} sortOrder=${row?.sortOrder ?? ""}`,
+    ipAddress: req.ip,
+    userAgent: req.headers["user-agent"],
+  });
+
+  res.status(200).json({
+    id: row.id,
+    itemKey: row.itemKey,
+    customName: row.customName ?? null,
+    datedOn: row.datedOn ? String(row.datedOn) : null,
+    stampedOn: row.stampedOn ? String(row.stampedOn) : null,
+    fileName: row.fileName ?? null,
+    mimeType: row.mimeType ?? null,
+    fileSize: row.fileSize ?? null,
+    sortOrder: row.sortOrder ?? 0,
+    createdAt: toIsoStringSafeOrNull(row.createdAt),
+    updatedAt: toIsoStringSafeOrNull(row.updatedAt),
+  });
 });
 
 router.put("/cases/:caseId/loan-stamping", requireAuth, requireFirmUser, requirePermission("documents", "update"), async (req: AuthRequest, res): Promise<void> => {
@@ -3475,6 +3804,8 @@ router.get("/cases/:caseId/workflow", requireAuth, requireFirmUser, requirePermi
       return;
     }
 
+    await ensureCaseWorkflowSteps(r, req.firmId!, params.data.caseId);
+
     const steps = await r.select().from(caseWorkflowStepsTable)
       .where(eq(caseWorkflowStepsTable.caseId, params.data.caseId))
       .orderBy(caseWorkflowStepsTable.stepOrder);
@@ -3550,10 +3881,24 @@ router.patch("/cases/:caseId/workflow/:stepId", requireAuth, requireFirmUser, re
     return;
   }
 
+  const [existingStep] = await r
+    .select({ id: caseWorkflowStepsTable.id, stepKey: caseWorkflowStepsTable.stepKey })
+    .from(caseWorkflowStepsTable)
+    .where(and(eq(caseWorkflowStepsTable.id, params.data.stepId), eq(caseWorkflowStepsTable.caseId, params.data.caseId)))
+    .limit(1);
+  if (!existingStep) {
+    res.status(404).json({ error: "Workflow step not found" });
+    return;
+  }
+  if (parsed.data.status !== undefined && Object.prototype.hasOwnProperty.call(WORKFLOW_AUTOMATION_RULE_BY_STEP_KEY, String(existingStep.stepKey))) {
+    res.status(422).json({ error: "This step is automated by key dates/attachments and cannot be updated manually." });
+    return;
+  }
+
   const [step] = await r
     .update(caseWorkflowStepsTable)
     .set(updates)
-    .where(and(eq(caseWorkflowStepsTable.id, params.data.stepId), eq(caseWorkflowStepsTable.caseId, params.data.caseId)))
+    .where(and(eq(caseWorkflowStepsTable.id, existingStep.id), eq(caseWorkflowStepsTable.caseId, params.data.caseId)))
     .returning();
 
   if (!step) {

@@ -108,6 +108,34 @@ describe("Loan stamping API", () => {
     expect(getRes.body[1].sortOrder).toBe(20);
   });
 
+  it("allows upload without manual Save (ensure row then bind file)", async () => {
+    const ensured = await request(app)
+      .post(`/api/cases/${createdCaseId}/loan-stamping/ensure`)
+      .set("Authorization", `Bearer ${token}`)
+      .send({ itemKey: "facility_agreement" });
+    expect(ensured.status).toBe(200);
+    const id = ensured.body.id;
+    expect(id).toBeTruthy();
+
+    const bind = await request(app)
+      .post(`/api/cases/${createdCaseId}/loan-stamping/${id}/file`)
+      .set("Authorization", `Bearer ${token}`)
+      .send({
+        objectPath: `/objects/cases/${firmId}/case-${createdCaseId}/loan-stamping/${Date.now()}-fa.pdf`,
+        fileName: "fa.pdf",
+        mimeType: "application/pdf",
+        fileSize: 12,
+      });
+    expect(bind.status).toBe(200);
+
+    const list = await request(app)
+      .get(`/api/cases/${createdCaseId}/loan-stamping`)
+      .set("Authorization", `Bearer ${token}`);
+    expect(list.status).toBe(200);
+    const fa = list.body.find((x: any) => x.itemKey === "facility_agreement");
+    expect(fa?.fileName).toBe("fa.pdf");
+  });
+
   it("DELETE removes a row", async () => {
     const list = await request(app)
       .get(`/api/cases/${createdCaseId}/loan-stamping`)

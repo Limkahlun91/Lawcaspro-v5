@@ -115,6 +115,7 @@ export default function CaseDetail() {
       queryClient.invalidateQueries({ queryKey: getListCasesQueryKey() });
       queryClient.invalidateQueries({ queryKey: getGetCaseQueryKey(caseId) });
       queryClient.invalidateQueries({ queryKey: ["case-key-dates", caseId] });
+      queryClient.invalidateQueries({ queryKey: ["case-progress", caseId] });
       queryClient.invalidateQueries({ queryKey: getGetCaseWorkflowQueryKey(caseId) });
       setKeyDatesBaseline((prev) => {
         const next = { ...prev };
@@ -122,9 +123,7 @@ export default function CaseDetail() {
         return next;
       });
       setSavingScope("");
-      const payload = (data && typeof data === "object") ? (data as Record<string, unknown>) : {};
-      const synced = Array.isArray(payload.synced_workflow_steps) ? payload.synced_workflow_steps.filter((x) => typeof x === "string") : [];
-      toast({ title: `${vars.scope} saved`, description: synced.length ? `${synced.length} milestone(s) synced to workflow` : undefined });
+      toast({ title: `${vars.scope} saved` });
     },
     onError: (err) => toastError(toast, err, "Save failed"),
   });
@@ -170,6 +169,13 @@ export default function CaseDetail() {
   const loanStampingQuery = useQuery<LoanStampingItem[]>({
     queryKey: ["case-loan-stamping", caseId],
     queryFn: ({ signal }) => apiFetchJson(`/cases/${caseId}/loan-stamping`, { signal }),
+    enabled: !!caseId,
+    retry: false,
+  });
+
+  const progressQuery = useQuery<any>({
+    queryKey: ["case-progress", caseId],
+    queryFn: ({ signal }) => apiFetchJson(`/cases/${caseId}/progress`, { signal }),
     enabled: !!caseId,
     retry: false,
   });
@@ -469,6 +475,8 @@ export default function CaseDetail() {
       }),
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: ["case-workflow-documents", caseId] });
+      await queryClient.invalidateQueries({ queryKey: ["case-progress", caseId] });
+      await queryClient.invalidateQueries({ queryKey: getGetCaseWorkflowQueryKey(caseId) });
     },
     onError: (err) => toastError(toast, err, "Upload failed"),
   });
@@ -477,6 +485,8 @@ export default function CaseDetail() {
     mutationFn: (id: number) => apiFetchJson(`/cases/${caseId}/workflow-documents/${id}`, { method: "DELETE", allowStatuses: [204] }),
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: ["case-workflow-documents", caseId] });
+      await queryClient.invalidateQueries({ queryKey: ["case-progress", caseId] });
+      await queryClient.invalidateQueries({ queryKey: getGetCaseWorkflowQueryKey(caseId) });
       toast({ title: "Deleted" });
     },
     onError: (err) => toastError(toast, err, "Delete failed"),
@@ -555,6 +565,7 @@ export default function CaseDetail() {
       apiFetchJson(`/cases/${caseId}/loan-stamping`, { method: "PUT", body: JSON.stringify({ items }) }),
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: ["case-loan-stamping", caseId] });
+      await queryClient.invalidateQueries({ queryKey: ["case-progress", caseId] });
       setStampingDirty(false);
       toast({ title: "Stamping saved" });
     },
@@ -565,6 +576,7 @@ export default function CaseDetail() {
     mutationFn: (id: number) => apiFetchJson(`/cases/${caseId}/loan-stamping/${id}`, { method: "DELETE", allowStatuses: [204] }),
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: ["case-loan-stamping", caseId] });
+      await queryClient.invalidateQueries({ queryKey: ["case-progress", caseId] });
       setStampingDirty(false);
       toast({ title: "Deleted" });
     },
@@ -584,6 +596,7 @@ export default function CaseDetail() {
       }),
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: ["case-loan-stamping", caseId] });
+      await queryClient.invalidateQueries({ queryKey: ["case-progress", caseId] });
       setStampingDirty(false);
     },
     onError: (err) => toastError(toast, err, "Upload failed"),
@@ -593,6 +606,7 @@ export default function CaseDetail() {
     mutationFn: (id: number) => apiFetchJson(`/cases/${caseId}/loan-stamping/${id}/file`, { method: "DELETE", allowStatuses: [204] }),
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: ["case-loan-stamping", caseId] });
+      await queryClient.invalidateQueries({ queryKey: ["case-progress", caseId] });
       setStampingDirty(false);
       toast({ title: "Deleted" });
     },
@@ -604,9 +618,71 @@ export default function CaseDetail() {
     return `/objects/cases/${firmId}/case-${caseId}/loan-stamping/${crypto.randomUUID()}-${safeFileNamePart(file.name)}`;
   }
 
-  function openStampingUpload(id: number) {
-    stampingUploadIdRef.current = id;
+  const ensureStampingItemMutation = useMutation({
+    mutationFn: (payload: { itemKey: LoanStampingItemKey; customName?: string | null; sortOrder?: number; datedOn?: string | null; stampedOn?: string | null }) =>
+      apiFetchJson(`/cases/${caseId}/loan-stamping/ensure`, { method: "POST", body: JSON.stringify(payload) }),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ["case-loan-stamping", caseId] });
+      await queryClient.invalidateQueries({ queryKey: ["case-progress", caseId] });
+    },
+    onError: (err) => toastError(toast, err, "Failed to prepare upload"),
+  });
+
+  async function ensureStampingRowForUpload(row: LoanStampingItem): Promise<number | null> {
+    if (!canDocsUpdate) return null;
+    const ensured = await ensureStampingItemMutation.mutateAsync({
+      itemKey: row.itemKey,
+      customName: row.itemKey === "other" ? (row.customName ?? "") : null,
+      sortOrder: row.sortOrder,
+      datedOn: row.datedOn ?? null,
+      stampedOn: row.stampedOn ?? null,
+    });
+    const ensuredId = Number((ensured as any)?.id);
+    if (!Number.isFinite(ensuredId)) return null;
+    setStampingDraft((prev) => {
+      const next = [...prev];
+      const idx = next.findIndex((x) =>
+        x.id
+          ? x.id === row.id
+          : (row.itemKey !== "other" ? x.itemKey === row.itemKey : x.itemKey === "other" && x.sortOrder === row.sortOrder)
+      );
+      const merged = {
+        ...row,
+        id: ensuredId,
+        customName: (ensured as any)?.customName ?? row.customName ?? null,
+        datedOn: (ensured as any)?.datedOn ?? row.datedOn ?? null,
+        stampedOn: (ensured as any)?.stampedOn ?? row.stampedOn ?? null,
+      } as LoanStampingItem;
+      if (idx >= 0) next[idx] = { ...next[idx], ...merged };
+      else next.push(merged);
+      return next;
+    });
+    return ensuredId;
+  }
+
+  async function openStampingUpload(row: LoanStampingItem) {
+    const ensuredId = row.id ? row.id : await ensureStampingRowForUpload(row);
+    if (!ensuredId) return;
+    stampingUploadIdRef.current = ensuredId;
     stampingFileInputRef.current?.click();
+  }
+
+  async function addStampingOtherRow() {
+    if (!canDocsUpdate) return;
+    const nextOrder = 1000 + visibleStampingItems.others.length;
+    const ensured = await ensureStampingItemMutation.mutateAsync({
+      itemKey: "other",
+      customName: "",
+      sortOrder: nextOrder,
+      datedOn: null,
+      stampedOn: null,
+    });
+    const ensuredId = Number((ensured as any)?.id);
+    if (!Number.isFinite(ensuredId)) return;
+    setStampingDraft((prev) => [
+      ...prev,
+      { id: ensuredId, itemKey: "other", customName: "", datedOn: null, stampedOn: null, fileName: null, mimeType: null, fileSize: null, sortOrder: nextOrder },
+    ]);
   }
 
   async function handleStampingFileSelected(file: File | null) {
@@ -720,6 +796,9 @@ export default function CaseDetail() {
     const doc = workflowDocsByKey.get(props.docKey);
     const uploading = workflowUploadingKey === props.docKey || uploadWorkflowDocMutation.isPending;
     const canUpload = canDocsWrite && Boolean(value) && !uploading && !deleteWorkflowDocMutation.isPending;
+    const derivedStatus = Array.isArray(progressQuery.data?.attachments)
+      ? progressQuery.data.attachments.find((x: any) => x?.docKey === props.docKey)?.status
+      : null;
     const showPrinter = Boolean(props.printerKey);
     const printerKey = props.printerKey || "";
     const st = showPrinter ? printState(printerKey) : null;
@@ -730,15 +809,25 @@ export default function CaseDetail() {
       <div className="rounded-lg border border-slate-200 bg-white p-3">
         <div className="flex items-center justify-between gap-2">
           <Label className="text-xs text-slate-600">{props.label}</Label>
-          {showStatus && (
-            <Badge
-              variant={st?.status === "configured" ? "secondary" : "outline"}
-              className="text-[10px] whitespace-nowrap"
-              title={st?.hint}
-            >
-              {statusLabel}
-            </Badge>
-          )}
+          <div className="flex items-center gap-1">
+            {derivedStatus && (
+              <Badge
+                variant={derivedStatus === "completed" ? "default" : "outline"}
+                className="text-[10px] whitespace-nowrap"
+              >
+                {String(derivedStatus).replace(/_/g, " ")}
+              </Badge>
+            )}
+            {showStatus && (
+              <Badge
+                variant={st?.status === "configured" ? "secondary" : "outline"}
+                className="text-[10px] whitespace-nowrap"
+                title={st?.hint}
+              >
+                {statusLabel}
+              </Badge>
+            )}
+          </div>
         </div>
         <div className="mt-2 flex items-center gap-2">
           <DateOnlyInput
@@ -955,6 +1044,37 @@ export default function CaseDetail() {
         </Button>
       </div>
 
+      {!progressQuery.isError && Array.isArray(progressQuery.data?.sections) && progressQuery.data.sections.length > 0 && (
+        <Card className="mb-6">
+          <CardHeader>
+            <CardTitle>Progress Summary</CardTitle>
+          </CardHeader>
+          <CardContent className="min-w-0">
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 min-w-0">
+              {progressQuery.data.sections.map((s: any) => (
+                <button
+                  key={s.key}
+                  type="button"
+                  className="min-w-0 rounded-lg border border-slate-200 bg-white p-3 text-left hover:bg-slate-50"
+                  onClick={() => {
+                    setActiveTab("overview");
+                    if (s?.target?.milestoneTab) setMilestoneTab(s.target.milestoneTab);
+                  }}
+                >
+                  <div className="text-sm font-medium text-slate-800 break-words">{s.label}</div>
+                  <div className="mt-1 flex items-center justify-between gap-2 min-w-0">
+                    <div className="text-xl font-bold text-slate-900">{s.completed}/{s.total}</div>
+                    <Badge variant={s.total > 0 && s.completed === s.total ? "default" : "secondary"}>
+                      {s.total > 0 && s.completed === s.total ? "Completed" : "In Progress"}
+                    </Badge>
+                  </div>
+                </button>
+              ))}
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
       <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">
         <TabsList className="flex w-full flex-wrap gap-1 mb-6 bg-slate-100 p-1">
           <TabsTrigger value="overview">Overview</TabsTrigger>
@@ -1141,16 +1261,29 @@ export default function CaseDetail() {
 
                   <Card>
                     <CardHeader className="flex flex-row items-center justify-between gap-3">
-                      <CardTitle className="text-sm">Stamping</CardTitle>
+                      <div className="min-w-0">
+                        <CardTitle className="text-sm">Stamping</CardTitle>
+                        {progressQuery.data?.stamping && (
+                          <div className="mt-1 text-xs text-slate-600 break-words">
+                            {progressQuery.data.stamping.completed}/{progressQuery.data.stamping.total} completed
+                            {Array.isArray(progressQuery.data.stamping.missing) && progressQuery.data.stamping.missing.length > 0 && (
+                              <span className="ml-2">
+                                Missing: {progressQuery.data.stamping.missing
+                                  .slice(0, 4)
+                                  .map((m: any) => `${m.itemKey}(${String(m.status).replace(/_/g, " ")})`)
+                                  .join(", ")}
+                                {progressQuery.data.stamping.missing.length > 4 ? "…" : ""}
+                              </span>
+                            )}
+                          </div>
+                        )}
+                      </div>
                       <div className="flex items-center gap-2">
                         <Button
                           size="sm"
                           variant="outline"
                           className="gap-1.5"
-                          onClick={() => {
-                            const nextOrder = 1000 + visibleStampingItems.others.length;
-                            upsertStampingItem({ itemKey: "other", customName: "", datedOn: null, stampedOn: null, fileName: null, mimeType: null, fileSize: null, sortOrder: nextOrder });
-                          }}
+                          onClick={addStampingOtherRow}
                           disabled={!canDocsUpdate}
                         >
                           <Plus className="w-4 h-4" />
@@ -1185,7 +1318,21 @@ export default function CaseDetail() {
                             <tbody className="divide-y">
                               {visibleStampingItems.fixed.map((row) => (
                                 <tr key={`fixed-${row.itemKey}`}>
-                                  <td className="px-3 py-2 font-medium text-slate-800">{fixedStampingKeys.find((x) => x.key === row.itemKey)?.label}</td>
+                                  <td className="px-3 py-2 font-medium text-slate-800">
+                                    <div className="flex items-center gap-2 min-w-0">
+                                      <span className="truncate">{fixedStampingKeys.find((x) => x.key === row.itemKey)?.label}</span>
+                                      {Array.isArray(progressQuery.data?.stampingItems) && (
+                                        (() => {
+                                          const st = progressQuery.data.stampingItems.find((x: any) => x?.itemKey === row.itemKey && (row.id ? x?.id === row.id : true));
+                                          return st?.status ? (
+                                            <Badge variant={st.status === "completed" ? "default" : "outline"} className="text-[10px] whitespace-nowrap">
+                                              {String(st.status).replace(/_/g, " ")}
+                                            </Badge>
+                                          ) : null;
+                                        })()
+                                      )}
+                                    </div>
+                                  </td>
                                   <td className="px-3 py-2">
                                     <DateOnlyInput disabled={!canDocsUpdate} valueYmd={row.datedOn || ""} onChangeYmd={(v) => upsertStampingItem({ ...row, datedOn: v || null })} />
                                   </td>
@@ -1212,9 +1359,9 @@ export default function CaseDetail() {
                                           size="icon"
                                           variant="ghost"
                                           className="h-8 w-8"
-                                          title={row.id ? "Upload/Replace" : "Save to enable upload"}
-                                          disabled={!row.id || stampingUploadingId === row.id}
-                                          onClick={() => row.id && openStampingUpload(row.id)}
+                                          title="Upload/Replace"
+                                          disabled={ensureStampingItemMutation.isPending || stampingUploadingId === row.id}
+                                          onClick={() => openStampingUpload(row)}
                                         >
                                           <Upload className="w-4 h-4" />
                                         </Button>
@@ -1238,12 +1385,25 @@ export default function CaseDetail() {
                               {visibleStampingItems.others.map((row) => (
                                 <tr key={`other-${row.id ?? row.sortOrder}`}>
                                   <td className="px-3 py-2">
-                                    <Input
-                                      value={row.customName ?? ""}
-                                      placeholder="Other document name"
-                                      onChange={(e) => upsertStampingItem({ ...row, customName: e.target.value })}
-                                      disabled={!canDocsUpdate}
-                                    />
+                                    <div className="flex items-center gap-2 min-w-0">
+                                      <Input
+                                        className="min-w-0"
+                                        value={row.customName ?? ""}
+                                        placeholder="Other document name"
+                                        onChange={(e) => upsertStampingItem({ ...row, customName: e.target.value })}
+                                        disabled={!canDocsUpdate}
+                                      />
+                                      {Array.isArray(progressQuery.data?.stampingItems) && (
+                                        (() => {
+                                          const st = progressQuery.data.stampingItems.find((x: any) => x?.itemKey === "other" && (row.id ? x?.id === row.id : x?.sortOrder === row.sortOrder));
+                                          return st?.status ? (
+                                            <Badge variant={st.status === "completed" ? "default" : "outline"} className="text-[10px] whitespace-nowrap">
+                                              {String(st.status).replace(/_/g, " ")}
+                                            </Badge>
+                                          ) : null;
+                                        })()
+                                      )}
+                                    </div>
                                   </td>
                                   <td className="px-3 py-2">
                                     <DateOnlyInput disabled={!canDocsUpdate} valueYmd={row.datedOn || ""} onChangeYmd={(v) => upsertStampingItem({ ...row, datedOn: v || null })} />
@@ -1271,9 +1431,9 @@ export default function CaseDetail() {
                                           size="icon"
                                           variant="ghost"
                                           className="h-8 w-8"
-                                          title={row.id ? "Upload/Replace" : "Save to enable upload"}
-                                          disabled={!row.id || stampingUploadingId === row.id}
-                                          onClick={() => row.id && openStampingUpload(row.id)}
+                                          title="Upload/Replace"
+                                          disabled={ensureStampingItemMutation.isPending || stampingUploadingId === row.id}
+                                          onClick={() => openStampingUpload(row)}
                                         >
                                           <Upload className="w-4 h-4" />
                                         </Button>
@@ -1426,7 +1586,13 @@ export default function CaseDetail() {
                           <div className="flex justify-between items-start mb-2">
                             <h4 className="font-semibold text-slate-900">{step.stepName}</h4>
                             <span className="text-xs text-slate-500">
-                              {step.status === 'completed' ? `Done by ${step.completedByName}` : 'Pending'}
+                              {step.status === "completed"
+                                ? `Done by ${step.completedByName}`
+                                : (Array.isArray(progressQuery.data?.workflowSteps)
+                                  ? (progressQuery.data.workflowSteps.find((x: any) => x?.stepKey === step.stepKey)?.derivedStatus
+                                    ? String(progressQuery.data.workflowSteps.find((x: any) => x?.stepKey === step.stepKey)?.derivedStatus).replace(/_/g, " ")
+                                    : "Pending")
+                                  : "Pending")}
                             </span>
                           </div>
                           
@@ -1451,11 +1617,14 @@ export default function CaseDetail() {
                             </div>
                           )}
 
-                          {step.status !== 'completed' && activeStepId !== step.id && (
-                            <Button size="sm" variant="secondary" className="mt-2 text-xs" onClick={() => setActiveStepId(step.id)}>
-                              Mark Complete
-                            </Button>
-                          )}
+                          {step.status !== "completed"
+                            && activeStepId !== step.id
+                            && !(Array.isArray(progressQuery.data?.workflowSteps) && progressQuery.data.workflowSteps.find((x: any) => x?.stepKey === step.stepKey)?.derivedStatus)
+                            && (
+                              <Button size="sm" variant="secondary" className="mt-2 text-xs" onClick={() => setActiveStepId(step.id)}>
+                                Mark Complete
+                              </Button>
+                            )}
                         </div>
                       </div>
                     ))}
@@ -1484,7 +1653,13 @@ export default function CaseDetail() {
                             <div className="flex justify-between items-start mb-2">
                               <h4 className="font-semibold text-slate-900">{step.stepName}</h4>
                               <span className="text-xs text-slate-500">
-                                {step.status === 'completed' ? 'Completed' : 'Pending'}
+                                {step.status === "completed"
+                                  ? "Completed"
+                                  : (Array.isArray(progressQuery.data?.workflowSteps)
+                                    ? (progressQuery.data.workflowSteps.find((x: any) => x?.stepKey === step.stepKey)?.derivedStatus
+                                      ? String(progressQuery.data.workflowSteps.find((x: any) => x?.stepKey === step.stepKey)?.derivedStatus).replace(/_/g, " ")
+                                      : "Pending")
+                                    : "Pending")}
                               </span>
                             </div>
                             
@@ -1505,11 +1680,14 @@ export default function CaseDetail() {
                               </div>
                             )}
 
-                            {step.status !== 'completed' && activeStepId !== step.id && (
-                              <Button size="sm" variant="secondary" className="mt-2 text-xs" onClick={() => setActiveStepId(step.id)}>
-                                Mark Complete
-                              </Button>
-                            )}
+                            {step.status !== "completed"
+                              && activeStepId !== step.id
+                              && !(Array.isArray(progressQuery.data?.workflowSteps) && progressQuery.data.workflowSteps.find((x: any) => x?.stepKey === step.stepKey)?.derivedStatus)
+                              && (
+                                <Button size="sm" variant="secondary" className="mt-2 text-xs" onClick={() => setActiveStepId(step.id)}>
+                                  Mark Complete
+                                </Button>
+                              )}
                           </div>
                         </div>
                       ))}

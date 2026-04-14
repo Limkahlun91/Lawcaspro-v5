@@ -44,6 +44,7 @@ function getNoaPaSteps(): WorkflowStepDef[] {
     { stepKey: "noa_served", stepName: "NOA Served", stepOrder: 14, pathType: "noa_pa" },
     { stepKey: "pa_pending", stepName: "Pending Register Power of Attorney (PA)", stepOrder: 15, pathType: "noa_pa" },
     { stepKey: "pa_registered", stepName: "Power of Attorney Registered", stepOrder: 16, pathType: "noa_pa" },
+    { stepKey: "letter_disclaimer", stepName: "Letter Disclaimer", stepOrder: 17, pathType: "noa_pa" },
   ];
 }
 

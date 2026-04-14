@@ -17,6 +17,7 @@ export default defineConfig({
         "src/__tests__/dateOnly.test.ts",
         "src/__tests__/caseWorkflowDocuments.unit.test.ts",
         "src/__tests__/loanStamping.unit.test.ts",
+        "src/__tests__/workflowAutomation.unit.test.ts",
       ],
     pool: "forks",
     poolOptions: {
