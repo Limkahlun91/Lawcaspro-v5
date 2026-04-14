@@ -1,4 +1,4 @@
-import { pgTable, serial, text, integer, boolean, timestamp, index, date } from "drizzle-orm/pg-core";
+import { pgTable, serial, text, integer, boolean, timestamp, index, date, jsonb, uuid } from "drizzle-orm/pg-core";
 
 export const documentTemplatesTable = pgTable("document_templates", {
   id: serial("id").primaryKey(),
@@ -99,4 +99,109 @@ export const caseLoanStampingItemsTable = pgTable("case_loan_stamping_items", {
   caseIdx: index("idx_case_loan_stamping_items_case").on(t.caseId),
   firmKeyIdx: index("idx_case_loan_stamping_items_firm_key").on(t.firmId, t.itemKey),
   sortIdx: index("idx_case_loan_stamping_items_sort").on(t.firmId, t.caseId, t.sortOrder),
+}));
+
+export const documentTemplateVersionsTable = pgTable("document_template_versions", {
+  id: serial("id").primaryKey(),
+  firmId: integer("firm_id").notNull(),
+  templateId: integer("template_id").notNull(),
+  versionNo: integer("version_no").notNull(),
+  status: text("status").notNull().default("draft"),
+  sourceObjectPath: text("source_object_path").notNull(),
+  filename: text("filename").notNull(),
+  mimeType: text("mime_type"),
+  templateKind: text("template_kind"),
+  category: text("category"),
+  documentGroup: text("document_group"),
+  variablesSnapshot: jsonb("variables_snapshot"),
+  pdfMappingsSnapshot: jsonb("pdf_mappings_snapshot"),
+  applicabilityRulesSnapshot: jsonb("applicability_rules_snapshot"),
+  readinessRulesSnapshot: jsonb("readiness_rules_snapshot"),
+  createdBy: integer("created_by"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  publishedBy: integer("published_by"),
+  publishedAt: timestamp("published_at", { withTimezone: true }),
+  archivedBy: integer("archived_by"),
+  archivedAt: timestamp("archived_at", { withTimezone: true }),
+}, (t) => ({
+  firmIdx: index("idx_document_template_versions_firm").on(t.firmId),
+  templateIdx: index("idx_document_template_versions_template").on(t.templateId),
+  statusIdx: index("idx_document_template_versions_status").on(t.firmId, t.status),
+  createdAtIdx: index("idx_document_template_versions_created_at").on(t.firmId, t.createdAt),
+}));
+
+export const documentGenerationRunsTable = pgTable("document_generation_runs", {
+  id: serial("id").primaryKey(),
+  firmId: integer("firm_id").notNull(),
+  caseId: integer("case_id").notNull(),
+  templateSource: text("template_source").notNull(),
+  templateId: integer("template_id"),
+  templateVersionId: integer("template_version_id"),
+  platformDocumentId: integer("platform_document_id"),
+  caseDocumentId: integer("case_document_id"),
+  documentName: text("document_name").notNull(),
+  renderMode: text("render_mode").notNull().default("docx"),
+  status: text("status").notNull().default("pending"),
+  renderedVariablesSnapshot: jsonb("rendered_variables_snapshot"),
+  checklistSnapshot: jsonb("checklist_snapshot"),
+  readinessSnapshot: jsonb("readiness_snapshot"),
+  triggeredBy: integer("triggered_by"),
+  triggeredAt: timestamp("triggered_at", { withTimezone: true }).notNull().defaultNow(),
+  finishedAt: timestamp("finished_at", { withTimezone: true }),
+  errorCode: text("error_code"),
+  errorMessage: text("error_message"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => ({
+  firmIdx: index("idx_document_generation_runs_firm").on(t.firmId),
+  firmCaseIdx: index("idx_document_generation_runs_case").on(t.firmId, t.caseId),
+  statusIdx: index("idx_document_generation_runs_status").on(t.firmId, t.status),
+  triggeredAtIdx: index("idx_document_generation_runs_triggered_at").on(t.firmId, t.caseId, t.triggeredAt),
+}));
+
+export const documentBatchJobsTable = pgTable("document_batch_jobs", {
+  id: uuid("id").primaryKey(),
+  firmId: integer("firm_id").notNull(),
+  caseId: integer("case_id").notNull(),
+  jobType: text("job_type").notNull(),
+  status: text("status").notNull().default("pending"),
+  totalCount: integer("total_count").notNull().default(0),
+  successCount: integer("success_count").notNull().default(0),
+  failedCount: integer("failed_count").notNull().default(0),
+  pendingCount: integer("pending_count").notNull().default(0),
+  createdBy: integer("created_by"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  startedAt: timestamp("started_at", { withTimezone: true }),
+  finishedAt: timestamp("finished_at", { withTimezone: true }),
+  downloadObjectPath: text("download_object_path"),
+  downloadFileName: text("download_file_name"),
+  downloadMimeType: text("download_mime_type"),
+  errorSummary: text("error_summary"),
+}, (t) => ({
+  firmIdx: index("idx_document_batch_jobs_firm").on(t.firmId),
+  firmCaseIdx: index("idx_document_batch_jobs_case").on(t.firmId, t.caseId),
+  statusIdx: index("idx_document_batch_jobs_status").on(t.firmId, t.status),
+  createdAtIdx: index("idx_document_batch_jobs_created_at").on(t.firmId, t.createdAt),
+}));
+
+export const documentBatchJobItemsTable = pgTable("document_batch_job_items", {
+  id: serial("id").primaryKey(),
+  jobId: uuid("job_id").notNull(),
+  firmId: integer("firm_id").notNull(),
+  caseId: integer("case_id").notNull(),
+  templateSource: text("template_source").notNull(),
+  templateId: integer("template_id"),
+  templateVersionId: integer("template_version_id"),
+  platformDocumentId: integer("platform_document_id"),
+  caseDocumentId: integer("case_document_id"),
+  status: text("status").notNull().default("pending"),
+  errorCode: text("error_code"),
+  errorMessage: text("error_message"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  finishedAt: timestamp("finished_at", { withTimezone: true }),
+}, (t) => ({
+  jobIdx: index("idx_document_batch_job_items_job").on(t.jobId),
+  firmIdx: index("idx_document_batch_job_items_firm").on(t.firmId),
+  firmCaseIdx: index("idx_document_batch_job_items_case").on(t.firmId, t.caseId),
+  statusIdx: index("idx_document_batch_job_items_status").on(t.firmId, t.status),
+  createdAtIdx: index("idx_document_batch_job_items_created_at").on(t.firmId, t.caseId, t.createdAt),
 }));

@@ -2,6 +2,7 @@ import { useState, useRef } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import { useToast } from "@/hooks/use-toast";
 import { ToastAction } from "@/components/ui/toast";
 import {
@@ -21,6 +22,8 @@ import { QueryFallback } from "@/components/query-fallback";
 import { apiFetchBlob, apiFetchJson } from "@/lib/api-client";
 import { downloadBlob } from "@/lib/download";
 import { toastError } from "@/lib/toast-error";
+import { useAuth } from "@/lib/auth-context";
+import { hasPermission } from "@/lib/permissions";
 
 function docTypeLabel(dt: string): string {
   return (DOCUMENT_TYPE_LABELS as Record<string, string>)[dt] ?? dt;
@@ -75,10 +78,11 @@ interface FirmLetterhead {
 
 export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
   const { toast } = useToast();
+  const { user } = useAuth();
   const qc = useQueryClient();
   const uploadRef = useRef<HTMLInputElement>(null);
 
-  const [viewTab, setViewTab] = useState<"list" | "checklist">("list");
+  const [viewTab, setViewTab] = useState<"list" | "checklist" | "history">("list");
   const [generateDialogOpen, setGenerateDialogOpen] = useState(false);
   const [showAllTemplates, setShowAllTemplates] = useState(false);
   const [templateSourceFilter, setTemplateSourceFilter] = useState<"all" | "firm" | "master">("all");
@@ -90,7 +94,19 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [isUploading, setIsUploading] = useState(false);
   const [isGenerating, setIsGenerating] = useState(false);
+  const [isBatchGenerating, setIsBatchGenerating] = useState(false);
+  const [batchGenerateResult, setBatchGenerateResult] = useState<null | { jobId: string; items: Array<Record<string, unknown>> }>(null);
+  const [selectedChecklistKeys, setSelectedChecklistKeys] = useState<Set<string>>(new Set());
+
+  const [selectedDocIds, setSelectedDocIds] = useState<Set<number>>(new Set());
+  const [isBatchExporting, setIsBatchExporting] = useState(false);
   const [downloadingDocId, setDownloadingDocId] = useState<number | null>(null);
+
+
+  const canGenerate = hasPermission(user, "documents", "generate");
+  const canExport = hasPermission(user, "documents", "export");
+  const canDelete = hasPermission(user, "documents", "delete");
+  const canCreate = hasPermission(user, "documents", "create");
 
   const documentsQuery = useQuery<CaseDocument[]>({
     queryKey: ["case-documents", caseId],
@@ -103,6 +119,32 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
     queryKey: ["case-documents-checklist", caseId, showAllTemplates],
     queryFn: ({ signal }) => apiFetchJson(`/cases/${caseId}/documents/checklist${showAllTemplates ? "?includeAll=1" : ""}`, { signal }),
     enabled: viewTab === "checklist" || generateDialogOpen,
+    retry: false,
+  });
+
+  interface DocumentInstance {
+    id: number;
+    template_source: string;
+    template_id: number | null;
+    template_version_id: number | null;
+    platform_document_id: number | null;
+    case_document_id: number | null;
+    document_name: string;
+    render_mode: string;
+    status: string;
+    triggered_at: string;
+    finished_at: string | null;
+    error_code: string | null;
+    error_message: string | null;
+    triggered_by_name: string | null;
+    template_name: string | null;
+    platform_document_name: string | null;
+  }
+
+  const instancesQuery = useQuery<DocumentInstance[]>({
+    queryKey: ["case-documents-instances", caseId],
+    queryFn: ({ signal }) => apiFetchJson(`/cases/${caseId}/document-instances`, { signal }),
+    enabled: viewTab === "history",
     retry: false,
   });
 
@@ -190,6 +232,82 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
     }
   }
 
+  function itemKey(it: { source: string; templateId: number }): string {
+    return `${it.source}:${it.templateId}`;
+  }
+
+  function toggleChecklistSelection(it: ChecklistItem) {
+    const key = itemKey(it);
+    setSelectedChecklistKeys((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  }
+
+  function toggleDocSelection(docId: number) {
+    setSelectedDocIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(docId)) next.delete(docId);
+      else next.add(docId);
+      return next;
+    });
+  }
+
+  async function handleBatchGenerate() {
+    const keys = selectedChecklistKeys;
+    if (!canGenerate || keys.size === 0) return;
+    const allItems = (checklistQuery.data?.sections ?? []).flatMap((s) => s.items ?? []);
+    const selected = allItems.filter((it) => keys.has(itemKey(it)));
+    if (selected.length === 0) return;
+
+    const letterheadIdToSend = selectedLetterheadId ? Number(selectedLetterheadId) : defaultLetterhead?.id ?? null;
+    setIsBatchGenerating(true);
+    setBatchGenerateResult(null);
+    try {
+      const result = await apiFetchJson<{ jobId: string; items: Array<Record<string, unknown>> }>(`/cases/${caseId}/documents/batch-generate`, {
+        method: "POST",
+        body: JSON.stringify({
+          items: selected.map((it) => ({ source: it.source, templateId: it.templateId })),
+          letterheadId: letterheadIdToSend,
+        }),
+      });
+      setBatchGenerateResult(result);
+      setSelectedChecklistKeys(new Set());
+      await qc.invalidateQueries({ queryKey: ["case-documents", caseId] });
+      await qc.invalidateQueries({ queryKey: ["case-documents-checklist", caseId] });
+      await qc.invalidateQueries({ queryKey: ["case-documents-instances", caseId] });
+      toast({ title: "Batch generate completed", description: `Job ${result.jobId}` });
+      setViewTab("list");
+    } catch (err) {
+      toastError(toast, err, "Batch generate failed");
+    } finally {
+      setIsBatchGenerating(false);
+    }
+  }
+
+  async function handleBatchExport() {
+    const ids = Array.from(selectedDocIds);
+    if (!canExport || ids.length === 0) return;
+    setIsBatchExporting(true);
+    try {
+      const result = await apiFetchJson<{ jobId: string; downloadPath?: string }>(`/cases/${caseId}/documents/batch-export`, {
+        method: "POST",
+        body: JSON.stringify({ documentIds: ids }),
+      });
+      const downloadPath = result.downloadPath ?? `/document-batch-jobs/${result.jobId}/download`;
+      const blob = await apiFetchBlob(downloadPath);
+      downloadBlob(blob, `case-${caseId}-documents.zip`);
+      setSelectedDocIds(new Set());
+      toast({ title: "Export ready", description: `Job ${result.jobId}` });
+    } catch (err) {
+      toastError(toast, err, "Batch export failed");
+    } finally {
+      setIsBatchExporting(false);
+    }
+  }
+
   function closeGenerateDialog() {
     setGenerateDialogOpen(false);
     setDocumentName("");
@@ -270,6 +388,7 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
               variant="outline"
               onClick={() => setUploadDialogOpen(true)}
               className="gap-1.5"
+              disabled={!canCreate}
             >
               <Upload className="w-3.5 h-3.5" />
               Upload
@@ -278,6 +397,7 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
               size="sm"
               className="bg-amber-500 hover:bg-amber-600 gap-1.5"
               onClick={() => setGenerateDialogOpen(true)}
+              disabled={!canGenerate}
             >
               <Plus className="w-3.5 h-3.5" />
               Generate from Template
@@ -285,10 +405,11 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
           </div>
         </CardHeader>
         <CardContent>
-          <Tabs value={viewTab} onValueChange={(v) => setViewTab(v === "checklist" ? "checklist" : "list")}>
+          <Tabs value={viewTab} onValueChange={(v) => setViewTab(v === "checklist" ? "checklist" : v === "history" ? "history" : "list")}>
             <TabsList className="mb-4">
               <TabsTrigger value="list">List</TabsTrigger>
               <TabsTrigger value="checklist">Checklist</TabsTrigger>
+              <TabsTrigger value="history">History</TabsTrigger>
             </TabsList>
 
             <TabsContent value="list">
@@ -300,11 +421,31 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
                 </div>
               ) : (
                 <div className="space-y-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="text-sm text-slate-600">
+                      Selected: <span className="font-medium text-slate-900">{selectedDocIds.size}</span>
+                    </div>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={handleBatchExport}
+                      disabled={!canExport || selectedDocIds.size === 0 || isBatchExporting}
+                      className="gap-1.5"
+                    >
+                      <Download className="w-4 h-4" />
+                      {isBatchExporting ? "Exporting..." : "Batch Export (ZIP)"}
+                    </Button>
+                  </div>
                   {documents.map((doc) => (
                     <div
                       key={doc.id}
                       className="flex items-center gap-3 p-4 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 transition-colors"
                     >
+                      <Checkbox
+                        checked={selectedDocIds.has(doc.id)}
+                        onCheckedChange={() => toggleDocSelection(doc.id)}
+                        disabled={!canExport}
+                      />
                       <FileText className="w-5 h-5 text-amber-500 flex-shrink-0" />
                       <div className="flex-1 min-w-0">
                         <div className="font-medium text-slate-900 truncate" title={doc.name}>{doc.name}</div>
@@ -348,6 +489,7 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
                         variant="ghost"
                         className="h-8 w-8 text-slate-400 hover:text-red-600"
                         onClick={() => deleteMutation.mutate(doc.id)}
+                        disabled={!canDelete}
                       >
                         <Trash2 className="w-4 h-4" />
                       </Button>
@@ -364,6 +506,61 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
                 <QueryFallback title="Checklist unavailable" error={checklistQuery.error} onRetry={() => checklistQuery.refetch()} isRetrying={checklistQuery.isFetching} />
               ) : (
                 <div className="space-y-6">
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="text-sm text-slate-600">
+                      Selected: <span className="font-medium text-slate-900">{selectedChecklistKeys.size}</span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => setSelectedChecklistKeys(new Set())}
+                        disabled={selectedChecklistKeys.size === 0}
+                      >
+                        Clear
+                      </Button>
+                      <Button
+                        size="sm"
+                        onClick={handleBatchGenerate}
+                        disabled={!canGenerate || selectedChecklistKeys.size === 0 || isBatchGenerating}
+                        className="gap-1.5"
+                      >
+                        <Plus className="w-4 h-4" />
+                        {isBatchGenerating ? "Generating..." : "Batch Generate"}
+                      </Button>
+                    </div>
+                  </div>
+                  {activeLetterheads.length > 0 && (
+                    <div className="space-y-1.5">
+                      <Label>Letterhead (for letter-like templates)</Label>
+                      <Select value={selectedLetterheadId} onValueChange={setSelectedLetterheadId}>
+                        <SelectTrigger>
+                          <SelectValue placeholder={defaultLetterhead ? `Default: ${defaultLetterhead.name}` : "Select letterhead..."} />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {activeLetterheads.map((l) => (
+                            <SelectItem key={l.id} value={String(l.id)}>{l.name}</SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                  )}
+                  {batchGenerateResult && (
+                    <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
+                      <div className="text-sm font-medium text-slate-900">Last batch job: {batchGenerateResult.jobId}</div>
+                      <div className="mt-2 space-y-1">
+                        {batchGenerateResult.items.filter((x) => x.status === "failed").length === 0 ? (
+                          <div className="text-sm text-emerald-700">All items succeeded.</div>
+                        ) : (
+                          batchGenerateResult.items.filter((x) => x.status === "failed").map((x, idx) => (
+                            <div key={idx} className="text-sm text-slate-700 break-words">
+                              {String(x.source ?? "")} #{String(x.templateId ?? "")}: {String(x.errorCode ?? "")} {String(x.errorMessage ?? "")}
+                            </div>
+                          ))
+                        )}
+                      </div>
+                    </div>
+                  )}
                   {(checklistQuery.data?.sections ?? []).map((sec) => (
                     <div key={sec.section} className="space-y-2">
                       <div className="text-sm font-semibold text-slate-900">{sec.section}</div>
@@ -380,6 +577,13 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
                               : "";
                           return (
                             <div key={`${it.source}-${it.templateId}`} className="flex items-start justify-between gap-3 rounded-lg border border-slate-200 bg-white p-3 min-w-0">
+                              <div className="pt-1">
+                                <Checkbox
+                                  checked={selectedChecklistKeys.has(itemKey(it))}
+                                  onCheckedChange={() => toggleChecklistSelection(it)}
+                                  disabled={!canGenerate}
+                                />
+                              </div>
                               <div className="min-w-0">
                                 <div className="font-medium text-slate-900 truncate" title={it.name}>{it.name}</div>
                                 <div className="mt-1 flex items-center gap-2 flex-wrap">
@@ -404,7 +608,7 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
                                     Download
                                   </Button>
                                 ) : (
-                                  <Button size="sm" onClick={() => handleGenerate(it)} disabled={!applicable || !ready || isGenerating}>
+                                  <Button size="sm" onClick={() => handleGenerate(it)} disabled={!canGenerate || !applicable || !ready || isGenerating}>
                                     Generate
                                   </Button>
                                 )}
@@ -415,6 +619,64 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
                       </div>
                     </div>
                   ))}
+                </div>
+              )}
+            </TabsContent>
+
+            <TabsContent value="history">
+              {instancesQuery.isLoading ? (
+                <div className="p-4 text-slate-500">Loading history...</div>
+              ) : instancesQuery.isError ? (
+                <QueryFallback title="History unavailable" error={instancesQuery.error} onRetry={() => instancesQuery.refetch()} isRetrying={instancesQuery.isFetching} />
+              ) : (instancesQuery.data ?? []).length === 0 ? (
+                <div className="text-center py-12 text-slate-500">
+                  <FileText className="w-10 h-10 text-slate-300 mx-auto mb-3" />
+                  <p className="font-medium text-slate-600 mb-1">No generation history yet</p>
+                  <p className="text-sm">Generate documents to see runs here (including failures).</p>
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  {(instancesQuery.data ?? []).map((run) => {
+                    const doc = run.case_document_id ? documents.find((d) => d.id === run.case_document_id) : null;
+                    const title = run.template_source === "master"
+                      ? (run.platform_document_name || `Master #${run.platform_document_id ?? ""}`)
+                      : (run.template_name || `Template #${run.template_id ?? ""}`);
+                    return (
+                      <div key={run.id} className="flex items-start justify-between gap-3 rounded-lg border border-slate-200 bg-white p-3 min-w-0">
+                        <div className="min-w-0">
+                          <div className="font-medium text-slate-900 truncate" title={run.document_name}>{run.document_name}</div>
+                          <div className="mt-1 text-xs text-slate-600 truncate" title={title}>{title}</div>
+                          <div className="mt-1 flex items-center gap-2 flex-wrap">
+                            <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-100 text-slate-700 font-medium capitalize">{run.template_source}</span>
+                            <span className={cn("text-[10px] px-1.5 py-0.5 rounded font-medium capitalize", run.status === "success" ? "bg-emerald-50 text-emerald-700" : run.status === "failed" ? "bg-rose-50 text-rose-700" : "bg-amber-50 text-amber-800")}>
+                              {run.status}
+                            </span>
+                            <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-50 text-blue-700 font-medium">
+                              {run.render_mode}
+                            </span>
+                            <span className="text-xs text-slate-400">
+                              {new Date(run.triggered_at).toLocaleString("en-MY")}
+                            </span>
+                            {run.triggered_by_name && (
+                              <span className="text-xs text-slate-500">by {run.triggered_by_name}</span>
+                            )}
+                          </div>
+                          {run.status === "failed" && (run.error_code || run.error_message) && (
+                            <div className="mt-1 text-sm text-rose-700 break-words">
+                              {run.error_code ? `${run.error_code}: ` : ""}{run.error_message ?? ""}
+                            </div>
+                          )}
+                        </div>
+                        <div className="shrink-0">
+                          {doc ? (
+                            <Button size="sm" variant="outline" onClick={() => handleDownload(doc)} disabled={downloadingDocId === doc.id}>
+                              Download
+                            </Button>
+                          ) : null}
+                        </div>
+                      </div>
+                    );
+                  })}
                 </div>
               )}
             </TabsContent>

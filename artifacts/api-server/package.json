@@ -37,6 +37,7 @@
     "pino-http": "^10",
     "pizzip": "^3.1.7",
     "qrcode": "^1.5.4",
+    "yazl": "^3.3.1",
     "xlsx": "^0.18.5",
     "zod": "catalog:"
   },
@@ -47,6 +48,7 @@
     "@types/express": "^5.0.6",
     "@types/node": "catalog:",
     "@types/supertest": "^7.2.0",
+    "@types/yazl": "^3.3.1",
     "esbuild": "^0.27.3",
     "esbuild-plugin-pino": "^2.3.3",
     "pino-pretty": "^13",

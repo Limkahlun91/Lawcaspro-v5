@@ -14,6 +14,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { DOCUMENT_TYPE_LABELS } from "@workspace/documents-registry";
 import { QueryFallback } from "@/components/query-fallback";
 import { apiFetchBlob, apiFetchJson } from "@/lib/api-client";
@@ -40,6 +41,24 @@ interface DocumentTemplate {
   applies_to_case_type?: string | null;
   document_group?: string | null;
   sort_order?: number | null;
+}
+
+interface DocumentTemplateVersion {
+  id: number;
+  template_id: number;
+  version_no: number;
+  status: "draft" | "published" | "archived";
+  filename: string;
+  source_object_path: string;
+  created_at: string;
+  created_by_name: string | null;
+  published_at: string | null;
+  published_by_name: string | null;
+  archived_at: string | null;
+  archived_by_name: string | null;
+  variables_snapshot: unknown;
+  applicability_rules_snapshot: unknown;
+  readiness_rules_snapshot: unknown;
 }
 
 const TEMPLATE_FIELDS = [
@@ -71,6 +90,8 @@ export default function DocumentTemplates() {
   const qc = useQueryClient();
   const uploadRef = useRef<HTMLInputElement>(null);
   const [uploadDialogOpen, setUploadDialogOpen] = useState(false);
+  const versionUploadRef = useRef<HTMLInputElement>(null);
+  const [uploadDialogOpen, setUploadDialogOpen] = useState(false);
   const [infoOpen, setInfoOpen] = useState(false);
   const [detailOpen, setDetailOpen] = useState(false);
   const [activeTemplate, setActiveTemplate] = useState<DocumentTemplate | null>(null);
@@ -93,9 +114,13 @@ export default function DocumentTemplates() {
   const [editCaseType, setEditCaseType] = useState<string>("");
   const [editGroup, setEditGroup] = useState<string>("Others");
   const [editSortOrder, setEditSortOrder] = useState<number>(0);
+  const [detailTab, setDetailTab] = useState<"details" | "versions">("details");
+  const [versionFile, setVersionFile] = useState<File | null>(null);
 
   useEffect(() => {
     if (!activeTemplate) return;
+    setDetailTab("details");
+    setVersionFile(null);
     setEditIsActive(activeTemplate.is_active ?? true);
     setEditPurchaseMode(activeTemplate.applies_to_purchase_mode ?? "both");
     setEditTitleType(activeTemplate.applies_to_title_type ?? "any");
@@ -112,6 +137,14 @@ export default function DocumentTemplates() {
   });
   const templates = templatesQuery.data ?? [];
   const isLoading = templatesQuery.isLoading;
+
+  const versionsQuery = useQuery<DocumentTemplateVersion[]>({
+    queryKey: ["document-template-versions", activeTemplate?.id],
+    queryFn: ({ signal }) => apiFetchJson(`/document-templates/${activeTemplate!.id}/versions`, { signal }),
+    retry: false,
+    enabled: detailOpen && !!activeTemplate && canRead,
+  });
+  const versions = versionsQuery.data ?? [];
 
   const deleteMutation = useMutation({
     mutationFn: (id: number) => apiFetchJson(`/document-templates/${id}`, { method: "DELETE" }),
@@ -130,6 +163,68 @@ export default function DocumentTemplates() {
       toast({ title: "Template updated" });
     },
     onError: (err) => toastError(toast, err, "Update failed"),
+  });
+
+  const createVersionMutation = useMutation({
+    mutationFn: async (payload: { templateId: number; file?: File | null; patch: Record<string, unknown> }) => {
+      let objectPath: string | undefined;
+      let fileName: string | undefined;
+      let mimeType: string | undefined;
+      if (payload.file) {
+        const formData = new FormData();
+        formData.append("file", payload.file);
+        const up = await apiFetchJson<{ objectPath: string }>("/storage/upload", { method: "POST", body: formData });
+        objectPath = up.objectPath;
+        fileName = payload.file.name;
+        mimeType = payload.file.type || "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+      }
+      return apiFetchJson(`/document-templates/${payload.templateId}/versions`, {
+        method: "POST",
+        body: JSON.stringify({
+          objectPath,
+          fileName,
+          mimeType,
+          patch: payload.patch,
+        }),
+      });
+    },
+    onSuccess: async () => {
+      await qc.invalidateQueries({ queryKey: ["document-template-versions", activeTemplate?.id] });
+      toast({ title: "Draft saved" });
+      setVersionFile(null);
+    },
+    onError: (err) => toastError(toast, err, "Save draft failed"),
+  });
+
+  const publishVersionMutation = useMutation({
+    mutationFn: (payload: { templateId: number; versionId: number }) =>
+      apiFetchJson(`/document-templates/${payload.templateId}/versions/${payload.versionId}/publish`, { method: "POST" }),
+    onSuccess: async () => {
+      await qc.invalidateQueries({ queryKey: ["document-template-versions", activeTemplate?.id] });
+      await qc.invalidateQueries({ queryKey: ["document-templates"] });
+      toast({ title: "Version published" });
+    },
+    onError: (err) => toastError(toast, err, "Publish failed"),
+  });
+
+  const restoreVersionMutation = useMutation({
+    mutationFn: (payload: { templateId: number; versionId: number }) =>
+      apiFetchJson(`/document-templates/${payload.templateId}/versions/${payload.versionId}/restore`, { method: "POST" }),
+    onSuccess: async () => {
+      await qc.invalidateQueries({ queryKey: ["document-template-versions", activeTemplate?.id] });
+      toast({ title: "Restored as draft" });
+    },
+    onError: (err) => toastError(toast, err, "Restore failed"),
+  });
+
+  const archiveVersionMutation = useMutation({
+    mutationFn: (payload: { templateId: number; versionId: number }) =>
+      apiFetchJson(`/document-templates/${payload.templateId}/versions/${payload.versionId}/archive`, { method: "POST" }),
+    onSuccess: async () => {
+      await qc.invalidateQueries({ queryKey: ["document-template-versions", activeTemplate?.id] });
+      toast({ title: "Version archived" });
+    },
+    onError: (err) => toastError(toast, err, "Archive failed"),
   });
 
   async function handleUpload() {
@@ -257,163 +352,288 @@ export default function DocumentTemplates() {
         <DialogContent className="sm:max-w-lg">
           <DialogHeader><DialogTitle>Template Details</DialogTitle></DialogHeader>
           {activeTemplate && (
-            <div className="space-y-3">
-              <div>
-                <div className="text-xs text-slate-500">Name</div>
-                <div className="text-sm font-medium text-slate-900">{activeTemplate.name}</div>
-              </div>
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <div className="text-xs text-slate-500">Type</div>
-                  <div className="text-sm text-slate-900">
-                    {(() => {
-                      const dt = activeTemplate.document_type;
-                      return Object.prototype.hasOwnProperty.call(DOCUMENT_TYPE_LABELS, dt)
-                        ? DOCUMENT_TYPE_LABELS[dt as keyof typeof DOCUMENT_TYPE_LABELS]
-                        : dt;
-                    })()}
+            <Tabs value={detailTab} onValueChange={(v) => setDetailTab(v === "versions" ? "versions" : "details")} className="w-full">
+              <TabsList className="mb-3">
+                <TabsTrigger value="details">Details</TabsTrigger>
+                <TabsTrigger value="versions">Versions</TabsTrigger>
+              </TabsList>
+
+              <TabsContent value="details">
+                <div className="space-y-3">
+                  <div>
+                    <div className="text-xs text-slate-500">Name</div>
+                    <div className="text-sm font-medium text-slate-900">{activeTemplate.name}</div>
+                  </div>
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <div className="text-xs text-slate-500">Type</div>
+                      <div className="text-sm text-slate-900">
+                        {(() => {
+                          const dt = activeTemplate.document_type;
+                          return Object.prototype.hasOwnProperty.call(DOCUMENT_TYPE_LABELS, dt)
+                            ? DOCUMENT_TYPE_LABELS[dt as keyof typeof DOCUMENT_TYPE_LABELS]
+                            : dt;
+                        })()}
+                      </div>
+                    </div>
+                    <div>
+                      <div className="text-xs text-slate-500">Uploaded</div>
+                      <div className="text-sm text-slate-900">{new Date(activeTemplate.created_at).toLocaleString("en-MY")}</div>
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-2 gap-3">
+                    <div className="space-y-1.5">
+                      <Label>Active</Label>
+                      <Select value={String(editIsActive)} onValueChange={(v) => setEditIsActive(v === "true")}>
+                        <SelectTrigger>
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="true">Active</SelectItem>
+                          <SelectItem value="false">Inactive</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    <div className="space-y-1.5">
+                      <Label>Group</Label>
+                      <Select value={editGroup} onValueChange={setEditGroup}>
+                        <SelectTrigger>
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="SPA">SPA</SelectItem>
+                          <SelectItem value="Loan">Loan</SelectItem>
+                          <SelectItem value="MOT / Transfer">MOT / Transfer</SelectItem>
+                          <SelectItem value="Completion">Completion</SelectItem>
+                          <SelectItem value="Others">Others</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-2 gap-3">
+                    <div className="space-y-1.5">
+                      <Label>Applies to Purchase Mode</Label>
+                      <Select value={editPurchaseMode} onValueChange={setEditPurchaseMode}>
+                        <SelectTrigger>
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="both">Both</SelectItem>
+                          <SelectItem value="cash">Cash</SelectItem>
+                          <SelectItem value="loan">Loan</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    <div className="space-y-1.5">
+                      <Label>Applies to Title Type</Label>
+                      <Select value={editTitleType} onValueChange={setEditTitleType}>
+                        <SelectTrigger>
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="any">Any</SelectItem>
+                          <SelectItem value="master">Master</SelectItem>
+                          <SelectItem value="strata">Strata</SelectItem>
+                          <SelectItem value="individual">Individual</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-2 gap-3">
+                    <div className="space-y-1.5">
+                      <Label>Applies to Case Type (optional)</Label>
+                      <Input value={editCaseType} onChange={(e) => setEditCaseType(e.target.value)} placeholder="e.g. Primary Market" />
+                    </div>
+                    <div className="space-y-1.5">
+                      <Label>Sort order</Label>
+                      <Input
+                        inputMode="numeric"
+                        value={String(editSortOrder)}
+                        onChange={(e) => setEditSortOrder(Number(e.target.value || "0"))}
+                      />
+                    </div>
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label>New DOCX (optional)</Label>
+                    <div
+                      className="border-2 border-dashed border-slate-200 rounded-lg p-4 text-center cursor-pointer hover:border-amber-300 transition-colors"
+                      onClick={() => versionUploadRef.current?.click()}
+                    >
+                      {versionFile ? (
+                        <div className="text-sm text-slate-700 font-medium">{versionFile.name}</div>
+                      ) : (
+                        <div className="text-sm text-slate-500">Click to select a DOCX file for a new draft</div>
+                      )}
+                    </div>
+                    <input
+                      type="file"
+                      ref={versionUploadRef}
+                      className="hidden"
+                      accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                      onChange={(e) => setVersionFile(e.target.files?.[0] ?? null)}
+                    />
+                  </div>
+                  <div>
+                    <div className="text-xs text-slate-500">File</div>
+                    <div className="text-sm text-slate-700 break-words">{activeTemplate.file_name}</div>
+                  </div>
+                  {activeTemplate.description ? (
+                    <div>
+                      <div className="text-xs text-slate-500">Description</div>
+                      <div className="text-sm text-slate-700 whitespace-pre-wrap">{activeTemplate.description}</div>
+                    </div>
+                  ) : null}
+                  <div className="pt-2 flex gap-2 justify-end flex-wrap">
+                    <Button
+                      variant="outline"
+                      onClick={() => {
+                        if (!canUpdate) return;
+                        createVersionMutation.mutate({
+                          templateId: activeTemplate.id,
+                          file: versionFile,
+                          patch: {
+                            isActive: editIsActive,
+                            appliesToPurchaseMode: editPurchaseMode,
+                            appliesToTitleType: editTitleType,
+                            appliesToCaseType: editCaseType ? editCaseType : null,
+                            documentGroup: editGroup,
+                            sortOrder: editSortOrder,
+                          },
+                        });
+                      }}
+                      disabled={!canUpdate || createVersionMutation.isPending}
+                    >
+                      {createVersionMutation.isPending ? "Saving..." : "Save Draft"}
+                    </Button>
+                    <Button
+                      variant="outline"
+                      onClick={() => {
+                        if (!canUpdate) return;
+                        updateMutation.mutate({
+                          id: activeTemplate.id,
+                          patch: {
+                            isActive: editIsActive,
+                            appliesToPurchaseMode: editPurchaseMode,
+                            appliesToTitleType: editTitleType,
+                            appliesToCaseType: editCaseType ? editCaseType : null,
+                            documentGroup: editGroup,
+                            sortOrder: editSortOrder,
+                          },
+                        });
+                      }}
+                      disabled={!canUpdate || updateMutation.isPending}
+                    >
+                      Apply Now
+                    </Button>
+                    <Button
+                      variant="outline"
+                      disabled={isDownloading}
+                      onClick={async () => {
+                        setIsDownloading(true);
+                        try {
+                          const blob = await apiFetchBlob(`/document-templates/${activeTemplate.id}/download`);
+                          downloadBlob(blob, activeTemplate.file_name || "download");
+                        } catch (e) {
+                          toastError(toast, e, "Download failed");
+                        } finally {
+                          setIsDownloading(false);
+                        }
+                      }}
+                      className="gap-1.5"
+                    >
+                      <Download className="w-4 h-4" /> {isDownloading ? "Downloading..." : "Download"}
+                    </Button>
+                    <Button
+                      variant="destructive"
+                      onClick={() => {
+                        if (!confirm("Delete this template?")) return;
+                        deleteMutation.mutate(activeTemplate.id);
+                        setDetailOpen(false);
+                      }}
+                      className="gap-1.5"
+                      disabled={!canDelete || deleteMutation.isPending}
+                    >
+                      <Trash2 className="w-4 h-4" /> Delete
+                    </Button>
                   </div>
                 </div>
-                <div>
-                  <div className="text-xs text-slate-500">Uploaded</div>
-                  <div className="text-sm text-slate-900">{new Date(activeTemplate.created_at).toLocaleString("en-MY")}</div>
-                </div>
-              </div>
-              <div className="grid grid-cols-2 gap-3">
-                <div className="space-y-1.5">
-                  <Label>Active</Label>
-                  <Select value={String(editIsActive)} onValueChange={(v) => setEditIsActive(v === "true")}>
-                    <SelectTrigger>
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="true">Active</SelectItem>
-                      <SelectItem value="false">Inactive</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </div>
-                <div className="space-y-1.5">
-                  <Label>Group</Label>
-                  <Select value={editGroup} onValueChange={setEditGroup}>
-                    <SelectTrigger>
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="SPA">SPA</SelectItem>
-                      <SelectItem value="Loan">Loan</SelectItem>
-                      <SelectItem value="MOT / Transfer">MOT / Transfer</SelectItem>
-                      <SelectItem value="Completion">Completion</SelectItem>
-                      <SelectItem value="Others">Others</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </div>
-              </div>
-              <div className="grid grid-cols-2 gap-3">
-                <div className="space-y-1.5">
-                  <Label>Applies to Purchase Mode</Label>
-                  <Select value={editPurchaseMode} onValueChange={setEditPurchaseMode}>
-                    <SelectTrigger>
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="both">Both</SelectItem>
-                      <SelectItem value="cash">Cash</SelectItem>
-                      <SelectItem value="loan">Loan</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </div>
-                <div className="space-y-1.5">
-                  <Label>Applies to Title Type</Label>
-                  <Select value={editTitleType} onValueChange={setEditTitleType}>
-                    <SelectTrigger>
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="any">Any</SelectItem>
-                      <SelectItem value="master">Master</SelectItem>
-                      <SelectItem value="strata">Strata</SelectItem>
-                      <SelectItem value="individual">Individual</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </div>
-              </div>
-              <div className="grid grid-cols-2 gap-3">
-                <div className="space-y-1.5">
-                  <Label>Applies to Case Type (optional)</Label>
-                  <Input value={editCaseType} onChange={(e) => setEditCaseType(e.target.value)} placeholder="e.g. Primary Market" />
-                </div>
-                <div className="space-y-1.5">
-                  <Label>Sort order</Label>
-                  <Input
-                    inputMode="numeric"
-                    value={String(editSortOrder)}
-                    onChange={(e) => setEditSortOrder(Number(e.target.value || "0"))}
-                  />
-                </div>
-              </div>
-              <div>
-                <div className="text-xs text-slate-500">File</div>
-                <div className="text-sm text-slate-700 break-words">{activeTemplate.file_name}</div>
-              </div>
-              {activeTemplate.description ? (
-                <div>
-                  <div className="text-xs text-slate-500">Description</div>
-                  <div className="text-sm text-slate-700 whitespace-pre-wrap">{activeTemplate.description}</div>
-                </div>
-              ) : null}
-              <div className="pt-2 flex gap-2 justify-end">
-                <Button
-                  variant="outline"
-                  onClick={() => {
-                    if (!canUpdate) return;
-                    updateMutation.mutate({
-                      id: activeTemplate.id,
-                      patch: {
-                        isActive: editIsActive,
-                        appliesToPurchaseMode: editPurchaseMode,
-                        appliesToTitleType: editTitleType,
-                        appliesToCaseType: editCaseType ? editCaseType : null,
-                        documentGroup: editGroup,
-                        sortOrder: editSortOrder,
-                      },
-                    });
-                  }}
-                  disabled={!canUpdate || updateMutation.isPending}
-                >
-                  Save
-                </Button>
-                <Button
-                  variant="outline"
-                  disabled={isDownloading}
-                  onClick={async () => {
-                    setIsDownloading(true);
-                    try {
-                      const blob = await apiFetchBlob(`/document-templates/${activeTemplate.id}/download`);
-                      downloadBlob(blob, activeTemplate.file_name || "download");
-                    } catch (e) {
-                      toastError(toast, e, "Download failed");
-                    } finally {
-                      setIsDownloading(false);
-                    }
-                  }}
-                  className="gap-1.5"
-                >
-                  <Download className="w-4 h-4" /> {isDownloading ? "Downloading..." : "Download"}
-                </Button>
-                <Button
-                  variant="destructive"
-                  onClick={() => {
-                    if (!confirm("Delete this template?")) return;
-                    deleteMutation.mutate(activeTemplate.id);
-                    setDetailOpen(false);
-                  }}
-                  className="gap-1.5"
-                  disabled={!canDelete || deleteMutation.isPending}
-                >
-                  <Trash2 className="w-4 h-4" /> Delete
-                </Button>
-              </div>
-            </div>
+              </TabsContent>
+
+              <TabsContent value="versions">
+                {versionsQuery.isError ? (
+                  <QueryFallback title="Versions unavailable" error={versionsQuery.error} onRetry={() => versionsQuery.refetch()} isRetrying={versionsQuery.isFetching} />
+                ) : versionsQuery.isLoading ? (
+                  <div className="text-slate-500 py-4">Loading versions...</div>
+                ) : versions.length === 0 ? (
+                  <div className="text-slate-500 py-6 text-center">No versions yet.</div>
+                ) : (
+                  <div className="space-y-3">
+                    <div className="text-sm text-slate-700">
+                      Current: <span className="font-medium">v{versions[0]?.version_no}</span>
+                      {versions.find((v) => v.status === "published") ? (
+                        <span className="ml-2 text-slate-500">Last published: v{versions.find((v) => v.status === "published")!.version_no}</span>
+                      ) : null}
+                    </div>
+                    <div className="space-y-2">
+                      {versions.map((v) => {
+                        const keys = (v.variables_snapshot && typeof v.variables_snapshot === "object" && v.variables_snapshot !== null && "keys" in (v.variables_snapshot as any))
+                          ? ((v.variables_snapshot as any).keys as unknown[])
+                          : [];
+                        const keysCount = Array.isArray(keys) ? keys.length : 0;
+                        return (
+                          <div key={v.id} className="rounded-lg border border-slate-200 bg-white p-3">
+                            <div className="flex items-start justify-between gap-3">
+                              <div className="min-w-0">
+                                <div className="font-medium text-slate-900 truncate">v{v.version_no} <span className="text-xs text-slate-500">({v.status})</span></div>
+                                <div className="mt-1 text-xs text-slate-500 break-words">{v.filename}</div>
+                                <div className="mt-1 text-xs text-slate-400">
+                                  Created {new Date(v.created_at).toLocaleString("en-MY")}{v.created_by_name ? ` by ${v.created_by_name}` : ""}
+                                  {v.published_at ? ` • Published ${new Date(v.published_at).toLocaleString("en-MY")}${v.published_by_name ? ` by ${v.published_by_name}` : ""}` : ""}
+                                  {v.archived_at ? ` • Archived ${new Date(v.archived_at).toLocaleString("en-MY")}${v.archived_by_name ? ` by ${v.archived_by_name}` : ""}` : ""}
+                                </div>
+                                {keysCount > 0 ? (
+                                  <div className="mt-1 text-xs text-slate-600">Variables detected: {keysCount}</div>
+                                ) : null}
+                              </div>
+                              <div className="shrink-0 flex items-center gap-2">
+                                <Button
+                                  size="sm"
+                                  variant="outline"
+                                  onClick={() => restoreVersionMutation.mutate({ templateId: activeTemplate.id, versionId: v.id })}
+                                  disabled={!canUpdate || restoreVersionMutation.isPending}
+                                >
+                                  Restore
+                                </Button>
+                                {v.status === "draft" ? (
+                                  <Button
+                                    size="sm"
+                                    onClick={() => publishVersionMutation.mutate({ templateId: activeTemplate.id, versionId: v.id })}
+                                    disabled={!canUpdate || publishVersionMutation.isPending}
+                                    className="bg-amber-500 hover:bg-amber-600"
+                                  >
+                                    Publish
+                                  </Button>
+                                ) : null}
+                                {v.status !== "archived" ? (
+                                  <Button
+                                    size="sm"
+                                    variant="outline"
+                                    onClick={() => archiveVersionMutation.mutate({ templateId: activeTemplate.id, versionId: v.id })}
+                                    disabled={!canUpdate || archiveVersionMutation.isPending}
+                                  >
+                                    Archive
+                                  </Button>
+                                ) : null}
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+              </TabsContent>
+            </Tabs>
           )}
         </DialogContent>
       </Dialog>

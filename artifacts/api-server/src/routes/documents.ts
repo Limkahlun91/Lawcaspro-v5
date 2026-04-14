@@ -9,6 +9,7 @@ import { Readable } from "stream";
 import { randomUUID } from "crypto";
 import Docxtemplater from "docxtemplater";
 import PizZip from "pizzip";
+import * as yazl from "yazl";
 import { PDFDocument, rgb, StandardFonts } from "pdf-lib";
 import fontkit from "@pdf-lib/fontkit";
 import { evaluateTemplateApplicability, normalizePurchaseMode, normalizeTitleType } from "../lib/documentApplicability";
@@ -118,6 +119,19 @@ async function streamSupabasePrivateObjectToResponse({
     res.on("finish", resolve);
     nodeStream.pipe(res);
   });
+}
+
+async function readSupabasePrivateObjectBytes(objectPath: string): Promise<Buffer> {
+  const storageResp = await supabaseStorage.fetchPrivateObjectResponse(objectPath);
+  if (!storageResp.body) throw new Error("Failed to read file");
+  const nodeStream = Readable.fromWeb(storageResp.body as any);
+  const chunks: Buffer[] = [];
+  await new Promise<void>((resolve, reject) => {
+    nodeStream.on("data", (c) => chunks.push(Buffer.isBuffer(c) ? c : Buffer.from(c)));
+    nodeStream.on("error", reject);
+    nodeStream.on("end", resolve);
+  });
+  return Buffer.concat(chunks);
 }
 
 function wrapText(text: string, font: any, fontSize: number, maxWidth: number): string[] {
@@ -230,6 +244,24 @@ function zipReadBytes(zip: PizZip, path: string): Buffer | null {
   return Buffer.from(u8);
 }
 
+function detectDocxVariables(fileBytes: Buffer): string[] {
+  const zip = new PizZip(fileBytes);
+  const paths = Object.keys(zip.files).filter((p) =>
+    p === "word/document.xml" || (/^word\/(header|footer)\d*\.xml$/).test(p)
+  );
+  const keys = new Set<string>();
+  const re = /\{\{\s*([^{}\s]+)\s*\}\}/g;
+  for (const p of paths) {
+    const xml = zipReadText(zip, p);
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(xml))) {
+      const k = (m[1] ?? "").trim();
+      if (k) keys.add(k);
+    }
+  }
+  return Array.from(keys).sort((a, b) => a.localeCompare(b));
+}
+
 function extractDocxBodyInnerXml(documentXml: string): string {
   const m = documentXml.match(/<w:body[^>]*>([\s\S]*?)<\/w:body>/);
   if (!m) return "";
@@ -326,6 +358,27 @@ async function downloadPrivateObjectBytes(objectPath: string): Promise<Buffer> {
   const response = await supabaseStorage.fetchPrivateObjectResponse(objectPath);
   const ab = await response.arrayBuffer();
   return Buffer.from(ab);
+}
+
+async function buildZipBufferFromPrivateObjects(entries: Array<{ zipPath: string; objectPath: string }>): Promise<Buffer> {
+  const zipfile = new yazl.ZipFile();
+  const nameCounts = new Map<string, number>();
+  for (const e of entries) {
+    const base = e.zipPath.replace(/^\/*/, "");
+    const n = (nameCounts.get(base) ?? 0) + 1;
+    nameCounts.set(base, n);
+    const zipPath = n === 1 ? base : base.replace(/(\.[^./\\]+)?$/, (_m, ext) => ` (${n})${ext ?? ""}`);
+    const bytes = await downloadPrivateObjectBytes(e.objectPath);
+    zipfile.addBuffer(bytes, zipPath);
+  }
+  zipfile.end();
+  const chunks: Buffer[] = [];
+  await new Promise<void>((resolve, reject) => {
+    zipfile.outputStream.on("data", (c: any) => chunks.push(Buffer.isBuffer(c) ? c : Buffer.from(c)));
+    zipfile.outputStream.on("error", reject);
+    zipfile.outputStream.on("end", resolve);
+  });
+  return Buffer.concat(chunks);
 }
 
 async function applyLetterheadToDocxBuffer({
@@ -1145,6 +1198,287 @@ router.patch("/document-templates/:templateId", requireAuth, requireFirmUser, re
   res.json(rows[0]);
 });
 
+router.get("/document-templates/:templateId/versions", requireAuth, requireFirmUser, requirePermission("documents", "read"), async (req: AuthRequest, res): Promise<void> => {
+  const r = getRlsDb(req, res);
+  if (!r) return;
+  const templateIdStr = one((req.params as any).templateId);
+  const templateId = templateIdStr ? parseInt(templateIdStr, 10) : NaN;
+  if (Number.isNaN(templateId)) {
+    res.status(400).json({ error: "Invalid template ID" });
+    return;
+  }
+
+  const tplRows = await queryRows(r, sql`SELECT id FROM document_templates WHERE id = ${templateId} AND firm_id = ${req.firmId!}`);
+  if (!tplRows[0]) {
+    res.status(404).json({ error: "Template not found" });
+    return;
+  }
+
+  const rows = await queryRows(r, sql`
+    SELECT
+      v.*,
+      cu.name AS created_by_name,
+      pu.name AS published_by_name,
+      au.name AS archived_by_name
+    FROM document_template_versions v
+    LEFT JOIN users cu ON cu.id = v.created_by
+    LEFT JOIN users pu ON pu.id = v.published_by
+    LEFT JOIN users au ON au.id = v.archived_by
+    WHERE v.firm_id = ${req.firmId!} AND v.template_id = ${templateId}
+    ORDER BY v.version_no DESC
+  `);
+  res.json(rows);
+});
+
+router.post("/document-templates/:templateId/versions", requireAuth, requireFirmUser, requirePermission("documents", "update"), async (req: AuthRequest, res): Promise<void> => {
+  const r = getRlsDb(req, res);
+  if (!r) return;
+  const templateIdStr = one((req.params as any).templateId);
+  const templateId = templateIdStr ? parseInt(templateIdStr, 10) : NaN;
+  if (Number.isNaN(templateId)) {
+    res.status(400).json({ error: "Invalid template ID" });
+    return;
+  }
+
+  const body = req.body as Record<string, unknown>;
+  const objectPath = typeof body.objectPath === "string" ? body.objectPath.trim() : "";
+  const fileName = typeof body.fileName === "string" ? body.fileName.trim() : "";
+  const mimeType = typeof body.mimeType === "string" ? body.mimeType.trim() : null;
+  const patch = (body.patch && typeof body.patch === "object") ? (body.patch as Record<string, unknown>) : {};
+
+  const tplRows = await queryRows(r, sql`SELECT * FROM document_templates WHERE id = ${templateId} AND firm_id = ${req.firmId!}`);
+  const tpl = tplRows[0];
+  if (!tpl) {
+    res.status(404).json({ error: "Template not found" });
+    return;
+  }
+  const effectiveObjectPath = objectPath || String((tpl as any).object_path ?? "");
+  const effectiveFileName = fileName || String((tpl as any).file_name ?? "");
+  if (!effectiveObjectPath || !effectiveFileName) {
+    res.status(422).json({ error: "Missing template file", code: "TEMPLATE_FILE_MISSING" });
+    return;
+  }
+
+  const maxRows = await queryRows(r, sql`SELECT COALESCE(MAX(version_no), 0) AS max_no FROM document_template_versions WHERE firm_id = ${req.firmId!} AND template_id = ${templateId}`);
+  const maxNo = Number((maxRows[0] as any)?.max_no ?? 0) || 0;
+  const nextNo = maxNo + 1;
+
+  const ext = fileExtensionFromName(effectiveFileName);
+  let variablesSnapshot: unknown = null;
+  if (ext === "docx") {
+    try {
+      const bytes = await downloadPrivateObjectBytes(effectiveObjectPath);
+      variablesSnapshot = { keys: detectDocxVariables(bytes) };
+    } catch (err) {
+      const cfgErr = getSupabaseStorageConfigError(err);
+      if (cfgErr) {
+        res.status(cfgErr.statusCode).json({ error: cfgErr.error });
+        return;
+      }
+      if (err instanceof ObjectNotFoundError) {
+        res.status(404).json({ error: "Template file not found", code: "TEMPLATE_FILE_NOT_FOUND" });
+        return;
+      }
+      logger.error({ err, path: req.path, firmId: req.firmId, userId: req.userId, templateId }, "[documents] detect_variables_failed");
+    }
+  }
+
+  const isActive = Object.prototype.hasOwnProperty.call(patch, "isActive") ? Boolean(patch.isActive) : Boolean((tpl as any).is_active ?? true);
+  const appliesToPurchaseMode = Object.prototype.hasOwnProperty.call(patch, "appliesToPurchaseMode")
+    ? (typeof patch.appliesToPurchaseMode === "string" ? patch.appliesToPurchaseMode : null)
+    : ((tpl as any).applies_to_purchase_mode ? String((tpl as any).applies_to_purchase_mode) : null);
+  const appliesToTitleType = Object.prototype.hasOwnProperty.call(patch, "appliesToTitleType")
+    ? (typeof patch.appliesToTitleType === "string" ? patch.appliesToTitleType : "any")
+    : String((tpl as any).applies_to_title_type ?? "any");
+  const appliesToCaseType = Object.prototype.hasOwnProperty.call(patch, "appliesToCaseType")
+    ? (typeof patch.appliesToCaseType === "string" ? patch.appliesToCaseType : null)
+    : ((tpl as any).applies_to_case_type ? String((tpl as any).applies_to_case_type) : null);
+  const documentGroup = Object.prototype.hasOwnProperty.call(patch, "documentGroup")
+    ? (typeof patch.documentGroup === "string" ? patch.documentGroup : "Others")
+    : String((tpl as any).document_group ?? "Others");
+
+  const rows = await queryRows(r, sql`
+    INSERT INTO document_template_versions (
+      firm_id, template_id, version_no, status,
+      source_object_path, filename, mime_type,
+      template_kind, category, document_group,
+      variables_snapshot, pdf_mappings_snapshot, applicability_rules_snapshot, readiness_rules_snapshot,
+      created_by
+    )
+    VALUES (
+      ${req.firmId!}, ${templateId}, ${nextNo}, 'draft',
+      ${effectiveObjectPath}, ${effectiveFileName}, ${mimeType},
+      ${String((tpl as any).kind ?? "template")}, ${String((tpl as any).document_type ?? "other")}, ${documentGroup},
+      ${variablesSnapshot as any}, ${null as any},
+      ${{
+        applies_to_purchase_mode: appliesToPurchaseMode,
+        applies_to_title_type: appliesToTitleType,
+        applies_to_case_type: appliesToCaseType,
+        is_active: isActive,
+      } as any},
+      ${{ document_group: documentGroup } as any},
+      ${req.userId!}
+    )
+    RETURNING *
+  `);
+  const created = rows[0];
+  const versionId = created && typeof created === "object" && "id" in created ? Number((created as any).id) : undefined;
+  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.template_version.create", entityType: "document_template_version", entityId: versionId, detail: `templateId=${templateId} versionNo=${nextNo}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+  res.status(201).json(created);
+});
+
+router.post("/document-templates/:templateId/versions/:versionId/publish", requireAuth, requireFirmUser, requirePermission("documents", "update"), async (req: AuthRequest, res): Promise<void> => {
+  const r = getRlsDb(req, res);
+  if (!r) return;
+  const templateIdStr = one((req.params as any).templateId);
+  const versionIdStr = one((req.params as any).versionId);
+  const templateId = templateIdStr ? parseInt(templateIdStr, 10) : NaN;
+  const versionId = versionIdStr ? parseInt(versionIdStr, 10) : NaN;
+  if (Number.isNaN(templateId) || Number.isNaN(versionId)) {
+    res.status(400).json({ error: "Invalid template/version ID" });
+    return;
+  }
+
+  const rows = await queryRows(r, sql`
+    SELECT * FROM document_template_versions
+    WHERE id = ${versionId} AND firm_id = ${req.firmId!} AND template_id = ${templateId}
+  `);
+  const v = rows[0];
+  if (!v) {
+    res.status(404).json({ error: "Version not found" });
+    return;
+  }
+  if (String((v as any).status ?? "") === "archived") {
+    res.status(409).json({ error: "Version is archived", code: "VERSION_ARCHIVED" });
+    return;
+  }
+
+  await queryRows(r, sql`
+    UPDATE document_template_versions
+    SET status = 'archived', archived_by = ${req.userId!}, archived_at = now()
+    WHERE firm_id = ${req.firmId!} AND template_id = ${templateId}
+      AND status = 'published' AND id <> ${versionId}
+  `);
+
+  const publishedRows = await queryRows(r, sql`
+    UPDATE document_template_versions
+    SET status = 'published', published_by = ${req.userId!}, published_at = now()
+    WHERE id = ${versionId} AND firm_id = ${req.firmId!} AND template_id = ${templateId}
+    RETURNING *
+  `);
+  const published = publishedRows[0] ?? v;
+
+  const app = (published as any).applicability_rules_snapshot ?? {};
+  const purchaseMode = typeof app.applies_to_purchase_mode === "string" ? app.applies_to_purchase_mode : null;
+  const titleType = typeof app.applies_to_title_type === "string" ? app.applies_to_title_type : "any";
+  const caseType = typeof app.applies_to_case_type === "string" ? app.applies_to_case_type : null;
+  const isActive = typeof app.is_active === "boolean" ? app.is_active : true;
+  const fileName = String((published as any).filename ?? "");
+  const objectPath = String((published as any).source_object_path ?? "");
+  const ext = fileExtensionFromName(fileName);
+
+  const updatedTplRows = await queryRows(r, sql`
+    UPDATE document_templates
+    SET object_path = ${objectPath},
+        file_name = ${fileName},
+        mime_type = ${((published as any).mime_type ?? null) as any},
+        extension = ${ext || null},
+        kind = ${String((published as any).template_kind ?? (published as any).kind ?? "template")},
+        document_type = ${String((published as any).category ?? (published as any).document_type ?? "other")},
+        document_group = ${String((published as any).document_group ?? "Others")},
+        is_active = ${isActive},
+        applies_to_purchase_mode = ${purchaseMode},
+        applies_to_title_type = ${titleType},
+        applies_to_case_type = ${caseType},
+        updated_at = now()
+    WHERE id = ${templateId} AND firm_id = ${req.firmId!}
+    RETURNING *
+  `);
+  if (!updatedTplRows[0]) {
+    res.status(404).json({ error: "Template not found" });
+    return;
+  }
+
+  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.template_version.publish", entityType: "document_template_version", entityId: versionId, detail: `templateId=${templateId} versionNo=${(published as any).version_no ?? ""}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+  res.json({ version: published, template: updatedTplRows[0] });
+});
+
+router.post("/document-templates/:templateId/versions/:versionId/restore", requireAuth, requireFirmUser, requirePermission("documents", "update"), async (req: AuthRequest, res): Promise<void> => {
+  const r = getRlsDb(req, res);
+  if (!r) return;
+  const templateIdStr = one((req.params as any).templateId);
+  const versionIdStr = one((req.params as any).versionId);
+  const templateId = templateIdStr ? parseInt(templateIdStr, 10) : NaN;
+  const versionId = versionIdStr ? parseInt(versionIdStr, 10) : NaN;
+  if (Number.isNaN(templateId) || Number.isNaN(versionId)) {
+    res.status(400).json({ error: "Invalid template/version ID" });
+    return;
+  }
+
+  const rows = await queryRows(r, sql`
+    SELECT * FROM document_template_versions
+    WHERE id = ${versionId} AND firm_id = ${req.firmId!} AND template_id = ${templateId}
+  `);
+  const src = rows[0];
+  if (!src) {
+    res.status(404).json({ error: "Version not found" });
+    return;
+  }
+
+  const maxRows = await queryRows(r, sql`SELECT COALESCE(MAX(version_no), 0) AS max_no FROM document_template_versions WHERE firm_id = ${req.firmId!} AND template_id = ${templateId}`);
+  const maxNo = Number((maxRows[0] as any)?.max_no ?? 0) || 0;
+  const nextNo = maxNo + 1;
+
+  const insertedRows = await queryRows(r, sql`
+    INSERT INTO document_template_versions (
+      firm_id, template_id, version_no, status,
+      source_object_path, filename, mime_type,
+      template_kind, category, document_group,
+      variables_snapshot, pdf_mappings_snapshot, applicability_rules_snapshot, readiness_rules_snapshot,
+      created_by
+    )
+    VALUES (
+      ${req.firmId!}, ${templateId}, ${nextNo}, 'draft',
+      ${String((src as any).source_object_path ?? "")}, ${String((src as any).filename ?? "")}, ${((src as any).mime_type ?? null) as any},
+      ${String((src as any).template_kind ?? "")}, ${String((src as any).category ?? "")}, ${String((src as any).document_group ?? "")},
+      ${((src as any).variables_snapshot ?? null) as any}, ${((src as any).pdf_mappings_snapshot ?? null) as any},
+      ${((src as any).applicability_rules_snapshot ?? null) as any}, ${((src as any).readiness_rules_snapshot ?? null) as any},
+      ${req.userId!}
+    )
+    RETURNING *
+  `);
+  const created = insertedRows[0];
+  const newId = created && typeof created === "object" && "id" in created ? Number((created as any).id) : undefined;
+  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.template_version.restore", entityType: "document_template_version", entityId: newId, detail: `templateId=${templateId} restoredFrom=${versionId} newVersionNo=${nextNo}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+  res.status(201).json(created);
+});
+
+router.post("/document-templates/:templateId/versions/:versionId/archive", requireAuth, requireFirmUser, requirePermission("documents", "update"), async (req: AuthRequest, res): Promise<void> => {
+  const r = getRlsDb(req, res);
+  if (!r) return;
+  const templateIdStr = one((req.params as any).templateId);
+  const versionIdStr = one((req.params as any).versionId);
+  const templateId = templateIdStr ? parseInt(templateIdStr, 10) : NaN;
+  const versionId = versionIdStr ? parseInt(versionIdStr, 10) : NaN;
+  if (Number.isNaN(templateId) || Number.isNaN(versionId)) {
+    res.status(400).json({ error: "Invalid template/version ID" });
+    return;
+  }
+
+  const rows = await queryRows(r, sql`
+    UPDATE document_template_versions
+    SET status = 'archived', archived_by = ${req.userId!}, archived_at = now()
+    WHERE id = ${versionId} AND firm_id = ${req.firmId!} AND template_id = ${templateId}
+    RETURNING *
+  `);
+  if (!rows[0]) {
+    res.status(404).json({ error: "Version not found" });
+    return;
+  }
+  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.template_version.archive", entityType: "document_template_version", entityId: versionId, detail: `templateId=${templateId}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+  res.json(rows[0]);
+});
+
 router.get("/document-templates/:templateId/download", requireAuth, requireFirmUser, requirePermission("documents", "read"), async (req: AuthRequest, res): Promise<void> => {
   const r = getRlsDb(req, res);
   if (!r) return;
@@ -1633,6 +1967,33 @@ router.get("/cases/:caseId/documents", requireAuth, requireFirmUser, requirePerm
   res.json(rows);
 });
 
+router.get("/cases/:caseId/document-instances", requireAuth, requireFirmUser, requirePermission("documents", "read"), async (req: AuthRequest, res): Promise<void> => {
+  const r = getRlsDb(req, res);
+  if (!r) return;
+  const caseIdStr = one((req.params as any).caseId);
+  const caseId = caseIdStr ? parseInt(caseIdStr, 10) : NaN;
+  if (Number.isNaN(caseId)) {
+    res.status(400).json({ error: "Invalid case ID" });
+    return;
+  }
+
+  const rows = await queryRows(r, sql`
+    SELECT
+      gr.*,
+      dt.name AS template_name,
+      pd.name AS platform_document_name,
+      u.name AS triggered_by_name
+    FROM document_generation_runs gr
+    LEFT JOIN document_templates dt ON gr.template_id = dt.id
+    LEFT JOIN platform_documents pd ON gr.platform_document_id = pd.id
+    LEFT JOIN users u ON gr.triggered_by = u.id
+    WHERE gr.firm_id = ${req.firmId!} AND gr.case_id = ${caseId}
+    ORDER BY gr.triggered_at DESC, gr.id DESC
+    LIMIT 200`
+  );
+  res.json(rows);
+});
+
 router.get("/cases/:caseId/documents/checklist", requireAuth, requireFirmUser, requirePermission("documents", "read"), async (req: AuthRequest, res): Promise<void> => {
   const r = getRlsDb(req, res);
   if (!r) return;
@@ -1840,43 +2201,146 @@ router.get("/cases/:caseId/documents/checklist", requireAuth, requireFirmUser, r
   });
 });
 
-router.post("/cases/:caseId/documents/generate", requireAuth, requireFirmUser, requirePermission("documents", "create"), async (req: AuthRequest, res): Promise<void> => {
-  const r = getRlsDb(req, res);
-  if (!r) return;
-  const caseIdStr = one((req.params as any).caseId);
-  const caseId = caseIdStr ? parseInt(caseIdStr, 10) : NaN;
-  if (Number.isNaN(caseId)) {
-    res.status(400).json({ error: "Invalid case ID" });
-    return;
+class DocumentGenerationError extends Error {
+  statusCode: number;
+  code: string;
+  payload?: Record<string, unknown>;
+  constructor(statusCode: number, code: string, message: string, payload?: Record<string, unknown>) {
+    super(message);
+    this.name = "DocumentGenerationError";
+    this.statusCode = statusCode;
+    this.code = code;
+    this.payload = payload;
+    Object.setPrototypeOf(this, DocumentGenerationError.prototype);
   }
-  const { templateId, documentName, letterheadId } = req.body as { templateId: number; documentName?: string; letterheadId?: number | null };
+}
 
-  if (!templateId) {
-    res.status(400).json({ error: "templateId is required" });
-    return;
-  }
+async function ensureFirmTemplatePublishedVersionId(r: DbConn, firmId: number, templateId: number, actorId: number | null): Promise<number> {
+  const existingRows = await queryRows(r, sql`
+    SELECT id
+    FROM document_template_versions
+    WHERE firm_id = ${firmId} AND template_id = ${templateId} AND status = 'published'
+    ORDER BY published_at DESC NULLS LAST, version_no DESC
+    LIMIT 1
+  `);
+  const existingId = existingRows[0]?.id;
+  if (typeof existingId === "number") return Number(existingId);
 
-  const templateRows = await queryRows(
-    r,
-    sql`SELECT * FROM document_templates WHERE id = ${templateId} AND firm_id = ${req.firmId!}`
-  );
-  if (!templateRows[0]) {
-    res.status(404).json({ error: "Template not found" });
-    return;
-  }
+  const tplRows = await queryRows(r, sql`SELECT * FROM document_templates WHERE id = ${templateId} AND firm_id = ${firmId}`);
+  const tpl = tplRows[0];
+  if (!tpl) throw new DocumentGenerationError(404, "TEMPLATE_NOT_FOUND", "Template not found");
+
+  const insertedRows = await queryRows(r, sql`
+    INSERT INTO document_template_versions (
+      firm_id, template_id, version_no, status,
+      source_object_path, filename, mime_type,
+      template_kind, category, document_group,
+      variables_snapshot, pdf_mappings_snapshot, applicability_rules_snapshot, readiness_rules_snapshot,
+      created_by, created_at, published_by, published_at
+    )
+    VALUES (
+      ${firmId}, ${templateId}, 1, 'published',
+      ${String((tpl as any).object_path ?? "")}, ${String((tpl as any).file_name ?? "")}, ${((tpl as any).mime_type ?? null) as any},
+      ${String((tpl as any).kind ?? "template")}, ${String((tpl as any).document_type ?? "other")}, ${String((tpl as any).document_group ?? "Others")},
+      ${null as any}, ${null as any},
+      ${{
+        applies_to_purchase_mode: (tpl as any).applies_to_purchase_mode ?? null,
+        applies_to_title_type: (tpl as any).applies_to_title_type ?? "any",
+        applies_to_case_type: (tpl as any).applies_to_case_type ?? null,
+        is_active: Boolean((tpl as any).is_active ?? true),
+      } as any},
+      ${{ document_group: String((tpl as any).document_group ?? "Others") } as any},
+      ${actorId}, ${(tpl as any).created_at ?? null}, ${actorId}, now()
+    )
+    RETURNING id
+  `);
+  const newId = insertedRows[0]?.id;
+  if (typeof newId !== "number") throw new Error("Failed to create template version");
+  return Number(newId);
+}
+
+async function createGenerationRun(r: DbConn, row: Record<string, unknown>): Promise<number> {
+  const rows = await queryRows(r, sql`
+    INSERT INTO document_generation_runs (
+      firm_id, case_id, template_source,
+      template_id, template_version_id, platform_document_id,
+      document_name, render_mode, status,
+      rendered_variables_snapshot, checklist_snapshot, readiness_snapshot,
+      triggered_by, triggered_at,
+      error_code, error_message
+    ) VALUES (
+      ${row.firm_id as any}, ${row.case_id as any}, ${row.template_source as any},
+      ${row.template_id as any}, ${row.template_version_id as any}, ${row.platform_document_id as any},
+      ${row.document_name as any}, ${row.render_mode as any}, ${row.status as any},
+      ${row.rendered_variables_snapshot as any}, ${row.checklist_snapshot as any}, ${row.readiness_snapshot as any},
+      ${row.triggered_by as any}, now(),
+      ${row.error_code as any}, ${row.error_message as any}
+    )
+    RETURNING id
+  `);
+  const id = rows[0]?.id;
+  if (typeof id !== "number") throw new Error("Failed to create generation run");
+  return Number(id);
+}
+
+async function finishGenerationRunSuccess(r: DbConn, firmId: number, runId: number, caseDocumentId: number | null, renderedVars: unknown, checklistSnapshot: unknown, readinessSnapshot: unknown): Promise<void> {
+  await queryRows(r, sql`
+    UPDATE document_generation_runs
+    SET status = 'success',
+        finished_at = now(),
+        case_document_id = ${caseDocumentId},
+        rendered_variables_snapshot = ${renderedVars as any},
+        checklist_snapshot = ${checklistSnapshot as any},
+        readiness_snapshot = ${readinessSnapshot as any}
+    WHERE id = ${runId} AND firm_id = ${firmId}
+  `);
+}
+
+async function finishGenerationRunFailed(r: DbConn, firmId: number, runId: number, errorCode: string, errorMessage: string): Promise<void> {
+  await queryRows(r, sql`
+    UPDATE document_generation_runs
+    SET status = 'failed',
+        finished_at = now(),
+        error_code = ${errorCode},
+        error_message = ${errorMessage}
+    WHERE id = ${runId} AND firm_id = ${firmId}
+  `);
+}
+
+async function generateFirmDocument({
+  r,
+  firmId,
+  actorId,
+  actorType,
+  ipAddress,
+  userAgent,
+  caseId,
+  templateId,
+  documentName,
+  letterheadId,
+  runId,
+}: {
+  r: DbConn;
+  firmId: number;
+  actorId: number;
+  actorType: string | undefined;
+  ipAddress: string;
+  userAgent: string | undefined;
+  caseId: number;
+  templateId: number;
+  documentName?: string;
+  letterheadId?: number | null;
+  runId: number;
+}): Promise<{ caseDocument: Record<string, unknown>; caseDocumentId: number | null; templateVersionId: number | null; checklistSnapshot: unknown; readinessSnapshot: unknown; renderedVars: unknown; }> {
+  const templateRows = await queryRows(r, sql`SELECT * FROM document_templates WHERE id = ${templateId} AND firm_id = ${firmId}`);
   const template = templateRows[0];
-  const templateCapable = template && typeof template === "object" && "is_template_capable" in template ? Boolean((template as any).is_template_capable) : true;
-  const templateDocType = template && typeof template === "object" && "document_type" in template ? String((template as any).document_type) : "other";
-  if (!templateCapable) {
-    res.status(400).json({ error: "Selected document is not template-capable", code: "NOT_TEMPLATE_CAPABLE" });
-    return;
-  }
+  if (!template) throw new DocumentGenerationError(404, "TEMPLATE_NOT_FOUND", "Template not found");
+  const templateCapable = Boolean((template as any).is_template_capable ?? true);
+  const templateDocType = String((template as any).document_type ?? "other");
+  if (!templateCapable) throw new DocumentGenerationError(422, "NOT_TEMPLATE_CAPABLE", "Selected document is not template-capable");
 
-  const context = await buildCaseContext(r, caseId, req.firmId!);
-  if (!context) {
-    res.status(404).json({ error: "Case not found" });
-    return;
-  }
+  const context = await buildCaseContext(r, caseId, firmId);
+  if (!context) throw new DocumentGenerationError(404, "CASE_NOT_FOUND", "Case not found");
 
   const applicability = evaluateTemplateApplicability({
     isActive: Boolean((template as any).is_active ?? true),
@@ -1888,16 +2352,13 @@ router.post("/cases/:caseId/documents/generate", requireAuth, requireFirmUser, r
     titleType: (context as any).title_type ?? null,
     caseType: (context as any).case_type ?? null,
   });
-  if (!applicability.applicable) {
-    res.status(409).json({ error: "Template not applicable", code: "TEMPLATE_NOT_APPLICABLE", reasons: applicability.reasons });
-    return;
-  }
+  if (!applicability.applicable) throw new DocumentGenerationError(409, "TEMPLATE_NOT_APPLICABLE", "Template not applicable", { reasons: applicability.reasons });
 
   const wfDocs = (await tableExists(r, "public.case_workflow_documents"))
     ? await queryRows(r, sql`
       SELECT milestone_key, object_path, file_name, updated_at
       FROM case_workflow_documents
-      WHERE firm_id = ${req.firmId!} AND case_id = ${caseId} AND deleted_at IS NULL
+      WHERE firm_id = ${firmId} AND case_id = ${caseId} AND deleted_at IS NULL
       ORDER BY updated_at DESC
     `)
     : [];
@@ -1912,7 +2373,7 @@ router.post("/cases/:caseId/documents/generate", requireAuth, requireFirmUser, r
     ? await queryRows(r, sql`
       SELECT item_key, custom_name, dated_on, stamped_on, object_path, file_name, sort_order
       FROM case_loan_stamping_items
-      WHERE firm_id = ${req.firmId!} AND case_id = ${caseId} AND deleted_at IS NULL
+      WHERE firm_id = ${firmId} AND case_id = ${caseId} AND deleted_at IS NULL
       ORDER BY sort_order ASC, id ASC
     `)
     : [];
@@ -1949,157 +2410,129 @@ router.post("/cases/:caseId/documents/generate", requireAuth, requireFirmUser, r
     documentGroup: String((template as any).document_group ?? "Others"),
     input: readinessInput,
   });
-  if (readiness.status !== "ready") {
-    res.status(422).json({ error: "Template not ready", code: "TEMPLATE_NOT_READY", status: readiness.status, missing: readiness.missing });
-    return;
-  }
+  if (readiness.status !== "ready") throw new DocumentGenerationError(422, "TEMPLATE_NOT_READY", "Template not ready", { status: readiness.status, missing: readiness.missing });
 
+  const templateVersionId = await ensureFirmTemplatePublishedVersionId(r, firmId, templateId, actorId);
+  await queryRows(r, sql`UPDATE document_generation_runs SET template_version_id = ${templateVersionId} WHERE id = ${runId} AND firm_id = ${firmId}`);
+
+  const versionRows = await queryRows(r, sql`SELECT * FROM document_template_versions WHERE id = ${templateVersionId} AND firm_id = ${firmId}`);
+  const version = versionRows[0];
+  const templateObjectPath = String((version as any)?.source_object_path ?? "");
+  if (!templateObjectPath) throw new DocumentGenerationError(404, "TEMPLATE_FILE_MISSING", "Template file missing");
+
+  const fileContents = await downloadPrivateObjectBytes(templateObjectPath);
+  const zip = new PizZip(fileContents);
+  const doc = new Docxtemplater(zip, { paragraphLoop: true, linebreaks: true });
   try {
-    const templateObjectPath = typeof (template as any).object_path === "string" ? String((template as any).object_path) : "";
-    if (!templateObjectPath) {
-      res.status(404).json({ error: "Template file missing" });
-      return;
+    doc.render(context);
+  } catch {
+    throw new DocumentGenerationError(422, "TEMPLATE_RENDER_FAILED", "Template render failed");
+  }
+
+  let buffer = doc.getZip().generate({ type: "nodebuffer", compression: "DEFLATE" }) as Buffer;
+  const isLetterLike = isLetterheadApplicableDocumentType(templateDocType);
+  let usedLetterheadId: number | null = null;
+  if (isLetterLike) {
+    const letterheadIdNum = typeof letterheadId === "number" ? letterheadId : null;
+    let lh: Record<string, unknown> | undefined;
+    if (letterheadIdNum !== null) {
+      const byId = await queryRows(r, sql`SELECT * FROM firm_letterheads WHERE id = ${letterheadIdNum} AND firm_id = ${firmId}`);
+      const candidate = byId[0];
+      if (!candidate) throw new DocumentGenerationError(404, "LETTERHEAD_NOT_FOUND", "Letterhead not found");
+      if (String((candidate as any).status ?? "active") !== "active") throw new DocumentGenerationError(409, "LETTERHEAD_INACTIVE", "Selected letterhead is inactive");
+      lh = candidate;
+    } else {
+      const defaults = await queryRows(r, sql`SELECT * FROM firm_letterheads WHERE firm_id = ${firmId} AND status = 'active' ORDER BY is_default DESC, created_at DESC LIMIT 1`);
+      lh = defaults[0];
+      if (!lh) throw new DocumentGenerationError(422, "NO_LETTERHEAD", "No active firm letterhead configured");
     }
-    const fileContents = await downloadPrivateObjectBytes(templateObjectPath);
-
-    const zip = new PizZip(fileContents);
-    const doc = new Docxtemplater(zip, { paragraphLoop: true, linebreaks: true });
-
-    try {
-      doc.render(context);
-    } catch (err) {
-      logger.warn({ err, path: req.path, firmId: req.firmId, userId: req.userId, caseId, templateId }, "[documents] template_render_failed");
-      res.status(422).json({ error: "Template render failed", code: "TEMPLATE_RENDER_FAILED" });
-      return;
-    }
-
-    let buffer = doc.getZip().generate({ type: "nodebuffer", compression: "DEFLATE" }) as Buffer;
-
-    const isLetterLike = isLetterheadApplicableDocumentType(templateDocType);
-    let usedLetterheadId: number | null = null;
-    if (isLetterLike) {
-      const letterheadIdNum = typeof letterheadId === "number" ? letterheadId : null;
-      let lh: Record<string, unknown> | undefined;
-      if (letterheadIdNum !== null) {
-        const byId = await queryRows(r, sql`SELECT * FROM firm_letterheads WHERE id = ${letterheadIdNum} AND firm_id = ${req.firmId!}`);
-        const candidate = byId[0];
-        if (!candidate) {
-          res.status(404).json({ error: "Letterhead not found", code: "LETTERHEAD_NOT_FOUND" });
-          return;
-        }
-        if (String((candidate as any).status ?? "active") !== "active") {
-          res.status(409).json({ error: "Selected letterhead is inactive", code: "LETTERHEAD_INACTIVE" });
-          return;
-        }
-        lh = candidate;
-      } else {
-        const defaults = await queryRows(r, sql`SELECT * FROM firm_letterheads WHERE firm_id = ${req.firmId!} AND status = 'active' ORDER BY is_default DESC, created_at DESC LIMIT 1`);
-        lh = defaults[0];
-        if (!lh) {
-          res.status(422).json({ error: "No active firm letterhead configured", code: "NO_LETTERHEAD" });
-          return;
-        }
-      }
-      usedLetterheadId = typeof (lh as any).id === "number" ? Number((lh as any).id) : null;
-      const firstPath = String((lh as any).first_page_object_path);
-      const contPath = String((lh as any).continuation_header_object_path);
-      const footerPath = (lh as any).footer_object_path ? String((lh as any).footer_object_path) : null;
-      const footerMode = (lh as any).footer_mode === "last_page_only" ? "last_page_only" : "every_page";
-
-      const firstBytes = await downloadPrivateObjectBytes(firstPath);
-      const contBytes = await downloadPrivateObjectBytes(contPath);
-      const footerBytes = footerPath ? await downloadPrivateObjectBytes(footerPath) : null;
-
-      buffer = await applyLetterheadToDocxBuffer({
-        baseDocx: buffer,
-        firstPageTemplateDocx: firstBytes,
-        continuationHeaderTemplateDocx: contBytes,
-        footerTemplateDocx: footerBytes,
-        footerMode,
-      });
-    }
-
-    const normalizedPath = newGeneratedDocObjectPath(req.firmId!, caseId, "docx");
-    await supabaseStorage.uploadPrivateObject({
-      objectPath: normalizedPath,
-      fileBytes: buffer,
-      contentType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    usedLetterheadId = typeof (lh as any).id === "number" ? Number((lh as any).id) : null;
+    const firstPath = String((lh as any).first_page_object_path);
+    const contPath = String((lh as any).continuation_header_object_path);
+    const footerPath = (lh as any).footer_object_path ? String((lh as any).footer_object_path) : null;
+    const footerMode = (lh as any).footer_mode === "last_page_only" ? "last_page_only" : "every_page";
+    const firstBytes = await downloadPrivateObjectBytes(firstPath);
+    const contBytes = await downloadPrivateObjectBytes(contPath);
+    const footerBytes = footerPath ? await downloadPrivateObjectBytes(footerPath) : null;
+    buffer = await applyLetterheadToDocxBuffer({
+      baseDocx: buffer,
+      firstPageTemplateDocx: firstBytes,
+      continuationHeaderTemplateDocx: contBytes,
+      footerTemplateDocx: footerBytes,
+      footerMode,
     });
-    const docName = documentName ?? String((template as any).name ?? "Generated document");
-    const templateCode = String((template as any).document_type ?? "DOC");
-    const fileName = buildGeneratedDownloadFileName({
-      referenceNo: String((context as any).reference_no ?? ""),
-      templateCode,
-      purchaserName: String((context as any).spa_purchaser1_name ?? (context as any).borrower1_name ?? ""),
-      projectName: String((context as any).project_name ?? ""),
-      extension: "docx",
-    });
-
-    const docRows = await queryRows(r, sql`
-      INSERT INTO case_documents (case_id, firm_id, template_id, template_source, template_snapshot_name, template_snapshot_updated_at, name, document_type, status, object_path, file_name, generated_by)
-      VALUES (${caseId}, ${req.firmId!}, ${templateId}, 'firm', ${String((template as any).name ?? "")}, ${(template as any).updated_at ?? null}, ${docName}, ${template.document_type as string}, 'generated', ${normalizedPath}, ${fileName}, ${req.userId!})
-      RETURNING *`
-    );
-
-    const created = docRows[0];
-    const createdId = created && typeof created === "object" && "id" in created && typeof (created as { id?: unknown }).id === "number"
-      ? (created as { id: number }).id
-      : undefined;
-    await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.case.generate", entityType: "case_document", entityId: createdId, detail: `caseId=${caseId} templateId=${templateId} name=${docName} letterhead=${isLetterLike ? (usedLetterheadId ?? "default") : "n/a"}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
-    res.status(201).json(docRows[0]);
-  } catch (err: unknown) {
-    const cfgErr = getSupabaseStorageConfigError(err);
-    if (cfgErr) {
-      logger.error({ err, path: req.path, firmId: req.firmId, userId: req.userId, caseId, templateId }, "[documents] supabase_storage_not_configured");
-      res.status(cfgErr.statusCode).json({ error: cfgErr.error });
-      return;
-    }
-    if (err instanceof ObjectNotFoundError) {
-      res.status(404).json({ error: "Template file not found" });
-      return;
-    }
-    if (isDocxTemplateRenderError(err)) {
-      res.status(422).json({ error: "Template render failed", code: "TEMPLATE_RENDER_FAILED" });
-      return;
-    }
-    logger.error({ err, path: req.path, firmId: req.firmId, userId: req.userId, caseId, templateId }, "[documents] generate_failed");
-    res.status(500).json({ error: "Internal Server Error" });
-  }
-});
-
-router.post("/cases/:caseId/documents/generate-from-master", requireAuth, requireFirmUser, requirePermission("documents", "create"), async (req: AuthRequest, res): Promise<void> => {
-  const r = getRlsDb(req, res);
-  if (!r) return;
-  const caseIdStr = one((req.params as any).caseId);
-  const caseId = caseIdStr ? parseInt(caseIdStr, 10) : NaN;
-  if (Number.isNaN(caseId)) {
-    res.status(400).json({ error: "Invalid case ID" });
-    return;
-  }
-  const { masterDocId, documentName, letterheadId } = req.body as { masterDocId: number; documentName?: string; letterheadId?: number | null };
-
-  if (!masterDocId) {
-    res.status(400).json({ error: "masterDocId is required" });
-    return;
   }
 
-  const docRows2 = await queryRows(
-    r,
-    sql`SELECT * FROM platform_documents WHERE id = ${masterDocId} AND (firm_id IS NULL OR firm_id = ${req.firmId!})`
-  );
-  if (!docRows2[0]) {
-    res.status(404).json({ error: "Master document not found" });
-    return;
-  }
+  const normalizedPath = newGeneratedDocObjectPath(firmId, caseId, "docx");
+  await supabaseStorage.uploadPrivateObject({
+    objectPath: normalizedPath,
+    fileBytes: buffer,
+    contentType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  });
+  const docName = documentName ?? String((template as any).name ?? "Generated document");
+  const templateCode = String((template as any).document_type ?? "DOC");
+  const downloadName = buildGeneratedDownloadFileName({
+    referenceNo: String((context as any).reference_no ?? ""),
+    templateCode,
+    purchaserName: String((context as any).spa_purchaser1_name ?? (context as any).borrower1_name ?? ""),
+    projectName: String((context as any).project_name ?? ""),
+    extension: "docx",
+  });
+  const templateSnapshotUpdatedAt = (version as any)?.published_at ?? (template as any).updated_at ?? null;
+  const docRows = await queryRows(r, sql`
+    INSERT INTO case_documents (case_id, firm_id, template_id, template_source, template_snapshot_name, template_snapshot_updated_at, name, document_type, status, object_path, file_name, generated_by)
+    VALUES (${caseId}, ${firmId}, ${templateId}, 'firm', ${String((template as any).name ?? "")}, ${templateSnapshotUpdatedAt as any}, ${docName}, ${templateDocType}, 'generated', ${normalizedPath}, ${downloadName}, ${actorId})
+    RETURNING *
+  `);
+  const created = docRows[0];
+  const createdId = created && typeof created === "object" && "id" in created && typeof (created as any).id === "number"
+    ? Number((created as any).id)
+    : null;
+  await writeAuditLog({ firmId, actorId, actorType, action: "documents.case.generate", entityType: "case_document", entityId: createdId ?? undefined, detail: `caseId=${caseId} templateId=${templateId} name=${docName} letterhead=${isLetterLike ? (usedLetterheadId ?? "default") : "n/a"}`, ipAddress, userAgent });
+  return {
+    caseDocument: created,
+    caseDocumentId: createdId,
+    templateVersionId,
+    checklistSnapshot: { applicability },
+    readinessSnapshot: { readiness },
+    renderedVars: context,
+  };
+}
+
+async function generateMasterDocument({
+  r,
+  firmId,
+  actorId,
+  actorType,
+  ipAddress,
+  userAgent,
+  caseId,
+  masterDocId,
+  documentName,
+  letterheadId,
+  runId,
+}: {
+  r: DbConn;
+  firmId: number;
+  actorId: number;
+  actorType: string | undefined;
+  ipAddress: string;
+  userAgent: string | undefined;
+  caseId: number;
+  masterDocId: number;
+  documentName?: string;
+  letterheadId?: number | null;
+  runId: number;
+}): Promise<{ caseDocument: Record<string, unknown>; caseDocumentId: number | null; templateVersionId: number | null; checklistSnapshot: unknown; readinessSnapshot: unknown; renderedVars: unknown; renderMode: "docx" | "pdf" }> {
+  const docRows2 = await queryRows(r, sql`SELECT * FROM platform_documents WHERE id = ${masterDocId} AND (firm_id IS NULL OR firm_id = ${firmId})`);
   const masterDoc = docRows2[0];
-  const masterFileName = masterDoc.file_name as string;
+  if (!masterDoc) throw new DocumentGenerationError(404, "MASTER_DOCUMENT_NOT_FOUND", "Master document not found");
+  const masterFileName = String((masterDoc as any).file_name ?? "");
   const isDocx = masterFileName.toLowerCase().endsWith(".docx") || masterFileName.toLowerCase().endsWith(".doc");
+  const isPdf = masterFileName.toLowerCase().endsWith(".pdf");
 
-  const context = await buildCaseContext(r, caseId, req.firmId!);
-  if (!context) {
-    res.status(404).json({ error: "Case not found" });
-    return;
-  }
+  const context = await buildCaseContext(r, caseId, firmId);
+  if (!context) throw new DocumentGenerationError(404, "CASE_NOT_FOUND", "Case not found");
 
   const applicability = evaluateTemplateApplicability({
     isActive: Boolean((masterDoc as any).is_active ?? true),
@@ -2111,16 +2544,13 @@ router.post("/cases/:caseId/documents/generate-from-master", requireAuth, requir
     titleType: (context as any).title_type ?? null,
     caseType: (context as any).case_type ?? null,
   });
-  if (!applicability.applicable) {
-    res.status(409).json({ error: "Template not applicable", code: "TEMPLATE_NOT_APPLICABLE", reasons: applicability.reasons });
-    return;
-  }
+  if (!applicability.applicable) throw new DocumentGenerationError(409, "TEMPLATE_NOT_APPLICABLE", "Template not applicable", { reasons: applicability.reasons });
 
   const wfDocs = (await tableExists(r, "public.case_workflow_documents"))
     ? await queryRows(r, sql`
       SELECT milestone_key, object_path, file_name, updated_at
       FROM case_workflow_documents
-      WHERE firm_id = ${req.firmId!} AND case_id = ${caseId} AND deleted_at IS NULL
+      WHERE firm_id = ${firmId} AND case_id = ${caseId} AND deleted_at IS NULL
       ORDER BY updated_at DESC
     `)
     : [];
@@ -2135,7 +2565,7 @@ router.post("/cases/:caseId/documents/generate-from-master", requireAuth, requir
     ? await queryRows(r, sql`
       SELECT item_key, custom_name, dated_on, stamped_on, object_path, file_name, sort_order
       FROM case_loan_stamping_items
-      WHERE firm_id = ${req.firmId!} AND case_id = ${caseId} AND deleted_at IS NULL
+      WHERE firm_id = ${firmId} AND case_id = ${caseId} AND deleted_at IS NULL
       ORDER BY sort_order ASC, id ASC
     `)
     : [];
@@ -2144,7 +2574,7 @@ router.post("/cases/:caseId/documents/generate-from-master", requireAuth, requir
       .filter(([k]) => k.endsWith("_ymd"))
       .map(([k, v]) => [k.replace(/_ymd$/, ""), typeof v === "string" ? v : null])
   );
-  const readinessInput2: TemplateReadinessInputs = {
+  const readinessInput: TemplateReadinessInputs = {
     purchaseMode: normalizePurchaseMode(String((context as any).purchase_mode ?? "")) ?? null,
     titleType: normalizeTitleType(String((context as any).title_type ?? "")) ?? null,
     caseType: typeof (context as any).case_type === "string" ? String((context as any).case_type) : null,
@@ -2170,175 +2600,585 @@ router.post("/cases/:caseId/documents/generate-from-master", requireAuth, requir
   };
   const readiness = evaluateTemplateReadiness({
     documentGroup: String((masterDoc as any).document_group ?? (masterDoc as any).category ?? "Others"),
-    input: readinessInput2,
+    input: readinessInput,
   });
-  if (readiness.status !== "ready") {
-    res.status(422).json({ error: "Template not ready", code: "TEMPLATE_NOT_READY", status: readiness.status, missing: readiness.missing });
+  if (readiness.status !== "ready") throw new DocumentGenerationError(422, "TEMPLATE_NOT_READY", "Template not ready", { status: readiness.status, missing: readiness.missing });
+
+  const masterObjectPath = typeof (masterDoc as any).object_path === "string" ? String((masterDoc as any).object_path) : "";
+  if (!masterObjectPath) throw new DocumentGenerationError(404, "MASTER_FILE_MISSING", "Master file missing");
+  const fileContents = await downloadPrivateObjectBytes(masterObjectPath);
+
+  let buffer: Buffer;
+  let outputMime: string;
+  let outputExt: string;
+  let renderMode: "docx" | "pdf" = "docx";
+
+  if (isDocx) {
+    const zip = new PizZip(fileContents);
+    const doc = new Docxtemplater(zip, { paragraphLoop: true, linebreaks: true });
+    try {
+      doc.render(context);
+    } catch {
+      throw new DocumentGenerationError(422, "TEMPLATE_RENDER_FAILED", "Template render failed");
+    }
+    buffer = doc.getZip().generate({ type: "nodebuffer", compression: "DEFLATE" }) as Buffer;
+    outputMime = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+    outputExt = ".docx";
+    renderMode = "docx";
+  } else if (isPdf && (masterDoc as any).pdf_mappings) {
+    const mappings = (masterDoc as any).pdf_mappings as { pages: Array<{ pageIndex: number; textBoxes: Array<{ id: string; x: number; y: number; width: number; height: number; fontSize: number; content: string }> }> };
+    const pdfDoc = await PDFDocument.load(fileContents);
+    pdfDoc.registerFontkit(fontkit);
+    const helvetica = await pdfDoc.embedFont(StandardFonts.Helvetica);
+    const pages = pdfDoc.getPages();
+    for (const pageMapping of mappings.pages) {
+      const page = pages[pageMapping.pageIndex];
+      if (!page) continue;
+      const pageHeight = page.getHeight();
+      for (const tb of pageMapping.textBoxes) {
+        let text = tb.content || "";
+        text = text.replace(/\{\{(\w+)\}\}/g, (_m: string, key: string) => {
+          const val = (context as Record<string, unknown>)[key];
+          if (val === undefined || val === null) return "";
+          return String(val);
+        });
+        const fontSize = tb.fontSize || 10;
+        const pdfY = pageHeight - tb.y - fontSize;
+        const pdfYBottom = pageHeight - tb.y - tb.height;
+        const lines = wrapText(text, helvetica, fontSize, tb.width);
+        let currentY = pdfY;
+        for (const line of lines) {
+          if (currentY < pdfYBottom) break;
+          page.drawText(line, {
+            x: tb.x,
+            y: currentY,
+            size: fontSize,
+            font: helvetica,
+            color: rgb(0, 0, 0),
+          });
+          currentY -= fontSize * 1.3;
+        }
+      }
+    }
+    const pdfBytes = await pdfDoc.save();
+    buffer = Buffer.from(pdfBytes);
+    outputMime = "application/pdf";
+    outputExt = ".pdf";
+    renderMode = "pdf";
+  } else {
+    buffer = Buffer.from(fileContents);
+    outputMime = String((masterDoc as any).file_type ?? "application/octet-stream");
+    outputExt = "." + (masterFileName.split(".").pop() || "bin");
+    renderMode = "docx";
+  }
+
+  await queryRows(r, sql`UPDATE document_generation_runs SET render_mode = ${renderMode} WHERE id = ${runId} AND firm_id = ${firmId}`);
+
+  if (isDocx) {
+    const lhIdNum = typeof letterheadId === "number" ? letterheadId : null;
+    const shouldApply = lhIdNum !== null || isMasterDocumentLetterLike({ name: (masterDoc as any).name, category: (masterDoc as any).category, fileName: masterFileName });
+    if (shouldApply) {
+      let lh: Record<string, unknown> | undefined;
+      if (lhIdNum !== null) {
+        const byId = await queryRows(r, sql`SELECT * FROM firm_letterheads WHERE id = ${lhIdNum} AND firm_id = ${firmId}`);
+        const candidate = byId[0];
+        if (!candidate) throw new DocumentGenerationError(404, "LETTERHEAD_NOT_FOUND", "Letterhead not found");
+        if (String((candidate as any).status ?? "active") !== "active") throw new DocumentGenerationError(409, "LETTERHEAD_INACTIVE", "Selected letterhead is inactive");
+        lh = candidate;
+      } else {
+        const defaults = await queryRows(r, sql`SELECT * FROM firm_letterheads WHERE firm_id = ${firmId} AND status = 'active' ORDER BY is_default DESC, created_at DESC LIMIT 1`);
+        lh = defaults[0];
+        if (!lh) throw new DocumentGenerationError(422, "NO_LETTERHEAD", "No active firm letterhead configured");
+      }
+      const firstBytes = await downloadPrivateObjectBytes(String((lh as any).first_page_object_path));
+      const contBytes = await downloadPrivateObjectBytes(String((lh as any).continuation_header_object_path));
+      const footerPath = (lh as any).footer_object_path ? String((lh as any).footer_object_path) : null;
+      const footerBytes = footerPath ? await downloadPrivateObjectBytes(footerPath) : null;
+      const footerMode = (lh as any).footer_mode === "last_page_only" ? "last_page_only" : "every_page";
+      buffer = await applyLetterheadToDocxBuffer({
+        baseDocx: buffer,
+        firstPageTemplateDocx: firstBytes,
+        continuationHeaderTemplateDocx: contBytes,
+        footerTemplateDocx: footerBytes,
+        footerMode,
+      });
+    }
+  }
+
+  const normalizedPath = newGeneratedDocObjectPath(firmId, caseId, outputExt);
+  await supabaseStorage.uploadPrivateObject({
+    objectPath: normalizedPath,
+    fileBytes: buffer,
+    contentType: outputMime,
+  });
+  const docName = documentName ?? String((masterDoc as any).name ?? "Generated document");
+  const templateCode = String((masterDoc as any).category ?? (masterDoc as any).name ?? "DOC");
+  const fileName = buildGeneratedDownloadFileName({
+    referenceNo: String((context as any).reference_no ?? ""),
+    templateCode,
+    purchaserName: String((context as any).spa_purchaser1_name ?? (context as any).borrower1_name ?? ""),
+    projectName: String((context as any).project_name ?? ""),
+    extension: outputExt,
+  });
+  const savedRows = await queryRows(r, sql`
+    INSERT INTO case_documents (case_id, firm_id, template_source, platform_document_id, template_snapshot_name, template_snapshot_updated_at, name, document_type, status, object_path, file_name, generated_by)
+    VALUES (${caseId}, ${firmId}, 'master', ${masterDocId}, ${String((masterDoc as any).name ?? "")}, ${(masterDoc as any).created_at ?? null}, ${docName}, ${(masterDoc as any).category ?? "other"}, 'generated', ${normalizedPath}, ${fileName}, ${actorId})
+    RETURNING *
+  `);
+  const created = savedRows[0];
+  const createdId = created && typeof created === "object" && "id" in created && typeof (created as any).id === "number"
+    ? Number((created as any).id)
+    : null;
+  await writeAuditLog({ firmId, actorId, actorType, action: "documents.case.generate_from_master", entityType: "case_document", entityId: createdId ?? undefined, detail: `caseId=${caseId} masterDocId=${masterDocId} name=${docName}`, ipAddress, userAgent });
+  return {
+    caseDocument: created,
+    caseDocumentId: createdId,
+    templateVersionId: null,
+    checklistSnapshot: { applicability },
+    readinessSnapshot: { readiness },
+    renderedVars: context,
+    renderMode,
+  };
+}
+
+router.post("/cases/:caseId/documents/batch-generate", requireAuth, requireFirmUser, requirePermission("documents", "generate"), async (req: AuthRequest, res): Promise<void> => {
+  const r = getRlsDb(req, res);
+  if (!r) return;
+  const caseIdStr = one((req.params as any).caseId);
+  const caseId = caseIdStr ? parseInt(caseIdStr, 10) : NaN;
+  if (Number.isNaN(caseId)) {
+    res.status(400).json({ error: "Invalid case ID" });
+    return;
+  }
+  const body = req.body as Record<string, unknown>;
+  const items = Array.isArray(body.items) ? body.items : [];
+  const letterheadId = typeof body.letterheadId === "number" ? body.letterheadId : null;
+  if (items.length === 0) {
+    res.status(422).json({ error: "items is required", code: "ITEMS_REQUIRED" });
     return;
   }
 
-  try {
-    const masterObjectPath = typeof (masterDoc as any).object_path === "string" ? String((masterDoc as any).object_path) : "";
-    if (!masterObjectPath) {
-      res.status(404).json({ error: "Master file missing" });
-      return;
-    }
-    const fileContents = await downloadPrivateObjectBytes(masterObjectPath);
+  const jobId = randomUUID();
+  await queryRows(r, sql`
+    INSERT INTO document_batch_jobs (id, firm_id, case_id, job_type, status, total_count, pending_count, created_by, started_at)
+    VALUES (${jobId}::uuid, ${req.firmId!}, ${caseId}, 'generate', 'running', ${items.length}, ${items.length}, ${req.userId!}, now())
+  `);
+  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.batch_generate", entityType: "document_batch_job", entityId: undefined, detail: `jobId=${jobId} caseId=${caseId} total=${items.length}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
 
-    let buffer: Buffer;
-    let outputMime: string;
-    let outputExt: string;
+  const results: Array<Record<string, unknown>> = [];
+  let success = 0;
+  let failed = 0;
 
-    const isPdf = masterFileName.toLowerCase().endsWith(".pdf");
+  for (const raw of items) {
+    const it = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+    const source = it.source === "master" ? "master" : "firm";
+    const templateId = typeof it.templateId === "number" ? it.templateId : NaN;
+    const documentName = typeof it.documentName === "string" ? it.documentName : undefined;
+    const itemRows = await queryRows(r, sql`
+      INSERT INTO document_batch_job_items (job_id, firm_id, case_id, template_source, template_id, platform_document_id, status)
+      VALUES (${jobId}::uuid, ${req.firmId!}, ${caseId}, ${source}, ${source === "firm" ? templateId : null}, ${source === "master" ? templateId : null}, 'running')
+      RETURNING id
+    `);
+    const itemId = typeof itemRows[0]?.id === "number" ? Number(itemRows[0].id) : null;
 
-    if (isDocx) {
-      const zip = new PizZip(fileContents);
-      const doc = new Docxtemplater(zip, { paragraphLoop: true, linebreaks: true });
-      try {
-        doc.render(context);
-      } catch (err) {
-        logger.warn({ err, path: req.path, firmId: req.firmId, userId: req.userId, caseId, masterDocId }, "[documents] master_template_render_failed");
-        res.status(422).json({ error: "Template render failed", code: "TEMPLATE_RENDER_FAILED" });
-        return;
-      }
-      buffer = doc.getZip().generate({ type: "nodebuffer", compression: "DEFLATE" }) as Buffer;
-      outputMime = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
-      outputExt = ".docx";
-    } else if (isPdf && masterDoc.pdf_mappings) {
-      const mappings = masterDoc.pdf_mappings as { pages: Array<{ pageIndex: number; textBoxes: Array<{ id: string; x: number; y: number; width: number; height: number; fontSize: number; content: string }> }> };
-      const pdfDoc = await PDFDocument.load(fileContents);
-      pdfDoc.registerFontkit(fontkit);
-      const helvetica = await pdfDoc.embedFont(StandardFonts.Helvetica);
-      const pages = pdfDoc.getPages();
+    const runId = await createGenerationRun(r, {
+      firm_id: req.firmId!,
+      case_id: caseId,
+      template_source: source,
+      template_id: source === "firm" ? templateId : null,
+      template_version_id: null,
+      platform_document_id: source === "master" ? templateId : null,
+      document_name: documentName ?? "Generated document",
+      render_mode: "docx",
+      status: "running",
+      rendered_variables_snapshot: null,
+      checklist_snapshot: null,
+      readiness_snapshot: null,
+      triggered_by: req.userId!,
+      error_code: null,
+      error_message: null,
+    });
 
-      for (const pageMapping of mappings.pages) {
-        const page = pages[pageMapping.pageIndex];
-        if (!page) continue;
-        const pageHeight = page.getHeight();
-
-        for (const tb of pageMapping.textBoxes) {
-          let text = tb.content || "";
-          text = text.replace(/\{\{(\w+)\}\}/g, (_m: string, key: string) => {
-            const val = (context as Record<string, unknown>)[key];
-            if (val === undefined || val === null) return "";
-            return String(val);
-          });
-
-          const fontSize = tb.fontSize || 10;
-          const pdfY = pageHeight - tb.y - fontSize;
-          const pdfYBottom = pageHeight - tb.y - tb.height;
-
-          const lines = wrapText(text, helvetica, fontSize, tb.width);
-          let currentY = pdfY;
-          for (const line of lines) {
-            if (currentY < pdfYBottom) break;
-            page.drawText(line, {
-              x: tb.x,
-              y: currentY,
-              size: fontSize,
-              font: helvetica,
-              color: rgb(0, 0, 0),
-            });
-            currentY -= fontSize * 1.3;
-          }
-        }
-      }
-
-      const pdfBytes = await pdfDoc.save();
-      buffer = Buffer.from(pdfBytes);
-      outputMime = "application/pdf";
-      outputExt = ".pdf";
-    } else {
-      buffer = Buffer.from(fileContents);
-      outputMime = masterDoc.file_type as string;
-      outputExt = "." + masterFileName.split(".").pop();
-    }
-
-    if (isDocx) {
-      const lhIdNum = typeof letterheadId === "number" ? letterheadId : null;
-      const shouldApply = lhIdNum !== null || isMasterDocumentLetterLike({ name: (masterDoc as any).name, category: (masterDoc as any).category, fileName: masterFileName });
-      if (shouldApply) {
-        let lh: Record<string, unknown> | undefined;
-        if (lhIdNum !== null) {
-          const byId = await queryRows(r, sql`SELECT * FROM firm_letterheads WHERE id = ${lhIdNum} AND firm_id = ${req.firmId!}`);
-          const candidate = byId[0];
-          if (!candidate) {
-            res.status(404).json({ error: "Letterhead not found", code: "LETTERHEAD_NOT_FOUND" });
-            return;
-          }
-          if (String((candidate as any).status ?? "active") !== "active") {
-            res.status(409).json({ error: "Selected letterhead is inactive", code: "LETTERHEAD_INACTIVE" });
-            return;
-          }
-          lh = candidate;
-        } else {
-          const defaults = await queryRows(r, sql`SELECT * FROM firm_letterheads WHERE firm_id = ${req.firmId!} AND status = 'active' ORDER BY is_default DESC, created_at DESC LIMIT 1`);
-          lh = defaults[0];
-          if (!lh) {
-            res.status(422).json({ error: "No active firm letterhead configured", code: "NO_LETTERHEAD" });
-            return;
-          }
-        }
-        const firstBytes = await downloadPrivateObjectBytes(String((lh as any).first_page_object_path));
-        const contBytes = await downloadPrivateObjectBytes(String((lh as any).continuation_header_object_path));
-        const footerPath = (lh as any).footer_object_path ? String((lh as any).footer_object_path) : null;
-        const footerBytes = footerPath ? await downloadPrivateObjectBytes(footerPath) : null;
-        const footerMode = (lh as any).footer_mode === "last_page_only" ? "last_page_only" : "every_page";
-        buffer = await applyLetterheadToDocxBuffer({
-          baseDocx: buffer,
-          firstPageTemplateDocx: firstBytes,
-          continuationHeaderTemplateDocx: contBytes,
-          footerTemplateDocx: footerBytes,
-          footerMode,
+    try {
+      if (Number.isNaN(templateId)) throw new DocumentGenerationError(422, "INVALID_TEMPLATE_ID", "Invalid templateId");
+      if (source === "firm") {
+        const out = await generateFirmDocument({
+          r,
+          firmId: req.firmId!,
+          actorId: req.userId!,
+          actorType: req.userType,
+          ipAddress: req.ip,
+          userAgent: req.headers["user-agent"],
+          caseId,
+          templateId,
+          documentName,
+          letterheadId,
+          runId,
         });
+        await finishGenerationRunSuccess(r, req.firmId!, runId, out.caseDocumentId, out.renderedVars, out.checklistSnapshot, out.readinessSnapshot);
+        await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.generation.succeeded", entityType: "document_generation_run", entityId: runId, detail: `caseId=${caseId} templateSource=${source} templateId=${templateId} jobId=${jobId}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+        await queryRows(r, sql`UPDATE document_batch_job_items SET status='success', case_document_id=${out.caseDocumentId}, finished_at=now(), template_version_id=${out.templateVersionId} WHERE id=${itemId ?? 0} AND firm_id=${req.firmId!}`);
+        success += 1;
+        results.push({ itemId, runId, source, templateId, status: "success", caseDocumentId: out.caseDocumentId });
+      } else {
+        const out = await generateMasterDocument({
+          r,
+          firmId: req.firmId!,
+          actorId: req.userId!,
+          actorType: req.userType,
+          ipAddress: req.ip,
+          userAgent: req.headers["user-agent"],
+          caseId,
+          masterDocId: templateId,
+          documentName,
+          letterheadId,
+          runId,
+        });
+        await finishGenerationRunSuccess(r, req.firmId!, runId, out.caseDocumentId, out.renderedVars, out.checklistSnapshot, out.readinessSnapshot);
+        await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.generation.succeeded", entityType: "document_generation_run", entityId: runId, detail: `caseId=${caseId} templateSource=${source} templateId=${templateId} jobId=${jobId}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+        await queryRows(r, sql`UPDATE document_batch_job_items SET status='success', case_document_id=${out.caseDocumentId}, finished_at=now() WHERE id=${itemId ?? 0} AND firm_id=${req.firmId!}`);
+        success += 1;
+        results.push({ itemId, runId, source, templateId, status: "success", caseDocumentId: out.caseDocumentId, renderMode: out.renderMode });
       }
+    } catch (err: unknown) {
+      const cfgErr = getSupabaseStorageConfigError(err);
+      const e =
+        cfgErr ? new DocumentGenerationError(cfgErr.statusCode, "STORAGE_NOT_CONFIGURED", cfgErr.error)
+        : err instanceof ObjectNotFoundError
+          ? new DocumentGenerationError(404, source === "firm" ? "TEMPLATE_FILE_NOT_FOUND" : "MASTER_FILE_NOT_FOUND", source === "firm" ? "Template file not found" : "Master file not found")
+          : err instanceof DocumentGenerationError
+            ? err
+            : new DocumentGenerationError(500, "INTERNAL_ERROR", "Internal Server Error");
+      await finishGenerationRunFailed(r, req.firmId!, runId, e.code, e.message);
+      await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.generation.failed", entityType: "document_generation_run", entityId: runId, detail: `caseId=${caseId} templateSource=${source} templateId=${templateId} jobId=${jobId} code=${e.code}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+      await queryRows(r, sql`UPDATE document_batch_job_items SET status='failed', error_code=${e.code}, error_message=${e.message}, finished_at=now() WHERE id=${itemId ?? 0} AND firm_id=${req.firmId!}`);
+      failed += 1;
+      results.push({ itemId, runId, source, templateId, status: "failed", errorCode: e.code, errorMessage: e.message, ...(e.payload ? { payload: e.payload } : {}) });
     }
+  }
 
-    const normalizedPath = newGeneratedDocObjectPath(req.firmId!, caseId, outputExt);
-    await supabaseStorage.uploadPrivateObject({
-      objectPath: normalizedPath,
-      fileBytes: buffer,
-      contentType: outputMime,
-    });
-    const docName = documentName ?? String((masterDoc as any).name ?? "Generated document");
-    const templateCode = String((masterDoc as any).category ?? (masterDoc as any).name ?? "DOC");
-    const fileName = buildGeneratedDownloadFileName({
-      referenceNo: String((context as any).reference_no ?? ""),
-      templateCode,
-      purchaserName: String((context as any).spa_purchaser1_name ?? (context as any).borrower1_name ?? ""),
-      projectName: String((context as any).project_name ?? ""),
-      extension: outputExt,
-    });
+  const pending = Math.max(items.length - success - failed, 0);
+  const status = failed > 0 ? "completed" : "completed";
+  await queryRows(r, sql`
+    UPDATE document_batch_jobs
+    SET status = ${status},
+        total_count = ${items.length},
+        success_count = ${success},
+        failed_count = ${failed},
+        pending_count = ${pending},
+        finished_at = now()
+    WHERE id = ${jobId}::uuid AND firm_id = ${req.firmId!}
+  `);
+  res.status(201).json({ jobId, total: items.length, success, failed, pending, items: results });
+});
 
-    const savedRows = await queryRows(r, sql`
-      INSERT INTO case_documents (case_id, firm_id, template_source, platform_document_id, template_snapshot_name, template_snapshot_updated_at, name, document_type, status, object_path, file_name, generated_by)
-      VALUES (${caseId}, ${req.firmId!}, 'master', ${masterDocId}, ${String((masterDoc as any).name ?? "")}, ${(masterDoc as any).created_at ?? null}, ${docName}, ${(masterDoc.category as string) || "other"}, 'generated', ${normalizedPath}, ${fileName}, ${req.userId!})
-      RETURNING *`
-    );
+router.post("/cases/:caseId/documents/batch-export", requireAuth, requireFirmUser, requirePermission("documents", "export"), async (req: AuthRequest, res): Promise<void> => {
+  const r = getRlsDb(req, res);
+  if (!r) return;
+  const caseIdStr = one((req.params as any).caseId);
+  const caseId = caseIdStr ? parseInt(caseIdStr, 10) : NaN;
+  if (Number.isNaN(caseId)) {
+    res.status(400).json({ error: "Invalid case ID" });
+    return;
+  }
 
-    const created = savedRows[0];
-    const createdId = created && typeof created === "object" && "id" in created && typeof (created as { id?: unknown }).id === "number"
-      ? (created as { id: number }).id
-      : undefined;
-    await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.case.generate_from_master", entityType: "case_document", entityId: createdId, detail: `caseId=${caseId} masterDocId=${masterDocId} name=${docName}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
-    res.status(201).json(savedRows[0]);
+  const body = req.body as Record<string, unknown>;
+  const idsRaw = Array.isArray(body.documentIds) ? body.documentIds : [];
+  const docIds = Array.from(new Set(idsRaw.filter((x): x is number => typeof x === "number" && Number.isFinite(x))));
+  if (docIds.length === 0) {
+    res.status(422).json({ error: "documentIds is required", code: "DOCUMENT_IDS_REQUIRED" });
+    return;
+  }
+  if (docIds.length > 50) {
+    res.status(422).json({ error: "Too many documents", code: "TOO_MANY_DOCUMENTS", limit: 50 });
+    return;
+  }
+
+  const rows = await queryRows(r, sql`
+    SELECT id, object_path, file_name, name, template_source, template_id, platform_document_id
+    FROM case_documents
+    WHERE firm_id = ${req.firmId!} AND case_id = ${caseId}
+      AND id IN (${sql.join(docIds.map((id) => sql`${id}`), sql`, `)})
+    ORDER BY created_at DESC
+  `);
+  if (rows.length !== docIds.length) {
+    res.status(404).json({ error: "One or more documents not found", code: "DOCUMENT_NOT_FOUND" });
+    return;
+  }
+
+  const jobId = randomUUID();
+  await queryRows(r, sql`
+    INSERT INTO document_batch_jobs (id, firm_id, case_id, job_type, status, total_count, pending_count, created_by, started_at)
+    VALUES (${jobId}::uuid, ${req.firmId!}, ${caseId}, 'export', 'running', ${rows.length}, ${rows.length}, ${req.userId!}, now())
+  `);
+  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.batch_export", entityType: "document_batch_job", entityId: undefined, detail: `jobId=${jobId} caseId=${caseId} total=${rows.length}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+
+  for (const d of rows) {
+    const src =
+      d.template_source === "master" ? "master"
+      : d.template_source === "firm" ? "firm"
+      : (d.platform_document_id ? "master" : "firm");
+    await queryRows(r, sql`
+      INSERT INTO document_batch_job_items (job_id, firm_id, case_id, template_source, template_id, platform_document_id, case_document_id, status)
+      VALUES (${jobId}::uuid, ${req.firmId!}, ${caseId}, ${src}, ${src === "firm" ? (d.template_id as any) : null}, ${src === "master" ? (d.platform_document_id as any) : null}, ${d.id as any}, 'running')
+    `);
+  }
+
+  try {
+    const entries = rows.map((d) => ({
+      zipPath: safeFilenameAscii(String(d.file_name ?? d.name ?? `document-${d.id}`)) || `document-${d.id}`,
+      objectPath: String(d.object_path ?? ""),
+    }));
+    if (entries.some((e) => !e.objectPath)) {
+      throw new DocumentGenerationError(422, "DOCUMENT_FILE_MISSING", "One or more document files missing");
+    }
+    const zipBytes = await buildZipBufferFromPrivateObjects(entries);
+    const outName = `case-${caseId}-documents.zip`;
+    const objectPath = `/objects/cases/${req.firmId!}/case-${caseId}/batch-exports/${jobId}.zip`;
+    await supabaseStorage.uploadPrivateObject({ objectPath, fileBytes: zipBytes, contentType: "application/zip" });
+
+    await queryRows(r, sql`
+      UPDATE document_batch_jobs
+      SET status = 'completed',
+          total_count = ${rows.length},
+          success_count = ${rows.length},
+          failed_count = 0,
+          pending_count = 0,
+          finished_at = now(),
+          download_object_path = ${objectPath},
+          download_file_name = ${outName},
+          download_mime_type = 'application/zip'
+      WHERE id = ${jobId}::uuid AND firm_id = ${req.firmId!}
+    `);
+    await queryRows(r, sql`
+      UPDATE document_batch_job_items
+      SET status = 'success', finished_at = now()
+      WHERE job_id = ${jobId}::uuid AND firm_id = ${req.firmId!}
+    `);
+    res.status(201).json({ jobId, status: "completed", downloadPath: `/document-batch-jobs/${jobId}/download` });
   } catch (err: unknown) {
     const cfgErr = getSupabaseStorageConfigError(err);
+    const e =
+      cfgErr ? new DocumentGenerationError(cfgErr.statusCode, "STORAGE_NOT_CONFIGURED", cfgErr.error)
+      : err instanceof ObjectNotFoundError ? new DocumentGenerationError(404, "DOCUMENT_FILE_NOT_FOUND", "One or more document files not found")
+      : err instanceof DocumentGenerationError ? err
+      : new DocumentGenerationError(500, "INTERNAL_ERROR", "Internal Server Error");
+
+    await queryRows(r, sql`
+      UPDATE document_batch_jobs
+      SET status = 'failed',
+          failed_count = ${rows.length},
+          pending_count = 0,
+          finished_at = now(),
+          error_summary = ${`${e.code}: ${e.message}`}
+      WHERE id = ${jobId}::uuid AND firm_id = ${req.firmId!}
+    `);
+    await queryRows(r, sql`
+      UPDATE document_batch_job_items
+      SET status = 'failed', error_code = ${e.code}, error_message = ${e.message}, finished_at = now()
+      WHERE job_id = ${jobId}::uuid AND firm_id = ${req.firmId!}
+    `);
+    res.status(e.statusCode).json({ error: e.message, code: e.code });
+  }
+});
+
+router.get("/document-batch-jobs/:jobId", requireAuth, requireFirmUser, requirePermission("documents", "read"), async (req: AuthRequest, res): Promise<void> => {
+  const r = getRlsDb(req, res);
+  if (!r) return;
+  const jobId = one((req.params as any).jobId) ?? "";
+  if (!/^[0-9a-fA-F-]{36}$/.test(jobId)) {
+    res.status(400).json({ error: "Invalid jobId" });
+    return;
+  }
+  const jobs = await queryRows(r, sql`SELECT * FROM document_batch_jobs WHERE id = ${jobId}::uuid AND firm_id = ${req.firmId!}`);
+  const job = jobs[0];
+  if (!job) {
+    res.status(404).json({ error: "Job not found" });
+    return;
+  }
+  const items = await queryRows(r, sql`SELECT * FROM document_batch_job_items WHERE job_id = ${jobId}::uuid AND firm_id = ${req.firmId!} ORDER BY id ASC`);
+  res.json({ job, items });
+});
+
+router.get("/document-batch-jobs/:jobId/download", requireAuth, requireFirmUser, requirePermission("documents", "export"), async (req: AuthRequest, res): Promise<void> => {
+  const r = getRlsDb(req, res);
+  if (!r) return;
+  const jobId = one((req.params as any).jobId) ?? "";
+  if (!/^[0-9a-fA-F-]{36}$/.test(jobId)) {
+    res.status(400).json({ error: "Invalid jobId" });
+    return;
+  }
+  const jobs = await queryRows(r, sql`SELECT * FROM document_batch_jobs WHERE id = ${jobId}::uuid AND firm_id = ${req.firmId!}`);
+  const job = jobs[0];
+  if (!job) {
+    res.status(404).json({ error: "Job not found" });
+    return;
+  }
+  const objectPath = typeof (job as any).download_object_path === "string" ? String((job as any).download_object_path) : "";
+  if (!objectPath) {
+    res.status(404).json({ error: "Download not available", code: "DOWNLOAD_NOT_READY" });
+    return;
+  }
+  try {
+    const fileName = typeof (job as any).download_file_name === "string" ? String((job as any).download_file_name) : `export-${jobId}.zip`;
+    await streamSupabasePrivateObjectToResponse({ objectPath, res, fileName, fallbackContentType: "application/zip" });
+    await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.batch_export.download", entityType: "document_batch_job", entityId: undefined, detail: `jobId=${jobId}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+  } catch (err) {
+    const cfgErr = getSupabaseStorageConfigError(err);
     if (cfgErr) {
-      logger.error({ err, path: req.path, firmId: req.firmId, userId: req.userId, caseId, masterDocId }, "[documents] supabase_storage_not_configured");
-      res.status(cfgErr.statusCode).json({ error: cfgErr.error });
+      res.status(cfgErr.statusCode).json({ error: cfgErr.error, code: "STORAGE_NOT_CONFIGURED" });
       return;
     }
     if (err instanceof ObjectNotFoundError) {
-      res.status(404).json({ error: "Master file not found" });
+      res.status(404).json({ error: "File not found" });
       return;
     }
-    if (isDocxTemplateRenderError(err)) {
-      res.status(422).json({ error: "Template render failed", code: "TEMPLATE_RENDER_FAILED" });
-      return;
-    }
-    logger.error({ err, path: req.path, firmId: req.firmId, userId: req.userId, caseId, masterDocId }, "[documents] generate_from_master_failed");
+    logger.error({ err, path: req.path, firmId: req.firmId, userId: req.userId, jobId }, "[documents] batch_download_failed");
     res.status(500).json({ error: "Internal Server Error" });
+  }
+});
+
+router.post("/cases/:caseId/documents/generate", requireAuth, requireFirmUser, requirePermission("documents", "generate"), async (req: AuthRequest, res): Promise<void> => {
+  const r = getRlsDb(req, res);
+  if (!r) return;
+  const caseIdStr = one((req.params as any).caseId);
+  const caseId = caseIdStr ? parseInt(caseIdStr, 10) : NaN;
+  if (Number.isNaN(caseId)) {
+    res.status(400).json({ error: "Invalid case ID" });
+    return;
+  }
+  const { templateId, documentName, letterheadId } = req.body as { templateId: number; documentName?: string; letterheadId?: number | null };
+  const tid = typeof templateId === "number" ? templateId : NaN;
+  if (Number.isNaN(tid)) {
+    res.status(422).json({ error: "templateId is required", code: "TEMPLATE_ID_REQUIRED" });
+    return;
+  }
+
+  const runId = await createGenerationRun(r, {
+    firm_id: req.firmId!,
+    case_id: caseId,
+    template_source: "firm",
+    template_id: tid,
+    template_version_id: null,
+    platform_document_id: null,
+    document_name: documentName ?? "Generated document",
+    render_mode: "docx",
+    status: "running",
+    rendered_variables_snapshot: null,
+    checklist_snapshot: null,
+    readiness_snapshot: null,
+    triggered_by: req.userId!,
+    error_code: null,
+    error_message: null,
+  });
+
+  try {
+    const out = await generateFirmDocument({
+      r,
+      firmId: req.firmId!,
+      actorId: req.userId!,
+      actorType: req.userType,
+      ipAddress: req.ip,
+      userAgent: req.headers["user-agent"],
+      caseId,
+      templateId: tid,
+      documentName,
+      letterheadId,
+      runId,
+    });
+    await finishGenerationRunSuccess(r, req.firmId!, runId, out.caseDocumentId, out.renderedVars, out.checklistSnapshot, out.readinessSnapshot);
+    await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.generation.succeeded", entityType: "document_generation_run", entityId: runId, detail: `caseId=${caseId} templateSource=firm templateId=${tid}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+    res.status(201).json(out.caseDocument);
+  } catch (err: unknown) {
+    const cfgErr = getSupabaseStorageConfigError(err);
+    if (cfgErr) {
+      await finishGenerationRunFailed(r, req.firmId!, runId, "STORAGE_NOT_CONFIGURED", cfgErr.error);
+      await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.generation.failed", entityType: "document_generation_run", entityId: runId, detail: `caseId=${caseId} templateSource=firm templateId=${tid} code=STORAGE_NOT_CONFIGURED`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+      res.status(cfgErr.statusCode).json({ error: cfgErr.error, code: "STORAGE_NOT_CONFIGURED" });
+      return;
+    }
+    if (err instanceof ObjectNotFoundError) {
+      await finishGenerationRunFailed(r, req.firmId!, runId, "TEMPLATE_FILE_NOT_FOUND", "Template file not found");
+      await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.generation.failed", entityType: "document_generation_run", entityId: runId, detail: `caseId=${caseId} templateSource=firm templateId=${tid} code=TEMPLATE_FILE_NOT_FOUND`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+      res.status(404).json({ error: "Template file not found", code: "TEMPLATE_FILE_NOT_FOUND" });
+      return;
+    }
+    const e = err instanceof DocumentGenerationError ? err : new DocumentGenerationError(500, "INTERNAL_ERROR", "Internal Server Error");
+    await finishGenerationRunFailed(r, req.firmId!, runId, e.code, e.message);
+    await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.generation.failed", entityType: "document_generation_run", entityId: runId, detail: `caseId=${caseId} templateSource=firm templateId=${tid} code=${e.code}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+    res.status(e.statusCode).json({ error: e.message, code: e.code, ...(e.payload ? e.payload : {}) });
+  }
+});
+
+router.post("/cases/:caseId/documents/generate-from-master", requireAuth, requireFirmUser, requirePermission("documents", "generate"), async (req: AuthRequest, res): Promise<void> => {
+  const r = getRlsDb(req, res);
+  if (!r) return;
+  const caseIdStr = one((req.params as any).caseId);
+  const caseId = caseIdStr ? parseInt(caseIdStr, 10) : NaN;
+  if (Number.isNaN(caseId)) {
+    res.status(400).json({ error: "Invalid case ID" });
+    return;
+  }
+  const { masterDocId, documentName, letterheadId } = req.body as { masterDocId: number; documentName?: string; letterheadId?: number | null };
+  const mid = typeof masterDocId === "number" ? masterDocId : NaN;
+  if (Number.isNaN(mid)) {
+    res.status(422).json({ error: "masterDocId is required", code: "MASTER_DOC_ID_REQUIRED" });
+    return;
+  }
+
+  const runId = await createGenerationRun(r, {
+    firm_id: req.firmId!,
+    case_id: caseId,
+    template_source: "master",
+    template_id: null,
+    template_version_id: null,
+    platform_document_id: mid,
+    document_name: documentName ?? "Generated document",
+    render_mode: "docx",
+    status: "running",
+    rendered_variables_snapshot: null,
+    checklist_snapshot: null,
+    readiness_snapshot: null,
+    triggered_by: req.userId!,
+    error_code: null,
+    error_message: null,
+  });
+
+  try {
+    const out = await generateMasterDocument({
+      r,
+      firmId: req.firmId!,
+      actorId: req.userId!,
+      actorType: req.userType,
+      ipAddress: req.ip,
+      userAgent: req.headers["user-agent"],
+      caseId,
+      masterDocId: mid,
+      documentName,
+      letterheadId,
+      runId,
+    });
+    await finishGenerationRunSuccess(r, req.firmId!, runId, out.caseDocumentId, out.renderedVars, out.checklistSnapshot, out.readinessSnapshot);
+    await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.generation.succeeded", entityType: "document_generation_run", entityId: runId, detail: `caseId=${caseId} templateSource=master templateId=${mid}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+    res.status(201).json(out.caseDocument);
+  } catch (err: unknown) {
+    const cfgErr = getSupabaseStorageConfigError(err);
+    if (cfgErr) {
+      await finishGenerationRunFailed(r, req.firmId!, runId, "STORAGE_NOT_CONFIGURED", cfgErr.error);
+      await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.generation.failed", entityType: "document_generation_run", entityId: runId, detail: `caseId=${caseId} templateSource=master templateId=${mid} code=STORAGE_NOT_CONFIGURED`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+      res.status(cfgErr.statusCode).json({ error: cfgErr.error, code: "STORAGE_NOT_CONFIGURED" });
+      return;
+    }
+    if (err instanceof ObjectNotFoundError) {
+      await finishGenerationRunFailed(r, req.firmId!, runId, "MASTER_FILE_NOT_FOUND", "Master file not found");
+      await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.generation.failed", entityType: "document_generation_run", entityId: runId, detail: `caseId=${caseId} templateSource=master templateId=${mid} code=MASTER_FILE_NOT_FOUND`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+      res.status(404).json({ error: "Master file not found", code: "MASTER_FILE_NOT_FOUND" });
+      return;
+    }
+    const e = err instanceof DocumentGenerationError ? err : new DocumentGenerationError(500, "INTERNAL_ERROR", "Internal Server Error");
+    await finishGenerationRunFailed(r, req.firmId!, runId, e.code, e.message);
+    await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.generation.failed", entityType: "document_generation_run", entityId: runId, detail: `caseId=${caseId} templateSource=master templateId=${mid} code=${e.code}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+    res.status(e.statusCode).json({ error: e.message, code: e.code, ...(e.payload ? e.payload : {}) });
   }
 });
 
@@ -2416,7 +3256,7 @@ router.get("/printable-config", requireAuth, requireFirmUser, requirePermission(
   res.json(result);
 });
 
-router.post("/cases/:caseId/documents/print", requireAuth, requireFirmUser, requirePermission("documents", "create"), async (req: AuthRequest, res): Promise<void> => {
+router.post("/cases/:caseId/documents/print", requireAuth, requireFirmUser, requirePermission("documents", "generate"), async (req: AuthRequest, res): Promise<void> => {
   const r = getRlsDb(req, res);
   if (!r) return;
   const caseIdStr = one((req.params as any).caseId);
@@ -2459,10 +3299,41 @@ router.post("/cases/:caseId/documents/print", requireAuth, requireFirmUser, requ
     return;
   }
 
+  const templateId = typeof (template as any).id === "number" ? Number((template as any).id) : NaN;
+  const runId = await createGenerationRun(r, {
+    firm_id: req.firmId!,
+    case_id: caseId,
+    template_source: "firm",
+    template_id: Number.isNaN(templateId) ? null : templateId,
+    template_version_id: null,
+    platform_document_id: null,
+    document_name: documentName || cfg.label,
+    render_mode: "print",
+    status: "running",
+    rendered_variables_snapshot: null,
+    checklist_snapshot: null,
+    readiness_snapshot: null,
+    triggered_by: req.userId!,
+    error_code: null,
+    error_message: null,
+  });
+
   try {
-    const templateObjectPath = typeof (template as any).object_path === "string" ? String((template as any).object_path) : "";
+    const templateVersionId = Number.isNaN(templateId) ? null : await ensureFirmTemplatePublishedVersionId(r, req.firmId!, templateId, req.userId!);
+    if (templateVersionId) {
+      await queryRows(r, sql`UPDATE document_generation_runs SET template_version_id = ${templateVersionId} WHERE id = ${runId} AND firm_id = ${req.firmId!}`);
+    }
+    const vRows = templateVersionId
+      ? await queryRows(r, sql`SELECT * FROM document_template_versions WHERE id = ${templateVersionId} AND firm_id = ${req.firmId!}`)
+      : [];
+    const v = vRows[0];
+    const templateObjectPath = typeof (v as any)?.source_object_path === "string"
+      ? String((v as any).source_object_path)
+      : (typeof (template as any).object_path === "string" ? String((template as any).object_path) : "");
     if (!templateObjectPath) {
       res.status(404).json({ error: "Template file missing" });
+      await finishGenerationRunFailed(r, req.firmId!, runId, "TEMPLATE_FILE_MISSING", "Template file missing");
+      await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.generation.failed", entityType: "document_generation_run", entityId: runId, detail: `caseId=${caseId} templateSource=firm templateId=${templateId} code=TEMPLATE_FILE_MISSING`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
       return;
     }
     const fileContents = await downloadPrivateObjectBytes(templateObjectPath);
@@ -2474,6 +3345,8 @@ router.post("/cases/:caseId/documents/print", requireAuth, requireFirmUser, requ
     } catch (err) {
       logger.warn({ err, path: req.path, firmId: req.firmId, userId: req.userId, caseId, templateId: (template as any).id, printKey }, "[documents] template_render_failed");
       res.status(422).json({ error: "Template render failed", code: "TEMPLATE_RENDER_FAILED" });
+      await finishGenerationRunFailed(r, req.firmId!, runId, "TEMPLATE_RENDER_FAILED", "Template render failed");
+      await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.generation.failed", entityType: "document_generation_run", entityId: runId, detail: `caseId=${caseId} templateSource=firm templateId=${templateId} code=TEMPLATE_RENDER_FAILED`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
       return;
     }
     let buffer = doc.getZip().generate({ type: "nodebuffer", compression: "DEFLATE" }) as Buffer;
@@ -2539,24 +3412,34 @@ router.post("/cases/:caseId/documents/print", requireAuth, requireFirmUser, requ
       ? (created as { id: number }).id
       : undefined;
     await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.case.print", entityType: "case_document", entityId: createdId, detail: `caseId=${caseId} printKey=${printKey} templateId=${(template as any).id} name=${nameToUse} letterhead=${isLetterLike ? (usedLetterheadId ?? "default") : "n/a"}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+    await finishGenerationRunSuccess(r, req.firmId!, runId, createdId ?? null, context, null, null);
+    await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.generation.succeeded", entityType: "document_generation_run", entityId: runId, detail: `caseId=${caseId} templateSource=firm templateId=${templateId} renderMode=print`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
     res.status(201).json(docRows[0]);
   } catch (err: unknown) {
     const cfgErr = getSupabaseStorageConfigError(err);
     if (cfgErr) {
       logger.error({ err, path: req.path, firmId: req.firmId, userId: req.userId, caseId, printKey }, "[documents] supabase_storage_not_configured");
       res.status(cfgErr.statusCode).json({ error: cfgErr.error });
+      await finishGenerationRunFailed(r, req.firmId!, runId, "STORAGE_NOT_CONFIGURED", cfgErr.error);
+      await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.generation.failed", entityType: "document_generation_run", entityId: runId, detail: `caseId=${caseId} templateSource=firm templateId=${templateId} code=STORAGE_NOT_CONFIGURED`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
       return;
     }
     if (err instanceof ObjectNotFoundError) {
       res.status(404).json({ error: "Template file not found" });
+      await finishGenerationRunFailed(r, req.firmId!, runId, "TEMPLATE_FILE_NOT_FOUND", "Template file not found");
+      await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.generation.failed", entityType: "document_generation_run", entityId: runId, detail: `caseId=${caseId} templateSource=firm templateId=${templateId} code=TEMPLATE_FILE_NOT_FOUND`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
       return;
     }
     if (isDocxTemplateRenderError(err)) {
       res.status(422).json({ error: "Template render failed", code: "TEMPLATE_RENDER_FAILED" });
+      await finishGenerationRunFailed(r, req.firmId!, runId, "TEMPLATE_RENDER_FAILED", "Template render failed");
+      await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.generation.failed", entityType: "document_generation_run", entityId: runId, detail: `caseId=${caseId} templateSource=firm templateId=${templateId} code=TEMPLATE_RENDER_FAILED`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
       return;
     }
     logger.error({ err, path: req.path, firmId: req.firmId, userId: req.userId, caseId, printKey }, "[documents] print_failed");
     res.status(500).json({ error: "Internal Server Error" });
+    await finishGenerationRunFailed(r, req.firmId!, runId, "INTERNAL_ERROR", "Internal Server Error");
+    await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.generation.failed", entityType: "document_generation_run", entityId: runId, detail: `caseId=${caseId} templateSource=firm templateId=${templateId} code=INTERNAL_ERROR`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
   }
 });
 
