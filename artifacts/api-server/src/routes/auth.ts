@@ -7,7 +7,7 @@ import { LoginBody } from "@workspace/api-zod";
 import { requireAuth, requireReAuth, issueReauthToken, type AuthRequest, writeAuditLog } from "../lib/auth";
 import { authRateLimiter, sensitiveRateLimiter } from "../lib/rate-limit";
 import { logger } from "../lib/logger";
-import { withAuthSafeDb } from "../lib/auth-safe-db";
+import { isTransientDbConnectionError, withAuthSafeDb } from "../lib/auth-safe-db";
 import * as OTPAuth from "otpauth";
 import QRCode from "qrcode";
 
@@ -55,13 +55,13 @@ router.post("/auth/login", authRateLimiter, async (req, res): Promise<void> => {
       .slice(0, 12);
     const ip = req.ip;
     const ua = req.headers["user-agent"];
+    const reqId = (req as any).id;
 
     logger.info({ emailHash }, "auth.login.start");
 
     stage = "user_lookup";
     const userLookupStartedAt = Date.now();
     const user = await withAuthSafeDb(async (authDb) => {
-      const hasAuditLogs = await tableExistsAuthDb(authDb, "public.audit_logs");
       const [u] = await authDb
         .select({
           id: usersTable.id,
@@ -77,28 +77,28 @@ router.post("/auth/login", authRateLimiter, async (req, res): Promise<void> => {
         })
         .from(usersTable)
         .where(eq(usersTable.email, emailNormalized));
-      if (!u) {
-        if (hasAuditLogs) {
-          try {
-            await authDb.insert(auditLogsTable).values({
-              firmId: null,
-              actorId: null,
-              actorType: "firm_user",
-              action: "auth.login_failed",
-              detail: `email=${emailNormalized} reason=user_not_found`,
-              ipAddress: ip ?? null,
-              userAgent: ua ?? null,
-            });
-          } catch (err) {
-            logger.error({ emailHash, stage: "audit_log_user_not_found", err }, "auth.login.audit_log_error");
-          }
-        }
-      }
       return u ?? null;
-    });
+    }, { retry: true, ctx: { route: req.path, stage, reqId, emailHash, firmId: null, userId: null } });
 
     if (!user) {
       logger.info({ emailHash, ms: Date.now() - startedAt }, "auth.login.user_not_found");
+      try {
+        await withAuthSafeDb(async (authDb) => {
+          const hasAuditLogs = await tableExistsAuthDb(authDb, "public.audit_logs");
+          if (!hasAuditLogs) return;
+          await authDb.insert(auditLogsTable).values({
+            firmId: null,
+            actorId: null,
+            actorType: "firm_user",
+            action: "auth.login_failed",
+            detail: `email=${emailNormalized} reason=user_not_found`,
+            ipAddress: ip ?? null,
+            userAgent: ua ?? null,
+          });
+        }, { retry: false, ctx: { route: req.path, stage: "audit_log_user_not_found", reqId, emailHash, firmId: null, userId: null } });
+      } catch (err) {
+        logger.error({ emailHash, stage: "audit_log_user_not_found", err }, "auth.login.audit_log_error");
+      }
       res.status(401).json({ error: "Invalid email or password" });
       return;
     }
@@ -110,48 +110,46 @@ router.post("/auth/login", authRateLimiter, async (req, res): Promise<void> => {
     const passwordMatch = await bcrypt.compare(password, user.passwordHash);
     if (!passwordMatch) {
       logger.info({ emailHash, userId: user.id, userLookupMs, ms: Date.now() - startedAt }, "auth.login.wrong_password");
-      await withAuthSafeDb(async (authDb) => {
-        const hasAuditLogs = await tableExistsAuthDb(authDb, "public.audit_logs");
-        if (hasAuditLogs) {
-          try {
-            await authDb.insert(auditLogsTable).values({
-              firmId: user.firmId,
-              actorId: user.id,
-              actorType: user.userType,
-              action: "auth.login_failed",
-              detail: "reason=wrong_password",
-              ipAddress: ip ?? null,
-              userAgent: ua ?? null,
-            });
-          } catch (err) {
-            logger.error({ emailHash, userId: user.id, stage: "audit_log_wrong_password", err }, "auth.login.audit_log_error");
-          }
-        }
-      });
+      try {
+        await withAuthSafeDb(async (authDb) => {
+          const hasAuditLogs = await tableExistsAuthDb(authDb, "public.audit_logs");
+          if (!hasAuditLogs) return;
+          await authDb.insert(auditLogsTable).values({
+            firmId: user.firmId,
+            actorId: user.id,
+            actorType: user.userType,
+            action: "auth.login_failed",
+            detail: "reason=wrong_password",
+            ipAddress: ip ?? null,
+            userAgent: ua ?? null,
+          });
+        }, { retry: false, ctx: { route: req.path, stage: "audit_log_wrong_password", reqId, emailHash, firmId: user.firmId, userId: user.id } });
+      } catch (err) {
+        logger.error({ emailHash, userId: user.id, stage: "audit_log_wrong_password", err }, "auth.login.audit_log_error");
+      }
       res.status(401).json({ error: "Invalid email or password" });
       return;
     }
 
     if (user.status !== "active") {
       logger.info({ emailHash, userId: user.id, ms: Date.now() - startedAt }, "auth.login.inactive");
-      await withAuthSafeDb(async (authDb) => {
-        const hasAuditLogs = await tableExistsAuthDb(authDb, "public.audit_logs");
-        if (hasAuditLogs) {
-          try {
-            await authDb.insert(auditLogsTable).values({
-              firmId: user.firmId,
-              actorId: user.id,
-              actorType: user.userType,
-              action: "auth.login_failed",
-              detail: "reason=inactive_account",
-              ipAddress: ip ?? null,
-              userAgent: ua ?? null,
-            });
-          } catch (err) {
-            logger.error({ emailHash, userId: user.id, stage: "audit_log_inactive", err }, "auth.login.audit_log_error");
-          }
-        }
-      });
+      try {
+        await withAuthSafeDb(async (authDb) => {
+          const hasAuditLogs = await tableExistsAuthDb(authDb, "public.audit_logs");
+          if (!hasAuditLogs) return;
+          await authDb.insert(auditLogsTable).values({
+            firmId: user.firmId,
+            actorId: user.id,
+            actorType: user.userType,
+            action: "auth.login_failed",
+            detail: "reason=inactive_account",
+            ipAddress: ip ?? null,
+            userAgent: ua ?? null,
+          });
+        }, { retry: false, ctx: { route: req.path, stage: "audit_log_inactive", reqId, emailHash, firmId: user.firmId, userId: user.id } });
+      } catch (err) {
+        logger.error({ emailHash, userId: user.id, stage: "audit_log_inactive", err }, "auth.login.audit_log_error");
+      }
       res.status(401).json({ error: "Account is inactive" });
       return;
     }
@@ -169,24 +167,23 @@ router.post("/auth/login", authRateLimiter, async (req, res): Promise<void> => {
       const isValid = totp.validate({ token: totpCode, window: 1 }) !== null;
       if (!isValid) {
         logger.info({ emailHash, userId: user.id, ms: Date.now() - startedAt }, "auth.login.totp_invalid");
-        await withAuthSafeDb(async (authDb) => {
-          const hasAuditLogs = await tableExistsAuthDb(authDb, "public.audit_logs");
-          if (hasAuditLogs) {
-            try {
-              await authDb.insert(auditLogsTable).values({
-                firmId: user.firmId,
-                actorId: user.id,
-                actorType: user.userType,
-                action: "auth.totp_failed",
-                detail: "reason=invalid_totp_code",
-                ipAddress: ip ?? null,
-                userAgent: ua ?? null,
-              });
-            } catch (err) {
-              logger.error({ emailHash, userId: user.id, stage: "audit_log_totp_failed", err }, "auth.login.audit_log_error");
-            }
-          }
-        });
+        try {
+          await withAuthSafeDb(async (authDb) => {
+            const hasAuditLogs = await tableExistsAuthDb(authDb, "public.audit_logs");
+            if (!hasAuditLogs) return;
+            await authDb.insert(auditLogsTable).values({
+              firmId: user.firmId,
+              actorId: user.id,
+              actorType: user.userType,
+              action: "auth.totp_failed",
+              detail: "reason=invalid_totp_code",
+              ipAddress: ip ?? null,
+              userAgent: ua ?? null,
+            });
+          }, { retry: false, ctx: { route: req.path, stage: "audit_log_totp_failed", reqId, emailHash, firmId: user.firmId, userId: user.id } });
+        } catch (err) {
+          logger.error({ emailHash, userId: user.id, stage: "audit_log_totp_failed", err }, "auth.login.audit_log_error");
+        }
         res.status(401).json({ error: "Invalid authenticator code" });
         return;
       }
@@ -242,7 +239,7 @@ router.post("/auth/login", authRateLimiter, async (req, res): Promise<void> => {
       }
 
       return { roleName, firmName };
-    });
+    }, { retry: false, ctx: { route: req.path, stage, reqId, emailHash, firmId: user.firmId, userId: user.id } });
 
     res.cookie("auth_token", token, {
       httpOnly: true,
@@ -268,7 +265,7 @@ router.post("/auth/login", authRateLimiter, async (req, res): Promise<void> => {
     logger.info({ emailHash, userId: user.id, userLookupMs, ms: Date.now() - startedAt }, "auth.login.success");
   } catch (err) {
     logger.error({ emailHash, userId, stage, err }, "[auth-login]");
-    res.status(500).json({ error: "Login temporarily unavailable" });
+    res.status(isTransientDbConnectionError(err) ? 503 : 500).json({ error: "Login temporarily unavailable" });
   }
 });
 
@@ -291,6 +288,7 @@ router.post("/auth/logout", requireAuth, async (req: AuthRequest, res): Promise<
 
 router.get("/auth/me", requireAuth, async (req: AuthRequest, res): Promise<void> => {
   try {
+    const reqId = (req as any).id;
     const result = await withAuthSafeDb(async (authDb) => {
       const [user] = await authDb.select({
         id: usersTable.id,
@@ -393,7 +391,7 @@ router.get("/auth/me", requireAuth, async (req: AuthRequest, res): Promise<void>
         totpEnabled: user.totpEnabled,
         permissions,
       };
-    });
+    }, { retry: true, ctx: { route: req.path, stage: "auth_me", reqId, firmId: req.firmId ?? null, userId: req.userId ?? null } });
 
     if (!result) {
       res.status(401).json({ error: "User not found" });
@@ -403,7 +401,7 @@ router.get("/auth/me", requireAuth, async (req: AuthRequest, res): Promise<void>
     res.json(result);
   } catch (err) {
     logger.error({ err, userId: req.userId }, "[auth-me]");
-    res.status(500).json({ error: "Auth temporarily unavailable" });
+    res.status(isTransientDbConnectionError(err) ? 503 : 500).json({ error: "Auth temporarily unavailable" });
   }
 });
 

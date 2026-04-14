@@ -13,6 +13,7 @@ import FirmDocuments from "@/pages/app/documents/FirmDocuments";
 import FirmLetterHead from "@/pages/app/documents/FirmLetterHead";
 import { QueryFallback } from "@/components/query-fallback";
 import { apiFetchBlob, apiFetchJson } from "@/lib/api-client";
+import { downloadBlob } from "@/lib/download";
 import { toastError } from "@/lib/toast-error";
 
 interface SystemDoc {
@@ -174,12 +175,7 @@ function MasterDocumentsTab() {
       const pathPart = String(doc.objectPath ?? "").replace(/^\/objects\//, "");
       if (!pathPart) throw new Error("Missing document path");
       const blob = await apiFetchBlob(`/storage/objects/${pathPart}`);
-      const url = URL.createObjectURL(blob);
-      const el = document.createElement("a");
-      el.href = url;
-      el.download = doc.fileName;
-      el.click();
-      URL.revokeObjectURL(url);
+      downloadBlob(blob, doc.fileName);
     } catch (err) {
       toastError(toast, err, "Download failed");
     } finally {
@@ -191,8 +187,8 @@ function MasterDocumentsTab() {
     <div className="space-y-4">
       <p className="text-sm text-slate-500">Documents shared by Lawcaspro platform. These are read-only and cannot be modified.</p>
 
-      <div className="flex gap-6 min-h-[400px]">
-        <div className="w-80 shrink-0">
+      <div className="flex flex-col lg:flex-row gap-6 min-h-[400px] min-w-0">
+        <div className="w-full lg:w-80 shrink-0">
           <Card>
             <CardContent className="p-3">
               <div className="flex items-center gap-2 mb-3">
@@ -252,7 +248,8 @@ function MasterDocumentsTab() {
                   <p className="text-slate-500">No documents in this folder</p>
                 </div>
               ) : (
-                <table className="w-full text-sm">
+                <div className="overflow-x-auto">
+                  <table className="w-full min-w-[820px] text-sm">
                   <thead>
                     <tr className="border-b border-slate-200 bg-slate-50">
                       <th className="text-left px-4 py-2.5 font-medium text-slate-600">Name</th>
@@ -289,7 +286,8 @@ function MasterDocumentsTab() {
                       </tr>
                     ))}
                   </tbody>
-                </table>
+                  </table>
+                </div>
               )}
             </CardContent>
           </Card>

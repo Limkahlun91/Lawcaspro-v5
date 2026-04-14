@@ -3,7 +3,7 @@ import { db, pool, sessionsTable, usersTable, auditLogsTable, makeRlsDb, setTena
 import { and, eq, sql } from "drizzle-orm";
 import crypto from "crypto";
 import { logger } from "./logger";
-import { withAuthSafeDb } from "./auth-safe-db";
+import { isTransientDbConnectionError, withAuthSafeDb } from "./auth-safe-db";
 
 export interface AuthRequest extends Request {
   userId?: number;
@@ -104,6 +104,7 @@ export async function requireAuth(
       }
     | undefined;
   try {
+    const reqId = (req as any).id;
     const result = await withAuthSafeDb(async (authDb) => {
       const [s] = await authDb
         .select()
@@ -121,12 +122,12 @@ export async function requireAuth(
         .from(usersTable)
         .where(eq(usersTable.id, s.userId));
       return { session: s, user: u };
-    });
+    }, { retry: true, ctx: { route: req.path, stage: "require_auth.session_lookup", reqId, firmId: null, userId: null } });
     session = result.session;
     user = result.user;
   } catch (err) {
     logger.error({ err }, "auth.require_auth.db_error");
-    res.status(500).json({ error: "Auth temporarily unavailable" });
+    res.status(isTransientDbConnectionError(err) ? 503 : 500).json({ error: "Auth temporarily unavailable" });
     return;
   }
 

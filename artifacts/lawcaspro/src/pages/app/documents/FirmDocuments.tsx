@@ -14,6 +14,7 @@ import { DOCUMENT_TYPE_LABELS } from "@workspace/documents-registry";
 import { QueryFallback } from "@/components/query-fallback";
 import { toastError } from "@/lib/toast-error";
 import { apiFetchBlob, apiFetchJson } from "@/lib/api-client";
+import { downloadBlob } from "@/lib/download";
 
 interface FirmFolder {
   id: number;
@@ -322,12 +323,7 @@ export default function FirmDocuments() {
     setDownloadingDocId(doc.id);
     try {
       const blob = await apiFetchBlob(`/document-templates/${doc.id}/download`);
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = doc.file_name || "download";
-      a.click();
-      URL.revokeObjectURL(url);
+      downloadBlob(blob, doc.file_name || "download");
     } catch (err) {
       toastError(toast, err, "Download failed");
     } finally {
@@ -358,8 +354,8 @@ export default function FirmDocuments() {
           </div>
         </CardHeader>
         <CardContent>
-          <div className="flex gap-4">
-            <div className="w-56 shrink-0 border rounded-lg p-2">
+          <div className="flex flex-col lg:flex-row gap-4 min-w-0">
+            <div className="w-full lg:w-56 shrink-0 border rounded-lg p-2">
               <FolderTree folders={folders} selectedId={selectedFolderId} onSelect={setSelectedFolderId} />
               {selectedFolderId !== null && (
                 <div className="mt-3 flex gap-2">
@@ -383,7 +379,7 @@ export default function FirmDocuments() {
               )}
             </div>
 
-            <div className="flex-1">
+            <div className="flex-1 min-w-0">
               <div className="flex items-center justify-between mb-3">
                 <div className="text-sm font-medium text-slate-800">{buildFolderPath(folders, selectedFolderId)}</div>
               </div>
@@ -404,8 +400,8 @@ export default function FirmDocuments() {
                   <p className="text-sm">Upload files and organize them into folders.</p>
                 </div>
               ) : (
-                <div className="border rounded-lg overflow-hidden">
-                  <table className="w-full text-sm">
+                <div className="border rounded-lg overflow-x-auto">
+                  <table className="w-full min-w-[900px] text-sm">
                     <thead className="bg-slate-50 border-b">
                       <tr>
                         <th className="text-left px-4 py-2 font-medium text-slate-600">Name</th>

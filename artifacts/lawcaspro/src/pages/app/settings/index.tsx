@@ -16,10 +16,11 @@ import { ME_QUERY_KEY } from "@/lib/query-keys";
 import { apiFetchJson } from "@/lib/api-client";
 import { toastError } from "@/lib/toast-error";
 import { QueryFallback } from "@/components/query-fallback";
+import DocumentTemplates from "@/pages/app/settings/DocumentTemplates";
 
 const apiFetch = apiFetchJson;
 
-const TABS = ["Firm Info", "Users", "Roles & Permissions", "Security"] as const;
+const TABS = ["Firm Info", "Users", "Roles & Permissions", "Security", "Document Templates"] as const;
 type Tab = typeof TABS[number];
 
 const TAB_KEYS: Record<string, Tab> = {
@@ -27,6 +28,7 @@ const TAB_KEYS: Record<string, Tab> = {
   users: "Users",
   roles: "Roles & Permissions",
   security: "Security",
+  documents: "Document Templates",
 };
 
 type AuthSession = {
@@ -620,6 +622,7 @@ export default function Settings() {
   const canManageUsers = hasPermission(user, "users", "create") || hasPermission(user, "users", "update") || hasPermission(user, "users", "delete");
   const canManageRoles = hasPermission(user, "roles", "create") || hasPermission(user, "roles", "update") || hasPermission(user, "roles", "delete");
   const canUpdateSettings = hasPermission(user, "settings", "update");
+  const canAccessDocuments = hasPermission(user, "documents", "read") || hasPermission(user, "documents", "create") || hasPermission(user, "documents", "update") || hasPermission(user, "documents", "delete");
 
   const searchString = useSearch();
   const params = new URLSearchParams(searchString);
@@ -629,20 +632,22 @@ export default function Settings() {
     ...(canManageUsers ? (["Users"] as const) : []),
     ...(canManageRoles ? (["Roles & Permissions"] as const) : []),
     "Security",
+    "Document Templates",
   ] as const) as readonly Tab[];
+  const enabledTabs = visibleTabs.filter((t) => (t === "Document Templates" ? canAccessDocuments : true));
   const resolvedTabFromUrl = (tabFromUrl && TAB_KEYS[tabFromUrl]) ? TAB_KEYS[tabFromUrl] : null;
-  const initialTab = (resolvedTabFromUrl && visibleTabs.includes(resolvedTabFromUrl)) ? resolvedTabFromUrl : "Firm Info";
+  const initialTab = (resolvedTabFromUrl && enabledTabs.includes(resolvedTabFromUrl)) ? resolvedTabFromUrl : "Firm Info";
   const [activeTab, setActiveTab] = useState<Tab>(initialTab);
 
   useEffect(() => {
-    if (resolvedTabFromUrl && visibleTabs.includes(resolvedTabFromUrl)) {
+    if (resolvedTabFromUrl && enabledTabs.includes(resolvedTabFromUrl)) {
       setActiveTab(resolvedTabFromUrl);
       return;
     }
-    if (!visibleTabs.includes(activeTab)) {
+    if (!enabledTabs.includes(activeTab)) {
       setActiveTab("Firm Info");
     }
-  }, [resolvedTabFromUrl, visibleTabs, activeTab]);
+  }, [resolvedTabFromUrl, enabledTabs, activeTab]);
   const [userSearch, setUserSearch] = useState("");
 
   const userParams = {
@@ -682,13 +687,21 @@ export default function Settings() {
         <p className="text-slate-500 mt-1">Firm preferences and configuration</p>
       </div>
 
-      <div className="flex border-b border-gray-200">
+      <div className="flex flex-wrap border-b border-gray-200">
         {visibleTabs.map(tab => (
           <button
             key={tab}
-            onClick={() => setActiveTab(tab)}
+            onClick={() => {
+              if (tab === "Document Templates" && !canAccessDocuments) {
+                toast({ title: "No access", description: "You do not have permission to manage documents/templates." });
+                return;
+              }
+              setActiveTab(tab);
+            }}
+            disabled={tab === "Document Templates" && !canAccessDocuments}
             className={cn(
               "px-5 py-3 text-sm font-medium border-b-2 transition-colors whitespace-nowrap",
+              tab === "Document Templates" && !canAccessDocuments && "opacity-50 cursor-not-allowed",
               activeTab === tab
                 ? "border-amber-500 text-amber-600"
                 : "border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300"
@@ -700,6 +713,35 @@ export default function Settings() {
       </div>
 
       {activeTab === "Firm Info" && <FirmInfoTab />}
+      {activeTab === "Document Templates" && (
+        <div className="space-y-6">
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-base">Document Templates</CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              <div className="text-sm text-slate-600">
+                Document Templates are DOCX templates used for generating case documents. Firm Documents are your firm-level library (templates + reference files). Master Templates are system-provided templates.
+              </div>
+              <div className="flex flex-wrap gap-2">
+                <Link href="/app/documents">
+                  <Button variant="outline">Open Firm Documents</Button>
+                </Link>
+                <Link href="/app/documents?tab=master">
+                  <Button variant="outline">Open Master Templates</Button>
+                </Link>
+              </div>
+              {!canAccessDocuments && (
+                <div className="text-sm text-slate-500">
+                  You do not have permission to view document templates.
+                </div>
+              )}
+            </CardContent>
+          </Card>
+
+          {canAccessDocuments ? <DocumentTemplates /> : null}
+        </div>
+      )}
 
       {canManageUsers && activeTab === "Users" && (
         <div className="space-y-4">

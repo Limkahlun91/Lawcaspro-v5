@@ -17,7 +17,10 @@ import { Textarea } from "@/components/ui/textarea";
 import { DOCUMENT_TYPE_LABELS } from "@workspace/documents-registry";
 import { QueryFallback } from "@/components/query-fallback";
 import { apiFetchBlob, apiFetchJson } from "@/lib/api-client";
+import { downloadBlob } from "@/lib/download";
 import { toastError } from "@/lib/toast-error";
+import { useAuth } from "@/lib/auth-context";
+import { hasPermission } from "@/lib/permissions";
 
 function docTypeLabel(dt: string): string {
   return (DOCUMENT_TYPE_LABELS as Record<string, string>)[dt] ?? dt;
@@ -58,6 +61,7 @@ const TEMPLATE_FIELDS = [
 
 export default function DocumentTemplates() {
   const { toast } = useToast();
+  const { user } = useAuth();
   const qc = useQueryClient();
   const uploadRef = useRef<HTMLInputElement>(null);
   const [uploadDialogOpen, setUploadDialogOpen] = useState(false);
@@ -72,10 +76,15 @@ export default function DocumentTemplates() {
 
   const [isDownloading, setIsDownloading] = useState(false);
 
+  const canRead = hasPermission(user, "documents", "read");
+  const canCreate = hasPermission(user, "documents", "create");
+  const canDelete = hasPermission(user, "documents", "delete");
+
   const templatesQuery = useQuery<DocumentTemplate[]>({
     queryKey: ["document-templates"],
     queryFn: () => apiFetchJson("/document-templates"),
     retry: false,
+    enabled: canRead,
   });
   const templates = templatesQuery.data ?? [];
   const isLoading = templatesQuery.isLoading;
@@ -145,6 +154,7 @@ export default function DocumentTemplates() {
             size="sm"
             className="bg-amber-500 hover:bg-amber-600 gap-1.5"
             onClick={() => setUploadDialogOpen(true)}
+            disabled={!canCreate}
           >
             <Upload className="w-3.5 h-3.5" />
             Upload Template
@@ -152,7 +162,9 @@ export default function DocumentTemplates() {
         </div>
       </CardHeader>
       <CardContent>
-        {templatesQuery.isError ? (
+        {!canRead ? (
+          <div className="text-slate-500 py-8 text-center">You do not have permission to view document templates.</div>
+        ) : templatesQuery.isError ? (
           <QueryFallback title="Templates unavailable" error={templatesQuery.error} onRetry={() => templatesQuery.refetch()} isRetrying={templatesQuery.isFetching} />
         ) : isLoading ? (
           <div className="text-slate-500 py-8 text-center">Loading templates...</div>
@@ -197,7 +209,7 @@ export default function DocumentTemplates() {
                   variant="ghost"
                   className="h-8 w-8 text-slate-400 hover:text-red-600"
                   onClick={(e) => { e.stopPropagation(); if (!confirm("Delete this template?")) return; deleteMutation.mutate(t.id); }}
-                  disabled={deleteMutation.isPending}
+                  disabled={!canDelete || deleteMutation.isPending}
                 >
                   <Trash2 className="w-4 h-4" />
                 </Button>
@@ -252,12 +264,7 @@ export default function DocumentTemplates() {
                     try {
                       const pathPart = activeTemplate.object_path.replace(/^\/objects\//, "");
                       const blob = await apiFetchBlob(`/storage/objects/${pathPart}`);
-                      const url = URL.createObjectURL(blob);
-                      const a = document.createElement("a");
-                      a.href = url;
-                      a.download = activeTemplate.file_name || "download";
-                      a.click();
-                      URL.revokeObjectURL(url);
+                      downloadBlob(blob, activeTemplate.file_name || "download");
                     } catch (e) {
                       toastError(toast, e, "Download failed");
                     } finally {
@@ -276,7 +283,7 @@ export default function DocumentTemplates() {
                     setDetailOpen(false);
                   }}
                   className="gap-1.5"
-                  disabled={deleteMutation.isPending}
+                  disabled={!canDelete || deleteMutation.isPending}
                 >
                   <Trash2 className="w-4 h-4" /> Delete
                 </Button>
@@ -352,7 +359,7 @@ export default function DocumentTemplates() {
               <Button
                 className="bg-amber-500 hover:bg-amber-600"
                 onClick={handleUpload}
-                disabled={!selectedFile || !templateName || isUploading}
+                disabled={!selectedFile || !templateName || isUploading || !canCreate}
               >
                 {isUploading ? "Uploading..." : "Upload Template"}
               </Button>

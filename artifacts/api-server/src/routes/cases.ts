@@ -20,6 +20,7 @@ import { KEY_DATE_FIELD_TO_STEP_KEY, WORKFLOW_STEP_KEY_TO_KEY_DATE_FIELD, type K
 import { loanStatusSql, milestoneDateSql, milestoneDateYmdSql, milestonePresenceWhereSql, spaStatusSql, type CaseMilestoneKey, type MilestonePresence } from "../lib/caseListLogic";
 import { daysAgoSql } from "../lib/dateSql";
 import { logger } from "../lib/logger";
+import { isTransientDbConnectionError } from "../lib/auth-safe-db";
 
 const router: IRouter = Router();
 
@@ -1228,7 +1229,7 @@ router.get("/cases/workbench", requireAuth, requireFirmUser, requirePermission("
     });
   } catch (err) {
     logger.error({ err, path: req.path, firmId: req.firmId, userId: req.userId }, "[cases-workbench]");
-    res.status(500).json({ error: "Internal Server Error" });
+    res.status(isTransientDbConnectionError(err) ? 503 : 500).json({ error: isTransientDbConnectionError(err) ? "Workbench temporarily unavailable" : "Internal Server Error" });
   }
 });
 

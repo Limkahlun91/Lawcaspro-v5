@@ -19,6 +19,7 @@ import { isFirmDocumentTypeLetterLike, isMasterDocumentLetterLike } from "@/lib/
 import { DOCUMENT_TYPE_LABELS } from "@workspace/documents-registry";
 import { QueryFallback } from "@/components/query-fallback";
 import { apiFetchBlob, apiFetchJson } from "@/lib/api-client";
+import { downloadBlob } from "@/lib/download";
 import { toastError } from "@/lib/toast-error";
 
 function docTypeLabel(dt: string): string {
@@ -302,12 +303,7 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
     setDownloadingDocId(doc.id);
     try {
       const blob = await apiFetchBlob(`/cases/${caseId}/documents/${doc.id}/download`);
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = doc.file_name || "download";
-      a.click();
-      URL.revokeObjectURL(url);
+      downloadBlob(blob, doc.file_name || "download");
     } catch (err) {
       toastError(toast, err, "Download failed");
     } finally {

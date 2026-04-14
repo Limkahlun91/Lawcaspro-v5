@@ -429,19 +429,19 @@ export default function CaseDetail() {
 
   return (
     <div className="space-y-6 pb-12">
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-4">
+      <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4 min-w-0">
+        <div className="flex items-start gap-4 min-w-0">
           <Button variant="outline" size="icon" onClick={() => setLocation(returnTo)}>
             <ArrowLeft className="w-4 h-4" />
           </Button>
-          <div>
-            <div className="flex items-center gap-3">
-              <h1 className="text-3xl font-bold text-slate-900 tracking-tight">{caseInfo.referenceNo}</h1>
+          <div className="min-w-0">
+            <div className="flex flex-wrap items-center gap-3">
+              <h1 className="text-3xl font-bold text-slate-900 tracking-tight truncate">{caseInfo.referenceNo}</h1>
               <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-bold uppercase tracking-wider bg-amber-100 text-amber-800">
                 {caseInfo.status.replace(/_/g, ' ')}
               </span>
             </div>
-            <p className="text-slate-500 mt-1">{caseInfo.projectName} • {caseInfo.developerName}</p>
+            <p className="text-slate-500 mt-1 truncate">{caseInfo.projectName} • {caseInfo.developerName}</p>
           </div>
         </div>
         <Button
@@ -469,7 +469,7 @@ export default function CaseDetail() {
       </div>
 
       <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">
-        <TabsList className="grid w-full grid-cols-9 mb-6 bg-slate-100 p-1">
+        <TabsList className="flex w-full flex-wrap gap-1 mb-6 bg-slate-100 p-1">
           <TabsTrigger value="overview">Overview</TabsTrigger>
           <TabsTrigger value="workflow">Workflow</TabsTrigger>
           <TabsTrigger value="documents">Documents</TabsTrigger>

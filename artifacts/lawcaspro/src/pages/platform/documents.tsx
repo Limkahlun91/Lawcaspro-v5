@@ -21,6 +21,7 @@ import { useToast } from "@/hooks/use-toast";
 import { cn } from "@/lib/utils";
 import { QueryFallback } from "@/components/query-fallback";
 import { apiFetchBlob, apiFetchJson } from "@/lib/api-client";
+import { downloadBlob } from "@/lib/download";
 import { toastError } from "@/lib/toast-error";
 
 const ALLOWED_TYPES: Record<string, string> = {
@@ -433,12 +434,7 @@ export default function PlatformDocuments() {
     setDownloadingDocId(doc.id);
     try {
       const blob = await apiFetchBlob(`/platform/documents/${doc.id}/download`);
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = doc.fileName || "download";
-      a.click();
-      URL.revokeObjectURL(url);
+      downloadBlob(blob, doc.fileName || "download");
     } catch (e) {
       toastError(toast, e, "Download failed");
     } finally {

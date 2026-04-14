@@ -47,7 +47,7 @@ export default function Workbench() {
 
   const { data: _filterOptions } = useQuery({
     queryKey: ["cases", "filter-options"],
-    queryFn: () => apiFetchJson("/cases/filter-options"),
+    queryFn: ({ signal }) => apiFetchJson("/cases/filter-options", { signal }),
     retry: false,
   });
   const filterOptions = _filterOptions as any;
@@ -69,8 +69,9 @@ export default function Workbench() {
 
   const { data, isLoading, error, refetch, isFetching } = useQuery<WorkbenchResponse>({
     queryKey: ["cases", "workbench", workbenchQuery],
-    queryFn: () => apiFetchJson(`/cases/workbench${workbenchQuery ? `?${workbenchQuery}` : ""}`),
-    retry: false,
+    queryFn: ({ signal }) => apiFetchJson(`/cases/workbench${workbenchQuery ? `?${workbenchQuery}` : ""}`, { signal }),
+    retry: 1,
+    retryDelay: 400,
   });
 
   useEffect(() => {
