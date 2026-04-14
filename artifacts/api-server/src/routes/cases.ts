@@ -21,10 +21,13 @@ import { buildWorkflowSteps } from "../lib/workflow";
 import { KEY_DATE_FIELD_TO_STEP_KEY, WORKFLOW_STEP_KEY_TO_KEY_DATE_FIELD, type KeyDateField } from "../lib/keyDatesWorkflow";
 import { loanStatusSql, milestoneDateSql, milestoneDateYmdSql, milestonePresenceWhereSql, spaStatusSql, type CaseMilestoneKey, type MilestonePresence } from "../lib/caseListLogic";
 import { daysAgoSql } from "../lib/dateSql";
+import { parseDateOnlyInput } from "../lib/dateOnly";
 import { logger } from "../lib/logger";
 import { isTransientDbConnectionError } from "../lib/auth-safe-db";
 import { Readable } from "stream";
 import { ObjectNotFoundError, SupabaseStorageService, getSupabaseStorageConfigError } from "../lib/objectStorage";
+import { CASE_ATTACHMENT_ALLOWED_EXTENSIONS, WORKFLOW_DOCUMENT_ALLOWED_KEYS, fileExtLower, workflowDocumentLabel, workflowDocumentLegacyKeys, normalizeWorkflowDocumentKeyFromDb, type WorkflowDocumentMilestoneKey } from "../lib/caseWorkflowDocuments";
+import { LOAN_STAMPING_ITEM_KEYS, type LoanStampingItemKey, isLoanStampingItemKeyAllowedForTitleType, normalizeTitleType } from "../lib/loanStamping";
 
 const router: IRouter = Router();
 const supabaseStorage = new SupabaseStorageService();
@@ -184,16 +187,6 @@ function sanitizeCaseListFiltersJson(raw: unknown): Record<string, string> {
   delete out.sortOrder;
 
   return out;
-}
-
-function parseDateOnlyInput(v: unknown): string | null | undefined {
-  if (v === undefined) return undefined;
-  if (v === null) return null;
-  if (typeof v !== "string") return undefined;
-  const s = v.trim();
-  if (!s) return null;
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return undefined;
-  return s;
 }
 
 function parseMoneyInput(v: unknown): string | null | undefined {
@@ -2549,29 +2542,6 @@ router.patch("/cases/:caseId", requireAuth, requireFirmUser, requirePermission("
   res.json(await formatCaseDetail(r, c));
 });
 
-const ALLOWED_WORKFLOW_DOC_KEYS = new Set([
-  "spa_stamped_date",
-  "letter_of_offer_stamped_date",
-  "register_poa_on",
-  "letter_disclaimer_dated",
-]);
-
-const ALLOWED_CASE_ATTACHMENT_EXTENSIONS = new Set([
-  "pdf",
-  "doc",
-  "docx",
-  "jpg",
-  "jpeg",
-  "png",
-]);
-
-function fileExtLower(fileName: string): string {
-  const base = fileName.trim();
-  const idx = base.lastIndexOf(".");
-  if (idx < 0) return "";
-  return base.slice(idx + 1).toLowerCase();
-}
-
 router.get("/cases/:caseId/workflow-documents", requireAuth, requireFirmUser, requirePermission("documents", "read"), async (req: AuthRequest, res): Promise<void> => {
   const r = req.rlsDb;
   if (!r) {
@@ -2585,9 +2555,17 @@ router.get("/cases/:caseId/workflow-documents", requireAuth, requireFirmUser, re
     res.status(400).json({ error: "Invalid caseId" });
     return;
   }
+  const [caseRow] = await r
+    .select({ id: casesTable.id })
+    .from(casesTable)
+    .where(and(eq(casesTable.id, caseId), eq(casesTable.firmId, req.firmId!)));
+  if (!caseRow) {
+    res.status(404).json({ error: "Case not found" });
+    return;
+  }
   const milestoneKey = one((req.query as any).milestoneKey);
-  if (milestoneKey && !ALLOWED_WORKFLOW_DOC_KEYS.has(milestoneKey)) {
-    res.status(400).json({ error: "Invalid milestoneKey" });
+  if (milestoneKey && !WORKFLOW_DOCUMENT_ALLOWED_KEYS.has(milestoneKey)) {
+    res.status(422).json({ error: "Invalid milestoneKey" });
     return;
   }
   const exists = await tableExists(r, "public.case_workflow_documents");
@@ -2600,6 +2578,9 @@ router.get("/cases/:caseId/workflow-documents", requireAuth, requireFirmUser, re
     eq(caseWorkflowDocumentsTable.caseId, caseId),
     sql`${caseWorkflowDocumentsTable.deletedAt} IS NULL`,
   );
+  const milestoneKeyFilter = milestoneKey
+    ? [milestoneKey, ...workflowDocumentLegacyKeys(milestoneKey as WorkflowDocumentMilestoneKey)]
+    : null;
   const rows = await r
     .select({
       id: caseWorkflowDocumentsTable.id,
@@ -2614,17 +2595,28 @@ router.get("/cases/:caseId/workflow-documents", requireAuth, requireFirmUser, re
       updatedAt: caseWorkflowDocumentsTable.updatedAt,
     })
     .from(caseWorkflowDocumentsTable)
-    .where(milestoneKey ? and(whereBase, eq(caseWorkflowDocumentsTable.milestoneKey, milestoneKey)) : whereBase)
+    .where(milestoneKeyFilter ? and(whereBase, inArray(caseWorkflowDocumentsTable.milestoneKey, milestoneKeyFilter)) : whereBase)
     .orderBy(desc(caseWorkflowDocumentsTable.updatedAt));
-  res.json(rows.map((x) => ({
-    ...x,
-    dateValue: x.dateValue ? String(x.dateValue) : null,
-    createdAt: x.createdAt ? toIsoStringSafeOrNull(x.createdAt) : null,
-    updatedAt: x.updatedAt ? toIsoStringSafeOrNull(x.updatedAt) : null,
-  })));
+  const seen = new Set<string>();
+  const out = [];
+  for (const x of rows) {
+    const normalized = normalizeWorkflowDocumentKeyFromDb(String(x.milestoneKey));
+    if (!normalized) continue;
+    if (seen.has(normalized)) continue;
+    seen.add(normalized);
+    out.push({
+      ...x,
+      milestoneKey: normalized,
+      label: workflowDocumentLabel(normalized) ?? x.label,
+      dateValue: x.dateValue ? String(x.dateValue) : null,
+      createdAt: x.createdAt ? toIsoStringSafeOrNull(x.createdAt) : null,
+      updatedAt: x.updatedAt ? toIsoStringSafeOrNull(x.updatedAt) : null,
+    });
+  }
+  res.json(out);
 });
 
-router.post("/cases/:caseId/workflow-documents", requireAuth, requireFirmUser, requirePermission("documents", "create"), async (req: AuthRequest, res): Promise<void> => {
+router.post("/cases/:caseId/workflow-documents", requireAuth, requireFirmUser, requirePermission("documents", "update"), async (req: AuthRequest, res): Promise<void> => {
   const r = req.rlsDb;
   if (!r) {
     logger.error({ path: req.path, firmId: req.firmId, userId: req.userId }, "[cases] missing tenant database context");
@@ -2639,19 +2631,19 @@ router.post("/cases/:caseId/workflow-documents", requireAuth, requireFirmUser, r
   }
   const body = asObject(req.body) ?? {};
   const milestoneKey = asString(body.milestoneKey);
-  const label = asString(body.label);
   const objectPath = asString(body.objectPath);
   const fileName = asString(body.fileName);
   const mimeType = asString(body.mimeType);
   const fileSize = asNumber(body.fileSize);
   const dateYmd = body.dateYmd;
 
-  if (!milestoneKey || !ALLOWED_WORKFLOW_DOC_KEYS.has(milestoneKey)) {
-    res.status(400).json({ error: "Invalid milestoneKey" });
+  if (!milestoneKey || !WORKFLOW_DOCUMENT_ALLOWED_KEYS.has(milestoneKey)) {
+    res.status(422).json({ error: "Invalid milestoneKey" });
     return;
   }
-  if (!label?.trim()) {
-    res.status(400).json({ error: "Missing label" });
+  const resolvedLabel = workflowDocumentLabel(milestoneKey);
+  if (!resolvedLabel) {
+    res.status(422).json({ error: "Invalid milestoneKey" });
     return;
   }
   if (!objectPath || !objectPath.startsWith(`/objects/cases/${req.firmId}/case-${caseId}/workflow/${milestoneKey}/`)) {
@@ -2663,7 +2655,7 @@ router.post("/cases/:caseId/workflow-documents", requireAuth, requireFirmUser, r
     return;
   }
   const ext = fileExtLower(fileName);
-  if (!ALLOWED_CASE_ATTACHMENT_EXTENSIONS.has(ext)) {
+  if (!CASE_ATTACHMENT_ALLOWED_EXTENSIONS.has(ext)) {
     res.status(422).json({ error: "Unsupported file type. Allowed: pdf, doc, docx, jpg, jpeg, png" });
     return;
   }
@@ -2689,19 +2681,22 @@ router.post("/cases/:caseId/workflow-documents", requireAuth, requireFirmUser, r
   }
 
   const now = new Date();
-  const [existing] = await r
-    .select({ id: caseWorkflowDocumentsTable.id, objectPath: caseWorkflowDocumentsTable.objectPath })
+  const legacyKeys = workflowDocumentLegacyKeys(milestoneKey as WorkflowDocumentMilestoneKey);
+  const selectExisting = async (keys: string[]) => (await r
+    .select({ id: caseWorkflowDocumentsTable.id, objectPath: caseWorkflowDocumentsTable.objectPath, milestoneKey: caseWorkflowDocumentsTable.milestoneKey })
     .from(caseWorkflowDocumentsTable)
     .where(and(
       eq(caseWorkflowDocumentsTable.firmId, req.firmId!),
       eq(caseWorkflowDocumentsTable.caseId, caseId),
-      eq(caseWorkflowDocumentsTable.milestoneKey, milestoneKey),
+      inArray(caseWorkflowDocumentsTable.milestoneKey, keys),
       sql`${caseWorkflowDocumentsTable.deletedAt} IS NULL`,
     ))
-    .limit(1);
+    .limit(1))[0];
+  const existing = (await selectExisting([milestoneKey])) ?? (legacyKeys.length ? await selectExisting(legacyKeys) : undefined);
 
   const baseUpdate: Partial<typeof caseWorkflowDocumentsTable.$inferInsert> = {
-    label: label.trim(),
+    milestoneKey,
+    label: resolvedLabel,
     dateValue: typeof parsedDate === "string" ? parsedDate : null,
     objectPath,
     fileName: fileName.trim(),
@@ -2720,7 +2715,7 @@ router.post("/cases/:caseId/workflow-documents", requireAuth, requireFirmUser, r
         firmId: req.firmId!,
         caseId,
         milestoneKey,
-        label: label.trim(),
+        label: resolvedLabel,
         dateValue: typeof parsedDate === "string" ? parsedDate : null,
         objectPath,
         fileName: fileName.trim(),
@@ -2745,10 +2740,10 @@ router.post("/cases/:caseId/workflow-documents", requireAuth, requireFirmUser, r
     firmId: req.firmId,
     actorId: req.userId,
     actorType: req.userType,
-    action: "cases.workflow_document.upsert",
+    action: existing ? "cases.workflow_document.replace" : "cases.workflow_document.upload",
     entityType: "case",
     entityId: caseId,
-    detail: `milestoneKey=${milestoneKey} fileName=${fileName.trim()}`,
+    detail: `workflowDocumentId=${row.id} milestoneKey=${milestoneKey} fileName=${fileName.trim()}`,
     ipAddress: req.ip,
     userAgent: req.headers["user-agent"],
   });
@@ -2788,7 +2783,11 @@ router.delete("/cases/:caseId/workflow-documents/:id", requireAuth, requireFirmU
     return;
   }
   const [existing] = await r
-    .select({ objectPath: caseWorkflowDocumentsTable.objectPath })
+    .select({
+      objectPath: caseWorkflowDocumentsTable.objectPath,
+      milestoneKey: caseWorkflowDocumentsTable.milestoneKey,
+      fileName: caseWorkflowDocumentsTable.fileName,
+    })
     .from(caseWorkflowDocumentsTable)
     .where(and(
       eq(caseWorkflowDocumentsTable.id, id),
@@ -2837,7 +2836,7 @@ router.delete("/cases/:caseId/workflow-documents/:id", requireAuth, requireFirmU
     action: "cases.workflow_document.delete",
     entityType: "case",
     entityId: caseId,
-    detail: `workflowDocumentId=${id}`,
+    detail: `workflowDocumentId=${id} milestoneKey=${existing.milestoneKey} fileName=${existing.fileName}`,
     ipAddress: req.ip,
     userAgent: req.headers["user-agent"],
   });
@@ -2867,6 +2866,7 @@ router.get("/cases/:caseId/workflow-documents/:id/download", requireAuth, requir
   const [row] = await r
     .select({
       objectPath: caseWorkflowDocumentsTable.objectPath,
+      milestoneKey: caseWorkflowDocumentsTable.milestoneKey,
       fileName: caseWorkflowDocumentsTable.fileName,
       mimeType: caseWorkflowDocumentsTable.mimeType,
     })
@@ -2888,7 +2888,7 @@ router.get("/cases/:caseId/workflow-documents/:id/download", requireAuth, requir
     action: "cases.workflow_document.download",
     entityType: "case",
     entityId: caseId,
-    detail: `workflowDocumentId=${id} fileName=${row.fileName}`,
+    detail: `workflowDocumentId=${id} milestoneKey=${row.milestoneKey} fileName=${row.fileName}`,
     ipAddress: req.ip,
     userAgent: req.headers["user-agent"],
   });
@@ -2914,13 +2914,7 @@ router.get("/cases/:caseId/workflow-documents/:id/download", requireAuth, requir
   }
 });
 
-const ALLOWED_LOAN_STAMPING_ITEM_KEYS = new Set([
-  "facility_agreement",
-  "deed_of_assignment",
-  "power_of_attorney",
-  "charge_annexure",
-  "other",
-]);
+const ALLOWED_LOAN_STAMPING_ITEM_KEYS = new Set<string>(LOAN_STAMPING_ITEM_KEYS);
 
 router.get("/cases/:caseId/loan-stamping", requireAuth, requireFirmUser, requirePermission("documents", "read"), async (req: AuthRequest, res): Promise<void> => {
   const r = req.rlsDb;
@@ -2933,6 +2927,14 @@ router.get("/cases/:caseId/loan-stamping", requireAuth, requireFirmUser, require
   const caseId = caseIdStr ? Number(caseIdStr) : NaN;
   if (!Number.isFinite(caseId)) {
     res.status(400).json({ error: "Invalid caseId" });
+    return;
+  }
+  const [caseRow] = await r
+    .select({ id: casesTable.id })
+    .from(casesTable)
+    .where(and(eq(casesTable.id, caseId), eq(casesTable.firmId, req.firmId!)));
+  if (!caseRow) {
+    res.status(404).json({ error: "Case not found" });
     return;
   }
   const exists = await tableExists(r, "public.case_loan_stamping_items");
@@ -2988,6 +2990,16 @@ router.put("/cases/:caseId/loan-stamping", requireAuth, requireFirmUser, require
     res.status(503).json({ error: "Loan stamping not available" });
     return;
   }
+  const [caseRow] = await r
+    .select({ titleType: casesTable.titleType })
+    .from(casesTable)
+    .where(and(eq(casesTable.id, caseId), eq(casesTable.firmId, req.firmId!)));
+  if (!caseRow) {
+    res.status(404).json({ error: "Case not found" });
+    return;
+  }
+
+  const titleType = normalizeTitleType(caseRow.titleType);
   const itemsRaw = (asObject(req.body)?.items ?? null);
   if (!Array.isArray(itemsRaw)) {
     res.status(400).json({ error: "Invalid items" });
@@ -3007,6 +3019,10 @@ router.put("/cases/:caseId/loan-stamping", requireAuth, requireFirmUser, require
 
     if (!itemKey || !ALLOWED_LOAN_STAMPING_ITEM_KEYS.has(itemKey)) {
       res.status(422).json({ error: `Invalid itemKey at index ${i}` });
+      return;
+    }
+    if (!isLoanStampingItemKeyAllowedForTitleType(titleType, itemKey as LoanStampingItemKey)) {
+      res.status(422).json({ error: `itemKey not allowed for title type at index ${i}` });
       return;
     }
     if (itemKey === "other" && !customName?.trim()) {
@@ -3106,8 +3122,20 @@ router.delete("/cases/:caseId/loan-stamping/:id", requireAuth, requireFirmUser, 
     res.status(404).json({ error: "Not found" });
     return;
   }
+  const [caseRow] = await r
+    .select({ id: casesTable.id })
+    .from(casesTable)
+    .where(and(eq(casesTable.id, caseId), eq(casesTable.firmId, req.firmId!)));
+  if (!caseRow) {
+    res.status(404).json({ error: "Case not found" });
+    return;
+  }
   const [existing] = await r
-    .select({ objectPath: caseLoanStampingItemsTable.objectPath })
+    .select({
+      objectPath: caseLoanStampingItemsTable.objectPath,
+      itemKey: caseLoanStampingItemsTable.itemKey,
+      fileName: caseLoanStampingItemsTable.fileName,
+    })
     .from(caseLoanStampingItemsTable)
     .where(and(
       eq(caseLoanStampingItemsTable.id, id),
@@ -3151,7 +3179,7 @@ router.delete("/cases/:caseId/loan-stamping/:id", requireAuth, requireFirmUser, 
     action: "cases.loan_stamping.delete",
     entityType: "case",
     entityId: caseId,
-    detail: `loanStampingItemId=${id}`,
+    detail: `loanStampingItemId=${id} itemKey=${existing.itemKey} fileName=${existing.fileName ?? ""}`,
     ipAddress: req.ip,
     userAgent: req.headers["user-agent"],
   });
@@ -3187,7 +3215,7 @@ router.post("/cases/:caseId/loan-stamping/:id/file", requireAuth, requireFirmUse
     return;
   }
   const ext = fileExtLower(fileName);
-  if (!ALLOWED_CASE_ATTACHMENT_EXTENSIONS.has(ext)) {
+  if (!CASE_ATTACHMENT_ALLOWED_EXTENSIONS.has(ext)) {
     res.status(422).json({ error: "Unsupported file type. Allowed: pdf, doc, docx, jpg, jpeg, png" });
     return;
   }
@@ -3196,8 +3224,19 @@ router.post("/cases/:caseId/loan-stamping/:id/file", requireAuth, requireFirmUse
     res.status(404).json({ error: "Not found" });
     return;
   }
+  const [caseRow] = await r
+    .select({ id: casesTable.id })
+    .from(casesTable)
+    .where(and(eq(casesTable.id, caseId), eq(casesTable.firmId, req.firmId!)));
+  if (!caseRow) {
+    res.status(404).json({ error: "Case not found" });
+    return;
+  }
   const [existing] = await r
-    .select({ objectPath: caseLoanStampingItemsTable.objectPath })
+    .select({
+      objectPath: caseLoanStampingItemsTable.objectPath,
+      itemKey: caseLoanStampingItemsTable.itemKey,
+    })
     .from(caseLoanStampingItemsTable)
     .where(and(
       eq(caseLoanStampingItemsTable.id, id),
@@ -3244,10 +3283,10 @@ router.post("/cases/:caseId/loan-stamping/:id/file", requireAuth, requireFirmUse
     firmId: req.firmId,
     actorId: req.userId,
     actorType: req.userType,
-    action: "cases.loan_stamping.file_bind",
+    action: existing.objectPath ? "cases.loan_stamping.file_replace" : "cases.loan_stamping.file_upload",
     entityType: "case",
     entityId: caseId,
-    detail: `loanStampingItemId=${id} fileName=${fileName.trim()}`,
+    detail: `loanStampingItemId=${id} itemKey=${existing.itemKey} fileName=${fileName.trim()}`,
     ipAddress: req.ip,
     userAgent: req.headers["user-agent"],
   });
@@ -3274,8 +3313,20 @@ router.delete("/cases/:caseId/loan-stamping/:id/file", requireAuth, requireFirmU
     res.status(404).json({ error: "Not found" });
     return;
   }
+  const [caseRow] = await r
+    .select({ id: casesTable.id })
+    .from(casesTable)
+    .where(and(eq(casesTable.id, caseId), eq(casesTable.firmId, req.firmId!)));
+  if (!caseRow) {
+    res.status(404).json({ error: "Case not found" });
+    return;
+  }
   const [existing] = await r
-    .select({ objectPath: caseLoanStampingItemsTable.objectPath })
+    .select({
+      objectPath: caseLoanStampingItemsTable.objectPath,
+      itemKey: caseLoanStampingItemsTable.itemKey,
+      fileName: caseLoanStampingItemsTable.fileName,
+    })
     .from(caseLoanStampingItemsTable)
     .where(and(eq(caseLoanStampingItemsTable.id, id), eq(caseLoanStampingItemsTable.firmId, req.firmId!), eq(caseLoanStampingItemsTable.caseId, caseId), sql`${caseLoanStampingItemsTable.deletedAt} IS NULL`));
   if (!existing) {
@@ -3314,7 +3365,7 @@ router.delete("/cases/:caseId/loan-stamping/:id/file", requireAuth, requireFirmU
     action: "cases.loan_stamping.file_cleared",
     entityType: "case",
     entityId: caseId,
-    detail: `loanStampingItemId=${id}`,
+    detail: `loanStampingItemId=${id} itemKey=${existing.itemKey} fileName=${existing.fileName ?? ""}`,
     ipAddress: req.ip,
     userAgent: req.headers["user-agent"],
   });
@@ -3341,9 +3392,18 @@ router.get("/cases/:caseId/loan-stamping/:id/download", requireAuth, requireFirm
     res.status(404).json({ error: "Not found" });
     return;
   }
+  const [caseRow] = await r
+    .select({ id: casesTable.id })
+    .from(casesTable)
+    .where(and(eq(casesTable.id, caseId), eq(casesTable.firmId, req.firmId!)));
+  if (!caseRow) {
+    res.status(404).json({ error: "Case not found" });
+    return;
+  }
   const [row] = await r
     .select({
       objectPath: caseLoanStampingItemsTable.objectPath,
+      itemKey: caseLoanStampingItemsTable.itemKey,
       fileName: caseLoanStampingItemsTable.fileName,
       mimeType: caseLoanStampingItemsTable.mimeType,
     })
@@ -3360,7 +3420,7 @@ router.get("/cases/:caseId/loan-stamping/:id/download", requireAuth, requireFirm
     action: "cases.loan_stamping.download",
     entityType: "case",
     entityId: caseId,
-    detail: `loanStampingItemId=${id} fileName=${row.fileName}`,
+    detail: `loanStampingItemId=${id} itemKey=${row.itemKey} fileName=${row.fileName}`,
     ipAddress: req.ip,
     userAgent: req.headers["user-agent"],
   });

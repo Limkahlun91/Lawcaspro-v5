@@ -6,6 +6,17 @@ function pad2(n: number): string {
   return n < 10 ? `0${n}` : String(n);
 }
 
+function isValidYmd(ymd: string): boolean {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(ymd);
+  if (!m) return false;
+  const yyyy = Number(m[1]);
+  const mm = Number(m[2]);
+  const dd = Number(m[3]);
+  if (!Number.isFinite(yyyy) || !Number.isFinite(mm) || !Number.isFinite(dd)) return false;
+  const dt = new Date(Date.UTC(yyyy, mm - 1, dd));
+  return dt.getUTCFullYear() === yyyy && dt.getUTCMonth() + 1 === mm && dt.getUTCDate() === dd;
+}
+
 export function formatYmdToDmy(ymd: string): string {
   const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(ymd.trim());
   if (!m) return "";
@@ -14,6 +25,25 @@ export function formatYmdToDmy(ymd: string): string {
   const dd = Number(m[3]);
   if (!Number.isFinite(yyyy) || !Number.isFinite(mm) || !Number.isFinite(dd)) return "";
   return `${pad2(dd)}/${pad2(mm)}/${m[1]}`;
+}
+
+export function normalizeDateOnlyFromApi(v: unknown): string {
+  if (!v) return "";
+  if (typeof v === "string") {
+    const s = v.trim();
+    if (!s) return "";
+    if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return isValidYmd(s) ? s : "";
+    if (s.length >= 10 && /^\d{4}-\d{2}-\d{2}/.test(s)) {
+      const ymd = s.slice(0, 10);
+      return isValidYmd(ymd) ? ymd : "";
+    }
+    return "";
+  }
+  if (v instanceof Date) {
+    if (Number.isNaN(v.getTime())) return "";
+    return v.toISOString().slice(0, 10);
+  }
+  return "";
 }
 
 export function parseDateInputToYmd(input: string): string | null {
@@ -94,4 +124,3 @@ export function DateOnlyInput(props: {
     />
   );
 }
-

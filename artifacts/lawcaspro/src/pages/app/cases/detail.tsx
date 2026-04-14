@@ -26,30 +26,18 @@ import CaseComplianceTab from "./components/CaseComplianceTab";
 import { QueryFallback } from "@/components/query-fallback";
 import { toastError } from "@/lib/toast-error";
 import { apiFetchBlob, apiFetchJson } from "@/lib/api-client";
-import { DateOnlyInput, formatYmdToDmy } from "@/components/date-only-input";
+import { DateOnlyInput, formatYmdToDmy, normalizeDateOnlyFromApi } from "@/components/date-only-input";
 import { downloadBlob } from "@/lib/download";
 import { useAuth } from "@/lib/auth-context";
+import { hasPermission } from "@/lib/permissions";
+import { WORKFLOW_ATTACHMENT_ACCEPT, WORKFLOW_ATTACHMENT_ITEMS, isAllowedWorkflowAttachmentFileName, type WorkflowAttachmentDocKey, type WorkflowAttachmentDateKey } from "./components/workflow-attachments";
 
 import { getListCasesQueryKey } from "@workspace/api-client-react";
-
-function dateInputValue(v: unknown): string {
-  if (!v) return "";
-  const s = String(v);
-  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
-  if (s.length >= 10 && /^\d{4}-\d{2}-\d{2}/.test(s)) return s.slice(0, 10);
-  return "";
-}
-
-type WorkflowDocKey =
-  | "spa_stamped_date"
-  | "letter_of_offer_stamped_date"
-  | "register_poa_on"
-  | "letter_disclaimer_dated";
 
 type WorkflowDocument = {
   id: number;
   caseId: number;
-  milestoneKey: WorkflowDocKey;
+  milestoneKey: WorkflowAttachmentDocKey;
   label: string;
   dateValue: string | null;
   fileName: string;
@@ -216,8 +204,8 @@ export default function CaseDetail() {
   const [keyDatesInitialized, setKeyDatesInitialized] = useState(false);
 
   const workflowFileInputRef = useRef<HTMLInputElement>(null);
-  const workflowUploadKeyRef = useRef<WorkflowDocKey | null>(null);
-  const [workflowUploadingKey, setWorkflowUploadingKey] = useState<WorkflowDocKey | null>(null);
+  const workflowUploadKeyRef = useRef<{ docKey: WorkflowAttachmentDocKey; dateKey: WorkflowAttachmentDateKey } | null>(null);
+  const [workflowUploadingKey, setWorkflowUploadingKey] = useState<WorkflowAttachmentDocKey | null>(null);
   const [workflowDownloadingId, setWorkflowDownloadingId] = useState<number | null>(null);
 
   const stampingFileInputRef = useRef<HTMLInputElement>(null);
@@ -228,45 +216,45 @@ export default function CaseDetail() {
   const [stampingDirty, setStampingDirty] = useState(false);
 
   const parseKeyDates = (src: Record<string, unknown>) => ({
-    spa_signed_date: dateInputValue((src as any).spa_signed_date),
-    spa_forward_to_developer_execution_on: dateInputValue((src as any).spa_forward_to_developer_execution_on),
-    spa_date: dateInputValue((src as any).spa_date),
-    spa_stamped_date: dateInputValue((src as any).spa_stamped_date),
-    stamped_spa_send_to_developer_on: dateInputValue((src as any).stamped_spa_send_to_developer_on),
-    stamped_spa_received_from_developer_on: dateInputValue((src as any).stamped_spa_received_from_developer_on),
-    letter_of_offer_date: dateInputValue((src as any).letter_of_offer_date),
-    letter_of_offer_stamped_date: dateInputValue((src as any).letter_of_offer_stamped_date),
-    loan_docs_pending_date: dateInputValue((src as any).loan_docs_pending_date),
-    loan_docs_signed_date: dateInputValue((src as any).loan_docs_signed_date),
-    acting_letter_issued_date: dateInputValue((src as any).acting_letter_issued_date),
-    developer_confirmation_received_on: dateInputValue((src as any).developer_confirmation_received_on),
-    developer_confirmation_date: dateInputValue((src as any).developer_confirmation_date),
-    loan_sent_bank_execution_date: dateInputValue((src as any).loan_sent_bank_execution_date),
-    loan_bank_executed_date: dateInputValue((src as any).loan_bank_executed_date),
-    bank_lu_received_date: dateInputValue((src as any).bank_lu_received_date),
-    bank_lu_forward_to_developer_on: dateInputValue((src as any).bank_lu_forward_to_developer_on),
-    developer_lu_received_on: dateInputValue((src as any).developer_lu_received_on),
-    developer_lu_dated: dateInputValue((src as any).developer_lu_dated),
-    letter_disclaimer_received_on: dateInputValue((src as any).letter_disclaimer_received_on),
-    letter_disclaimer_dated: dateInputValue((src as any).letter_disclaimer_dated),
+    spa_signed_date: normalizeDateOnlyFromApi((src as any).spa_signed_date),
+    spa_forward_to_developer_execution_on: normalizeDateOnlyFromApi((src as any).spa_forward_to_developer_execution_on),
+    spa_date: normalizeDateOnlyFromApi((src as any).spa_date),
+    spa_stamped_date: normalizeDateOnlyFromApi((src as any).spa_stamped_date),
+    stamped_spa_send_to_developer_on: normalizeDateOnlyFromApi((src as any).stamped_spa_send_to_developer_on),
+    stamped_spa_received_from_developer_on: normalizeDateOnlyFromApi((src as any).stamped_spa_received_from_developer_on),
+    letter_of_offer_date: normalizeDateOnlyFromApi((src as any).letter_of_offer_date),
+    letter_of_offer_stamped_date: normalizeDateOnlyFromApi((src as any).letter_of_offer_stamped_date),
+    loan_docs_pending_date: normalizeDateOnlyFromApi((src as any).loan_docs_pending_date),
+    loan_docs_signed_date: normalizeDateOnlyFromApi((src as any).loan_docs_signed_date),
+    acting_letter_issued_date: normalizeDateOnlyFromApi((src as any).acting_letter_issued_date),
+    developer_confirmation_received_on: normalizeDateOnlyFromApi((src as any).developer_confirmation_received_on),
+    developer_confirmation_date: normalizeDateOnlyFromApi((src as any).developer_confirmation_date),
+    loan_sent_bank_execution_date: normalizeDateOnlyFromApi((src as any).loan_sent_bank_execution_date),
+    loan_bank_executed_date: normalizeDateOnlyFromApi((src as any).loan_bank_executed_date),
+    bank_lu_received_date: normalizeDateOnlyFromApi((src as any).bank_lu_received_date),
+    bank_lu_forward_to_developer_on: normalizeDateOnlyFromApi((src as any).bank_lu_forward_to_developer_on),
+    developer_lu_received_on: normalizeDateOnlyFromApi((src as any).developer_lu_received_on),
+    developer_lu_dated: normalizeDateOnlyFromApi((src as any).developer_lu_dated),
+    letter_disclaimer_received_on: normalizeDateOnlyFromApi((src as any).letter_disclaimer_received_on),
+    letter_disclaimer_dated: normalizeDateOnlyFromApi((src as any).letter_disclaimer_dated),
     letter_disclaimer_reference_nos: typeof (src as any).letter_disclaimer_reference_nos === "string" ? String((src as any).letter_disclaimer_reference_nos) : "",
     redemption_sum: (src as any).redemption_sum !== null && (src as any).redemption_sum !== undefined ? String((src as any).redemption_sum) : "",
-    loan_agreement_dated: dateInputValue((src as any).loan_agreement_dated),
-    loan_agreement_submitted_stamping_date: dateInputValue((src as any).loan_agreement_submitted_stamping_date),
-    loan_agreement_stamped_date: dateInputValue((src as any).loan_agreement_stamped_date),
-    register_poa_on: dateInputValue((src as any).register_poa_on),
+    loan_agreement_dated: normalizeDateOnlyFromApi((src as any).loan_agreement_dated),
+    loan_agreement_submitted_stamping_date: normalizeDateOnlyFromApi((src as any).loan_agreement_submitted_stamping_date),
+    loan_agreement_stamped_date: normalizeDateOnlyFromApi((src as any).loan_agreement_stamped_date),
+    register_poa_on: normalizeDateOnlyFromApi((src as any).register_poa_on),
     registered_poa_registration_number: typeof (src as any).registered_poa_registration_number === "string" ? String((src as any).registered_poa_registration_number) : "",
-    noa_served_on: dateInputValue((src as any).noa_served_on),
-    advice_to_bank_date: dateInputValue((src as any).advice_to_bank_date),
-    bank_1st_release_on: dateInputValue((src as any).bank_1st_release_on),
+    noa_served_on: normalizeDateOnlyFromApi((src as any).noa_served_on),
+    advice_to_bank_date: normalizeDateOnlyFromApi((src as any).advice_to_bank_date),
+    bank_1st_release_on: normalizeDateOnlyFromApi((src as any).bank_1st_release_on),
     first_release_amount_rm: (src as any).first_release_amount_rm !== null && (src as any).first_release_amount_rm !== undefined ? String((src as any).first_release_amount_rm) : "",
-    mot_received_date: dateInputValue((src as any).mot_received_date),
-    mot_signed_date: dateInputValue((src as any).mot_signed_date),
-    mot_stamped_date: dateInputValue((src as any).mot_stamped_date),
-    mot_registered_date: dateInputValue((src as any).mot_registered_date),
-    progressive_payment_date: dateInputValue((src as any).progressive_payment_date),
-    full_settlement_date: dateInputValue((src as any).full_settlement_date),
-    completion_date: dateInputValue((src as any).completion_date),
+    mot_received_date: normalizeDateOnlyFromApi((src as any).mot_received_date),
+    mot_signed_date: normalizeDateOnlyFromApi((src as any).mot_signed_date),
+    mot_stamped_date: normalizeDateOnlyFromApi((src as any).mot_stamped_date),
+    mot_registered_date: normalizeDateOnlyFromApi((src as any).mot_registered_date),
+    progressive_payment_date: normalizeDateOnlyFromApi((src as any).progressive_payment_date),
+    full_settlement_date: normalizeDateOnlyFromApi((src as any).full_settlement_date),
+    completion_date: normalizeDateOnlyFromApi((src as any).completion_date),
   });
 
   const scopeKeys = {
@@ -451,18 +439,12 @@ export default function CaseDetail() {
 
   const workflowDocsByKey = useMemo(() => {
     const rows = Array.isArray(workflowDocsQuery.data) ? workflowDocsQuery.data : [];
-    const map = new Map<WorkflowDocKey, WorkflowDocument>();
+    const map = new Map<WorkflowAttachmentDocKey, WorkflowDocument>();
     for (const r of rows) {
-      if (r && (r.milestoneKey as any)) map.set(r.milestoneKey as WorkflowDocKey, r);
+      if (r && (r.milestoneKey as any)) map.set(r.milestoneKey as WorkflowAttachmentDocKey, r);
     }
     return map;
   }, [workflowDocsQuery.data]);
-
-  const allowedFileExt = (name: string): boolean => {
-    const idx = name.lastIndexOf(".");
-    const ext = idx >= 0 ? name.slice(idx + 1).toLowerCase() : "";
-    return ext === "pdf" || ext === "doc" || ext === "docx" || ext === "jpg" || ext === "jpeg" || ext === "png";
-  };
 
   const toastDownloadError = (err: unknown) => {
     const status = (err as any)?.status;
@@ -473,12 +455,11 @@ export default function CaseDetail() {
   };
 
   const uploadWorkflowDocMutation = useMutation({
-    mutationFn: (vars: { milestoneKey: WorkflowDocKey; label: string; objectPath: string; file: File; dateYmd: string }) =>
+    mutationFn: (vars: { milestoneKey: WorkflowAttachmentDocKey; objectPath: string; file: File; dateYmd: string }) =>
       apiFetchJson(`/cases/${caseId}/workflow-documents`, {
         method: "POST",
         body: JSON.stringify({
           milestoneKey: vars.milestoneKey,
-          label: vars.label,
           objectPath: vars.objectPath,
           fileName: vars.file.name,
           mimeType: vars.file.type || null,
@@ -507,24 +488,28 @@ export default function CaseDetail() {
     return await apiFetchJson<{ objectPath: string }>(`/storage/upload?objectPath=${encodeURIComponent(objectPath)}`, { method: "POST", body: fd });
   }
 
-  function workflowObjectPath(milestoneKey: WorkflowDocKey, file: File): string {
+  function workflowObjectPath(milestoneKey: WorkflowAttachmentDocKey, file: File): string {
     const firmId = user?.firmId;
     return `/objects/cases/${firmId}/case-${caseId}/workflow/${milestoneKey}/${crypto.randomUUID()}-${safeFileNamePart(file.name)}`;
   }
 
-  function openWorkflowUpload(milestoneKey: WorkflowDocKey) {
-    workflowUploadKeyRef.current = milestoneKey;
+  function openWorkflowUpload(docKey: WorkflowAttachmentDocKey, dateKey: WorkflowAttachmentDateKey) {
+    workflowUploadKeyRef.current = { docKey, dateKey };
     workflowFileInputRef.current?.click();
   }
 
   async function handleWorkflowFileSelected(file: File | null) {
-    const milestoneKey = workflowUploadKeyRef.current;
-    if (!file || !milestoneKey) return;
-    if (!allowedFileExt(file.name)) {
+    const ref = workflowUploadKeyRef.current;
+    if (!file || !ref) return;
+    if (!hasPermission(user, "documents", "create") && !hasPermission(user, "documents", "update")) {
+      toast({ title: "Permission denied", description: "You do not have permission to upload documents.", variant: "destructive" });
+      return;
+    }
+    if (!isAllowedWorkflowAttachmentFileName(file.name)) {
       toast({ title: "Unsupported file type", description: "Allowed: pdf, doc, docx, jpg, jpeg, png", variant: "destructive" });
       return;
     }
-    const dateYmd = keyDatesDraft[milestoneKey] || "";
+    const dateYmd = keyDatesDraft[ref.dateKey] || "";
     if (!dateYmd) {
       toast({ title: "Select date first", description: "Please enter the date before uploading the file." });
       return;
@@ -533,18 +518,13 @@ export default function CaseDetail() {
       toast({ title: "No firm context", description: "Please sign in again." });
       return;
     }
-    setWorkflowUploadingKey(milestoneKey);
+    setWorkflowUploadingKey(ref.docKey);
     try {
-      const existed = Boolean(workflowDocsByKey.get(milestoneKey));
-      const objectPath = workflowObjectPath(milestoneKey, file);
+      const existed = Boolean(workflowDocsByKey.get(ref.docKey));
+      const objectPath = workflowObjectPath(ref.docKey, file);
       const uploaded = await uploadToPrivateCasePath(objectPath, file);
       await uploadWorkflowDocMutation.mutateAsync({
-        milestoneKey,
-        label:
-          milestoneKey === "spa_stamped_date" ? "SPA Stamped" :
-          milestoneKey === "letter_of_offer_stamped_date" ? "LO Stamped" :
-          milestoneKey === "register_poa_on" ? "Register POA" :
-          "Letter Disclaimer Dated",
+        milestoneKey: ref.docKey,
         objectPath: uploaded.objectPath,
         file,
         dateYmd,
@@ -632,7 +612,11 @@ export default function CaseDetail() {
   async function handleStampingFileSelected(file: File | null) {
     const id = stampingUploadIdRef.current;
     if (!file || !id) return;
-    if (!allowedFileExt(file.name)) {
+    if (!hasPermission(user, "documents", "create") && !hasPermission(user, "documents", "update")) {
+      toast({ title: "Permission denied", description: "You do not have permission to upload documents.", variant: "destructive" });
+      return;
+    }
+    if (!isAllowedWorkflowAttachmentFileName(file.name)) {
       toast({ title: "Unsupported file type", description: "Allowed: pdf, doc, docx, jpg, jpeg, png", variant: "destructive" });
       return;
     }
@@ -726,11 +710,16 @@ export default function CaseDetail() {
     );
   };
 
-  const WorkflowFileCard = (props: { label: string; fieldKey: WorkflowDocKey; printerKey?: string }) => {
-    const value = keyDatesDraft[props.fieldKey] ?? "";
-    const doc = workflowDocsByKey.get(props.fieldKey);
-    const uploading = workflowUploadingKey === props.fieldKey || uploadWorkflowDocMutation.isPending;
-    const canUpload = Boolean(value) && !uploading && !deleteWorkflowDocMutation.isPending;
+  const canDocsRead = hasPermission(user, "documents", "read");
+  const canDocsUpdate = hasPermission(user, "documents", "update");
+  const canDocsWrite = hasPermission(user, "documents", "create") || canDocsUpdate;
+  const canDocsDelete = hasPermission(user, "documents", "delete");
+
+  const WorkflowFileCard = (props: { label: string; docKey: WorkflowAttachmentDocKey; dateKey: WorkflowAttachmentDateKey; printerKey?: string }) => {
+    const value = keyDatesDraft[props.dateKey] ?? "";
+    const doc = workflowDocsByKey.get(props.docKey);
+    const uploading = workflowUploadingKey === props.docKey || uploadWorkflowDocMutation.isPending;
+    const canUpload = canDocsWrite && Boolean(value) && !uploading && !deleteWorkflowDocMutation.isPending;
     const showPrinter = Boolean(props.printerKey);
     const printerKey = props.printerKey || "";
     const st = showPrinter ? printState(printerKey) : null;
@@ -755,7 +744,7 @@ export default function CaseDetail() {
           <DateOnlyInput
             className="flex-1"
             valueYmd={value}
-            onChangeYmd={(v) => setKeyDatesDraft((d) => ({ ...d, [props.fieldKey]: v }))}
+            onChangeYmd={(v) => setKeyDatesDraft((d) => ({ ...d, [props.dateKey]: v }))}
           />
           {showPrinter && (
             <Button
@@ -771,7 +760,7 @@ export default function CaseDetail() {
           )}
         </div>
         <div className="mt-2 flex items-center justify-between gap-2 min-w-0">
-          <div className="text-xs text-slate-600 truncate min-w-0">
+          <div className="text-xs text-slate-600 truncate min-w-0" title={doc?.fileName ?? "No file uploaded"}>
             {doc ? doc.fileName : "No file uploaded"}
           </div>
           <div className="flex items-center gap-1 shrink-0">
@@ -783,43 +772,49 @@ export default function CaseDetail() {
                   className="h-8 w-8"
                   title="Download"
                   onClick={() => downloadWorkflowDoc(doc)}
-                  disabled={workflowDownloadingId === doc.id}
+                  disabled={!canDocsRead || workflowDownloadingId === doc.id}
                 >
                   <Download className="w-4 h-4" />
                 </Button>
-                <Button
-                  size="icon"
-                  variant="ghost"
-                  className="h-8 w-8"
-                  title="Replace"
-                  onClick={() => openWorkflowUpload(props.fieldKey)}
-                  disabled={!canUpload}
-                >
-                  <Upload className="w-4 h-4" />
-                </Button>
-                <Button
-                  size="icon"
-                  variant="ghost"
-                  className="h-8 w-8 text-red-600"
-                  title="Delete"
-                  onClick={() => deleteWorkflowDocMutation.mutate(doc.id)}
-                  disabled={deleteWorkflowDocMutation.isPending}
-                >
-                  <Trash2 className="w-4 h-4" />
-                </Button>
+                {canDocsWrite && (
+                  <Button
+                    size="icon"
+                    variant="ghost"
+                    className="h-8 w-8"
+                    title="Replace"
+                    onClick={() => openWorkflowUpload(props.docKey, props.dateKey)}
+                    disabled={!canUpload}
+                  >
+                    <Upload className="w-4 h-4" />
+                  </Button>
+                )}
+                {canDocsDelete && (
+                  <Button
+                    size="icon"
+                    variant="ghost"
+                    className="h-8 w-8 text-red-600"
+                    title="Delete"
+                    onClick={() => deleteWorkflowDocMutation.mutate(doc.id)}
+                    disabled={deleteWorkflowDocMutation.isPending}
+                  >
+                    <Trash2 className="w-4 h-4" />
+                  </Button>
+                )}
               </>
             ) : (
-              <Button
-                size="sm"
-                variant="outline"
-                className="gap-1.5"
-                onClick={() => openWorkflowUpload(props.fieldKey)}
-                disabled={!canUpload}
-                title={value ? "Upload file" : "Enter date to enable upload"}
-              >
-                <Upload className="w-4 h-4" />
-                Upload
-              </Button>
+              canDocsWrite ? (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="gap-1.5"
+                  onClick={() => openWorkflowUpload(props.docKey, props.dateKey)}
+                  disabled={!canUpload}
+                  title={value ? "Upload file" : "Enter date to enable upload"}
+                >
+                  <Upload className="w-4 h-4" />
+                  Upload
+                </Button>
+              ) : null
             )}
           </div>
         </div>
@@ -910,14 +905,14 @@ export default function CaseDetail() {
       <input
         ref={workflowFileInputRef}
         type="file"
-        accept=".pdf,.doc,.docx,.jpg,.jpeg,.png"
+        accept={WORKFLOW_ATTACHMENT_ACCEPT}
         className="hidden"
         onChange={(e) => handleWorkflowFileSelected(e.target.files?.[0] ?? null)}
       />
       <input
         ref={stampingFileInputRef}
         type="file"
-        accept=".pdf,.doc,.docx,.jpg,.jpeg,.png"
+        accept={WORKFLOW_ATTACHMENT_ACCEPT}
         className="hidden"
         onChange={(e) => handleStampingFileSelected(e.target.files?.[0] ?? null)}
       />
@@ -1101,7 +1096,7 @@ export default function CaseDetail() {
                   <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
                     <FieldCard label="SPA Date" value={keyDatesDraft.spa_date || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, spa_date: v }))} />
                     <FieldCard label="SPA Signed" value={keyDatesDraft.spa_signed_date || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, spa_signed_date: v }))} />
-                    <WorkflowFileCard label="SPA Stamped" fieldKey="spa_stamped_date" />
+                    <WorkflowFileCard label="SPA STAMPED" docKey="spa_stamped" dateKey="spa_stamped_date" />
                     <FieldCard label="SPA Forward to Dev. Execution On" value={keyDatesDraft.spa_forward_to_developer_execution_on || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, spa_forward_to_developer_execution_on: v }))} />
                     <FieldCard label="Stamped SPA Send to Dev. On" value={keyDatesDraft.stamped_spa_send_to_developer_on || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, stamped_spa_send_to_developer_on: v }))} />
                     <FieldCard label="Stamped SPA Received from Dev. On" value={keyDatesDraft.stamped_spa_received_from_developer_on || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, stamped_spa_received_from_developer_on: v }))} />
@@ -1128,7 +1123,7 @@ export default function CaseDetail() {
                         <FieldCard label="Loan Docs Signed" value={keyDatesDraft.loan_docs_signed_date || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, loan_docs_signed_date: v }))} />
                         <FieldCard label="Letter of Offer Date" value={keyDatesDraft.letter_of_offer_date || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, letter_of_offer_date: v }))} />
                         <FieldCard label="Loan Docs Pending Signing" value={keyDatesDraft.loan_docs_pending_date || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, loan_docs_pending_date: v }))} />
-                        <WorkflowFileCard label="LO Stamped" fieldKey="letter_of_offer_stamped_date" />
+                        <WorkflowFileCard label="LO STAMPED" docKey="lo_stamped" dateKey="letter_of_offer_stamped_date" />
                       </div>
                     </div>
 
@@ -1156,6 +1151,7 @@ export default function CaseDetail() {
                             const nextOrder = 1000 + visibleStampingItems.others.length;
                             upsertStampingItem({ itemKey: "other", customName: "", datedOn: null, stampedOn: null, fileName: null, mimeType: null, fileSize: null, sortOrder: nextOrder });
                           }}
+                          disabled={!canDocsUpdate}
                         >
                           <Plus className="w-4 h-4" />
                           Add Another Document
@@ -1165,7 +1161,7 @@ export default function CaseDetail() {
                           variant={stampingDirty ? "default" : "outline"}
                           className={stampingDirty ? "bg-amber-500 hover:bg-amber-600" : undefined}
                           onClick={saveStamping}
-                          disabled={saveStampingMutation.isPending || !stampingDirty}
+                          disabled={!canDocsUpdate || saveStampingMutation.isPending || !stampingDirty}
                         >
                           {saveStampingMutation.isPending ? "Saving..." : stampingDirty ? "Save Stamping" : "Saved"}
                         </Button>
@@ -1191,13 +1187,13 @@ export default function CaseDetail() {
                                 <tr key={`fixed-${row.itemKey}`}>
                                   <td className="px-3 py-2 font-medium text-slate-800">{fixedStampingKeys.find((x) => x.key === row.itemKey)?.label}</td>
                                   <td className="px-3 py-2">
-                                    <DateOnlyInput valueYmd={row.datedOn || ""} onChangeYmd={(v) => upsertStampingItem({ ...row, datedOn: v || null })} />
+                                    <DateOnlyInput disabled={!canDocsUpdate} valueYmd={row.datedOn || ""} onChangeYmd={(v) => upsertStampingItem({ ...row, datedOn: v || null })} />
                                   </td>
                                   <td className="px-3 py-2">
-                                    <DateOnlyInput valueYmd={row.stampedOn || ""} onChangeYmd={(v) => upsertStampingItem({ ...row, stampedOn: v || null })} />
+                                    <DateOnlyInput disabled={!canDocsUpdate} valueYmd={row.stampedOn || ""} onChangeYmd={(v) => upsertStampingItem({ ...row, stampedOn: v || null })} />
                                   </td>
                                   <td className="px-3 py-2">
-                                    <div className="truncate text-slate-600">{row.fileName || "No file uploaded"}</div>
+                                    <div className="truncate text-slate-600" title={row.fileName || "No file uploaded"}>{row.fileName || "No file uploaded"}</div>
                                   </td>
                                   <td className="px-3 py-2 text-right">
                                     <div className="inline-flex items-center gap-1">
@@ -1206,31 +1202,35 @@ export default function CaseDetail() {
                                         variant="ghost"
                                         className="h-8 w-8"
                                         title="Download"
-                                        disabled={!row.id || !row.fileName || stampingDownloadingId === row.id}
+                                        disabled={!canDocsRead || !row.id || !row.fileName || stampingDownloadingId === row.id}
                                         onClick={() => downloadStampingFile(row)}
                                       >
                                         <Download className="w-4 h-4" />
                                       </Button>
-                                      <Button
-                                        size="icon"
-                                        variant="ghost"
-                                        className="h-8 w-8"
-                                        title={row.id ? "Upload/Replace" : "Save to enable upload"}
-                                        disabled={!row.id || stampingUploadingId === row.id}
-                                        onClick={() => row.id && openStampingUpload(row.id)}
-                                      >
-                                        <Upload className="w-4 h-4" />
-                                      </Button>
-                                      <Button
-                                        size="icon"
-                                        variant="ghost"
-                                        className="h-8 w-8 text-red-600"
-                                        title="Remove file"
-                                        disabled={!row.id || !row.fileName || clearStampingFileMutation.isPending}
-                                        onClick={() => row.id && clearStampingFileMutation.mutate(row.id)}
-                                      >
-                                        <X className="w-4 h-4" />
-                                      </Button>
+                                      {canDocsUpdate && (
+                                        <Button
+                                          size="icon"
+                                          variant="ghost"
+                                          className="h-8 w-8"
+                                          title={row.id ? "Upload/Replace" : "Save to enable upload"}
+                                          disabled={!row.id || stampingUploadingId === row.id}
+                                          onClick={() => row.id && openStampingUpload(row.id)}
+                                        >
+                                          <Upload className="w-4 h-4" />
+                                        </Button>
+                                      )}
+                                      {canDocsUpdate && (
+                                        <Button
+                                          size="icon"
+                                          variant="ghost"
+                                          className="h-8 w-8 text-red-600"
+                                          title="Remove file"
+                                          disabled={!row.id || !row.fileName || clearStampingFileMutation.isPending}
+                                          onClick={() => row.id && clearStampingFileMutation.mutate(row.id)}
+                                        >
+                                          <X className="w-4 h-4" />
+                                        </Button>
+                                      )}
                                     </div>
                                   </td>
                                 </tr>
@@ -1242,16 +1242,17 @@ export default function CaseDetail() {
                                       value={row.customName ?? ""}
                                       placeholder="Other document name"
                                       onChange={(e) => upsertStampingItem({ ...row, customName: e.target.value })}
+                                      disabled={!canDocsUpdate}
                                     />
                                   </td>
                                   <td className="px-3 py-2">
-                                    <DateOnlyInput valueYmd={row.datedOn || ""} onChangeYmd={(v) => upsertStampingItem({ ...row, datedOn: v || null })} />
+                                    <DateOnlyInput disabled={!canDocsUpdate} valueYmd={row.datedOn || ""} onChangeYmd={(v) => upsertStampingItem({ ...row, datedOn: v || null })} />
                                   </td>
                                   <td className="px-3 py-2">
-                                    <DateOnlyInput valueYmd={row.stampedOn || ""} onChangeYmd={(v) => upsertStampingItem({ ...row, stampedOn: v || null })} />
+                                    <DateOnlyInput disabled={!canDocsUpdate} valueYmd={row.stampedOn || ""} onChangeYmd={(v) => upsertStampingItem({ ...row, stampedOn: v || null })} />
                                   </td>
                                   <td className="px-3 py-2">
-                                    <div className="truncate text-slate-600">{row.fileName || "No file uploaded"}</div>
+                                    <div className="truncate text-slate-600" title={row.fileName || "No file uploaded"}>{row.fileName || "No file uploaded"}</div>
                                   </td>
                                   <td className="px-3 py-2 text-right">
                                     <div className="inline-flex items-center gap-1">
@@ -1260,41 +1261,45 @@ export default function CaseDetail() {
                                         variant="ghost"
                                         className="h-8 w-8"
                                         title="Download"
-                                        disabled={!row.id || !row.fileName || stampingDownloadingId === row.id}
+                                        disabled={!canDocsRead || !row.id || !row.fileName || stampingDownloadingId === row.id}
                                         onClick={() => downloadStampingFile(row)}
                                       >
                                         <Download className="w-4 h-4" />
                                       </Button>
-                                      <Button
-                                        size="icon"
-                                        variant="ghost"
-                                        className="h-8 w-8"
-                                        title={row.id ? "Upload/Replace" : "Save to enable upload"}
-                                        disabled={!row.id || stampingUploadingId === row.id}
-                                        onClick={() => row.id && openStampingUpload(row.id)}
-                                      >
-                                        <Upload className="w-4 h-4" />
-                                      </Button>
-                                      <Button
-                                        size="icon"
-                                        variant="ghost"
-                                        className="h-8 w-8 text-red-600"
-                                        title={row.fileName ? "Remove file" : "Remove row"}
-                                        disabled={clearStampingFileMutation.isPending || deleteStampingRowMutation.isPending}
-                                        onClick={() => {
-                                          if (row.fileName && row.id) {
-                                            clearStampingFileMutation.mutate(row.id);
-                                            return;
-                                          }
-                                          if (row.id) {
-                                            deleteStampingRowMutation.mutate(row.id);
-                                            return;
-                                          }
-                                          removeUnsavedStampingOther(row.sortOrder);
-                                        }}
-                                      >
-                                        <X className="w-4 h-4" />
-                                      </Button>
+                                      {canDocsUpdate && (
+                                        <Button
+                                          size="icon"
+                                          variant="ghost"
+                                          className="h-8 w-8"
+                                          title={row.id ? "Upload/Replace" : "Save to enable upload"}
+                                          disabled={!row.id || stampingUploadingId === row.id}
+                                          onClick={() => row.id && openStampingUpload(row.id)}
+                                        >
+                                          <Upload className="w-4 h-4" />
+                                        </Button>
+                                      )}
+                                      {(row.fileName ? canDocsUpdate : row.id ? canDocsDelete : canDocsUpdate) ? (
+                                        <Button
+                                          size="icon"
+                                          variant="ghost"
+                                          className="h-8 w-8 text-red-600"
+                                          title={row.fileName ? "Remove file" : "Remove row"}
+                                          disabled={clearStampingFileMutation.isPending || deleteStampingRowMutation.isPending}
+                                          onClick={() => {
+                                            if (row.fileName && row.id) {
+                                              clearStampingFileMutation.mutate(row.id);
+                                              return;
+                                            }
+                                            if (row.id) {
+                                              deleteStampingRowMutation.mutate(row.id);
+                                              return;
+                                            }
+                                            removeUnsavedStampingOther(row.sortOrder);
+                                          }}
+                                        >
+                                          <X className="w-4 h-4" />
+                                        </Button>
+                                      ) : null}
                                     </div>
                                   </td>
                                 </tr>
@@ -1336,10 +1341,10 @@ export default function CaseDetail() {
                       <div className="text-sm font-semibold text-slate-800">NOA / POA / Disclaimer</div>
                       <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                         <FieldCard label="NOA Served On" value={keyDatesDraft.noa_served_on || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, noa_served_on: v }))} printerKey="noa" />
-                        <WorkflowFileCard label="Register POA" fieldKey="register_poa_on" />
+                        <WorkflowFileCard label="Register POA" docKey="register_poa" dateKey="register_poa_on" />
                         <FieldCard label="Registered POA Registration Number" type="text" value={keyDatesDraft.registered_poa_registration_number || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, registered_poa_registration_number: v }))} />
                         <FieldCard label="Letter Disclaimer Received On" value={keyDatesDraft.letter_disclaimer_received_on || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, letter_disclaimer_received_on: v }))} />
-                        <WorkflowFileCard label="Letter Disclaimer Dated" fieldKey="letter_disclaimer_dated" />
+                        <WorkflowFileCard label="Letter Disclaimer" docKey="letter_disclaimer" dateKey="letter_disclaimer_dated" />
                         <FieldCard label="Letter Disclaimer Reference Nos" type="text" value={keyDatesDraft.letter_disclaimer_reference_nos || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, letter_disclaimer_reference_nos: v }))} />
                       </div>
 
@@ -1388,10 +1393,9 @@ export default function CaseDetail() {
             </CardHeader>
             <CardContent className="min-w-0">
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3 min-w-0">
-                <WorkflowFileCard label="SPA Stamped" fieldKey="spa_stamped_date" />
-                <WorkflowFileCard label="Letter of Offer Stamped" fieldKey="letter_of_offer_stamped_date" />
-                <WorkflowFileCard label="Register POA On" fieldKey="register_poa_on" />
-                <WorkflowFileCard label="Letter Disclaimer Dated" fieldKey="letter_disclaimer_dated" />
+                {WORKFLOW_ATTACHMENT_ITEMS.map((it) => (
+                  <WorkflowFileCard key={it.docKey} label={it.label} docKey={it.docKey} dateKey={it.dateKey} />
+                ))}
               </div>
             </CardContent>
           </Card>
