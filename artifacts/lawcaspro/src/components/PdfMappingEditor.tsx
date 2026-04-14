@@ -38,10 +38,30 @@ interface PdfMappings {
   pages: PageMapping[];
 }
 
-interface VarGroup {
+type LegacyVarGroup = {
   group: string;
   vars: { key: string; label: string; type?: string; fields?: string }[];
-}
+};
+
+type VariableDefinition = {
+  id: number;
+  key: string;
+  label: string;
+  description: string | null;
+  category: string;
+  valueType: string;
+  sourcePath: string | null;
+  formatter: string | null;
+  exampleValue: string | null;
+  isSystem: boolean;
+  isActive: boolean;
+  sortOrder: number;
+};
+
+type VarGroup = {
+  group: string;
+  vars: { key: string; label: string; type?: string }[];
+};
 
 interface Props {
   docId: number;
@@ -84,8 +104,51 @@ export default function PdfMappingEditor({ docId, docName, pdfUrl, onClose }: Pr
 
   const loadVarGroups = async () => {
     try {
-      const data = await apiFetchJson<VarGroup[]>("/document-variables");
-      setVarGroups(data);
+      const data = await apiFetchJson<unknown>("/document-variables");
+      const isLegacyGroups = (v: unknown): v is LegacyVarGroup[] => {
+        if (!Array.isArray(v)) return false;
+        const first = v[0] as any;
+        return !!first && typeof first === "object" && typeof first.group === "string" && Array.isArray(first.vars);
+      };
+      if (isLegacyGroups(data)) {
+        setVarGroups(data);
+        return;
+      }
+
+      const isVariableDefs = (v: unknown): v is VariableDefinition[] => {
+        if (!Array.isArray(v)) return false;
+        const first = v[0] as any;
+        return !!first && typeof first === "object" && typeof first.key === "string" && typeof first.label === "string";
+      };
+      if (!isVariableDefs(data)) return;
+
+      const groupLabelForCategory = (cat: string): string => {
+        const c = (cat || "").toLowerCase();
+        if (c === "case") return "Case";
+        if (c === "purchaser") return "Purchaser";
+        if (c === "property") return "Property";
+        if (c === "loan") return "Loan";
+        if (c === "developer") return "Developer";
+        if (c === "project") return "Project";
+        if (c === "workflow") return "Workflow";
+        if (c === "custom") return "Custom";
+        return "Other";
+      };
+
+      const groupsMap = new Map<string, VarGroup>();
+      for (const v of data) {
+        const group = groupLabelForCategory(v.category);
+        const item = { key: v.key, label: v.label, type: v.valueType === "array" ? "loop" : undefined };
+        const existing = groupsMap.get(group);
+        if (existing) existing.vars.push(item);
+        else groupsMap.set(group, { group, vars: [item] });
+      }
+
+      const groups = Array.from(groupsMap.values()).map((g) => ({
+        group: g.group,
+        vars: [...g.vars].sort((a, b) => a.label.localeCompare(b.label)),
+      }));
+      setVarGroups(groups.sort((a, b) => a.group.localeCompare(b.group)));
     } catch { /* ignore */ }
   };
 

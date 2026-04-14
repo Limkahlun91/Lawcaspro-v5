@@ -7,6 +7,7 @@ import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
+import { Checkbox } from "@/components/ui/checkbox";
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
 } from "@/components/ui/dialog";
@@ -67,6 +68,38 @@ interface PlatformDoc {
   folderId: number | null;
   uploadedBy: number;
   createdAt: string;
+}
+
+interface DocumentVariableDefinition {
+  id: number;
+  key: string;
+  label: string;
+  description: string | null;
+  category: string;
+  valueType: string;
+  sourcePath: string | null;
+  formatter: string | null;
+  exampleValue: string | null;
+  isSystem: boolean;
+  isActive: boolean;
+  sortOrder: number;
+}
+
+interface DocumentTemplateBinding {
+  variableKey: string;
+  sourceMode: "registry_default" | "custom_path" | "fixed_value";
+  sourcePath: string | null;
+  fixedValue: string | null;
+  formatterOverride: string | null;
+  isRequired: boolean;
+  fallbackValue: string | null;
+  notes: string | null;
+}
+
+interface TemplateBindingsResponse {
+  placeholders: string[];
+  variables: DocumentVariableDefinition[];
+  bindings: DocumentTemplateBinding[];
 }
 
 function fileTypeLabel(mime: string) {
@@ -229,6 +262,8 @@ export default function PlatformDocuments() {
   const [editGroup, setEditGroup] = useState<string>("Others");
   const [editSortOrder, setEditSortOrder] = useState<number>(0);
   const [editCategory, setEditCategory] = useState<string>("general");
+  const [bindingsOpen, setBindingsOpen] = useState(false);
+  const [bindingsDraft, setBindingsDraft] = useState<Record<string, DocumentTemplateBinding>>({});
 
   useEffect(() => {
     if (!editingDoc) return;
@@ -261,13 +296,22 @@ export default function PlatformDocuments() {
   const docs = docsQuery.data ?? [];
   const docsLoading = docsQuery.isLoading;
 
-  const varGroupsQuery = useQuery<{ group: string; vars: { key: string; label: string }[] }[]>({
+  const varGroupsQuery = useQuery<DocumentVariableDefinition[]>({
     queryKey: ["document-variables"],
-    queryFn: () => apiFetchJson("/document-variables"),
+    queryFn: () => apiFetchJson("/document-variables?active=1"),
     enabled: showVarRef,
     retry: false,
   });
-  const varGroups = varGroupsQuery.data ?? [];
+  const varGroups = (() => {
+    const vars = varGroupsQuery.data ?? [];
+    const byGroup: Record<string, { group: string; vars: { key: string; label: string }[] }> = {};
+    for (const v of vars) {
+      const g = v.category || "other";
+      if (!byGroup[g]) byGroup[g] = { group: g, vars: [] };
+      byGroup[g].vars.push({ key: v.key, label: v.label });
+    }
+    return Object.values(byGroup).map((g) => ({ ...g, vars: g.vars.sort((a, b) => a.key.localeCompare(b.key)) })).sort((a, b) => a.group.localeCompare(b.group));
+  })();
 
   const handleCopyVar = (key: string, type?: string) => {
     let text: string;
@@ -482,13 +526,40 @@ export default function PlatformDocuments() {
   };
 
   const updateDocMutation = useMutation({
-    mutationFn: (payload: { id: number; patch: Record<string, unknown> }) =>
-      apiFetchJson(`/platform/documents/${payload.id}`, { method: "PATCH", body: JSON.stringify(payload.patch) }),
+    mutationFn: async (payload: { id: number; patch: Record<string, unknown> }) => {
+      await apiFetchJson(`/platform/documents/${payload.id}`, { method: "PATCH", body: JSON.stringify(payload.patch) });
+      await apiFetchJson(`/platform/documents/${payload.id}/applicability`, { method: "PUT", body: JSON.stringify(payload.patch) });
+    },
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: ["platform-documents"], exact: false });
       toast({ title: "Document updated" });
     },
     onError: (e) => toastError(toast, e, "Update failed"),
+  });
+
+  const bindingsQuery = useQuery<TemplateBindingsResponse>({
+    queryKey: ["platform-document-bindings", editingDoc?.id, bindingsOpen],
+    queryFn: ({ signal }) => apiFetchJson(`/platform/documents/${editingDoc!.id}/bindings`, { signal }),
+    enabled: bindingsOpen && !!editingDoc,
+    retry: false,
+  });
+
+  useEffect(() => {
+    if (!bindingsQuery.data) return;
+    if (Object.keys(bindingsDraft).length > 0) return;
+    const m: Record<string, DocumentTemplateBinding> = {};
+    for (const b of bindingsQuery.data.bindings ?? []) m[b.variableKey] = b;
+    setBindingsDraft(m);
+  }, [bindingsQuery.data, bindingsDraft]);
+
+  const saveBindingsMutation = useMutation({
+    mutationFn: (payload: { id: number; bindings: DocumentTemplateBinding[] }) =>
+      apiFetchJson(`/platform/documents/${payload.id}/bindings`, { method: "PUT", body: JSON.stringify({ bindings: payload.bindings }) }),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ["platform-document-bindings"], exact: false });
+      toast({ title: "Bindings saved" });
+    },
+    onError: (e) => toastError(toast, e, "Save bindings failed"),
   });
 
   const handleStartAddSub = (parentId: number) => {
@@ -887,6 +958,13 @@ export default function PlatformDocuments() {
                 </Select>
               </div>
               <div className="flex justify-end gap-2 pt-2">
+                <Button
+                  variant="outline"
+                  onClick={() => { setBindingsDraft({}); setBindingsOpen(true); }}
+                  disabled={!editingDoc || updateDocMutation.isPending}
+                >
+                  Bindings
+                </Button>
                 <Button variant="outline" onClick={() => setEditDocOpen(false)} disabled={updateDocMutation.isPending}>Cancel</Button>
                 <Button
                   onClick={() => {
@@ -911,6 +989,141 @@ export default function PlatformDocuments() {
               </div>
             </div>
           )}
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={bindingsOpen} onOpenChange={(v) => { if (!v) { setBindingsOpen(false); setBindingsDraft({}); } else setBindingsOpen(true); }}>
+        <DialogContent className="max-w-3xl max-h-[80vh] flex flex-col">
+          <DialogHeader>
+            <DialogTitle>Document Bindings</DialogTitle>
+          </DialogHeader>
+          {!editingDoc ? (
+            <div className="text-slate-500 py-6">No document selected.</div>
+          ) : bindingsQuery.isError ? (
+            <QueryFallback title="Bindings unavailable" error={bindingsQuery.error} onRetry={() => bindingsQuery.refetch()} isRetrying={bindingsQuery.isFetching} />
+          ) : bindingsQuery.isLoading ? (
+            <div className="text-slate-500 py-6">Loading bindings...</div>
+          ) : (
+            <div className="flex-1 overflow-y-auto space-y-3 pr-1">
+              <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
+                <div className="text-sm font-medium text-slate-900">Detected placeholders</div>
+                <div className="mt-1 text-xs text-slate-600 break-words">
+                  {(bindingsQuery.data?.placeholders ?? []).length === 0 ? "No placeholders detected." : (bindingsQuery.data?.placeholders ?? []).join(", ")}
+                </div>
+              </div>
+
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="text-left text-xs text-slate-500">
+                      <th className="py-2 pr-3">Variable</th>
+                      <th className="py-2 pr-3">Mode</th>
+                      <th className="py-2 pr-3">Source path / Fixed</th>
+                      <th className="py-2 pr-3">Formatter</th>
+                      <th className="py-2 pr-3">Required</th>
+                      <th className="py-2 pr-3">Fallback</th>
+                      <th className="py-2 text-right">Action</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {(() => {
+                      const vars = bindingsQuery.data?.variables ?? [];
+                      const placeholders = bindingsQuery.data?.placeholders ?? [];
+                      const keys = Array.from(new Set<string>([...placeholders, ...vars.map((v) => v.key), ...Object.keys(bindingsDraft)])).sort((a, b) => a.localeCompare(b));
+                      return keys.map((key) => {
+                        const def = vars.find((v) => v.key === key);
+                        const b = bindingsDraft[key] ?? {
+                          variableKey: key,
+                          sourceMode: "registry_default" as const,
+                          sourcePath: def?.sourcePath ?? null,
+                          fixedValue: null,
+                          formatterOverride: null,
+                          isRequired: false,
+                          fallbackValue: null,
+                          notes: null,
+                        };
+                        const mode = b.sourceMode;
+                        return (
+                          <tr key={key} className="border-t border-slate-200 align-top">
+                            <td className="py-2 pr-3 min-w-[180px]">
+                              <div className="font-medium text-slate-900 break-words">{key}</div>
+                              <div className="text-xs text-slate-500 break-words">{def?.label ?? ""}</div>
+                            </td>
+                            <td className="py-2 pr-3 min-w-[160px]">
+                              <Select
+                                value={mode}
+                                onValueChange={(v) => setBindingsDraft((prev) => ({ ...prev, [key]: { ...b, sourceMode: (v as any) } }))}
+                              >
+                                <SelectTrigger><SelectValue /></SelectTrigger>
+                                <SelectContent>
+                                  <SelectItem value="registry_default">Registry default</SelectItem>
+                                  <SelectItem value="custom_path">Custom path</SelectItem>
+                                  <SelectItem value="fixed_value">Fixed value</SelectItem>
+                                </SelectContent>
+                              </Select>
+                            </td>
+                            <td className="py-2 pr-3 min-w-[220px]">
+                              <Input
+                                value={mode === "fixed_value" ? (b.fixedValue ?? "") : (b.sourcePath ?? "")}
+                                onChange={(e) => {
+                                  const v = e.target.value;
+                                  setBindingsDraft((prev) => ({ ...prev, [key]: mode === "fixed_value" ? { ...b, fixedValue: v } : { ...b, sourcePath: v } }));
+                                }}
+                                placeholder={mode === "fixed_value" ? "e.g. RM 500,000.00" : "e.g. reference_no"}
+                              />
+                            </td>
+                            <td className="py-2 pr-3 min-w-[140px]">
+                              <Input value={b.formatterOverride ?? ""} onChange={(e) => setBindingsDraft((prev) => ({ ...prev, [key]: { ...b, formatterOverride: e.target.value || null } }))} placeholder={def?.formatter ?? "e.g. currency"} />
+                            </td>
+                            <td className="py-2 pr-3">
+                              <Checkbox checked={b.isRequired} onCheckedChange={(v) => setBindingsDraft((prev) => ({ ...prev, [key]: { ...b, isRequired: Boolean(v) } }))} />
+                            </td>
+                            <td className="py-2 pr-3 min-w-[140px]">
+                              <Input value={b.fallbackValue ?? ""} onChange={(e) => setBindingsDraft((prev) => ({ ...prev, [key]: { ...b, fallbackValue: e.target.value || null } }))} placeholder="(optional)" />
+                            </td>
+                            <td className="py-2 text-right">
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                onClick={() => {
+                                  setBindingsDraft((prev) => {
+                                    const next = { ...prev };
+                                    delete next[key];
+                                    return next;
+                                  });
+                                }}
+                              >
+                                Clear
+                              </Button>
+                            </td>
+                          </tr>
+                        );
+                      });
+                    })()}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+          <DialogFooter className="pt-2 border-t">
+            <Button variant="outline" onClick={() => { setBindingsOpen(false); setBindingsDraft({}); }}>
+              Close
+            </Button>
+            <Button
+              onClick={() => {
+                if (!editingDoc) return;
+                const bindings = Object.values(bindingsDraft).map((b) => ({
+                  ...b,
+                  sourcePath: b.sourceMode === "fixed_value" ? null : (b.sourcePath ? b.sourcePath : null),
+                  fixedValue: b.sourceMode === "fixed_value" ? (b.fixedValue ?? "") : null,
+                }));
+                saveBindingsMutation.mutate({ id: editingDoc.id, bindings });
+              }}
+              disabled={!editingDoc || saveBindingsMutation.isPending}
+            >
+              {saveBindingsMutation.isPending ? "Saving..." : "Save"}
+            </Button>
+          </DialogFooter>
         </DialogContent>
       </Dialog>
 

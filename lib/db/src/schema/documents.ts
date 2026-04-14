@@ -205,3 +205,65 @@ export const documentBatchJobItemsTable = pgTable("document_batch_job_items", {
   statusIdx: index("idx_document_batch_job_items_status").on(t.firmId, t.status),
   createdAtIdx: index("idx_document_batch_job_items_created_at").on(t.firmId, t.caseId, t.createdAt),
 }));
+
+export const documentVariableDefinitionsTable = pgTable("document_variable_definitions", {
+  id: serial("id").primaryKey(),
+  key: text("key").notNull(),
+  label: text("label").notNull(),
+  description: text("description"),
+  category: text("category").notNull().default("case"),
+  valueType: text("value_type").notNull().default("string"),
+  sourcePath: text("source_path"),
+  formatter: text("formatter"),
+  exampleValue: text("example_value"),
+  isSystem: boolean("is_system").notNull().default(true),
+  isActive: boolean("is_active").notNull().default(true),
+  sortOrder: integer("sort_order").notNull().default(0),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow().$onUpdate(() => new Date()),
+}, (t) => ({
+  activeIdx: index("idx_document_variable_definitions_active").on(t.isActive, t.category, t.sortOrder, t.key),
+}));
+
+export const documentTemplateBindingsTable = pgTable("document_template_bindings", {
+  id: serial("id").primaryKey(),
+  firmId: integer("firm_id"),
+  templateId: integer("template_id"),
+  platformDocumentId: integer("platform_document_id"),
+  variableKey: text("variable_key").notNull(),
+  sourceMode: text("source_mode").notNull().default("registry_default"),
+  sourcePath: text("source_path"),
+  fixedValue: text("fixed_value"),
+  formatterOverride: text("formatter_override"),
+  isRequired: boolean("is_required").notNull().default(false),
+  fallbackValue: text("fallback_value"),
+  notes: text("notes"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow().$onUpdate(() => new Date()),
+}, (t) => ({
+  firmIdx: index("idx_document_template_bindings_firm").on(t.firmId),
+  firmTemplateIdx: index("idx_document_template_bindings_template").on(t.firmId, t.templateId),
+  platformIdx: index("idx_document_template_bindings_platform").on(t.platformDocumentId),
+  keyIdx: index("idx_document_template_bindings_key").on(t.firmId, t.variableKey),
+}));
+
+export const documentTemplateApplicabilityRulesTable = pgTable("document_template_applicability_rules", {
+  id: serial("id").primaryKey(),
+  firmId: integer("firm_id"),
+  templateId: integer("template_id"),
+  platformDocumentId: integer("platform_document_id"),
+  isActive: boolean("is_active"),
+  purchaseMode: text("purchase_mode"),
+  titleType: text("title_type"),
+  titleSubType: text("title_sub_type"),
+  projectType: text("project_type"),
+  developmentCondition: text("development_condition"),
+  unitCategory: text("unit_category"),
+  isTemplateCapable: boolean("is_template_capable"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow().$onUpdate(() => new Date()),
+}, (t) => ({
+  firmIdx: index("idx_document_template_applicability_rules_firm").on(t.firmId),
+  firmTemplateIdx: index("idx_document_template_applicability_rules_template").on(t.firmId, t.templateId),
+  platformIdx: index("idx_document_template_applicability_rules_platform").on(t.platformDocumentId),
+}));

@@ -68,6 +68,16 @@ type ChecklistResponse = {
   sections: ChecklistSection[];
 };
 
+type DocumentPreviewResponse = {
+  resolvedVariables: Record<string, unknown>;
+  missingRequiredVariables: Array<{ variableKey: string; reason: string }>;
+  unusedBindings: string[];
+  placeholderWarnings: Array<{ placeholder: string; warning: string }>;
+  applicabilityResult: { applicable: boolean; reasons: string[] };
+  renderMode: string;
+  previewSummary: { renderable: boolean; placeholdersCount: number; usedMode: string; missingRequiredCount: number };
+};
+
 interface FirmLetterhead {
   id: number;
   name: string;
@@ -107,6 +117,16 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
   const canExport = hasPermission(user, "documents", "export");
   const canDelete = hasPermission(user, "documents", "delete");
   const canCreate = hasPermission(user, "documents", "create");
+  const canBypassApplicability = hasPermission(user, "documents", "update");
+
+  const [previewOpen, setPreviewOpen] = useState(false);
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [previewItem, setPreviewItem] = useState<ChecklistItem | null>(null);
+  const [previewResult, setPreviewResult] = useState<DocumentPreviewResponse | null>(null);
+
+  useEffect(() => {
+    if (!canBypassApplicability && showAllTemplates) setShowAllTemplates(false);
+  }, [canBypassApplicability, showAllTemplates]);
 
   const documentsQuery = useQuery<CaseDocument[]>({
     queryKey: ["case-documents", caseId],
@@ -117,7 +137,7 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
 
   const checklistQuery = useQuery<ChecklistResponse>({
     queryKey: ["case-documents-checklist", caseId, showAllTemplates],
-    queryFn: ({ signal }) => apiFetchJson(`/cases/${caseId}/documents/checklist${showAllTemplates ? "?includeAll=1" : ""}`, { signal }),
+    queryFn: ({ signal }) => apiFetchJson(`/cases/${caseId}/documents/checklist${showAllTemplates && canBypassApplicability ? "?includeAll=1" : ""}`, { signal }),
     enabled: viewTab === "checklist" || generateDialogOpen,
     retry: false,
   });
@@ -186,15 +206,16 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
     setIsGenerating(true);
     try {
       let created: CaseDocument;
+      const bypassApplicability = Boolean(showAllTemplates && canBypassApplicability);
       if (item.source === "firm") {
         created = await apiFetchJson(`/cases/${caseId}/documents/generate`, {
           method: "POST",
-          body: JSON.stringify({ templateId: Number(item.templateId), documentName: documentName || undefined, letterheadId: letterheadIdToSend }),
+          body: JSON.stringify({ templateId: Number(item.templateId), documentName: documentName || undefined, letterheadId: letterheadIdToSend, bypassApplicability }),
         });
       } else {
         created = await apiFetchJson(`/cases/${caseId}/documents/generate-from-master`, {
           method: "POST",
-          body: JSON.stringify({ masterDocId: Number(item.templateId), documentName: documentName || undefined, letterheadId: letterheadIdToSend }),
+          body: JSON.stringify({ masterDocId: Number(item.templateId), documentName: documentName || undefined, letterheadId: letterheadIdToSend, bypassApplicability }),
         });
       }
       await qc.invalidateQueries({ queryKey: ["case-documents", caseId] });
@@ -216,19 +237,49 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
       const code = typeof data?.code === "string" ? String(data.code) : "";
       const missingRaw = Array.isArray(data?.missing) ? data?.missing : null;
       const reasonsRaw = Array.isArray(data?.reasons) ? data?.reasons : null;
+      const missingReq = Array.isArray(data?.missingRequiredVariables) ? data?.missingRequiredVariables : null;
       if (code === "TEMPLATE_NOT_READY" && missingRaw) {
         const missingMsgs = missingRaw
           .map((m) => asRecord(m)?.message)
           .filter((m): m is string => typeof m === "string" && Boolean(m.trim()));
         toast({ title: "Template not ready", description: missingMsgs.join(", "), variant: "destructive" });
-      } else if (code === "TEMPLATE_NOT_APPLICABLE") {
+      } else if (code === "TEMPLATE_APPLICABILITY_BLOCKED") {
         const reasons = reasonsRaw?.filter((x): x is string => typeof x === "string" && Boolean(x.trim()));
-        toast({ title: "Template not applicable", description: reasons?.length ? reasons.join(", ") : undefined, variant: "destructive" });
+        toast({ title: "Template blocked", description: reasons?.length ? reasons.join(", ") : undefined, variant: "destructive" });
+      } else if (code === "TEMPLATE_BINDING_MISSING" && missingReq) {
+        const missingKeys = missingReq
+          .map((m) => asRecord(m)?.variableKey)
+          .filter((m): m is string => typeof m === "string" && Boolean(m.trim()));
+        toast({ title: "Missing required variables", description: missingKeys.join(", "), variant: "destructive" });
       } else {
         toastError(toast, err, "Generation failed");
       }
     } finally {
       setIsGenerating(false);
+    }
+  }
+
+  async function handlePreview(item: ChecklistItem) {
+    if (!canGenerate) return;
+    setPreviewItem(item);
+    setPreviewOpen(true);
+    setPreviewLoading(true);
+    setPreviewResult(null);
+    try {
+      const bypassApplicability = Boolean(showAllTemplates && canBypassApplicability);
+      const result = await apiFetchJson<DocumentPreviewResponse>(`/cases/${caseId}/documents/preview`, {
+        method: "POST",
+        body: JSON.stringify(
+          item.source === "firm"
+            ? { templateId: Number(item.templateId), bypassApplicability }
+            : { platformDocumentId: Number(item.templateId), bypassApplicability }
+        ),
+      });
+      setPreviewResult(result);
+    } catch (err) {
+      toastError(toast, err, "Preview failed");
+    } finally {
+      setPreviewLoading(false);
     }
   }
 
@@ -271,6 +322,7 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
         body: JSON.stringify({
           items: selected.map((it) => ({ source: it.source, templateId: it.templateId })),
           letterheadId: letterheadIdToSend,
+          bypassApplicability: Boolean(showAllTemplates && canBypassApplicability),
         }),
       });
       setBatchGenerateResult(result);
@@ -603,6 +655,14 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
                                 {reason && <div className="mt-1 text-xs text-slate-600 break-words">{reason}</div>}
                               </div>
                               <div className="shrink-0 flex items-center gap-2">
+                                <Button
+                                  size="sm"
+                                  variant="outline"
+                                  onClick={() => handlePreview(it)}
+                                  disabled={!canGenerate || previewLoading}
+                                >
+                                  Preview
+                                </Button>
                                 {latestDoc ? (
                                   <Button size="sm" variant="outline" onClick={() => handleDownload(latestDoc)} disabled={downloadingDocId === latestDoc.id}>
                                     Download
@@ -684,6 +744,85 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
         </CardContent>
       </Card>
 
+      <Dialog open={previewOpen} onOpenChange={(v) => { if (!v) { setPreviewOpen(false); setPreviewItem(null); setPreviewResult(null); } else setPreviewOpen(true); }}>
+        <DialogContent className="sm:max-w-2xl">
+          <DialogHeader>
+            <DialogTitle>Preview</DialogTitle>
+          </DialogHeader>
+          {previewLoading ? (
+            <div className="text-slate-500 py-6">Loading preview...</div>
+          ) : !previewResult ? (
+            <div className="text-slate-500 py-6">No preview data.</div>
+          ) : (
+            <div className="space-y-4">
+              <div className="rounded-lg border border-slate-200 bg-white p-3">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="text-sm font-medium text-slate-900">Applicability</div>
+                  <span className={cn("text-xs px-2 py-1 rounded font-medium", previewResult.applicabilityResult.applicable ? "bg-emerald-50 text-emerald-700" : "bg-rose-50 text-rose-700")}>
+                    {previewResult.applicabilityResult.applicable ? "Applicable" : "Blocked"}
+                  </span>
+                </div>
+                {!previewResult.applicabilityResult.applicable && previewResult.applicabilityResult.reasons.length > 0 ? (
+                  <div className="mt-2 text-sm text-rose-700 break-words">{previewResult.applicabilityResult.reasons.join(", ")}</div>
+                ) : null}
+                <div className="mt-2 text-xs text-slate-500">
+                  Mode: {previewResult.previewSummary.usedMode} • Placeholders: {previewResult.previewSummary.placeholdersCount} • Renderable: {previewResult.previewSummary.renderable ? "Yes" : "No"}
+                </div>
+              </div>
+
+              {previewResult.missingRequiredVariables.length > 0 ? (
+                <div className="rounded-lg border border-rose-200 bg-rose-50 p-3">
+                  <div className="text-sm font-medium text-rose-900">Missing required variables</div>
+                  <div className="mt-2 text-sm text-rose-800 break-words">
+                    {previewResult.missingRequiredVariables.map((m) => m.variableKey).join(", ")}
+                  </div>
+                </div>
+              ) : null}
+
+              {previewResult.placeholderWarnings.length > 0 ? (
+                <div className="rounded-lg border border-amber-200 bg-amber-50 p-3">
+                  <div className="text-sm font-medium text-amber-900">Warnings</div>
+                  <div className="mt-2 space-y-1">
+                    {previewResult.placeholderWarnings.slice(0, 10).map((w, idx) => (
+                      <div key={idx} className="text-sm text-amber-800 break-words">
+                        {w.placeholder}: {w.warning}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
+
+              <div className="rounded-lg border border-slate-200 bg-white p-3">
+                <div className="text-sm font-medium text-slate-900">Resolved sample values</div>
+                <div className="mt-2 space-y-1">
+                  {Object.entries(previewResult.resolvedVariables).slice(0, 20).map(([k, v]) => (
+                    <div key={k} className="text-xs text-slate-700 break-words">
+                      <span className="font-medium text-slate-900">{k}</span>: {String(v ?? "")}
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <div className="flex justify-end gap-2">
+                <Button variant="outline" onClick={() => { setPreviewOpen(false); setPreviewItem(null); setPreviewResult(null); }}>
+                  Close
+                </Button>
+                <Button
+                  onClick={() => {
+                    if (!previewItem) return;
+                    setPreviewOpen(false);
+                    handleGenerate(previewItem);
+                  }}
+                  disabled={!previewItem || !canGenerate || !previewResult.applicabilityResult.applicable || previewResult.missingRequiredVariables.length > 0 || !previewResult.previewSummary.renderable}
+                >
+                  Generate
+                </Button>
+              </div>
+            </div>
+          )}
+        </DialogContent>
+      </Dialog>
+
       <Dialog open={generateDialogOpen} onOpenChange={(v) => { if (!v) closeGenerateDialog(); else setGenerateDialogOpen(true); }}>
         <DialogContent className="sm:max-w-2xl">
           <DialogHeader>
@@ -691,14 +830,18 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
           </DialogHeader>
           <div className="space-y-4">
             <div className="flex items-center justify-between gap-3">
-              <div className="flex items-center gap-2">
-                <Button size="sm" variant={showAllTemplates ? "outline" : "default"} onClick={() => setShowAllTemplates(false)}>
-                  Applicable
-                </Button>
-                <Button size="sm" variant={showAllTemplates ? "default" : "outline"} onClick={() => setShowAllTemplates(true)}>
-                  All templates
-                </Button>
-              </div>
+              {canBypassApplicability ? (
+                <div className="flex items-center gap-2">
+                  <Button size="sm" variant={showAllTemplates ? "outline" : "default"} onClick={() => setShowAllTemplates(false)}>
+                    Applicable
+                  </Button>
+                  <Button size="sm" variant={showAllTemplates ? "default" : "outline"} onClick={() => setShowAllTemplates(true)}>
+                    All templates
+                  </Button>
+                </div>
+              ) : (
+                <div className="text-sm text-slate-600">Applicable templates</div>
+              )}
               <Select
                 value={templateSourceFilter}
                 onValueChange={(v) => setTemplateSourceFilter(v === "firm" ? "firm" : v === "master" ? "master" : "all")}

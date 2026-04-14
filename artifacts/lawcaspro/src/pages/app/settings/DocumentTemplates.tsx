@@ -15,6 +15,7 @@ import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Checkbox } from "@/components/ui/checkbox";
 import { DOCUMENT_TYPE_LABELS } from "@workspace/documents-registry";
 import { QueryFallback } from "@/components/query-fallback";
 import { apiFetchBlob, apiFetchJson } from "@/lib/api-client";
@@ -61,6 +62,52 @@ interface DocumentTemplateVersion {
   readiness_rules_snapshot: unknown;
 }
 
+interface DocumentVariableDefinition {
+  id: number;
+  key: string;
+  label: string;
+  description: string | null;
+  category: string;
+  valueType: string;
+  sourcePath: string | null;
+  formatter: string | null;
+  exampleValue: string | null;
+  isSystem: boolean;
+  isActive: boolean;
+  sortOrder: number;
+}
+
+interface DocumentTemplateBinding {
+  variableKey: string;
+  sourceMode: "registry_default" | "custom_path" | "fixed_value";
+  sourcePath: string | null;
+  fixedValue: string | null;
+  formatterOverride: string | null;
+  isRequired: boolean;
+  fallbackValue: string | null;
+  notes: string | null;
+}
+
+interface TemplateBindingsResponse {
+  placeholders: string[];
+  variables: DocumentVariableDefinition[];
+  bindings: DocumentTemplateBinding[];
+}
+
+interface TemplateApplicabilityResponse {
+  effective: {
+    isActive: boolean;
+    purchaseMode: string | null;
+    titleType: string | null;
+    caseType: string | null;
+    projectType: string | null;
+    titleSubType: string | null;
+    developmentCondition: string | null;
+    unitCategory: string | null;
+    isTemplateCapable: boolean;
+  };
+}
+
 const TEMPLATE_FIELDS = [
   { key: "reference_no", label: "Case Reference No." },
   { key: "date", label: "Document Date (formatted)" },
@@ -91,7 +138,6 @@ export default function DocumentTemplates() {
   const uploadRef = useRef<HTMLInputElement>(null);
   const [uploadDialogOpen, setUploadDialogOpen] = useState(false);
   const versionUploadRef = useRef<HTMLInputElement>(null);
-  const [uploadDialogOpen, setUploadDialogOpen] = useState(false);
   const [infoOpen, setInfoOpen] = useState(false);
   const [detailOpen, setDetailOpen] = useState(false);
   const [activeTemplate, setActiveTemplate] = useState<DocumentTemplate | null>(null);
@@ -114,13 +160,17 @@ export default function DocumentTemplates() {
   const [editCaseType, setEditCaseType] = useState<string>("");
   const [editGroup, setEditGroup] = useState<string>("Others");
   const [editSortOrder, setEditSortOrder] = useState<number>(0);
-  const [detailTab, setDetailTab] = useState<"details" | "versions">("details");
+  const [detailTab, setDetailTab] = useState<"details" | "versions" | "bindings" | "applicability">("details");
   const [versionFile, setVersionFile] = useState<File | null>(null);
+  const [bindingsDraft, setBindingsDraft] = useState<Record<string, DocumentTemplateBinding>>({});
+  const [appDraft, setAppDraft] = useState<TemplateApplicabilityResponse["effective"] | null>(null);
 
   useEffect(() => {
     if (!activeTemplate) return;
     setDetailTab("details");
     setVersionFile(null);
+    setBindingsDraft({});
+    setAppDraft(null);
     setEditIsActive(activeTemplate.is_active ?? true);
     setEditPurchaseMode(activeTemplate.applies_to_purchase_mode ?? "both");
     setEditTitleType(activeTemplate.applies_to_title_type ?? "any");
@@ -145,6 +195,36 @@ export default function DocumentTemplates() {
     enabled: detailOpen && !!activeTemplate && canRead,
   });
   const versions = versionsQuery.data ?? [];
+
+  const bindingsQuery = useQuery<TemplateBindingsResponse>({
+    queryKey: ["document-template-bindings", activeTemplate?.id],
+    queryFn: ({ signal }) => apiFetchJson(`/document-templates/${activeTemplate!.id}/bindings`, { signal }),
+    retry: false,
+    enabled: detailOpen && !!activeTemplate && canRead && detailTab === "bindings",
+  });
+
+  const applicabilityQuery = useQuery<TemplateApplicabilityResponse>({
+    queryKey: ["document-template-applicability", activeTemplate?.id],
+    queryFn: ({ signal }) => apiFetchJson(`/document-templates/${activeTemplate!.id}/applicability`, { signal }),
+    retry: false,
+    enabled: detailOpen && !!activeTemplate && canRead && detailTab === "applicability",
+  });
+
+  useEffect(() => {
+    if (!bindingsQuery.data) return;
+    if (Object.keys(bindingsDraft).length > 0) return;
+    const m: Record<string, DocumentTemplateBinding> = {};
+    for (const b of bindingsQuery.data.bindings ?? []) {
+      m[b.variableKey] = b;
+    }
+    setBindingsDraft(m);
+  }, [bindingsQuery.data, bindingsDraft]);
+
+  useEffect(() => {
+    if (!applicabilityQuery.data) return;
+    if (appDraft) return;
+    setAppDraft(applicabilityQuery.data.effective);
+  }, [applicabilityQuery.data, appDraft]);
 
   const deleteMutation = useMutation({
     mutationFn: (id: number) => apiFetchJson(`/document-templates/${id}`, { method: "DELETE" }),
@@ -194,6 +274,27 @@ export default function DocumentTemplates() {
       setVersionFile(null);
     },
     onError: (err) => toastError(toast, err, "Save draft failed"),
+  });
+
+  const saveBindingsMutation = useMutation({
+    mutationFn: (payload: { templateId: number; bindings: DocumentTemplateBinding[] }) =>
+      apiFetchJson(`/document-templates/${payload.templateId}/bindings`, { method: "PUT", body: JSON.stringify({ bindings: payload.bindings }) }),
+    onSuccess: async () => {
+      await qc.invalidateQueries({ queryKey: ["document-template-bindings", activeTemplate?.id] });
+      toast({ title: "Bindings saved" });
+    },
+    onError: (err) => toastError(toast, err, "Save bindings failed"),
+  });
+
+  const saveApplicabilityMutation = useMutation({
+    mutationFn: (payload: { templateId: number; patch: Record<string, unknown> }) =>
+      apiFetchJson(`/document-templates/${payload.templateId}/applicability`, { method: "PUT", body: JSON.stringify(payload.patch) }),
+    onSuccess: async () => {
+      await qc.invalidateQueries({ queryKey: ["document-template-applicability", activeTemplate?.id] });
+      await qc.invalidateQueries({ queryKey: ["document-templates"] });
+      toast({ title: "Applicability saved" });
+    },
+    onError: (err) => toastError(toast, err, "Save applicability failed"),
   });
 
   const publishVersionMutation = useMutation({
@@ -352,10 +453,12 @@ export default function DocumentTemplates() {
         <DialogContent className="sm:max-w-lg">
           <DialogHeader><DialogTitle>Template Details</DialogTitle></DialogHeader>
           {activeTemplate && (
-            <Tabs value={detailTab} onValueChange={(v) => setDetailTab(v === "versions" ? "versions" : "details")} className="w-full">
+            <Tabs value={detailTab} onValueChange={(v) => setDetailTab(v === "versions" ? "versions" : v === "bindings" ? "bindings" : v === "applicability" ? "applicability" : "details")} className="w-full">
               <TabsList className="mb-3">
                 <TabsTrigger value="details">Details</TabsTrigger>
                 <TabsTrigger value="versions">Versions</TabsTrigger>
+                <TabsTrigger value="bindings">Bindings</TabsTrigger>
+                <TabsTrigger value="applicability">Applicability</TabsTrigger>
               </TabsList>
 
               <TabsContent value="details">
@@ -629,6 +732,283 @@ export default function DocumentTemplates() {
                           </div>
                         );
                       })}
+                    </div>
+                  </div>
+                )}
+              </TabsContent>
+
+              <TabsContent value="bindings">
+                {bindingsQuery.isError ? (
+                  <QueryFallback title="Bindings unavailable" error={bindingsQuery.error} onRetry={() => bindingsQuery.refetch()} isRetrying={bindingsQuery.isFetching} />
+                ) : bindingsQuery.isLoading ? (
+                  <div className="text-slate-500 py-4">Loading bindings...</div>
+                ) : (
+                  <div className="space-y-3">
+                    <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
+                      <div className="text-sm font-medium text-slate-900">Detected placeholders</div>
+                      <div className="mt-1 text-xs text-slate-600">
+                        {(bindingsQuery.data?.placeholders ?? []).length === 0
+                          ? "No placeholders detected (or file is not DOCX)."
+                          : (bindingsQuery.data?.placeholders ?? []).join(", ")}
+                      </div>
+                    </div>
+
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-sm">
+                        <thead>
+                          <tr className="text-left text-xs text-slate-500">
+                            <th className="py-2 pr-3">Variable</th>
+                            <th className="py-2 pr-3">Mode</th>
+                            <th className="py-2 pr-3">Source path / Fixed</th>
+                            <th className="py-2 pr-3">Formatter</th>
+                            <th className="py-2 pr-3">Required</th>
+                            <th className="py-2 pr-3">Fallback</th>
+                            <th className="py-2 pr-3">Notes</th>
+                            <th className="py-2 text-right">Action</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {(() => {
+                            const vars = bindingsQuery.data?.variables?.length ? bindingsQuery.data.variables : [];
+                            const placeholders = bindingsQuery.data?.placeholders ?? [];
+                            const keys = Array.from(new Set<string>([...placeholders, ...vars.map((v) => v.key), ...Object.keys(bindingsDraft)])).sort((a, b) => a.localeCompare(b));
+                            return keys.map((key) => {
+                              const def = vars.find((v) => v.key === key);
+                              const b = bindingsDraft[key] ?? {
+                                variableKey: key,
+                                sourceMode: "registry_default" as const,
+                                sourcePath: def?.sourcePath ?? null,
+                                fixedValue: null,
+                                formatterOverride: null,
+                                isRequired: false,
+                                fallbackValue: null,
+                                notes: null,
+                              };
+                              const mode = b.sourceMode;
+                              return (
+                                <tr key={key} className="border-t border-slate-200 align-top">
+                                  <td className="py-2 pr-3 min-w-[160px]">
+                                    <div className="font-medium text-slate-900 break-words">{key}</div>
+                                    <div className="text-xs text-slate-500 break-words">{def?.label ?? ""}</div>
+                                  </td>
+                                  <td className="py-2 pr-3 min-w-[160px]">
+                                    <Select
+                                      value={mode}
+                                      onValueChange={(v) => {
+                                        const nextMode = (v as DocumentTemplateBinding["sourceMode"]) || "registry_default";
+                                        setBindingsDraft((prev) => ({ ...prev, [key]: { ...b, sourceMode: nextMode } }));
+                                      }}
+                                      disabled={!canUpdate}
+                                    >
+                                      <SelectTrigger>
+                                        <SelectValue />
+                                      </SelectTrigger>
+                                      <SelectContent>
+                                        <SelectItem value="registry_default">Registry default</SelectItem>
+                                        <SelectItem value="custom_path">Custom path</SelectItem>
+                                        <SelectItem value="fixed_value">Fixed value</SelectItem>
+                                      </SelectContent>
+                                    </Select>
+                                  </td>
+                                  <td className="py-2 pr-3 min-w-[220px]">
+                                    <Input
+                                      value={mode === "fixed_value" ? (b.fixedValue ?? "") : (b.sourcePath ?? "")}
+                                      onChange={(e) => {
+                                        const v = e.target.value;
+                                        setBindingsDraft((prev) => ({
+                                          ...prev,
+                                          [key]: mode === "fixed_value" ? { ...b, fixedValue: v } : { ...b, sourcePath: v },
+                                        }));
+                                      }}
+                                      placeholder={mode === "fixed_value" ? "e.g. RM 500,000.00" : "e.g. spa_purchaser1_name"}
+                                      disabled={!canUpdate}
+                                    />
+                                  </td>
+                                  <td className="py-2 pr-3 min-w-[140px]">
+                                    <Input
+                                      value={b.formatterOverride ?? ""}
+                                      onChange={(e) => setBindingsDraft((prev) => ({ ...prev, [key]: { ...b, formatterOverride: e.target.value || null } }))}
+                                      placeholder={def?.formatter ?? "e.g. currency"}
+                                      disabled={!canUpdate}
+                                    />
+                                  </td>
+                                  <td className="py-2 pr-3">
+                                    <Checkbox
+                                      checked={b.isRequired}
+                                      onCheckedChange={(v) => setBindingsDraft((prev) => ({ ...prev, [key]: { ...b, isRequired: Boolean(v) } }))}
+                                      disabled={!canUpdate}
+                                    />
+                                  </td>
+                                  <td className="py-2 pr-3 min-w-[140px]">
+                                    <Input
+                                      value={b.fallbackValue ?? ""}
+                                      onChange={(e) => setBindingsDraft((prev) => ({ ...prev, [key]: { ...b, fallbackValue: e.target.value || null } }))}
+                                      placeholder="(optional)"
+                                      disabled={!canUpdate}
+                                    />
+                                  </td>
+                                  <td className="py-2 pr-3 min-w-[160px]">
+                                    <Input
+                                      value={b.notes ?? ""}
+                                      onChange={(e) => setBindingsDraft((prev) => ({ ...prev, [key]: { ...b, notes: e.target.value || null } }))}
+                                      placeholder="(optional)"
+                                      disabled={!canUpdate}
+                                    />
+                                  </td>
+                                  <td className="py-2 text-right">
+                                    <Button
+                                      size="sm"
+                                      variant="outline"
+                                      onClick={() => {
+                                        setBindingsDraft((prev) => {
+                                          const next = { ...prev };
+                                          delete next[key];
+                                          return next;
+                                        });
+                                      }}
+                                      disabled={!canUpdate}
+                                    >
+                                      Clear
+                                    </Button>
+                                  </td>
+                                </tr>
+                              );
+                            });
+                          })()}
+                        </tbody>
+                      </table>
+                    </div>
+
+                    <div className="flex justify-end gap-2">
+                      <Button
+                        variant="outline"
+                        onClick={() => {
+                          if (!activeTemplate) return;
+                          const bindings = Object.values(bindingsDraft).map((b) => ({
+                            ...b,
+                            sourcePath: b.sourceMode === "fixed_value" ? null : (b.sourcePath ? b.sourcePath : null),
+                            fixedValue: b.sourceMode === "fixed_value" ? (b.fixedValue ?? "") : null,
+                          }));
+                          saveBindingsMutation.mutate({ templateId: activeTemplate.id, bindings });
+                        }}
+                        disabled={!canUpdate || saveBindingsMutation.isPending}
+                      >
+                        {saveBindingsMutation.isPending ? "Saving..." : "Save Bindings"}
+                      </Button>
+                    </div>
+                  </div>
+                )}
+              </TabsContent>
+
+              <TabsContent value="applicability">
+                {applicabilityQuery.isError ? (
+                  <QueryFallback title="Applicability unavailable" error={applicabilityQuery.error} onRetry={() => applicabilityQuery.refetch()} isRetrying={applicabilityQuery.isFetching} />
+                ) : applicabilityQuery.isLoading ? (
+                  <div className="text-slate-500 py-4">Loading applicability...</div>
+                ) : !appDraft ? (
+                  <div className="text-slate-500 py-4">No data.</div>
+                ) : (
+                  <div className="space-y-3">
+                    <div className="grid grid-cols-2 gap-3">
+                      <div className="space-y-1.5">
+                        <Label>Active</Label>
+                        <Select value={String(appDraft.isActive)} onValueChange={(v) => setAppDraft({ ...appDraft, isActive: v === "true" })} disabled={!canUpdate}>
+                          <SelectTrigger><SelectValue /></SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="true">Active</SelectItem>
+                            <SelectItem value="false">Inactive</SelectItem>
+                          </SelectContent>
+                        </Select>
+                      </div>
+                      <div className="space-y-1.5">
+                        <Label>Template capable</Label>
+                        <Select value={String(appDraft.isTemplateCapable)} onValueChange={(v) => setAppDraft({ ...appDraft, isTemplateCapable: v === "true" })} disabled={!canUpdate}>
+                          <SelectTrigger><SelectValue /></SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="true">Yes</SelectItem>
+                            <SelectItem value="false">No</SelectItem>
+                          </SelectContent>
+                        </Select>
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-3">
+                      <div className="space-y-1.5">
+                        <Label>Purchase mode</Label>
+                        <Select value={appDraft.purchaseMode ?? "both"} onValueChange={(v) => setAppDraft({ ...appDraft, purchaseMode: v })} disabled={!canUpdate}>
+                          <SelectTrigger><SelectValue /></SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="both">Both</SelectItem>
+                            <SelectItem value="cash">Cash</SelectItem>
+                            <SelectItem value="loan">Loan</SelectItem>
+                          </SelectContent>
+                        </Select>
+                      </div>
+                      <div className="space-y-1.5">
+                        <Label>Title type</Label>
+                        <Select value={appDraft.titleType ?? "any"} onValueChange={(v) => setAppDraft({ ...appDraft, titleType: v })} disabled={!canUpdate}>
+                          <SelectTrigger><SelectValue /></SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="any">Any</SelectItem>
+                            <SelectItem value="master">Master</SelectItem>
+                            <SelectItem value="strata">Strata</SelectItem>
+                            <SelectItem value="individual">Individual</SelectItem>
+                          </SelectContent>
+                        </Select>
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-3">
+                      <div className="space-y-1.5">
+                        <Label>Case type</Label>
+                        <Input value={appDraft.caseType ?? ""} onChange={(e) => setAppDraft({ ...appDraft, caseType: e.target.value || null })} placeholder="(optional)" disabled={!canUpdate} />
+                      </div>
+                      <div className="space-y-1.5">
+                        <Label>Project type</Label>
+                        <Input value={appDraft.projectType ?? ""} onChange={(e) => setAppDraft({ ...appDraft, projectType: e.target.value || null })} placeholder="(optional)" disabled={!canUpdate} />
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-3">
+                      <div className="space-y-1.5">
+                        <Label>Development condition</Label>
+                        <Input value={appDraft.developmentCondition ?? ""} onChange={(e) => setAppDraft({ ...appDraft, developmentCondition: e.target.value || null })} placeholder="(optional)" disabled={!canUpdate} />
+                      </div>
+                      <div className="space-y-1.5">
+                        <Label>Unit category</Label>
+                        <Input value={appDraft.unitCategory ?? ""} onChange={(e) => setAppDraft({ ...appDraft, unitCategory: e.target.value || null })} placeholder="(optional)" disabled={!canUpdate} />
+                      </div>
+                    </div>
+
+                    <div className="space-y-1.5">
+                      <Label>Title sub type</Label>
+                      <Input value={appDraft.titleSubType ?? ""} onChange={(e) => setAppDraft({ ...appDraft, titleSubType: e.target.value || null })} placeholder="(optional)" disabled={!canUpdate} />
+                    </div>
+
+                    <div className="flex justify-end gap-2">
+                      <Button
+                        variant="outline"
+                        onClick={() => {
+                          if (!activeTemplate) return;
+                          saveApplicabilityMutation.mutate({
+                            templateId: activeTemplate.id,
+                            patch: {
+                              isActive: appDraft.isActive,
+                              purchaseMode: appDraft.purchaseMode,
+                              titleType: appDraft.titleType,
+                              caseType: appDraft.caseType,
+                              projectType: appDraft.projectType,
+                              developmentCondition: appDraft.developmentCondition,
+                              unitCategory: appDraft.unitCategory,
+                              titleSubType: appDraft.titleSubType,
+                              isTemplateCapable: appDraft.isTemplateCapable,
+                            },
+                          });
+                        }}
+                        disabled={!canUpdate || saveApplicabilityMutation.isPending}
+                      >
+                        {saveApplicabilityMutation.isPending ? "Saving..." : "Save Applicability"}
+                      </Button>
                     </div>
                   </div>
                 )}

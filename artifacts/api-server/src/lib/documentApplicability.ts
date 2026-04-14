@@ -5,15 +5,24 @@ export type TemplateTitleTypeRule = "master" | "strata" | "individual" | "any";
 
 export type TemplateApplicabilityFields = {
   isActive: boolean;
+  isTemplateCapable?: boolean | null;
   appliesToPurchaseMode: string | null;
   appliesToTitleType: string | null;
   appliesToCaseType: string | null;
+  projectType?: string | null;
+  titleSubType?: string | null;
+  developmentCondition?: string | null;
+  unitCategory?: string | null;
 };
 
 export type CaseApplicabilityInputs = {
   purchaseMode: string | null;
   titleType: string | null;
   caseType: string | null;
+  projectType?: string | null;
+  titleSubType?: string | null;
+  developmentCondition?: string | null;
+  unitCategory?: string | null;
 };
 
 export type ApplicabilityResult = {
@@ -66,6 +75,10 @@ export function evaluateTemplateApplicability(
     return { applicable: false, reasons: ["Template is inactive"] };
   }
 
+  if (template.isTemplateCapable === false) {
+    return { applicable: false, reasons: ["Template is not template-capable"] };
+  }
+
   const pmRule = normalizeTemplatePurchaseModeRule(template.appliesToPurchaseMode);
   const pm = normalizePurchaseMode(input.purchaseMode);
   if (pmRule && pm) {
@@ -85,6 +98,38 @@ export function evaluateTemplateApplicability(
   if (caseTypeRule && caseType) {
     if (caseTypeRule.toLowerCase() !== caseType.toLowerCase()) {
       reasons.push(`Not applicable for case type: ${caseType}`);
+    }
+  }
+
+  const projectTypeRule = (template.projectType || "").trim();
+  const projectType = (input.projectType || "").trim();
+  if (projectTypeRule && projectType) {
+    if (projectTypeRule.toLowerCase() !== projectType.toLowerCase()) {
+      reasons.push(`Not applicable for project type: ${projectType}`);
+    }
+  }
+
+  const titleSubTypeRule = (template.titleSubType || "").trim();
+  const titleSubType = (input.titleSubType || "").trim();
+  if (titleSubTypeRule && titleSubType) {
+    if (titleSubTypeRule.toLowerCase() !== titleSubType.toLowerCase()) {
+      reasons.push(`Not applicable for title sub type: ${titleSubType}`);
+    }
+  }
+
+  const devCondRule = (template.developmentCondition || "").trim();
+  const devCond = (input.developmentCondition || "").trim();
+  if (devCondRule && devCond) {
+    if (devCondRule.toLowerCase() !== devCond.toLowerCase()) {
+      reasons.push(`Not applicable for development condition: ${devCond}`);
+    }
+  }
+
+  const unitCatRule = (template.unitCategory || "").trim();
+  const unitCat = (input.unitCategory || "").trim();
+  if (unitCatRule && unitCat) {
+    if (unitCatRule.toLowerCase() !== unitCat.toLowerCase()) {
+      reasons.push(`Not applicable for unit category: ${unitCat}`);
     }
   }
 

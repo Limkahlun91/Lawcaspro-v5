@@ -33,7 +33,7 @@ GRANT USAGE ON SCHEMA public TO app_user;
 GRANT SELECT, INSERT, UPDATE, DELETE ON
   audit_logs, case_billing_entries, case_communications, case_documents,
   case_tasks, cases, clients, communication_threads, credit_notes,
-  developers, document_templates, document_template_versions, document_generation_runs, document_batch_jobs, document_batch_job_items, firm_document_folders, firm_letterheads, firm_bank_accounts, invoices,
+  developers, document_templates, document_template_versions, document_generation_runs, document_batch_jobs, document_batch_job_items, document_variable_definitions, document_template_bindings, document_template_applicability_rules, firm_document_folders, firm_letterheads, firm_bank_accounts, invoices,
   ledger_entries, payment_vouchers, platform_documents, projects,
   quotations, receipts, roles, time_entries, users
 TO app_user;
@@ -96,6 +96,12 @@ ALTER TABLE document_batch_jobs ENABLE ROW LEVEL SECURITY;
 ALTER TABLE document_batch_jobs FORCE ROW LEVEL SECURITY;
 ALTER TABLE document_batch_job_items ENABLE ROW LEVEL SECURITY;
 ALTER TABLE document_batch_job_items FORCE ROW LEVEL SECURITY;
+ALTER TABLE document_variable_definitions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE document_variable_definitions FORCE ROW LEVEL SECURITY;
+ALTER TABLE document_template_bindings ENABLE ROW LEVEL SECURITY;
+ALTER TABLE document_template_bindings FORCE ROW LEVEL SECURITY;
+ALTER TABLE document_template_applicability_rules ENABLE ROW LEVEL SECURITY;
+ALTER TABLE document_template_applicability_rules FORCE ROW LEVEL SECURITY;
 ALTER TABLE firm_document_folders  ENABLE ROW LEVEL SECURITY;
 ALTER TABLE firm_document_folders  FORCE ROW LEVEL SECURITY;
 ALTER TABLE firm_letterheads       ENABLE ROW LEVEL SECURITY;
@@ -177,6 +183,8 @@ DROP POLICY IF EXISTS tenant_isolation ON document_template_versions;
 DROP POLICY IF EXISTS tenant_isolation ON document_generation_runs;
 DROP POLICY IF EXISTS tenant_isolation ON document_batch_jobs;
 DROP POLICY IF EXISTS tenant_isolation ON document_batch_job_items;
+DROP POLICY IF EXISTS tenant_isolation ON document_template_bindings;
+DROP POLICY IF EXISTS tenant_isolation ON document_template_applicability_rules;
 DROP POLICY IF EXISTS tenant_isolation ON firm_document_folders;
 DROP POLICY IF EXISTS tenant_isolation ON firm_letterheads;
 DROP POLICY IF EXISTS tenant_isolation ON firm_bank_accounts;
@@ -277,6 +285,36 @@ CREATE POLICY tenant_isolation ON document_batch_jobs FOR ALL TO PUBLIC
 CREATE POLICY tenant_isolation ON document_batch_job_items FOR ALL TO PUBLIC
   USING ((firm_id = NULLIF(current_setting('app.current_firm_id',true),'')::integer) OR current_setting('app.is_founder',true)='true')
   WITH CHECK ((firm_id = NULLIF(current_setting('app.current_firm_id',true),'')::integer) OR current_setting('app.is_founder',true)='true');
+
+DROP POLICY IF EXISTS variable_registry_read ON document_variable_definitions;
+DROP POLICY IF EXISTS variable_registry_manage ON document_variable_definitions;
+CREATE POLICY variable_registry_read ON document_variable_definitions FOR SELECT TO PUBLIC
+  USING (true);
+CREATE POLICY variable_registry_manage ON document_variable_definitions FOR ALL TO PUBLIC
+  USING (current_setting('app.is_founder',true)='true')
+  WITH CHECK (current_setting('app.is_founder',true)='true');
+
+CREATE POLICY tenant_isolation ON document_template_bindings FOR ALL TO PUBLIC
+  USING (
+    (firm_id = NULLIF(current_setting('app.current_firm_id',true),'')::integer)
+    OR firm_id IS NULL
+    OR current_setting('app.is_founder',true)='true'
+  )
+  WITH CHECK (
+    (firm_id = NULLIF(current_setting('app.current_firm_id',true),'')::integer)
+    OR (firm_id IS NULL AND current_setting('app.is_founder',true)='true')
+  );
+
+CREATE POLICY tenant_isolation ON document_template_applicability_rules FOR ALL TO PUBLIC
+  USING (
+    (firm_id = NULLIF(current_setting('app.current_firm_id',true),'')::integer)
+    OR firm_id IS NULL
+    OR current_setting('app.is_founder',true)='true'
+  )
+  WITH CHECK (
+    (firm_id = NULLIF(current_setting('app.current_firm_id',true),'')::integer)
+    OR (firm_id IS NULL AND current_setting('app.is_founder',true)='true')
+  );
 
 CREATE POLICY tenant_isolation ON firm_document_folders FOR ALL TO PUBLIC
   USING ((firm_id = NULLIF(current_setting('app.current_firm_id',true),'')::integer) OR current_setting('app.is_founder',true)='true')

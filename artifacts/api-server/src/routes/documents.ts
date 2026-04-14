@@ -2,8 +2,9 @@ import { Router, type IRouter } from "express";
 import { sql } from "drizzle-orm";
 import { db, documentTemplatesTable, caseDocumentsTable } from "@workspace/db";
 import { PRINT_ACTIONS, isLetterheadApplicableDocumentType, isMasterDocumentLetterLike } from "@workspace/documents-registry";
-import { requireAuth, requireFirmUser, requirePermission, writeAuditLog, type AuthRequest } from "../lib/auth";
+import { requireAuth, requireFirmUser, requireFounder, requirePermission, writeAuditLog, type AuthRequest } from "../lib/auth";
 import { logger } from "../lib/logger";
+import { withAuthSafeDb } from "../lib/auth-safe-db";
 import { getSupabaseStorageConfigError, ObjectNotFoundError, ObjectStorageService, SupabaseStorageService } from "../lib/objectStorage";
 import { Readable } from "stream";
 import { randomUUID } from "crypto";
@@ -17,6 +18,10 @@ import { evaluateTemplateReadiness, type TemplateReadinessInputs } from "../lib/
 import { buildGeneratedDownloadFileName } from "../lib/documentNaming";
 import { normalizeWorkflowDocumentKeyFromDb } from "../lib/caseWorkflowDocuments";
 import { LOAN_STAMPING_ITEM_KEYS, type LoanStampingItemKey } from "../lib/loanStamping";
+import { listDocumentVariables, resolveVariablesForTemplate, type PlaceholderWarning } from "../lib/documentVariables";
+import { getFirmTemplateBindings, getPlatformDocumentBindings, replaceFirmTemplateBindings, replacePlatformDocumentBindings } from "../lib/documentBindings";
+import { getFirmTemplateApplicabilityRules, getPlatformDocumentApplicabilityRules, upsertFirmTemplateApplicabilityRules, upsertPlatformDocumentApplicabilityRules } from "../lib/documentApplicabilityRules";
+import { runDocumentPreview } from "../lib/documentPreview";
 
 const router: IRouter = Router();
 const storage = new ObjectStorageService();
@@ -257,6 +262,38 @@ function detectDocxVariables(fileBytes: Buffer): string[] {
     while ((m = re.exec(xml))) {
       const k = (m[1] ?? "").trim();
       if (k) keys.add(k);
+    }
+  }
+  return Array.from(keys).sort((a, b) => a.localeCompare(b));
+}
+
+function placeholdersFromVariablesSnapshot(snapshot: unknown): string[] {
+  if (!snapshot || typeof snapshot !== "object") return [];
+  const rec = snapshot as Record<string, unknown>;
+  const keys = rec.keys;
+  if (!Array.isArray(keys)) return [];
+  return keys.map((k) => String(k)).filter(Boolean);
+}
+
+function extractPdfMappingPlaceholders(mappings: unknown): string[] {
+  if (!mappings || typeof mappings !== "object") return [];
+  const rec = mappings as Record<string, unknown>;
+  const pages = rec.pages;
+  if (!Array.isArray(pages)) return [];
+  const keys = new Set<string>();
+  const re = /\{\{\s*([^{}\s]+)\s*\}\}/g;
+  for (const p of pages) {
+    const pr = p && typeof p === "object" ? (p as Record<string, unknown>) : null;
+    const tbs = pr?.textBoxes;
+    if (!Array.isArray(tbs)) continue;
+    for (const tb of tbs) {
+      const tr = tb && typeof tb === "object" ? (tb as Record<string, unknown>) : null;
+      const content = typeof tr?.content === "string" ? tr.content : "";
+      let m: RegExpExecArray | null;
+      while ((m = re.exec(content))) {
+        const k = (m[1] ?? "").trim();
+        if (k) keys.add(k);
+      }
     }
   }
   return Array.from(keys).sort((a, b) => a.localeCompare(b));
@@ -1198,6 +1235,331 @@ router.patch("/document-templates/:templateId", requireAuth, requireFirmUser, re
   res.json(rows[0]);
 });
 
+router.get("/document-variables", requireAuth, requireFirmUser, requirePermission("documents", "read"), async (req: AuthRequest, res): Promise<void> => {
+  const r = getRlsDb(req, res);
+  if (!r) return;
+  const category = one((req.query as any).category);
+  const activeRaw = one((req.query as any).active);
+  const active =
+    activeRaw === undefined ? undefined
+    : activeRaw === "0" || activeRaw.toLowerCase() === "false" || activeRaw.toLowerCase() === "no" ? false
+    : true;
+  const vars = await listDocumentVariables(r, { category: category || undefined, active });
+  res.json(vars);
+});
+
+async function getFirmTemplatePlaceholders(r: DbConn, firmId: number, templateId: number): Promise<string[]> {
+  const rows = await queryRows(r, sql`
+    SELECT v.variables_snapshot, v.source_object_path, v.filename
+    FROM document_template_versions v
+    WHERE v.firm_id = ${firmId} AND v.template_id = ${templateId} AND v.status = 'published'
+    ORDER BY v.published_at DESC NULLS LAST, v.version_no DESC
+    LIMIT 1
+  `);
+  const v = rows[0];
+  const fromSnap = placeholdersFromVariablesSnapshot(v?.variables_snapshot);
+  if (fromSnap.length > 0) return fromSnap;
+  const obj = typeof v?.source_object_path === "string" ? String(v.source_object_path) : "";
+  const filename = typeof v?.filename === "string" ? String(v.filename) : "";
+  if (obj && fileExtensionFromName(filename) === "docx") {
+    try {
+      const bytes = await downloadPrivateObjectBytes(obj);
+      return detectDocxVariables(bytes);
+    } catch {
+      return [];
+    }
+  }
+  return [];
+}
+
+async function getPlatformDocPlaceholders(r: DbConn, firmId: number | null, docId: number): Promise<string[]> {
+  const docRows = await queryRows(r, sql`SELECT * FROM platform_documents WHERE id = ${docId} AND (firm_id IS NULL OR firm_id = ${firmId ?? null})`);
+  const d = docRows[0];
+  if (!d) return [];
+  const fileName = typeof d.file_name === "string" ? String(d.file_name) : "";
+  const ext = fileExtensionFromName(fileName);
+  if (ext === "docx") {
+    const obj = typeof d.object_path === "string" ? String(d.object_path) : "";
+    if (!obj) return [];
+    try {
+      const bytes = await downloadPrivateObjectBytes(obj);
+      return detectDocxVariables(bytes);
+    } catch {
+      return [];
+    }
+  }
+  if (ext === "pdf") {
+    return extractPdfMappingPlaceholders((d as any).pdf_mappings);
+  }
+  return [];
+}
+
+router.get("/document-templates/:templateId/bindings", requireAuth, requireFirmUser, requirePermission("documents", "read"), async (req: AuthRequest, res): Promise<void> => {
+  const r = getRlsDb(req, res);
+  if (!r) return;
+  const templateIdStr = one((req.params as any).templateId);
+  const templateId = templateIdStr ? parseInt(templateIdStr, 10) : NaN;
+  if (Number.isNaN(templateId)) {
+    res.status(400).json({ error: "Invalid template ID" });
+    return;
+  }
+  const tplRows = await queryRows(r, sql`SELECT id, firm_id FROM document_templates WHERE id = ${templateId} AND firm_id = ${req.firmId!}`);
+  if (!tplRows[0]) {
+    res.status(404).json({ error: "Template not found" });
+    return;
+  }
+
+  const [vars, bindings, placeholders] = await Promise.all([
+    listDocumentVariables(r, { active: true }),
+    getFirmTemplateBindings(r, req.firmId!, templateId),
+    getFirmTemplatePlaceholders(r, req.firmId!, templateId),
+  ]);
+  res.json({ placeholders, variables: vars, bindings });
+});
+
+router.put("/document-templates/:templateId/bindings", requireAuth, requireFirmUser, requirePermission("documents", "update"), async (req: AuthRequest, res): Promise<void> => {
+  const r = getRlsDb(req, res);
+  if (!r) return;
+  const templateIdStr = one((req.params as any).templateId);
+  const templateId = templateIdStr ? parseInt(templateIdStr, 10) : NaN;
+  if (Number.isNaN(templateId)) {
+    res.status(400).json({ error: "Invalid template ID" });
+    return;
+  }
+  const tplRows = await queryRows(r, sql`SELECT id FROM document_templates WHERE id = ${templateId} AND firm_id = ${req.firmId!}`);
+  if (!tplRows[0]) {
+    res.status(404).json({ error: "Template not found" });
+    return;
+  }
+  const body = req.body as Record<string, unknown>;
+  const list = Array.isArray(body.bindings) ? body.bindings : [];
+  const normalized = list
+    .map((x) => (x && typeof x === "object" ? (x as Record<string, unknown>) : null))
+    .filter((x): x is Record<string, unknown> => !!x)
+    .map((x) => ({
+      variableKey: String(x.variableKey ?? x.variable_key ?? "").trim(),
+      sourceMode: (String(x.sourceMode ?? x.source_mode ?? "registry_default").trim() as "registry_default" | "custom_path" | "fixed_value"),
+      sourcePath: typeof (x.sourcePath ?? x.source_path) === "string" ? String(x.sourcePath ?? x.source_path).trim() || null : null,
+      fixedValue: typeof (x.fixedValue ?? x.fixed_value) === "string" ? String(x.fixedValue ?? x.fixed_value) : null,
+      formatterOverride: typeof (x.formatterOverride ?? x.formatter_override) === "string" ? String(x.formatterOverride ?? x.formatter_override).trim() || null : null,
+      isRequired: Boolean(x.isRequired ?? x.is_required ?? false),
+      fallbackValue: typeof (x.fallbackValue ?? x.fallback_value) === "string" ? String(x.fallbackValue ?? x.fallback_value) : null,
+      notes: typeof x.notes === "string" ? x.notes : null,
+    }))
+    .filter((b) => b.variableKey.length > 0);
+
+  await replaceFirmTemplateBindings(r, req.firmId!, templateId, normalized);
+  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.template.bindings.update", entityType: "document_template", entityId: templateId, detail: `count=${normalized.length}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+  const bindings = await getFirmTemplateBindings(r, req.firmId!, templateId);
+  res.json({ bindings });
+});
+
+router.get("/platform/documents/:documentId/bindings", requireAuth, requireFounder, async (req: AuthRequest, res): Promise<void> => {
+  const documentIdStr = one((req.params as any).documentId);
+  const documentId = documentIdStr ? parseInt(documentIdStr, 10) : NaN;
+  if (Number.isNaN(documentId)) {
+    res.status(400).json({ error: "Invalid document ID" });
+    return;
+  }
+  const result = await withAuthSafeDb(async (authDb) => {
+    const doc = await queryRows(authDb, sql`SELECT id FROM platform_documents WHERE id = ${documentId}`);
+    if (!doc[0]) return { status: 404 as const, body: { error: "Document not found" } };
+    const [vars, bindings, placeholders] = await Promise.all([
+      listDocumentVariables(authDb, { active: true }),
+      getPlatformDocumentBindings(authDb, null, documentId),
+      getPlatformDocPlaceholders(authDb, null, documentId),
+    ]);
+    return { status: 200 as const, body: { placeholders, variables: vars, bindings } };
+  }, { route: req.path, userId: req.userId ?? null });
+  res.status(result.status).json(result.body);
+});
+
+router.put("/platform/documents/:documentId/bindings", requireAuth, requireFounder, async (req: AuthRequest, res): Promise<void> => {
+  const documentIdStr = one((req.params as any).documentId);
+  const documentId = documentIdStr ? parseInt(documentIdStr, 10) : NaN;
+  if (Number.isNaN(documentId)) {
+    res.status(400).json({ error: "Invalid document ID" });
+    return;
+  }
+  const body = req.body as Record<string, unknown>;
+  const list = Array.isArray(body.bindings) ? body.bindings : [];
+  const normalized = list
+    .map((x) => (x && typeof x === "object" ? (x as Record<string, unknown>) : null))
+    .filter((x): x is Record<string, unknown> => !!x)
+    .map((x) => ({
+      variableKey: String(x.variableKey ?? x.variable_key ?? "").trim(),
+      sourceMode: (String(x.sourceMode ?? x.source_mode ?? "registry_default").trim() as "registry_default" | "custom_path" | "fixed_value"),
+      sourcePath: typeof (x.sourcePath ?? x.source_path) === "string" ? String(x.sourcePath ?? x.source_path).trim() || null : null,
+      fixedValue: typeof (x.fixedValue ?? x.fixed_value) === "string" ? String(x.fixedValue ?? x.fixed_value) : null,
+      formatterOverride: typeof (x.formatterOverride ?? x.formatter_override) === "string" ? String(x.formatterOverride ?? x.formatter_override).trim() || null : null,
+      isRequired: Boolean(x.isRequired ?? x.is_required ?? false),
+      fallbackValue: typeof (x.fallbackValue ?? x.fallback_value) === "string" ? String(x.fallbackValue ?? x.fallback_value) : null,
+      notes: typeof x.notes === "string" ? x.notes : null,
+    }))
+    .filter((b) => b.variableKey.length > 0);
+
+  const result = await withAuthSafeDb(async (authDb) => {
+    const doc = await queryRows(authDb, sql`SELECT id FROM platform_documents WHERE id = ${documentId}`);
+    if (!doc[0]) return { status: 404 as const, body: { error: "Document not found" } };
+    await replacePlatformDocumentBindings(authDb, null, documentId, normalized);
+    await writeAuditLog({ actorId: req.userId, actorType: req.userType, action: "documents.template.bindings.update", entityType: "platform_document", entityId: documentId, detail: `scope=global count=${normalized.length}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] }, { db: authDb });
+    const bindings = await getPlatformDocumentBindings(authDb, null, documentId);
+    return { status: 200 as const, body: { bindings } };
+  }, { route: req.path, userId: req.userId ?? null });
+  res.status(result.status).json(result.body);
+});
+
+router.get("/document-templates/:templateId/applicability", requireAuth, requireFirmUser, requirePermission("documents", "read"), async (req: AuthRequest, res): Promise<void> => {
+  const r = getRlsDb(req, res);
+  if (!r) return;
+  const templateIdStr = one((req.params as any).templateId);
+  const templateId = templateIdStr ? parseInt(templateIdStr, 10) : NaN;
+  if (Number.isNaN(templateId)) {
+    res.status(400).json({ error: "Invalid template ID" });
+    return;
+  }
+  const tplRows = await queryRows(r, sql`SELECT * FROM document_templates WHERE id = ${templateId} AND firm_id = ${req.firmId!}`);
+  const tpl = tplRows[0];
+  if (!tpl) {
+    res.status(404).json({ error: "Template not found" });
+    return;
+  }
+  const rules = await getFirmTemplateApplicabilityRules(r, req.firmId!, templateId);
+  res.json({
+    template: tpl,
+    rules,
+    effective: {
+      isActive: rules?.isActive ?? Boolean((tpl as any).is_active ?? true),
+      purchaseMode: rules?.purchaseMode ?? ((tpl as any).applies_to_purchase_mode ?? null),
+      titleType: rules?.titleType ?? ((tpl as any).applies_to_title_type ?? "any"),
+      caseType: (tpl as any).applies_to_case_type ?? null,
+      projectType: rules?.projectType ?? null,
+      titleSubType: rules?.titleSubType ?? null,
+      developmentCondition: rules?.developmentCondition ?? null,
+      unitCategory: rules?.unitCategory ?? null,
+      isTemplateCapable: rules?.isTemplateCapable ?? Boolean((tpl as any).is_template_capable ?? true),
+    },
+  });
+});
+
+router.put("/document-templates/:templateId/applicability", requireAuth, requireFirmUser, requirePermission("documents", "update"), async (req: AuthRequest, res): Promise<void> => {
+  const r = getRlsDb(req, res);
+  if (!r) return;
+  const templateIdStr = one((req.params as any).templateId);
+  const templateId = templateIdStr ? parseInt(templateIdStr, 10) : NaN;
+  if (Number.isNaN(templateId)) {
+    res.status(400).json({ error: "Invalid template ID" });
+    return;
+  }
+  const tplRows = await queryRows(r, sql`SELECT * FROM document_templates WHERE id = ${templateId} AND firm_id = ${req.firmId!}`);
+  const tpl = tplRows[0];
+  if (!tpl) {
+    res.status(404).json({ error: "Template not found" });
+    return;
+  }
+  const body = req.body as Record<string, unknown>;
+  const isActive = Object.prototype.hasOwnProperty.call(body, "isActive") ? Boolean(body.isActive) : undefined;
+  const purchaseMode = typeof body.purchaseMode === "string" ? body.purchaseMode : undefined;
+  const titleType = typeof body.titleType === "string" ? body.titleType : undefined;
+  const caseType = typeof body.caseType === "string" ? body.caseType : undefined;
+  const projectType = typeof body.projectType === "string" ? body.projectType : undefined;
+  const titleSubType = typeof body.titleSubType === "string" ? body.titleSubType : undefined;
+  const developmentCondition = typeof body.developmentCondition === "string" ? body.developmentCondition : undefined;
+  const unitCategory = typeof body.unitCategory === "string" ? body.unitCategory : undefined;
+  const isTemplateCapable = Object.prototype.hasOwnProperty.call(body, "isTemplateCapable") ? Boolean(body.isTemplateCapable) : undefined;
+
+  await queryRows(r, sql`
+    UPDATE document_templates
+    SET
+      is_active = COALESCE(${isActive as any}, is_active),
+      applies_to_purchase_mode = COALESCE(${purchaseMode ?? null}, applies_to_purchase_mode),
+      applies_to_title_type = COALESCE(${titleType ?? null}, applies_to_title_type),
+      applies_to_case_type = COALESCE(${caseType ?? null}, applies_to_case_type),
+      is_template_capable = COALESCE(${isTemplateCapable as any}, is_template_capable),
+      updated_at = now()
+    WHERE id = ${templateId} AND firm_id = ${req.firmId!}
+  `);
+
+  await upsertFirmTemplateApplicabilityRules(r, req.firmId!, templateId, {
+    isActive: isActive ?? null,
+    purchaseMode: purchaseMode ?? null,
+    titleType: titleType ?? null,
+    titleSubType: titleSubType ?? null,
+    projectType: projectType ?? null,
+    developmentCondition: developmentCondition ?? null,
+    unitCategory: unitCategory ?? null,
+    isTemplateCapable: isTemplateCapable ?? null,
+  });
+
+  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.template.applicability.update", entityType: "document_template", entityId: templateId, detail: "updated", ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+  const rules = await getFirmTemplateApplicabilityRules(r, req.firmId!, templateId);
+  res.json({ ok: true, rules });
+});
+
+router.get("/platform/documents/:documentId/applicability", requireAuth, requireFounder, async (req: AuthRequest, res): Promise<void> => {
+  const documentIdStr = one((req.params as any).documentId);
+  const documentId = documentIdStr ? parseInt(documentIdStr, 10) : NaN;
+  if (Number.isNaN(documentId)) {
+    res.status(400).json({ error: "Invalid document ID" });
+    return;
+  }
+  const result = await withAuthSafeDb(async (authDb) => {
+    const doc = await queryRows(authDb, sql`SELECT * FROM platform_documents WHERE id = ${documentId}`);
+    if (!doc[0]) return { status: 404 as const, body: { error: "Document not found" } };
+    const rules = await getPlatformDocumentApplicabilityRules(authDb, null, documentId);
+    return { status: 200 as const, body: { document: doc[0], rules } };
+  }, { route: req.path, userId: req.userId ?? null });
+  res.status(result.status).json(result.body);
+});
+
+router.put("/platform/documents/:documentId/applicability", requireAuth, requireFounder, async (req: AuthRequest, res): Promise<void> => {
+  const documentIdStr = one((req.params as any).documentId);
+  const documentId = documentIdStr ? parseInt(documentIdStr, 10) : NaN;
+  if (Number.isNaN(documentId)) {
+    res.status(400).json({ error: "Invalid document ID" });
+    return;
+  }
+  const body = req.body as Record<string, unknown>;
+  const isActive = Object.prototype.hasOwnProperty.call(body, "isActive") ? Boolean(body.isActive) : undefined;
+  const purchaseMode = typeof body.purchaseMode === "string" ? body.purchaseMode : undefined;
+  const titleType = typeof body.titleType === "string" ? body.titleType : undefined;
+  const caseType = typeof body.caseType === "string" ? body.caseType : undefined;
+  const projectType = typeof body.projectType === "string" ? body.projectType : undefined;
+  const titleSubType = typeof body.titleSubType === "string" ? body.titleSubType : undefined;
+  const developmentCondition = typeof body.developmentCondition === "string" ? body.developmentCondition : undefined;
+  const unitCategory = typeof body.unitCategory === "string" ? body.unitCategory : undefined;
+  const isTemplateCapable = Object.prototype.hasOwnProperty.call(body, "isTemplateCapable") ? Boolean(body.isTemplateCapable) : undefined;
+
+  const result = await withAuthSafeDb(async (authDb) => {
+    const doc = await queryRows(authDb, sql`SELECT * FROM platform_documents WHERE id = ${documentId}`);
+    if (!doc[0]) return { status: 404 as const, body: { error: "Document not found" } };
+    await queryRows(authDb, sql`
+      UPDATE platform_documents
+      SET
+        is_active = COALESCE(${isActive as any}, is_active),
+        applies_to_purchase_mode = COALESCE(${purchaseMode ?? null}, applies_to_purchase_mode),
+        applies_to_title_type = COALESCE(${titleType ?? null}, applies_to_title_type),
+        applies_to_case_type = COALESCE(${caseType ?? null}, applies_to_case_type),
+        is_template_capable = COALESCE(${isTemplateCapable as any}, is_template_capable)
+      WHERE id = ${documentId}
+    `);
+    await upsertPlatformDocumentApplicabilityRules(authDb, null, documentId, {
+      isActive: isActive ?? null,
+      purchaseMode: purchaseMode ?? null,
+      titleType: titleType ?? null,
+      titleSubType: titleSubType ?? null,
+      projectType: projectType ?? null,
+      developmentCondition: developmentCondition ?? null,
+      unitCategory: unitCategory ?? null,
+      isTemplateCapable: isTemplateCapable ?? null,
+    });
+    await writeAuditLog({ actorId: req.userId, actorType: req.userType, action: "documents.template.applicability.update", entityType: "platform_document", entityId: documentId, detail: "scope=global updated", ipAddress: req.ip, userAgent: req.headers["user-agent"] }, { db: authDb });
+    const rules = await getPlatformDocumentApplicabilityRules(authDb, null, documentId);
+    return { status: 200 as const, body: { ok: true, rules } };
+  }, { route: req.path, userId: req.userId ?? null });
+  res.status(result.status).json(result.body);
+});
+
 router.get("/document-templates/:templateId/versions", requireAuth, requireFirmUser, requirePermission("documents", "read"), async (req: AuthRequest, res): Promise<void> => {
   const r = getRlsDb(req, res);
   if (!r) return;
@@ -2004,7 +2366,8 @@ router.get("/cases/:caseId/documents/checklist", requireAuth, requireFirmUser, r
     return;
   }
 
-  const includeAll = truthy((req.query as any).includeAll);
+  const includeAllRequested = truthy((req.query as any).includeAll);
+  const includeAll = includeAllRequested ? await canBypassApplicability(r, req.firmId!, req.roleId) : false;
 
   const context = await buildCaseContext(r, caseId, req.firmId!);
   if (!context) {
@@ -2072,6 +2435,34 @@ router.get("/cases/:caseId/documents/checklist", requireAuth, requireFirmUser, r
     ORDER BY document_group ASC, sort_order ASC, name ASC
   `);
 
+  const firmTemplateIds = firmTemplates.map((t) => Number((t as any).id)).filter((id) => Number.isFinite(id));
+  const firmRulesRows = firmTemplateIds.length === 0 ? [] : await queryRows(r, sql`
+    SELECT *
+    FROM document_template_applicability_rules
+    WHERE firm_id = ${req.firmId!}
+      AND template_id IN (${sql.join(firmTemplateIds.map((id) => sql`${id}`), sql`, `)})
+  `);
+  const firmRulesById = new Map<number, Record<string, unknown>>();
+  for (const row of firmRulesRows) {
+    const tid = typeof row.template_id === "number" ? Number(row.template_id) : null;
+    if (tid) firmRulesById.set(tid, row);
+  }
+
+  const masterIds = masterTemplates.map((t) => Number((t as any).id)).filter((id) => Number.isFinite(id));
+  const masterRulesRows = masterIds.length === 0 ? [] : await queryRows(r, sql`
+    SELECT *
+    FROM document_template_applicability_rules
+    WHERE platform_document_id IN (${sql.join(masterIds.map((id) => sql`${id}`), sql`, `)})
+      AND (firm_id = ${req.firmId!} OR firm_id IS NULL)
+    ORDER BY firm_id DESC NULLS LAST
+  `);
+  const masterRulesById = new Map<number, Record<string, unknown>>();
+  for (const row of masterRulesRows) {
+    const pid = typeof row.platform_document_id === "number" ? Number(row.platform_document_id) : null;
+    if (!pid) continue;
+    if (!masterRulesById.has(pid)) masterRulesById.set(pid, row);
+  }
+
   const purchaseMode = normalizePurchaseMode(String((context as any).purchase_mode ?? "")) ?? null;
   const titleType = normalizeTitleType(String((context as any).title_type ?? "")) ?? null;
   const caseType = typeof (context as any).case_type === "string" ? String((context as any).case_type) : null;
@@ -2133,12 +2524,27 @@ router.get("/cases/:caseId/documents/checklist", requireAuth, requireFirmUser, r
   for (const t of firmTemplates) {
     const templateId = Number((t as any).id);
     const documentGroup = String((t as any).document_group ?? "Others");
+    const extra = firmRulesById.get(templateId) ?? null;
     const app = evaluateTemplateApplicability({
-      isActive: Boolean((t as any).is_active ?? true),
-      appliesToPurchaseMode: (t as any).applies_to_purchase_mode ? String((t as any).applies_to_purchase_mode) : null,
-      appliesToTitleType: (t as any).applies_to_title_type ? String((t as any).applies_to_title_type) : null,
+      isActive: extra && typeof extra.is_active === "boolean" ? Boolean(extra.is_active) : Boolean((t as any).is_active ?? true),
+      isTemplateCapable: extra && typeof extra.is_template_capable === "boolean" ? Boolean(extra.is_template_capable) : Boolean((t as any).is_template_capable ?? true),
+      appliesToPurchaseMode: extra && typeof extra.purchase_mode === "string" ? String(extra.purchase_mode) : ((t as any).applies_to_purchase_mode ? String((t as any).applies_to_purchase_mode) : null),
+      appliesToTitleType: extra && typeof extra.title_type === "string" ? String(extra.title_type) : ((t as any).applies_to_title_type ? String((t as any).applies_to_title_type) : null),
       appliesToCaseType: (t as any).applies_to_case_type ? String((t as any).applies_to_case_type) : null,
-    }, { purchaseMode: (context as any).purchase_mode ?? null, titleType: (context as any).title_type ?? null, caseType });
+      projectType: extra && typeof extra.project_type === "string" ? String(extra.project_type) : null,
+      titleSubType: extra && typeof extra.title_sub_type === "string" ? String(extra.title_sub_type) : null,
+      developmentCondition: extra && typeof extra.development_condition === "string" ? String(extra.development_condition) : null,
+      unitCategory: extra && typeof extra.unit_category === "string" ? String(extra.unit_category) : null,
+    }, {
+      purchaseMode: (context as any).purchase_mode ?? null,
+      titleType: (context as any).title_type ?? null,
+      caseType,
+      projectType: (context as any).project_type ?? null,
+      developmentCondition: (context as any).project_development_condition ?? null,
+      unitCategory: (context as any).unit_category ?? null,
+      titleSubType: (context as any).title_sub_type ?? null,
+    });
+    if (!includeAll && !app.applicable) continue;
     const ready = app.applicable ? evaluateTemplateReadiness({ documentGroup, input: readinessInput }) : { status: "ready", missing: [] };
     items.push({
       source: "firm",
@@ -2159,12 +2565,27 @@ router.get("/cases/:caseId/documents/checklist", requireAuth, requireFirmUser, r
   for (const t of masterTemplates) {
     const templateId = Number((t as any).id);
     const documentGroup = String((t as any).document_group ?? (t as any).category ?? "Others");
+    const extra = masterRulesById.get(templateId) ?? null;
     const app = evaluateTemplateApplicability({
-      isActive: Boolean((t as any).is_active ?? true),
-      appliesToPurchaseMode: (t as any).applies_to_purchase_mode ? String((t as any).applies_to_purchase_mode) : null,
-      appliesToTitleType: (t as any).applies_to_title_type ? String((t as any).applies_to_title_type) : null,
+      isActive: extra && typeof extra.is_active === "boolean" ? Boolean(extra.is_active) : Boolean((t as any).is_active ?? true),
+      isTemplateCapable: extra && typeof extra.is_template_capable === "boolean" ? Boolean(extra.is_template_capable) : Boolean((t as any).is_template_capable ?? true),
+      appliesToPurchaseMode: extra && typeof extra.purchase_mode === "string" ? String(extra.purchase_mode) : ((t as any).applies_to_purchase_mode ? String((t as any).applies_to_purchase_mode) : null),
+      appliesToTitleType: extra && typeof extra.title_type === "string" ? String(extra.title_type) : ((t as any).applies_to_title_type ? String((t as any).applies_to_title_type) : null),
       appliesToCaseType: (t as any).applies_to_case_type ? String((t as any).applies_to_case_type) : null,
-    }, { purchaseMode: (context as any).purchase_mode ?? null, titleType: (context as any).title_type ?? null, caseType });
+      projectType: extra && typeof extra.project_type === "string" ? String(extra.project_type) : null,
+      titleSubType: extra && typeof extra.title_sub_type === "string" ? String(extra.title_sub_type) : null,
+      developmentCondition: extra && typeof extra.development_condition === "string" ? String(extra.development_condition) : null,
+      unitCategory: extra && typeof extra.unit_category === "string" ? String(extra.unit_category) : null,
+    }, {
+      purchaseMode: (context as any).purchase_mode ?? null,
+      titleType: (context as any).title_type ?? null,
+      caseType,
+      projectType: (context as any).project_type ?? null,
+      developmentCondition: (context as any).project_development_condition ?? null,
+      unitCategory: (context as any).unit_category ?? null,
+      titleSubType: (context as any).title_sub_type ?? null,
+    });
+    if (!includeAll && !app.applicable) continue;
     const ready = app.applicable ? evaluateTemplateReadiness({ documentGroup, input: readinessInput }) : { status: "ready", missing: [] };
     items.push({
       source: "master",
@@ -2319,6 +2740,7 @@ async function generateFirmDocument({
   documentName,
   letterheadId,
   runId,
+  bypassApplicability,
 }: {
   r: DbConn;
   firmId: number;
@@ -2331,6 +2753,7 @@ async function generateFirmDocument({
   documentName?: string;
   letterheadId?: number | null;
   runId: number;
+  bypassApplicability?: boolean;
 }): Promise<{ caseDocument: Record<string, unknown>; caseDocumentId: number | null; templateVersionId: number | null; checklistSnapshot: unknown; readinessSnapshot: unknown; renderedVars: unknown; }> {
   const templateRows = await queryRows(r, sql`SELECT * FROM document_templates WHERE id = ${templateId} AND firm_id = ${firmId}`);
   const template = templateRows[0];
@@ -2342,17 +2765,29 @@ async function generateFirmDocument({
   const context = await buildCaseContext(r, caseId, firmId);
   if (!context) throw new DocumentGenerationError(404, "CASE_NOT_FOUND", "Case not found");
 
+  const extraRules = await getFirmTemplateApplicabilityRules(r, firmId, templateId);
   const applicability = evaluateTemplateApplicability({
-    isActive: Boolean((template as any).is_active ?? true),
-    appliesToPurchaseMode: (template as any).applies_to_purchase_mode ? String((template as any).applies_to_purchase_mode) : null,
-    appliesToTitleType: (template as any).applies_to_title_type ? String((template as any).applies_to_title_type) : null,
+    isActive: extraRules?.isActive ?? Boolean((template as any).is_active ?? true),
+    isTemplateCapable: extraRules?.isTemplateCapable ?? Boolean((template as any).is_template_capable ?? true),
+    appliesToPurchaseMode: extraRules?.purchaseMode ?? ((template as any).applies_to_purchase_mode ? String((template as any).applies_to_purchase_mode) : null),
+    appliesToTitleType: extraRules?.titleType ?? ((template as any).applies_to_title_type ? String((template as any).applies_to_title_type) : null),
     appliesToCaseType: (template as any).applies_to_case_type ? String((template as any).applies_to_case_type) : null,
+    projectType: extraRules?.projectType ?? null,
+    titleSubType: extraRules?.titleSubType ?? null,
+    developmentCondition: extraRules?.developmentCondition ?? null,
+    unitCategory: extraRules?.unitCategory ?? null,
   }, {
     purchaseMode: (context as any).purchase_mode ?? null,
     titleType: (context as any).title_type ?? null,
     caseType: (context as any).case_type ?? null,
+    projectType: (context as any).project_type ?? null,
+    developmentCondition: (context as any).project_development_condition ?? null,
+    unitCategory: (context as any).unit_category ?? null,
+    titleSubType: (context as any).title_sub_type ?? null,
   });
-  if (!applicability.applicable) throw new DocumentGenerationError(409, "TEMPLATE_NOT_APPLICABLE", "Template not applicable", { reasons: applicability.reasons });
+  if (!applicability.applicable && !bypassApplicability) {
+    throw new DocumentGenerationError(422, "TEMPLATE_APPLICABILITY_BLOCKED", "Template blocked by applicability", { reasons: applicability.reasons });
+  }
 
   const wfDocs = (await tableExists(r, "public.case_workflow_documents"))
     ? await queryRows(r, sql`
@@ -2421,10 +2856,22 @@ async function generateFirmDocument({
   if (!templateObjectPath) throw new DocumentGenerationError(404, "TEMPLATE_FILE_MISSING", "Template file missing");
 
   const fileContents = await downloadPrivateObjectBytes(templateObjectPath);
+  const placeholders = placeholdersFromVariablesSnapshot((version as any)?.variables_snapshot);
+  const effectivePlaceholders = placeholders.length > 0 ? placeholders : detectDocxVariables(fileContents);
+  const preview = await runDocumentPreview(r, {
+    firmId,
+    caseContext: context,
+    templateRef: { kind: "firm", templateId },
+    placeholders: effectivePlaceholders,
+    overrides: null,
+  });
+  if (preview.usedMode === "bindings" && preview.missingRequiredVariables.length > 0) {
+    throw new DocumentGenerationError(422, "TEMPLATE_BINDING_MISSING", "Missing required variables", { missingRequiredVariables: preview.missingRequiredVariables });
+  }
   const zip = new PizZip(fileContents);
   const doc = new Docxtemplater(zip, { paragraphLoop: true, linebreaks: true });
   try {
-    doc.render(context);
+    doc.render(preview.usedMode === "bindings" ? preview.resolvedVariables : context);
   } catch {
     throw new DocumentGenerationError(422, "TEMPLATE_RENDER_FAILED", "Template render failed");
   }
@@ -2489,13 +2936,16 @@ async function generateFirmDocument({
     ? Number((created as any).id)
     : null;
   await writeAuditLog({ firmId, actorId, actorType, action: "documents.case.generate", entityType: "case_document", entityId: createdId ?? undefined, detail: `caseId=${caseId} templateId=${templateId} name=${docName} letterhead=${isLetterLike ? (usedLetterheadId ?? "default") : "n/a"}`, ipAddress, userAgent });
+  if (preview.usedMode === "bindings") {
+    await writeAuditLog({ firmId, actorId, actorType, action: "documents.generate.binding_used", entityType: "case_document", entityId: createdId ?? undefined, detail: `caseId=${caseId} templateId=${templateId} placeholders=${effectivePlaceholders.length} missing=${preview.missingRequiredVariables.length}`, ipAddress, userAgent });
+  }
   return {
     caseDocument: created,
     caseDocumentId: createdId,
     templateVersionId,
-    checklistSnapshot: { applicability },
+    checklistSnapshot: { applicability, bindingMode: preview.usedMode, placeholderWarnings: preview.placeholderWarnings },
     readinessSnapshot: { readiness },
-    renderedVars: context,
+    renderedVars: preview.usedMode === "bindings" ? preview.resolvedVariables : context,
   };
 }
 
@@ -2511,6 +2961,7 @@ async function generateMasterDocument({
   documentName,
   letterheadId,
   runId,
+  bypassApplicability,
 }: {
   r: DbConn;
   firmId: number;
@@ -2523,6 +2974,7 @@ async function generateMasterDocument({
   documentName?: string;
   letterheadId?: number | null;
   runId: number;
+  bypassApplicability?: boolean;
 }): Promise<{ caseDocument: Record<string, unknown>; caseDocumentId: number | null; templateVersionId: number | null; checklistSnapshot: unknown; readinessSnapshot: unknown; renderedVars: unknown; renderMode: "docx" | "pdf" }> {
   const docRows2 = await queryRows(r, sql`SELECT * FROM platform_documents WHERE id = ${masterDocId} AND (firm_id IS NULL OR firm_id = ${firmId})`);
   const masterDoc = docRows2[0];
@@ -2534,17 +2986,29 @@ async function generateMasterDocument({
   const context = await buildCaseContext(r, caseId, firmId);
   if (!context) throw new DocumentGenerationError(404, "CASE_NOT_FOUND", "Case not found");
 
+  const extraRules = await getPlatformDocumentApplicabilityRules(r, firmId, masterDocId);
   const applicability = evaluateTemplateApplicability({
-    isActive: Boolean((masterDoc as any).is_active ?? true),
-    appliesToPurchaseMode: (masterDoc as any).applies_to_purchase_mode ? String((masterDoc as any).applies_to_purchase_mode) : null,
-    appliesToTitleType: (masterDoc as any).applies_to_title_type ? String((masterDoc as any).applies_to_title_type) : null,
+    isActive: extraRules?.isActive ?? Boolean((masterDoc as any).is_active ?? true),
+    isTemplateCapable: extraRules?.isTemplateCapable ?? Boolean((masterDoc as any).is_template_capable ?? true),
+    appliesToPurchaseMode: extraRules?.purchaseMode ?? ((masterDoc as any).applies_to_purchase_mode ? String((masterDoc as any).applies_to_purchase_mode) : null),
+    appliesToTitleType: extraRules?.titleType ?? ((masterDoc as any).applies_to_title_type ? String((masterDoc as any).applies_to_title_type) : null),
     appliesToCaseType: (masterDoc as any).applies_to_case_type ? String((masterDoc as any).applies_to_case_type) : null,
+    projectType: extraRules?.projectType ?? null,
+    titleSubType: extraRules?.titleSubType ?? null,
+    developmentCondition: extraRules?.developmentCondition ?? null,
+    unitCategory: extraRules?.unitCategory ?? null,
   }, {
     purchaseMode: (context as any).purchase_mode ?? null,
     titleType: (context as any).title_type ?? null,
     caseType: (context as any).case_type ?? null,
+    projectType: (context as any).project_type ?? null,
+    developmentCondition: (context as any).project_development_condition ?? null,
+    unitCategory: (context as any).unit_category ?? null,
+    titleSubType: (context as any).title_sub_type ?? null,
   });
-  if (!applicability.applicable) throw new DocumentGenerationError(409, "TEMPLATE_NOT_APPLICABLE", "Template not applicable", { reasons: applicability.reasons });
+  if (!applicability.applicable && !bypassApplicability) {
+    throw new DocumentGenerationError(422, "TEMPLATE_APPLICABILITY_BLOCKED", "Template blocked by applicability", { reasons: applicability.reasons });
+  }
 
   const wfDocs = (await tableExists(r, "public.case_workflow_documents"))
     ? await queryRows(r, sql`
@@ -2608,6 +3072,22 @@ async function generateMasterDocument({
   if (!masterObjectPath) throw new DocumentGenerationError(404, "MASTER_FILE_MISSING", "Master file missing");
   const fileContents = await downloadPrivateObjectBytes(masterObjectPath);
 
+  const placeholders =
+    isDocx ? detectDocxVariables(fileContents)
+    : isPdf ? extractPdfMappingPlaceholders((masterDoc as any).pdf_mappings)
+    : [];
+  const preview = await runDocumentPreview(r, {
+    firmId,
+    caseContext: context,
+    templateRef: { kind: "platform", documentId: masterDocId },
+    placeholders,
+    overrides: null,
+  });
+  if (preview.usedMode === "bindings" && preview.missingRequiredVariables.length > 0) {
+    throw new DocumentGenerationError(422, "TEMPLATE_BINDING_MISSING", "Missing required variables", { missingRequiredVariables: preview.missingRequiredVariables });
+  }
+  const renderInput = preview.usedMode === "bindings" ? preview.resolvedVariables : context;
+
   let buffer: Buffer;
   let outputMime: string;
   let outputExt: string;
@@ -2617,7 +3097,7 @@ async function generateMasterDocument({
     const zip = new PizZip(fileContents);
     const doc = new Docxtemplater(zip, { paragraphLoop: true, linebreaks: true });
     try {
-      doc.render(context);
+      doc.render(renderInput);
     } catch {
       throw new DocumentGenerationError(422, "TEMPLATE_RENDER_FAILED", "Template render failed");
     }
@@ -2638,7 +3118,7 @@ async function generateMasterDocument({
       for (const tb of pageMapping.textBoxes) {
         let text = tb.content || "";
         text = text.replace(/\{\{(\w+)\}\}/g, (_m: string, key: string) => {
-          const val = (context as Record<string, unknown>)[key];
+            const val = (renderInput as Record<string, unknown>)[key];
           if (val === undefined || val === null) return "";
           return String(val);
         });
@@ -2730,13 +3210,16 @@ async function generateMasterDocument({
     ? Number((created as any).id)
     : null;
   await writeAuditLog({ firmId, actorId, actorType, action: "documents.case.generate_from_master", entityType: "case_document", entityId: createdId ?? undefined, detail: `caseId=${caseId} masterDocId=${masterDocId} name=${docName}`, ipAddress, userAgent });
+  if (preview.usedMode === "bindings") {
+    await writeAuditLog({ firmId, actorId, actorType, action: "documents.generate.binding_used", entityType: "case_document", entityId: createdId ?? undefined, detail: `caseId=${caseId} platformDocumentId=${masterDocId} placeholders=${placeholders.length} missing=${preview.missingRequiredVariables.length}`, ipAddress, userAgent });
+  }
   return {
     caseDocument: created,
     caseDocumentId: createdId,
     templateVersionId: null,
-    checklistSnapshot: { applicability },
+    checklistSnapshot: { applicability, bindingMode: preview.usedMode, placeholderWarnings: preview.placeholderWarnings },
     readinessSnapshot: { readiness },
-    renderedVars: context,
+    renderedVars: preview.usedMode === "bindings" ? preview.resolvedVariables : context,
     renderMode,
   };
 }
@@ -2753,6 +3236,7 @@ router.post("/cases/:caseId/documents/batch-generate", requireAuth, requireFirmU
   const body = req.body as Record<string, unknown>;
   const items = Array.isArray(body.items) ? body.items : [];
   const letterheadId = typeof body.letterheadId === "number" ? body.letterheadId : null;
+  const bypass = Boolean(body.bypassApplicability ?? false) ? await canBypassApplicability(r, req.firmId!, req.roleId) : false;
   if (items.length === 0) {
     res.status(422).json({ error: "items is required", code: "ITEMS_REQUIRED" });
     return;
@@ -2814,6 +3298,7 @@ router.post("/cases/:caseId/documents/batch-generate", requireAuth, requireFirmU
           documentName,
           letterheadId,
           runId,
+          bypassApplicability: bypass,
         });
         await finishGenerationRunSuccess(r, req.firmId!, runId, out.caseDocumentId, out.renderedVars, out.checklistSnapshot, out.readinessSnapshot);
         await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.generation.succeeded", entityType: "document_generation_run", entityId: runId, detail: `caseId=${caseId} templateSource=${source} templateId=${templateId} jobId=${jobId}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
@@ -2833,6 +3318,7 @@ router.post("/cases/:caseId/documents/batch-generate", requireAuth, requireFirmU
           documentName,
           letterheadId,
           runId,
+          bypassApplicability: bypass,
         });
         await finishGenerationRunSuccess(r, req.firmId!, runId, out.caseDocumentId, out.renderedVars, out.checklistSnapshot, out.readinessSnapshot);
         await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.generation.succeeded", entityType: "document_generation_run", entityId: runId, detail: `caseId=${caseId} templateSource=${source} templateId=${templateId} jobId=${jobId}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
@@ -3038,6 +3524,239 @@ router.get("/document-batch-jobs/:jobId/download", requireAuth, requireFirmUser,
   }
 });
 
+async function canBypassApplicability(r: DbConn, firmId: number, roleId: number | null | undefined): Promise<boolean> {
+  if (!roleId) return false;
+  const rows = await queryRows(r, sql`SELECT name FROM roles WHERE id = ${roleId} AND firm_id = ${firmId} LIMIT 1`);
+  const name = rows[0]?.name ? String(rows[0].name).toLowerCase() : "";
+  return name.includes("partner") || name.includes("admin");
+}
+
+router.post("/cases/:caseId/documents/preview", requireAuth, requireFirmUser, requirePermission("documents", "generate"), async (req: AuthRequest, res): Promise<void> => {
+  const r = getRlsDb(req, res);
+  if (!r) return;
+  const caseIdStr = one((req.params as any).caseId);
+  const caseId = caseIdStr ? parseInt(caseIdStr, 10) : NaN;
+  if (Number.isNaN(caseId)) {
+    res.status(400).json({ error: "Invalid case ID" });
+    return;
+  }
+
+  const body = req.body as Record<string, unknown>;
+  const templateId = typeof body.templateId === "number" ? body.templateId : null;
+  const platformDocumentId = typeof body.platformDocumentId === "number" ? body.platformDocumentId : null;
+  const overrides = (body.overrides && typeof body.overrides === "object") ? (body.overrides as Record<string, unknown>) : null;
+  const bypassReq = Boolean(body.bypassApplicability ?? false);
+  const bypass = bypassReq ? await canBypassApplicability(r, req.firmId!, req.roleId) : false;
+
+  if (!templateId && !platformDocumentId) {
+    res.status(422).json({ error: "templateId or platformDocumentId is required", code: "TEMPLATE_ID_REQUIRED" });
+    return;
+  }
+  if (templateId && platformDocumentId) {
+    res.status(422).json({ error: "Provide only one of templateId or platformDocumentId", code: "TEMPLATE_ID_CONFLICT" });
+    return;
+  }
+
+  const context = await buildCaseContext(r, caseId, req.firmId!);
+  if (!context) {
+    res.status(404).json({ error: "Case not found" });
+    return;
+  }
+
+  try {
+    if (templateId) {
+      const tplRows = await queryRows(r, sql`SELECT * FROM document_templates WHERE id = ${templateId} AND firm_id = ${req.firmId!}`);
+      const tpl = tplRows[0];
+      if (!tpl) {
+        res.status(404).json({ error: "Template not found" });
+        return;
+      }
+      const vRows = await queryRows(r, sql`
+        SELECT * FROM document_template_versions
+        WHERE firm_id = ${req.firmId!} AND template_id = ${templateId} AND status = 'published'
+        ORDER BY published_at DESC NULLS LAST, version_no DESC
+        LIMIT 1
+      `);
+      const v = vRows[0];
+      const obj = typeof (v as any)?.source_object_path === "string" ? String((v as any).source_object_path) : String((tpl as any).object_path ?? "");
+      const filename = typeof (v as any)?.filename === "string" ? String((v as any).filename) : String((tpl as any).file_name ?? "");
+      if (!obj) {
+        res.status(404).json({ error: "Template file missing", code: "TEMPLATE_FILE_MISSING" });
+        return;
+      }
+      const ext = fileExtensionFromName(filename);
+      const extra = await getFirmTemplateApplicabilityRules(r, req.firmId!, templateId);
+      const applicabilityResult = evaluateTemplateApplicability({
+        isActive: extra?.isActive ?? Boolean((tpl as any).is_active ?? true),
+        isTemplateCapable: extra?.isTemplateCapable ?? Boolean((tpl as any).is_template_capable ?? true),
+        appliesToPurchaseMode: extra?.purchaseMode ?? ((tpl as any).applies_to_purchase_mode ? String((tpl as any).applies_to_purchase_mode) : null),
+        appliesToTitleType: extra?.titleType ?? ((tpl as any).applies_to_title_type ? String((tpl as any).applies_to_title_type) : null),
+        appliesToCaseType: (tpl as any).applies_to_case_type ? String((tpl as any).applies_to_case_type) : null,
+        projectType: extra?.projectType ?? null,
+        titleSubType: extra?.titleSubType ?? null,
+        developmentCondition: extra?.developmentCondition ?? null,
+        unitCategory: extra?.unitCategory ?? null,
+      }, {
+        purchaseMode: (context as any).purchase_mode ?? null,
+        titleType: (context as any).title_type ?? null,
+        caseType: (context as any).case_type ?? null,
+        projectType: (context as any).project_type ?? null,
+        developmentCondition: (context as any).project_development_condition ?? null,
+        unitCategory: (context as any).unit_category ?? null,
+        titleSubType: (context as any).title_sub_type ?? null,
+      });
+
+      let placeholders: string[] = [];
+      let renderMode: "docx" | "pdf" | "print" = "docx";
+      let placeholderWarnings: PlaceholderWarning[] = [];
+      let renderable = true;
+
+      if (ext === "docx") {
+        const bytes = await downloadPrivateObjectBytes(obj);
+        placeholders = placeholdersFromVariablesSnapshot((v as any)?.variables_snapshot);
+        if (placeholders.length === 0) placeholders = detectDocxVariables(bytes);
+        const preview = await runDocumentPreview(r, {
+          firmId: req.firmId!,
+          caseContext: context,
+          templateRef: { kind: "firm", templateId },
+          placeholders,
+          overrides,
+        });
+        placeholderWarnings = preview.placeholderWarnings;
+        const input = preview.usedMode === "bindings" ? preview.resolvedVariables : context;
+        try {
+          const zip = new PizZip(bytes);
+          const doc = new Docxtemplater(zip, { paragraphLoop: true, linebreaks: true });
+          doc.render(input);
+        } catch {
+          renderable = false;
+        }
+        const resp = {
+          resolvedVariables: preview.resolvedVariables,
+          missingRequiredVariables: preview.missingRequiredVariables,
+          unusedBindings: preview.unusedBindings,
+          placeholderWarnings,
+          applicabilityResult,
+          renderMode,
+          previewSummary: {
+            renderable,
+            placeholdersCount: placeholders.length,
+            usedMode: preview.usedMode,
+            missingRequiredCount: preview.missingRequiredVariables.length,
+          },
+        };
+        await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: renderable ? "documents.preview" : "documents.preview.failed", entityType: "document_template", entityId: templateId, detail: `caseId=${caseId} mode=${preview.usedMode} applicable=${applicabilityResult.applicable} bypass=${bypass}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+        res.json(resp);
+        return;
+      }
+
+      renderMode = ext === "pdf" ? "pdf" : "docx";
+      await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.preview", entityType: "document_template", entityId: templateId, detail: `caseId=${caseId} ext=${ext} applicable=${applicabilityResult.applicable} bypass=${bypass}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+      res.json({
+        resolvedVariables: {},
+        missingRequiredVariables: [],
+        unusedBindings: [],
+        placeholderWarnings: [],
+        applicabilityResult,
+        renderMode,
+        previewSummary: { renderable: false, placeholdersCount: 0, usedMode: "legacy", missingRequiredCount: 0 },
+      });
+      return;
+    }
+
+    const docRows = await queryRows(r, sql`SELECT * FROM platform_documents WHERE id = ${platformDocumentId!} AND (firm_id IS NULL OR firm_id = ${req.firmId!})`);
+    const doc = docRows[0];
+    if (!doc) {
+      res.status(404).json({ error: "Document not found" });
+      return;
+    }
+    const fileName = typeof (doc as any).file_name === "string" ? String((doc as any).file_name) : "";
+    const ext = fileExtensionFromName(fileName);
+    const obj = typeof (doc as any).object_path === "string" ? String((doc as any).object_path) : "";
+    if (!obj) {
+      res.status(404).json({ error: "Master file missing", code: "MASTER_FILE_MISSING" });
+      return;
+    }
+    const extra = await getPlatformDocumentApplicabilityRules(r, req.firmId!, platformDocumentId!);
+    const applicabilityResult = evaluateTemplateApplicability({
+      isActive: extra?.isActive ?? Boolean((doc as any).is_active ?? true),
+      isTemplateCapable: extra?.isTemplateCapable ?? Boolean((doc as any).is_template_capable ?? true),
+      appliesToPurchaseMode: extra?.purchaseMode ?? ((doc as any).applies_to_purchase_mode ? String((doc as any).applies_to_purchase_mode) : null),
+      appliesToTitleType: extra?.titleType ?? ((doc as any).applies_to_title_type ? String((doc as any).applies_to_title_type) : null),
+      appliesToCaseType: (doc as any).applies_to_case_type ? String((doc as any).applies_to_case_type) : null,
+      projectType: extra?.projectType ?? null,
+      titleSubType: extra?.titleSubType ?? null,
+      developmentCondition: extra?.developmentCondition ?? null,
+      unitCategory: extra?.unitCategory ?? null,
+    }, {
+      purchaseMode: (context as any).purchase_mode ?? null,
+      titleType: (context as any).title_type ?? null,
+      caseType: (context as any).case_type ?? null,
+      projectType: (context as any).project_type ?? null,
+      developmentCondition: (context as any).project_development_condition ?? null,
+      unitCategory: (context as any).unit_category ?? null,
+      titleSubType: (context as any).title_sub_type ?? null,
+    });
+
+    const bytes = await downloadPrivateObjectBytes(obj);
+    const placeholders =
+      ext === "docx" ? detectDocxVariables(bytes)
+      : ext === "pdf" ? extractPdfMappingPlaceholders((doc as any).pdf_mappings)
+      : [];
+    const preview = await runDocumentPreview(r, {
+      firmId: req.firmId!,
+      caseContext: context,
+      templateRef: { kind: "platform", documentId: platformDocumentId! },
+      placeholders,
+      overrides,
+    });
+    const renderMode: "docx" | "pdf" | "print" =
+      ext === "pdf" ? "pdf"
+      : ext === "docx" ? "docx"
+      : "docx";
+    let renderable = ext === "docx";
+    if (ext === "docx") {
+      try {
+        const zip = new PizZip(bytes);
+        const d = new Docxtemplater(zip, { paragraphLoop: true, linebreaks: true });
+        d.render(preview.usedMode === "bindings" ? preview.resolvedVariables : context);
+      } catch {
+        renderable = false;
+      }
+    }
+    await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: renderable ? "documents.preview" : "documents.preview.failed", entityType: "platform_document", entityId: platformDocumentId!, detail: `caseId=${caseId} mode=${preview.usedMode} applicable=${applicabilityResult.applicable} bypass=${bypass}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+    res.json({
+      resolvedVariables: preview.resolvedVariables,
+      missingRequiredVariables: preview.missingRequiredVariables,
+      unusedBindings: preview.unusedBindings,
+      placeholderWarnings: preview.placeholderWarnings,
+      applicabilityResult,
+      renderMode,
+      previewSummary: {
+        renderable,
+        placeholdersCount: placeholders.length,
+        usedMode: preview.usedMode,
+        missingRequiredCount: preview.missingRequiredVariables.length,
+      },
+    });
+  } catch (err: unknown) {
+    const cfgErr = getSupabaseStorageConfigError(err);
+    if (cfgErr) {
+      await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.preview.failed", entityType: "case", entityId: caseId, detail: `code=STORAGE_NOT_CONFIGURED`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+      res.status(cfgErr.statusCode).json({ error: cfgErr.error, code: "STORAGE_NOT_CONFIGURED" });
+      return;
+    }
+    if (err instanceof ObjectNotFoundError) {
+      await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.preview.failed", entityType: "case", entityId: caseId, detail: `code=FILE_NOT_FOUND`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+      res.status(404).json({ error: "Template file not found", code: "FILE_NOT_FOUND" });
+      return;
+    }
+    logger.error({ err, path: req.path, firmId: req.firmId, userId: req.userId, caseId }, "[documents] preview_failed");
+    await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.preview.failed", entityType: "case", entityId: caseId, detail: `code=INTERNAL_ERROR`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+    res.status(503).json({ error: "Preview failed", code: "TEMPLATE_PREVIEW_FAILED" });
+  }
+});
+
 router.post("/cases/:caseId/documents/generate", requireAuth, requireFirmUser, requirePermission("documents", "generate"), async (req: AuthRequest, res): Promise<void> => {
   const r = getRlsDb(req, res);
   if (!r) return;
@@ -3047,7 +3766,7 @@ router.post("/cases/:caseId/documents/generate", requireAuth, requireFirmUser, r
     res.status(400).json({ error: "Invalid case ID" });
     return;
   }
-  const { templateId, documentName, letterheadId } = req.body as { templateId: number; documentName?: string; letterheadId?: number | null };
+  const { templateId, documentName, letterheadId, bypassApplicability } = req.body as { templateId: number; documentName?: string; letterheadId?: number | null; bypassApplicability?: boolean };
   const tid = typeof templateId === "number" ? templateId : NaN;
   if (Number.isNaN(tid)) {
     res.status(422).json({ error: "templateId is required", code: "TEMPLATE_ID_REQUIRED" });
@@ -3073,6 +3792,7 @@ router.post("/cases/:caseId/documents/generate", requireAuth, requireFirmUser, r
   });
 
   try {
+    const bypass = Boolean(bypassApplicability) ? await canBypassApplicability(r, req.firmId!, req.roleId) : false;
     const out = await generateFirmDocument({
       r,
       firmId: req.firmId!,
@@ -3085,6 +3805,7 @@ router.post("/cases/:caseId/documents/generate", requireAuth, requireFirmUser, r
       documentName,
       letterheadId,
       runId,
+      bypassApplicability: bypass,
     });
     await finishGenerationRunSuccess(r, req.firmId!, runId, out.caseDocumentId, out.renderedVars, out.checklistSnapshot, out.readinessSnapshot);
     await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.generation.succeeded", entityType: "document_generation_run", entityId: runId, detail: `caseId=${caseId} templateSource=firm templateId=${tid}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
@@ -3119,7 +3840,7 @@ router.post("/cases/:caseId/documents/generate-from-master", requireAuth, requir
     res.status(400).json({ error: "Invalid case ID" });
     return;
   }
-  const { masterDocId, documentName, letterheadId } = req.body as { masterDocId: number; documentName?: string; letterheadId?: number | null };
+  const { masterDocId, documentName, letterheadId, bypassApplicability } = req.body as { masterDocId: number; documentName?: string; letterheadId?: number | null; bypassApplicability?: boolean };
   const mid = typeof masterDocId === "number" ? masterDocId : NaN;
   if (Number.isNaN(mid)) {
     res.status(422).json({ error: "masterDocId is required", code: "MASTER_DOC_ID_REQUIRED" });
@@ -3145,6 +3866,7 @@ router.post("/cases/:caseId/documents/generate-from-master", requireAuth, requir
   });
 
   try {
+    const bypass = Boolean(bypassApplicability) ? await canBypassApplicability(r, req.firmId!, req.roleId) : false;
     const out = await generateMasterDocument({
       r,
       firmId: req.firmId!,
@@ -3157,6 +3879,7 @@ router.post("/cases/:caseId/documents/generate-from-master", requireAuth, requir
       documentName,
       letterheadId,
       runId,
+      bypassApplicability: bypass,
     });
     await finishGenerationRunSuccess(r, req.firmId!, runId, out.caseDocumentId, out.renderedVars, out.checklistSnapshot, out.readinessSnapshot);
     await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.generation.succeeded", entityType: "document_generation_run", entityId: runId, detail: `caseId=${caseId} templateSource=master templateId=${mid}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
@@ -3443,7 +4166,7 @@ router.post("/cases/:caseId/documents/print", requireAuth, requireFirmUser, requ
   }
 });
 
-router.get("/document-variables", requireAuth, async (_req: AuthRequest, res): Promise<void> => {
+router.get("/document-variables-legacy", requireAuth, async (_req: AuthRequest, res): Promise<void> => {
   const variables = [
     { group: "General", vars: [
       { key: "reference_no", label: "Case Reference No" },
