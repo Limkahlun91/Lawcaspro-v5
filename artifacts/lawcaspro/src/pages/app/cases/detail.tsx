@@ -125,7 +125,7 @@ export default function CaseDetail() {
 
   const keyDatesQuery = useQuery<Record<string, unknown>>({
     queryKey: ["case-key-dates", caseId],
-    queryFn: () => apiFetchJson(`/cases/${caseId}/key-dates`),
+    queryFn: ({ signal }) => apiFetchJson(`/cases/${caseId}/key-dates`, { signal }),
     enabled: !!caseId,
     retry: false,
   });
@@ -133,7 +133,7 @@ export default function CaseDetail() {
 
   const printableQuery = useQuery<any[]>({
     queryKey: ["printable-config"],
-    queryFn: () => apiFetchJson("/printable-config"),
+    queryFn: ({ signal }) => apiFetchJson("/printable-config", { signal }),
     retry: false,
   });
   const printableConfig = Array.isArray(printableQuery.data) ? printableQuery.data : [];

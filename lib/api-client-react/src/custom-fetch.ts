@@ -1,5 +1,6 @@
 export type CustomFetchOptions = RequestInit & {
   responseType?: "json" | "text" | "blob" | "auto";
+  timeoutMs?: number;
 };
 
 export type ErrorType<T = unknown> = ApiError<T>;
@@ -10,6 +11,31 @@ export type AuthTokenGetter = () => Promise<string | null> | string | null;
 
 const NO_BODY_STATUS = new Set([204, 205, 304]);
 const DEFAULT_JSON_ACCEPT = "application/json, application/problem+json";
+
+class RequestTimeoutError extends Error {
+  readonly timeoutMs: number;
+  constructor(timeoutMs: number) {
+    super(`Request timed out after ${timeoutMs}ms`);
+    this.name = "RequestTimeoutError";
+    this.timeoutMs = timeoutMs;
+  }
+}
+
+function anySignal(signals: Array<AbortSignal | undefined>): AbortSignal | undefined {
+  const filtered = signals.filter(Boolean) as AbortSignal[];
+  if (filtered.length === 0) return undefined;
+  const anyFn = (globalThis.AbortSignal as unknown as { any?: (signals: AbortSignal[]) => AbortSignal })?.any;
+  if (typeof anyFn === "function") return anyFn(filtered);
+  return undefined;
+}
+
+function isAbortError(err: unknown): boolean {
+  if (!err || typeof err !== "object") return false;
+  const rec = err as Record<string, unknown>;
+  if (rec.name === "AbortError") return true;
+  const msg = typeof rec.message === "string" ? rec.message.toLowerCase() : "";
+  return msg.includes("signal is aborted") || msg.includes("aborted");
+}
 
 // ---------------------------------------------------------------------------
 // Module-level configuration
@@ -327,7 +353,7 @@ export async function customFetch<T = unknown>(
   options: CustomFetchOptions = {},
 ): Promise<T> {
   input = applyBaseUrl(input);
-  const { responseType = "auto", headers: headersInit, ...init } = options;
+  const { responseType = "auto", headers: headersInit, timeoutMs = 15000, ...init } = options;
 
   const method = resolveMethod(input, init.method);
 
@@ -360,7 +386,37 @@ export async function customFetch<T = unknown>(
 
   const requestInfo = { method, url: resolveUrl(input) };
 
-  const response = await fetch(input, { ...init, method, headers });
+  const externalSignal: AbortSignal | undefined = init.signal ?? undefined;
+  const timeoutController = new AbortController();
+  const combinedSignal = anySignal([externalSignal, timeoutController.signal]) ?? timeoutController.signal;
+  const onExternalAbort = externalSignal && combinedSignal === timeoutController.signal ? () => timeoutController.abort() : null;
+  if (externalSignal && onExternalAbort) {
+    if (externalSignal.aborted) onExternalAbort();
+    else externalSignal.addEventListener("abort", onExternalAbort, { once: true });
+  }
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    timeoutController.abort();
+  }, timeoutMs);
+
+  let response: Response;
+  try {
+    response = await fetch(input, { ...init, method, headers, signal: combinedSignal });
+  } catch (err) {
+    if (timedOut && isAbortError(err)) {
+      throw new RequestTimeoutError(timeoutMs);
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
+    if (externalSignal && onExternalAbort) {
+      try {
+        externalSignal.removeEventListener("abort", onExternalAbort);
+      } catch {
+      }
+    }
+  }
 
   if (response.status === 401 && typeof window !== "undefined") {
     window.dispatchEvent(new Event("lawcaspro:auth-unauthorized"));

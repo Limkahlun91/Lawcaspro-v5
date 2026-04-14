@@ -24,14 +24,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const { data: me, isLoading: isMeLoading } = useQuery<AuthUser | null>({
     queryKey: ME_QUERY_KEY,
     retry: false,
-    queryFn: async () => {
+    queryFn: async ({ signal }) => {
       const token = getStoredAuthToken();
       const res = await apiRequest("/api/auth/me", {
         allowStatuses: [401],
         headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+        signal,
       });
       if (res.status === 401) return null;
-      return res.json();
+      if (res.status === 204) return null;
+      return (await res.json()) as AuthUser;
     },
   });
 

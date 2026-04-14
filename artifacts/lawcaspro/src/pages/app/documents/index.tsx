@@ -133,16 +133,16 @@ function MasterDocumentsTab() {
 
   const foldersQuery = useQuery<SystemFolder[]>({
     queryKey: ["hub-folders"],
-    queryFn: () => apiFetchJson("/hub/folders"),
+    queryFn: ({ signal }) => apiFetchJson("/hub/folders", { signal }),
   });
 
   const docsQuery = useQuery<SystemDoc[]>({
     queryKey: ["hub-documents", selectedFolderId],
-    queryFn: async () => {
+    queryFn: async ({ signal }) => {
       const url = selectedFolderId !== null
         ? `/hub/documents?folderId=${selectedFolderId}`
         : "/hub/documents";
-      return await apiFetchJson(url);
+      return await apiFetchJson(url, { signal });
     },
   });
 

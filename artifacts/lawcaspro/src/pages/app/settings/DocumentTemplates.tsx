@@ -82,7 +82,7 @@ export default function DocumentTemplates() {
 
   const templatesQuery = useQuery<DocumentTemplate[]>({
     queryKey: ["document-templates"],
-    queryFn: () => apiFetchJson("/document-templates"),
+    queryFn: ({ signal }) => apiFetchJson("/document-templates", { signal }),
     retry: false,
     enabled: canRead,
   });

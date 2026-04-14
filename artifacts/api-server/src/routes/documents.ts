@@ -4,8 +4,9 @@ import { db, documentTemplatesTable, caseDocumentsTable } from "@workspace/db";
 import { PRINT_ACTIONS, isLetterheadApplicableDocumentType, isMasterDocumentLetterLike } from "@workspace/documents-registry";
 import { requireAuth, requireFirmUser, requirePermission, writeAuditLog, type AuthRequest } from "../lib/auth";
 import { logger } from "../lib/logger";
-import { ObjectStorageService, ObjectNotFoundError, SupabaseStorageService } from "../lib/objectStorage";
+import { getSupabaseStorageConfigError, ObjectNotFoundError, ObjectStorageService, SupabaseStorageService } from "../lib/objectStorage";
 import { Readable } from "stream";
+import { randomUUID } from "crypto";
 import Docxtemplater from "docxtemplater";
 import PizZip from "pizzip";
 import { PDFDocument, rgb, StandardFonts } from "pdf-lib";
@@ -45,6 +46,64 @@ async function queryRows(r: DbConn, query: ReturnType<typeof sql>): Promise<Reco
 function safeJson(str: unknown): Record<string, unknown> {
   if (!str || typeof str !== "string") return {};
   try { return JSON.parse(str); } catch { return {}; }
+}
+
+function safeFilenameAscii(filename: string): string {
+  const base = filename.replace(/[\r\n"]/g, "").trim();
+  if (!base) return "download";
+  return base.replace(/[^\x20-\x7E]/g, "_");
+}
+
+function encodeRFC5987ValueChars(str: string): string {
+  return encodeURIComponent(str)
+    .replace(/['()]/g, escape)
+    .replace(/\*/g, "%2A")
+    .replace(/%(7C|60|5E)/g, (m) => m.toLowerCase());
+}
+
+function contentDispositionAttachment(filename: string): string {
+  const ascii = safeFilenameAscii(filename);
+  const encoded = encodeRFC5987ValueChars(filename);
+  return `attachment; filename="${ascii}"; filename*=UTF-8''${encoded}`;
+}
+
+function isDocxTemplateRenderError(err: unknown): boolean {
+  if (!err || typeof err !== "object") return false;
+  const rec = err as Record<string, unknown>;
+  if (rec.name === "TemplateError") return true;
+  const msg = typeof rec.message === "string" ? rec.message.toLowerCase() : "";
+  return msg.includes("docxtemplater") || msg.includes("template");
+}
+
+function newGeneratedDocObjectPath(firmId: number, caseId: number, extension: string): string {
+  const ext = extension.replace(/^\./, "").toLowerCase() || "docx";
+  return `/objects/cases/${firmId}/case-${caseId}/generated/${randomUUID()}.${ext}`;
+}
+
+async function streamSupabasePrivateObjectToResponse({
+  objectPath,
+  res,
+  fileName,
+  fallbackContentType,
+}: {
+  objectPath: string;
+  res: any;
+  fileName: string;
+  fallbackContentType: string;
+}): Promise<void> {
+  const storageResp = await supabaseStorage.fetchPrivateObjectResponse(objectPath);
+  const ct = storageResp.headers.get("content-type") || fallbackContentType;
+  const cl = storageResp.headers.get("content-length");
+  if (ct) res.setHeader("Content-Type", ct);
+  if (cl) res.setHeader("Content-Length", cl);
+  res.setHeader("Content-Disposition", contentDispositionAttachment(fileName));
+  if (!storageResp.body) throw new Error("Failed to stream file");
+  const nodeStream = Readable.fromWeb(storageResp.body as any);
+  await new Promise<void>((resolve, reject) => {
+    nodeStream.on("error", reject);
+    res.on("finish", resolve);
+    nodeStream.pipe(res);
+  });
 }
 
 function wrapText(text: string, font: any, fontSize: number, maxWidth: number): string[] {
@@ -1029,28 +1088,32 @@ router.get("/document-templates/:templateId/download", requireAuth, requireFirmU
     res.status(404).json({ error: "Document not found" });
     return;
   }
+  const objectPath = typeof (doc as any).object_path === "string" ? String((doc as any).object_path) : "";
+  if (!objectPath) {
+    res.status(404).json({ error: "File missing" });
+    return;
+  }
 
   try {
-    const objectFile = await storage.getObjectEntityFile(doc.object_path as string);
-    const storageResp = await storage.downloadObject(objectFile);
-    storageResp.headers.forEach((value, key) => {
-      res.setHeader(key, value);
-    });
     const fileName = typeof (doc as any).file_name === "string" ? String((doc as any).file_name) : `document-${templateId}`;
-    res.setHeader("Content-Disposition", `attachment; filename="${fileName}"`);
-    if (!storageResp.body) {
-      res.status(500).json({ error: "Failed to stream file" });
-      return;
-    }
-    const nodeStream = Readable.fromWeb(storageResp.body as any);
-    await new Promise<void>((resolve, reject) => {
-      nodeStream.on("error", reject);
-      res.on("finish", resolve);
-      nodeStream.pipe(res);
-    });
+    const fallbackContentType =
+      typeof (doc as any).mime_type === "string"
+        ? String((doc as any).mime_type)
+        : "application/octet-stream";
+    await streamSupabasePrivateObjectToResponse({ objectPath, res, fileName, fallbackContentType });
     await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.firm_document.download", entityType: "firm_document", entityId: templateId, detail: `fileName=${fileName}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
   } catch (err) {
-    logger.error({ err, path: req.path, firmId: req.firmId, userId: req.userId }, "[documents]");
+    const cfgErr = getSupabaseStorageConfigError(err);
+    if (cfgErr) {
+      logger.error({ err, path: req.path, firmId: req.firmId, userId: req.userId, templateId }, "[documents] supabase_storage_not_configured");
+      res.status(cfgErr.statusCode).json({ error: cfgErr.error });
+      return;
+    }
+    if (err instanceof ObjectNotFoundError) {
+      res.status(404).json({ error: "File not found" });
+      return;
+    }
+    logger.error({ err, path: req.path, firmId: req.firmId, userId: req.userId, templateId }, "[documents] download_failed");
     res.status(500).json({ error: "Internal Server Error" });
   }
 });
@@ -1451,25 +1514,24 @@ router.get("/firm-letterheads/:letterheadId/templates/:part/download", requireAu
     return;
   }
   try {
-    const objectFile = await storage.getObjectEntityFile(objectPath);
-    const storageResp = await storage.downloadObject(objectFile);
-    storageResp.headers.forEach((value, key) => {
-      res.setHeader(key, value);
-    });
-    res.setHeader("Content-Disposition", `attachment; filename="${fileName}"`);
-    if (!storageResp.body) {
-      res.status(500).json({ error: "Failed to stream file" });
-      return;
-    }
-    const nodeStream = Readable.fromWeb(storageResp.body as any);
-    await new Promise<void>((resolve, reject) => {
-      nodeStream.on("error", reject);
-      res.on("finish", resolve);
-      nodeStream.pipe(res);
-    });
+    const fallbackContentType =
+      part === "footer"
+        ? "application/pdf"
+        : "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+    await streamSupabasePrivateObjectToResponse({ objectPath, res, fileName, fallbackContentType });
     await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.letterhead.download_template", entityType: "firm_letterhead", entityId: letterheadId, detail: `part=${part} fileName=${fileName}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
   } catch (err) {
-    logger.error({ err, path: req.path, firmId: req.firmId, userId: req.userId }, "[documents]");
+    const cfgErr = getSupabaseStorageConfigError(err);
+    if (cfgErr) {
+      logger.error({ err, path: req.path, firmId: req.firmId, userId: req.userId, letterheadId, part }, "[documents] supabase_storage_not_configured");
+      res.status(cfgErr.statusCode).json({ error: cfgErr.error });
+      return;
+    }
+    if (err instanceof ObjectNotFoundError) {
+      res.status(404).json({ error: "File not found" });
+      return;
+    }
+    logger.error({ err, path: req.path, firmId: req.firmId, userId: req.userId, letterheadId, part }, "[documents] letterhead_download_failed");
     res.status(500).json({ error: "Internal Server Error" });
   }
 });
@@ -1533,13 +1595,23 @@ router.post("/cases/:caseId/documents/generate", requireAuth, requireFirmUser, r
   }
 
   try {
-    const objectFile = await storage.getObjectEntityFile(template.object_path as string);
-    const [fileContents] = await objectFile.download();
+    const templateObjectPath = typeof (template as any).object_path === "string" ? String((template as any).object_path) : "";
+    if (!templateObjectPath) {
+      res.status(404).json({ error: "Template file missing" });
+      return;
+    }
+    const fileContents = await downloadPrivateObjectBytes(templateObjectPath);
 
     const zip = new PizZip(fileContents);
     const doc = new Docxtemplater(zip, { paragraphLoop: true, linebreaks: true });
 
-    doc.render(context);
+    try {
+      doc.render(context);
+    } catch (err) {
+      logger.warn({ err, path: req.path, firmId: req.firmId, userId: req.userId, caseId, templateId }, "[documents] template_render_failed");
+      res.status(422).json({ error: "Template render failed", code: "TEMPLATE_RENDER_FAILED" });
+      return;
+    }
 
     let buffer = doc.getZip().generate({ type: "nodebuffer", compression: "DEFLATE" }) as Buffer;
 
@@ -1587,22 +1659,12 @@ router.post("/cases/:caseId/documents/generate", requireAuth, requireFirmUser, r
       });
     }
 
-    const uploadURL = await storage.getObjectEntityUploadURL();
-
-    const uploadRes = await fetch(uploadURL, {
-      method: "PUT",
-      headers: { "Content-Type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document" },
-      body: buffer,
+    const normalizedPath = newGeneratedDocObjectPath(req.firmId!, caseId, "docx");
+    await supabaseStorage.uploadPrivateObject({
+      objectPath: normalizedPath,
+      fileBytes: buffer,
+      contentType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     });
-
-    if (!uploadRes.ok) {
-      const detail = await uploadRes.text();
-      logger.error({ detail, path: req.path, firmId: req.firmId, userId: req.userId }, "[documents] upload failed");
-      res.status(500).json({ error: "Internal Server Error" });
-      return;
-    }
-
-    const normalizedPath = storage.normalizeObjectEntityPath(uploadURL.split("?")[0]);
     const docName = documentName ?? `${template.name} - ${context.reference_no}`;
     const fileName = `${docName.replace(/[^a-zA-Z0-9 \-_]/g, "_")}.docx`;
 
@@ -1619,11 +1681,22 @@ router.post("/cases/:caseId/documents/generate", requireAuth, requireFirmUser, r
     await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.case.generate", entityType: "case_document", entityId: createdId, detail: `caseId=${caseId} templateId=${templateId} name=${docName} letterhead=${isLetterLike ? (usedLetterheadId ?? "default") : "n/a"}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
     res.status(201).json(docRows[0]);
   } catch (err: unknown) {
-    console.error("Document generation error:", err);
-    res.status(500).json({
-      error: "Failed to generate document",
-      detail: err instanceof Error ? err.message : String(err),
-    });
+    const cfgErr = getSupabaseStorageConfigError(err);
+    if (cfgErr) {
+      logger.error({ err, path: req.path, firmId: req.firmId, userId: req.userId, caseId, templateId }, "[documents] supabase_storage_not_configured");
+      res.status(cfgErr.statusCode).json({ error: cfgErr.error });
+      return;
+    }
+    if (err instanceof ObjectNotFoundError) {
+      res.status(404).json({ error: "Template file not found" });
+      return;
+    }
+    if (isDocxTemplateRenderError(err)) {
+      res.status(422).json({ error: "Template render failed", code: "TEMPLATE_RENDER_FAILED" });
+      return;
+    }
+    logger.error({ err, path: req.path, firmId: req.firmId, userId: req.userId, caseId, templateId }, "[documents] generate_failed");
+    res.status(500).json({ error: "Internal Server Error" });
   }
 });
 
@@ -1662,8 +1735,12 @@ router.post("/cases/:caseId/documents/generate-from-master", requireAuth, requir
   }
 
   try {
-    const objectFile = await storage.getObjectEntityFile(masterDoc.object_path as string);
-    const [fileContents] = await objectFile.download();
+    const masterObjectPath = typeof (masterDoc as any).object_path === "string" ? String((masterDoc as any).object_path) : "";
+    if (!masterObjectPath) {
+      res.status(404).json({ error: "Master file missing" });
+      return;
+    }
+    const fileContents = await downloadPrivateObjectBytes(masterObjectPath);
 
     let buffer: Buffer;
     let outputMime: string;
@@ -1674,7 +1751,13 @@ router.post("/cases/:caseId/documents/generate-from-master", requireAuth, requir
     if (isDocx) {
       const zip = new PizZip(fileContents);
       const doc = new Docxtemplater(zip, { paragraphLoop: true, linebreaks: true });
-      doc.render(context);
+      try {
+        doc.render(context);
+      } catch (err) {
+        logger.warn({ err, path: req.path, firmId: req.firmId, userId: req.userId, caseId, masterDocId }, "[documents] master_template_render_failed");
+        res.status(422).json({ error: "Template render failed", code: "TEMPLATE_RENDER_FAILED" });
+        return;
+      }
       buffer = doc.getZip().generate({ type: "nodebuffer", compression: "DEFLATE" }) as Buffer;
       outputMime = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
       outputExt = ".docx";
@@ -1768,22 +1851,12 @@ router.post("/cases/:caseId/documents/generate-from-master", requireAuth, requir
       }
     }
 
-    const uploadURL = await storage.getObjectEntityUploadURL();
-
-    const uploadRes = await fetch(uploadURL, {
-      method: "PUT",
-      headers: { "Content-Type": outputMime },
-      body: buffer,
+    const normalizedPath = newGeneratedDocObjectPath(req.firmId!, caseId, outputExt);
+    await supabaseStorage.uploadPrivateObject({
+      objectPath: normalizedPath,
+      fileBytes: buffer,
+      contentType: outputMime,
     });
-
-    if (!uploadRes.ok) {
-      const detail = await uploadRes.text();
-      logger.error({ detail, path: req.path, firmId: req.firmId, userId: req.userId }, "[documents] upload failed");
-      res.status(500).json({ error: "Internal Server Error" });
-      return;
-    }
-
-    const normalizedPath = storage.normalizeObjectEntityPath(uploadURL.split("?")[0]);
     const docName = documentName ?? `${masterDoc.name} - ${context.reference_no}`;
     const fileName = `${docName.replace(/[^a-zA-Z0-9 \-_]/g, "_")}${outputExt}`;
 
@@ -1800,11 +1873,22 @@ router.post("/cases/:caseId/documents/generate-from-master", requireAuth, requir
     await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.case.generate_from_master", entityType: "case_document", entityId: createdId, detail: `caseId=${caseId} masterDocId=${masterDocId} name=${docName}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
     res.status(201).json(savedRows[0]);
   } catch (err: unknown) {
-    console.error("Master document generation error:", err);
-    res.status(500).json({
-      error: "Failed to generate document from master template",
-      detail: err instanceof Error ? err.message : String(err),
-    });
+    const cfgErr = getSupabaseStorageConfigError(err);
+    if (cfgErr) {
+      logger.error({ err, path: req.path, firmId: req.firmId, userId: req.userId, caseId, masterDocId }, "[documents] supabase_storage_not_configured");
+      res.status(cfgErr.statusCode).json({ error: cfgErr.error });
+      return;
+    }
+    if (err instanceof ObjectNotFoundError) {
+      res.status(404).json({ error: "Master file not found" });
+      return;
+    }
+    if (isDocxTemplateRenderError(err)) {
+      res.status(422).json({ error: "Template render failed", code: "TEMPLATE_RENDER_FAILED" });
+      return;
+    }
+    logger.error({ err, path: req.path, firmId: req.firmId, userId: req.userId, caseId, masterDocId }, "[documents] generate_from_master_failed");
+    res.status(500).json({ error: "Internal Server Error" });
   }
 });
 
@@ -1926,12 +2010,22 @@ router.post("/cases/:caseId/documents/print", requireAuth, requireFirmUser, requ
   }
 
   try {
-    const objectFile = await storage.getObjectEntityFile(template.object_path as string);
-    const [fileContents] = await objectFile.download();
+    const templateObjectPath = typeof (template as any).object_path === "string" ? String((template as any).object_path) : "";
+    if (!templateObjectPath) {
+      res.status(404).json({ error: "Template file missing" });
+      return;
+    }
+    const fileContents = await downloadPrivateObjectBytes(templateObjectPath);
 
     const zip = new PizZip(fileContents);
     const doc = new Docxtemplater(zip, { paragraphLoop: true, linebreaks: true });
-    doc.render(context);
+    try {
+      doc.render(context);
+    } catch (err) {
+      logger.warn({ err, path: req.path, firmId: req.firmId, userId: req.userId, caseId, templateId: (template as any).id, printKey }, "[documents] template_render_failed");
+      res.status(422).json({ error: "Template render failed", code: "TEMPLATE_RENDER_FAILED" });
+      return;
+    }
     let buffer = doc.getZip().generate({ type: "nodebuffer", compression: "DEFLATE" }) as Buffer;
 
     const templateDocType = template && typeof template === "object" && "document_type" in template ? String((template as any).document_type) : "other";
@@ -1975,20 +2069,12 @@ router.post("/cases/:caseId/documents/print", requireAuth, requireFirmUser, requ
       });
     }
 
-    const uploadURL = await storage.getObjectEntityUploadURL();
-    const uploadRes = await fetch(uploadURL, {
-      method: "PUT",
-      headers: { "Content-Type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document" },
-      body: buffer,
+    const normalizedPath = newGeneratedDocObjectPath(req.firmId!, caseId, "docx");
+    await supabaseStorage.uploadPrivateObject({
+      objectPath: normalizedPath,
+      fileBytes: buffer,
+      contentType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     });
-    if (!uploadRes.ok) {
-      const detail = await uploadRes.text();
-      logger.error({ detail, path: req.path, firmId: req.firmId, userId: req.userId }, "[documents] upload failed");
-      res.status(500).json({ error: "Internal Server Error" });
-      return;
-    }
-
-    const normalizedPath = storage.normalizeObjectEntityPath(uploadURL.split("?")[0]);
     const nameToUse = documentName || `${cfg.label} - ${context.reference_no}`;
     const fileName = `${nameToUse.replace(/[^a-zA-Z0-9 \-_]/g, "_")}.docx`;
 
@@ -2005,7 +2091,21 @@ router.post("/cases/:caseId/documents/print", requireAuth, requireFirmUser, requ
     await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.case.print", entityType: "case_document", entityId: createdId, detail: `caseId=${caseId} printKey=${printKey} templateId=${(template as any).id} name=${nameToUse} letterhead=${isLetterLike ? (usedLetterheadId ?? "default") : "n/a"}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
     res.status(201).json(docRows[0]);
   } catch (err: unknown) {
-    logger.error({ err, path: req.path, firmId: req.firmId, userId: req.userId }, "[documents]");
+    const cfgErr = getSupabaseStorageConfigError(err);
+    if (cfgErr) {
+      logger.error({ err, path: req.path, firmId: req.firmId, userId: req.userId, caseId, printKey }, "[documents] supabase_storage_not_configured");
+      res.status(cfgErr.statusCode).json({ error: cfgErr.error });
+      return;
+    }
+    if (err instanceof ObjectNotFoundError) {
+      res.status(404).json({ error: "Template file not found" });
+      return;
+    }
+    if (isDocxTemplateRenderError(err)) {
+      res.status(422).json({ error: "Template render failed", code: "TEMPLATE_RENDER_FAILED" });
+      return;
+    }
+    logger.error({ err, path: req.path, firmId: req.firmId, userId: req.userId, caseId, printKey }, "[documents] print_failed");
     res.status(500).json({ error: "Internal Server Error" });
   }
 });
@@ -2352,28 +2452,30 @@ router.get("/cases/:caseId/documents/:docId/download", requireAuth, requireFirmU
   const doc = rows[0];
 
   try {
-    const objectFile = await storage.getObjectEntityFile(doc.object_path as string);
-    const storageResp = await storage.downloadObject(objectFile);
-    storageResp.headers.forEach((value, key) => {
-      res.setHeader(key, value);
-    });
-    res.setHeader("Content-Disposition", `attachment; filename="${doc.file_name}"`);
-    if (!storageResp.body) {
-      res.status(500).json({ error: "Failed to stream file" });
+    const objectPath = typeof (doc as any).object_path === "string" ? String((doc as any).object_path) : "";
+    const fileName = typeof (doc as any).file_name === "string" ? String((doc as any).file_name) : `case-document-${docId}`;
+    if (!objectPath) {
+      res.status(404).json({ error: "File missing" });
       return;
     }
-    const nodeStream = Readable.fromWeb(storageResp.body as any);
-    await new Promise<void>((resolve, reject) => {
-      nodeStream.on("error", reject);
-      res.on("finish", resolve);
-      nodeStream.pipe(res);
-    });
+    const fallbackContentType =
+      typeof (doc as any).mime_type === "string"
+        ? String((doc as any).mime_type)
+        : "application/octet-stream";
+    await streamSupabasePrivateObjectToResponse({ objectPath, res, fileName, fallbackContentType });
   } catch (err) {
+    const cfgErr = getSupabaseStorageConfigError(err);
+    if (cfgErr) {
+      logger.error({ err, path: req.path, firmId: req.firmId, userId: req.userId, caseId, docId }, "[documents] supabase_storage_not_configured");
+      res.status(cfgErr.statusCode).json({ error: cfgErr.error });
+      return;
+    }
     if (err instanceof ObjectNotFoundError) {
       res.status(404).json({ error: "File not found in storage" });
       return;
     }
-    throw err;
+    logger.error({ err, path: req.path, firmId: req.firmId, userId: req.userId, caseId, docId }, "[documents] case_document_download_failed");
+    res.status(500).json({ error: "Internal Server Error" });
   }
 });
 

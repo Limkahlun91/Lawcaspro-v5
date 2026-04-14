@@ -162,13 +162,13 @@ export default function FirmDocuments() {
 
   const foldersQuery = useQuery<FirmFolder[]>({
     queryKey: ["firm-document-folders"],
-    queryFn: () => apiFetchJson("/firm-document-folders"),
+    queryFn: ({ signal }) => apiFetchJson("/firm-document-folders", { signal }),
     retry: false,
   });
 
   const docsQuery = useQuery<FirmDocument[]>({
     queryKey: ["firm-documents"],
-    queryFn: () => apiFetchJson("/document-templates"),
+    queryFn: ({ signal }) => apiFetchJson("/document-templates", { signal }),
     retry: false,
   });
   const folders = foldersQuery.data ?? [];
