@@ -73,7 +73,7 @@ function SecurityTab() {
 
   const sessionsQuery = useQuery<AuthSessionsResponse>({
     queryKey: ["auth-sessions"],
-    queryFn: () => apiFetch<AuthSessionsResponse>("/auth/sessions"),
+    queryFn: ({ signal }) => apiFetch<AuthSessionsResponse>("/auth/sessions", { signal }),
     retry: false,
   });
   const { data: sessionsData, isLoading: loadingSessions } = sessionsQuery;
@@ -313,7 +313,7 @@ function FirmInfoTab() {
 
   const { data: settings, isLoading } = useQuery<FirmSettings>({
     queryKey: ["firm-settings"],
-    queryFn: () => apiFetch<FirmSettings>("/firm-settings"),
+    queryFn: ({ signal }) => apiFetch<FirmSettings>("/firm-settings", { signal }),
   });
 
   const [name, setName] = useState("");

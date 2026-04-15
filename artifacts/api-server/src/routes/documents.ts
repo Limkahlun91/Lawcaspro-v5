@@ -1370,7 +1370,7 @@ router.get("/platform/documents/:documentId/bindings", requireAuth, requireFound
       getPlatformDocPlaceholders(authDb, null, documentId),
     ]);
     return { status: 200 as const, body: { placeholders, variables: vars, bindings } };
-  }, { route: req.path, userId: req.userId ?? null });
+  }, { retry: true, ctx: { route: req.path, stage: "platform_document_bindings.get", userId: req.userId ?? null, firmId: null } });
   res.status(result.status).json(result.body);
 });
 
@@ -1405,7 +1405,7 @@ router.put("/platform/documents/:documentId/bindings", requireAuth, requireFound
     await writeAuditLog({ actorId: req.userId, actorType: req.userType, action: "documents.template.bindings.update", entityType: "platform_document", entityId: documentId, detail: `scope=global count=${normalized.length}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] }, { db: authDb });
     const bindings = await getPlatformDocumentBindings(authDb, null, documentId);
     return { status: 200 as const, body: { bindings } };
-  }, { route: req.path, userId: req.userId ?? null });
+  }, { retry: true, ctx: { route: req.path, stage: "platform_document_bindings.put", userId: req.userId ?? null, firmId: null } });
   res.status(result.status).json(result.body);
 });
 
@@ -1508,7 +1508,7 @@ router.get("/platform/documents/:documentId/applicability", requireAuth, require
     if (!doc[0]) return { status: 404 as const, body: { error: "Document not found" } };
     const rules = await getPlatformDocumentApplicabilityRules(authDb, null, documentId);
     return { status: 200 as const, body: { document: doc[0], rules } };
-  }, { route: req.path, userId: req.userId ?? null });
+  }, { retry: true, ctx: { route: req.path, stage: "platform_document_applicability.get", userId: req.userId ?? null, firmId: null } });
   res.status(result.status).json(result.body);
 });
 
@@ -1556,7 +1556,7 @@ router.put("/platform/documents/:documentId/applicability", requireAuth, require
     await writeAuditLog({ actorId: req.userId, actorType: req.userType, action: "documents.template.applicability.update", entityType: "platform_document", entityId: documentId, detail: "scope=global updated", ipAddress: req.ip, userAgent: req.headers["user-agent"] }, { db: authDb });
     const rules = await getPlatformDocumentApplicabilityRules(authDb, null, documentId);
     return { status: 200 as const, body: { ok: true, rules } };
-  }, { route: req.path, userId: req.userId ?? null });
+  }, { retry: true, ctx: { route: req.path, stage: "platform_document_applicability.put", userId: req.userId ?? null, firmId: null } });
   res.status(result.status).json(result.body);
 });
 
@@ -2746,7 +2746,7 @@ async function generateFirmDocument({
   firmId: number;
   actorId: number;
   actorType: string | undefined;
-  ipAddress: string;
+  ipAddress: string | undefined;
   userAgent: string | undefined;
   caseId: number;
   templateId: number;
@@ -2967,7 +2967,7 @@ async function generateMasterDocument({
   firmId: number;
   actorId: number;
   actorType: string | undefined;
-  ipAddress: string;
+  ipAddress: string | undefined;
   userAgent: string | undefined;
   caseId: number;
   masterDocId: number;

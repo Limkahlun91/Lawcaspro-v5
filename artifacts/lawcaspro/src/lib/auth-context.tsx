@@ -10,6 +10,9 @@ import { ME_QUERY_KEY } from "./query-keys";
 interface AuthContextType {
   user: AuthUser | null;
   isLoading: boolean;
+  hydrationError?: unknown;
+  retryHydration?: () => void;
+  isRetryingHydration?: boolean;
   login: (user: AuthUser) => void;
   logout: () => void;
 }
@@ -21,7 +24,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [isLoading, setIsLoading] = useState(true);
   const queryClient = useQueryClient();
 
-  const { data: me, isLoading: isMeLoading } = useQuery<AuthUser | null>({
+  const meQuery = useQuery<AuthUser | null>({
     queryKey: ME_QUERY_KEY,
     retry: false,
     queryFn: async ({ signal }) => {
@@ -30,21 +33,26 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         allowStatuses: [401],
         headers: token ? { Authorization: `Bearer ${token}` } : undefined,
         signal,
+        timeoutMs: 25000,
       });
       if (res.status === 401) return null;
       if (res.status === 204) return null;
       return (await res.json()) as AuthUser;
     },
   });
+  const { data: me, isLoading: isMeLoading, isError: isMeError, error: meError, refetch: refetchMe, isFetching: isMeFetching } = meQuery;
 
   const logoutMutation = useLogout();
 
   useEffect(() => {
-    if (!isMeLoading) {
-      setUser(me ?? null);
+    if (isMeLoading) return;
+    if (isMeError) {
       setIsLoading(false);
+      return;
     }
-  }, [me, isMeLoading]);
+    setUser(me ?? null);
+    setIsLoading(false);
+  }, [me, isMeLoading, isMeError]);
 
   useEffect(() => {
     return onAuthUnauthorized(() => {
@@ -69,8 +77,23 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     });
   };
 
+  const retryHydration = () => {
+    setIsLoading(true);
+    void refetchMe();
+  };
+
   return (
-    <AuthContext.Provider value={{ user, isLoading, login, logout: handleLogout }}>
+    <AuthContext.Provider
+      value={{
+        user,
+        isLoading,
+        hydrationError: isMeError ? meError : undefined,
+        retryHydration,
+        isRetryingHydration: isMeFetching,
+        login,
+        logout: handleLogout,
+      }}
+    >
       {children}
     </AuthContext.Provider>
   );

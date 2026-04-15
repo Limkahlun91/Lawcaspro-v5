@@ -57,10 +57,16 @@ router.post("/auth/login", authRateLimiter, async (req, res): Promise<void> => {
     const ua = req.headers["user-agent"];
     const reqId = (req as any).id;
 
-    logger.info({ emailHash }, "auth.login.start");
+    const ctx = { route: req.path, stage, reqId, emailHash, firmId: null as number | null, userId: null as number | null };
+
+    stage = "login_start";
+    ctx.stage = stage;
+    logger.info({ ...ctx }, "auth.login.stage");
 
     stage = "user_lookup";
+    ctx.stage = stage;
     const userLookupStartedAt = Date.now();
+    logger.info({ ...ctx }, "auth.login.stage");
     const user = await withAuthSafeDb(async (authDb) => {
       const [u] = await authDb
         .select({
@@ -78,7 +84,7 @@ router.post("/auth/login", authRateLimiter, async (req, res): Promise<void> => {
         .from(usersTable)
         .where(eq(usersTable.email, emailNormalized));
       return u ?? null;
-    }, { retry: true, ctx: { route: req.path, stage, reqId, emailHash, firmId: null, userId: null } });
+    }, { retry: true, ctx });
 
     if (!user) {
       logger.info({ emailHash, ms: Date.now() - startedAt }, "auth.login.user_not_found");
@@ -95,7 +101,7 @@ router.post("/auth/login", authRateLimiter, async (req, res): Promise<void> => {
             ipAddress: ip ?? null,
             userAgent: ua ?? null,
           });
-        }, { retry: false, ctx: { route: req.path, stage: "audit_log_user_not_found", reqId, emailHash, firmId: null, userId: null } });
+        }, { retry: false, ctx: { ...ctx, stage: "audit_log_user_not_found" } });
       } catch (err) {
         logger.error({ emailHash, stage: "audit_log_user_not_found", err }, "auth.login.audit_log_error");
       }
@@ -104,9 +110,14 @@ router.post("/auth/login", authRateLimiter, async (req, res): Promise<void> => {
     }
 
     userId = user.id;
+    ctx.userId = user.id;
+    ctx.firmId = user.firmId;
     const userLookupMs = Date.now() - userLookupStartedAt;
+    logger.info({ ...ctx, ms: userLookupMs }, "auth.login.stage.user_lookup_done");
 
-    stage = "password_compare";
+    stage = "password_verify";
+    ctx.stage = stage;
+    logger.info({ ...ctx }, "auth.login.stage");
     const passwordMatch = await bcrypt.compare(password, user.passwordHash);
     if (!passwordMatch) {
       logger.info({ emailHash, userId: user.id, userLookupMs, ms: Date.now() - startedAt }, "auth.login.wrong_password");
@@ -123,7 +134,7 @@ router.post("/auth/login", authRateLimiter, async (req, res): Promise<void> => {
             ipAddress: ip ?? null,
             userAgent: ua ?? null,
           });
-        }, { retry: false, ctx: { route: req.path, stage: "audit_log_wrong_password", reqId, emailHash, firmId: user.firmId, userId: user.id } });
+        }, { retry: false, ctx: { ...ctx, stage: "audit_log_wrong_password" } });
       } catch (err) {
         logger.error({ emailHash, userId: user.id, stage: "audit_log_wrong_password", err }, "auth.login.audit_log_error");
       }
@@ -146,7 +157,7 @@ router.post("/auth/login", authRateLimiter, async (req, res): Promise<void> => {
             ipAddress: ip ?? null,
             userAgent: ua ?? null,
           });
-        }, { retry: false, ctx: { route: req.path, stage: "audit_log_inactive", reqId, emailHash, firmId: user.firmId, userId: user.id } });
+        }, { retry: false, ctx: { ...ctx, stage: "audit_log_inactive" } });
       } catch (err) {
         logger.error({ emailHash, userId: user.id, stage: "audit_log_inactive", err }, "auth.login.audit_log_error");
       }
@@ -157,6 +168,8 @@ router.post("/auth/login", authRateLimiter, async (req, res): Promise<void> => {
     let didUseTotp = false;
     if (user.totpEnabled) {
       stage = "totp";
+      ctx.stage = stage;
+      logger.info({ ...ctx }, "auth.login.stage");
       const totpCode = req.body.totpCode as string | undefined;
       if (!totpCode) {
         logger.info({ emailHash, userId: user.id, ms: Date.now() - startedAt }, "auth.login.totp_required");
@@ -180,7 +193,7 @@ router.post("/auth/login", authRateLimiter, async (req, res): Promise<void> => {
               ipAddress: ip ?? null,
               userAgent: ua ?? null,
             });
-          }, { retry: false, ctx: { route: req.path, stage: "audit_log_totp_failed", reqId, emailHash, firmId: user.firmId, userId: user.id } });
+          }, { retry: false, ctx: { ...ctx, stage: "audit_log_totp_failed" } });
         } catch (err) {
           logger.error({ emailHash, userId: user.id, stage: "audit_log_totp_failed", err }, "auth.login.audit_log_error");
         }
@@ -191,13 +204,21 @@ router.post("/auth/login", authRateLimiter, async (req, res): Promise<void> => {
     }
 
     stage = "session_create";
+    ctx.stage = stage;
+    logger.info({ ...ctx }, "auth.login.stage");
     const token = crypto.randomBytes(32).toString("hex");
     const tokenHash = crypto.createHash("sha256").update(token).digest("hex");
     const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
 
     stage = "persist";
+    ctx.stage = stage;
+    logger.info({ ...ctx }, "auth.login.stage");
     const { roleName, firmName } = await withAuthSafeDb(async (authDb) => {
       const hasAuditLogs = await tableExistsAuthDb(authDb, "public.audit_logs");
+
+      stage = "session_create";
+      ctx.stage = stage;
+      logger.info({ ...ctx }, "auth.login.stage");
       await authDb.insert(sessionsTable).values({
         userId: user.id,
         tokenHash,
@@ -208,6 +229,9 @@ router.post("/auth/login", authRateLimiter, async (req, res): Promise<void> => {
 
       const updateFields: Partial<typeof usersTable.$inferInsert> = { lastLoginAt: new Date() };
       if (didUseTotp) updateFields.totpLastUsedAt = new Date();
+      stage = "last_login_update";
+      ctx.stage = stage;
+      logger.info({ ...ctx }, "auth.login.stage");
       await authDb.update(usersTable).set(updateFields).where(eq(usersTable.id, user.id));
 
       if (hasAuditLogs) {
@@ -239,7 +263,7 @@ router.post("/auth/login", authRateLimiter, async (req, res): Promise<void> => {
       }
 
       return { roleName, firmName };
-    }, { retry: false, ctx: { route: req.path, stage, reqId, emailHash, firmId: user.firmId, userId: user.id } });
+    }, { retry: false, ctx });
 
     res.cookie("auth_token", token, {
       httpOnly: true,
@@ -262,6 +286,9 @@ router.post("/auth/login", authRateLimiter, async (req, res): Promise<void> => {
       totpEnabled: user.totpEnabled,
     });
 
+    stage = "response_sent";
+    ctx.stage = stage;
+    logger.info({ ...ctx, userLookupMs, ms: Date.now() - startedAt }, "auth.login.stage");
     logger.info({ emailHash, userId: user.id, userLookupMs, ms: Date.now() - startedAt }, "auth.login.success");
   } catch (err) {
     logger.error({ emailHash, userId, stage, err }, "[auth-login]");
@@ -287,9 +314,16 @@ router.post("/auth/logout", requireAuth, async (req: AuthRequest, res): Promise<
 });
 
 router.get("/auth/me", requireAuth, async (req: AuthRequest, res): Promise<void> => {
+  const startedAt = Date.now();
+  let stage = "me_start";
   try {
     const reqId = (req as any).id;
+    const ctx = { route: req.path, stage, reqId, firmId: req.firmId ?? null, userId: req.userId ?? null };
+    logger.info({ ...ctx }, "auth.me.stage");
     const result = await withAuthSafeDb(async (authDb) => {
+      stage = "user_lookup";
+      ctx.stage = stage;
+      logger.info({ ...ctx }, "auth.me.stage");
       const [user] = await authDb.select({
         id: usersTable.id,
         firmId: usersTable.firmId,
@@ -304,16 +338,25 @@ router.get("/auth/me", requireAuth, async (req: AuthRequest, res): Promise<void>
 
       let roleName: string | null = null;
       if (user.roleId) {
+        stage = "role_lookup";
+        ctx.stage = stage;
+        logger.info({ ...ctx }, "auth.me.stage");
         const [role] = await authDb.select().from(rolesTable).where(eq(rolesTable.id, user.roleId));
         roleName = role?.name ?? null;
       }
 
       let firmName: string | null = null;
       if (user.firmId) {
+        stage = "firm_lookup";
+        ctx.stage = stage;
+        logger.info({ ...ctx }, "auth.me.stage");
         const [firm] = await authDb.select().from(firmsTable).where(eq(firmsTable.id, user.firmId));
         firmName = firm?.name ?? null;
       }
 
+      stage = "permissions_lookup";
+      ctx.stage = stage;
+      logger.info({ ...ctx }, "auth.me.stage");
       let permissions =
         user.userType === "firm_user" && user.roleId
           ? await authDb
@@ -323,6 +366,9 @@ router.get("/auth/me", requireAuth, async (req: AuthRequest, res): Promise<void>
           : [];
 
       if (user.userType === "firm_user" && user.roleId && permissions.length === 0 && (roleName === "Partner" || roleName === "Clerk")) {
+        stage = "permissions_seed";
+        ctx.stage = stage;
+        logger.info({ ...ctx }, "auth.me.stage");
         const roleId = user.roleId;
         if (roleName === "Partner") {
           await authDb.execute(sql`
@@ -372,6 +418,9 @@ router.get("/auth/me", requireAuth, async (req: AuthRequest, res): Promise<void>
           `);
         }
 
+        stage = "permissions_lookup";
+        ctx.stage = stage;
+        logger.info({ ...ctx }, "auth.me.stage");
         permissions = await authDb
           .select({ module: permissionsTable.module, action: permissionsTable.action })
           .from(permissionsTable)
@@ -391,7 +440,7 @@ router.get("/auth/me", requireAuth, async (req: AuthRequest, res): Promise<void>
         totpEnabled: user.totpEnabled,
         permissions,
       };
-    }, { retry: true, ctx: { route: req.path, stage: "auth_me", reqId, firmId: req.firmId ?? null, userId: req.userId ?? null } });
+    }, { retry: true, ctx });
 
     if (!result) {
       res.status(401).json({ error: "User not found" });
@@ -399,8 +448,10 @@ router.get("/auth/me", requireAuth, async (req: AuthRequest, res): Promise<void>
     }
 
     res.json(result);
+    stage = "response_sent";
+    logger.info({ route: req.path, stage, reqId, firmId: req.firmId ?? null, userId: req.userId ?? null, ms: Date.now() - startedAt }, "auth.me.stage");
   } catch (err) {
-    logger.error({ err, userId: req.userId }, "[auth-me]");
+    logger.error({ err, userId: req.userId, stage }, "[auth-me]");
     res.status(isTransientDbConnectionError(err) ? 503 : 500).json({ error: "Auth temporarily unavailable" });
   }
 });

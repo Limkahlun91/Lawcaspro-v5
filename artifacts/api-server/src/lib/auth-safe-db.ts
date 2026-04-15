@@ -18,6 +18,24 @@ type TransientDbErrorKind =
   | "unknown";
 
 function classifyTransientDbConnectionError(err: unknown): TransientDbErrorKind | null {
+  const code = (() => {
+    if (!err || typeof err !== "object") return undefined;
+    const c = (err as { code?: unknown }).code;
+    return typeof c === "string" ? c : undefined;
+  })();
+  if (code) {
+    const loweredCode = code.toLowerCase();
+    if (loweredCode === "etimedout" || loweredCode === "econnrefused" || loweredCode === "ehostunreach") {
+      return "connection_timeout";
+    }
+    if (loweredCode === "econnreset" || loweredCode === "epipe") {
+      return "socket_reset";
+    }
+    if (loweredCode === "08000" || loweredCode === "08003" || loweredCode === "08006" || loweredCode === "57p01" || loweredCode === "57p02" || loweredCode === "57p03") {
+      return "connection_terminated";
+    }
+  }
+
   const message = err instanceof Error ? err.message : String(err ?? "");
   const lowered = message.toLowerCase();
 
@@ -28,11 +46,21 @@ function classifyTransientDbConnectionError(err: unknown): TransientDbErrorKind 
     lowered.includes("connection terminated unexpectedly") ||
     lowered.includes("server closed the connection unexpectedly") ||
     lowered.includes("terminating connection due to administrator command") ||
-    lowered.includes("connection ended unexpectedly")
+    lowered.includes("connection ended unexpectedly") ||
+    lowered.includes("client was closed and is not queryable") ||
+    lowered.includes("connection terminated") ||
+    lowered.includes("connection ended")
   ) {
     return "connection_terminated";
   }
-  if (lowered.includes("socket hang up") || lowered.includes("econnreset") || lowered.includes("ecconnreset") || lowered.includes("econnrefused")) {
+  if (
+    lowered.includes("socket hang up") ||
+    lowered.includes("econnreset") ||
+    lowered.includes("econnrefused") ||
+    lowered.includes("etimedout") ||
+    lowered.includes("broken pipe") ||
+    lowered.includes("epipe")
+  ) {
     return "socket_reset";
   }
   if (lowered.includes("timeout exceeded when trying to connect") || lowered.includes("pool") && lowered.includes("timeout")) {
@@ -80,15 +108,34 @@ export async function withAuthSafeDb<T>(
   fn: (db: ReturnType<typeof makeRlsDb>) => Promise<T>,
   opts?: { retry?: boolean; ctx?: AuthSafeDbContext },
 ): Promise<T> {
+  const attempt1StartedAt = Date.now();
   try {
     return await runWithAuthSafeDbOnce(fn, opts?.ctx);
   } catch (err) {
-    if (!isTransientDbConnectionError(err) || !opts?.retry) {
-      throw err;
+    const kind = classifyTransientDbConnectionError(err) ?? "unknown";
+    if (isTransientDbConnectionError(err)) {
+      logger.warn(
+        { ...opts?.ctx, err, kind, attempt: 1, ms: Date.now() - attempt1StartedAt },
+        "auth-safe-db.first_attempt_failed",
+      );
     }
 
-    const kind = classifyTransientDbConnectionError(err) ?? "unknown";
+    if (!isTransientDbConnectionError(err) || !opts?.retry) throw err;
+
     logger.warn({ ...opts?.ctx, err, kind, retryCount: 1 }, "auth-safe-db.retrying_transient_connection_error");
-    return await runWithAuthSafeDbOnce(fn, opts?.ctx);
+    logger.warn({ ...opts?.ctx, err, kind, retryCount: 1 }, "auth-safe-db.retry_started");
+
+    const attempt2StartedAt = Date.now();
+    try {
+      const result = await runWithAuthSafeDbOnce(fn, opts?.ctx);
+      logger.info({ ...opts?.ctx, kind, retryCount: 1, ms: Date.now() - attempt2StartedAt }, "auth-safe-db.retry_success");
+      return result;
+    } catch (err2) {
+      logger.error(
+        { ...opts?.ctx, err: err2, firstErr: err, kind, retryCount: 1, ms: Date.now() - attempt2StartedAt },
+        "auth-safe-db.retry_failed",
+      );
+      throw err2;
+    }
   }
 }

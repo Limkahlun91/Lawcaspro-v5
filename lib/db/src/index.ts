@@ -18,6 +18,30 @@ const connectTimeoutMs =
     ? Number(rawConnectTimeoutMs)
     : 10_000;
 
+const rawPoolMax = process.env.PG_POOL_MAX;
+const poolMax =
+  rawPoolMax && !Number.isNaN(Number(rawPoolMax)) && Number(rawPoolMax) > 0
+    ? Number(rawPoolMax)
+    : undefined;
+
+const rawIdleTimeoutMs = process.env.PG_IDLE_TIMEOUT_MS;
+const idleTimeoutMs =
+  rawIdleTimeoutMs && !Number.isNaN(Number(rawIdleTimeoutMs)) && Number(rawIdleTimeoutMs) >= 0
+    ? Number(rawIdleTimeoutMs)
+    : 30_000;
+
+const rawKeepAlive = process.env.PG_KEEPALIVE;
+const keepAlive =
+  rawKeepAlive && (rawKeepAlive === "0" || rawKeepAlive.toLowerCase() === "false")
+    ? false
+    : true;
+
+const rawKeepAliveDelayMs = process.env.PG_KEEPALIVE_DELAY_MS;
+const keepAliveDelayMs =
+  rawKeepAliveDelayMs && !Number.isNaN(Number(rawKeepAliveDelayMs)) && Number(rawKeepAliveDelayMs) >= 0
+    ? Number(rawKeepAliveDelayMs)
+    : 10_000;
+
 const isSupabasePoolerDatabaseUrl = (databaseUrl: string): boolean =>
   databaseUrl.toLowerCase().includes("pooler.supabase.com");
 
@@ -46,6 +70,9 @@ const isPooler = isSupabasePoolerDatabaseUrl(databaseUrl);
 export const pool = new Pool({
   connectionString: isPooler ? stripSslmodeFromDatabaseUrl(databaseUrl) : databaseUrl,
   connectionTimeoutMillis: connectTimeoutMs,
+  idleTimeoutMillis: idleTimeoutMs,
+  ...(poolMax ? { max: poolMax } : {}),
+  ...(keepAlive ? { keepAlive: true, keepAliveInitialDelayMillis: keepAliveDelayMs } : {}),
   ...(isPooler ? { ssl: { rejectUnauthorized: false } } : {}),
 });
 export const db = drizzle(pool, { schema });
