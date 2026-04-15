@@ -136,6 +136,7 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
   const [templateSourceFilter, setTemplateSourceFilter] = useState<"all" | "firm" | "master">("all");
   const [selectedLetterheadId, setSelectedLetterheadId] = useState<string>("");
   const [documentName, setDocumentName] = useState("");
+  const [rowNamingPreview, setRowNamingPreview] = useState<Record<string, { fileName: string; ruleUsed: string; warnings?: string[] }>>({});
   const [uploadDialogOpen, setUploadDialogOpen] = useState(false);
   const [uploadName, setUploadName] = useState("");
   const [uploadPreviewFileName, setUploadPreviewFileName] = useState("");
@@ -162,7 +163,12 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
   const [previewLoading, setPreviewLoading] = useState(false);
   const [previewItem, setPreviewItem] = useState<ChecklistItem | null>(null);
   const [previewResult, setPreviewResult] = useState<DocumentPreviewResponse | null>(null);
-  const [previewFileName, setPreviewFileName] = useState<string>("");
+  const [previewNaming, setPreviewNaming] = useState<null | {
+    fileName: string;
+    ruleUsed: string;
+    warnings?: string[];
+    fallbackUsed?: boolean;
+  }>(null);
   const [selectedClauses, setSelectedClauses] = useState<Array<{ scope: "firm" | "platform"; id: number; includeTitle: boolean }>>([]);
   const [clauseQuery, setClauseQuery] = useState("");
   const [clauseIncludeTitleDefault, setClauseIncludeTitleDefault] = useState(true);
@@ -428,7 +434,7 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
     setPreviewOpen(true);
     setPreviewLoading(true);
     setPreviewResult(null);
-    setPreviewFileName("");
+    setPreviewNaming(null);
     try {
       const bypassApplicability = Boolean(showAllTemplates && canBypassApplicability);
       const result = await apiFetchJson<DocumentPreviewResponse>(`/cases/${caseId}/documents/preview`, {
@@ -441,7 +447,7 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
       });
       setPreviewResult(result);
       try {
-        const naming = await apiFetchJson<{ fileName: string }>(`/cases/${caseId}/documents/filename-preview`, {
+        const naming = await apiFetchJson<{ fileName: string; ruleUsed: string; warnings?: string[]; fallbackUsed?: boolean }>(`/cases/${caseId}/documents/filename-preview`, {
           method: "POST",
           body: JSON.stringify(
             item.source === "firm"
@@ -449,7 +455,7 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
               : { platformDocumentId: Number(item.templateId), documentName: documentName || item.name, originalFileName: item.fileName ?? "docx", fallbackExt: "docx" }
           ),
         });
-        setPreviewFileName(naming.fileName);
+        setPreviewNaming(naming);
       } catch {
         void 0;
       }
@@ -457,6 +463,24 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
       toastError(toast, err, "Preview failed");
     } finally {
       setPreviewLoading(false);
+    }
+  }
+
+  async function previewFileNameForItem(item: ChecklistItem): Promise<void> {
+    if (item.kind !== "template" || typeof item.templateId !== "number" || (item.source !== "firm" && item.source !== "master")) return;
+    const key = `${item.source}-${item.templateId}`;
+    try {
+      const naming = await apiFetchJson<{ fileName: string; ruleUsed: string; warnings?: string[] }>(`/cases/${caseId}/documents/filename-preview`, {
+        method: "POST",
+        body: JSON.stringify(
+          item.source === "firm"
+            ? { templateId: Number(item.templateId), documentName: documentName || item.name, originalFileName: item.fileName ?? "docx", fallbackExt: "docx" }
+            : { platformDocumentId: Number(item.templateId), documentName: documentName || item.name, originalFileName: item.fileName ?? "docx", fallbackExt: "docx" }
+        ),
+      });
+      setRowNamingPreview((prev) => ({ ...prev, [key]: naming }));
+    } catch (err) {
+      toastError(toast, err, "Filename preview failed");
     }
   }
 
@@ -542,6 +566,7 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
     setSelectedLetterheadId("");
     setShowAllTemplates(false);
     setTemplateSourceFilter("all");
+    setRowNamingPreview({});
   }
 
   async function uploadPrivateObject(file: File, objectPath?: string): Promise<string> {
@@ -1381,10 +1406,14 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
                   <div className="mt-1 text-xs text-amber-700">Duplicate clauses were ignored.</div>
                 ) : null}
               </div>
-              {previewFileName ? (
+              {previewNaming ? (
                 <div className="rounded-lg border border-slate-200 bg-white p-3">
-                  <div className="text-sm font-medium text-slate-900">Output filename</div>
-                  <div className="mt-1 text-sm text-slate-700 break-words">{previewFileName}</div>
+                  <div className="text-sm font-medium text-slate-900">Filename preview</div>
+                  <div className="mt-1 text-xs text-slate-500 break-words">Rule: {previewNaming.ruleUsed}</div>
+                  <div className="mt-1 text-sm text-slate-700 break-words">{previewNaming.fileName}</div>
+                  {previewNaming.warnings?.length ? (
+                    <div className="mt-1 text-xs text-amber-700 break-words">{previewNaming.warnings.join(" | ")}</div>
+                  ) : null}
                 </div>
               ) : null}
               <div className="rounded-lg border border-slate-200 bg-white p-3">
@@ -1561,22 +1590,45 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
                                     </span>
                                   </div>
                                   {reason && <div className="mt-1 text-xs text-slate-600 break-words">{reason}</div>}
+                                  {rowNamingPreview[`${it.source}-${it.templateId}`] ? (
+                                    <div className="mt-1 text-xs text-slate-600 break-words">
+                                      Rule: {rowNamingPreview[`${it.source}-${it.templateId}`].ruleUsed}
+                                      <br />
+                                      Name: {rowNamingPreview[`${it.source}-${it.templateId}`].fileName}
+                                      {rowNamingPreview[`${it.source}-${it.templateId}`].warnings?.length ? (
+                                        <>
+                                          <br />
+                                          Warning: {rowNamingPreview[`${it.source}-${it.templateId}`].warnings?.join(", ")}
+                                        </>
+                                      ) : null}
+                                    </div>
+                                  ) : null}
                                 </div>
                                 <div className="shrink-0">
-                                  {selectedClauses.length > 0 ? (
+                                  <div className="flex items-center gap-2">
                                     <Button
                                       size="sm"
                                       variant="outline"
-                                      onClick={() => { closeGenerateDialog(); handlePreview(it); }}
-                                      disabled={!applicable || !ready || previewLoading}
+                                      onClick={() => previewFileNameForItem(it)}
+                                      disabled={!applicable || !ready}
                                     >
-                                      Preview
+                                      Filename
                                     </Button>
-                                  ) : (
-                                    <Button size="sm" onClick={() => handleGenerate(it)} disabled={!applicable || !ready || isGenerating}>
-                                      Generate
-                                    </Button>
-                                  )}
+                                    {selectedClauses.length > 0 ? (
+                                      <Button
+                                        size="sm"
+                                        variant="outline"
+                                        onClick={() => { closeGenerateDialog(); handlePreview(it); }}
+                                        disabled={!applicable || !ready || previewLoading}
+                                      >
+                                        Preview
+                                      </Button>
+                                    ) : (
+                                      <Button size="sm" onClick={() => handleGenerate(it)} disabled={!applicable || !ready || isGenerating}>
+                                        Generate
+                                      </Button>
+                                    )}
+                                  </div>
                                 </div>
                               </div>
                             );

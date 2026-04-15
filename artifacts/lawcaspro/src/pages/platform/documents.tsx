@@ -1131,11 +1131,18 @@ export default function PlatformDocuments() {
                 <Textarea
                   value={editFileNamingRule}
                   onChange={(e) => setEditFileNamingRule(e.target.value)}
-                  placeholder="{case_reference}_{template_name}_{date_ymd}_{sequence}"
+                  placeholder="{{our_ref}} - {{document_title}}"
                   rows={2}
                 />
                 <div className="text-xs text-slate-500">
-                  Tokens: {"{case_reference} {client_name} {project_name} {developer_name} {document_name} {template_name} {date_ymd} {date_dmy} {status} {title_type} {loan_bank} {sequence}"}
+                  Tokens: {"{{our_ref}} {{case_id}} {{document_title}} {{template_name}} {{generated_date}} {{generated_datetime}} {{primary_client_name}} {{purchaser_names}} {{borrower_names}} {{project_name}} {{developer_name}} {{unit_no}} {{parcel_no}} {{property_description_short}} {{bank_name}} {{date_ymd}} {{date_dmy}} {{timestamp_compact}}"}
+                </div>
+                <div className="flex flex-wrap gap-1">
+                  {["{{our_ref}}","{{document_title}}","{{primary_client_name}}","{{project_name}}","{{unit_no}}","{{bank_name}}","{{date_ymd}}"].map((tk) => (
+                    <Button key={tk} type="button" variant="outline" size="sm" onClick={() => setEditFileNamingRule((prev) => `${prev}${prev ? " " : ""}${tk}`)}>
+                      {tk}
+                    </Button>
+                  ))}
                 </div>
                 <div className="grid grid-cols-2 gap-2 items-end">
                   <div className="space-y-1.5">
@@ -1151,7 +1158,7 @@ export default function PlatformDocuments() {
                         return;
                       }
                       try {
-                        const resp = await apiFetchJson<{ fileName: string }>(`/cases/${id}/documents/filename-preview`, {
+                        const resp = await apiFetchJson<{ fileName: string; ruleUsed: string; warnings?: string[] }>(`/cases/${id}/documents/filename-preview`, {
                           method: "POST",
                           body: JSON.stringify({
                             platformDocumentId: editingDoc.id,
@@ -1160,7 +1167,7 @@ export default function PlatformDocuments() {
                             fallbackExt: ((editingDoc as any).fileType ?? "docx") === "pdf" ? "pdf" : "docx",
                           }),
                         });
-                        setNamingPreviewFileName(resp.fileName);
+                        setNamingPreviewFileName(`${resp.fileName}${resp.warnings?.length ? ` | ${resp.warnings.join(", ")}` : ""}`);
                       } catch (e) {
                         toastError(toast, e, "Preview failed");
                       }

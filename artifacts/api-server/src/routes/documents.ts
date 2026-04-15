@@ -16,8 +16,8 @@ import fontkit from "@pdf-lib/fontkit";
 import { z } from "zod";
 import { evaluateTemplateApplicability, normalizePurchaseMode, normalizeTitleType } from "../lib/documentApplicability";
 import { evaluateTemplateReadiness, type TemplateReadinessInputs } from "../lib/documentReadiness";
-import { buildGeneratedDownloadFileName } from "../lib/documentNaming";
 import { resolveSmartFilename } from "../lib/smartFileNaming";
+import { ensureUniqueCaseDocumentFileName, resolveDocumentFileName } from "../lib/documentFileName";
 import { normalizeWorkflowDocumentKeyFromDb, workflowDocumentLabel } from "../lib/caseWorkflowDocuments";
 import { LOAN_STAMPING_ITEM_KEYS, isLoanStampingItemKeyAllowedForTitleType, normalizeTitleType as normalizeLoanTitleType, type LoanStampingItemKey } from "../lib/loanStamping";
 import { listDocumentVariables, resolveVariablesForTemplate, type PlaceholderWarning } from "../lib/documentVariables";
@@ -52,6 +52,46 @@ async function nextCaseDocumentSequence(r: DbConn, firmId: number, caseId: numbe
   const c = typeof cRaw === "number" ? cRaw : (typeof cRaw === "string" ? Number(cRaw) : 0);
   const n = Number.isFinite(c) ? c : 0;
   return Math.max(1, Math.floor(n) + 1);
+}
+
+function buildNamingContext(params: {
+  caseId: number;
+  firmId: number;
+  context: Record<string, unknown>;
+  documentName: string;
+  templateName?: string;
+  sequence: number;
+}): Parameters<typeof resolveDocumentFileName>[0]["ctx"] {
+  const c = params.context as any;
+  const purchaserNames = [c.spa_purchaser1_name, c.spa_purchaser2_name].filter((x: unknown): x is string => typeof x === "string" && Boolean(String(x).trim())).join(", ");
+  const borrowerNames = [c.borrower1_name, c.borrower2_name].filter((x: unknown): x is string => typeof x === "string" && Boolean(String(x).trim())).join(", ");
+  const primaryClient = typeof c.spa_purchaser1_name === "string" && c.spa_purchaser1_name.trim()
+    ? String(c.spa_purchaser1_name)
+    : typeof c.borrower1_name === "string"
+      ? String(c.borrower1_name)
+      : "";
+
+  return {
+    caseId: params.caseId,
+    firmId: params.firmId,
+    caseReferenceNo: String(c.reference_no ?? ""),
+    parcelNo: String(c.parcel_no ?? ""),
+    unitNo: String(c.property_building_no ?? c.property_floor_no ?? ""),
+    clientName: primaryClient,
+    primaryClientName: primaryClient,
+    purchaserNames,
+    borrowerNames,
+    projectName: String(c.project_name ?? ""),
+    propertyDescriptionShort: String(c.property_type ?? ""),
+    developerName: String(c.developer_name ?? ""),
+    documentName: params.documentName,
+    templateName: params.templateName ?? "",
+    bankName: String(c.end_financier ?? c.loan_end_financier ?? ""),
+    status: String(c.case_status ?? c.status ?? ""),
+    titleType: String(c.title_type ?? ""),
+    loanBank: String(c.end_financier ?? c.loan_end_financier ?? ""),
+    sequence: params.sequence,
+  };
 }
 
 const getRlsDb = (req: AuthRequest, res: any): NonNullable<AuthRequest["rlsDb"]> | null => {
@@ -4070,37 +4110,45 @@ async function generateFirmDocument({
   const templateCode = String((template as any).document_type ?? "DOC");
   const sequence = await nextCaseDocumentSequence(r, firmId, caseId);
   const namingRule = typeof (template as any).file_naming_rule === "string" ? String((template as any).file_naming_rule) : null;
-  const downloadName = resolveSmartFilename({
-    ctx: {
+  const namingPreview = resolveDocumentFileName({
+    ctx: buildNamingContext({
       caseId,
       firmId,
-      caseReferenceNo: String((context as any).reference_no ?? ""),
-      parcelNo: String((context as any).parcel_no ?? ""),
-      clientName: String((context as any).spa_purchaser1_name ?? (context as any).borrower1_name ?? ""),
-      projectName: String((context as any).project_name ?? ""),
-      developerName: String((context as any).developer_name ?? ""),
+      context,
       documentName: docName,
       templateName: String((template as any).name ?? ""),
-      status: String((context as any).case_status ?? (context as any).status ?? ""),
-      titleType: String((context as any).title_type ?? ""),
-      loanBank: String((context as any).loan_end_financier ?? ""),
       sequence,
-    },
+    }),
     rule: namingRule,
     originalFileNameOrExt: "docx",
     fallbackExt: "docx",
-  }).fileName;
+  });
+  const uniq = await ensureUniqueCaseDocumentFileName({
+    r,
+    firmId,
+    caseId,
+    desiredFileName: namingPreview.fileName,
+  });
+  const downloadName = uniq.fileName;
+  const namingSnapshot = {
+    namingRuleUsed: namingPreview.ruleUsed,
+    resolvedFileName: downloadName,
+    namingWarnings: namingPreview.warnings,
+    namingFallbackUsed: namingPreview.fallbackUsed,
+    collisionResolved: uniq.collisionResolved,
+    collisionSuffixApplied: uniq.collisionSuffixApplied,
+  };
   const templateSnapshotUpdatedAt = (version as any)?.published_at ?? (template as any).updated_at ?? null;
   const docRows = await queryRows(r, sql`
-    INSERT INTO case_documents (case_id, firm_id, template_id, template_source, template_snapshot_name, template_snapshot_updated_at, name, document_type, status, object_path, file_name, generated_by, clause_snapshot)
-    VALUES (${caseId}, ${firmId}, ${templateId}, 'firm', ${String((template as any).name ?? "")}, ${templateSnapshotUpdatedAt as any}, ${docName}, ${templateDocType}, 'generated', ${normalizedPath}, ${downloadName}, ${actorId}, ${clauseSnapshot as any})
+    INSERT INTO case_documents (case_id, firm_id, template_id, template_source, template_snapshot_name, template_snapshot_updated_at, name, document_type, status, object_path, file_name, generated_by, clause_snapshot, naming_snapshot)
+    VALUES (${caseId}, ${firmId}, ${templateId}, 'firm', ${String((template as any).name ?? "")}, ${templateSnapshotUpdatedAt as any}, ${docName}, ${templateDocType}, 'generated', ${normalizedPath}, ${downloadName}, ${actorId}, ${clauseSnapshot as any}, ${namingSnapshot as any})
     RETURNING *
   `);
   const created = docRows[0];
   const createdId = created && typeof created === "object" && "id" in created && typeof (created as any).id === "number"
     ? Number((created as any).id)
     : null;
-  await writeAuditLog({ firmId, actorId, actorType, action: "documents.case.generate", entityType: "case_document", entityId: createdId ?? undefined, detail: `caseId=${caseId} templateId=${templateId} name=${docName} letterhead=${isLetterLike ? (usedLetterheadId ?? "default") : "n/a"} clauses=${clauseSnapshot ? "yes" : "no"}`, ipAddress, userAgent });
+  await writeAuditLog({ firmId, actorId, actorType, action: "documents.case.generate", entityType: "case_document", entityId: createdId ?? undefined, detail: `caseId=${caseId} templateId=${templateId} name=${docName} letterhead=${isLetterLike ? (usedLetterheadId ?? "default") : "n/a"} clauses=${clauseSnapshot ? "yes" : "no"} fileName=${downloadName} fallback=${namingPreview.fallbackUsed ? "1" : "0"} collision=${uniq.collisionResolved ? "1" : "0"}`, ipAddress, userAgent });
   if (preview.usedMode === "bindings") {
     await writeAuditLog({ firmId, actorId, actorType, action: "documents.generate.binding_used", entityType: "case_document", entityId: createdId ?? undefined, detail: `caseId=${caseId} templateId=${templateId} placeholders=${effectivePlaceholders.length} missing=${preview.missingRequiredVariables.length}`, ipAddress, userAgent });
   }
@@ -4408,36 +4456,44 @@ async function generateMasterDocument({
   const templateCode = String((masterDoc as any).category ?? (masterDoc as any).name ?? "DOC");
   const sequence = await nextCaseDocumentSequence(r, firmId, caseId);
   const namingRule = typeof (masterDoc as any).file_naming_rule === "string" ? String((masterDoc as any).file_naming_rule) : null;
-  const fileName = resolveSmartFilename({
-    ctx: {
+  const namingPreview = resolveDocumentFileName({
+    ctx: buildNamingContext({
       caseId,
       firmId,
-      caseReferenceNo: String((context as any).reference_no ?? ""),
-      parcelNo: String((context as any).parcel_no ?? ""),
-      clientName: String((context as any).spa_purchaser1_name ?? (context as any).borrower1_name ?? ""),
-      projectName: String((context as any).project_name ?? ""),
-      developerName: String((context as any).developer_name ?? ""),
+      context,
       documentName: docName,
       templateName: String((masterDoc as any).name ?? ""),
-      status: String((context as any).case_status ?? (context as any).status ?? ""),
-      titleType: String((context as any).title_type ?? ""),
-      loanBank: String((context as any).loan_end_financier ?? ""),
       sequence,
-    },
+    }),
     rule: namingRule,
     originalFileNameOrExt: outputExt,
     fallbackExt: outputExt,
-  }).fileName;
+  });
+  const uniq = await ensureUniqueCaseDocumentFileName({
+    r,
+    firmId,
+    caseId,
+    desiredFileName: namingPreview.fileName,
+  });
+  const fileName = uniq.fileName;
+  const namingSnapshot = {
+    namingRuleUsed: namingPreview.ruleUsed,
+    resolvedFileName: fileName,
+    namingWarnings: namingPreview.warnings,
+    namingFallbackUsed: namingPreview.fallbackUsed,
+    collisionResolved: uniq.collisionResolved,
+    collisionSuffixApplied: uniq.collisionSuffixApplied,
+  };
   const savedRows = await queryRows(r, sql`
-    INSERT INTO case_documents (case_id, firm_id, template_source, platform_document_id, template_snapshot_name, template_snapshot_updated_at, name, document_type, status, object_path, file_name, generated_by, clause_snapshot)
-    VALUES (${caseId}, ${firmId}, 'master', ${masterDocId}, ${String((masterDoc as any).name ?? "")}, ${(masterDoc as any).created_at ?? null}, ${docName}, ${(masterDoc as any).category ?? "other"}, 'generated', ${normalizedPath}, ${fileName}, ${actorId}, ${clauseSnapshot as any})
+    INSERT INTO case_documents (case_id, firm_id, template_source, platform_document_id, template_snapshot_name, template_snapshot_updated_at, name, document_type, status, object_path, file_name, generated_by, clause_snapshot, naming_snapshot)
+    VALUES (${caseId}, ${firmId}, 'master', ${masterDocId}, ${String((masterDoc as any).name ?? "")}, ${(masterDoc as any).created_at ?? null}, ${docName}, ${(masterDoc as any).category ?? "other"}, 'generated', ${normalizedPath}, ${fileName}, ${actorId}, ${clauseSnapshot as any}, ${namingSnapshot as any})
     RETURNING *
   `);
   const created = savedRows[0];
   const createdId = created && typeof created === "object" && "id" in created && typeof (created as any).id === "number"
     ? Number((created as any).id)
     : null;
-  await writeAuditLog({ firmId, actorId, actorType, action: "documents.case.generate_from_master", entityType: "case_document", entityId: createdId ?? undefined, detail: `caseId=${caseId} masterDocId=${masterDocId} name=${docName} clauses=${clauseSnapshot ? "yes" : "no"}`, ipAddress, userAgent });
+  await writeAuditLog({ firmId, actorId, actorType, action: "documents.case.generate_from_master", entityType: "case_document", entityId: createdId ?? undefined, detail: `caseId=${caseId} masterDocId=${masterDocId} name=${docName} clauses=${clauseSnapshot ? "yes" : "no"} fileName=${fileName} fallback=${namingPreview.fallbackUsed ? "1" : "0"} collision=${uniq.collisionResolved ? "1" : "0"}`, ipAddress, userAgent });
   if (preview.usedMode === "bindings") {
     await writeAuditLog({ firmId, actorId, actorType, action: "documents.generate.binding_used", entityType: "case_document", entityId: createdId ?? undefined, detail: `caseId=${caseId} platformDocumentId=${masterDocId} placeholders=${placeholders.length} missing=${preview.missingRequiredVariables.length}`, ipAddress, userAgent });
   }
@@ -4834,22 +4890,15 @@ router.post("/cases/:caseId/documents/filename-preview", requireAuth, requireFir
   }
 
   const sequence = await nextCaseDocumentSequence(r, req.firmId!, caseId);
-  const preview = resolveSmartFilename({
-    ctx: {
+  const preview = resolveDocumentFileName({
+    ctx: buildNamingContext({
       caseId,
       firmId: req.firmId!,
-      caseReferenceNo: String((context as any).reference_no ?? ""),
-      parcelNo: String((context as any).parcel_no ?? ""),
-      clientName: String((context as any).spa_purchaser1_name ?? (context as any).borrower1_name ?? ""),
-      projectName: String((context as any).project_name ?? ""),
-      developerName: String((context as any).developer_name ?? ""),
+      context,
       documentName: documentName || templateName || "Document",
       templateName,
-      status: String((context as any).case_status ?? (context as any).status ?? ""),
-      titleType: String((context as any).title_type ?? ""),
-      loanBank: String((context as any).loan_end_financier ?? ""),
       sequence,
-    },
+    }),
     rule,
     originalFileNameOrExt: originalFileName,
     fallbackExt,

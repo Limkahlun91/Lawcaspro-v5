@@ -53,6 +53,7 @@ export const caseDocumentsTable = pgTable("case_documents", {
   generatedAt: timestamp("generated_at", { withTimezone: true }).notNull().defaultNow(),
   notes: text("notes"),
   clauseSnapshot: jsonb("clause_snapshot"),
+  namingSnapshot: jsonb("naming_snapshot"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 }, (t) => ({
   firmCaseIdx: index("idx_case_docs_firm_case").on(t.firmId, t.caseId),
