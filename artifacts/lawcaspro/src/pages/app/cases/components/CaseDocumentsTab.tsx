@@ -5,9 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { useToast } from "@/hooks/use-toast";
 import { ToastAction } from "@/components/ui/toast";
-import {
-  FileText, Upload, Trash2, Download, Plus,
-} from "lucide-react";
+import { FileText, Upload, Trash2, Download, Plus, ChevronUp, ChevronDown, X } from "lucide-react";
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle,
 } from "@/components/ui/dialog";
@@ -104,6 +102,14 @@ type DocumentPreviewResponse = {
     selected: Array<{ scope: string; id: number; includeTitle?: boolean }>;
     previewText: string;
     warnings: Array<{ clauseId: number; scope: string; unknownVariables: string[] }>;
+    insertionModeUsed?: string | null;
+    insertionTarget?: string | null;
+    insertionError?: string | null;
+    hasClausesPlaceholder?: boolean | null;
+    detectedClauseCodePlaceholders?: string[];
+    duplicateClauseWarnings?: Array<{ scope: string; id: number }>;
+    clauseOrder?: Array<{ scope: string; id: number; includeTitle?: boolean }>;
+    selectedClausesResolved?: Array<{ scope: string; id: number; clauseCode: string; title: string; includeTitle: boolean; body: string }>;
   };
   applicabilityResult: { applicable: boolean; reasons: string[] };
   renderMode: string;
@@ -1282,6 +1288,84 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
                   })}
                   {(clausesQuery.data ?? []).length === 0 ? <div className="text-sm text-slate-500 py-2">No clauses.</div> : null}
                 </div>
+                {selectedClauses.length > 0 ? (
+                  <div className="mt-3 rounded border border-slate-200 bg-white p-2">
+                    <div className="text-xs text-slate-600">Selected order</div>
+                    <div className="mt-2 space-y-1">
+                      {selectedClauses.map((s, idx) => {
+                        const info = (clausesQuery.data ?? []).find((c) => c.scope === s.scope && c.id === s.id);
+                        const label = info ? `${info.clause_code} • ${info.title}` : `${s.scope}#${s.id}`;
+                        return (
+                          <div key={`${s.scope}-${s.id}`} className="flex items-center justify-between gap-2 rounded border border-slate-100 px-2 py-1">
+                            <div className="min-w-0">
+                              <div className="text-sm text-slate-900 truncate">{idx + 1}. {label}</div>
+                              <div className="mt-1 flex items-center gap-2">
+                                <Checkbox
+                                  checked={s.includeTitle}
+                                  onCheckedChange={(v) => {
+                                    const next = [...selectedClauses];
+                                    next[idx] = { ...next[idx], includeTitle: Boolean(v) };
+                                    setSelectedClauses(next);
+                                  }}
+                                />
+                                <span className="text-xs text-slate-600">Include title</span>
+                              </div>
+                            </div>
+                            <div className="flex items-center gap-1">
+                              <Button
+                                size="icon"
+                                variant="outline"
+                                onClick={() => {
+                                  if (idx === 0) return;
+                                  const next = [...selectedClauses];
+                                  const t = next[idx - 1];
+                                  next[idx - 1] = next[idx];
+                                  next[idx] = t;
+                                  setSelectedClauses(next);
+                                }}
+                                disabled={idx === 0}
+                              >
+                                <ChevronUp className="w-4 h-4" />
+                              </Button>
+                              <Button
+                                size="icon"
+                                variant="outline"
+                                onClick={() => {
+                                  if (idx === selectedClauses.length - 1) return;
+                                  const next = [...selectedClauses];
+                                  const t = next[idx + 1];
+                                  next[idx + 1] = next[idx];
+                                  next[idx] = t;
+                                  setSelectedClauses(next);
+                                }}
+                                disabled={idx === selectedClauses.length - 1}
+                              >
+                                <ChevronDown className="w-4 h-4" />
+                              </Button>
+                              <Button
+                                size="icon"
+                                variant="outline"
+                                onClick={() => setSelectedClauses(selectedClauses.filter((x) => !(x.scope === s.scope && x.id === s.id)))}
+                              >
+                                <X className="w-4 h-4" />
+                              </Button>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                ) : null}
+                {previewResult.clauseInsertion ? (
+                  <div className="mt-3 text-xs text-slate-600">
+                    Detected: {"{{clauses}}"}={previewResult.clauseInsertion.hasClausesPlaceholder ? "yes" : "no"} • {"{{clause_CODE}}"}={previewResult.clauseInsertion.detectedClauseCodePlaceholders?.length ?? 0}
+                    {previewResult.clauseInsertion.insertionModeUsed ? ` • Mode: ${previewResult.clauseInsertion.insertionModeUsed}` : ""}
+                    {previewResult.clauseInsertion.insertionTarget ? ` • Target: ${previewResult.clauseInsertion.insertionTarget}` : ""}
+                  </div>
+                ) : null}
+                {previewResult.clauseInsertion?.insertionError ? (
+                  <div className="mt-1 text-xs text-rose-700">{previewResult.clauseInsertion.insertionError}</div>
+                ) : null}
                 {previewResult.clauseInsertion?.previewText ? (
                   <div className="mt-3 rounded border border-slate-200 bg-slate-50 p-2">
                     <div className="text-xs text-slate-600">Insertion preview</div>
@@ -1292,6 +1376,9 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
                   <div className="mt-2 text-xs text-amber-700">
                     Unknown variables in selected clauses: {previewResult.clauseInsertion.warnings.map((w) => w.unknownVariables).flat().filter(Boolean).slice(0, 10).join(", ")}
                   </div>
+                ) : null}
+                {previewResult.clauseInsertion?.duplicateClauseWarnings?.length ? (
+                  <div className="mt-1 text-xs text-amber-700">Duplicate clauses were ignored.</div>
                 ) : null}
               </div>
               {previewFileName ? (
@@ -1424,6 +1511,11 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
             )}
 
             <div className="border rounded-lg p-3 max-h-[340px] overflow-y-auto">
+              {selectedClauses.length > 0 ? (
+                <div className="mb-3 rounded border border-amber-200 bg-amber-50 p-2 text-xs text-amber-900">
+                  Clauses selected. Use Preview to confirm insertion target before generating.
+                </div>
+              ) : null}
               {checklistQuery.isLoading ? (
                 <div className="text-sm text-slate-500 py-6 text-center">Loading templates…</div>
               ) : checklistQuery.isError ? (
@@ -1471,9 +1563,20 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
                                   {reason && <div className="mt-1 text-xs text-slate-600 break-words">{reason}</div>}
                                 </div>
                                 <div className="shrink-0">
-                                  <Button size="sm" onClick={() => handleGenerate(it)} disabled={!applicable || !ready || isGenerating}>
-                                    Generate
-                                  </Button>
+                                  {selectedClauses.length > 0 ? (
+                                    <Button
+                                      size="sm"
+                                      variant="outline"
+                                      onClick={() => { closeGenerateDialog(); handlePreview(it); }}
+                                      disabled={!applicable || !ready || previewLoading}
+                                    >
+                                      Preview
+                                    </Button>
+                                  ) : (
+                                    <Button size="sm" onClick={() => handleGenerate(it)} disabled={!applicable || !ready || isGenerating}>
+                                      Generate
+                                    </Button>
+                                  )}
                                 </div>
                               </div>
                             );

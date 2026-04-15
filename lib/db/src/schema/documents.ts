@@ -9,6 +9,7 @@ export const documentTemplatesTable = pgTable("document_templates", {
   documentType: text("document_type").notNull().default("other"),
   isActive: boolean("is_active").notNull().default(true),
   fileNamingRule: text("file_naming_rule"),
+  clauseInsertionMode: text("clause_insertion_mode"),
   appliesToPurchaseMode: text("applies_to_purchase_mode"),
   appliesToTitleType: text("applies_to_title_type").notNull().default("any"),
   appliesToCaseType: text("applies_to_case_type"),
@@ -51,6 +52,7 @@ export const caseDocumentsTable = pgTable("case_documents", {
   generatedBy: integer("generated_by"),
   generatedAt: timestamp("generated_at", { withTimezone: true }).notNull().defaultNow(),
   notes: text("notes"),
+  clauseSnapshot: jsonb("clause_snapshot"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 }, (t) => ({
   firmCaseIdx: index("idx_case_docs_firm_case").on(t.firmId, t.caseId),

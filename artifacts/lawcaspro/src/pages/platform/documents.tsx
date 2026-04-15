@@ -281,6 +281,7 @@ export default function PlatformDocuments() {
   const [editSortOrder, setEditSortOrder] = useState<number>(0);
   const [editCategory, setEditCategory] = useState<string>("general");
   const [editFileNamingRule, setEditFileNamingRule] = useState<string>("");
+  const [editClauseInsertionMode, setEditClauseInsertionMode] = useState<string>("prefer_placeholder_else_append");
   const [namingPreviewCaseId, setNamingPreviewCaseId] = useState<string>("");
   const [namingPreviewFileName, setNamingPreviewFileName] = useState<string>("");
   const [bindingsOpen, setBindingsOpen] = useState(false);
@@ -307,9 +308,17 @@ export default function PlatformDocuments() {
     setEditSortOrder(typeof editingDoc.sortOrder === "number" ? editingDoc.sortOrder : 0);
     setEditCategory(editingDoc.category ?? "general");
     setEditFileNamingRule((editingDoc as any).fileNamingRule ? String((editingDoc as any).fileNamingRule) : "");
+    setEditClauseInsertionMode((editingDoc as any).clauseInsertionMode ? String((editingDoc as any).clauseInsertionMode) : "prefer_placeholder_else_append");
     setNamingPreviewCaseId("");
     setNamingPreviewFileName("");
   }, [editingDoc]);
+
+  const platformDocClausePlaceholdersQuery = useQuery<{ supported: boolean; hasClausesPlaceholder: boolean; clauseCodePlaceholders: string[] }>({
+    queryKey: ["platform-document-clause-placeholders", editingDoc?.id, editDocOpen],
+    queryFn: ({ signal }) => apiFetchJson(`/platform/documents/${editingDoc!.id}/clause-placeholders`, { signal }),
+    enabled: editDocOpen && !!editingDoc,
+    retry: false,
+  });
 
   const platformDocRulesQuery = useQuery<{ document: PlatformDoc; rules: { isRequired?: boolean | null } | null }>({
     queryKey: ["platform-document-rules", editingDoc?.id, editDocOpen],
@@ -1097,6 +1106,27 @@ export default function PlatformDocuments() {
                 <span className="text-sm text-slate-700">Required in checklist</span>
               </div>
               <div className="space-y-1.5">
+                <Label>Clause insertion mode</Label>
+                <Select value={editClauseInsertionMode} onValueChange={setEditClauseInsertionMode}>
+                  <SelectTrigger><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="prefer_placeholder_else_append">Prefer placeholder else append</SelectItem>
+                    <SelectItem value="explicit_placeholder_only">Explicit placeholder only</SelectItem>
+                    <SelectItem value="append_to_end">Append to end</SelectItem>
+                  </SelectContent>
+                </Select>
+                <div className="text-xs text-slate-500">
+                  Tip: place {"{{clauses}}"} or {"{{clause_CODE}}"} in the DOCX to control insertion location.
+                </div>
+                {platformDocClausePlaceholdersQuery.data?.supported ? (
+                  <div className="text-xs text-slate-600">
+                    Detected: {"{{clauses}}"}={platformDocClausePlaceholdersQuery.data.hasClausesPlaceholder ? "yes" : "no"} • {"{{clause_CODE}}"}={platformDocClausePlaceholdersQuery.data.clauseCodePlaceholders.length}
+                  </div>
+                ) : (
+                  <div className="text-xs text-slate-400">Detected placeholders: unavailable (non-DOCX).</div>
+                )}
+              </div>
+              <div className="space-y-1.5">
                 <Label>File naming rule</Label>
                 <Textarea
                   value={editFileNamingRule}
@@ -1168,6 +1198,7 @@ export default function PlatformDocuments() {
                         sortOrder: editSortOrder,
                         category: editCategory,
                         fileNamingRule: editFileNamingRule.trim() ? editFileNamingRule.trim() : null,
+                        clauseInsertionMode: editClauseInsertionMode || null,
                       },
                     });
                     setEditDocOpen(false);

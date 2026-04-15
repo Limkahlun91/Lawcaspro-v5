@@ -146,6 +146,7 @@ export default function DocumentTemplates() {
   const [editGroup, setEditGroup] = useState<string>("Others");
   const [editSortOrder, setEditSortOrder] = useState<number>(0);
   const [editFileNamingRule, setEditFileNamingRule] = useState<string>("");
+  const [editClauseInsertionMode, setEditClauseInsertionMode] = useState<string>("prefer_placeholder_else_append");
   const [previewCaseId, setPreviewCaseId] = useState<string>("");
   const [previewFileName, setPreviewFileName] = useState<string>("");
   const [clauseDialogOpen, setClauseDialogOpen] = useState(false);
@@ -179,6 +180,7 @@ export default function DocumentTemplates() {
     setEditGroup(activeTemplate.document_group ?? "Others");
     setEditSortOrder(typeof activeTemplate.sort_order === "number" ? activeTemplate.sort_order : 0);
     setEditFileNamingRule(typeof (activeTemplate as any).file_naming_rule === "string" ? String((activeTemplate as any).file_naming_rule) : "");
+    setEditClauseInsertionMode(typeof (activeTemplate as any).clause_insertion_mode === "string" ? String((activeTemplate as any).clause_insertion_mode) : "prefer_placeholder_else_append");
     setPreviewCaseId("");
     setPreviewFileName("");
   }, [activeTemplate]);
@@ -642,6 +644,34 @@ export default function DocumentTemplates() {
                     <div className="text-sm text-slate-700 break-words">{activeTemplate.file_name}</div>
                   </div>
                   <div className="space-y-1.5">
+                    <Label>Clause insertion mode</Label>
+                    <Select value={editClauseInsertionMode} onValueChange={setEditClauseInsertionMode} disabled={!canUpdate}>
+                      <SelectTrigger><SelectValue /></SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="prefer_placeholder_else_append">Prefer placeholder else append</SelectItem>
+                        <SelectItem value="explicit_placeholder_only">Explicit placeholder only</SelectItem>
+                        <SelectItem value="append_to_end">Append to end</SelectItem>
+                      </SelectContent>
+                    </Select>
+                    <div className="text-xs text-slate-500">
+                      Tip: place {"{{clauses}}"} or {"{{clause_CODE}}"} in the DOCX to control insertion location.
+                    </div>
+                    {(() => {
+                      const v0 = (versionsQuery.data ?? [])[0] as any;
+                      const keys = (v0?.variables_snapshot && typeof v0.variables_snapshot === "object" && "keys" in v0.variables_snapshot)
+                        ? (v0.variables_snapshot.keys as unknown[])
+                        : [];
+                      const keyStrings = Array.isArray(keys) ? keys.filter((k): k is string => typeof k === "string") : [];
+                      const hasClauses = keyStrings.includes("clauses");
+                      const clauseCodes = keyStrings.filter((k) => k.startsWith("clause_")).length;
+                      return (
+                        <div className="text-xs text-slate-600">
+                          Detected: {"{{clauses}}"}={hasClauses ? "yes" : "no"} • {"{{clause_CODE}}"}={clauseCodes}
+                        </div>
+                      );
+                    })()}
+                  </div>
+                  <div className="space-y-1.5">
                     <Label>File naming rule</Label>
                     <Textarea
                       value={editFileNamingRule}
@@ -725,6 +755,7 @@ export default function DocumentTemplates() {
                             documentGroup: editGroup,
                             sortOrder: editSortOrder,
                             fileNamingRule: editFileNamingRule.trim() ? editFileNamingRule.trim() : null,
+                            clauseInsertionMode: editClauseInsertionMode || null,
                           },
                         });
                       }}
@@ -746,6 +777,7 @@ export default function DocumentTemplates() {
                             documentGroup: editGroup,
                             sortOrder: editSortOrder,
                             fileNamingRule: editFileNamingRule.trim() ? editFileNamingRule.trim() : null,
+                            clauseInsertionMode: editClauseInsertionMode || null,
                           },
                         });
                       }}

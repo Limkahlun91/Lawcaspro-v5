@@ -25,7 +25,8 @@ import { getFirmTemplateBindings, getPlatformDocumentBindings, replaceFirmTempla
 import { getFirmTemplateApplicabilityRules, getPlatformDocumentApplicabilityRules, upsertFirmTemplateApplicabilityRules, upsertPlatformDocumentApplicabilityRules } from "../lib/documentApplicabilityRules";
 import { runDocumentPreview } from "../lib/documentPreview";
 import { findUnknownVariablesInClause, getFirmClauseById, getPlatformClauseById, isClauseApplicable, normalizeClauseCode } from "../lib/clauseLibrary";
-import { applyClauseInsertionToDocx, buildClauseInsertion, type SelectedClauseRef } from "../lib/documentClauses";
+import { applyClauseInsertionToDocx, buildClauseInsertion, decideClauseInsertion, normalizeClauseInsertionMode, type SelectedClauseRef } from "../lib/documentClauses";
+import { detectClausePlaceholders } from "../lib/docxPlaceholder";
 
 const router: IRouter = Router();
 const storage = new ObjectStorageService();
@@ -1095,6 +1096,7 @@ router.patch("/document-templates/:templateId", requireAuth, requireFirmUser, re
   const hasDocumentGroup = Object.prototype.hasOwnProperty.call(body, "documentGroup");
   const hasSortOrder = Object.prototype.hasOwnProperty.call(body, "sortOrder");
   const hasFileNamingRule = Object.prototype.hasOwnProperty.call(body, "fileNamingRule");
+  const hasClauseInsertionMode = Object.prototype.hasOwnProperty.call(body, "clauseInsertionMode");
 
   const folderId = body.folderId;
   const kind = body.kind;
@@ -1108,6 +1110,7 @@ router.patch("/document-templates/:templateId", requireAuth, requireFirmUser, re
   const documentGroup = body.documentGroup;
   const sortOrder = body.sortOrder;
   const fileNamingRule = body.fileNamingRule;
+  const clauseInsertionMode = body.clauseInsertionMode;
 
   const folderIdNum: number | null | undefined = hasFolderId ? (typeof folderId === "number" ? folderId : folderId === null ? null : undefined) : undefined;
   if (hasFolderId && folderIdNum === undefined) {
@@ -1188,6 +1191,14 @@ router.patch("/document-templates/:templateId", requireAuth, requireFirmUser, re
     res.status(400).json({ error: "Invalid fileNamingRule" });
     return;
   }
+  const clauseInsertionModeVal: string | null | undefined =
+    hasClauseInsertionMode
+      ? (typeof clauseInsertionMode === "string" ? (clauseInsertionMode.trim() || null) : clauseInsertionMode === null ? null : undefined)
+      : undefined;
+  if (hasClauseInsertionMode && clauseInsertionModeVal === undefined) {
+    res.status(400).json({ error: "Invalid clauseInsertionMode" });
+    return;
+  }
   if (kindVal && kindVal !== "template" && kindVal !== "reference") {
     res.status(400).json({ error: "Invalid kind" });
     return;
@@ -1237,6 +1248,7 @@ router.patch("/document-templates/:templateId", requireAuth, requireFirmUser, re
             document_group = CASE WHEN ${hasDocumentGroup} THEN ${groupVal ?? "Others"} ELSE document_group END,
             sort_order = CASE WHEN ${hasSortOrder} THEN ${sortOrderVal ?? 0} ELSE sort_order END,
             file_naming_rule = CASE WHEN ${hasFileNamingRule} THEN ${fileNamingRuleVal ?? null} ELSE file_naming_rule END,
+            clause_insertion_mode = CASE WHEN ${hasClauseInsertionMode} THEN ${clauseInsertionModeVal ?? null} ELSE clause_insertion_mode END,
             is_template_capable = (
               ${effectiveKind} = 'template'
               AND LOWER(COALESCE(NULLIF(extension,''), split_part(file_name, '.', array_length(string_to_array(file_name, '.'), 1)))) = 'docx'
@@ -3964,11 +3976,47 @@ async function generateFirmDocument({
     throw new DocumentGenerationError(422, "TEMPLATE_BINDING_MISSING", "Missing required variables", { missingRequiredVariables: preview.missingRequiredVariables });
   }
   let input: Record<string, unknown> = preview.usedMode === "bindings" ? preview.resolvedVariables : (context as any);
+  let clauseSnapshot: Record<string, unknown> | null = null;
   if (clauses && clauses.length > 0) {
     const ins = await buildClauseInsertion({ r, firmId, selected: clauses, resolvedVariables: input });
-    const applied = applyClauseInsertionToDocx({ docxBytes: fileContents, data: input, clausesText: ins.clausesText, perClauseValues: ins.perClauseValues });
+    const selectedCodes = ins.selectedClausesResolved.map((c) => c.clauseCode).filter(Boolean);
+    const detection = detectClausePlaceholders(fileContents, selectedCodes);
+    const mode = normalizeClauseInsertionMode((template as any).clause_insertion_mode);
+    const decision = decideClauseInsertion({
+      mode,
+      hasClausesPlaceholder: detection.hasClausesPlaceholder,
+      foundClauseCodes: detection.foundClauseCodes,
+      selectedClauseCodes: selectedCodes,
+    });
+    if (decision.insertionTarget === "none") {
+      throw new DocumentGenerationError(422, "CLAUSE_INSERTION_TARGET_NOT_FOUND", decision.insertionError || "Clause insertion target not found");
+    }
+    const applied = applyClauseInsertionToDocx({
+      docxBytes: fileContents,
+      data: input,
+      clausesText: ins.clausesText,
+      perClauseValues: ins.perClauseValues,
+      insertionMode: mode,
+      selectedClauseCodes: selectedCodes,
+    });
     fileContents = applied.docxBytes;
     input = applied.data;
+    clauseSnapshot = {
+      insertionModeUsed: decision.insertionModeUsed,
+      insertionTarget: decision.insertionTarget,
+      hasClausesPlaceholder: detection.hasClausesPlaceholder,
+      detectedClauseCodePlaceholders: detection.foundClauseCodes,
+      clauseOrder: ins.clauseOrder,
+      duplicateClauseWarnings: ins.duplicateClauseWarnings,
+      selectedClausesResolved: ins.selectedClausesResolved.map((c) => ({
+        scope: c.scope,
+        id: c.id,
+        clauseCode: c.clauseCode,
+        title: c.title,
+        includeTitle: c.includeTitle,
+        body: c.body,
+      })),
+    };
   }
   const zip = new PizZip(fileContents);
   const doc = new Docxtemplater(zip, { paragraphLoop: true, linebreaks: true });
@@ -4044,15 +4092,15 @@ async function generateFirmDocument({
   }).fileName;
   const templateSnapshotUpdatedAt = (version as any)?.published_at ?? (template as any).updated_at ?? null;
   const docRows = await queryRows(r, sql`
-    INSERT INTO case_documents (case_id, firm_id, template_id, template_source, template_snapshot_name, template_snapshot_updated_at, name, document_type, status, object_path, file_name, generated_by)
-    VALUES (${caseId}, ${firmId}, ${templateId}, 'firm', ${String((template as any).name ?? "")}, ${templateSnapshotUpdatedAt as any}, ${docName}, ${templateDocType}, 'generated', ${normalizedPath}, ${downloadName}, ${actorId})
+    INSERT INTO case_documents (case_id, firm_id, template_id, template_source, template_snapshot_name, template_snapshot_updated_at, name, document_type, status, object_path, file_name, generated_by, clause_snapshot)
+    VALUES (${caseId}, ${firmId}, ${templateId}, 'firm', ${String((template as any).name ?? "")}, ${templateSnapshotUpdatedAt as any}, ${docName}, ${templateDocType}, 'generated', ${normalizedPath}, ${downloadName}, ${actorId}, ${clauseSnapshot as any})
     RETURNING *
   `);
   const created = docRows[0];
   const createdId = created && typeof created === "object" && "id" in created && typeof (created as any).id === "number"
     ? Number((created as any).id)
     : null;
-  await writeAuditLog({ firmId, actorId, actorType, action: "documents.case.generate", entityType: "case_document", entityId: createdId ?? undefined, detail: `caseId=${caseId} templateId=${templateId} name=${docName} letterhead=${isLetterLike ? (usedLetterheadId ?? "default") : "n/a"}`, ipAddress, userAgent });
+  await writeAuditLog({ firmId, actorId, actorType, action: "documents.case.generate", entityType: "case_document", entityId: createdId ?? undefined, detail: `caseId=${caseId} templateId=${templateId} name=${docName} letterhead=${isLetterLike ? (usedLetterheadId ?? "default") : "n/a"} clauses=${clauseSnapshot ? "yes" : "no"}`, ipAddress, userAgent });
   if (preview.usedMode === "bindings") {
     await writeAuditLog({ firmId, actorId, actorType, action: "documents.generate.binding_used", entityType: "case_document", entityId: createdId ?? undefined, detail: `caseId=${caseId} templateId=${templateId} placeholders=${effectivePlaceholders.length} missing=${preview.missingRequiredVariables.length}`, ipAddress, userAgent });
   }
@@ -4207,13 +4255,49 @@ async function generateMasterDocument({
   }
   let renderInput: Record<string, unknown> = preview.usedMode === "bindings" ? preview.resolvedVariables : (context as any);
   let docxBytesForRender: Buffer | null = null;
+  let clauseSnapshot: Record<string, unknown> | null = null;
   if (isDocx) {
     docxBytesForRender = fileContents;
     if (clauses && clauses.length > 0) {
       const ins = await buildClauseInsertion({ r, firmId, selected: clauses, resolvedVariables: renderInput });
-      const applied = applyClauseInsertionToDocx({ docxBytes: docxBytesForRender, data: renderInput, clausesText: ins.clausesText, perClauseValues: ins.perClauseValues });
+      const selectedCodes = ins.selectedClausesResolved.map((c) => c.clauseCode).filter(Boolean);
+      const detection = detectClausePlaceholders(docxBytesForRender, selectedCodes);
+      const mode = normalizeClauseInsertionMode((masterDoc as any).clause_insertion_mode);
+      const decision = decideClauseInsertion({
+        mode,
+        hasClausesPlaceholder: detection.hasClausesPlaceholder,
+        foundClauseCodes: detection.foundClauseCodes,
+        selectedClauseCodes: selectedCodes,
+      });
+      if (decision.insertionTarget === "none") {
+        throw new DocumentGenerationError(422, "CLAUSE_INSERTION_TARGET_NOT_FOUND", decision.insertionError || "Clause insertion target not found");
+      }
+      const applied = applyClauseInsertionToDocx({
+        docxBytes: docxBytesForRender,
+        data: renderInput,
+        clausesText: ins.clausesText,
+        perClauseValues: ins.perClauseValues,
+        insertionMode: mode,
+        selectedClauseCodes: selectedCodes,
+      });
       docxBytesForRender = applied.docxBytes;
       renderInput = applied.data;
+      clauseSnapshot = {
+        insertionModeUsed: decision.insertionModeUsed,
+        insertionTarget: decision.insertionTarget,
+        hasClausesPlaceholder: detection.hasClausesPlaceholder,
+        detectedClauseCodePlaceholders: detection.foundClauseCodes,
+        clauseOrder: ins.clauseOrder,
+        duplicateClauseWarnings: ins.duplicateClauseWarnings,
+        selectedClausesResolved: ins.selectedClausesResolved.map((c) => ({
+          scope: c.scope,
+          id: c.id,
+          clauseCode: c.clauseCode,
+          title: c.title,
+          includeTitle: c.includeTitle,
+          body: c.body,
+        })),
+      };
     }
   }
 
@@ -4345,15 +4429,15 @@ async function generateMasterDocument({
     fallbackExt: outputExt,
   }).fileName;
   const savedRows = await queryRows(r, sql`
-    INSERT INTO case_documents (case_id, firm_id, template_source, platform_document_id, template_snapshot_name, template_snapshot_updated_at, name, document_type, status, object_path, file_name, generated_by)
-    VALUES (${caseId}, ${firmId}, 'master', ${masterDocId}, ${String((masterDoc as any).name ?? "")}, ${(masterDoc as any).created_at ?? null}, ${docName}, ${(masterDoc as any).category ?? "other"}, 'generated', ${normalizedPath}, ${fileName}, ${actorId})
+    INSERT INTO case_documents (case_id, firm_id, template_source, platform_document_id, template_snapshot_name, template_snapshot_updated_at, name, document_type, status, object_path, file_name, generated_by, clause_snapshot)
+    VALUES (${caseId}, ${firmId}, 'master', ${masterDocId}, ${String((masterDoc as any).name ?? "")}, ${(masterDoc as any).created_at ?? null}, ${docName}, ${(masterDoc as any).category ?? "other"}, 'generated', ${normalizedPath}, ${fileName}, ${actorId}, ${clauseSnapshot as any})
     RETURNING *
   `);
   const created = savedRows[0];
   const createdId = created && typeof created === "object" && "id" in created && typeof (created as any).id === "number"
     ? Number((created as any).id)
     : null;
-  await writeAuditLog({ firmId, actorId, actorType, action: "documents.case.generate_from_master", entityType: "case_document", entityId: createdId ?? undefined, detail: `caseId=${caseId} masterDocId=${masterDocId} name=${docName}`, ipAddress, userAgent });
+  await writeAuditLog({ firmId, actorId, actorType, action: "documents.case.generate_from_master", entityType: "case_document", entityId: createdId ?? undefined, detail: `caseId=${caseId} masterDocId=${masterDocId} name=${docName} clauses=${clauseSnapshot ? "yes" : "no"}`, ipAddress, userAgent });
   if (preview.usedMode === "bindings") {
     await writeAuditLog({ firmId, actorId, actorType, action: "documents.generate.binding_used", entityType: "case_document", entityId: createdId ?? undefined, detail: `caseId=${caseId} platformDocumentId=${masterDocId} placeholders=${placeholders.length} missing=${preview.missingRequiredVariables.length}`, ipAddress, userAgent });
   }
@@ -5083,11 +5167,45 @@ router.post("/cases/:caseId/documents/preview", requireAuth, requireFirmUser, re
         let input: Record<string, unknown> = preview.usedMode === "bindings" ? preview.resolvedVariables : (context as any);
         let clausePreviewText = "";
         let clauseWarnings: unknown[] = [];
+        let duplicateClauseWarnings: unknown[] = [];
+        let insertionModeUsed: string | null = null;
+        let insertionTarget: string | null = null;
+        let insertionError: string | null = null;
+        let hasClausesPlaceholder: boolean | null = null;
+        let detectedClauseCodePlaceholders: string[] = [];
+        let clauseOrder: unknown[] = [];
+        let selectedClausesResolved: unknown[] = [];
         if (clauseRefs.length > 0) {
           const ins = await buildClauseInsertion({ r, firmId: req.firmId!, selected: clauseRefs, resolvedVariables: input });
           clausePreviewText = ins.clausesText;
           clauseWarnings = ins.warnings;
-          const applied = applyClauseInsertionToDocx({ docxBytes: bytes, data: input, clausesText: ins.clausesText, perClauseValues: ins.perClauseValues });
+          duplicateClauseWarnings = ins.duplicateClauseWarnings;
+          clauseOrder = ins.clauseOrder;
+          selectedClausesResolved = ins.selectedClausesResolved.map((c) => ({
+            scope: c.scope,
+            id: c.id,
+            clauseCode: c.clauseCode,
+            title: c.title,
+            includeTitle: c.includeTitle,
+            body: c.body,
+          }));
+          const selectedCodes = ins.selectedClausesResolved.map((c) => c.clauseCode).filter(Boolean);
+          const detection = detectClausePlaceholders(bytes, selectedCodes);
+          hasClausesPlaceholder = detection.hasClausesPlaceholder;
+          detectedClauseCodePlaceholders = detection.foundClauseCodes;
+          const mode = normalizeClauseInsertionMode((tpl as any).clause_insertion_mode);
+          const decision = decideClauseInsertion({ mode, hasClausesPlaceholder: detection.hasClausesPlaceholder, foundClauseCodes: detection.foundClauseCodes, selectedClauseCodes: selectedCodes });
+          insertionModeUsed = decision.insertionModeUsed;
+          insertionTarget = decision.insertionTarget;
+          insertionError = decision.insertionError;
+          const applied = applyClauseInsertionToDocx({
+            docxBytes: bytes,
+            data: input,
+            clausesText: ins.clausesText,
+            perClauseValues: ins.perClauseValues,
+            insertionMode: mode,
+            selectedClauseCodes: selectedCodes,
+          });
           bytes = applied.docxBytes;
           input = applied.data;
         }
@@ -5103,7 +5221,13 @@ router.post("/cases/:caseId/documents/preview", requireAuth, requireFirmUser, re
           missingRequiredVariables: preview.missingRequiredVariables,
           unusedBindings: preview.unusedBindings,
           placeholderWarnings,
-          clauseInsertion: clauseRefs.length ? { selected: clauseRefs, previewText: clausePreviewText, warnings: clauseWarnings } : null,
+          selectedClausesResolved: clauseRefs.length ? selectedClausesResolved : [],
+          insertionModeUsed,
+          insertionTarget,
+          duplicateClauseWarnings: clauseRefs.length ? duplicateClauseWarnings : [],
+          clauseOrder: clauseRefs.length ? clauseOrder : [],
+          clauseSnapshotPreview: clauseRefs.length ? selectedClausesResolved : [],
+          clauseInsertion: clauseRefs.length ? { selected: clauseRefs, previewText: clausePreviewText, warnings: clauseWarnings, insertionModeUsed, insertionTarget, insertionError, hasClausesPlaceholder, detectedClauseCodePlaceholders, duplicateClauseWarnings, clauseOrder, selectedClausesResolved } : null,
           applicabilityResult,
           renderMode,
           previewSummary: {
@@ -5113,7 +5237,7 @@ router.post("/cases/:caseId/documents/preview", requireAuth, requireFirmUser, re
             missingRequiredCount: preview.missingRequiredVariables.length,
           },
         };
-        await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: renderable ? "documents.preview" : "documents.preview.failed", entityType: "document_template", entityId: templateId, detail: `caseId=${caseId} mode=${preview.usedMode} applicable=${applicabilityResult.applicable} bypass=${bypass}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+        await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: renderable ? "documents.preview" : "documents.preview.failed", entityType: "document_template", entityId: templateId, detail: `caseId=${caseId} mode=${preview.usedMode} applicable=${applicabilityResult.applicable} bypass=${bypass} clauses=${clauseRefs.length} target=${insertionTarget ?? ""}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
         res.json(resp);
         return;
       }
@@ -5180,6 +5304,14 @@ router.post("/cases/:caseId/documents/preview", requireAuth, requireFirmUser, re
     });
     let clausePreviewText = "";
     let clauseWarnings: unknown[] = [];
+    let duplicateClauseWarnings: unknown[] = [];
+    let insertionModeUsed: string | null = null;
+    let insertionTarget: string | null = null;
+    let insertionError: string | null = null;
+    let hasClausesPlaceholder: boolean | null = null;
+    let detectedClauseCodePlaceholders: string[] = [];
+    let clauseOrder: unknown[] = [];
+    let selectedClausesResolved: unknown[] = [];
     const renderMode: "docx" | "pdf" | "print" =
       ext === "pdf" ? "pdf"
       : ext === "docx" ? "docx"
@@ -5191,7 +5323,33 @@ router.post("/cases/:caseId/documents/preview", requireAuth, requireFirmUser, re
         const ins = await buildClauseInsertion({ r, firmId: req.firmId!, selected: clauseRefs, resolvedVariables: input });
         clausePreviewText = ins.clausesText;
         clauseWarnings = ins.warnings;
-        const applied = applyClauseInsertionToDocx({ docxBytes: bytes, data: input, clausesText: ins.clausesText, perClauseValues: ins.perClauseValues });
+        duplicateClauseWarnings = ins.duplicateClauseWarnings;
+        clauseOrder = ins.clauseOrder;
+        selectedClausesResolved = ins.selectedClausesResolved.map((c) => ({
+          scope: c.scope,
+          id: c.id,
+          clauseCode: c.clauseCode,
+          title: c.title,
+          includeTitle: c.includeTitle,
+          body: c.body,
+        }));
+        const selectedCodes = ins.selectedClausesResolved.map((c) => c.clauseCode).filter(Boolean);
+        const detection = detectClausePlaceholders(bytes, selectedCodes);
+        hasClausesPlaceholder = detection.hasClausesPlaceholder;
+        detectedClauseCodePlaceholders = detection.foundClauseCodes;
+        const mode = normalizeClauseInsertionMode((doc as any).clause_insertion_mode);
+        const decision = decideClauseInsertion({ mode, hasClausesPlaceholder: detection.hasClausesPlaceholder, foundClauseCodes: detection.foundClauseCodes, selectedClauseCodes: selectedCodes });
+        insertionModeUsed = decision.insertionModeUsed;
+        insertionTarget = decision.insertionTarget;
+        insertionError = decision.insertionError;
+        const applied = applyClauseInsertionToDocx({
+          docxBytes: bytes,
+          data: input,
+          clausesText: ins.clausesText,
+          perClauseValues: ins.perClauseValues,
+          insertionMode: mode,
+          selectedClauseCodes: selectedCodes,
+        });
         bytes = applied.docxBytes;
         input = applied.data;
       }
@@ -5203,13 +5361,19 @@ router.post("/cases/:caseId/documents/preview", requireAuth, requireFirmUser, re
         renderable = false;
       }
     }
-    await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: renderable ? "documents.preview" : "documents.preview.failed", entityType: "platform_document", entityId: platformDocumentId!, detail: `caseId=${caseId} mode=${preview.usedMode} applicable=${applicabilityResult.applicable} bypass=${bypass}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+    await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: renderable ? "documents.preview" : "documents.preview.failed", entityType: "platform_document", entityId: platformDocumentId!, detail: `caseId=${caseId} mode=${preview.usedMode} applicable=${applicabilityResult.applicable} bypass=${bypass} clauses=${clauseRefs.length} target=${insertionTarget ?? ""}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
     res.json({
       resolvedVariables: preview.resolvedVariables,
       missingRequiredVariables: preview.missingRequiredVariables,
       unusedBindings: preview.unusedBindings,
       placeholderWarnings: preview.placeholderWarnings,
-      clauseInsertion: clauseRefs.length ? { selected: clauseRefs, previewText: clausePreviewText, warnings: clauseWarnings } : null,
+      selectedClausesResolved: clauseRefs.length ? selectedClausesResolved : [],
+      insertionModeUsed,
+      insertionTarget,
+      duplicateClauseWarnings: clauseRefs.length ? duplicateClauseWarnings : [],
+      clauseOrder: clauseRefs.length ? clauseOrder : [],
+      clauseSnapshotPreview: clauseRefs.length ? selectedClausesResolved : [],
+      clauseInsertion: clauseRefs.length ? { selected: clauseRefs, previewText: clausePreviewText, warnings: clauseWarnings, insertionModeUsed, insertionTarget, insertionError, hasClausesPlaceholder, detectedClauseCodePlaceholders, duplicateClauseWarnings, clauseOrder, selectedClausesResolved } : null,
       applicabilityResult,
       renderMode,
       previewSummary: {

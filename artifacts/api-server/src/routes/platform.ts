@@ -1,5 +1,6 @@
 import { Router, type IRouter } from "express";
 import { Readable } from "stream";
+import PizZip from "pizzip";
 import { eq, ilike, count, sql, desc, and, isNull, or, type SQL } from "drizzle-orm";
 import {
   db,
@@ -87,6 +88,22 @@ function mapCreateFirmError(err: unknown): { status: number; body: Record<string
 
 const router: IRouter = Router();
 const storage = new SupabaseStorageService();
+
+function scanClausePlaceholdersInDocx(bytes: Buffer): { hasClausesPlaceholder: boolean; clauseCodePlaceholders: string[] } {
+  const zip = new PizZip(bytes);
+  const xml = zip.file("word/document.xml")?.asText() ?? "";
+  const hasClausesPlaceholder = /\{\{\s*clauses\s*\}\}/g.test(xml);
+  const out: string[] = [];
+  const re = /\{\{\s*(clause_[^{}\s]+)\s*\}\}/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(xml))) {
+    const key = m[1] ? String(m[1]).trim() : "";
+    if (!key.startsWith("clause_")) continue;
+    const code = key.slice("clause_".length);
+    if (code && !out.includes(code)) out.push(code);
+  }
+  return { hasClausesPlaceholder, clauseCodePlaceholders: out };
+}
 
 // ─── Firms ────────────────────────────────────────────────────────────────────
 
@@ -611,6 +628,7 @@ router.patch("/platform/documents/:docId", requireAuth, requireFounder, async (r
   const hasSortOrder = Object.prototype.hasOwnProperty.call(body, "sortOrder");
   const hasCategory = Object.prototype.hasOwnProperty.call(body, "category");
   const hasFileNamingRule = Object.prototype.hasOwnProperty.call(body, "fileNamingRule");
+  const hasClauseInsertionMode = Object.prototype.hasOwnProperty.call(body, "clauseInsertionMode");
 
   const isActiveVal: boolean | undefined = hasIsActive ? (typeof body.isActive === "boolean" ? body.isActive : undefined) : undefined;
   if (hasIsActive && isActiveVal === undefined) { res.status(400).json({ error: "Invalid isActive" }); return; }
@@ -657,6 +675,12 @@ router.patch("/platform/documents/:docId", requireAuth, requireFounder, async (r
       : undefined;
   if (hasFileNamingRule && fileNamingRuleVal === undefined) { res.status(400).json({ error: "Invalid fileNamingRule" }); return; }
 
+  const clauseInsertionModeVal: string | null | undefined =
+    hasClauseInsertionMode
+      ? (typeof body.clauseInsertionMode === "string" ? (String(body.clauseInsertionMode).trim() || null) : body.clauseInsertionMode === null ? null : undefined)
+      : undefined;
+  if (hasClauseInsertionMode && clauseInsertionModeVal === undefined) { res.status(400).json({ error: "Invalid clauseInsertionMode" }); return; }
+
   const updated = await withAuthSafeDb(async (authDb) => {
     const [existing] = await authDb.select().from(platformDocumentsTable).where(eq(platformDocumentsTable.id, docId));
     if (!existing) return null;
@@ -672,6 +696,7 @@ router.patch("/platform/documents/:docId", requireAuth, requireFounder, async (r
         ...(hasSortOrder ? { sortOrder: sortOrderVal ?? 0 } : {}),
         ...(hasCategory ? { category: categoryVal ?? "general" } : {}),
         ...(hasFileNamingRule ? { fileNamingRule: fileNamingRuleVal ?? null } : {}),
+        ...(hasClauseInsertionMode ? { clauseInsertionMode: clauseInsertionModeVal ?? null } : {}),
       })
       .where(eq(platformDocumentsTable.id, docId))
       .returning();
@@ -685,6 +710,7 @@ router.patch("/platform/documents/:docId", requireAuth, requireFounder, async (r
     if (hasSortOrder) changed.push(`sortOrder=${String(sortOrderVal ?? 0)}`);
     if (hasCategory) changed.push(`category=${categoryVal ?? "general"}`);
     if (hasFileNamingRule) changed.push(`fileNamingRule=${fileNamingRuleVal ?? "null"}`);
+    if (hasClauseInsertionMode) changed.push(`clauseInsertionMode=${clauseInsertionModeVal ?? "null"}`);
 
     await writeAuditLog(
       {
@@ -802,6 +828,38 @@ router.get("/platform/documents/:docId/download", requireAuth, requireFounder, a
     }
     req.log.error({ err: error, docId }, "platform.document.download_failed");
     res.status(500).json({ error: "Failed to download document" });
+  }
+});
+
+router.get("/platform/documents/:docId/clause-placeholders", requireAuth, requireFounder, async (req: AuthRequest, res): Promise<void> => {
+  const docIdStr = one(req.params.docId);
+  const docId = docIdStr ? parseInt(docIdStr, 10) : NaN;
+  if (isNaN(docId)) { res.status(400).json({ error: "Invalid document ID" }); return; }
+  const [doc] = await withAuthSafeDb(async (authDb) => authDb.select().from(platformDocumentsTable).where(eq(platformDocumentsTable.id, docId)));
+  if (!doc) { res.status(404).json({ error: "Document not found" }); return; }
+
+  const fileName = String(doc.fileName ?? "");
+  const ext = fileName.toLowerCase().endsWith(".docx") ? "docx" : "";
+  if (ext !== "docx") {
+    res.json({ supported: false, hasClausesPlaceholder: false, clauseCodePlaceholders: [] });
+    return;
+  }
+  try {
+    const response = await storage.fetchPrivateObjectResponse(doc.objectPath);
+    if (!response.ok) {
+      res.status(response.status).json({ error: "Failed to download document" });
+      return;
+    }
+    const ab = await response.arrayBuffer();
+    const bytes = Buffer.from(ab);
+    const scan = scanClausePlaceholdersInDocx(bytes);
+    res.json({ supported: true, ...scan });
+  } catch (error) {
+    if (error instanceof ObjectNotFoundError) { res.status(404).json({ error: "Object not found" }); return; }
+    const configErr = getSupabaseStorageConfigError(error);
+    if (configErr) { res.status(configErr.statusCode).json({ error: configErr.error }); return; }
+    req.log.error({ err: error, docId }, "platform.document.clause_placeholders_failed");
+    res.status(500).json({ error: "Failed to detect placeholders" });
   }
 });
 
