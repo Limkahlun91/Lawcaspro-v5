@@ -15,6 +15,7 @@ export const platformDocumentsTable = pgTable("platform_documents", {
   description: text("description"),
   category: text("category").notNull().default("general"),
   isActive: boolean("is_active").notNull().default(true),
+  fileNamingRule: text("file_naming_rule"),
   appliesToPurchaseMode: text("applies_to_purchase_mode"),
   appliesToTitleType: text("applies_to_title_type").notNull().default("any"),
   appliesToCaseType: text("applies_to_case_type"),

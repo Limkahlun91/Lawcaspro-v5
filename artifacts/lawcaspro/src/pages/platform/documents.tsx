@@ -280,6 +280,9 @@ export default function PlatformDocuments() {
   const [editGroup, setEditGroup] = useState<string>("Others");
   const [editSortOrder, setEditSortOrder] = useState<number>(0);
   const [editCategory, setEditCategory] = useState<string>("general");
+  const [editFileNamingRule, setEditFileNamingRule] = useState<string>("");
+  const [namingPreviewCaseId, setNamingPreviewCaseId] = useState<string>("");
+  const [namingPreviewFileName, setNamingPreviewFileName] = useState<string>("");
   const [bindingsOpen, setBindingsOpen] = useState(false);
   const [bindingsDraft, setBindingsDraft] = useState<Record<string, DocumentTemplateBinding>>({});
 
@@ -292,6 +295,9 @@ export default function PlatformDocuments() {
     setEditGroup(editingDoc.documentGroup ?? "Others");
     setEditSortOrder(typeof editingDoc.sortOrder === "number" ? editingDoc.sortOrder : 0);
     setEditCategory(editingDoc.category ?? "general");
+    setEditFileNamingRule((editingDoc as any).fileNamingRule ? String((editingDoc as any).fileNamingRule) : "");
+    setNamingPreviewCaseId("");
+    setNamingPreviewFileName("");
   }, [editingDoc]);
 
   const platformDocRulesQuery = useQuery<{ document: PlatformDoc; rules: { isRequired?: boolean | null } | null }>({
@@ -1029,6 +1035,55 @@ export default function PlatformDocuments() {
                 <Checkbox checked={editIsRequired} onCheckedChange={(v) => setEditIsRequired(Boolean(v))} />
                 <span className="text-sm text-slate-700">Required in checklist</span>
               </div>
+              <div className="space-y-1.5">
+                <Label>File naming rule</Label>
+                <Textarea
+                  value={editFileNamingRule}
+                  onChange={(e) => setEditFileNamingRule(e.target.value)}
+                  placeholder="{case_reference}_{template_name}_{date_ymd}_{sequence}"
+                  rows={2}
+                />
+                <div className="text-xs text-slate-500">
+                  Tokens: {"{case_reference} {client_name} {project_name} {developer_name} {document_name} {template_name} {date_ymd} {date_dmy} {status} {title_type} {loan_bank} {sequence}"}
+                </div>
+                <div className="grid grid-cols-2 gap-2 items-end">
+                  <div className="space-y-1.5">
+                    <Label>Preview case ID</Label>
+                    <Input value={namingPreviewCaseId} onChange={(e) => setNamingPreviewCaseId(e.target.value)} placeholder="e.g. 123" />
+                  </div>
+                  <Button
+                    variant="outline"
+                    onClick={async () => {
+                      const id = parseInt(namingPreviewCaseId || "", 10);
+                      if (!Number.isFinite(id)) {
+                        toast({ title: "Invalid case ID" });
+                        return;
+                      }
+                      try {
+                        const resp = await apiFetchJson<{ fileName: string }>(`/cases/${id}/documents/filename-preview`, {
+                          method: "POST",
+                          body: JSON.stringify({
+                            platformDocumentId: editingDoc.id,
+                            documentName: editingDoc.name,
+                            originalFileName: (editingDoc as any).fileName ?? "docx",
+                            fallbackExt: ((editingDoc as any).fileType ?? "docx") === "pdf" ? "pdf" : "docx",
+                          }),
+                        });
+                        setNamingPreviewFileName(resp.fileName);
+                      } catch (e) {
+                        toastError(toast, e, "Preview failed");
+                      }
+                    }}
+                  >
+                    Preview filename
+                  </Button>
+                </div>
+                {namingPreviewFileName ? (
+                  <div className="text-sm text-slate-700 break-words">
+                    <span className="text-xs text-slate-500">Preview:</span> {namingPreviewFileName}
+                  </div>
+                ) : null}
+              </div>
               <div className="flex justify-end gap-2 pt-2">
                 <Button
                   variant="outline"
@@ -1051,6 +1106,7 @@ export default function PlatformDocuments() {
                         documentGroup: editGroup,
                         sortOrder: editSortOrder,
                         category: editCategory,
+                        fileNamingRule: editFileNamingRule.trim() ? editFileNamingRule.trim() : null,
                       },
                     });
                     setEditDocOpen(false);

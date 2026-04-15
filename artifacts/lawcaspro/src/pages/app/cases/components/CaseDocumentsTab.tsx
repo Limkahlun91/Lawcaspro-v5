@@ -127,6 +127,7 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
   const [documentName, setDocumentName] = useState("");
   const [uploadDialogOpen, setUploadDialogOpen] = useState(false);
   const [uploadName, setUploadName] = useState("");
+  const [uploadPreviewFileName, setUploadPreviewFileName] = useState("");
   const [uploadType, setUploadType] = useState("other");
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [isUploading, setIsUploading] = useState(false);
@@ -150,6 +151,7 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
   const [previewLoading, setPreviewLoading] = useState(false);
   const [previewItem, setPreviewItem] = useState<ChecklistItem | null>(null);
   const [previewResult, setPreviewResult] = useState<DocumentPreviewResponse | null>(null);
+  const [previewFileName, setPreviewFileName] = useState<string>("");
 
   const [checklistFilter, setChecklistFilter] = useState<"all" | "required" | "missing" | "completed" | "waived" | "not_applicable">("all");
   const [waiveDialogOpen, setWaiveDialogOpen] = useState(false);
@@ -394,6 +396,7 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
     setPreviewOpen(true);
     setPreviewLoading(true);
     setPreviewResult(null);
+    setPreviewFileName("");
     try {
       const bypassApplicability = Boolean(showAllTemplates && canBypassApplicability);
       const result = await apiFetchJson<DocumentPreviewResponse>(`/cases/${caseId}/documents/preview`, {
@@ -405,6 +408,19 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
         ),
       });
       setPreviewResult(result);
+      try {
+        const naming = await apiFetchJson<{ fileName: string }>(`/cases/${caseId}/documents/filename-preview`, {
+          method: "POST",
+          body: JSON.stringify(
+            item.source === "firm"
+              ? { templateId: Number(item.templateId), documentName: documentName || item.name, originalFileName: item.fileName ?? "docx", fallbackExt: "docx" }
+              : { platformDocumentId: Number(item.templateId), documentName: documentName || item.name, originalFileName: item.fileName ?? "docx", fallbackExt: "docx" }
+          ),
+        });
+        setPreviewFileName(naming.fileName);
+      } catch {
+        void 0;
+      }
     } catch (err) {
       toastError(toast, err, "Preview failed");
     } finally {
@@ -472,13 +488,13 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
     if (!canExport || ids.length === 0) return;
     setIsBatchExporting(true);
     try {
-      const result = await apiFetchJson<{ jobId: string; downloadPath?: string }>(`/cases/${caseId}/documents/batch-export`, {
+      const result = await apiFetchJson<{ jobId: string; downloadPath?: string; downloadFileName?: string }>(`/cases/${caseId}/documents/batch-export`, {
         method: "POST",
         body: JSON.stringify({ documentIds: ids }),
       });
       const downloadPath = result.downloadPath ?? `/document-batch-jobs/${result.jobId}/download`;
       const blob = await apiFetchBlob(downloadPath);
-      downloadBlob(blob, `case-${caseId}-documents.zip`);
+      downloadBlob(blob, result.downloadFileName || `case-${caseId}-documents.zip`);
       setSelectedDocIds(new Set());
       toast({ title: "Export ready", description: `Job ${result.jobId}` });
     } catch (err) {
@@ -589,11 +605,22 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
       } else {
         const objectPath = `/objects/cases/${firmId}/case-${caseId}/documents/checklist/${safeKey}/${crypto.randomUUID()}-${file.name}`;
         const stored = await uploadPrivateObject(file, objectPath);
+        const ext = file.name.includes(".") ? file.name.split(".").pop() || "pdf" : "pdf";
+        const naming = await apiFetchJson<{ fileName: string }>(`/cases/${caseId}/documents/filename-preview`, {
+          method: "POST",
+          body: JSON.stringify(
+            checklistUploadTarget.kind === "template" && checklistUploadTarget.source === "firm" && typeof checklistUploadTarget.templateId === "number"
+              ? { templateId: checklistUploadTarget.templateId, documentName: checklistUploadTarget.name, originalFileName: file.name, fallbackExt: ext }
+              : checklistUploadTarget.kind === "template" && checklistUploadTarget.source === "master" && typeof checklistUploadTarget.templateId === "number"
+                ? { platformDocumentId: checklistUploadTarget.templateId, documentName: checklistUploadTarget.name, originalFileName: file.name, fallbackExt: ext }
+                : { documentName: checklistUploadTarget.name, originalFileName: file.name, fallbackExt: ext }
+          ),
+        });
         await apiFetchJson(`/cases/${caseId}/documents/checklist/items/${encodeURIComponent(checklistUploadTarget.checklistKey)}/upload`, {
           method: "POST",
           body: JSON.stringify({
             objectPath: stored,
-            fileName: file.name,
+            fileName: naming.fileName,
             mimeType: file.type || null,
             fileSize: file.size,
             label: checklistUploadTarget.name,
@@ -1188,6 +1215,12 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
             <div className="text-slate-500 py-6">No preview data.</div>
           ) : (
             <div className="space-y-4">
+              {previewFileName ? (
+                <div className="rounded-lg border border-slate-200 bg-white p-3">
+                  <div className="text-sm font-medium text-slate-900">Output filename</div>
+                  <div className="mt-1 text-sm text-slate-700 break-words">{previewFileName}</div>
+                </div>
+              ) : null}
               <div className="rounded-lg border border-slate-200 bg-white p-3">
                 <div className="flex items-center justify-between gap-2">
                   <div className="text-sm font-medium text-slate-900">Applicability</div>
@@ -1426,6 +1459,36 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
                 className="hidden"
                 onChange={(e) => setSelectedFile(e.target.files?.[0] ?? null)}
               />
+            </div>
+            <div className="flex items-center justify-between gap-2">
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={async () => {
+                  if (!uploadName || !selectedFile) return;
+                  try {
+                    const resp = await apiFetchJson<{ fileName: string }>(`/cases/${caseId}/documents/filename-preview`, {
+                      method: "POST",
+                      body: JSON.stringify({
+                        documentName: uploadName,
+                        originalFileName: selectedFile.name,
+                        fallbackExt: "pdf",
+                      }),
+                    });
+                    setUploadPreviewFileName(resp.fileName);
+                  } catch (e) {
+                    toastError(toast, e, "Preview failed");
+                  }
+                }}
+                disabled={!uploadName || !selectedFile}
+              >
+                Preview filename
+              </Button>
+              {uploadPreviewFileName ? (
+                <div className="text-xs text-slate-600 break-words text-right min-w-0">{uploadPreviewFileName}</div>
+              ) : (
+                <div className="text-xs text-slate-400"> </div>
+              )}
             </div>
             <div className="flex justify-end gap-2 pt-2">
               <Button variant="outline" onClick={() => setUploadDialogOpen(false)}>Cancel</Button>

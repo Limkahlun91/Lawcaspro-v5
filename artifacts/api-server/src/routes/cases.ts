@@ -31,6 +31,7 @@ import { LOAN_STAMPING_ITEM_KEYS, type LoanStampingItemKey, isLoanStampingItemKe
 import { ensureCaseWorkflowSteps, syncWorkflowStepsFromCaseState } from "../lib/workflowAutomationService";
 import { WORKFLOW_AUTOMATION_RULE_BY_STEP_KEY, deriveStatusFromRequirement } from "../lib/workflowAutomation";
 import { computeStampingSummary, deriveStampingItemStatus, type StampingItemInput } from "../lib/stampingProgress";
+import { resolveSmartFilename } from "../lib/smartFileNaming";
 
 const router: IRouter = Router();
 const supabaseStorage = new SupabaseStorageService();
@@ -56,6 +57,63 @@ function safeFilenameAscii(filename: string): string {
   const base = filename.replace(/[\r\n"]/g, "").trim();
   if (!base) return "download";
   return base.replace(/[^\x20-\x7E]/g, "_");
+}
+
+async function buildSmartNamingContext(r: DbConn, firmId: number, caseId: number): Promise<{
+  referenceNo: string;
+  parcelNo: string | null;
+  status: string;
+  titleType: string;
+  projectName: string;
+  developerName: string;
+  clientName: string;
+  loanBank: string;
+}> {
+  const [base] = await r
+    .select({
+      referenceNo: casesTable.referenceNo,
+      parcelNo: casesTable.parcelNo,
+      status: casesTable.status,
+      titleType: casesTable.titleType,
+      projectName: projectsTable.name,
+      developerName: developersTable.name,
+      loanDetails: casesTable.loanDetails,
+    })
+    .from(casesTable)
+    .innerJoin(projectsTable, eq(projectsTable.id, casesTable.projectId))
+    .innerJoin(developersTable, eq(developersTable.id, casesTable.developerId))
+    .where(and(eq(casesTable.id, caseId), eq(casesTable.firmId, firmId)));
+
+  const [purchaser] = await r
+    .select({ name: clientsTable.name })
+    .from(casePurchasersTable)
+    .innerJoin(clientsTable, eq(clientsTable.id, casePurchasersTable.clientId))
+    .where(and(eq(casePurchasersTable.caseId, caseId), eq(casePurchasersTable.role, "main")))
+    .orderBy(asc(casePurchasersTable.orderNo))
+    .limit(1);
+
+  const loanBank = (() => {
+    const raw = base?.loanDetails ? String(base.loanDetails) : "";
+    if (!raw) return "";
+    try {
+      const obj = JSON.parse(raw) as Record<string, unknown>;
+      const v = obj["end_financier"] ?? obj["endFinancier"] ?? obj["bank"] ?? obj["financier"];
+      return v ? String(v) : "";
+    } catch {
+      return "";
+    }
+  })();
+
+  return {
+    referenceNo: String(base?.referenceNo ?? ""),
+    parcelNo: base?.parcelNo ? String(base.parcelNo) : null,
+    status: String(base?.status ?? ""),
+    titleType: String(base?.titleType ?? ""),
+    projectName: String(base?.projectName ?? ""),
+    developerName: String(base?.developerName ?? ""),
+    clientName: String(purchaser?.name ?? ""),
+    loanBank,
+  };
 }
 
 function encodeRFC5987ValueChars(str: string): string {
@@ -2867,12 +2925,34 @@ router.post("/cases/:caseId/workflow-documents", requireAuth, requireFirmUser, r
     .limit(1))[0];
   const existing = (await selectExisting([milestoneKey])) ?? (legacyKeys.length ? await selectExisting(legacyKeys) : undefined);
 
+  const namingCtx = await buildSmartNamingContext(r, req.firmId!, caseId);
+  const smartFileName = resolveSmartFilename({
+    ctx: {
+      caseId,
+      firmId: req.firmId!,
+      caseReferenceNo: namingCtx.referenceNo,
+      parcelNo: namingCtx.parcelNo,
+      clientName: namingCtx.clientName,
+      projectName: namingCtx.projectName,
+      developerName: namingCtx.developerName,
+      documentName: resolvedLabel,
+      templateName: "",
+      status: namingCtx.status,
+      titleType: namingCtx.titleType,
+      loanBank: namingCtx.loanBank,
+      sequence: 1,
+    },
+    rule: null,
+    originalFileNameOrExt: fileName.trim(),
+    fallbackExt: ext,
+  }).fileName;
+
   const baseUpdate: Partial<typeof caseWorkflowDocumentsTable.$inferInsert> = {
     milestoneKey,
     label: resolvedLabel,
     dateValue: typeof parsedDate === "string" ? parsedDate : null,
     objectPath,
-    fileName: fileName.trim(),
+    fileName: smartFileName,
     mimeType: mimeType ?? null,
     fileSize: fileSize ?? null,
     uploadedBy: req.userId ?? null,
@@ -2891,7 +2971,7 @@ router.post("/cases/:caseId/workflow-documents", requireAuth, requireFirmUser, r
         label: resolvedLabel,
         dateValue: typeof parsedDate === "string" ? parsedDate : null,
         objectPath,
-        fileName: fileName.trim(),
+        fileName: smartFileName,
         mimeType: mimeType ?? null,
         fileSize: fileSize ?? null,
         uploadedBy: req.userId ?? null,
@@ -2916,7 +2996,7 @@ router.post("/cases/:caseId/workflow-documents", requireAuth, requireFirmUser, r
     action: existing ? "cases.workflow_document.replace" : "cases.workflow_document.upload",
     entityType: "case",
     entityId: caseId,
-    detail: `workflowDocumentId=${row.id} milestoneKey=${milestoneKey} fileName=${fileName.trim()}`,
+    detail: `workflowDocumentId=${row.id} milestoneKey=${milestoneKey} fileName=${smartFileName}`,
     ipAddress: req.ip,
     userAgent: req.headers["user-agent"],
   });
@@ -3578,11 +3658,32 @@ router.post("/cases/:caseId/loan-stamping/:id/file", requireAuth, requireFirmUse
     res.status(404).json({ error: "Not found" });
     return;
   }
+  const namingCtx = await buildSmartNamingContext(r, req.firmId!, caseId);
+  const smartFileName = resolveSmartFilename({
+    ctx: {
+      caseId,
+      firmId: req.firmId!,
+      caseReferenceNo: namingCtx.referenceNo,
+      parcelNo: namingCtx.parcelNo,
+      clientName: namingCtx.clientName,
+      projectName: namingCtx.projectName,
+      developerName: namingCtx.developerName,
+      documentName: `Loan Stamping ${String(existing.itemKey ?? "")}`.trim(),
+      templateName: "",
+      status: namingCtx.status,
+      titleType: namingCtx.titleType,
+      loanBank: namingCtx.loanBank,
+      sequence: 1,
+    },
+    rule: null,
+    originalFileNameOrExt: fileName.trim(),
+    fallbackExt: ext,
+  }).fileName;
   const [row] = await r
     .update(caseLoanStampingItemsTable)
     .set({
       objectPath,
-      fileName: fileName.trim(),
+      fileName: smartFileName,
       mimeType: mimeType ?? null,
       fileSize: fileSize ?? null,
       uploadedBy: req.userId ?? null,
@@ -3615,7 +3716,7 @@ router.post("/cases/:caseId/loan-stamping/:id/file", requireAuth, requireFirmUse
     action: existing.objectPath ? "cases.loan_stamping.file_replace" : "cases.loan_stamping.file_upload",
     entityType: "case",
     entityId: caseId,
-    detail: `loanStampingItemId=${id} itemKey=${existing.itemKey} fileName=${fileName.trim()}`,
+    detail: `loanStampingItemId=${id} itemKey=${existing.itemKey} fileName=${smartFileName}`,
     ipAddress: req.ip,
     userAgent: req.headers["user-agent"],
   });

@@ -7,6 +7,7 @@ export const documentTemplatesTable = pgTable("document_templates", {
   kind: text("kind").notNull().default("template"),
   documentType: text("document_type").notNull().default("other"),
   isActive: boolean("is_active").notNull().default(true),
+  fileNamingRule: text("file_naming_rule"),
   appliesToPurchaseMode: text("applies_to_purchase_mode"),
   appliesToTitleType: text("applies_to_title_type").notNull().default("any"),
   appliesToCaseType: text("applies_to_case_type"),

@@ -609,6 +609,7 @@ router.patch("/platform/documents/:docId", requireAuth, requireFounder, async (r
   const hasDocumentGroup = Object.prototype.hasOwnProperty.call(body, "documentGroup");
   const hasSortOrder = Object.prototype.hasOwnProperty.call(body, "sortOrder");
   const hasCategory = Object.prototype.hasOwnProperty.call(body, "category");
+  const hasFileNamingRule = Object.prototype.hasOwnProperty.call(body, "fileNamingRule");
 
   const isActiveVal: boolean | undefined = hasIsActive ? (typeof body.isActive === "boolean" ? body.isActive : undefined) : undefined;
   if (hasIsActive && isActiveVal === undefined) { res.status(400).json({ error: "Invalid isActive" }); return; }
@@ -649,6 +650,12 @@ router.patch("/platform/documents/:docId", requireAuth, requireFounder, async (r
       : undefined;
   if (hasCategory && !categoryVal) { res.status(400).json({ error: "Invalid category" }); return; }
 
+  const fileNamingRuleVal: string | null | undefined =
+    hasFileNamingRule
+      ? (typeof body.fileNamingRule === "string" ? (String(body.fileNamingRule).trim() || null) : body.fileNamingRule === null ? null : undefined)
+      : undefined;
+  if (hasFileNamingRule && fileNamingRuleVal === undefined) { res.status(400).json({ error: "Invalid fileNamingRule" }); return; }
+
   const updated = await withAuthSafeDb(async (authDb) => {
     const [existing] = await authDb.select().from(platformDocumentsTable).where(eq(platformDocumentsTable.id, docId));
     if (!existing) return null;
@@ -663,6 +670,7 @@ router.patch("/platform/documents/:docId", requireAuth, requireFounder, async (r
         ...(hasDocumentGroup ? { documentGroup: groupVal ?? "Others" } : {}),
         ...(hasSortOrder ? { sortOrder: sortOrderVal ?? 0 } : {}),
         ...(hasCategory ? { category: categoryVal ?? "general" } : {}),
+        ...(hasFileNamingRule ? { fileNamingRule: fileNamingRuleVal ?? null } : {}),
       })
       .where(eq(platformDocumentsTable.id, docId))
       .returning();
@@ -675,6 +683,7 @@ router.patch("/platform/documents/:docId", requireAuth, requireFounder, async (r
     if (hasDocumentGroup) changed.push(`group=${groupVal ?? "Others"}`);
     if (hasSortOrder) changed.push(`sortOrder=${String(sortOrderVal ?? 0)}`);
     if (hasCategory) changed.push(`category=${categoryVal ?? "general"}`);
+    if (hasFileNamingRule) changed.push(`fileNamingRule=${fileNamingRuleVal ?? "null"}`);
 
     await writeAuditLog(
       {

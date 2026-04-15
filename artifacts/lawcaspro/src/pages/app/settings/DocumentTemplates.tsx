@@ -145,6 +145,9 @@ export default function DocumentTemplates() {
   const [editCaseType, setEditCaseType] = useState<string>("");
   const [editGroup, setEditGroup] = useState<string>("Others");
   const [editSortOrder, setEditSortOrder] = useState<number>(0);
+  const [editFileNamingRule, setEditFileNamingRule] = useState<string>("");
+  const [previewCaseId, setPreviewCaseId] = useState<string>("");
+  const [previewFileName, setPreviewFileName] = useState<string>("");
   const [detailTab, setDetailTab] = useState<"details" | "versions" | "bindings" | "applicability">("details");
   const [versionFile, setVersionFile] = useState<File | null>(null);
   const [bindingsDraft, setBindingsDraft] = useState<Record<string, DocumentTemplateBinding>>({});
@@ -162,6 +165,9 @@ export default function DocumentTemplates() {
     setEditCaseType(activeTemplate.applies_to_case_type ?? "");
     setEditGroup(activeTemplate.document_group ?? "Others");
     setEditSortOrder(typeof activeTemplate.sort_order === "number" ? activeTemplate.sort_order : 0);
+    setEditFileNamingRule(typeof (activeTemplate as any).file_naming_rule === "string" ? String((activeTemplate as any).file_naming_rule) : "");
+    setPreviewCaseId("");
+    setPreviewFileName("");
   }, [activeTemplate]);
 
   const templatesQuery = useQuery<DocumentTemplate[]>({
@@ -565,6 +571,57 @@ export default function DocumentTemplates() {
                     <div className="text-xs text-slate-500">File</div>
                     <div className="text-sm text-slate-700 break-words">{activeTemplate.file_name}</div>
                   </div>
+                  <div className="space-y-1.5">
+                    <Label>File naming rule</Label>
+                    <Textarea
+                      value={editFileNamingRule}
+                      onChange={(e) => setEditFileNamingRule(e.target.value)}
+                      placeholder="{case_reference}_{template_name}_{date_ymd}_{sequence}"
+                      rows={2}
+                      disabled={!canUpdate}
+                    />
+                    <div className="text-xs text-slate-500">
+                      Tokens: {"{case_reference} {client_name} {project_name} {developer_name} {document_name} {template_name} {date_ymd} {date_dmy} {status} {title_type} {loan_bank} {sequence}"}
+                    </div>
+                    <div className="grid grid-cols-2 gap-2 items-end">
+                      <div className="space-y-1.5">
+                        <Label>Preview case ID</Label>
+                        <Input value={previewCaseId} onChange={(e) => setPreviewCaseId(e.target.value)} placeholder="e.g. 123" />
+                      </div>
+                      <Button
+                        variant="outline"
+                        onClick={async () => {
+                          const id = parseInt(previewCaseId || "", 10);
+                          if (!Number.isFinite(id)) {
+                            toast({ title: "Invalid case ID", variant: "destructive" as any });
+                            return;
+                          }
+                          try {
+                            const resp = await apiFetchJson<{ fileName: string }>(`/cases/${id}/documents/filename-preview`, {
+                              method: "POST",
+                              body: JSON.stringify({
+                                templateId: activeTemplate.id,
+                                documentName: activeTemplate.name,
+                                originalFileName: activeTemplate.file_name,
+                                fallbackExt: "docx",
+                              }),
+                            });
+                            setPreviewFileName(resp.fileName);
+                          } catch (e) {
+                            toastError(toast, e, "Preview failed");
+                          }
+                        }}
+                        disabled={!canRead}
+                      >
+                        Preview filename
+                      </Button>
+                    </div>
+                    {previewFileName ? (
+                      <div className="text-sm text-slate-700 break-words">
+                        <span className="text-xs text-slate-500">Preview:</span> {previewFileName}
+                      </div>
+                    ) : null}
+                  </div>
                   {activeTemplate.description ? (
                     <div>
                       <div className="text-xs text-slate-500">Description</div>
@@ -586,6 +643,7 @@ export default function DocumentTemplates() {
                             appliesToCaseType: editCaseType ? editCaseType : null,
                             documentGroup: editGroup,
                             sortOrder: editSortOrder,
+                            fileNamingRule: editFileNamingRule.trim() ? editFileNamingRule.trim() : null,
                           },
                         });
                       }}
@@ -606,6 +664,7 @@ export default function DocumentTemplates() {
                             appliesToCaseType: editCaseType ? editCaseType : null,
                             documentGroup: editGroup,
                             sortOrder: editSortOrder,
+                            fileNamingRule: editFileNamingRule.trim() ? editFileNamingRule.trim() : null,
                           },
                         });
                       }}

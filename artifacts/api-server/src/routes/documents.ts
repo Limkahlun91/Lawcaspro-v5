@@ -17,6 +17,7 @@ import { z } from "zod";
 import { evaluateTemplateApplicability, normalizePurchaseMode, normalizeTitleType } from "../lib/documentApplicability";
 import { evaluateTemplateReadiness, type TemplateReadinessInputs } from "../lib/documentReadiness";
 import { buildGeneratedDownloadFileName } from "../lib/documentNaming";
+import { resolveSmartFilename } from "../lib/smartFileNaming";
 import { normalizeWorkflowDocumentKeyFromDb, workflowDocumentLabel } from "../lib/caseWorkflowDocuments";
 import { LOAN_STAMPING_ITEM_KEYS, isLoanStampingItemKeyAllowedForTitleType, normalizeTitleType as normalizeLoanTitleType, type LoanStampingItemKey } from "../lib/loanStamping";
 import { listDocumentVariables, resolveVariablesForTemplate, type PlaceholderWarning } from "../lib/documentVariables";
@@ -37,6 +38,18 @@ const truthy = (v: string | string[] | undefined): boolean => {
   if (!s) return false;
   return s === "1" || s.toLowerCase() === "true" || s.toLowerCase() === "yes";
 };
+
+async function nextCaseDocumentSequence(r: DbConn, firmId: number, caseId: number): Promise<number> {
+  const rows = await queryRows(r, sql`
+    SELECT COUNT(*)::int AS c
+    FROM case_documents
+    WHERE firm_id = ${firmId} AND case_id = ${caseId}
+  `);
+  const cRaw = rows[0]?.c;
+  const c = typeof cRaw === "number" ? cRaw : (typeof cRaw === "string" ? Number(cRaw) : 0);
+  const n = Number.isFinite(c) ? c : 0;
+  return Math.max(1, Math.floor(n) + 1);
+}
 
 const getRlsDb = (req: AuthRequest, res: any): NonNullable<AuthRequest["rlsDb"]> | null => {
   const r = req.rlsDb;
@@ -1079,6 +1092,7 @@ router.patch("/document-templates/:templateId", requireAuth, requireFirmUser, re
   const hasAppliesToCaseType = Object.prototype.hasOwnProperty.call(body, "appliesToCaseType");
   const hasDocumentGroup = Object.prototype.hasOwnProperty.call(body, "documentGroup");
   const hasSortOrder = Object.prototype.hasOwnProperty.call(body, "sortOrder");
+  const hasFileNamingRule = Object.prototype.hasOwnProperty.call(body, "fileNamingRule");
 
   const folderId = body.folderId;
   const kind = body.kind;
@@ -1091,6 +1105,7 @@ router.patch("/document-templates/:templateId", requireAuth, requireFirmUser, re
   const appliesToCaseType = body.appliesToCaseType;
   const documentGroup = body.documentGroup;
   const sortOrder = body.sortOrder;
+  const fileNamingRule = body.fileNamingRule;
 
   const folderIdNum: number | null | undefined = hasFolderId ? (typeof folderId === "number" ? folderId : folderId === null ? null : undefined) : undefined;
   if (hasFolderId && folderIdNum === undefined) {
@@ -1163,6 +1178,14 @@ router.patch("/document-templates/:templateId", requireAuth, requireFirmUser, re
     res.status(400).json({ error: "Invalid sortOrder" });
     return;
   }
+  const fileNamingRuleVal: string | null | undefined =
+    hasFileNamingRule
+      ? (typeof fileNamingRule === "string" ? (fileNamingRule.trim() || null) : fileNamingRule === null ? null : undefined)
+      : undefined;
+  if (hasFileNamingRule && fileNamingRuleVal === undefined) {
+    res.status(400).json({ error: "Invalid fileNamingRule" });
+    return;
+  }
   if (kindVal && kindVal !== "template" && kindVal !== "reference") {
     res.status(400).json({ error: "Invalid kind" });
     return;
@@ -1211,6 +1234,7 @@ router.patch("/document-templates/:templateId", requireAuth, requireFirmUser, re
             applies_to_case_type = CASE WHEN ${hasAppliesToCaseType} THEN ${caseTypeVal ?? null} ELSE applies_to_case_type END,
             document_group = CASE WHEN ${hasDocumentGroup} THEN ${groupVal ?? "Others"} ELSE document_group END,
             sort_order = CASE WHEN ${hasSortOrder} THEN ${sortOrderVal ?? 0} ELSE sort_order END,
+            file_naming_rule = CASE WHEN ${hasFileNamingRule} THEN ${fileNamingRuleVal ?? null} ELSE file_naming_rule END,
             is_template_capable = (
               ${effectiveKind} = 'template'
               AND LOWER(COALESCE(NULLIF(extension,''), split_part(file_name, '.', array_length(string_to_array(file_name, '.'), 1)))) = 'docx'
@@ -3985,13 +4009,28 @@ async function generateFirmDocument({
   });
   const docName = documentName ?? String((template as any).name ?? "Generated document");
   const templateCode = String((template as any).document_type ?? "DOC");
-  const downloadName = buildGeneratedDownloadFileName({
-    referenceNo: String((context as any).reference_no ?? ""),
-    templateCode,
-    purchaserName: String((context as any).spa_purchaser1_name ?? (context as any).borrower1_name ?? ""),
-    projectName: String((context as any).project_name ?? ""),
-    extension: "docx",
-  });
+  const sequence = await nextCaseDocumentSequence(r, firmId, caseId);
+  const namingRule = typeof (template as any).file_naming_rule === "string" ? String((template as any).file_naming_rule) : null;
+  const downloadName = resolveSmartFilename({
+    ctx: {
+      caseId,
+      firmId,
+      caseReferenceNo: String((context as any).reference_no ?? ""),
+      parcelNo: String((context as any).parcel_no ?? ""),
+      clientName: String((context as any).spa_purchaser1_name ?? (context as any).borrower1_name ?? ""),
+      projectName: String((context as any).project_name ?? ""),
+      developerName: String((context as any).developer_name ?? ""),
+      documentName: docName,
+      templateName: String((template as any).name ?? ""),
+      status: String((context as any).case_status ?? (context as any).status ?? ""),
+      titleType: String((context as any).title_type ?? ""),
+      loanBank: String((context as any).loan_end_financier ?? ""),
+      sequence,
+    },
+    rule: namingRule,
+    originalFileNameOrExt: "docx",
+    fallbackExt: "docx",
+  }).fileName;
   const templateSnapshotUpdatedAt = (version as any)?.published_at ?? (template as any).updated_at ?? null;
   const docRows = await queryRows(r, sql`
     INSERT INTO case_documents (case_id, firm_id, template_id, template_source, template_snapshot_name, template_snapshot_updated_at, name, document_type, status, object_path, file_name, generated_by)
@@ -4260,13 +4299,28 @@ async function generateMasterDocument({
   });
   const docName = documentName ?? String((masterDoc as any).name ?? "Generated document");
   const templateCode = String((masterDoc as any).category ?? (masterDoc as any).name ?? "DOC");
-  const fileName = buildGeneratedDownloadFileName({
-    referenceNo: String((context as any).reference_no ?? ""),
-    templateCode,
-    purchaserName: String((context as any).spa_purchaser1_name ?? (context as any).borrower1_name ?? ""),
-    projectName: String((context as any).project_name ?? ""),
-    extension: outputExt,
-  });
+  const sequence = await nextCaseDocumentSequence(r, firmId, caseId);
+  const namingRule = typeof (masterDoc as any).file_naming_rule === "string" ? String((masterDoc as any).file_naming_rule) : null;
+  const fileName = resolveSmartFilename({
+    ctx: {
+      caseId,
+      firmId,
+      caseReferenceNo: String((context as any).reference_no ?? ""),
+      parcelNo: String((context as any).parcel_no ?? ""),
+      clientName: String((context as any).spa_purchaser1_name ?? (context as any).borrower1_name ?? ""),
+      projectName: String((context as any).project_name ?? ""),
+      developerName: String((context as any).developer_name ?? ""),
+      documentName: docName,
+      templateName: String((masterDoc as any).name ?? ""),
+      status: String((context as any).case_status ?? (context as any).status ?? ""),
+      titleType: String((context as any).title_type ?? ""),
+      loanBank: String((context as any).loan_end_financier ?? ""),
+      sequence,
+    },
+    rule: namingRule,
+    originalFileNameOrExt: outputExt,
+    fallbackExt: outputExt,
+  }).fileName;
   const savedRows = await queryRows(r, sql`
     INSERT INTO case_documents (case_id, firm_id, template_source, platform_document_id, template_snapshot_name, template_snapshot_updated_at, name, document_type, status, object_path, file_name, generated_by)
     VALUES (${caseId}, ${firmId}, 'master', ${masterDocId}, ${String((masterDoc as any).name ?? "")}, ${(masterDoc as any).created_at ?? null}, ${docName}, ${(masterDoc as any).category ?? "other"}, 'generated', ${normalizedPath}, ${fileName}, ${actorId})
@@ -4486,7 +4540,27 @@ router.post("/cases/:caseId/documents/batch-export", requireAuth, requireFirmUse
       throw new DocumentGenerationError(422, "DOCUMENT_FILE_MISSING", "One or more document files missing");
     }
     const zipBytes = await buildZipBufferFromPrivateObjects(entries);
-    const outName = `case-${caseId}-documents.zip`;
+    const context = await buildCaseContext(r, caseId, req.firmId!);
+    const outName = resolveSmartFilename({
+      ctx: {
+        caseId,
+        firmId: req.firmId!,
+        caseReferenceNo: String((context as any)?.reference_no ?? ""),
+        parcelNo: String((context as any)?.parcel_no ?? ""),
+        clientName: String((context as any)?.spa_purchaser1_name ?? (context as any)?.borrower1_name ?? ""),
+        projectName: String((context as any)?.project_name ?? ""),
+        developerName: String((context as any)?.developer_name ?? ""),
+        documentName: "Documents Export",
+        templateName: "",
+        status: String((context as any)?.case_status ?? (context as any)?.status ?? ""),
+        titleType: String((context as any)?.title_type ?? ""),
+        loanBank: String((context as any)?.loan_end_financier ?? ""),
+        sequence: await nextCaseDocumentSequence(r, req.firmId!, caseId),
+      },
+      rule: null,
+      originalFileNameOrExt: "zip",
+      fallbackExt: "zip",
+    }).fileName;
     const objectPath = `/objects/cases/${req.firmId!}/case-${caseId}/batch-exports/${jobId}.zip`;
     await supabaseStorage.uploadPrivateObject({ objectPath, fileBytes: zipBytes, contentType: "application/zip" });
 
@@ -4508,7 +4582,7 @@ router.post("/cases/:caseId/documents/batch-export", requireAuth, requireFirmUse
       SET status = 'success', finished_at = now()
       WHERE job_id = ${jobId}::uuid AND firm_id = ${req.firmId!}
     `);
-    res.status(201).json({ jobId, status: "completed", downloadPath: `/document-batch-jobs/${jobId}/download` });
+    res.status(201).json({ jobId, status: "completed", downloadPath: `/document-batch-jobs/${jobId}/download`, downloadFileName: outName });
   } catch (err: unknown) {
     const cfgErr = getSupabaseStorageConfigError(err);
     const e =
@@ -4597,6 +4671,85 @@ async function canBypassApplicability(r: DbConn, firmId: number, roleId: number 
   const name = rows[0]?.name ? String(rows[0].name).toLowerCase() : "";
   return name.includes("partner") || name.includes("admin");
 }
+
+router.post("/cases/:caseId/documents/filename-preview", requireAuth, requireFirmUser, requirePermission("documents", "read"), async (req: AuthRequest, res): Promise<void> => {
+  const r = getRlsDb(req, res);
+  if (!r) return;
+  const caseIdStr = one((req.params as any).caseId);
+  const caseId = caseIdStr ? parseInt(caseIdStr, 10) : NaN;
+  if (Number.isNaN(caseId)) {
+    res.status(400).json({ error: "Invalid case ID" });
+    return;
+  }
+
+  const body = req.body as Record<string, unknown>;
+  const templateId = typeof body.templateId === "number" ? body.templateId : null;
+  const platformDocumentId = typeof body.platformDocumentId === "number" ? body.platformDocumentId : null;
+  const documentName = typeof body.documentName === "string" ? body.documentName.trim() : "";
+  const originalFileName = typeof body.originalFileName === "string" ? body.originalFileName.trim() : null;
+  const fallbackExt = typeof body.fallbackExt === "string" ? body.fallbackExt.trim() : "docx";
+
+  if (!templateId && !platformDocumentId && !documentName) {
+    res.status(422).json({ error: "templateId/platformDocumentId or documentName is required" });
+    return;
+  }
+  if (templateId && platformDocumentId) {
+    res.status(422).json({ error: "Provide only one of templateId or platformDocumentId" });
+    return;
+  }
+
+  const context = await buildCaseContext(r, caseId, req.firmId!);
+  if (!context) {
+    res.status(404).json({ error: "Case not found" });
+    return;
+  }
+
+  let rule: string | null = null;
+  let templateName = "";
+  if (templateId) {
+    const tplRows = await queryRows(r, sql`SELECT * FROM document_templates WHERE id = ${templateId} AND firm_id = ${req.firmId!}`);
+    const tpl = tplRows[0];
+    if (!tpl) {
+      res.status(404).json({ error: "Template not found" });
+      return;
+    }
+    templateName = String((tpl as any).name ?? "");
+    rule = typeof (tpl as any).file_naming_rule === "string" ? String((tpl as any).file_naming_rule) : null;
+  } else if (platformDocumentId) {
+    const rows = await queryRows(r, sql`SELECT * FROM platform_documents WHERE id = ${platformDocumentId}`);
+    const doc = rows[0];
+    if (!doc) {
+      res.status(404).json({ error: "Document not found" });
+      return;
+    }
+    templateName = String((doc as any).name ?? "");
+    rule = typeof (doc as any).file_naming_rule === "string" ? String((doc as any).file_naming_rule) : null;
+  }
+
+  const sequence = await nextCaseDocumentSequence(r, req.firmId!, caseId);
+  const preview = resolveSmartFilename({
+    ctx: {
+      caseId,
+      firmId: req.firmId!,
+      caseReferenceNo: String((context as any).reference_no ?? ""),
+      parcelNo: String((context as any).parcel_no ?? ""),
+      clientName: String((context as any).spa_purchaser1_name ?? (context as any).borrower1_name ?? ""),
+      projectName: String((context as any).project_name ?? ""),
+      developerName: String((context as any).developer_name ?? ""),
+      documentName: documentName || templateName || "Document",
+      templateName,
+      status: String((context as any).case_status ?? (context as any).status ?? ""),
+      titleType: String((context as any).title_type ?? ""),
+      loanBank: String((context as any).loan_end_financier ?? ""),
+      sequence,
+    },
+    rule,
+    originalFileNameOrExt: originalFileName,
+    fallbackExt,
+  });
+
+  res.json(preview);
+});
 
 router.post("/cases/:caseId/documents/preview", requireAuth, requireFirmUser, requirePermission("documents", "generate"), async (req: AuthRequest, res): Promise<void> => {
   const r = getRlsDb(req, res);
@@ -5536,9 +5689,32 @@ router.post("/cases/:caseId/documents/upload", requireAuth, requireFirmUser, req
     return;
   }
 
+  const context = await buildCaseContext(r, caseId, req.firmId!);
+  const sequence = await nextCaseDocumentSequence(r, req.firmId!, caseId);
+  const smartName = resolveSmartFilename({
+    ctx: {
+      caseId,
+      firmId: req.firmId!,
+      caseReferenceNo: String((context as any)?.reference_no ?? ""),
+      parcelNo: String((context as any)?.parcel_no ?? ""),
+      clientName: String((context as any)?.spa_purchaser1_name ?? (context as any)?.borrower1_name ?? ""),
+      projectName: String((context as any)?.project_name ?? ""),
+      developerName: String((context as any)?.developer_name ?? ""),
+      documentName: name,
+      templateName: "",
+      status: String((context as any)?.case_status ?? (context as any)?.status ?? ""),
+      titleType: String((context as any)?.title_type ?? ""),
+      loanBank: String((context as any)?.loan_end_financier ?? ""),
+      sequence,
+    },
+    rule: null,
+    originalFileNameOrExt: fileName,
+    fallbackExt: "pdf",
+  }).fileName;
+
   const rows = await queryRows(r, sql`
     INSERT INTO case_documents (case_id, firm_id, name, document_type, status, object_path, file_name, file_size, is_uploaded, generated_by)
-    VALUES (${caseId}, ${req.firmId!}, ${name}, ${documentType ?? "other"}, 'uploaded', ${objectPath}, ${fileName}, ${fileSize ?? null}, true, ${req.userId!})
+    VALUES (${caseId}, ${req.firmId!}, ${name}, ${documentType ?? "other"}, 'uploaded', ${objectPath}, ${smartName}, ${fileSize ?? null}, true, ${req.userId!})
     RETURNING *`
   );
 
@@ -5546,7 +5722,7 @@ router.post("/cases/:caseId/documents/upload", requireAuth, requireFirmUser, req
   const createdId = created && typeof created === "object" && "id" in created && typeof (created as { id?: unknown }).id === "number"
     ? (created as { id: number }).id
     : undefined;
-  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.case.upload", entityType: "case_document", entityId: createdId, detail: `caseId=${caseId} name=${name} fileName=${fileName}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.case.upload", entityType: "case_document", entityId: createdId, detail: `caseId=${caseId} name=${name} fileName=${smartName}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
   res.status(201).json(rows[0]);
 });
 
