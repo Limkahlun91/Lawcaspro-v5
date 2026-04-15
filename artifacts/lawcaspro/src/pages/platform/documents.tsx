@@ -273,6 +273,7 @@ export default function PlatformDocuments() {
   const [editDocOpen, setEditDocOpen] = useState(false);
   const [editingDoc, setEditingDoc] = useState<PlatformDoc | null>(null);
   const [editIsActive, setEditIsActive] = useState(true);
+  const [editIsRequired, setEditIsRequired] = useState(false);
   const [editPurchaseMode, setEditPurchaseMode] = useState<string>("both");
   const [editTitleType, setEditTitleType] = useState<string>("any");
   const [editCaseType, setEditCaseType] = useState<string>("");
@@ -292,6 +293,19 @@ export default function PlatformDocuments() {
     setEditSortOrder(typeof editingDoc.sortOrder === "number" ? editingDoc.sortOrder : 0);
     setEditCategory(editingDoc.category ?? "general");
   }, [editingDoc]);
+
+  const platformDocRulesQuery = useQuery<{ document: PlatformDoc; rules: { isRequired?: boolean | null } | null }>({
+    queryKey: ["platform-document-rules", editingDoc?.id, editDocOpen],
+    queryFn: ({ signal }) => apiFetchJson(`/platform/documents/${editingDoc!.id}/applicability`, { signal }),
+    enabled: editDocOpen && !!editingDoc,
+    retry: false,
+  });
+
+  useEffect(() => {
+    if (!platformDocRulesQuery.data) return;
+    const r = platformDocRulesQuery.data.rules as any;
+    setEditIsRequired(Boolean(r?.isRequired ?? r?.is_required ?? false));
+  }, [platformDocRulesQuery.data]);
 
   const foldersQuery = useQuery<SystemFolder[]>({
     queryKey: ["system-folders"],
@@ -1011,6 +1025,10 @@ export default function PlatformDocuments() {
                   </SelectContent>
                 </Select>
               </div>
+              <div className="flex items-center gap-2">
+                <Checkbox checked={editIsRequired} onCheckedChange={(v) => setEditIsRequired(Boolean(v))} />
+                <span className="text-sm text-slate-700">Required in checklist</span>
+              </div>
               <div className="flex justify-end gap-2 pt-2">
                 <Button
                   variant="outline"
@@ -1026,6 +1044,7 @@ export default function PlatformDocuments() {
                       id: editingDoc.id,
                       patch: {
                         isActive: editIsActive,
+                        isRequired: editIsRequired,
                         appliesToPurchaseMode: editPurchaseMode,
                         appliesToTitleType: editTitleType,
                         appliesToCaseType: editCaseType ? editCaseType : null,

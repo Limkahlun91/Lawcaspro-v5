@@ -772,20 +772,20 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
                 <QueryFallback title="Checklist unavailable" error={checklistQuery.error} onRetry={() => checklistQuery.refetch()} isRetrying={checklistQuery.isFetching} />
               ) : (
                 <div className="space-y-6">
-                  <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-                    <div className="rounded-lg border bg-white p-3">
+                  <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+                    <div className="rounded-lg border bg-white p-3 min-w-0">
                       <div className="text-xs text-slate-500">Total applicable</div>
                       <div className="text-xl font-semibold text-slate-900">{checklistQuery.data?.summary?.totalApplicable ?? 0}</div>
                     </div>
-                    <div className="rounded-lg border bg-white p-3">
+                    <div className="rounded-lg border bg-white p-3 min-w-0">
                       <div className="text-xs text-slate-500">Required missing</div>
                       <div className="text-xl font-semibold text-rose-700">{checklistQuery.data?.summary?.requiredMissing ?? 0}</div>
                     </div>
-                    <div className="rounded-lg border bg-white p-3">
+                    <div className="rounded-lg border bg-white p-3 min-w-0">
                       <div className="text-xs text-slate-500">Completed</div>
                       <div className="text-xl font-semibold text-emerald-700">{checklistQuery.data?.summary?.completed ?? 0}</div>
                     </div>
-                    <div className="rounded-lg border bg-white p-3">
+                    <div className="rounded-lg border bg-white p-3 min-w-0">
                       <div className="text-xs text-slate-500">Waived</div>
                       <div className="text-xl font-semibold text-slate-800">{checklistQuery.data?.summary?.waived ?? 0}</div>
                     </div>
@@ -889,6 +889,7 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
                             const ready = it.readiness?.status === "ready";
                             const latestId = it.latestDocument?.id;
                             const latestDoc = latestId ? documents.find((d) => d.id === latestId) : null;
+                            const missing = it.isRequired && applicable && !["generated", "uploaded", "received", "completed", "waived"].includes(it.status);
                             const reason = !applicable
                               ? (it.applicability?.reasons ?? []).join(", ")
                               : it.blocked
@@ -910,6 +911,13 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
 
                             const updatedLabel = it.updatedAt ? new Date(it.updatedAt).toLocaleString("en-MY") : null;
 
+                            const sourceLabel =
+                              it.source === "firm" ? "Firm"
+                              : it.source === "master" ? "Master"
+                              : it.source === "workflow" ? "Workflow"
+                              : it.source === "stamping" ? "Loan stamping"
+                              : "Manual";
+
                             return (
                               <div key={it.checklistKey} className="flex items-start justify-between gap-3 rounded-lg border border-slate-200 bg-white p-3 min-w-0">
                                 <div className="pt-1">
@@ -929,11 +937,16 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
                                   <div className="font-medium text-slate-900 truncate" title={it.name}>{it.name}</div>
                                   <div className="mt-1 flex items-center gap-2 flex-wrap">
                                     <span className={cn("text-[10px] px-1.5 py-0.5 rounded font-medium", it.source === "firm" ? "bg-slate-100 text-slate-700" : it.source === "master" ? "bg-purple-50 text-purple-700" : "bg-slate-100 text-slate-700")}>
-                                      {it.source}
+                                      {sourceLabel}
                                     </span>
                                     <span className={cn("text-[10px] px-1.5 py-0.5 rounded font-medium", it.isRequired ? "bg-rose-50 text-rose-700" : "bg-slate-100 text-slate-600")}>
                                       {it.isRequired ? "Required" : "Optional"}
                                     </span>
+                                    {missing ? (
+                                      <span className="text-[10px] px-1.5 py-0.5 rounded font-medium bg-rose-50 text-rose-700">
+                                        Missing
+                                      </span>
+                                    ) : null}
                                     <span className={cn("text-[10px] px-1.5 py-0.5 rounded font-medium", applicable ? "bg-emerald-50 text-emerald-700" : "bg-slate-100 text-slate-500")}>
                                       {applicable ? "Applicable" : "Not applicable"}
                                     </span>
@@ -950,7 +963,7 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
                                   {updatedLabel ? <div className="mt-1 text-xs text-slate-400">Updated: {updatedLabel}</div> : null}
                                 </div>
                                 <div className="shrink-0 flex flex-col items-end gap-2">
-                                  <div className="flex items-center gap-2">
+                                  <div className="flex items-center gap-2 flex-wrap justify-end">
                                     {it.kind === "template" ? (
                                       <Button size="sm" variant="outline" onClick={() => handlePreview(it)} disabled={!canGenerate || previewLoading}>
                                         Preview
@@ -1009,6 +1022,16 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
                                     >
                                       Upload
                                     </Button>
+                                    <Button
+                                      size="sm"
+                                      variant="outline"
+                                      onClick={() => {
+                                        setChecklistHistoryKey(it.checklistKey);
+                                        setChecklistHistoryOpen(true);
+                                      }}
+                                    >
+                                      History
+                                    </Button>
                                     {it.kind === "workflow" && it.workflowDocumentId && it.fileName ? (
                                       <Button
                                         size="sm"
@@ -1022,6 +1045,7 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
                                               body: JSON.stringify({ event: "upload_removed", label: it.name }),
                                             });
                                             await qc.invalidateQueries({ queryKey: ["case-documents-checklist", caseId] });
+                                            await qc.invalidateQueries({ queryKey: ["case-documents-checklist-history", caseId] });
                                             toast({ title: "File removed" });
                                           } catch (err) {
                                             toastError(toast, err, "Remove failed");
@@ -1045,6 +1069,7 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
                                               body: JSON.stringify({ event: "upload_removed", label: it.name }),
                                             });
                                             await qc.invalidateQueries({ queryKey: ["case-documents-checklist", caseId] });
+                                            await qc.invalidateQueries({ queryKey: ["case-documents-checklist-history", caseId] });
                                             toast({ title: "File removed" });
                                           } catch (err) {
                                             toastError(toast, err, "Remove failed");

@@ -2979,7 +2979,12 @@ router.get("/cases/:caseId/documents/checklist", requireAuth, requireFirmUser, r
         blocked,
         updatedAt: existing && (existing as any).updated_at ? String((existing as any).updated_at) : updatedAt,
         notes: typeof override?.notes === "string" ? String(override.notes) : null,
-        name: itemKey.replaceAll("_", " ").toUpperCase(),
+        name:
+          itemKey === "facility_agreement" ? "Facility Agreement"
+          : itemKey === "deed_of_assignment" ? "Deed of Assignment"
+          : itemKey === "power_of_attorney" ? "Power of Attorney"
+          : itemKey === "charge_annexure" ? "Charge Annexure"
+          : String(itemKey).split("_").join(" "),
         documentGroup: "Loan Stamping",
         sortOrder: existing && typeof (existing as any).sort_order === "number" ? Number((existing as any).sort_order) : 0,
         fileName: existing && (existing as any).file_name ? String((existing as any).file_name) : null,
@@ -3139,6 +3144,39 @@ function parseChecklistKeyTarget(checklistKey: string): { templateId?: number; p
   return {};
 }
 
+async function resolveChecklistIsRequired(r: DbConn, firmId: number, caseId: number, checklistKey: string): Promise<boolean> {
+  const existing = await queryRows(r, sql`
+    SELECT is_required
+    FROM case_document_checklist_items
+    WHERE firm_id = ${firmId} AND case_id = ${caseId} AND checklist_key = ${checklistKey}
+    LIMIT 1
+  `);
+  if (existing[0] && typeof existing[0].is_required === "boolean") return Boolean(existing[0].is_required);
+
+  const { templateId, platformDocumentId } = parseChecklistKeyTarget(checklistKey);
+  if (typeof templateId === "number") {
+    const rows = await queryRows(r, sql`
+      SELECT is_required
+      FROM document_template_applicability_rules
+      WHERE firm_id = ${firmId} AND template_id = ${templateId}
+      LIMIT 1
+    `);
+    if (rows[0] && rows[0].is_required !== null && rows[0].is_required !== undefined) return Boolean(rows[0].is_required);
+  }
+  if (typeof platformDocumentId === "number") {
+    const rows = await queryRows(r, sql`
+      SELECT is_required
+      FROM document_template_applicability_rules
+      WHERE platform_document_id = ${platformDocumentId}
+        AND (firm_id = ${firmId} OR firm_id IS NULL)
+      ORDER BY firm_id DESC NULLS LAST
+      LIMIT 1
+    `);
+    if (rows[0] && rows[0].is_required !== null && rows[0].is_required !== undefined) return Boolean(rows[0].is_required);
+  }
+  return false;
+}
+
 router.post("/cases/:caseId/documents/checklist/items", requireAuth, requireFirmUser, requirePermission("documents", "update"), async (req: AuthRequest, res): Promise<void> => {
   const r = getRlsDb(req, res);
   if (!r) return;
@@ -3222,6 +3260,7 @@ router.post("/cases/:caseId/documents/checklist/items/:checklistKey/received", r
   const label = typeof (req.body as any)?.label === "string" ? String((req.body as any).label).trim() : null;
   const notes = typeof (req.body as any)?.notes === "string" ? String((req.body as any).notes).trim() : null;
   const { templateId, platformDocumentId } = parseChecklistKeyTarget(checklistKey);
+  const isRequired = await resolveChecklistIsRequired(r, req.firmId!, caseId, checklistKey);
   const rows = await queryRows(r, sql`
     INSERT INTO case_document_checklist_items (
       firm_id, case_id, checklist_key,
@@ -3231,7 +3270,7 @@ router.post("/cases/:caseId/documents/checklist/items/:checklistKey/received", r
     ) VALUES (
       ${req.firmId!}, ${caseId}, ${checklistKey},
       ${templateId ?? null}, ${platformDocumentId ?? null},
-      ${label ?? checklistKey}, 'external_received', false,
+      ${label ?? checklistKey}, 'external_received', ${isRequired},
       'received', ${notes as any}, now(), ${req.userId ?? null}, now()
     )
     ON CONFLICT (firm_id, case_id, checklist_key)
@@ -3251,7 +3290,7 @@ router.post("/cases/:caseId/documents/checklist/items/:checklistKey/received", r
     action: "checklist.received",
     entityType: "case",
     entityId: caseId,
-    detail: `checklistKey=${checklistKey}`,
+    detail: `checklistKey=${checklistKey} label=${label ?? ""}`,
     ipAddress: req.ip,
     userAgent: req.headers["user-agent"],
   });
@@ -3282,6 +3321,7 @@ router.post("/cases/:caseId/documents/checklist/items/:checklistKey/completed", 
   const label = typeof (req.body as any)?.label === "string" ? String((req.body as any).label).trim() : null;
   const notes = typeof (req.body as any)?.notes === "string" ? String((req.body as any).notes).trim() : null;
   const { templateId, platformDocumentId } = parseChecklistKeyTarget(checklistKey);
+  const isRequired = await resolveChecklistIsRequired(r, req.firmId!, caseId, checklistKey);
   const rows = await queryRows(r, sql`
     INSERT INTO case_document_checklist_items (
       firm_id, case_id, checklist_key,
@@ -3291,7 +3331,7 @@ router.post("/cases/:caseId/documents/checklist/items/:checklistKey/completed", 
     ) VALUES (
       ${req.firmId!}, ${caseId}, ${checklistKey},
       ${templateId ?? null}, ${platformDocumentId ?? null},
-      ${label ?? checklistKey}, 'manual', false,
+      ${label ?? checklistKey}, 'manual', ${isRequired},
       'completed', ${notes as any}, now(), ${req.userId ?? null}, now()
     )
     ON CONFLICT (firm_id, case_id, checklist_key)
@@ -3310,7 +3350,7 @@ router.post("/cases/:caseId/documents/checklist/items/:checklistKey/completed", 
     action: "checklist.completed",
     entityType: "case",
     entityId: caseId,
-    detail: `checklistKey=${checklistKey}`,
+    detail: `checklistKey=${checklistKey} label=${label ?? ""}`,
     ipAddress: req.ip,
     userAgent: req.headers["user-agent"],
   });
@@ -3342,6 +3382,7 @@ router.post("/cases/:caseId/documents/checklist/items/:checklistKey/waive", requ
   const label = typeof body.label === "string" ? body.label.trim() : null;
   const notes = typeof body.notes === "string" ? body.notes.trim() : null;
   const { templateId, platformDocumentId } = parseChecklistKeyTarget(checklistKey);
+  const isRequired = await resolveChecklistIsRequired(r, req.firmId!, caseId, checklistKey);
   const rows = await queryRows(r, sql`
     INSERT INTO case_document_checklist_items (
       firm_id, case_id, checklist_key,
@@ -3351,7 +3392,7 @@ router.post("/cases/:caseId/documents/checklist/items/:checklistKey/waive", requ
     ) VALUES (
       ${req.firmId!}, ${caseId}, ${checklistKey},
       ${templateId ?? null}, ${platformDocumentId ?? null},
-      ${label ?? checklistKey}, 'manual', false,
+      ${label ?? checklistKey}, 'manual', ${isRequired},
       'waived', ${notes as any}, now(), ${req.userId ?? null}, ${reason}, now()
     )
     ON CONFLICT (firm_id, case_id, checklist_key)
@@ -3371,7 +3412,7 @@ router.post("/cases/:caseId/documents/checklist/items/:checklistKey/waive", requ
     action: "checklist.waived",
     entityType: "case",
     entityId: caseId,
-    detail: `checklistKey=${checklistKey} reason=${reason}`,
+    detail: `checklistKey=${checklistKey} label=${label ?? ""} reason=${reason}`,
     ipAddress: req.ip,
     userAgent: req.headers["user-agent"],
   });
@@ -3469,6 +3510,7 @@ router.post("/cases/:caseId/documents/checklist/items/:checklistKey/upload", req
   }
   const { templateId, platformDocumentId } = parseChecklistKeyTarget(checklistKey);
   const templateSource = templateId ? "firm" : platformDocumentId ? "master" : null;
+  const isRequired = await resolveChecklistIsRequired(r, req.firmId!, caseId, checklistKey);
 
   const existingRows = await queryRows(r, sql`
     SELECT id, case_document_id
@@ -3511,7 +3553,7 @@ router.post("/cases/:caseId/documents/checklist/items/:checklistKey/upload", req
     ) VALUES (
       ${req.firmId!}, ${caseId}, ${checklistKey},
       ${templateId ?? null}, ${platformDocumentId ?? null}, ${createdId as any},
-      ${label || checklistKey}, 'uploaded', false,
+      ${label || checklistKey}, 'uploaded', ${isRequired},
       'uploaded', NULL, now()
     )
     ON CONFLICT (firm_id, case_id, checklist_key)
@@ -3532,7 +3574,7 @@ router.post("/cases/:caseId/documents/checklist/items/:checklistKey/upload", req
     action: previousCaseDocumentId ? "checklist.upload_replaced" : "checklist.upload",
     entityType: "case",
     entityId: caseId,
-    detail: `checklistKey=${checklistKey} caseDocumentId=${createdId ?? ""} prevCaseDocumentId=${previousCaseDocumentId ?? ""}`,
+    detail: `checklistKey=${checklistKey} label=${label || ""} caseDocumentId=${createdId ?? ""} prevCaseDocumentId=${previousCaseDocumentId ?? ""}`,
     ipAddress: req.ip,
     userAgent: req.headers["user-agent"],
   });
@@ -3564,6 +3606,8 @@ router.post("/cases/:caseId/documents/checklist/items/:checklistKey/upload-event
   }
   const label = typeof body.label === "string" ? body.label.trim() : null;
   const { templateId, platformDocumentId } = parseChecklistKeyTarget(checklistKey);
+  const isRequired = await resolveChecklistIsRequired(r, req.firmId!, caseId, checklistKey);
+  const nextStatus = event === "upload_removed" ? "pending" : "pending";
   await queryRows(r, sql`
     INSERT INTO case_document_checklist_items (
       firm_id, case_id, checklist_key,
@@ -3573,11 +3617,35 @@ router.post("/cases/:caseId/documents/checklist/items/:checklistKey/upload-event
     ) VALUES (
       ${req.firmId!}, ${caseId}, ${checklistKey},
       ${templateId ?? null}, ${platformDocumentId ?? null},
-      ${label ?? checklistKey}, 'uploaded', false,
-      'pending', now()
+      ${label ?? checklistKey}, 'uploaded', ${isRequired},
+      ${nextStatus}, now()
     )
     ON CONFLICT (firm_id, case_id, checklist_key)
     DO UPDATE SET
+      status = CASE
+        WHEN ${event} = 'upload_removed' AND case_document_checklist_items.status <> 'waived' THEN 'pending'
+        ELSE case_document_checklist_items.status
+      END,
+      case_document_id = CASE
+        WHEN ${event} = 'upload_removed' AND case_document_checklist_items.status <> 'waived' THEN NULL
+        ELSE case_document_checklist_items.case_document_id
+      END,
+      received_at = CASE
+        WHEN ${event} = 'upload_removed' AND case_document_checklist_items.status <> 'waived' THEN NULL
+        ELSE case_document_checklist_items.received_at
+      END,
+      received_by = CASE
+        WHEN ${event} = 'upload_removed' AND case_document_checklist_items.status <> 'waived' THEN NULL
+        ELSE case_document_checklist_items.received_by
+      END,
+      completed_at = CASE
+        WHEN ${event} = 'upload_removed' AND case_document_checklist_items.status <> 'waived' THEN NULL
+        ELSE case_document_checklist_items.completed_at
+      END,
+      completed_by = CASE
+        WHEN ${event} = 'upload_removed' AND case_document_checklist_items.status <> 'waived' THEN NULL
+        ELSE case_document_checklist_items.completed_by
+      END,
       updated_at = now()
   `);
   await writeAuditLog({
@@ -3587,7 +3655,7 @@ router.post("/cases/:caseId/documents/checklist/items/:checklistKey/upload-event
     action: `checklist.${event}`,
     entityType: "case",
     entityId: caseId,
-    detail: `checklistKey=${checklistKey}`,
+    detail: `checklistKey=${checklistKey} label=${label ?? ""}`,
     ipAddress: req.ip,
     userAgent: req.headers["user-agent"],
   });
