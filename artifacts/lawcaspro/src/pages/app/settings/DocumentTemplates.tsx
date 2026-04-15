@@ -108,29 +108,6 @@ interface TemplateApplicabilityResponse {
   };
 }
 
-const TEMPLATE_FIELDS = [
-  { key: "reference_no", label: "Case Reference No." },
-  { key: "date", label: "Document Date (formatted)" },
-  { key: "spa_price", label: "SPA Price (formatted, e.g. RM 500,000.00)" },
-  { key: "spa_price_raw", label: "SPA Price (raw number)" },
-  { key: "purchase_mode", label: "Purchase Mode (cash/loan)" },
-  { key: "title_type", label: "Title Type (master/individual/strata)" },
-  { key: "project_name", label: "Project Name" },
-  { key: "project_type", label: "Project Type" },
-  { key: "developer_name", label: "Developer Name" },
-  { key: "developer_reg_no", label: "Developer Company Reg No." },
-  { key: "developer_address", label: "Developer Address" },
-  { key: "purchaser_name", label: "Main Purchaser Name" },
-  { key: "purchaser_ic", label: "Main Purchaser IC No." },
-  { key: "purchaser_nationality", label: "Main Purchaser Nationality" },
-  { key: "purchaser_address", label: "Main Purchaser Address" },
-  { key: "purchaser_phone", label: "Main Purchaser Phone" },
-  { key: "purchaser_email", label: "Main Purchaser Email" },
-  { key: "lawyer_name", label: "Assigned Lawyer Name" },
-  { key: "lawyer_email", label: "Assigned Lawyer Email" },
-  { key: "clerk_name", label: "Assigned Clerk Name" },
-];
-
 export default function DocumentTemplates() {
   const { toast } = useToast();
   const { user } = useAuth();
@@ -153,6 +130,13 @@ export default function DocumentTemplates() {
   const canCreate = hasPermission(user, "documents", "create");
   const canUpdate = hasPermission(user, "documents", "update");
   const canDelete = hasPermission(user, "documents", "delete");
+
+  const variablesQuery = useQuery<DocumentVariableDefinition[]>({
+    queryKey: ["document-variables", "active"],
+    queryFn: ({ signal }) => apiFetchJson("/document-variables?active=1", { signal }),
+    enabled: infoOpen && canRead,
+    retry: false,
+  });
 
   const [editIsActive, setEditIsActive] = useState(true);
   const [editPurchaseMode, setEditPurchaseMode] = useState<string>("both");
@@ -1104,16 +1088,33 @@ export default function DocumentTemplates() {
               Use these field names in double curly braces in your DOCX file. When a document is generated,
               they will be replaced with the actual case data.
             </p>
-            <div className="space-y-1">
-              {TEMPLATE_FIELDS.map((f) => (
-                <div key={f.key} className="flex items-start gap-3 py-2 border-b border-slate-100 last:border-0">
-                  <code className="text-xs bg-amber-50 text-amber-800 px-2 py-1 rounded font-mono flex-shrink-0 mt-0.5">
-                    {`{{${f.key}}}`}
-                  </code>
-                  <span className="text-sm text-slate-600">{f.label}</span>
-                </div>
-              ))}
-            </div>
+            {variablesQuery.isError ? (
+              <QueryFallback title="Variables unavailable" error={variablesQuery.error} onRetry={() => variablesQuery.refetch()} isRetrying={variablesQuery.isFetching} />
+            ) : variablesQuery.isLoading ? (
+              <div className="text-sm text-slate-500">Loading variables…</div>
+            ) : (
+              <div className="space-y-1">
+                {(variablesQuery.data ?? []).map((v) => (
+                  <div key={v.key} className="flex items-start gap-3 py-2 border-b border-slate-100 last:border-0">
+                    <code className="text-xs bg-amber-50 text-amber-800 px-2 py-1 rounded font-mono flex-shrink-0 mt-0.5">
+                      {`{{${v.key}}}`}
+                    </code>
+                    <div className="min-w-0">
+                      <div className="text-sm text-slate-700">{v.label}</div>
+                      <div className="text-xs text-slate-500 break-words">
+                        {v.category}
+                        {v.sourcePath ? ` · ${v.sourcePath}` : ""}
+                        {v.formatter ? ` · fmt=${v.formatter}` : ""}
+                        {v.exampleValue ? ` · e.g. ${v.exampleValue}` : ""}
+                      </div>
+                    </div>
+                  </div>
+                ))}
+                {(variablesQuery.data ?? []).length === 0 ? (
+                  <div className="text-sm text-slate-500">No variables found.</div>
+                ) : null}
+              </div>
+            )}
             <p className="text-sm text-slate-500 mt-4">
               For multiple purchasers, use a loop tag:
             </p>

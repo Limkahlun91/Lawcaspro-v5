@@ -13,7 +13,7 @@ export function AuthGuard({ children, requireRole }: { children: ReactNode, requ
     if (!isLoading) {
       if (!user && !hydrationError) {
         setLocation("/auth/login");
-      } else if (requireRole && user.userType !== requireRole) {
+      } else if (requireRole && user && user.userType !== requireRole) {
         if (user.userType === "founder") {
           setLocation("/platform/dashboard");
         } else {

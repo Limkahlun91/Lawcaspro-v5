@@ -13,6 +13,7 @@ import PizZip from "pizzip";
 import * as yazl from "yazl";
 import { PDFDocument, rgb, StandardFonts } from "pdf-lib";
 import fontkit from "@pdf-lib/fontkit";
+import { z } from "zod";
 import { evaluateTemplateApplicability, normalizePurchaseMode, normalizeTitleType } from "../lib/documentApplicability";
 import { evaluateTemplateReadiness, type TemplateReadinessInputs } from "../lib/documentReadiness";
 import { buildGeneratedDownloadFileName } from "../lib/documentNaming";
@@ -1246,6 +1247,148 @@ router.get("/document-variables", requireAuth, requireFirmUser, requirePermissio
     : true;
   const vars = await listDocumentVariables(r, { category: category || undefined, active });
   res.json(vars);
+});
+
+const variableCategorySchema = z.enum(["case", "purchaser", "property", "loan", "developer", "project", "workflow", "custom"]);
+const variableValueTypeSchema = z.enum(["string", "number", "date", "boolean", "richtext", "array"]);
+
+const createVariableBodySchema = z.object({
+  key: z.string().trim().min(1).max(120).regex(/^[a-z0-9_]+$/i),
+  label: z.string().trim().min(1).max(200),
+  description: z.string().trim().max(1000).nullable().optional(),
+  category: variableCategorySchema,
+  valueType: variableValueTypeSchema,
+  sourcePath: z.string().trim().max(300).nullable().optional(),
+  formatter: z.string().trim().max(80).nullable().optional(),
+  exampleValue: z.string().trim().max(300).nullable().optional(),
+  isActive: z.boolean().optional(),
+  sortOrder: z.number().int().min(0).max(100000).optional(),
+});
+
+const updateVariableBodySchema = createVariableBodySchema
+  .omit({ key: true })
+  .extend({ key: z.string().trim().min(1).max(120).regex(/^[a-z0-9_]+$/i).optional() })
+  .partial();
+
+router.get("/platform/document-variables", requireAuth, requireFounder, async (req: AuthRequest, res): Promise<void> => {
+  const category = one((req.query as any).category);
+  const activeRaw = one((req.query as any).active);
+  const active =
+    activeRaw === undefined ? undefined
+    : activeRaw === "0" || activeRaw.toLowerCase() === "false" || activeRaw.toLowerCase() === "no" ? false
+    : true;
+
+  try {
+    const reqId = (req as any).id;
+    const vars = await withAuthSafeDb(
+      async (authDb) => await listDocumentVariables(authDb, { category: category || undefined, active }),
+      { retry: true, ctx: { route: req.path, stage: "platform_document_variables.list", reqId, firmId: null, userId: req.userId ?? null } },
+    );
+    res.json(vars);
+  } catch (err) {
+    logger.error({ err, userId: req.userId }, "[platform-document-variables]");
+    res.status(500).json({ error: "Internal Server Error" });
+  }
+});
+
+router.post("/platform/document-variables", requireAuth, requireFounder, async (req: AuthRequest, res): Promise<void> => {
+  const parsed = createVariableBodySchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: "Invalid request" });
+    return;
+  }
+
+  try {
+    const reqId = (req as any).id;
+    const v = parsed.data;
+    const created = await withAuthSafeDb(async (authDb) => {
+      const rows = await queryRows(authDb, sql`
+        INSERT INTO document_variable_definitions
+          (key, label, description, category, value_type, source_path, formatter, example_value, is_system, is_active, sort_order)
+        VALUES
+          (${v.key}, ${v.label}, ${v.description ?? null}, ${v.category}, ${v.valueType}, ${v.sourcePath ?? null}, ${v.formatter ?? null}, ${v.exampleValue ?? null}, TRUE, ${v.isActive ?? true}, ${v.sortOrder ?? 0})
+        RETURNING *
+      `);
+      const row = rows[0];
+      const id = typeof row?.id === "number" ? row.id : Number(row?.id);
+      await writeAuditLog(
+        { firmId: null, actorId: req.userId, actorType: req.userType, action: "documents.variable_registry.create", entityType: "document_variable_definition", entityId: Number.isFinite(id) ? id : undefined, detail: `key=${v.key}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] },
+        { db: authDb },
+      );
+      return row;
+    }, { retry: true, ctx: { route: req.path, stage: "platform_document_variables.create", reqId, firmId: null, userId: req.userId ?? null } });
+
+    res.status(201).json(created);
+  } catch (err) {
+    logger.error({ err, userId: req.userId }, "[platform-document-variables-create]");
+    res.status(500).json({ error: "Internal Server Error" });
+  }
+});
+
+router.put("/platform/document-variables/:id", requireAuth, requireFounder, async (req: AuthRequest, res): Promise<void> => {
+  const idStr = one((req.params as any).id);
+  const id = idStr ? parseInt(idStr, 10) : NaN;
+  if (Number.isNaN(id)) {
+    res.status(400).json({ error: "Invalid variable ID" });
+    return;
+  }
+
+  const parsed = updateVariableBodySchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: "Invalid request" });
+    return;
+  }
+
+  try {
+    const reqId = (req as any).id;
+    const patch = parsed.data;
+    const updated = await withAuthSafeDb(async (authDb) => {
+      const existingRows = await queryRows(authDb, sql`SELECT * FROM document_variable_definitions WHERE id = ${id}`);
+      const existing = existingRows[0];
+      if (!existing) return null;
+
+      const existingKey = typeof existing.key === "string" ? existing.key : String(existing.key ?? "");
+      if (typeof patch.key === "string" && patch.key !== existingKey) {
+        return { status: 400 as const, body: { error: "Variable key cannot be changed" } };
+      }
+
+      const nextRows = await queryRows(authDb, sql`
+        UPDATE document_variable_definitions
+        SET
+          label = COALESCE(${patch.label ?? null}, label),
+          description = CASE WHEN ${Object.prototype.hasOwnProperty.call(patch, "description")} THEN ${patch.description ?? null} ELSE description END,
+          category = COALESCE(${patch.category ?? null}, category),
+          value_type = COALESCE(${patch.valueType ?? null}, value_type),
+          source_path = CASE WHEN ${Object.prototype.hasOwnProperty.call(patch, "sourcePath")} THEN ${patch.sourcePath ?? null} ELSE source_path END,
+          formatter = CASE WHEN ${Object.prototype.hasOwnProperty.call(patch, "formatter")} THEN ${patch.formatter ?? null} ELSE formatter END,
+          example_value = CASE WHEN ${Object.prototype.hasOwnProperty.call(patch, "exampleValue")} THEN ${patch.exampleValue ?? null} ELSE example_value END,
+          is_active = COALESCE(${typeof patch.isActive === "boolean" ? patch.isActive : null}, is_active),
+          sort_order = COALESCE(${typeof patch.sortOrder === "number" ? patch.sortOrder : null}, sort_order),
+          updated_at = now()
+        WHERE id = ${id}
+        RETURNING *
+      `);
+      const row = nextRows[0];
+      await writeAuditLog(
+        { firmId: null, actorId: req.userId, actorType: req.userType, action: "documents.variable_registry.update", entityType: "document_variable_definition", entityId: id, detail: `key=${existingKey}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] },
+        { db: authDb },
+      );
+      return { status: 200 as const, body: row };
+    }, { retry: true, ctx: { route: req.path, stage: "platform_document_variables.update", reqId, firmId: null, userId: req.userId ?? null } });
+
+    if (!updated) {
+      res.status(404).json({ error: "Variable not found" });
+      return;
+    }
+    if ("status" in updated && updated.status === 400) {
+      res.status(400).json(updated.body);
+      return;
+    }
+    res.status(updated.status).json(updated.body);
+  } catch (err) {
+    logger.error({ err, userId: req.userId, variableId: id }, "[platform-document-variables-update]");
+    res.status(500).json({ error: "Internal Server Error" });
+  }
 });
 
 async function getFirmTemplatePlaceholders(r: DbConn, firmId: number, templateId: number): Promise<string[]> {

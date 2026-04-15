@@ -246,6 +246,23 @@ export default function PlatformDocuments() {
   const [editFolderName, setEditFolderName] = useState("");
 
   const [showVarRef, setShowVarRef] = useState(false);
+  const [variableRegistryOpen, setVariableRegistryOpen] = useState(false);
+  const [variableSearch, setVariableSearch] = useState("");
+  const [includeInactiveVariables, setIncludeInactiveVariables] = useState(false);
+  const [editVariableOpen, setEditVariableOpen] = useState(false);
+  const [editVariableId, setEditVariableId] = useState<number | null>(null);
+  const [variableForm, setVariableForm] = useState({
+    key: "",
+    label: "",
+    description: "",
+    category: "case",
+    valueType: "string",
+    sourcePath: "",
+    formatter: "",
+    exampleValue: "",
+    isActive: true,
+    sortOrder: 0,
+  });
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
   const [expandedGroups, setExpandedGroups] = useState<Record<string, boolean>>({});
 
@@ -301,6 +318,30 @@ export default function PlatformDocuments() {
     queryFn: () => apiFetchJson("/document-variables?active=1"),
     enabled: showVarRef,
     retry: false,
+  });
+
+  const platformVariablesQuery = useQuery<DocumentVariableDefinition[]>({
+    queryKey: ["platform-document-variables", includeInactiveVariables],
+    queryFn: ({ signal }) =>
+      apiFetchJson(`/platform/document-variables${includeInactiveVariables ? "" : "?active=1"}`, { signal }),
+    enabled: variableRegistryOpen,
+    retry: false,
+  });
+
+  const saveVariableMutation = useMutation({
+    mutationFn: async (payload: { id?: number; data: Record<string, unknown> }) => {
+      if (payload.id) {
+        return await apiFetchJson(`/platform/document-variables/${payload.id}`, { method: "PUT", body: JSON.stringify(payload.data) });
+      }
+      return await apiFetchJson("/platform/document-variables", { method: "POST", body: JSON.stringify(payload.data) });
+    },
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ["platform-document-variables"] });
+      toast({ title: "Variable saved" });
+      setEditVariableOpen(false);
+      setEditVariableId(null);
+    },
+    onError: (e) => toastError(toast, e, "Save variable failed"),
   });
   const varGroups = (() => {
     const vars = varGroupsQuery.data ?? [];
@@ -674,6 +715,19 @@ export default function PlatformDocuments() {
                   <Button variant="outline" size="sm" className="gap-1.5" onClick={() => { setShowVarRef(true); setExpandedGroups({}); }}>
                     <BookOpen className="w-3.5 h-3.5" />
                     Variable Reference
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="gap-1.5"
+                    onClick={() => {
+                      setVariableRegistryOpen(true);
+                      setIncludeInactiveVariables(false);
+                      setVariableSearch("");
+                    }}
+                  >
+                    <FileEdit className="w-3.5 h-3.5" />
+                    Variable Registry
                   </Button>
                   <Button onClick={() => setShowUpload(true)} size="sm" className="gap-1.5">
                     <Plus className="w-3.5 h-3.5" />
@@ -1277,6 +1331,270 @@ export default function PlatformDocuments() {
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setShowVarRef(false)}>Close</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={variableRegistryOpen} onOpenChange={setVariableRegistryOpen}>
+        <DialogContent className="max-w-5xl max-h-[85vh] flex flex-col">
+          <DialogHeader>
+            <DialogTitle>Variable Registry</DialogTitle>
+            <p className="text-sm text-slate-500 mt-1">
+              Manage system-level document variables used for template bindings and preview.
+            </p>
+          </DialogHeader>
+
+          <div className="flex flex-col gap-3">
+            <div className="flex flex-col md:flex-row md:items-center gap-2 justify-between">
+              <div className="flex items-center gap-2">
+                <Input
+                  placeholder="Search key/label..."
+                  value={variableSearch}
+                  onChange={(e) => setVariableSearch(e.target.value)}
+                  className="w-[280px]"
+                />
+                <div className="flex items-center gap-2">
+                  <Checkbox
+                    checked={includeInactiveVariables}
+                    onCheckedChange={(v) => setIncludeInactiveVariables(Boolean(v))}
+                  />
+                  <span className="text-sm text-slate-600">Include inactive</span>
+                </div>
+              </div>
+              <Button
+                size="sm"
+                className="gap-1.5"
+                onClick={() => {
+                  setEditVariableId(null);
+                  setVariableForm({
+                    key: "",
+                    label: "",
+                    description: "",
+                    category: "case",
+                    valueType: "string",
+                    sourcePath: "",
+                    formatter: "",
+                    exampleValue: "",
+                    isActive: true,
+                    sortOrder: 0,
+                  });
+                  setEditVariableOpen(true);
+                }}
+              >
+                <Plus className="w-3.5 h-3.5" />
+                New Variable
+              </Button>
+            </div>
+
+            {platformVariablesQuery.isError ? (
+              <QueryFallback title="Variables unavailable" error={platformVariablesQuery.error} onRetry={() => platformVariablesQuery.refetch()} isRetrying={platformVariablesQuery.isFetching} />
+            ) : platformVariablesQuery.isLoading ? (
+              <div className="text-slate-500 text-sm py-8 text-center">Loading variables...</div>
+            ) : (
+              <div className="border rounded-lg overflow-hidden">
+                <div className="overflow-x-auto">
+                  <table className="w-full text-sm">
+                    <thead className="bg-slate-50 text-xs text-slate-500">
+                      <tr>
+                        <th className="text-left px-3 py-2">Key</th>
+                        <th className="text-left px-3 py-2">Label</th>
+                        <th className="text-left px-3 py-2">Category</th>
+                        <th className="text-left px-3 py-2">Type</th>
+                        <th className="text-left px-3 py-2">Active</th>
+                        <th className="text-left px-3 py-2">Source</th>
+                        <th className="text-left px-3 py-2">Formatter</th>
+                        <th className="text-left px-3 py-2">Sort</th>
+                        <th className="text-right px-3 py-2">Action</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y">
+                      {(platformVariablesQuery.data ?? [])
+                        .filter((v) => {
+                          const q = variableSearch.trim().toLowerCase();
+                          if (!q) return true;
+                          return v.key.toLowerCase().includes(q) || v.label.toLowerCase().includes(q);
+                        })
+                        .map((v) => (
+                          <tr key={v.id} className="hover:bg-slate-50/50">
+                            <td className="px-3 py-2 font-mono text-xs text-slate-800">{v.key}</td>
+                            <td className="px-3 py-2 text-slate-700">{v.label}</td>
+                            <td className="px-3 py-2 text-slate-600">{v.category}</td>
+                            <td className="px-3 py-2 text-slate-600">{v.valueType}</td>
+                            <td className="px-3 py-2">
+                              {v.isActive ? (
+                                <Badge className="bg-green-100 text-green-800">Active</Badge>
+                              ) : (
+                                <Badge variant="secondary">Inactive</Badge>
+                              )}
+                            </td>
+                            <td className="px-3 py-2 text-slate-600 font-mono text-xs">{v.sourcePath ?? ""}</td>
+                            <td className="px-3 py-2 text-slate-600 font-mono text-xs">{v.formatter ?? ""}</td>
+                            <td className="px-3 py-2 text-slate-600">{String(v.sortOrder ?? 0)}</td>
+                            <td className="px-3 py-2 text-right">
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                onClick={() => {
+                                  setEditVariableId(v.id);
+                                  setVariableForm({
+                                    key: v.key,
+                                    label: v.label,
+                                    description: v.description ?? "",
+                                    category: v.category ?? "case",
+                                    valueType: v.valueType ?? "string",
+                                    sourcePath: v.sourcePath ?? "",
+                                    formatter: v.formatter ?? "",
+                                    exampleValue: v.exampleValue ?? "",
+                                    isActive: Boolean(v.isActive),
+                                    sortOrder: typeof v.sortOrder === "number" ? v.sortOrder : Number(v.sortOrder ?? 0),
+                                  });
+                                  setEditVariableOpen(true);
+                                }}
+                              >
+                                Edit
+                              </Button>
+                            </td>
+                          </tr>
+                        ))}
+                      {(platformVariablesQuery.data ?? []).length === 0 ? (
+                        <tr>
+                          <td colSpan={9} className="px-3 py-10 text-center text-slate-500">No variables found.</td>
+                        </tr>
+                      ) : null}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+          </div>
+
+          <DialogFooter className="pt-2 border-t">
+            <Button variant="outline" onClick={() => setVariableRegistryOpen(false)}>Close</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={editVariableOpen} onOpenChange={setEditVariableOpen}>
+        <DialogContent className="max-w-2xl">
+          <DialogHeader>
+            <DialogTitle>{editVariableId ? "Edit Variable" : "New Variable"}</DialogTitle>
+          </DialogHeader>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 py-2">
+            <div className="space-y-1.5">
+              <Label>Key</Label>
+              <Input
+                value={variableForm.key}
+                onChange={(e) => setVariableForm((prev) => ({ ...prev, key: e.target.value }))}
+                placeholder="e.g. reference_no"
+                disabled={!!editVariableId}
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label>Label</Label>
+              <Input
+                value={variableForm.label}
+                onChange={(e) => setVariableForm((prev) => ({ ...prev, label: e.target.value }))}
+                placeholder="e.g. Case Reference No."
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label>Category</Label>
+              <Select value={variableForm.category} onValueChange={(v) => setVariableForm((prev) => ({ ...prev, category: v }))}>
+                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  {["case", "purchaser", "property", "loan", "developer", "project", "workflow", "custom"].map((c) => (
+                    <SelectItem key={c} value={c}>{c}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-1.5">
+              <Label>Value Type</Label>
+              <Select value={variableForm.valueType} onValueChange={(v) => setVariableForm((prev) => ({ ...prev, valueType: v }))}>
+                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  {["string", "number", "date", "boolean", "richtext", "array"].map((t) => (
+                    <SelectItem key={t} value={t}>{t}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-1.5">
+              <Label>Source Path</Label>
+              <Input
+                value={variableForm.sourcePath}
+                onChange={(e) => setVariableForm((prev) => ({ ...prev, sourcePath: e.target.value }))}
+                placeholder="e.g. reference_no"
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label>Formatter</Label>
+              <Input
+                value={variableForm.formatter}
+                onChange={(e) => setVariableForm((prev) => ({ ...prev, formatter: e.target.value }))}
+                placeholder="e.g. currency"
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label>Example Value</Label>
+              <Input
+                value={variableForm.exampleValue}
+                onChange={(e) => setVariableForm((prev) => ({ ...prev, exampleValue: e.target.value }))}
+                placeholder="e.g. LCP-000123"
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label>Sort Order</Label>
+              <Input
+                inputMode="numeric"
+                value={String(variableForm.sortOrder)}
+                onChange={(e) => setVariableForm((prev) => ({ ...prev, sortOrder: Number(e.target.value || "0") }))}
+              />
+            </div>
+            <div className="md:col-span-2 space-y-1.5">
+              <Label>Description</Label>
+              <Textarea
+                value={variableForm.description}
+                onChange={(e) => setVariableForm((prev) => ({ ...prev, description: e.target.value }))}
+                placeholder="(optional)"
+                rows={3}
+              />
+            </div>
+            <div className="md:col-span-2 flex items-center gap-2">
+              <Checkbox checked={variableForm.isActive} onCheckedChange={(v) => setVariableForm((prev) => ({ ...prev, isActive: Boolean(v) }))} />
+              <span className="text-sm text-slate-700">Active</span>
+            </div>
+          </div>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => {
+                setEditVariableOpen(false);
+                setEditVariableId(null);
+              }}
+            >
+              Cancel
+            </Button>
+            <Button
+              onClick={() => {
+                const payload = {
+                  key: variableForm.key.trim(),
+                  label: variableForm.label.trim(),
+                  description: variableForm.description.trim() ? variableForm.description.trim() : null,
+                  category: variableForm.category,
+                  valueType: variableForm.valueType,
+                  sourcePath: variableForm.sourcePath.trim() ? variableForm.sourcePath.trim() : null,
+                  formatter: variableForm.formatter.trim() ? variableForm.formatter.trim() : null,
+                  exampleValue: variableForm.exampleValue.trim() ? variableForm.exampleValue.trim() : null,
+                  isActive: Boolean(variableForm.isActive),
+                  sortOrder: Number.isFinite(variableForm.sortOrder) ? Number(variableForm.sortOrder) : 0,
+                };
+                saveVariableMutation.mutate({ id: editVariableId ?? undefined, data: payload });
+              }}
+              disabled={saveVariableMutation.isPending || !variableForm.label.trim() || (!editVariableId && !variableForm.key.trim())}
+            >
+              {saveVariableMutation.isPending ? "Saving..." : "Save"}
+            </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
