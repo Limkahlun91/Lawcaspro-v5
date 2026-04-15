@@ -8,6 +8,7 @@ export type TemplateApplicabilityRulesRow = {
   templateId: number | null;
   platformDocumentId: number | null;
   isActive: boolean | null;
+  isRequired: boolean | null;
   purchaseMode: string | null;
   titleType: string | null;
   titleSubType: string | null;
@@ -31,6 +32,7 @@ function rowToRules(x: Record<string, unknown>): TemplateApplicabilityRulesRow {
     templateId: x.template_id === null ? null : Number(x.template_id),
     platformDocumentId: x.platform_document_id === null ? null : Number(x.platform_document_id),
     isActive: typeof x.is_active === "boolean" ? x.is_active : (x.is_active === null ? null : Boolean(x.is_active)),
+    isRequired: typeof x.is_required === "boolean" ? x.is_required : (x.is_required === null ? null : Boolean(x.is_required)),
     purchaseMode: typeof x.purchase_mode === "string" ? x.purchase_mode : null,
     titleType: typeof x.title_type === "string" ? x.title_type : null,
     titleSubType: typeof x.title_sub_type === "string" ? x.title_sub_type : null,
@@ -55,16 +57,17 @@ export async function upsertFirmTemplateApplicabilityRules(r: DbConn, firmId: nu
   await queryRows(r, sql`
     INSERT INTO document_template_applicability_rules (
       firm_id, template_id, platform_document_id,
-      is_active, purchase_mode, title_type, title_sub_type,
+      is_active, is_required, purchase_mode, title_type, title_sub_type,
       project_type, development_condition, unit_category, is_template_capable, updated_at
     ) VALUES (
       ${firmId}, ${templateId}, NULL,
-      ${patch.isActive ?? null}, ${patch.purchaseMode ?? null}, ${patch.titleType ?? null}, ${patch.titleSubType ?? null},
+      ${patch.isActive ?? null}, ${patch.isRequired ?? null}, ${patch.purchaseMode ?? null}, ${patch.titleType ?? null}, ${patch.titleSubType ?? null},
       ${patch.projectType ?? null}, ${patch.developmentCondition ?? null}, ${patch.unitCategory ?? null}, ${patch.isTemplateCapable ?? null}, now()
     )
     ON CONFLICT (template_id) WHERE template_id IS NOT NULL
     DO UPDATE SET
       is_active = EXCLUDED.is_active,
+      is_required = EXCLUDED.is_required,
       purchase_mode = EXCLUDED.purchase_mode,
       title_type = EXCLUDED.title_type,
       title_sub_type = EXCLUDED.title_sub_type,
@@ -92,17 +95,18 @@ export async function upsertPlatformDocumentApplicabilityRules(r: DbConn, firmId
   await queryRows(r, sql`
     INSERT INTO document_template_applicability_rules (
       firm_id, template_id, platform_document_id,
-      is_active, purchase_mode, title_type, title_sub_type,
+      is_active, is_required, purchase_mode, title_type, title_sub_type,
       project_type, development_condition, unit_category, is_template_capable, updated_at
     ) VALUES (
       ${firmId as any}, NULL, ${documentId},
-      ${patch.isActive ?? null}, ${patch.purchaseMode ?? null}, ${patch.titleType ?? null}, ${patch.titleSubType ?? null},
+      ${patch.isActive ?? null}, ${patch.isRequired ?? null}, ${patch.purchaseMode ?? null}, ${patch.titleType ?? null}, ${patch.titleSubType ?? null},
       ${patch.projectType ?? null}, ${patch.developmentCondition ?? null}, ${patch.unitCategory ?? null}, ${patch.isTemplateCapable ?? null}, now()
     )
     ON CONFLICT (platform_document_id) WHERE platform_document_id IS NOT NULL
     DO UPDATE SET
       firm_id = EXCLUDED.firm_id,
       is_active = EXCLUDED.is_active,
+      is_required = EXCLUDED.is_required,
       purchase_mode = EXCLUDED.purchase_mode,
       title_type = EXCLUDED.title_type,
       title_sub_type = EXCLUDED.title_sub_type,

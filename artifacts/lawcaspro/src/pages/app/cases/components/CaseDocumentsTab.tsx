@@ -14,6 +14,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { isFirmDocumentTypeLetterLike, isMasterDocumentLetterLike } from "@/lib/documents/letterLike";
@@ -47,24 +48,50 @@ interface CaseDocument {
 type ApplicabilityStatus = "applicable" | "not_applicable";
 type ReadinessStatus = "ready" | "missing_data" | "missing_file" | "incomplete";
 
+type ChecklistStatus =
+  | "pending"
+  | "generated"
+  | "uploaded"
+  | "received"
+  | "completed"
+  | "waived"
+  | "not_applicable";
+
 type ChecklistItem = {
-  source: "firm" | "master";
-  templateId: number;
+  checklistKey: string;
+  kind: "template" | "workflow" | "stamping" | "manual";
+  source: "firm" | "master" | "workflow" | "stamping" | "manual";
+  sourceType: "generated" | "uploaded" | "manual" | "external_received";
+  isRequired: boolean;
+  status: ChecklistStatus;
+  blocked: boolean;
+  updatedAt: string | null;
+  notes: string | null;
+  applicability: { status: ApplicabilityStatus; reasons: string[] };
+  readiness: { status: ReadinessStatus; missing: Array<{ code: string; message: string }> } | null;
+  templateId?: number;
   name: string;
-  documentType: string;
+  documentType?: string;
   documentGroup: string;
   sortOrder: number;
   fileName: string | null;
   fileType: string | null;
   pdfMappings: unknown;
-  applicability: { status: ApplicabilityStatus; reasons: string[] };
-  readiness: { status: ReadinessStatus; missing: Array<{ code: string; message: string }> };
   latestDocument: { id: number } | null;
+  workflowMilestoneKey?: string;
+  workflowDocumentId?: number | null;
+  loanStampingItemId?: number | null;
+  loanStampingItemKey?: string | null;
+  receivedAt?: string | null;
+  completedAt?: string | null;
+  waivedAt?: string | null;
+  waivedReason?: string | null;
 };
 
 type ChecklistSection = { section: string; items: ChecklistItem[] };
 type ChecklistResponse = {
   case: { caseId: number; referenceNo: string | null; purchaseMode: string | null; titleType: string | null; caseType: string | null; projectName: string | null };
+  summary: { totalApplicable: number; requiredMissing: number; completed: number; waived: number };
   sections: ChecklistSection[];
 };
 
@@ -124,6 +151,22 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
   const [previewItem, setPreviewItem] = useState<ChecklistItem | null>(null);
   const [previewResult, setPreviewResult] = useState<DocumentPreviewResponse | null>(null);
 
+  const [checklistFilter, setChecklistFilter] = useState<"all" | "required" | "missing" | "completed" | "waived" | "not_applicable">("all");
+  const [waiveDialogOpen, setWaiveDialogOpen] = useState(false);
+  const [waiveTarget, setWaiveTarget] = useState<ChecklistItem | null>(null);
+  const [waiveReason, setWaiveReason] = useState("");
+
+  const [checklistUploadOpen, setChecklistUploadOpen] = useState(false);
+  const [checklistUploadTarget, setChecklistUploadTarget] = useState<ChecklistItem | null>(null);
+  const [checklistUploadFile, setChecklistUploadFile] = useState<File | null>(null);
+
+  const [manualDialogOpen, setManualDialogOpen] = useState(false);
+  const [manualLabel, setManualLabel] = useState("");
+  const [manualRequired, setManualRequired] = useState(false);
+
+  const [checklistHistoryOpen, setChecklistHistoryOpen] = useState(false);
+  const [checklistHistoryKey, setChecklistHistoryKey] = useState<string | null>(null);
+
   useEffect(() => {
     if (!canBypassApplicability && showAllTemplates) setShowAllTemplates(false);
   }, [canBypassApplicability, showAllTemplates]);
@@ -181,9 +224,94 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
     mutationFn: (docId: number) => apiFetchJson(`/cases/${caseId}/documents/${docId}`, { method: "DELETE" }),
     onSuccess: async () => {
       await qc.invalidateQueries({ queryKey: ["case-documents", caseId] });
+      await qc.invalidateQueries({ queryKey: ["case-documents-checklist", caseId] });
       toast({ title: "Document deleted" });
     },
     onError: (err) => toastError(toast, err, "Delete failed"),
+  });
+
+  const checklistReceivedMutation = useMutation({
+    mutationFn: (item: ChecklistItem) =>
+      apiFetchJson(`/cases/${caseId}/documents/checklist/items/${encodeURIComponent(item.checklistKey)}/received`, {
+        method: "POST",
+        body: JSON.stringify({ label: item.name }),
+      }),
+    onSuccess: async () => {
+      await qc.invalidateQueries({ queryKey: ["case-documents-checklist", caseId] });
+      toast({ title: "Marked as received" });
+    },
+    onError: (err) => toastError(toast, err, "Mark received failed"),
+  });
+
+  const checklistCompletedMutation = useMutation({
+    mutationFn: (item: ChecklistItem) =>
+      apiFetchJson(`/cases/${caseId}/documents/checklist/items/${encodeURIComponent(item.checklistKey)}/completed`, {
+        method: "POST",
+        body: JSON.stringify({ label: item.name }),
+      }),
+    onSuccess: async () => {
+      await qc.invalidateQueries({ queryKey: ["case-documents-checklist", caseId] });
+      toast({ title: "Marked as completed" });
+    },
+    onError: (err) => toastError(toast, err, "Mark completed failed"),
+  });
+
+  const checklistReopenMutation = useMutation({
+    mutationFn: (item: ChecklistItem) =>
+      apiFetchJson(`/cases/${caseId}/documents/checklist/items/${encodeURIComponent(item.checklistKey)}/reopen`, {
+        method: "POST",
+      }),
+    onSuccess: async () => {
+      await qc.invalidateQueries({ queryKey: ["case-documents-checklist", caseId] });
+      toast({ title: "Reopened" });
+    },
+    onError: (err) => toastError(toast, err, "Reopen failed"),
+  });
+
+  const checklistWaiveMutation = useMutation({
+    mutationFn: ({ item, reason }: { item: ChecklistItem; reason: string }) =>
+      apiFetchJson(`/cases/${caseId}/documents/checklist/items/${encodeURIComponent(item.checklistKey)}/waive`, {
+        method: "POST",
+        body: JSON.stringify({ reason, label: item.name }),
+      }),
+    onSuccess: async () => {
+      await qc.invalidateQueries({ queryKey: ["case-documents-checklist", caseId] });
+      toast({ title: "Waived" });
+      setWaiveDialogOpen(false);
+      setWaiveTarget(null);
+      setWaiveReason("");
+    },
+    onError: (err) => toastError(toast, err, "Waive failed"),
+  });
+
+  const checklistManualCreateMutation = useMutation({
+    mutationFn: ({ label, isRequired }: { label: string; isRequired: boolean }) =>
+      apiFetchJson(`/cases/${caseId}/documents/checklist/items`, {
+        method: "POST",
+        body: JSON.stringify({ label, isRequired }),
+      }),
+    onSuccess: async () => {
+      await qc.invalidateQueries({ queryKey: ["case-documents-checklist", caseId] });
+      toast({ title: "Manual checklist item added" });
+      setManualDialogOpen(false);
+      setManualLabel("");
+      setManualRequired(false);
+    },
+    onError: (err) => toastError(toast, err, "Create checklist item failed"),
+  });
+
+  type AuditLogRow = {
+    id: number;
+    action: string;
+    detail: string | null;
+    created_at: string;
+  };
+
+  const checklistHistoryQuery = useQuery<AuditLogRow[]>({
+    queryKey: ["case-documents-checklist-history", caseId],
+    queryFn: ({ signal }) => apiFetchJson(`/cases/${caseId}/documents/checklist/history`, { signal }),
+    enabled: checklistHistoryOpen,
+    retry: false,
   });
 
   function asRecord(v: unknown): Record<string, unknown> | null {
@@ -261,6 +389,7 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
 
   async function handlePreview(item: ChecklistItem) {
     if (!canGenerate) return;
+    if (item.kind !== "template" || typeof item.templateId !== "number" || (item.source !== "firm" && item.source !== "master")) return;
     setPreviewItem(item);
     setPreviewOpen(true);
     setPreviewLoading(true);
@@ -283,12 +412,9 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
     }
   }
 
-  function itemKey(it: { source: string; templateId: number }): string {
-    return `${it.source}:${it.templateId}`;
-  }
-
   function toggleChecklistSelection(it: ChecklistItem) {
-    const key = itemKey(it);
+    if (it.kind !== "template" || (it.source !== "firm" && it.source !== "master") || typeof it.templateId !== "number") return;
+    const key = it.checklistKey;
     setSelectedChecklistKeys((prev) => {
       const next = new Set(prev);
       if (next.has(key)) next.delete(key);
@@ -310,7 +436,9 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
     const keys = selectedChecklistKeys;
     if (!canGenerate || keys.size === 0) return;
     const allItems = (checklistQuery.data?.sections ?? []).flatMap((s) => s.items ?? []);
-    const selected = allItems.filter((it) => keys.has(itemKey(it)));
+    const selected = allItems
+      .filter((it) => it.kind === "template" && (it.source === "firm" || it.source === "master") && typeof it.templateId === "number")
+      .filter((it) => keys.has(it.checklistKey));
     if (selected.length === 0) return;
 
     const letterheadIdToSend = selectedLetterheadId ? Number(selectedLetterheadId) : defaultLetterhead?.id ?? null;
@@ -320,7 +448,7 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
       const result = await apiFetchJson<{ jobId: string; items: Array<Record<string, unknown>> }>(`/cases/${caseId}/documents/batch-generate`, {
         method: "POST",
         body: JSON.stringify({
-          items: selected.map((it) => ({ source: it.source, templateId: it.templateId })),
+          items: selected.map((it) => ({ source: it.source, templateId: Number(it.templateId) })),
           letterheadId: letterheadIdToSend,
           bypassApplicability: Boolean(showAllTemplates && canBypassApplicability),
         }),
@@ -368,13 +496,19 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
     setTemplateSourceFilter("all");
   }
 
+  async function uploadPrivateObject(file: File, objectPath?: string): Promise<string> {
+    const formData = new FormData();
+    formData.append("file", file);
+    const path = objectPath ? `/storage/upload?objectPath=${encodeURIComponent(objectPath)}` : "/storage/upload";
+    const { objectPath: storedPath } = await apiFetchJson<{ objectPath: string }>(path, { method: "POST", body: formData });
+    return storedPath;
+  }
+
   async function handleUpload() {
     if (!selectedFile || !uploadName) return;
     setIsUploading(true);
     try {
-      const formData = new FormData();
-      formData.append("file", selectedFile);
-      const { objectPath } = await apiFetchJson<{ objectPath: string }>("/storage/upload", { method: "POST", body: formData });
+      const objectPath = await uploadPrivateObject(selectedFile);
 
       await apiFetchJson(`/cases/${caseId}/documents/upload`, {
         method: "POST",
@@ -393,6 +527,86 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
       setUploadName("");
       setUploadType("other");
       setSelectedFile(null);
+    } catch (err) {
+      toastError(toast, err, "Upload failed");
+    } finally {
+      setIsUploading(false);
+    }
+  }
+
+  async function handleChecklistUpload() {
+    if (!checklistUploadTarget || !checklistUploadFile || !user?.firmId) return;
+    setIsUploading(true);
+    try {
+      const file = checklistUploadFile;
+      const firmId = Number(user.firmId);
+      const safeKey = checklistUploadTarget.checklistKey.replace(/[^a-zA-Z0-9:_-]/g, "_");
+      if (checklistUploadTarget.kind === "workflow") {
+        const milestoneKey = checklistUploadTarget.workflowMilestoneKey;
+        if (!milestoneKey) throw new Error("Missing workflow milestoneKey");
+        const objectPath = `/objects/cases/${firmId}/case-${caseId}/workflow/${milestoneKey}/${crypto.randomUUID()}-${file.name}`;
+        const stored = await uploadPrivateObject(file, objectPath);
+        await apiFetchJson(`/cases/${caseId}/workflow-documents`, {
+          method: "POST",
+          body: JSON.stringify({
+            milestoneKey,
+            objectPath: stored,
+            fileName: file.name,
+            mimeType: file.type || null,
+            fileSize: file.size,
+          }),
+        });
+        await apiFetchJson(`/cases/${caseId}/documents/checklist/items/${encodeURIComponent(checklistUploadTarget.checklistKey)}/upload-event`, {
+          method: "POST",
+          body: JSON.stringify({ event: "upload", label: checklistUploadTarget.name }),
+        });
+      } else if (checklistUploadTarget.kind === "stamping") {
+        const itemKey = checklistUploadTarget.loanStampingItemKey;
+        if (!itemKey) throw new Error("Missing loan stamping itemKey");
+        let itemId = checklistUploadTarget.loanStampingItemId ?? null;
+        if (!itemId) {
+          const ensured = await apiFetchJson<{ id: number }>(`/cases/${caseId}/loan-stamping/ensure`, {
+            method: "POST",
+            body: JSON.stringify({ itemKey }),
+          });
+          itemId = ensured.id;
+        }
+        const objectPath = `/objects/cases/${firmId}/case-${caseId}/loan-stamping/${itemId}/${crypto.randomUUID()}-${file.name}`;
+        const stored = await uploadPrivateObject(file, objectPath);
+        await apiFetchJson(`/cases/${caseId}/loan-stamping/${itemId}/file`, {
+          method: "POST",
+          body: JSON.stringify({
+            objectPath: stored,
+            fileName: file.name,
+            mimeType: file.type || null,
+            fileSize: file.size,
+          }),
+        });
+        await apiFetchJson(`/cases/${caseId}/documents/checklist/items/${encodeURIComponent(checklistUploadTarget.checklistKey)}/upload-event`, {
+          method: "POST",
+          body: JSON.stringify({ event: "upload", label: checklistUploadTarget.name }),
+        });
+      } else {
+        const objectPath = `/objects/cases/${firmId}/case-${caseId}/documents/checklist/${safeKey}/${crypto.randomUUID()}-${file.name}`;
+        const stored = await uploadPrivateObject(file, objectPath);
+        await apiFetchJson(`/cases/${caseId}/documents/checklist/items/${encodeURIComponent(checklistUploadTarget.checklistKey)}/upload`, {
+          method: "POST",
+          body: JSON.stringify({
+            objectPath: stored,
+            fileName: file.name,
+            mimeType: file.type || null,
+            fileSize: file.size,
+            label: checklistUploadTarget.name,
+          }),
+        });
+      }
+
+      await qc.invalidateQueries({ queryKey: ["case-documents", caseId] });
+      await qc.invalidateQueries({ queryKey: ["case-documents-checklist", caseId] });
+      toast({ title: "Uploaded" });
+      setChecklistUploadOpen(false);
+      setChecklistUploadTarget(null);
+      setChecklistUploadFile(null);
     } catch (err) {
       toastError(toast, err, "Upload failed");
     } finally {
@@ -558,11 +772,52 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
                 <QueryFallback title="Checklist unavailable" error={checklistQuery.error} onRetry={() => checklistQuery.refetch()} isRetrying={checklistQuery.isFetching} />
               ) : (
                 <div className="space-y-6">
-                  <div className="flex items-center justify-between gap-2">
-                    <div className="text-sm text-slate-600">
-                      Selected: <span className="font-medium text-slate-900">{selectedChecklistKeys.size}</span>
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                    <div className="rounded-lg border bg-white p-3">
+                      <div className="text-xs text-slate-500">Total applicable</div>
+                      <div className="text-xl font-semibold text-slate-900">{checklistQuery.data?.summary?.totalApplicable ?? 0}</div>
+                    </div>
+                    <div className="rounded-lg border bg-white p-3">
+                      <div className="text-xs text-slate-500">Required missing</div>
+                      <div className="text-xl font-semibold text-rose-700">{checklistQuery.data?.summary?.requiredMissing ?? 0}</div>
+                    </div>
+                    <div className="rounded-lg border bg-white p-3">
+                      <div className="text-xs text-slate-500">Completed</div>
+                      <div className="text-xl font-semibold text-emerald-700">{checklistQuery.data?.summary?.completed ?? 0}</div>
+                    </div>
+                    <div className="rounded-lg border bg-white p-3">
+                      <div className="text-xs text-slate-500">Waived</div>
+                      <div className="text-xl font-semibold text-slate-800">{checklistQuery.data?.summary?.waived ?? 0}</div>
+                    </div>
+                  </div>
+
+                  <div className="flex flex-col md:flex-row md:items-center justify-between gap-2">
+                    <div className="flex flex-col sm:flex-row sm:items-center gap-2">
+                      <div className="text-sm text-slate-600">
+                        Selected: <span className="font-medium text-slate-900">{selectedChecklistKeys.size}</span>
+                      </div>
+                      <Select value={checklistFilter} onValueChange={(v) => setChecklistFilter(v as any)}>
+                        <SelectTrigger className="w-[200px]">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="all">All</SelectItem>
+                          <SelectItem value="required">Required</SelectItem>
+                          <SelectItem value="missing">Missing</SelectItem>
+                          <SelectItem value="completed">Completed</SelectItem>
+                          <SelectItem value="waived">Waived</SelectItem>
+                          <SelectItem value="not_applicable">Not applicable</SelectItem>
+                        </SelectContent>
+                      </Select>
                     </div>
                     <div className="flex items-center gap-2">
+                      <Button size="sm" variant="outline" onClick={() => setChecklistHistoryOpen(true)} className="gap-1.5">
+                        View history
+                      </Button>
+                      <Button size="sm" variant="outline" onClick={() => setManualDialogOpen(true)} disabled={!canBypassApplicability} className="gap-1.5">
+                        <Plus className="w-4 h-4" />
+                        Manual item
+                      </Button>
                       <Button
                         size="sm"
                         variant="outline"
@@ -617,65 +872,218 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
                     <div key={sec.section} className="space-y-2">
                       <div className="text-sm font-semibold text-slate-900">{sec.section}</div>
                       <div className="space-y-2">
-                        {(sec.items ?? []).map((it) => {
-                          const applicable = it.applicability?.status === "applicable";
-                          const ready = it.readiness?.status === "ready";
-                          const latestId = it.latestDocument?.id;
-                          const latestDoc = latestId ? documents.find((d) => d.id === latestId) : null;
-                          const reason = !applicable
-                            ? (it.applicability?.reasons ?? []).join(", ")
-                            : !ready
-                              ? (it.readiness?.missing ?? []).map((m) => m.message).filter(Boolean).slice(0, 3).join(", ")
-                              : "";
-                          return (
-                            <div key={`${it.source}-${it.templateId}`} className="flex items-start justify-between gap-3 rounded-lg border border-slate-200 bg-white p-3 min-w-0">
-                              <div className="pt-1">
-                                <Checkbox
-                                  checked={selectedChecklistKeys.has(itemKey(it))}
-                                  onCheckedChange={() => toggleChecklistSelection(it)}
-                                  disabled={!canGenerate}
-                                />
-                              </div>
-                              <div className="min-w-0">
-                                <div className="font-medium text-slate-900 truncate" title={it.name}>{it.name}</div>
-                                <div className="mt-1 flex items-center gap-2 flex-wrap">
-                                  <span className={cn("text-[10px] px-1.5 py-0.5 rounded font-medium", it.source === "firm" ? "bg-slate-100 text-slate-700" : "bg-purple-50 text-purple-700")}>
-                                    {it.source}
-                                  </span>
-                                  <span className={cn("text-[10px] px-1.5 py-0.5 rounded font-medium", applicable ? "bg-emerald-50 text-emerald-700" : "bg-slate-100 text-slate-500")}>
-                                    {applicable ? "Applicable" : "Not applicable"}
-                                  </span>
-                                  <span className={cn("text-[10px] px-1.5 py-0.5 rounded font-medium", ready ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-800")}>
-                                    {ready ? "Ready" : (it.readiness?.status || "Incomplete")}
-                                  </span>
-                                  <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-50 text-blue-700 font-medium">
-                                    {it.documentGroup}
-                                  </span>
+                        {(sec.items ?? [])
+                          .filter((it) => {
+                            const applicable = it.applicability?.status === "applicable" && it.status !== "not_applicable";
+                            const missing = it.isRequired && applicable && !["generated", "uploaded", "received", "completed", "waived"].includes(it.status);
+                            if (checklistFilter === "all") return true;
+                            if (checklistFilter === "required") return it.isRequired && applicable;
+                            if (checklistFilter === "missing") return missing;
+                            if (checklistFilter === "completed") return it.status === "completed";
+                            if (checklistFilter === "waived") return it.status === "waived";
+                            if (checklistFilter === "not_applicable") return it.status === "not_applicable";
+                            return true;
+                          })
+                          .map((it) => {
+                            const applicable = it.applicability?.status === "applicable";
+                            const ready = it.readiness?.status === "ready";
+                            const latestId = it.latestDocument?.id;
+                            const latestDoc = latestId ? documents.find((d) => d.id === latestId) : null;
+                            const reason = !applicable
+                              ? (it.applicability?.reasons ?? []).join(", ")
+                              : it.blocked
+                                ? (it.readiness?.missing ?? []).map((m) => m.message).filter(Boolean).slice(0, 3).join(", ")
+                                : "";
+
+                            const canSelectForBatch = canGenerate && it.kind === "template" && it.source !== "workflow" && it.source !== "stamping" && it.source !== "manual";
+                            const selected = selectedChecklistKeys.has(it.checklistKey);
+
+                            const statusTone =
+                              it.status === "completed" ? "bg-emerald-50 text-emerald-700"
+                              : it.status === "waived" ? "bg-slate-100 text-slate-700"
+                              : it.status === "received" ? "bg-blue-50 text-blue-700"
+                              : it.status === "uploaded" ? "bg-blue-50 text-blue-700"
+                              : it.status === "generated" ? "bg-purple-50 text-purple-700"
+                              : it.status === "not_applicable" ? "bg-slate-100 text-slate-500"
+                              : it.blocked ? "bg-amber-50 text-amber-800"
+                              : "bg-slate-100 text-slate-700";
+
+                            const updatedLabel = it.updatedAt ? new Date(it.updatedAt).toLocaleString("en-MY") : null;
+
+                            return (
+                              <div key={it.checklistKey} className="flex items-start justify-between gap-3 rounded-lg border border-slate-200 bg-white p-3 min-w-0">
+                                <div className="pt-1">
+                                  <Checkbox
+                                    checked={selected}
+                                    onCheckedChange={() => {
+                                      if (!canSelectForBatch) return;
+                                      const next = new Set(selectedChecklistKeys);
+                                      if (next.has(it.checklistKey)) next.delete(it.checklistKey);
+                                      else next.add(it.checklistKey);
+                                      setSelectedChecklistKeys(next);
+                                    }}
+                                    disabled={!canSelectForBatch}
+                                  />
                                 </div>
-                                {reason && <div className="mt-1 text-xs text-slate-600 break-words">{reason}</div>}
+                                <div className="min-w-0">
+                                  <div className="font-medium text-slate-900 truncate" title={it.name}>{it.name}</div>
+                                  <div className="mt-1 flex items-center gap-2 flex-wrap">
+                                    <span className={cn("text-[10px] px-1.5 py-0.5 rounded font-medium", it.source === "firm" ? "bg-slate-100 text-slate-700" : it.source === "master" ? "bg-purple-50 text-purple-700" : "bg-slate-100 text-slate-700")}>
+                                      {it.source}
+                                    </span>
+                                    <span className={cn("text-[10px] px-1.5 py-0.5 rounded font-medium", it.isRequired ? "bg-rose-50 text-rose-700" : "bg-slate-100 text-slate-600")}>
+                                      {it.isRequired ? "Required" : "Optional"}
+                                    </span>
+                                    <span className={cn("text-[10px] px-1.5 py-0.5 rounded font-medium", applicable ? "bg-emerald-50 text-emerald-700" : "bg-slate-100 text-slate-500")}>
+                                      {applicable ? "Applicable" : "Not applicable"}
+                                    </span>
+                                    {it.readiness ? (
+                                      <span className={cn("text-[10px] px-1.5 py-0.5 rounded font-medium", ready ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-800")}>
+                                        {ready ? "Ready" : (it.readiness?.status || "Incomplete")}
+                                      </span>
+                                    ) : null}
+                                    <span className={cn("text-[10px] px-1.5 py-0.5 rounded font-medium capitalize", statusTone)}>
+                                      {it.status}
+                                    </span>
+                                  </div>
+                                  {reason ? <div className="mt-1 text-xs text-slate-600 break-words">{reason}</div> : null}
+                                  {updatedLabel ? <div className="mt-1 text-xs text-slate-400">Updated: {updatedLabel}</div> : null}
+                                </div>
+                                <div className="shrink-0 flex flex-col items-end gap-2">
+                                  <div className="flex items-center gap-2">
+                                    {it.kind === "template" ? (
+                                      <Button size="sm" variant="outline" onClick={() => handlePreview(it)} disabled={!canGenerate || previewLoading}>
+                                        Preview
+                                      </Button>
+                                    ) : null}
+                                    {latestDoc ? (
+                                      <Button size="sm" variant="outline" onClick={() => handleDownload(latestDoc)} disabled={downloadingDocId === latestDoc.id}>
+                                        Download
+                                      </Button>
+                                    ) : it.kind === "workflow" && it.workflowDocumentId ? (
+                                      <Button
+                                        size="sm"
+                                        variant="outline"
+                                        onClick={async () => {
+                                          try {
+                                            const blob = await apiFetchBlob(`/cases/${caseId}/workflow-documents/${it.workflowDocumentId}/download`);
+                                            downloadBlob(blob, it.fileName || "download");
+                                          } catch (err) {
+                                            toastError(toast, err, "Download failed");
+                                          }
+                                        }}
+                                      >
+                                        Download
+                                      </Button>
+                                    ) : it.kind === "stamping" && it.loanStampingItemId ? (
+                                      <Button
+                                        size="sm"
+                                        variant="outline"
+                                        onClick={async () => {
+                                          try {
+                                            const blob = await apiFetchBlob(`/cases/${caseId}/loan-stamping/${it.loanStampingItemId}/download`);
+                                            downloadBlob(blob, it.fileName || "download");
+                                          } catch (err) {
+                                            toastError(toast, err, "Download failed");
+                                          }
+                                        }}
+                                      >
+                                        Download
+                                      </Button>
+                                    ) : it.kind === "template" ? (
+                                      <Button size="sm" onClick={() => handleGenerate(it)} disabled={!canGenerate || !applicable || !ready || isGenerating}>
+                                        Generate
+                                      </Button>
+                                    ) : null}
+                                  </div>
+                                  <div className="flex items-center gap-2 flex-wrap justify-end">
+                                    <Button
+                                      size="sm"
+                                      variant="outline"
+                                      onClick={() => {
+                                        setChecklistUploadTarget(it);
+                                        setChecklistUploadFile(null);
+                                        setChecklistUploadOpen(true);
+                                      }}
+                                      disabled={!canCreate}
+                                    >
+                                      Upload
+                                    </Button>
+                                    {it.kind === "workflow" && it.workflowDocumentId && it.fileName ? (
+                                      <Button
+                                        size="sm"
+                                        variant="outline"
+                                        onClick={async () => {
+                                          if (!confirm("Remove this workflow document file?")) return;
+                                          try {
+                                            await apiFetchJson(`/cases/${caseId}/workflow-documents/${it.workflowDocumentId}`, { method: "DELETE" });
+                                            await apiFetchJson(`/cases/${caseId}/documents/checklist/items/${encodeURIComponent(it.checklistKey)}/upload-event`, {
+                                              method: "POST",
+                                              body: JSON.stringify({ event: "upload_removed", label: it.name }),
+                                            });
+                                            await qc.invalidateQueries({ queryKey: ["case-documents-checklist", caseId] });
+                                            toast({ title: "File removed" });
+                                          } catch (err) {
+                                            toastError(toast, err, "Remove failed");
+                                          }
+                                        }}
+                                        disabled={!canBypassApplicability}
+                                      >
+                                        Remove file
+                                      </Button>
+                                    ) : null}
+                                    {it.kind === "stamping" && it.loanStampingItemId && it.fileName ? (
+                                      <Button
+                                        size="sm"
+                                        variant="outline"
+                                        onClick={async () => {
+                                          if (!confirm("Remove this stamping file?")) return;
+                                          try {
+                                            await apiFetchJson(`/cases/${caseId}/loan-stamping/${it.loanStampingItemId}/file`, { method: "DELETE" });
+                                            await apiFetchJson(`/cases/${caseId}/documents/checklist/items/${encodeURIComponent(it.checklistKey)}/upload-event`, {
+                                              method: "POST",
+                                              body: JSON.stringify({ event: "upload_removed", label: it.name }),
+                                            });
+                                            await qc.invalidateQueries({ queryKey: ["case-documents-checklist", caseId] });
+                                            toast({ title: "File removed" });
+                                          } catch (err) {
+                                            toastError(toast, err, "Remove failed");
+                                          }
+                                        }}
+                                        disabled={!canBypassApplicability}
+                                      >
+                                        Remove file
+                                      </Button>
+                                    ) : null}
+                                    <Button size="sm" variant="outline" onClick={() => checklistReceivedMutation.mutate(it)} disabled={!canBypassApplicability || it.status === "waived" || it.status === "not_applicable"}>
+                                      Mark received
+                                    </Button>
+                                    <Button size="sm" variant="outline" onClick={() => checklistCompletedMutation.mutate(it)} disabled={!canBypassApplicability || it.status === "waived" || it.status === "not_applicable"}>
+                                      Mark completed
+                                    </Button>
+                                    {it.status === "waived" || it.status === "completed" || it.status === "received" ? (
+                                      <Button size="sm" variant="outline" onClick={() => checklistReopenMutation.mutate(it)} disabled={!canBypassApplicability}>
+                                        Reopen
+                                      </Button>
+                                    ) : (
+                                      <Button
+                                        size="sm"
+                                        variant="outline"
+                                        onClick={() => {
+                                          setWaiveTarget(it);
+                                          setWaiveReason("");
+                                          setWaiveDialogOpen(true);
+                                        }}
+                                        disabled={!canBypassApplicability || it.status === "not_applicable"}
+                                      >
+                                        Waive
+                                      </Button>
+                                    )}
+                                  </div>
+                                </div>
                               </div>
-                              <div className="shrink-0 flex items-center gap-2">
-                                <Button
-                                  size="sm"
-                                  variant="outline"
-                                  onClick={() => handlePreview(it)}
-                                  disabled={!canGenerate || previewLoading}
-                                >
-                                  Preview
-                                </Button>
-                                {latestDoc ? (
-                                  <Button size="sm" variant="outline" onClick={() => handleDownload(latestDoc)} disabled={downloadingDocId === latestDoc.id}>
-                                    Download
-                                  </Button>
-                                ) : (
-                                  <Button size="sm" onClick={() => handleGenerate(it)} disabled={!canGenerate || !applicable || !ready || isGenerating}>
-                                    Generate
-                                  </Button>
-                                )}
-                              </div>
-                            </div>
-                          );
-                        })}
+                            );
+                          })}
                       </div>
                     </div>
                   ))}
@@ -887,6 +1295,7 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
                 <div className="space-y-4">
                   {(checklistQuery.data?.sections ?? []).map((sec) => {
                     const filtered = (sec.items ?? []).filter((it) => {
+                      if (it.kind !== "template") return false;
                       if (!showAllTemplates && it.applicability?.status !== "applicable") return false;
                       if (templateSourceFilter !== "all" && it.source !== templateSourceFilter) return false;
                       return true;
@@ -1003,6 +1412,148 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
                 {isUploading ? "Uploading..." : "Upload"}
               </Button>
             </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={checklistUploadOpen} onOpenChange={setChecklistUploadOpen}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Upload for Checklist</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4 py-2">
+            <div className="text-sm text-slate-700">
+              {checklistUploadTarget ? (
+                <>
+                  <div className="font-medium">{checklistUploadTarget.name}</div>
+                  <div className="text-xs text-slate-500">{checklistUploadTarget.checklistKey}</div>
+                </>
+              ) : (
+                <div className="text-slate-500">No item selected</div>
+              )}
+            </div>
+            <div className="space-y-1.5">
+              <Label>File</Label>
+              <Input type="file" onChange={(e) => setChecklistUploadFile(e.target.files?.[0] ?? null)} />
+              {checklistUploadFile ? <div className="text-xs text-slate-500">{checklistUploadFile.name}</div> : null}
+            </div>
+            <div className="flex justify-end gap-2 pt-2">
+              <Button
+                variant="outline"
+                onClick={() => {
+                  setChecklistUploadOpen(false);
+                  setChecklistUploadTarget(null);
+                  setChecklistUploadFile(null);
+                }}
+              >
+                Cancel
+              </Button>
+              <Button onClick={handleChecklistUpload} disabled={!checklistUploadTarget || !checklistUploadFile || isUploading}>
+                {isUploading ? "Uploading..." : "Upload"}
+              </Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={waiveDialogOpen} onOpenChange={setWaiveDialogOpen}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Waive Checklist Item</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4 py-2">
+            <div className="text-sm text-slate-700">
+              {waiveTarget ? <div className="font-medium">{waiveTarget.name}</div> : <div className="text-slate-500">No item selected</div>}
+            </div>
+            <div className="space-y-1.5">
+              <Label>Reason (required)</Label>
+              <Textarea value={waiveReason} onChange={(e) => setWaiveReason(e.target.value)} rows={3} placeholder="Explain why this item is waived..." />
+            </div>
+            <div className="flex justify-end gap-2 pt-2">
+              <Button
+                variant="outline"
+                onClick={() => {
+                  setWaiveDialogOpen(false);
+                  setWaiveTarget(null);
+                  setWaiveReason("");
+                }}
+              >
+                Cancel
+              </Button>
+              <Button
+                variant="outline"
+                onClick={() => {
+                  if (!waiveTarget) return;
+                  checklistWaiveMutation.mutate({ item: waiveTarget, reason: waiveReason.trim() });
+                }}
+                disabled={!waiveTarget || !waiveReason.trim() || checklistWaiveMutation.isPending}
+              >
+                {checklistWaiveMutation.isPending ? "Saving..." : "Waive"}
+              </Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={manualDialogOpen} onOpenChange={setManualDialogOpen}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Add Manual Checklist Item</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4 py-2">
+            <div className="space-y-1.5">
+              <Label>Label</Label>
+              <Input value={manualLabel} onChange={(e) => setManualLabel(e.target.value)} placeholder="e.g. Developer authorization letter" />
+            </div>
+            <div className="flex items-center gap-2">
+              <Checkbox checked={manualRequired} onCheckedChange={(v) => setManualRequired(Boolean(v))} />
+              <span className="text-sm text-slate-700">Required</span>
+            </div>
+            <div className="flex justify-end gap-2 pt-2">
+              <Button variant="outline" onClick={() => setManualDialogOpen(false)}>Cancel</Button>
+              <Button
+                onClick={() => checklistManualCreateMutation.mutate({ label: manualLabel.trim(), isRequired: manualRequired })}
+                disabled={!manualLabel.trim() || checklistManualCreateMutation.isPending}
+              >
+                {checklistManualCreateMutation.isPending ? "Saving..." : "Add"}
+              </Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={checklistHistoryOpen} onOpenChange={setChecklistHistoryOpen}>
+        <DialogContent className="max-w-2xl max-h-[80vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>Checklist History</DialogTitle>
+          </DialogHeader>
+          {checklistHistoryQuery.isLoading ? (
+            <div className="text-sm text-slate-500 py-6">Loading history...</div>
+          ) : checklistHistoryQuery.isError ? (
+            <QueryFallback title="History unavailable" error={checklistHistoryQuery.error} onRetry={() => checklistHistoryQuery.refetch()} isRetrying={checklistHistoryQuery.isFetching} />
+          ) : (
+            <div className="space-y-2">
+              {(checklistHistoryQuery.data ?? [])
+                .filter((x) => {
+                  if (!checklistHistoryKey) return true;
+                  return (x.detail ?? "").includes(`checklistKey=${checklistHistoryKey}`);
+                })
+                .map((x) => (
+                  <div key={x.id} className="rounded border bg-white p-2">
+                    <div className="text-xs text-slate-500">{x.created_at ? new Date(x.created_at).toLocaleString("en-MY") : ""}</div>
+                    <div className="text-sm text-slate-900 font-medium">{x.action}</div>
+                    {x.detail ? <div className="text-xs text-slate-600 break-words mt-1">{x.detail}</div> : null}
+                  </div>
+                ))}
+              {(checklistHistoryQuery.data ?? []).length === 0 ? (
+                <div className="text-sm text-slate-500 py-6">No checklist events.</div>
+              ) : null}
+            </div>
+          )}
+          <div className="flex justify-end pt-2">
+            <Button variant="outline" onClick={() => { setChecklistHistoryOpen(false); setChecklistHistoryKey(null); }}>
+              Close
+            </Button>
           </div>
         </DialogContent>
       </Dialog>

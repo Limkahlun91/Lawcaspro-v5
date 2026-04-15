@@ -600,4 +600,56 @@ suite("Documents checklist + applicability", () => {
       ));
     }
   });
+
+  it("Checklist P5 tracking: manual item create -> waive -> reopen -> received -> completed", async () => {
+    const before = await request(app)
+      .get(`/api/cases/${createdCaseId}/documents/checklist`)
+      .set("Authorization", `Bearer ${token}`);
+    expect(before.status).toBe(200);
+    expect(before.body).toHaveProperty("summary");
+
+    const create = await request(app)
+      .post(`/api/cases/${createdCaseId}/documents/checklist/items`)
+      .set("Authorization", `Bearer ${token}`)
+      .send({ label: "P5 Manual Required Doc", isRequired: true });
+    expect(create.status).toBe(201);
+    const checklistKey = String(create.body.checklist_key ?? create.body.checklistKey ?? "");
+    expect(checklistKey).toMatch(/^manual:/);
+
+    const afterCreate = await request(app)
+      .get(`/api/cases/${createdCaseId}/documents/checklist`)
+      .set("Authorization", `Bearer ${token}`);
+    expect(afterCreate.status).toBe(200);
+    expect(afterCreate.body.summary.requiredMissing).toBeGreaterThanOrEqual(before.body.summary.requiredMissing);
+
+    const waive = await request(app)
+      .post(`/api/cases/${createdCaseId}/documents/checklist/items/${encodeURIComponent(checklistKey)}/waive`)
+      .set("Authorization", `Bearer ${token}`)
+      .send({ reason: "Not needed for this case" });
+    expect(waive.status).toBe(200);
+
+    const reopen = await request(app)
+      .post(`/api/cases/${createdCaseId}/documents/checklist/items/${encodeURIComponent(checklistKey)}/reopen`)
+      .set("Authorization", `Bearer ${token}`);
+    expect(reopen.status).toBe(200);
+
+    const received = await request(app)
+      .post(`/api/cases/${createdCaseId}/documents/checklist/items/${encodeURIComponent(checklistKey)}/received`)
+      .set("Authorization", `Bearer ${token}`)
+      .send({ notes: "Received via email" });
+    expect(received.status).toBe(200);
+
+    const completed = await request(app)
+      .post(`/api/cases/${createdCaseId}/documents/checklist/items/${encodeURIComponent(checklistKey)}/completed`)
+      .set("Authorization", `Bearer ${token}`);
+    expect(completed.status).toBe(200);
+
+    const history = await request(app)
+      .get(`/api/cases/${createdCaseId}/documents/checklist/history`)
+      .set("Authorization", `Bearer ${token}`);
+    expect(history.status).toBe(200);
+    expect(Array.isArray(history.body)).toBe(true);
+    const actions = (history.body as Array<{ action?: string }>).map((x) => String(x.action ?? ""));
+    expect(actions.some((a) => a.startsWith("checklist."))).toBe(true);
+  });
 });

@@ -17,8 +17,8 @@ import { z } from "zod";
 import { evaluateTemplateApplicability, normalizePurchaseMode, normalizeTitleType } from "../lib/documentApplicability";
 import { evaluateTemplateReadiness, type TemplateReadinessInputs } from "../lib/documentReadiness";
 import { buildGeneratedDownloadFileName } from "../lib/documentNaming";
-import { normalizeWorkflowDocumentKeyFromDb } from "../lib/caseWorkflowDocuments";
-import { LOAN_STAMPING_ITEM_KEYS, type LoanStampingItemKey } from "../lib/loanStamping";
+import { normalizeWorkflowDocumentKeyFromDb, workflowDocumentLabel } from "../lib/caseWorkflowDocuments";
+import { LOAN_STAMPING_ITEM_KEYS, isLoanStampingItemKeyAllowedForTitleType, normalizeTitleType as normalizeLoanTitleType, type LoanStampingItemKey } from "../lib/loanStamping";
 import { listDocumentVariables, resolveVariablesForTemplate, type PlaceholderWarning } from "../lib/documentVariables";
 import { getFirmTemplateBindings, getPlatformDocumentBindings, replaceFirmTemplateBindings, replacePlatformDocumentBindings } from "../lib/documentBindings";
 import { getFirmTemplateApplicabilityRules, getPlatformDocumentApplicabilityRules, upsertFirmTemplateApplicabilityRules, upsertPlatformDocumentApplicabilityRules } from "../lib/documentApplicabilityRules";
@@ -1573,6 +1573,7 @@ router.get("/document-templates/:templateId/applicability", requireAuth, require
     rules,
     effective: {
       isActive: rules?.isActive ?? Boolean((tpl as any).is_active ?? true),
+      isRequired: rules?.isRequired ?? false,
       purchaseMode: rules?.purchaseMode ?? ((tpl as any).applies_to_purchase_mode ?? null),
       titleType: rules?.titleType ?? ((tpl as any).applies_to_title_type ?? "any"),
       caseType: (tpl as any).applies_to_case_type ?? null,
@@ -1602,6 +1603,7 @@ router.put("/document-templates/:templateId/applicability", requireAuth, require
   }
   const body = req.body as Record<string, unknown>;
   const isActive = Object.prototype.hasOwnProperty.call(body, "isActive") ? Boolean(body.isActive) : undefined;
+  const isRequired = Object.prototype.hasOwnProperty.call(body, "isRequired") ? Boolean(body.isRequired) : undefined;
   const purchaseMode = typeof body.purchaseMode === "string" ? body.purchaseMode : undefined;
   const titleType = typeof body.titleType === "string" ? body.titleType : undefined;
   const caseType = typeof body.caseType === "string" ? body.caseType : undefined;
@@ -1625,6 +1627,7 @@ router.put("/document-templates/:templateId/applicability", requireAuth, require
 
   await upsertFirmTemplateApplicabilityRules(r, req.firmId!, templateId, {
     isActive: isActive ?? null,
+    isRequired: isRequired ?? null,
     purchaseMode: purchaseMode ?? null,
     titleType: titleType ?? null,
     titleSubType: titleSubType ?? null,
@@ -1664,6 +1667,7 @@ router.put("/platform/documents/:documentId/applicability", requireAuth, require
   }
   const body = req.body as Record<string, unknown>;
   const isActive = Object.prototype.hasOwnProperty.call(body, "isActive") ? Boolean(body.isActive) : undefined;
+  const isRequired = Object.prototype.hasOwnProperty.call(body, "isRequired") ? Boolean(body.isRequired) : undefined;
   const purchaseMode = typeof body.purchaseMode === "string" ? body.purchaseMode : undefined;
   const titleType = typeof body.titleType === "string" ? body.titleType : undefined;
   const caseType = typeof body.caseType === "string" ? body.caseType : undefined;
@@ -1688,6 +1692,7 @@ router.put("/platform/documents/:documentId/applicability", requireAuth, require
     `);
     await upsertPlatformDocumentApplicabilityRules(authDb, null, documentId, {
       isActive: isActive ?? null,
+      isRequired: isRequired ?? null,
       purchaseMode: purchaseMode ?? null,
       titleType: titleType ?? null,
       titleSubType: titleSubType ?? null,
@@ -2520,23 +2525,28 @@ router.get("/cases/:caseId/documents/checklist", requireAuth, requireFirmUser, r
 
   const wfDocs = (await tableExists(r, "public.case_workflow_documents"))
     ? await queryRows(r, sql`
-      SELECT milestone_key, object_path, file_name, updated_at
+      SELECT id, milestone_key, label, object_path, file_name, updated_at
       FROM case_workflow_documents
       WHERE firm_id = ${req.firmId!} AND case_id = ${caseId} AND deleted_at IS NULL
       ORDER BY updated_at DESC
     `)
     : [];
-  const workflowDocs: Record<string, { hasFile: boolean }> = {};
+  const workflowDocs: Record<string, { hasFile: boolean; workflowDocumentId?: number; fileName?: string | null; updatedAt?: string | null }> = {};
   for (const d of wfDocs) {
     const k = normalizeWorkflowDocumentKeyFromDb(String(d.milestone_key ?? ""));
     if (!k) continue;
     if (workflowDocs[k]) continue;
-    workflowDocs[k] = { hasFile: Boolean(d.object_path && d.file_name) };
+    workflowDocs[k] = {
+      hasFile: Boolean(d.object_path && d.file_name),
+      workflowDocumentId: typeof d.id === "number" ? Number(d.id) : undefined,
+      fileName: d.file_name ? String(d.file_name) : null,
+      updatedAt: d.updated_at ? String(d.updated_at) : null,
+    };
   }
 
   const stampingRows = (await tableExists(r, "public.case_loan_stamping_items"))
     ? await queryRows(r, sql`
-      SELECT item_key, custom_name, dated_on, stamped_on, object_path, file_name, sort_order
+      SELECT id, item_key, custom_name, dated_on, stamped_on, object_path, file_name, sort_order, updated_at
       FROM case_loan_stamping_items
       WHERE firm_id = ${req.firmId!} AND case_id = ${caseId} AND deleted_at IS NULL
       ORDER BY sort_order ASC, id ASC
@@ -2544,7 +2554,7 @@ router.get("/cases/:caseId/documents/checklist", requireAuth, requireFirmUser, r
     : [];
 
   const caseDocuments = await queryRows(r, sql`
-    SELECT id, template_id, platform_document_id, name, file_name, created_at, generated_by
+    SELECT id, template_id, template_source, platform_document_id, name, file_name, status, is_uploaded, object_path, created_at, generated_by
     FROM case_documents
     WHERE firm_id = ${req.firmId!} AND case_id = ${caseId}
     ORDER BY created_at DESC
@@ -2647,22 +2657,107 @@ router.get("/cases/:caseId/documents/checklist", requireAuth, requireFirmUser, r
     })),
   };
 
+  const checklistOverrides = (await tableExists(r, "public.case_document_checklist_items"))
+    ? await queryRows(r, sql`
+      SELECT *
+      FROM case_document_checklist_items
+      WHERE firm_id = ${req.firmId!} AND case_id = ${caseId}
+      ORDER BY sort_order ASC, id ASC
+    `)
+    : [];
+  const overrideByKey = new Map<string, Record<string, unknown>>();
+  for (const row of checklistOverrides) {
+    const k = typeof row.checklist_key === "string" ? row.checklist_key : String(row.checklist_key ?? "");
+    if (!k) continue;
+    if (!overrideByKey.has(k)) overrideByKey.set(k, row);
+  }
+
+  type ChecklistStatus =
+    | "pending"
+    | "generated"
+    | "uploaded"
+    | "received"
+    | "completed"
+    | "waived"
+    | "not_applicable";
+
   type ChecklistItem = {
-    source: "firm" | "master";
-    templateId: number;
+    checklistKey: string;
+    kind: "template" | "workflow" | "stamping" | "manual";
+    source: "firm" | "master" | "workflow" | "stamping" | "manual";
+    sourceType: "generated" | "uploaded" | "manual" | "external_received";
+    isRequired: boolean;
+    status: ChecklistStatus;
+    blocked: boolean;
+    updatedAt: string | null;
+    notes: string | null;
+    applicability: { status: "applicable" | "not_applicable"; reasons: string[] };
+    readiness: { status: string; missing: Array<{ code: string; message: string }> } | null;
+    templateId?: number;
     name: string;
-    documentType: string;
+    documentType?: string;
     documentGroup: string;
     sortOrder: number;
     fileName: string | null;
     fileType: string | null;
     pdfMappings: unknown;
-    applicability: { status: "applicable" | "not_applicable"; reasons: string[] };
-    readiness: { status: string; missing: Array<{ code: string; message: string }> };
     latestDocument: Record<string, unknown> | null;
+    workflowMilestoneKey?: string;
+    workflowDocumentId?: number | null;
+    loanStampingItemId?: number | null;
+    loanStampingItemKey?: string | null;
+    completedAt?: string | null;
+    completedBy?: number | null;
+    receivedAt?: string | null;
+    receivedBy?: number | null;
+    waivedAt?: string | null;
+    waivedBy?: number | null;
+    waivedReason?: string | null;
   };
 
   const items: ChecklistItem[] = [];
+
+  const computeStatus = ({
+    checklistKey,
+    applicable,
+    readiness,
+    latestDocument,
+    baseHasFile,
+  }: {
+    checklistKey: string;
+    applicable: boolean;
+    readiness: { status: string } | null;
+    latestDocument: Record<string, unknown> | null;
+    baseHasFile: boolean;
+  }): { status: ChecklistStatus; blocked: boolean; updatedAt: string | null; override: Record<string, unknown> | null } => {
+    if (!applicable) return { status: "not_applicable", blocked: false, updatedAt: null, override: overrideByKey.get(checklistKey) ?? null };
+    const ov = overrideByKey.get(checklistKey) ?? null;
+    const ovStatus = typeof ov?.status === "string" ? String(ov.status) : null;
+    const waivedAt = ov?.waived_at ? String(ov.waived_at) : null;
+    const completedAt = ov?.completed_at ? String(ov.completed_at) : null;
+    const receivedAt = ov?.received_at ? String(ov.received_at) : null;
+    if (ovStatus === "waived" || waivedAt) {
+      return { status: "waived", blocked: false, updatedAt: ov?.updated_at ? String(ov.updated_at) : null, override: ov };
+    }
+
+    const hasFile = baseHasFile || !!latestDocument;
+    if (completedAt && (hasFile || receivedAt)) {
+      return { status: "completed", blocked: false, updatedAt: ov?.updated_at ? String(ov.updated_at) : null, override: ov };
+    }
+    if (receivedAt) {
+      return { status: "received", blocked: false, updatedAt: ov?.updated_at ? String(ov.updated_at) : null, override: ov };
+    }
+    if (latestDocument) {
+      const isUploaded = typeof (latestDocument as any).is_uploaded === "boolean" ? Boolean((latestDocument as any).is_uploaded) : false;
+      const createdAt = (latestDocument as any).created_at ? String((latestDocument as any).created_at) : null;
+      return { status: isUploaded ? "uploaded" : "generated", blocked: false, updatedAt: createdAt, override: ov };
+    }
+    if (baseHasFile) {
+      return { status: "uploaded", blocked: false, updatedAt: ov?.updated_at ? String(ov.updated_at) : null, override: ov };
+    }
+    const blocked = readiness ? readiness.status !== "ready" : false;
+    return { status: "pending", blocked, updatedAt: ov?.updated_at ? String(ov.updated_at) : null, override: ov };
+  };
 
   for (const t of firmTemplates) {
     const templateId = Number((t as any).id);
@@ -2689,8 +2784,25 @@ router.get("/cases/:caseId/documents/checklist", requireAuth, requireFirmUser, r
     });
     if (!includeAll && !app.applicable) continue;
     const ready = app.applicable ? evaluateTemplateReadiness({ documentGroup, input: readinessInput }) : { status: "ready", missing: [] };
+    const checklistKey = `tpl:firm:${templateId}`;
+    const { status, blocked, updatedAt, override } = computeStatus({
+      checklistKey,
+      applicable: app.applicable,
+      readiness: ready,
+      latestDocument: latestByFirmTemplateId.get(templateId) ?? null,
+      baseHasFile: false,
+    });
+    const isRequired = extra && typeof extra.is_required === "boolean" ? Boolean(extra.is_required) : false;
     items.push({
+      checklistKey,
+      kind: "template",
       source: "firm",
+      sourceType: status === "generated" ? "generated" : status === "uploaded" ? "uploaded" : "generated",
+      isRequired,
+      status,
+      blocked,
+      updatedAt,
+      notes: typeof override?.notes === "string" ? String(override.notes) : null,
       templateId,
       name: String((t as any).name ?? ""),
       documentType: String((t as any).document_type ?? "other"),
@@ -2702,6 +2814,13 @@ router.get("/cases/:caseId/documents/checklist", requireAuth, requireFirmUser, r
       applicability: { status: app.applicable ? "applicable" : "not_applicable", reasons: app.reasons },
       readiness: ready,
       latestDocument: latestByFirmTemplateId.get(templateId) ?? null,
+      completedAt: override?.completed_at ? String(override.completed_at) : null,
+      completedBy: override?.completed_by === null ? null : (typeof override?.completed_by === "number" ? Number(override.completed_by) : (override?.completed_by ? Number(override.completed_by) : null)),
+      receivedAt: override?.received_at ? String(override.received_at) : null,
+      receivedBy: override?.received_by === null ? null : (typeof override?.received_by === "number" ? Number(override.received_by) : (override?.received_by ? Number(override.received_by) : null)),
+      waivedAt: override?.waived_at ? String(override.waived_at) : null,
+      waivedBy: override?.waived_by === null ? null : (typeof override?.waived_by === "number" ? Number(override.waived_by) : (override?.waived_by ? Number(override.waived_by) : null)),
+      waivedReason: typeof override?.waived_reason === "string" ? String(override.waived_reason) : null,
     });
   }
 
@@ -2730,8 +2849,25 @@ router.get("/cases/:caseId/documents/checklist", requireAuth, requireFirmUser, r
     });
     if (!includeAll && !app.applicable) continue;
     const ready = app.applicable ? evaluateTemplateReadiness({ documentGroup, input: readinessInput }) : { status: "ready", missing: [] };
+    const checklistKey = `tpl:master:${templateId}`;
+    const { status, blocked, updatedAt, override } = computeStatus({
+      checklistKey,
+      applicable: app.applicable,
+      readiness: ready,
+      latestDocument: latestByPlatformDocId.get(templateId) ?? null,
+      baseHasFile: false,
+    });
+    const isRequired = extra && typeof extra.is_required === "boolean" ? Boolean(extra.is_required) : false;
     items.push({
+      checklistKey,
+      kind: "template",
       source: "master",
+      sourceType: status === "generated" ? "generated" : status === "uploaded" ? "uploaded" : "generated",
+      isRequired,
+      status,
+      blocked,
+      updatedAt,
+      notes: typeof override?.notes === "string" ? String(override.notes) : null,
       templateId,
       name: String((t as any).name ?? ""),
       documentType: String((t as any).category ?? "other"),
@@ -2743,6 +2879,218 @@ router.get("/cases/:caseId/documents/checklist", requireAuth, requireFirmUser, r
       applicability: { status: app.applicable ? "applicable" : "not_applicable", reasons: app.reasons },
       readiness: ready,
       latestDocument: latestByPlatformDocId.get(templateId) ?? null,
+      completedAt: override?.completed_at ? String(override.completed_at) : null,
+      completedBy: override?.completed_by === null ? null : (typeof override?.completed_by === "number" ? Number(override.completed_by) : (override?.completed_by ? Number(override.completed_by) : null)),
+      receivedAt: override?.received_at ? String(override.received_at) : null,
+      receivedBy: override?.received_by === null ? null : (typeof override?.received_by === "number" ? Number(override.received_by) : (override?.received_by ? Number(override.received_by) : null)),
+      waivedAt: override?.waived_at ? String(override.waived_at) : null,
+      waivedBy: override?.waived_by === null ? null : (typeof override?.waived_by === "number" ? Number(override.waived_by) : (override?.waived_by ? Number(override.waived_by) : null)),
+      waivedReason: typeof override?.waived_reason === "string" ? String(override.waived_reason) : null,
+    });
+  }
+
+  const workflowMilestones: Array<{ milestoneKey: string; label: string; applicable: boolean }> = [
+    { milestoneKey: "spa_stamped", label: workflowDocumentLabel("spa_stamped") ?? "SPA Stamped File", applicable: true },
+    { milestoneKey: "lo_stamped", label: workflowDocumentLabel("lo_stamped") ?? "Loan Offer Stamped File", applicable: purchaseMode === "loan" },
+    { milestoneKey: "register_poa", label: workflowDocumentLabel("register_poa") ?? "Register POA File", applicable: purchaseMode === "loan" },
+    { milestoneKey: "letter_disclaimer", label: workflowDocumentLabel("letter_disclaimer") ?? "Letter Disclaimer File", applicable: purchaseMode === "loan" },
+  ];
+  for (const m of workflowMilestones) {
+    const checklistKey = `workflow:${m.milestoneKey}`;
+    const app = m.applicable ? { status: "applicable" as const, reasons: [] } : { status: "not_applicable" as const, reasons: ["Not applicable for this case"] };
+    if (!includeAll && app.status !== "applicable") continue;
+    const existing = workflowDocs[m.milestoneKey];
+    const { status, blocked, updatedAt, override } = computeStatus({
+      checklistKey,
+      applicable: app.status === "applicable",
+      readiness: null,
+      latestDocument: null,
+      baseHasFile: Boolean(existing?.hasFile),
+    });
+    items.push({
+      checklistKey,
+      kind: "workflow",
+      source: "workflow",
+      sourceType: "uploaded",
+      isRequired: app.status === "applicable",
+      status,
+      blocked,
+      updatedAt: existing?.updatedAt ?? updatedAt,
+      notes: typeof override?.notes === "string" ? String(override.notes) : null,
+      name: m.label,
+      documentGroup: "Workflow",
+      sortOrder: 0,
+      fileName: existing?.fileName ?? null,
+      fileType: "file",
+      pdfMappings: null,
+      applicability: { status: app.status, reasons: app.reasons },
+      readiness: null,
+      latestDocument: null,
+      workflowMilestoneKey: m.milestoneKey,
+      workflowDocumentId: existing?.workflowDocumentId ?? null,
+      completedAt: override?.completed_at ? String(override.completed_at) : null,
+      completedBy: override?.completed_by === null ? null : (typeof override?.completed_by === "number" ? Number(override.completed_by) : (override?.completed_by ? Number(override.completed_by) : null)),
+      receivedAt: override?.received_at ? String(override.received_at) : null,
+      receivedBy: override?.received_by === null ? null : (typeof override?.received_by === "number" ? Number(override.received_by) : (override?.received_by ? Number(override.received_by) : null)),
+      waivedAt: override?.waived_at ? String(override.waived_at) : null,
+      waivedBy: override?.waived_by === null ? null : (typeof override?.waived_by === "number" ? Number(override.waived_by) : (override?.waived_by ? Number(override.waived_by) : null)),
+      waivedReason: typeof override?.waived_reason === "string" ? String(override.waived_reason) : null,
+    });
+  }
+
+  const loanTitleType = normalizeLoanTitleType((context as any).title_type ?? null);
+  const shouldShowStamping = purchaseMode === "loan";
+  if (shouldShowStamping) {
+    const existingByKey = new Map<string, Record<string, unknown>>();
+    const customRows: Record<string, unknown>[] = [];
+    for (const row of stampingRows) {
+      const itemKeyRaw = String(row.item_key ?? "");
+      const itemKey = isLoanStampingItemKey(itemKeyRaw) ? itemKeyRaw : "other";
+      if (itemKey === "other") {
+        customRows.push(row);
+        continue;
+      }
+      if (!existingByKey.has(itemKey)) existingByKey.set(itemKey, row);
+    }
+
+    for (const itemKey of LOAN_STAMPING_ITEM_KEYS) {
+      if (itemKey === "other") continue;
+      const applicable = isLoanStampingItemKeyAllowedForTitleType(loanTitleType, itemKey);
+      const app = applicable ? { status: "applicable" as const, reasons: [] } : { status: "not_applicable" as const, reasons: ["Not applicable for this case"] };
+      if (!includeAll && app.status !== "applicable") continue;
+      const existing = existingByKey.get(itemKey) ?? null;
+      const id = existing && typeof (existing as any).id === "number" ? Number((existing as any).id) : null;
+      const checklistKey = `stamping:key:${itemKey}`;
+      const hasFile = Boolean(existing && (existing as any).object_path && (existing as any).file_name);
+      const { status, blocked, updatedAt, override } = computeStatus({
+        checklistKey,
+        applicable: app.status === "applicable",
+        readiness: null,
+        latestDocument: null,
+        baseHasFile: hasFile,
+      });
+      items.push({
+        checklistKey,
+        kind: "stamping",
+        source: "stamping",
+        sourceType: "uploaded",
+        isRequired: app.status === "applicable",
+        status,
+        blocked,
+        updatedAt: existing && (existing as any).updated_at ? String((existing as any).updated_at) : updatedAt,
+        notes: typeof override?.notes === "string" ? String(override.notes) : null,
+        name: itemKey.replaceAll("_", " ").toUpperCase(),
+        documentGroup: "Loan Stamping",
+        sortOrder: existing && typeof (existing as any).sort_order === "number" ? Number((existing as any).sort_order) : 0,
+        fileName: existing && (existing as any).file_name ? String((existing as any).file_name) : null,
+        fileType: "file",
+        pdfMappings: null,
+        applicability: { status: app.status, reasons: app.reasons },
+        readiness: null,
+        latestDocument: null,
+        loanStampingItemId: id,
+        loanStampingItemKey: itemKey,
+        completedAt: override?.completed_at ? String(override.completed_at) : null,
+        completedBy: override?.completed_by === null ? null : (typeof override?.completed_by === "number" ? Number(override.completed_by) : (override?.completed_by ? Number(override.completed_by) : null)),
+        receivedAt: override?.received_at ? String(override.received_at) : null,
+        receivedBy: override?.received_by === null ? null : (typeof override?.received_by === "number" ? Number(override.received_by) : (override?.received_by ? Number(override.received_by) : null)),
+        waivedAt: override?.waived_at ? String(override.waived_at) : null,
+        waivedBy: override?.waived_by === null ? null : (typeof override?.waived_by === "number" ? Number(override.waived_by) : (override?.waived_by ? Number(override.waived_by) : null)),
+        waivedReason: typeof override?.waived_reason === "string" ? String(override.waived_reason) : null,
+      });
+    }
+
+    for (const row of customRows) {
+      const id = typeof row.id === "number" ? Number(row.id) : NaN;
+      if (!Number.isFinite(id)) continue;
+      const label = typeof row.custom_name === "string" && row.custom_name.trim() ? String(row.custom_name) : "Other Stamping Item";
+      const checklistKey = `stamping:other:${id}`;
+      const app = { status: "applicable" as const, reasons: [] };
+      const hasFile = Boolean(row.object_path && row.file_name);
+      const { status, blocked, updatedAt, override } = computeStatus({
+        checklistKey,
+        applicable: true,
+        readiness: null,
+        latestDocument: null,
+        baseHasFile: hasFile,
+      });
+      items.push({
+        checklistKey,
+        kind: "stamping",
+        source: "stamping",
+        sourceType: "uploaded",
+        isRequired: false,
+        status,
+        blocked,
+        updatedAt: row.updated_at ? String(row.updated_at) : updatedAt,
+        notes: typeof override?.notes === "string" ? String(override.notes) : null,
+        name: label,
+        documentGroup: "Loan Stamping",
+        sortOrder: typeof row.sort_order === "number" ? Number(row.sort_order) : 0,
+        fileName: row.file_name ? String(row.file_name) : null,
+        fileType: "file",
+        pdfMappings: null,
+        applicability: { status: app.status, reasons: app.reasons },
+        readiness: null,
+        latestDocument: null,
+        loanStampingItemId: id,
+        loanStampingItemKey: "other",
+        completedAt: override?.completed_at ? String(override.completed_at) : null,
+        completedBy: override?.completed_by === null ? null : (typeof override?.completed_by === "number" ? Number(override.completed_by) : (override?.completed_by ? Number(override.completed_by) : null)),
+        receivedAt: override?.received_at ? String(override.received_at) : null,
+        receivedBy: override?.received_by === null ? null : (typeof override?.received_by === "number" ? Number(override.received_by) : (override?.received_by ? Number(override.received_by) : null)),
+        waivedAt: override?.waived_at ? String(override.waived_at) : null,
+        waivedBy: override?.waived_by === null ? null : (typeof override?.waived_by === "number" ? Number(override.waived_by) : (override?.waived_by ? Number(override.waived_by) : null)),
+        waivedReason: typeof override?.waived_reason === "string" ? String(override.waived_reason) : null,
+      });
+    }
+  }
+
+  for (const row of checklistOverrides) {
+    const sourceType = typeof row.source_type === "string" ? String(row.source_type) : "manual";
+    if (sourceType !== "manual" && sourceType !== "external_received") continue;
+    const checklistKey = typeof row.checklist_key === "string" ? String(row.checklist_key) : "";
+    if (!checklistKey) continue;
+    const label = typeof row.label === "string" ? String(row.label) : checklistKey;
+    const isRequired = typeof row.is_required === "boolean" ? Boolean(row.is_required) : false;
+    const status = (() => {
+      const s = typeof row.status === "string" ? String(row.status) : "pending";
+      if (s === "waived") return "waived";
+      if (s === "completed") return "completed";
+      if (s === "received") return "received";
+      if (s === "uploaded") return "uploaded";
+      if (s === "generated") return "generated";
+      if (s === "not_applicable") return "not_applicable";
+      return "pending";
+    })() as ChecklistStatus;
+    const applicable = status !== "not_applicable";
+    if (!includeAll && !applicable) continue;
+    items.push({
+      checklistKey,
+      kind: "manual",
+      source: "manual",
+      sourceType: sourceType as any,
+      isRequired,
+      status,
+      blocked: false,
+      updatedAt: row.updated_at ? String(row.updated_at) : null,
+      notes: typeof row.notes === "string" ? String(row.notes) : null,
+      name: label,
+      documentGroup: "Manual",
+      sortOrder: typeof row.sort_order === "number" ? Number(row.sort_order) : 0,
+      fileName: null,
+      fileType: null,
+      pdfMappings: null,
+      applicability: { status: applicable ? "applicable" : "not_applicable", reasons: [] },
+      readiness: null,
+      latestDocument: null,
+      completedAt: row.completed_at ? String(row.completed_at) : null,
+      completedBy: row.completed_by === null ? null : (typeof row.completed_by === "number" ? Number(row.completed_by) : (row.completed_by ? Number(row.completed_by) : null)),
+      receivedAt: row.received_at ? String(row.received_at) : null,
+      receivedBy: row.received_by === null ? null : (typeof row.received_by === "number" ? Number(row.received_by) : (row.received_by ? Number(row.received_by) : null)),
+      waivedAt: row.waived_at ? String(row.waived_at) : null,
+      waivedBy: row.waived_by === null ? null : (typeof row.waived_by === "number" ? Number(row.waived_by) : (row.waived_by ? Number(row.waived_by) : null)),
+      waivedReason: typeof row.waived_reason === "string" ? String(row.waived_reason) : null,
     });
   }
 
@@ -2759,10 +3107,518 @@ router.get("/cases/:caseId/documents/checklist", requireAuth, requireFirmUser, r
       items: arr.sort((x, y) => (x.sortOrder - y.sortOrder) || x.name.localeCompare(y.name)),
     }));
 
+  const applicableItems = items.filter((it) => it.applicability.status === "applicable" && it.status !== "not_applicable");
+  const waivedCount = applicableItems.filter((it) => it.status === "waived").length;
+  const completedCount = applicableItems.filter((it) => it.status === "completed").length;
+  const requiredMissingCount = applicableItems.filter((it) => it.isRequired && it.status !== "waived" && it.status !== "completed" && it.status !== "received" && it.status !== "uploaded" && it.status !== "generated").length;
+
   res.json({
     case: { caseId, referenceNo, purchaseMode, titleType, caseType, projectName },
+    summary: {
+      totalApplicable: applicableItems.length,
+      requiredMissing: requiredMissingCount,
+      completed: completedCount,
+      waived: waivedCount,
+    },
     sections: sectionList,
   });
+});
+
+const CHECKLIST_ALLOWED_ATTACHMENT_EXTENSIONS = new Set<string>(["pdf", "doc", "docx", "jpg", "jpeg", "png"]);
+
+function parseChecklistKeyTarget(checklistKey: string): { templateId?: number; platformDocumentId?: number } {
+  const k = checklistKey.trim();
+  if (k.startsWith("tpl:firm:")) {
+    const id = parseInt(k.slice("tpl:firm:".length), 10);
+    if (Number.isFinite(id)) return { templateId: id };
+  }
+  if (k.startsWith("tpl:master:")) {
+    const id = parseInt(k.slice("tpl:master:".length), 10);
+    if (Number.isFinite(id)) return { platformDocumentId: id };
+  }
+  return {};
+}
+
+router.post("/cases/:caseId/documents/checklist/items", requireAuth, requireFirmUser, requirePermission("documents", "update"), async (req: AuthRequest, res): Promise<void> => {
+  const r = getRlsDb(req, res);
+  if (!r) return;
+  const caseIdStr = one((req.params as any).caseId);
+  const caseId = caseIdStr ? parseInt(caseIdStr, 10) : NaN;
+  if (Number.isNaN(caseId)) {
+    res.status(400).json({ error: "Invalid case ID" });
+    return;
+  }
+  const exists = await tableExists(r, "public.case_document_checklist_items");
+  if (!exists) {
+    res.status(503).json({ error: "Checklist tracking not available" });
+    return;
+  }
+  const body = (req.body && typeof req.body === "object") ? (req.body as Record<string, unknown>) : {};
+  const label = typeof body.label === "string" ? body.label.trim() : "";
+  const isRequired = Object.prototype.hasOwnProperty.call(body, "isRequired") ? Boolean(body.isRequired) : false;
+  const notes = typeof body.notes === "string" ? body.notes.trim() : null;
+  const sortOrder = typeof body.sortOrder === "number" && Number.isFinite(body.sortOrder) ? Math.max(0, Math.floor(body.sortOrder)) : 0;
+  if (!label) {
+    res.status(400).json({ error: "Missing label" });
+    return;
+  }
+  const caseGuard = await queryRows(r, sql`SELECT 1 FROM cases WHERE id = ${caseId} AND firm_id = ${req.firmId!}`);
+  if (!caseGuard[0]) {
+    res.status(404).json({ error: "Case not found" });
+    return;
+  }
+  const checklistKey = `manual:${randomUUID()}`;
+  const rows = await queryRows(r, sql`
+    INSERT INTO case_document_checklist_items (
+      firm_id, case_id, checklist_key,
+      template_id, platform_document_id, case_document_id,
+      label, source_type, applicability_result,
+      is_required, status, notes,
+      sort_order, updated_at
+    ) VALUES (
+      ${req.firmId!}, ${caseId}, ${checklistKey},
+      NULL, NULL, NULL,
+      ${label}, 'manual', NULL,
+      ${isRequired}, 'pending', ${notes as any},
+      ${sortOrder}, now()
+    )
+    RETURNING *
+  `);
+  await writeAuditLog({
+    firmId: req.firmId,
+    actorId: req.userId,
+    actorType: req.userType,
+    action: "checklist.manual.create",
+    entityType: "case",
+    entityId: caseId,
+    detail: `checklistKey=${checklistKey} label=${label} required=${isRequired}`,
+    ipAddress: req.ip,
+    userAgent: req.headers["user-agent"],
+  });
+  res.status(201).json(rows[0]);
+});
+
+router.post("/cases/:caseId/documents/checklist/items/:checklistKey/received", requireAuth, requireFirmUser, requirePermission("documents", "update"), async (req: AuthRequest, res): Promise<void> => {
+  const r = getRlsDb(req, res);
+  if (!r) return;
+  const caseIdStr = one((req.params as any).caseId);
+  const rawKey = one((req.params as any).checklistKey);
+  const caseId = caseIdStr ? parseInt(caseIdStr, 10) : NaN;
+  const checklistKey = rawKey ? String(rawKey) : "";
+  if (Number.isNaN(caseId) || !checklistKey) {
+    res.status(400).json({ error: "Invalid params" });
+    return;
+  }
+  const exists = await tableExists(r, "public.case_document_checklist_items");
+  if (!exists) {
+    res.status(503).json({ error: "Checklist tracking not available" });
+    return;
+  }
+  const caseGuard = await queryRows(r, sql`SELECT 1 FROM cases WHERE id = ${caseId} AND firm_id = ${req.firmId!}`);
+  if (!caseGuard[0]) {
+    res.status(404).json({ error: "Case not found" });
+    return;
+  }
+  const label = typeof (req.body as any)?.label === "string" ? String((req.body as any).label).trim() : null;
+  const notes = typeof (req.body as any)?.notes === "string" ? String((req.body as any).notes).trim() : null;
+  const { templateId, platformDocumentId } = parseChecklistKeyTarget(checklistKey);
+  const rows = await queryRows(r, sql`
+    INSERT INTO case_document_checklist_items (
+      firm_id, case_id, checklist_key,
+      template_id, platform_document_id,
+      label, source_type, is_required,
+      status, notes, received_at, received_by, updated_at
+    ) VALUES (
+      ${req.firmId!}, ${caseId}, ${checklistKey},
+      ${templateId ?? null}, ${platformDocumentId ?? null},
+      ${label ?? checklistKey}, 'external_received', false,
+      'received', ${notes as any}, now(), ${req.userId ?? null}, now()
+    )
+    ON CONFLICT (firm_id, case_id, checklist_key)
+    DO UPDATE SET
+      status = 'received',
+      source_type = 'external_received',
+      notes = COALESCE(EXCLUDED.notes, case_document_checklist_items.notes),
+      received_at = now(),
+      received_by = ${req.userId ?? null},
+      updated_at = now()
+    RETURNING *
+  `);
+  await writeAuditLog({
+    firmId: req.firmId,
+    actorId: req.userId,
+    actorType: req.userType,
+    action: "checklist.received",
+    entityType: "case",
+    entityId: caseId,
+    detail: `checklistKey=${checklistKey}`,
+    ipAddress: req.ip,
+    userAgent: req.headers["user-agent"],
+  });
+  res.json(rows[0]);
+});
+
+router.post("/cases/:caseId/documents/checklist/items/:checklistKey/completed", requireAuth, requireFirmUser, requirePermission("documents", "update"), async (req: AuthRequest, res): Promise<void> => {
+  const r = getRlsDb(req, res);
+  if (!r) return;
+  const caseIdStr = one((req.params as any).caseId);
+  const rawKey = one((req.params as any).checklistKey);
+  const caseId = caseIdStr ? parseInt(caseIdStr, 10) : NaN;
+  const checklistKey = rawKey ? String(rawKey) : "";
+  if (Number.isNaN(caseId) || !checklistKey) {
+    res.status(400).json({ error: "Invalid params" });
+    return;
+  }
+  const exists = await tableExists(r, "public.case_document_checklist_items");
+  if (!exists) {
+    res.status(503).json({ error: "Checklist tracking not available" });
+    return;
+  }
+  const caseGuard = await queryRows(r, sql`SELECT 1 FROM cases WHERE id = ${caseId} AND firm_id = ${req.firmId!}`);
+  if (!caseGuard[0]) {
+    res.status(404).json({ error: "Case not found" });
+    return;
+  }
+  const label = typeof (req.body as any)?.label === "string" ? String((req.body as any).label).trim() : null;
+  const notes = typeof (req.body as any)?.notes === "string" ? String((req.body as any).notes).trim() : null;
+  const { templateId, platformDocumentId } = parseChecklistKeyTarget(checklistKey);
+  const rows = await queryRows(r, sql`
+    INSERT INTO case_document_checklist_items (
+      firm_id, case_id, checklist_key,
+      template_id, platform_document_id,
+      label, source_type, is_required,
+      status, notes, completed_at, completed_by, updated_at
+    ) VALUES (
+      ${req.firmId!}, ${caseId}, ${checklistKey},
+      ${templateId ?? null}, ${platformDocumentId ?? null},
+      ${label ?? checklistKey}, 'manual', false,
+      'completed', ${notes as any}, now(), ${req.userId ?? null}, now()
+    )
+    ON CONFLICT (firm_id, case_id, checklist_key)
+    DO UPDATE SET
+      status = 'completed',
+      notes = COALESCE(EXCLUDED.notes, case_document_checklist_items.notes),
+      completed_at = now(),
+      completed_by = ${req.userId ?? null},
+      updated_at = now()
+    RETURNING *
+  `);
+  await writeAuditLog({
+    firmId: req.firmId,
+    actorId: req.userId,
+    actorType: req.userType,
+    action: "checklist.completed",
+    entityType: "case",
+    entityId: caseId,
+    detail: `checklistKey=${checklistKey}`,
+    ipAddress: req.ip,
+    userAgent: req.headers["user-agent"],
+  });
+  res.json(rows[0]);
+});
+
+router.post("/cases/:caseId/documents/checklist/items/:checklistKey/waive", requireAuth, requireFirmUser, requirePermission("documents", "update"), async (req: AuthRequest, res): Promise<void> => {
+  const r = getRlsDb(req, res);
+  if (!r) return;
+  const caseIdStr = one((req.params as any).caseId);
+  const rawKey = one((req.params as any).checklistKey);
+  const caseId = caseIdStr ? parseInt(caseIdStr, 10) : NaN;
+  const checklistKey = rawKey ? String(rawKey) : "";
+  if (Number.isNaN(caseId) || !checklistKey) {
+    res.status(400).json({ error: "Invalid params" });
+    return;
+  }
+  const exists = await tableExists(r, "public.case_document_checklist_items");
+  if (!exists) {
+    res.status(503).json({ error: "Checklist tracking not available" });
+    return;
+  }
+  const body = (req.body && typeof req.body === "object") ? (req.body as Record<string, unknown>) : {};
+  const reason = typeof body.reason === "string" ? body.reason.trim() : "";
+  if (!reason) {
+    res.status(400).json({ error: "Missing reason" });
+    return;
+  }
+  const label = typeof body.label === "string" ? body.label.trim() : null;
+  const notes = typeof body.notes === "string" ? body.notes.trim() : null;
+  const { templateId, platformDocumentId } = parseChecklistKeyTarget(checklistKey);
+  const rows = await queryRows(r, sql`
+    INSERT INTO case_document_checklist_items (
+      firm_id, case_id, checklist_key,
+      template_id, platform_document_id,
+      label, source_type, is_required,
+      status, notes, waived_at, waived_by, waived_reason, updated_at
+    ) VALUES (
+      ${req.firmId!}, ${caseId}, ${checklistKey},
+      ${templateId ?? null}, ${platformDocumentId ?? null},
+      ${label ?? checklistKey}, 'manual', false,
+      'waived', ${notes as any}, now(), ${req.userId ?? null}, ${reason}, now()
+    )
+    ON CONFLICT (firm_id, case_id, checklist_key)
+    DO UPDATE SET
+      status = 'waived',
+      notes = COALESCE(EXCLUDED.notes, case_document_checklist_items.notes),
+      waived_at = now(),
+      waived_by = ${req.userId ?? null},
+      waived_reason = ${reason},
+      updated_at = now()
+    RETURNING *
+  `);
+  await writeAuditLog({
+    firmId: req.firmId,
+    actorId: req.userId,
+    actorType: req.userType,
+    action: "checklist.waived",
+    entityType: "case",
+    entityId: caseId,
+    detail: `checklistKey=${checklistKey} reason=${reason}`,
+    ipAddress: req.ip,
+    userAgent: req.headers["user-agent"],
+  });
+  res.json(rows[0]);
+});
+
+router.post("/cases/:caseId/documents/checklist/items/:checklistKey/reopen", requireAuth, requireFirmUser, requirePermission("documents", "update"), async (req: AuthRequest, res): Promise<void> => {
+  const r = getRlsDb(req, res);
+  if (!r) return;
+  const caseIdStr = one((req.params as any).caseId);
+  const rawKey = one((req.params as any).checklistKey);
+  const caseId = caseIdStr ? parseInt(caseIdStr, 10) : NaN;
+  const checklistKey = rawKey ? String(rawKey) : "";
+  if (Number.isNaN(caseId) || !checklistKey) {
+    res.status(400).json({ error: "Invalid params" });
+    return;
+  }
+  const exists = await tableExists(r, "public.case_document_checklist_items");
+  if (!exists) {
+    res.status(503).json({ error: "Checklist tracking not available" });
+    return;
+  }
+  const rows = await queryRows(r, sql`
+    UPDATE case_document_checklist_items
+    SET
+      status = 'pending',
+      received_at = NULL,
+      received_by = NULL,
+      completed_at = NULL,
+      completed_by = NULL,
+      waived_at = NULL,
+      waived_by = NULL,
+      waived_reason = NULL,
+      updated_at = now()
+    WHERE firm_id = ${req.firmId!} AND case_id = ${caseId} AND checklist_key = ${checklistKey}
+    RETURNING *
+  `);
+  if (!rows[0]) {
+    res.status(404).json({ error: "Checklist item not found" });
+    return;
+  }
+  await writeAuditLog({
+    firmId: req.firmId,
+    actorId: req.userId,
+    actorType: req.userType,
+    action: "checklist.reopened",
+    entityType: "case",
+    entityId: caseId,
+    detail: `checklistKey=${checklistKey}`,
+    ipAddress: req.ip,
+    userAgent: req.headers["user-agent"],
+  });
+  res.json(rows[0]);
+});
+
+router.post("/cases/:caseId/documents/checklist/items/:checklistKey/upload", requireAuth, requireFirmUser, requirePermission("documents", "create"), async (req: AuthRequest, res): Promise<void> => {
+  const r = getRlsDb(req, res);
+  if (!r) return;
+  const caseIdStr = one((req.params as any).caseId);
+  const rawKey = one((req.params as any).checklistKey);
+  const caseId = caseIdStr ? parseInt(caseIdStr, 10) : NaN;
+  const checklistKey = rawKey ? String(rawKey) : "";
+  if (Number.isNaN(caseId) || !checklistKey) {
+    res.status(400).json({ error: "Invalid params" });
+    return;
+  }
+  const exists = await tableExists(r, "public.case_document_checklist_items");
+  if (!exists) {
+    res.status(503).json({ error: "Checklist tracking not available" });
+    return;
+  }
+  const caseGuard = await queryRows(r, sql`SELECT 1 FROM cases WHERE id = ${caseId} AND firm_id = ${req.firmId!}`);
+  if (!caseGuard[0]) {
+    res.status(404).json({ error: "Case not found" });
+    return;
+  }
+  const body = (req.body && typeof req.body === "object") ? (req.body as Record<string, unknown>) : {};
+  const objectPath = typeof body.objectPath === "string" ? body.objectPath.trim() : "";
+  const fileName = typeof body.fileName === "string" ? body.fileName.trim() : "";
+  const mimeType = typeof body.mimeType === "string" ? body.mimeType.trim() : null;
+  const fileSize = typeof body.fileSize === "number" && Number.isFinite(body.fileSize) ? Math.max(0, Math.floor(body.fileSize)) : null;
+  const label = typeof body.label === "string" ? body.label.trim() : "";
+  if (!objectPath || !fileName) {
+    res.status(400).json({ error: "Missing objectPath or fileName" });
+    return;
+  }
+  if (!objectPath.startsWith(`/objects/cases/${req.firmId!}/case-${caseId}/documents/`)) {
+    res.status(400).json({ error: "Invalid objectPath" });
+    return;
+  }
+  const ext = fileExtensionFromName(fileName);
+  if (!ext || !CHECKLIST_ALLOWED_ATTACHMENT_EXTENSIONS.has(ext)) {
+    res.status(422).json({ error: "Unsupported file type. Allowed: pdf, doc, docx, jpg, jpeg, png" });
+    return;
+  }
+  const { templateId, platformDocumentId } = parseChecklistKeyTarget(checklistKey);
+  const templateSource = templateId ? "firm" : platformDocumentId ? "master" : null;
+
+  const existingRows = await queryRows(r, sql`
+    SELECT id, case_document_id
+    FROM case_document_checklist_items
+    WHERE firm_id = ${req.firmId!} AND case_id = ${caseId} AND checklist_key = ${checklistKey}
+    LIMIT 1
+  `);
+  const existingChecklist = existingRows[0] ?? null;
+  const previousCaseDocumentId =
+    existingChecklist && (existingChecklist as any).case_document_id
+      ? Number((existingChecklist as any).case_document_id)
+      : null;
+
+  const inserted = await queryRows(r, sql`
+    INSERT INTO case_documents (
+      case_id, firm_id,
+      template_id, template_source, platform_document_id,
+      name, document_type, status,
+      object_path, file_name, file_size,
+      is_uploaded, generated_by, generated_at
+    )
+    VALUES (
+      ${caseId}, ${req.firmId!},
+      ${templateId ?? null}, ${templateSource as any}, ${platformDocumentId ?? null},
+      ${label || checklistKey}, 'uploaded', 'uploaded',
+      ${objectPath}, ${fileName}, ${fileSize as any},
+      true, ${req.userId ?? null}, now()
+    )
+    RETURNING *
+  `);
+  const created = inserted[0];
+  const createdId = created && typeof created === "object" && "id" in created ? Number((created as any).id) : null;
+
+  const upserted = await queryRows(r, sql`
+    INSERT INTO case_document_checklist_items (
+      firm_id, case_id, checklist_key,
+      template_id, platform_document_id, case_document_id,
+      label, source_type, is_required,
+      status, notes, updated_at
+    ) VALUES (
+      ${req.firmId!}, ${caseId}, ${checklistKey},
+      ${templateId ?? null}, ${platformDocumentId ?? null}, ${createdId as any},
+      ${label || checklistKey}, 'uploaded', false,
+      'uploaded', NULL, now()
+    )
+    ON CONFLICT (firm_id, case_id, checklist_key)
+    DO UPDATE SET
+      case_document_id = EXCLUDED.case_document_id,
+      status = 'uploaded',
+      source_type = 'uploaded',
+      label = COALESCE(EXCLUDED.label, case_document_checklist_items.label),
+      updated_at = now()
+    RETURNING *
+  `);
+
+  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.case.upload", entityType: "case_document", entityId: createdId ?? undefined, detail: `caseId=${caseId} name=${label || checklistKey} fileName=${fileName}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+  await writeAuditLog({
+    firmId: req.firmId,
+    actorId: req.userId,
+    actorType: req.userType,
+    action: previousCaseDocumentId ? "checklist.upload_replaced" : "checklist.upload",
+    entityType: "case",
+    entityId: caseId,
+    detail: `checklistKey=${checklistKey} caseDocumentId=${createdId ?? ""} prevCaseDocumentId=${previousCaseDocumentId ?? ""}`,
+    ipAddress: req.ip,
+    userAgent: req.headers["user-agent"],
+  });
+  res.status(201).json({ checklist: upserted[0], caseDocument: created });
+});
+
+router.post("/cases/:caseId/documents/checklist/items/:checklistKey/upload-event", requireAuth, requireFirmUser, requirePermission("documents", "update"), async (req: AuthRequest, res): Promise<void> => {
+  const r = getRlsDb(req, res);
+  if (!r) return;
+  const caseIdStr = one((req.params as any).caseId);
+  const rawKey = one((req.params as any).checklistKey);
+  const caseId = caseIdStr ? parseInt(caseIdStr, 10) : NaN;
+  const checklistKey = rawKey ? String(rawKey) : "";
+  if (Number.isNaN(caseId) || !checklistKey) {
+    res.status(400).json({ error: "Invalid params" });
+    return;
+  }
+  const exists = await tableExists(r, "public.case_document_checklist_items");
+  if (!exists) {
+    res.status(503).json({ error: "Checklist tracking not available" });
+    return;
+  }
+  const body = (req.body && typeof req.body === "object") ? (req.body as Record<string, unknown>) : {};
+  const event = typeof body.event === "string" ? body.event.trim() : "";
+  const allowed = new Set(["upload", "upload_replaced", "upload_removed"]);
+  if (!allowed.has(event)) {
+    res.status(400).json({ error: "Invalid event" });
+    return;
+  }
+  const label = typeof body.label === "string" ? body.label.trim() : null;
+  const { templateId, platformDocumentId } = parseChecklistKeyTarget(checklistKey);
+  await queryRows(r, sql`
+    INSERT INTO case_document_checklist_items (
+      firm_id, case_id, checklist_key,
+      template_id, platform_document_id,
+      label, source_type, is_required,
+      status, updated_at
+    ) VALUES (
+      ${req.firmId!}, ${caseId}, ${checklistKey},
+      ${templateId ?? null}, ${platformDocumentId ?? null},
+      ${label ?? checklistKey}, 'uploaded', false,
+      'pending', now()
+    )
+    ON CONFLICT (firm_id, case_id, checklist_key)
+    DO UPDATE SET
+      updated_at = now()
+  `);
+  await writeAuditLog({
+    firmId: req.firmId,
+    actorId: req.userId,
+    actorType: req.userType,
+    action: `checklist.${event}`,
+    entityType: "case",
+    entityId: caseId,
+    detail: `checklistKey=${checklistKey}`,
+    ipAddress: req.ip,
+    userAgent: req.headers["user-agent"],
+  });
+  res.json({ ok: true });
+});
+
+router.get("/cases/:caseId/documents/checklist/history", requireAuth, requireFirmUser, requirePermission("documents", "read"), async (req: AuthRequest, res): Promise<void> => {
+  const r = getRlsDb(req, res);
+  if (!r) return;
+  const caseIdStr = one((req.params as any).caseId);
+  const caseId = caseIdStr ? parseInt(caseIdStr, 10) : NaN;
+  if (Number.isNaN(caseId)) {
+    res.status(400).json({ error: "Invalid case ID" });
+    return;
+  }
+  const exists = await tableExists(r, "public.audit_logs");
+  if (!exists) {
+    res.json([]);
+    return;
+  }
+  const rows = await queryRows(r, sql`
+    SELECT *
+    FROM audit_logs
+    WHERE firm_id = ${req.firmId!}
+      AND entity_type = 'case'
+      AND entity_id = ${caseId}
+      AND action LIKE 'checklist.%'
+    ORDER BY created_at DESC, id DESC
+    LIMIT 200
+  `);
+  res.json(rows);
 });
 
 class DocumentGenerationError extends Error {
@@ -4704,6 +5560,40 @@ router.delete("/cases/:caseId/documents/:docId", requireAuth, requireFirmUser, r
   const deleted = rows[0];
   const deletedName = deleted && typeof deleted === "object" && "name" in deleted ? String((deleted as { name?: unknown }).name) : undefined;
   await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.case.delete", entityType: "case_document", entityId: docId, detail: deletedName ? `caseId=${caseId} name=${deletedName}` : `caseId=${caseId}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+
+  if (await tableExists(r, "public.case_document_checklist_items")) {
+    const linked = await queryRows(r, sql`
+      SELECT checklist_key
+      FROM case_document_checklist_items
+      WHERE firm_id = ${req.firmId!} AND case_id = ${caseId} AND case_document_id = ${docId}
+    `);
+    for (const row of linked) {
+      const checklistKey = typeof row.checklist_key === "string" ? String(row.checklist_key) : String(row.checklist_key ?? "");
+      if (!checklistKey) continue;
+      await queryRows(r, sql`
+        UPDATE case_document_checklist_items
+        SET
+          case_document_id = NULL,
+          status = 'pending',
+          completed_at = NULL,
+          completed_by = NULL,
+          updated_at = now()
+        WHERE firm_id = ${req.firmId!} AND case_id = ${caseId} AND checklist_key = ${checklistKey}
+      `);
+      await writeAuditLog({
+        firmId: req.firmId,
+        actorId: req.userId,
+        actorType: req.userType,
+        action: "checklist.upload_removed",
+        entityType: "case",
+        entityId: caseId,
+        detail: `checklistKey=${checklistKey} caseDocumentId=${docId}`,
+        ipAddress: req.ip,
+        userAgent: req.headers["user-agent"],
+      });
+    }
+  }
+
   res.sendStatus(204);
 });
 

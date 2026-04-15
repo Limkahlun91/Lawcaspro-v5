@@ -97,6 +97,7 @@ interface TemplateBindingsResponse {
 interface TemplateApplicabilityResponse {
   effective: {
     isActive: boolean;
+    isRequired: boolean;
     purchaseMode: string | null;
     titleType: string | null;
     caseType: string | null;
@@ -916,6 +917,11 @@ export default function DocumentTemplates() {
                       </div>
                     </div>
 
+                    <div className="flex items-center gap-2">
+                      <Checkbox checked={Boolean(appDraft.isRequired)} onCheckedChange={(v) => setAppDraft({ ...appDraft, isRequired: Boolean(v) })} disabled={!canUpdate} />
+                      <span className="text-sm text-slate-700">Required in checklist</span>
+                    </div>
+
                     <div className="grid grid-cols-2 gap-3">
                       <div className="space-y-1.5">
                         <Label>Purchase mode</Label>
@@ -978,6 +984,7 @@ export default function DocumentTemplates() {
                             templateId: activeTemplate.id,
                             patch: {
                               isActive: appDraft.isActive,
+                              isRequired: appDraft.isRequired,
                               purchaseMode: appDraft.purchaseMode,
                               titleType: appDraft.titleType,
                               caseType: appDraft.caseType,
