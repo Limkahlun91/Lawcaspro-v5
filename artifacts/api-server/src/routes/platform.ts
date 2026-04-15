@@ -9,6 +9,7 @@ import {
   rolesTable,
   systemFoldersTable,
   platformDocumentsTable,
+  platformClausesTable,
   platformMessagesTable,
   platformMessageAttachmentsTable,
 } from "@workspace/db";
@@ -848,6 +849,105 @@ router.put("/platform/documents/:docId/pdf-mappings", requireAuth, requireFounde
 
   if (result.kind === "not_found") { res.status(404).json({ error: "Document not found" }); return; }
   res.json({ success: true });
+});
+
+router.get("/platform/clauses", requireAuth, requireFounder, async (req: AuthRequest, res): Promise<void> => {
+  const q = typeof req.query.q === "string" ? req.query.q.trim() : "";
+  const status = typeof req.query.status === "string" ? req.query.status.trim() : "";
+  const category = typeof req.query.category === "string" ? req.query.category.trim() : "";
+  const tag = typeof req.query.tag === "string" ? req.query.tag.trim() : "";
+  const language = typeof req.query.language === "string" ? req.query.language.trim() : "";
+
+  const where: SQL[] = [];
+  if (status) where.push(eq(platformClausesTable.status, status));
+  if (category) where.push(eq(platformClausesTable.category, category));
+  if (language) where.push(eq(platformClausesTable.language, language));
+  if (q) where.push(or(
+    ilike(platformClausesTable.clauseCode, `%${q}%`),
+    ilike(platformClausesTable.title, `%${q}%`),
+    ilike(platformClausesTable.body, `%${q}%`),
+    ilike(sql`COALESCE(${platformClausesTable.notes}, '')`, `%${q}%`),
+  ) as any);
+  if (tag) where.push(sql`${platformClausesTable.tags} @> ARRAY[${tag}]::text[]`);
+
+  const rows = await withAuthSafeDb(async (authDb) =>
+    authDb.select().from(platformClausesTable).where(where.length ? and(...where) : undefined).orderBy(platformClausesTable.sortOrder, platformClausesTable.clauseCode).limit(500)
+  );
+  res.json(rows);
+});
+
+router.post("/platform/clauses", requireAuth, requireFounder, async (req: AuthRequest, res): Promise<void> => {
+  const body = (req.body && typeof req.body === "object") ? (req.body as Record<string, unknown>) : {};
+  const title = typeof body.title === "string" ? body.title.trim() : "";
+  const clauseCodeRaw = typeof body.clauseCode === "string" ? body.clauseCode.trim() : "";
+  const clauseCode = clauseCodeRaw ? clauseCodeRaw.toUpperCase().replace(/[^A-Z0-9_]/g, "_").replace(/_+/g, "_").replace(/^_+|_+$/g, "") : "";
+  const category = typeof body.category === "string" ? body.category.trim() : "General";
+  const language = typeof body.language === "string" ? body.language.trim() : "en";
+  const clauseBody = typeof body.body === "string" ? body.body : "";
+  const notes = typeof body.notes === "string" ? body.notes : null;
+  const tags = Array.isArray(body.tags) ? body.tags.filter((x): x is string => typeof x === "string" && Boolean(x.trim())).map((x) => x.trim()) : [];
+  const status = typeof body.status === "string" ? body.status : "draft";
+  const isSystem = typeof body.isSystem === "boolean" ? body.isSystem : false;
+  const sortOrder = typeof body.sortOrder === "number" && Number.isFinite(body.sortOrder) ? Math.floor(body.sortOrder) : 0;
+  const applicability = body.applicability && typeof body.applicability === "object" ? body.applicability : null;
+
+  if (!title || !clauseBody) { res.status(400).json({ error: "Missing title or body" }); return; }
+  const finalCode = clauseCode || title.toUpperCase().replace(/[^A-Z0-9_]/g, "_").replace(/_+/g, "_").replace(/^_+|_+$/g, "") || "CLAUSE";
+
+  const created = await withAuthSafeDb(async (authDb) => {
+    const [row] = await authDb
+      .insert(platformClausesTable)
+      .values({
+        clauseCode: finalCode,
+        title,
+        category,
+        language,
+        body: clauseBody,
+        notes,
+        tags,
+        status,
+        isSystem,
+        sortOrder,
+        applicability: applicability as any,
+        createdBy: req.userId ?? null,
+        updatedBy: req.userId ?? null,
+      })
+      .returning();
+    await writeAuditLog({ firmId: null, actorId: req.userId, actorType: req.userType, action: "clauses.platform.create", entityType: "platform_clause", entityId: row.id, detail: `clauseCode=${finalCode}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] }, { db: authDb, strict: true });
+    return row;
+  });
+  res.status(201).json(created);
+});
+
+router.put("/platform/clauses/:id", requireAuth, requireFounder, async (req: AuthRequest, res): Promise<void> => {
+  const idStr = one(req.params.id as any);
+  const id = idStr ? parseInt(idStr, 10) : NaN;
+  if (!Number.isFinite(id)) { res.status(400).json({ error: "Invalid id" }); return; }
+  const body = (req.body && typeof req.body === "object") ? (req.body as Record<string, unknown>) : {};
+
+  const patch: Record<string, unknown> = {};
+  if (typeof body.title === "string") patch.title = body.title.trim();
+  if (typeof body.clauseCode === "string") patch.clauseCode = body.clauseCode.trim().toUpperCase().replace(/[^A-Z0-9_]/g, "_").replace(/_+/g, "_").replace(/^_+|_+$/g, "") || null;
+  if (typeof body.category === "string") patch.category = body.category.trim();
+  if (typeof body.language === "string") patch.language = body.language.trim();
+  if (typeof body.body === "string") patch.body = body.body;
+  if (Object.prototype.hasOwnProperty.call(body, "notes")) patch.notes = typeof body.notes === "string" ? body.notes : null;
+  if (Object.prototype.hasOwnProperty.call(body, "tags")) patch.tags = Array.isArray(body.tags) ? body.tags.filter((x): x is string => typeof x === "string" && Boolean(x.trim())).map((x) => x.trim()) : [];
+  if (typeof body.status === "string") patch.status = body.status;
+  if (typeof body.isSystem === "boolean") patch.isSystem = body.isSystem;
+  if (typeof body.sortOrder === "number" && Number.isFinite(body.sortOrder)) patch.sortOrder = Math.floor(body.sortOrder);
+  if (Object.prototype.hasOwnProperty.call(body, "applicability")) patch.applicability = body.applicability && typeof body.applicability === "object" ? body.applicability : null;
+  patch.updatedBy = req.userId ?? null;
+  patch.updatedAt = new Date();
+
+  const updated = await withAuthSafeDb(async (authDb) => {
+    const [row] = await authDb.update(platformClausesTable).set(patch as any).where(eq(platformClausesTable.id, id)).returning();
+    if (!row) return null;
+    await writeAuditLog({ firmId: null, actorId: req.userId, actorType: req.userType, action: "clauses.platform.update", entityType: "platform_clause", entityId: id, detail: `clauseId=${id}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] }, { db: authDb, strict: true });
+    return row;
+  });
+  if (!updated) { res.status(404).json({ error: "Clause not found" }); return; }
+  res.json(updated);
 });
 
 // ─── Platform Messages (Communication Hub) ───────────────────────────────────

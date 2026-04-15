@@ -1,4 +1,5 @@
-import { pgTable, serial, text, integer, boolean, timestamp, index, date, jsonb, uuid } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
+import { pgTable, serial, text, integer, boolean, timestamp, index, date, jsonb, uuid, uniqueIndex } from "drizzle-orm/pg-core";
 
 export const documentTemplatesTable = pgTable("document_templates", {
   id: serial("id").primaryKey(),
@@ -297,4 +298,31 @@ export const caseDocumentChecklistItemsTable = pgTable("case_document_checklist_
 }, (t) => ({
   caseIdx: index("idx_case_document_checklist_items_case").on(t.firmId, t.caseId, t.sortOrder),
   statusIdx: index("idx_case_document_checklist_items_status").on(t.firmId, t.caseId, t.status),
+}));
+
+export const firmClausesTable = pgTable("firm_clauses", {
+  id: serial("id").primaryKey(),
+  firmId: integer("firm_id").notNull(),
+  sourcePlatformClauseId: integer("source_platform_clause_id"),
+  clauseCode: text("clause_code").notNull(),
+  title: text("title").notNull(),
+  category: text("category").notNull().default("General"),
+  language: text("language").notNull().default("en"),
+  body: text("body").notNull(),
+  notes: text("notes"),
+  tags: text("tags").array().notNull().default(sql`'{}'::text[]`),
+  status: text("status").notNull().default("draft"),
+  isSystem: boolean("is_system").notNull().default(false),
+  sortOrder: integer("sort_order").notNull().default(0),
+  applicability: jsonb("applicability"),
+  createdBy: integer("created_by"),
+  updatedBy: integer("updated_by"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow().$onUpdate(() => new Date()),
+}, (t) => ({
+  codeUq: uniqueIndex("uq_firm_clauses_code").on(t.firmId, t.clauseCode),
+  statusIdx: index("idx_firm_clauses_status").on(t.firmId, t.status),
+  categoryIdx: index("idx_firm_clauses_category").on(t.firmId, t.category),
+  languageIdx: index("idx_firm_clauses_language").on(t.firmId, t.language),
+  tagsIdx: index("idx_firm_clauses_tags").using("gin", t.tags),
 }));

@@ -148,6 +148,19 @@ export default function DocumentTemplates() {
   const [editFileNamingRule, setEditFileNamingRule] = useState<string>("");
   const [previewCaseId, setPreviewCaseId] = useState<string>("");
   const [previewFileName, setPreviewFileName] = useState<string>("");
+  const [clauseDialogOpen, setClauseDialogOpen] = useState(false);
+  const [clauseScope, setClauseScope] = useState<"all" | "firm" | "platform">("all");
+  const [clauseSearch, setClauseSearch] = useState("");
+  const [clauseEditorOpen, setClauseEditorOpen] = useState(false);
+  const [editingClause, setEditingClause] = useState<any | null>(null);
+  const [clauseTitle, setClauseTitle] = useState("");
+  const [clauseCode, setClauseCode] = useState("");
+  const [clauseCategory, setClauseCategory] = useState("General");
+  const [clauseLanguage, setClauseLanguage] = useState("en");
+  const [clauseBody, setClauseBody] = useState("");
+  const [clauseStatus, setClauseStatus] = useState("draft");
+  const [clauseTags, setClauseTags] = useState("");
+  const [clauseIncludeTitle, setClauseIncludeTitle] = useState(true);
   const [detailTab, setDetailTab] = useState<"details" | "versions" | "bindings" | "applicability">("details");
   const [versionFile, setVersionFile] = useState<File | null>(null);
   const [bindingsDraft, setBindingsDraft] = useState<Record<string, DocumentTemplateBinding>>({});
@@ -177,6 +190,63 @@ export default function DocumentTemplates() {
     enabled: canRead,
   });
   const templates = templatesQuery.data ?? [];
+
+  type ClauseRow = {
+    id: number;
+    scope: "firm" | "platform";
+    clause_code: string;
+    title: string;
+    category: string;
+    language: string;
+    body?: string;
+    notes?: string | null;
+    tags: string[];
+    status: string;
+    is_system?: boolean;
+    sort_order?: number;
+    applicable?: boolean;
+  };
+
+  const clausesQuery = useQuery<ClauseRow[]>({
+    queryKey: ["clauses", clauseScope, clauseSearch, clauseDialogOpen],
+    queryFn: ({ signal }) => apiFetchJson(`/clauses?scope=${clauseScope}&includeBody=1&${clauseSearch ? `q=${encodeURIComponent(clauseSearch)}&` : ""}`, { signal }),
+    enabled: clauseDialogOpen,
+    retry: false,
+  });
+
+  const clauseUpsertMutation = useMutation({
+    mutationFn: async () => {
+      const payload = {
+        title: clauseTitle.trim(),
+        clauseCode: clauseCode.trim(),
+        category: clauseCategory,
+        language: clauseLanguage.trim() || "en",
+        body: clauseBody,
+        status: clauseStatus,
+        tags: clauseTags.split(",").map((x) => x.trim()).filter(Boolean),
+      };
+      if (editingClause?.scope === "firm" && typeof editingClause?.id === "number") {
+        return apiFetchJson(`/clauses/${editingClause.id}`, { method: "PUT", body: JSON.stringify(payload) });
+      }
+      return apiFetchJson(`/clauses`, { method: "POST", body: JSON.stringify(payload) });
+    },
+    onSuccess: async () => {
+      await qc.invalidateQueries({ queryKey: ["clauses"] });
+      toast({ title: "Clause saved" });
+      setClauseEditorOpen(false);
+      setEditingClause(null);
+    },
+    onError: (e) => toastError(toast, e, "Save failed"),
+  });
+
+  const clauseCopyToFirmMutation = useMutation({
+    mutationFn: (id: number) => apiFetchJson(`/clauses/platform/${id}/copy`, { method: "POST" }),
+    onSuccess: async () => {
+      await qc.invalidateQueries({ queryKey: ["clauses"] });
+      toast({ title: "Copied to firm (draft)" });
+    },
+    onError: (e) => toastError(toast, e, "Copy failed"),
+  });
   const isLoading = templatesQuery.isLoading;
 
   const versionsQuery = useQuery<DocumentTemplateVersion[]>({
@@ -621,6 +691,17 @@ export default function DocumentTemplates() {
                         <span className="text-xs text-slate-500">Preview:</span> {previewFileName}
                       </div>
                     ) : null}
+                  </div>
+                  <div className="rounded-lg border border-slate-200 bg-white p-3">
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="text-sm font-medium text-slate-900">Clause Library</div>
+                      <Button variant="outline" size="sm" onClick={() => setClauseDialogOpen(true)} disabled={!canRead}>
+                        Open
+                      </Button>
+                    </div>
+                    <div className="mt-2 text-xs text-slate-500">
+                      Use clause body or placeholder {"{{clause_CODE}}"} in Word template.
+                    </div>
                   </div>
                   {activeTemplate.description ? (
                     <div>
@@ -1190,6 +1271,179 @@ export default function DocumentTemplates() {
 {/purchasers}`}
             </pre>
           </div>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={clauseDialogOpen} onOpenChange={setClauseDialogOpen}>
+        <DialogContent className="max-w-3xl max-h-[80vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>Clause Library</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-3">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <Select value={clauseScope} onValueChange={(v) => setClauseScope(v as any)}>
+                  <SelectTrigger className="w-[160px]"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="all">All</SelectItem>
+                    <SelectItem value="firm">Firm</SelectItem>
+                    <SelectItem value="platform">Platform</SelectItem>
+                  </SelectContent>
+                </Select>
+                <Input value={clauseSearch} onChange={(e) => setClauseSearch(e.target.value)} placeholder="Search title/code/body..." className="w-[260px]" />
+                <div className="flex items-center gap-2">
+                  <Checkbox checked={clauseIncludeTitle} onCheckedChange={(v) => setClauseIncludeTitle(Boolean(v))} />
+                  <span className="text-sm text-slate-700">Include title</span>
+                </div>
+              </div>
+              <Button
+                size="sm"
+                onClick={() => {
+                  setEditingClause(null);
+                  setClauseTitle("");
+                  setClauseCode("");
+                  setClauseCategory("General");
+                  setClauseLanguage("en");
+                  setClauseBody("");
+                  setClauseStatus("draft");
+                  setClauseTags("");
+                  setClauseEditorOpen(true);
+                }}
+                disabled={!canUpdate}
+              >
+                New firm clause
+              </Button>
+            </div>
+
+            <div className="space-y-2">
+              {(clausesQuery.data ?? []).map((c) => (
+                <div key={`${c.scope}-${c.id}`} className="rounded border bg-white p-2">
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="min-w-0">
+                      <div className="text-sm font-medium text-slate-900 truncate">{c.clause_code} • {c.title}</div>
+                      <div className="text-xs text-slate-500 truncate">{c.scope} • {c.category} • {c.language} • {c.status}</div>
+                    </div>
+                    <div className="flex items-center gap-2 flex-wrap justify-end">
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={async () => {
+                          const titleLine = clauseIncludeTitle ? `${c.title}\n` : "";
+                          const text = `${titleLine}${c.body ?? ""}`.trim();
+                          await navigator.clipboard.writeText(text);
+                          toast({ title: "Copied clause body" });
+                        }}
+                        disabled={!c.body}
+                      >
+                        Copy body
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={async () => {
+                          const ph = `{{clause_${c.clause_code}}}`;
+                          await navigator.clipboard.writeText(ph);
+                          toast({ title: "Copied placeholder", description: ph });
+                        }}
+                      >
+                        Copy placeholder
+                      </Button>
+                      {c.scope === "platform" ? (
+                        <Button size="sm" variant="outline" onClick={() => clauseCopyToFirmMutation.mutate(c.id)} disabled={!canUpdate}>
+                          Copy to firm
+                        </Button>
+                      ) : (
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={() => {
+                            setEditingClause(c);
+                            setClauseTitle(c.title);
+                            setClauseCode(c.clause_code);
+                            setClauseCategory(c.category);
+                            setClauseLanguage(c.language);
+                            setClauseBody(c.body ?? "");
+                            setClauseStatus(c.status);
+                            setClauseTags((c.tags ?? []).join(", "));
+                            setClauseEditorOpen(true);
+                          }}
+                          disabled={!canUpdate}
+                        >
+                          Edit
+                        </Button>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              ))}
+              {(clausesQuery.data ?? []).length === 0 ? <div className="text-sm text-slate-500 py-6">No clauses.</div> : null}
+            </div>
+          </div>
+
+          <Dialog open={clauseEditorOpen} onOpenChange={setClauseEditorOpen}>
+            <DialogContent className="sm:max-w-lg">
+              <DialogHeader>
+                <DialogTitle>{editingClause ? "Edit Firm Clause" : "New Firm Clause"}</DialogTitle>
+              </DialogHeader>
+              <div className="space-y-3 py-2">
+                <div className="space-y-1.5">
+                  <Label>Title</Label>
+                  <Input value={clauseTitle} onChange={(e) => setClauseTitle(e.target.value)} />
+                </div>
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="space-y-1.5">
+                    <Label>Clause code</Label>
+                    <Input value={clauseCode} onChange={(e) => setClauseCode(e.target.value)} placeholder="e.g. SPA_SPECIAL_CONDITION_01" />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label>Status</Label>
+                    <Select value={clauseStatus} onValueChange={setClauseStatus}>
+                      <SelectTrigger><SelectValue /></SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="draft">Draft</SelectItem>
+                        <SelectItem value="active">Active</SelectItem>
+                        <SelectItem value="archived">Archived</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                </div>
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="space-y-1.5">
+                    <Label>Category</Label>
+                    <Select value={clauseCategory} onValueChange={setClauseCategory}>
+                      <SelectTrigger><SelectValue /></SelectTrigger>
+                      <SelectContent>
+                        {["SPA","Loan","Banking","Property","Litigation","Corporate","General","Special Condition"].map((x) => (
+                          <SelectItem key={x} value={x}>{x}</SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label>Language</Label>
+                    <Input value={clauseLanguage} onChange={(e) => setClauseLanguage(e.target.value)} placeholder="en / zh-Hant" />
+                  </div>
+                </div>
+                <div className="space-y-1.5">
+                  <Label>Tags (comma separated)</Label>
+                  <Input value={clauseTags} onChange={(e) => setClauseTags(e.target.value)} placeholder="spa, special, purchaser" />
+                </div>
+                <div className="space-y-1.5">
+                  <Label>Body</Label>
+                  <Textarea value={clauseBody} onChange={(e) => setClauseBody(e.target.value)} rows={8} />
+                  <div className="text-xs text-slate-500">Placeholders: {"{{variable_key}}"}.</div>
+                </div>
+                <div className="flex justify-end gap-2 pt-2">
+                  <Button variant="outline" onClick={() => { setClauseEditorOpen(false); setEditingClause(null); }}>
+                    Cancel
+                  </Button>
+                  <Button onClick={() => clauseUpsertMutation.mutate()} disabled={!clauseTitle.trim() || !clauseBody.trim() || clauseUpsertMutation.isPending}>
+                    {clauseUpsertMutation.isPending ? "Saving..." : "Save"}
+                  </Button>
+                </div>
+              </div>
+            </DialogContent>
+          </Dialog>
         </DialogContent>
       </Dialog>
     </Card>

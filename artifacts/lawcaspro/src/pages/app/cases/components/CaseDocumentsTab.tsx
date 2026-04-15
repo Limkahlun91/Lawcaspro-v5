@@ -100,6 +100,11 @@ type DocumentPreviewResponse = {
   missingRequiredVariables: Array<{ variableKey: string; reason: string }>;
   unusedBindings: string[];
   placeholderWarnings: Array<{ placeholder: string; warning: string }>;
+  clauseInsertion?: null | {
+    selected: Array<{ scope: string; id: number; includeTitle?: boolean }>;
+    previewText: string;
+    warnings: Array<{ clauseId: number; scope: string; unknownVariables: string[] }>;
+  };
   applicabilityResult: { applicable: boolean; reasons: string[] };
   renderMode: string;
   previewSummary: { renderable: boolean; placeholdersCount: number; usedMode: string; missingRequiredCount: number };
@@ -152,6 +157,9 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
   const [previewItem, setPreviewItem] = useState<ChecklistItem | null>(null);
   const [previewResult, setPreviewResult] = useState<DocumentPreviewResponse | null>(null);
   const [previewFileName, setPreviewFileName] = useState<string>("");
+  const [selectedClauses, setSelectedClauses] = useState<Array<{ scope: "firm" | "platform"; id: number; includeTitle: boolean }>>([]);
+  const [clauseQuery, setClauseQuery] = useState("");
+  const [clauseIncludeTitleDefault, setClauseIncludeTitleDefault] = useState(true);
 
   const [checklistFilter, setChecklistFilter] = useState<"all" | "required" | "missing" | "completed" | "waived" | "not_applicable">("all");
   const [waiveDialogOpen, setWaiveDialogOpen] = useState(false);
@@ -184,6 +192,24 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
     queryKey: ["case-documents-checklist", caseId, showAllTemplates],
     queryFn: ({ signal }) => apiFetchJson(`/cases/${caseId}/documents/checklist${showAllTemplates && canBypassApplicability ? "?includeAll=1" : ""}`, { signal }),
     enabled: viewTab === "checklist" || generateDialogOpen,
+    retry: false,
+  });
+
+  type ClauseListItem = {
+    id: number;
+    scope: "firm" | "platform";
+    clause_code: string;
+    title: string;
+    category: string;
+    language: string;
+    status: string;
+    tags: string[];
+    applicable: boolean;
+  };
+
+  const clausesQuery = useQuery<ClauseListItem[]>({
+    queryKey: ["clauses", caseId, clauseQuery],
+    queryFn: ({ signal }) => apiFetchJson(`/clauses?scope=all&status=active&caseId=${caseId}&q=${encodeURIComponent(clauseQuery)}`, { signal }),
     retry: false,
   });
 
@@ -340,12 +366,12 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
       if (item.source === "firm") {
         created = await apiFetchJson(`/cases/${caseId}/documents/generate`, {
           method: "POST",
-          body: JSON.stringify({ templateId: Number(item.templateId), documentName: documentName || undefined, letterheadId: letterheadIdToSend, bypassApplicability }),
+          body: JSON.stringify({ templateId: Number(item.templateId), documentName: documentName || undefined, letterheadId: letterheadIdToSend, bypassApplicability, clauses: selectedClauses }),
         });
       } else {
         created = await apiFetchJson(`/cases/${caseId}/documents/generate-from-master`, {
           method: "POST",
-          body: JSON.stringify({ masterDocId: Number(item.templateId), documentName: documentName || undefined, letterheadId: letterheadIdToSend, bypassApplicability }),
+          body: JSON.stringify({ masterDocId: Number(item.templateId), documentName: documentName || undefined, letterheadId: letterheadIdToSend, bypassApplicability, clauses: selectedClauses }),
         });
       }
       await qc.invalidateQueries({ queryKey: ["case-documents", caseId] });
@@ -403,8 +429,8 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
         method: "POST",
         body: JSON.stringify(
           item.source === "firm"
-            ? { templateId: Number(item.templateId), bypassApplicability }
-            : { platformDocumentId: Number(item.templateId), bypassApplicability }
+            ? { templateId: Number(item.templateId), bypassApplicability, clauses: selectedClauses }
+            : { platformDocumentId: Number(item.templateId), bypassApplicability, clauses: selectedClauses }
         ),
       });
       setPreviewResult(result);
@@ -1215,6 +1241,59 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
             <div className="text-slate-500 py-6">No preview data.</div>
           ) : (
             <div className="space-y-4">
+              <div className="rounded-lg border border-slate-200 bg-white p-3">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="text-sm font-medium text-slate-900">Clauses</div>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => { if (previewItem) handlePreview(previewItem); }}
+                    disabled={!previewItem || previewLoading}
+                  >
+                    Update preview
+                  </Button>
+                </div>
+                <div className="mt-2 grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  <Input value={clauseQuery} onChange={(e) => setClauseQuery(e.target.value)} placeholder="Search clauses..." />
+                  <div className="flex items-center gap-2">
+                    <Checkbox checked={clauseIncludeTitleDefault} onCheckedChange={(v) => setClauseIncludeTitleDefault(Boolean(v))} />
+                    <span className="text-sm text-slate-700">Include title</span>
+                  </div>
+                </div>
+                <div className="mt-2 max-h-40 overflow-y-auto space-y-1">
+                  {(clausesQuery.data ?? []).slice(0, 50).map((c) => {
+                    const checked = selectedClauses.some((x) => x.scope === c.scope && x.id === c.id);
+                    return (
+                      <div key={`${c.scope}-${c.id}`} className="flex items-center justify-between gap-2 rounded border border-slate-100 px-2 py-1">
+                        <div className="min-w-0">
+                          <div className="text-sm text-slate-900 truncate">{c.clause_code} • {c.title}</div>
+                          <div className="text-xs text-slate-500 truncate">{c.scope} • {c.category} • {c.language}{c.applicable ? "" : " • not applicable"}</div>
+                        </div>
+                        <Checkbox
+                          checked={checked}
+                          onCheckedChange={(v) => {
+                            const next = selectedClauses.filter((x) => !(x.scope === c.scope && x.id === c.id));
+                            if (Boolean(v)) next.push({ scope: c.scope, id: c.id, includeTitle: clauseIncludeTitleDefault });
+                            setSelectedClauses(next);
+                          }}
+                        />
+                      </div>
+                    );
+                  })}
+                  {(clausesQuery.data ?? []).length === 0 ? <div className="text-sm text-slate-500 py-2">No clauses.</div> : null}
+                </div>
+                {previewResult.clauseInsertion?.previewText ? (
+                  <div className="mt-3 rounded border border-slate-200 bg-slate-50 p-2">
+                    <div className="text-xs text-slate-600">Insertion preview</div>
+                    <div className="mt-1 text-sm text-slate-800 whitespace-pre-wrap break-words">{previewResult.clauseInsertion.previewText}</div>
+                  </div>
+                ) : null}
+                {previewResult.clauseInsertion?.warnings?.length ? (
+                  <div className="mt-2 text-xs text-amber-700">
+                    Unknown variables in selected clauses: {previewResult.clauseInsertion.warnings.map((w) => w.unknownVariables).flat().filter(Boolean).slice(0, 10).join(", ")}
+                  </div>
+                ) : null}
+              </div>
               {previewFileName ? (
                 <div className="rounded-lg border border-slate-200 bg-white p-3">
                   <div className="text-sm font-medium text-slate-900">Output filename</div>

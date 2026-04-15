@@ -285,6 +285,17 @@ export default function PlatformDocuments() {
   const [namingPreviewFileName, setNamingPreviewFileName] = useState<string>("");
   const [bindingsOpen, setBindingsOpen] = useState(false);
   const [bindingsDraft, setBindingsDraft] = useState<Record<string, DocumentTemplateBinding>>({});
+  const [clausesOpen, setClausesOpen] = useState(false);
+  const [clauseSearch, setClauseSearch] = useState("");
+  const [clauseEditorOpen, setClauseEditorOpen] = useState(false);
+  const [editingClause, setEditingClause] = useState<any | null>(null);
+  const [clauseTitle, setClauseTitle] = useState("");
+  const [clauseCode, setClauseCode] = useState("");
+  const [clauseCategory, setClauseCategory] = useState("General");
+  const [clauseLanguage, setClauseLanguage] = useState("en");
+  const [clauseBody, setClauseBody] = useState("");
+  const [clauseStatus, setClauseStatus] = useState("draft");
+  const [clauseTags, setClauseTags] = useState("");
 
   useEffect(() => {
     if (!editingDoc) return;
@@ -312,6 +323,50 @@ export default function PlatformDocuments() {
     const r = platformDocRulesQuery.data.rules as any;
     setEditIsRequired(Boolean(r?.isRequired ?? r?.is_required ?? false));
   }, [platformDocRulesQuery.data]);
+
+  type PlatformClauseRow = {
+    id: number;
+    clauseCode: string;
+    title: string;
+    category: string;
+    language: string;
+    body: string;
+    notes: string | null;
+    tags: string[];
+    status: string;
+    isSystem: boolean;
+    sortOrder: number;
+  };
+
+  const platformClausesQuery = useQuery<PlatformClauseRow[]>({
+    queryKey: ["platform-clauses", clausesOpen, clauseSearch],
+    queryFn: ({ signal }) => apiFetchJson(`/platform/clauses?q=${encodeURIComponent(clauseSearch)}`, { signal }),
+    enabled: clausesOpen,
+    retry: false,
+  });
+
+  const platformClauseUpsertMutation = useMutation({
+    mutationFn: async () => {
+      const payload = {
+        title: clauseTitle.trim(),
+        clauseCode: clauseCode.trim(),
+        category: clauseCategory,
+        language: clauseLanguage.trim() || "en",
+        body: clauseBody,
+        status: clauseStatus,
+        tags: clauseTags.split(",").map((x) => x.trim()).filter(Boolean),
+      };
+      if (editingClause?.id) return apiFetchJson(`/platform/clauses/${editingClause.id}`, { method: "PUT", body: JSON.stringify(payload) });
+      return apiFetchJson(`/platform/clauses`, { method: "POST", body: JSON.stringify(payload) });
+    },
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ["platform-clauses"] });
+      toast({ title: "Clause saved" });
+      setClauseEditorOpen(false);
+      setEditingClause(null);
+    },
+    onError: (e) => toastError(toast, e, "Save failed"),
+  });
 
   const foldersQuery = useQuery<SystemFolder[]>({
     queryKey: ["system-folders"],
@@ -656,6 +711,12 @@ export default function PlatformDocuments() {
         <div>
           <h1 className="text-3xl font-bold text-slate-900 tracking-tight">System Documents</h1>
           <p className="text-slate-500 mt-1">Manage global system folders and master documents for all firms</p>
+        </div>
+        <div className="flex items-center gap-2">
+          <Button variant="outline" onClick={() => setClausesOpen(true)} className="gap-2">
+            <BookOpen className="w-4 h-4" />
+            Clauses
+          </Button>
         </div>
       </div>
 
@@ -1671,6 +1732,139 @@ export default function PlatformDocuments() {
               {saveVariableMutation.isPending ? "Saving..." : "Save"}
             </Button>
           </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={clausesOpen} onOpenChange={setClausesOpen}>
+        <DialogContent className="max-w-4xl max-h-[85vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>Platform Clauses</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-3">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+              <Input value={clauseSearch} onChange={(e) => setClauseSearch(e.target.value)} placeholder="Search clauses..." className="w-[320px]" />
+              <Button
+                size="sm"
+                onClick={() => {
+                  setEditingClause(null);
+                  setClauseTitle("");
+                  setClauseCode("");
+                  setClauseCategory("General");
+                  setClauseLanguage("en");
+                  setClauseBody("");
+                  setClauseStatus("draft");
+                  setClauseTags("");
+                  setClauseEditorOpen(true);
+                }}
+              >
+                New clause
+              </Button>
+            </div>
+
+            {platformClausesQuery.isError ? (
+              <QueryFallback title="Clauses unavailable" error={platformClausesQuery.error} onRetry={() => platformClausesQuery.refetch()} isRetrying={platformClausesQuery.isFetching} />
+            ) : platformClausesQuery.isLoading ? (
+              <div className="text-slate-500 text-sm py-6">Loading clauses...</div>
+            ) : (
+              <div className="space-y-2">
+                {(platformClausesQuery.data ?? []).map((c) => (
+                  <div key={c.id} className="rounded border bg-white p-2">
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="min-w-0">
+                        <div className="text-sm font-medium text-slate-900 truncate">{c.clauseCode} • {c.title}</div>
+                        <div className="text-xs text-slate-500 truncate">{c.category} • {c.language} • {c.status}</div>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={() => {
+                            setEditingClause(c);
+                            setClauseTitle(c.title);
+                            setClauseCode(c.clauseCode);
+                            setClauseCategory(c.category);
+                            setClauseLanguage(c.language);
+                            setClauseBody(c.body);
+                            setClauseStatus(c.status);
+                            setClauseTags((c.tags ?? []).join(", "));
+                            setClauseEditorOpen(true);
+                          }}
+                        >
+                          Edit
+                        </Button>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+                {(platformClausesQuery.data ?? []).length === 0 ? <div className="text-sm text-slate-500 py-6">No clauses.</div> : null}
+              </div>
+            )}
+          </div>
+
+          <Dialog open={clauseEditorOpen} onOpenChange={setClauseEditorOpen}>
+            <DialogContent className="sm:max-w-lg">
+              <DialogHeader>
+                <DialogTitle>{editingClause ? "Edit Clause" : "New Clause"}</DialogTitle>
+              </DialogHeader>
+              <div className="space-y-3 py-2">
+                <div className="space-y-1.5">
+                  <Label>Title</Label>
+                  <Input value={clauseTitle} onChange={(e) => setClauseTitle(e.target.value)} />
+                </div>
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="space-y-1.5">
+                    <Label>Clause code</Label>
+                    <Input value={clauseCode} onChange={(e) => setClauseCode(e.target.value)} placeholder="e.g. SPA_SPECIAL_CONDITION_01" />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label>Status</Label>
+                    <Select value={clauseStatus} onValueChange={setClauseStatus}>
+                      <SelectTrigger><SelectValue /></SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="draft">Draft</SelectItem>
+                        <SelectItem value="active">Active</SelectItem>
+                        <SelectItem value="archived">Archived</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                </div>
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="space-y-1.5">
+                    <Label>Category</Label>
+                    <Select value={clauseCategory} onValueChange={setClauseCategory}>
+                      <SelectTrigger><SelectValue /></SelectTrigger>
+                      <SelectContent>
+                        {["SPA","Loan","Banking","Property","Litigation","Corporate","General","Special Condition"].map((x) => (
+                          <SelectItem key={x} value={x}>{x}</SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label>Language</Label>
+                    <Input value={clauseLanguage} onChange={(e) => setClauseLanguage(e.target.value)} placeholder="en / zh-Hant" />
+                  </div>
+                </div>
+                <div className="space-y-1.5">
+                  <Label>Tags (comma separated)</Label>
+                  <Input value={clauseTags} onChange={(e) => setClauseTags(e.target.value)} placeholder="spa, special, purchaser" />
+                </div>
+                <div className="space-y-1.5">
+                  <Label>Body</Label>
+                  <Textarea value={clauseBody} onChange={(e) => setClauseBody(e.target.value)} rows={8} />
+                  <div className="text-xs text-slate-500">Placeholders: {"{{variable_key}}"}.</div>
+                </div>
+                <div className="flex justify-end gap-2 pt-2">
+                  <Button variant="outline" onClick={() => { setClauseEditorOpen(false); setEditingClause(null); }}>
+                    Cancel
+                  </Button>
+                  <Button onClick={() => platformClauseUpsertMutation.mutate()} disabled={!clauseTitle.trim() || !clauseBody.trim() || platformClauseUpsertMutation.isPending}>
+                    {platformClauseUpsertMutation.isPending ? "Saving..." : "Save"}
+                  </Button>
+                </div>
+              </div>
+            </DialogContent>
+          </Dialog>
         </DialogContent>
       </Dialog>
 

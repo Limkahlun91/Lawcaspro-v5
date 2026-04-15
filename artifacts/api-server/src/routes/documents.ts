@@ -24,6 +24,8 @@ import { listDocumentVariables, resolveVariablesForTemplate, type PlaceholderWar
 import { getFirmTemplateBindings, getPlatformDocumentBindings, replaceFirmTemplateBindings, replacePlatformDocumentBindings } from "../lib/documentBindings";
 import { getFirmTemplateApplicabilityRules, getPlatformDocumentApplicabilityRules, upsertFirmTemplateApplicabilityRules, upsertPlatformDocumentApplicabilityRules } from "../lib/documentApplicabilityRules";
 import { runDocumentPreview } from "../lib/documentPreview";
+import { findUnknownVariablesInClause, getFirmClauseById, getPlatformClauseById, isClauseApplicable, normalizeClauseCode } from "../lib/clauseLibrary";
+import { applyClauseInsertionToDocx, buildClauseInsertion, type SelectedClauseRef } from "../lib/documentClauses";
 
 const router: IRouter = Router();
 const storage = new ObjectStorageService();
@@ -3832,6 +3834,7 @@ async function generateFirmDocument({
   letterheadId,
   runId,
   bypassApplicability,
+  clauses,
 }: {
   r: DbConn;
   firmId: number;
@@ -3845,6 +3848,7 @@ async function generateFirmDocument({
   letterheadId?: number | null;
   runId: number;
   bypassApplicability?: boolean;
+  clauses?: SelectedClauseRef[];
 }): Promise<{ caseDocument: Record<string, unknown>; caseDocumentId: number | null; templateVersionId: number | null; checklistSnapshot: unknown; readinessSnapshot: unknown; renderedVars: unknown; }> {
   const templateRows = await queryRows(r, sql`SELECT * FROM document_templates WHERE id = ${templateId} AND firm_id = ${firmId}`);
   const template = templateRows[0];
@@ -3946,7 +3950,7 @@ async function generateFirmDocument({
   const templateObjectPath = String((version as any)?.source_object_path ?? "");
   if (!templateObjectPath) throw new DocumentGenerationError(404, "TEMPLATE_FILE_MISSING", "Template file missing");
 
-  const fileContents = await downloadPrivateObjectBytes(templateObjectPath);
+  let fileContents = await downloadPrivateObjectBytes(templateObjectPath);
   const placeholders = placeholdersFromVariablesSnapshot((version as any)?.variables_snapshot);
   const effectivePlaceholders = placeholders.length > 0 ? placeholders : detectDocxVariables(fileContents);
   const preview = await runDocumentPreview(r, {
@@ -3959,10 +3963,17 @@ async function generateFirmDocument({
   if (preview.usedMode === "bindings" && preview.missingRequiredVariables.length > 0) {
     throw new DocumentGenerationError(422, "TEMPLATE_BINDING_MISSING", "Missing required variables", { missingRequiredVariables: preview.missingRequiredVariables });
   }
+  let input: Record<string, unknown> = preview.usedMode === "bindings" ? preview.resolvedVariables : (context as any);
+  if (clauses && clauses.length > 0) {
+    const ins = await buildClauseInsertion({ r, firmId, selected: clauses, resolvedVariables: input });
+    const applied = applyClauseInsertionToDocx({ docxBytes: fileContents, data: input, clausesText: ins.clausesText, perClauseValues: ins.perClauseValues });
+    fileContents = applied.docxBytes;
+    input = applied.data;
+  }
   const zip = new PizZip(fileContents);
   const doc = new Docxtemplater(zip, { paragraphLoop: true, linebreaks: true });
   try {
-    doc.render(preview.usedMode === "bindings" ? preview.resolvedVariables : context);
+    doc.render(input);
   } catch {
     throw new DocumentGenerationError(422, "TEMPLATE_RENDER_FAILED", "Template render failed");
   }
@@ -4068,6 +4079,7 @@ async function generateMasterDocument({
   letterheadId,
   runId,
   bypassApplicability,
+  clauses,
 }: {
   r: DbConn;
   firmId: number;
@@ -4081,6 +4093,7 @@ async function generateMasterDocument({
   letterheadId?: number | null;
   runId: number;
   bypassApplicability?: boolean;
+  clauses?: SelectedClauseRef[];
 }): Promise<{ caseDocument: Record<string, unknown>; caseDocumentId: number | null; templateVersionId: number | null; checklistSnapshot: unknown; readinessSnapshot: unknown; renderedVars: unknown; renderMode: "docx" | "pdf" }> {
   const docRows2 = await queryRows(r, sql`SELECT * FROM platform_documents WHERE id = ${masterDocId} AND (firm_id IS NULL OR firm_id = ${firmId})`);
   const masterDoc = docRows2[0];
@@ -4192,7 +4205,17 @@ async function generateMasterDocument({
   if (preview.usedMode === "bindings" && preview.missingRequiredVariables.length > 0) {
     throw new DocumentGenerationError(422, "TEMPLATE_BINDING_MISSING", "Missing required variables", { missingRequiredVariables: preview.missingRequiredVariables });
   }
-  const renderInput = preview.usedMode === "bindings" ? preview.resolvedVariables : context;
+  let renderInput: Record<string, unknown> = preview.usedMode === "bindings" ? preview.resolvedVariables : (context as any);
+  let docxBytesForRender: Buffer | null = null;
+  if (isDocx) {
+    docxBytesForRender = fileContents;
+    if (clauses && clauses.length > 0) {
+      const ins = await buildClauseInsertion({ r, firmId, selected: clauses, resolvedVariables: renderInput });
+      const applied = applyClauseInsertionToDocx({ docxBytes: docxBytesForRender, data: renderInput, clausesText: ins.clausesText, perClauseValues: ins.perClauseValues });
+      docxBytesForRender = applied.docxBytes;
+      renderInput = applied.data;
+    }
+  }
 
   let buffer: Buffer;
   let outputMime: string;
@@ -4200,7 +4223,7 @@ async function generateMasterDocument({
   let renderMode: "docx" | "pdf" = "docx";
 
   if (isDocx) {
-    const zip = new PizZip(fileContents);
+    const zip = new PizZip(docxBytesForRender ?? fileContents);
     const doc = new Docxtemplater(zip, { paragraphLoop: true, linebreaks: true });
     try {
       doc.render(renderInput);
@@ -4751,6 +4774,210 @@ router.post("/cases/:caseId/documents/filename-preview", requireAuth, requireFir
   res.json(preview);
 });
 
+router.get("/clauses", requireAuth, requireFirmUser, requirePermission("documents", "read"), async (req: AuthRequest, res): Promise<void> => {
+  const r = getRlsDb(req, res);
+  if (!r) return;
+
+  const q = typeof (req.query as any).q === "string" ? String((req.query as any).q).trim() : "";
+  const scope = typeof (req.query as any).scope === "string" ? String((req.query as any).scope).trim() : "all";
+  const category = typeof (req.query as any).category === "string" ? String((req.query as any).category).trim() : "";
+  const status = typeof (req.query as any).status === "string" ? String((req.query as any).status).trim() : "";
+  const tag = typeof (req.query as any).tag === "string" ? String((req.query as any).tag).trim() : "";
+  const language = typeof (req.query as any).language === "string" ? String((req.query as any).language).trim() : "";
+  const includeBody = truthy((req.query as any).includeBody);
+  const caseIdParam = typeof (req.query as any).caseId === "string" ? parseInt(String((req.query as any).caseId), 10) : NaN;
+  const caseId = Number.isFinite(caseIdParam) ? caseIdParam : null;
+  const caseContext = caseId ? await buildCaseContext(r, caseId, req.firmId!) : null;
+
+  const parts: Array<{ scope: "firm" | "platform"; rows: Record<string, unknown>[] }> = [];
+
+  if (scope === "all" || scope === "firm") {
+    const where: any[] = [sql`firm_id = ${req.firmId!}`];
+    if (status) where.push(sql`status = ${status}`);
+    if (category) where.push(sql`category = ${category}`);
+    if (language) where.push(sql`language = ${language}`);
+    if (tag) where.push(sql`tags @> ARRAY[${tag}]::text[]`);
+    if (q) where.push(sql`(clause_code ILIKE ${"%" + q + "%"} OR title ILIKE ${"%" + q + "%"} OR body ILIKE ${"%" + q + "%"} OR COALESCE(notes,'') ILIKE ${"%" + q + "%"})`);
+    const cols = includeBody ? sql`*` : sql`id, firm_id, source_platform_clause_id, clause_code, title, category, language, notes, tags, status, is_system, sort_order, applicability, created_by, updated_by, created_at, updated_at`;
+    const rows = await queryRows(r, sql`SELECT ${cols} FROM firm_clauses WHERE ${sql.join(where, sql` AND `)} ORDER BY sort_order ASC, clause_code ASC`);
+    parts.push({ scope: "firm", rows });
+  }
+
+  if (scope === "all" || scope === "platform") {
+    const where: any[] = [sql`1=1`];
+    if (status) where.push(sql`status = ${status}`);
+    if (category) where.push(sql`category = ${category}`);
+    if (language) where.push(sql`language = ${language}`);
+    if (tag) where.push(sql`tags @> ARRAY[${tag}]::text[]`);
+    if (q) where.push(sql`(clause_code ILIKE ${"%" + q + "%"} OR title ILIKE ${"%" + q + "%"} OR body ILIKE ${"%" + q + "%"} OR COALESCE(notes,'') ILIKE ${"%" + q + "%"})`);
+    const cols = includeBody ? sql`*` : sql`id, clause_code, title, category, language, notes, tags, status, is_system, sort_order, applicability, created_by, updated_by, created_at, updated_at`;
+    const rows = await queryRows(r, sql`SELECT ${cols} FROM platform_clauses WHERE ${sql.join(where, sql` AND `)} ORDER BY sort_order ASC, clause_code ASC`);
+    parts.push({ scope: "platform", rows });
+  }
+
+  const out = parts.flatMap((p) => p.rows.map((row) => {
+    const app = row.applicability && typeof row.applicability === "object" ? (row.applicability as Record<string, unknown>) : null;
+    const applicable = caseContext ? isClauseApplicable(app, caseContext as any) : true;
+    return {
+      ...row,
+      scope: p.scope,
+      applicable,
+    };
+  }));
+
+  res.json(out);
+});
+
+router.get("/clauses/:scope/:id/preview", requireAuth, requireFirmUser, requirePermission("documents", "read"), async (req: AuthRequest, res): Promise<void> => {
+  const r = getRlsDb(req, res);
+  if (!r) return;
+  const scope = one((req.params as any).scope) === "platform" ? "platform" : "firm";
+  const idStr = one((req.params as any).id);
+  const id = idStr ? parseInt(idStr, 10) : NaN;
+  if (!Number.isFinite(id)) {
+    res.status(400).json({ error: "Invalid id" });
+    return;
+  }
+  const row = scope === "platform"
+    ? await getPlatformClauseById(r, id)
+    : await getFirmClauseById(r, req.firmId!, id);
+  if (!row) {
+    res.status(404).json({ error: "Clause not found" });
+    return;
+  }
+  const body = typeof (row as any).body === "string" ? String((row as any).body) : "";
+  const scan = await findUnknownVariablesInClause(r, body);
+  res.json({ variables: scan.variables, unknownVariables: scan.unknown });
+});
+
+router.post("/clauses", requireAuth, requireFirmUser, requirePermission("documents", "update"), async (req: AuthRequest, res): Promise<void> => {
+  const r = getRlsDb(req, res);
+  if (!r) return;
+  const body = (req.body && typeof req.body === "object") ? (req.body as Record<string, unknown>) : {};
+  const title = typeof body.title === "string" ? body.title.trim() : "";
+  const clauseCode = normalizeClauseCode(typeof body.clauseCode === "string" ? body.clauseCode : title);
+  const category = typeof body.category === "string" ? body.category.trim() : "General";
+  const language = typeof body.language === "string" ? body.language.trim() : "en";
+  const clauseBody = typeof body.body === "string" ? body.body : "";
+  const notes = typeof body.notes === "string" ? body.notes : null;
+  const tags = Array.isArray(body.tags) ? body.tags.filter((x): x is string => typeof x === "string" && Boolean(x.trim())).map((x) => x.trim()) : [];
+  const status = typeof body.status === "string" ? body.status : "draft";
+  const sortOrder = typeof body.sortOrder === "number" && Number.isFinite(body.sortOrder) ? Math.floor(body.sortOrder) : 0;
+  const applicability = body.applicability && typeof body.applicability === "object" ? (body.applicability as Record<string, unknown>) : null;
+
+  if (!title || !clauseBody) {
+    res.status(400).json({ error: "Missing title or body" });
+    return;
+  }
+
+  const rows = await queryRows(r, sql`
+    INSERT INTO firm_clauses (
+      firm_id, source_platform_clause_id, clause_code, title, category, language,
+      body, notes, tags, status, is_system, sort_order, applicability,
+      created_by, updated_by, created_at, updated_at
+    ) VALUES (
+      ${req.firmId!}, NULL, ${clauseCode}, ${title}, ${category}, ${language},
+      ${clauseBody}, ${notes as any}, ${tags as any}, ${status}, false, ${sortOrder}, ${applicability as any},
+      ${req.userId ?? null}, ${req.userId ?? null}, now(), now()
+    )
+    RETURNING *
+  `);
+  const created = rows[0];
+  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "clauses.firm.create", entityType: "firm_clause", entityId: typeof (created as any)?.id === "number" ? Number((created as any).id) : undefined, detail: `clauseCode=${clauseCode}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+  res.status(201).json(created);
+});
+
+router.put("/clauses/:id", requireAuth, requireFirmUser, requirePermission("documents", "update"), async (req: AuthRequest, res): Promise<void> => {
+  const r = getRlsDb(req, res);
+  if (!r) return;
+  const idStr = one((req.params as any).id);
+  const id = idStr ? parseInt(idStr, 10) : NaN;
+  if (!Number.isFinite(id)) { res.status(400).json({ error: "Invalid id" }); return; }
+  const body = (req.body && typeof req.body === "object") ? (req.body as Record<string, unknown>) : {};
+  const patch: any[] = [];
+  const title = typeof body.title === "string" ? body.title.trim() : null;
+  const clauseCode = typeof body.clauseCode === "string" ? normalizeClauseCode(body.clauseCode) : null;
+  const category = typeof body.category === "string" ? body.category.trim() : null;
+  const language = typeof body.language === "string" ? body.language.trim() : null;
+  const clauseBody = typeof body.body === "string" ? body.body : null;
+  const notes = Object.prototype.hasOwnProperty.call(body, "notes") ? (typeof body.notes === "string" ? body.notes : null) : undefined;
+  const tags = Object.prototype.hasOwnProperty.call(body, "tags") ? (Array.isArray(body.tags) ? body.tags.filter((x): x is string => typeof x === "string" && Boolean(x.trim())).map((x) => x.trim()) : []) : undefined;
+  const status = typeof body.status === "string" ? body.status : null;
+  const sortOrder = typeof body.sortOrder === "number" && Number.isFinite(body.sortOrder) ? Math.floor(body.sortOrder) : null;
+  const applicability = Object.prototype.hasOwnProperty.call(body, "applicability") ? (body.applicability && typeof body.applicability === "object" ? (body.applicability as Record<string, unknown>) : null) : undefined;
+
+  if (title !== null) patch.push(sql`title = ${title}`);
+  if (clauseCode !== null) patch.push(sql`clause_code = ${clauseCode}`);
+  if (category !== null) patch.push(sql`category = ${category}`);
+  if (language !== null) patch.push(sql`language = ${language}`);
+  if (clauseBody !== null) patch.push(sql`body = ${clauseBody}`);
+  if (notes !== undefined) patch.push(sql`notes = ${notes as any}`);
+  if (tags !== undefined) patch.push(sql`tags = ${tags as any}`);
+  if (status !== null) patch.push(sql`status = ${status}`);
+  if (sortOrder !== null) patch.push(sql`sort_order = ${sortOrder}`);
+  if (applicability !== undefined) patch.push(sql`applicability = ${applicability as any}`);
+  patch.push(sql`updated_by = ${req.userId ?? null}`);
+  patch.push(sql`updated_at = now()`);
+
+  if (patch.length === 0) { res.status(400).json({ error: "No changes" }); return; }
+
+  const rows = await queryRows(r, sql`
+    UPDATE firm_clauses
+    SET ${sql.join(patch, sql`, `)}
+    WHERE firm_id = ${req.firmId!} AND id = ${id}
+    RETURNING *
+  `);
+  if (!rows[0]) { res.status(404).json({ error: "Clause not found" }); return; }
+  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "clauses.firm.update", entityType: "firm_clause", entityId: id, detail: `clauseId=${id}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+  res.json(rows[0]);
+});
+
+router.post("/clauses/platform/:id/copy", requireAuth, requireFirmUser, requirePermission("documents", "update"), async (req: AuthRequest, res): Promise<void> => {
+  const r = getRlsDb(req, res);
+  if (!r) return;
+  const idStr = one((req.params as any).id);
+  const id = idStr ? parseInt(idStr, 10) : NaN;
+  if (!Number.isFinite(id)) { res.status(400).json({ error: "Invalid id" }); return; }
+  const src = await getPlatformClauseById(r, id);
+  if (!src) { res.status(404).json({ error: "Platform clause not found" }); return; }
+  const clauseCode = normalizeClauseCode(String((src as any).clause_code ?? ""));
+  const title = String((src as any).title ?? "");
+  const category = String((src as any).category ?? "General");
+  const language = String((src as any).language ?? "en");
+  const clauseBody = String((src as any).body ?? "");
+  const notes = (src as any).notes ? String((src as any).notes) : null;
+  const tags = Array.isArray((src as any).tags) ? (src as any).tags : [];
+  const applicability = (src as any).applicability ?? null;
+
+  const rows = await queryRows(r, sql`
+    INSERT INTO firm_clauses (
+      firm_id, source_platform_clause_id, clause_code, title, category, language,
+      body, notes, tags, status, is_system, sort_order, applicability,
+      created_by, updated_by, created_at, updated_at
+    ) VALUES (
+      ${req.firmId!}, ${id}, ${clauseCode}, ${title}, ${category}, ${language},
+      ${clauseBody}, ${notes as any}, ${tags as any}, 'draft', false, ${Number((src as any).sort_order ?? 0)}, ${applicability as any},
+      ${req.userId ?? null}, ${req.userId ?? null}, now(), now()
+    )
+    ON CONFLICT (firm_id, clause_code)
+    DO UPDATE SET
+      title = EXCLUDED.title,
+      category = EXCLUDED.category,
+      language = EXCLUDED.language,
+      body = EXCLUDED.body,
+      notes = EXCLUDED.notes,
+      tags = EXCLUDED.tags,
+      applicability = EXCLUDED.applicability,
+      source_platform_clause_id = EXCLUDED.source_platform_clause_id,
+      updated_by = ${req.userId ?? null},
+      updated_at = now()
+    RETURNING *
+  `);
+  const created = rows[0];
+  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "clauses.platform.copy_to_firm", entityType: "platform_clause", entityId: id, detail: `firmClauseCode=${clauseCode}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+  res.status(201).json(created);
+});
+
 router.post("/cases/:caseId/documents/preview", requireAuth, requireFirmUser, requirePermission("documents", "generate"), async (req: AuthRequest, res): Promise<void> => {
   const r = getRlsDb(req, res);
   if (!r) return;
@@ -4765,6 +4992,16 @@ router.post("/cases/:caseId/documents/preview", requireAuth, requireFirmUser, re
   const templateId = typeof body.templateId === "number" ? body.templateId : null;
   const platformDocumentId = typeof body.platformDocumentId === "number" ? body.platformDocumentId : null;
   const overrides = (body.overrides && typeof body.overrides === "object") ? (body.overrides as Record<string, unknown>) : null;
+  const clauseRefsRaw = Array.isArray(body.clauses) ? body.clauses : [];
+  const clauseRefs: SelectedClauseRef[] = clauseRefsRaw
+    .map((x) => (x && typeof x === "object") ? (x as Record<string, unknown>) : null)
+    .filter((x): x is Record<string, unknown> => Boolean(x))
+    .map((x) => ({
+      scope: x.scope === "platform" ? ("platform" as const) : ("firm" as const),
+      id: typeof x.id === "number" ? x.id : NaN,
+      includeTitle: typeof x.includeTitle === "boolean" ? x.includeTitle : false,
+    }))
+    .filter((x) => Number.isFinite(x.id));
   const bypassReq = Boolean(body.bypassApplicability ?? false);
   const bypass = bypassReq ? await canBypassApplicability(r, req.firmId!, req.roleId) : false;
 
@@ -4832,7 +5069,7 @@ router.post("/cases/:caseId/documents/preview", requireAuth, requireFirmUser, re
       let renderable = true;
 
       if (ext === "docx") {
-        const bytes = await downloadPrivateObjectBytes(obj);
+        let bytes = await downloadPrivateObjectBytes(obj);
         placeholders = placeholdersFromVariablesSnapshot((v as any)?.variables_snapshot);
         if (placeholders.length === 0) placeholders = detectDocxVariables(bytes);
         const preview = await runDocumentPreview(r, {
@@ -4843,7 +5080,17 @@ router.post("/cases/:caseId/documents/preview", requireAuth, requireFirmUser, re
           overrides,
         });
         placeholderWarnings = preview.placeholderWarnings;
-        const input = preview.usedMode === "bindings" ? preview.resolvedVariables : context;
+        let input: Record<string, unknown> = preview.usedMode === "bindings" ? preview.resolvedVariables : (context as any);
+        let clausePreviewText = "";
+        let clauseWarnings: unknown[] = [];
+        if (clauseRefs.length > 0) {
+          const ins = await buildClauseInsertion({ r, firmId: req.firmId!, selected: clauseRefs, resolvedVariables: input });
+          clausePreviewText = ins.clausesText;
+          clauseWarnings = ins.warnings;
+          const applied = applyClauseInsertionToDocx({ docxBytes: bytes, data: input, clausesText: ins.clausesText, perClauseValues: ins.perClauseValues });
+          bytes = applied.docxBytes;
+          input = applied.data;
+        }
         try {
           const zip = new PizZip(bytes);
           const doc = new Docxtemplater(zip, { paragraphLoop: true, linebreaks: true });
@@ -4856,6 +5103,7 @@ router.post("/cases/:caseId/documents/preview", requireAuth, requireFirmUser, re
           missingRequiredVariables: preview.missingRequiredVariables,
           unusedBindings: preview.unusedBindings,
           placeholderWarnings,
+          clauseInsertion: clauseRefs.length ? { selected: clauseRefs, previewText: clausePreviewText, warnings: clauseWarnings } : null,
           applicabilityResult,
           renderMode,
           previewSummary: {
@@ -4918,7 +5166,7 @@ router.post("/cases/:caseId/documents/preview", requireAuth, requireFirmUser, re
       titleSubType: (context as any).title_sub_type ?? null,
     });
 
-    const bytes = await downloadPrivateObjectBytes(obj);
+    let bytes = await downloadPrivateObjectBytes(obj);
     const placeholders =
       ext === "docx" ? detectDocxVariables(bytes)
       : ext === "pdf" ? extractPdfMappingPlaceholders((doc as any).pdf_mappings)
@@ -4930,16 +5178,27 @@ router.post("/cases/:caseId/documents/preview", requireAuth, requireFirmUser, re
       placeholders,
       overrides,
     });
+    let clausePreviewText = "";
+    let clauseWarnings: unknown[] = [];
     const renderMode: "docx" | "pdf" | "print" =
       ext === "pdf" ? "pdf"
       : ext === "docx" ? "docx"
       : "docx";
     let renderable = ext === "docx";
     if (ext === "docx") {
+      let input: Record<string, unknown> = preview.usedMode === "bindings" ? preview.resolvedVariables : (context as any);
+      if (clauseRefs.length > 0) {
+        const ins = await buildClauseInsertion({ r, firmId: req.firmId!, selected: clauseRefs, resolvedVariables: input });
+        clausePreviewText = ins.clausesText;
+        clauseWarnings = ins.warnings;
+        const applied = applyClauseInsertionToDocx({ docxBytes: bytes, data: input, clausesText: ins.clausesText, perClauseValues: ins.perClauseValues });
+        bytes = applied.docxBytes;
+        input = applied.data;
+      }
       try {
         const zip = new PizZip(bytes);
         const d = new Docxtemplater(zip, { paragraphLoop: true, linebreaks: true });
-        d.render(preview.usedMode === "bindings" ? preview.resolvedVariables : context);
+        d.render(input);
       } catch {
         renderable = false;
       }
@@ -4950,6 +5209,7 @@ router.post("/cases/:caseId/documents/preview", requireAuth, requireFirmUser, re
       missingRequiredVariables: preview.missingRequiredVariables,
       unusedBindings: preview.unusedBindings,
       placeholderWarnings: preview.placeholderWarnings,
+      clauseInsertion: clauseRefs.length ? { selected: clauseRefs, previewText: clausePreviewText, warnings: clauseWarnings } : null,
       applicabilityResult,
       renderMode,
       previewSummary: {
@@ -4986,7 +5246,7 @@ router.post("/cases/:caseId/documents/generate", requireAuth, requireFirmUser, r
     res.status(400).json({ error: "Invalid case ID" });
     return;
   }
-  const { templateId, documentName, letterheadId, bypassApplicability } = req.body as { templateId: number; documentName?: string; letterheadId?: number | null; bypassApplicability?: boolean };
+  const { templateId, documentName, letterheadId, bypassApplicability, clauses } = req.body as { templateId: number; documentName?: string; letterheadId?: number | null; bypassApplicability?: boolean; clauses?: SelectedClauseRef[] };
   const tid = typeof templateId === "number" ? templateId : NaN;
   if (Number.isNaN(tid)) {
     res.status(422).json({ error: "templateId is required", code: "TEMPLATE_ID_REQUIRED" });
@@ -5026,6 +5286,7 @@ router.post("/cases/:caseId/documents/generate", requireAuth, requireFirmUser, r
       letterheadId,
       runId,
       bypassApplicability: bypass,
+      clauses,
     });
     await finishGenerationRunSuccess(r, req.firmId!, runId, out.caseDocumentId, out.renderedVars, out.checklistSnapshot, out.readinessSnapshot);
     await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.generation.succeeded", entityType: "document_generation_run", entityId: runId, detail: `caseId=${caseId} templateSource=firm templateId=${tid}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
@@ -5060,7 +5321,7 @@ router.post("/cases/:caseId/documents/generate-from-master", requireAuth, requir
     res.status(400).json({ error: "Invalid case ID" });
     return;
   }
-  const { masterDocId, documentName, letterheadId, bypassApplicability } = req.body as { masterDocId: number; documentName?: string; letterheadId?: number | null; bypassApplicability?: boolean };
+  const { masterDocId, documentName, letterheadId, bypassApplicability, clauses } = req.body as { masterDocId: number; documentName?: string; letterheadId?: number | null; bypassApplicability?: boolean; clauses?: SelectedClauseRef[] };
   const mid = typeof masterDocId === "number" ? masterDocId : NaN;
   if (Number.isNaN(mid)) {
     res.status(422).json({ error: "masterDocId is required", code: "MASTER_DOC_ID_REQUIRED" });
@@ -5100,6 +5361,7 @@ router.post("/cases/:caseId/documents/generate-from-master", requireAuth, requir
       letterheadId,
       runId,
       bypassApplicability: bypass,
+      clauses,
     });
     await finishGenerationRunSuccess(r, req.firmId!, runId, out.caseDocumentId, out.renderedVars, out.checklistSnapshot, out.readinessSnapshot);
     await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.generation.succeeded", entityType: "document_generation_run", entityId: runId, detail: `caseId=${caseId} templateSource=master templateId=${mid}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });

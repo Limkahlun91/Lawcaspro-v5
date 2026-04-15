@@ -1,4 +1,5 @@
-import { pgTable, serial, text, integer, boolean, timestamp, jsonb } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
+import { pgTable, serial, text, integer, boolean, timestamp, jsonb, index, uniqueIndex } from "drizzle-orm/pg-core";
 
 export const systemFoldersTable = pgTable("system_folders", {
   id: serial("id").primaryKey(),
@@ -53,3 +54,28 @@ export const platformMessageAttachmentsTable = pgTable("platform_message_attachm
   objectPath: text("object_path").notNull(),
   uploadedAt: timestamp("uploaded_at", { withTimezone: true }).notNull().defaultNow(),
 });
+
+export const platformClausesTable = pgTable("platform_clauses", {
+  id: serial("id").primaryKey(),
+  clauseCode: text("clause_code").notNull(),
+  title: text("title").notNull(),
+  category: text("category").notNull().default("General"),
+  language: text("language").notNull().default("en"),
+  body: text("body").notNull(),
+  notes: text("notes"),
+  tags: text("tags").array().notNull().default(sql`'{}'::text[]`),
+  status: text("status").notNull().default("draft"),
+  isSystem: boolean("is_system").notNull().default(false),
+  sortOrder: integer("sort_order").notNull().default(0),
+  applicability: jsonb("applicability"),
+  createdBy: integer("created_by"),
+  updatedBy: integer("updated_by"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow().$onUpdate(() => new Date()),
+}, (t) => ({
+  codeUq: uniqueIndex("uq_platform_clauses_code").on(t.clauseCode),
+  statusIdx: index("idx_platform_clauses_status").on(t.status),
+  categoryIdx: index("idx_platform_clauses_category").on(t.category),
+  languageIdx: index("idx_platform_clauses_language").on(t.language),
+  tagsIdx: index("idx_platform_clauses_tags").using("gin", t.tags),
+}));
