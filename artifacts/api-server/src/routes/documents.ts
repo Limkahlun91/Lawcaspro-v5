@@ -14,7 +14,8 @@ import * as yazl from "yazl";
 import { PDFDocument, rgb, StandardFonts } from "pdf-lib";
 import fontkit from "@pdf-lib/fontkit";
 import { z } from "zod";
-import { evaluateTemplateApplicability, normalizePurchaseMode, normalizeTitleType } from "../lib/documentApplicability";
+import { normalizePurchaseMode, normalizeTitleType } from "../lib/documentApplicability";
+import { evaluateTemplateApplicabilityV2 } from "../lib/templateApplicabilityEngine";
 import { evaluateTemplateReadiness, type TemplateReadinessInputs } from "../lib/documentReadiness";
 import { resolveSmartFilename } from "../lib/smartFileNaming";
 import { ensureUniqueCaseDocumentFileName, resolveDocumentFileName } from "../lib/documentFileName";
@@ -91,6 +92,28 @@ function buildNamingContext(params: {
     titleType: String(c.title_type ?? ""),
     loanBank: String(c.end_financier ?? c.loan_end_financier ?? ""),
     sequence: params.sequence,
+  };
+}
+
+function buildApplicabilityContext(caseContext: Record<string, unknown>): Record<string, unknown> {
+  const c = caseContext as any;
+  return {
+    purchase_mode: c.purchase_mode ?? null,
+    case_status: c.case_status ?? null,
+    lawyer_in_charge: c.case_handler_name ?? null,
+    clerk_in_charge: c.case_assistant_name ?? null,
+    project_type: c.project_type ?? null,
+    title_type: c.title_type ?? null,
+    title_sub_type: c.title_sub_type ?? null,
+    development_condition: c.project_development_condition ?? null,
+    unit_category: c.unit_category ?? null,
+    developer_id: c.developer_id ?? null,
+    developer_name: c.developer_name ?? null,
+    bank_name: c.end_financier ?? c.loan_end_financier ?? null,
+    has_loan: String(c.purchase_mode ?? "").toLowerCase() === "loan",
+    purchaser_count: [1, 2].filter((i) => Boolean(c[`spa_purchaser${i}_name`])).length,
+    borrower_count: [1, 2].filter((i) => Boolean(c[`borrower${i}_name`])).length,
+    has_company_party: Boolean(c.spa_purchaser1_is_company || c.spa_purchaser2_is_company || c.borrower1_is_company || c.borrower2_is_company),
   };
 }
 
@@ -1660,6 +1683,8 @@ router.get("/document-templates/:templateId/applicability", requireAuth, require
       developmentCondition: rules?.developmentCondition ?? null,
       unitCategory: rules?.unitCategory ?? null,
       isTemplateCapable: rules?.isTemplateCapable ?? Boolean((tpl as any).is_template_capable ?? true),
+      applicabilityMode: typeof (tpl as any).applicability_mode === "string" ? String((tpl as any).applicability_mode) : "universal",
+      applicabilityRules: (tpl as any).applicability_rules ?? null,
     },
   });
 });
@@ -1690,6 +1715,10 @@ router.put("/document-templates/:templateId/applicability", requireAuth, require
   const developmentCondition = typeof body.developmentCondition === "string" ? body.developmentCondition : undefined;
   const unitCategory = typeof body.unitCategory === "string" ? body.unitCategory : undefined;
   const isTemplateCapable = Object.prototype.hasOwnProperty.call(body, "isTemplateCapable") ? Boolean(body.isTemplateCapable) : undefined;
+  const applicabilityMode = typeof body.applicabilityMode === "string" ? body.applicabilityMode : undefined;
+  const applicabilityRules = Object.prototype.hasOwnProperty.call(body, "applicabilityRules")
+    ? (body.applicabilityRules && typeof body.applicabilityRules === "object" ? body.applicabilityRules : null)
+    : undefined;
 
   await queryRows(r, sql`
     UPDATE document_templates
@@ -1699,6 +1728,8 @@ router.put("/document-templates/:templateId/applicability", requireAuth, require
       applies_to_title_type = COALESCE(${titleType ?? null}, applies_to_title_type),
       applies_to_case_type = COALESCE(${caseType ?? null}, applies_to_case_type),
       is_template_capable = COALESCE(${isTemplateCapable as any}, is_template_capable),
+      applicability_mode = COALESCE(${applicabilityMode ?? null}, applicability_mode),
+      applicability_rules = COALESCE(${applicabilityRules as any}, applicability_rules),
       updated_at = now()
     WHERE id = ${templateId} AND firm_id = ${req.firmId!}
   `);
@@ -1715,7 +1746,7 @@ router.put("/document-templates/:templateId/applicability", requireAuth, require
     isTemplateCapable: isTemplateCapable ?? null,
   });
 
-  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.template.applicability.update", entityType: "document_template", entityId: templateId, detail: "updated", ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.template.applicability.update", entityType: "document_template", entityId: templateId, detail: `updated mode=${applicabilityMode ?? "unchanged"} rules=${applicabilityRules ? "yes" : "no"}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
   const rules = await getFirmTemplateApplicabilityRules(r, req.firmId!, templateId);
   res.json({ ok: true, rules });
 });
@@ -1731,7 +1762,27 @@ router.get("/platform/documents/:documentId/applicability", requireAuth, require
     const doc = await queryRows(authDb, sql`SELECT * FROM platform_documents WHERE id = ${documentId}`);
     if (!doc[0]) return { status: 404 as const, body: { error: "Document not found" } };
     const rules = await getPlatformDocumentApplicabilityRules(authDb, null, documentId);
-    return { status: 200 as const, body: { document: doc[0], rules } };
+    return {
+      status: 200 as const,
+      body: {
+        document: doc[0],
+        rules,
+        effective: {
+          isActive: rules?.isActive ?? Boolean((doc[0] as any).is_active ?? true),
+          isRequired: rules?.isRequired ?? false,
+          purchaseMode: rules?.purchaseMode ?? ((doc[0] as any).applies_to_purchase_mode ?? null),
+          titleType: rules?.titleType ?? ((doc[0] as any).applies_to_title_type ?? "any"),
+          caseType: (doc[0] as any).applies_to_case_type ?? null,
+          projectType: rules?.projectType ?? null,
+          titleSubType: rules?.titleSubType ?? null,
+          developmentCondition: rules?.developmentCondition ?? null,
+          unitCategory: rules?.unitCategory ?? null,
+          isTemplateCapable: rules?.isTemplateCapable ?? Boolean((doc[0] as any).is_template_capable ?? true),
+          applicabilityMode: typeof (doc[0] as any).applicability_mode === "string" ? String((doc[0] as any).applicability_mode) : "universal",
+          applicabilityRules: (doc[0] as any).applicability_rules ?? null,
+        },
+      },
+    };
   }, { retry: true, ctx: { route: req.path, stage: "platform_document_applicability.get", userId: req.userId ?? null, firmId: null } });
   res.status(result.status).json(result.body);
 });
@@ -1754,6 +1805,10 @@ router.put("/platform/documents/:documentId/applicability", requireAuth, require
   const developmentCondition = typeof body.developmentCondition === "string" ? body.developmentCondition : undefined;
   const unitCategory = typeof body.unitCategory === "string" ? body.unitCategory : undefined;
   const isTemplateCapable = Object.prototype.hasOwnProperty.call(body, "isTemplateCapable") ? Boolean(body.isTemplateCapable) : undefined;
+  const applicabilityMode = typeof body.applicabilityMode === "string" ? body.applicabilityMode : undefined;
+  const applicabilityRules = Object.prototype.hasOwnProperty.call(body, "applicabilityRules")
+    ? (body.applicabilityRules && typeof body.applicabilityRules === "object" ? body.applicabilityRules : null)
+    : undefined;
 
   const result = await withAuthSafeDb(async (authDb) => {
     const doc = await queryRows(authDb, sql`SELECT * FROM platform_documents WHERE id = ${documentId}`);
@@ -1765,7 +1820,9 @@ router.put("/platform/documents/:documentId/applicability", requireAuth, require
         applies_to_purchase_mode = COALESCE(${purchaseMode ?? null}, applies_to_purchase_mode),
         applies_to_title_type = COALESCE(${titleType ?? null}, applies_to_title_type),
         applies_to_case_type = COALESCE(${caseType ?? null}, applies_to_case_type),
-        is_template_capable = COALESCE(${isTemplateCapable as any}, is_template_capable)
+        is_template_capable = COALESCE(${isTemplateCapable as any}, is_template_capable),
+        applicability_mode = COALESCE(${applicabilityMode ?? null}, applicability_mode),
+        applicability_rules = COALESCE(${applicabilityRules as any}, applicability_rules)
       WHERE id = ${documentId}
     `);
     await upsertPlatformDocumentApplicabilityRules(authDb, null, documentId, {
@@ -1779,7 +1836,7 @@ router.put("/platform/documents/:documentId/applicability", requireAuth, require
       unitCategory: unitCategory ?? null,
       isTemplateCapable: isTemplateCapable ?? null,
     });
-    await writeAuditLog({ actorId: req.userId, actorType: req.userType, action: "documents.template.applicability.update", entityType: "platform_document", entityId: documentId, detail: "scope=global updated", ipAddress: req.ip, userAgent: req.headers["user-agent"] }, { db: authDb });
+    await writeAuditLog({ actorId: req.userId, actorType: req.userType, action: "documents.template.applicability.update", entityType: "platform_document", entityId: documentId, detail: `scope=global updated mode=${applicabilityMode ?? "unchanged"} rules=${applicabilityRules ? "yes" : "no"}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] }, { db: authDb });
     const rules = await getPlatformDocumentApplicabilityRules(authDb, null, documentId);
     return { status: 200 as const, body: { ok: true, rules } };
   }, { retry: true, ctx: { route: req.path, stage: "platform_document_applicability.put", userId: req.userId ?? null, firmId: null } });
@@ -2769,7 +2826,7 @@ router.get("/cases/:caseId/documents/checklist", requireAuth, requireFirmUser, r
     blocked: boolean;
     updatedAt: string | null;
     notes: string | null;
-    applicability: { status: "applicable" | "not_applicable"; reasons: string[] };
+    applicability: { status: "applicable" | "warning" | "not_applicable"; reasons: string[]; matchedRulesCount?: number; failedRulesCount?: number; manuallyOverridable?: boolean };
     readiness: { status: string; missing: Array<{ code: string; message: string }> } | null;
     templateId?: number;
     name: string;
@@ -2841,7 +2898,8 @@ router.get("/cases/:caseId/documents/checklist", requireAuth, requireFirmUser, r
     const templateId = Number((t as any).id);
     const documentGroup = String((t as any).document_group ?? "Others");
     const extra = firmRulesById.get(templateId) ?? null;
-    const app = evaluateTemplateApplicability({
+    const app = evaluateTemplateApplicabilityV2({
+      legacyTemplate: {
       isActive: extra && typeof extra.is_active === "boolean" ? Boolean(extra.is_active) : Boolean((t as any).is_active ?? true),
       isTemplateCapable: extra && typeof extra.is_template_capable === "boolean" ? Boolean(extra.is_template_capable) : Boolean((t as any).is_template_capable ?? true),
       appliesToPurchaseMode: extra && typeof extra.purchase_mode === "string" ? String(extra.purchase_mode) : ((t as any).applies_to_purchase_mode ? String((t as any).applies_to_purchase_mode) : null),
@@ -2851,7 +2909,8 @@ router.get("/cases/:caseId/documents/checklist", requireAuth, requireFirmUser, r
       titleSubType: extra && typeof extra.title_sub_type === "string" ? String(extra.title_sub_type) : null,
       developmentCondition: extra && typeof extra.development_condition === "string" ? String(extra.development_condition) : null,
       unitCategory: extra && typeof extra.unit_category === "string" ? String(extra.unit_category) : null,
-    }, {
+      },
+      legacyInput: {
       purchaseMode: (context as any).purchase_mode ?? null,
       titleType: (context as any).title_type ?? null,
       caseType,
@@ -2859,13 +2918,34 @@ router.get("/cases/:caseId/documents/checklist", requireAuth, requireFirmUser, r
       developmentCondition: (context as any).project_development_condition ?? null,
       unitCategory: (context as any).unit_category ?? null,
       titleSubType: (context as any).title_sub_type ?? null,
+      },
+      context: {
+        purchase_mode: (context as any).purchase_mode ?? null,
+        case_status: (context as any).case_status ?? null,
+        lawyer_in_charge: (context as any).case_handler_name ?? null,
+        clerk_in_charge: (context as any).case_assistant_name ?? null,
+        project_type: (context as any).project_type ?? null,
+        title_type: (context as any).title_type ?? null,
+        title_sub_type: (context as any).title_sub_type ?? null,
+        development_condition: (context as any).project_development_condition ?? null,
+        unit_category: (context as any).unit_category ?? null,
+        developer_id: (context as any).developer_id ?? null,
+        developer_name: (context as any).developer_name ?? null,
+        bank_name: (context as any).end_financier ?? null,
+        has_loan: ((context as any).purchase_mode ?? "").toLowerCase() === "loan",
+        purchaser_count: [1, 2].filter((i) => Boolean((context as any)[`spa_purchaser${i}_name`])).length,
+        borrower_count: [1, 2].filter((i) => Boolean((context as any)[`borrower${i}_name`])).length,
+        has_company_party: Boolean((context as any).spa_purchaser1_is_company || (context as any).spa_purchaser2_is_company || (context as any).borrower1_is_company || (context as any).borrower2_is_company),
+      },
+      applicabilityMode: (t as any).applicability_mode,
+      applicabilityRules: (t as any).applicability_rules,
     });
-    if (!includeAll && !app.applicable) continue;
-    const ready = app.applicable ? evaluateTemplateReadiness({ documentGroup, input: readinessInput }) : { status: "ready", missing: [] };
+    if (!includeAll && app.applicabilityStatus === "not_applicable") continue;
+    const ready = app.applicabilityStatus === "not_applicable" ? { status: "ready", missing: [] } : evaluateTemplateReadiness({ documentGroup, input: readinessInput });
     const checklistKey = `tpl:firm:${templateId}`;
     const { status, blocked, updatedAt, override } = computeStatus({
       checklistKey,
-      applicable: app.applicable,
+      applicable: app.applicabilityStatus !== "not_applicable",
       readiness: ready,
       latestDocument: latestByFirmTemplateId.get(templateId) ?? null,
       baseHasFile: false,
@@ -2889,7 +2969,13 @@ router.get("/cases/:caseId/documents/checklist", requireAuth, requireFirmUser, r
       fileName: (t as any).file_name ? String((t as any).file_name) : null,
       fileType: "docx",
       pdfMappings: null,
-      applicability: { status: app.applicable ? "applicable" : "not_applicable", reasons: app.reasons },
+      applicability: {
+        status: app.applicabilityStatus,
+        reasons: app.applicabilityReasons,
+        matchedRulesCount: app.matchedRulesCount,
+        failedRulesCount: app.failedRulesCount,
+        manuallyOverridable: app.manuallyOverridable,
+      },
       readiness: ready,
       latestDocument: latestByFirmTemplateId.get(templateId) ?? null,
       completedAt: override?.completed_at ? String(override.completed_at) : null,
@@ -2906,7 +2992,8 @@ router.get("/cases/:caseId/documents/checklist", requireAuth, requireFirmUser, r
     const templateId = Number((t as any).id);
     const documentGroup = String((t as any).document_group ?? (t as any).category ?? "Others");
     const extra = masterRulesById.get(templateId) ?? null;
-    const app = evaluateTemplateApplicability({
+    const app = evaluateTemplateApplicabilityV2({
+      legacyTemplate: {
       isActive: extra && typeof extra.is_active === "boolean" ? Boolean(extra.is_active) : Boolean((t as any).is_active ?? true),
       isTemplateCapable: extra && typeof extra.is_template_capable === "boolean" ? Boolean(extra.is_template_capable) : Boolean((t as any).is_template_capable ?? true),
       appliesToPurchaseMode: extra && typeof extra.purchase_mode === "string" ? String(extra.purchase_mode) : ((t as any).applies_to_purchase_mode ? String((t as any).applies_to_purchase_mode) : null),
@@ -2916,7 +3003,8 @@ router.get("/cases/:caseId/documents/checklist", requireAuth, requireFirmUser, r
       titleSubType: extra && typeof extra.title_sub_type === "string" ? String(extra.title_sub_type) : null,
       developmentCondition: extra && typeof extra.development_condition === "string" ? String(extra.development_condition) : null,
       unitCategory: extra && typeof extra.unit_category === "string" ? String(extra.unit_category) : null,
-    }, {
+      },
+      legacyInput: {
       purchaseMode: (context as any).purchase_mode ?? null,
       titleType: (context as any).title_type ?? null,
       caseType,
@@ -2924,13 +3012,34 @@ router.get("/cases/:caseId/documents/checklist", requireAuth, requireFirmUser, r
       developmentCondition: (context as any).project_development_condition ?? null,
       unitCategory: (context as any).unit_category ?? null,
       titleSubType: (context as any).title_sub_type ?? null,
+      },
+      context: {
+        purchase_mode: (context as any).purchase_mode ?? null,
+        case_status: (context as any).case_status ?? null,
+        lawyer_in_charge: (context as any).case_handler_name ?? null,
+        clerk_in_charge: (context as any).case_assistant_name ?? null,
+        project_type: (context as any).project_type ?? null,
+        title_type: (context as any).title_type ?? null,
+        title_sub_type: (context as any).title_sub_type ?? null,
+        development_condition: (context as any).project_development_condition ?? null,
+        unit_category: (context as any).unit_category ?? null,
+        developer_id: (context as any).developer_id ?? null,
+        developer_name: (context as any).developer_name ?? null,
+        bank_name: (context as any).end_financier ?? null,
+        has_loan: ((context as any).purchase_mode ?? "").toLowerCase() === "loan",
+        purchaser_count: [1, 2].filter((i) => Boolean((context as any)[`spa_purchaser${i}_name`])).length,
+        borrower_count: [1, 2].filter((i) => Boolean((context as any)[`borrower${i}_name`])).length,
+        has_company_party: Boolean((context as any).spa_purchaser1_is_company || (context as any).spa_purchaser2_is_company || (context as any).borrower1_is_company || (context as any).borrower2_is_company),
+      },
+      applicabilityMode: (t as any).applicability_mode,
+      applicabilityRules: (t as any).applicability_rules,
     });
-    if (!includeAll && !app.applicable) continue;
-    const ready = app.applicable ? evaluateTemplateReadiness({ documentGroup, input: readinessInput }) : { status: "ready", missing: [] };
+    if (!includeAll && app.applicabilityStatus === "not_applicable") continue;
+    const ready = app.applicabilityStatus === "not_applicable" ? { status: "ready", missing: [] } : evaluateTemplateReadiness({ documentGroup, input: readinessInput });
     const checklistKey = `tpl:master:${templateId}`;
     const { status, blocked, updatedAt, override } = computeStatus({
       checklistKey,
-      applicable: app.applicable,
+      applicable: app.applicabilityStatus !== "not_applicable",
       readiness: ready,
       latestDocument: latestByPlatformDocId.get(templateId) ?? null,
       baseHasFile: false,
@@ -2954,7 +3063,13 @@ router.get("/cases/:caseId/documents/checklist", requireAuth, requireFirmUser, r
       fileName: (t as any).file_name ? String((t as any).file_name) : null,
       fileType: (t as any).file_type ? String((t as any).file_type) : null,
       pdfMappings: (t as any).pdf_mappings ?? null,
-      applicability: { status: app.applicable ? "applicable" : "not_applicable", reasons: app.reasons },
+      applicability: {
+        status: app.applicabilityStatus,
+        reasons: app.applicabilityReasons,
+        matchedRulesCount: app.matchedRulesCount,
+        failedRulesCount: app.failedRulesCount,
+        manuallyOverridable: app.manuallyOverridable,
+      },
       readiness: ready,
       latestDocument: latestByPlatformDocId.get(templateId) ?? null,
       completedAt: override?.completed_at ? String(override.completed_at) : null,
@@ -3190,7 +3305,7 @@ router.get("/cases/:caseId/documents/checklist", requireAuth, requireFirmUser, r
       items: arr.sort((x, y) => (x.sortOrder - y.sortOrder) || x.name.localeCompare(y.name)),
     }));
 
-  const applicableItems = items.filter((it) => it.applicability.status === "applicable" && it.status !== "not_applicable");
+  const applicableItems = items.filter((it) => it.applicability.status !== "not_applicable" && it.status !== "not_applicable");
   const waivedCount = applicableItems.filter((it) => it.status === "waived").length;
   const completedCount = applicableItems.filter((it) => it.status === "completed").length;
   const requiredMissingCount = applicableItems.filter((it) => it.isRequired && it.status !== "waived" && it.status !== "completed" && it.status !== "received" && it.status !== "uploaded" && it.status !== "generated").length;
@@ -3913,27 +4028,41 @@ async function generateFirmDocument({
   if (!context) throw new DocumentGenerationError(404, "CASE_NOT_FOUND", "Case not found");
 
   const extraRules = await getFirmTemplateApplicabilityRules(r, firmId, templateId);
-  const applicability = evaluateTemplateApplicability({
-    isActive: extraRules?.isActive ?? Boolean((template as any).is_active ?? true),
-    isTemplateCapable: extraRules?.isTemplateCapable ?? Boolean((template as any).is_template_capable ?? true),
-    appliesToPurchaseMode: extraRules?.purchaseMode ?? ((template as any).applies_to_purchase_mode ? String((template as any).applies_to_purchase_mode) : null),
-    appliesToTitleType: extraRules?.titleType ?? ((template as any).applies_to_title_type ? String((template as any).applies_to_title_type) : null),
-    appliesToCaseType: (template as any).applies_to_case_type ? String((template as any).applies_to_case_type) : null,
-    projectType: extraRules?.projectType ?? null,
-    titleSubType: extraRules?.titleSubType ?? null,
-    developmentCondition: extraRules?.developmentCondition ?? null,
-    unitCategory: extraRules?.unitCategory ?? null,
-  }, {
-    purchaseMode: (context as any).purchase_mode ?? null,
-    titleType: (context as any).title_type ?? null,
-    caseType: (context as any).case_type ?? null,
-    projectType: (context as any).project_type ?? null,
-    developmentCondition: (context as any).project_development_condition ?? null,
-    unitCategory: (context as any).unit_category ?? null,
-    titleSubType: (context as any).title_sub_type ?? null,
+  const applicability = evaluateTemplateApplicabilityV2({
+    legacyTemplate: {
+      isActive: extraRules?.isActive ?? Boolean((template as any).is_active ?? true),
+      isTemplateCapable: extraRules?.isTemplateCapable ?? Boolean((template as any).is_template_capable ?? true),
+      appliesToPurchaseMode: extraRules?.purchaseMode ?? ((template as any).applies_to_purchase_mode ? String((template as any).applies_to_purchase_mode) : null),
+      appliesToTitleType: extraRules?.titleType ?? ((template as any).applies_to_title_type ? String((template as any).applies_to_title_type) : null),
+      appliesToCaseType: (template as any).applies_to_case_type ? String((template as any).applies_to_case_type) : null,
+      projectType: extraRules?.projectType ?? null,
+      titleSubType: extraRules?.titleSubType ?? null,
+      developmentCondition: extraRules?.developmentCondition ?? null,
+      unitCategory: extraRules?.unitCategory ?? null,
+    },
+    legacyInput: {
+      purchaseMode: (context as any).purchase_mode ?? null,
+      titleType: (context as any).title_type ?? null,
+      caseType: (context as any).case_type ?? null,
+      projectType: (context as any).project_type ?? null,
+      developmentCondition: (context as any).project_development_condition ?? null,
+      unitCategory: (context as any).unit_category ?? null,
+      titleSubType: (context as any).title_sub_type ?? null,
+    },
+    context: buildApplicabilityContext(context),
+    applicabilityMode: (template as any).applicability_mode,
+    applicabilityRules: (template as any).applicability_rules,
   });
-  if (!applicability.applicable && !bypassApplicability) {
-    throw new DocumentGenerationError(422, "TEMPLATE_APPLICABILITY_BLOCKED", "Template blocked by applicability", { reasons: applicability.reasons });
+  const overrideUsed = Boolean(bypassApplicability && applicability.manuallyOverridable && applicability.applicabilityStatus === "not_applicable");
+  if (applicability.applicabilityStatus === "not_applicable") {
+    if (applicability.modeUsed === "rules_only") {
+      await writeAuditLog({ firmId, actorId, actorType, action: "documents.case.generate.blocked", entityType: "document_template", entityId: templateId, detail: `applicabilityStatus=not_applicable mode=${applicability.modeUsed} overrideUsed=0 reasons=${applicability.applicabilityReasons.join("|")}`, ipAddress, userAgent });
+      throw new DocumentGenerationError(422, "TEMPLATE_APPLICABILITY_BLOCKED", "Template blocked by applicability", { reasons: applicability.applicabilityReasons, mode: applicability.modeUsed });
+    }
+    if (applicability.modeUsed === "rules_with_manual_override" && !overrideUsed) {
+      await writeAuditLog({ firmId, actorId, actorType, action: "documents.case.generate.blocked", entityType: "document_template", entityId: templateId, detail: `applicabilityStatus=not_applicable mode=${applicability.modeUsed} overrideUsed=0 reasons=${applicability.applicabilityReasons.join("|")}`, ipAddress, userAgent });
+      throw new DocumentGenerationError(422, "TEMPLATE_APPLICABILITY_OVERRIDE_REQUIRED", "Template requires manual override", { reasons: applicability.applicabilityReasons, mode: applicability.modeUsed });
+    }
   }
 
   const wfDocs = (await tableExists(r, "public.case_workflow_documents"))
@@ -4148,7 +4277,7 @@ async function generateFirmDocument({
   const createdId = created && typeof created === "object" && "id" in created && typeof (created as any).id === "number"
     ? Number((created as any).id)
     : null;
-  await writeAuditLog({ firmId, actorId, actorType, action: "documents.case.generate", entityType: "case_document", entityId: createdId ?? undefined, detail: `caseId=${caseId} templateId=${templateId} name=${docName} letterhead=${isLetterLike ? (usedLetterheadId ?? "default") : "n/a"} clauses=${clauseSnapshot ? "yes" : "no"} fileName=${downloadName} fallback=${namingPreview.fallbackUsed ? "1" : "0"} collision=${uniq.collisionResolved ? "1" : "0"}`, ipAddress, userAgent });
+  await writeAuditLog({ firmId, actorId, actorType, action: "documents.case.generate", entityType: "case_document", entityId: createdId ?? undefined, detail: `caseId=${caseId} templateId=${templateId} name=${docName} letterhead=${isLetterLike ? (usedLetterheadId ?? "default") : "n/a"} clauses=${clauseSnapshot ? "yes" : "no"} fileName=${downloadName} fallback=${namingPreview.fallbackUsed ? "1" : "0"} collision=${uniq.collisionResolved ? "1" : "0"} applicabilityStatus=${applicability.applicabilityStatus} overrideUsed=${overrideUsed ? "1" : "0"}`, ipAddress, userAgent });
   if (preview.usedMode === "bindings") {
     await writeAuditLog({ firmId, actorId, actorType, action: "documents.generate.binding_used", entityType: "case_document", entityId: createdId ?? undefined, detail: `caseId=${caseId} templateId=${templateId} placeholders=${effectivePlaceholders.length} missing=${preview.missingRequiredVariables.length}`, ipAddress, userAgent });
   }
@@ -4202,27 +4331,41 @@ async function generateMasterDocument({
   if (!context) throw new DocumentGenerationError(404, "CASE_NOT_FOUND", "Case not found");
 
   const extraRules = await getPlatformDocumentApplicabilityRules(r, firmId, masterDocId);
-  const applicability = evaluateTemplateApplicability({
-    isActive: extraRules?.isActive ?? Boolean((masterDoc as any).is_active ?? true),
-    isTemplateCapable: extraRules?.isTemplateCapable ?? Boolean((masterDoc as any).is_template_capable ?? true),
-    appliesToPurchaseMode: extraRules?.purchaseMode ?? ((masterDoc as any).applies_to_purchase_mode ? String((masterDoc as any).applies_to_purchase_mode) : null),
-    appliesToTitleType: extraRules?.titleType ?? ((masterDoc as any).applies_to_title_type ? String((masterDoc as any).applies_to_title_type) : null),
-    appliesToCaseType: (masterDoc as any).applies_to_case_type ? String((masterDoc as any).applies_to_case_type) : null,
-    projectType: extraRules?.projectType ?? null,
-    titleSubType: extraRules?.titleSubType ?? null,
-    developmentCondition: extraRules?.developmentCondition ?? null,
-    unitCategory: extraRules?.unitCategory ?? null,
-  }, {
-    purchaseMode: (context as any).purchase_mode ?? null,
-    titleType: (context as any).title_type ?? null,
-    caseType: (context as any).case_type ?? null,
-    projectType: (context as any).project_type ?? null,
-    developmentCondition: (context as any).project_development_condition ?? null,
-    unitCategory: (context as any).unit_category ?? null,
-    titleSubType: (context as any).title_sub_type ?? null,
+  const applicability = evaluateTemplateApplicabilityV2({
+    legacyTemplate: {
+      isActive: extraRules?.isActive ?? Boolean((masterDoc as any).is_active ?? true),
+      isTemplateCapable: extraRules?.isTemplateCapable ?? Boolean((masterDoc as any).is_template_capable ?? true),
+      appliesToPurchaseMode: extraRules?.purchaseMode ?? ((masterDoc as any).applies_to_purchase_mode ? String((masterDoc as any).applies_to_purchase_mode) : null),
+      appliesToTitleType: extraRules?.titleType ?? ((masterDoc as any).applies_to_title_type ? String((masterDoc as any).applies_to_title_type) : null),
+      appliesToCaseType: (masterDoc as any).applies_to_case_type ? String((masterDoc as any).applies_to_case_type) : null,
+      projectType: extraRules?.projectType ?? null,
+      titleSubType: extraRules?.titleSubType ?? null,
+      developmentCondition: extraRules?.developmentCondition ?? null,
+      unitCategory: extraRules?.unitCategory ?? null,
+    },
+    legacyInput: {
+      purchaseMode: (context as any).purchase_mode ?? null,
+      titleType: (context as any).title_type ?? null,
+      caseType: (context as any).case_type ?? null,
+      projectType: (context as any).project_type ?? null,
+      developmentCondition: (context as any).project_development_condition ?? null,
+      unitCategory: (context as any).unit_category ?? null,
+      titleSubType: (context as any).title_sub_type ?? null,
+    },
+    context: buildApplicabilityContext(context),
+    applicabilityMode: (masterDoc as any).applicability_mode,
+    applicabilityRules: (masterDoc as any).applicability_rules,
   });
-  if (!applicability.applicable && !bypassApplicability) {
-    throw new DocumentGenerationError(422, "TEMPLATE_APPLICABILITY_BLOCKED", "Template blocked by applicability", { reasons: applicability.reasons });
+  const overrideUsed = Boolean(bypassApplicability && applicability.manuallyOverridable && applicability.applicabilityStatus === "not_applicable");
+  if (applicability.applicabilityStatus === "not_applicable") {
+    if (applicability.modeUsed === "rules_only") {
+      await writeAuditLog({ firmId, actorId, actorType, action: "documents.case.generate.blocked", entityType: "platform_document", entityId: masterDocId, detail: `applicabilityStatus=not_applicable mode=${applicability.modeUsed} overrideUsed=0 reasons=${applicability.applicabilityReasons.join("|")}`, ipAddress, userAgent });
+      throw new DocumentGenerationError(422, "TEMPLATE_APPLICABILITY_BLOCKED", "Template blocked by applicability", { reasons: applicability.applicabilityReasons, mode: applicability.modeUsed });
+    }
+    if (applicability.modeUsed === "rules_with_manual_override" && !overrideUsed) {
+      await writeAuditLog({ firmId, actorId, actorType, action: "documents.case.generate.blocked", entityType: "platform_document", entityId: masterDocId, detail: `applicabilityStatus=not_applicable mode=${applicability.modeUsed} overrideUsed=0 reasons=${applicability.applicabilityReasons.join("|")}`, ipAddress, userAgent });
+      throw new DocumentGenerationError(422, "TEMPLATE_APPLICABILITY_OVERRIDE_REQUIRED", "Template requires manual override", { reasons: applicability.applicabilityReasons, mode: applicability.modeUsed });
+    }
   }
 
   const wfDocs = (await tableExists(r, "public.case_workflow_documents"))
@@ -4493,7 +4636,7 @@ async function generateMasterDocument({
   const createdId = created && typeof created === "object" && "id" in created && typeof (created as any).id === "number"
     ? Number((created as any).id)
     : null;
-  await writeAuditLog({ firmId, actorId, actorType, action: "documents.case.generate_from_master", entityType: "case_document", entityId: createdId ?? undefined, detail: `caseId=${caseId} masterDocId=${masterDocId} name=${docName} clauses=${clauseSnapshot ? "yes" : "no"} fileName=${fileName} fallback=${namingPreview.fallbackUsed ? "1" : "0"} collision=${uniq.collisionResolved ? "1" : "0"}`, ipAddress, userAgent });
+  await writeAuditLog({ firmId, actorId, actorType, action: "documents.case.generate_from_master", entityType: "case_document", entityId: createdId ?? undefined, detail: `caseId=${caseId} masterDocId=${masterDocId} name=${docName} clauses=${clauseSnapshot ? "yes" : "no"} fileName=${fileName} fallback=${namingPreview.fallbackUsed ? "1" : "0"} collision=${uniq.collisionResolved ? "1" : "0"} applicabilityStatus=${applicability.applicabilityStatus} overrideUsed=${overrideUsed ? "1" : "0"}`, ipAddress, userAgent });
   if (preview.usedMode === "bindings") {
     await writeAuditLog({ firmId, actorId, actorType, action: "documents.generate.binding_used", entityType: "case_document", entityId: createdId ?? undefined, detail: `caseId=${caseId} platformDocumentId=${masterDocId} placeholders=${placeholders.length} missing=${preview.missingRequiredVariables.length}`, ipAddress, userAgent });
   }
@@ -5176,25 +5319,39 @@ router.post("/cases/:caseId/documents/preview", requireAuth, requireFirmUser, re
       }
       const ext = fileExtensionFromName(filename);
       const extra = await getFirmTemplateApplicabilityRules(r, req.firmId!, templateId);
-      const applicabilityResult = evaluateTemplateApplicability({
-        isActive: extra?.isActive ?? Boolean((tpl as any).is_active ?? true),
-        isTemplateCapable: extra?.isTemplateCapable ?? Boolean((tpl as any).is_template_capable ?? true),
-        appliesToPurchaseMode: extra?.purchaseMode ?? ((tpl as any).applies_to_purchase_mode ? String((tpl as any).applies_to_purchase_mode) : null),
-        appliesToTitleType: extra?.titleType ?? ((tpl as any).applies_to_title_type ? String((tpl as any).applies_to_title_type) : null),
-        appliesToCaseType: (tpl as any).applies_to_case_type ? String((tpl as any).applies_to_case_type) : null,
-        projectType: extra?.projectType ?? null,
-        titleSubType: extra?.titleSubType ?? null,
-        developmentCondition: extra?.developmentCondition ?? null,
-        unitCategory: extra?.unitCategory ?? null,
-      }, {
-        purchaseMode: (context as any).purchase_mode ?? null,
-        titleType: (context as any).title_type ?? null,
-        caseType: (context as any).case_type ?? null,
-        projectType: (context as any).project_type ?? null,
-        developmentCondition: (context as any).project_development_condition ?? null,
-        unitCategory: (context as any).unit_category ?? null,
-        titleSubType: (context as any).title_sub_type ?? null,
+      const appV2 = evaluateTemplateApplicabilityV2({
+        legacyTemplate: {
+          isActive: extra?.isActive ?? Boolean((tpl as any).is_active ?? true),
+          isTemplateCapable: extra?.isTemplateCapable ?? Boolean((tpl as any).is_template_capable ?? true),
+          appliesToPurchaseMode: extra?.purchaseMode ?? ((tpl as any).applies_to_purchase_mode ? String((tpl as any).applies_to_purchase_mode) : null),
+          appliesToTitleType: extra?.titleType ?? ((tpl as any).applies_to_title_type ? String((tpl as any).applies_to_title_type) : null),
+          appliesToCaseType: (tpl as any).applies_to_case_type ? String((tpl as any).applies_to_case_type) : null,
+          projectType: extra?.projectType ?? null,
+          titleSubType: extra?.titleSubType ?? null,
+          developmentCondition: extra?.developmentCondition ?? null,
+          unitCategory: extra?.unitCategory ?? null,
+        },
+        legacyInput: {
+          purchaseMode: (context as any).purchase_mode ?? null,
+          titleType: (context as any).title_type ?? null,
+          caseType: (context as any).case_type ?? null,
+          projectType: (context as any).project_type ?? null,
+          developmentCondition: (context as any).project_development_condition ?? null,
+          unitCategory: (context as any).unit_category ?? null,
+          titleSubType: (context as any).title_sub_type ?? null,
+        },
+        context: buildApplicabilityContext(context),
+        applicabilityMode: (tpl as any).applicability_mode,
+        applicabilityRules: (tpl as any).applicability_rules,
       });
+      const applicabilityResult = {
+        applicable: appV2.applicabilityStatus !== "not_applicable",
+        reasons: appV2.applicabilityReasons,
+        status: appV2.applicabilityStatus,
+        matchedRulesCount: appV2.matchedRulesCount,
+        failedRulesCount: appV2.failedRulesCount,
+        manuallyOverridable: appV2.manuallyOverridable,
+      };
 
       let placeholders: string[] = [];
       let renderMode: "docx" | "pdf" | "print" = "docx";
@@ -5319,25 +5476,39 @@ router.post("/cases/:caseId/documents/preview", requireAuth, requireFirmUser, re
       return;
     }
     const extra = await getPlatformDocumentApplicabilityRules(r, req.firmId!, platformDocumentId!);
-    const applicabilityResult = evaluateTemplateApplicability({
-      isActive: extra?.isActive ?? Boolean((doc as any).is_active ?? true),
-      isTemplateCapable: extra?.isTemplateCapable ?? Boolean((doc as any).is_template_capable ?? true),
-      appliesToPurchaseMode: extra?.purchaseMode ?? ((doc as any).applies_to_purchase_mode ? String((doc as any).applies_to_purchase_mode) : null),
-      appliesToTitleType: extra?.titleType ?? ((doc as any).applies_to_title_type ? String((doc as any).applies_to_title_type) : null),
-      appliesToCaseType: (doc as any).applies_to_case_type ? String((doc as any).applies_to_case_type) : null,
-      projectType: extra?.projectType ?? null,
-      titleSubType: extra?.titleSubType ?? null,
-      developmentCondition: extra?.developmentCondition ?? null,
-      unitCategory: extra?.unitCategory ?? null,
-    }, {
-      purchaseMode: (context as any).purchase_mode ?? null,
-      titleType: (context as any).title_type ?? null,
-      caseType: (context as any).case_type ?? null,
-      projectType: (context as any).project_type ?? null,
-      developmentCondition: (context as any).project_development_condition ?? null,
-      unitCategory: (context as any).unit_category ?? null,
-      titleSubType: (context as any).title_sub_type ?? null,
+    const appV2 = evaluateTemplateApplicabilityV2({
+      legacyTemplate: {
+        isActive: extra?.isActive ?? Boolean((doc as any).is_active ?? true),
+        isTemplateCapable: extra?.isTemplateCapable ?? Boolean((doc as any).is_template_capable ?? true),
+        appliesToPurchaseMode: extra?.purchaseMode ?? ((doc as any).applies_to_purchase_mode ? String((doc as any).applies_to_purchase_mode) : null),
+        appliesToTitleType: extra?.titleType ?? ((doc as any).applies_to_title_type ? String((doc as any).applies_to_title_type) : null),
+        appliesToCaseType: (doc as any).applies_to_case_type ? String((doc as any).applies_to_case_type) : null,
+        projectType: extra?.projectType ?? null,
+        titleSubType: extra?.titleSubType ?? null,
+        developmentCondition: extra?.developmentCondition ?? null,
+        unitCategory: extra?.unitCategory ?? null,
+      },
+      legacyInput: {
+        purchaseMode: (context as any).purchase_mode ?? null,
+        titleType: (context as any).title_type ?? null,
+        caseType: (context as any).case_type ?? null,
+        projectType: (context as any).project_type ?? null,
+        developmentCondition: (context as any).project_development_condition ?? null,
+        unitCategory: (context as any).unit_category ?? null,
+        titleSubType: (context as any).title_sub_type ?? null,
+      },
+      context: buildApplicabilityContext(context),
+      applicabilityMode: (doc as any).applicability_mode,
+      applicabilityRules: (doc as any).applicability_rules,
     });
+    const applicabilityResult = {
+      applicable: appV2.applicabilityStatus !== "not_applicable",
+      reasons: appV2.applicabilityReasons,
+      status: appV2.applicabilityStatus,
+      matchedRulesCount: appV2.matchedRulesCount,
+      failedRulesCount: appV2.failedRulesCount,
+      manuallyOverridable: appV2.manuallyOverridable,
+    };
 
     let bytes = await downloadPrivateObjectBytes(obj);
     const placeholders =

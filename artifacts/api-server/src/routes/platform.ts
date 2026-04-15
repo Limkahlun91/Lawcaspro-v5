@@ -629,6 +629,8 @@ router.patch("/platform/documents/:docId", requireAuth, requireFounder, async (r
   const hasCategory = Object.prototype.hasOwnProperty.call(body, "category");
   const hasFileNamingRule = Object.prototype.hasOwnProperty.call(body, "fileNamingRule");
   const hasClauseInsertionMode = Object.prototype.hasOwnProperty.call(body, "clauseInsertionMode");
+  const hasApplicabilityMode = Object.prototype.hasOwnProperty.call(body, "applicabilityMode");
+  const hasApplicabilityRules = Object.prototype.hasOwnProperty.call(body, "applicabilityRules");
 
   const isActiveVal: boolean | undefined = hasIsActive ? (typeof body.isActive === "boolean" ? body.isActive : undefined) : undefined;
   if (hasIsActive && isActiveVal === undefined) { res.status(400).json({ error: "Invalid isActive" }); return; }
@@ -680,6 +682,16 @@ router.patch("/platform/documents/:docId", requireAuth, requireFounder, async (r
       ? (typeof body.clauseInsertionMode === "string" ? (String(body.clauseInsertionMode).trim() || null) : body.clauseInsertionMode === null ? null : undefined)
       : undefined;
   if (hasClauseInsertionMode && clauseInsertionModeVal === undefined) { res.status(400).json({ error: "Invalid clauseInsertionMode" }); return; }
+  const applicabilityModeVal: string | null | undefined =
+    hasApplicabilityMode
+      ? (typeof body.applicabilityMode === "string" ? (String(body.applicabilityMode).trim() || null) : body.applicabilityMode === null ? null : undefined)
+      : undefined;
+  if (hasApplicabilityMode && applicabilityModeVal === undefined) { res.status(400).json({ error: "Invalid applicabilityMode" }); return; }
+  const applicabilityRulesVal: Record<string, unknown> | null | undefined =
+    hasApplicabilityRules
+      ? (body.applicabilityRules && typeof body.applicabilityRules === "object" ? (body.applicabilityRules as Record<string, unknown>) : body.applicabilityRules === null ? null : undefined)
+      : undefined;
+  if (hasApplicabilityRules && applicabilityRulesVal === undefined) { res.status(400).json({ error: "Invalid applicabilityRules" }); return; }
 
   const updated = await withAuthSafeDb(async (authDb) => {
     const [existing] = await authDb.select().from(platformDocumentsTable).where(eq(platformDocumentsTable.id, docId));
@@ -697,6 +709,8 @@ router.patch("/platform/documents/:docId", requireAuth, requireFounder, async (r
         ...(hasCategory ? { category: categoryVal ?? "general" } : {}),
         ...(hasFileNamingRule ? { fileNamingRule: fileNamingRuleVal ?? null } : {}),
         ...(hasClauseInsertionMode ? { clauseInsertionMode: clauseInsertionModeVal ?? null } : {}),
+        ...(hasApplicabilityMode ? { applicabilityMode: applicabilityModeVal ?? null } : {}),
+        ...(hasApplicabilityRules ? { applicabilityRules: applicabilityRulesVal ?? null } : {}),
       })
       .where(eq(platformDocumentsTable.id, docId))
       .returning();
@@ -711,6 +725,8 @@ router.patch("/platform/documents/:docId", requireAuth, requireFounder, async (r
     if (hasCategory) changed.push(`category=${categoryVal ?? "general"}`);
     if (hasFileNamingRule) changed.push(`fileNamingRule=${fileNamingRuleVal ?? "null"}`);
     if (hasClauseInsertionMode) changed.push(`clauseInsertionMode=${clauseInsertionModeVal ?? "null"}`);
+    if (hasApplicabilityMode) changed.push(`applicabilityMode=${applicabilityModeVal ?? "null"}`);
+    if (hasApplicabilityRules) changed.push(`applicabilityRules=${applicabilityRulesVal ? "set" : "null"}`);
 
     await writeAuditLog(
       {

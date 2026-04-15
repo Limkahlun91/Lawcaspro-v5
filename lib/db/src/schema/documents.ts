@@ -10,6 +10,8 @@ export const documentTemplatesTable = pgTable("document_templates", {
   isActive: boolean("is_active").notNull().default(true),
   fileNamingRule: text("file_naming_rule"),
   clauseInsertionMode: text("clause_insertion_mode"),
+  applicabilityMode: text("applicability_mode"),
+  applicabilityRules: jsonb("applicability_rules"),
   appliesToPurchaseMode: text("applies_to_purchase_mode"),
   appliesToTitleType: text("applies_to_title_type").notNull().default("any"),
   appliesToCaseType: text("applies_to_case_type"),

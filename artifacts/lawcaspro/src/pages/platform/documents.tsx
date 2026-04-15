@@ -282,6 +282,8 @@ export default function PlatformDocuments() {
   const [editCategory, setEditCategory] = useState<string>("general");
   const [editFileNamingRule, setEditFileNamingRule] = useState<string>("");
   const [editClauseInsertionMode, setEditClauseInsertionMode] = useState<string>("prefer_placeholder_else_append");
+  const [editApplicabilityMode, setEditApplicabilityMode] = useState<string>("universal");
+  const [editApplicabilityRulesText, setEditApplicabilityRulesText] = useState<string>("");
   const [namingPreviewCaseId, setNamingPreviewCaseId] = useState<string>("");
   const [namingPreviewFileName, setNamingPreviewFileName] = useState<string>("");
   const [bindingsOpen, setBindingsOpen] = useState(false);
@@ -309,6 +311,8 @@ export default function PlatformDocuments() {
     setEditCategory(editingDoc.category ?? "general");
     setEditFileNamingRule((editingDoc as any).fileNamingRule ? String((editingDoc as any).fileNamingRule) : "");
     setEditClauseInsertionMode((editingDoc as any).clauseInsertionMode ? String((editingDoc as any).clauseInsertionMode) : "prefer_placeholder_else_append");
+    setEditApplicabilityMode((editingDoc as any).applicabilityMode ? String((editingDoc as any).applicabilityMode) : "universal");
+    setEditApplicabilityRulesText((editingDoc as any).applicabilityRules ? JSON.stringify((editingDoc as any).applicabilityRules, null, 2) : "");
     setNamingPreviewCaseId("");
     setNamingPreviewFileName("");
   }, [editingDoc]);
@@ -1182,6 +1186,27 @@ export default function PlatformDocuments() {
                   </div>
                 ) : null}
               </div>
+              <div className="space-y-1.5">
+                <Label>Applicability mode</Label>
+                <Select value={editApplicabilityMode} onValueChange={setEditApplicabilityMode}>
+                  <SelectTrigger><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="universal">Universal</SelectItem>
+                    <SelectItem value="rules_only">Rules only</SelectItem>
+                    <SelectItem value="rules_with_manual_override">Rules + manual override</SelectItem>
+                  </SelectContent>
+                </Select>
+                <div className="text-xs text-slate-500">Example rule: {"{\"all\":[{\"field\":\"purchase_mode\",\"operator\":\"equals\",\"value\":\"loan\"}]}"}</div>
+              </div>
+              <div className="space-y-1.5">
+                <Label>Applicability rules (JSON)</Label>
+                <Textarea
+                  value={editApplicabilityRulesText}
+                  onChange={(e) => setEditApplicabilityRulesText(e.target.value)}
+                  rows={6}
+                  placeholder='{"all":[{"field":"purchase_mode","operator":"equals","value":"loan"}]}'
+                />
+              </div>
               <div className="flex justify-end gap-2 pt-2">
                 <Button
                   variant="outline"
@@ -1206,6 +1231,10 @@ export default function PlatformDocuments() {
                         category: editCategory,
                         fileNamingRule: editFileNamingRule.trim() ? editFileNamingRule.trim() : null,
                         clauseInsertionMode: editClauseInsertionMode || null,
+                        applicabilityMode: editApplicabilityMode || "universal",
+                        applicabilityRules: (() => {
+                          try { return editApplicabilityRulesText.trim() ? JSON.parse(editApplicabilityRulesText) : null; } catch { return null; }
+                        })(),
                       },
                     });
                     setEditDocOpen(false);

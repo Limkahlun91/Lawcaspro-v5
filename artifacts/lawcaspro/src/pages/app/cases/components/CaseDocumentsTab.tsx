@@ -43,7 +43,7 @@ interface CaseDocument {
   created_at: string;
 }
 
-type ApplicabilityStatus = "applicable" | "not_applicable";
+type ApplicabilityStatus = "applicable" | "warning" | "not_applicable";
 type ReadinessStatus = "ready" | "missing_data" | "missing_file" | "incomplete";
 
 type ChecklistStatus =
@@ -65,7 +65,7 @@ type ChecklistItem = {
   blocked: boolean;
   updatedAt: string | null;
   notes: string | null;
-  applicability: { status: ApplicabilityStatus; reasons: string[] };
+  applicability: { status: ApplicabilityStatus; reasons: string[]; matchedRulesCount?: number; failedRulesCount?: number; manuallyOverridable?: boolean };
   readiness: { status: ReadinessStatus; missing: Array<{ code: string; message: string }> } | null;
   templateId?: number;
   name: string;
@@ -111,7 +111,7 @@ type DocumentPreviewResponse = {
     clauseOrder?: Array<{ scope: string; id: number; includeTitle?: boolean }>;
     selectedClausesResolved?: Array<{ scope: string; id: number; clauseCode: string; title: string; includeTitle: boolean; body: string }>;
   };
-  applicabilityResult: { applicable: boolean; reasons: string[] };
+  applicabilityResult: { applicable: boolean; reasons: string[]; status?: "applicable" | "warning" | "not_applicable"; matchedRulesCount?: number; failedRulesCount?: number; manuallyOverridable?: boolean };
   renderMode: string;
   previewSummary: { renderable: boolean; placeholdersCount: number; usedMode: string; missingRequiredCount: number };
 };
@@ -134,6 +134,7 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
   const [generateDialogOpen, setGenerateDialogOpen] = useState(false);
   const [showAllTemplates, setShowAllTemplates] = useState(false);
   const [templateSourceFilter, setTemplateSourceFilter] = useState<"all" | "firm" | "master">("all");
+  const [templateApplicabilityFilter, setTemplateApplicabilityFilter] = useState<"all" | "applicable" | "warning" | "not_applicable">("all");
   const [selectedLetterheadId, setSelectedLetterheadId] = useState<string>("");
   const [documentName, setDocumentName] = useState("");
   const [rowNamingPreview, setRowNamingPreview] = useState<Record<string, { fileName: string; ruleUsed: string; warnings?: string[] }>>({});
@@ -173,7 +174,7 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
   const [clauseQuery, setClauseQuery] = useState("");
   const [clauseIncludeTitleDefault, setClauseIncludeTitleDefault] = useState(true);
 
-  const [checklistFilter, setChecklistFilter] = useState<"all" | "required" | "missing" | "completed" | "waived" | "not_applicable">("all");
+  const [checklistFilter, setChecklistFilter] = useState<"all" | "required" | "missing" | "completed" | "waived" | "warning" | "not_applicable">("all");
   const [waiveDialogOpen, setWaiveDialogOpen] = useState(false);
   const [waiveTarget, setWaiveTarget] = useState<ChecklistItem | null>(null);
   const [waiveReason, setWaiveReason] = useState("");
@@ -566,6 +567,7 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
     setSelectedLetterheadId("");
     setShowAllTemplates(false);
     setTemplateSourceFilter("all");
+    setTemplateApplicabilityFilter("all");
     setRowNamingPreview({});
   }
 
@@ -890,6 +892,7 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
                           <SelectItem value="missing">Missing</SelectItem>
                           <SelectItem value="completed">Completed</SelectItem>
                           <SelectItem value="waived">Waived</SelectItem>
+                          <SelectItem value="warning">With warnings</SelectItem>
                           <SelectItem value="not_applicable">Not applicable</SelectItem>
                         </SelectContent>
                       </Select>
@@ -958,18 +961,19 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
                       <div className="space-y-2">
                         {(sec.items ?? [])
                           .filter((it) => {
-                            const applicable = it.applicability?.status === "applicable" && it.status !== "not_applicable";
+                            const applicable = it.applicability?.status !== "not_applicable" && it.status !== "not_applicable";
                             const missing = it.isRequired && applicable && !["generated", "uploaded", "received", "completed", "waived"].includes(it.status);
                             if (checklistFilter === "all") return true;
                             if (checklistFilter === "required") return it.isRequired && applicable;
                             if (checklistFilter === "missing") return missing;
                             if (checklistFilter === "completed") return it.status === "completed";
                             if (checklistFilter === "waived") return it.status === "waived";
+                            if (checklistFilter === "warning") return it.applicability?.status === "warning";
                             if (checklistFilter === "not_applicable") return it.status === "not_applicable";
                             return true;
                           })
                           .map((it) => {
-                            const applicable = it.applicability?.status === "applicable";
+                            const applicable = it.applicability?.status !== "not_applicable";
                             const ready = it.readiness?.status === "ready";
                             const latestId = it.latestDocument?.id;
                             const latestDoc = latestId ? documents.find((d) => d.id === latestId) : null;
@@ -1032,7 +1036,7 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
                                       </span>
                                     ) : null}
                                     <span className={cn("text-[10px] px-1.5 py-0.5 rounded font-medium", applicable ? "bg-emerald-50 text-emerald-700" : "bg-slate-100 text-slate-500")}>
-                                      {applicable ? "Applicable" : "Not applicable"}
+                                      {it.applicability?.status === "warning" ? "Warning" : applicable ? "Applicable" : "Not applicable"}
                                     </span>
                                     {it.readiness ? (
                                       <span className={cn("text-[10px] px-1.5 py-0.5 rounded font-medium", ready ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-800")}>
@@ -1419,8 +1423,15 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
               <div className="rounded-lg border border-slate-200 bg-white p-3">
                 <div className="flex items-center justify-between gap-2">
                   <div className="text-sm font-medium text-slate-900">Applicability</div>
-                  <span className={cn("text-xs px-2 py-1 rounded font-medium", previewResult.applicabilityResult.applicable ? "bg-emerald-50 text-emerald-700" : "bg-rose-50 text-rose-700")}>
-                    {previewResult.applicabilityResult.applicable ? "Applicable" : "Blocked"}
+                  <span className={cn(
+                    "text-xs px-2 py-1 rounded font-medium",
+                    previewResult.applicabilityResult.status === "warning"
+                      ? "bg-amber-50 text-amber-800"
+                      : previewResult.applicabilityResult.applicable
+                        ? "bg-emerald-50 text-emerald-700"
+                        : "bg-rose-50 text-rose-700"
+                  )}>
+                    {previewResult.applicabilityResult.status === "warning" ? "Warning" : previewResult.applicabilityResult.applicable ? "Applicable" : "Blocked"}
                   </span>
                 </div>
                 {!previewResult.applicabilityResult.applicable && previewResult.applicabilityResult.reasons.length > 0 ? (
@@ -1474,7 +1485,13 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
                     setPreviewOpen(false);
                     handleGenerate(previewItem);
                   }}
-                  disabled={!previewItem || !canGenerate || !previewResult.applicabilityResult.applicable || previewResult.missingRequiredVariables.length > 0 || !previewResult.previewSummary.renderable}
+                  disabled={
+                    !previewItem
+                    || !canGenerate
+                    || (!(previewResult.applicabilityResult.applicable || (previewResult.applicabilityResult.manuallyOverridable && canBypassApplicability && showAllTemplates)))
+                    || previewResult.missingRequiredVariables.length > 0
+                    || !previewResult.previewSummary.renderable
+                  }
                 >
                   Generate
                 </Button>
@@ -1516,6 +1533,17 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
                   <SelectItem value="master">Master</SelectItem>
                 </SelectContent>
               </Select>
+              <Select value={templateApplicabilityFilter} onValueChange={(v) => setTemplateApplicabilityFilter(v as any)}>
+                <SelectTrigger className="w-44">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">Show all</SelectItem>
+                  <SelectItem value="applicable">Applicable only</SelectItem>
+                  <SelectItem value="warning">With warnings</SelectItem>
+                  <SelectItem value="not_applicable">Not applicable</SelectItem>
+                </SelectContent>
+              </Select>
             </div>
 
             <div className="space-y-1.5">
@@ -1554,8 +1582,9 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
                   {(checklistQuery.data?.sections ?? []).map((sec) => {
                     const filtered = (sec.items ?? []).filter((it) => {
                       if (it.kind !== "template") return false;
-                      if (!showAllTemplates && it.applicability?.status !== "applicable") return false;
+                      if (!showAllTemplates && it.applicability?.status === "not_applicable") return false;
                       if (templateSourceFilter !== "all" && it.source !== templateSourceFilter) return false;
+                      if (templateApplicabilityFilter !== "all" && (it.applicability?.status ?? "applicable") !== templateApplicabilityFilter) return false;
                       return true;
                     });
                     if (filtered.length === 0) return null;
@@ -1564,7 +1593,8 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
                         <div className="text-xs font-semibold text-slate-700">{sec.section}</div>
                         <div className="space-y-2">
                           {filtered.map((it) => {
-                            const applicable = it.applicability?.status === "applicable";
+                            const overridable = Boolean(it.applicability?.status === "not_applicable" && it.applicability?.manuallyOverridable && canBypassApplicability && showAllTemplates);
+                            const applicable = it.applicability?.status !== "not_applicable" || overridable;
                             const ready = it.readiness?.status === "ready";
                             const reason = !applicable
                               ? (it.applicability?.reasons ?? []).join(", ")
@@ -1579,8 +1609,8 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
                                     <span className={cn("text-[10px] px-1.5 py-0.5 rounded font-medium", it.source === "firm" ? "bg-slate-100 text-slate-700" : "bg-purple-50 text-purple-700")}>
                                       {it.source}
                                     </span>
-                                    <span className={cn("text-[10px] px-1.5 py-0.5 rounded font-medium", applicable ? "bg-emerald-50 text-emerald-700" : "bg-slate-100 text-slate-500")}>
-                                      {applicable ? "Applicable" : "Not applicable"}
+                                    <span className={cn("text-[10px] px-1.5 py-0.5 rounded font-medium", it.applicability?.status === "warning" ? "bg-amber-50 text-amber-800" : applicable ? "bg-emerald-50 text-emerald-700" : "bg-slate-100 text-slate-500")}>
+                                      {it.applicability?.status === "warning" ? "Warning" : overridable ? "Override" : applicable ? "Applicable" : "Not applicable"}
                                     </span>
                                     <span className={cn("text-[10px] px-1.5 py-0.5 rounded font-medium", ready ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-800")}>
                                       {ready ? "Ready" : (it.readiness?.status || "Incomplete")}

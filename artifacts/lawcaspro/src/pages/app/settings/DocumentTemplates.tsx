@@ -106,6 +106,8 @@ interface TemplateApplicabilityResponse {
     developmentCondition: string | null;
     unitCategory: string | null;
     isTemplateCapable: boolean;
+    applicabilityMode?: "universal" | "rules_only" | "rules_with_manual_override";
+    applicabilityRules?: unknown;
   };
 }
 
@@ -166,6 +168,11 @@ export default function DocumentTemplates() {
   const [versionFile, setVersionFile] = useState<File | null>(null);
   const [bindingsDraft, setBindingsDraft] = useState<Record<string, DocumentTemplateBinding>>({});
   const [appDraft, setAppDraft] = useState<TemplateApplicabilityResponse["effective"] | null>(null);
+  const [appRulesText, setAppRulesText] = useState<string>("");
+  const [ruleGroup, setRuleGroup] = useState<"all" | "any">("all");
+  const [ruleField, setRuleField] = useState("purchase_mode");
+  const [ruleOperator, setRuleOperator] = useState("equals");
+  const [ruleValue, setRuleValue] = useState("");
 
   useEffect(() => {
     if (!activeTemplate) return;
@@ -287,7 +294,27 @@ export default function DocumentTemplates() {
     if (!applicabilityQuery.data) return;
     if (appDraft) return;
     setAppDraft(applicabilityQuery.data.effective);
+    const rules = (applicabilityQuery.data.effective as any)?.applicabilityRules;
+    setAppRulesText(rules ? JSON.stringify(rules, null, 2) : "");
   }, [applicabilityQuery.data, appDraft]);
+
+  function appendRuleToDraft(): void {
+    if (!appDraft) return;
+    let parsed: any = {};
+    try {
+      parsed = appRulesText.trim() ? JSON.parse(appRulesText) : {};
+    } catch {
+      parsed = {};
+    }
+    if (!parsed || typeof parsed !== "object") parsed = {};
+    if (!Array.isArray(parsed[ruleGroup])) parsed[ruleGroup] = [];
+    parsed[ruleGroup].push({
+      field: ruleField,
+      operator: ruleOperator,
+      value: ruleValue,
+    });
+    setAppRulesText(JSON.stringify(parsed, null, 2));
+  }
 
   const deleteMutation = useMutation({
     mutationFn: (id: number) => apiFetchJson(`/document-templates/${id}`, { method: "DELETE" }),
@@ -1154,6 +1181,59 @@ export default function DocumentTemplates() {
                       <Input value={appDraft.titleSubType ?? ""} onChange={(e) => setAppDraft({ ...appDraft, titleSubType: e.target.value || null })} placeholder="(optional)" disabled={!canUpdate} />
                     </div>
 
+                    <div className="space-y-1.5">
+                      <Label>Applicability mode</Label>
+                      <Select value={appDraft.applicabilityMode ?? "universal"} onValueChange={(v) => setAppDraft({ ...appDraft, applicabilityMode: v as any })} disabled={!canUpdate}>
+                        <SelectTrigger><SelectValue /></SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="universal">Universal</SelectItem>
+                          <SelectItem value="rules_only">Rules only</SelectItem>
+                          <SelectItem value="rules_with_manual_override">Rules + manual override</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+
+                    <div className="space-y-2 rounded border border-slate-200 p-3">
+                      <div className="text-sm font-medium text-slate-900">Rule builder</div>
+                      <div className="grid grid-cols-1 sm:grid-cols-4 gap-2">
+                        <Select value={ruleGroup} onValueChange={(v) => setRuleGroup(v as any)} disabled={!canUpdate}>
+                          <SelectTrigger><SelectValue /></SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="all">AND (all)</SelectItem>
+                            <SelectItem value="any">OR (any)</SelectItem>
+                          </SelectContent>
+                        </Select>
+                        <Select value={ruleField} onValueChange={setRuleField} disabled={!canUpdate}>
+                          <SelectTrigger><SelectValue /></SelectTrigger>
+                          <SelectContent>
+                            {["purchase_mode","case_status","lawyer_in_charge","clerk_in_charge","project_type","title_type","title_sub_type","development_condition","unit_category","developer_id","developer_name","bank_name","has_loan","purchaser_count","borrower_count","has_company_party"].map((f) => (
+                              <SelectItem key={f} value={f}>{f}</SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                        <Select value={ruleOperator} onValueChange={setRuleOperator} disabled={!canUpdate}>
+                          <SelectTrigger><SelectValue /></SelectTrigger>
+                          <SelectContent>
+                            {["equals","not_equals","in","not_in","contains","is_true","is_false","greater_than_or_equal","less_than_or_equal"].map((op) => (
+                              <SelectItem key={op} value={op}>{op}</SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                        <Input value={ruleValue} onChange={(e) => setRuleValue(e.target.value)} placeholder="value" disabled={!canUpdate} />
+                      </div>
+                      <div className="flex justify-end">
+                        <Button type="button" variant="outline" size="sm" onClick={appendRuleToDraft} disabled={!canUpdate}>
+                          Add rule
+                        </Button>
+                      </div>
+                    </div>
+
+                    <div className="space-y-1.5">
+                      <Label>Applicability rules (JSON)</Label>
+                      <Textarea value={appRulesText} onChange={(e) => setAppRulesText(e.target.value)} rows={8} disabled={!canUpdate} placeholder='{"all":[{"field":"purchase_mode","operator":"equals","value":"loan"}]}' />
+                      <div className="text-xs text-slate-500">Example: loan-only template =&gt; all: purchase_mode equals loan.</div>
+                    </div>
+
                     <div className="flex justify-end gap-2">
                       <Button
                         variant="outline"
@@ -1172,6 +1252,10 @@ export default function DocumentTemplates() {
                               unitCategory: appDraft.unitCategory,
                               titleSubType: appDraft.titleSubType,
                               isTemplateCapable: appDraft.isTemplateCapable,
+                              applicabilityMode: appDraft.applicabilityMode ?? "universal",
+                              applicabilityRules: (() => {
+                                try { return appRulesText.trim() ? JSON.parse(appRulesText) : null; } catch { return null; }
+                              })(),
                             },
                           });
                         }}
