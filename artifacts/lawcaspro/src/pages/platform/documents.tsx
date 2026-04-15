@@ -284,6 +284,8 @@ export default function PlatformDocuments() {
   const [editClauseInsertionMode, setEditClauseInsertionMode] = useState<string>("prefer_placeholder_else_append");
   const [editApplicabilityMode, setEditApplicabilityMode] = useState<string>("universal");
   const [editApplicabilityRulesText, setEditApplicabilityRulesText] = useState<string>("");
+  const [editChecklistMode, setEditChecklistMode] = useState<string>("off");
+  const [editChecklistItemsText, setEditChecklistItemsText] = useState<string>("");
   const [namingPreviewCaseId, setNamingPreviewCaseId] = useState<string>("");
   const [namingPreviewFileName, setNamingPreviewFileName] = useState<string>("");
   const [bindingsOpen, setBindingsOpen] = useState(false);
@@ -313,6 +315,8 @@ export default function PlatformDocuments() {
     setEditClauseInsertionMode((editingDoc as any).clauseInsertionMode ? String((editingDoc as any).clauseInsertionMode) : "prefer_placeholder_else_append");
     setEditApplicabilityMode((editingDoc as any).applicabilityMode ? String((editingDoc as any).applicabilityMode) : "universal");
     setEditApplicabilityRulesText((editingDoc as any).applicabilityRules ? JSON.stringify((editingDoc as any).applicabilityRules, null, 2) : "");
+    setEditChecklistMode((editingDoc as any).checklistMode ? String((editingDoc as any).checklistMode) : "off");
+    setEditChecklistItemsText((editingDoc as any).checklistItems ? JSON.stringify((editingDoc as any).checklistItems, null, 2) : "");
     setNamingPreviewCaseId("");
     setNamingPreviewFileName("");
   }, [editingDoc]);
@@ -1207,6 +1211,27 @@ export default function PlatformDocuments() {
                   placeholder='{"all":[{"field":"purchase_mode","operator":"equals","value":"loan"}]}'
                 />
               </div>
+              <div className="space-y-1.5">
+                <Label>Checklist mode</Label>
+                <Select value={editChecklistMode} onValueChange={setEditChecklistMode}>
+                  <SelectTrigger><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="off">Off</SelectItem>
+                    <SelectItem value="advisory">Advisory</SelectItem>
+                    <SelectItem value="required_to_generate">Required to generate</SelectItem>
+                    <SelectItem value="required_with_manual_override">Required + manual override</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="space-y-1.5">
+                <Label>Checklist items (JSON)</Label>
+                <Textarea
+                  value={editChecklistItemsText}
+                  onChange={(e) => setEditChecklistItemsText(e.target.value)}
+                  rows={6}
+                  placeholder='[{"id":"bank_name","label":"Bank name exists","type":"required_case_field","required":true,"config":{"fieldKey":"bank_name"}}]'
+                />
+              </div>
               <div className="flex justify-end gap-2 pt-2">
                 <Button
                   variant="outline"
@@ -1234,6 +1259,10 @@ export default function PlatformDocuments() {
                         applicabilityMode: editApplicabilityMode || "universal",
                         applicabilityRules: (() => {
                           try { return editApplicabilityRulesText.trim() ? JSON.parse(editApplicabilityRulesText) : null; } catch { return null; }
+                        })(),
+                        checklistMode: editChecklistMode || "off",
+                        checklistItems: (() => {
+                          try { return editChecklistItemsText.trim() ? JSON.parse(editChecklistItemsText) : null; } catch { return null; }
                         })(),
                       },
                     });

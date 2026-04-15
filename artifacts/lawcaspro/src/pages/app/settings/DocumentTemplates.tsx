@@ -108,6 +108,8 @@ interface TemplateApplicabilityResponse {
     isTemplateCapable: boolean;
     applicabilityMode?: "universal" | "rules_only" | "rules_with_manual_override";
     applicabilityRules?: unknown;
+    checklistMode?: "off" | "advisory" | "required_to_generate" | "required_with_manual_override";
+    checklistItems?: unknown;
   };
 }
 
@@ -169,6 +171,7 @@ export default function DocumentTemplates() {
   const [bindingsDraft, setBindingsDraft] = useState<Record<string, DocumentTemplateBinding>>({});
   const [appDraft, setAppDraft] = useState<TemplateApplicabilityResponse["effective"] | null>(null);
   const [appRulesText, setAppRulesText] = useState<string>("");
+  const [checklistItemsText, setChecklistItemsText] = useState<string>("");
   const [ruleGroup, setRuleGroup] = useState<"all" | "any">("all");
   const [ruleField, setRuleField] = useState("purchase_mode");
   const [ruleOperator, setRuleOperator] = useState("equals");
@@ -296,6 +299,8 @@ export default function DocumentTemplates() {
     setAppDraft(applicabilityQuery.data.effective);
     const rules = (applicabilityQuery.data.effective as any)?.applicabilityRules;
     setAppRulesText(rules ? JSON.stringify(rules, null, 2) : "");
+    const checklist = (applicabilityQuery.data.effective as any)?.checklistItems;
+    setChecklistItemsText(checklist ? JSON.stringify(checklist, null, 2) : "");
   }, [applicabilityQuery.data, appDraft]);
 
   function appendRuleToDraft(): void {
@@ -1234,6 +1239,31 @@ export default function DocumentTemplates() {
                       <div className="text-xs text-slate-500">Example: loan-only template =&gt; all: purchase_mode equals loan.</div>
                     </div>
 
+                    <div className="space-y-1.5">
+                      <Label>Checklist mode</Label>
+                      <Select value={appDraft.checklistMode ?? "off"} onValueChange={(v) => setAppDraft({ ...appDraft, checklistMode: v as any })} disabled={!canUpdate}>
+                        <SelectTrigger><SelectValue /></SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="off">Off</SelectItem>
+                          <SelectItem value="advisory">Advisory</SelectItem>
+                          <SelectItem value="required_to_generate">Required to generate</SelectItem>
+                          <SelectItem value="required_with_manual_override">Required + manual override</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+
+                    <div className="space-y-1.5">
+                      <Label>Checklist items (JSON)</Label>
+                      <Textarea
+                        value={checklistItemsText}
+                        onChange={(e) => setChecklistItemsText(e.target.value)}
+                        rows={8}
+                        disabled={!canUpdate}
+                        placeholder='[{"id":"bank_name","label":"Bank name exists","type":"required_case_field","required":true,"config":{"fieldKey":"bank_name"}}]'
+                      />
+                      <div className="text-xs text-slate-500">Types: required_case_field, required_generated_variable, required_uploaded_document, required_milestone, manual_confirmation.</div>
+                    </div>
+
                     <div className="flex justify-end gap-2">
                       <Button
                         variant="outline"
@@ -1255,6 +1285,10 @@ export default function DocumentTemplates() {
                               applicabilityMode: appDraft.applicabilityMode ?? "universal",
                               applicabilityRules: (() => {
                                 try { return appRulesText.trim() ? JSON.parse(appRulesText) : null; } catch { return null; }
+                              })(),
+                              checklistMode: appDraft.checklistMode ?? "off",
+                              checklistItems: (() => {
+                                try { return checklistItemsText.trim() ? JSON.parse(checklistItemsText) : null; } catch { return null; }
                               })(),
                             },
                           });

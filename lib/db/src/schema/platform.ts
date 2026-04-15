@@ -20,6 +20,8 @@ export const platformDocumentsTable = pgTable("platform_documents", {
   clauseInsertionMode: text("clause_insertion_mode"),
   applicabilityMode: text("applicability_mode"),
   applicabilityRules: jsonb("applicability_rules"),
+  checklistMode: text("checklist_mode"),
+  checklistItems: jsonb("checklist_items"),
   appliesToPurchaseMode: text("applies_to_purchase_mode"),
   appliesToTitleType: text("applies_to_title_type").notNull().default("any"),
   appliesToCaseType: text("applies_to_case_type"),

@@ -631,6 +631,8 @@ router.patch("/platform/documents/:docId", requireAuth, requireFounder, async (r
   const hasClauseInsertionMode = Object.prototype.hasOwnProperty.call(body, "clauseInsertionMode");
   const hasApplicabilityMode = Object.prototype.hasOwnProperty.call(body, "applicabilityMode");
   const hasApplicabilityRules = Object.prototype.hasOwnProperty.call(body, "applicabilityRules");
+  const hasChecklistMode = Object.prototype.hasOwnProperty.call(body, "checklistMode");
+  const hasChecklistItems = Object.prototype.hasOwnProperty.call(body, "checklistItems");
 
   const isActiveVal: boolean | undefined = hasIsActive ? (typeof body.isActive === "boolean" ? body.isActive : undefined) : undefined;
   if (hasIsActive && isActiveVal === undefined) { res.status(400).json({ error: "Invalid isActive" }); return; }
@@ -692,6 +694,16 @@ router.patch("/platform/documents/:docId", requireAuth, requireFounder, async (r
       ? (body.applicabilityRules && typeof body.applicabilityRules === "object" ? (body.applicabilityRules as Record<string, unknown>) : body.applicabilityRules === null ? null : undefined)
       : undefined;
   if (hasApplicabilityRules && applicabilityRulesVal === undefined) { res.status(400).json({ error: "Invalid applicabilityRules" }); return; }
+  const checklistModeVal: string | null | undefined =
+    hasChecklistMode
+      ? (typeof body.checklistMode === "string" ? (String(body.checklistMode).trim() || null) : body.checklistMode === null ? null : undefined)
+      : undefined;
+  if (hasChecklistMode && checklistModeVal === undefined) { res.status(400).json({ error: "Invalid checklistMode" }); return; }
+  const checklistItemsVal: Record<string, unknown>[] | null | undefined =
+    hasChecklistItems
+      ? (Array.isArray(body.checklistItems) ? (body.checklistItems as Record<string, unknown>[]) : body.checklistItems === null ? null : undefined)
+      : undefined;
+  if (hasChecklistItems && checklistItemsVal === undefined) { res.status(400).json({ error: "Invalid checklistItems" }); return; }
 
   const updated = await withAuthSafeDb(async (authDb) => {
     const [existing] = await authDb.select().from(platformDocumentsTable).where(eq(platformDocumentsTable.id, docId));
@@ -711,6 +723,8 @@ router.patch("/platform/documents/:docId", requireAuth, requireFounder, async (r
         ...(hasClauseInsertionMode ? { clauseInsertionMode: clauseInsertionModeVal ?? null } : {}),
         ...(hasApplicabilityMode ? { applicabilityMode: applicabilityModeVal ?? null } : {}),
         ...(hasApplicabilityRules ? { applicabilityRules: applicabilityRulesVal ?? null } : {}),
+        ...(hasChecklistMode ? { checklistMode: checklistModeVal ?? null } : {}),
+        ...(hasChecklistItems ? { checklistItems: checklistItemsVal ?? null } : {}),
       })
       .where(eq(platformDocumentsTable.id, docId))
       .returning();
@@ -727,6 +741,8 @@ router.patch("/platform/documents/:docId", requireAuth, requireFounder, async (r
     if (hasClauseInsertionMode) changed.push(`clauseInsertionMode=${clauseInsertionModeVal ?? "null"}`);
     if (hasApplicabilityMode) changed.push(`applicabilityMode=${applicabilityModeVal ?? "null"}`);
     if (hasApplicabilityRules) changed.push(`applicabilityRules=${applicabilityRulesVal ? "set" : "null"}`);
+    if (hasChecklistMode) changed.push(`checklistMode=${checklistModeVal ?? "null"}`);
+    if (hasChecklistItems) changed.push(`checklistItems=${checklistItemsVal ? "set" : "null"}`);
 
     await writeAuditLog(
       {

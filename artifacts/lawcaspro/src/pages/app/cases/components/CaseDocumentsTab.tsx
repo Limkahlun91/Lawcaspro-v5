@@ -67,6 +67,15 @@ type ChecklistItem = {
   notes: string | null;
   applicability: { status: ApplicabilityStatus; reasons: string[]; matchedRulesCount?: number; failedRulesCount?: number; manuallyOverridable?: boolean };
   readiness: { status: ReadinessStatus; missing: Array<{ code: string; message: string }> } | null;
+  checklistResult?: {
+    checklistStatus: "ready" | "warning" | "blocked";
+    totalItems: number;
+    passedItems: number;
+    missingRequiredItems: number;
+    warningItems: number;
+    manuallyOverridable: boolean;
+    items: Array<{ id: string; label: string; type: string; passed: boolean; required: boolean; message: string; source: string; checkedBy?: number | null; checkedAt?: string | null }>;
+  } | null;
   templateId?: number;
   name: string;
   documentType?: string;
@@ -112,6 +121,15 @@ type DocumentPreviewResponse = {
     selectedClausesResolved?: Array<{ scope: string; id: number; clauseCode: string; title: string; includeTitle: boolean; body: string }>;
   };
   applicabilityResult: { applicable: boolean; reasons: string[]; status?: "applicable" | "warning" | "not_applicable"; matchedRulesCount?: number; failedRulesCount?: number; manuallyOverridable?: boolean };
+  checklistResult?: {
+    checklistStatus: "ready" | "warning" | "blocked";
+    totalItems: number;
+    passedItems: number;
+    missingRequiredItems: number;
+    warningItems: number;
+    manuallyOverridable: boolean;
+    items: Array<{ id: string; label: string; type: string; passed: boolean; required: boolean; message: string; source: string; checkedBy?: number | null; checkedAt?: string | null }>;
+  };
   renderMode: string;
   previewSummary: { renderable: boolean; placeholdersCount: number; usedMode: string; missingRequiredCount: number };
 };
@@ -415,6 +433,14 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
       } else if (code === "TEMPLATE_APPLICABILITY_BLOCKED") {
         const reasons = reasonsRaw?.filter((x): x is string => typeof x === "string" && Boolean(x.trim()));
         toast({ title: "Template blocked", description: reasons?.length ? reasons.join(", ") : undefined, variant: "destructive" });
+      } else if (code === "TEMPLATE_CHECKLIST_BLOCKED" || code === "TEMPLATE_CHECKLIST_OVERRIDE_REQUIRED") {
+        const checklist = asRecord(data?.checklist);
+        const items = Array.isArray(checklist?.items) ? checklist.items : [];
+        const missingMsgs = items
+          .map((x) => asRecord(x)?.message)
+          .filter((x): x is string => typeof x === "string" && Boolean(x.trim()))
+          .slice(0, 5);
+        toast({ title: "Checklist blocked", description: missingMsgs.length ? missingMsgs.join(", ") : "Missing required checklist items", variant: "destructive" });
       } else if (code === "TEMPLATE_BINDING_MISSING" && missingReq) {
         const missingKeys = missingReq
           .map((m) => asRecord(m)?.variableKey)
@@ -482,6 +508,19 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
       setRowNamingPreview((prev) => ({ ...prev, [key]: naming }));
     } catch (err) {
       toastError(toast, err, "Filename preview failed");
+    }
+  }
+
+  async function confirmManualChecklist(itemId: string): Promise<void> {
+    if (!previewItem || previewItem.kind !== "template" || typeof previewItem.templateId !== "number") return;
+    const prefix = previewItem.source === "firm" ? `tpl:firm:${previewItem.templateId}` : `tpl:master:${previewItem.templateId}`;
+    const checklistKey = `${prefix}:confirm:${itemId}`;
+    try {
+      await apiFetchJson(`/cases/${caseId}/documents/checklist/items/${encodeURIComponent(checklistKey)}/completed`, { method: "POST", body: JSON.stringify({ notes: "confirmed from preview" }) });
+      toast({ title: "Manual confirmation saved" });
+      await handlePreview(previewItem);
+    } catch (err) {
+      toastError(toast, err, "Confirmation failed");
     }
   }
 
@@ -1038,6 +1077,11 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
                                     <span className={cn("text-[10px] px-1.5 py-0.5 rounded font-medium", applicable ? "bg-emerald-50 text-emerald-700" : "bg-slate-100 text-slate-500")}>
                                       {it.applicability?.status === "warning" ? "Warning" : applicable ? "Applicable" : "Not applicable"}
                                     </span>
+                                    {it.checklistResult ? (
+                                      <span className={cn("text-[10px] px-1.5 py-0.5 rounded font-medium", it.checklistResult.checklistStatus === "ready" ? "bg-emerald-50 text-emerald-700" : it.checklistResult.checklistStatus === "warning" ? "bg-amber-50 text-amber-800" : "bg-rose-50 text-rose-700")}>
+                                        Checklist {it.checklistResult.checklistStatus}
+                                      </span>
+                                    ) : null}
                                     {it.readiness ? (
                                       <span className={cn("text-[10px] px-1.5 py-0.5 rounded font-medium", ready ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-800")}>
                                         {ready ? "Ready" : (it.readiness?.status || "Incomplete")}
@@ -1048,6 +1092,7 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
                                     </span>
                                   </div>
                                   {reason ? <div className="mt-1 text-xs text-slate-600 break-words">{reason}</div> : null}
+                                  {it.checklistResult ? <div className="mt-1 text-xs text-slate-600">{it.checklistResult.passedItems}/{it.checklistResult.totalItems} passed, missing {it.checklistResult.missingRequiredItems}{it.checklistResult.manuallyOverridable ? ", override available" : ""}</div> : null}
                                   {updatedLabel ? <div className="mt-1 text-xs text-slate-400">Updated: {updatedLabel}</div> : null}
                                 </div>
                                 <div className="shrink-0 flex flex-col items-end gap-2">
@@ -1441,6 +1486,32 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
                   Mode: {previewResult.previewSummary.usedMode} • Placeholders: {previewResult.previewSummary.placeholdersCount} • Renderable: {previewResult.previewSummary.renderable ? "Yes" : "No"}
                 </div>
               </div>
+              {previewResult.checklistResult ? (
+                <div className="rounded-lg border border-slate-200 bg-white p-3">
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="text-sm font-medium text-slate-900">Checklist</div>
+                    <span className={cn("text-xs px-2 py-1 rounded font-medium", previewResult.checklistResult.checklistStatus === "ready" ? "bg-emerald-50 text-emerald-700" : previewResult.checklistResult.checklistStatus === "warning" ? "bg-amber-50 text-amber-800" : "bg-rose-50 text-rose-700")}>
+                      {previewResult.checklistResult.checklistStatus}
+                    </span>
+                  </div>
+                  <div className="mt-1 text-xs text-slate-600">
+                    {previewResult.checklistResult.passedItems}/{previewResult.checklistResult.totalItems} passed • missing {previewResult.checklistResult.missingRequiredItems}
+                    {previewResult.checklistResult.manuallyOverridable ? " • manual override available" : ""}
+                  </div>
+                  <div className="mt-2 space-y-1">
+                    {previewResult.checklistResult.items.filter((x) => !x.passed).slice(0, 8).map((x) => (
+                      <div key={x.id} className="flex items-center justify-between gap-2 text-xs text-rose-700">
+                        <span className="break-words">{x.label}: {x.message || "missing"}</span>
+                        {x.type === "manual_confirmation" && canBypassApplicability ? (
+                          <Button size="sm" variant="outline" onClick={() => confirmManualChecklist(x.id)}>
+                            Confirm
+                          </Button>
+                        ) : null}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
 
               {previewResult.missingRequiredVariables.length > 0 ? (
                 <div className="rounded-lg border border-rose-200 bg-rose-50 p-3">
@@ -1489,6 +1560,7 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
                     !previewItem
                     || !canGenerate
                     || (!(previewResult.applicabilityResult.applicable || (previewResult.applicabilityResult.manuallyOverridable && canBypassApplicability && showAllTemplates)))
+                    || (previewResult.checklistResult?.checklistStatus === "blocked" && !(previewResult.checklistResult?.manuallyOverridable && canBypassApplicability && showAllTemplates))
                     || previewResult.missingRequiredVariables.length > 0
                     || !previewResult.previewSummary.renderable
                   }
@@ -1594,7 +1666,9 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
                         <div className="space-y-2">
                           {filtered.map((it) => {
                             const overridable = Boolean(it.applicability?.status === "not_applicable" && it.applicability?.manuallyOverridable && canBypassApplicability && showAllTemplates);
-                            const applicable = it.applicability?.status !== "not_applicable" || overridable;
+                            const checklistOverridable = Boolean(it.checklistResult?.checklistStatus === "blocked" && it.checklistResult?.manuallyOverridable && canBypassApplicability && showAllTemplates);
+                            const checklistAllowed = !it.checklistResult || it.checklistResult.checklistStatus !== "blocked" || checklistOverridable;
+                            const applicable = (it.applicability?.status !== "not_applicable" || overridable) && checklistAllowed;
                             const ready = it.readiness?.status === "ready";
                             const reason = !applicable
                               ? (it.applicability?.reasons ?? []).join(", ")
@@ -1612,6 +1686,11 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
                                     <span className={cn("text-[10px] px-1.5 py-0.5 rounded font-medium", it.applicability?.status === "warning" ? "bg-amber-50 text-amber-800" : applicable ? "bg-emerald-50 text-emerald-700" : "bg-slate-100 text-slate-500")}>
                                       {it.applicability?.status === "warning" ? "Warning" : overridable ? "Override" : applicable ? "Applicable" : "Not applicable"}
                                     </span>
+                                    {it.checklistResult ? (
+                                      <span className={cn("text-[10px] px-1.5 py-0.5 rounded font-medium", it.checklistResult.checklistStatus === "ready" ? "bg-emerald-50 text-emerald-700" : it.checklistResult.checklistStatus === "warning" ? "bg-amber-50 text-amber-800" : "bg-rose-50 text-rose-700")}>
+                                        Checklist {it.checklistResult.checklistStatus}
+                                      </span>
+                                    ) : null}
                                     <span className={cn("text-[10px] px-1.5 py-0.5 rounded font-medium", ready ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-800")}>
                                       {ready ? "Ready" : (it.readiness?.status || "Incomplete")}
                                     </span>
@@ -1620,6 +1699,7 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
                                     </span>
                                   </div>
                                   {reason && <div className="mt-1 text-xs text-slate-600 break-words">{reason}</div>}
+                                  {it.checklistResult ? <div className="mt-1 text-xs text-slate-600">{it.checklistResult.passedItems}/{it.checklistResult.totalItems} passed, missing {it.checklistResult.missingRequiredItems}{it.checklistResult.manuallyOverridable ? ", override available" : ""}</div> : null}
                                   {rowNamingPreview[`${it.source}-${it.templateId}`] ? (
                                     <div className="mt-1 text-xs text-slate-600 break-words">
                                       Rule: {rowNamingPreview[`${it.source}-${it.templateId}`].ruleUsed}

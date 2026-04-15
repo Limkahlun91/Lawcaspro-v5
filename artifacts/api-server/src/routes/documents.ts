@@ -16,6 +16,7 @@ import fontkit from "@pdf-lib/fontkit";
 import { z } from "zod";
 import { normalizePurchaseMode, normalizeTitleType } from "../lib/documentApplicability";
 import { evaluateTemplateApplicabilityV2 } from "../lib/templateApplicabilityEngine";
+import { evaluateTemplateChecklist, normalizeChecklistMode } from "../lib/templateChecklistEngine";
 import { evaluateTemplateReadiness, type TemplateReadinessInputs } from "../lib/documentReadiness";
 import { resolveSmartFilename } from "../lib/smartFileNaming";
 import { ensureUniqueCaseDocumentFileName, resolveDocumentFileName } from "../lib/documentFileName";
@@ -115,6 +116,22 @@ function buildApplicabilityContext(caseContext: Record<string, unknown>): Record
     borrower_count: [1, 2].filter((i) => Boolean(c[`borrower${i}_name`])).length,
     has_company_party: Boolean(c.spa_purchaser1_is_company || c.spa_purchaser2_is_company || c.borrower1_is_company || c.borrower2_is_company),
   };
+}
+
+function buildChecklistMilestones(params: {
+  workflowDocs?: Record<string, { hasFile: boolean }>;
+  context: Record<string, unknown>;
+}): Record<string, { completed: boolean }> {
+  const out: Record<string, { completed: boolean }> = {};
+  const workflow = params.workflowDocs ?? {};
+  for (const [k, v] of Object.entries(workflow)) out[k] = { completed: Boolean(v?.hasFile) };
+  for (const [k, v] of Object.entries(params.context)) {
+    if (k.endsWith("_ymd")) {
+      const mk = k.replace(/_ymd$/, "");
+      out[mk] = { completed: Boolean(v) };
+    }
+  }
+  return out;
 }
 
 const getRlsDb = (req: AuthRequest, res: any): NonNullable<AuthRequest["rlsDb"]> | null => {
@@ -1160,6 +1177,8 @@ router.patch("/document-templates/:templateId", requireAuth, requireFirmUser, re
   const hasSortOrder = Object.prototype.hasOwnProperty.call(body, "sortOrder");
   const hasFileNamingRule = Object.prototype.hasOwnProperty.call(body, "fileNamingRule");
   const hasClauseInsertionMode = Object.prototype.hasOwnProperty.call(body, "clauseInsertionMode");
+  const hasChecklistMode = Object.prototype.hasOwnProperty.call(body, "checklistMode");
+  const hasChecklistItems = Object.prototype.hasOwnProperty.call(body, "checklistItems");
 
   const folderId = body.folderId;
   const kind = body.kind;
@@ -1174,6 +1193,8 @@ router.patch("/document-templates/:templateId", requireAuth, requireFirmUser, re
   const sortOrder = body.sortOrder;
   const fileNamingRule = body.fileNamingRule;
   const clauseInsertionMode = body.clauseInsertionMode;
+  const checklistMode = body.checklistMode;
+  const checklistItems = body.checklistItems;
 
   const folderIdNum: number | null | undefined = hasFolderId ? (typeof folderId === "number" ? folderId : folderId === null ? null : undefined) : undefined;
   if (hasFolderId && folderIdNum === undefined) {
@@ -1262,6 +1283,22 @@ router.patch("/document-templates/:templateId", requireAuth, requireFirmUser, re
     res.status(400).json({ error: "Invalid clauseInsertionMode" });
     return;
   }
+  const checklistModeVal: string | null | undefined =
+    hasChecklistMode
+      ? (typeof checklistMode === "string" ? (checklistMode.trim() || null) : checklistMode === null ? null : undefined)
+      : undefined;
+  if (hasChecklistMode && checklistModeVal === undefined) {
+    res.status(400).json({ error: "Invalid checklistMode" });
+    return;
+  }
+  const checklistItemsVal: Record<string, unknown>[] | null | undefined =
+    hasChecklistItems
+      ? (Array.isArray(checklistItems) ? (checklistItems as Record<string, unknown>[]) : checklistItems === null ? null : undefined)
+      : undefined;
+  if (hasChecklistItems && checklistItemsVal === undefined) {
+    res.status(400).json({ error: "Invalid checklistItems" });
+    return;
+  }
   if (kindVal && kindVal !== "template" && kindVal !== "reference") {
     res.status(400).json({ error: "Invalid kind" });
     return;
@@ -1312,6 +1349,8 @@ router.patch("/document-templates/:templateId", requireAuth, requireFirmUser, re
             sort_order = CASE WHEN ${hasSortOrder} THEN ${sortOrderVal ?? 0} ELSE sort_order END,
             file_naming_rule = CASE WHEN ${hasFileNamingRule} THEN ${fileNamingRuleVal ?? null} ELSE file_naming_rule END,
             clause_insertion_mode = CASE WHEN ${hasClauseInsertionMode} THEN ${clauseInsertionModeVal ?? null} ELSE clause_insertion_mode END,
+            checklist_mode = CASE WHEN ${hasChecklistMode} THEN ${checklistModeVal ?? null} ELSE checklist_mode END,
+            checklist_items = CASE WHEN ${hasChecklistItems} THEN ${checklistItemsVal as any} ELSE checklist_items END,
             is_template_capable = (
               ${effectiveKind} = 'template'
               AND LOWER(COALESCE(NULLIF(extension,''), split_part(file_name, '.', array_length(string_to_array(file_name, '.'), 1)))) = 'docx'
@@ -1685,6 +1724,8 @@ router.get("/document-templates/:templateId/applicability", requireAuth, require
       isTemplateCapable: rules?.isTemplateCapable ?? Boolean((tpl as any).is_template_capable ?? true),
       applicabilityMode: typeof (tpl as any).applicability_mode === "string" ? String((tpl as any).applicability_mode) : "universal",
       applicabilityRules: (tpl as any).applicability_rules ?? null,
+      checklistMode: typeof (tpl as any).checklist_mode === "string" ? String((tpl as any).checklist_mode) : "off",
+      checklistItems: (tpl as any).checklist_items ?? null,
     },
   });
 });
@@ -1719,6 +1760,10 @@ router.put("/document-templates/:templateId/applicability", requireAuth, require
   const applicabilityRules = Object.prototype.hasOwnProperty.call(body, "applicabilityRules")
     ? (body.applicabilityRules && typeof body.applicabilityRules === "object" ? body.applicabilityRules : null)
     : undefined;
+  const checklistMode = typeof body.checklistMode === "string" ? body.checklistMode : undefined;
+  const checklistItems = Object.prototype.hasOwnProperty.call(body, "checklistItems")
+    ? (Array.isArray(body.checklistItems) ? body.checklistItems : body.checklistItems === null ? null : undefined)
+    : undefined;
 
   await queryRows(r, sql`
     UPDATE document_templates
@@ -1730,6 +1775,8 @@ router.put("/document-templates/:templateId/applicability", requireAuth, require
       is_template_capable = COALESCE(${isTemplateCapable as any}, is_template_capable),
       applicability_mode = COALESCE(${applicabilityMode ?? null}, applicability_mode),
       applicability_rules = COALESCE(${applicabilityRules as any}, applicability_rules),
+      checklist_mode = COALESCE(${checklistMode ?? null}, checklist_mode),
+      checklist_items = COALESCE(${checklistItems as any}, checklist_items),
       updated_at = now()
     WHERE id = ${templateId} AND firm_id = ${req.firmId!}
   `);
@@ -1746,7 +1793,7 @@ router.put("/document-templates/:templateId/applicability", requireAuth, require
     isTemplateCapable: isTemplateCapable ?? null,
   });
 
-  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.template.applicability.update", entityType: "document_template", entityId: templateId, detail: `updated mode=${applicabilityMode ?? "unchanged"} rules=${applicabilityRules ? "yes" : "no"}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.template.applicability.update", entityType: "document_template", entityId: templateId, detail: `updated mode=${applicabilityMode ?? "unchanged"} rules=${applicabilityRules ? "yes" : "no"} checklistMode=${checklistMode ?? "unchanged"} checklistItems=${checklistItems ? "set" : "nochange"}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
   const rules = await getFirmTemplateApplicabilityRules(r, req.firmId!, templateId);
   res.json({ ok: true, rules });
 });
@@ -1780,6 +1827,8 @@ router.get("/platform/documents/:documentId/applicability", requireAuth, require
           isTemplateCapable: rules?.isTemplateCapable ?? Boolean((doc[0] as any).is_template_capable ?? true),
           applicabilityMode: typeof (doc[0] as any).applicability_mode === "string" ? String((doc[0] as any).applicability_mode) : "universal",
           applicabilityRules: (doc[0] as any).applicability_rules ?? null,
+          checklistMode: typeof (doc[0] as any).checklist_mode === "string" ? String((doc[0] as any).checklist_mode) : "off",
+          checklistItems: (doc[0] as any).checklist_items ?? null,
         },
       },
     };
@@ -1809,6 +1858,10 @@ router.put("/platform/documents/:documentId/applicability", requireAuth, require
   const applicabilityRules = Object.prototype.hasOwnProperty.call(body, "applicabilityRules")
     ? (body.applicabilityRules && typeof body.applicabilityRules === "object" ? body.applicabilityRules : null)
     : undefined;
+  const checklistMode = typeof body.checklistMode === "string" ? body.checklistMode : undefined;
+  const checklistItems = Object.prototype.hasOwnProperty.call(body, "checklistItems")
+    ? (Array.isArray(body.checklistItems) ? body.checklistItems : body.checklistItems === null ? null : undefined)
+    : undefined;
 
   const result = await withAuthSafeDb(async (authDb) => {
     const doc = await queryRows(authDb, sql`SELECT * FROM platform_documents WHERE id = ${documentId}`);
@@ -1822,7 +1875,9 @@ router.put("/platform/documents/:documentId/applicability", requireAuth, require
         applies_to_case_type = COALESCE(${caseType ?? null}, applies_to_case_type),
         is_template_capable = COALESCE(${isTemplateCapable as any}, is_template_capable),
         applicability_mode = COALESCE(${applicabilityMode ?? null}, applicability_mode),
-        applicability_rules = COALESCE(${applicabilityRules as any}, applicability_rules)
+        applicability_rules = COALESCE(${applicabilityRules as any}, applicability_rules),
+        checklist_mode = COALESCE(${checklistMode ?? null}, checklist_mode),
+        checklist_items = COALESCE(${checklistItems as any}, checklist_items)
       WHERE id = ${documentId}
     `);
     await upsertPlatformDocumentApplicabilityRules(authDb, null, documentId, {
@@ -1836,7 +1891,7 @@ router.put("/platform/documents/:documentId/applicability", requireAuth, require
       unitCategory: unitCategory ?? null,
       isTemplateCapable: isTemplateCapable ?? null,
     });
-    await writeAuditLog({ actorId: req.userId, actorType: req.userType, action: "documents.template.applicability.update", entityType: "platform_document", entityId: documentId, detail: `scope=global updated mode=${applicabilityMode ?? "unchanged"} rules=${applicabilityRules ? "yes" : "no"}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] }, { db: authDb });
+    await writeAuditLog({ actorId: req.userId, actorType: req.userType, action: "documents.template.applicability.update", entityType: "platform_document", entityId: documentId, detail: `scope=global updated mode=${applicabilityMode ?? "unchanged"} rules=${applicabilityRules ? "yes" : "no"} checklistMode=${checklistMode ?? "unchanged"} checklistItems=${checklistItems ? "set" : "nochange"}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] }, { db: authDb });
     const rules = await getPlatformDocumentApplicabilityRules(authDb, null, documentId);
     return { status: 200 as const, body: { ok: true, rules } };
   }, { retry: true, ctx: { route: req.path, stage: "platform_document_applicability.put", userId: req.userId ?? null, firmId: null } });
@@ -2806,6 +2861,44 @@ router.get("/cases/:caseId/documents/checklist", requireAuth, requireFirmUser, r
     if (!k) continue;
     if (!overrideByKey.has(k)) overrideByKey.set(k, row);
   }
+  const checklistUploadedDocuments = [
+    ...caseDocuments.map((d) => ({
+      fileName: d.file_name ? String(d.file_name) : null,
+      documentType: d.document_type ? String(d.document_type) : null,
+      checklistKey: d.checklist_key ? String(d.checklist_key) : null,
+      source: "case_document",
+      hasFile: Boolean(d.object_path && d.file_name),
+    })),
+    ...wfDocs.map((d) => ({
+      fileName: d.file_name ? String(d.file_name) : null,
+      documentType: d.milestone_key ? String(d.milestone_key) : null,
+      checklistKey: d.milestone_key ? `workflow:${String(d.milestone_key)}` : null,
+      source: "workflow_document",
+      hasFile: Boolean(d.object_path && d.file_name),
+    })),
+  ];
+  const checklistMilestones = buildChecklistMilestones({ workflowDocs, context });
+
+  function buildManualConfirmations(prefix: string, checklistItemsRaw: unknown): Record<string, { checkedBy?: number | null; checkedAt?: string | null; passed: boolean }> {
+    const map: Record<string, { checkedBy?: number | null; checkedAt?: string | null; passed: boolean }> = {};
+    const parsed = Array.isArray(checklistItemsRaw) ? checklistItemsRaw : [];
+    for (const it of parsed) {
+      const row = it && typeof it === "object" ? (it as Record<string, unknown>) : null;
+      if (!row) continue;
+      const type = typeof row.type === "string" ? row.type : "";
+      const id = typeof row.id === "string" ? row.id : "";
+      if (type !== "manual_confirmation" || !id) continue;
+      const k = `${prefix}:confirm:${id}`;
+      const ov = overrideByKey.get(k);
+      const passed = Boolean(ov?.completed_at || ov?.received_at || ov?.status === "completed" || ov?.status === "received");
+      map[id] = {
+        passed,
+        checkedBy: (ov?.completed_by ?? ov?.received_by) as number | null | undefined,
+        checkedAt: (ov?.completed_at ?? ov?.received_at) ? String(ov?.completed_at ?? ov?.received_at) : null,
+      };
+    }
+    return map;
+  }
 
   type ChecklistStatus =
     | "pending"
@@ -2828,6 +2921,25 @@ router.get("/cases/:caseId/documents/checklist", requireAuth, requireFirmUser, r
     notes: string | null;
     applicability: { status: "applicable" | "warning" | "not_applicable"; reasons: string[]; matchedRulesCount?: number; failedRulesCount?: number; manuallyOverridable?: boolean };
     readiness: { status: string; missing: Array<{ code: string; message: string }> } | null;
+    checklistResult?: {
+      checklistStatus: "ready" | "warning" | "blocked";
+      totalItems: number;
+      passedItems: number;
+      missingRequiredItems: number;
+      warningItems: number;
+      manuallyOverridable: boolean;
+      items: Array<{
+        id: string;
+        label: string;
+        type: string;
+        passed: boolean;
+        required: boolean;
+        message: string;
+        source: string;
+        checkedBy?: number | null;
+        checkedAt?: string | null;
+      }>;
+    } | null;
     templateId?: number;
     name: string;
     documentType?: string;
@@ -2943,10 +3055,18 @@ router.get("/cases/:caseId/documents/checklist", requireAuth, requireFirmUser, r
     if (!includeAll && app.applicabilityStatus === "not_applicable") continue;
     const ready = app.applicabilityStatus === "not_applicable" ? { status: "ready", missing: [] } : evaluateTemplateReadiness({ documentGroup, input: readinessInput });
     const checklistKey = `tpl:firm:${templateId}`;
+    const checklistEval = evaluateTemplateChecklist({
+      checklistMode: (t as any).checklist_mode,
+      checklistItems: (t as any).checklist_items,
+      caseContext: context as Record<string, unknown>,
+      uploadedDocuments: checklistUploadedDocuments,
+      milestones: checklistMilestones,
+      manualConfirmations: buildManualConfirmations(checklistKey, (t as any).checklist_items),
+    });
     const { status, blocked, updatedAt, override } = computeStatus({
       checklistKey,
       applicable: app.applicabilityStatus !== "not_applicable",
-      readiness: ready,
+      readiness: checklistEval.checklistStatus === "blocked" ? { status: "blocked" } : ready,
       latestDocument: latestByFirmTemplateId.get(templateId) ?? null,
       baseHasFile: false,
     });
@@ -2977,6 +3097,7 @@ router.get("/cases/:caseId/documents/checklist", requireAuth, requireFirmUser, r
         manuallyOverridable: app.manuallyOverridable,
       },
       readiness: ready,
+      checklistResult: checklistEval,
       latestDocument: latestByFirmTemplateId.get(templateId) ?? null,
       completedAt: override?.completed_at ? String(override.completed_at) : null,
       completedBy: override?.completed_by === null ? null : (typeof override?.completed_by === "number" ? Number(override.completed_by) : (override?.completed_by ? Number(override.completed_by) : null)),
@@ -3037,10 +3158,18 @@ router.get("/cases/:caseId/documents/checklist", requireAuth, requireFirmUser, r
     if (!includeAll && app.applicabilityStatus === "not_applicable") continue;
     const ready = app.applicabilityStatus === "not_applicable" ? { status: "ready", missing: [] } : evaluateTemplateReadiness({ documentGroup, input: readinessInput });
     const checklistKey = `tpl:master:${templateId}`;
+    const checklistEval = evaluateTemplateChecklist({
+      checklistMode: (t as any).checklist_mode,
+      checklistItems: (t as any).checklist_items,
+      caseContext: context as Record<string, unknown>,
+      uploadedDocuments: checklistUploadedDocuments,
+      milestones: checklistMilestones,
+      manualConfirmations: buildManualConfirmations(checklistKey, (t as any).checklist_items),
+    });
     const { status, blocked, updatedAt, override } = computeStatus({
       checklistKey,
       applicable: app.applicabilityStatus !== "not_applicable",
-      readiness: ready,
+      readiness: checklistEval.checklistStatus === "blocked" ? { status: "blocked" } : ready,
       latestDocument: latestByPlatformDocId.get(templateId) ?? null,
       baseHasFile: false,
     });
@@ -3071,6 +3200,7 @@ router.get("/cases/:caseId/documents/checklist", requireAuth, requireFirmUser, r
         manuallyOverridable: app.manuallyOverridable,
       },
       readiness: ready,
+      checklistResult: checklistEval,
       latestDocument: latestByPlatformDocId.get(templateId) ?? null,
       completedAt: override?.completed_at ? String(override.completed_at) : null,
       completedBy: override?.completed_by === null ? null : (typeof override?.completed_by === "number" ? Number(override.completed_by) : (override?.completed_by ? Number(override.completed_by) : null)),
@@ -4146,6 +4276,16 @@ async function generateFirmDocument({
   }
   let input: Record<string, unknown> = preview.usedMode === "bindings" ? preview.resolvedVariables : (context as any);
   let clauseSnapshot: Record<string, unknown> | null = null;
+  let checklistEval = evaluateTemplateChecklist({
+    checklistMode: (template as any).checklist_mode,
+    checklistItems: (template as any).checklist_items,
+    caseContext: context as Record<string, unknown>,
+    resolvedVariables: input,
+    uploadedDocuments: [],
+    milestones: buildChecklistMilestones({ workflowDocs, context }),
+    manualConfirmations: {},
+  });
+  let checklistOverrideUsed = false;
   if (clauses && clauses.length > 0) {
     const ins = await buildClauseInsertion({ r, firmId, selected: clauses, resolvedVariables: input });
     const selectedCodes = ins.selectedClausesResolved.map((c) => c.clauseCode).filter(Boolean);
@@ -4186,6 +4326,73 @@ async function generateFirmDocument({
         body: c.body,
       })),
     };
+  }
+  {
+    const caseDocs = await queryRows(r, sql`
+      SELECT checklist_key, file_name, document_type, object_path
+      FROM case_documents
+      WHERE firm_id = ${firmId} AND case_id = ${caseId}
+    `);
+    const confirmPrefix = `tpl:firm:${templateId}:confirm:`;
+    const confirmationRows = (await tableExists(r, "public.case_document_checklist_items"))
+      ? await queryRows(r, sql`
+        SELECT checklist_key, status, completed_at, completed_by, received_at, received_by
+        FROM case_document_checklist_items
+        WHERE firm_id = ${firmId} AND case_id = ${caseId} AND checklist_key LIKE ${`${confirmPrefix}%`}
+      `)
+      : [];
+    const manualConfirmations: Record<string, { checkedBy?: number | null; checkedAt?: string | null; passed: boolean }> = {};
+    for (const row of confirmationRows) {
+      const k = typeof row.checklist_key === "string" ? String(row.checklist_key) : "";
+      const itemId = k.startsWith(confirmPrefix) ? k.slice(confirmPrefix.length) : "";
+      if (!itemId) continue;
+      const passed = Boolean(row.completed_at || row.received_at || row.status === "completed" || row.status === "received");
+      manualConfirmations[itemId] = {
+        passed,
+        checkedBy: (row.completed_by ?? row.received_by) as number | null | undefined,
+        checkedAt: (row.completed_at ?? row.received_at) ? String(row.completed_at ?? row.received_at) : null,
+      };
+    }
+    checklistEval = evaluateTemplateChecklist({
+      checklistMode: (template as any).checklist_mode,
+      checklistItems: (template as any).checklist_items,
+      caseContext: context as Record<string, unknown>,
+      resolvedVariables: input,
+      uploadedDocuments: [
+        ...caseDocs.map((d) => ({
+          fileName: d.file_name ? String(d.file_name) : null,
+          documentType: d.document_type ? String(d.document_type) : null,
+          checklistKey: d.checklist_key ? String(d.checklist_key) : null,
+          source: "case_document",
+          hasFile: Boolean(d.object_path && d.file_name),
+        })),
+        ...wfDocs.map((d) => ({
+          fileName: d.file_name ? String(d.file_name) : null,
+          documentType: d.milestone_key ? String(d.milestone_key) : null,
+          checklistKey: d.milestone_key ? `workflow:${String(d.milestone_key)}` : null,
+          source: "workflow_document",
+          hasFile: Boolean(d.object_path && d.file_name),
+        })),
+      ],
+      milestones: buildChecklistMilestones({ workflowDocs, context }),
+      manualConfirmations,
+    });
+    checklistOverrideUsed = Boolean(
+      bypassApplicability
+      && checklistEval.manuallyOverridable
+      && checklistEval.checklistStatus === "blocked"
+    );
+    const checklistMode = normalizeChecklistMode((template as any).checklist_mode);
+    if (checklistEval.checklistStatus === "blocked") {
+      if (checklistMode === "required_to_generate") {
+        await writeAuditLog({ firmId, actorId, actorType, action: "documents.case.generate.blocked", entityType: "document_template", entityId: templateId, detail: `checklistStatus=blocked mode=${checklistMode} overrideUsed=0 missing=${checklistEval.missingRequiredItems}`, ipAddress, userAgent });
+        throw new DocumentGenerationError(422, "TEMPLATE_CHECKLIST_BLOCKED", "Template blocked by checklist", { checklist: checklistEval, mode: checklistMode });
+      }
+      if (checklistMode === "required_with_manual_override" && !checklistOverrideUsed) {
+        await writeAuditLog({ firmId, actorId, actorType, action: "documents.case.generate.blocked", entityType: "document_template", entityId: templateId, detail: `checklistStatus=blocked mode=${checklistMode} overrideUsed=0 missing=${checklistEval.missingRequiredItems}`, ipAddress, userAgent });
+        throw new DocumentGenerationError(422, "TEMPLATE_CHECKLIST_OVERRIDE_REQUIRED", "Template checklist requires manual override", { checklist: checklistEval, mode: checklistMode });
+      }
+    }
   }
   const zip = new PizZip(fileContents);
   const doc = new Docxtemplater(zip, { paragraphLoop: true, linebreaks: true });
@@ -4277,7 +4484,7 @@ async function generateFirmDocument({
   const createdId = created && typeof created === "object" && "id" in created && typeof (created as any).id === "number"
     ? Number((created as any).id)
     : null;
-  await writeAuditLog({ firmId, actorId, actorType, action: "documents.case.generate", entityType: "case_document", entityId: createdId ?? undefined, detail: `caseId=${caseId} templateId=${templateId} name=${docName} letterhead=${isLetterLike ? (usedLetterheadId ?? "default") : "n/a"} clauses=${clauseSnapshot ? "yes" : "no"} fileName=${downloadName} fallback=${namingPreview.fallbackUsed ? "1" : "0"} collision=${uniq.collisionResolved ? "1" : "0"} applicabilityStatus=${applicability.applicabilityStatus} overrideUsed=${overrideUsed ? "1" : "0"}`, ipAddress, userAgent });
+  await writeAuditLog({ firmId, actorId, actorType, action: "documents.case.generate", entityType: "case_document", entityId: createdId ?? undefined, detail: `caseId=${caseId} templateId=${templateId} name=${docName} letterhead=${isLetterLike ? (usedLetterheadId ?? "default") : "n/a"} clauses=${clauseSnapshot ? "yes" : "no"} fileName=${downloadName} fallback=${namingPreview.fallbackUsed ? "1" : "0"} collision=${uniq.collisionResolved ? "1" : "0"} applicabilityStatus=${applicability.applicabilityStatus} applicabilityOverrideUsed=${overrideUsed ? "1" : "0"} checklistStatus=${checklistEval.checklistStatus} checklistOverrideUsed=${checklistOverrideUsed ? "1" : "0"}`, ipAddress, userAgent });
   if (preview.usedMode === "bindings") {
     await writeAuditLog({ firmId, actorId, actorType, action: "documents.generate.binding_used", entityType: "case_document", entityId: createdId ?? undefined, detail: `caseId=${caseId} templateId=${templateId} placeholders=${effectivePlaceholders.length} missing=${preview.missingRequiredVariables.length}`, ipAddress, userAgent });
   }
@@ -4285,7 +4492,7 @@ async function generateFirmDocument({
     caseDocument: created,
     caseDocumentId: createdId,
     templateVersionId,
-    checklistSnapshot: { applicability, bindingMode: preview.usedMode, placeholderWarnings: preview.placeholderWarnings },
+    checklistSnapshot: { applicability, checklist: checklistEval, checklistOverrideUsed, bindingMode: preview.usedMode, placeholderWarnings: preview.placeholderWarnings },
     readinessSnapshot: { readiness },
     renderedVars: preview.usedMode === "bindings" ? preview.resolvedVariables : context,
   };
@@ -4492,6 +4699,84 @@ async function generateMasterDocument({
     }
   }
 
+  let checklistEval = evaluateTemplateChecklist({
+    checklistMode: (masterDoc as any).checklist_mode,
+    checklistItems: (masterDoc as any).checklist_items,
+    caseContext: context as Record<string, unknown>,
+    resolvedVariables: renderInput,
+    uploadedDocuments: [],
+    milestones: buildChecklistMilestones({ workflowDocs, context }),
+    manualConfirmations: {},
+  });
+  let checklistOverrideUsed = false;
+  {
+    const caseDocs = await queryRows(r, sql`
+      SELECT checklist_key, file_name, document_type, object_path
+      FROM case_documents
+      WHERE firm_id = ${firmId} AND case_id = ${caseId}
+    `);
+    const confirmPrefix = `tpl:master:${masterDocId}:confirm:`;
+    const confirmationRows = (await tableExists(r, "public.case_document_checklist_items"))
+      ? await queryRows(r, sql`
+        SELECT checklist_key, status, completed_at, completed_by, received_at, received_by
+        FROM case_document_checklist_items
+        WHERE firm_id = ${firmId} AND case_id = ${caseId} AND checklist_key LIKE ${`${confirmPrefix}%`}
+      `)
+      : [];
+    const manualConfirmations: Record<string, { checkedBy?: number | null; checkedAt?: string | null; passed: boolean }> = {};
+    for (const row of confirmationRows) {
+      const k = typeof row.checklist_key === "string" ? String(row.checklist_key) : "";
+      const itemId = k.startsWith(confirmPrefix) ? k.slice(confirmPrefix.length) : "";
+      if (!itemId) continue;
+      const passed = Boolean(row.completed_at || row.received_at || row.status === "completed" || row.status === "received");
+      manualConfirmations[itemId] = {
+        passed,
+        checkedBy: (row.completed_by ?? row.received_by) as number | null | undefined,
+        checkedAt: (row.completed_at ?? row.received_at) ? String(row.completed_at ?? row.received_at) : null,
+      };
+    }
+    checklistEval = evaluateTemplateChecklist({
+      checklistMode: (masterDoc as any).checklist_mode,
+      checklistItems: (masterDoc as any).checklist_items,
+      caseContext: context as Record<string, unknown>,
+      resolvedVariables: renderInput,
+      uploadedDocuments: [
+        ...caseDocs.map((d) => ({
+          fileName: d.file_name ? String(d.file_name) : null,
+          documentType: d.document_type ? String(d.document_type) : null,
+          checklistKey: d.checklist_key ? String(d.checklist_key) : null,
+          source: "case_document",
+          hasFile: Boolean(d.object_path && d.file_name),
+        })),
+        ...wfDocs.map((d) => ({
+          fileName: d.file_name ? String(d.file_name) : null,
+          documentType: d.milestone_key ? String(d.milestone_key) : null,
+          checklistKey: d.milestone_key ? `workflow:${String(d.milestone_key)}` : null,
+          source: "workflow_document",
+          hasFile: Boolean(d.object_path && d.file_name),
+        })),
+      ],
+      milestones: buildChecklistMilestones({ workflowDocs, context }),
+      manualConfirmations,
+    });
+    checklistOverrideUsed = Boolean(
+      bypassApplicability
+      && checklistEval.manuallyOverridable
+      && checklistEval.checklistStatus === "blocked"
+    );
+    const checklistMode = normalizeChecklistMode((masterDoc as any).checklist_mode);
+    if (checklistEval.checklistStatus === "blocked") {
+      if (checklistMode === "required_to_generate") {
+        await writeAuditLog({ firmId, actorId, actorType, action: "documents.case.generate.blocked", entityType: "platform_document", entityId: masterDocId, detail: `checklistStatus=blocked mode=${checklistMode} overrideUsed=0 missing=${checklistEval.missingRequiredItems}`, ipAddress, userAgent });
+        throw new DocumentGenerationError(422, "TEMPLATE_CHECKLIST_BLOCKED", "Template blocked by checklist", { checklist: checklistEval, mode: checklistMode });
+      }
+      if (checklistMode === "required_with_manual_override" && !checklistOverrideUsed) {
+        await writeAuditLog({ firmId, actorId, actorType, action: "documents.case.generate.blocked", entityType: "platform_document", entityId: masterDocId, detail: `checklistStatus=blocked mode=${checklistMode} overrideUsed=0 missing=${checklistEval.missingRequiredItems}`, ipAddress, userAgent });
+        throw new DocumentGenerationError(422, "TEMPLATE_CHECKLIST_OVERRIDE_REQUIRED", "Template checklist requires manual override", { checklist: checklistEval, mode: checklistMode });
+      }
+    }
+  }
+
   let buffer: Buffer;
   let outputMime: string;
   let outputExt: string;
@@ -4636,7 +4921,7 @@ async function generateMasterDocument({
   const createdId = created && typeof created === "object" && "id" in created && typeof (created as any).id === "number"
     ? Number((created as any).id)
     : null;
-  await writeAuditLog({ firmId, actorId, actorType, action: "documents.case.generate_from_master", entityType: "case_document", entityId: createdId ?? undefined, detail: `caseId=${caseId} masterDocId=${masterDocId} name=${docName} clauses=${clauseSnapshot ? "yes" : "no"} fileName=${fileName} fallback=${namingPreview.fallbackUsed ? "1" : "0"} collision=${uniq.collisionResolved ? "1" : "0"} applicabilityStatus=${applicability.applicabilityStatus} overrideUsed=${overrideUsed ? "1" : "0"}`, ipAddress, userAgent });
+  await writeAuditLog({ firmId, actorId, actorType, action: "documents.case.generate_from_master", entityType: "case_document", entityId: createdId ?? undefined, detail: `caseId=${caseId} masterDocId=${masterDocId} name=${docName} clauses=${clauseSnapshot ? "yes" : "no"} fileName=${fileName} fallback=${namingPreview.fallbackUsed ? "1" : "0"} collision=${uniq.collisionResolved ? "1" : "0"} applicabilityStatus=${applicability.applicabilityStatus} applicabilityOverrideUsed=${overrideUsed ? "1" : "0"} checklistStatus=${checklistEval.checklistStatus} checklistOverrideUsed=${checklistOverrideUsed ? "1" : "0"}`, ipAddress, userAgent });
   if (preview.usedMode === "bindings") {
     await writeAuditLog({ firmId, actorId, actorType, action: "documents.generate.binding_used", entityType: "case_document", entityId: createdId ?? undefined, detail: `caseId=${caseId} platformDocumentId=${masterDocId} placeholders=${placeholders.length} missing=${preview.missingRequiredVariables.length}`, ipAddress, userAgent });
   }
@@ -4644,7 +4929,7 @@ async function generateMasterDocument({
     caseDocument: created,
     caseDocumentId: createdId,
     templateVersionId: null,
-    checklistSnapshot: { applicability, bindingMode: preview.usedMode, placeholderWarnings: preview.placeholderWarnings },
+    checklistSnapshot: { applicability, checklist: checklistEval, checklistOverrideUsed, bindingMode: preview.usedMode, placeholderWarnings: preview.placeholderWarnings },
     readinessSnapshot: { readiness },
     renderedVars: preview.usedMode === "bindings" ? preview.resolvedVariables : context,
     renderMode,
@@ -5415,6 +5700,67 @@ router.post("/cases/:caseId/documents/preview", requireAuth, requireFirmUser, re
           bytes = applied.docxBytes;
           input = applied.data;
         }
+        const caseDocs = await queryRows(r, sql`
+          SELECT checklist_key, file_name, document_type, object_path
+          FROM case_documents
+          WHERE firm_id = ${req.firmId!} AND case_id = ${caseId}
+        `);
+        const wfDocs = (await tableExists(r, "public.case_workflow_documents"))
+          ? await queryRows(r, sql`
+            SELECT milestone_key, object_path, file_name
+            FROM case_workflow_documents
+            WHERE firm_id = ${req.firmId!} AND case_id = ${caseId} AND deleted_at IS NULL
+          `)
+          : [];
+        const workflowMap: Record<string, { hasFile: boolean }> = {};
+        for (const d of wfDocs) {
+          const k = normalizeWorkflowDocumentKeyFromDb(String(d.milestone_key ?? ""));
+          if (!k) continue;
+          workflowMap[k] = { hasFile: Boolean(d.object_path && d.file_name) };
+        }
+        const confirmPrefix = `tpl:firm:${templateId}:confirm:`;
+        const confirmationRows = (await tableExists(r, "public.case_document_checklist_items"))
+          ? await queryRows(r, sql`
+            SELECT checklist_key, status, completed_at, completed_by, received_at, received_by
+            FROM case_document_checklist_items
+            WHERE firm_id = ${req.firmId!} AND case_id = ${caseId} AND checklist_key LIKE ${`${confirmPrefix}%`}
+          `)
+          : [];
+        const manualConfirmations: Record<string, { checkedBy?: number | null; checkedAt?: string | null; passed: boolean }> = {};
+        for (const row of confirmationRows) {
+          const k = typeof row.checklist_key === "string" ? String(row.checklist_key) : "";
+          const itemId = k.startsWith(confirmPrefix) ? k.slice(confirmPrefix.length) : "";
+          if (!itemId) continue;
+          manualConfirmations[itemId] = {
+            passed: Boolean(row.completed_at || row.received_at || row.status === "completed" || row.status === "received"),
+            checkedBy: (row.completed_by ?? row.received_by) as number | null | undefined,
+            checkedAt: (row.completed_at ?? row.received_at) ? String(row.completed_at ?? row.received_at) : null,
+          };
+        }
+        const checklistResult = evaluateTemplateChecklist({
+          checklistMode: (tpl as any).checklist_mode,
+          checklistItems: (tpl as any).checklist_items,
+          caseContext: context as Record<string, unknown>,
+          resolvedVariables: input,
+          uploadedDocuments: [
+            ...caseDocs.map((d) => ({
+              fileName: d.file_name ? String(d.file_name) : null,
+              documentType: d.document_type ? String(d.document_type) : null,
+              checklistKey: d.checklist_key ? String(d.checklist_key) : null,
+              source: "case_document",
+              hasFile: Boolean(d.object_path && d.file_name),
+            })),
+            ...wfDocs.map((d) => ({
+              fileName: d.file_name ? String(d.file_name) : null,
+              documentType: d.milestone_key ? String(d.milestone_key) : null,
+              checklistKey: d.milestone_key ? `workflow:${String(d.milestone_key)}` : null,
+              source: "workflow_document",
+              hasFile: Boolean(d.object_path && d.file_name),
+            })),
+          ],
+          milestones: buildChecklistMilestones({ workflowDocs: workflowMap, context }),
+          manualConfirmations,
+        });
         try {
           const zip = new PizZip(bytes);
           const doc = new Docxtemplater(zip, { paragraphLoop: true, linebreaks: true });
@@ -5433,6 +5779,7 @@ router.post("/cases/:caseId/documents/preview", requireAuth, requireFirmUser, re
           duplicateClauseWarnings: clauseRefs.length ? duplicateClauseWarnings : [],
           clauseOrder: clauseRefs.length ? clauseOrder : [],
           clauseSnapshotPreview: clauseRefs.length ? selectedClausesResolved : [],
+          checklistResult,
           clauseInsertion: clauseRefs.length ? { selected: clauseRefs, previewText: clausePreviewText, warnings: clauseWarnings, insertionModeUsed, insertionTarget, insertionError, hasClausesPlaceholder, detectedClauseCodePlaceholders, duplicateClauseWarnings, clauseOrder, selectedClausesResolved } : null,
           applicabilityResult,
           renderMode,
@@ -5581,6 +5928,67 @@ router.post("/cases/:caseId/documents/preview", requireAuth, requireFirmUser, re
         renderable = false;
       }
     }
+    const caseDocs = await queryRows(r, sql`
+      SELECT checklist_key, file_name, document_type, object_path
+      FROM case_documents
+      WHERE firm_id = ${req.firmId!} AND case_id = ${caseId}
+    `);
+    const wfDocs = (await tableExists(r, "public.case_workflow_documents"))
+      ? await queryRows(r, sql`
+        SELECT milestone_key, object_path, file_name
+        FROM case_workflow_documents
+        WHERE firm_id = ${req.firmId!} AND case_id = ${caseId} AND deleted_at IS NULL
+      `)
+      : [];
+    const workflowMap: Record<string, { hasFile: boolean }> = {};
+    for (const d of wfDocs) {
+      const k = normalizeWorkflowDocumentKeyFromDb(String(d.milestone_key ?? ""));
+      if (!k) continue;
+      workflowMap[k] = { hasFile: Boolean(d.object_path && d.file_name) };
+    }
+    const confirmPrefix = `tpl:master:${platformDocumentId}:confirm:`;
+    const confirmationRows = (await tableExists(r, "public.case_document_checklist_items"))
+      ? await queryRows(r, sql`
+        SELECT checklist_key, status, completed_at, completed_by, received_at, received_by
+        FROM case_document_checklist_items
+        WHERE firm_id = ${req.firmId!} AND case_id = ${caseId} AND checklist_key LIKE ${`${confirmPrefix}%`}
+      `)
+      : [];
+    const manualConfirmations: Record<string, { checkedBy?: number | null; checkedAt?: string | null; passed: boolean }> = {};
+    for (const row of confirmationRows) {
+      const k = typeof row.checklist_key === "string" ? String(row.checklist_key) : "";
+      const itemId = k.startsWith(confirmPrefix) ? k.slice(confirmPrefix.length) : "";
+      if (!itemId) continue;
+      manualConfirmations[itemId] = {
+        passed: Boolean(row.completed_at || row.received_at || row.status === "completed" || row.status === "received"),
+        checkedBy: (row.completed_by ?? row.received_by) as number | null | undefined,
+        checkedAt: (row.completed_at ?? row.received_at) ? String(row.completed_at ?? row.received_at) : null,
+      };
+    }
+    const checklistResult = evaluateTemplateChecklist({
+      checklistMode: (doc as any).checklist_mode,
+      checklistItems: (doc as any).checklist_items,
+      caseContext: context as Record<string, unknown>,
+      resolvedVariables: preview.usedMode === "bindings" ? preview.resolvedVariables : (context as Record<string, unknown>),
+      uploadedDocuments: [
+        ...caseDocs.map((d) => ({
+          fileName: d.file_name ? String(d.file_name) : null,
+          documentType: d.document_type ? String(d.document_type) : null,
+          checklistKey: d.checklist_key ? String(d.checklist_key) : null,
+          source: "case_document",
+          hasFile: Boolean(d.object_path && d.file_name),
+        })),
+        ...wfDocs.map((d) => ({
+          fileName: d.file_name ? String(d.file_name) : null,
+          documentType: d.milestone_key ? String(d.milestone_key) : null,
+          checklistKey: d.milestone_key ? `workflow:${String(d.milestone_key)}` : null,
+          source: "workflow_document",
+          hasFile: Boolean(d.object_path && d.file_name),
+        })),
+      ],
+      milestones: buildChecklistMilestones({ workflowDocs: workflowMap, context }),
+      manualConfirmations,
+    });
     await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: renderable ? "documents.preview" : "documents.preview.failed", entityType: "platform_document", entityId: platformDocumentId!, detail: `caseId=${caseId} mode=${preview.usedMode} applicable=${applicabilityResult.applicable} bypass=${bypass} clauses=${clauseRefs.length} target=${insertionTarget ?? ""}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
     res.json({
       resolvedVariables: preview.resolvedVariables,
@@ -5593,6 +6001,7 @@ router.post("/cases/:caseId/documents/preview", requireAuth, requireFirmUser, re
       duplicateClauseWarnings: clauseRefs.length ? duplicateClauseWarnings : [],
       clauseOrder: clauseRefs.length ? clauseOrder : [],
       clauseSnapshotPreview: clauseRefs.length ? selectedClausesResolved : [],
+      checklistResult,
       clauseInsertion: clauseRefs.length ? { selected: clauseRefs, previewText: clausePreviewText, warnings: clauseWarnings, insertionModeUsed, insertionTarget, insertionError, hasClausesPlaceholder, detectedClauseCodePlaceholders, duplicateClauseWarnings, clauseOrder, selectedClausesResolved } : null,
       applicabilityResult,
       renderMode,
