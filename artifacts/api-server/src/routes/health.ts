@@ -9,6 +9,16 @@ router.get("/healthz", (_req, res) => {
   res.json(data);
 });
 
+router.get("/healthz/version", (_req, res) => {
+  const commit =
+    process.env.RENDER_GIT_COMMIT ??
+    process.env.VERCEL_GIT_COMMIT_SHA ??
+    process.env.GIT_COMMIT_SHA ??
+    process.env.COMMIT_SHA ??
+    null;
+  res.json({ status: "ok", commit });
+});
+
 router.get("/healthz/db", async (_req, res) => {
   try {
     await pool.query("select 1 as ok");
