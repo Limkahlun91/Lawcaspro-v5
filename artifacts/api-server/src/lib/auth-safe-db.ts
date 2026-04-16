@@ -93,6 +93,12 @@ async function runWithAuthSafeDbOnce<T>(
           { ...ctx, stage: "set_founder_context", errMessageShort, err },
           "auth-safe-db.founder_context_failed",
         );
+        try {
+          await client.query("SET LOCAL app.is_founder = 'true'");
+          await client.query("SET LOCAL app.current_firm_id = '0'");
+          await client.query("SET LOCAL app.current_user_id = '0'");
+        } catch {
+        }
       }
     } else {
       await setFounderContext(client);
