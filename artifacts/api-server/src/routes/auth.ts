@@ -95,7 +95,7 @@ router.post("/auth/login", authRateLimiter, async (req, res): Promise<void> => {
         .from(usersTable)
         .where(eq(usersTable.email, emailNormalized));
       return u ?? null;
-    }, { retry: true, ctx });
+    }, { retry: true, ctx, allowUnsafe: true });
 
     if (!user) {
       logger.info({ emailHash, ms: Date.now() - startedAt }, "auth.login.user_not_found");
@@ -112,7 +112,7 @@ router.post("/auth/login", authRateLimiter, async (req, res): Promise<void> => {
             ipAddress: ip ?? null,
             userAgent: ua ?? null,
           });
-        }, { retry: false, ctx: { ...ctx, stage: "audit_log_user_not_found" } });
+        }, { retry: false, ctx: { ...ctx, stage: "audit_log_user_not_found" }, allowUnsafe: true });
       } catch (err) {
         logger.error({ emailHash, stage: "audit_log_user_not_found", err }, "auth.login.audit_log_error");
       }
@@ -145,7 +145,7 @@ router.post("/auth/login", authRateLimiter, async (req, res): Promise<void> => {
             ipAddress: ip ?? null,
             userAgent: ua ?? null,
           });
-        }, { retry: false, ctx: { ...ctx, stage: "audit_log_wrong_password" } });
+        }, { retry: false, ctx: { ...ctx, stage: "audit_log_wrong_password" }, allowUnsafe: true });
       } catch (err) {
         logger.error({ emailHash, userId: user.id, stage: "audit_log_wrong_password", err }, "auth.login.audit_log_error");
       }
@@ -168,7 +168,7 @@ router.post("/auth/login", authRateLimiter, async (req, res): Promise<void> => {
             ipAddress: ip ?? null,
             userAgent: ua ?? null,
           });
-        }, { retry: false, ctx: { ...ctx, stage: "audit_log_inactive" } });
+        }, { retry: false, ctx: { ...ctx, stage: "audit_log_inactive" }, allowUnsafe: true });
       } catch (err) {
         logger.error({ emailHash, userId: user.id, stage: "audit_log_inactive", err }, "auth.login.audit_log_error");
       }
@@ -204,7 +204,7 @@ router.post("/auth/login", authRateLimiter, async (req, res): Promise<void> => {
               ipAddress: ip ?? null,
               userAgent: ua ?? null,
             });
-          }, { retry: false, ctx: { ...ctx, stage: "audit_log_totp_failed" } });
+          }, { retry: false, ctx: { ...ctx, stage: "audit_log_totp_failed" }, allowUnsafe: true });
         } catch (err) {
           logger.error({ emailHash, userId: user.id, stage: "audit_log_totp_failed", err }, "auth.login.audit_log_error");
         }
@@ -232,7 +232,7 @@ router.post("/auth/login", authRateLimiter, async (req, res): Promise<void> => {
         userAgent: ua ?? null,
         ipAddress: ip ?? null,
       });
-    }, { retry: false, ctx: { ...ctx, stage } });
+    }, { retry: false, ctx: { ...ctx, stage }, allowUnsafe: true });
 
     stage = "side_effects";
     ctx.stage = stage;
@@ -255,7 +255,7 @@ router.post("/auth/login", authRateLimiter, async (req, res): Promise<void> => {
             ipAddress: ip ?? null,
             userAgent: ua ?? null,
           });
-        }, { retry: false, ctx: { ...ctx, stage: "side_effects.persist" } });
+        }, { retry: false, ctx: { ...ctx, stage: "side_effects.persist" }, allowUnsafe: true });
       } catch (err) {
         logger.error({ emailHash, userId: user.id, stage: "side_effects", err }, "auth.login_side_effect_failed");
       }
@@ -267,7 +267,7 @@ router.post("/auth/login", authRateLimiter, async (req, res): Promise<void> => {
         const role = await withAuthSafeDb(async (authDb) => {
           const [r] = await authDb.select().from(rolesTable).where(eq(rolesTable.id, user.roleId!));
           return r ?? null;
-        }, { retry: false, ctx: { ...ctx, stage: "role_lookup" } });
+        }, { retry: false, ctx: { ...ctx, stage: "role_lookup" }, allowUnsafe: true });
         roleName = role?.name ?? null;
       } catch (err) {
         logger.error({ ...ctx, stage: "role_lookup", err }, "auth.login.degraded");
@@ -281,7 +281,7 @@ router.post("/auth/login", authRateLimiter, async (req, res): Promise<void> => {
         const firm = await withAuthSafeDb(async (authDb) => {
           const [f] = await authDb.select().from(firmsTable).where(eq(firmsTable.id, user.firmId!));
           return f ?? null;
-        }, { retry: false, ctx: { ...ctx, stage: "firm_lookup" } });
+        }, { retry: false, ctx: { ...ctx, stage: "firm_lookup" }, allowUnsafe: true });
         firmName = firm?.name ?? null;
       } catch (err) {
         logger.error({ ...ctx, stage: "firm_lookup", err }, "auth.login.degraded");
@@ -434,7 +434,7 @@ router.get("/auth/me", async (req, res): Promise<void> => {
           status: user.status,
         },
       };
-    }, { retry: false, ctx: { route: req.path, stage: "me", reqId, firmId: null, userId: null } });
+    }, { retry: false, ctx: { route: req.path, stage: "me", reqId, firmId: null, userId: null }, allowUnsafe: true });
 
     if (result.kind === "no_session" || result.kind === "expired") {
       if (typeof cookieToken === "string") res.clearCookie("auth_token");
@@ -481,7 +481,7 @@ router.get("/auth/permissions", requireAuth, async (req: AuthRequest, res): Prom
         .from(permissionsTable)
         .where(and(eq(permissionsTable.roleId, req.roleId!), eq(permissionsTable.allowed, true)));
       return { rows, ms: Date.now() - started };
-    }, { retry: false, ctx: { ...ctx, stage: "permissions_lookup" } });
+    }, { retry: false, ctx: { ...ctx, stage: "permissions_lookup" }, allowUnsafe: true });
 
     res.json({ permissions: permissions.rows });
     logger.info({ ...ctx, stage: "ok", ms: Date.now() - startedAt, permissionsLookupMs: permissions.ms, count: permissions.rows.length }, "auth.permissions");

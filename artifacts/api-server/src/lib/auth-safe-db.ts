@@ -76,13 +76,22 @@ export function isTransientDbConnectionError(err: unknown): boolean {
 async function runWithAuthSafeDbOnce<T>(
   fn: (db: ReturnType<typeof makeRlsDb>) => Promise<T>,
   ctx?: AuthSafeDbContext,
+  allowUnsafe?: boolean,
 ): Promise<T> {
   const client = await pool.connect();
   let destroyClient = false;
 
   try {
     await client.query("BEGIN");
-    await setFounderContext(client);
+    if (allowUnsafe) {
+      try {
+        await setFounderContext(client);
+      } catch (err) {
+        logger.error({ ...ctx, stage: "set_founder_context", err }, "auth-safe-db.founder_context_failed");
+      }
+    } else {
+      await setFounderContext(client);
+    }
     const authDb = makeRlsDb(client);
     const result = await fn(authDb);
     await client.query("COMMIT");
@@ -110,11 +119,11 @@ async function runWithAuthSafeDbOnce<T>(
 
 export async function withAuthSafeDb<T>(
   fn: (db: ReturnType<typeof makeRlsDb>) => Promise<T>,
-  opts?: { retry?: boolean; ctx?: AuthSafeDbContext },
+  opts?: { retry?: boolean; ctx?: AuthSafeDbContext; allowUnsafe?: boolean },
 ): Promise<T> {
   const attempt1StartedAt = Date.now();
   try {
-    return await runWithAuthSafeDbOnce(fn, opts?.ctx);
+    return await runWithAuthSafeDbOnce(fn, opts?.ctx, opts?.allowUnsafe);
   } catch (err) {
     const kind = classifyTransientDbConnectionError(err) ?? "unknown";
     if (isTransientDbConnectionError(err)) {
@@ -131,7 +140,7 @@ export async function withAuthSafeDb<T>(
 
     const attempt2StartedAt = Date.now();
     try {
-      const result = await runWithAuthSafeDbOnce(fn, opts?.ctx);
+      const result = await runWithAuthSafeDbOnce(fn, opts?.ctx, opts?.allowUnsafe);
       logger.info({ ...opts?.ctx, kind, retryCount: 1, ms: Date.now() - attempt2StartedAt }, "auth-safe-db.retry_success");
       return result;
     } catch (err2) {
