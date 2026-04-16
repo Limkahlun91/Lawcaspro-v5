@@ -124,36 +124,23 @@ async function runWithAuthSafeDbOnce<T>(
 
 export async function withAuthSafeDb<T>(
   fn: (db: ReturnType<typeof makeRlsDb>) => Promise<T>,
-  opts?: { retry?: boolean; ctx?: AuthSafeDbContext; allowUnsafe?: boolean },
+  opts?: { retry?: boolean; maxRetries?: number; ctx?: AuthSafeDbContext; allowUnsafe?: boolean },
 ): Promise<T> {
-  const attempt1StartedAt = Date.now();
-  try {
-    return await runWithAuthSafeDbOnce(fn, opts?.ctx, opts?.allowUnsafe);
-  } catch (err) {
-    const kind = classifyTransientDbConnectionError(err) ?? "unknown";
-    if (isTransientDbConnectionError(err)) {
-      logger.warn(
-        { ...opts?.ctx, err, kind, attempt: 1, ms: Date.now() - attempt1StartedAt },
-        "auth-safe-db.first_attempt_failed",
-      );
-    }
+  const maxRetries = opts?.maxRetries ?? (opts?.retry ? 1 : 0);
+  let lastErr: unknown;
 
-    if (!isTransientDbConnectionError(err) || !opts?.retry) throw err;
-
-    logger.warn({ ...opts?.ctx, err, kind, retryCount: 1 }, "auth-safe-db.retrying_transient_connection_error");
-    logger.warn({ ...opts?.ctx, err, kind, retryCount: 1 }, "auth-safe-db.retry_started");
-
-    const attempt2StartedAt = Date.now();
+  for (let attempt = 1; attempt <= 1 + maxRetries; attempt++) {
+    const startedAt = Date.now();
     try {
-      const result = await runWithAuthSafeDbOnce(fn, opts?.ctx, opts?.allowUnsafe);
-      logger.info({ ...opts?.ctx, kind, retryCount: 1, ms: Date.now() - attempt2StartedAt }, "auth-safe-db.retry_success");
-      return result;
-    } catch (err2) {
-      logger.error(
-        { ...opts?.ctx, err: err2, firstErr: err, kind, retryCount: 1, ms: Date.now() - attempt2StartedAt },
-        "auth-safe-db.retry_failed",
-      );
-      throw err2;
+      return await runWithAuthSafeDbOnce(fn, opts?.ctx, opts?.allowUnsafe);
+    } catch (err) {
+      lastErr = err;
+      const kind = classifyTransientDbConnectionError(err) ?? "unknown";
+      const shouldRetry = isTransientDbConnectionError(err) && attempt <= maxRetries;
+      if (!shouldRetry) throw err;
+      logger.warn({ ...opts?.ctx, err, kind, attempt, ms: Date.now() - startedAt }, "auth-safe-db.attempt_failed");
     }
   }
+
+  throw lastErr;
 }

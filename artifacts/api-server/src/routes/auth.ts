@@ -95,7 +95,7 @@ router.post("/auth/login", authRateLimiter, async (req, res): Promise<void> => {
         .from(usersTable)
         .where(eq(usersTable.email, emailNormalized));
       return u ?? null;
-    }, { retry: true, ctx, allowUnsafe: true });
+    }, { retry: true, maxRetries: 2, ctx, allowUnsafe: true });
 
     if (!user) {
       logger.info({ emailHash, ms: Date.now() - startedAt }, "auth.login.user_not_found");
@@ -232,7 +232,7 @@ router.post("/auth/login", authRateLimiter, async (req, res): Promise<void> => {
         userAgent: ua ?? null,
         ipAddress: ip ?? null,
       });
-    }, { retry: false, ctx: { ...ctx, stage }, allowUnsafe: true });
+    }, { maxRetries: 2, ctx: { ...ctx, stage }, allowUnsafe: true });
 
     stage = "side_effects";
     ctx.stage = stage;
@@ -436,7 +436,7 @@ router.get("/auth/me", async (req, res): Promise<void> => {
           status: user.status,
         },
       };
-    }, { retry: false, ctx: { route: req.path, stage: "me", reqId, firmId: null, userId: null }, allowUnsafe: true });
+    }, { maxRetries: 2, ctx: { route: req.path, stage: "me", reqId, firmId: null, userId: null }, allowUnsafe: true });
 
     if (result.kind === "no_session" || result.kind === "expired") {
       if (typeof cookieToken === "string") res.clearCookie("auth_token");
