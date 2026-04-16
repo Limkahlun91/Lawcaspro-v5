@@ -3,7 +3,7 @@ import { db, pool, sessionsTable, usersTable, auditLogsTable, makeRlsDb, setTena
 import { and, eq, sql } from "drizzle-orm";
 import crypto from "crypto";
 import { logger } from "./logger";
-import { isTransientDbConnectionError, withAuthSafeDb } from "./auth-safe-db";
+import { isTransientDbConnectionError } from "./auth-safe-db";
 
 export interface AuthRequest extends Request {
   userId?: number;
@@ -20,6 +20,11 @@ export interface AuthRequest extends Request {
   rlsDb?: RlsDb;
 }
 
+const getReqId = (req: unknown): string | undefined => {
+  const id = (req as { id?: unknown } | null)?.id;
+  return typeof id === "string" ? id : undefined;
+};
+
 export async function writeAuditLog(params: {
   firmId?: number | null;
   actorId?: number | null;
@@ -34,8 +39,8 @@ export async function writeAuditLog(params: {
   const targetDb = options?.db;
   const strict = options?.strict ?? false;
   try {
-    const insert = async (rlsDb: RlsDb) => {
-      await rlsDb.insert(auditLogsTable).values({
+    if (targetDb) {
+      await targetDb.insert(auditLogsTable).values({
         firmId: params.firmId ?? null,
         actorId: params.actorId ?? null,
         actorType: params.actorType ?? "firm_user",
@@ -46,16 +51,19 @@ export async function writeAuditLog(params: {
         ipAddress: params.ipAddress ?? null,
         userAgent: params.userAgent ?? null,
       });
-    };
-
-    if (targetDb) {
-      await insert(targetDb);
-      return;
+    } else {
+      await db.insert(auditLogsTable).values({
+        firmId: params.firmId ?? null,
+        actorId: params.actorId ?? null,
+        actorType: params.actorType ?? "firm_user",
+        action: params.action,
+        entityType: params.entityType ?? null,
+        entityId: params.entityId ?? null,
+        detail: params.detail ?? null,
+        ipAddress: params.ipAddress ?? null,
+        userAgent: params.userAgent ?? null,
+      });
     }
-
-    await withAuthSafeDb(async (authDb) => {
-      await insert(authDb);
-    });
   } catch (err) {
     logger.error(
       {
@@ -104,15 +112,11 @@ export async function requireAuth(
       }
     | undefined;
   try {
-    const reqId = (req as any).id;
+    const reqId = getReqId(req);
     const lookupStartedAt = Date.now();
-    const result = await withAuthSafeDb(async (authDb) => {
-      const [s] = await authDb
-        .select()
-        .from(sessionsTable)
-        .where(eq(sessionsTable.tokenHash, tokenHash));
-      if (!s) return { session: undefined, user: undefined };
-      const [u] = await authDb
+    const [s] = await db.select().from(sessionsTable).where(eq(sessionsTable.tokenHash, tokenHash));
+    if (s) {
+      const [u] = await db
         .select({
           id: usersTable.id,
           userType: usersTable.userType,
@@ -122,17 +126,16 @@ export async function requireAuth(
         })
         .from(usersTable)
         .where(eq(usersTable.id, s.userId));
-      return { session: s, user: u };
-    }, { retry: true, ctx: { route: req.path, stage: "require_auth.session_lookup", reqId, firmId: null, userId: null } });
-    session = result.session;
-    user = result.user;
+      session = s;
+      user = u;
+    }
     const ms = Date.now() - lookupStartedAt;
     if (ms > 1000) {
       logger.warn({ route: req.path, reqId, ms }, "auth.require_auth.slow");
     }
   } catch (err) {
     logger.error({ err }, "auth.require_auth.db_error");
-    res.status(isTransientDbConnectionError(err) ? 503 : 500).json({ error: "Auth temporarily unavailable" });
+    res.status(503).json({ error: "Auth temporarily unavailable" });
     return;
   }
 

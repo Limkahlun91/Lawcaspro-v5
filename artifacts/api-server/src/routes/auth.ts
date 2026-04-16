@@ -7,7 +7,7 @@ import { LoginBody } from "@workspace/api-zod";
 import { requireAuth, requireReAuth, issueReauthToken, type AuthRequest, writeAuditLog } from "../lib/auth";
 import { authRateLimiter, sensitiveRateLimiter } from "../lib/rate-limit";
 import { logger } from "../lib/logger";
-import { isTransientDbConnectionError, withAuthSafeDb } from "../lib/auth-safe-db";
+import { isTransientDbConnectionError } from "../lib/auth-safe-db";
 import * as OTPAuth from "otpauth";
 import QRCode from "qrcode";
 
@@ -107,68 +107,64 @@ router.post("/auth/login", authRateLimiter, async (req, res): Promise<void> => {
 
     const user: LoginUser | null = await (async () => {
       try {
-        return await withAuthSafeDb(async (authDb) => {
-          const [u] = await authDb
-            .select({
-              id: usersTable.id,
-              firmId: usersTable.firmId,
-              email: usersTable.email,
-              name: usersTable.name,
-              passwordHash: usersTable.passwordHash,
-              userType: usersTable.userType,
-              roleId: usersTable.roleId,
-              status: usersTable.status,
-              totpSecret: usersTable.totpSecret,
-              totpEnabled: usersTable.totpEnabled,
-            })
-            .from(usersTable)
-            .where(eq(usersTable.email, emailNormalized));
-          return (u as LoginUser | undefined) ?? null;
-        }, { retry: true, maxRetries: 2, ctx, allowUnsafe: true });
+        const [u] = await db
+          .select({
+            id: usersTable.id,
+            firmId: usersTable.firmId,
+            email: usersTable.email,
+            name: usersTable.name,
+            passwordHash: usersTable.passwordHash,
+            userType: usersTable.userType,
+            roleId: usersTable.roleId,
+            status: usersTable.status,
+            totpSecret: usersTable.totpSecret,
+            totpEnabled: usersTable.totpEnabled,
+          })
+          .from(usersTable)
+          .where(eq(usersTable.email, emailNormalized));
+        return (u as LoginUser | undefined) ?? null;
       } catch (err) {
         if (!isUndefinedColumnError(err)) throw err;
         const errMessageShort =
           err instanceof Error ? err.message.slice(0, 180) : String(err ?? "").slice(0, 180);
         logger.warn({ ...ctx, stage: "user_lookup_fallback", errMessageShort, err }, "auth.login.degraded_schema");
-        return await withAuthSafeDb(async (authDb) => {
-          const [u] = await authDb
-            .select({
-              id: usersTable.id,
-              firmId: usersTable.firmId,
-              email: usersTable.email,
-              name: usersTable.name,
-              passwordHash: usersTable.passwordHash,
-              userType: usersTable.userType,
-              roleId: usersTable.roleId,
-              status: usersTable.status,
-            })
-            .from(usersTable)
-            .where(eq(usersTable.email, emailNormalized));
 
-          if (!u) return null;
-          return {
-            id: u.id,
-            firmId: u.firmId,
-            email: u.email,
-            name: u.name,
-            passwordHash: u.passwordHash,
-            userType: u.userType,
-            roleId: u.roleId,
-            status: u.status,
-            totpEnabled: false,
-            totpSecret: null,
-          } satisfies LoginUser;
-        }, { retry: true, maxRetries: 2, ctx: { ...ctx, stage: "user_lookup_fallback" }, allowUnsafe: true });
+        const [u] = await db
+          .select({
+            id: usersTable.id,
+            firmId: usersTable.firmId,
+            email: usersTable.email,
+            name: usersTable.name,
+            passwordHash: usersTable.passwordHash,
+            userType: usersTable.userType,
+            roleId: usersTable.roleId,
+            status: usersTable.status,
+          })
+          .from(usersTable)
+          .where(eq(usersTable.email, emailNormalized));
+
+        if (!u) return null;
+        return {
+          id: u.id,
+          firmId: u.firmId,
+          email: u.email,
+          name: u.name,
+          passwordHash: u.passwordHash,
+          userType: u.userType,
+          roleId: u.roleId,
+          status: u.status,
+          totpEnabled: false,
+          totpSecret: null,
+        } satisfies LoginUser;
       }
     })();
 
     if (!user) {
       logger.info({ emailHash, ms: Date.now() - startedAt }, "auth.login.user_not_found");
       try {
-        await withAuthSafeDb(async (authDb) => {
-          const hasAuditLogs = await tableExistsAuthDb(authDb, "public.audit_logs");
-          if (!hasAuditLogs) return;
-          await authDb.insert(auditLogsTable).values({
+        const hasAuditLogs = await tableExistsAuthDb(db, "public.audit_logs");
+        if (hasAuditLogs) {
+          await db.insert(auditLogsTable).values({
             firmId: null,
             actorId: null,
             actorType: "firm_user",
@@ -177,7 +173,7 @@ router.post("/auth/login", authRateLimiter, async (req, res): Promise<void> => {
             ipAddress: ip ?? null,
             userAgent: ua ?? null,
           });
-        }, { retry: false, ctx: { ...ctx, stage: "audit_log_user_not_found" }, allowUnsafe: true });
+        }
       } catch (err) {
         logger.error({ emailHash, stage: "audit_log_user_not_found", err }, "auth.login.audit_log_error");
       }
@@ -198,10 +194,9 @@ router.post("/auth/login", authRateLimiter, async (req, res): Promise<void> => {
     if (!passwordMatch) {
       logger.info({ emailHash, userId: user.id, userLookupMs, ms: Date.now() - startedAt }, "auth.login.wrong_password");
       try {
-        await withAuthSafeDb(async (authDb) => {
-          const hasAuditLogs = await tableExistsAuthDb(authDb, "public.audit_logs");
-          if (!hasAuditLogs) return;
-          await authDb.insert(auditLogsTable).values({
+        const hasAuditLogs = await tableExistsAuthDb(db, "public.audit_logs");
+        if (hasAuditLogs) {
+          await db.insert(auditLogsTable).values({
             firmId: user.firmId,
             actorId: user.id,
             actorType: user.userType,
@@ -210,7 +205,7 @@ router.post("/auth/login", authRateLimiter, async (req, res): Promise<void> => {
             ipAddress: ip ?? null,
             userAgent: ua ?? null,
           });
-        }, { retry: false, ctx: { ...ctx, stage: "audit_log_wrong_password" }, allowUnsafe: true });
+        }
       } catch (err) {
         logger.error({ emailHash, userId: user.id, stage: "audit_log_wrong_password", err }, "auth.login.audit_log_error");
       }
@@ -221,10 +216,9 @@ router.post("/auth/login", authRateLimiter, async (req, res): Promise<void> => {
     if (user.status !== "active") {
       logger.info({ emailHash, userId: user.id, ms: Date.now() - startedAt }, "auth.login.inactive");
       try {
-        await withAuthSafeDb(async (authDb) => {
-          const hasAuditLogs = await tableExistsAuthDb(authDb, "public.audit_logs");
-          if (!hasAuditLogs) return;
-          await authDb.insert(auditLogsTable).values({
+        const hasAuditLogs = await tableExistsAuthDb(db, "public.audit_logs");
+        if (hasAuditLogs) {
+          await db.insert(auditLogsTable).values({
             firmId: user.firmId,
             actorId: user.id,
             actorType: user.userType,
@@ -233,7 +227,7 @@ router.post("/auth/login", authRateLimiter, async (req, res): Promise<void> => {
             ipAddress: ip ?? null,
             userAgent: ua ?? null,
           });
-        }, { retry: false, ctx: { ...ctx, stage: "audit_log_inactive" }, allowUnsafe: true });
+        }
       } catch (err) {
         logger.error({ emailHash, userId: user.id, stage: "audit_log_inactive", err }, "auth.login.audit_log_error");
       }
@@ -257,10 +251,9 @@ router.post("/auth/login", authRateLimiter, async (req, res): Promise<void> => {
       if (!isValid) {
         logger.info({ emailHash, userId: user.id, ms: Date.now() - startedAt }, "auth.login.totp_invalid");
         try {
-          await withAuthSafeDb(async (authDb) => {
-            const hasAuditLogs = await tableExistsAuthDb(authDb, "public.audit_logs");
-            if (!hasAuditLogs) return;
-            await authDb.insert(auditLogsTable).values({
+          const hasAuditLogs = await tableExistsAuthDb(db, "public.audit_logs");
+          if (hasAuditLogs) {
+            await db.insert(auditLogsTable).values({
               firmId: user.firmId,
               actorId: user.id,
               actorType: user.userType,
@@ -269,7 +262,7 @@ router.post("/auth/login", authRateLimiter, async (req, res): Promise<void> => {
               ipAddress: ip ?? null,
               userAgent: ua ?? null,
             });
-          }, { retry: false, ctx: { ...ctx, stage: "audit_log_totp_failed" }, allowUnsafe: true });
+          }
         } catch (err) {
           logger.error({ emailHash, userId: user.id, stage: "audit_log_totp_failed", err }, "auth.login.audit_log_error");
         }
@@ -289,38 +282,34 @@ router.post("/auth/login", authRateLimiter, async (req, res): Promise<void> => {
     stage = "session_persist";
     ctx.stage = stage;
     logger.info({ ...ctx }, "auth.login.stage");
-    await withAuthSafeDb(async (authDb) => {
-      await authDb.insert(sessionsTable).values({
-        userId: user.id,
-        tokenHash,
-        expiresAt,
-        userAgent: ua ?? null,
-        ipAddress: ip ?? null,
-      });
-    }, { maxRetries: 2, ctx: { ...ctx, stage }, allowUnsafe: true });
+    await db.insert(sessionsTable).values({
+      userId: user.id,
+      tokenHash,
+      expiresAt,
+      userAgent: ua ?? null,
+      ipAddress: ip ?? null,
+    });
 
     stage = "side_effects";
     ctx.stage = stage;
     logger.info({ ...ctx }, "auth.login.stage");
     void (async () => {
       try {
-        await withAuthSafeDb(async (authDb) => {
-          const updateFields: Partial<typeof usersTable.$inferInsert> = { lastLoginAt: new Date() };
-          if (didUseTotp) updateFields.totpLastUsedAt = new Date();
-          await authDb.update(usersTable).set(updateFields).where(eq(usersTable.id, user.id));
+        const updateFields: Partial<typeof usersTable.$inferInsert> = { lastLoginAt: new Date() };
+        if (didUseTotp) updateFields.totpLastUsedAt = new Date();
+        await db.update(usersTable).set(updateFields).where(eq(usersTable.id, user.id));
 
-          const hasAuditLogs = await tableExistsAuthDb(authDb, "public.audit_logs");
-          if (!hasAuditLogs) return;
-          await authDb.insert(auditLogsTable).values({
-            firmId: user.firmId,
-            actorId: user.id,
-            actorType: user.userType,
-            action: "auth.login_success",
-            detail: null,
-            ipAddress: ip ?? null,
-            userAgent: ua ?? null,
-          });
-        }, { retry: false, ctx: { ...ctx, stage: "side_effects.persist" }, allowUnsafe: true });
+        const hasAuditLogs = await tableExistsAuthDb(db, "public.audit_logs");
+        if (!hasAuditLogs) return;
+        await db.insert(auditLogsTable).values({
+          firmId: user.firmId,
+          actorId: user.id,
+          actorType: user.userType,
+          action: "auth.login_success",
+          detail: null,
+          ipAddress: ip ?? null,
+          userAgent: ua ?? null,
+        });
       } catch (err) {
         logger.error({ emailHash, userId: user.id, stage: "side_effects", err }, "auth.login_side_effect_failed");
       }
@@ -329,11 +318,8 @@ router.post("/auth/login", authRateLimiter, async (req, res): Promise<void> => {
     let roleName: string | null = null;
     if (user.roleId) {
       try {
-        const role = await withAuthSafeDb(async (authDb) => {
-          const [r] = await authDb.select().from(rolesTable).where(eq(rolesTable.id, user.roleId!));
-          return r ?? null;
-        }, { retry: false, ctx: { ...ctx, stage: "role_lookup" }, allowUnsafe: true });
-        roleName = role?.name ?? null;
+        const [role] = await db.select().from(rolesTable).where(eq(rolesTable.id, user.roleId));
+        roleName = (role as { name?: unknown } | undefined)?.name as string | undefined ?? null;
       } catch (err) {
         logger.error({ ...ctx, stage: "role_lookup", err }, "auth.login.degraded");
         roleName = null;
@@ -343,11 +329,8 @@ router.post("/auth/login", authRateLimiter, async (req, res): Promise<void> => {
     let firmName: string | null = null;
     if (user.firmId) {
       try {
-        const firm = await withAuthSafeDb(async (authDb) => {
-          const [f] = await authDb.select().from(firmsTable).where(eq(firmsTable.id, user.firmId!));
-          return f ?? null;
-        }, { retry: false, ctx: { ...ctx, stage: "firm_lookup" }, allowUnsafe: true });
-        firmName = firm?.name ?? null;
+        const [firm] = await db.select().from(firmsTable).where(eq(firmsTable.id, user.firmId));
+        firmName = (firm as { name?: unknown } | undefined)?.name as string | undefined ?? null;
       } catch (err) {
         logger.error({ ...ctx, stage: "firm_lookup", err }, "auth.login.degraded");
         firmName = null;
@@ -427,102 +410,96 @@ router.get("/auth/me", async (req, res): Promise<void> => {
   const ctxBase = { route: req.path, reqId, stage: "start" };
 
   try {
-    const result = await withAuthSafeDb(async (authDb) => {
-      const [s] = await authDb
-        .select({ userId: sessionsTable.userId, expiresAt: sessionsTable.expiresAt })
-        .from(sessionsTable)
-        .where(eq(sessionsTable.tokenHash, tokenHash));
-      if (!s) return { kind: "no_session" as const };
-      if (s.expiresAt < new Date()) return { kind: "expired" as const };
-
-      const [user] = await authDb
-        .select({
-          id: usersTable.id,
-          email: usersTable.email,
-          name: usersTable.name,
-          userType: usersTable.userType,
-          firmId: usersTable.firmId,
-          roleId: usersTable.roleId,
-          department: usersTable.department,
-          status: usersTable.status,
-        })
-        .from(usersTable)
-        .where(eq(usersTable.id, s.userId));
-
-      if (!user) return { kind: "missing_user" as const };
-      if (user.status !== "active") return { kind: "inactive_user" as const };
-
-      let roleName: string | null = null;
-      if (user.roleId) {
-        try {
-          const [role] = await authDb.select().from(rolesTable).where(eq(rolesTable.id, user.roleId));
-          roleName = role?.name ?? null;
-        } catch (err) {
-          logger.error({ route: req.path, reqId, stage: "role_lookup", err }, "auth.me.degraded");
-        }
-      }
-
-      let firmName: string | null = null;
-      if (user.firmId) {
-        try {
-          const [firm] = await authDb.select().from(firmsTable).where(eq(firmsTable.id, user.firmId));
-          firmName = firm?.name ?? null;
-        } catch (err) {
-          logger.error({ route: req.path, reqId, stage: "firm_lookup", err }, "auth.me.degraded");
-        }
-      }
-
-      let permissions: Array<{ module: string; action: string }> = [];
-      if (user.userType === "firm_user" && user.roleId) {
-        try {
-          permissions = await authDb
-            .select({ module: permissionsTable.module, action: permissionsTable.action })
-            .from(permissionsTable)
-            .where(and(eq(permissionsTable.roleId, user.roleId), eq(permissionsTable.allowed, true)));
-        } catch (err) {
-          logger.error({ route: req.path, reqId, stage: "permissions_lookup", err }, "auth.me.degraded");
-          permissions = [];
-        }
-      }
-
-      return {
-        kind: "ok" as const,
-        user: {
-          id: user.id,
-          userType: user.userType,
-          firmId: user.firmId,
-          roleId: user.roleId,
-          roleName,
-          firmName,
-          permissions,
-          email: user.email,
-          name: user.name,
-          department: user.department ?? null,
-          status: user.status,
-        },
-      };
-    }, { maxRetries: 2, ctx: { route: req.path, stage: "me", reqId, firmId: null, userId: null }, allowUnsafe: true });
-
-    if (result.kind === "no_session" || result.kind === "expired") {
+    const [s] = await db
+      .select({ userId: sessionsTable.userId, expiresAt: sessionsTable.expiresAt })
+      .from(sessionsTable)
+      .where(eq(sessionsTable.tokenHash, tokenHash));
+    if (!s) {
       if (typeof cookieToken === "string") res.clearCookie("auth_token");
       res.status(401).json({ error: "Not authenticated" });
-      logger.info({ ...ctxBase, stage: result.kind, ms: Date.now() - startedAt }, "auth.me");
+      logger.info({ ...ctxBase, stage: "no_session", ms: Date.now() - startedAt }, "auth.me");
       return;
     }
-    if (result.kind === "missing_user") {
+    if (s.expiresAt < new Date()) {
+      if (typeof cookieToken === "string") res.clearCookie("auth_token");
+      res.status(401).json({ error: "Not authenticated" });
+      logger.info({ ...ctxBase, stage: "expired", ms: Date.now() - startedAt }, "auth.me");
+      return;
+    }
+
+    const [user] = await db
+      .select({
+        id: usersTable.id,
+        email: usersTable.email,
+        name: usersTable.name,
+        userType: usersTable.userType,
+        firmId: usersTable.firmId,
+        roleId: usersTable.roleId,
+        department: usersTable.department,
+        status: usersTable.status,
+      })
+      .from(usersTable)
+      .where(eq(usersTable.id, s.userId));
+
+    if (!user) {
       if (typeof cookieToken === "string") res.clearCookie("auth_token");
       res.status(404).json({ error: "User not found" });
       logger.warn({ ...ctxBase, stage: "missing_user", ms: Date.now() - startedAt }, "auth.me");
       return;
     }
-    if (result.kind === "inactive_user") {
+    if (user.status !== "active") {
       if (typeof cookieToken === "string") res.clearCookie("auth_token");
       res.status(401).json({ error: "Not authenticated" });
       logger.warn({ ...ctxBase, stage: "inactive_user", ms: Date.now() - startedAt }, "auth.me");
       return;
     }
 
-    res.json(result.user);
+    let roleName: string | null = null;
+    if (user.roleId) {
+      try {
+        const [role] = await db.select().from(rolesTable).where(eq(rolesTable.id, user.roleId));
+        roleName = (role as { name?: unknown } | undefined)?.name as string | undefined ?? null;
+      } catch (err) {
+        logger.error({ route: req.path, reqId, stage: "role_lookup", err }, "auth.me.degraded");
+      }
+    }
+
+    let firmName: string | null = null;
+    if (user.firmId) {
+      try {
+        const [firm] = await db.select().from(firmsTable).where(eq(firmsTable.id, user.firmId));
+        firmName = (firm as { name?: unknown } | undefined)?.name as string | undefined ?? null;
+      } catch (err) {
+        logger.error({ route: req.path, reqId, stage: "firm_lookup", err }, "auth.me.degraded");
+      }
+    }
+
+    let permissions: Array<{ module: string; action: string }> = [];
+    if (user.userType === "firm_user" && user.roleId) {
+      try {
+        permissions = await db
+          .select({ module: permissionsTable.module, action: permissionsTable.action })
+          .from(permissionsTable)
+          .where(and(eq(permissionsTable.roleId, user.roleId), eq(permissionsTable.allowed, true)));
+      } catch (err) {
+        logger.error({ route: req.path, reqId, stage: "permissions_lookup", err }, "auth.me.degraded");
+        permissions = [];
+      }
+    }
+
+    res.json({
+      id: user.id,
+      userType: user.userType,
+      firmId: user.firmId,
+      roleId: user.roleId,
+      roleName,
+      firmName,
+      permissions,
+      email: user.email,
+      name: user.name,
+      department: user.department ?? null,
+      status: user.status,
+    });
     logger.info({ ...ctxBase, stage: "ok", ms: Date.now() - startedAt }, "auth.me");
   } catch (err) {
     logger.error({ ...ctxBase, stage: "me_error", err }, "auth.me_error");
@@ -541,17 +518,14 @@ router.get("/auth/permissions", requireAuth, async (req: AuthRequest, res): Prom
       return;
     }
 
-    const permissions = await withAuthSafeDb(async (authDb) => {
-      const started = Date.now();
-      const rows = await authDb
-        .select({ module: permissionsTable.module, action: permissionsTable.action })
-        .from(permissionsTable)
-        .where(and(eq(permissionsTable.roleId, req.roleId!), eq(permissionsTable.allowed, true)));
-      return { rows, ms: Date.now() - started };
-    }, { retry: false, ctx: { ...ctx, stage: "permissions_lookup" }, allowUnsafe: true });
+    const started = Date.now();
+    const rows = await db
+      .select({ module: permissionsTable.module, action: permissionsTable.action })
+      .from(permissionsTable)
+      .where(and(eq(permissionsTable.roleId, req.roleId), eq(permissionsTable.allowed, true)));
 
-    res.json({ permissions: permissions.rows });
-    logger.info({ ...ctx, stage: "ok", ms: Date.now() - startedAt, permissionsLookupMs: permissions.ms, count: permissions.rows.length }, "auth.permissions");
+    res.json({ permissions: rows });
+    logger.info({ ...ctx, stage: "ok", ms: Date.now() - startedAt, permissionsLookupMs: Date.now() - started, count: rows.length }, "auth.permissions");
   } catch (err) {
     logger.error({ ...ctx, err }, "auth.permissions_failed");
     res.status(503).json({ error: "Auth temporarily unavailable" });

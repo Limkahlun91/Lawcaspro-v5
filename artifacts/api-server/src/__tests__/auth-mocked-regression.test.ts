@@ -3,7 +3,7 @@ import { beforeAll, describe, expect, it, vi } from "vitest";
 import { usersTable, sessionsTable, rolesTable, firmsTable, permissionsTable } from "@workspace/db";
 import type { Express } from "express";
 
-type AuthDb = {
+type MockDb = {
   execute: (query?: unknown) => Promise<unknown[]>;
   select: (sel?: unknown) => { from: (table: unknown) => { where: (cond?: unknown) => Promise<unknown[]> } };
   insert: (table: unknown) => { values: (values: unknown) => Promise<void> };
@@ -18,6 +18,7 @@ type AuthDbState = {
   firmsById: Map<number, unknown>;
   throwPermissionsSelect: boolean;
   throwUndefinedColumnOnUserLookup: boolean;
+  throwSideEffects: boolean;
 };
 
 const state: AuthDbState = {
@@ -28,6 +29,7 @@ const state: AuthDbState = {
   firmsById: new Map(),
   throwPermissionsSelect: false,
   throwUndefinedColumnOnUserLookup: false,
+  throwSideEffects: false,
 };
 
 vi.mock("bcryptjs", () => ({
@@ -39,85 +41,54 @@ vi.mock("bcryptjs", () => ({
   hash: async () => "hash",
 }));
 
-vi.mock("../lib/auth-safe-db", async (orig) => {
-  const actual = (await orig()) as Record<string, unknown>;
+vi.mock("@workspace/db", async (orig) => {
+  const actual = await orig<typeof import("@workspace/db")>();
 
   const emptyRows = (): unknown[] => [];
+  const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null;
 
-  const makeAuthDb = (): AuthDb => ({
+  const mockDb: MockDb = {
     execute: async () => [{ reg: "public.audit_logs" }],
-    select: () => ({
-      from: () => ({
-        where: async () => emptyRows(),
-      }),
-    }),
-    insert: () => ({
-      values: async () => undefined,
-    }),
-    update: () => ({
-      set: () => ({
-        where: async () => undefined,
-      }),
-    }),
-  });
-
-  const withAuthSafeDb = async (
-    fn: (authDb: AuthDb) => Promise<unknown>,
-    opts: { ctx?: { stage?: unknown } } | undefined
-  ) => {
-    const stage = typeof opts?.ctx?.stage === "string" ? opts.ctx.stage : undefined;
-    if (stage === "side_effects.persist") {
-      throw new Error("audit write failed");
-    }
-    if (stage === "user_lookup" && state.throwUndefinedColumnOnUserLookup) {
-      const e = new Error('column "totp_secret" does not exist') as Error & { code?: string };
-      e.code = "42703";
-      throw e;
-    }
-
-    const authDb = makeAuthDb();
-
-    authDb.select = () => ({
+    select: (sel?: unknown) => ({
       from: (table: unknown) => ({
         where: async () => {
-          if (table === usersTable && (stage === "user_lookup" || stage === "user_lookup_fallback")) {
-            const u = Array.from(state.usersByEmail.values())[0] ?? null;
-            return u ? [u] : emptyRows();
-          }
-          if (table === sessionsTable && stage === "me") {
+          if (table === actual.sessionsTable) {
             const s = Array.from(state.sessionsByTokenHash.values())[0] ?? null;
             return s ? [s] : emptyRows();
           }
-          if (table === usersTable && stage === "me") {
-            const s = Array.from(state.sessionsByTokenHash.values())[0] ?? null;
-            const userId = (s as { userId?: unknown } | null)?.userId;
-            const u = typeof userId === "number" ? (state.usersById.get(userId) ?? null) : null;
+          if (table === actual.usersTable) {
+            const hasPasswordHash = isRecord(sel) && "passwordHash" in sel;
+            if (hasPasswordHash) {
+              if (state.throwUndefinedColumnOnUserLookup) {
+                const e = new Error('column "totp_secret" does not exist') as Error & { code?: string };
+                e.code = "42703";
+                throw e;
+              }
+              const u = Array.from(state.usersByEmail.values())[0] ?? null;
+              return u ? [u] : emptyRows();
+            }
+            const u = Array.from(state.usersById.values())[0] ?? null;
             return u ? [u] : emptyRows();
           }
-          if (table === rolesTable) {
-            const anyUser = Array.from(state.usersById.values())[0] ?? Array.from(state.usersByEmail.values())[0] ?? null;
-            const roleId = (anyUser as { roleId?: unknown } | null)?.roleId ?? null;
-            const r = typeof roleId === "number" ? (state.rolesById.get(roleId) ?? null) : null;
+          if (table === actual.rolesTable) {
+            const r = Array.from(state.rolesById.values())[0] ?? null;
             return r ? [r] : emptyRows();
           }
-          if (table === firmsTable) {
-            const anyUser = Array.from(state.usersById.values())[0] ?? Array.from(state.usersByEmail.values())[0] ?? null;
-            const firmId = (anyUser as { firmId?: unknown } | null)?.firmId ?? null;
-            const f = typeof firmId === "number" ? (state.firmsById.get(firmId) ?? null) : null;
+          if (table === actual.firmsTable) {
+            const f = Array.from(state.firmsById.values())[0] ?? null;
             return f ? [f] : emptyRows();
           }
-          if (table === permissionsTable) {
+          if (table === actual.permissionsTable) {
             if (state.throwPermissionsSelect) throw new Error("permissions query failed");
             return [{ module: "cases", action: "read" }];
           }
           return emptyRows();
         },
       }),
-    });
-
-    authDb.insert = (table: unknown) => ({
+    }),
+    insert: (table: unknown) => ({
       values: async (values: unknown) => {
-        if (table === sessionsTable) {
+        if (table === actual.sessionsTable) {
           const v = values as { tokenHash: string; userId: number; expiresAt: Date };
           state.sessionsByTokenHash.set(String(v.tokenHash), {
             userId: v.userId,
@@ -126,14 +97,30 @@ vi.mock("../lib/auth-safe-db", async (orig) => {
         }
         return undefined;
       },
-    });
-
-    return fn(authDb);
+    }),
+    update: () => ({
+      set: () => ({
+        where: async () => {
+          if (state.throwSideEffects) throw new Error("side effects failed");
+          return undefined;
+        },
+      }),
+    }),
   };
 
-  const isTransientDbConnectionError =
-    (actual.isTransientDbConnectionError as ((err: unknown) => boolean) | undefined) ?? (() => false);
-  return { ...(actual as object), withAuthSafeDb, isTransientDbConnectionError };
+  return {
+    ...actual,
+    db: mockDb as unknown as typeof actual.db,
+    pool: {
+      ...actual.pool,
+      connect: async () => {
+        throw new Error("pool.connect should not be used in these tests");
+      },
+      query: async () => {
+        throw new Error("pool.query should not be used in these tests");
+      },
+    } as unknown as typeof actual.pool,
+  };
 });
 
 let app: Express;
@@ -152,6 +139,7 @@ describe("Auth mocked regressions", () => {
     state.firmsById.clear();
     state.throwPermissionsSelect = false;
     state.throwUndefinedColumnOnUserLookup = false;
+    state.throwSideEffects = true;
 
     const user = {
       id: 10,
@@ -184,6 +172,7 @@ describe("Auth mocked regressions", () => {
     state.firmsById.clear();
     state.throwPermissionsSelect = false;
     state.throwUndefinedColumnOnUserLookup = true;
+    state.throwSideEffects = false;
 
     const res = await request(app)
       .post("/api/auth/login")
