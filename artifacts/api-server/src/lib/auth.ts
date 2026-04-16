@@ -228,8 +228,8 @@ export async function requireFirmUser(
         : message.includes("SET ROLE") || message.includes("RESET ROLE") || message.includes("Cannot enforce RLS safely")
           ? "RLS_CONTEXT"
           : "DB";
-    logger.error({ code, userId: req.userId, firmId: req.firmId }, "[auth-firm-user]");
-    res.status(500).json({ error: "Internal Server Error" });
+    logger.error({ code, userId: req.userId, firmId: req.firmId }, "auth.firm_context_failed");
+    res.status(503).json({ error: "Tenant context temporarily unavailable", code });
     return;
   }
 
@@ -245,53 +245,43 @@ export function requirePermission(moduleName: string, action: string) {
     res: Response,
     next: NextFunction
   ): Promise<void> {
-    if (req.userType !== "firm_user" || !req.firmId || !req.roleId) {
-      await writeAuditLog({
-        actorId: req.userId,
-        firmId: req.firmId,
-        actorType: req.userType ?? "unknown",
-        action: "auth.forbidden.permission",
-        detail: `${moduleName}:${action} ${req.method} ${req.path}`,
-        ipAddress: req.ip,
-        userAgent: req.headers["user-agent"],
-      });
-      res.status(403).json({ error: "Permission denied" });
-      return;
-    }
+    try {
+      if (req.userType !== "firm_user" || !req.firmId || !req.roleId) {
+        await writeAuditLog({
+          actorId: req.userId,
+          firmId: req.firmId,
+          actorType: req.userType ?? "unknown",
+          action: "auth.forbidden.permission",
+          detail: `${moduleName}:${action} ${req.method} ${req.path}`,
+          ipAddress: req.ip,
+          userAgent: req.headers["user-agent"],
+        });
+        res.status(403).json({ error: "Permission denied" });
+        return;
+      }
 
-    const rlsDb = req.rlsDb ?? db;
+      const rlsDb = req.rlsDb ?? db;
 
-    const [role] = await rlsDb
-      .select()
-      .from(rolesTable)
-      .where(and(eq(rolesTable.id, req.roleId), eq(rolesTable.firmId, req.firmId)));
+      const [role] = await rlsDb
+        .select()
+        .from(rolesTable)
+        .where(and(eq(rolesTable.id, req.roleId), eq(rolesTable.firmId, req.firmId)));
 
-    if (!role) {
-      await writeAuditLog({
-        actorId: req.userId,
-        firmId: req.firmId,
-        actorType: req.userType ?? "unknown",
-        action: "auth.forbidden.permission",
-        detail: `${moduleName}:${action} ${req.method} ${req.path} reason=role_not_found`,
-        ipAddress: req.ip,
-        userAgent: req.headers["user-agent"],
-      });
-      res.status(403).json({ error: "Permission denied" });
-      return;
-    }
+      if (!role) {
+        await writeAuditLog({
+          actorId: req.userId,
+          firmId: req.firmId,
+          actorType: req.userType ?? "unknown",
+          action: "auth.forbidden.permission",
+          detail: `${moduleName}:${action} ${req.method} ${req.path} reason=role_not_found`,
+          ipAddress: req.ip,
+          userAgent: req.headers["user-agent"],
+        });
+        res.status(403).json({ error: "Permission denied" });
+        return;
+      }
 
-    let [perm] = await rlsDb
-      .select()
-      .from(permissionsTable)
-      .where(and(
-        eq(permissionsTable.roleId, req.roleId),
-        eq(permissionsTable.module, moduleName),
-        eq(permissionsTable.action, action),
-      ));
-
-    if (!perm && role.isSystemRole && (role.name === "Partner" || role.name === "Clerk")) {
-      await ensureBaselinePermissions(rlsDb, role.id, role.name);
-      [perm] = await rlsDb
+      let [perm] = await rlsDb
         .select()
         .from(permissionsTable)
         .where(and(
@@ -299,23 +289,43 @@ export function requirePermission(moduleName: string, action: string) {
           eq(permissionsTable.module, moduleName),
           eq(permissionsTable.action, action),
         ));
-    }
 
-    if (!perm || !perm.allowed) {
-      await writeAuditLog({
-        actorId: req.userId,
-        firmId: req.firmId,
-        actorType: req.userType ?? "unknown",
-        action: "auth.forbidden.permission",
-        detail: `${moduleName}:${action} ${req.method} ${req.path}`,
-        ipAddress: req.ip,
-        userAgent: req.headers["user-agent"],
-      });
-      res.status(403).json({ error: "Permission denied", code: "PERMISSION_DENIED" });
+      if (!perm && role.isSystemRole && (role.name === "Partner" || role.name === "Clerk")) {
+        try {
+          await ensureBaselinePermissions(rlsDb, role.id, role.name);
+        } catch (err) {
+          logger.error({ err, userId: req.userId, firmId: req.firmId, roleId: req.roleId }, "auth.permission_seed_failed");
+        }
+        [perm] = await rlsDb
+          .select()
+          .from(permissionsTable)
+          .where(and(
+            eq(permissionsTable.roleId, req.roleId),
+            eq(permissionsTable.module, moduleName),
+            eq(permissionsTable.action, action),
+          ));
+      }
+
+      if (!perm || !perm.allowed) {
+        await writeAuditLog({
+          actorId: req.userId,
+          firmId: req.firmId,
+          actorType: req.userType ?? "unknown",
+          action: "auth.forbidden.permission",
+          detail: `${moduleName}:${action} ${req.method} ${req.path}`,
+          ipAddress: req.ip,
+          userAgent: req.headers["user-agent"],
+        });
+        res.status(403).json({ error: "Permission denied", code: "PERMISSION_DENIED" });
+        return;
+      }
+
+      next();
+    } catch (err) {
+      logger.error({ err, userId: req.userId, firmId: req.firmId, roleId: req.roleId, moduleName, action }, "auth.permission_failed");
+      res.status(503).json({ error: "Auth temporarily unavailable" });
       return;
     }
-
-    next();
   };
 }
 

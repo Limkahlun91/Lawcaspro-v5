@@ -10,6 +10,7 @@ import {
 import { requireAuth, requireFirmUser, requirePermission, writeAuditLog, type AuthRequest } from "../lib/auth";
 import { Readable } from "stream";
 import { getSupabaseStorageConfigError, ObjectNotFoundError, SupabaseStorageService } from "../lib/objectStorage";
+import { logger } from "../lib/logger";
 
 const one = (v: unknown): string | undefined => {
   if (typeof v === "string") return v;
@@ -20,8 +21,8 @@ const one = (v: unknown): string | undefined => {
 const getRlsDb = (req: AuthRequest, res: any): NonNullable<AuthRequest["rlsDb"]> | null => {
   const r = req.rlsDb;
   if (!r) {
-    (req as any).log?.error?.({ route: req.originalUrl, userId: req.userId, firmId: req.firmId }, "missing req.rlsDb");
-    res.status(500).json({ error: "Internal Server Error" });
+    logger.error({ route: req.originalUrl, userId: req.userId ?? null, firmId: req.firmId ?? null }, "rls.missing_context");
+    res.status(503).json({ error: "Tenant context temporarily unavailable", code: "RLS_CONTEXT" });
     return null;
   }
   return r;
@@ -75,8 +76,8 @@ router.get("/hub/messages", requireAuth, requireFirmUser, requirePermission("com
 
     res.json(enriched);
   } catch (err) {
-    (req as any).log?.error?.({ err, route: req.originalUrl, firmId: req.firmId, userId: req.userId }, "hub.messages_failed");
-    res.status(500).json({ error: "Failed to load messages" });
+    logger.error({ err, route: req.originalUrl, firmId: req.firmId ?? null, userId: req.userId ?? null }, "hub.messages_failed");
+    res.status(503).json({ error: "Failed to load messages" });
   }
 });
 
@@ -241,8 +242,8 @@ router.get("/hub/documents", requireAuth, requireFirmUser, requirePermission("do
 
     res.json(filtered);
   } catch (err) {
-    (req as any).log?.error?.({ err, route: req.originalUrl, firmId: req.firmId, userId: req.userId }, "hub.documents_failed");
-    res.status(500).json({ error: "Failed to load documents" });
+    logger.error({ err, route: req.originalUrl, firmId: req.firmId ?? null, userId: req.userId ?? null }, "hub.documents_failed");
+    res.status(503).json({ error: "Failed to load documents" });
   }
 });
 

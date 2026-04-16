@@ -7,7 +7,7 @@ import {
   GetUserParams, UpdateUserParams, DeleteUserParams
 } from "@workspace/api-zod";
 import { requireAuth, requireFirmUser, requirePermission, type AuthRequest, writeAuditLog } from "../lib/auth";
-import { withAuthSafeDb } from "../lib/auth-safe-db";
+import { logger } from "../lib/logger";
 
 const router: IRouter = Router();
 
@@ -146,7 +146,7 @@ router.get("/users", requireAuth, requireFirmUser, requirePermission("users", "r
 
 router.post("/users", requireAuth, requireFirmUser, requirePermission("users", "create"), async (req: AuthRequest, res): Promise<void> => {
   const r = rdb(req);
-  const reqId = (req as any).id;
+  const reqId = (req as { id?: unknown } | null)?.id;
   await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "users.create.attempt", detail: req.path, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
   const parsed = CreateUserBody.safeParse(req.body);
   if (!parsed.success) {
@@ -158,14 +158,12 @@ router.post("/users", requireAuth, requireFirmUser, requirePermission("users", "
   const normalizedEmail = email.toLowerCase();
 
   try {
-    const emailTaken = await withAuthSafeDb(async (authDb) => {
-      const [row] = await authDb
-        .select({ id: usersTable.id })
-        .from(usersTable)
-        .where(eq(usersTable.email, normalizedEmail))
-        .limit(1);
-      return Boolean(row);
-    }, { retry: false, ctx: { route: req.path, stage: "users.create.email_exists", reqId, firmId: req.firmId ?? null, userId: req.userId ?? null } });
+    const [row] = await db
+      .select({ id: usersTable.id })
+      .from(usersTable)
+      .where(eq(usersTable.email, normalizedEmail))
+      .limit(1);
+    const emailTaken = Boolean(row);
 
     if (emailTaken) {
       res.status(400).json({ error: "Email already in use" });
@@ -224,12 +222,12 @@ router.post("/users", requireAuth, requireFirmUser, requirePermission("users", "
     res.status(201).json(await enrichUser(r, req.firmId!, created.user));
   } catch (err) {
     const code = (err as any)?.code;
-    (req as any).log?.error?.({ err, code, route: req.originalUrl, firmId: req.firmId, userId: req.userId }, "users.create_failed");
+    logger.error({ err, code, route: req.originalUrl, firmId: req.firmId ?? null, userId: req.userId ?? null, reqId }, "users.create_failed");
     if (code === "23505") {
       res.status(400).json({ error: "Email already in use" });
       return;
     }
-    res.status(500).json({ error: "Failed to create user" });
+    res.status(503).json({ error: "Failed to create user" });
   }
 });
 

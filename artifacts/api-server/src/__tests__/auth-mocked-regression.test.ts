@@ -57,13 +57,14 @@ vi.mock("@workspace/db", async (orig) => {
             return s ? [s] : emptyRows();
           }
           if (table === actual.usersTable) {
+            const wantsTotp = isRecord(sel) && ("totpSecret" in sel || "totpEnabled" in sel);
             const hasPasswordHash = isRecord(sel) && "passwordHash" in sel;
+            if (wantsTotp && state.throwUndefinedColumnOnUserLookup) {
+              const e = new Error('column "totp_secret" does not exist') as Error & { code?: string };
+              e.code = "42703";
+              throw e;
+            }
             if (hasPasswordHash) {
-              if (state.throwUndefinedColumnOnUserLookup) {
-                const e = new Error('column "totp_secret" does not exist') as Error & { code?: string };
-                e.code = "42703";
-                throw e;
-              }
               const u = Array.from(state.usersByEmail.values())[0] ?? null;
               return u ? [u] : emptyRows();
             }
