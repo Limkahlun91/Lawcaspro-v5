@@ -73,6 +73,25 @@ export function isTransientDbConnectionError(err: unknown): boolean {
   return classifyTransientDbConnectionError(err) !== null;
 }
 
+function isPermissionOrRoleError(err: unknown): boolean {
+  if (!err || typeof err !== "object") return false;
+  const code = (err as { code?: unknown }).code;
+  if (code === "42501") return true;
+  const message =
+    err instanceof Error
+      ? err.message
+      : typeof (err as { message?: unknown }).message === "string"
+        ? ((err as { message: string }).message as string)
+        : String(err);
+  const lowered = message.toLowerCase();
+  return (
+    lowered.includes("permission denied") ||
+    lowered.includes("cannot enforce rls safely") ||
+    lowered.includes("failed to set role app_user") ||
+    lowered.includes("role \"app_user\" does not exist")
+  );
+}
+
 async function runWithAuthSafeDbOnce<T>(
   fn: (db: ReturnType<typeof makeRlsDb>) => Promise<T>,
   ctx?: AuthSafeDbContext,
@@ -128,12 +147,46 @@ async function runWithAuthSafeDbOnce<T>(
   }
 }
 
+async function runWithAuthUnsafeRoleOnce<T>(
+  fn: (db: ReturnType<typeof makeRlsDb>) => Promise<T>,
+  ctx?: AuthSafeDbContext,
+): Promise<T> {
+  const client = await pool.connect();
+  let destroyClient = false;
+
+  try {
+    await client.query("BEGIN");
+    await client.query("SET LOCAL app.is_founder = 'true'");
+    await client.query("SET LOCAL app.current_firm_id = '0'");
+    await client.query("SET LOCAL app.current_user_id = '0'");
+    const authDb = makeRlsDb(client);
+    const result = await fn(authDb);
+    await client.query("COMMIT");
+    return result;
+  } catch (err) {
+    destroyClient = isTransientDbConnectionError(err);
+    try {
+      await client.query("ROLLBACK");
+    } catch {
+      destroyClient = true;
+    }
+    throw err;
+  } finally {
+    try {
+      await clearTenantContext(client);
+    } catch {
+    }
+    client.release(destroyClient);
+  }
+}
+
 export async function withAuthSafeDb<T>(
   fn: (db: ReturnType<typeof makeRlsDb>) => Promise<T>,
   opts?: { retry?: boolean; maxRetries?: number; ctx?: AuthSafeDbContext; allowUnsafe?: boolean },
 ): Promise<T> {
   const maxRetries = opts?.maxRetries ?? (opts?.retry ? 1 : 0);
   let lastErr: unknown;
+  let didUnsafeRoleRetry = false;
 
   for (let attempt = 1; attempt <= 1 + maxRetries; attempt++) {
     const startedAt = Date.now();
@@ -143,6 +196,11 @@ export async function withAuthSafeDb<T>(
       lastErr = err;
       const kind = classifyTransientDbConnectionError(err) ?? "unknown";
       const shouldRetry = isTransientDbConnectionError(err) && attempt <= maxRetries;
+      if (!shouldRetry && opts?.allowUnsafe && !didUnsafeRoleRetry && isPermissionOrRoleError(err)) {
+        didUnsafeRoleRetry = true;
+        logger.warn({ ...opts?.ctx, err, kind }, "auth-safe-db.retrying_with_unsafe_role");
+        return await runWithAuthUnsafeRoleOnce(fn, opts?.ctx);
+      }
       if (!shouldRetry) throw err;
       logger.warn({ ...opts?.ctx, err, kind, attempt, ms: Date.now() - startedAt }, "auth-safe-db.attempt_failed");
     }
