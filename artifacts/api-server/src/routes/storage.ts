@@ -11,7 +11,7 @@ import {
   SupabaseStorageService,
   getSupabaseStorageConfigError,
 } from "../lib/objectStorage";
-import { requireAuth, type AuthRequest } from "../lib/auth";
+import { requireAuth, requireFounder, type AuthRequest } from "../lib/auth";
 
 const one = (v: unknown): string | undefined => {
   if (typeof v === "string") return v;
@@ -84,7 +84,7 @@ router.get("/storage/public-objects/*filePath", async (req: Request, res: Respon
   }
 });
 
-router.get("/storage/objects/*path", requireAuth, async (req: AuthRequest, res: Response) => {
+router.get("/storage/objects/*path", requireAuth, requireFounder, async (req: AuthRequest, res: Response) => {
   try {
     const raw = req.params.path;
     const wildcardPath = Array.isArray(raw) ? raw.join("/") : raw;
@@ -129,6 +129,24 @@ router.post("/storage/upload", requireAuth, upload.single("file"), async (req: A
     const objectPath = requestedObjectPath && requestedObjectPath.startsWith("/objects/")
       ? requestedObjectPath
       : `/objects/uploads/${randomUUID()}`;
+
+    if (requestedObjectPath) {
+      if (!requestedObjectPath.startsWith("/objects/")) {
+        res.status(400).json({ error: "Invalid objectPath" });
+        return;
+      }
+      if (req.userType === "firm_user") {
+        if (!req.firmId) {
+          res.status(403).json({ error: "Firm context required" });
+          return;
+        }
+        const allowedPrefix = `/objects/cases/${req.firmId}/`;
+        if (!requestedObjectPath.startsWith(allowedPrefix)) {
+          res.status(403).json({ error: "Invalid objectPath" });
+          return;
+        }
+      }
+    }
 
     await supabaseStorage.uploadPrivateObject({
       objectPath,

@@ -69,9 +69,9 @@ describe("POST /api/auth/logout", () => {
 });
 
 describe("GET /api/auth/me", () => {
-  it("returns 401 without auth token", async () => {
+  it("returns 204 without auth token", async () => {
     const res = await request(app).get("/api/auth/me");
-    expect(res.status).toBe(401);
+    expect(res.status).toBe(204);
   });
 
   it("returns 401 with invalid token", async () => {
@@ -93,6 +93,27 @@ describe("GET /api/auth/me", () => {
     expect(meRes.status).toBe(200);
     expect(meRes.body.email).toBe(FOUNDER_EMAIL);
     expect(meRes.body).not.toHaveProperty("passwordHash");
+  });
+});
+
+describe("GET /api/auth/permissions", () => {
+  it("returns permissions array for authenticated firm user", async () => {
+    const loginRes = await request(app)
+      .post("/api/auth/login")
+      .send({ email: LAWYER_EMAIL, password: LAWYER_PASSWORD });
+    expect(loginRes.status).toBe(200);
+    const token = loginRes.body.token;
+
+    const res = await request(app)
+      .get("/api/auth/permissions")
+      .set("Authorization", `Bearer ${token}`);
+    expect(res.status).toBe(200);
+    expect(res.body).toHaveProperty("permissions");
+    expect(Array.isArray(res.body.permissions)).toBe(true);
+
+    await request(app)
+      .post("/api/auth/logout")
+      .set("Authorization", `Bearer ${token}`);
   });
 });
 

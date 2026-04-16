@@ -105,6 +105,7 @@ export async function requireAuth(
     | undefined;
   try {
     const reqId = (req as any).id;
+    const lookupStartedAt = Date.now();
     const result = await withAuthSafeDb(async (authDb) => {
       const [s] = await authDb
         .select()
@@ -125,6 +126,10 @@ export async function requireAuth(
     }, { retry: true, ctx: { route: req.path, stage: "require_auth.session_lookup", reqId, firmId: null, userId: null } });
     session = result.session;
     user = result.user;
+    const ms = Date.now() - lookupStartedAt;
+    if (ms > 1000) {
+      logger.warn({ route: req.path, reqId, ms }, "auth.require_auth.slow");
+    }
   } catch (err) {
     logger.error({ err }, "auth.require_auth.db_error");
     res.status(isTransientDbConnectionError(err) ? 503 : 500).json({ error: "Auth temporarily unavailable" });

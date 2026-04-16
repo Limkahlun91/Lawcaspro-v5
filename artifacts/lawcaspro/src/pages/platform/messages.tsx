@@ -84,7 +84,7 @@ function AttachmentChip({ attachment, onDownload }: { attachment: Attachment; on
   );
 }
 
-function MessageCard({ msg, onDownloadAttachment }: { msg: Message; onDownloadAttachment: (a: Attachment) => void }) {
+function MessageCard({ msg, onDownloadAttachment }: { msg: Message; onDownloadAttachment: (msgId: number, a: Attachment) => void }) {
   const isFromFirm = msg.fromFirmId !== null;
   const isRead = !!msg.readAt;
 
@@ -117,7 +117,7 @@ function MessageCard({ msg, onDownloadAttachment }: { msg: Message; onDownloadAt
             {msg.attachments.length > 0 && (
               <div className="flex flex-wrap gap-2 mt-3">
                 {msg.attachments.map((a) => (
-                  <AttachmentChip key={a.id} attachment={a} onDownload={() => onDownloadAttachment(a)} />
+                  <AttachmentChip key={a.id} attachment={a} onDownload={() => onDownloadAttachment(msg.id, a)} />
                 ))}
               </div>
             )}
@@ -163,10 +163,9 @@ export default function PlatformMessages() {
   });
   const firms = firmsQuery.data ?? [];
 
-  const handleDownloadAttachment = async (a: Attachment) => {
+  const handleDownloadAttachment = async (msgId: number, a: Attachment) => {
     try {
-      const pathPart = a.objectPath.replace(/^\/objects\//, "");
-      const blob = await apiFetchBlob(`/storage/objects/${pathPart}`);
+      const blob = await apiFetchBlob(`/platform/messages/${msgId}/attachments/${a.id}/download`);
       const url = URL.createObjectURL(blob);
       const el = document.createElement("a");
       el.href = url;

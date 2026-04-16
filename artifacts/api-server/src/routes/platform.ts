@@ -1117,4 +1117,57 @@ router.patch("/platform/messages/:msgId/read", requireAuth, requireFounder, asyn
   res.json({ success: true });
 });
 
+router.get("/platform/messages/:msgId/attachments/:attachmentId/download", requireAuth, requireFounder, async (req: AuthRequest, res): Promise<void> => {
+  const msgIdStr = one(req.params.msgId);
+  const attachmentIdStr = one(req.params.attachmentId);
+  const msgId = msgIdStr ? parseInt(msgIdStr, 10) : NaN;
+  const attachmentId = attachmentIdStr ? parseInt(attachmentIdStr, 10) : NaN;
+  if (!Number.isFinite(msgId) || !Number.isFinite(attachmentId)) {
+    res.status(400).json({ error: "Invalid id" });
+    return;
+  }
+
+  const [att] = await db
+    .select()
+    .from(platformMessageAttachmentsTable)
+    .where(and(eq(platformMessageAttachmentsTable.id, attachmentId), eq(platformMessageAttachmentsTable.messageId, msgId)));
+  if (!att) {
+    res.status(404).json({ error: "Attachment not found" });
+    return;
+  }
+
+  try {
+    const response = await storage.fetchPrivateObjectResponse(att.objectPath);
+    await writeAuditLog({
+      firmId: null,
+      actorId: req.userId,
+      actorType: req.userType,
+      action: "platform.message_attachment.download",
+      entityType: "platform_message_attachment",
+      entityId: attachmentId,
+      detail: `messageId=${msgId} fileName=${att.fileName}`,
+      ipAddress: req.ip,
+      userAgent: req.headers["user-agent"],
+    }, { strict: true });
+
+    res.status(response.status);
+    response.headers.forEach((value, key) => res.setHeader(key, value));
+    const ascii = String(att.fileName ?? "download").replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 120) || "download";
+    const encoded = encodeURIComponent(String(att.fileName ?? ascii));
+    res.setHeader("Content-Disposition", `attachment; filename="${ascii}"; filename*=UTF-8''${encoded}`);
+
+    if (response.body) {
+      const nodeStream = Readable.fromWeb(response.body as ReadableStream<Uint8Array>);
+      nodeStream.pipe(res);
+    } else {
+      res.end();
+    }
+  } catch (err) {
+    if (err instanceof ObjectNotFoundError) { res.status(404).json({ error: "File not found" }); return; }
+    const cfgErr = getSupabaseStorageConfigError(err);
+    if (cfgErr) { res.status(cfgErr.statusCode).json({ error: cfgErr.error }); return; }
+    res.status(500).json({ error: "Failed to download attachment" });
+  }
+});
+
 export default router;

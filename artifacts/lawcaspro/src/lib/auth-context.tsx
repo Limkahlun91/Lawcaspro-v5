@@ -3,16 +3,13 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useLogout } from "@workspace/api-client-react";
 import type { AuthUser } from "@workspace/api-client-react";
 import { apiRequest } from "./api-client";
-import { clearStoredAuthToken, getStoredAuthToken } from "./auth-token";
+import { clearStoredAuthToken } from "./auth-token";
 import { onAuthUnauthorized } from "./auth-events";
 import { ME_QUERY_KEY } from "./query-keys";
 
 interface AuthContextType {
   user: AuthUser | null;
   isLoading: boolean;
-  hydrationError?: unknown;
-  retryHydration?: () => void;
-  isRetryingHydration?: boolean;
   login: (user: AuthUser) => void;
   logout: () => void;
 }
@@ -28,19 +25,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     queryKey: ME_QUERY_KEY,
     retry: false,
     queryFn: async ({ signal }) => {
-      const token = getStoredAuthToken();
       const res = await apiRequest("/api/auth/me", {
         allowStatuses: [401],
-        headers: token ? { Authorization: `Bearer ${token}` } : undefined,
         signal,
-        timeoutMs: 25000,
+        timeoutMs: 8000,
       });
       if (res.status === 401) return null;
       if (res.status === 204) return null;
       return (await res.json()) as AuthUser;
     },
   });
-  const { data: me, isLoading: isMeLoading, isError: isMeError, error: meError, refetch: refetchMe, isFetching: isMeFetching } = meQuery;
+  const { data: me, isLoading: isMeLoading, isError: isMeError } = meQuery;
 
   const logoutMutation = useLogout();
 
@@ -53,6 +48,46 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setUser(me ?? null);
     setIsLoading(false);
   }, [me, isMeLoading, isMeError]);
+
+  const permissionsQuery = useQuery<{ permissions: Array<{ module: string; action: string }> }>({
+    queryKey: ["auth-permissions", user?.roleId ?? null],
+    enabled: Boolean(user && user.userType === "firm_user" && user.roleId),
+    retry: false,
+    queryFn: async ({ signal }) => {
+      const res = await apiRequest("/api/auth/permissions", {
+        allowStatuses: [401],
+        signal,
+        timeoutMs: 8000,
+      });
+      if (res.status === 401 || res.status === 204) return { permissions: [] };
+      const body = (await res.json()) as unknown;
+      const perms = (body as any)?.permissions;
+      if (!Array.isArray(perms)) return { permissions: [] };
+      return {
+        permissions: perms
+          .filter((p: any) => p && typeof p === "object")
+          .map((p: any) => ({ module: String(p.module ?? ""), action: String(p.action ?? "") }))
+          .filter((p: any) => p.module && p.action),
+      };
+    },
+  });
+
+  useEffect(() => {
+    if (!user || user.userType !== "firm_user") return;
+    if (!permissionsQuery.data) return;
+    const next = permissionsQuery.data.permissions ?? [];
+    const current = (user as unknown as { permissions?: unknown }).permissions;
+    if (Array.isArray(current)) {
+      if (current.length === next.length) {
+        const a = current.map((p: any) => `${String(p.module)}:${String(p.action)}`).sort().join("|");
+        const b = next.map((p) => `${p.module}:${p.action}`).sort().join("|");
+        if (a === b) return;
+      }
+    }
+    const merged = Object.assign({}, user, { permissions: next });
+    setUser(merged);
+    queryClient.setQueryData(ME_QUERY_KEY, merged);
+  }, [permissionsQuery.data, queryClient, user]);
 
   useEffect(() => {
     return onAuthUnauthorized(() => {
@@ -77,19 +112,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     });
   };
 
-  const retryHydration = () => {
-    setIsLoading(true);
-    void refetchMe();
-  };
-
   return (
     <AuthContext.Provider
       value={{
         user,
         isLoading,
-        hydrationError: isMeError ? meError : undefined,
-        retryHydration,
-        isRetryingHydration: isMeFetching,
         login,
         logout: handleLogout,
       }}

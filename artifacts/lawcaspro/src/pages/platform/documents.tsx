@@ -648,8 +648,7 @@ export default function PlatformDocuments() {
 
   const handleEditPdfMappings = async (doc: PlatformDoc) => {
     try {
-      const pathPart = doc.objectPath.replace(/^\/objects\//, "");
-      const blob = await apiFetchBlob(`/storage/objects/${pathPart}`);
+      const blob = await apiFetchBlob(`/platform/documents/${doc.id}/download`);
       const url = URL.createObjectURL(blob);
       setEditingPdfUrl(url);
       setEditingPdfDoc(doc);

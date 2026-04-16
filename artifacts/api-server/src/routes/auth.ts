@@ -313,145 +313,119 @@ router.post("/auth/logout", requireAuth, async (req: AuthRequest, res): Promise<
   res.json({ success: true });
 });
 
-router.get("/auth/me", requireAuth, async (req: AuthRequest, res): Promise<void> => {
+router.get("/auth/me", async (req, res): Promise<void> => {
   const startedAt = Date.now();
-  let stage = "me_start";
+  let stage = "token_parse";
+  const reqId = (req as any).id;
+  const cookieToken = (req as any).cookies?.["auth_token"];
+  const authHeader = (req as any).headers?.["authorization"];
+  const headerToken =
+    typeof authHeader === "string" && authHeader.startsWith("Bearer ") ? authHeader.slice(7) : undefined;
+  const token = (typeof cookieToken === "string" ? cookieToken : undefined) || headerToken;
+
+  const ctxBase = { route: (req as any).path, reqId };
+
+  if (!token) {
+    res.sendStatus(204);
+    logger.info({ ...ctxBase, stage: "no_token", ms: Date.now() - startedAt }, "auth.me.light");
+    return;
+  }
+
+  const tokenHash = crypto.createHash("sha256").update(token).digest("hex");
   try {
-    const reqId = (req as any).id;
-    const ctx = { route: req.path, stage, reqId, firmId: req.firmId ?? null, userId: req.userId ?? null };
-    logger.info({ ...ctx }, "auth.me.stage");
     const result = await withAuthSafeDb(async (authDb) => {
+      stage = "session_lookup";
+      const sessionLookupStartedAt = Date.now();
+      const [s] = await authDb
+        .select({ userId: sessionsTable.userId, expiresAt: sessionsTable.expiresAt })
+        .from(sessionsTable)
+        .where(eq(sessionsTable.tokenHash, tokenHash));
+      const sessionLookupMs = Date.now() - sessionLookupStartedAt;
+      if (!s) return { kind: "no_session" as const, sessionLookupMs };
+      if (s.expiresAt < new Date()) return { kind: "expired" as const, sessionLookupMs };
+
       stage = "user_lookup";
-      ctx.stage = stage;
-      logger.info({ ...ctx }, "auth.me.stage");
-      const [user] = await authDb.select({
-        id: usersTable.id,
-        firmId: usersTable.firmId,
-        email: usersTable.email,
-        name: usersTable.name,
-        userType: usersTable.userType,
-        roleId: usersTable.roleId,
-        status: usersTable.status,
-        totpEnabled: usersTable.totpEnabled,
-      }).from(usersTable).where(eq(usersTable.id, req.userId!));
-      if (!user) return null;
-
-      let roleName: string | null = null;
-      if (user.roleId) {
-        stage = "role_lookup";
-        ctx.stage = stage;
-        logger.info({ ...ctx }, "auth.me.stage");
-        const [role] = await authDb.select().from(rolesTable).where(eq(rolesTable.id, user.roleId));
-        roleName = role?.name ?? null;
-      }
-
-      let firmName: string | null = null;
-      if (user.firmId) {
-        stage = "firm_lookup";
-        ctx.stage = stage;
-        logger.info({ ...ctx }, "auth.me.stage");
-        const [firm] = await authDb.select().from(firmsTable).where(eq(firmsTable.id, user.firmId));
-        firmName = firm?.name ?? null;
-      }
-
-      stage = "permissions_lookup";
-      ctx.stage = stage;
-      logger.info({ ...ctx }, "auth.me.stage");
-      let permissions =
-        user.userType === "firm_user" && user.roleId
-          ? await authDb
-              .select({ module: permissionsTable.module, action: permissionsTable.action })
-              .from(permissionsTable)
-              .where(and(eq(permissionsTable.roleId, user.roleId), eq(permissionsTable.allowed, true)))
-          : [];
-
-      if (user.userType === "firm_user" && user.roleId && permissions.length === 0 && (roleName === "Partner" || roleName === "Clerk")) {
-        stage = "permissions_seed";
-        ctx.stage = stage;
-        logger.info({ ...ctx }, "auth.me.stage");
-        const roleId = user.roleId;
-        if (roleName === "Partner") {
-          await authDb.execute(sql`
-            INSERT INTO permissions (role_id, module, action, allowed)
-            SELECT ${roleId}, v.module, v.action, TRUE
-            FROM (
-              VALUES
-                ('dashboard','read'),
-                ('cases','read'),('cases','create'),('cases','update'),('cases','delete'),
-                ('projects','read'),('projects','create'),('projects','update'),('projects','delete'),
-                ('developers','read'),('developers','create'),('developers','update'),('developers','delete'),
-                ('documents','read'),('documents','create'),('documents','update'),('documents','delete'),
-                ('communications','read'),('communications','create'),('communications','update'),('communications','delete'),
-                ('accounting','read'),('accounting','write'),
-                ('reports','read'),('reports','export'),
-                ('audit','read'),
-                ('settings','read'),('settings','update'),
-                ('users','read'),('users','create'),('users','update'),('users','delete'),
-                ('roles','read'),('roles','create'),('roles','update'),('roles','delete')
-            ) AS v(module, action)
-            WHERE NOT EXISTS (
-              SELECT 1 FROM permissions p
-              WHERE p.role_id = ${roleId} AND p.module = v.module AND p.action = v.action
-            )
-          `);
-        } else {
-          await authDb.execute(sql`
-            INSERT INTO permissions (role_id, module, action, allowed)
-            SELECT ${roleId}, v.module, v.action, TRUE
-            FROM (
-              VALUES
-                ('dashboard','read'),
-                ('cases','read'),('cases','create'),('cases','update'),
-                ('projects','read'),('projects','create'),('projects','update'),
-                ('developers','read'),('developers','create'),('developers','update'),
-                ('documents','read'),
-                ('communications','read'),('communications','create'),
-                ('accounting','read'),
-                ('reports','read'),
-                ('settings','read'),
-                ('users','read')
-            ) AS v(module, action)
-            WHERE NOT EXISTS (
-              SELECT 1 FROM permissions p
-              WHERE p.role_id = ${roleId} AND p.module = v.module AND p.action = v.action
-            )
-          `);
-        }
-
-        stage = "permissions_lookup";
-        ctx.stage = stage;
-        logger.info({ ...ctx }, "auth.me.stage");
-        permissions = await authDb
-          .select({ module: permissionsTable.module, action: permissionsTable.action })
-          .from(permissionsTable)
-          .where(and(eq(permissionsTable.roleId, user.roleId), eq(permissionsTable.allowed, true)));
-      }
+      const userLookupStartedAt = Date.now();
+      const [u] = await authDb
+        .select({
+          id: usersTable.id,
+          email: usersTable.email,
+          name: usersTable.name,
+          userType: usersTable.userType,
+          firmId: usersTable.firmId,
+          roleId: usersTable.roleId,
+          department: usersTable.department,
+          status: usersTable.status,
+        })
+        .from(usersTable)
+        .where(eq(usersTable.id, s.userId));
+      const userLookupMs = Date.now() - userLookupStartedAt;
+      if (!u || u.status !== "active") return { kind: "no_user" as const, sessionLookupMs, userLookupMs };
 
       return {
-        id: user.id,
-        email: user.email,
-        name: user.name,
-        userType: user.userType,
-        firmId: user.firmId,
-        firmName,
-        roleId: user.roleId,
-        roleName,
-        status: user.status,
-        totpEnabled: user.totpEnabled,
-        permissions,
+        kind: "ok" as const,
+        sessionLookupMs,
+        userLookupMs,
+        user: {
+          id: u.id,
+          email: u.email,
+          name: u.name,
+          userType: u.userType,
+          firmId: u.firmId,
+          firmName: null,
+          roleId: u.roleId,
+          roleName: null,
+          department: u.department ?? null,
+          status: u.status,
+        },
       };
-    }, { retry: true, ctx });
+    }, { retry: false, ctx: { ...ctxBase, stage } });
 
-    if (!result) {
-      res.status(401).json({ error: "User not found" });
+    if (result.kind !== "ok") {
+      if (typeof cookieToken === "string") res.clearCookie("auth_token");
+      res.status(401).json({ error: "Not authenticated" });
+      logger.info(
+        { ...ctxBase, stage: result.kind, ms: Date.now() - startedAt, ...(result as any) },
+        "auth.me.light",
+      );
       return;
     }
 
-    res.json(result);
-    stage = "response_sent";
-    logger.info({ route: req.path, stage, reqId, firmId: req.firmId ?? null, userId: req.userId ?? null, ms: Date.now() - startedAt }, "auth.me.stage");
+    res.json(result.user);
+    logger.info(
+      { ...ctxBase, stage: "ok", ms: Date.now() - startedAt, sessionLookupMs: result.sessionLookupMs, userLookupMs: result.userLookupMs },
+      "auth.me.light",
+    );
   } catch (err) {
-    logger.error({ err, userId: req.userId, stage }, "[auth-me]");
+    logger.error({ ...ctxBase, stage, err }, "auth.me.light_error");
+    res.status(isTransientDbConnectionError(err) ? 503 : 500).json({ error: "Auth temporarily unavailable" });
+  }
+});
+
+router.get("/auth/permissions", requireAuth, async (req: AuthRequest, res): Promise<void> => {
+  const startedAt = Date.now();
+  const reqId = (req as any).id;
+  const ctx = { route: req.path, reqId, userId: req.userId ?? null, firmId: req.firmId ?? null, roleId: req.roleId ?? null };
+  try {
+    if (req.userType !== "firm_user" || !req.roleId) {
+      res.json({ permissions: [] });
+      logger.info({ ...ctx, stage: "not_firm_user", ms: Date.now() - startedAt }, "auth.permissions");
+      return;
+    }
+
+    const permissions = await withAuthSafeDb(async (authDb) => {
+      const started = Date.now();
+      const rows = await authDb
+        .select({ module: permissionsTable.module, action: permissionsTable.action })
+        .from(permissionsTable)
+        .where(and(eq(permissionsTable.roleId, req.roleId!), eq(permissionsTable.allowed, true)));
+      return { rows, ms: Date.now() - started };
+    }, { retry: false, ctx: { ...ctx, stage: "permissions_lookup" } });
+
+    res.json({ permissions: permissions.rows });
+    logger.info({ ...ctx, stage: "ok", ms: Date.now() - startedAt, permissionsLookupMs: permissions.ms, count: permissions.rows.length }, "auth.permissions");
+  } catch (err) {
+    logger.error({ ...ctx, err }, "auth.permissions_error");
     res.status(isTransientDbConnectionError(err) ? 503 : 500).json({ error: "Auth temporarily unavailable" });
   }
 });

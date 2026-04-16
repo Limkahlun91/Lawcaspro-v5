@@ -126,6 +126,71 @@ router.patch("/hub/messages/:msgId/read", requireAuth, requireFirmUser, requireP
   res.json({ success: true });
 });
 
+router.get("/hub/messages/:msgId/attachments/:attachmentId/download", requireAuth, requireFirmUser, requirePermission("communications", "read"), async (req: AuthRequest, res): Promise<void> => {
+  const r = getRlsDb(req, res);
+  if (!r) return;
+  const firmId = req.firmId!;
+
+  const msgIdStr = one(req.params.msgId);
+  const attachmentIdStr = one(req.params.attachmentId);
+  const msgId = msgIdStr ? parseInt(msgIdStr, 10) : NaN;
+  const attachmentId = attachmentIdStr ? parseInt(attachmentIdStr, 10) : NaN;
+  if (!Number.isFinite(msgId) || !Number.isFinite(attachmentId)) {
+    res.status(400).json({ error: "Invalid id" });
+    return;
+  }
+
+  const [msg] = await r
+    .select()
+    .from(platformMessagesTable)
+    .where(and(eq(platformMessagesTable.id, msgId), or(eq(platformMessagesTable.fromFirmId, firmId), eq(platformMessagesTable.toFirmId, firmId))));
+  if (!msg) {
+    res.status(404).json({ error: "Message not found" });
+    return;
+  }
+
+  const [att] = await r
+    .select()
+    .from(platformMessageAttachmentsTable)
+    .where(and(eq(platformMessageAttachmentsTable.id, attachmentId), eq(platformMessageAttachmentsTable.messageId, msgId)));
+  if (!att) {
+    res.status(404).json({ error: "Attachment not found" });
+    return;
+  }
+
+  try {
+    const response = await supabaseStorage.fetchPrivateObjectResponse(att.objectPath);
+
+    await writeAuditLog({
+      firmId,
+      actorId: req.userId,
+      actorType: req.userType,
+      action: "hub.message_attachment.download",
+      entityType: "platform_message_attachment",
+      entityId: attachmentId,
+      detail: `messageId=${msgId} fileName=${att.fileName}`,
+      ipAddress: req.ip,
+      userAgent: req.headers["user-agent"],
+    });
+
+    res.status(response.status);
+    response.headers.forEach((value, key) => res.setHeader(key, value));
+    res.setHeader("Content-Disposition", contentDispositionAttachment(String(att.fileName ?? "download")));
+
+    if (response.body) {
+      const nodeStream = Readable.fromWeb(response.body as ReadableStream<Uint8Array>);
+      nodeStream.pipe(res);
+    } else {
+      res.end();
+    }
+  } catch (err) {
+    if (err instanceof ObjectNotFoundError) { res.status(404).json({ error: "File not found" }); return; }
+    const cfgErr = getSupabaseStorageConfigError(err);
+    if (cfgErr) { res.status(cfgErr.statusCode).json({ error: cfgErr.error }); return; }
+    res.status(500).json({ error: "Failed to download attachment" });
+  }
+});
+
 // ─── System Folders (visible to firm, read-only) ────────────────────────────
 
 router.get("/hub/folders", requireAuth, requireFirmUser, requirePermission("documents", "read"), async (req: AuthRequest, res): Promise<void> => {

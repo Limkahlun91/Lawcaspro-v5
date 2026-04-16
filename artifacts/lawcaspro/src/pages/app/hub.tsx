@@ -129,10 +129,9 @@ export default function HubPage() {
     onError: (e) => toastError(toast, e, "Update failed"),
   });
 
-  const handleDownloadAttachment = async (a: Attachment) => {
+  const handleDownloadAttachment = async (msgId: number, a: Attachment) => {
     try {
-      const pathPart = a.objectPath.replace(/^\/objects\//, "");
-      const blob = await apiFetchBlob(`/storage/objects/${pathPart}`);
+      const blob = await apiFetchBlob(`/hub/messages/${msgId}/attachments/${a.id}/download`);
       const url = URL.createObjectURL(blob);
       const el = document.createElement("a");
       el.href = url;
@@ -146,8 +145,7 @@ export default function HubPage() {
 
   const handleDownloadDoc = async (doc: SystemDoc) => {
     try {
-      const pathPart = doc.objectPath.replace(/^\/objects\//, "");
-      const blob = await apiFetchBlob(`/storage/objects/${pathPart}`);
+      const blob = await apiFetchBlob(`/hub/documents/${doc.id}/download`);
       const url = URL.createObjectURL(blob);
       const el = document.createElement("a");
       el.href = url;
@@ -298,7 +296,7 @@ export default function HubPage() {
                           {msg.attachments.length > 0 && (
                             <div className="flex flex-wrap gap-2 mt-3">
                               {msg.attachments.map((a) => (
-                                <AttachmentChip key={a.id} attachment={a} onDownload={() => handleDownloadAttachment(a)} />
+                                <AttachmentChip key={a.id} attachment={a} onDownload={() => handleDownloadAttachment(msg.id, a)} />
                               ))}
                             </div>
                           )}
