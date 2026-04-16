@@ -45,11 +45,14 @@ const keepAliveDelayMs =
 const isSupabasePoolerDatabaseUrl = (databaseUrl: string): boolean =>
   databaseUrl.toLowerCase().includes("pooler.supabase.com");
 
-const stripSslmodeFromDatabaseUrl = (databaseUrl: string): string => {
+const stripSslmodeFromDatabaseUrl = (
+  databaseUrl: string,
+): { url: string; hadSslmode: boolean } => {
   const [beforeHash, hash] = databaseUrl.split("#", 2);
   const [base, query] = beforeHash.split("?", 2);
-  if (!query) return databaseUrl;
+  if (!query) return { url: databaseUrl, hadSslmode: false };
 
+  let hadSslmode = false;
   const filtered = query
     .split("&")
     .map((part) => part.trim())
@@ -57,23 +60,28 @@ const stripSslmodeFromDatabaseUrl = (databaseUrl: string): string => {
     .filter((part) => {
       const eq = part.indexOf("=");
       const key = (eq === -1 ? part : part.slice(0, eq)).toLowerCase();
+      if (key === "sslmode") hadSslmode = true;
       return key !== "sslmode";
     });
 
   const rebuilt = filtered.length ? `${base}?${filtered.join("&")}` : base;
-  return hash ? `${rebuilt}#${hash}` : rebuilt;
+  return { url: hash ? `${rebuilt}#${hash}` : rebuilt, hadSslmode };
 };
 
 const databaseUrl = process.env.DATABASE_URL ?? "postgres://127.0.0.1:1/postgres";
 const isPooler = isSupabasePoolerDatabaseUrl(databaseUrl);
+const loweredDatabaseUrl = databaseUrl.toLowerCase();
+const stripped = stripSslmodeFromDatabaseUrl(databaseUrl);
+const shouldUseSsl =
+  isPooler || stripped.hadSslmode || loweredDatabaseUrl.includes("supabase.co") || loweredDatabaseUrl.includes("supabase.com");
 
 export const pool = new Pool({
-  connectionString: isPooler ? stripSslmodeFromDatabaseUrl(databaseUrl) : databaseUrl,
+  connectionString: stripped.url,
   connectionTimeoutMillis: connectTimeoutMs,
   idleTimeoutMillis: idleTimeoutMs,
   ...(poolMax ? { max: poolMax } : {}),
   ...(keepAlive ? { keepAlive: true, keepAliveInitialDelayMillis: keepAliveDelayMs } : {}),
-  ...(isPooler ? { ssl: { rejectUnauthorized: false } } : {}),
+  ...(shouldUseSsl ? (isPooler ? { ssl: { rejectUnauthorized: false } } : { ssl: true }) : {}),
 });
 export const db = drizzle(pool, { schema });
 
