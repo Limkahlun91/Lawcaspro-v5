@@ -38,6 +38,25 @@ const isUndefinedColumnError = (err: unknown): boolean => {
   return lowered.includes("column") && lowered.includes("does not exist");
 };
 
+async function withTransientDbRetry<T>(
+  fn: () => Promise<T>,
+  ctx: { route?: string; reqId?: unknown; stage?: string; firmId?: number | null; userId?: number | null; emailHash?: string },
+  maxRetries: number,
+): Promise<T> {
+  let lastErr: unknown;
+  for (let attempt = 1; attempt <= 1 + maxRetries; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastErr = err;
+      const shouldRetry = isTransientDbConnectionError(err) && attempt <= maxRetries;
+      if (!shouldRetry) throw err;
+      logger.warn({ ...ctx, attempt, err }, "auth.db_transient_retry");
+    }
+  }
+  throw lastErr;
+}
+
 async function tableExistsAuthDb(
   authDb: { execute: (q: SQL<unknown>) => Promise<unknown> },
   reg: string,
@@ -107,41 +126,62 @@ router.post("/auth/login", authRateLimiter, async (req, res): Promise<void> => {
 
     const user: LoginUser | null = await (async () => {
       try {
-        const [u] = await db
-          .select({
-            id: usersTable.id,
-            firmId: usersTable.firmId,
-            email: usersTable.email,
-            name: usersTable.name,
-            passwordHash: usersTable.passwordHash,
-            userType: usersTable.userType,
-            roleId: usersTable.roleId,
-            status: usersTable.status,
-            totpSecret: usersTable.totpSecret,
-            totpEnabled: usersTable.totpEnabled,
-          })
-          .from(usersTable)
-          .where(eq(usersTable.email, emailNormalized));
-        return (u as LoginUser | undefined) ?? null;
+        const rows = await withTransientDbRetry(
+          async () =>
+            await db
+              .select({
+                id: usersTable.id,
+                firmId: usersTable.firmId,
+                email: usersTable.email,
+                name: usersTable.name,
+                passwordHash: usersTable.passwordHash,
+                userType: usersTable.userType,
+                roleId: usersTable.roleId,
+                status: usersTable.status,
+                totpSecret: usersTable.totpSecret,
+                totpEnabled: usersTable.totpEnabled,
+              })
+              .from(usersTable)
+              .where(eq(usersTable.email, emailNormalized)),
+          { ...ctx, stage: "user_lookup.query" },
+          2,
+        );
+        const u = rows[0] as LoginUser | undefined;
+        return u ?? null;
       } catch (err) {
         if (!isUndefinedColumnError(err)) throw err;
         const errMessageShort =
           err instanceof Error ? err.message.slice(0, 180) : String(err ?? "").slice(0, 180);
         logger.warn({ ...ctx, stage: "user_lookup_fallback", errMessageShort, err }, "auth.login.degraded_schema");
 
-        const [u] = await db
-          .select({
-            id: usersTable.id,
-            firmId: usersTable.firmId,
-            email: usersTable.email,
-            name: usersTable.name,
-            passwordHash: usersTable.passwordHash,
-            userType: usersTable.userType,
-            roleId: usersTable.roleId,
-            status: usersTable.status,
-          })
-          .from(usersTable)
-          .where(eq(usersTable.email, emailNormalized));
+        const rows = await withTransientDbRetry(
+          async () =>
+            await db
+              .select({
+                id: usersTable.id,
+                firmId: usersTable.firmId,
+                email: usersTable.email,
+                name: usersTable.name,
+                passwordHash: usersTable.passwordHash,
+                userType: usersTable.userType,
+                roleId: usersTable.roleId,
+                status: usersTable.status,
+              })
+              .from(usersTable)
+              .where(eq(usersTable.email, emailNormalized)),
+          { ...ctx, stage: "user_lookup_fallback.query" },
+          2,
+        );
+        const u = rows[0] as {
+          id: number;
+          firmId: number | null;
+          email: string;
+          name: string;
+          passwordHash: string;
+          userType: string;
+          roleId: number | null;
+          status: string;
+        } | undefined;
 
         if (!u) return null;
         return {
@@ -282,13 +322,19 @@ router.post("/auth/login", authRateLimiter, async (req, res): Promise<void> => {
     stage = "session_persist";
     ctx.stage = stage;
     logger.info({ ...ctx }, "auth.login.stage");
-    await db.insert(sessionsTable).values({
-      userId: user.id,
-      tokenHash,
-      expiresAt,
-      userAgent: ua ?? null,
-      ipAddress: ip ?? null,
-    });
+    await withTransientDbRetry(
+      async () => {
+        await db.insert(sessionsTable).values({
+          userId: user.id,
+          tokenHash,
+          expiresAt,
+          userAgent: ua ?? null,
+          ipAddress: ip ?? null,
+        });
+      },
+      { ...ctx, stage: "session_persist.query" },
+      2,
+    );
 
     stage = "side_effects";
     ctx.stage = stage;
@@ -503,7 +549,8 @@ router.get("/auth/me", async (req, res): Promise<void> => {
     logger.info({ ...ctxBase, stage: "ok", ms: Date.now() - startedAt }, "auth.me");
   } catch (err) {
     logger.error({ ...ctxBase, stage: "me_error", err }, "auth.me_error");
-    res.status(503).json({ error: "Auth temporarily unavailable" });
+    if (typeof cookieToken === "string") res.clearCookie("auth_token");
+    res.status(401).json({ error: "Not authenticated" });
   }
 });
 
