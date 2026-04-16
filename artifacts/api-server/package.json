@@ -33,10 +33,12 @@
     "multer": "^2.1.1",
     "otpauth": "^9.5.0",
     "pdf-lib": "^1.17.1",
+    "pdfjs-dist": "^4.10.38",
     "pino": "^9",
     "pino-http": "^10",
     "pizzip": "^3.1.7",
     "qrcode": "^1.5.4",
+    "tesseract.js": "^5.1.1",
     "yazl": "^3.3.1",
     "xlsx": "^0.18.5",
     "zod": "catalog:"

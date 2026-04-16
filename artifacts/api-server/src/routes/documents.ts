@@ -29,6 +29,8 @@ import { runDocumentPreview } from "../lib/documentPreview";
 import { findUnknownVariablesInClause, getFirmClauseById, getPlatformClauseById, isClauseApplicable, normalizeClauseCode } from "../lib/clauseLibrary";
 import { applyClauseInsertionToDocx, buildClauseInsertion, decideClauseInsertion, normalizeClauseInsertionMode, type SelectedClauseRef } from "../lib/documentClauses";
 import { detectClausePlaceholders } from "../lib/docxPlaceholder";
+import { classifyDocumentForExtraction, extractDocumentText, guessDocumentTypeFromText, mapExtractedTextToSuggestions } from "../lib/documentExtraction";
+import { applyExtractionSuggestion } from "../lib/extractionWriteback";
 
 const router: IRouter = Router();
 const storage = new ObjectStorageService();
@@ -6832,6 +6834,183 @@ router.get("/cases/:caseId/documents/:docId/download", requireAuth, requireFirmU
     logger.error({ err, path: req.path, firmId: req.firmId, userId: req.userId, caseId, docId }, "[documents] case_document_download_failed");
     res.status(500).json({ error: "Internal Server Error" });
   }
+});
+
+async function fetchCaseDocumentBytes(objectPath: string): Promise<Buffer> {
+  const resp = await supabaseStorage.fetchPrivateObjectResponse(objectPath);
+  if (!resp.ok) throw new Error(`storage_download_failed:${resp.status}`);
+  const ab = await resp.arrayBuffer();
+  return Buffer.from(ab);
+}
+
+router.post("/cases/:caseId/documents/:docId/extraction/run", requireAuth, requireFirmUser, requirePermission("documents", "read"), async (req: AuthRequest, res): Promise<void> => {
+  const r = getRlsDb(req, res);
+  if (!r) return;
+  const caseId = Number.parseInt(one((req.params as any).caseId) ?? "", 10);
+  const docId = Number.parseInt(one((req.params as any).docId) ?? "", 10);
+  if (!Number.isFinite(caseId) || !Number.isFinite(docId)) { res.status(400).json({ error: "Invalid caseId/docId" }); return; }
+
+  const [doc] = await queryRows(r, sql`SELECT * FROM case_documents WHERE id = ${docId} AND case_id = ${caseId} AND firm_id = ${req.firmId!} LIMIT 1`);
+  if (!doc) { res.status(404).json({ error: "Document not found" }); return; }
+  const objectPath = typeof (doc as any).object_path === "string" ? String((doc as any).object_path) : "";
+  const fileName = typeof (doc as any).file_name === "string" ? String((doc as any).file_name) : `case-document-${docId}`;
+  const mimeType = typeof (doc as any).mime_type === "string" ? String((doc as any).mime_type) : null;
+  if (!objectPath) { res.status(422).json({ error: "Document has no file" }); return; }
+
+  const jobRows = await queryRows(r, sql`
+    INSERT INTO document_extraction_jobs (firm_id, case_id, case_document_id, status, created_by)
+    VALUES (${req.firmId!}, ${caseId}, ${docId}, 'running', ${req.userId!})
+    RETURNING *
+  `);
+  const job = jobRows[0] as any;
+  const jobId = typeof job?.id === "number" ? job.id : null;
+  try {
+    const bytes = await fetchCaseDocumentBytes(objectPath);
+    const cls = classifyDocumentForExtraction({ fileName, mimeType, hintDocumentType: typeof (doc as any).document_type === "string" ? String((doc as any).document_type) : null });
+    const raw = await extractDocumentText({ bytes, fileName });
+    const guessed = cls.documentTypeGuess === "unknown" ? guessDocumentTypeFromText(raw.extractedRawText) : cls.documentTypeGuess;
+    const suggestions = mapExtractedTextToSuggestions({ raw, documentTypeGuess: guessed });
+
+    await queryRows(r, sql`
+      UPDATE document_extraction_jobs
+      SET status = 'completed', extraction_method = ${raw.extractionMethod}, document_type_guess = ${guessed}, completed_at = now()
+      WHERE id = ${jobId}
+    `);
+    await queryRows(r, sql`
+      INSERT INTO document_extraction_results (job_id, raw_text, structured_result_json, warnings, confidence_summary)
+      VALUES (${jobId}, ${raw.extractedRawText.slice(0, 500000)}, ${JSON.stringify({ perPageText: raw.perPageText, pageCount: raw.pageCount })}, ${JSON.stringify(raw.warnings)}, ${JSON.stringify({ suggestionCount: suggestions.length })})
+    `);
+    for (const s of suggestions) {
+      await queryRows(r, sql`
+        INSERT INTO document_extraction_suggestions (job_id, field_key, suggested_value, confidence, source_page, source_snippet, document_type_guess, target_entity_type)
+        VALUES (${jobId}, ${s.fieldKey}, ${s.suggestedValue}, ${s.confidence as any}, ${s.sourcePage as any}, ${s.sourceSnippet}, ${s.documentTypeGuess}, ${s.targetEntityType})
+      `);
+    }
+    await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.extraction.run", entityType: "case_document", entityId: docId, detail: `caseId=${caseId} method=${raw.extractionMethod} guess=${guessed} suggestions=${suggestions.length}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+
+    const suggestionRows = await queryRows(r, sql`SELECT * FROM document_extraction_suggestions WHERE job_id = ${jobId} ORDER BY confidence DESC NULLS LAST, id ASC`);
+    const [resultRow] = await queryRows(r, sql`SELECT * FROM document_extraction_results WHERE job_id = ${jobId} ORDER BY id DESC LIMIT 1`);
+    res.json({ job: jobRows[0], result: resultRow, suggestions: suggestionRows });
+  } catch (err) {
+    await queryRows(r, sql`UPDATE document_extraction_jobs SET status = 'failed', error_message = ${err instanceof Error ? err.message : "unknown"}, completed_at = now() WHERE id = ${jobId}`);
+    await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.extraction.failed", entityType: "case_document", entityId: docId, detail: `caseId=${caseId}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+    res.status(500).json({ error: "Extraction failed" });
+  }
+});
+
+router.get("/cases/:caseId/documents/:docId/extraction/latest", requireAuth, requireFirmUser, requirePermission("documents", "read"), async (req: AuthRequest, res): Promise<void> => {
+  const r = getRlsDb(req, res);
+  if (!r) return;
+  const caseId = Number.parseInt(one((req.params as any).caseId) ?? "", 10);
+  const docId = Number.parseInt(one((req.params as any).docId) ?? "", 10);
+  if (!Number.isFinite(caseId) || !Number.isFinite(docId)) { res.status(400).json({ error: "Invalid caseId/docId" }); return; }
+  const jobs = await queryRows(r, sql`
+    SELECT *
+    FROM document_extraction_jobs
+    WHERE firm_id = ${req.firmId!} AND case_id = ${caseId} AND case_document_id = ${docId}
+    ORDER BY id DESC
+    LIMIT 1
+  `);
+  if (!jobs[0]) { res.json({ job: null, result: null, suggestions: [] }); return; }
+  const jobId = (jobs[0] as any).id;
+  const [result] = await queryRows(r, sql`SELECT * FROM document_extraction_results WHERE job_id = ${jobId} ORDER BY id DESC LIMIT 1`);
+  const suggestions = await queryRows(r, sql`SELECT * FROM document_extraction_suggestions WHERE job_id = ${jobId} ORDER BY confidence DESC NULLS LAST, id ASC`);
+  res.json({ job: jobs[0], result, suggestions });
+});
+
+router.post("/extractions/jobs/:jobId/suggestions/:suggestionId/reject", requireAuth, requireFirmUser, requirePermission("documents", "update"), async (req: AuthRequest, res): Promise<void> => {
+  const r = getRlsDb(req, res);
+  if (!r) return;
+  const jobId = Number.parseInt(one((req.params as any).jobId) ?? "", 10);
+  const suggestionId = Number.parseInt(one((req.params as any).suggestionId) ?? "", 10);
+  if (!Number.isFinite(jobId) || !Number.isFinite(suggestionId)) { res.status(400).json({ error: "Invalid id" }); return; }
+  const rows = await queryRows(r, sql`
+    UPDATE document_extraction_suggestions s
+    SET rejected_by = ${req.userId!}, rejected_at = now()
+    FROM document_extraction_jobs j
+    WHERE s.id = ${suggestionId} AND s.job_id = j.id AND j.id = ${jobId} AND j.firm_id = ${req.firmId!}
+    RETURNING s.*, j.case_id, j.case_document_id
+  `);
+  if (!rows[0]) { res.status(404).json({ error: "Suggestion not found" }); return; }
+  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.extraction.suggestion.reject", entityType: "case_document", entityId: Number((rows[0] as any).case_document_id), detail: `caseId=${Number((rows[0] as any).case_id)} suggestionId=${suggestionId}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+  res.json({ ok: true, suggestion: rows[0] });
+});
+
+router.post("/extractions/jobs/:jobId/suggestions/:suggestionId/accept", requireAuth, requireFirmUser, requirePermission("documents", "update"), async (req: AuthRequest, res): Promise<void> => {
+  const r = getRlsDb(req, res);
+  if (!r) return;
+  const jobId = Number.parseInt(one((req.params as any).jobId) ?? "", 10);
+  const suggestionId = Number.parseInt(one((req.params as any).suggestionId) ?? "", 10);
+  if (!Number.isFinite(jobId) || !Number.isFinite(suggestionId)) { res.status(400).json({ error: "Invalid id" }); return; }
+  const overrideExisting = Boolean((req.body as any)?.overrideExisting ?? false);
+  const rows = await queryRows(r, sql`
+    SELECT s.*, j.case_id, j.case_document_id
+    FROM document_extraction_suggestions s
+    JOIN document_extraction_jobs j ON j.id = s.job_id
+    WHERE s.id = ${suggestionId} AND s.job_id = ${jobId} AND j.firm_id = ${req.firmId!}
+    LIMIT 1
+  `);
+  if (!rows[0]) { res.status(404).json({ error: "Suggestion not found" }); return; }
+  const s = rows[0] as any;
+  const outcome = await applyExtractionSuggestion({
+    r,
+    firmId: req.firmId!,
+    caseId: Number(s.case_id),
+    actorId: req.userId!,
+    suggestion: { fieldKey: String(s.field_key), suggestedValue: s.suggested_value ? String(s.suggested_value) : null, targetEntityType: s.target_entity_type ? String(s.target_entity_type) : null },
+    overrideExisting,
+  });
+  await queryRows(r, sql`
+    UPDATE document_extraction_suggestions
+    SET accepted_by = ${req.userId!}, accepted_at = now()
+    WHERE id = ${suggestionId} AND job_id = ${jobId}
+  `);
+  await writeAuditLog({
+    firmId: req.firmId,
+    actorId: req.userId,
+    actorType: req.userType,
+    action: "documents.extraction.suggestion.accept",
+    entityType: "case_document",
+    entityId: Number(s.case_document_id),
+    detail: `caseId=${Number(s.case_id)} suggestionId=${suggestionId} field=${String(s.field_key)} applied=${outcome.applied ? "1" : "0"} override=${overrideExisting ? "1" : "0"} old=${String(outcome.oldValue ?? "")} new=${String(outcome.newValue ?? "")}`,
+    ipAddress: req.ip,
+    userAgent: req.headers["user-agent"],
+  });
+  res.json({ ok: true, outcome });
+});
+
+router.post("/extractions/jobs/:jobId/apply", requireAuth, requireFirmUser, requirePermission("documents", "update"), async (req: AuthRequest, res): Promise<void> => {
+  const r = getRlsDb(req, res);
+  if (!r) return;
+  const jobId = Number.parseInt(one((req.params as any).jobId) ?? "", 10);
+  if (!Number.isFinite(jobId)) { res.status(400).json({ error: "Invalid jobId" }); return; }
+  const suggestionIds = Array.isArray((req.body as any)?.suggestionIds) ? (req.body as any).suggestionIds : [];
+  const overrideExisting = Boolean((req.body as any)?.overrideExisting ?? false);
+  const ids = suggestionIds.filter((x: any) => typeof x === "number" && Number.isFinite(x));
+  if (ids.length === 0) { res.status(400).json({ error: "No suggestionIds" }); return; }
+  const rows = await queryRows(r, sql`
+    SELECT s.*, j.case_id, j.case_document_id
+    FROM document_extraction_suggestions s
+    JOIN document_extraction_jobs j ON j.id = s.job_id
+    WHERE s.job_id = ${jobId} AND s.id = ANY(${ids as any}) AND j.firm_id = ${req.firmId!}
+  `);
+  if (rows.length === 0) { res.status(404).json({ error: "No suggestions found" }); return; }
+  const outcomes: any[] = [];
+  for (const row of rows) {
+    const s = row as any;
+    const outcome = await applyExtractionSuggestion({
+      r,
+      firmId: req.firmId!,
+      caseId: Number(s.case_id),
+      actorId: req.userId!,
+      suggestion: { fieldKey: String(s.field_key), suggestedValue: s.suggested_value ? String(s.suggested_value) : null, targetEntityType: s.target_entity_type ? String(s.target_entity_type) : null },
+      overrideExisting,
+    });
+    await queryRows(r, sql`UPDATE document_extraction_suggestions SET accepted_by = ${req.userId!}, accepted_at = now() WHERE id = ${Number(s.id)} AND job_id = ${jobId}`);
+    outcomes.push({ suggestionId: Number(s.id), fieldKey: String(s.field_key), ...outcome });
+  }
+  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.extraction.apply", entityType: "document_extraction_job", entityId: jobId, detail: `applied=${outcomes.filter((o) => o.applied).length}/${outcomes.length} override=${overrideExisting ? "1" : "0"}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+  res.json({ ok: true, outcomes });
 });
 
 router.delete("/cases/:caseId/documents/:docId", requireAuth, requireFirmUser, requirePermission("documents", "delete"), async (req: AuthRequest, res): Promise<void> => {

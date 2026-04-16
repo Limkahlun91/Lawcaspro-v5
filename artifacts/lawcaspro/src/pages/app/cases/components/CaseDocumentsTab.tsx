@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { useToast } from "@/hooks/use-toast";
 import { ToastAction } from "@/components/ui/toast";
-import { FileText, Upload, Trash2, Download, Plus, ChevronUp, ChevronDown, X } from "lucide-react";
+import { FileText, Upload, Trash2, Download, Plus, ChevronUp, ChevronDown, X, Sparkles } from "lucide-react";
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle,
 } from "@/components/ui/dialog";
@@ -156,6 +156,12 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
   const [selectedLetterheadId, setSelectedLetterheadId] = useState<string>("");
   const [documentName, setDocumentName] = useState("");
   const [rowNamingPreview, setRowNamingPreview] = useState<Record<string, { fileName: string; ruleUsed: string; warnings?: string[] }>>({});
+  const [extractionOpen, setExtractionOpen] = useState(false);
+  const [extractionDoc, setExtractionDoc] = useState<CaseDocument | null>(null);
+  const [extractionLoading, setExtractionLoading] = useState(false);
+  const [extractionOverrideExisting, setExtractionOverrideExisting] = useState(false);
+  const [extractionData, setExtractionData] = useState<null | { job: any; result: any; suggestions: any[] }>(null);
+  const [extractionSelectedIds, setExtractionSelectedIds] = useState<Set<number>>(new Set());
   const [uploadDialogOpen, setUploadDialogOpen] = useState(false);
   const [uploadName, setUploadName] = useState("");
   const [uploadPreviewFileName, setUploadPreviewFileName] = useState("");
@@ -752,6 +758,81 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
     }
   }
 
+  async function openExtraction(doc: CaseDocument): Promise<void> {
+    setExtractionDoc(doc);
+    setExtractionOpen(true);
+    setExtractionLoading(true);
+    setExtractionData(null);
+    setExtractionSelectedIds(new Set());
+    try {
+      const data = await apiFetchJson<{ job: any; result: any; suggestions: any[] }>(`/cases/${caseId}/documents/${doc.id}/extraction/latest`);
+      setExtractionData(data);
+    } catch (err) {
+      toastError(toast, err, "Failed to load extraction");
+    } finally {
+      setExtractionLoading(false);
+    }
+  }
+
+  async function runExtraction(): Promise<void> {
+    if (!extractionDoc) return;
+    setExtractionLoading(true);
+    try {
+      const data = await apiFetchJson<{ job: any; result: any; suggestions: any[] }>(`/cases/${caseId}/documents/${extractionDoc.id}/extraction/run`, { method: "POST" });
+      setExtractionData(data);
+      setExtractionSelectedIds(new Set());
+    } catch (err) {
+      toastError(toast, err, "Extraction failed");
+    } finally {
+      setExtractionLoading(false);
+    }
+  }
+
+  async function applyExtractionSelected(): Promise<void> {
+    const jobId = extractionData?.job?.id;
+    if (!jobId) return;
+    const ids = Array.from(extractionSelectedIds.values());
+    if (ids.length === 0) return;
+    setExtractionLoading(true);
+    try {
+      await apiFetchJson(`/extractions/jobs/${jobId}/apply`, { method: "POST", body: JSON.stringify({ suggestionIds: ids, overrideExisting: extractionOverrideExisting }) });
+      const data = await apiFetchJson<{ job: any; result: any; suggestions: any[] }>(`/cases/${caseId}/documents/${extractionDoc!.id}/extraction/latest`);
+      setExtractionData(data);
+      setExtractionSelectedIds(new Set());
+      toast({ title: "Applied selected suggestions" });
+    } catch (err) {
+      toastError(toast, err, "Apply failed");
+    } finally {
+      setExtractionLoading(false);
+    }
+  }
+
+  async function acceptSuggestion(jobId: number, suggestionId: number): Promise<void> {
+    setExtractionLoading(true);
+    try {
+      await apiFetchJson(`/extractions/jobs/${jobId}/suggestions/${suggestionId}/accept`, { method: "POST", body: JSON.stringify({ overrideExisting: extractionOverrideExisting }) });
+      const data = await apiFetchJson<{ job: any; result: any; suggestions: any[] }>(`/cases/${caseId}/documents/${extractionDoc!.id}/extraction/latest`);
+      setExtractionData(data);
+    } catch (err) {
+      toastError(toast, err, "Accept failed");
+    } finally {
+      setExtractionLoading(false);
+    }
+  }
+
+  async function rejectSuggestion(jobId: number, suggestionId: number): Promise<void> {
+    setExtractionLoading(true);
+    try {
+      await apiFetchJson(`/extractions/jobs/${jobId}/suggestions/${suggestionId}/reject`, { method: "POST" });
+      const data = await apiFetchJson<{ job: any; result: any; suggestions: any[] }>(`/cases/${caseId}/documents/${extractionDoc!.id}/extraction/latest`);
+      setExtractionData(data);
+    } catch (err) {
+      toastError(toast, err, "Reject failed");
+    } finally {
+      setExtractionLoading(false);
+    }
+  }
+
   function formatFileSize(bytes: number | null) {
     if (!bytes) return "";
     if (bytes < 1024) return `${bytes} B`;
@@ -874,6 +955,15 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
                         disabled={downloadingDocId === doc.id}
                       >
                         <Download className={cn("w-4 h-4", downloadingDocId === doc.id && "animate-bounce")} />
+                      </Button>
+                      <Button
+                        size="icon"
+                        variant="ghost"
+                        className="h-8 w-8 text-slate-400 hover:text-slate-700"
+                        onClick={() => openExtraction(doc)}
+                        title="Extract data"
+                      >
+                        <Sparkles className="w-4 h-4" />
                       </Button>
                       <Button
                         size="icon"
@@ -1842,6 +1932,100 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
                 disabled={!selectedFile || !uploadName || isUploading}
               >
                 {isUploading ? "Uploading..." : "Upload"}
+              </Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={extractionOpen} onOpenChange={(v) => { if (!v) { setExtractionOpen(false); setExtractionDoc(null); setExtractionData(null); setExtractionSelectedIds(new Set()); } else setExtractionOpen(true); }}>
+        <DialogContent className="max-w-3xl max-h-[80vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>Extract data (suggestion mode)</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-3">
+            <div className="flex items-center justify-between gap-2">
+              <div className="text-sm text-slate-700 break-words">
+                {extractionDoc ? `${extractionDoc.name} • ${extractionDoc.file_name || ""}` : "No document selected"}
+              </div>
+              <div className="flex items-center gap-2">
+                <div className="flex items-center gap-2">
+                  <Checkbox checked={extractionOverrideExisting} onCheckedChange={(v) => setExtractionOverrideExisting(Boolean(v))} />
+                  <span className="text-xs text-slate-600">Override existing values</span>
+                </div>
+                <Button size="sm" onClick={runExtraction} disabled={!extractionDoc || extractionLoading}>
+                  {extractionLoading ? "Working..." : "Run extraction"}
+                </Button>
+              </div>
+            </div>
+
+            {extractionLoading ? (
+              <div className="text-sm text-slate-500 py-6">Loading…</div>
+            ) : !extractionData?.job ? (
+              <div className="text-sm text-slate-500 py-6">No extraction yet. Click “Run extraction”.</div>
+            ) : (
+              <div className="space-y-3">
+                <div className="rounded border bg-white p-3">
+                  <div className="text-xs text-slate-500">Job</div>
+                  <div className="text-sm text-slate-900">status={String(extractionData.job.status)} • method={String(extractionData.job.extraction_method ?? "")} • guess={String(extractionData.job.document_type_guess ?? "")}</div>
+                  {Array.isArray(extractionData.result?.warnings) && extractionData.result.warnings.length ? (
+                    <div className="mt-1 text-xs text-amber-700 break-words">{extractionData.result.warnings.join(" | ")}</div>
+                  ) : null}
+                </div>
+
+                <div className="flex items-center justify-between gap-2">
+                  <div className="text-sm font-medium text-slate-900">Suggestions</div>
+                  <Button size="sm" variant="outline" onClick={applyExtractionSelected} disabled={extractionSelectedIds.size === 0 || extractionLoading || !extractionData.job?.id}>
+                    Apply selected ({extractionSelectedIds.size})
+                  </Button>
+                </div>
+
+                <div className="space-y-2">
+                  {(extractionData.suggestions ?? []).map((s: any) => {
+                    const sid = Number(s.id);
+                    const checked = extractionSelectedIds.has(sid);
+                    const accepted = Boolean(s.accepted_at);
+                    const rejected = Boolean(s.rejected_at);
+                    return (
+                      <div key={sid} className="rounded border bg-white p-2">
+                        <div className="flex items-start justify-between gap-2">
+                          <div className="min-w-0">
+                            <div className="text-sm text-slate-900 break-words">
+                              <span className="font-medium">{String(s.field_key)}</span>: {String(s.suggested_value ?? "")}
+                            </div>
+                            <div className="mt-0.5 text-xs text-slate-500 break-words">
+                              conf={String(s.confidence ?? "")} • page={String(s.source_page ?? "")} • target={String(s.target_entity_type ?? "")}
+                            </div>
+                            {s.source_snippet ? <div className="mt-1 text-xs text-slate-600 break-words">{String(s.source_snippet)}</div> : null}
+                          </div>
+                          <div className="shrink-0 flex items-center gap-2">
+                            <Checkbox
+                              checked={checked}
+                              onCheckedChange={(v) => {
+                                const next = new Set(extractionSelectedIds);
+                                if (Boolean(v)) next.add(sid); else next.delete(sid);
+                                setExtractionSelectedIds(next);
+                              }}
+                            />
+                            <Button size="sm" variant="outline" onClick={() => acceptSuggestion(Number(extractionData.job.id), sid)} disabled={accepted || extractionLoading}>
+                              {accepted ? "Accepted" : "Accept"}
+                            </Button>
+                            <Button size="sm" variant="outline" onClick={() => rejectSuggestion(Number(extractionData.job.id), sid)} disabled={rejected || extractionLoading}>
+                              {rejected ? "Rejected" : "Reject"}
+                            </Button>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                  {(extractionData.suggestions ?? []).length === 0 ? <div className="text-sm text-slate-500 py-6">No suggestions.</div> : null}
+                </div>
+              </div>
+            )}
+
+            <div className="flex justify-end pt-2">
+              <Button variant="outline" onClick={() => { setExtractionOpen(false); setExtractionDoc(null); setExtractionData(null); setExtractionSelectedIds(new Set()); }}>
+                Close
               </Button>
             </div>
           </div>
