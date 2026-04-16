@@ -56,23 +56,28 @@ router.get("/hub/messages", requireAuth, requireFirmUser, requirePermission("com
   if (!r) return;
   const firmId = req.firmId!;
 
-  const msgs = await r
-    .select()
-    .from(platformMessagesTable)
-    .where(or(eq(platformMessagesTable.fromFirmId, firmId), eq(platformMessagesTable.toFirmId, firmId)))
-    .orderBy(desc(platformMessagesTable.createdAt))
-    .limit(100);
+  try {
+    const msgs = await r
+      .select()
+      .from(platformMessagesTable)
+      .where(or(eq(platformMessagesTable.fromFirmId, firmId), eq(platformMessagesTable.toFirmId, firmId)))
+      .orderBy(desc(platformMessagesTable.createdAt))
+      .limit(100);
 
-  const enriched = await Promise.all(
-    msgs.map(async (m) => {
-      const [sender] = await r.select({ name: usersTable.name, email: usersTable.email }).from(usersTable).where(eq(usersTable.id, m.fromUserId));
-      const attachments = await r.select().from(platformMessageAttachmentsTable).where(eq(platformMessageAttachmentsTable.messageId, m.id));
-      const direction = m.fromFirmId === firmId ? "outgoing" : "incoming";
-      return { ...m, senderName: sender?.name ?? "Unknown", senderEmail: sender?.email ?? "", direction, attachments };
-    })
-  );
+    const enriched = await Promise.all(
+      msgs.map(async (m) => {
+        const [sender] = await r.select({ name: usersTable.name, email: usersTable.email }).from(usersTable).where(eq(usersTable.id, m.fromUserId));
+        const attachments = await r.select().from(platformMessageAttachmentsTable).where(eq(platformMessageAttachmentsTable.messageId, m.id));
+        const direction = m.fromFirmId === firmId ? "outgoing" : "incoming";
+        return { ...m, senderName: sender?.name ?? "Unknown", senderEmail: sender?.email ?? "", direction, attachments };
+      })
+    );
 
-  res.json(enriched);
+    res.json(enriched);
+  } catch (err) {
+    (req as any).log?.error?.({ err, route: req.originalUrl, firmId: req.firmId, userId: req.userId }, "hub.messages_failed");
+    res.status(500).json({ error: "Failed to load messages" });
+  }
 });
 
 router.post("/hub/messages", requireAuth, requireFirmUser, requirePermission("communications", "create"), async (req: AuthRequest, res): Promise<void> => {
@@ -213,27 +218,32 @@ router.get("/hub/documents", requireAuth, requireFirmUser, requirePermission("do
   const folderIdStr = one((req.query as Record<string, unknown>).folderId);
   const folderId = folderIdStr ? parseInt(folderIdStr, 10) : undefined;
 
-  const disabledFolders = await r
-    .select({ id: systemFoldersTable.id })
-    .from(systemFoldersTable)
-    .where(eq(systemFoldersTable.isDisabled, true));
-  const disabledIds = disabledFolders.map(f => f.id);
+  try {
+    const disabledFolders = await r
+      .select({ id: systemFoldersTable.id })
+      .from(systemFoldersTable)
+      .where(eq(systemFoldersTable.isDisabled, true));
+    const disabledIds = disabledFolders.map(f => f.id);
 
-  const allDocs = await r
-    .select()
-    .from(platformDocumentsTable)
-    .where(or(isNull(platformDocumentsTable.firmId), eq(platformDocumentsTable.firmId, firmId)))
-    .orderBy(desc(platformDocumentsTable.createdAt));
+    const allDocs = await r
+      .select()
+      .from(platformDocumentsTable)
+      .where(or(isNull(platformDocumentsTable.firmId), eq(platformDocumentsTable.firmId, firmId)))
+      .orderBy(desc(platformDocumentsTable.createdAt));
 
-  const unique = allDocs.filter((d, i, arr) => arr.findIndex((x) => x.id === d.id) === i);
+    const unique = allDocs.filter((d, i, arr) => arr.findIndex((x) => x.id === d.id) === i);
 
-  let filtered = unique.filter(d => !d.folderId || !disabledIds.includes(d.folderId));
+    let filtered = unique.filter(d => !d.folderId || !disabledIds.includes(d.folderId));
 
-  if (folderId !== undefined) {
-    filtered = filtered.filter(d => d.folderId === folderId);
+    if (folderId !== undefined) {
+      filtered = filtered.filter(d => d.folderId === folderId);
+    }
+
+    res.json(filtered);
+  } catch (err) {
+    (req as any).log?.error?.({ err, route: req.originalUrl, firmId: req.firmId, userId: req.userId }, "hub.documents_failed");
+    res.status(500).json({ error: "Failed to load documents" });
   }
-
-  res.json(filtered);
 });
 
 router.get("/hub/documents/:docId/download", requireAuth, requireFirmUser, requirePermission("documents", "read"), async (req: AuthRequest, res): Promise<void> => {

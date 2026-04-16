@@ -10,6 +10,8 @@ import { ME_QUERY_KEY } from "./query-keys";
 interface AuthContextType {
   user: AuthUser | null;
   isLoading: boolean;
+  permissionsStatus?: "idle" | "loading" | "ready" | "unavailable" | "error";
+  retryPermissions?: () => void;
   login: (user: AuthUser) => void;
   logout: () => void;
 }
@@ -49,17 +51,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setIsLoading(false);
   }, [me, isMeLoading, isMeError]);
 
-  const permissionsQuery = useQuery<{ permissions: Array<{ module: string; action: string }> }>({
+  const permissionsQuery = useQuery<{ permissions: Array<{ module: string; action: string }>; unavailable?: boolean }>({
     queryKey: ["auth-permissions", user?.roleId ?? null],
     enabled: Boolean(user && user.userType === "firm_user" && user.roleId),
     retry: false,
     queryFn: async ({ signal }) => {
       const res = await apiRequest("/api/auth/permissions", {
-        allowStatuses: [401],
+        allowStatuses: [401, 404],
         signal,
         timeoutMs: 8000,
       });
       if (res.status === 401 || res.status === 204) return { permissions: [] };
+      if (res.status === 404) return { permissions: [], unavailable: true };
       const body = (await res.json()) as unknown;
       const perms = (body as any)?.permissions;
       if (!Array.isArray(perms)) return { permissions: [] };
@@ -75,6 +78,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (!user || user.userType !== "firm_user") return;
     if (!permissionsQuery.data) return;
+    if (permissionsQuery.data.unavailable) return;
     const next = permissionsQuery.data.permissions ?? [];
     const current = (user as unknown as { permissions?: unknown }).permissions;
     if (Array.isArray(current)) {
@@ -117,6 +121,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       value={{
         user,
         isLoading,
+        permissionsStatus: (() => {
+          if (!user || user.userType !== "firm_user" || !user.roleId) return "idle";
+          if (permissionsQuery.isError) return "error";
+          if (permissionsQuery.isLoading || permissionsQuery.isFetching) return "loading";
+          if (permissionsQuery.data?.unavailable) return "unavailable";
+          return "ready";
+        })(),
+        retryPermissions: () => { void permissionsQuery.refetch(); },
         login,
         logout: handleLogout,
       }}
