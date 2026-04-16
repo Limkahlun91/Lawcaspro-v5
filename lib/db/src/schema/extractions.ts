@@ -39,6 +39,9 @@ export const documentExtractionSuggestionsTable = pgTable("document_extraction_s
   documentTypeGuess: text("document_type_guess"),
   targetEntityType: text("target_entity_type"),
   targetEntityId: integer("target_entity_id"),
+  targetEntityPath: text("target_entity_path"),
+  suggestedTargetCandidates: jsonb("suggested_target_candidates"),
+  chosenTargetCandidate: jsonb("chosen_target_candidate"),
   acceptedBy: integer("accepted_by"),
   acceptedAt: timestamp("accepted_at", { withTimezone: true }),
   rejectedBy: integer("rejected_by"),
@@ -47,4 +50,3 @@ export const documentExtractionSuggestionsTable = pgTable("document_extraction_s
 }, (t) => ({
   jobIdx: index("idx_document_extraction_suggestions_job").on(t.jobId),
 }));
-

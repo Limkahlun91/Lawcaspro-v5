@@ -16,6 +16,10 @@ export type RawExtraction = {
   pageCount: number;
   warnings: string[];
   perPageText: string[];
+  scannedPdfDetected?: boolean;
+  rasterizedPagesCount?: number;
+  ocrWarnings?: string[];
+  perPageExtractionMethod?: Array<"text" | "ocr" | "none">;
 };
 
 export type StructuredSuggestion = {
@@ -195,29 +199,87 @@ async function extractPdfText(pdfBytes: Buffer): Promise<RawExtraction> {
     const doc = await loadingTask.promise;
     const pageCount = doc.numPages;
     const perPageText: string[] = [];
+    const perPageMethod: Array<"text" | "ocr" | "none"> = [];
     for (let i = 1; i <= pageCount; i += 1) {
       const page = await doc.getPage(i);
       const content = await page.getTextContent();
       const strings = (content.items as any[]).map((it) => (typeof it.str === "string" ? it.str : "")).filter(Boolean);
-      perPageText.push(normalizeExtractedText(strings.join(" ")));
+      const txt = normalizeExtractedText(strings.join(" "));
+      perPageText.push(txt);
+      perPageMethod.push(txt.length >= 20 ? "text" : "none");
     }
     const extractedRawText = normalizeExtractedText(perPageText.join("\n\n"));
-    if (extractedRawText.trim().length < 20) {
-      const ocrWarnings = await canOcrPdf();
-      warnings.push("PDF text extraction empty/very short; likely scanned PDF");
-      warnings.push(...ocrWarnings);
-      return { extractedRawText, extractionMethod: ocrWarnings.length ? "text" : "ocr", pageCount, warnings, perPageText };
+    const scannedPdfDetected = isScannedPdfCandidate({ pageCount, perPageText, extractedRawText });
+    if (!scannedPdfDetected) {
+      return { extractedRawText, extractionMethod: "text", pageCount, warnings, perPageText, scannedPdfDetected, rasterizedPagesCount: 0, ocrWarnings: [], perPageExtractionMethod: perPageMethod };
     }
-    return { extractedRawText, extractionMethod: "text", pageCount, warnings, perPageText };
+
+    const { imagesPng, rasterWarnings } = await rasterizePdfPagesForOcr(pdfBytes, { maxPages: Number(process.env.EXTRACTION_OCR_MAX_PAGES ?? 5) });
+    const ocrWarnings: string[] = [...rasterWarnings];
+    const ocrTexts: string[] = [];
+    const ocrPerPageMethod: Array<"text" | "ocr" | "none"> = [];
+    for (let i = 0; i < imagesPng.length; i += 1) {
+      const o = await ocrImage(imagesPng[i]);
+      ocrWarnings.push(...o.warnings);
+      ocrTexts.push(o.perPageText[0] ?? "");
+      ocrPerPageMethod.push((o.perPageText[0] ?? "").trim().length ? "ocr" : "none");
+    }
+    const merged = normalizeExtractedText([extractedRawText, ocrTexts.join("\n\n")].filter(Boolean).join("\n\n"));
+    const method: ExtractionMethod = extractedRawText.trim().length ? "hybrid" : "ocr";
+    return {
+      extractedRawText: merged,
+      extractionMethod: method,
+      pageCount,
+      warnings: [...warnings, "Scanned PDF detected; OCR fallback executed"],
+      perPageText: ocrTexts.length ? ocrTexts : perPageText,
+      scannedPdfDetected,
+      rasterizedPagesCount: imagesPng.length,
+      ocrWarnings,
+      perPageExtractionMethod: ocrTexts.length ? ocrPerPageMethod : perPageMethod,
+    };
   } catch (err) {
     warnings.push("PDF text extraction failed");
     warnings.push(err instanceof Error ? err.message : "unknown error");
-    return { extractedRawText: "", extractionMethod: "text", pageCount: 0, warnings, perPageText: [] };
+    return { extractedRawText: "", extractionMethod: "text", pageCount: 0, warnings, perPageText: [], scannedPdfDetected: false, rasterizedPagesCount: 0, ocrWarnings: [], perPageExtractionMethod: [] };
   }
 }
 
-async function canOcrPdf(): Promise<string[]> {
-  return ["OCR fallback for scanned PDF requires an external OCR provider; configure image extraction/rendering to enable"];
+function isScannedPdfCandidate(params: { pageCount: number; perPageText: string[]; extractedRawText: string }): boolean {
+  const total = params.extractedRawText.trim().length;
+  if (params.pageCount <= 0) return false;
+  const avg = total / Math.max(1, params.pageCount);
+  const shortPages = params.perPageText.filter((t) => t.trim().length < 20).length;
+  if (total < 80) return true;
+  if (avg < 40 && shortPages / params.pageCount >= 0.6) return true;
+  return false;
+}
+
+async function rasterizePdfPagesForOcr(pdfBytes: Buffer, opts: { maxPages: number }): Promise<{ imagesPng: Buffer[]; rasterWarnings: string[] }> {
+  const rasterWarnings: string[] = [];
+  try {
+    const pdfjs: any = await import("pdfjs-dist");
+    const { createCanvas } = await import("@napi-rs/canvas");
+    const loadingTask = pdfjs.getDocument({ data: new Uint8Array(pdfBytes) });
+    const doc = await loadingTask.promise;
+    const pageCount = doc.numPages;
+    const limit = Math.max(1, Math.min(pageCount, Number.isFinite(opts.maxPages) ? opts.maxPages : 5));
+    const imagesPng: Buffer[] = [];
+    for (let i = 1; i <= limit; i += 1) {
+      const page = await doc.getPage(i);
+      const viewport = page.getViewport({ scale: 2.0 });
+      const canvas = createCanvas(Math.ceil(viewport.width), Math.ceil(viewport.height));
+      const ctx = canvas.getContext("2d") as any;
+      await page.render({ canvasContext: ctx, viewport }).promise;
+      const png = canvas.toBuffer("image/png");
+      imagesPng.push(png);
+    }
+    if (pageCount > limit) rasterWarnings.push(`OCR limited to first ${limit} pages (of ${pageCount})`);
+    return { imagesPng, rasterWarnings };
+  } catch (err) {
+    rasterWarnings.push("PDF rasterization failed");
+    rasterWarnings.push(err instanceof Error ? err.message : "unknown error");
+    return { imagesPng: [], rasterWarnings };
+  }
 }
 
 async function ocrImage(imageBytes: Buffer): Promise<RawExtraction> {

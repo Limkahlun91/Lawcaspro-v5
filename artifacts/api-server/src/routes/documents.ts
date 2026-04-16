@@ -6843,6 +6843,43 @@ async function fetchCaseDocumentBytes(objectPath: string): Promise<Buffer> {
   return Buffer.from(ab);
 }
 
+function buildCandidatesForSuggestion(
+  suggestion: { fieldKey: string; targetEntityType: string },
+  targetCandidates: any
+): Array<{ targetEntityType: string; targetEntityId?: number | null; targetEntityPath?: string | null; label: string }> {
+  const out: Array<{ targetEntityType: string; targetEntityId?: number | null; targetEntityPath?: string | null; label: string }> = [];
+  const fieldKey = String(suggestion.fieldKey || "");
+  const type = String(suggestion.targetEntityType || "");
+
+  const purchasers = Array.isArray(targetCandidates?.purchasers) ? targetCandidates.purchasers : [];
+  const borrowers = Array.isArray(targetCandidates?.borrowers) ? targetCandidates.borrowers : [];
+
+  if (type === "client_primary_purchaser") {
+    for (const p of purchasers) {
+      out.push({ targetEntityType: "client", targetEntityId: Number(p.clientId), targetEntityPath: "clients", label: String(p.label) });
+    }
+    return out.length ? out : [{ targetEntityType: "client", targetEntityPath: "clients", label: "Client" }];
+  }
+
+  if (fieldKey === "purchaser_names" || type === "case_spa") {
+    out.push({ targetEntityType: "case_spa", targetEntityPath: "cases.spa_details.purchasers", label: "Case: SPA purchasers" });
+    for (const p of purchasers) out.push({ targetEntityType: "client", targetEntityId: Number(p.clientId), targetEntityPath: "clients", label: String(p.label) });
+    return out;
+  }
+
+  if (fieldKey === "borrower_name") {
+    for (const b of borrowers) out.push({ targetEntityType: "case_loan", targetEntityPath: `cases.loan_details.borrower${Number(b.slot)}Name`, label: String(b.label) });
+    return out.length ? out : [{ targetEntityType: "case_loan", targetEntityPath: "cases.loan_details.borrower1Name", label: "Borrower 1" }];
+  }
+
+  if (type === "case_loan") return [{ targetEntityType: "case_loan", targetEntityPath: "cases.loan_details", label: "Case: loan details" }];
+  if (type === "case_property") return [{ targetEntityType: "case_property", targetEntityPath: "cases.property_details", label: "Case: property details" }];
+  if (type === "case_key_dates") return [{ targetEntityType: "case_key_dates", targetEntityPath: "case_key_dates", label: "Case: key dates" }];
+  if (type === "case") return [{ targetEntityType: "case", targetEntityPath: `cases.${fieldKey}`, label: `Case: ${fieldKey}` }];
+
+  return [{ targetEntityType: type || "case", targetEntityPath: null, label: "Case" }];
+}
+
 router.post("/cases/:caseId/documents/:docId/extraction/run", requireAuth, requireFirmUser, requirePermission("documents", "read"), async (req: AuthRequest, res): Promise<void> => {
   const r = getRlsDb(req, res);
   if (!r) return;
@@ -6870,6 +6907,26 @@ router.post("/cases/:caseId/documents/:docId/extraction/run", requireAuth, requi
     const raw = await extractDocumentText({ bytes, fileName });
     const guessed = cls.documentTypeGuess === "unknown" ? guessDocumentTypeFromText(raw.extractedRawText) : cls.documentTypeGuess;
     const suggestions = mapExtractedTextToSuggestions({ raw, documentTypeGuess: guessed });
+    const purchasers = await queryRows(r, sql`
+      SELECT cp.order_no, c.id as client_id, c.name
+      FROM case_purchasers cp
+      JOIN clients c ON c.id = cp.client_id
+      WHERE cp.case_id = ${caseId} AND c.firm_id = ${req.firmId!}
+      ORDER BY cp.order_no ASC
+    `);
+    const targetCandidates = {
+      purchasers: purchasers.map((p) => ({ type: "client", role: "purchaser", orderNo: Number((p as any).order_no), clientId: Number((p as any).client_id), label: `Purchaser ${Number((p as any).order_no)}: ${String((p as any).name ?? "")}` })),
+      borrowers: [1, 2].map((i) => ({ type: "loan_borrower_slot", slot: i, label: `Borrower ${i}` })),
+      common: [
+        { type: "case", path: "cases.reference_no", label: "Case: our_ref" },
+        { type: "case", path: "cases.parcel_no", label: "Case: parcel_no" },
+        { type: "case", path: "cases.spa_price", label: "Case: spa_price" },
+        { type: "case_property", path: "cases.property_details", label: "Property details" },
+        { type: "case_spa", path: "cases.spa_details", label: "SPA details" },
+        { type: "case_loan", path: "cases.loan_details", label: "Loan details" },
+        { type: "case_key_dates", path: "case_key_dates", label: "Key dates" },
+      ],
+    };
 
     await queryRows(r, sql`
       UPDATE document_extraction_jobs
@@ -6878,12 +6935,29 @@ router.post("/cases/:caseId/documents/:docId/extraction/run", requireAuth, requi
     `);
     await queryRows(r, sql`
       INSERT INTO document_extraction_results (job_id, raw_text, structured_result_json, warnings, confidence_summary)
-      VALUES (${jobId}, ${raw.extractedRawText.slice(0, 500000)}, ${JSON.stringify({ perPageText: raw.perPageText, pageCount: raw.pageCount })}, ${JSON.stringify(raw.warnings)}, ${JSON.stringify({ suggestionCount: suggestions.length })})
+      VALUES (
+        ${jobId},
+        ${raw.extractedRawText.slice(0, 500000)},
+        ${JSON.stringify({
+          pageCount: raw.pageCount,
+          perPageText: raw.perPageText,
+          extractionMethodUsed: raw.extractionMethod,
+          scannedPdfDetected: Boolean(raw.scannedPdfDetected),
+          rasterizedPagesCount: Number(raw.rasterizedPagesCount ?? 0),
+          ocrWarnings: raw.ocrWarnings ?? [],
+          perPageExtractionMethod: raw.perPageExtractionMethod ?? [],
+          targetCandidates,
+        })},
+        ${JSON.stringify(raw.warnings)},
+        ${JSON.stringify({ suggestionCount: suggestions.length, scannedPdfDetected: Boolean(raw.scannedPdfDetected) })}
+      )
     `);
     for (const s of suggestions) {
+      const candidatesForSuggestion = buildCandidatesForSuggestion(s, targetCandidates);
+      const chosen = candidatesForSuggestion[0] ?? null;
       await queryRows(r, sql`
-        INSERT INTO document_extraction_suggestions (job_id, field_key, suggested_value, confidence, source_page, source_snippet, document_type_guess, target_entity_type)
-        VALUES (${jobId}, ${s.fieldKey}, ${s.suggestedValue}, ${s.confidence as any}, ${s.sourcePage as any}, ${s.sourceSnippet}, ${s.documentTypeGuess}, ${s.targetEntityType})
+        INSERT INTO document_extraction_suggestions (job_id, field_key, suggested_value, confidence, source_page, source_snippet, document_type_guess, target_entity_type, target_entity_path, suggested_target_candidates, chosen_target_candidate, target_entity_id)
+        VALUES (${jobId}, ${s.fieldKey}, ${s.suggestedValue}, ${s.confidence as any}, ${s.sourcePage as any}, ${s.sourceSnippet}, ${s.documentTypeGuess}, ${String(chosen?.targetEntityType ?? s.targetEntityType)}, ${String(chosen?.targetEntityPath ?? "") || null}, ${JSON.stringify(candidatesForSuggestion)}, ${JSON.stringify(chosen)}, ${chosen?.targetEntityId ?? null})
       `);
     }
     await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.extraction.run", entityType: "case_document", entityId: docId, detail: `caseId=${caseId} method=${raw.extractionMethod} guess=${guessed} suggestions=${suggestions.length}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
@@ -6957,7 +7031,14 @@ router.post("/extractions/jobs/:jobId/suggestions/:suggestionId/accept", require
     firmId: req.firmId!,
     caseId: Number(s.case_id),
     actorId: req.userId!,
-    suggestion: { fieldKey: String(s.field_key), suggestedValue: s.suggested_value ? String(s.suggested_value) : null, targetEntityType: s.target_entity_type ? String(s.target_entity_type) : null },
+    suggestion: {
+      fieldKey: String(s.field_key),
+      suggestedValue: s.suggested_value ? String(s.suggested_value) : null,
+      targetEntityType: s.target_entity_type ? String(s.target_entity_type) : null,
+      targetEntityId: typeof s.target_entity_id === "number" ? Number(s.target_entity_id) : null,
+      targetEntityPath: s.target_entity_path ? String(s.target_entity_path) : null,
+      chosenTargetCandidate: s.chosen_target_candidate ?? null,
+    },
     overrideExisting,
   });
   await queryRows(r, sql`
@@ -6972,11 +7053,74 @@ router.post("/extractions/jobs/:jobId/suggestions/:suggestionId/accept", require
     action: "documents.extraction.suggestion.accept",
     entityType: "case_document",
     entityId: Number(s.case_document_id),
-    detail: `caseId=${Number(s.case_id)} suggestionId=${suggestionId} field=${String(s.field_key)} applied=${outcome.applied ? "1" : "0"} override=${overrideExisting ? "1" : "0"} old=${String(outcome.oldValue ?? "")} new=${String(outcome.newValue ?? "")}`,
+    detail: `caseId=${Number(s.case_id)} suggestionId=${suggestionId} field=${String(s.field_key)} applied=${outcome.applied ? "1" : "0"} override=${overrideExisting ? "1" : "0"} target=${String(outcome.target)} old=${String(outcome.oldValue ?? "")} new=${String(outcome.newValue ?? "")} snippet=${String(s.source_snippet ?? "").slice(0, 80)}`,
     ipAddress: req.ip,
     userAgent: req.headers["user-agent"],
   });
   res.json({ ok: true, outcome });
+});
+
+router.post("/extractions/jobs/:jobId/suggestions/:suggestionId/target", requireAuth, requireFirmUser, requirePermission("documents", "update"), async (req: AuthRequest, res): Promise<void> => {
+  const r = getRlsDb(req, res);
+  if (!r) return;
+  const jobId = Number.parseInt(one((req.params as any).jobId) ?? "", 10);
+  const suggestionId = Number.parseInt(one((req.params as any).suggestionId) ?? "", 10);
+  if (!Number.isFinite(jobId) || !Number.isFinite(suggestionId)) { res.status(400).json({ error: "Invalid id" }); return; }
+  const chosen = (req.body as any)?.chosenTargetCandidate;
+  const chosenObj = chosen && typeof chosen === "object" ? chosen : null;
+  const targetEntityType = chosenObj && typeof chosenObj.targetEntityType === "string" ? String(chosenObj.targetEntityType) : null;
+  const targetEntityPath = chosenObj && typeof chosenObj.targetEntityPath === "string" ? String(chosenObj.targetEntityPath) : null;
+  const targetEntityId = chosenObj && typeof chosenObj.targetEntityId === "number" ? Number(chosenObj.targetEntityId) : null;
+  const rows = await queryRows(r, sql`
+    UPDATE document_extraction_suggestions s
+    SET chosen_target_candidate = ${chosenObj ? JSON.stringify(chosenObj) : null}, target_entity_type = COALESCE(${targetEntityType as any}, target_entity_type), target_entity_path = COALESCE(${targetEntityPath as any}, target_entity_path), target_entity_id = COALESCE(${targetEntityId as any}, target_entity_id)
+    FROM document_extraction_jobs j
+    WHERE s.id = ${suggestionId} AND s.job_id = j.id AND j.id = ${jobId} AND j.firm_id = ${req.firmId!}
+    RETURNING s.*
+  `);
+  if (!rows[0]) { res.status(404).json({ error: "Suggestion not found" }); return; }
+  res.json({ ok: true, suggestion: rows[0] });
+});
+
+router.post("/extractions/jobs/:jobId/preview-apply", requireAuth, requireFirmUser, requirePermission("documents", "read"), async (req: AuthRequest, res): Promise<void> => {
+  const r = getRlsDb(req, res);
+  if (!r) return;
+  const jobId = Number.parseInt(one((req.params as any).jobId) ?? "", 10);
+  if (!Number.isFinite(jobId)) { res.status(400).json({ error: "Invalid jobId" }); return; }
+  const suggestionIds = Array.isArray((req.body as any)?.suggestionIds) ? (req.body as any).suggestionIds : [];
+  const overrideExisting = Boolean((req.body as any)?.overrideExisting ?? false);
+  const ids = suggestionIds.filter((x: any) => typeof x === "number" && Number.isFinite(x));
+  if (ids.length === 0) { res.status(400).json({ error: "No suggestionIds" }); return; }
+  const rows = await queryRows(r, sql`
+    SELECT s.*, j.case_id
+    FROM document_extraction_suggestions s
+    JOIN document_extraction_jobs j ON j.id = s.job_id
+    WHERE s.job_id = ${jobId} AND s.id = ANY(${ids as any}) AND j.firm_id = ${req.firmId!}
+  `);
+  if (rows.length === 0) { res.status(404).json({ error: "No suggestions found" }); return; }
+  const caseId = Number((rows[0] as any).case_id);
+  const previews: any[] = [];
+  for (const row of rows) {
+    const s = row as any;
+    const outcome = await applyExtractionSuggestion({
+      r,
+      firmId: req.firmId!,
+      caseId,
+      actorId: req.userId!,
+      suggestion: {
+        fieldKey: String(s.field_key),
+        suggestedValue: s.suggested_value ? String(s.suggested_value) : null,
+        targetEntityType: s.target_entity_type ? String(s.target_entity_type) : null,
+        targetEntityId: typeof s.target_entity_id === "number" ? Number(s.target_entity_id) : null,
+        targetEntityPath: s.target_entity_path ? String(s.target_entity_path) : null,
+        chosenTargetCandidate: s.chosen_target_candidate ?? null,
+      },
+      overrideExisting,
+      dryRun: true,
+    } as any);
+    previews.push({ suggestionId: Number(s.id), fieldKey: String(s.field_key), ...outcome });
+  }
+  res.json({ ok: true, previews });
 });
 
 router.post("/extractions/jobs/:jobId/apply", requireAuth, requireFirmUser, requirePermission("documents", "update"), async (req: AuthRequest, res): Promise<void> => {
@@ -7003,7 +7147,14 @@ router.post("/extractions/jobs/:jobId/apply", requireAuth, requireFirmUser, requ
       firmId: req.firmId!,
       caseId: Number(s.case_id),
       actorId: req.userId!,
-      suggestion: { fieldKey: String(s.field_key), suggestedValue: s.suggested_value ? String(s.suggested_value) : null, targetEntityType: s.target_entity_type ? String(s.target_entity_type) : null },
+      suggestion: {
+        fieldKey: String(s.field_key),
+        suggestedValue: s.suggested_value ? String(s.suggested_value) : null,
+        targetEntityType: s.target_entity_type ? String(s.target_entity_type) : null,
+        targetEntityId: typeof s.target_entity_id === "number" ? Number(s.target_entity_id) : null,
+        targetEntityPath: s.target_entity_path ? String(s.target_entity_path) : null,
+        chosenTargetCandidate: s.chosen_target_candidate ?? null,
+      },
       overrideExisting,
     });
     await queryRows(r, sql`UPDATE document_extraction_suggestions SET accepted_by = ${req.userId!}, accepted_at = now() WHERE id = ${Number(s.id)} AND job_id = ${jobId}`);

@@ -96,6 +96,9 @@ importers:
       '@google-cloud/storage':
         specifier: ^7.16.0
         version: 7.19.0
+      '@napi-rs/canvas':
+        specifier: ^0.1.65
+        version: 0.1.97
       '@pdf-lib/fontkit':
         specifier: ^1.1.1
         version: 1.1.1
@@ -8864,7 +8867,6 @@ snapshots:
       '@napi-rs/canvas-linux-x64-musl': 0.1.97
       '@napi-rs/canvas-win32-arm64-msvc': 0.1.97
       '@napi-rs/canvas-win32-x64-msvc': 0.1.97
-    optional: true
 
   '@noble/hashes@1.8.0': {}
 

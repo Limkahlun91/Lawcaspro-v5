@@ -162,6 +162,7 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
   const [extractionOverrideExisting, setExtractionOverrideExisting] = useState(false);
   const [extractionData, setExtractionData] = useState<null | { job: any; result: any; suggestions: any[] }>(null);
   const [extractionSelectedIds, setExtractionSelectedIds] = useState<Set<number>>(new Set());
+  const [extractionPreview, setExtractionPreview] = useState<null | { previews: any[] }>(null);
   const [uploadDialogOpen, setUploadDialogOpen] = useState(false);
   const [uploadName, setUploadName] = useState("");
   const [uploadPreviewFileName, setUploadPreviewFileName] = useState("");
@@ -804,6 +805,19 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
       toastError(toast, err, "Apply failed");
     } finally {
       setExtractionLoading(false);
+    }
+  }
+
+  async function refreshExtractionPreview(nextSelected?: Set<number>, nextOverride?: boolean): Promise<void> {
+    const jobId = extractionData?.job?.id;
+    if (!jobId) { setExtractionPreview(null); return; }
+    const ids = Array.from((nextSelected ?? extractionSelectedIds).values());
+    if (ids.length === 0) { setExtractionPreview(null); return; }
+    try {
+      const resp = await apiFetchJson<{ ok: boolean; previews: any[] }>(`/extractions/jobs/${jobId}/preview-apply`, { method: "POST", body: JSON.stringify({ suggestionIds: ids, overrideExisting: Boolean(nextOverride ?? extractionOverrideExisting) }) });
+      setExtractionPreview({ previews: resp.previews ?? [] });
+    } catch {
+      setExtractionPreview(null);
     }
   }
 
@@ -1950,7 +1964,7 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
               </div>
               <div className="flex items-center gap-2">
                 <div className="flex items-center gap-2">
-                  <Checkbox checked={extractionOverrideExisting} onCheckedChange={(v) => setExtractionOverrideExisting(Boolean(v))} />
+                  <Checkbox checked={extractionOverrideExisting} onCheckedChange={(v) => { const nv = Boolean(v); setExtractionOverrideExisting(nv); void refreshExtractionPreview(undefined, nv); }} />
                   <span className="text-xs text-slate-600">Override existing values</span>
                 </div>
                 <Button size="sm" onClick={runExtraction} disabled={!extractionDoc || extractionLoading}>
@@ -1971,6 +1985,11 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
                   {Array.isArray(extractionData.result?.warnings) && extractionData.result.warnings.length ? (
                     <div className="mt-1 text-xs text-amber-700 break-words">{extractionData.result.warnings.join(" | ")}</div>
                   ) : null}
+                  {extractionData.result?.structured_result_json ? (
+                    <div className="mt-2 text-xs text-slate-600">
+                      scannedPdfDetected={String(Boolean((extractionData.result.structured_result_json as any).scannedPdfDetected))} • rasterizedPages={String((extractionData.result.structured_result_json as any).rasterizedPagesCount ?? 0)} • perPageMethod={Array.isArray((extractionData.result.structured_result_json as any).perPageExtractionMethod) ? String(((extractionData.result.structured_result_json as any).perPageExtractionMethod as any[]).join(",")) : ""}
+                    </div>
+                  ) : null}
                 </div>
 
                 <div className="flex items-center justify-between gap-2">
@@ -1980,12 +1999,25 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
                   </Button>
                 </div>
 
+                {extractionPreview?.previews?.length ? (
+                  <div className="rounded border bg-white p-3 text-xs text-slate-700">
+                    <div className="font-medium text-slate-900">Apply summary</div>
+                    <div className="mt-1">
+                      willApply {extractionPreview.previews.filter((p: any) => p.applied).length} / {extractionPreview.previews.length}
+                      {" • "}
+                      willSkip {extractionPreview.previews.filter((p: any) => !p.applied).length}
+                    </div>
+                  </div>
+                ) : null}
+
                 <div className="space-y-2">
                   {(extractionData.suggestions ?? []).map((s: any) => {
                     const sid = Number(s.id);
                     const checked = extractionSelectedIds.has(sid);
                     const accepted = Boolean(s.accepted_at);
                     const rejected = Boolean(s.rejected_at);
+                    const candidates = Array.isArray(s.suggested_target_candidates) ? s.suggested_target_candidates : [];
+                    const chosen = s.chosen_target_candidate && typeof s.chosen_target_candidate === "object" ? s.chosen_target_candidate : null;
                     return (
                       <div key={sid} className="rounded border bg-white p-2">
                         <div className="flex items-start justify-between gap-2">
@@ -1996,6 +2028,31 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
                             <div className="mt-0.5 text-xs text-slate-500 break-words">
                               conf={String(s.confidence ?? "")} • page={String(s.source_page ?? "")} • target={String(s.target_entity_type ?? "")}
                             </div>
+                            {candidates.length ? (
+                              <div className="mt-1">
+                                <Select
+                                  value={chosen ? JSON.stringify(chosen) : JSON.stringify(candidates[0])}
+                                  onValueChange={async (v) => {
+                                    try {
+                                      const next = JSON.parse(v);
+                                      await apiFetchJson(`/extractions/jobs/${Number(extractionData.job.id)}/suggestions/${sid}/target`, { method: "POST", body: JSON.stringify({ chosenTargetCandidate: next }) });
+                                      const data = await apiFetchJson<{ job: any; result: any; suggestions: any[] }>(`/cases/${caseId}/documents/${extractionDoc!.id}/extraction/latest`);
+                                      setExtractionData(data);
+                                      await refreshExtractionPreview();
+                                    } catch (err) {
+                                      toastError(toast, err, "Target update failed");
+                                    }
+                                  }}
+                                >
+                                  <SelectTrigger className="h-8 text-xs w-full max-w-sm"><SelectValue /></SelectTrigger>
+                                  <SelectContent>
+                                    {candidates.map((c: any, idx: number) => (
+                                      <SelectItem key={idx} value={JSON.stringify(c)}>{String(c.label ?? c.targetEntityType ?? "")}</SelectItem>
+                                    ))}
+                                  </SelectContent>
+                                </Select>
+                              </div>
+                            ) : null}
                             {s.source_snippet ? <div className="mt-1 text-xs text-slate-600 break-words">{String(s.source_snippet)}</div> : null}
                           </div>
                           <div className="shrink-0 flex items-center gap-2">
@@ -2005,6 +2062,7 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
                                 const next = new Set(extractionSelectedIds);
                                 if (Boolean(v)) next.add(sid); else next.delete(sid);
                                 setExtractionSelectedIds(next);
+                                void refreshExtractionPreview(next);
                               }}
                             />
                             <Button size="sm" variant="outline" onClick={() => acceptSuggestion(Number(extractionData.job.id), sid)} disabled={accepted || extractionLoading}>
