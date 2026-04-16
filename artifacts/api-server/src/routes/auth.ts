@@ -210,15 +210,10 @@ router.post("/auth/login", authRateLimiter, async (req, res): Promise<void> => {
     const tokenHash = crypto.createHash("sha256").update(token).digest("hex");
     const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
 
-    stage = "persist";
+    stage = "session_persist";
     ctx.stage = stage;
     logger.info({ ...ctx }, "auth.login.stage");
-    const { roleName, firmName } = await withAuthSafeDb(async (authDb) => {
-      const hasAuditLogs = await tableExistsAuthDb(authDb, "public.audit_logs");
-
-      stage = "session_create";
-      ctx.stage = stage;
-      logger.info({ ...ctx }, "auth.login.stage");
+    await withAuthSafeDb(async (authDb) => {
       await authDb.insert(sessionsTable).values({
         userId: user.id,
         tokenHash,
@@ -226,16 +221,20 @@ router.post("/auth/login", authRateLimiter, async (req, res): Promise<void> => {
         userAgent: ua ?? null,
         ipAddress: ip ?? null,
       });
+    }, { retry: false, ctx: { ...ctx, stage } });
 
-      const updateFields: Partial<typeof usersTable.$inferInsert> = { lastLoginAt: new Date() };
-      if (didUseTotp) updateFields.totpLastUsedAt = new Date();
-      stage = "last_login_update";
-      ctx.stage = stage;
-      logger.info({ ...ctx }, "auth.login.stage");
-      await authDb.update(usersTable).set(updateFields).where(eq(usersTable.id, user.id));
+    stage = "side_effects";
+    ctx.stage = stage;
+    logger.info({ ...ctx }, "auth.login.stage");
+    void (async () => {
+      try {
+        await withAuthSafeDb(async (authDb) => {
+          const updateFields: Partial<typeof usersTable.$inferInsert> = { lastLoginAt: new Date() };
+          if (didUseTotp) updateFields.totpLastUsedAt = new Date();
+          await authDb.update(usersTable).set(updateFields).where(eq(usersTable.id, user.id));
 
-      if (hasAuditLogs) {
-        try {
+          const hasAuditLogs = await tableExistsAuthDb(authDb, "public.audit_logs");
+          if (!hasAuditLogs) return;
           await authDb.insert(auditLogsTable).values({
             firmId: user.firmId,
             actorId: user.id,
@@ -245,25 +244,39 @@ router.post("/auth/login", authRateLimiter, async (req, res): Promise<void> => {
             ipAddress: ip ?? null,
             userAgent: ua ?? null,
           });
-        } catch (err) {
-          logger.error({ emailHash, userId: user.id, stage: "audit_log_login_success", err }, "auth.login.audit_log_error");
-        }
+        }, { retry: false, ctx: { ...ctx, stage: "side_effects.persist" } });
+      } catch (err) {
+        logger.error({ emailHash, userId: user.id, stage: "side_effects", err }, "auth.login.side_effects_error");
       }
+    })();
 
-      let roleName: string | null = null;
-      if (user.roleId) {
-        const [role] = await authDb.select().from(rolesTable).where(eq(rolesTable.id, user.roleId));
+    let roleName: string | null = null;
+    if (user.roleId) {
+      try {
+        const role = await withAuthSafeDb(async (authDb) => {
+          const [r] = await authDb.select().from(rolesTable).where(eq(rolesTable.id, user.roleId!));
+          return r ?? null;
+        }, { retry: false, ctx: { ...ctx, stage: "role_lookup" } });
         roleName = role?.name ?? null;
+      } catch (err) {
+        logger.error({ ...ctx, stage: "role_lookup", err }, "auth.login.degraded");
+        roleName = null;
       }
+    }
 
-      let firmName: string | null = null;
-      if (user.firmId) {
-        const [firm] = await authDb.select().from(firmsTable).where(eq(firmsTable.id, user.firmId));
+    let firmName: string | null = null;
+    if (user.firmId) {
+      try {
+        const firm = await withAuthSafeDb(async (authDb) => {
+          const [f] = await authDb.select().from(firmsTable).where(eq(firmsTable.id, user.firmId!));
+          return f ?? null;
+        }, { retry: false, ctx: { ...ctx, stage: "firm_lookup" } });
         firmName = firm?.name ?? null;
+      } catch (err) {
+        logger.error({ ...ctx, stage: "firm_lookup", err }, "auth.login.degraded");
+        firmName = null;
       }
-
-      return { roleName, firmName };
-    }, { retry: false, ctx });
+    }
 
     res.cookie("auth_token", token, {
       httpOnly: true,
@@ -292,7 +305,11 @@ router.post("/auth/login", authRateLimiter, async (req, res): Promise<void> => {
     logger.info({ emailHash, userId: user.id, userLookupMs, ms: Date.now() - startedAt }, "auth.login.success");
   } catch (err) {
     logger.error({ emailHash, userId, stage, err }, "[auth-login]");
-    res.status(isTransientDbConnectionError(err) ? 503 : 500).json({ error: "Login temporarily unavailable" });
+    if (isTransientDbConnectionError(err)) {
+      res.status(503).json({ error: "Login temporarily unavailable" });
+      return;
+    }
+    res.status(500).json({ error: "Login failed" });
   }
 });
 
@@ -313,13 +330,33 @@ router.post("/auth/logout", requireAuth, async (req: AuthRequest, res): Promise<
   res.json({ success: true });
 });
 
-router.get("/auth/me", requireAuth, async (req: AuthRequest, res): Promise<void> => {
+router.get("/auth/me", async (req, res): Promise<void> => {
   const startedAt = Date.now();
   const reqId = (req as any).id;
-  const ctxBase = { route: req.path, reqId, userId: req.userId ?? null, firmId: req.firmId ?? null, roleId: req.roleId ?? null };
+  const cookieToken = (req as any).cookies?.["auth_token"];
+  const authHeader = (req as any).headers?.["authorization"];
+  const headerToken =
+    typeof authHeader === "string" && authHeader.startsWith("Bearer ") ? authHeader.slice(7) : undefined;
+  const token = (typeof cookieToken === "string" ? cookieToken : undefined) || headerToken;
+
+  if (!token) {
+    res.sendStatus(204);
+    logger.info({ route: req.path, reqId, stage: "no_token", ms: Date.now() - startedAt }, "auth.me");
+    return;
+  }
+
+  const tokenHash = crypto.createHash("sha256").update(token).digest("hex");
+  const ctxBase = { route: req.path, reqId, stage: "start" };
 
   try {
     const result = await withAuthSafeDb(async (authDb) => {
+      const [s] = await authDb
+        .select({ userId: sessionsTable.userId, expiresAt: sessionsTable.expiresAt })
+        .from(sessionsTable)
+        .where(eq(sessionsTable.tokenHash, tokenHash));
+      if (!s) return { kind: "no_session" as const };
+      if (s.expiresAt < new Date()) return { kind: "expired" as const };
+
       const [user] = await authDb
         .select({
           id: usersTable.id,
@@ -332,7 +369,7 @@ router.get("/auth/me", requireAuth, async (req: AuthRequest, res): Promise<void>
           status: usersTable.status,
         })
         .from(usersTable)
-        .where(eq(usersTable.id, req.userId!));
+        .where(eq(usersTable.id, s.userId));
 
       if (!user) return { kind: "missing_user" as const };
       if (user.status !== "active") return { kind: "inactive_user" as const };
@@ -343,7 +380,7 @@ router.get("/auth/me", requireAuth, async (req: AuthRequest, res): Promise<void>
           const [role] = await authDb.select().from(rolesTable).where(eq(rolesTable.id, user.roleId));
           roleName = role?.name ?? null;
         } catch (err) {
-          logger.error({ ...ctxBase, stage: "role_lookup", err }, "auth.me.degraded");
+          logger.error({ route: req.path, reqId, stage: "role_lookup", err }, "auth.me.degraded");
         }
       }
 
@@ -353,7 +390,7 @@ router.get("/auth/me", requireAuth, async (req: AuthRequest, res): Promise<void>
           const [firm] = await authDb.select().from(firmsTable).where(eq(firmsTable.id, user.firmId));
           firmName = firm?.name ?? null;
         } catch (err) {
-          logger.error({ ...ctxBase, stage: "firm_lookup", err }, "auth.me.degraded");
+          logger.error({ route: req.path, reqId, stage: "firm_lookup", err }, "auth.me.degraded");
         }
       }
 
@@ -365,7 +402,7 @@ router.get("/auth/me", requireAuth, async (req: AuthRequest, res): Promise<void>
             .from(permissionsTable)
             .where(and(eq(permissionsTable.roleId, user.roleId), eq(permissionsTable.allowed, true)));
         } catch (err) {
-          logger.error({ ...ctxBase, stage: "permissions_lookup", err }, "auth.me.degraded");
+          logger.error({ route: req.path, reqId, stage: "permissions_lookup", err }, "auth.me.degraded");
           permissions = [];
         }
       }
@@ -383,18 +420,25 @@ router.get("/auth/me", requireAuth, async (req: AuthRequest, res): Promise<void>
           email: user.email,
           name: user.name,
           department: user.department ?? null,
+          status: user.status,
         },
       };
-    }, { retry: false, ctx: { ...ctxBase, stage: "me" } });
+    }, { retry: false, ctx: { route: req.path, stage: "me", reqId, firmId: null, userId: null } });
 
+    if (result.kind === "no_session" || result.kind === "expired") {
+      if (typeof cookieToken === "string") res.clearCookie("auth_token");
+      res.status(401).json({ error: "Not authenticated" });
+      logger.info({ ...ctxBase, stage: result.kind, ms: Date.now() - startedAt }, "auth.me");
+      return;
+    }
     if (result.kind === "missing_user") {
-      res.clearCookie("auth_token");
+      if (typeof cookieToken === "string") res.clearCookie("auth_token");
       res.status(404).json({ error: "User not found" });
       logger.warn({ ...ctxBase, stage: "missing_user", ms: Date.now() - startedAt }, "auth.me");
       return;
     }
     if (result.kind === "inactive_user") {
-      res.clearCookie("auth_token");
+      if (typeof cookieToken === "string") res.clearCookie("auth_token");
       res.status(401).json({ error: "Not authenticated" });
       logger.warn({ ...ctxBase, stage: "inactive_user", ms: Date.now() - startedAt }, "auth.me");
       return;
@@ -404,7 +448,7 @@ router.get("/auth/me", requireAuth, async (req: AuthRequest, res): Promise<void>
     logger.info({ ...ctxBase, stage: "ok", ms: Date.now() - startedAt }, "auth.me");
   } catch (err) {
     logger.error({ ...ctxBase, stage: "me_error", err }, "auth.me_error");
-    res.status(isTransientDbConnectionError(err) ? 503 : 500).json({ error: "Auth temporarily unavailable" });
+    res.status(503).json({ error: "Auth temporarily unavailable" });
   }
 });
 
