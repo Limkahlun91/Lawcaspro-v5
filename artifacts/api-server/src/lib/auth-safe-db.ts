@@ -87,7 +87,12 @@ async function runWithAuthSafeDbOnce<T>(
       try {
         await setFounderContext(client);
       } catch (err) {
-        logger.error({ ...ctx, stage: "set_founder_context", err }, "auth-safe-db.founder_context_failed");
+        const errMessageShort =
+          err instanceof Error ? err.message.slice(0, 180) : String(err ?? "").slice(0, 180);
+        logger.error(
+          { ...ctx, stage: "set_founder_context", errMessageShort, err },
+          "auth-safe-db.founder_context_failed",
+        );
       }
     } else {
       await setFounderContext(client);

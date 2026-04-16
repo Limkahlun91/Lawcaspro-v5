@@ -315,7 +315,9 @@ router.post("/auth/login", authRateLimiter, async (req, res): Promise<void> => {
     logger.info({ ...ctx, userLookupMs, ms: Date.now() - startedAt }, "auth.login.stage");
     logger.info({ emailHash, userId: user.id, userLookupMs, ms: Date.now() - startedAt }, "auth.login.success");
   } catch (err) {
-    logger.error({ emailHash, userId, stage, err }, "auth.login_failed");
+    const errMessageShort =
+      err instanceof Error ? err.message.slice(0, 180) : String(err ?? "").slice(0, 180);
+    logger.error({ emailHash, userId, stage, errMessageShort, err }, "auth.login_failed");
     if (isTransientDbConnectionError(err)) {
       res.status(503).json({ error: "Login temporarily unavailable" });
       return;
