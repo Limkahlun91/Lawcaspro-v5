@@ -25,6 +25,24 @@ describe("Runtime 500 regressions (no-db)", () => {
     expect(res.body).not.toHaveProperty("sql");
   });
 
+  it("users create unauthenticated returns 401 (not 500)", async () => {
+    const res = await request(app).post("/api/users").send({ email: "x@test.com" });
+    expect(res.status).toBe(401);
+    expect(res.body).toHaveProperty("error");
+    expect(res.body).not.toHaveProperty("detail");
+    expect(res.body).not.toHaveProperty("stack");
+    expect(res.body).not.toHaveProperty("sql");
+  });
+
+  it("hub/documents unauthenticated returns 401 (not 500)", async () => {
+    const res = await request(app).get("/api/hub/documents");
+    expect(res.status).toBe(401);
+    expect(res.body).toHaveProperty("error");
+    expect(res.body).not.toHaveProperty("detail");
+    expect(res.body).not.toHaveProperty("stack");
+    expect(res.body).not.toHaveProperty("sql");
+  });
+
   it("auth/login invalid body returns 400 (not 500)", async () => {
     const res = await request(app).post("/api/auth/login").send({});
     expect(res.status).toBe(400);

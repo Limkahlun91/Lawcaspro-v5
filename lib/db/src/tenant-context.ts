@@ -67,8 +67,14 @@ export async function setTenantContextSession(
   firmId: number,
   userId?: number
 ): Promise<void> {
+  try {
+    await client.query("SET ROLE app_user");
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err ?? "");
+    throw new Error(`Cannot enforce RLS safely: failed to SET ROLE app_user (${message})`);
+  }
   await assertSafeRlsRole(client, "firm");
-  
+
   await client.query(`SET app.current_firm_id = '${firmId}'`);
   await client.query("SET app.is_founder = 'false'");
   if (userId !== undefined) {
@@ -88,8 +94,14 @@ export async function setTenantContext(
   firmId: number,
   userId?: number
 ): Promise<void> {
+  try {
+    await client.query("SET LOCAL ROLE app_user");
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err ?? "");
+    throw new Error(`Cannot enforce RLS safely: failed to SET LOCAL ROLE app_user (${message})`);
+  }
   await assertSafeRlsRole(client, "firm");
-  
+
   await client.query(`SET LOCAL app.current_firm_id = '${firmId}'`);
   await client.query("SET LOCAL app.is_founder = 'false'");
   if (userId !== undefined) {
@@ -98,6 +110,12 @@ export async function setTenantContext(
 }
 
 export async function setFounderContext(client: PoolClient): Promise<void> {
+  try {
+    await client.query("SET LOCAL ROLE app_user");
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err ?? "");
+    throw new Error(`Cannot enforce RLS safely: failed to SET LOCAL ROLE app_user (${message})`);
+  }
   await assertSafeRlsRole(client, "founder");
   await client.query("SET LOCAL app.is_founder = 'true'");
   await client.query("RESET app.current_firm_id");
@@ -111,8 +129,14 @@ export async function setFounderContext(client: PoolClient): Promise<void> {
 export async function setFounderContextSession(
   client: PoolClient
 ): Promise<void> {
+  try {
+    await client.query("SET ROLE app_user");
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err ?? "");
+    throw new Error(`Cannot enforce RLS safely: failed to SET ROLE app_user (${message})`);
+  }
   await assertSafeRlsRole(client, "founder");
-  
+
   await client.query("SET app.is_founder = 'true'");
   await client.query("RESET app.current_firm_id");
   await client.query("RESET app.current_user_id");
@@ -127,6 +151,10 @@ export async function clearTenantContext(client: PoolClient): Promise<void> {
   await client.query("RESET app.current_firm_id");
   await client.query("RESET app.is_founder");
   await client.query("RESET app.current_user_id");
+  try {
+    await client.query("RESET ROLE");
+  } catch {
+  }
 }
 
 /**

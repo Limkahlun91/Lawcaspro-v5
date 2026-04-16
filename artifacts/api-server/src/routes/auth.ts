@@ -313,40 +313,14 @@ router.post("/auth/logout", requireAuth, async (req: AuthRequest, res): Promise<
   res.json({ success: true });
 });
 
-router.get("/auth/me", async (req, res): Promise<void> => {
+router.get("/auth/me", requireAuth, async (req: AuthRequest, res): Promise<void> => {
   const startedAt = Date.now();
-  let stage = "token_parse";
   const reqId = (req as any).id;
-  const cookieToken = (req as any).cookies?.["auth_token"];
-  const authHeader = (req as any).headers?.["authorization"];
-  const headerToken =
-    typeof authHeader === "string" && authHeader.startsWith("Bearer ") ? authHeader.slice(7) : undefined;
-  const token = (typeof cookieToken === "string" ? cookieToken : undefined) || headerToken;
+  const ctxBase = { route: req.path, reqId, userId: req.userId ?? null, firmId: req.firmId ?? null, roleId: req.roleId ?? null };
 
-  const ctxBase = { route: (req as any).path, reqId };
-
-  if (!token) {
-    res.sendStatus(204);
-    logger.info({ ...ctxBase, stage: "no_token", ms: Date.now() - startedAt }, "auth.me.light");
-    return;
-  }
-
-  const tokenHash = crypto.createHash("sha256").update(token).digest("hex");
   try {
     const result = await withAuthSafeDb(async (authDb) => {
-      stage = "session_lookup";
-      const sessionLookupStartedAt = Date.now();
-      const [s] = await authDb
-        .select({ userId: sessionsTable.userId, expiresAt: sessionsTable.expiresAt })
-        .from(sessionsTable)
-        .where(eq(sessionsTable.tokenHash, tokenHash));
-      const sessionLookupMs = Date.now() - sessionLookupStartedAt;
-      if (!s) return { kind: "no_session" as const, sessionLookupMs };
-      if (s.expiresAt < new Date()) return { kind: "expired" as const, sessionLookupMs };
-
-      stage = "user_lookup";
-      const userLookupStartedAt = Date.now();
-      const [u] = await authDb
+      const [user] = await authDb
         .select({
           id: usersTable.id,
           email: usersTable.email,
@@ -358,46 +332,78 @@ router.get("/auth/me", async (req, res): Promise<void> => {
           status: usersTable.status,
         })
         .from(usersTable)
-        .where(eq(usersTable.id, s.userId));
-      const userLookupMs = Date.now() - userLookupStartedAt;
-      if (!u || u.status !== "active") return { kind: "no_user" as const, sessionLookupMs, userLookupMs };
+        .where(eq(usersTable.id, req.userId!));
+
+      if (!user) return { kind: "missing_user" as const };
+      if (user.status !== "active") return { kind: "inactive_user" as const };
+
+      let roleName: string | null = null;
+      if (user.roleId) {
+        try {
+          const [role] = await authDb.select().from(rolesTable).where(eq(rolesTable.id, user.roleId));
+          roleName = role?.name ?? null;
+        } catch (err) {
+          logger.error({ ...ctxBase, stage: "role_lookup", err }, "auth.me.degraded");
+        }
+      }
+
+      let firmName: string | null = null;
+      if (user.firmId) {
+        try {
+          const [firm] = await authDb.select().from(firmsTable).where(eq(firmsTable.id, user.firmId));
+          firmName = firm?.name ?? null;
+        } catch (err) {
+          logger.error({ ...ctxBase, stage: "firm_lookup", err }, "auth.me.degraded");
+        }
+      }
+
+      let permissions: Array<{ module: string; action: string }> = [];
+      if (user.userType === "firm_user" && user.roleId) {
+        try {
+          permissions = await authDb
+            .select({ module: permissionsTable.module, action: permissionsTable.action })
+            .from(permissionsTable)
+            .where(and(eq(permissionsTable.roleId, user.roleId), eq(permissionsTable.allowed, true)));
+        } catch (err) {
+          logger.error({ ...ctxBase, stage: "permissions_lookup", err }, "auth.me.degraded");
+          permissions = [];
+        }
+      }
 
       return {
         kind: "ok" as const,
-        sessionLookupMs,
-        userLookupMs,
         user: {
-          id: u.id,
-          email: u.email,
-          name: u.name,
-          userType: u.userType,
-          firmId: u.firmId,
-          firmName: null,
-          roleId: u.roleId,
-          roleName: null,
-          department: u.department ?? null,
-          status: u.status,
+          id: user.id,
+          userType: user.userType,
+          firmId: user.firmId,
+          roleId: user.roleId,
+          roleName,
+          firmName,
+          permissions,
+          email: user.email,
+          name: user.name,
+          department: user.department ?? null,
         },
       };
-    }, { retry: false, ctx: { ...ctxBase, stage } });
+    }, { retry: false, ctx: { ...ctxBase, stage: "me" } });
 
-    if (result.kind !== "ok") {
-      if (typeof cookieToken === "string") res.clearCookie("auth_token");
+    if (result.kind === "missing_user") {
+      res.clearCookie("auth_token");
+      res.status(404).json({ error: "User not found" });
+      logger.warn({ ...ctxBase, stage: "missing_user", ms: Date.now() - startedAt }, "auth.me");
+      return;
+    }
+    if (result.kind === "inactive_user") {
+      res.clearCookie("auth_token");
       res.status(401).json({ error: "Not authenticated" });
-      logger.info(
-        { ...ctxBase, stage: result.kind, ms: Date.now() - startedAt, ...(result as any) },
-        "auth.me.light",
-      );
+      logger.warn({ ...ctxBase, stage: "inactive_user", ms: Date.now() - startedAt }, "auth.me");
       return;
     }
 
     res.json(result.user);
-    logger.info(
-      { ...ctxBase, stage: "ok", ms: Date.now() - startedAt, sessionLookupMs: result.sessionLookupMs, userLookupMs: result.userLookupMs },
-      "auth.me.light",
-    );
+    logger.info({ ...ctxBase, stage: "ok", ms: Date.now() - startedAt }, "auth.me");
   } catch (err) {
-    logger.error({ ...ctxBase, stage, err }, "auth.me.light_error");
+    logger.error({ ...ctxBase, stage: "me_error", err }, "auth.me_error");
     res.status(isTransientDbConnectionError(err) ? 503 : 500).json({ error: "Auth temporarily unavailable" });
   }
 });

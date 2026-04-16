@@ -7,6 +7,7 @@ import {
   GetUserParams, UpdateUserParams, DeleteUserParams
 } from "@workspace/api-zod";
 import { requireAuth, requireFirmUser, requirePermission, type AuthRequest, writeAuditLog } from "../lib/auth";
+import { withAuthSafeDb } from "../lib/auth-safe-db";
 
 const router: IRouter = Router();
 
@@ -145,6 +146,7 @@ router.get("/users", requireAuth, requireFirmUser, requirePermission("users", "r
 
 router.post("/users", requireAuth, requireFirmUser, requirePermission("users", "create"), async (req: AuthRequest, res): Promise<void> => {
   const r = rdb(req);
+  const reqId = (req as any).id;
   await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "users.create.attempt", detail: req.path, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
   const parsed = CreateUserBody.safeParse(req.body);
   if (!parsed.success) {
@@ -153,43 +155,82 @@ router.post("/users", requireAuth, requireFirmUser, requirePermission("users", "
   }
 
   const { email, name, password, roleId, department, barCouncilNo, nricNo } = parsed.data;
+  const normalizedEmail = email.toLowerCase();
 
-  const [existing] = await r.select().from(usersTable).where(eq(usersTable.email, email.toLowerCase()));
-  if (existing) {
-    res.status(400).json({ error: "Email already in use" });
-    return;
-  }
+  try {
+    const emailTaken = await withAuthSafeDb(async (authDb) => {
+      const [row] = await authDb
+        .select({ id: usersTable.id })
+        .from(usersTable)
+        .where(eq(usersTable.email, normalizedEmail))
+        .limit(1);
+      return Boolean(row);
+    }, { retry: false, ctx: { route: req.path, stage: "users.create.email_exists", reqId, firmId: req.firmId ?? null, userId: req.userId ?? null } });
 
-  const passwordHash = await bcrypt.hash(password, 10);
-  const hasDepartment = await usersDepartmentExists(r);
-  const hasBarCouncilNo = await usersBarCouncilNoExists(r);
-  const hasNricNo = await usersNricNoExists(r);
-  const values: typeof usersTable.$inferInsert = {
-    firmId: req.firmId!,
-    email: email.toLowerCase(),
-    name,
-    passwordHash,
-    roleId,
-    userType: "firm_user",
-    status: "active",
-  };
-  if (hasDepartment) {
-    values.department = department ?? null;
-  }
-  if (hasBarCouncilNo) {
-    values.barCouncilNo = barCouncilNo?.trim() ? barCouncilNo.trim() : null;
-  }
-  if (hasNricNo) {
-    values.nricNo = nricNo?.trim() ? nricNo.trim() : null;
-  }
+    if (emailTaken) {
+      res.status(400).json({ error: "Email already in use" });
+      return;
+    }
 
-  const [user] = await r
-    .insert(usersTable)
-    .values(values)
-    .returning();
+    const passwordHash = await bcrypt.hash(password, 10);
 
-  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "users.create", entityType: "user", entityId: user.id, detail: `email=${user.email}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
-  res.status(201).json(await enrichUser(r, req.firmId!, user));
+    const created = await (r as any).transaction(async (tx: DbConn) => {
+      const [role] = await tx
+        .select({ id: rolesTable.id, name: rolesTable.name })
+        .from(rolesTable)
+        .where(and(eq(rolesTable.id, roleId), eq(rolesTable.firmId, req.firmId!)));
+      if (!role) {
+        return { kind: "bad_role" as const };
+      }
+
+      const legalRoleNames = new Set(["Lawyer", "Senior Lawyer", "Partner"]);
+      const isLegalRole = legalRoleNames.has(role.name);
+
+      const hasDepartment = await usersDepartmentExists(tx);
+      const hasBarCouncilNo = await usersBarCouncilNoExists(tx);
+      const hasNricNo = await usersNricNoExists(tx);
+
+      if (hasBarCouncilNo && isLegalRole && !barCouncilNo?.trim()) {
+        return { kind: "missing_bar_council" as const };
+      }
+
+      const values: typeof usersTable.$inferInsert = {
+        firmId: req.firmId!,
+        email: normalizedEmail,
+        name,
+        passwordHash,
+        roleId,
+        userType: "firm_user",
+        status: "active",
+      };
+      if (hasDepartment) values.department = department ?? null;
+      if (hasBarCouncilNo) values.barCouncilNo = isLegalRole ? (barCouncilNo?.trim() ? barCouncilNo.trim() : null) : null;
+      if (hasNricNo) values.nricNo = nricNo?.trim() ? nricNo.trim() : null;
+
+      const [user] = await tx.insert(usersTable).values(values).returning();
+      return { kind: "ok" as const, user };
+    });
+
+    if (created.kind === "bad_role") {
+      res.status(400).json({ error: "Invalid roleId" });
+      return;
+    }
+    if (created.kind === "missing_bar_council") {
+      res.status(400).json({ error: "Bar Council No. is required for legal roles" });
+      return;
+    }
+
+    await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "users.create", entityType: "user", entityId: created.user.id, detail: `email=${created.user.email}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+    res.status(201).json(await enrichUser(r, req.firmId!, created.user));
+  } catch (err) {
+    const code = (err as any)?.code;
+    (req as any).log?.error?.({ err, code, route: req.originalUrl, firmId: req.firmId, userId: req.userId }, "users.create_failed");
+    if (code === "23505") {
+      res.status(400).json({ error: "Email already in use" });
+      return;
+    }
+    res.status(500).json({ error: "Failed to create user" });
+  }
 });
 
 router.get("/users/:userId", requireAuth, requireFirmUser, requirePermission("users", "read"), async (req: AuthRequest, res): Promise<void> => {
