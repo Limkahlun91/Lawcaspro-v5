@@ -246,7 +246,7 @@ router.post("/auth/login", authRateLimiter, async (req, res): Promise<void> => {
           });
         }, { retry: false, ctx: { ...ctx, stage: "side_effects.persist" } });
       } catch (err) {
-        logger.error({ emailHash, userId: user.id, stage: "side_effects", err }, "auth.login.side_effects_error");
+        logger.error({ emailHash, userId: user.id, stage: "side_effects", err }, "auth.login_side_effect_failed");
       }
     })();
 
@@ -304,7 +304,7 @@ router.post("/auth/login", authRateLimiter, async (req, res): Promise<void> => {
     logger.info({ ...ctx, userLookupMs, ms: Date.now() - startedAt }, "auth.login.stage");
     logger.info({ emailHash, userId: user.id, userLookupMs, ms: Date.now() - startedAt }, "auth.login.success");
   } catch (err) {
-    logger.error({ emailHash, userId, stage, err }, "[auth-login]");
+    logger.error({ emailHash, userId, stage, err }, "auth.login_failed");
     if (isTransientDbConnectionError(err)) {
       res.status(503).json({ error: "Login temporarily unavailable" });
       return;
@@ -475,8 +475,8 @@ router.get("/auth/permissions", requireAuth, async (req: AuthRequest, res): Prom
     res.json({ permissions: permissions.rows });
     logger.info({ ...ctx, stage: "ok", ms: Date.now() - startedAt, permissionsLookupMs: permissions.ms, count: permissions.rows.length }, "auth.permissions");
   } catch (err) {
-    logger.error({ ...ctx, err }, "auth.permissions_error");
-    res.status(isTransientDbConnectionError(err) ? 503 : 500).json({ error: "Auth temporarily unavailable" });
+    logger.error({ ...ctx, err }, "auth.permissions_failed");
+    res.status(503).json({ error: "Auth temporarily unavailable" });
   }
 });
 
