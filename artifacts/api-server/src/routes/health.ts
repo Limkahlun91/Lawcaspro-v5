@@ -3,6 +3,7 @@ import { HealthCheckResponse } from "@workspace/api-zod";
 import { pool } from "@workspace/db";
 import { withAuthSafeDb } from "../lib/auth-safe-db";
 import { logger } from "../lib/logger";
+import { sql } from "drizzle-orm";
 
 const router: IRouter = Router();
 
@@ -35,7 +36,7 @@ router.get("/healthz/authsafe", async (req, res) => {
   const reqId = (req as { id?: unknown } | null)?.id;
   try {
     await withAuthSafeDb(async (authDb) => {
-      await authDb.execute("select 1 as ok");
+      await authDb.execute(sql`select 1 as ok`);
     }, { retry: true, maxRetries: 1, allowUnsafe: true, ctx: { route: req.path, stage: "healthz", reqId } });
     res.json({ status: "ok", authSafeDb: "ok" });
   } catch (err) {
@@ -44,10 +45,25 @@ router.get("/healthz/authsafe", async (req, res) => {
       const c = (err as { code?: unknown }).code;
       return typeof c === "string" ? c : undefined;
     })();
+    const cause = (err && typeof err === "object" ? (err as { cause?: unknown }).cause : undefined) ?? undefined;
+    const causeCode = (() => {
+      if (!cause || typeof cause !== "object") return undefined;
+      const c = (cause as { code?: unknown }).code;
+      return typeof c === "string" ? c : undefined;
+    })();
     const errMessageShort =
       err instanceof Error ? err.message.slice(0, 180) : String(err ?? "").slice(0, 180);
+    const causeMessageShort =
+      cause instanceof Error ? cause.message.slice(0, 180) : cause ? String(cause).slice(0, 180) : null;
     logger.error({ route: req.path, reqId, code, errMessageShort, err }, "healthz.authsafe_failed");
-    res.status(500).json({ status: "error", authSafeDb: "error", code: code ?? null, error: errMessageShort });
+    res.status(500).json({
+      status: "error",
+      authSafeDb: "error",
+      code: code ?? null,
+      causeCode: causeCode ?? null,
+      error: errMessageShort,
+      cause: causeMessageShort,
+    });
   }
 });
 
