@@ -1,4 +1,4 @@
-import { makeRlsDb, pool, setFounderContext } from "@workspace/db";
+import { clearTenantContext, makeRlsDb, pool, setFounderContext } from "@workspace/db";
 import { logger } from "./logger";
 
 export type AuthSafeDbContext = {
@@ -100,6 +100,10 @@ async function runWithAuthSafeDbOnce<T>(
     }
     throw err;
   } finally {
+    try {
+      await clearTenantContext(client);
+    } catch {
+    }
     client.release(destroyClient);
   }
 }
