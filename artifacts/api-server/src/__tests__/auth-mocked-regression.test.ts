@@ -17,6 +17,7 @@ type AuthDbState = {
   rolesById: Map<number, unknown>;
   firmsById: Map<number, unknown>;
   throwPermissionsSelect: boolean;
+  throwUndefinedColumnOnUserLookup: boolean;
 };
 
 const state: AuthDbState = {
@@ -26,6 +27,7 @@ const state: AuthDbState = {
   rolesById: new Map(),
   firmsById: new Map(),
   throwPermissionsSelect: false,
+  throwUndefinedColumnOnUserLookup: false,
 };
 
 vi.mock("bcryptjs", () => ({
@@ -67,13 +69,18 @@ vi.mock("../lib/auth-safe-db", async (orig) => {
     if (stage === "side_effects.persist") {
       throw new Error("audit write failed");
     }
+    if (stage === "user_lookup" && state.throwUndefinedColumnOnUserLookup) {
+      const e = new Error('column "totp_secret" does not exist') as Error & { code?: string };
+      e.code = "42703";
+      throw e;
+    }
 
     const authDb = makeAuthDb();
 
     authDb.select = () => ({
       from: (table: unknown) => ({
         where: async () => {
-          if (table === usersTable && stage === "user_lookup") {
+          if (table === usersTable && (stage === "user_lookup" || stage === "user_lookup_fallback")) {
             const u = Array.from(state.usersByEmail.values())[0] ?? null;
             return u ? [u] : emptyRows();
           }
@@ -144,6 +151,7 @@ describe("Auth mocked regressions", () => {
     state.rolesById.clear();
     state.firmsById.clear();
     state.throwPermissionsSelect = false;
+    state.throwUndefinedColumnOnUserLookup = false;
 
     const user = {
       id: 10,
@@ -166,6 +174,21 @@ describe("Auth mocked regressions", () => {
     expect(res.status).toBe(200);
     expect(res.body).toHaveProperty("token");
     expect(res.headers["set-cookie"]).toBeTruthy();
+  });
+
+  it("login returns 401 when user not found even if schema mismatch triggers fallback", async () => {
+    state.usersByEmail.clear();
+    state.usersById.clear();
+    state.sessionsByTokenHash.clear();
+    state.rolesById.clear();
+    state.firmsById.clear();
+    state.throwPermissionsSelect = false;
+    state.throwUndefinedColumnOnUserLookup = true;
+
+    const res = await request(app)
+      .post("/api/auth/login")
+      .send({ email: "noone@example.com", password: "badpw" });
+    expect(res.status).toBe(401);
   });
 
   it("auth/me no token returns 204", async () => {
@@ -205,6 +228,7 @@ describe("Auth mocked regressions", () => {
 
     state.sessionsByTokenHash.set("th", { userId: 11, expiresAt: new Date(Date.now() + 60_000) });
     state.throwPermissionsSelect = true;
+    state.throwUndefinedColumnOnUserLookup = false;
 
     const res = await request(app).get("/api/auth/me").set("Cookie", "auth_token=token");
     expect(res.status).toBe(200);

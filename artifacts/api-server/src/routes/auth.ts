@@ -24,6 +24,20 @@ const getCookieToken = (req: unknown): string | undefined => {
   return typeof token === "string" ? token : undefined;
 };
 
+const isUndefinedColumnError = (err: unknown): boolean => {
+  if (!err || typeof err !== "object") return false;
+  const code = (err as { code?: unknown }).code;
+  if (code === "42703") return true;
+  const message =
+    err instanceof Error
+      ? err.message
+      : typeof (err as { message?: unknown }).message === "string"
+        ? ((err as { message: string }).message as string)
+        : String(err);
+  const lowered = message.toLowerCase();
+  return lowered.includes("column") && lowered.includes("does not exist");
+};
+
 async function tableExistsAuthDb(
   authDb: { execute: (q: SQL<unknown>) => Promise<unknown> },
   reg: string,
@@ -78,24 +92,75 @@ router.post("/auth/login", authRateLimiter, async (req, res): Promise<void> => {
     ctx.stage = stage;
     const userLookupStartedAt = Date.now();
     logger.info({ ...ctx }, "auth.login.stage");
-    const user = await withAuthSafeDb(async (authDb) => {
-      const [u] = await authDb
-        .select({
-          id: usersTable.id,
-          firmId: usersTable.firmId,
-          email: usersTable.email,
-          name: usersTable.name,
-          passwordHash: usersTable.passwordHash,
-          userType: usersTable.userType,
-          roleId: usersTable.roleId,
-          status: usersTable.status,
-          totpSecret: usersTable.totpSecret,
-          totpEnabled: usersTable.totpEnabled,
-        })
-        .from(usersTable)
-        .where(eq(usersTable.email, emailNormalized));
-      return u ?? null;
-    }, { retry: true, maxRetries: 2, ctx, allowUnsafe: true });
+    type LoginUser = {
+      id: number;
+      firmId: number | null;
+      email: string;
+      name: string;
+      passwordHash: string;
+      userType: string;
+      roleId: number | null;
+      status: string;
+      totpSecret: string | null;
+      totpEnabled: boolean;
+    };
+
+    const user: LoginUser | null = await (async () => {
+      try {
+        return await withAuthSafeDb(async (authDb) => {
+          const [u] = await authDb
+            .select({
+              id: usersTable.id,
+              firmId: usersTable.firmId,
+              email: usersTable.email,
+              name: usersTable.name,
+              passwordHash: usersTable.passwordHash,
+              userType: usersTable.userType,
+              roleId: usersTable.roleId,
+              status: usersTable.status,
+              totpSecret: usersTable.totpSecret,
+              totpEnabled: usersTable.totpEnabled,
+            })
+            .from(usersTable)
+            .where(eq(usersTable.email, emailNormalized));
+          return (u as LoginUser | undefined) ?? null;
+        }, { retry: true, maxRetries: 2, ctx, allowUnsafe: true });
+      } catch (err) {
+        if (!isUndefinedColumnError(err)) throw err;
+        const errMessageShort =
+          err instanceof Error ? err.message.slice(0, 180) : String(err ?? "").slice(0, 180);
+        logger.warn({ ...ctx, stage: "user_lookup_fallback", errMessageShort, err }, "auth.login.degraded_schema");
+        return await withAuthSafeDb(async (authDb) => {
+          const [u] = await authDb
+            .select({
+              id: usersTable.id,
+              firmId: usersTable.firmId,
+              email: usersTable.email,
+              name: usersTable.name,
+              passwordHash: usersTable.passwordHash,
+              userType: usersTable.userType,
+              roleId: usersTable.roleId,
+              status: usersTable.status,
+            })
+            .from(usersTable)
+            .where(eq(usersTable.email, emailNormalized));
+
+          if (!u) return null;
+          return {
+            id: u.id,
+            firmId: u.firmId,
+            email: u.email,
+            name: u.name,
+            passwordHash: u.passwordHash,
+            userType: u.userType,
+            roleId: u.roleId,
+            status: u.status,
+            totpEnabled: false,
+            totpSecret: null,
+          } satisfies LoginUser;
+        }, { retry: true, maxRetries: 2, ctx: { ...ctx, stage: "user_lookup_fallback" }, allowUnsafe: true });
+      }
+    })();
 
     if (!user) {
       logger.info({ emailHash, ms: Date.now() - startedAt }, "auth.login.user_not_found");
