@@ -7,6 +7,21 @@ import { clearStoredAuthToken } from "./auth-token";
 import { onAuthUnauthorized } from "./auth-events";
 import { ME_QUERY_KEY } from "./query-keys";
 
+const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null;
+
+const parsePermissionsPayload = (body: unknown): Array<{ module: string; action: string }> => {
+  if (!isRecord(body)) return [];
+  const perms = body.permissions;
+  if (!Array.isArray(perms)) return [];
+  return perms
+    .filter((p): p is Record<string, unknown> => isRecord(p))
+    .map((p) => ({
+      module: typeof p.module === "string" ? p.module : "",
+      action: typeof p.action === "string" ? p.action : "",
+    }))
+    .filter((p) => p.module && p.action);
+};
+
 interface AuthContextType {
   user: AuthUser | null;
   isLoading: boolean;
@@ -63,14 +78,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       });
       if (res.status === 401 || res.status === 204) return { permissions: [] };
       if (res.status === 404) return { permissions: [], unavailable: true };
-      const body = (await res.json()) as unknown;
-      const perms = (body as any)?.permissions;
-      if (!Array.isArray(perms)) return { permissions: [] };
       return {
-        permissions: perms
-          .filter((p: any) => p && typeof p === "object")
-          .map((p: any) => ({ module: String(p.module ?? ""), action: String(p.action ?? "") }))
-          .filter((p: any) => p.module && p.action),
+        permissions: parsePermissionsPayload((await res.json()) as unknown),
       };
     },
   });
@@ -80,10 +89,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     if (!permissionsQuery.data) return;
     if (permissionsQuery.data.unavailable) return;
     const next = permissionsQuery.data.permissions ?? [];
-    const current = (user as unknown as { permissions?: unknown }).permissions;
+    const current = (user as { permissions?: unknown } | null)?.permissions;
     if (Array.isArray(current)) {
       if (current.length === next.length) {
-        const a = current.map((p: any) => `${String(p.module)}:${String(p.action)}`).sort().join("|");
+        const a = current
+          .filter((p): p is Record<string, unknown> => isRecord(p))
+          .map((p) => `${String(p.module ?? "")}:${String(p.action ?? "")}`)
+          .sort()
+          .join("|");
         const b = next.map((p) => `${p.module}:${p.action}`).sort().join("|");
         if (a === b) return;
       }

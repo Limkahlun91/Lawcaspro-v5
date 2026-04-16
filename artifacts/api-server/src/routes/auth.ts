@@ -13,6 +13,17 @@ import QRCode from "qrcode";
 
 const router: IRouter = Router();
 
+const getReqId = (req: unknown): string | undefined => {
+  const id = (req as { id?: unknown } | null)?.id;
+  return typeof id === "string" ? id : undefined;
+};
+
+const getCookieToken = (req: unknown): string | undefined => {
+  const cookies = (req as { cookies?: Record<string, unknown> } | null)?.cookies;
+  const token = cookies?.["auth_token"];
+  return typeof token === "string" ? token : undefined;
+};
+
 async function tableExistsAuthDb(
   authDb: { execute: (q: SQL<unknown>) => Promise<unknown> },
   reg: string,
@@ -55,7 +66,7 @@ router.post("/auth/login", authRateLimiter, async (req, res): Promise<void> => {
       .slice(0, 12);
     const ip = req.ip;
     const ua = req.headers["user-agent"];
-    const reqId = (req as any).id;
+    const reqId = getReqId(req);
 
     const ctx = { route: req.path, stage, reqId, emailHash, firmId: null as number | null, userId: null as number | null };
 
@@ -309,7 +320,7 @@ router.post("/auth/login", authRateLimiter, async (req, res): Promise<void> => {
       res.status(503).json({ error: "Login temporarily unavailable" });
       return;
     }
-    res.status(500).json({ error: "Login failed" });
+    res.status(503).json({ error: "Login temporarily unavailable" });
   }
 });
 
@@ -332,9 +343,9 @@ router.post("/auth/logout", requireAuth, async (req: AuthRequest, res): Promise<
 
 router.get("/auth/me", async (req, res): Promise<void> => {
   const startedAt = Date.now();
-  const reqId = (req as any).id;
-  const cookieToken = (req as any).cookies?.["auth_token"];
-  const authHeader = (req as any).headers?.["authorization"];
+  const reqId = getReqId(req);
+  const cookieToken = getCookieToken(req);
+  const authHeader = req.headers.authorization;
   const headerToken =
     typeof authHeader === "string" && authHeader.startsWith("Bearer ") ? authHeader.slice(7) : undefined;
   const token = (typeof cookieToken === "string" ? cookieToken : undefined) || headerToken;
@@ -454,7 +465,7 @@ router.get("/auth/me", async (req, res): Promise<void> => {
 
 router.get("/auth/permissions", requireAuth, async (req: AuthRequest, res): Promise<void> => {
   const startedAt = Date.now();
-  const reqId = (req as any).id;
+  const reqId = getReqId(req);
   const ctx = { route: req.path, reqId, userId: req.userId ?? null, firmId: req.firmId ?? null, roleId: req.roleId ?? null };
   try {
     if (req.userType !== "firm_user" || !req.roleId) {
