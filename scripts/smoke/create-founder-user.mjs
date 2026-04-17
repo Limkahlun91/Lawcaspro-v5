@@ -42,18 +42,16 @@ const main = async () => {
 
     if (founders.rowCount > 0) {
       const match = founders.rows.find((r) => String(r.email).toLowerCase() === founderEmail) ?? null;
-      if (!match) {
-        const existing = founders.rows.map((r) => String(r.email)).slice(0, 5);
-        throw new Error(`Founder already exists with different email(s): ${existing.join(", ")}`);
-      }
+      const targetId = match ? match.id : founders.rows[0].id;
+      const action = match ? "updated" : "replaced";
 
       await client.query(
-        "update users set password_hash=$1, status='active', firm_id=null, role_id=null, user_type='founder', totp_enabled=false, totp_secret=null where id=$2",
-        [passwordHash, match.id],
+        "update users set email=$1, password_hash=$2, status='active', firm_id=null, role_id=null, user_type='founder', totp_enabled=false, totp_secret=null where id=$3",
+        [founderEmail, passwordHash, targetId],
       );
 
       await client.query("COMMIT");
-      console.log(JSON.stringify({ at: now(), ok: true, action: "updated", userId: match.id, email: founderEmail }, null, 2));
+      console.log(JSON.stringify({ at: now(), ok: true, action, userId: targetId, email: founderEmail }, null, 2));
       return;
     }
 
