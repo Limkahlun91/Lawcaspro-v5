@@ -11,6 +11,21 @@ const main = async () => {
   const founderEmail = requiredEnv("FOUNDER_EMAIL").trim().toLowerCase();
   const founderPassword = requiredEnv("FOUNDER_PASSWORD");
 
+  if (!databaseUrl.startsWith("postgres://") && !databaseUrl.startsWith("postgresql://")) {
+    console.error(
+      JSON.stringify(
+        {
+          at: now(),
+          ok: false,
+          error: "DATABASE_URL must be a Postgres connection string, not Supabase project HTTPS URL",
+        },
+        null,
+        2,
+      ),
+    );
+    process.exit(1);
+  }
+
   const { Pool } = await import("pg");
   const bcrypt = await import("bcryptjs");
   const pool = new Pool({ connectionString: databaseUrl });
@@ -86,4 +101,3 @@ main().catch((err) => {
   console.error(JSON.stringify({ at: now(), ok: false, error: msg.slice(0, 500) }, null, 2));
   process.exit(1);
 });
-

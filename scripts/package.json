@@ -8,6 +8,10 @@
     "platform:documents:e2e": "tsx ./src/platform-documents-e2e.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
+  "dependencies": {
+    "bcryptjs": "^3.0.2",
+    "pg": "^8.20.0"
+  },
   "devDependencies": {
     "@types/node": "catalog:",
     "tsx": "catalog:"
