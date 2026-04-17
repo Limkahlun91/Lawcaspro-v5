@@ -11,6 +11,7 @@ export default defineConfig({
     include: hasDatabaseUrl
       ? ["src/__tests__/**/*.test.ts"]
       : [
+        "src/__tests__/auth-founder-bcrypt-regression.test.ts",
         "src/__tests__/auth-mocked-regression.test.ts",
         "src/__tests__/users-hub-regression.test.ts",
         "src/__tests__/sql-regression.test.ts",
