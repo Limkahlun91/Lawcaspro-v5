@@ -3,7 +3,7 @@ import { HealthCheckResponse } from "@workspace/api-zod";
 import { pool } from "@workspace/db";
 import crypto from "crypto";
 import { db, usersTable } from "@workspace/db";
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 
 const router: IRouter = Router();
 
@@ -80,7 +80,7 @@ router.get("/healthz/founder-exists", async (req, res) => {
     const [u] = await db
       .select({ id: usersTable.id, status: usersTable.status })
       .from(usersTable)
-      .where(and(eq(usersTable.userType, "founder"), eq(usersTable.email, email)))
+      .where(and(eq(usersTable.userType, "founder"), eq(sql`lower(trim(${usersTable.email}))`, email)))
       .limit(1);
     res.json({ status: "ok", exists: Boolean(u), userId: u?.id ?? null, userStatus: u?.status ?? null });
   } catch (err) {

@@ -160,7 +160,7 @@ router.post("/auth/login", authRateLimiter, async (req, res): Promise<void> => {
                 totpEnabled: usersTable.totpEnabled,
               })
               .from(usersTable)
-              .where(eq(usersTable.email, emailNormalized)),
+              .where(eq(sql`lower(trim(${usersTable.email}))`, emailNormalized)),
           { ...ctx, stage: "user_lookup.query" },
           2,
         );
@@ -186,7 +186,7 @@ router.post("/auth/login", authRateLimiter, async (req, res): Promise<void> => {
                 status: usersTable.status,
               })
               .from(usersTable)
-              .where(eq(usersTable.email, emailNormalized)),
+              .where(eq(sql`lower(trim(${usersTable.email}))`, emailNormalized)),
           { ...ctx, stage: "user_lookup_fallback.query" },
           2,
         );
