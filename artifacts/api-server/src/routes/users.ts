@@ -145,6 +145,7 @@ router.get("/users", requireAuth, requireFirmUser, requirePermission("users", "r
 });
 
 router.post("/users", requireAuth, requireFirmUser, requirePermission("users", "create"), async (req: AuthRequest, res): Promise<void> => {
+  const startedAt = Date.now();
   const r = rdb(req);
   const reqId = (req as { id?: unknown } | null)?.id;
   await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "users.create.attempt", detail: req.path, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
@@ -222,7 +223,19 @@ router.post("/users", requireAuth, requireFirmUser, requirePermission("users", "
     res.status(201).json(await enrichUser(r, req.firmId!, created.user));
   } catch (err) {
     const code = (err as any)?.code;
-    logger.error({ err, code, route: req.originalUrl, firmId: req.firmId ?? null, userId: req.userId ?? null, reqId }, "users.create_failed");
+    logger.error(
+      {
+        err,
+        route: req.originalUrl,
+        firmId: req.firmId ?? null,
+        userId: req.userId ?? null,
+        requestId: reqId ?? null,
+        sqlState: typeof code === "string" ? code : null,
+        errorCode: typeof code === "string" ? code : null,
+        durationMs: Date.now() - startedAt,
+      },
+      "users.create_failed",
+    );
     if (code === "23505") {
       res.status(400).json({ error: "Email already in use" });
       return;

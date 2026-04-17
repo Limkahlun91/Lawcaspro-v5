@@ -21,7 +21,17 @@ const one = (v: unknown): string | undefined => {
 const getRlsDb = (req: AuthRequest, res: any): NonNullable<AuthRequest["rlsDb"]> | null => {
   const r = req.rlsDb;
   if (!r) {
-    logger.error({ route: req.originalUrl, userId: req.userId ?? null, firmId: req.firmId ?? null }, "rls.missing_context");
+    logger.error(
+      {
+        route: req.originalUrl,
+        requestId: (req as { id?: unknown } | null)?.id ?? null,
+        userId: req.userId ?? null,
+        firmId: req.firmId ?? null,
+        errorCode: "RLS_CONTEXT",
+        sqlState: null,
+      },
+      "rls.missing_context",
+    );
     res.status(503).json({ error: "Tenant context temporarily unavailable", code: "RLS_CONTEXT" });
     return null;
   }
@@ -53,6 +63,7 @@ function contentDispositionAttachment(filename: string): string {
 // ─── Firm → Founder messages ──────────────────────────────────────────────────
 
 router.get("/hub/messages", requireAuth, requireFirmUser, requirePermission("communications", "read"), async (req: AuthRequest, res): Promise<void> => {
+  const startedAt = Date.now();
   const r = getRlsDb(req, res);
   if (!r) return;
   const firmId = req.firmId!;
@@ -76,7 +87,24 @@ router.get("/hub/messages", requireAuth, requireFirmUser, requirePermission("com
 
     res.json(enriched);
   } catch (err) {
-    logger.error({ err, route: req.originalUrl, firmId: req.firmId ?? null, userId: req.userId ?? null }, "hub.messages_failed");
+    const sqlState = (() => {
+      if (!err || typeof err !== "object") return undefined;
+      const c = (err as { code?: unknown }).code;
+      return typeof c === "string" ? c : undefined;
+    })();
+    logger.error(
+      {
+        err,
+        route: req.originalUrl,
+        requestId: (req as { id?: unknown } | null)?.id ?? null,
+        firmId: req.firmId ?? null,
+        userId: req.userId ?? null,
+        errorCode: sqlState ?? null,
+        sqlState: sqlState ?? null,
+        durationMs: Date.now() - startedAt,
+      },
+      "hub.messages_failed",
+    );
     res.status(503).json({ error: "Failed to load messages" });
   }
 });
@@ -213,6 +241,7 @@ router.get("/hub/folders", requireAuth, requireFirmUser, requirePermission("docu
 // ─── System Documents (visible to firm) ──────────────────────────────────────
 
 router.get("/hub/documents", requireAuth, requireFirmUser, requirePermission("documents", "read"), async (req: AuthRequest, res): Promise<void> => {
+  const startedAt = Date.now();
   const r = getRlsDb(req, res);
   if (!r) return;
   const firmId = req.firmId!;
@@ -242,7 +271,24 @@ router.get("/hub/documents", requireAuth, requireFirmUser, requirePermission("do
 
     res.json(filtered);
   } catch (err) {
-    logger.error({ err, route: req.originalUrl, firmId: req.firmId ?? null, userId: req.userId ?? null }, "hub.documents_failed");
+    const sqlState = (() => {
+      if (!err || typeof err !== "object") return undefined;
+      const c = (err as { code?: unknown }).code;
+      return typeof c === "string" ? c : undefined;
+    })();
+    logger.error(
+      {
+        err,
+        route: req.originalUrl,
+        requestId: (req as { id?: unknown } | null)?.id ?? null,
+        firmId: req.firmId ?? null,
+        userId: req.userId ?? null,
+        errorCode: sqlState ?? null,
+        sqlState: sqlState ?? null,
+        durationMs: Date.now() - startedAt,
+      },
+      "hub.documents_failed",
+    );
     res.status(503).json({ error: "Failed to load documents" });
   }
 });

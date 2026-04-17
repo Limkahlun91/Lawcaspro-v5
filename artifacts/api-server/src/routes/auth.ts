@@ -38,12 +38,19 @@ const isUndefinedColumnError = (err: unknown): boolean => {
   return lowered.includes("column") && lowered.includes("does not exist");
 };
 
+const getSqlState = (err: unknown): string | undefined => {
+  if (!err || typeof err !== "object") return undefined;
+  const code = (err as { code?: unknown }).code;
+  return typeof code === "string" ? code : undefined;
+};
+
 async function withTransientDbRetry<T>(
   fn: () => Promise<T>,
   ctx: { route?: string; reqId?: unknown; stage?: string; firmId?: number | null; userId?: number | null; emailHash?: string },
   maxRetries: number,
 ): Promise<T> {
   let lastErr: unknown;
+  const startedAt = Date.now();
   for (let attempt = 1; attempt <= 1 + maxRetries; attempt++) {
     try {
       return await fn();
@@ -51,7 +58,18 @@ async function withTransientDbRetry<T>(
       lastErr = err;
       const shouldRetry = isTransientDbConnectionError(err) && attempt <= maxRetries;
       if (!shouldRetry) throw err;
-      logger.warn({ ...ctx, attempt, err }, "auth.db_transient_retry");
+      logger.warn(
+        {
+          ...ctx,
+          attempt,
+          retryCount: attempt,
+          durationMs: Date.now() - startedAt,
+          sqlState: getSqlState(err) ?? null,
+          errorCode: getSqlState(err) ?? null,
+          err,
+        },
+        "auth.db_transient_retry",
+      );
     }
   }
   throw lastErr;
@@ -357,7 +375,21 @@ router.post("/auth/login", authRateLimiter, async (req, res): Promise<void> => {
           userAgent: ua ?? null,
         });
       } catch (err) {
-        logger.error({ emailHash, userId: user.id, stage: "side_effects", err }, "auth.login_side_effect_failed");
+        logger.error(
+          {
+            emailHash,
+            userId: user.id,
+            route: req.path,
+            reqId: getReqId(req) ?? null,
+            firmId: user.firmId ?? null,
+            stage: "side_effects",
+            durationMs: Date.now() - startedAt,
+            sqlState: getSqlState(err) ?? null,
+            errorCode: getSqlState(err) ?? null,
+            err,
+          },
+          "auth.login_side_effect_failed",
+        );
       }
     })();
 
@@ -411,7 +443,21 @@ router.post("/auth/login", authRateLimiter, async (req, res): Promise<void> => {
   } catch (err) {
     const errMessageShort =
       err instanceof Error ? err.message.slice(0, 180) : String(err ?? "").slice(0, 180);
-    logger.error({ emailHash, userId, stage, errMessageShort, err }, "auth.login_failed");
+    logger.error(
+      {
+        emailHash,
+        userId,
+        route: req.path,
+        reqId: getReqId(req) ?? null,
+        stage,
+        durationMs: Date.now() - startedAt,
+        sqlState: getSqlState(err) ?? null,
+        errorCode: getSqlState(err) ?? null,
+        errMessageShort,
+        err,
+      },
+      "auth.login_failed",
+    );
     if (isTransientDbConnectionError(err)) {
       res.status(503).json({ error: "Login temporarily unavailable" });
       return;
@@ -548,7 +594,17 @@ router.get("/auth/me", async (req, res): Promise<void> => {
     });
     logger.info({ ...ctxBase, stage: "ok", ms: Date.now() - startedAt }, "auth.me");
   } catch (err) {
-    logger.error({ ...ctxBase, stage: "me_error", err }, "auth.me_error");
+    logger.error(
+      {
+        ...ctxBase,
+        stage: "me_error",
+        durationMs: Date.now() - startedAt,
+        sqlState: getSqlState(err) ?? null,
+        errorCode: getSqlState(err) ?? null,
+        err,
+      },
+      "auth.me_error",
+    );
     if (typeof cookieToken === "string") res.clearCookie("auth_token");
     res.status(401).json({ error: "Not authenticated" });
   }

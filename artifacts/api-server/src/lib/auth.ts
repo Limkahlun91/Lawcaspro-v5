@@ -221,6 +221,11 @@ export async function requireFirmUser(
     } catch {
     }
     const message = err instanceof Error ? err.message : String(err);
+    const sqlState = (() => {
+      if (!err || typeof err !== "object") return undefined;
+      const c = (err as { code?: unknown }).code;
+      return typeof c === "string" ? c : undefined;
+    })();
     logger.error({ err, message, userId: req.userId, firmId: req.firmId }, "auth.firm_context_error");
     const code =
       message.includes("must be member of role") || message.includes("permission denied")
@@ -228,7 +233,19 @@ export async function requireFirmUser(
         : message.includes("SET ROLE") || message.includes("RESET ROLE") || message.includes("Cannot enforce RLS safely")
           ? "RLS_CONTEXT"
           : "DB";
-    logger.error({ code, userId: req.userId, firmId: req.firmId }, "auth.firm_context_failed");
+    logger.error(
+      {
+        route: req.path,
+        requestId: getReqId(req) ?? null,
+        code,
+        errorCode: code,
+        sqlState: sqlState ?? null,
+        userId: req.userId ?? null,
+        firmId: req.firmId ?? null,
+        err,
+      },
+      "auth.firm_context_failed",
+    );
     res.status(503).json({ error: "Tenant context temporarily unavailable", code });
     return;
   }
@@ -294,7 +311,26 @@ export function requirePermission(moduleName: string, action: string) {
         try {
           await ensureBaselinePermissions(rlsDb, role.id, role.name);
         } catch (err) {
-          logger.error({ err, userId: req.userId, firmId: req.firmId, roleId: req.roleId }, "auth.permission_seed_failed");
+          const sqlState = (() => {
+            if (!err || typeof err !== "object") return undefined;
+            const c = (err as { code?: unknown }).code;
+            return typeof c === "string" ? c : undefined;
+          })();
+          logger.error(
+            {
+              route: req.path,
+              requestId: getReqId(req) ?? null,
+              userId: req.userId ?? null,
+              firmId: req.firmId ?? null,
+              roleId: req.roleId ?? null,
+              moduleName,
+              action,
+              sqlState: sqlState ?? null,
+              errorCode: sqlState ?? null,
+              err,
+            },
+            "auth.permission_seed_failed",
+          );
         }
         [perm] = await rlsDb
           .select()
@@ -322,7 +358,26 @@ export function requirePermission(moduleName: string, action: string) {
 
       next();
     } catch (err) {
-      logger.error({ err, userId: req.userId, firmId: req.firmId, roleId: req.roleId, moduleName, action }, "auth.permission_failed");
+      const sqlState = (() => {
+        if (!err || typeof err !== "object") return undefined;
+        const c = (err as { code?: unknown }).code;
+        return typeof c === "string" ? c : undefined;
+      })();
+      logger.error(
+        {
+          route: req.path,
+          requestId: getReqId(req) ?? null,
+          userId: req.userId ?? null,
+          firmId: req.firmId ?? null,
+          roleId: req.roleId ?? null,
+          moduleName,
+          action,
+          sqlState: sqlState ?? null,
+          errorCode: sqlState ?? null,
+          err,
+        },
+        "auth.permission_failed",
+      );
       res.status(503).json({ error: "Auth temporarily unavailable" });
       return;
     }
