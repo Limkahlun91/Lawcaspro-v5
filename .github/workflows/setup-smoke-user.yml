@@ -1,0 +1,38 @@
+name: Setup Smoke User
+
+on:
+  workflow_dispatch:
+    inputs:
+      firm_id:
+        description: "Target firm id"
+        required: false
+      firm_slug:
+        description: "Target firm slug"
+        required: false
+
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install deps (scripts)
+        run: |
+          corepack enable
+          pnpm install --frozen-lockfile
+
+      - name: Create or update smoke user
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          SMOKE_EMAIL: ${{ secrets.SMOKE_EMAIL }}
+          SMOKE_PASSWORD: ${{ secrets.SMOKE_PASSWORD }}
+          SMOKE_FIRM_ID: ${{ inputs.firm_id }}
+          SMOKE_FIRM_SLUG: ${{ inputs.firm_slug }}
+        run: |
+          node scripts/smoke/create-smoke-user.mjs
+

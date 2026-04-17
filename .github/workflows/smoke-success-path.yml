@@ -1,0 +1,77 @@
+name: Smoke Success Path
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Wait for Vercel /api to match commit
+        env:
+          TARGET: ${{ github.sha }}
+        run: |
+          node - <<'NODE'
+          const target = process.env.TARGET;
+          const base = "https://lawcaspro-v5.vercel.app";
+          const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+          const run = async () => {
+            for (let i = 1; i <= 40; i++) {
+              try {
+                const res = await fetch(`${base}/api/healthz/version`, { headers: { "cache-control": "no-cache" } });
+                const body = await res.json().catch(() => null);
+                const commit = body?.commit ?? null;
+                console.log(JSON.stringify({ step: "poll_vercel", i, status: res.status, commit }, null, 2));
+                if (typeof commit === "string" && commit.startsWith(target)) return;
+              } catch (e) {
+                console.log(JSON.stringify({ step: "poll_vercel", i, error: String(e?.message ?? e) }, null, 2));
+              }
+              await sleep(15000);
+            }
+            process.exit(2);
+          };
+          run();
+          NODE
+
+      - name: Wait for Render API to match commit
+        env:
+          TARGET: ${{ github.sha }}
+        run: |
+          node - <<'NODE'
+          const target = process.env.TARGET;
+          const base = "https://lawcaspro-api.onrender.com";
+          const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+          const run = async () => {
+            for (let i = 1; i <= 40; i++) {
+              try {
+                const res = await fetch(`${base}/api/healthz/version`, { headers: { "cache-control": "no-cache" } });
+                const body = await res.json().catch(() => null);
+                const commit = body?.commit ?? null;
+                console.log(JSON.stringify({ step: "poll_render", i, status: res.status, commit }, null, 2));
+                if (typeof commit === "string" && commit.startsWith(target)) return;
+              } catch (e) {
+                console.log(JSON.stringify({ step: "poll_render", i, error: String(e?.message ?? e) }, null, 2));
+              }
+              await sleep(15000);
+            }
+            process.exit(2);
+          };
+          run();
+          NODE
+
+      - name: Run smoke
+        env:
+          SMOKE_EMAIL: ${{ secrets.SMOKE_EMAIL }}
+          SMOKE_PASSWORD: ${{ secrets.SMOKE_PASSWORD }}
+        run: |
+          node scripts/smoke/online-success-path.mjs --base https://lawcaspro-v5.vercel.app
+

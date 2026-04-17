@@ -35,9 +35,9 @@ describe("Success path (integration)", () => {
       client.release();
     }
 
-    const login = await request(app)
-      .post("/api/auth/login")
-      .send({ email: "partner@tan-associates.my", password: "partner123" });
+    const email = process.env.SMOKE_EMAIL ?? "partner@tan-associates.my";
+    const password = process.env.SMOKE_PASSWORD ?? "partner123";
+    const login = await request(app).post("/api/auth/login").send({ email, password });
     expect(login.status).toBe(200);
     const setCookieHeader = (login.headers as Record<string, unknown>)["set-cookie"];
     const cookies = Array.isArray(setCookieHeader) ? setCookieHeader : [];
