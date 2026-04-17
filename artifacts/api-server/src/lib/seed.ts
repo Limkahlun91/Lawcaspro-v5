@@ -90,8 +90,13 @@ export async function seedIfEmpty() {
     return;
   }
 
-  const founderEmail = process.env.SEED_FOUNDER_EMAIL || "founder@lawcaspro.com";
   const isProduction = process.env.NODE_ENV === "production";
+  if (isProduction) {
+    logger.warn("SEED_DEMO_DATA ignored in production");
+    return;
+  }
+
+  const founderEmail = process.env.SEED_FOUNDER_EMAIL || "founder@lawcaspro.com";
   const founderPassword = isProduction ? requireEnv("SEED_FOUNDER_PASSWORD") : process.env.SEED_FOUNDER_PASSWORD || "founder123";
 
   const firmName = process.env.SEED_FIRM_NAME || "Messrs. Tan & Associates";

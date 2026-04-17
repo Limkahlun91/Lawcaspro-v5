@@ -7,6 +7,14 @@ import { and, eq, sql } from "drizzle-orm";
 
 const router: IRouter = Router();
 
+const hash10 = (v: string): string => crypto.createHash("sha256").update(v).digest("hex").slice(0, 10);
+const maskEmail = (email: string): string => {
+  const [local, domain] = email.split("@", 2);
+  if (!domain) return "***";
+  const localMasked = local.length <= 2 ? `${local[0] ?? "*"}*` : `${local[0]}***${local[local.length - 1]}`;
+  return `${localMasked}@${domain}`;
+};
+
 router.get("/healthz", (_req, res) => {
   const data = HealthCheckResponse.parse({ status: "ok" });
   res.json(data);
@@ -48,8 +56,8 @@ router.get("/healthz/dbinfo", async (_req, res) => {
   const dbNameHash = dbName ? crypto.createHash("sha256").update(dbName).digest("hex").slice(0, 10) : null;
 
   try {
-    const r = await pool.query<{ db: string; user: string; server: string }>(
-      "select current_database() as db, current_user as user, inet_server_addr()::text as server",
+    const r = await pool.query<{ db: string; user: string; server: string; project_ref: string | null }>(
+      "select current_database() as db, current_user as user, inet_server_addr()::text as server, current_setting('supabase.project_ref', true) as project_ref",
     );
     const row = r.rows?.[0] ?? null;
     res.json({
@@ -61,6 +69,7 @@ router.get("/healthz/dbinfo", async (_req, res) => {
       currentDatabase: row?.db ?? null,
       currentUser: row?.user ?? null,
       serverAddr: row?.server ?? null,
+      supabaseProjectRef: row?.project_ref ?? null,
       databaseUrlSanitized: sanitized,
     });
   } catch (err) {
@@ -83,6 +92,44 @@ router.get("/healthz/founder-exists", async (req, res) => {
       .where(and(eq(usersTable.userType, "founder"), eq(sql`lower(trim(${usersTable.email}))`, email)))
       .limit(1);
     res.json({ status: "ok", exists: Boolean(u), userId: u?.id ?? null, userStatus: u?.status ?? null });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Query failed";
+    res.status(500).json({ status: "error", error: message });
+  }
+});
+
+router.get("/healthz/founder-status", async (_req, res) => {
+  const expectedEmail = "lun.6923@hotmail.com";
+  try {
+    const founders = await db
+      .select({ id: usersTable.id, email: usersTable.email, status: usersTable.status })
+      .from(usersTable)
+      .where(eq(usersTable.userType, "founder"));
+
+    const normalized = founders
+      .map((f) => ({
+        id: f.id,
+        email: String(f.email ?? "").trim().toLowerCase(),
+        status: f.status,
+      }))
+      .filter((f) => f.email.length > 0);
+
+    const match = normalized.find((f) => f.email === expectedEmail) ?? null;
+    const activeCount = normalized.filter((f) => f.status === "active").length;
+    const founderCount = normalized.length;
+    const first = normalized[0] ?? null;
+
+    res.json({
+      status: "ok",
+      expectedEmail,
+      founderCount,
+      activeCount,
+      expectedExists: Boolean(match),
+      expectedActive: match?.status === "active",
+      currentFounderEmail: match ? expectedEmail : null,
+      currentFounderEmailMasked: match ? maskEmail(expectedEmail) : first ? maskEmail(first.email) : null,
+      currentFounderEmailHash: match ? hash10(expectedEmail) : first ? hash10(first.email) : null,
+    });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Query failed";
     res.status(500).json({ status: "error", error: message });

@@ -10,6 +10,18 @@ const main = async () => {
   const databaseUrl = requiredEnv("DATABASE_URL");
   const founderEmail = requiredEnv("FOUNDER_EMAIL").trim().toLowerCase();
   const founderPassword = requiredEnv("FOUNDER_PASSWORD");
+  const expectedEmail = "lun.6923@hotmail.com";
+
+  if (founderEmail !== expectedEmail) {
+    console.error(
+      JSON.stringify(
+        { at: now(), ok: false, error: `FOUNDER_EMAIL must be exactly ${expectedEmail}` },
+        null,
+        2,
+      ),
+    );
+    process.exit(1);
+  }
 
   if (!databaseUrl.startsWith("postgres://") && !databaseUrl.startsWith("postgresql://")) {
     console.error(
@@ -50,8 +62,19 @@ const main = async () => {
         [founderEmail, passwordHash, targetId],
       );
 
+      const cleaned = await client.query(
+        "update users set user_type='firm_user', status='inactive', firm_id=null, role_id=null where user_type='founder' and id <> $1",
+        [targetId],
+      );
+
       await client.query("COMMIT");
-      console.log(JSON.stringify({ at: now(), ok: true, action, userId: targetId, email: founderEmail }, null, 2));
+      console.log(
+        JSON.stringify(
+          { at: now(), ok: true, action, userId: targetId, email: founderEmail, cleanedFounders: cleaned.rowCount ?? 0 },
+          null,
+          2,
+        ),
+      );
       return;
     }
 
@@ -66,8 +89,18 @@ const main = async () => {
         "update users set password_hash=$1, status='active', firm_id=null, role_id=null, user_type='founder', totp_enabled=false, totp_secret=null where id=$2",
         [passwordHash, id],
       );
+      const cleaned = await client.query(
+        "update users set user_type='firm_user', status='inactive', firm_id=null, role_id=null where user_type='founder' and id <> $1",
+        [id],
+      );
       await client.query("COMMIT");
-      console.log(JSON.stringify({ at: now(), ok: true, action: "converted", userId: id, email: founderEmail }, null, 2));
+      console.log(
+        JSON.stringify(
+          { at: now(), ok: true, action: "converted", userId: id, email: founderEmail, cleanedFounders: cleaned.rowCount ?? 0 },
+          null,
+          2,
+        ),
+      );
       return;
     }
 
@@ -77,9 +110,19 @@ const main = async () => {
       [founderEmail, name, passwordHash],
     );
     const id = inserted.rows?.[0]?.id ?? null;
+    const cleaned = await client.query(
+      "update users set user_type='firm_user', status='inactive', firm_id=null, role_id=null where user_type='founder' and id <> $1",
+      [id],
+    );
     await client.query("COMMIT");
 
-    console.log(JSON.stringify({ at: now(), ok: true, action: "created", userId: id, email: founderEmail }, null, 2));
+    console.log(
+      JSON.stringify(
+        { at: now(), ok: true, action: "created", userId: id, email: founderEmail, cleanedFounders: cleaned.rowCount ?? 0 },
+        null,
+        2,
+      ),
+    );
   } catch (err) {
     try {
       await client.query("ROLLBACK");
