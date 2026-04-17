@@ -1,0 +1,29 @@
+name: Setup Founder User
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install deps
+        run: |
+          corepack enable
+          pnpm install --frozen-lockfile
+
+      - name: Create or update founder
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          FOUNDER_EMAIL: ${{ secrets.FOUNDER_EMAIL }}
+          FOUNDER_PASSWORD: ${{ secrets.FOUNDER_PASSWORD }}
+        run: |
+          node scripts/smoke/create-founder-user.mjs
+
