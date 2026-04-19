@@ -90,6 +90,8 @@ export type AppDb = typeof db;
 
 export * from "./schema";
 export * from "./tenant-context";
+export type { RlsDb } from "./tenant-context";
+export { auditLogsTable } from "./schema";
 
 export {
   clearTenantContext,

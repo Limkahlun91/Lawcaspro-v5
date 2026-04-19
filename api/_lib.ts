@@ -1,7 +1,8 @@
 import crypto from "crypto";
 import type { IncomingMessage, ServerResponse } from "http";
 import type { RlsDb } from "@workspace/db";
-import { auditLogsTable, db } from "@workspace/db";
+import { db } from "@workspace/db";
+import { auditLogsTable } from "@workspace/db/schema";
 
 export type ApiRequest = IncomingMessage & {
   headers: IncomingMessage["headers"] & {
@@ -171,4 +172,3 @@ export async function writeAuditLog(
     if (options?.strict) throw err;
   }
 }
-
