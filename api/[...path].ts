@@ -1,3 +1,5 @@
+import express from "express";
+import type { Express, NextFunction, Request, Response } from "express";
 import bcrypt from "bcryptjs";
 import * as OTPAuth from "otpauth";
 import { and, count, desc, eq, ilike, sql } from "drizzle-orm";
@@ -45,7 +47,7 @@ import {
   writeAuditLog,
   readJsonBody,
 } from "./_lib";
-import app from "../artifacts/api-server/src/app";
+import apiServerApp from "../artifacts/api-server/src/app";
 
 type AuthContext = {
   userId: number;
@@ -1026,15 +1028,13 @@ async function handleUserDelete(req: ApiRequest, res: ApiResponse, auth: AuthCon
   });
 }
 
-export default async function handler(req: ApiRequest, res: ApiResponse): Promise<void> {
+const app: Express = express();
+app.use((req: Request, res: Response, next: NextFunction) => {
   const rawUrl = req.url ?? "/";
   if (!rawUrl.startsWith("/api")) {
     req.url = rawUrl.startsWith("/") ? `/api${rawUrl}` : `/api/${rawUrl}`;
   }
+  return (apiServerApp as any)(req, res, next);
+});
 
-  await new Promise<void>((resolve) => {
-    app(req as any, res as any, () => resolve());
-    res.on("finish", () => resolve());
-    res.on("close", () => resolve());
-  });
-}
+export default app;

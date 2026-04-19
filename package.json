@@ -14,10 +14,17 @@
     "@workspace/api-zod": "workspace:*",
     "@workspace/db": "workspace:*",
     "bcryptjs": "^3.0.2",
-    "drizzle-orm": "^0.45.1",
-    "otpauth": "^9.5.0"
+    "cookie-parser": "^1.4.7",
+    "cors": "^2",
+    "drizzle-orm": "0.45.1",
+    "express": "^5",
+    "helmet": "^8.1.0",
+    "otpauth": "^9.5.0",
+    "pino": "^9",
+    "pino-http": "^10"
   },
   "devDependencies": {
+    "@types/express": "^5.0.6",
     "@types/node": "^25.3.3",
     "typescript": "~5.9.2",
     "prettier": "^3.8.1"

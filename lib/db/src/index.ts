@@ -90,3 +90,18 @@ export type AppDb = typeof db;
 
 export * from "./schema";
 export * from "./tenant-context";
+
+export {
+  clearTenantContext,
+  makeRlsDb,
+  setFounderContextSession,
+  setTenantContextSession,
+} from "./tenant-context";
+
+export {
+  firmsTable,
+  permissionsTable,
+  rolesTable,
+  sessionsTable,
+  usersTable,
+} from "./schema";
