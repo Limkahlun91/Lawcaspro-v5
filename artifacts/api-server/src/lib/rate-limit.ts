@@ -1,6 +1,7 @@
-import rateLimit from "express-rate-limit";
+import type { RequestHandler } from "express";
+import { createRateLimit } from "./express-rate-limit-compat";
 
-export const authRateLimiter = rateLimit({
+export const authRateLimiter: RequestHandler = createRateLimit({
   windowMs: 15 * 60 * 1000,
   max: 10,
   standardHeaders: true,
@@ -9,7 +10,7 @@ export const authRateLimiter = rateLimit({
   skip: () => process.env.NODE_ENV === "test",
 });
 
-export const sensitiveRateLimiter = rateLimit({
+export const sensitiveRateLimiter: RequestHandler = createRateLimit({
   windowMs: 60 * 1000,
   max: 30,
   standardHeaders: true,
