@@ -1,11 +1,11 @@
 import request from "supertest";
 import { beforeAll, describe, expect, it } from "vitest";
-import type { Express } from "express";
+import type { Application } from "express";
 import { db, pool, rolesTable, permissionsTable } from "@workspace/db";
 import { and, eq } from "drizzle-orm";
 import { seedIfEmpty } from "../lib/seed";
 
-let app: Express;
+let app: Application;
 
 const hasDatabaseUrl = Boolean(process.env.DATABASE_URL);
 

@@ -1,6 +1,6 @@
 import request from "supertest";
 import { beforeAll, describe, expect, it, vi } from "vitest";
-import type { Express } from "express";
+import type { Application } from "express";
 
 vi.mock("@workspace/db", async (orig) => {
   const actual = await orig<typeof import("@workspace/db")>();
@@ -29,7 +29,7 @@ vi.mock("@workspace/db", async (orig) => {
   };
 });
 
-let app: Express;
+let app: Application;
 
 beforeAll(async () => {
   const mod = await import("../app");

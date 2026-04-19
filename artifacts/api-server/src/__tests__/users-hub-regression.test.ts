@@ -1,6 +1,6 @@
 import request from "supertest";
 import { beforeAll, describe, expect, it, vi } from "vitest";
-import type { Express } from "express";
+import type { Application } from "express";
 
 type FakeDb = {
   execute: (query?: unknown) => Promise<unknown>;
@@ -171,7 +171,7 @@ vi.mock("../lib/auth", async (orig) => {
   };
 });
 
-let app: Express;
+let app: Application;
 
 beforeAll(async () => {
   const mod = await import("../app");

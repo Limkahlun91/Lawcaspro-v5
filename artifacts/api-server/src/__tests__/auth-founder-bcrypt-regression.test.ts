@@ -1,6 +1,6 @@
 import request from "supertest";
 import { beforeAll, describe, expect, it, vi } from "vitest";
-import type { Express } from "express";
+import type { Application } from "express";
 import bcrypt from "bcryptjs";
 import { usersTable, sessionsTable } from "@workspace/db";
 
@@ -62,7 +62,7 @@ vi.mock("@workspace/db", async (orig) => {
   return { ...actual, db: dbMock as unknown as typeof actual.db };
 });
 
-let app: Express;
+let app: Application;
 
 beforeAll(async () => {
   state.passwordHash = await bcrypt.hash("CorrectPassword123!", 10);
