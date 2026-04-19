@@ -1029,7 +1029,7 @@ async function handleUserDelete(req: ApiRequest, res: ApiResponse, auth: AuthCon
   });
 }
 
-const app = express();
+const app: import("express").Express = express();
 app.use((req: Request, res: Response, next: NextFunction) => {
   const rawUrl = req.url ?? "/";
   if (!rawUrl.startsWith("/api")) {

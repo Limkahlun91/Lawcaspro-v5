@@ -20,11 +20,11 @@ seedIfEmpty().catch((err) => {
   logger.error({ err }, "Seed failed — continuing anyway");
 });
 
-app.listen(port, (err) => {
-  if (err) {
-    logger.error({ err }, "Error listening on port");
-    process.exit(1);
-  }
-
+const server = app.listen(port, () => {
   logger.info({ port }, "Server listening");
+});
+
+server.on("error", (err) => {
+  logger.error({ err }, "Error listening on port");
+  process.exit(1);
 });
