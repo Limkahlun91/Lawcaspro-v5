@@ -2,7 +2,7 @@
   "compilerOptions": {
     "outDir": "dist",
     "rootDir": "src",
-    "types": ["node"],
+    "types": ["node", "express"],
     "target": "ES2022",
     "lib": ["ES2022"],
     "module": "ESNext",
