@@ -1,6 +1,5 @@
 import { Router, type IRouter } from "express";
-import { sql } from "drizzle-orm";
-import { db, documentTemplatesTable, caseDocumentsTable } from "@workspace/db";
+import { caseDocumentsTable, db, documentTemplatesTable, sql } from "@workspace/db";
 import { PRINT_ACTIONS, isLetterheadApplicableDocumentType, isMasterDocumentLetterLike } from "@workspace/documents-registry";
 import { requireAuth, requireFirmUser, requireFounder, requirePermission, writeAuditLog, type AuthRequest } from "../lib/auth";
 import { logger } from "../lib/logger";

@@ -1,4 +1,4 @@
-import { sql } from "drizzle-orm";
+import { sql } from "@workspace/db";
 import { resolveSmartFilename, type SmartFilenamePreview, type SmartNamingContext } from "./smartFileNaming";
 
 type DbConn = { execute: (q: any) => any };

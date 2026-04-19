@@ -1,6 +1,6 @@
 import { Router, type IRouter } from "express";
-import { eq, count, desc, sql } from "drizzle-orm";
-import { db, casesTable, clientsTable, developersTable, projectsTable, caseAssignmentsTable, usersTable, caseKeyDatesTable } from "@workspace/db";
+import { eq, count, desc } from "drizzle-orm";
+import { caseAssignmentsTable, caseKeyDatesTable, casesTable, clientsTable, db, developersTable, projectsTable, sql, usersTable } from "@workspace/db";
 import { requireAuth, requireFirmUser, requirePermission, type AuthRequest } from "../lib/auth";
 import { milestonePresenceWhereSql, type CaseMilestoneKey, type MilestonePresence } from "../lib/caseListLogic";
 import { logger } from "../lib/logger";

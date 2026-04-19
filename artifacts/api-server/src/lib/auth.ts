@@ -1,6 +1,6 @@
 import { Request, Response, NextFunction } from "express";
-import { db, pool, sessionsTable, usersTable, auditLogsTable, makeRlsDb, setTenantContextSession, clearTenantContext, RlsDb, rolesTable, permissionsTable } from "@workspace/db";
-import { and, eq, sql } from "drizzle-orm";
+import { clearTenantContext, db, makeRlsDb, permissionsTable, pool, RlsDb, rolesTable, sessionsTable, setTenantContextSession, sql, usersTable, auditLogsTable } from "@workspace/db";
+import { and, eq } from "drizzle-orm";
 import crypto from "crypto";
 import { logger } from "./logger";
 import { isTransientDbConnectionError } from "./auth-safe-db";

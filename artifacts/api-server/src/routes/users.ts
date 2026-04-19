@@ -1,7 +1,7 @@
 import { Router, type IRouter } from "express";
 import bcrypt from "bcryptjs";
-import { and, count, desc, eq, ilike, sql } from "drizzle-orm";
-import { db, usersTable, rolesTable } from "@workspace/db";
+import { and, count, desc, eq, ilike } from "drizzle-orm";
+import { db, rolesTable, sql, usersTable } from "@workspace/db";
 import {
   CreateUserBody, UpdateUserBody, ListUsersQueryParams,
   GetUserParams, UpdateUserParams, DeleteUserParams

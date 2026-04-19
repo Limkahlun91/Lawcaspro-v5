@@ -5,5 +5,6 @@
     "noEmit": true,
     "types": ["node"]
   },
-  "include": ["./**/*.ts", "../artifacts/api-server/src/**/*.ts"]
+  "include": ["./**/*.ts", "../artifacts/api-server/src/**/*.ts"],
+  "exclude": ["../artifacts/api-server/src/__tests__/**", "../artifacts/api-server/src/**/*.test.ts", "../artifacts/api-server/src/**/*.spec.ts"]
 }

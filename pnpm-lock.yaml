@@ -39,9 +39,6 @@ catalogs:
     clsx:
       specifier: ^2.1.1
       version: 2.1.1
-    drizzle-orm:
-      specifier: 0.45.1
-      version: 0.45.1
     framer-motion:
       specifier: ^12.23.24
       version: 12.35.1
@@ -69,6 +66,9 @@ catalogs:
     zod:
       specifier: ^3.25.76
       version: 3.25.76
+
+overrides:
+  drizzle-orm: 0.45.1
 
 importers:
 
@@ -128,7 +128,7 @@ importers:
         specifier: ^3.8.1
         version: 3.8.1
       typescript:
-        specifier: ~5.9.2
+        specifier: ~5.9.3
         version: 5.9.3
 
   artifacts/api-server:
@@ -172,9 +172,6 @@ importers:
       docxtemplater:
         specifier: ^3.60.5
         version: 3.68.3
-      drizzle-orm:
-        specifier: 'catalog:'
-        version: 0.45.1(@types/pg@8.18.0)(pg@8.20.0)
       express:
         specifier: ^5
         version: 5.2.1
@@ -807,9 +804,6 @@ importers:
 
   lib/db:
     dependencies:
-      drizzle-orm:
-        specifier: 'catalog:'
-        version: 0.45.1(@types/pg@8.18.0)(pg@8.20.0)
       drizzle-zod:
         specifier: ^0.8.3
         version: 0.8.3(drizzle-orm@0.45.1(@types/pg@8.18.0)(pg@8.20.0))(zod@3.25.76)
@@ -4488,7 +4482,7 @@ packages:
   drizzle-zod@0.8.3:
     resolution: {integrity: sha512-66yVOuvGhKJnTdiqj1/Xaaz9/qzOdRJADpDa68enqS6g3t0kpNkwNYjUuaeXgZfO/UWuIM9HIhSlJ6C5ZraMww==}
     peerDependencies:
-      drizzle-orm: '>=0.36.0'
+      drizzle-orm: 0.45.1
       zod: ^3.25.0 || ^4.0.0
 
   dunder-proto@1.0.1:

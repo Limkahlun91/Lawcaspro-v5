@@ -1,6 +1,5 @@
 import { Router, type IRouter } from "express";
-import { sql } from "drizzle-orm";
-import { db } from "@workspace/db";
+import { db, sql } from "@workspace/db";
 import { requireAuth, requireFirmUser, requireFounder, requirePermission, type AuthRequest } from "../lib/auth";
 import { withAuthSafeDb } from "../lib/auth-safe-db";
 

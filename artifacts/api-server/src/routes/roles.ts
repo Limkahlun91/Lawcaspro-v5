@@ -1,6 +1,6 @@
 import { Router, type IRouter } from "express";
-import { and, count, eq, or, sql } from "drizzle-orm";
-import { db, rolesTable, permissionsTable, usersTable } from "@workspace/db";
+import { and, count, eq, or } from "drizzle-orm";
+import { db, permissionsTable, rolesTable, sql, usersTable } from "@workspace/db";
 import {
   CreateRoleBody, UpdateRoleBody,
   GetRoleParams, UpdateRoleParams, DeleteRoleParams

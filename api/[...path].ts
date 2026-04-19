@@ -2,7 +2,7 @@ import express from "express";
 import type { Express, NextFunction, Request, Response } from "express";
 import bcrypt from "bcryptjs";
 import * as OTPAuth from "otpauth";
-import { and, count, desc, eq, ilike, sql } from "drizzle-orm";
+import { and, count, desc, eq, ilike } from "drizzle-orm";
 import {
   clearTenantContext,
   db,
@@ -14,6 +14,7 @@ import {
   sessionsTable,
   setFounderContextSession,
   setTenantContextSession,
+  sql,
   usersTable,
 } from "@workspace/db";
 import {

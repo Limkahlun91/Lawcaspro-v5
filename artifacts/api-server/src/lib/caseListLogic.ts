@@ -1,5 +1,4 @@
-import { sql, type SQL } from "drizzle-orm";
-import { casesTable, caseKeyDatesTable, caseWorkflowStepsTable } from "@workspace/db";
+import { casesTable, caseKeyDatesTable, caseWorkflowStepsTable, sql, type SQL } from "@workspace/db";
 
 export type MilestonePresence = "filled" | "missing";
 

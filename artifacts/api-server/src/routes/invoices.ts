@@ -1,8 +1,9 @@
 import { Router, type IRouter } from "express";
-import { eq, and, desc, sql } from "drizzle-orm";
+import { eq, and, desc } from "drizzle-orm";
 import {
   db, invoicesTable, invoiceItemsTable, quotationsTable, quotationItemsTable,
   casesTable, clientsTable, casePurchasersTable, ledgerEntriesTable,
+  sql,
 } from "@workspace/db";
 import { requireAuth, requireFirmUser, requirePermission, requireReAuth, type AuthRequest, writeAuditLog } from "../lib/auth";
 import { sensitiveRateLimiter } from "../lib/rate-limit";

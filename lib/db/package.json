@@ -17,10 +17,12 @@
     "apply-rls": "psql \"$DATABASE_URL\" -f scripts/apply-rls.sql"
   },
   "dependencies": {
-    "drizzle-orm": "catalog:",
     "drizzle-zod": "^0.8.3",
     "pg": "^8.20.0",
     "zod": "catalog:"
+  },
+  "peerDependencies": {
+    "drizzle-orm": "0.45.1"
   },
   "devDependencies": {
     "@types/node": "catalog:",

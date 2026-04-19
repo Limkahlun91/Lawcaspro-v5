@@ -1,4 +1,4 @@
-import { sql } from "drizzle-orm";
+import { sql } from "@workspace/db";
 import type { TemplateBinding } from "./documentVariables";
 
 type DbConn = { execute: (q: any) => any };
@@ -103,4 +103,3 @@ export async function replacePlatformDocumentBindings(r: DbConn, firmId: number 
     `);
   }
 }
-

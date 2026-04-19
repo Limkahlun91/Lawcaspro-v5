@@ -1,7 +1,7 @@
 import { Router, type IRouter } from "express";
 import { Readable } from "stream";
 import PizZip from "pizzip";
-import { eq, ilike, count, sql, desc, and, isNull, or, type SQL } from "drizzle-orm";
+import { eq, ilike, count, desc, and, isNull, or } from "drizzle-orm";
 import {
   db,
   firmsTable,
@@ -13,6 +13,8 @@ import {
   platformClausesTable,
   platformMessagesTable,
   platformMessageAttachmentsTable,
+  sql,
+  type SQL,
 } from "@workspace/db";
 import { CreateFirmBody, UpdateFirmBody, ListFirmsQueryParams, GetFirmParams, UpdateFirmParams } from "@workspace/api-zod";
 import { requireAuth, requireFounder, writeAuditLog, type AuthRequest } from "../lib/auth";

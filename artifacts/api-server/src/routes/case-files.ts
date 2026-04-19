@@ -1,6 +1,6 @@
 import { Router, type IRouter } from "express";
 import { z } from "zod/v4";
-import { and, desc, eq, inArray, sql } from "drizzle-orm";
+import { and, desc, eq, inArray } from "drizzle-orm";
 import {
   db,
   caseAssignmentsTable,
@@ -9,6 +9,7 @@ import {
   casesTable,
   clientsTable,
   developersTable,
+  sql,
   partiesTable,
   projectsTable,
   usersTable,

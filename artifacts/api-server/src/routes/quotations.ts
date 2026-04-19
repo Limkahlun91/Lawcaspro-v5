@@ -1,6 +1,6 @@
 import { Router, type IRouter } from "express";
-import { eq, desc, and, count, sql } from "drizzle-orm";
-import { db, quotationsTable, quotationItemsTable, regulatoryRuleSetsTable, regulatoryRuleVersionsTable } from "@workspace/db";
+import { eq, desc, and, count } from "drizzle-orm";
+import { db, quotationItemsTable, quotationsTable, regulatoryRuleSetsTable, regulatoryRuleVersionsTable, sql } from "@workspace/db";
 import { requireAuth, requireFirmUser, type AuthRequest } from "../lib/auth";
 import { applyRule } from "./regulatory";
 import { logger } from "../lib/logger";

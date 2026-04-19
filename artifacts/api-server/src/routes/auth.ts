@@ -1,8 +1,8 @@
 import { Router, type IRouter } from "express";
 import bcrypt from "bcryptjs";
 import crypto from "crypto";
-import { and, eq, sql, type SQL } from "drizzle-orm";
-import { db, usersTable, sessionsTable, rolesTable, permissionsTable, firmsTable, auditLogsTable } from "@workspace/db";
+import { and, eq } from "drizzle-orm";
+import { auditLogsTable, db, firmsTable, permissionsTable, rolesTable, sessionsTable, sql, type SQL, usersTable } from "@workspace/db";
 import { LoginBody } from "@workspace/api-zod";
 import { requireAuth, requireReAuth, issueReauthToken, type AuthRequest, writeAuditLog } from "../lib/auth";
 import { authRateLimiter, sensitiveRateLimiter } from "../lib/rate-limit";

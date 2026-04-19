@@ -1,5 +1,5 @@
 import { Router, type IRouter } from "express";
-import { eq, count, desc, and, or, sql, asc, inArray } from "drizzle-orm";
+import { eq, count, desc, and, or, asc, inArray } from "drizzle-orm";
 import {
   db, casesTable, casePurchasersTable, caseAssignmentsTable,
   caseWorkflowStepsTable, caseNotesTable,
@@ -9,6 +9,7 @@ import {
   caseListSavedViewsTable,
   projectsTable, developersTable, clientsTable, usersTable, rolesTable, auditLogsTable,
   permissionsTable,
+  sql,
 } from "@workspace/db";
 import {
   CreateCaseBody, UpdateCaseBody, ListCasesQueryParams,

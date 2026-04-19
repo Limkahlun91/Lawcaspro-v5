@@ -1,6 +1,6 @@
 import { Router, type IRouter } from "express";
-import { eq, and, desc, sql } from "drizzle-orm";
-import { db, timeEntriesTable, usersTable } from "@workspace/db";
+import { eq, and, desc } from "drizzle-orm";
+import { db, sql, timeEntriesTable, usersTable } from "@workspace/db";
 import { requireAuth, requireFirmUser, type AuthRequest } from "../lib/auth";
 
 const one = (v: string | string[] | undefined): string | undefined => (Array.isArray(v) ? v[0] : v);

@@ -1,6 +1,6 @@
 import { Router, type IRouter } from "express";
-import { eq, ilike, count, desc, and, sql } from "drizzle-orm";
-import { db, developersTable, projectsTable, type Developer, type InsertDeveloper } from "@workspace/db";
+import { eq, ilike, count, desc, and } from "drizzle-orm";
+import { db, developersTable, projectsTable, sql, type Developer, type InsertDeveloper } from "@workspace/db";
 import {
   ListDevelopersQueryParams,
   GetDeveloperParams, UpdateDeveloperParams, DeleteDeveloperParams
