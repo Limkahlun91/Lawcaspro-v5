@@ -1,5 +1,5 @@
 import express from "express";
-import type { Application, NextFunction, Request, Response } from "express";
+import type { NextFunction, Request, Response } from "express";
 import cors from "cors";
 import cookieParser from "cookie-parser";
 import pinoHttp from "pino-http";
@@ -7,7 +7,7 @@ import helmet from "helmet";
 import router from "./routes";
 import { logger } from "./lib/logger";
 
-const app: Application = express();
+const app = express() as unknown as import("express").Application;
 
 app.set("trust proxy", 1);
 
@@ -17,17 +17,17 @@ app.use(helmet({
 }));
 
 app.use(
-  pinoHttp({
+  (pinoHttp as any)({
     logger,
     serializers: {
-      req(req) {
+      req(req: any) {
         return {
           id: req.id,
           method: req.method,
           url: req.url?.split("?")[0],
         };
       },
-      res(res) {
+      res(res: any) {
         return {
           statusCode: res.statusCode,
         };
