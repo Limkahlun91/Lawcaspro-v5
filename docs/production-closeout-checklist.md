@@ -14,10 +14,10 @@ This checklist locks down production after demo seeding and baseline recovery wo
 - In Supabase: rotate the Postgres password for the production database user used by the app.
 - Copy the new connection string.
 
-### 2) Update Render `DATABASE_URL`
+### 2) Update production `DATABASE_URL`
 
-- In Render (api-server service), update `DATABASE_URL` to the rotated connection string.
-- Trigger a redeploy (or restart) of api-server.
+- In the deployment platform (Vercel project env), update `DATABASE_URL` to the rotated connection string.
+- Trigger a redeploy (or restart) so the new env is picked up.
 
 ### 3) Verify DB health
 
@@ -26,7 +26,7 @@ This checklist locks down production after demo seeding and baseline recovery wo
 
 ### 4) Remove *all* seed environment variables from production
 
-In Render (api-server service), delete:
+In the deployment platform (Vercel project env), delete:
 
 - `SEED_DEMO_DATA`
 - `SEED_FOUNDER_PASSWORD`
@@ -34,12 +34,12 @@ In Render (api-server service), delete:
 - `SEED_CLERK_PASSWORD`
 - Any other `SEED_*` variables (emails, firm slug/name overrides, etc.)
 
-Then redeploy/restart api-server once more.
+Then redeploy/restart once more.
 
 ### 5) Post-closeout verification (must pass)
 
 - Login works for:
-  - `founder@lawcaspro.com` (platform-only)
+  - `lun.6923@hotmail.com` (platform-only)
   - `partner@tan-associates.my` (firm workspace)
   - `clerk@tan-associates.my` (firm workspace)
 - Firm workspace pages load without infinite loading:

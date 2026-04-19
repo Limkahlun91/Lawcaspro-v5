@@ -12,7 +12,10 @@ const oneArg = (name) => {
 
 const hasFlag = (name) => args.includes(name);
 
-const base = oneArg("--base") ?? "https://lawcaspro-api.onrender.com";
+const base = oneArg("--base") ?? process.env.SMOKE_BASE_URL;
+if (!base) {
+  throw new Error("Missing base URL. Provide --base https://<domain> or set SMOKE_BASE_URL.");
+}
 const useSeedDefaults = hasFlag("--use-seed-defaults");
 
 const seedFile = path.resolve(process.cwd(), "artifacts/api-server/src/lib/seed.ts");

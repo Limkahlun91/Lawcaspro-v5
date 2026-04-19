@@ -8,7 +8,7 @@ import { SupabaseStorageService } from "../lib/objectStorage";
 
 const PARTNER_EMAIL = "partner@tan-associates.my";
 const PARTNER_PWD = "lawyer123";
-const FOUNDER_EMAIL = "founder@lawcaspro.com";
+const FOUNDER_EMAIL = "lun.6923@hotmail.com";
 const FOUNDER_PWD = "founder123";
 const skipDb = process.env.VITEST_SKIP_DB === "1";
 const suite = skipDb ? describe.skip : describe;

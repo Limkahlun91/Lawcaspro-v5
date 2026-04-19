@@ -2,7 +2,7 @@ import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import request from "supertest";
 import app from "../app";
 
-const FOUNDER_EMAIL = "founder@lawcaspro.com";
+const FOUNDER_EMAIL = "lun.6923@hotmail.com";
 const FOUNDER_PASSWORD = "founder123";
 const LAWYER_EMAIL = "lawyer@tan-associates.my";
 const LAWYER_PASSWORD = "lawyer123";

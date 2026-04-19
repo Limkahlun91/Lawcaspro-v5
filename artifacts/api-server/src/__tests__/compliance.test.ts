@@ -25,7 +25,7 @@ const PARTNER_EMAIL   = "partner@tan-associates.my";
 const PARTNER_PWD     = "lawyer123";
 const LAWYER_EMAIL    = "lawyer@tan-associates.my";
 const LAWYER_PWD      = "lawyer123";
-const FOUNDER_EMAIL   = "founder@lawcaspro.com";
+const FOUNDER_EMAIL   = "lun.6923@hotmail.com";
 const FOUNDER_PWD     = "founder123";
 
 let partnerToken: string;

@@ -100,17 +100,34 @@ router.get("/healthz/founder-exists", async (req, res) => {
 
 router.get("/healthz/founder-status", async (_req, res) => {
   const expectedEmail = "lun.6923@hotmail.com";
+  const client = await pool.connect();
+  let destroyClient = false;
   try {
-    const founders = await db
-      .select({ id: usersTable.id, email: usersTable.email, status: usersTable.status })
-      .from(usersTable)
-      .where(eq(usersTable.userType, "founder"));
+    try {
+      await client.query("SET ROLE app_user");
+    } catch {
+    }
+    try {
+      await client.query("SET app.is_founder = 'true'");
+      await client.query("SET app.current_firm_id = '0'");
+      await client.query("SET app.current_user_id = '0'");
+    } catch {
+    }
+
+    const r = await client.query<{
+      id: number;
+      email: string;
+      user_type: string;
+      status: string;
+    }>("select id, email, user_type, status from users where user_type = 'founder'");
+    const founders = r.rows ?? [];
 
     const normalized = founders
       .map((f) => ({
         id: f.id,
         email: String(f.email ?? "").trim().toLowerCase(),
-        status: f.status,
+        userType: String((f as unknown as { user_type?: unknown }).user_type ?? "").trim().toLowerCase(),
+        status: String(f.status ?? ""),
       }))
       .filter((f) => f.email.length > 0);
 
@@ -121,8 +138,10 @@ router.get("/healthz/founder-status", async (_req, res) => {
 
     res.json({
       status: "ok",
+      expectedFounderEmail: expectedEmail,
       expectedEmail,
       founderCount,
+      activeFounderCount: activeCount,
       activeCount,
       expectedExists: Boolean(match),
       expectedActive: match?.status === "active",
@@ -131,14 +150,26 @@ router.get("/healthz/founder-status", async (_req, res) => {
       currentFounderEmailHash: match ? hash10(expectedEmail) : first ? hash10(first.email) : null,
     });
   } catch (err) {
+    destroyClient = true;
     const message = err instanceof Error ? err.message : "Query failed";
     res.status(500).json({ status: "error", error: message });
+  } finally {
+    try {
+      await client.query("SET app.current_firm_id = '0'");
+      await client.query("SET app.is_founder = 'false'");
+      await client.query("SET app.current_user_id = '0'");
+    } catch {
+    }
+    try {
+      await client.query("RESET ROLE");
+    } catch {
+    }
+    client.release(destroyClient);
   }
 });
 
 router.get("/healthz/version", (_req, res) => {
   const commit =
-    process.env.RENDER_GIT_COMMIT ??
     process.env.VERCEL_GIT_COMMIT_SHA ??
     process.env.GIT_COMMIT_SHA ??
     process.env.COMMIT_SHA ??

@@ -1,4 +1,4 @@
-import { Router } from "express";
+import { Router, type IRouter } from "express";
 import { z } from "zod/v4";
 import { and, desc, eq, inArray, sql } from "drizzle-orm";
 import {
@@ -18,7 +18,7 @@ import {
 } from "@workspace/db";
 import { requireAuth, requireFirmUser, type AuthRequest, writeAuditLog } from "../lib/auth";
 
-const router = Router();
+const router: IRouter = Router();
 
 const listQuerySchema = z.object({
   q: z.string().trim().optional().default(""),

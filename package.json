@@ -10,7 +10,15 @@
     "typecheck": "pnpm run typecheck:libs && pnpm -r --filter \"./artifacts/**\" --filter \"./scripts\" --filter \"!@workspace/lawcaspro\" --filter \"!@workspace/lawcaspro-mobile\" --if-present run typecheck"
   },
   "private": true,
+  "dependencies": {
+    "@workspace/api-zod": "workspace:*",
+    "@workspace/db": "workspace:*",
+    "bcryptjs": "^3.0.2",
+    "drizzle-orm": "^0.45.1",
+    "otpauth": "^9.5.0"
+  },
   "devDependencies": {
+    "@types/node": "^25.3.3",
     "typescript": "~5.9.2",
     "prettier": "^3.8.1"
   },

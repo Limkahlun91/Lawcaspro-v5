@@ -208,7 +208,7 @@ Called automatically before every `start`. Compares `dist/index.mjs` mtime again
 | Partner | partner@tan-associates.my | lawyer123 |
 | Lawyer | lawyer@tan-associates.my | lawyer123 |
 | Clerk | clerk@tan-associates.my | clerk123 |
-| Founder | founder@lawcaspro.com | founder123 |
+| Founder | lun.6923@hotmail.com | founder123 |
 
 ---
 

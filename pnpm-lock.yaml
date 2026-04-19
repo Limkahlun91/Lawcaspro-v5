@@ -73,6 +73,22 @@ catalogs:
 importers:
 
   .:
+    dependencies:
+      '@workspace/api-zod':
+        specifier: workspace:*
+        version: link:lib/api-zod
+      '@workspace/db':
+        specifier: workspace:*
+        version: link:lib/db
+      bcryptjs:
+        specifier: ^3.0.2
+        version: 3.0.3
+      drizzle-orm:
+        specifier: ^0.45.1
+        version: 0.45.1(@types/pg@8.18.0)(pg@8.20.0)
+      otpauth:
+        specifier: ^9.5.0
+        version: 9.5.0
     optionalDependencies:
       '@rollup/rollup-win32-x64-msvc':
         specifier: 4.59.0
@@ -84,6 +100,9 @@ importers:
         specifier: 1.31.1
         version: 1.31.1
     devDependencies:
+      '@types/node':
+        specifier: ^25.3.3
+        version: 25.3.5
       prettier:
         specifier: ^3.8.1
         version: 3.8.1

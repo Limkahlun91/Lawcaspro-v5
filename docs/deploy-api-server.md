@@ -1,16 +1,14 @@
-# Deploy api-server on Render (Docker)
+# Deploy API (Vercel + Supabase)
 
-This repo is a pnpm workspace monorepo. The most stable way to deploy `artifacts/api-server` is to run it on Render as a Docker-based Web Service built from the repo root.
+This repo is a pnpm workspace monorepo. Production API is served from Vercel `/api/*` Serverless Functions and connects directly to Supabase Postgres via `DATABASE_URL` (pooler).
 
-## Render service settings (summary)
+## Vercel (Serverless Functions)
 
-- Service type: Web Service
-- Environment: Docker
-- Root directory: repo root
-- Dockerfile path: `artifacts/api-server/Dockerfile`
+- API routes live under `/<repo>/api/*`
 - Health check path: `/api/healthz`
+- Database: set `DATABASE_URL` to Supabase pooler connection string (port 6543)
 
-## Build image (from repo root)
+## Optional: Docker (legacy / self-host)
 
 ```bash
 docker build -f artifacts/api-server/Dockerfile -t lawcaspro-api .
@@ -38,7 +36,7 @@ Minimum required to start:
 
 - `DATABASE_URL` (Postgres connection string)
 
-Provided by Render automatically:
+Provided by the deployment platform:
 
 - `PORT` (do not hardcode; the server reads `process.env.PORT`)
 
@@ -61,7 +59,7 @@ Legacy Object Storage (only used by endpoints that still rely on @google-cloud/s
 
 ## One-time DB setup
 
-Provision a Postgres database (Render Postgres is fine), then apply schema + migrations using the workspace DB package:
+Provision a Postgres database, then apply schema + migrations using the workspace DB package:
 
 ```bash
 pnpm install

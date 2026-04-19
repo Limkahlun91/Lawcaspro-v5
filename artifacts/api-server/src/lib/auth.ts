@@ -7,6 +7,7 @@ import { isTransientDbConnectionError } from "./auth-safe-db";
 
 export interface AuthRequest extends Request {
   userId?: number;
+  email?: string;
   userType?: string;
   firmId?: number | null;
   roleId?: number | null;
@@ -24,6 +25,8 @@ const getReqId = (req: unknown): string | undefined => {
   const id = (req as { id?: unknown } | null)?.id;
   return typeof id === "string" ? id : undefined;
 };
+
+const FOUNDER_EMAIL = "lun.6923@hotmail.com";
 
 export async function writeAuditLog(params: {
   firmId?: number | null;
@@ -105,6 +108,7 @@ export async function requireAuth(
   let user:
     | {
         id: number;
+        email: string;
         userType: string;
         firmId: number | null;
         roleId: number | null;
@@ -119,6 +123,7 @@ export async function requireAuth(
       const [u] = await db
         .select({
           id: usersTable.id,
+          email: usersTable.email,
           userType: usersTable.userType,
           firmId: usersTable.firmId,
           roleId: usersTable.roleId,
@@ -152,6 +157,7 @@ export async function requireAuth(
   }
 
   req.userId = user.id;
+  req.email = user.email;
   req.userType = user.userType;
   req.firmId = user.firmId;
   req.roleId = user.roleId;
@@ -166,6 +172,12 @@ export async function requireFounder(
 ): Promise<void> {
   if (req.userType !== "founder") {
     await writeAuditLog({ actorId: req.userId, actorType: req.userType ?? "unknown", action: "auth.forbidden.founder_required", detail: `${req.method} ${req.path}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+    res.status(403).json({ error: "Founder access required" });
+    return;
+  }
+  const email = String(req.email ?? "").trim().toLowerCase();
+  if (email !== FOUNDER_EMAIL) {
+    await writeAuditLog({ actorId: req.userId, actorType: req.userType ?? "unknown", action: "auth.forbidden.founder_email_mismatch", detail: `${req.method} ${req.path}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
     res.status(403).json({ error: "Founder access required" });
     return;
   }

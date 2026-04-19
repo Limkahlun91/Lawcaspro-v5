@@ -18,7 +18,7 @@ This document captures the current “known-good” baseline for Lawcaspro-v5 af
 
 ## Supported Login Identities
 
-- Founder (platform-level): `founder@lawcaspro.com` (platform routes only)
+- Founder (platform-level): `lun.6923@hotmail.com` (platform routes only)
 - Firm users (tenant-level):
   - Partner: `partner@tan-associates.my`
   - Clerk: `clerk@tan-associates.my`
@@ -69,7 +69,7 @@ Notes:
 
 If production becomes unstable after baseline changes:
 
-1. Roll back the deployment to the previous known-good image/revision (Render).
+1. Roll back the deployment to the previous known-good image/revision.
 2. Revert the most recent baseline commits in Git and redeploy.
 3. If the issue is tenant-context related, validate `SET ROLE app_user` and RLS/app role settings in the database.
 

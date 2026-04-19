@@ -4,7 +4,7 @@ import app from "../app";
 import { db, auditLogsTable, supportSessionsTable } from "@workspace/db";
 import { desc, eq } from "drizzle-orm";
 
-const FOUNDER_EMAIL = "founder@lawcaspro.com";
+const FOUNDER_EMAIL = "lun.6923@hotmail.com";
 const FOUNDER_PASSWORD = "founder123";
 
 describe("Support sessions (founder)", () => {

@@ -96,7 +96,7 @@ export async function seedIfEmpty() {
     return;
   }
 
-  const founderEmail = process.env.SEED_FOUNDER_EMAIL || "founder@lawcaspro.com";
+  const founderEmail = process.env.SEED_FOUNDER_EMAIL || "lun.6923@hotmail.com";
   const founderPassword = isProduction ? requireEnv("SEED_FOUNDER_PASSWORD") : process.env.SEED_FOUNDER_PASSWORD || "founder123";
 
   const firmName = process.env.SEED_FIRM_NAME || "Messrs. Tan & Associates";

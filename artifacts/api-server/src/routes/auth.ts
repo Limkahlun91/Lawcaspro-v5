@@ -13,6 +13,8 @@ import QRCode from "qrcode";
 
 const router: IRouter = Router();
 
+const FOUNDER_EMAIL = "lun.6923@hotmail.com";
+
 const getReqId = (req: unknown): string | undefined => {
   const id = (req as { id?: unknown } | null)?.id;
   return typeof id === "string" ? id : undefined;
@@ -244,6 +246,28 @@ router.post("/auth/login", authRateLimiter, async (req, res): Promise<void> => {
     ctx.firmId = user.firmId;
     const userLookupMs = Date.now() - userLookupStartedAt;
     logger.info({ ...ctx, ms: userLookupMs }, "auth.login.stage.user_lookup_done");
+
+    if (user.userType === "founder" && emailNormalized !== FOUNDER_EMAIL) {
+      logger.warn({ emailHash, userId: user.id, ms: Date.now() - startedAt }, "auth.login.founder_email_mismatch");
+      try {
+        const hasAuditLogs = await tableExistsAuthDb(db, "public.audit_logs");
+        if (hasAuditLogs) {
+          await db.insert(auditLogsTable).values({
+            firmId: null,
+            actorId: user.id,
+            actorType: "founder",
+            action: "auth.login_failed",
+            detail: "reason=founder_email_mismatch",
+            ipAddress: ip ?? null,
+            userAgent: ua ?? null,
+          });
+        }
+      } catch (err) {
+        logger.error({ emailHash, userId: user.id, stage: "audit_log_founder_email_mismatch", err }, "auth.login.audit_log_error");
+      }
+      res.status(403).json({ error: "Founder access required" });
+      return;
+    }
 
     stage = "password_verify";
     ctx.stage = stage;
