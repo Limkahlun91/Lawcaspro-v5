@@ -5,6 +5,7 @@ export * from "./developers";
 export * from "./projects";
 export * from "./clients";
 export * from "./cases";
+export { auditLogsTable } from "./cases";
 export * from "./documents";
 export * from "./extractions";
 export * from "./firm-documents";
