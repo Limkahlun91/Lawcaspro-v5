@@ -1,4 +1,5 @@
-import express, { type Express } from "express";
+import express from "express";
+import type { Application, NextFunction, Request, Response } from "express";
 import cors from "cors";
 import cookieParser from "cookie-parser";
 import pinoHttp from "pino-http";
@@ -6,7 +7,7 @@ import helmet from "helmet";
 import router from "./routes";
 import { logger } from "./lib/logger";
 
-const app: Express = express();
+const app: Application = express();
 
 app.set("trust proxy", 1);
 
@@ -45,7 +46,7 @@ app.use("/api", (_req, res) => {
   res.status(404).json({ error: "Not Found", code: "NOT_FOUND" });
 });
 
-app.use((err: unknown, req: express.Request, res: express.Response, next: express.NextFunction) => {
+app.use((err: unknown, req: Request, res: Response, next: NextFunction) => {
   if (res.headersSent) {
     next(err);
     return;
