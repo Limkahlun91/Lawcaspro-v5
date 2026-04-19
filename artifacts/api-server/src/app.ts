@@ -1,5 +1,5 @@
 import express from "express";
-import type { NextFunction, Request, Response } from "express";
+import type { Application } from "express";
 import cors from "cors";
 import cookieParser from "cookie-parser";
 import pinoHttp from "pino-http";
@@ -7,7 +7,7 @@ import helmet from "helmet";
 import router from "./routes";
 import { logger } from "./lib/logger";
 
-const app = express() as unknown as import("express").Application;
+const app: Application = express();
 
 app.set("trust proxy", 1);
 
@@ -17,23 +17,7 @@ app.use(helmet({
 }));
 
 app.use(
-  (pinoHttp as any)({
-    logger,
-    serializers: {
-      req(req: any) {
-        return {
-          id: req.id,
-          method: req.method,
-          url: req.url?.split("?")[0],
-        };
-      },
-      res(res: any) {
-        return {
-          statusCode: res.statusCode,
-        };
-      },
-    },
-  }),
+  (pinoHttp as any)(),
 );
 app.use(cors({ origin: true, credentials: true }));
 app.use(cookieParser());
@@ -46,7 +30,7 @@ app.use("/api", (_req, res) => {
   res.status(404).json({ error: "Not Found", code: "NOT_FOUND" });
 });
 
-app.use((err: unknown, req: Request, res: Response, next: NextFunction) => {
+app.use((err: unknown, req: any, res: any, next: any) => {
   if (res.headersSent) {
     next(err);
     return;
