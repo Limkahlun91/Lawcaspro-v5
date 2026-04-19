@@ -17,14 +17,14 @@
     "cookie-parser": "^1.4.7",
     "cors": "^2",
     "drizzle-orm": "0.45.1",
-    "express": "^5",
+    "express": "^4.19.2",
     "helmet": "^8.1.0",
     "otpauth": "^9.5.0",
     "pino": "^9",
     "pino-http": "^10"
   },
   "devDependencies": {
-    "@types/express": "^5.0.6",
+    "@types/express": "^4.17.21",
     "@types/node": "^25.3.3",
     "prettier": "^3.8.1",
     "typescript": "~5.9.3"

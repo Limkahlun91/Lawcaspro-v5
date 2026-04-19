@@ -1,5 +1,5 @@
 import express from "express";
-import type { Express, NextFunction, Request, Response } from "express";
+import type { NextFunction, Request, Response } from "express";
 import bcrypt from "bcryptjs";
 import * as OTPAuth from "otpauth";
 import { and, count, desc, eq, ilike } from "drizzle-orm";
@@ -1029,7 +1029,7 @@ async function handleUserDelete(req: ApiRequest, res: ApiResponse, auth: AuthCon
   });
 }
 
-const app: Express = express();
+const app = express();
 app.use((req: Request, res: Response, next: NextFunction) => {
   const rawUrl = req.url ?? "/";
   if (!rawUrl.startsWith("/api")) {
