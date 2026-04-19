@@ -171,12 +171,12 @@ router.post("/developers", requireAuth, requireFirmUser, requirePermission("deve
       email: "email",
     };
 
-    let insertValues: Record<string, unknown> = { ...insertBase };
+    let insertValues: Omit<InsertDeveloper, "createdBy"> = { ...insertBase };
     for (;;) {
       try {
         [dev] = await r
           .insert(developersTable)
-          .values(insertValues as any)
+          .values(insertValues)
           .returning();
         break;
       } catch (e) {
@@ -190,9 +190,10 @@ router.post("/developers", requireAuth, requireFirmUser, requirePermission("deve
     }
 
     try {
+      const createdByUpdate = { createdBy: req.userId } satisfies Partial<typeof developersTable.$inferInsert>;
       await r
         .update(developersTable)
-        .set({ createdBy: req.userId } as any)
+        .set(createdByUpdate)
         .where(and(eq(developersTable.id, dev.id), eq(developersTable.firmId, req.firmId!)));
     } catch {
     }
@@ -257,7 +258,7 @@ router.patch("/developers/:developerId", requireAuth, requireFirmUser, requirePe
     email?: string;
   };
 
-  const updateData: Record<string, unknown> = {};
+  const updateData: Partial<typeof developersTable.$inferInsert> = {};
   if (name !== undefined) updateData.name = name;
   if (companyRegNo !== undefined) updateData.companyRegNo = companyRegNo;
   if (address !== undefined) updateData.address = address;
@@ -269,7 +270,7 @@ router.patch("/developers/:developerId", requireAuth, requireFirmUser, requirePe
 
   const [dev] = await r
     .update(developersTable)
-    .set(updateData as any)
+    .set(updateData)
     .where(eq(developersTable.id, params.data.developerId))
     .returning();
 

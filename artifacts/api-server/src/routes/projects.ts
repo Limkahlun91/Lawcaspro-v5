@@ -148,9 +148,10 @@ router.post("/projects", requireAuth, requireFirmUser, requirePermission("projec
       .returning();
 
     try {
+      const createdByUpdate = { createdBy: req.userId } satisfies Partial<typeof projectsTable.$inferInsert>;
       await r
         .update(projectsTable)
-        .set({ createdBy: req.userId } as any)
+        .set(createdByUpdate)
         .where(and(eq(projectsTable.id, proj.id), eq(projectsTable.firmId, req.firmId!)));
     } catch {
     }
@@ -225,7 +226,7 @@ router.patch("/projects/:projectId", requireAuth, requireFirmUser, requirePermis
     }
   }
 
-  const updateData: Record<string, unknown> = {};
+  const updateData: Partial<typeof projectsTable.$inferInsert> = {};
   if (name !== undefined) updateData.name = name;
   if (developerId !== undefined) updateData.developerId = developerId;
   if (projectType !== undefined) updateData.projectType = projectType;

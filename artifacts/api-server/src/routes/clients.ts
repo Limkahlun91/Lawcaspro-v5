@@ -53,9 +53,20 @@ router.post("/clients", requireAuth, requireFirmUser, async (req: AuthRequest, r
     return;
   }
 
+  const insertPayload = {
+    firmId: req.firmId!,
+    name: parsed.data.name,
+    icNo: parsed.data.icNo,
+    nationality: parsed.data.nationality,
+    address: parsed.data.address,
+    email: parsed.data.email,
+    phone: parsed.data.phone,
+    createdBy: req.userId,
+  } satisfies typeof clientsTable.$inferInsert;
+
   const [client] = await db
     .insert(clientsTable)
-    .values({ firmId: req.firmId!, ...parsed.data, createdBy: req.userId })
+    .values(insertPayload)
     .returning();
 
   res.status(201).json(await enrichClient(client));
@@ -90,9 +101,17 @@ router.patch("/clients/:clientId", requireAuth, requireFirmUser, async (req: Aut
     return;
   }
 
+  const updatePayload: Partial<typeof clientsTable.$inferInsert> = {};
+  if (parsed.data.name !== undefined) updatePayload.name = parsed.data.name;
+  if (parsed.data.icNo !== undefined) updatePayload.icNo = parsed.data.icNo;
+  if (parsed.data.nationality !== undefined) updatePayload.nationality = parsed.data.nationality;
+  if (parsed.data.address !== undefined) updatePayload.address = parsed.data.address;
+  if (parsed.data.email !== undefined) updatePayload.email = parsed.data.email;
+  if (parsed.data.phone !== undefined) updatePayload.phone = parsed.data.phone;
+
   const [client] = await db
     .update(clientsTable)
-    .set(parsed.data)
+    .set(updatePayload)
     .where(eq(clientsTable.id, params.data.clientId))
     .returning();
 

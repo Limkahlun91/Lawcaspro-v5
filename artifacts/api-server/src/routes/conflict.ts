@@ -76,21 +76,7 @@ interface PartyInput {
   role?: string;
 }
 
-interface ConflictMatchInput {
-  conflictCheckId: number;
-  firmId: number;
-  partyName: string;
-  partyIdentifier?: string;
-  identifierType?: string;
-  matchedCaseId?: number;
-  matchedCaseRef?: string;
-  matchedPartyRole?: string;
-  matchedPartyName?: string;
-  matchType: string;
-  matchScore: number;
-  result: string;
-  detail: string;
-}
+type ConflictMatchInput = typeof conflictMatchesTable.$inferInsert;
 
 async function runConflictEngine(
   rlsDb: ReturnType<typeof rdb>,
@@ -284,9 +270,13 @@ router.post("/conflict/check", sensitiveRateLimiter, requireAuth, requireFirmUse
       const key = `${m.partyName}|${m.matchedCaseId}`;
       const existing = seen.get(key);
       if (!existing) { seen.set(key, m); continue; }
-      const mPri = TYPE_PRIORITY[m.matchType] ?? 0;
-      const ePri = TYPE_PRIORITY[existing.matchType] ?? 0;
-      if (mPri > ePri || (mPri === ePri && m.matchScore > existing.matchScore)) seen.set(key, m);
+      const mType = m.matchType ?? "name_fuzzy";
+      const eType = existing.matchType ?? "name_fuzzy";
+      const mPri = TYPE_PRIORITY[mType] ?? 0;
+      const ePri = TYPE_PRIORITY[eType] ?? 0;
+      const mScore = m.matchScore ?? 0;
+      const eScore = existing.matchScore ?? 0;
+      if (mPri > ePri || (mPri === ePri && mScore > eScore)) seen.set(key, m);
     }
     const deduped = Array.from(seen.values());
 

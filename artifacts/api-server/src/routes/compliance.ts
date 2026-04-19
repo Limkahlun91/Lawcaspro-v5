@@ -138,7 +138,7 @@ router.patch("/compliance/profiles/:id/status", requireAuth, requireFirmUser, as
   if (!profile) { res.status(404).json({ error: "Compliance profile not found" }); return; }
 
   const now = new Date();
-  const update: Record<string, unknown> = { cddStatus: parsed.data.cddStatus };
+  const update: Partial<typeof complianceProfilesTable.$inferInsert> = { cddStatus: parsed.data.cddStatus };
   if (parsed.data.cddStatus === "approved") { update.approvedBy = req.userId; update.approvedAt = now; }
   if (parsed.data.cddStatus === "rejected") {
     update.rejectedBy = req.userId; update.rejectedAt = now;
@@ -176,13 +176,18 @@ router.post("/compliance/profiles/:id/cdd-checks", requireAuth, requireFirmUser,
     .where(and(eq(complianceProfilesTable.id, profileId), eq(complianceProfilesTable.firmId, req.firmId!)));
   if (!profile) { res.status(404).json({ error: "Compliance profile not found" }); return; }
 
-  const [check] = await rdb(req).insert(cddChecksTable).values({
+  const checkInsert = {
     firmId: req.firmId!,
     complianceProfileId: profileId,
-    ...parsed.data,
+    checkType: parsed.data.checkType,
+    status: parsed.data.status,
+    result: parsed.data.result,
+    notes: parsed.data.notes,
     performedBy: req.userId,
     performedAt: new Date(),
-  }).returning();
+  } satisfies typeof cddChecksTable.$inferInsert;
+
+  const [check] = await rdb(req).insert(cddChecksTable).values(checkInsert).returning();
 
   await writeAuditLog({
     actorId: req.userId, firmId: req.firmId, actorType: "firm_user",
@@ -217,16 +222,26 @@ router.post("/compliance/profiles/:id/risk-assessment", sensitiveRateLimiter, re
 
   const scoring = computeRiskScore(parsed.data);
 
-  const [assessment] = await rdb(req).insert(riskAssessmentsTable).values({
+  const assessmentInsert = {
     firmId: req.firmId!,
     partyId: profile.partyId,
     complianceProfileId: profileId,
-    ...parsed.data,
-    ...scoring,
+    factorIsPep: parsed.data.factorIsPep,
+    factorHighRiskJurisdiction: parsed.data.factorHighRiskJurisdiction,
+    factorComplexOwnership: parsed.data.factorComplexOwnership,
+    factorNomineeArrangement: parsed.data.factorNomineeArrangement,
+    factorMissingSourceOfFunds: parsed.data.factorMissingSourceOfFunds,
+    factorSuspiciousInconsistencies: parsed.data.factorSuspiciousInconsistencies,
+    riskScore: scoring.riskScore,
+    riskLevel: scoring.riskLevel,
+    eddTriggered: scoring.eddTriggered,
+    eddReason: scoring.eddReason,
     assessedBy: req.userId,
     assessedAt: new Date(),
     notes: parsed.data.notes,
-  }).returning();
+  } satisfies typeof riskAssessmentsTable.$inferInsert;
+
+  const [assessment] = await rdb(req).insert(riskAssessmentsTable).values(assessmentInsert).returning();
 
   // Sync back to compliance profile
   const newStatus = scoring.eddTriggered ? "enhanced_due_diligence_required" : profile.cddStatus;
@@ -307,12 +322,19 @@ router.post("/compliance/profiles/:id/pep-flags", requireAuth, requireFirmUser, 
     .where(and(eq(complianceProfilesTable.id, profileId), eq(complianceProfilesTable.firmId, req.firmId!)));
   if (!profile) { res.status(404).json({ error: "Compliance profile not found" }); return; }
 
-  const [flag] = await rdb(req).insert(pepFlagsTable).values({
+  const pepFlagInsert = {
     firmId: req.firmId!,
     partyId: profile.partyId,
     flaggedBy: req.userId,
-    ...parsed.data,
-  }).returning();
+    position: parsed.data.position,
+    country: parsed.data.country,
+    pepCategory: parsed.data.pepCategory,
+    isActive: parsed.data.isActive,
+    source: parsed.data.source,
+    notes: parsed.data.notes,
+  } satisfies typeof pepFlagsTable.$inferInsert;
+
+  const [flag] = await rdb(req).insert(pepFlagsTable).values(pepFlagInsert).returning();
 
   // Update party isPep flag
   await rdb(req).update(partiesTable).set({ isPep: true, pepDetails: parsed.data.position }).where(eq(partiesTable.id, profile.partyId));
@@ -363,12 +385,17 @@ router.post("/compliance/profiles/:id/source-of-funds", requireAuth, requireFirm
     .where(and(eq(complianceProfilesTable.id, profileId), eq(complianceProfilesTable.firmId, req.firmId!)));
   if (!profile) { res.status(404).json({ error: "Compliance profile not found" }); return; }
 
-  const [record] = await rdb(req).insert(sourceOfFundsRecordsTable).values({
+  const sourceOfFundsInsert = {
     firmId: req.firmId!,
     partyId: profile.partyId,
     complianceProfileId: profileId,
-    ...parsed.data,
-  }).returning();
+    sourceType: parsed.data.sourceType,
+    description: parsed.data.description,
+    amountEstimated: parsed.data.amountEstimated,
+    currency: parsed.data.currency,
+  } satisfies typeof sourceOfFundsRecordsTable.$inferInsert;
+
+  const [record] = await rdb(req).insert(sourceOfFundsRecordsTable).values(sourceOfFundsInsert).returning();
 
   await writeAuditLog({
     actorId: req.userId, firmId: req.firmId, actorType: "firm_user",
@@ -398,12 +425,17 @@ router.post("/compliance/profiles/:id/source-of-wealth", requireAuth, requireFir
     .where(and(eq(complianceProfilesTable.id, profileId), eq(complianceProfilesTable.firmId, req.firmId!)));
   if (!profile) { res.status(404).json({ error: "Compliance profile not found" }); return; }
 
-  const [record] = await rdb(req).insert(sourceOfWealthRecordsTable).values({
+  const sourceOfWealthInsert = {
     firmId: req.firmId!,
     partyId: profile.partyId,
     complianceProfileId: profileId,
-    ...parsed.data,
-  }).returning();
+    wealthType: parsed.data.wealthType,
+    description: parsed.data.description,
+    amountEstimated: parsed.data.amountEstimated,
+    currency: parsed.data.currency,
+  } satisfies typeof sourceOfWealthRecordsTable.$inferInsert;
+
+  const [record] = await rdb(req).insert(sourceOfWealthRecordsTable).values(sourceOfWealthInsert).returning();
 
   await writeAuditLog({
     actorId: req.userId, firmId: req.firmId, actorType: "firm_user",
@@ -431,13 +463,16 @@ router.post("/compliance/profiles/:id/suspicious-notes", requireAuth, requireFir
     .where(and(eq(complianceProfilesTable.id, profileId), eq(complianceProfilesTable.firmId, req.firmId!)));
   if (!profile) { res.status(404).json({ error: "Compliance profile not found" }); return; }
 
-  const [note] = await rdb(req).insert(suspiciousReviewNotesTable).values({
+  const suspiciousNoteInsert = {
     firmId: req.firmId!,
     partyId: profile.partyId,
     complianceProfileId: profileId,
     createdBy: req.userId!,
-    ...parsed.data,
-  }).returning();
+    noteType: parsed.data.noteType,
+    content: parsed.data.content,
+  } satisfies typeof suspiciousReviewNotesTable.$inferInsert;
+
+  const [note] = await rdb(req).insert(suspiciousReviewNotesTable).values(suspiciousNoteInsert).returning();
 
   await writeAuditLog({
     actorId: req.userId, firmId: req.firmId, actorType: "firm_user",

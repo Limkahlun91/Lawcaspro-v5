@@ -87,12 +87,33 @@ router.post("/parties", sensitiveRateLimiter, requireAuth, requireFirmUser, asyn
   if (!parsed.success) { res.status(400).json({ error: parsed.error.issues }); return; }
 
   const data = parsed.data;
-  const [party] = await rdb(req).insert(partiesTable).values({
+  const partyInsert = {
     firmId: req.firmId!,
-    ...data,
+    partyType: data.partyType,
+    fullName: data.fullName,
+    nric: data.nric,
+    passportNo: data.passportNo,
+    companyRegNo: data.companyRegNo,
+    dob: data.dob,
+    incorporationDate: data.incorporationDate,
+    nationality: data.nationality,
+    jurisdiction: data.jurisdiction,
+    address: data.address,
+    email: data.email,
+    phone: data.phone,
+    occupation: data.occupation,
+    natureOfBusiness: data.natureOfBusiness,
+    transactionPurpose: data.transactionPurpose,
+    isPep: data.isPep,
+    pepDetails: data.pepDetails,
+    isHighRiskJurisdiction: data.isHighRiskJurisdiction,
+    hasNomineeArrangement: data.hasNomineeArrangement,
+    hasLayeredOwnership: data.hasLayeredOwnership,
     directors: data.directors ?? [],
     createdBy: req.userId,
-  }).returning();
+  } satisfies typeof partiesTable.$inferInsert;
+
+  const [party] = await rdb(req).insert(partiesTable).values(partyInsert).returning();
 
   // Auto-create compliance profile
   await rdb(req).insert(complianceProfilesTable).values({
@@ -148,7 +169,30 @@ router.patch("/parties/:id", requireAuth, requireFirmUser, async (req: AuthReque
   const parsed = UpdatePartyBody.safeParse(req.body);
   if (!parsed.success) { res.status(400).json({ error: parsed.error.issues }); return; }
 
-  const [updated] = await rdb(req).update(partiesTable).set(parsed.data).where(eq(partiesTable.id, id)).returning();
+  const updatePayload: Partial<typeof partiesTable.$inferInsert> = {};
+  if (parsed.data.partyType !== undefined) updatePayload.partyType = parsed.data.partyType;
+  if (parsed.data.fullName !== undefined) updatePayload.fullName = parsed.data.fullName;
+  if (parsed.data.nric !== undefined) updatePayload.nric = parsed.data.nric;
+  if (parsed.data.passportNo !== undefined) updatePayload.passportNo = parsed.data.passportNo;
+  if (parsed.data.companyRegNo !== undefined) updatePayload.companyRegNo = parsed.data.companyRegNo;
+  if (parsed.data.dob !== undefined) updatePayload.dob = parsed.data.dob;
+  if (parsed.data.incorporationDate !== undefined) updatePayload.incorporationDate = parsed.data.incorporationDate;
+  if (parsed.data.nationality !== undefined) updatePayload.nationality = parsed.data.nationality;
+  if (parsed.data.jurisdiction !== undefined) updatePayload.jurisdiction = parsed.data.jurisdiction;
+  if (parsed.data.address !== undefined) updatePayload.address = parsed.data.address;
+  if (parsed.data.email !== undefined) updatePayload.email = parsed.data.email;
+  if (parsed.data.phone !== undefined) updatePayload.phone = parsed.data.phone;
+  if (parsed.data.occupation !== undefined) updatePayload.occupation = parsed.data.occupation;
+  if (parsed.data.natureOfBusiness !== undefined) updatePayload.natureOfBusiness = parsed.data.natureOfBusiness;
+  if (parsed.data.transactionPurpose !== undefined) updatePayload.transactionPurpose = parsed.data.transactionPurpose;
+  if (parsed.data.isPep !== undefined) updatePayload.isPep = parsed.data.isPep;
+  if (parsed.data.pepDetails !== undefined) updatePayload.pepDetails = parsed.data.pepDetails;
+  if (parsed.data.isHighRiskJurisdiction !== undefined) updatePayload.isHighRiskJurisdiction = parsed.data.isHighRiskJurisdiction;
+  if (parsed.data.hasNomineeArrangement !== undefined) updatePayload.hasNomineeArrangement = parsed.data.hasNomineeArrangement;
+  if (parsed.data.hasLayeredOwnership !== undefined) updatePayload.hasLayeredOwnership = parsed.data.hasLayeredOwnership;
+  if (parsed.data.directors !== undefined) updatePayload.directors = parsed.data.directors;
+
+  const [updated] = await rdb(req).update(partiesTable).set(updatePayload).where(eq(partiesTable.id, id)).returning();
 
   await writeAuditLog({
     actorId: req.userId, firmId: req.firmId, actorType: "firm_user",
@@ -189,11 +233,22 @@ router.post("/parties/:id/beneficial-owners", requireAuth, requireFirmUser, asyn
   const parsed = CreateBeneficialOwnerBody.safeParse(req.body);
   if (!parsed.success) { res.status(400).json({ error: parsed.error.issues }); return; }
 
-  const [bo] = await rdb(req).insert(beneficialOwnersTable).values({
+  const boInsert = {
     firmId: req.firmId!,
     partyId,
-    ...parsed.data,
-  }).returning();
+    ownerName: parsed.data.ownerName,
+    ownerType: parsed.data.ownerType,
+    ownershipPercentage: parsed.data.ownershipPercentage,
+    nric: parsed.data.nric,
+    passportNo: parsed.data.passportNo,
+    nationality: parsed.data.nationality,
+    address: parsed.data.address,
+    isPep: parsed.data.isPep,
+    isUltimateBeneficialOwner: parsed.data.isUltimateBeneficialOwner,
+    throughEntityName: parsed.data.throughEntityName,
+  } satisfies typeof beneficialOwnersTable.$inferInsert;
+
+  const [bo] = await rdb(req).insert(beneficialOwnersTable).values(boInsert).returning();
 
   await writeAuditLog({
     actorId: req.userId, firmId: req.firmId, actorType: "firm_user",
