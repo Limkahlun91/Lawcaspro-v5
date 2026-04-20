@@ -69,12 +69,15 @@ const EXACT_THRESHOLD = 100;
 const FUZZY_WARNING_THRESHOLD = 75;   // >= 75 triggers warning
 const FUZZY_BLOCK_THRESHOLD = 95;     // >= 95 triggers block
 
-interface PartyInput {
+type PartyInput = {
   name: string;
+};
+
+type ConflictPartyInput = PartyInput & {
   identifier?: string;
-  identifierType?: string;
+  identifierType?: "nric" | "passport" | "company_reg" | "none";
   role?: string;
-}
+};
 
 type ConflictMatchInput = typeof conflictMatchesTable.$inferInsert;
 
@@ -83,7 +86,7 @@ async function runConflictEngine(
   firmId: number,
   checkId: number,
   caseIdToExclude: number,
-  parties: PartyInput[],
+  parties: ConflictPartyInput[],
 ): Promise<ConflictMatchInput[]> {
   const matches: ConflictMatchInput[] = [];
 
@@ -136,9 +139,9 @@ async function runConflictEngine(
           if (ep.clientNric && ep.clientNric.replace(/[-\s]/g, "") === party.identifier.replace(/[-\s]/g, "")) {
             matches.push({
               conflictCheckId: checkId, firmId,
-              partyName: party.name, partyIdentifier: party.identifier, identifierType: party.identifierType,
-              matchedCaseId: ep.caseId ?? undefined, matchedCaseRef: ep.referenceNo ?? undefined,
-              matchedPartyRole: ep.role ?? undefined, matchedPartyName: ep.clientName ?? undefined,
+              partyName: party.name, partyIdentifier: party.identifier ?? null, identifierType: party.identifierType ?? null,
+              matchedCaseId: ep.caseId ?? null, matchedCaseRef: ep.referenceNo ?? null,
+              matchedPartyRole: ep.role ?? null, matchedPartyName: ep.clientName ?? null,
               matchType: "nric", matchScore: 100, result: "blocked",
               detail: `NRIC exact match: ${party.identifier} — appears in case ${ep.referenceNo ?? ep.caseId} as ${ep.role}`,
             });
@@ -149,9 +152,9 @@ async function runConflictEngine(
           if (cp.nric && cp.nric.replace(/[-\s]/g, "") === party.identifier.replace(/[-\s]/g, "")) {
             matches.push({
               conflictCheckId: checkId, firmId,
-              partyName: party.name, partyIdentifier: party.identifier, identifierType: party.identifierType,
-              matchedCaseId: cp.caseId ?? undefined, matchedCaseRef: cp.referenceNo ?? undefined,
-              matchedPartyRole: cp.partyRole ?? undefined, matchedPartyName: cp.fullName ?? undefined,
+              partyName: party.name, partyIdentifier: party.identifier ?? null, identifierType: party.identifierType ?? null,
+              matchedCaseId: cp.caseId ?? null, matchedCaseRef: cp.referenceNo ?? null,
+              matchedPartyRole: cp.partyRole ?? null, matchedPartyName: cp.fullName ?? null,
               matchType: "nric", matchScore: 100, result: "blocked",
               detail: `NRIC exact match: ${party.identifier} — appears in case ${cp.referenceNo ?? cp.caseId} as ${cp.partyRole}`,
             });
@@ -162,9 +165,9 @@ async function runConflictEngine(
           if (cp.passportNo && cp.passportNo.toUpperCase() === party.identifier.toUpperCase()) {
             matches.push({
               conflictCheckId: checkId, firmId,
-              partyName: party.name, partyIdentifier: party.identifier, identifierType: party.identifierType,
-              matchedCaseId: cp.caseId ?? undefined, matchedCaseRef: cp.referenceNo ?? undefined,
-              matchedPartyRole: cp.partyRole ?? undefined, matchedPartyName: cp.fullName ?? undefined,
+              partyName: party.name, partyIdentifier: party.identifier ?? null, identifierType: party.identifierType ?? null,
+              matchedCaseId: cp.caseId ?? null, matchedCaseRef: cp.referenceNo ?? null,
+              matchedPartyRole: cp.partyRole ?? null, matchedPartyName: cp.fullName ?? null,
               matchType: "passport", matchScore: 100, result: "blocked",
               detail: `Passport exact match: ${party.identifier} — appears in case ${cp.referenceNo ?? cp.caseId} as ${cp.partyRole}`,
             });
@@ -175,9 +178,9 @@ async function runConflictEngine(
           if (cp.companyRegNo && cp.companyRegNo.replace(/[-\s]/g, "") === party.identifier.replace(/[-\s]/g, "")) {
             matches.push({
               conflictCheckId: checkId, firmId,
-              partyName: party.name, partyIdentifier: party.identifier, identifierType: party.identifierType,
-              matchedCaseId: cp.caseId ?? undefined, matchedCaseRef: cp.referenceNo ?? undefined,
-              matchedPartyRole: cp.partyRole ?? undefined, matchedPartyName: cp.fullName ?? undefined,
+              partyName: party.name, partyIdentifier: party.identifier ?? null, identifierType: party.identifierType ?? null,
+              matchedCaseId: cp.caseId ?? null, matchedCaseRef: cp.referenceNo ?? null,
+              matchedPartyRole: cp.partyRole ?? null, matchedPartyName: cp.fullName ?? null,
               matchType: "company_reg", matchScore: 100, result: "blocked",
               detail: `Company reg exact match: ${party.identifier} — appears in case ${cp.referenceNo ?? cp.caseId} as ${cp.partyRole}`,
             });
@@ -195,9 +198,9 @@ async function runConflictEngine(
         const matchType = score === EXACT_THRESHOLD ? "name_exact" : "name_fuzzy";
         matches.push({
           conflictCheckId: checkId, firmId,
-          partyName: party.name, partyIdentifier: party.identifier, identifierType: party.identifierType,
-          matchedCaseId: ep.caseId ?? undefined, matchedCaseRef: ep.referenceNo ?? undefined,
-          matchedPartyRole: ep.role ?? undefined, matchedPartyName: ep.clientName,
+          partyName: party.name, partyIdentifier: party.identifier ?? null, identifierType: party.identifierType ?? null,
+          matchedCaseId: ep.caseId ?? null, matchedCaseRef: ep.referenceNo ?? null,
+          matchedPartyRole: ep.role ?? null, matchedPartyName: ep.clientName,
           matchType, matchScore: score, result,
           detail: `Name match (score ${score}%): "${party.name}" vs "${ep.clientName}" in case ${ep.referenceNo ?? ep.caseId}`,
         });
@@ -212,9 +215,9 @@ async function runConflictEngine(
         const matchType = score === EXACT_THRESHOLD ? "name_exact" : "name_fuzzy";
         matches.push({
           conflictCheckId: checkId, firmId,
-          partyName: party.name, partyIdentifier: party.identifier, identifierType: party.identifierType,
-          matchedCaseId: cp.caseId ?? undefined, matchedCaseRef: cp.referenceNo ?? undefined,
-          matchedPartyRole: cp.partyRole ?? undefined, matchedPartyName: cp.fullName,
+          partyName: party.name, partyIdentifier: party.identifier ?? null, identifierType: party.identifierType ?? null,
+          matchedCaseId: cp.caseId ?? null, matchedCaseRef: cp.referenceNo ?? null,
+          matchedPartyRole: cp.partyRole ?? null, matchedPartyName: cp.fullName,
           matchType, matchScore: score, result,
           detail: `Name match (score ${score}%): "${party.name}" vs "${cp.fullName}" in case ${cp.referenceNo ?? cp.caseId}`,
         });
@@ -256,9 +259,15 @@ router.post("/conflict/check", sensitiveRateLimiter, requireAuth, requireFirmUse
   }).returning();
 
   try {
+    const partiesInput: ConflictPartyInput[] = parsed.data.parties.map((p) => ({
+      name: p.name ?? "",
+      identifier: p.identifier,
+      identifierType: p.identifierType,
+      role: p.role,
+    }));
     const rawMatches = await runConflictEngine(
       rdb(req),
-      req.firmId!, check.id, parsed.data.caseId, parsed.data.parties,
+      req.firmId!, check.id, parsed.data.caseId, partiesInput,
     );
 
     // Deduplicate: one match per (partyName, matchedCaseId) pair.

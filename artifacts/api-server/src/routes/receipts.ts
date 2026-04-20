@@ -27,8 +27,8 @@ async function updateInvoicePaymentStatus(invoiceId: number, firmId: number) {
   else if (paid > 0) status = "partially_paid";
   else if (inv.status === "paid" || inv.status === "partially_paid") status = "issued";
   await db.update(invoicesTable).set({
-    amountPaid: paid.toFixed(2) as any,
-    amountDue: Math.max(0, grandTotal - paid).toFixed(2) as any,
+    amountPaid: paid.toFixed(2),
+    amountDue: Math.max(0, grandTotal - paid).toFixed(2),
     status, updatedAt: new Date()
   }).where(eq(invoicesTable.id, invoiceId));
 }
@@ -45,10 +45,16 @@ async function postLedger(firmId: number, caseId: number | null, opts: {
   const prevBal = Number(last?.bal ?? 0);
   const balanceAfter = prevBal + opts.credit - opts.debit;
   await db.insert(ledgerEntriesTable).values({
-    firmId, caseId, entryDate: opts.entryDate as any, entryType: opts.entryType,
-    accountType: opts.accountType, debit: opts.debit.toFixed(2) as any,
-    credit: opts.credit.toFixed(2) as any, balanceAfter: balanceAfter.toFixed(2) as any,
-    description: opts.description, referenceNo: opts.referenceNo,
+    firmId,
+    caseId,
+    entryDate: opts.entryDate,
+    entryType: opts.entryType,
+    accountType: opts.accountType,
+    debit: opts.debit.toFixed(2),
+    credit: opts.credit.toFixed(2),
+    balanceAfter: balanceAfter.toFixed(2),
+    description: opts.description,
+    referenceNo: opts.referenceNo ?? null,
     sourceType: opts.sourceType, sourceId: opts.sourceId, createdBy: opts.createdBy,
   });
 }
@@ -56,9 +62,9 @@ async function postLedger(firmId: number, caseId: number | null, opts: {
 // List
 router.get("/receipts", requireAuth, requireFirmUser, requirePermission("accounting", "read"), async (req: AuthRequest, res): Promise<void> => {
   const caseId = one((req.query as any).caseId);
-  let cond = eq(receiptsTable.firmId, req.firmId!);
-  if (caseId) cond = and(cond, eq(receiptsTable.caseId, parseInt(caseId))) as any;
-  const rows = await db.select().from(receiptsTable).where(cond).orderBy(desc(receiptsTable.createdAt));
+  const conds = [eq(receiptsTable.firmId, req.firmId!)];
+  if (caseId) conds.push(eq(receiptsTable.caseId, parseInt(caseId, 10)));
+  const rows = await db.select().from(receiptsTable).where(and(...conds)).orderBy(desc(receiptsTable.createdAt));
   res.json(rows);
 });
 
@@ -79,32 +85,55 @@ router.post("/receipts", sensitiveRateLimiter, requireAuth, requireFirmUser, req
     receivedDate, referenceNo, notes, allocations } = req.body;
   if (!amount || !receivedDate) { res.status(400).json({ error: "amount and receivedDate required" }); return; }
 
+  const amountNum = Number(amount);
+  if (!Number.isFinite(amountNum) || amountNum <= 0) { res.status(400).json({ error: "Invalid amount" }); return; }
+  const amountStr = amountNum.toFixed(2);
+  const receivedDateStr = typeof receivedDate === "string" ? receivedDate : String(receivedDate);
+
+  const caseIdNum = caseId ? Number(caseId) : null;
+  if (caseIdNum !== null && (!Number.isFinite(caseIdNum) || caseIdNum <= 0)) { res.status(400).json({ error: "Invalid caseId" }); return; }
+  const invoiceIdNum = invoiceId ? Number(invoiceId) : null;
+  if (invoiceIdNum !== null && (!Number.isFinite(invoiceIdNum) || invoiceIdNum <= 0)) { res.status(400).json({ error: "Invalid invoiceId" }); return; }
+  const bankAccountIdNum = bankAccountId ? Number(bankAccountId) : null;
+  if (bankAccountIdNum !== null && (!Number.isFinite(bankAccountIdNum) || bankAccountIdNum <= 0)) { res.status(400).json({ error: "Invalid bankAccountId" }); return; }
+
   const receiptNo = await nextReceiptNo(req.firmId!);
   const [rec] = await db.insert(receiptsTable).values({
-    firmId: req.firmId!, caseId: caseId || null, invoiceId: invoiceId || null,
-    receiptNo, paymentMethod: paymentMethod || "bank_transfer",
-    bankAccountId: bankAccountId || null,
+    firmId: req.firmId!,
+    caseId: caseIdNum,
+    invoiceId: invoiceIdNum,
+    receiptNo,
+    paymentMethod: paymentMethod || "bank_transfer",
+    bankAccountId: bankAccountIdNum,
     accountType: accountType || "client",
-    amount: Number(amount).toFixed(2) as any,
-    receivedDate: receivedDate as any,
-    referenceNo: referenceNo || null, notes: notes || null,
+    amount: amountStr,
+    receivedDate: receivedDateStr,
+    referenceNo: referenceNo || null,
+    notes: notes || null,
     createdBy: req.userId!,
   }).returning();
 
   // Auto-allocate to invoice if specified
-  const allocList = allocations as { invoiceId: number; amount: number }[] || [];
-  if (invoiceId && !allocList.length) {
-    allocList.push({ invoiceId: parseInt(invoiceId), amount: Number(amount) });
+  const allocList = (Array.isArray(allocations) ? allocations : []) as { invoiceId: number; amount: number }[];
+  if (invoiceIdNum && !allocList.length) {
+    allocList.push({ invoiceId: invoiceIdNum, amount: amountNum });
   }
   for (const alloc of allocList) {
-    await db.insert(receiptAllocationsTable).values({ receiptId: rec.id, invoiceId: alloc.invoiceId || null, amount: Number(alloc.amount).toFixed(2) as any });
+    const allocAmountNum = Number(alloc.amount);
+    if (!Number.isFinite(allocAmountNum) || allocAmountNum <= 0) continue;
+    const allocInvoiceIdNum = alloc.invoiceId ? Number(alloc.invoiceId) : null;
+    await db.insert(receiptAllocationsTable).values({
+      receiptId: rec.id,
+      invoiceId: allocInvoiceIdNum,
+      amount: allocAmountNum.toFixed(2),
+    });
     if (alloc.invoiceId) await updateInvoicePaymentStatus(alloc.invoiceId, req.firmId!);
   }
 
   // Post to ledger
-  await postLedger(req.firmId!, caseId || null, {
-    entryDate: receivedDate, entryType: "receipt", accountType: accountType || "client",
-    debit: 0, credit: Number(amount),
+  await postLedger(req.firmId!, caseIdNum, {
+    entryDate: receivedDateStr, entryType: "receipt", accountType: accountType || "client",
+    debit: 0, credit: amountNum,
     description: `Receipt ${receiptNo} — ${paymentMethod || "bank_transfer"}`,
     referenceNo: receiptNo, sourceType: "receipt", sourceId: rec.id, createdBy: req.userId!,
   });

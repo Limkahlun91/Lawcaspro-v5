@@ -170,10 +170,11 @@ export async function syncWorkflowStepsFromCaseState(
   }
 
   if (changes.length) {
+    const actorType = actor.actorType ? String(actor.actorType) : "firm_user";
     await r.insert(auditLogsTable).values({
       firmId: actor.firmId,
       actorId: actor.actorId ?? null,
-      actorType: (actor.actorType as any) ?? "firm_user",
+      actorType,
       action: "workflow.auto_sync",
       entityType: "case",
       entityId: caseId,

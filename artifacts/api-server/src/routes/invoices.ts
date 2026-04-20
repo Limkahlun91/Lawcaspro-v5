@@ -80,9 +80,9 @@ router.post("/invoices/from-quotation/:quotationId", sensitiveRateLimiter, requi
   const [inv] = await r.insert(invoicesTable).values({
     firmId: req.firmId!, caseId: q.caseId ?? null, quotationId,
     invoiceNo, status: "draft",
-    subtotal: subtotal.toFixed(2) as any, taxTotal: taxTotal.toFixed(2) as any,
-    grandTotal: grandTotal.toFixed(2) as any, amountPaid: "0", amountDue: grandTotal.toFixed(2) as any,
-    issuedDate: today as any, dueDate: dueDate as any,
+    subtotal: subtotal.toFixed(2), taxTotal: taxTotal.toFixed(2),
+    grandTotal: grandTotal.toFixed(2), amountPaid: "0", amountDue: grandTotal.toFixed(2),
+    issuedDate: today, dueDate,
     notes: req.body.notes || null, createdBy: req.userId!,
   }).returning();
 
@@ -91,10 +91,10 @@ router.post("/invoices/from-quotation/:quotationId", sensitiveRateLimiter, requi
       invoiceId: inv.id,
       description: qi.description,
       itemType: qi.itemType || "disbursement",
-      amountExclTax: qi.amountExclTax as any,
-      taxRate: qi.taxRate as any,
-      taxAmount: qi.taxAmount as any,
-      amountInclTax: qi.amountInclTax as any,
+      amountExclTax: String(qi.amountExclTax),
+      taxRate: String(qi.taxRate),
+      taxAmount: String(qi.taxAmount),
+      amountInclTax: String(qi.amountInclTax),
       sortOrder: idx,
     })));
   }
@@ -107,9 +107,22 @@ router.post("/invoices/from-quotation/:quotationId", sensitiveRateLimiter, requi
 router.post("/invoices", sensitiveRateLimiter, requireAuth, requireFirmUser, requirePermission("accounting", "write"), async (req: AuthRequest, res): Promise<void> => {
   const r = rdb(req);
   const { caseId, quotationId, items, notes, issuedDate, dueDate } = req.body;
-  const parsedItems = (items || []) as any[];
-  const subtotal = parsedItems.reduce((s: number, i: any) => s + Number(i.amountExclTax || 0), 0);
-  const taxTotal = parsedItems.reduce((s: number, i: any) => s + Number(i.taxAmount || 0), 0);
+  const rawItems = Array.isArray(items) ? items : [];
+  const parsedItems = rawItems
+    .map((i) => {
+      const obj = (i && typeof i === "object") ? (i as Record<string, unknown>) : {};
+      const description = typeof obj.description === "string" ? obj.description : "";
+      const itemType = typeof obj.itemType === "string" ? obj.itemType : "professional_fee";
+      const amountExclTax = Number(obj.amountExclTax ?? 0);
+      const taxRate = Number(obj.taxRate ?? 0);
+      const taxAmount = Number(obj.taxAmount ?? 0);
+      const amountInclTax = Number(obj.amountInclTax ?? (amountExclTax + taxAmount));
+      return { description, itemType, amountExclTax, taxRate, taxAmount, amountInclTax };
+    })
+    .filter((i) => Boolean(i.description));
+
+  const subtotal = parsedItems.reduce((s, i) => s + (Number.isFinite(i.amountExclTax) ? i.amountExclTax : 0), 0);
+  const taxTotal = parsedItems.reduce((s, i) => s + (Number.isFinite(i.taxAmount) ? i.taxAmount : 0), 0);
   const grandTotal = subtotal + taxTotal;
   const invoiceNo = await nextInvoiceNo(r, req.firmId!);
   const today = issuedDate || new Date().toISOString().slice(0, 10);
@@ -118,19 +131,21 @@ router.post("/invoices", sensitiveRateLimiter, requireAuth, requireFirmUser, req
   const [inv] = await r.insert(invoicesTable).values({
     firmId: req.firmId!, caseId: caseId || null, quotationId: quotationId || null,
     invoiceNo, status: "draft",
-    subtotal: subtotal.toFixed(2) as any, taxTotal: taxTotal.toFixed(2) as any,
-    grandTotal: grandTotal.toFixed(2) as any, amountPaid: "0", amountDue: grandTotal.toFixed(2) as any,
-    issuedDate: today as any, dueDate: due as any,
+    subtotal: subtotal.toFixed(2), taxTotal: taxTotal.toFixed(2),
+    grandTotal: grandTotal.toFixed(2), amountPaid: "0", amountDue: grandTotal.toFixed(2),
+    issuedDate: typeof today === "string" ? today : String(today), dueDate: typeof due === "string" ? due : String(due),
     notes: notes || null, createdBy: req.userId!,
   }).returning();
 
   if (parsedItems.length) {
-    await r.insert(invoiceItemsTable).values(parsedItems.map((i: any, idx: number) => ({
-      invoiceId: inv.id, description: i.description, itemType: i.itemType || "professional_fee",
-      amountExclTax: (Number(i.amountExclTax) || 0).toFixed(2) as any,
-      taxRate: (Number(i.taxRate) || 0).toFixed(2) as any,
-      taxAmount: (Number(i.taxAmount) || 0).toFixed(2) as any,
-      amountInclTax: (Number(i.amountInclTax) || 0).toFixed(2) as any,
+    await r.insert(invoiceItemsTable).values(parsedItems.map((i, idx) => ({
+      invoiceId: inv.id,
+      description: i.description,
+      itemType: i.itemType || "professional_fee",
+      amountExclTax: (Number.isFinite(i.amountExclTax) ? i.amountExclTax : 0).toFixed(2),
+      taxRate: (Number.isFinite(i.taxRate) ? i.taxRate : 0).toFixed(2),
+      taxAmount: (Number.isFinite(i.taxAmount) ? i.taxAmount : 0).toFixed(2),
+      amountInclTax: (Number.isFinite(i.amountInclTax) ? i.amountInclTax : 0).toFixed(2),
       sortOrder: idx,
     })));
   }

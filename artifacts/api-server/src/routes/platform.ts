@@ -954,12 +954,15 @@ router.get("/platform/clauses", requireAuth, requireFounder, async (req: AuthReq
   if (status) where.push(eq(platformClausesTable.status, status));
   if (category) where.push(eq(platformClausesTable.category, category));
   if (language) where.push(eq(platformClausesTable.language, language));
-  if (q) where.push(or(
-    ilike(platformClausesTable.clauseCode, `%${q}%`),
-    ilike(platformClausesTable.title, `%${q}%`),
-    ilike(platformClausesTable.body, `%${q}%`),
-    ilike(sql`COALESCE(${platformClausesTable.notes}, '')`, `%${q}%`),
-  ) as any);
+  if (q) {
+    const qCond = or(
+      ilike(platformClausesTable.clauseCode, `%${q}%`),
+      ilike(platformClausesTable.title, `%${q}%`),
+      ilike(platformClausesTable.body, `%${q}%`),
+      ilike(sql`COALESCE(${platformClausesTable.notes}, '')`, `%${q}%`),
+    );
+    if (qCond) where.push(qCond);
+  }
   if (tag) where.push(sql`${platformClausesTable.tags} @> ARRAY[${tag}]::text[]`);
 
   const rows = await withAuthSafeDb(async (authDb) =>
@@ -1000,7 +1003,7 @@ router.post("/platform/clauses", requireAuth, requireFounder, async (req: AuthRe
         status,
         isSystem,
         sortOrder,
-        applicability: applicability as any,
+        applicability,
         createdBy: req.userId ?? null,
         updatedBy: req.userId ?? null,
       })
@@ -1012,14 +1015,17 @@ router.post("/platform/clauses", requireAuth, requireFounder, async (req: AuthRe
 });
 
 router.put("/platform/clauses/:id", requireAuth, requireFounder, async (req: AuthRequest, res): Promise<void> => {
-  const idStr = one(req.params.id as any);
+  const idStr = one(req.params.id);
   const id = idStr ? parseInt(idStr, 10) : NaN;
   if (!Number.isFinite(id)) { res.status(400).json({ error: "Invalid id" }); return; }
   const body = (req.body && typeof req.body === "object") ? (req.body as Record<string, unknown>) : {};
 
-  const patch: Record<string, unknown> = {};
+  const patch: Partial<typeof platformClausesTable.$inferInsert> = {};
   if (typeof body.title === "string") patch.title = body.title.trim();
-  if (typeof body.clauseCode === "string") patch.clauseCode = body.clauseCode.trim().toUpperCase().replace(/[^A-Z0-9_]/g, "_").replace(/_+/g, "_").replace(/^_+|_+$/g, "") || null;
+  if (typeof body.clauseCode === "string") {
+    const cleaned = body.clauseCode.trim().toUpperCase().replace(/[^A-Z0-9_]/g, "_").replace(/_+/g, "_").replace(/^_+|_+$/g, "");
+    if (cleaned) patch.clauseCode = cleaned;
+  }
   if (typeof body.category === "string") patch.category = body.category.trim();
   if (typeof body.language === "string") patch.language = body.language.trim();
   if (typeof body.body === "string") patch.body = body.body;
@@ -1033,7 +1039,7 @@ router.put("/platform/clauses/:id", requireAuth, requireFounder, async (req: Aut
   patch.updatedAt = new Date();
 
   const updated = await withAuthSafeDb(async (authDb) => {
-    const [row] = await authDb.update(platformClausesTable).set(patch as any).where(eq(platformClausesTable.id, id)).returning();
+    const [row] = await authDb.update(platformClausesTable).set(patch).where(eq(platformClausesTable.id, id)).returning();
     if (!row) return null;
     await writeAuditLog({ firmId: null, actorId: req.userId, actorType: req.userType, action: "clauses.platform.update", entityType: "platform_clause", entityId: id, detail: `clauseId=${id}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] }, { db: authDb, strict: true });
     return row;

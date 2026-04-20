@@ -1970,21 +1970,14 @@ router.post("/cases", requireAuth, requireFirmUser, requirePermission("cases", "
             firmId: req.firmId!,
             name: trimmedName,
             icNo: trimmedIc,
-          };
+            createdBy: req.userId ?? null,
+          } satisfies typeof clientsTable.$inferInsert;
 
           let client: typeof clientsTable.$inferSelect;
           [client] = await r
             .insert(clientsTable)
-            .values(insertBase as any)
+            .values(insertBase)
             .returning();
-
-          try {
-            await r
-              .update(clientsTable)
-              .set({ createdBy: req.userId } as any)
-              .where(and(eq(clientsTable.id, client.id), eq(clientsTable.firmId, req.firmId!)));
-          } catch {
-          }
           resolvedPurchaserIds.push(client.id);
           purchasersCreated++;
         }
@@ -2032,7 +2025,8 @@ router.post("/cases", requireAuth, requireFirmUser, requirePermission("cases", "
       propertyDetails: propertyDetails ? JSON.stringify(propertyDetails) : null,
       loanDetails: loanDetails ? JSON.stringify(loanDetails) : null,
       companyDetails: companyDetails ? JSON.stringify(companyDetails) : null,
-    };
+      createdBy: req.userId ?? null,
+    } satisfies typeof casesTable.$inferInsert;
 
     let ctxFirmId: string | null = null;
     let ctxIsFounder: string | null = null;
@@ -2062,16 +2056,8 @@ router.post("/cases", requireAuth, requireFirmUser, requirePermission("cases", "
     let newCase: typeof casesTable.$inferSelect;
     [newCase] = await r
       .insert(casesTable)
-      .values(insertCaseBase as any)
+      .values(insertCaseBase)
       .returning();
-
-    try {
-      await r
-        .update(casesTable)
-        .set({ createdBy: req.userId } as any)
-        .where(and(eq(casesTable.id, newCase.id), eq(casesTable.firmId, req.firmId!)));
-    } catch {
-    }
 
     for (let i = 0; i < resolvedPurchaserIds.length; i++) {
       await r.insert(casePurchasersTable).values({

@@ -9,16 +9,17 @@ const router: IRouter = Router();
 
 router.get("/time-entries", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
   const caseId = one((req.query as any).caseId);
-  let cond = eq(timeEntriesTable.firmId, req.firmId!);
-  if (caseId) cond = and(cond, eq(timeEntriesTable.caseId, parseInt(caseId))) as any;
-  const rows = await db.select().from(timeEntriesTable).where(cond).orderBy(desc(timeEntriesTable.entryDate));
+  const conds = [eq(timeEntriesTable.firmId, req.firmId!)];
+  if (caseId) conds.push(eq(timeEntriesTable.caseId, parseInt(caseId, 10)));
+  const rows = await db.select().from(timeEntriesTable).where(and(...conds)).orderBy(desc(timeEntriesTable.entryDate));
   res.json(rows);
 });
 
 router.get("/time-entries/summary", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
   const caseId = one((req.query as any).caseId);
-  let cond = eq(timeEntriesTable.firmId, req.firmId!);
-  if (caseId) cond = and(cond, eq(timeEntriesTable.caseId, parseInt(caseId))) as any;
+  const conds = [eq(timeEntriesTable.firmId, req.firmId!)];
+  if (caseId) conds.push(eq(timeEntriesTable.caseId, parseInt(caseId, 10)));
+  const cond = and(...conds);
   const [row] = await db.select({
     totalHours: sql<string>`COALESCE(SUM(hours), 0)`,
     totalAmount: sql<string>`COALESCE(SUM(hours * rate_per_hour), 0)`,
@@ -33,14 +34,31 @@ router.post("/time-entries", requireAuth, requireFirmUser, async (req: AuthReque
   if (!caseId || !entryDate || !description || hours === undefined) {
     res.status(400).json({ error: "caseId, entryDate, description, hours required" }); return;
   }
-  const [row] = await db.insert(timeEntriesTable).values({
-    firmId: req.firmId!, caseId: parseInt(caseId), userId: req.userId!,
-    entryDate: entryDate as any, description,
-    hours: String(Number(hours)) as any,
-    ratePerHour: String(Number(ratePerHour ?? 0)) as any,
-    isBillable: isBillable !== false,
+
+  const caseIdNum = Number(caseId);
+  if (!Number.isFinite(caseIdNum) || caseIdNum <= 0) { res.status(400).json({ error: "Invalid caseId" }); return; }
+
+  const entryDateStr = typeof entryDate === "string" ? entryDate : String(entryDate);
+  const descriptionStr = typeof description === "string" ? description : String(description);
+  const hoursNum = Number(hours);
+  if (!Number.isFinite(hoursNum)) { res.status(400).json({ error: "Invalid hours" }); return; }
+  const rateNum = ratePerHour === undefined || ratePerHour === null ? 0 : Number(ratePerHour);
+  if (!Number.isFinite(rateNum)) { res.status(400).json({ error: "Invalid ratePerHour" }); return; }
+  const isBillableBool = typeof isBillable === "boolean" ? isBillable : true;
+
+  const insert = {
+    firmId: req.firmId!,
+    caseId: caseIdNum,
+    userId: req.userId!,
+    entryDate: entryDateStr,
+    description: descriptionStr,
+    hours: hoursNum.toFixed(2),
+    ratePerHour: rateNum.toFixed(2),
+    isBillable: isBillableBool,
     createdBy: req.userId!,
-  }).returning();
+  } satisfies typeof timeEntriesTable.$inferInsert;
+
+  const [row] = await db.insert(timeEntriesTable).values(insert).returning();
   res.status(201).json(row);
 });
 
@@ -49,14 +67,26 @@ router.put("/time-entries/:id", requireAuth, requireFirmUser, async (req: AuthRe
   const id = idStr ? parseInt(idStr) : NaN;
   if (isNaN(id)) { res.status(400).json({ error: "Invalid time entry ID" }); return; }
   const { description, hours, ratePerHour, isBillable, entryDate } = req.body;
-  const [row] = await db.update(timeEntriesTable).set({
-    ...(description !== undefined && { description }),
-    ...(hours !== undefined && { hours: String(Number(hours)) as any }),
-    ...(ratePerHour !== undefined && { ratePerHour: String(Number(ratePerHour)) as any }),
-    ...(isBillable !== undefined && { isBillable }),
-    ...(entryDate !== undefined && { entryDate: entryDate as any }),
-    updatedAt: new Date(),
-  }).where(and(eq(timeEntriesTable.id, id), eq(timeEntriesTable.firmId, req.firmId!))).returning();
+
+  const patch: Partial<typeof timeEntriesTable.$inferInsert> = { updatedAt: new Date() };
+  if (description !== undefined) patch.description = typeof description === "string" ? description : String(description);
+  if (hours !== undefined) {
+    const hoursNum = Number(hours);
+    if (!Number.isFinite(hoursNum)) { res.status(400).json({ error: "Invalid hours" }); return; }
+    patch.hours = hoursNum.toFixed(2);
+  }
+  if (ratePerHour !== undefined) {
+    const rateNum = Number(ratePerHour);
+    if (!Number.isFinite(rateNum)) { res.status(400).json({ error: "Invalid ratePerHour" }); return; }
+    patch.ratePerHour = rateNum.toFixed(2);
+  }
+  if (isBillable !== undefined) {
+    if (typeof isBillable !== "boolean") { res.status(400).json({ error: "Invalid isBillable" }); return; }
+    patch.isBillable = isBillable;
+  }
+  if (entryDate !== undefined) patch.entryDate = typeof entryDate === "string" ? entryDate : String(entryDate);
+
+  const [row] = await db.update(timeEntriesTable).set(patch).where(and(eq(timeEntriesTable.id, id), eq(timeEntriesTable.firmId, req.firmId!))).returning();
   if (!row) { res.status(404).json({ error: "Not found" }); return; }
   res.json(row);
 });

@@ -29,10 +29,10 @@ async function nextVoucherNo(firmId: number): Promise<string> {
 router.get("/payment-vouchers", requireAuth, requireFirmUser, requirePermission("accounting", "read"), async (req: AuthRequest, res): Promise<void> => {
   const caseId = one((req.query as any).caseId);
   const status = one((req.query as any).status);
-  let cond = eq(paymentVouchersTable.firmId, req.firmId!);
-  if (caseId) cond = and(cond, eq(paymentVouchersTable.caseId, parseInt(caseId))) as any;
-  if (status) cond = and(cond, eq(paymentVouchersTable.status, status)) as any;
-  const rows = await db.select().from(paymentVouchersTable).where(cond).orderBy(desc(paymentVouchersTable.createdAt));
+  const conds = [eq(paymentVouchersTable.firmId, req.firmId!)];
+  if (caseId) conds.push(eq(paymentVouchersTable.caseId, parseInt(caseId, 10)));
+  if (status) conds.push(eq(paymentVouchersTable.status, status));
+  const rows = await db.select().from(paymentVouchersTable).where(and(...conds)).orderBy(desc(paymentVouchersTable.createdAt));
   res.json(rows);
 });
 
@@ -53,20 +53,40 @@ router.post("/payment-vouchers", sensitiveRateLimiter, requireAuth, requireFirmU
     accountType, amount, purpose, notes, items } = req.body;
   if (!payeeName || !amount || !purpose) { res.status(400).json({ error: "payeeName, amount, purpose required" }); return; }
 
+  const amountNum = Number(amount);
+  if (!Number.isFinite(amountNum) || amountNum <= 0) { res.status(400).json({ error: "Invalid amount" }); return; }
+  const amountStr = amountNum.toFixed(2);
+  const caseIdNum = caseId ? Number(caseId) : null;
+  if (caseIdNum !== null && (!Number.isFinite(caseIdNum) || caseIdNum <= 0)) { res.status(400).json({ error: "Invalid caseId" }); return; }
+  const bankAccountIdNum = bankAccountId ? Number(bankAccountId) : null;
+  if (bankAccountIdNum !== null && (!Number.isFinite(bankAccountIdNum) || bankAccountIdNum <= 0)) { res.status(400).json({ error: "Invalid bankAccountId" }); return; }
+
   const voucherNo = await nextVoucherNo(req.firmId!);
   const [pv] = await db.insert(paymentVouchersTable).values({
-    firmId: req.firmId!, caseId: caseId || null, voucherNo,
-    status: "draft", payeeName, payeeBank: payeeBank || null, payeeAccountNo: payeeAccountNo || null,
-    paymentMethod: paymentMethod || "bank_transfer", bankAccountId: bankAccountId || null,
-    accountType: accountType || "office", amount: Number(amount).toFixed(2) as any,
-    purpose, notes: notes || null, createdBy: req.userId!,
+    firmId: req.firmId!,
+    caseId: caseIdNum,
+    voucherNo,
+    status: "draft",
+    payeeName,
+    payeeBank: payeeBank || null,
+    payeeAccountNo: payeeAccountNo || null,
+    paymentMethod: paymentMethod || "bank_transfer",
+    bankAccountId: bankAccountIdNum,
+    accountType: accountType || "office",
+    amount: amountStr,
+    purpose,
+    notes: notes || null,
+    createdBy: req.userId!,
   }).returning();
 
-  const itemList = items as { description: string; itemType?: string; amount: number }[] || [];
+  const itemList = (Array.isArray(items) ? items : []) as { description: string; itemType?: string; amount: number }[];
   if (itemList.length) {
     await db.insert(paymentVoucherItemsTable).values(itemList.map((i, idx) => ({
-      voucherId: pv.id, description: i.description, itemType: i.itemType || "disbursement",
-      amount: Number(i.amount).toFixed(2) as any, sortOrder: idx,
+      voucherId: pv.id,
+      description: String(i.description ?? ""),
+      itemType: i.itemType || "disbursement",
+      amount: Number(i.amount || 0).toFixed(2),
+      sortOrder: idx,
     })));
   }
 
@@ -88,7 +108,7 @@ router.post("/payment-vouchers/:id/transition", sensitiveRateLimiter, requireAut
   if (!allowed.includes(toStatus)) { res.status(400).json({ error: `Cannot move from ${pv.status} to ${toStatus}` }); return; }
 
   const now = new Date();
-  const updateFields: Record<string, any> = { status: toStatus, updatedAt: now };
+  const updateFields: Partial<typeof paymentVouchersTable.$inferInsert> = { status: toStatus, updatedAt: now };
   if (toStatus === "prepared") { updateFields.preparedBy = req.userId!; updateFields.preparedAt = now; }
   if (toStatus === "lawyer_approved") { updateFields.lawyerApprovedBy = req.userId!; updateFields.lawyerApprovedAt = now; }
   if (toStatus === "partner_approved") { updateFields.partnerApprovedBy = req.userId!; updateFields.partnerApprovedAt = now; }
@@ -96,9 +116,14 @@ router.post("/payment-vouchers/:id/transition", sensitiveRateLimiter, requireAut
     updateFields.paidAt = now; updateFields.paidBy = req.userId!;
     // Post ledger entry (debit from account)
     await db.insert(ledgerEntriesTable).values({
-      firmId: req.firmId!, caseId: pv.caseId, entryDate: now.toISOString().slice(0, 10) as any,
-      entryType: "payment_voucher", accountType: pv.accountType,
-      debit: Number(pv.amount).toFixed(2) as any, credit: "0" as any, balanceAfter: "0" as any,
+      firmId: req.firmId!,
+      caseId: pv.caseId ?? null,
+      entryDate: now.toISOString().slice(0, 10),
+      entryType: "payment_voucher",
+      accountType: pv.accountType,
+      debit: Number(pv.amount).toFixed(2),
+      credit: "0",
+      balanceAfter: "0",
       description: `Payment Voucher ${pv.voucherNo} — ${pv.payeeName}`,
       referenceNo: pv.voucherNo, sourceType: "payment_voucher", sourceId: id, createdBy: req.userId!,
     });
@@ -113,18 +138,19 @@ router.post("/payment-vouchers/:id/transition", sensitiveRateLimiter, requireAut
 router.get("/ledger", requireAuth, requireFirmUser, requirePermission("accounting", "read"), async (req: AuthRequest, res): Promise<void> => {
   const caseId = one((req.query as any).caseId);
   const accountType = one((req.query as any).accountType);
-  let cond = eq(ledgerEntriesTable.firmId, req.firmId!);
-  if (caseId) cond = and(cond, eq(ledgerEntriesTable.caseId, parseInt(caseId))) as any;
-  if (accountType) cond = and(cond, eq(ledgerEntriesTable.accountType, accountType)) as any;
-  const rows = await db.select().from(ledgerEntriesTable).where(cond).orderBy(ledgerEntriesTable.entryDate, ledgerEntriesTable.createdAt);
+  const conds = [eq(ledgerEntriesTable.firmId, req.firmId!)];
+  if (caseId) conds.push(eq(ledgerEntriesTable.caseId, parseInt(caseId, 10)));
+  if (accountType) conds.push(eq(ledgerEntriesTable.accountType, accountType));
+  const rows = await db.select().from(ledgerEntriesTable).where(and(...conds)).orderBy(ledgerEntriesTable.entryDate, ledgerEntriesTable.createdAt);
   res.json(rows);
 });
 
 // Ledger summary (balance per account type per case)
 router.get("/ledger/summary", requireAuth, requireFirmUser, requirePermission("accounting", "read"), async (req: AuthRequest, res): Promise<void> => {
   const caseId = one((req.query as any).caseId);
-  let cond = eq(ledgerEntriesTable.firmId, req.firmId!);
-  if (caseId) cond = and(cond, eq(ledgerEntriesTable.caseId, parseInt(caseId))) as any;
+  const conds = [eq(ledgerEntriesTable.firmId, req.firmId!)];
+  if (caseId) conds.push(eq(ledgerEntriesTable.caseId, parseInt(caseId, 10)));
+  const cond = and(...conds);
   const rows = await db.select({
     accountType: ledgerEntriesTable.accountType,
     totalDebit: sql<string>`COALESCE(SUM(debit), 0)`,
