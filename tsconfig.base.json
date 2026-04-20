@@ -1,7 +1,9 @@
 {
   "compilerOptions": {
+    "strict": true,
     "baseUrl": ".",
     "paths": {
+      "@/*": ["./*"],
       "drizzle-orm": ["./node_modules/drizzle-orm"]
     },
     "isolatedModules": true,
