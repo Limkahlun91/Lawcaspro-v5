@@ -1,5 +1,4 @@
-import express from "express";
-import type { Express, NextFunction, Request, Response } from "express";
+import express, { type NextFunction, type Request, type Response } from "express";
 import cors from "cors";
 import cookieParser from "cookie-parser";
 import pinoHttp from "pino-http";
@@ -7,7 +6,7 @@ import helmet from "helmet";
 import router from "./routes/index.js";
 import { logger } from "./lib/logger.js";
 
-const app: Express = express();
+const app = express();
 
 app.set("trust proxy", 1);
 
@@ -43,4 +42,5 @@ app.use((err: unknown, req: Request, res: Response, next: NextFunction) => {
   res.status(500).json({ error: "Internal Server Error" });
 });
 
-export default app;
+const exportedApp: ReturnType<typeof express> = app;
+export default exportedApp;
