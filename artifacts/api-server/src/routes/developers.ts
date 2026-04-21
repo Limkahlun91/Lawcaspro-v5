@@ -1,6 +1,6 @@
 import { Router, type IRouter } from "express";
 import { eq, ilike, count, desc, and } from "drizzle-orm";
-import { db, developersTable, projectsTable, sql, type Developer, type InsertDeveloper } from "@workspace/db";
+import { db, developersTable, projectsTable, sql, type Developer } from "@workspace/db";
 import {
   ListDevelopersQueryParams,
   GetDeveloperParams, UpdateDeveloperParams, DeleteDeveloperParams
@@ -12,6 +12,12 @@ const router: IRouter = Router();
 
 type DbConn = typeof db | NonNullable<AuthRequest["rlsDb"]>;
 const rdb = (req: AuthRequest): DbConn => req.rlsDb ?? db;
+
+type DeveloperInsert = typeof developersTable.$inferInsert;
+type DeveloperInsertPayload = Pick<DeveloperInsert, "firmId" | "name"> & Partial<Omit<
+  DeveloperInsert,
+  "firmId" | "name" | "id" | "createdAt" | "updatedAt"
+>>;
 
 interface DeveloperContact {
   name: string;
@@ -109,7 +115,7 @@ router.post("/developers", requireAuth, requireFirmUser, requirePermission("deve
       return;
     }
 
-    const insertBase: Omit<InsertDeveloper, "createdBy"> = {
+    const insertBase = {
       firmId: req.firmId!,
       name,
       companyRegNo: companyRegNo ?? null,
@@ -119,7 +125,7 @@ router.post("/developers", requireAuth, requireFirmUser, requirePermission("deve
       contactPerson: contactPerson ?? null,
       phone: phone ?? null,
       email: email ?? null,
-    };
+    } satisfies DeveloperInsertPayload;
 
     let ctxFirmId: string | null = null;
     let ctxIsFounder: string | null = null;
@@ -161,7 +167,7 @@ router.post("/developers", requireAuth, requireFirmUser, requirePermission("deve
       return m?.[1] ?? null;
     };
 
-    const columnToKey: Record<string, keyof Omit<InsertDeveloper, "createdBy">> = {
+    const columnToKey: Record<string, keyof DeveloperInsertPayload> = {
       company_reg_no: "companyRegNo",
       address: "address",
       business_address: "businessAddress",
@@ -171,7 +177,7 @@ router.post("/developers", requireAuth, requireFirmUser, requirePermission("deve
       email: "email",
     };
 
-    let insertValues: Omit<InsertDeveloper, "createdBy"> = { ...insertBase };
+    let insertValues: DeveloperInsertPayload = { ...insertBase };
     for (;;) {
       try {
         [dev] = await r
@@ -184,8 +190,7 @@ router.post("/developers", requireAuth, requireFirmUser, requirePermission("deve
         if (!col) throw e;
         const key = columnToKey[col];
         if (!key) throw e;
-        if (!(key in insertValues)) throw e;
-        delete insertValues[key];
+        insertValues = { ...insertValues, [key]: undefined };
       }
     }
 

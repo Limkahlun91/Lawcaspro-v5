@@ -220,7 +220,14 @@ router.post("/compliance/profiles/:id/risk-assessment", sensitiveRateLimiter, re
     .where(and(eq(complianceProfilesTable.id, profileId), eq(complianceProfilesTable.firmId, req.firmId!)));
   if (!profile) { res.status(404).json({ error: "Compliance profile not found" }); return; }
 
-  const scoring = computeRiskScore(parsed.data);
+  const scoring = computeRiskScore({
+    factorIsPep: parsed.data.factorIsPep ?? false,
+    factorHighRiskJurisdiction: parsed.data.factorHighRiskJurisdiction ?? false,
+    factorComplexOwnership: parsed.data.factorComplexOwnership ?? false,
+    factorNomineeArrangement: parsed.data.factorNomineeArrangement ?? false,
+    factorMissingSourceOfFunds: parsed.data.factorMissingSourceOfFunds ?? false,
+    factorSuspiciousInconsistencies: parsed.data.factorSuspiciousInconsistencies ?? false,
+  });
 
   const assessmentInsert = {
     firmId: req.firmId!,

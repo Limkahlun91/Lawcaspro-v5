@@ -1,6 +1,6 @@
 import { Router, type IRouter } from "express";
 import { eq, ilike, count, desc, and } from "drizzle-orm";
-import { casesTable, db, developersTable, projectsTable, sql, type InsertProject, type Project } from "@workspace/db";
+import { casesTable, db, developersTable, projectsTable, sql, type Project } from "@workspace/db";
 import {
   CreateProjectBody, UpdateProjectBody, ListProjectsQueryParams,
   GetProjectParams, UpdateProjectParams, DeleteProjectParams
@@ -12,6 +12,8 @@ const router: IRouter = Router();
 
 type DbConn = typeof db | NonNullable<AuthRequest["rlsDb"]>;
 const rdb = (req: AuthRequest): DbConn => req.rlsDb ?? db;
+
+type ProjectInsert = typeof projectsTable.$inferInsert;
 
 async function enrichProject(r: DbConn, proj: Project) {
   const [devRow] = await r.select().from(developersTable).where(eq(developersTable.id, proj.developerId));
@@ -88,7 +90,16 @@ router.post("/projects", requireAuth, requireFirmUser, requirePermission("projec
     }
 
     const { developerId, name, projectType, titleType, landUse, developmentCondition, unitCategory, extraFields } = parsed.data;
-    const { phase, developerName, titleSubtype, masterTitleNumber, masterTitleLandSize, mukim, daerah, negeri } = req.body as Record<string, unknown>;
+    const { phase, developerName, titleSubtype, masterTitleNumber, masterTitleLandSize, mukim, daerah, negeri } = req.body as {
+      phase?: string;
+      developerName?: string;
+      titleSubtype?: string;
+      masterTitleNumber?: string;
+      masterTitleLandSize?: string;
+      mukim?: string;
+      daerah?: string;
+      negeri?: string;
+    };
 
     const [dev] = await r.select().from(developersTable).where(eq(developersTable.id, developerId));
     if (!dev || dev.firmId !== req.firmId) {
@@ -96,7 +107,7 @@ router.post("/projects", requireAuth, requireFirmUser, requirePermission("projec
       return;
     }
 
-    const insertBase: Omit<InsertProject, "createdBy"> = {
+    const insertBase = {
       firmId: req.firmId!,
       developerId,
       name,
@@ -114,7 +125,7 @@ router.post("/projects", requireAuth, requireFirmUser, requirePermission("projec
       developmentCondition,
       unitCategory,
       extraFields: extraFields ?? {},
-    };
+    } satisfies Omit<ProjectInsert, "id" | "createdAt" | "updatedAt" | "createdBy">;
 
     let ctxFirmId: string | null = null;
     let ctxIsFounder: string | null = null;
