@@ -3,13 +3,19 @@ import express from "express";
 import cors from "cors";
 import helmet from "helmet";
 import cookieParser from "cookie-parser";
-import pinoHttpModule from "pino-http";
 import router from "./routes/index.js";
 import { logger } from "./lib/logger.js";
 
-const pinoHttp = pinoHttpModule as unknown as (opts?: unknown) => express.RequestHandler;
+type App = {
+  set: (setting: string, value: unknown) => unknown;
+  use: (...handlers: unknown[]) => unknown;
+  get: (path: string, handler: unknown) => unknown;
+  listen: (port: number, cb: () => void) => {
+    on: (event: "error", listener: (err: unknown) => void) => unknown;
+  };
+};
 
-const app = express();
+const app: App = express() as unknown as App;
 
 app.set("trust proxy", 1);
 app.use(helmet());
@@ -17,36 +23,30 @@ app.use(cors());
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
-app.use(pinoHttp({ logger }));
 
 function healthHandler(
-  _req: express.Request,
-  res: express.Response,
+  _req: unknown,
+  res: { json: (body: unknown) => unknown },
 ): void {
-  res.status(200).json({ ok: true });
+  res.json({ ok: true });
 }
 
 function notFoundHandler(
-  req: express.Request,
-  res: express.Response,
+  _req: unknown,
+  res: { json: (body: unknown) => unknown },
 ): void {
-  logger.warn({ path: req.path, method: req.method }, "Route not found");
-  res.status(404).json({ error: "Not found" });
+  logger.warn("Route not found");
+  res.json({ error: "Not found" });
 }
 
 function errorHandler(
   err: unknown,
-  _req: express.Request,
-  res: express.Response,
-  next: express.NextFunction,
+  _req: unknown,
+  res: { json: (body: unknown) => unknown },
+  _next: unknown,
 ): void {
-  if (res.headersSent) {
-    next(err);
-    return;
-  }
-
   logger.error({ err }, "Unhandled error");
-  res.status(500).json({ error: "Internal server error" });
+  res.json({ error: "Internal server error" });
 }
 
 app.get("/api/health", healthHandler);
@@ -54,4 +54,4 @@ app.use("/api", router);
 app.use(notFoundHandler);
 app.use(errorHandler);
 
-export default app as ReturnType<typeof express>;
+export default app;
