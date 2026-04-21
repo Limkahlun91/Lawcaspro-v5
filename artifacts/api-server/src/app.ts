@@ -1,57 +1,32 @@
-/// <reference types="express" />
-import express from "express";
+import express, { type NextFunction, type Request, type Response } from "express";
 import cors from "cors";
 import helmet from "helmet";
 import cookieParser from "cookie-parser";
+import pinoHttp from "pino-http";
 import router from "./routes/index.js";
 import { logger } from "./lib/logger.js";
 
-type App = {
-  set: (setting: string, value: unknown) => unknown;
-  use: (...handlers: unknown[]) => unknown;
-  get: (path: string, handler: unknown) => unknown;
-  listen: (port: number, cb: () => void) => {
-    on: (event: "error", listener: (err: unknown) => void) => unknown;
-  };
-};
-
-const app: App = express() as unknown as App;
+const app = express();
 
 app.set("trust proxy", 1);
+app.use(pinoHttp({ logger }));
 app.use(helmet());
 app.use(cors());
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
 
-function healthHandler(
-  _req: unknown,
-  res: { json: (body: unknown) => unknown },
-): void {
+app.get("/api/health", (_req: Request, res: Response) => {
   res.json({ ok: true });
-}
-
-function notFoundHandler(
-  _req: unknown,
-  res: { json: (body: unknown) => unknown },
-): void {
-  logger.warn("Route not found");
-  res.json({ error: "Not found" });
-}
-
-function errorHandler(
-  err: unknown,
-  _req: unknown,
-  res: { json: (body: unknown) => unknown },
-  _next: unknown,
-): void {
-  logger.error({ err }, "Unhandled error");
-  res.json({ error: "Internal server error" });
-}
-
-app.get("/api/health", healthHandler);
+});
 app.use("/api", router);
-app.use(notFoundHandler);
-app.use(errorHandler);
+app.use((req: Request, res: Response) => {
+  req.log.warn({ method: req.method, path: req.path }, "Route not found");
+  res.status(404).json({ error: "Not found" });
+});
+app.use((err: unknown, req: Request, res: Response, _next: NextFunction) => {
+  req.log.error({ err, method: req.method, path: req.path }, "Unhandled error");
+  res.status(500).json({ error: "Internal server error" });
+});
 
 export default app;

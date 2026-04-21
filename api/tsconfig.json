@@ -3,9 +3,13 @@
   "compilerOptions": {
     "composite": true,
     "noEmit": true,
-    "types": ["node", "express"],
-    "typeRoots": ["../node_modules/@types", "../artifacts/api-server/node_modules/@types"]
+    "types": ["node", "express"]
   },
-  "include": ["./**/*.ts", "../artifacts/api-server/src/**/*.ts"],
-  "exclude": ["../artifacts/api-server/src/__tests__/**", "../artifacts/api-server/src/**/*.test.ts", "../artifacts/api-server/src/**/*.spec.ts"]
+  "include": ["./**/*.ts"],
+  "references": [
+    { "path": "../lib/db" },
+    { "path": "../lib/api-zod" },
+    { "path": "../lib/documents-registry" },
+    { "path": "../artifacts/api-server" }
+  ]
 }
