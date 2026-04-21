@@ -1,46 +1,47 @@
-import express, { type NextFunction, type Request, type Response } from "express";
+import express from "express";
 import cors from "cors";
+import helmet from "helmet";
 import cookieParser from "cookie-parser";
 import pinoHttp from "pino-http";
-import helmet from "helmet";
+import type { ErrorRequestHandler, RequestHandler } from "express";
 import router from "./routes/index.js";
 import { logger } from "./lib/logger.js";
 
-const app = express();
+const app: ReturnType<typeof express> = express();
 
 app.set("trust proxy", 1);
 
-app.use(helmet({
-  crossOriginResourcePolicy: { policy: "cross-origin" },
-  contentSecurityPolicy: false,
-}));
-
-app.use(
-  (pinoHttp as any)(),
-);
+app.use(pinoHttp({ logger }));
+app.use(helmet());
 app.use(cors({ origin: true, credentials: true }));
-app.use(cookieParser());
-app.use(express.json());
+app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true }));
+app.use(cookieParser());
+
+const healthHandler: RequestHandler = (_req, res) => {
+  res.status(200).json({ ok: true });
+};
+
+const notFoundHandler: RequestHandler = (req, res) => {
+  logger.warn({ path: req.path, method: req.method }, "Route not found");
+  res.status(404).json({ error: "Not found" });
+};
+
+const errorHandler: ErrorRequestHandler = (err, _req, res, next) => {
+  if (res.headersSent) {
+    return next(err);
+  }
+
+  logger.error({ err }, "Unhandled error");
+  res.status(500).json({ error: "Internal server error" });
+};
+
+app.get("/api/healthz", healthHandler);
 
 app.use("/api", router);
 
-app.use("/api", (_req: Request, res: Response) => {
-  res.status(404).json({ error: "Not Found", code: "NOT_FOUND" });
-});
+app.use("/api", notFoundHandler);
 
-app.use((err: unknown, req: Request, res: Response, next: NextFunction) => {
-  if (res.headersSent) {
-    next(err);
-    return;
-  }
-  logger.error({
-    err,
-    path: req.path,
-    method: req.method,
-  }, "[unhandled]");
-  res.status(500).json({ error: "Internal Server Error" });
-});
+app.use(errorHandler);
 
-const exportedApp: ReturnType<typeof express> = app;
-export default exportedApp;
+export default app;
