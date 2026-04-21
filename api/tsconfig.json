@@ -3,7 +3,9 @@
   "compilerOptions": {
     "composite": true,
     "noEmit": true,
-    "types": ["node"]
+    "types": ["node", "express"],
+    "typeRoots": ["../node_modules/@types", "../artifacts/api-server/node_modules/@types"]
   },
-  "include": ["./**/*.ts"]
+  "include": ["./**/*.ts", "../artifacts/api-server/src/**/*.ts"],
+  "exclude": ["../artifacts/api-server/src/__tests__/**", "../artifacts/api-server/src/**/*.test.ts", "../artifacts/api-server/src/**/*.spec.ts"]
 }
