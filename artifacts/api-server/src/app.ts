@@ -9,7 +9,7 @@ import { logger } from "./lib/logger.js";
 const app = express();
 
 app.set("trust proxy", 1);
-app.use(pinoHttp({ logger }));
+app.use(pinoHttp({ logger, autoLogging: false }));
 app.use(helmet());
 app.use(cors());
 app.use(express.json({ limit: "10mb" }));
