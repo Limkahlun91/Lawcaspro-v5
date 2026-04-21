@@ -1,13 +1,13 @@
 import express from "express";
-import type { Application } from "express";
+import type { Express, NextFunction, Request, Response } from "express";
 import cors from "cors";
 import cookieParser from "cookie-parser";
 import pinoHttp from "pino-http";
 import helmet from "helmet";
-import router from "./routes";
-import { logger } from "./lib/logger";
+import router from "./routes/index.js";
+import { logger } from "./lib/logger.js";
 
-const app: Application = express();
+const app: Express = express();
 
 app.set("trust proxy", 1);
 
@@ -26,11 +26,11 @@ app.use(express.urlencoded({ extended: true }));
 
 app.use("/api", router);
 
-app.use("/api", (_req, res) => {
+app.use("/api", (_req: Request, res: Response) => {
   res.status(404).json({ error: "Not Found", code: "NOT_FOUND" });
 });
 
-app.use((err: unknown, req: any, res: any, next: any) => {
+app.use((err: unknown, req: Request, res: Response, next: NextFunction) => {
   if (res.headersSent) {
     next(err);
     return;
