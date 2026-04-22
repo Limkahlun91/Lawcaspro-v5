@@ -42,9 +42,13 @@ export function getErrorMessage(err: unknown): string {
   if (status === 401) return "Session expired. Please sign in again.";
   if (status === 403) return "You do not have permission to perform this action.";
   if (status === 404) return "File or template not found.";
-  if (status === 503) return "Service temporarily unavailable. Please retry.";
+  if (status === 503) {
+    const raw = isApiErrorLike(err) && typeof err.message === "string" ? err.message.trim() : "";
+    return raw || "Service temporarily unavailable. Please retry.";
+  }
   if (status && status >= 500) {
     const raw = isApiErrorLike(err) && typeof err.message === "string" ? err.message : "";
+    if (raw && !raw.toLowerCase().includes("internal server error")) return raw;
     if (!raw || raw.toLowerCase().includes("internal server error")) {
       return "Server failed to process the request. Please retry later.";
     }

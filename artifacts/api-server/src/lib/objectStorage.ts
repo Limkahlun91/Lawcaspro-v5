@@ -97,15 +97,44 @@ type SupabaseStorageConfig = {
   storageUrl: string;
 };
 
+function pickFirstNonEmpty(...values: Array<string | undefined | null>): string | "" {
+  for (const v of values) {
+    if (typeof v === "string") {
+      const t = v.trim();
+      if (t) return t;
+    }
+  }
+  return "";
+}
+
 function getSupabaseStorageConfig(): SupabaseStorageConfig {
-  const supabaseUrl = (process.env.SUPABASE_URL || "").trim();
-  if (!supabaseUrl) throw new Error("SUPABASE_URL not set");
+  const supabaseUrl = pickFirstNonEmpty(
+    process.env.SUPABASE_URL,
+    process.env.VITE_SUPABASE_URL,
+    process.env.NEXT_PUBLIC_SUPABASE_URL,
+  );
 
-  const serviceRoleKey = (process.env.SUPABASE_SERVICE_ROLE_KEY || "").trim();
-  if (!serviceRoleKey) throw new Error("SUPABASE_SERVICE_ROLE_KEY not set");
+  const serviceRoleKey = pickFirstNonEmpty(
+    process.env.SUPABASE_SERVICE_ROLE_KEY,
+    process.env.SUPABASE_SERVICE_KEY,
+    process.env.SUPABASE_SERVICE_ROLE,
+    process.env.SUPABASE_SERVICE_ROLE_TOKEN,
+  );
 
-  const bucketPrivate = (process.env.SUPABASE_STORAGE_BUCKET_PRIVATE || "").trim();
-  if (!bucketPrivate) throw new Error("SUPABASE_STORAGE_BUCKET_PRIVATE not set");
+  const bucketPrivate = pickFirstNonEmpty(
+    process.env.SUPABASE_STORAGE_BUCKET_PRIVATE,
+    process.env.SUPABASE_BUCKET_PRIVATE,
+    process.env.SUPABASE_PRIVATE_BUCKET,
+    process.env.SUPABASE_STORAGE_BUCKET,
+  );
+
+  const missing: string[] = [];
+  if (!supabaseUrl) missing.push("SUPABASE_URL");
+  if (!serviceRoleKey) missing.push("SUPABASE_SERVICE_ROLE_KEY");
+  if (!bucketPrivate) missing.push("SUPABASE_STORAGE_BUCKET_PRIVATE");
+  if (missing.length) {
+    throw new Error(`Supabase storage not configured: missing ${missing.join(", ")}`);
+  }
 
   const normalized = supabaseUrl.replace(/\/+$/, "");
   const storageUrl = `${normalized}/storage/v1`;
@@ -119,14 +148,8 @@ export function getSupabaseStorageConfigError(
   const message = err instanceof Error ? err.message : "";
   if (!message) return null;
 
-  if (message.includes("SUPABASE_URL not set")) {
-    return { statusCode: 503, error: "Supabase storage not configured: SUPABASE_URL not set" };
-  }
-  if (message.includes("SUPABASE_SERVICE_ROLE_KEY not set")) {
-    return { statusCode: 503, error: "Supabase storage not configured: SUPABASE_SERVICE_ROLE_KEY not set" };
-  }
-  if (message.includes("SUPABASE_STORAGE_BUCKET_PRIVATE not set")) {
-    return { statusCode: 503, error: "Supabase storage not configured: SUPABASE_STORAGE_BUCKET_PRIVATE not set" };
+  if (message.toLowerCase().includes("supabase storage not configured")) {
+    return { statusCode: 503, error: message };
   }
   return null;
 }

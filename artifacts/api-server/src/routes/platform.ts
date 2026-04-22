@@ -91,6 +91,40 @@ function mapCreateFirmError(err: unknown): { status: number; body: Record<string
 const router: IRouter = Router();
 const storage = new SupabaseStorageService();
 
+class RouteTimeoutError extends Error {
+  public readonly ms: number;
+  public readonly label: string;
+  constructor(label: string, ms: number) {
+    super(`Route timed out: ${label} (${ms}ms)`);
+    this.name = "RouteTimeoutError";
+    this.ms = ms;
+    this.label = label;
+    Object.setPrototypeOf(this, RouteTimeoutError.prototype);
+  }
+}
+
+const getRouteTimeoutMs = (): number => {
+  const raw = process.env.API_ROUTE_TIMEOUT_MS;
+  const n = raw ? Number(raw) : NaN;
+  if (Number.isFinite(n) && n > 0) return Math.floor(n);
+  return 10_000;
+};
+
+const withTimeout = async <T>(label: string, fn: () => Promise<T>): Promise<T> => {
+  const ms = getRouteTimeoutMs();
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      fn(),
+      new Promise<T>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new RouteTimeoutError(label, ms)), ms);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+};
+
 function scanClausePlaceholdersInDocx(bytes: Buffer): { hasClausesPlaceholder: boolean; clauseCodePlaceholders: string[] } {
   const zip = new PizZip(bytes);
   const xml = zip.file("word/document.xml")?.asText() ?? "";
@@ -326,14 +360,28 @@ router.post("/platform/firms/:firmId/users/:userId/reset-password", requireAuth,
     res.status(400).json({ error: "New password must be at least 6 characters" });
     return;
   }
-  const [user] = await db.select().from(usersTable).where(and(eq(usersTable.id, userId), eq(usersTable.firmId, firmId)));
-  if (!user) {
-    res.status(404).json({ error: "User not found in this firm" });
-    return;
+  try {
+    const [user] = await withTimeout("platform.reset_password.select_user", async () =>
+      db.select().from(usersTable).where(and(eq(usersTable.id, userId), eq(usersTable.firmId, firmId)))
+    );
+    if (!user) {
+      res.status(404).json({ error: "User not found in this firm" });
+      return;
+    }
+    const passwordHash = await withTimeout("platform.reset_password.hash", async () => bcrypt.hash(newPassword, 10));
+    await withTimeout("platform.reset_password.update_user", async () =>
+      db.update(usersTable).set({ passwordHash }).where(eq(usersTable.id, userId))
+    );
+    res.json({ success: true, message: "Password reset successfully" });
+  } catch (err) {
+    if (err instanceof RouteTimeoutError) {
+      logger.error({ err, firmId, userId }, "platform.reset_password.timeout");
+      res.status(504).json({ error: "Request timed out", code: "TIMEOUT" });
+      return;
+    }
+    logger.error({ err, firmId, userId }, "platform.reset_password.error");
+    res.status(500).json({ error: "Failed to reset password" });
   }
-  const passwordHash = await bcrypt.hash(newPassword, 10);
-  await db.update(usersTable).set({ passwordHash }).where(eq(usersTable.id, userId));
-  res.json({ success: true, message: "Password reset successfully" });
 });
 
 // ─── Platform Stats ───────────────────────────────────────────────────────────
@@ -352,13 +400,20 @@ router.get("/platform/stats", requireAuth, requireFounder, async (_req, res): Pr
 // ─── System Folders ───────────────────────────────────────────────────────────
 
 router.get("/platform/folders", requireAuth, requireFounder, async (_req: AuthRequest, res): Promise<void> => {
-  const folders = await withAuthSafeDb(async (authDb) =>
-    authDb
-      .select()
-      .from(systemFoldersTable)
-      .orderBy(systemFoldersTable.sortOrder, systemFoldersTable.name)
-  );
-  res.json(folders);
+  try {
+    const folders = await withTimeout("platform.folders.list", async () =>
+      db.select().from(systemFoldersTable).orderBy(systemFoldersTable.sortOrder, systemFoldersTable.name)
+    );
+    res.json(folders);
+  } catch (err) {
+    if (err instanceof RouteTimeoutError) {
+      logger.error({ err }, "platform.folders.timeout");
+      res.status(504).json({ error: "Request timed out", code: "TIMEOUT" });
+      return;
+    }
+    logger.error({ err }, "platform.folders.error");
+    res.status(500).json({ error: "Failed to load folders" });
+  }
 });
 
 router.post("/platform/folders", requireAuth, requireFounder, async (req: AuthRequest, res): Promise<void> => {
@@ -557,12 +612,22 @@ router.get("/platform/documents", requireAuth, requireFounder, async (req: AuthR
     const folderCondition = eq(platformDocumentsTable.folderId, folderId);
     condition = condition ? and(condition, folderCondition) : folderCondition;
   }
-  const docs = await withAuthSafeDb(async (authDb) => authDb
-    .select()
-    .from(platformDocumentsTable)
-    .where(condition)
-    .orderBy(desc(platformDocumentsTable.createdAt)));
-  res.json(docs);
+  try {
+    const docs = await withTimeout("platform.documents.list", async () => {
+      let q = db.select().from(platformDocumentsTable);
+      if (condition) q = q.where(condition) as typeof q;
+      return await q.orderBy(desc(platformDocumentsTable.createdAt));
+    });
+    res.json(docs);
+  } catch (err) {
+    if (err instanceof RouteTimeoutError) {
+      logger.error({ err, firmId: firmId ?? null, folderId: folderId ?? null }, "platform.documents.timeout");
+      res.status(504).json({ error: "Request timed out", code: "TIMEOUT" });
+      return;
+    }
+    logger.error({ err, firmId: firmId ?? null, folderId: folderId ?? null }, "platform.documents.error");
+    res.status(500).json({ error: "Failed to load documents" });
+  }
 });
 
 router.post("/platform/documents", requireAuth, requireFounder, async (req: AuthRequest, res): Promise<void> => {
