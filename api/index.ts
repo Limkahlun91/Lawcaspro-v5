@@ -9,6 +9,12 @@ type ExpressLikeHandler = (
 const handler = apiServerApp as unknown as ExpressLikeHandler;
 const isEnvDebug = process.env.DEBUG_VERCEL_BRIDGE === "1";
 
+const one = (v: unknown): string | undefined => {
+  if (typeof v === "string") return v;
+  if (Array.isArray(v)) return typeof v[0] === "string" ? v[0] : undefined;
+  return undefined;
+};
+
 const shouldDebug = (req: any): boolean => {
   if (isEnvDebug) return true;
 
@@ -37,7 +43,9 @@ const normalizeApiUrl = (rawUrl: unknown): string => {
 
 export default function vercelHandler(req: any, res: any): void {
   const originalUrl = req?.url;
-  const normalizedUrl = normalizeApiUrl(originalUrl);
+  const pathFromRewrite = one(req?.query?.__path);
+  const rewrittenUrl = pathFromRewrite ? `/api/${pathFromRewrite}` : "/api";
+  const normalizedUrl = normalizeApiUrl(rewrittenUrl);
   const isDebug = shouldDebug(req);
 
   if (isDebug) {
