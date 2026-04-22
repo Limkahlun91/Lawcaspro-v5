@@ -4,7 +4,10 @@
   "private": true,
   "type": "module",
   "exports": {
-    "./app": "./src/app.ts"
+    "./app": {
+      "types": "./dist/app.d.ts",
+      "default": "./src/app.ts"
+    }
   },
   "scripts": {
     "dev": "export NODE_ENV=development && tsx watch src/index.ts",
