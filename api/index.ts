@@ -1,18 +1,32 @@
-import apiServerApp from "@workspace/api-server/app";
-
 type ExpressLikeHandler = (
   req: any,
   res: any,
   next?: (err?: unknown) => void,
 ) => unknown;
 
-const handler = apiServerApp as unknown as ExpressLikeHandler;
 const isEnvDebug = process.env.DEBUG_VERCEL_BRIDGE === "1";
+let cachedHandler: ExpressLikeHandler | null = null;
 
 const one = (v: unknown): string | undefined => {
   if (typeof v === "string") return v;
   if (Array.isArray(v)) return typeof v[0] === "string" ? v[0] : undefined;
   return undefined;
+};
+
+const sendJsonError = (res: any, statusCode: number, payload: unknown) => {
+  try {
+    res.statusCode = statusCode;
+    if (!res.headersSent) {
+      res.setHeader("content-type", "application/json; charset=utf-8");
+    }
+    res.end(JSON.stringify(payload));
+  } catch {
+    try {
+      res.statusCode = statusCode;
+      res.end("Internal Server Error");
+    } catch {
+    }
+  }
 };
 
 const shouldDebug = (req: any): boolean => {
@@ -41,7 +55,17 @@ const normalizeApiUrl = (rawUrl: unknown): string => {
   return `/api/${url}`;
 };
 
-export default function vercelHandler(req: any, res: any): void {
+const getHandler = async (): Promise<ExpressLikeHandler> => {
+  if (cachedHandler) return cachedHandler;
+  const mod = (await import("@workspace/api-server/app")) as unknown as {
+    default?: unknown;
+  };
+  const h = (mod as any)?.default ?? (mod as any);
+  cachedHandler = h as ExpressLikeHandler;
+  return cachedHandler;
+};
+
+export default async function vercelHandler(req: any, res: any): Promise<void> {
   const originalUrl = req?.url;
   const pathFromRewrite = one(req?.query?.__path);
   const rewrittenUrl = pathFromRewrite ? `/api/${pathFromRewrite}` : "/api";
@@ -59,19 +83,28 @@ export default function vercelHandler(req: any, res: any): void {
   req.url = normalizedUrl;
 
   try {
+    const handler = await getHandler();
     handler(req, res, (err?: unknown) => {
       if (!err) return;
       if (isDebug) console.error("[vercel-bridge] next(err)", err);
       if (res && !res.headersSent) {
-        res.statusCode = 500;
-        res.end("Internal Server Error");
+        sendJsonError(res, 500, {
+          ok: false,
+          error: "internal_error",
+          source: "vercel-bridge-next",
+        });
       }
     });
   } catch (err) {
     if (isDebug) console.error("[vercel-bridge] handler throw", err);
     if (res && !res.headersSent) {
-      res.statusCode = 500;
-      res.end("Internal Server Error");
+      const msg = err instanceof Error ? err.message : String(err ?? "");
+      sendJsonError(res, 500, {
+        ok: false,
+        error: "internal_error",
+        source: "vercel-bridge",
+        message: msg.slice(0, 300),
+      });
     }
   }
 }
