@@ -1,6 +1,6 @@
 const rewrites = [
   { source: "/api/:path*", destination: "/api/:path*" },
-  { source: "/(.*)", destination: "/index.html" },
+  { source: "/((?!api(?:/|$)).*)", destination: "/index.html" },
 ];
 
 export default {
