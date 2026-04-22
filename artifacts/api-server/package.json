@@ -6,7 +6,7 @@
   "exports": {
     "./app": {
       "types": "./dist/app.d.ts",
-      "default": "./src/app.ts"
+      "default": "./dist/app.js"
     }
   },
   "scripts": {

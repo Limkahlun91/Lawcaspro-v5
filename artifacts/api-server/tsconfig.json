@@ -9,7 +9,6 @@
     "composite": true,
     "declaration": true,
     "declarationMap": true,
-    "emitDeclarationOnly": true,
     "types": ["node", "express"],
     "esModuleInterop": true,
     "allowSyntheticDefaultImports": true,
