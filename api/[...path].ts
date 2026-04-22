@@ -1,4 +1,3 @@
-import express from "express";
 import bcrypt from "bcryptjs";
 import * as OTPAuth from "otpauth";
 import { and, count, desc, eq, ilike } from "drizzle-orm";
@@ -1028,9 +1027,18 @@ async function handleUserDelete(req: ApiRequest, res: ApiResponse, auth: AuthCon
   });
 }
 
-const app: express.Express = express();
+type ExpressLikeHandler = (
+  req: unknown,
+  res: unknown,
+  next?: (err?: unknown) => void,
+) => unknown;
 
-app.use((req: any, res: any, next: any) => {
+const handler = apiServerApp as unknown as ExpressLikeHandler;
+
+export default async function vercelHandler(
+  req: any,
+  res: any,
+): Promise<void> {
   const rawUrl = typeof req?.url === "string" ? req.url : "/";
 
   req.url = rawUrl.startsWith("/api")
@@ -1039,7 +1047,13 @@ app.use((req: any, res: any, next: any) => {
       ? `/api${rawUrl}`
       : `/api/${rawUrl}`;
 
-  return (apiServerApp as any)(req, res, next);
-});
-
-export default app;
+  await new Promise<void>((resolve, reject) => {
+    handler(req, res, (err?: unknown) => {
+      if (err) {
+        reject(err);
+        return;
+      }
+      resolve();
+    });
+  });
+}
