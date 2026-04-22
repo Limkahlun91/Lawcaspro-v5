@@ -1,5 +1,4 @@
 const rewrites = [
-  { source: "/api/:path*", destination: "/api/:path*" },
   { source: "/((?!api(?:/|$)).*)", destination: "/index.html" },
 ];
 
