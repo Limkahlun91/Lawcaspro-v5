@@ -99,11 +99,18 @@ async function tableExistsAuthDb(
 }
 
 router.post("/auth/login", authRateLimiter, async (req, res): Promise<void> => {
-  if (process.env.DEBUG_VERCEL_BRIDGE === "1") {
+  const debugHeader = req.headers["x-lawcaspro-debug"] ?? req.headers["x-debug-bridge"] ?? req.headers["x-debug"];
+  const shouldDebug =
+    process.env.DEBUG_VERCEL_BRIDGE === "1" ||
+    debugHeader === "1" ||
+    (Array.isArray(debugHeader) && debugHeader[0] === "1") ||
+    /[?&]__debug=1(?:&|$)/.test(req.originalUrl ?? "");
+
+  if (shouldDebug) {
     logger.info(
       {
         method: req.method,
-        url: typeof (req as any).originalUrl === "string" ? (req as any).originalUrl : req.url,
+        url: req.originalUrl ?? req.url,
       },
       "AUTH LOGIN HIT",
     );

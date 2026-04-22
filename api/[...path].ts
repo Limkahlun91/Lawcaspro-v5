@@ -7,7 +7,22 @@ type ExpressLikeHandler = (
 ) => unknown;
 
 const handler = apiServerApp as unknown as ExpressLikeHandler;
-const isDebug = process.env.DEBUG_VERCEL_BRIDGE === "1";
+const isEnvDebug = process.env.DEBUG_VERCEL_BRIDGE === "1";
+
+const shouldDebug = (req: any): boolean => {
+  if (isEnvDebug) return true;
+
+  const headers = req?.headers ?? {};
+  const headerValue =
+    headers["x-lawcaspro-debug"] ??
+    headers["x-debug-bridge"] ??
+    headers["x-debug"];
+  if (headerValue === "1" || headerValue === 1) return true;
+  if (Array.isArray(headerValue) && headerValue[0] === "1") return true;
+
+  const url = typeof req?.url === "string" ? req.url : "";
+  return /[?&]__debug=1(?:&|$)/.test(url);
+};
 
 const normalizeApiUrl = (rawUrl: unknown): string => {
   const url = typeof rawUrl === "string" ? rawUrl : "/";
@@ -23,6 +38,7 @@ const normalizeApiUrl = (rawUrl: unknown): string => {
 export default function vercelHandler(req: any, res: any): void {
   const originalUrl = req?.url;
   const normalizedUrl = normalizeApiUrl(originalUrl);
+  const isDebug = shouldDebug(req);
 
   if (isDebug) {
     console.log("[vercel-bridge]", {
@@ -51,4 +67,3 @@ export default function vercelHandler(req: any, res: any): void {
     }
   }
 }
-
