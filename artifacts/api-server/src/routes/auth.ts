@@ -99,6 +99,15 @@ async function tableExistsAuthDb(
 }
 
 router.post("/auth/login", authRateLimiter, async (req, res): Promise<void> => {
+  if (process.env.DEBUG_VERCEL_BRIDGE === "1") {
+    logger.info(
+      {
+        method: req.method,
+        url: typeof (req as any).originalUrl === "string" ? (req as any).originalUrl : req.url,
+      },
+      "AUTH LOGIN HIT",
+    );
+  }
   const startedAt = Date.now();
   let stage: string = "parse";
   let emailHash: string | undefined;
