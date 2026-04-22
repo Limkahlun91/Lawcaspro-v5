@@ -1028,13 +1028,18 @@ async function handleUserDelete(req: ApiRequest, res: ApiResponse, auth: AuthCon
   });
 }
 
-const app: ReturnType<typeof express> = express();
-app.use((req: express.Request, res: express.Response, next: express.NextFunction) => {
-  const rawUrl = req.url ?? "/";
-  if (!rawUrl.startsWith("/api")) {
-    req.url = rawUrl.startsWith("/") ? `/api${rawUrl}` : `/api/${rawUrl}`;
-  }
-  return apiServerApp(req, res, next);
+const app: express.Express = express();
+
+app.use((req: any, res: any, next: any) => {
+  const rawUrl = typeof req?.url === "string" ? req.url : "/";
+
+  req.url = rawUrl.startsWith("/api")
+    ? rawUrl
+    : rawUrl.startsWith("/")
+      ? `/api${rawUrl}`
+      : `/api/${rawUrl}`;
+
+  return (apiServerApp as any)(req, res, next);
 });
 
 export default app;
