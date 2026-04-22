@@ -96,7 +96,7 @@ router.post("/developers", requireAuth, requireFirmUser, requirePermission("deve
   try {
     const r = req.rlsDb;
     if (!r) {
-      (req as any).log?.error?.({ route: "POST /api/developers", userId: req.userId, firmId: req.firmId }, "missing req.rlsDb");
+      req.log.error({ route: "POST /api/developers", userId: req.userId, firmId: req.firmId }, "missing req.rlsDb");
       res.status(500).json({ error: "Internal Server Error" });
       return;
     }
@@ -143,7 +143,7 @@ router.post("/developers", requireAuth, requireFirmUser, requirePermission("deve
       ctxIsFounder = typeof row?.is_founder === "string" ? row.is_founder : null;
     } catch {
     }
-    (req as any).log?.info?.({
+    req.log.info({
       route: "POST /api/developers",
       userId: req.userId,
       firmId: req.firmId,
@@ -221,7 +221,7 @@ router.post("/developers", requireAuth, requireFirmUser, requirePermission("deve
       }
       return {};
     })();
-    (req as any).log?.error?.({ err: e, pg }, "developers.create failed");
+    req.log.error({ err: e, pg }, "developers.create failed");
     res.status(500).json({ error: "Internal Server Error" });
     return;
   }

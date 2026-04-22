@@ -79,6 +79,9 @@ importers:
 
   .:
     dependencies:
+      '@workspace/api-server':
+        specifier: workspace:*
+        version: link:artifacts/api-server
       '@workspace/api-zod':
         specifier: workspace:*
         version: link:lib/api-zod

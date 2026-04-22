@@ -47,7 +47,7 @@ import {
   writeAuditLog,
   readJsonBody,
 } from "./_lib";
-import apiServerApp from "../artifacts/api-server/src/app";
+import apiServerApp from "@workspace/api-server/app";
 
 type AuthContext = {
   userId: number;
@@ -1028,8 +1028,8 @@ async function handleUserDelete(req: ApiRequest, res: ApiResponse, auth: AuthCon
   });
 }
 
-const app = express();
-app.use((req, res, next) => {
+const app: ReturnType<typeof express> = express();
+app.use((req: express.Request, res: express.Response, next: express.NextFunction) => {
   const rawUrl = req.url ?? "/";
   if (!rawUrl.startsWith("/api")) {
     req.url = rawUrl.startsWith("/") ? `/api${rawUrl}` : `/api/${rawUrl}`;

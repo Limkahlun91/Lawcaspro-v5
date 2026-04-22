@@ -1,11 +1,7 @@
-import type { Logger } from "pino";
+import "express-serve-static-core";
 
-declare global {
-  namespace Express {
-    interface Request {
-      log: Logger;
-    }
+declare module "express-serve-static-core" {
+  interface Request {
+    log: import("pino").Logger;
   }
 }
-
-export {};

@@ -5,11 +5,10 @@
     "noEmit": true,
     "types": ["node", "express"]
   },
-  "include": ["./**/*.ts"],
   "references": [
     { "path": "../lib/db" },
     { "path": "../lib/api-zod" },
-    { "path": "../lib/documents-registry" },
     { "path": "../artifacts/api-server" }
-  ]
+  ],
+  "include": ["./**/*.ts"]
 }

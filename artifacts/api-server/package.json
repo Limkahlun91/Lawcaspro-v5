@@ -3,6 +3,9 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
+  "exports": {
+    "./app": "./src/app.ts"
+  },
   "scripts": {
     "dev": "export NODE_ENV=development && tsx watch src/index.ts",
     "preview": "export NODE_ENV=development && pnpm run build && pnpm run start",

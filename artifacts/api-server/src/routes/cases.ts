@@ -1886,7 +1886,7 @@ router.post("/cases", requireAuth, requireFirmUser, requirePermission("cases", "
   try {
     const r = req.rlsDb;
     if (!r) {
-      (req as any).log?.error?.({ route: "POST /api/cases", userId: req.userId, firmId: req.firmId }, "missing req.rlsDb");
+      req.log.error({ route: "POST /api/cases", userId: req.userId, firmId: req.firmId }, "missing req.rlsDb");
       res.status(500).json({ error: "Internal Server Error" });
       return;
     }
@@ -2044,7 +2044,7 @@ router.post("/cases", requireAuth, requireFirmUser, requirePermission("cases", "
       ctxIsFounder = typeof row?.is_founder === "string" ? row.is_founder : null;
     } catch {
     }
-    (req as any).log?.info?.({
+    req.log.info({
       route: "POST /api/cases",
       userId: req.userId,
       firmId: req.firmId,
@@ -2128,7 +2128,7 @@ router.post("/cases", requireAuth, requireFirmUser, requirePermission("cases", "
       }
       return {};
     })();
-    (req as any).log?.error?.({ err: e, pg }, "cases.create failed");
+    req.log.error({ err: e, pg }, "cases.create failed");
     res.status(500).json({ error: "Internal Server Error" });
     return;
   }

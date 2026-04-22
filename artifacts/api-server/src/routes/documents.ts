@@ -138,7 +138,7 @@ function buildChecklistMilestones(params: {
 const getRlsDb = (req: AuthRequest, res: any): NonNullable<AuthRequest["rlsDb"]> | null => {
   const r = req.rlsDb;
   if (!r) {
-    (req as any).log?.error?.({ route: req.originalUrl, userId: req.userId, firmId: req.firmId }, "missing req.rlsDb");
+    req.log.error({ route: req.originalUrl, userId: req.userId, firmId: req.firmId }, "missing req.rlsDb");
     res.status(500).json({ error: "Internal Server Error" });
     return null;
   }

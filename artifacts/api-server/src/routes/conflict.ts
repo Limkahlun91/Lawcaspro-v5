@@ -10,6 +10,7 @@ import {
   type AuthRequest, writeAuditLog,
 } from "../lib/auth";
 import { sensitiveRateLimiter } from "../lib/rate-limit";
+import { queryOne } from "../lib/http";
 
 const router: IRouter = Router();
 
@@ -325,11 +326,16 @@ router.post("/conflict/check", sensitiveRateLimiter, requireAuth, requireFirmUse
 // GET /conflict/checks — list conflict checks for the firm
 // ---------------------------------------------------------------------------
 router.get("/conflict/checks", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
-  const { caseId } = req.query as Record<string, string>;
+  const caseIdStr = queryOne(req.query, "caseId");
+  const caseId = caseIdStr ? Number.parseInt(caseIdStr, 10) : undefined;
+  if (caseIdStr && Number.isNaN(caseId)) {
+    res.status(400).json({ error: "Invalid caseId" });
+    return;
+  }
   const checks = await rdb(req).select().from(conflictChecksTable)
     .where(and(
       eq(conflictChecksTable.firmId, req.firmId!),
-      caseId ? eq(conflictChecksTable.caseId, Number(caseId)) : undefined,
+      caseId ? eq(conflictChecksTable.caseId, caseId) : undefined,
     ))
     .orderBy(desc(conflictChecksTable.createdAt))
     .limit(100);

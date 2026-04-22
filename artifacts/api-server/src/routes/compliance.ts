@@ -11,6 +11,7 @@ import {
 } from "@workspace/db";
 import { requireAuth, requireFirmUser, type AuthRequest, writeAuditLog } from "../lib/auth";
 import { sensitiveRateLimiter } from "../lib/rate-limit";
+import { queryOne } from "../lib/http";
 
 const router: IRouter = Router();
 
@@ -64,7 +65,7 @@ function computeRiskScore(factors: {
 // GET /compliance/profiles — list profiles for the firm
 // ---------------------------------------------------------------------------
 router.get("/compliance/profiles", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
-  const { status } = req.query as Record<string, string>;
+  const status = queryOne(req.query, "status");
   const profiles = await rdb(req).select({
     id: complianceProfilesTable.id,
     partyId: complianceProfilesTable.partyId,

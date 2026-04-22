@@ -12,12 +12,7 @@ import {
   getSupabaseStorageConfigError,
 } from "../lib/objectStorage";
 import { requireAuth, requireFounder, type AuthRequest } from "../lib/auth";
-
-const one = (v: unknown): string | undefined => {
-  if (typeof v === "string") return v;
-  if (Array.isArray(v)) return typeof v[0] === "string" ? v[0] : undefined;
-  return undefined;
-};
+import { queryOne } from "../lib/http";
 
 const router: IRouter = Router();
 const objectStorageService = new ObjectStorageService();
@@ -124,7 +119,7 @@ router.post("/storage/upload", requireAuth, upload.single("file"), async (req: A
       return;
     }
 
-    const requestedObjectPath = one((req.query as Record<string, unknown>).objectPath);
+    const requestedObjectPath = queryOne(req.query, "objectPath");
     const { randomUUID } = await import("crypto");
     const objectPath = requestedObjectPath && requestedObjectPath.startsWith("/objects/")
       ? requestedObjectPath

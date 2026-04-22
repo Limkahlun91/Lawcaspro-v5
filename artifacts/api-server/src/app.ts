@@ -1,4 +1,4 @@
-import express, { type NextFunction, type Request, type Response } from "express";
+import express from "express";
 import cors from "cors";
 import helmet from "helmet";
 import cookieParser from "cookie-parser";
@@ -6,27 +6,39 @@ import pinoHttp from "pino-http";
 import router from "./routes/index.js";
 import { logger } from "./lib/logger.js";
 
-const app = express();
+const app: ReturnType<typeof express> = express();
 
 app.set("trust proxy", 1);
-app.use(pinoHttp({ logger, autoLogging: false }));
 app.use(helmet());
 app.use(cors());
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
+const requestLogger: express.RequestHandler = pinoHttp({ logger });
+app.use(requestLogger);
 
-app.get("/api/health", (_req: Request, res: Response) => {
-  res.json({ ok: true });
-});
-app.use("/api", router);
-app.use((req: Request, res: Response) => {
-  req.log.warn({ method: req.method, path: req.path }, "Route not found");
+const healthHandler: express.RequestHandler = (_req, res): void => {
+  res.status(200).json({ ok: true });
+};
+
+const notFoundHandler: express.RequestHandler = (req, res): void => {
+  logger.warn({ path: req.path, method: req.method, status: 404 }, "Route not found");
   res.status(404).json({ error: "Not found" });
-});
-app.use((err: unknown, req: Request, res: Response, _next: NextFunction) => {
-  req.log.error({ err, method: req.method, path: req.path }, "Unhandled error");
+};
+
+const errorHandler: express.ErrorRequestHandler = (err, req, res, next): void => {
+  if (res.headersSent) {
+    next(err);
+    return;
+  }
+
+  logger.error({ err, path: req.path, method: req.method, status: 500 }, "Unhandled error");
   res.status(500).json({ error: "Internal server error" });
-});
+};
+
+app.get("/api/health", healthHandler);
+app.use("/api", router);
+app.use(notFoundHandler);
+app.use(errorHandler);
 
 export default app;

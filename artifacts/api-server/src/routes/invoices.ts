@@ -7,8 +7,7 @@ import {
 } from "@workspace/db";
 import { requireAuth, requireFirmUser, requirePermission, requireReAuth, type AuthRequest, writeAuditLog } from "../lib/auth";
 import { sensitiveRateLimiter } from "../lib/rate-limit";
-
-const one = (v: string | string[] | undefined): string | undefined => (Array.isArray(v) ? v[0] : v);
+import { one, queryOne } from "../lib/http";
 
 const router: IRouter = Router();
 
@@ -30,15 +29,20 @@ async function nextInvoiceNo(r: DbConn, firmId: number): Promise<string> {
 router.get("/invoices", requireAuth, requireFirmUser, requirePermission("accounting", "read"), async (req: AuthRequest, res): Promise<void> => {
   try {
     const r = rdb(req);
-    const caseId = one((req.query as any).caseId);
-    const status = one((req.query as any).status);
+    const caseIdStr = queryOne(req.query, "caseId");
+    const status = queryOne(req.query, "status");
+    const caseId = caseIdStr ? Number.parseInt(caseIdStr, 10) : undefined;
+    if (caseIdStr && Number.isNaN(caseId)) {
+      res.status(400).json({ error: "Invalid caseId" });
+      return;
+    }
     let query = r.select().from(invoicesTable).where(eq(invoicesTable.firmId, req.firmId!)).$dynamic();
-    if (caseId) query = query.where(and(eq(invoicesTable.firmId, req.firmId!), eq(invoicesTable.caseId, parseInt(caseId))));
+    if (caseId) query = query.where(and(eq(invoicesTable.firmId, req.firmId!), eq(invoicesTable.caseId, caseId)));
     if (status) query = query.where(and(eq(invoicesTable.firmId, req.firmId!), eq(invoicesTable.status, status)));
     const rows = await query.orderBy(desc(invoicesTable.createdAt));
     res.json(rows);
   } catch (err) {
-    (req as any).log?.error?.({ err, route: req.originalUrl, firmId: req.firmId, userId: req.userId }, "invoices.list_failed");
+    req.log.error({ err, route: req.originalUrl, firmId: req.firmId, userId: req.userId }, "invoices.list_failed");
     res.status(500).json({ error: "Failed to load invoices" });
   }
 });
@@ -55,7 +59,7 @@ router.get("/invoices/:id", requireAuth, requireFirmUser, requirePermission("acc
     const items = await r.select().from(invoiceItemsTable).where(eq(invoiceItemsTable.invoiceId, id)).orderBy(invoiceItemsTable.sortOrder);
     res.json({ ...inv, items });
   } catch (err) {
-    (req as any).log?.error?.({ err, route: req.originalUrl, firmId: req.firmId, userId: req.userId }, "invoices.detail_failed");
+    req.log.error({ err, route: req.originalUrl, firmId: req.firmId, userId: req.userId }, "invoices.detail_failed");
     res.status(500).json({ error: "Failed to load invoice" });
   }
 });
