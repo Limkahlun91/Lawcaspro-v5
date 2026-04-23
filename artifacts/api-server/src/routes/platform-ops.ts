@@ -1,0 +1,684 @@
+import { Router, type IRouter } from "express";
+import { and, desc, eq } from "drizzle-orm";
+import { platformApprovalRequestsTable, platformMaintenanceActionsTable, platformRestoreActionsTable } from "@workspace/db";
+import { withAuthSafeDb } from "../lib/auth-safe-db";
+import { requireAuth, requireFounder, type AuthRequest, writeAuditLog } from "../lib/auth";
+import { ApiError, parseIntParam, sendError, sendOk } from "../lib/api-response";
+import { assertFounderPermission, createApprovalRequest, createStepUpChallenge, defaultStepUpPhrase, evaluateDecisionForExecute, evaluateDecisionForPreview, loadFounderGovernanceContext } from "../services/founder-governance";
+import {
+  createMaintenanceActionPreviewRecord,
+  createRestorePreviewRecord,
+  createSnapshot,
+  executeMaintenanceAction,
+  getSnapshotDetail,
+  listSnapshots,
+  pinSnapshot,
+  previewMaintenanceAction,
+  restoreCaseRecordFromSnapshot,
+  restoreProjectsModuleFromSnapshot,
+  restoreSettingsFromSnapshot,
+  searchTargets,
+  softDeleteSnapshot,
+  type MaintenanceActionCode,
+  type MaintenanceScopeType,
+  type ModuleCode,
+  type SnapshotTriggerType,
+  type SnapshotType,
+  type TargetEntityType,
+  unpinSnapshot,
+  requiredTypedConfirmation,
+} from "../services/platform-ops";
+import { SupabaseStorageService } from "../lib/objectStorage";
+
+const router: IRouter = Router();
+
+router.get("/platform/firms/:firmId/maintenance/actions", requireAuth, requireFounder, async (req: AuthRequest, res) => {
+  try {
+    const firmId = parseIntParam("firmId", req.params.firmId, { required: true, min: 1 })!;
+    const limit = (() => {
+      const v = req.query.limit;
+      const raw = typeof v === "string" ? v : Array.isArray(v) && typeof v[0] === "string" ? v[0] : undefined;
+      const n = raw ? Number.parseInt(raw, 10) : 50;
+      return Number.isFinite(n) ? Math.min(Math.max(n, 1), 100) : 50;
+    })();
+    const items = await withAuthSafeDb(async (authDb) => {
+      const ctx = await loadFounderGovernanceContext(authDb, req);
+      assertFounderPermission(ctx, "founder.maintenance.read");
+      return await authDb
+        .select()
+        .from(platformMaintenanceActionsTable)
+        .where(eq(platformMaintenanceActionsTable.firmId, firmId))
+        .orderBy(desc(platformMaintenanceActionsTable.createdAt))
+        .limit(limit);
+    }, { retry: true, allowUnsafe: true, ctx: { route: "GET /platform/firms/:firmId/maintenance/actions", firmId } });
+    sendOk(res, { items });
+  } catch (err) {
+    sendError(res, err);
+  }
+});
+
+router.post("/platform/firms/:firmId/maintenance/preview", requireAuth, requireFounder, async (req: AuthRequest, res) => {
+  try {
+    const firmId = parseIntParam("firmId", req.params.firmId, { required: true, min: 1 })!;
+    const body = req.body as {
+      action_code?: MaintenanceActionCode;
+      target?: { entity_type?: TargetEntityType; entity_id?: string; label?: string; module_code?: ModuleCode };
+    };
+    const actionCode = body?.action_code;
+    if (!actionCode) throw new ApiError({ status: 400, code: "MISSING_REQUIRED_FIELD", message: "action_code is required", retryable: false });
+
+    const preview = await withAuthSafeDb(async (authDb) => {
+      const ctx = await loadFounderGovernanceContext(authDb, req);
+      assertFounderPermission(ctx, "founder.maintenance.read");
+
+      const p = await previewMaintenanceAction(authDb, { firmId, actionCode, target: body.target });
+      const actionId = await createMaintenanceActionPreviewRecord(authDb, { firmId, preview: p, requestedByUserId: req.userId!, requestedByEmail: req.email ?? null });
+
+      const decision = evaluateDecisionForPreview({
+        actionCode: p.action_code,
+        riskLevel: p.risk_level,
+        scopeType: p.scope_type,
+        moduleCode: p.module_code ?? null,
+        actorPermissions: ctx.permissions,
+        impersonation: ctx.impersonation.active,
+      });
+
+      const stepUp = decision.challengePhraseRequired || decision.cooldownSecondsRequired > 0
+        ? await createStepUpChallenge(authDb, {
+          firmId,
+          actionCode: p.action_code,
+          riskLevel: p.risk_level,
+          scopeType: p.scope_type,
+          moduleCode: p.module_code ?? null,
+          targetEntityType: p.target?.entity_type ?? null,
+          targetEntityId: p.target?.entity_id ?? null,
+          requiredPhrase: defaultStepUpPhrase({ actionCode: p.action_code, firmSlugOrName: String(firmId) }),
+          cooldownSeconds: decision.cooldownSecondsRequired,
+          expiresInSeconds: 15 * 60,
+          issuedToUserId: req.userId!,
+          issuedToEmail: req.email ?? null,
+        })
+        : null;
+
+      await writeAuditLog(
+        {
+          firmId,
+          actorId: req.userId,
+          actorType: req.userType,
+          action: "firm.maintenance.previewed",
+          entityType: p.target?.entity_type ?? p.module_code ?? "firm",
+          entityId: p.target?.entity_type === "case" ? Number(p.target.entity_id) : undefined,
+          detail: JSON.stringify({ actionId, actionCode, scopeType: p.scope_type, policy: decision.approvalPolicyCode }),
+          ipAddress: req.ip,
+          userAgent: req.headers["user-agent"],
+        },
+        { db: authDb, strict: false }
+      );
+      return { preview: p, action_id: actionId, governance: decision, step_up: stepUp };
+    }, { retry: true, allowUnsafe: true, ctx: { route: "POST /platform/firms/:firmId/maintenance/preview", firmId } });
+
+    sendOk(res, { preview: preview.preview, action_id: preview.action_id, required_confirmation: requiredTypedConfirmation(preview.preview.risk_level), governance: preview.governance, step_up: preview.step_up });
+  } catch (err) {
+    sendError(res, err);
+  }
+});
+
+router.post("/platform/firms/:firmId/maintenance/execute", requireAuth, requireFounder, async (req: AuthRequest, res) => {
+  try {
+    const firmId = parseIntParam("firmId", req.params.firmId, { required: true, min: 1 })!;
+    const body = req.body as {
+      action_id?: string;
+      reason?: string;
+      typed_confirmation?: string;
+      confirm_firm?: string;
+      confirm_target?: string;
+      approval_request_id?: string;
+      step_up_challenge_id?: string;
+      step_up_phrase?: string;
+      emergency_flag?: boolean;
+    };
+    const actionId = String(body?.action_id ?? "").trim();
+    if (!actionId) throw new ApiError({ status: 400, code: "MISSING_REQUIRED_FIELD", message: "action_id is required", retryable: false });
+    const reason = String(body?.reason ?? "").trim();
+    const typed = body?.typed_confirmation ? String(body.typed_confirmation) : null;
+
+    const result = await withAuthSafeDb(async (authDb) => {
+      const ctx = await loadFounderGovernanceContext(authDb, req);
+      assertFounderPermission(ctx, "founder.maintenance.read");
+      return await executeMaintenanceAction(authDb, {
+        firmId,
+        actionId,
+        reason,
+        typedConfirmation: typed,
+        confirmFirm: body?.confirm_firm ?? null,
+        confirmTarget: body?.confirm_target ?? null,
+        approvalRequestId: body.approval_request_id ? String(body.approval_request_id) : null,
+        stepUpChallengeId: body.step_up_challenge_id ? String(body.step_up_challenge_id) : null,
+        stepUpPhrase: body.step_up_phrase ? String(body.step_up_phrase) : null,
+        emergencyFlag: !!body.emergency_flag,
+        actorPermissions: Array.from(ctx.permissions),
+        impersonationActive: ctx.impersonation.active,
+        requestedByUserId: req.userId!,
+        requestedByEmail: req.email ?? null,
+        ipAddress: req.ip,
+        userAgent: req.headers["user-agent"] ?? null,
+      });
+    }, { retry: true, allowUnsafe: true, ctx: { route: "POST /platform/firms/:firmId/maintenance/execute", firmId, reqId: (res.locals as any)?.requestId } });
+
+    sendOk(res, { operation: { id: result.actionId, type: "maintenance_action", status: result.status }, snapshot: { id: result.snapshotId, created: !!result.snapshotId }, result: result.result });
+  } catch (err) {
+    sendError(res, err);
+  }
+});
+
+router.get("/platform/firms/:firmId/maintenance/search", requireAuth, requireFounder, async (req: AuthRequest, res) => {
+  try {
+    const firmId = parseIntParam("firmId", req.params.firmId, { required: true, min: 1 })!;
+    const entityType = (() => {
+      const raw = typeof req.query.entity_type === "string" ? req.query.entity_type : Array.isArray(req.query.entity_type) ? req.query.entity_type[0] : "";
+      return String(raw || "").trim() as TargetEntityType;
+    })();
+    const keyword = (() => {
+      const raw = typeof req.query.q === "string" ? req.query.q : Array.isArray(req.query.q) ? req.query.q[0] : "";
+      return String(raw || "");
+    })();
+    const limit = (() => {
+      const v = req.query.limit;
+      const raw = typeof v === "string" ? v : Array.isArray(v) && typeof v[0] === "string" ? v[0] : undefined;
+      const n = raw ? Number.parseInt(raw, 10) : 10;
+      return Number.isFinite(n) ? n : 10;
+    })();
+    if (!entityType) throw new ApiError({ status: 400, code: "MISSING_REQUIRED_FIELD", message: "entity_type is required", retryable: false });
+    const items = await withAuthSafeDb(async (authDb) => {
+      const ctx = await loadFounderGovernanceContext(authDb, req);
+      assertFounderPermission(ctx, "founder.maintenance.read");
+      return await searchTargets(authDb, { firmId, entityType, keyword, limit });
+    }, { retry: true, allowUnsafe: true, ctx: { route: "GET /platform/firms/:firmId/maintenance/search", firmId } });
+    sendOk(res, { items, query: { keyword, entity_type: entityType } });
+  } catch (err) {
+    sendError(res, err);
+  }
+});
+
+router.get("/platform/firms/:firmId/snapshots", requireAuth, requireFounder, async (req: AuthRequest, res) => {
+  try {
+    const firmId = parseIntParam("firmId", req.params.firmId, { required: true, min: 1 })!;
+    const limit = (() => {
+      const v = req.query.limit;
+      const raw = typeof v === "string" ? v : Array.isArray(v) && typeof v[0] === "string" ? v[0] : undefined;
+      const n = raw ? Number.parseInt(raw, 10) : 50;
+      return Number.isFinite(n) ? Math.min(Math.max(n, 1), 100) : 50;
+    })();
+    const items = await withAuthSafeDb(async (authDb) => {
+      const ctx = await loadFounderGovernanceContext(authDb, req);
+      assertFounderPermission(ctx, "founder.snapshot.read");
+      return await listSnapshots(authDb, firmId, limit);
+    }, { retry: true, allowUnsafe: true, ctx: { route: "GET /platform/firms/:firmId/snapshots", firmId } });
+    sendOk(res, { items });
+  } catch (err) {
+    sendError(res, err);
+  }
+});
+
+router.post("/platform/firms/:firmId/snapshots", requireAuth, requireFounder, async (req: AuthRequest, res) => {
+  try {
+    const firmId = parseIntParam("firmId", req.params.firmId, { required: true, min: 1 })!;
+    const body = req.body as {
+      snapshot_type?: SnapshotType;
+      scope_type?: MaintenanceScopeType;
+      module_code?: ModuleCode;
+      target_entity_type?: TargetEntityType;
+      target_entity_id?: string;
+      target_label?: string;
+      trigger_type?: SnapshotTriggerType;
+      reason?: string;
+      note?: string;
+    };
+    const snapshotType = body.snapshot_type;
+    const scopeType = body.scope_type;
+    if (!snapshotType) throw new ApiError({ status: 400, code: "MISSING_REQUIRED_FIELD", message: "snapshot_type is required", retryable: false });
+    if (!scopeType) throw new ApiError({ status: 400, code: "MISSING_REQUIRED_FIELD", message: "scope_type is required", retryable: false });
+    const reason = String(body.reason ?? "").trim();
+    if (reason.length < 10) throw new ApiError({ status: 422, code: "INVALID_INPUT", message: "Reason must be at least 10 characters", retryable: false });
+    const storage = new SupabaseStorageService();
+    const result = await withAuthSafeDb(async (authDb) => {
+      const ctx = await loadFounderGovernanceContext(authDb, req);
+      assertFounderPermission(ctx, "founder.snapshot.create");
+      const snap = await createSnapshot(authDb, {
+        firmId,
+        snapshotType,
+        scopeType,
+        moduleCode: body.module_code,
+        targetEntityType: body.target_entity_type,
+        targetEntityId: body.target_entity_id,
+        targetLabel: body.target_label,
+        triggerType: body.trigger_type ?? "manual",
+        triggerActionCode: undefined,
+        createdByUserId: req.userId!,
+        createdByEmail: req.email ?? null,
+        reason,
+        note: body.note ?? null,
+        retentionPolicyCode: body.trigger_type === "scheduled" ? "scheduled_daily" : "manual",
+        storage,
+      });
+      await writeAuditLog(
+        {
+          firmId,
+          actorId: req.userId,
+          actorType: req.userType,
+          action: "firm.snapshot.create.manual",
+          entityType: "platform_snapshot",
+          entityId: undefined,
+          detail: JSON.stringify({ snapshotId: snap.snapshotId, snapshotType, scopeType }),
+          ipAddress: req.ip,
+          userAgent: req.headers["user-agent"],
+        },
+        { db: authDb, strict: false }
+      );
+      return snap;
+    }, { retry: true, allowUnsafe: true, ctx: { route: "POST /platform/firms/:firmId/snapshots", firmId } });
+    sendOk(res, { snapshot: { id: result.snapshotId, storage_driver: result.storageDriver, storage_path: result.storagePath, checksum: result.checksum, size_bytes: result.sizeBytes } }, { status: 201 });
+  } catch (err) {
+    sendError(res, err, { status: 500, code: "SNAPSHOT_CREATE_FAILED", message: "Snapshot creation failed" });
+  }
+});
+
+router.get("/platform/firms/:firmId/snapshots/:snapshotId", requireAuth, requireFounder, async (req: AuthRequest, res) => {
+  try {
+    const firmId = parseIntParam("firmId", req.params.firmId, { required: true, min: 1 })!;
+    const snapshotId = String(req.params.snapshotId ?? "").trim();
+    if (!snapshotId) throw new ApiError({ status: 400, code: "MISSING_REQUIRED_FIELD", message: "snapshotId is required", retryable: false });
+    const data = await withAuthSafeDb(async (authDb) => {
+      const ctx = await loadFounderGovernanceContext(authDb, req);
+      assertFounderPermission(ctx, "founder.snapshot.read");
+      return await getSnapshotDetail(authDb, firmId, snapshotId);
+    }, { retry: true, allowUnsafe: true, ctx: { route: "GET /platform/firms/:firmId/snapshots/:snapshotId", firmId } });
+    sendOk(res, { item: data.snapshot, items: data.items });
+  } catch (err) {
+    sendError(res, err);
+  }
+});
+
+router.post("/platform/firms/:firmId/snapshots/:snapshotId/pin", requireAuth, requireFounder, async (req: AuthRequest, res) => {
+  try {
+    const firmId = parseIntParam("firmId", req.params.firmId, { required: true, min: 1 })!;
+    const snapshotId = String(req.params.snapshotId ?? "").trim();
+    const body = req.body as { reason?: string };
+    const reason = String(body.reason ?? "").trim();
+    if (!snapshotId) throw new ApiError({ status: 400, code: "MISSING_REQUIRED_FIELD", message: "snapshotId is required", retryable: false });
+
+    await withAuthSafeDb(async (authDb) => {
+      const ctx = await loadFounderGovernanceContext(authDb, req);
+      assertFounderPermission(ctx, "founder.snapshot.pin");
+      await pinSnapshot(authDb, { firmId, snapshotId, actorUserId: ctx.actorUserId, reason });
+      await writeAuditLog({ firmId, actorId: ctx.actorUserId, actorType: "founder", action: "firm.snapshot.pinned", entityType: "platform_snapshot", detail: JSON.stringify({ snapshotId, reason }), ipAddress: req.ip, userAgent: req.headers["user-agent"] }, { db: authDb, strict: false });
+    }, { retry: true, allowUnsafe: true, ctx: { route: "POST /platform/firms/:firmId/snapshots/:snapshotId/pin", firmId } });
+
+    sendOk(res, { result: { snapshot_id: snapshotId, pinned: true } });
+  } catch (err) {
+    sendError(res, err);
+  }
+});
+
+router.post("/platform/firms/:firmId/snapshots/:snapshotId/unpin", requireAuth, requireFounder, async (req: AuthRequest, res) => {
+  try {
+    const firmId = parseIntParam("firmId", req.params.firmId, { required: true, min: 1 })!;
+    const snapshotId = String(req.params.snapshotId ?? "").trim();
+    if (!snapshotId) throw new ApiError({ status: 400, code: "MISSING_REQUIRED_FIELD", message: "snapshotId is required", retryable: false });
+
+    await withAuthSafeDb(async (authDb) => {
+      const ctx = await loadFounderGovernanceContext(authDb, req);
+      assertFounderPermission(ctx, "founder.snapshot.pin");
+      await unpinSnapshot(authDb, { firmId, snapshotId });
+      await writeAuditLog({ firmId, actorId: ctx.actorUserId, actorType: "founder", action: "firm.snapshot.unpinned", entityType: "platform_snapshot", detail: JSON.stringify({ snapshotId }), ipAddress: req.ip, userAgent: req.headers["user-agent"] }, { db: authDb, strict: false });
+    }, { retry: true, allowUnsafe: true, ctx: { route: "POST /platform/firms/:firmId/snapshots/:snapshotId/unpin", firmId } });
+
+    sendOk(res, { result: { snapshot_id: snapshotId, pinned: false } });
+  } catch (err) {
+    sendError(res, err);
+  }
+});
+
+router.post("/platform/firms/:firmId/snapshots/:snapshotId/delete", requireAuth, requireFounder, async (req: AuthRequest, res) => {
+  try {
+    const firmId = parseIntParam("firmId", req.params.firmId, { required: true, min: 1 })!;
+    const snapshotId = String(req.params.snapshotId ?? "").trim();
+    const body = req.body as { reason?: string; typed_confirmation?: string };
+    const reason = String(body.reason ?? "").trim();
+    const typed = String(body.typed_confirmation ?? "").trim();
+    if (!snapshotId) throw new ApiError({ status: 400, code: "MISSING_REQUIRED_FIELD", message: "snapshotId is required", retryable: false });
+    if (typed !== "CONFIRM") throw new ApiError({ status: 400, code: "INVALID_CONFIRMATION_TEXT", message: "Typed confirmation does not match required text", retryable: false, details: { required: "CONFIRM" } });
+
+    const storage = new SupabaseStorageService();
+    const removed = await withAuthSafeDb(async (authDb) => {
+      const ctx = await loadFounderGovernanceContext(authDb, req);
+      assertFounderPermission(ctx, "founder.snapshot.delete");
+      const result = await softDeleteSnapshot(authDb, { firmId, snapshotId, actorUserId: ctx.actorUserId, reason });
+      if (result.storageDriver === "supabase" && result.storagePath) {
+        try {
+          storage.assertConfigured();
+          await storage.deletePrivateObject(result.storagePath);
+        } catch {
+        }
+      }
+      await writeAuditLog({ firmId, actorId: ctx.actorUserId, actorType: "founder", action: "firm.snapshot.deleted", entityType: "platform_snapshot", detail: JSON.stringify({ snapshotId, reason }), ipAddress: req.ip, userAgent: req.headers["user-agent"] }, { db: authDb, strict: false });
+      return result;
+    }, { retry: true, allowUnsafe: true, ctx: { route: "POST /platform/firms/:firmId/snapshots/:snapshotId/delete", firmId } });
+
+    sendOk(res, { result: { snapshot_id: snapshotId, deleted: true, storage_driver: removed.storageDriver } });
+  } catch (err) {
+    sendError(res, err);
+  }
+});
+
+router.post("/platform/firms/:firmId/restore/preview", requireAuth, requireFounder, async (req: AuthRequest, res) => {
+  try {
+    const firmId = parseIntParam("firmId", req.params.firmId, { required: true, min: 1 })!;
+    const body = req.body as { snapshot_id?: string; restore_scope_type?: MaintenanceScopeType };
+    const snapshotId = String(body.snapshot_id ?? "").trim();
+    if (!snapshotId) throw new ApiError({ status: 400, code: "MISSING_REQUIRED_FIELD", message: "snapshot_id is required", retryable: false });
+    const result = await withAuthSafeDb(async (authDb) => {
+      const ctx = await loadFounderGovernanceContext(authDb, req);
+      assertFounderPermission(ctx, "founder.snapshot.restore.preview");
+
+      const detail = await getSnapshotDetail(authDb, firmId, snapshotId);
+      if ((detail.snapshot as any)?.deletedAt || String((detail.snapshot as any)?.status ?? "") === "deleted") {
+        throw new ApiError({ status: 409, code: "SNAPSHOT_NOT_RESTORABLE", message: "Snapshot is deleted", retryable: false });
+      }
+      const expiresAt = (detail.snapshot as any)?.expiresAt ? new Date(String((detail.snapshot as any).expiresAt)) : null;
+      if (expiresAt && expiresAt < new Date()) {
+        throw new ApiError({ status: 409, code: "SNAPSHOT_NOT_RESTORABLE", message: "Snapshot expired", retryable: false });
+      }
+      if (!(detail.snapshot as any)?.restorable) {
+        throw new ApiError({ status: 409, code: "SNAPSHOT_NOT_RESTORABLE", message: "Snapshot is not restorable", retryable: false });
+      }
+      if (String((detail.snapshot as any)?.integrityStatus ?? "valid") !== "valid") {
+        throw new ApiError({ status: 409, code: "SNAPSHOT_NOT_RESTORABLE", message: "Snapshot integrity is not valid", retryable: false, details: { integrity_status: (detail.snapshot as any)?.integrityStatus ?? null } });
+      }
+      if (String((detail.snapshot as any)?.status ?? "") !== "completed") {
+        throw new ApiError({ status: 409, code: "SNAPSHOT_NOT_RESTORABLE", message: "Snapshot is not completed", retryable: false });
+      }
+      const snapshotType = String(detail.snapshot.snapshotType ?? "");
+      const inferredScope: MaintenanceScopeType =
+        snapshotType === "settings" ? "settings" : snapshotType === "module" ? "module" : snapshotType === "record" ? "record" : "firm";
+      const scopeType = body.restore_scope_type ?? inferredScope;
+      if (scopeType !== inferredScope) {
+        throw new ApiError({ status: 422, code: "UNSUPPORTED_OPERATION", message: "Restore scope does not match snapshot type", retryable: false, details: { snapshot_type: snapshotType, restore_scope_type: scopeType } });
+      }
+      if (scopeType === "firm") throw new ApiError({ status: 422, code: "UNSUPPORTED_OPERATION", message: "Firm-wide restore is not supported", retryable: false });
+
+      const riskLevel = scopeType === "settings" ? "medium" : "high";
+      const impact: Record<string, number> = { snapshot_items: detail.items.length };
+      for (const it of detail.items) {
+        const k = String((it as any)?.itemType ?? "");
+        if (!k) continue;
+        impact[`snapshot_${k}`] = (impact[`snapshot_${k}`] ?? 0) + 1;
+      }
+      const previewPayload = { snapshot_id: snapshotId, restore_scope_type: scopeType, mode: "replace", impact_summary: impact, warnings: [] };
+
+      const restoreActionId = await createRestorePreviewRecord(authDb, {
+        firmId,
+        snapshotId,
+        restoreScopeType: scopeType,
+        moduleCode: (detail.snapshot.moduleCode ?? null) as any,
+        targetEntityType: (detail.snapshot.targetEntityType ?? null) as any,
+        targetEntityId: detail.snapshot.targetEntityId ?? null,
+        targetLabel: detail.snapshot.targetLabel ?? null,
+        riskLevel: riskLevel as any,
+        requestedByUserId: req.userId!,
+        requestedByEmail: req.email ?? null,
+        previewPayload,
+      });
+
+      const decision = evaluateDecisionForPreview({
+        actionCode: "restore_snapshot",
+        riskLevel: riskLevel as any,
+        scopeType,
+        moduleCode: detail.snapshot.moduleCode ?? null,
+        actorPermissions: ctx.permissions,
+        impersonation: ctx.impersonation.active,
+      });
+      const stepUp = decision.challengePhraseRequired || decision.cooldownSecondsRequired > 0
+        ? await createStepUpChallenge(authDb, {
+          firmId,
+          actionCode: "restore_snapshot",
+          riskLevel: riskLevel as any,
+          scopeType,
+          moduleCode: detail.snapshot.moduleCode ?? null,
+          targetEntityType: detail.snapshot.targetEntityType ?? null,
+          targetEntityId: detail.snapshot.targetEntityId ?? null,
+          requiredPhrase: defaultStepUpPhrase({ actionCode: "restore_snapshot", firmSlugOrName: String(firmId) }),
+          cooldownSeconds: decision.cooldownSecondsRequired,
+          expiresInSeconds: 15 * 60,
+          issuedToUserId: req.userId!,
+          issuedToEmail: req.email ?? null,
+        })
+        : null;
+
+      await writeAuditLog(
+        {
+          firmId,
+          actorId: req.userId,
+          actorType: "founder",
+          action: "firm.restore.previewed",
+          entityType: (detail.snapshot.targetEntityType ?? detail.snapshot.moduleCode ?? "firm") as any,
+          entityId: detail.snapshot.targetEntityType === "case" ? Number(detail.snapshot.targetEntityId) : undefined,
+          detail: JSON.stringify({ restoreActionId, snapshotId, scopeType, policy: decision.approvalPolicyCode }),
+          ipAddress: req.ip,
+          userAgent: req.headers["user-agent"],
+        },
+        { db: authDb, strict: false }
+      );
+
+      return { preview: previewPayload, restore_action_id: restoreActionId, risk_level: riskLevel, governance: decision, step_up: stepUp };
+    }, { retry: true, allowUnsafe: true, ctx: { route: "POST /platform/firms/:firmId/restore/preview", firmId } });
+
+    sendOk(res, { preview: result.preview, restore_action_id: result.restore_action_id, required_confirmation: requiredTypedConfirmation(result.risk_level as any), governance: result.governance, step_up: result.step_up });
+  } catch (err) {
+    sendError(res, err);
+  }
+});
+
+router.post("/platform/firms/:firmId/restore/execute", requireAuth, requireFounder, async (req: AuthRequest, res) => {
+  try {
+    const firmId = parseIntParam("firmId", req.params.firmId, { required: true, min: 1 })!;
+    const body = req.body as { restore_action_id?: string; reason?: string; typed_confirmation?: string; approval_request_id?: string; step_up_challenge_id?: string; step_up_phrase?: string; emergency_flag?: boolean };
+    const restoreActionId = String(body.restore_action_id ?? "").trim();
+    if (!restoreActionId) throw new ApiError({ status: 400, code: "MISSING_REQUIRED_FIELD", message: "restore_action_id is required", retryable: false });
+    const reason = String(body.reason ?? "").trim();
+    const typed = body.typed_confirmation ? String(body.typed_confirmation) : null;
+
+    const result = await withAuthSafeDb(async (authDb) => {
+      const ctx = await loadFounderGovernanceContext(authDb, req);
+      assertFounderPermission(ctx, "founder.snapshot.restore.execute");
+      const [op] = await authDb.select().from(platformRestoreActionsTable).where(and(eq(platformRestoreActionsTable.id, restoreActionId), eq(platformRestoreActionsTable.firmId, firmId)));
+      if (!op) throw new ApiError({ status: 404, code: "ACTION_NOT_FOUND", message: "Restore action not found", retryable: false });
+
+      const common = {
+        firmId,
+        restoreActionId,
+        reason,
+        typedConfirmation: typed,
+        approvalRequestId: body.approval_request_id ? String(body.approval_request_id) : null,
+        stepUpChallengeId: body.step_up_challenge_id ? String(body.step_up_challenge_id) : null,
+        stepUpPhrase: body.step_up_phrase ? String(body.step_up_phrase) : null,
+        emergencyFlag: !!body.emergency_flag,
+        actorPermissions: Array.from(ctx.permissions),
+        impersonationActive: ctx.impersonation.active,
+        requestedByUserId: req.userId!,
+        requestedByEmail: req.email ?? null,
+        ipAddress: req.ip,
+        userAgent: req.headers["user-agent"] ?? null,
+      };
+
+      if (op.restoreScopeType === "settings") return await restoreSettingsFromSnapshot(authDb, common);
+      if (op.restoreScopeType === "module" && op.moduleCode === "projects") return await restoreProjectsModuleFromSnapshot(authDb, common);
+      if (op.restoreScopeType === "record" && op.targetEntityType === "case") return await restoreCaseRecordFromSnapshot(authDb, common);
+      throw new ApiError({ status: 422, code: "UNSUPPORTED_OPERATION", message: "Restore scope not supported", retryable: false });
+    }, { retry: true, allowUnsafe: true, ctx: { route: "POST /platform/firms/:firmId/restore/execute", firmId } });
+
+    sendOk(res, { operation: { id: result.restoreActionId, type: "restore_action", status: "completed" }, snapshot: { id: result.preRestoreSnapshotId, created: true }, result: result.result });
+  } catch (err) {
+    sendError(res, err);
+  }
+});
+
+router.post("/platform/firms/:firmId/maintenance/request-approval", requireAuth, requireFounder, async (req: AuthRequest, res) => {
+  try {
+    const firmId = parseIntParam("firmId", req.params.firmId, { required: true, min: 1 })!;
+    const body = req.body as { action_id?: string; reason?: string; detailed_note?: string; emergency_flag?: boolean };
+    const actionId = String(body.action_id ?? "").trim();
+    if (!actionId) throw new ApiError({ status: 400, code: "MISSING_REQUIRED_FIELD", message: "action_id is required", retryable: false });
+    const reason = String(body.reason ?? "").trim();
+    if (reason.length < 10) throw new ApiError({ status: 422, code: "INVALID_INPUT", message: "Reason must be at least 10 characters", retryable: false });
+
+    const result = await withAuthSafeDb(async (authDb) => {
+      const ctx = await loadFounderGovernanceContext(authDb, req);
+      assertFounderPermission(ctx, "founder.approval.request");
+      assertFounderPermission(ctx, "founder.maintenance.read");
+
+      const [action] = await authDb.select().from(platformMaintenanceActionsTable).where(and(eq(platformMaintenanceActionsTable.id, actionId), eq(platformMaintenanceActionsTable.firmId, firmId)));
+      if (!action) throw new ApiError({ status: 404, code: "ACTION_NOT_FOUND", message: "Action not found", retryable: false });
+      if (action.status !== "previewed") throw new ApiError({ status: 409, code: "TARGET_STATE_CONFLICT", message: "Action is not in previewed state", retryable: true });
+
+      const preview = action.previewPayload as any;
+      const decision = evaluateDecisionForPreview({
+        actionCode: String(preview?.action_code ?? action.actionCode),
+        riskLevel: action.riskLevel as any,
+        scopeType: action.scopeType as any,
+        moduleCode: action.moduleCode ?? null,
+        actorPermissions: ctx.permissions,
+        impersonation: ctx.impersonation.active,
+      });
+      if (!decision.approvalRequired) throw new ApiError({ status: 422, code: "UNSUPPORTED_OPERATION", message: "Approval is not required for this action", retryable: false });
+
+      const approval = await createApprovalRequest(authDb, {
+        firmId,
+        actionCode: String(preview?.action_code ?? action.actionCode),
+        riskLevel: action.riskLevel as any,
+        scopeType: action.scopeType as any,
+        moduleCode: action.moduleCode ?? null,
+        targetEntityType: action.targetEntityType ?? null,
+        targetEntityId: action.targetEntityId ?? null,
+        targetLabel: action.targetLabel ?? null,
+        snapshotId: action.preActionSnapshotId ?? null,
+        operationType: "maintenance_action",
+        operationId: action.id,
+        requestedByUserId: req.userId!,
+        requestedByEmail: req.email ?? null,
+        reason,
+        detailedNote: body.detailed_note ? String(body.detailed_note) : null,
+        approvalPolicyCode: (body.emergency_flag ? "emergency_request" : decision.approvalPolicyCode),
+        requiredApprovals: decision.requiredApprovalCount,
+        selfApprovalAllowed: decision.selfApprovalAllowed,
+        expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
+        emergencyFlag: !!body.emergency_flag,
+        impersonationFlag: ctx.impersonation.active,
+        policyResultJson: decision,
+      });
+
+      await authDb.update(platformMaintenanceActionsTable).set({ approvalRequestId: approval.id, updatedAt: new Date() }).where(eq(platformMaintenanceActionsTable.id, action.id));
+
+      await writeAuditLog({ firmId, actorId: req.userId, actorType: "founder", action: "founder.approval.requested", entityType: "platform_approval", detail: JSON.stringify({ approvalId: approval.id, approvalCode: approval.requestCode, operationType: "maintenance_action", operationId: action.id }), ipAddress: req.ip, userAgent: req.headers["user-agent"] }, { db: authDb, strict: false });
+      return approval;
+    }, { retry: true, allowUnsafe: true, ctx: { route: "POST /platform/firms/:firmId/maintenance/request-approval", firmId } });
+
+    sendOk(res, { approval: result }, { status: 201 });
+  } catch (err) {
+    sendError(res, err);
+  }
+});
+
+router.post("/platform/firms/:firmId/restore/request-approval", requireAuth, requireFounder, async (req: AuthRequest, res) => {
+  try {
+    const firmId = parseIntParam("firmId", req.params.firmId, { required: true, min: 1 })!;
+    const body = req.body as { restore_action_id?: string; reason?: string; detailed_note?: string; emergency_flag?: boolean };
+    const restoreActionId = String(body.restore_action_id ?? "").trim();
+    if (!restoreActionId) throw new ApiError({ status: 400, code: "MISSING_REQUIRED_FIELD", message: "restore_action_id is required", retryable: false });
+    const reason = String(body.reason ?? "").trim();
+    if (reason.length < 10) throw new ApiError({ status: 422, code: "INVALID_INPUT", message: "Reason must be at least 10 characters", retryable: false });
+
+    const result = await withAuthSafeDb(async (authDb) => {
+      const ctx = await loadFounderGovernanceContext(authDb, req);
+      assertFounderPermission(ctx, "founder.approval.request");
+      assertFounderPermission(ctx, "founder.snapshot.restore.preview");
+
+      const [op] = await authDb.select().from(platformRestoreActionsTable).where(and(eq(platformRestoreActionsTable.id, restoreActionId), eq(platformRestoreActionsTable.firmId, firmId)));
+      if (!op) throw new ApiError({ status: 404, code: "ACTION_NOT_FOUND", message: "Restore action not found", retryable: false });
+      if (op.status !== "previewed") throw new ApiError({ status: 409, code: "TARGET_STATE_CONFLICT", message: "Restore action is not in previewed state", retryable: true });
+
+      const decision = evaluateDecisionForPreview({
+        actionCode: "restore_snapshot",
+        riskLevel: op.riskLevel as any,
+        scopeType: op.restoreScopeType as any,
+        moduleCode: op.moduleCode ?? null,
+        actorPermissions: ctx.permissions,
+        impersonation: ctx.impersonation.active,
+      });
+      if (!decision.approvalRequired) throw new ApiError({ status: 422, code: "UNSUPPORTED_OPERATION", message: "Approval is not required for this restore", retryable: false });
+
+      const approval = await createApprovalRequest(authDb, {
+        firmId,
+        actionCode: "restore_snapshot",
+        riskLevel: op.riskLevel as any,
+        scopeType: op.restoreScopeType as any,
+        moduleCode: op.moduleCode ?? null,
+        targetEntityType: op.targetEntityType ?? null,
+        targetEntityId: op.targetEntityId ?? null,
+        targetLabel: op.targetLabel ?? null,
+        snapshotId: op.snapshotId,
+        operationType: "restore_action",
+        operationId: op.id,
+        requestedByUserId: req.userId!,
+        requestedByEmail: req.email ?? null,
+        reason,
+        detailedNote: body.detailed_note ? String(body.detailed_note) : null,
+        approvalPolicyCode: (body.emergency_flag ? "emergency_request" : decision.approvalPolicyCode),
+        requiredApprovals: decision.requiredApprovalCount,
+        selfApprovalAllowed: decision.selfApprovalAllowed,
+        expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
+        emergencyFlag: !!body.emergency_flag,
+        impersonationFlag: ctx.impersonation.active,
+        policyResultJson: decision,
+      });
+
+      await authDb.update(platformRestoreActionsTable).set({ approvalRequestId: approval.id, updatedAt: new Date() }).where(eq(platformRestoreActionsTable.id, op.id));
+      await writeAuditLog({ firmId, actorId: req.userId, actorType: "founder", action: "founder.approval.requested", entityType: "platform_approval", detail: JSON.stringify({ approvalId: approval.id, approvalCode: approval.requestCode, operationType: "restore_action", operationId: op.id }), ipAddress: req.ip, userAgent: req.headers["user-agent"] }, { db: authDb, strict: false });
+      return approval;
+    }, { retry: true, allowUnsafe: true, ctx: { route: "POST /platform/firms/:firmId/restore/request-approval", firmId } });
+
+    sendOk(res, { approval: result }, { status: 201 });
+  } catch (err) {
+    sendError(res, err);
+  }
+});
+
+router.get("/platform/firms/:firmId/maintenance/history", requireAuth, requireFounder, async (req: AuthRequest, res) => {
+  try {
+    const firmId = parseIntParam("firmId", req.params.firmId, { required: true, min: 1 })!;
+    const limit = (() => {
+      const v = req.query.limit;
+      const raw = typeof v === "string" ? v : Array.isArray(v) && typeof v[0] === "string" ? v[0] : undefined;
+      const n = raw ? Number.parseInt(raw, 10) : 50;
+      return Number.isFinite(n) ? Math.min(Math.max(n, 1), 100) : 50;
+    })();
+    const items = await withAuthSafeDb(async (authDb) => {
+      const ctx = await loadFounderGovernanceContext(authDb, req);
+      assertFounderPermission(ctx, "founder.maintenance.read");
+      const maint = await authDb.select().from(platformMaintenanceActionsTable).where(eq(platformMaintenanceActionsTable.firmId, firmId)).orderBy(desc(platformMaintenanceActionsTable.createdAt)).limit(limit);
+      const restores = await authDb.select().from(platformRestoreActionsTable).where(eq(platformRestoreActionsTable.firmId, firmId)).orderBy(desc(platformRestoreActionsTable.createdAt)).limit(limit);
+      const approvals = await authDb.select().from(platformApprovalRequestsTable).where(eq(platformApprovalRequestsTable.firmId, firmId)).orderBy(desc(platformApprovalRequestsTable.createdAt)).limit(limit);
+      const merged = [
+        ...maint.map((m) => ({ kind: "maintenance", ...m })),
+        ...restores.map((r) => ({ kind: "restore", ...r })),
+        ...approvals.map((a) => ({ kind: "approval", ...a })),
+      ].sort((a: any, b: any) => new Date(b.createdAt as any).getTime() - new Date(a.createdAt as any).getTime()).slice(0, limit);
+      return merged;
+    }, { retry: true, allowUnsafe: true, ctx: { route: "GET /platform/firms/:firmId/maintenance/history", firmId } });
+    sendOk(res, { items });
+  } catch (err) {
+    sendError(res, err);
+  }
+});
+
+export default router;

@@ -14,10 +14,11 @@ describe("POST /api/auth/login", () => {
       .send({ email: FOUNDER_EMAIL, password: FOUNDER_PASSWORD });
 
     expect(res.status).toBe(200);
-    expect(res.body).toHaveProperty("token");
-    expect(res.body.email).toBe(FOUNDER_EMAIL);
-    expect(res.body.userType).toBe("founder");
-    expect(res.body).toHaveProperty("totpEnabled");
+    expect(res.body.ok).toBe(true);
+    expect(res.body.data).toHaveProperty("token");
+    expect(res.body.data.email).toBe(FOUNDER_EMAIL);
+    expect(res.body.data.userType).toBe("founder");
+    expect(res.body.data).toHaveProperty("totpEnabled");
     expect(res.headers["set-cookie"]).toBeDefined();
   });
 
@@ -27,7 +28,8 @@ describe("POST /api/auth/login", () => {
       .send({ email: FOUNDER_EMAIL, password: "wrongpassword" });
 
     expect(res.status).toBe(401);
-    expect(res.body).toHaveProperty("error");
+    expect(res.body.ok).toBe(false);
+    expect(res.body.error.message).toBeTruthy();
   });
 
   it("returns 401 on non-existent email", async () => {
@@ -36,7 +38,8 @@ describe("POST /api/auth/login", () => {
       .send({ email: "nonexistent@test.com", password: "anypassword" });
 
     expect(res.status).toBe(401);
-    expect(res.body).toHaveProperty("error");
+    expect(res.body.ok).toBe(false);
+    expect(res.body.error.message).toBeTruthy();
   });
 
   it("returns 401 on invalid email format (treated as non-existent user)", async () => {
@@ -54,7 +57,7 @@ describe("POST /api/auth/logout", () => {
       .post("/api/auth/login")
       .send({ email: LAWYER_EMAIL, password: LAWYER_PASSWORD });
     expect(loginRes.status).toBe(200);
-    const token = loginRes.body.token;
+    const token = loginRes.body.data.token;
 
     const logoutRes = await request(app)
       .post("/api/auth/logout")
@@ -69,9 +72,11 @@ describe("POST /api/auth/logout", () => {
 });
 
 describe("GET /api/auth/me", () => {
-  it("returns 204 without auth token", async () => {
+  it("returns ok:true with null without auth token", async () => {
     const res = await request(app).get("/api/auth/me");
-    expect(res.status).toBe(204);
+    expect(res.status).toBe(200);
+    expect(res.body.ok).toBe(true);
+    expect(res.body.data).toBe(null);
   });
 
   it("returns 401 with invalid token", async () => {
@@ -85,14 +90,15 @@ describe("GET /api/auth/me", () => {
     const loginRes = await request(app)
       .post("/api/auth/login")
       .send({ email: FOUNDER_EMAIL, password: FOUNDER_PASSWORD });
-    const token = loginRes.body.token;
+    const token = loginRes.body.data.token;
 
     const meRes = await request(app)
       .get("/api/auth/me")
       .set("Authorization", `Bearer ${token}`);
     expect(meRes.status).toBe(200);
-    expect(meRes.body.email).toBe(FOUNDER_EMAIL);
-    expect(meRes.body).not.toHaveProperty("passwordHash");
+    expect(meRes.body.ok).toBe(true);
+    expect(meRes.body.data.email).toBe(FOUNDER_EMAIL);
+    expect(meRes.body.data).not.toHaveProperty("passwordHash");
   });
 });
 
@@ -102,14 +108,15 @@ describe("GET /api/auth/permissions", () => {
       .post("/api/auth/login")
       .send({ email: LAWYER_EMAIL, password: LAWYER_PASSWORD });
     expect(loginRes.status).toBe(200);
-    const token = loginRes.body.token;
+    const token = loginRes.body.data.token;
 
     const res = await request(app)
       .get("/api/auth/permissions")
       .set("Authorization", `Bearer ${token}`);
     expect(res.status).toBe(200);
-    expect(res.body).toHaveProperty("permissions");
-    expect(Array.isArray(res.body.permissions)).toBe(true);
+    expect(res.body.ok).toBe(true);
+    expect(res.body.data).toHaveProperty("permissions");
+    expect(Array.isArray(res.body.data.permissions)).toBe(true);
 
     await request(app)
       .post("/api/auth/logout")
@@ -122,14 +129,15 @@ describe("GET /api/auth/sessions", () => {
     const loginRes = await request(app)
       .post("/api/auth/login")
       .send({ email: LAWYER_EMAIL, password: LAWYER_PASSWORD });
-    const token = loginRes.body.token;
+    const token = loginRes.body.data.token;
 
     const sessionsRes = await request(app)
       .get("/api/auth/sessions")
       .set("Authorization", `Bearer ${token}`);
     expect(sessionsRes.status).toBe(200);
-    expect(sessionsRes.body).toHaveProperty("data");
-    expect(Array.isArray(sessionsRes.body.data)).toBe(true);
+    expect(sessionsRes.body.ok).toBe(true);
+    expect(sessionsRes.body.data).toHaveProperty("data");
+    expect(Array.isArray(sessionsRes.body.data.data)).toBe(true);
 
     await request(app)
       .post("/api/auth/logout")
@@ -158,7 +166,7 @@ describe("Audit log creation on auth events", () => {
 
     await request(app)
       .post("/api/auth/logout")
-      .set("Authorization", `Bearer ${loginRes.body.token}`);
+      .set("Authorization", `Bearer ${loginRes.body.data.token}`);
   });
 });
 
@@ -169,7 +177,7 @@ describe("TOTP endpoints", () => {
     const res = await request(app)
       .post("/api/auth/login")
       .send({ email: LAWYER_EMAIL, password: LAWYER_PASSWORD });
-    lawyerToken = res.body.token;
+    lawyerToken = res.body.data.token;
   });
 
   afterAll(async () => {
@@ -191,11 +199,12 @@ describe("TOTP endpoints", () => {
       .set("Authorization", `Bearer ${lawyerToken}`);
 
     expect(res.status).toBe(200);
-    expect(res.body).toHaveProperty("secret");
-    expect(res.body).toHaveProperty("qrCodeDataUrl");
-    expect(res.body.qrCodeDataUrl).toMatch(/^data:image\/png;base64,/);
-    expect(res.body).toHaveProperty("otpAuthUrl");
-    expect(res.body.otpAuthUrl).toMatch(/^otpauth:\/\/totp\//);
+    expect(res.body.ok).toBe(true);
+    expect(res.body.data).toHaveProperty("secret");
+    expect(res.body.data).toHaveProperty("qrCodeDataUrl");
+    expect(res.body.data.qrCodeDataUrl).toMatch(/^data:image\/png;base64,/);
+    expect(res.body.data).toHaveProperty("otpAuthUrl");
+    expect(res.body.data.otpAuthUrl).toMatch(/^otpauth:\/\/totp\//);
   });
 
   it("returns 400 on confirm with wrong code", async () => {
@@ -217,10 +226,11 @@ describe("TOTP endpoints", () => {
     const res = await request(app)
       .post("/api/auth/totp/disable")
       .set("Authorization", `Bearer ${lawyerToken}`)
-      .set("x-reauth-token", reauthRes.body.reAuthToken)
+      .set("x-reauth-token", reauthRes.body.data.reAuthToken)
       .send({ code: "000000" });
 
     expect(res.status).toBe(400);
-    expect(res.body.error).toContain("not enabled");
+    expect(res.body.ok).toBe(false);
+    expect(String(res.body.error.message).toLowerCase()).toContain("not enabled");
   });
 });

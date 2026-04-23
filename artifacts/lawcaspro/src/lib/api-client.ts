@@ -1,6 +1,7 @@
 import { API_BASE, apiUrl } from "@/lib/api-base";
 import { clearStoredAuthToken, getStoredAuthToken } from "@/lib/auth-token";
 import { emitAuthUnauthorized } from "@/lib/auth-events";
+import { unwrapApiData } from "@/lib/api-contract";
 import { fetchWithTimeout } from "@/lib/fetch-with-timeout";
 import { apiErrorFromResponse } from "@/lib/http-error";
 
@@ -73,7 +74,8 @@ export async function apiRequest(path: string, options: ApiFetchOptions = {}): P
 export async function apiFetchJson<T = unknown>(path: string, options: ApiFetchOptions = {}): Promise<T> {
   const res = await apiRequest(path, { ...options, responseType: "json" });
   if (res.status === 204) return null as T;
-  return (await res.json()) as T;
+  const body = (await res.json()) as unknown;
+  return unwrapApiData<T>(body);
 }
 
 export async function apiFetchText(path: string, options: ApiFetchOptions = {}): Promise<string> {

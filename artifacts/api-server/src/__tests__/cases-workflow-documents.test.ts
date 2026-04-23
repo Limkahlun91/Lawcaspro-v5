@@ -19,14 +19,14 @@ beforeAll(async () => {
     .post("/api/auth/login")
     .send({ email: "partner@tan-associates.my", password: "lawyer123" });
   expect(loginResA.status).toBe(200);
-  tokenA = loginResA.body.token;
-  firmIdA = loginResA.body.firmId;
+  tokenA = loginResA.body.data.token;
+  firmIdA = loginResA.body.data.firmId;
 
   const loginResB = await request(app)
     .post("/api/auth/login")
     .send({ email: "partner@test.com", password: "password123" });
   expect(loginResB.status).toBe(200);
-  tokenB = loginResB.body.token;
+  tokenB = loginResB.body.data.token;
 
   const projRes = await request(app)
     .get("/api/projects?limit=5")

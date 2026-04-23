@@ -35,15 +35,15 @@ beforeAll(async () => {
     .post("/api/auth/login")
     .send({ email: PARTNER_EMAIL, password: PARTNER_PWD });
   expect(loginRes.status).toBe(200);
-  token = loginRes.body.token;
-  firmId = loginRes.body.firmId;
+  token = loginRes.body.data.token;
+  firmId = loginRes.body.data.firmId;
 
   const founderLoginRes = await request(app)
     .post("/api/auth/login")
     .send({ email: FOUNDER_EMAIL, password: FOUNDER_PWD });
   expect(founderLoginRes.status).toBe(200);
-  founderToken = founderLoginRes.body.token;
-  founderUserId = founderLoginRes.body.userId ?? founderLoginRes.body.id;
+  founderToken = founderLoginRes.body.data.token;
+  founderUserId = founderLoginRes.body.data.userId ?? founderLoginRes.body.data.id;
   expect(typeof founderToken).toBe("string");
   expect(typeof founderUserId).toBe("number");
 

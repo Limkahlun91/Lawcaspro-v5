@@ -11,16 +11,21 @@ beforeAll(async () => {
     .post("/api/auth/login")
     .send({ email: "partner@test.com", password: "password123" });
   expect(res.status).toBe(200);
-  token = res.body?.token;
+  token = res.body?.data?.token;
   expect(typeof token).toBe("string");
 });
 
 describe("Runtime 500 regressions (no-db)", () => {
-  it("auth/me unauthenticated returns 204 or 401 (not 500)", async () => {
+  it("auth/me unauthenticated returns 200 or 401 (not 500)", async () => {
     const res = await request(app).get("/api/auth/me");
-    expect([204, 401]).toContain(res.status);
+    expect([200, 401]).toContain(res.status);
+    if (res.status === 200) {
+      expect(res.body?.ok).toBe(true);
+      expect(res.body?.data).toBeNull();
+    }
     if (res.status === 401) {
-      expect(res.body).toEqual({ error: "Not authenticated" });
+      expect(res.body?.ok).toBe(false);
+      expect(res.body?.error?.message).toBeTruthy();
       expect(res.body).not.toHaveProperty("detail");
       expect(res.body).not.toHaveProperty("stack");
       expect(res.body).not.toHaveProperty("sql");
@@ -48,7 +53,8 @@ describe("Runtime 500 regressions (no-db)", () => {
   it("auth/login invalid body returns 400 (not 500)", async () => {
     const res = await request(app).post("/api/auth/login").send({});
     expect(res.status).toBe(400);
-    expect(res.body).toHaveProperty("error");
+    expect(res.body?.ok).toBe(false);
+    expect(res.body?.error?.message).toBeTruthy();
     expect(res.body).not.toHaveProperty("detail");
     expect(res.body).not.toHaveProperty("stack");
     expect(res.body).not.toHaveProperty("sql");

@@ -13,15 +13,16 @@ beforeAll(async () => {
     .post("/api/auth/login")
     .send({ email: "partner@test.com", password: "password123" });
   expect(loginRes.status).toBe(200);
-  token = loginRes.body?.token;
+  token = loginRes.body?.data?.token;
   expect(typeof token).toBe("string");
 
   const meRes = await request(app)
     .get("/api/auth/me")
     .set("Authorization", `Bearer ${token}`);
   expect(meRes.status).toBe(200);
-  firmId = meRes.body?.firmId;
-  roleId = meRes.body?.roleId;
+  expect(meRes.body.ok).toBe(true);
+  firmId = meRes.body?.data?.firmId;
+  roleId = meRes.body?.data?.roleId;
   expect(typeof firmId).toBe("number");
   expect(typeof roleId).toBe("number");
 });

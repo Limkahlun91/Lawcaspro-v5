@@ -22,6 +22,9 @@ export const projectsTable = pgTable("projects", {
   unitCategory: text("unit_category"),
   extraFields: jsonb("extra_fields").default({}),
   createdBy: integer("created_by"),
+  archivedAt: timestamp("archived_at", { withTimezone: true }),
+  archivedBy: integer("archived_by"),
+  archivedReason: text("archived_reason"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow().$onUpdate(() => new Date()),
 });

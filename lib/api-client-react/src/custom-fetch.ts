@@ -186,15 +186,33 @@ function buildErrorMessage(response: Response, data: unknown): string {
   const detail = getStringField(data, "detail");
   const message =
     getStringField(data, "message") ??
+    (typeof data === "object" && data !== null
+      ? getStringField((data as Record<string, unknown>).error, "message")
+      : undefined) ??
     getStringField(data, "error_description") ??
     getStringField(data, "error");
+  const code =
+    getStringField(data, "code") ??
+    (typeof data === "object" && data !== null
+      ? getStringField((data as Record<string, unknown>).error, "code")
+      : undefined);
 
   if (title && detail) return `${prefix}: ${title} — ${detail}`;
   if (detail) return `${prefix}: ${detail}`;
+  if (message && code) return `${prefix}: ${code} — ${message}`;
   if (message) return `${prefix}: ${message}`;
   if (title) return `${prefix}: ${title}`;
+  if (code) return `${prefix}: ${code}`;
 
   return prefix;
+}
+
+function isApiEnvelope(v: unknown): v is { ok: boolean; data?: unknown; error?: unknown } {
+  if (!v || typeof v !== "object") return false;
+  const rec = v as Record<string, unknown>;
+  if (typeof rec.ok !== "boolean") return false;
+  if ("data" in rec || "error" in rec) return true;
+  return false;
 }
 
 export class ApiError<T = unknown> extends Error {
@@ -330,7 +348,14 @@ async function parseSuccessBody(
 
   switch (effectiveType) {
     case "json":
-      return parseJsonBody(response, requestInfo);
+      {
+        const parsed = await parseJsonBody(response, requestInfo);
+        if (isApiEnvelope(parsed)) {
+          if (parsed.ok) return parsed.data ?? null;
+          throw new ApiError(response, parsed, requestInfo);
+        }
+        return parsed;
+      }
 
     case "text": {
       const text = await response.text();

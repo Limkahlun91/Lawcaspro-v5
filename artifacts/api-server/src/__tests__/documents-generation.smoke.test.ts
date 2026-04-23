@@ -16,7 +16,7 @@ beforeAll(async () => {
     .post("/api/auth/login")
     .send({ email: PARTNER_EMAIL, password: PARTNER_PWD });
   expect(res.status).toBe(200);
-  token = res.body.token;
+  token = res.body.data.token;
   expect(typeof token).toBe("string");
 });
 

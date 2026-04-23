@@ -12,8 +12,12 @@ export const documentExtractionJobsTable = pgTable("document_extraction_jobs", {
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   completedAt: timestamp("completed_at", { withTimezone: true }),
   errorMessage: text("error_message"),
+  archivedAt: timestamp("archived_at", { withTimezone: true }),
+  archivedBy: integer("archived_by"),
+  archivedReason: text("archived_reason"),
 }, (t) => ({
   caseIdx: index("idx_document_extraction_jobs_case").on(t.firmId, t.caseId, t.caseDocumentId, t.createdAt),
+  archivedAtIdx: index("idx_document_extraction_jobs_archived").on(t.firmId, t.archivedAt),
 }));
 
 export const documentExtractionResultsTable = pgTable("document_extraction_results", {

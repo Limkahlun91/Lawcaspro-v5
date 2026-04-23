@@ -1,6 +1,8 @@
 import app from "./app";
 import { logger } from "./lib/logger";
 import { seedIfEmpty } from "./lib/seed";
+import { startSnapshotScheduler } from "./jobs/snapshot-scheduler";
+import { startSnapshotRetentionCleanup } from "./jobs/snapshot-retention";
 
 const rawPort = process.env["PORT"];
 
@@ -23,6 +25,9 @@ seedIfEmpty().catch((err) => {
 const server = app.listen(port, () => {
   logger.info({ port }, "Server listening");
 });
+
+startSnapshotScheduler();
+startSnapshotRetentionCleanup();
 
 server.on("error", (err) => {
   logger.error({ err }, "Error listening on port");

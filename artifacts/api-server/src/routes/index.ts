@@ -30,6 +30,8 @@ import supportSessionsRouter from "./support-sessions";
 import partiesRouter from "./parties";
 import complianceRouter from "./compliance";
 import conflictRouter from "./conflict";
+import platformOpsRouter from "./platform-ops";
+import platformApprovalsRouter from "./platform-approvals";
 
 const router: IRouter = Router();
 
@@ -50,6 +52,8 @@ router.use(accountingRouter);
 router.use(communicationsRouter);
 router.use(reportsRouter);
 router.use(auditRouter);
+router.use(platformOpsRouter);
+router.use(platformApprovalsRouter);
 router.use(hubRouter);
 router.use(quotationsRouter);
 router.use(firmSettingsRouter);

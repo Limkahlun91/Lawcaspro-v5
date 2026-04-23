@@ -13,6 +13,10 @@ import { Badge } from "@/components/ui/badge";
 import { QueryFallback } from "@/components/query-fallback";
 import { apiFetchJson } from "@/lib/api-client";
 import { toastError } from "@/lib/toast-error";
+import { unwrapApiData } from "@/lib/api-contract";
+import { FirmMaintenanceTab } from "@/pages/platform/firms/maintenance-tab";
+import { FirmSnapshotsTab } from "@/pages/platform/firms/snapshots-tab";
+import { FirmActionHistoryTab } from "@/pages/platform/firms/history-tab";
 
 interface FirmUser {
   id: number;
@@ -44,7 +48,22 @@ function ResetPasswordRow({ user, firmId }: { user: FirmUser; firmId: number }) 
       setOpen(false);
       setNewPassword("");
     },
-    onError: (e) => toastError(toast, e, "Reset failed"),
+    onError: (e) => {
+      const data = (e as any)?.data as any;
+      const code = data?.ok === false ? String(data?.error?.code ?? "") : "";
+      const msg = (() => {
+        if (code === "USER_NOT_FOUND") return "User no longer exists in this firm.";
+        if (code === "INVALID_PASSWORD_POLICY") return "Password policy validation failed.";
+        if (code === "QUERY_TIMEOUT") return "Request timed out. Please retry.";
+        if (code === "SESSION_EXPIRED" || (e as any)?.status === 401) return "Founder session expired. Please sign in again.";
+        return null;
+      })();
+      if (msg) {
+        toast({ title: "Reset failed", description: msg, variant: "destructive" });
+        return;
+      }
+      toastError(toast, e, "Reset failed");
+    },
   });
 
   return (
@@ -122,7 +141,7 @@ export default function FirmDetail() {
   const [, setLocation] = useLocation();
   const { toast } = useToast();
   const queryClient = useQueryClient();
-  const [activeTab, setActiveTab] = useState<"settings" | "users">("settings");
+  const [activeTab, setActiveTab] = useState<"settings" | "users" | "maintenance" | "snapshots" | "history">("settings");
 
   const { data: firm, isLoading } = useGetFirm(firmId, {
     query: { enabled: !!firmId, queryKey: getGetFirmQueryKey(firmId) }
@@ -138,6 +157,29 @@ export default function FirmDetail() {
     retry: false,
   });
   const { data: users = [], isLoading: loadingUsers } = usersQuery;
+
+  const lastMaintenanceQuery = useQuery({
+    queryKey: ["platform-firm-maint-actions", firmId],
+    queryFn: async () => {
+      const res = await apiFetchJson(`/platform/firms/${firmId}/maintenance/actions?limit=1`);
+      return unwrapApiData<{ items: any[] }>(res);
+    },
+    enabled: !!firmId,
+    retry: false,
+  });
+
+  const lastSnapshotQuery = useQuery({
+    queryKey: ["platform-firm-snapshots", firmId, "last"],
+    queryFn: async () => {
+      const res = await apiFetchJson(`/platform/firms/${firmId}/snapshots?limit=1`);
+      return unwrapApiData<{ items: any[] }>(res);
+    },
+    enabled: !!firmId,
+    retry: false,
+  });
+
+  const lastMaintenanceAt = lastMaintenanceQuery.data?.items?.[0]?.createdAt ?? null;
+  const lastSnapshotAt = lastSnapshotQuery.data?.items?.[0]?.createdAt ?? null;
 
   useEffect(() => {
     if (firm) {
@@ -175,7 +217,7 @@ export default function FirmDetail() {
         </div>
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+      <div className="grid grid-cols-1 md:grid-cols-5 gap-4">
         <Card>
           <CardHeader className="flex flex-row items-center justify-between pb-2 space-y-0">
             <CardTitle className="text-sm font-medium text-slate-500">Total Users</CardTitle>
@@ -203,11 +245,38 @@ export default function FirmDetail() {
             <div className="text-lg font-bold">{new Date(firm.createdAt).toLocaleDateString()}</div>
           </CardContent>
         </Card>
+        <Card>
+          <CardHeader className="flex flex-row items-center justify-between pb-2 space-y-0">
+            <CardTitle className="text-sm font-medium text-slate-500">Last maintenance</CardTitle>
+            <RotateCcw className="w-4 h-4 text-slate-400" />
+          </CardHeader>
+          <CardContent>
+            <div className="text-sm font-bold">{lastMaintenanceAt ? new Date(lastMaintenanceAt).toLocaleString() : "—"}</div>
+          </CardContent>
+        </Card>
+        <Card>
+          <CardHeader className="flex flex-row items-center justify-between pb-2 space-y-0">
+            <CardTitle className="text-sm font-medium text-slate-500">Last snapshot</CardTitle>
+            <Building2 className="w-4 h-4 text-slate-400" />
+          </CardHeader>
+          <CardContent>
+            <div className="text-sm font-bold">{lastSnapshotAt ? new Date(lastSnapshotAt).toLocaleString() : "—"}</div>
+          </CardContent>
+        </Card>
       </div>
+
+      <Card className="border-amber-200 bg-amber-50">
+        <CardContent className="py-4 text-sm text-amber-900">
+          <div className="font-medium">Safety notice</div>
+          <div className="text-amber-800 mt-1">
+            High-risk actions require typed confirmation. Destructive actions automatically create a pre-action snapshot before execution.
+          </div>
+        </CardContent>
+      </Card>
 
       <div className="border-b border-slate-200">
         <div className="flex gap-0">
-          {(["settings", "users"] as const).map((tab) => (
+          {(["settings", "users", "maintenance", "snapshots", "history"] as const).map((tab) => (
             <button
               key={tab}
               onClick={() => setActiveTab(tab)}
@@ -217,7 +286,15 @@ export default function FirmDetail() {
                   : "border-transparent text-slate-500 hover:text-slate-700"
               }`}
             >
-              {tab === "settings" ? "Settings" : `Users (${firm.userCount})`}
+              {tab === "settings"
+                ? "Settings"
+                : tab === "users"
+                  ? `Users (${firm.userCount})`
+                  : tab === "maintenance"
+                    ? "Maintenance"
+                    : tab === "snapshots"
+                      ? "Backups / Restore"
+                      : "Action History"}
             </button>
           ))}
         </div>
@@ -284,6 +361,18 @@ export default function FirmDetail() {
             )}
           </CardContent>
         </Card>
+      )}
+
+      {activeTab === "maintenance" && (
+        <FirmMaintenanceTab firmId={firmId} firmName={firm.name} />
+      )}
+
+      {activeTab === "snapshots" && (
+        <FirmSnapshotsTab firmId={firmId} firmName={firm.name} />
+      )}
+
+      {activeTab === "history" && (
+        <FirmActionHistoryTab firmId={firmId} />
       )}
     </div>
   );

@@ -2,9 +2,32 @@ export type ApiErrorLike = {
   status?: unknown;
   data?: unknown;
   message?: unknown;
+  code?: unknown;
+  requestId?: unknown;
+  stage?: unknown;
+  retryable?: unknown;
+  suggestion?: unknown;
 };
 
 type ErrorLike = { name?: unknown; message?: unknown; code?: unknown; cause?: unknown };
+
+type ApiFailureShape = {
+  ok: false;
+  error: { code: string; message: string; retryable: boolean; stage?: string; suggestion?: string };
+  meta: { request_id: string };
+};
+
+function asApiFailure(data: unknown): ApiFailureShape | null {
+  if (!data || typeof data !== "object") return null;
+  const d = data as any;
+  if (d.ok !== false) return null;
+  if (!d.error || typeof d.error !== "object") return null;
+  if (!d.meta || typeof d.meta !== "object") return null;
+  if (typeof d.error.code !== "string" || typeof d.error.message !== "string") return null;
+  if (typeof d.error.retryable !== "boolean") return null;
+  if (typeof d.meta.request_id !== "string") return null;
+  return d as ApiFailureShape;
+}
 
 export function isApiErrorLike(err: unknown): err is ApiErrorLike {
   if (!err || typeof err !== "object") return false;
@@ -38,6 +61,14 @@ export function getErrorMessage(err: unknown): string {
   if (isRequestTimeoutError(err)) return "Request timed out";
   if (isAbortError(err)) return "Request cancelled";
   if (isNetworkUnavailableError(err)) return "Network unavailable";
+  if (isApiErrorLike(err)) {
+    const failure = asApiFailure(err.data);
+    if (failure) {
+      const base = failure.error.message || "Request failed";
+      const suggestion = failure.error.suggestion ? ` ${failure.error.suggestion}` : "";
+      return `${base}${suggestion}`.trim();
+    }
+  }
   const status = getHttpStatus(err);
   if (status === 401) return "Session expired. Please sign in again.";
   if (status === 403) return "You do not have permission to perform this action.";
@@ -70,6 +101,16 @@ export function getFriendlyErrorTitle(err: unknown): string {
   if (isRequestTimeoutError(err)) return "Request timeout";
   if (isAbortError(err)) return "Request cancelled";
   if (isNetworkUnavailableError(err)) return "Network unavailable";
+  if (isApiErrorLike(err)) {
+    const failure = asApiFailure(err.data);
+    if (failure) {
+      if (failure.error.code === "QUERY_TIMEOUT") return "Request timeout";
+      if (failure.error.code === "FORBIDDEN" || failure.error.code === "FOUNDER_ROLE_REQUIRED") return "Forbidden";
+      if (failure.error.code === "UNAUTHORIZED" || failure.error.code === "SESSION_EXPIRED") return "Not authenticated";
+      if (failure.error.code.endsWith("_NOT_FOUND")) return "Not found";
+      return "Request failed";
+    }
+  }
   const status = getHttpStatus(err);
   if (status === 401) return "Not authenticated";
   if (status === 403) return "Forbidden";

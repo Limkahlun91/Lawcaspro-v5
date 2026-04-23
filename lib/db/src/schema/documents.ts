@@ -185,11 +185,15 @@ export const documentBatchJobsTable = pgTable("document_batch_jobs", {
   downloadFileName: text("download_file_name"),
   downloadMimeType: text("download_mime_type"),
   errorSummary: text("error_summary"),
+  archivedAt: timestamp("archived_at", { withTimezone: true }),
+  archivedBy: integer("archived_by"),
+  archivedReason: text("archived_reason"),
 }, (t) => ({
   firmIdx: index("idx_document_batch_jobs_firm").on(t.firmId),
   firmCaseIdx: index("idx_document_batch_jobs_case").on(t.firmId, t.caseId),
   statusIdx: index("idx_document_batch_jobs_status").on(t.firmId, t.status),
   createdAtIdx: index("idx_document_batch_jobs_created_at").on(t.firmId, t.createdAt),
+  archivedAtIdx: index("idx_document_batch_jobs_archived").on(t.firmId, t.archivedAt),
 }));
 
 export const documentBatchJobItemsTable = pgTable("document_batch_job_items", {

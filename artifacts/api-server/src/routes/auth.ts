@@ -4,7 +4,8 @@ import crypto from "crypto";
 import { and, eq } from "drizzle-orm";
 import { auditLogsTable, db, firmsTable, permissionsTable, rolesTable, sessionsTable, sql, type SQL, usersTable } from "@workspace/db";
 import { LoginBody } from "@workspace/api-zod";
-import { requireAuth, requireReAuth, issueReauthToken, type AuthRequest, writeAuditLog } from "../lib/auth";
+import { loadFounderPermissions, requireAuth, requireReAuth, issueReauthToken, type AuthRequest, writeAuditLog } from "../lib/auth";
+import { ApiError, sendError, sendOk } from "../lib/api-response";
 import { authRateLimiter, sensitiveRateLimiter } from "../lib/rate-limit";
 import { logger } from "../lib/logger";
 import { isTransientDbConnectionError } from "../lib/auth-safe-db";
@@ -520,7 +521,7 @@ router.post("/auth/logout", requireAuth, async (req: AuthRequest, res): Promise<
   }
   await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "auth.logout", ipAddress: req.ip, userAgent: req.headers["user-agent"] });
   res.clearCookie("auth_token");
-  res.json({ success: true });
+  sendOk(res, { success: true });
 });
 
 router.get("/auth/me", async (req, res): Promise<void> => {
@@ -533,7 +534,7 @@ router.get("/auth/me", async (req, res): Promise<void> => {
   const token = (typeof cookieToken === "string" ? cookieToken : undefined) || headerToken;
 
   if (!token) {
-    res.sendStatus(204);
+    sendOk(res, null);
     logger.info({ route: req.path, reqId, stage: "no_token", ms: Date.now() - startedAt }, "auth.me");
     return;
   }
@@ -548,15 +549,13 @@ router.get("/auth/me", async (req, res): Promise<void> => {
       .where(eq(sessionsTable.tokenHash, tokenHash));
     if (!s) {
       if (typeof cookieToken === "string") res.clearCookie("auth_token");
-      res.status(401).json({ error: "Not authenticated" });
+      throw new ApiError({ status: 401, code: "UNAUTHORIZED", message: "Not authenticated", retryable: false });
       logger.info({ ...ctxBase, stage: "no_session", ms: Date.now() - startedAt }, "auth.me");
-      return;
     }
     if (s.expiresAt < new Date()) {
       if (typeof cookieToken === "string") res.clearCookie("auth_token");
-      res.status(401).json({ error: "Not authenticated" });
+      throw new ApiError({ status: 401, code: "SESSION_EXPIRED", message: "Not authenticated", retryable: false });
       logger.info({ ...ctxBase, stage: "expired", ms: Date.now() - startedAt }, "auth.me");
-      return;
     }
 
     const [user] = await db
@@ -575,15 +574,13 @@ router.get("/auth/me", async (req, res): Promise<void> => {
 
     if (!user) {
       if (typeof cookieToken === "string") res.clearCookie("auth_token");
-      res.status(404).json({ error: "User not found" });
+      throw new ApiError({ status: 404, code: "USER_NOT_FOUND", message: "User not found", retryable: false });
       logger.warn({ ...ctxBase, stage: "missing_user", ms: Date.now() - startedAt }, "auth.me");
-      return;
     }
     if (user.status !== "active") {
       if (typeof cookieToken === "string") res.clearCookie("auth_token");
-      res.status(401).json({ error: "Not authenticated" });
+      throw new ApiError({ status: 401, code: "UNAUTHORIZED", message: "Not authenticated", retryable: false });
       logger.warn({ ...ctxBase, stage: "inactive_user", ms: Date.now() - startedAt }, "auth.me");
-      return;
     }
 
     let roleName: string | null = null;
@@ -619,7 +616,11 @@ router.get("/auth/me", async (req, res): Promise<void> => {
       }
     }
 
-    res.json({
+    const founder = user.userType === "founder"
+      ? await loadFounderPermissions({ userId: user.id, userType: "founder" } as AuthRequest)
+      : { permissions: [], highestLevel: null };
+
+    sendOk(res, {
       id: user.id,
       userType: user.userType,
       firmId: user.firmId,
@@ -627,6 +628,8 @@ router.get("/auth/me", async (req, res): Promise<void> => {
       roleName,
       firmName,
       permissions,
+      founderPermissions: founder.permissions,
+      founderRoleLevel: founder.highestLevel,
       email: user.email,
       name: user.name,
       department: user.department ?? null,
@@ -646,7 +649,7 @@ router.get("/auth/me", async (req, res): Promise<void> => {
       "auth.me_error",
     );
     if (typeof cookieToken === "string") res.clearCookie("auth_token");
-    res.status(401).json({ error: "Not authenticated" });
+    sendError(res, err, { status: 401, code: "UNAUTHORIZED", message: "Not authenticated" });
   }
 });
 
@@ -656,7 +659,7 @@ router.get("/auth/permissions", requireAuth, async (req: AuthRequest, res): Prom
   const ctx = { route: req.path, reqId, userId: req.userId ?? null, firmId: req.firmId ?? null, roleId: req.roleId ?? null };
   try {
     if (req.userType !== "firm_user" || !req.roleId) {
-      res.json({ permissions: [] });
+      sendOk(res, { permissions: [] });
       logger.info({ ...ctx, stage: "not_firm_user", ms: Date.now() - startedAt }, "auth.permissions");
       return;
     }
@@ -667,11 +670,11 @@ router.get("/auth/permissions", requireAuth, async (req: AuthRequest, res): Prom
       .from(permissionsTable)
       .where(and(eq(permissionsTable.roleId, req.roleId), eq(permissionsTable.allowed, true)));
 
-    res.json({ permissions: rows });
+    sendOk(res, { permissions: rows });
     logger.info({ ...ctx, stage: "ok", ms: Date.now() - startedAt, permissionsLookupMs: Date.now() - started, count: rows.length }, "auth.permissions");
   } catch (err) {
     logger.error({ ...ctx, err }, "auth.permissions_failed");
-    res.status(503).json({ error: "Auth temporarily unavailable" });
+    sendError(res, err, { status: 503, code: "AUTH_ADMIN_UNAVAILABLE", message: "Auth temporarily unavailable" });
   }
 });
 
@@ -683,14 +686,14 @@ router.get("/auth/sessions", requireAuth, async (req: AuthRequest, res): Promise
     userAgent: sessionsTable.userAgent,
     ipAddress: sessionsTable.ipAddress,
   }).from(sessionsTable).where(eq(sessionsTable.userId, req.userId!));
-  res.json({ data: sessions });
+  sendOk(res, { data: sessions });
 });
 
 router.delete("/auth/sessions/:id", requireAuth, async (req: AuthRequest, res): Promise<void> => {
   const sessionId = Number(req.params.id);
   await db.delete(sessionsTable).where(eq(sessionsTable.id, sessionId));
   await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "auth.session_revoked", entityType: "session", entityId: sessionId, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
-  res.json({ success: true });
+  sendOk(res, { success: true });
 });
 
 // Issue a short-lived (5 min, single-use) re-auth token.

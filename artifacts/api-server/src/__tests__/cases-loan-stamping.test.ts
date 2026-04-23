@@ -16,9 +16,9 @@ beforeAll(async () => {
   const loginRes = await request(app)
     .post("/api/auth/login")
     .send({ email: "partner@tan-associates.my", password: "lawyer123" });
-  token = loginRes.body.token;
-  firmId = loginRes.body.firmId;
   expect(loginRes.status).toBe(200);
+  token = loginRes.body.data.token;
+  firmId = loginRes.body.data.firmId;
 
   const projRes = await request(app)
     .get("/api/projects?limit=5")

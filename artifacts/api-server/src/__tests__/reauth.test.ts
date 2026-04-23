@@ -31,8 +31,9 @@ async function getReauthToken(bearerToken: string): Promise<string> {
     .post("/api/auth/reauth-token")
     .set("Authorization", `Bearer ${bearerToken}`);
   expect(res.status).toBe(200);
-  expect(typeof res.body.reAuthToken).toBe("string");
-  return res.body.reAuthToken as string;
+  expect(res.body.ok).toBe(true);
+  expect(typeof res.body.data?.reAuthToken).toBe("string");
+  return res.body.data.reAuthToken as string;
 }
 
 describe("requireReAuth middleware", () => {
@@ -45,7 +46,7 @@ describe("requireReAuth middleware", () => {
     const loginRes = await request(app)
       .post("/api/auth/login")
       .send({ email: PARTNER_EMAIL, password: PARTNER_PASSWORD });
-    partnerToken = loginRes.body.token;
+    partnerToken = loginRes.body.data.token;
 
     // Create a draft invoice for testing
     const invRes = await request(app)

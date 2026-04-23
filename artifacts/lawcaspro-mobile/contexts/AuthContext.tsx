@@ -40,7 +40,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         });
         if (res.ok) {
           const data = await res.json();
-          setUser(data);
+          const user = (data && typeof data === "object" && "ok" in data) ? (data as any).data : data;
+          setUser(user ?? null);
         } else {
           await AsyncStorage.removeItem(TOKEN_KEY);
           setToken(null);
@@ -61,10 +62,15 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       body: JSON.stringify({ email, password }),
     });
     if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      throw new Error((err as { error?: string }).error ?? "Login failed");
+      const err = await res.json().catch(() => null);
+      const message =
+        err && typeof err === "object" && "ok" in (err as any) && (err as any).ok === false
+          ? String((err as any).error?.message ?? "Login failed")
+          : String((err as any)?.error ?? "Login failed");
+      throw new Error(message);
     }
-    const data = await res.json();
+    const raw = await res.json();
+    const data = raw && typeof raw === "object" && "ok" in (raw as any) ? (raw as any).data : raw;
     await AsyncStorage.setItem(TOKEN_KEY, data.token);
     setToken(data.token);
     setUser({

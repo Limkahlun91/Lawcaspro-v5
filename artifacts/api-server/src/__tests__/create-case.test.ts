@@ -15,8 +15,8 @@ beforeAll(async () => {
   const loginRes = await request(app)
     .post("/api/auth/login")
     .send({ email: "partner@tan-associates.my", password: "lawyer123" });
-  partnerToken = loginRes.body.token;
-  partnerFirmId = loginRes.body.firmId;
+  partnerToken = loginRes.body.data.token;
+  partnerFirmId = loginRes.body.data.firmId;
 
   // Pre-clean test clients (cascade through case_purchasers first to avoid FK violations)
   const testClients = await db.select().from(clientsTable).where(and(

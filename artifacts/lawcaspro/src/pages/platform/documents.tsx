@@ -24,6 +24,7 @@ import { QueryFallback } from "@/components/query-fallback";
 import { apiFetchBlob, apiFetchJson } from "@/lib/api-client";
 import { downloadBlob } from "@/lib/download";
 import { toastError } from "@/lib/toast-error";
+import { unwrapApiData } from "@/lib/api-contract";
 
 const ALLOWED_TYPES: Record<string, string> = {
   "application/pdf": "PDF",
@@ -398,7 +399,9 @@ export default function PlatformDocuments() {
       const url = selectedFolderId !== null
         ? `/platform/documents?folderId=${selectedFolderId}`
         : "/platform/documents";
-      return await apiFetchJson(url);
+      const res = await apiFetchJson(url);
+      const data = unwrapApiData<{ items: PlatformDoc[] }>(res);
+      return (data as any)?.items ?? (res as PlatformDoc[]);
     },
     retry: false,
   });

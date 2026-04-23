@@ -1,5 +1,5 @@
 import { Router, type IRouter } from "express";
-import { eq, ilike, count, desc, and } from "drizzle-orm";
+import { eq, ilike, count, desc, and, isNull } from "drizzle-orm";
 import { casesTable, db, developersTable, projectsTable, sql, type Project } from "@workspace/db";
 import {
   CreateProjectBody, UpdateProjectBody, ListProjectsQueryParams,
@@ -54,7 +54,7 @@ router.get("/projects", requireAuth, requireFirmUser, requirePermission("project
     const limit = params.success ? (params.data.limit ?? 20) : 20;
     const offset = (page - 1) * limit;
 
-    const conditions = [eq(projectsTable.firmId, req.firmId!)];
+    const conditions = [eq(projectsTable.firmId, req.firmId!), isNull(projectsTable.archivedAt)];
     if (developerId) conditions.push(eq(projectsTable.developerId, developerId));
     if (projectType) conditions.push(eq(projectsTable.projectType, projectType));
     if (titleType) conditions.push(eq(projectsTable.titleType, titleType));
@@ -280,16 +280,27 @@ router.delete("/projects/:projectId", requireAuth, requireFirmUser, requirePermi
     return;
   }
 
+  const [activeCases] = await r
+    .select({ c: count() })
+    .from(casesTable)
+    .where(and(eq(casesTable.firmId, req.firmId!), eq(casesTable.projectId, params.data.projectId), isNull(casesTable.deletedAt)));
+  const activeCaseCount = Number(activeCases?.c ?? 0);
+  if (activeCaseCount > 0) {
+    res.status(409).json({ error: "Project is referenced by active cases", code: "DEPENDENCY_BLOCKED", details: { activeCaseCount } });
+    return;
+  }
+
   const [proj] = await r
-    .delete(projectsTable)
-    .where(and(eq(projectsTable.id, params.data.projectId), eq(projectsTable.firmId, req.firmId!)))
+    .update(projectsTable)
+    .set({ archivedAt: new Date(), archivedBy: req.userId ?? null, archivedReason: "user_delete" })
+    .where(and(eq(projectsTable.id, params.data.projectId), eq(projectsTable.firmId, req.firmId!), isNull(projectsTable.archivedAt)))
     .returning();
   if (!proj || proj.firmId !== req.firmId) {
     res.status(404).json({ error: "Project not found" });
     return;
   }
 
-  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "projects.delete", entityType: "project", entityId: proj.id, detail: `name=${proj.name}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "projects.archive", entityType: "project", entityId: proj.id, detail: `name=${proj.name}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
   res.sendStatus(204);
 });
 

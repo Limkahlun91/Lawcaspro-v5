@@ -1,5 +1,5 @@
 import { Request, Response, NextFunction } from "express";
-import { clearTenantContext, db, makeRlsDb, permissionsTable, pool, RlsDb, rolesTable, sessionsTable, setTenantContextSession, sql, usersTable, auditLogsTable } from "@workspace/db";
+import { clearTenantContext, db, makeRlsDb, permissionsTable, pool, RlsDb, rolesTable, sessionsTable, setTenantContextSession, sql, usersTable, auditLogsTable, platformFounderRolePermissionsTable, platformFounderRolesTable, platformFounderUserRolesTable } from "@workspace/db";
 import { and, eq } from "drizzle-orm";
 import crypto from "crypto";
 import { logger } from "./logger";
@@ -12,6 +12,8 @@ export interface AuthRequest extends Request {
   firmId?: number | null;
   roleId?: number | null;
   supportSessionId?: number | null;
+  founderPermissions?: string[];
+  founderRoleLevel?: string | null;
   /**
    * Per-request RLS-enforced Drizzle instance.
    * Set by requireFirmUser. Runs inside a transaction as app_user with
@@ -27,6 +29,10 @@ const getReqId = (req: unknown): string | undefined => {
 };
 
 const FOUNDER_EMAIL = "lun.6923@hotmail.com";
+const FOUNDER_EMAILS = (process.env.FOUNDER_EMAILS ?? FOUNDER_EMAIL)
+  .split(",")
+  .map((s) => s.trim().toLowerCase())
+  .filter(Boolean);
 
 export async function writeAuditLog(params: {
   firmId?: number | null;
@@ -176,12 +182,83 @@ export async function requireFounder(
     return;
   }
   const email = String(req.email ?? "").trim().toLowerCase();
-  if (email !== FOUNDER_EMAIL) {
+  if (!FOUNDER_EMAILS.includes(email)) {
     await writeAuditLog({ actorId: req.userId, actorType: req.userType ?? "unknown", action: "auth.forbidden.founder_email_mismatch", detail: `${req.method} ${req.path}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
     res.status(403).json({ error: "Founder access required" });
     return;
   }
   next();
+}
+
+const founderLevelRank = (level: string | null | undefined): number => {
+  if (!level) return 0;
+  if (level === "viewer") return 1;
+  if (level === "operator") return 2;
+  if (level === "admin") return 3;
+  if (level === "super_admin") return 4;
+  return 0;
+};
+
+export async function loadFounderPermissions(req: AuthRequest): Promise<{ permissions: string[]; highestLevel: string | null }> {
+  if (!req.userId || req.userType !== "founder") return { permissions: [], highestLevel: null };
+  let rows: Array<{ perm: string; level: string | null }> = [];
+  try {
+    rows = await db
+      .select({
+        perm: platformFounderRolePermissionsTable.permissionCode,
+        level: platformFounderRolesTable.level,
+      })
+      .from(platformFounderUserRolesTable)
+      .innerJoin(platformFounderRolesTable, eq(platformFounderUserRolesTable.roleId, platformFounderRolesTable.id))
+      .innerJoin(platformFounderRolePermissionsTable, eq(platformFounderRolesTable.id, platformFounderRolePermissionsTable.roleId))
+      .where(eq(platformFounderUserRolesTable.userId, req.userId));
+  } catch (err) {
+    const code = err && typeof err === "object" ? (err as { code?: unknown }).code : undefined;
+    if (code === "42P01") return { permissions: [], highestLevel: null };
+    throw err;
+  }
+
+  const perms = Array.from(new Set(rows.map((r) => r.perm).filter((p): p is string => typeof p === "string" && p.length > 0)));
+  const highest = rows.reduce<string | null>((acc, r) => {
+    const lvl = typeof r.level === "string" ? r.level : null;
+    if (!acc) return lvl;
+    return founderLevelRank(lvl) > founderLevelRank(acc) ? lvl : acc;
+  }, null);
+
+  return { permissions: perms, highestLevel: highest };
+}
+
+export function requireFounderPermission(permissionCode: string) {
+  return async (req: AuthRequest, res: Response, next: NextFunction): Promise<void> => {
+    if (req.userType !== "founder") {
+      res.status(403).json({ error: "Founder access required" });
+      return;
+    }
+    try {
+      const loaded = req.founderPermissions
+        ? { permissions: req.founderPermissions, highestLevel: req.founderRoleLevel ?? null }
+        : await loadFounderPermissions(req);
+      req.founderPermissions = loaded.permissions;
+      req.founderRoleLevel = loaded.highestLevel;
+
+      if (!loaded.permissions.includes(permissionCode)) {
+        await writeAuditLog({
+          actorId: req.userId,
+          actorType: "founder",
+          action: "founder.permission.denied",
+          detail: `permission=${permissionCode} route=${req.method} ${req.path}`,
+          ipAddress: req.ip,
+          userAgent: req.headers["user-agent"],
+        });
+        res.status(403).json({ error: "Permission denied" });
+        return;
+      }
+      next();
+    } catch (err) {
+      logger.error({ err, userId: req.userId, route: req.path }, "founder.permission.load_failed");
+      res.status(503).json({ error: "Auth temporarily unavailable" });
+    }
+  };
 }
 
 /**

@@ -161,7 +161,8 @@ describe("Auth mocked regressions", () => {
 
     const res = await request(app).post("/api/auth/login").send({ email: "user@test.com", password: "goodpw" });
     expect(res.status).toBe(200);
-    expect(res.body).toHaveProperty("token");
+    expect(res.body?.ok).toBe(true);
+    expect(res.body?.data).toHaveProperty("token");
     expect(res.headers["set-cookie"]).toBeTruthy();
   });
 
@@ -181,15 +182,19 @@ describe("Auth mocked regressions", () => {
     expect(res.status).toBe(401);
   });
 
-  it("auth/me no token returns 204", async () => {
+  it("auth/me no token returns 200 with null data", async () => {
     const res = await request(app).get("/api/auth/me");
-    expect(res.status).toBe(204);
+    expect(res.status).toBe(200);
+    expect(res.body?.ok).toBe(true);
+    expect(res.body?.data).toBeNull();
   });
 
   it("auth/me invalid token returns 401 and clears cookie", async () => {
     state.sessionsByTokenHash.clear();
     const res = await request(app).get("/api/auth/me").set("Cookie", "auth_token=invalid");
     expect(res.status).toBe(401);
+    expect(res.body?.ok).toBe(false);
+    expect(res.body?.error?.code).toBeTruthy();
     const scHeader = (res.headers as Record<string, unknown>)["set-cookie"];
     const sc = Array.isArray(scHeader) ? scHeader.join(";") : String(scHeader ?? "");
     expect(sc).toMatch(/auth_token=/);
@@ -222,7 +227,8 @@ describe("Auth mocked regressions", () => {
 
     const res = await request(app).get("/api/auth/me").set("Cookie", "auth_token=token");
     expect(res.status).toBe(200);
-    expect(res.body).toHaveProperty("permissions");
-    expect(Array.isArray(res.body.permissions)).toBe(true);
+    expect(res.body?.ok).toBe(true);
+    expect(res.body?.data).toHaveProperty("permissions");
+    expect(Array.isArray(res.body?.data?.permissions)).toBe(true);
   });
 });

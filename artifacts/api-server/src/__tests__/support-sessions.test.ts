@@ -16,12 +16,12 @@ describe("Support sessions (founder)", () => {
     const res = await request(app)
       .post("/api/auth/login")
       .send({ email: FOUNDER_EMAIL, password: FOUNDER_PASSWORD });
-    founderToken = res.body.token;
+    founderToken = res.body.data.token;
 
     const firmsRes = await request(app)
       .get("/api/platform/firms")
       .set("Authorization", `Bearer ${founderToken}`);
-    targetFirmId = firmsRes.body.data?.[0]?.id;
+    targetFirmId = firmsRes.body.data?.data?.[0]?.id;
   });
 
   afterAll(async () => {

@@ -96,6 +96,7 @@ export { auditLogsTable } from "./schema";
 export {
   clearTenantContext,
   makeRlsDb,
+  assertSafeRlsRole,
   setFounderContextSession,
   setTenantContextSession,
 } from "./tenant-context";

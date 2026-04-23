@@ -76,7 +76,8 @@ describe("Auth founder bcrypt regression", () => {
       .post("/api/auth/login")
       .send({ email: "lun.6923@hotmail.com", password: "CorrectPassword123!" });
     expect(res.status).toBe(200);
-    expect(res.body).toHaveProperty("token");
+    expect(res.body.ok).toBe(true);
+    expect(res.body.data).toHaveProperty("token");
     const scHeader = (res.headers as Record<string, unknown>)["set-cookie"];
     const sc = Array.isArray(scHeader) ? scHeader.join(";") : String(scHeader ?? "");
     expect(sc).toMatch(/auth_token=/);

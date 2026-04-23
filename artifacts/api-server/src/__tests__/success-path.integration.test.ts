@@ -48,11 +48,12 @@ describe("Success path (integration)", () => {
 
     const me = await request(app).get("/api/auth/me").set("Cookie", cookie);
     expect(me.status).toBe(200);
-    expect(me.body).toHaveProperty("firmId");
-    expect(me.body).toHaveProperty("roleId");
+    expect(me.body.ok).toBe(true);
+    expect(me.body.data).toHaveProperty("firmId");
+    expect(me.body.data).toHaveProperty("roleId");
 
-    const roleId = typeof me.body?.roleId === "number" ? me.body.roleId : null;
-    const firmId = typeof me.body?.firmId === "number" ? me.body.firmId : null;
+    const roleId = typeof me.body?.data?.roleId === "number" ? me.body.data.roleId : null;
+    const firmId = typeof me.body?.data?.firmId === "number" ? me.body.data.firmId : null;
     expect(roleId).toBeTruthy();
     expect(firmId).toBeTruthy();
 

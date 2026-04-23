@@ -13,8 +13,8 @@ beforeAll(async () => {
   const loginRes = await request(app)
     .post("/api/auth/login")
     .send({ email: "partner@tan-associates.my", password: "lawyer123" });
-  partnerToken = loginRes.body.token;
-  partnerFirmId = loginRes.body.firmId;
+  partnerToken = loginRes.body.data.token;
+  partnerFirmId = loginRes.body.data.firmId;
 
   const [created] = await db.insert(platformClausesTable).values({
     clauseCode: "TEST_CLAUSE_001",
@@ -68,4 +68,3 @@ describe("Clause Library API", () => {
     expect(found.body).toContain("Hello");
   });
 });
-

@@ -18,13 +18,13 @@ describe("Tenant isolation — firm user cannot access other firm's data", () =>
     const partnerRes = await request(app)
       .post("/api/auth/login")
       .send({ email: PARTNER_EMAIL, password: PARTNER_PASSWORD });
-    partnerToken = partnerRes.body.token;
-    partnerFirmId = partnerRes.body.firmId;
+    partnerToken = partnerRes.body.data.token;
+    partnerFirmId = partnerRes.body.data.firmId;
 
     const founderRes = await request(app)
       .post("/api/auth/login")
       .send({ email: FOUNDER_EMAIL, password: FOUNDER_PASSWORD });
-    founderToken = founderRes.body.token;
+    founderToken = founderRes.body.data.token;
   });
 
   afterAll(async () => {
@@ -112,7 +112,7 @@ describe("Founder can access platform routes", () => {
     const res = await request(app)
       .post("/api/auth/login")
       .send({ email: FOUNDER_EMAIL, password: FOUNDER_PASSWORD });
-    founderToken = res.body.token;
+    founderToken = res.body.data.token;
   });
 
   afterAll(async () => {

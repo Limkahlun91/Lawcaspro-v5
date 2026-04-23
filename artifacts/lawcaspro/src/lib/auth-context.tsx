@@ -6,6 +6,7 @@ import { apiRequest } from "./api-client";
 import { clearStoredAuthToken } from "./auth-token";
 import { onAuthUnauthorized } from "./auth-events";
 import { ME_QUERY_KEY } from "./query-keys";
+import { unwrapApiData } from "./api-contract";
 
 const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null;
 
@@ -48,8 +49,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         timeoutMs: 8000,
       });
       if (res.status === 401) return null;
-      if (res.status === 204) return null;
-      return (await res.json()) as AuthUser;
+      const body = (await res.json()) as unknown;
+      const unwrapped = unwrapApiData<AuthUser | null>(body);
+      return unwrapped ?? null;
     },
   });
   const { data: me, isLoading: isMeLoading, isError: isMeError } = meQuery;
@@ -76,11 +78,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         signal,
         timeoutMs: 8000,
       });
-      if (res.status === 401 || res.status === 204) return { permissions: [] };
+      if (res.status === 401) return { permissions: [] };
       if (res.status === 404) return { permissions: [], unavailable: true };
-      return {
-        permissions: parsePermissionsPayload((await res.json()) as unknown),
-      };
+      const body = (await res.json()) as unknown;
+      const data = unwrapApiData<{ permissions: Array<{ module: string; action: string }> }>(body);
+      return { permissions: parsePermissionsPayload(data) };
     },
   });
 

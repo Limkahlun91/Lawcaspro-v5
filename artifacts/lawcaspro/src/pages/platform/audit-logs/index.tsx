@@ -6,6 +6,7 @@ import { Input } from "@/components/ui/input";
 import { ScrollText, Search } from "lucide-react";
 import { QueryFallback } from "@/components/query-fallback";
 import { apiFetchJson } from "@/lib/api-client";
+import { unwrapApiData } from "@/lib/api-contract";
 
 const ACTION_LABELS: Record<string, string> = {
   case_created: "Case Created",
@@ -40,17 +41,21 @@ export default function PlatformAuditLogs() {
   });
   const firms = firmsQuery.data?.data ?? [];
 
-  const params = new URLSearchParams({ limit: "150" });
+  const params = new URLSearchParams({ limit: "150", includeTotal: "0" });
   if (firmFilter !== "all") params.set("firmId", firmFilter);
 
-  const logsQuery = useQuery<{ data: Record<string, unknown>[]; total: number }>({
+  const logsQuery = useQuery<{ items: Record<string, unknown>[]; total?: number; pagination?: { limit: number; has_more: boolean; next_cursor: string | null } } | { data: Record<string, unknown>[]; total: number }>({
     queryKey: ["platform-audit-logs", firmFilter],
-    queryFn: () => apiFetchJson(`/platform/audit-logs?${params.toString()}`),
+    queryFn: async () => {
+      const res = await apiFetchJson(`/platform/audit-logs?${params.toString()}`);
+      return unwrapApiData(res);
+    },
     retry: false,
   });
   const { data, isLoading } = logsQuery;
 
-  const logs = (data?.data ?? []).filter((log) => {
+  const rawLogs = (data as any)?.items ?? (data as any)?.data ?? [];
+  const logs = (rawLogs as Record<string, unknown>[]).filter((log) => {
     if (!search) return true;
     const q = search.toLowerCase();
     return (
@@ -89,7 +94,7 @@ export default function PlatformAuditLogs() {
             ))}
           </SelectContent>
         </Select>
-        <span className="text-sm text-slate-500 shrink-0">{data?.total ?? 0} total events</span>
+        <span className="text-sm text-slate-500 shrink-0">{(data as any)?.total ?? "—"} total events</span>
       </div>
 
       <Card>

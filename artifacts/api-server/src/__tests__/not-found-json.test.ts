@@ -7,8 +7,8 @@ describe("API not found handler", () => {
     const res = await request(app).get("/api/__does_not_exist__");
     expect(res.status).toBe(404);
     expect(String(res.headers["content-type"] ?? "")).toContain("application/json");
-    expect(res.body.error).toBe("Not Found");
-    expect(res.body.code).toBe("NOT_FOUND");
+    expect(res.body.ok).toBe(false);
+    expect(res.body.error?.code).toBe("NOT_FOUND");
   });
 });
 

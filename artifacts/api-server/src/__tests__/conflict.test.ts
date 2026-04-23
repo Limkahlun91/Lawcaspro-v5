@@ -45,7 +45,7 @@ async function getReauthToken(bearerToken: string): Promise<string> {
     .post("/api/auth/reauth-token")
     .set("Authorization", `Bearer ${bearerToken}`);
   expect(res.status).toBe(200);
-  return res.body.reAuthToken as string;
+  return res.body.data.reAuthToken as string;
 }
 
 async function createTestCase(token: string): Promise<number> {
@@ -84,9 +84,9 @@ beforeAll(async () => {
     request(app).post("/api/auth/login").send({ email: PARTNER_EMAIL, password: PARTNER_PWD }),
     request(app).post("/api/auth/login").send({ email: LAWYER_EMAIL, password: LAWYER_PWD }),
   ]);
-  partnerToken = partnerRes.body.token;
-  partnerFirmId = partnerRes.body.firmId;
-  lawyerToken = lawyerRes.body.token;
+  partnerToken = partnerRes.body.data.token;
+  partnerFirmId = partnerRes.body.data.firmId;
+  lawyerToken = lawyerRes.body.data.token;
 
   // Pre-clean leftover seed parties from previous runs
   const stale = await db.select().from(partiesTable)

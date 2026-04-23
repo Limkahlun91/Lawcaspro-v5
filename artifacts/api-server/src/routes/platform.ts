@@ -21,6 +21,7 @@ import { requireAuth, requireFounder, writeAuditLog, type AuthRequest } from "..
 import { withAuthSafeDb } from "../lib/auth-safe-db";
 import { logger } from "../lib/logger";
 import bcrypt from "bcryptjs";
+import { ApiError, sendError, sendOk, parseIntParam } from "../lib/api-response";
 import {
   ObjectNotFoundError,
   SupabaseStorageService,
@@ -350,37 +351,63 @@ router.get("/platform/firms/:firmId/users", requireAuth, requireFounder, async (
 });
 
 router.post("/platform/firms/:firmId/users/:userId/reset-password", requireAuth, requireFounder, async (req: AuthRequest, res): Promise<void> => {
-  const firmIdStr = one(req.params.firmId);
-  const userIdStr = one(req.params.userId);
-  const firmId = firmIdStr ? parseInt(firmIdStr, 10) : NaN;
-  const userId = userIdStr ? parseInt(userIdStr, 10) : NaN;
-  if (isNaN(firmId) || isNaN(userId)) { res.status(400).json({ error: "Invalid firm ID or user ID" }); return; }
-  const { newPassword } = req.body as { newPassword?: string };
-  if (!newPassword || newPassword.length < 6) {
-    res.status(400).json({ error: "New password must be at least 6 characters" });
-    return;
-  }
   try {
-    const [user] = await withTimeout("platform.reset_password.select_user", async () =>
-      db.select().from(usersTable).where(and(eq(usersTable.id, userId), eq(usersTable.firmId, firmId)))
-    );
-    if (!user) {
-      res.status(404).json({ error: "User not found in this firm" });
-      return;
+    const firmId = parseIntParam("firmId", req.params.firmId, { required: true, min: 1 });
+    const userId = parseIntParam("userId", req.params.userId, { required: true, min: 1 });
+    const { newPassword } = req.body as { newPassword?: string };
+    if (!newPassword || typeof newPassword !== "string" || newPassword.trim().length < 6) {
+      throw new ApiError({
+        status: 422,
+        code: "INVALID_PASSWORD_POLICY",
+        message: "New password must be at least 6 characters",
+        retryable: false,
+      });
     }
-    const passwordHash = await withTimeout("platform.reset_password.hash", async () => bcrypt.hash(newPassword, 10));
-    await withTimeout("platform.reset_password.update_user", async () =>
-      db.update(usersTable).set({ passwordHash }).where(eq(usersTable.id, userId))
+    const normalized = newPassword.trim();
+
+    const result = await withAuthSafeDb(
+      async (authDb) => {
+        const [user] = await withTimeout("platform.reset_password.select_user", async () =>
+          authDb.select({ id: usersTable.id, email: usersTable.email, firmId: usersTable.firmId }).from(usersTable).where(and(eq(usersTable.id, userId!), eq(usersTable.firmId, firmId!)))
+        );
+        if (!user) {
+          throw new ApiError({ status: 404, code: "USER_NOT_FOUND", message: "User not found in this firm", retryable: false });
+        }
+        const passwordHash = await withTimeout("platform.reset_password.hash", async () => bcrypt.hash(normalized, 10));
+        const updated = await withTimeout("platform.reset_password.update_user", async () =>
+          authDb.update(usersTable).set({ passwordHash }).where(and(eq(usersTable.id, userId!), eq(usersTable.firmId, firmId!))).returning({ id: usersTable.id })
+        );
+        if (!updated?.[0]?.id) {
+          throw new ApiError({ status: 409, code: "TARGET_STATE_CONFLICT", message: "User could not be updated", retryable: true });
+        }
+        await writeAuditLog(
+          {
+            firmId: firmId!,
+            actorId: req.userId,
+            actorType: req.userType,
+            action: "platform.firm_user.password.reset",
+            entityType: "user",
+            entityId: userId!,
+            detail: `email=${user.email}`,
+            ipAddress: req.ip,
+            userAgent: req.headers["user-agent"],
+          },
+          { db: authDb, strict: false }
+        );
+        return { userId: userId!, firmId: firmId! };
+      },
+      { retry: true, allowUnsafe: true, ctx: { route: "POST /platform/firms/:firmId/users/:userId/reset-password", firmId, userId } }
     );
-    res.json({ success: true, message: "Password reset successfully" });
+
+    sendOk(res, { result: { user_id: result.userId, password_reset: true } });
   } catch (err) {
     if (err instanceof RouteTimeoutError) {
-      logger.error({ err, firmId, userId }, "platform.reset_password.timeout");
-      res.status(504).json({ error: "Request timed out", code: "TIMEOUT" });
+      logger.error({ err, firmId: req.params.firmId, userId: req.params.userId }, "platform.reset_password.timeout");
+      sendError(res, new ApiError({ status: 504, code: "QUERY_TIMEOUT", message: "Request timed out", retryable: true, stage: err.label }));
       return;
     }
-    logger.error({ err, firmId, userId }, "platform.reset_password.error");
-    res.status(500).json({ error: "Failed to reset password" });
+    logger.error({ err, firmId: req.params.firmId, userId: req.params.userId }, "platform.reset_password.error");
+    sendError(res, err);
   }
 });
 
@@ -602,31 +629,47 @@ router.post("/platform/folders/reorder", requireAuth, requireFounder, async (req
 // ─── Platform Documents ───────────────────────────────────────────────────────
 
 router.get("/platform/documents", requireAuth, requireFounder, async (req: AuthRequest, res): Promise<void> => {
-  const firmIdStr = one(req.query.firmId as any);
-  const folderIdStr = one(req.query.folderId as any);
-  const firmId = firmIdStr ? parseInt(firmIdStr, 10) : undefined;
-  const folderId = folderIdStr ? parseInt(folderIdStr, 10) : undefined;
-  let condition: SQL<unknown> | undefined;
-  if (firmId) condition = eq(platformDocumentsTable.firmId, firmId);
-  if (folderId !== undefined) {
-    const folderCondition = eq(platformDocumentsTable.folderId, folderId);
-    condition = condition ? and(condition, folderCondition) : folderCondition;
-  }
   try {
-    const docs = await withTimeout("platform.documents.list", async () => {
-      let q = db.select().from(platformDocumentsTable);
-      if (condition) q = q.where(condition) as typeof q;
-      return await q.orderBy(desc(platformDocumentsTable.createdAt));
-    });
-    res.json(docs);
+    const firmId = (() => {
+      const raw = one(req.query.firmId as any);
+      if (raw === undefined) return null;
+      if (!String(raw).trim()) return null;
+      const n = Number.parseInt(String(raw), 10);
+      if (!Number.isFinite(n) || n < 1) throw new ApiError({ status: 400, code: "INVALID_INPUT", message: "Invalid firmId", retryable: false });
+      return n;
+    })();
+    const folderId = (() => {
+      const raw = one(req.query.folderId as any);
+      if (raw === undefined) return null;
+      if (!String(raw).trim()) return null;
+      const n = Number.parseInt(String(raw), 10);
+      if (!Number.isFinite(n) || n < 1) throw new ApiError({ status: 400, code: "INVALID_INPUT", message: "Invalid folderId", retryable: false });
+      return n;
+    })();
+
+    const docs = await withAuthSafeDb(
+      async (authDb) => {
+        return await withTimeout("platform.documents.list", async () => {
+          let q = authDb.select().from(platformDocumentsTable);
+          if (firmId !== null) q = q.where(eq(platformDocumentsTable.firmId, firmId)) as typeof q;
+          if (folderId !== null) {
+            const folderCond = eq(platformDocumentsTable.folderId, folderId);
+            q = q.where(firmId !== null ? and(eq(platformDocumentsTable.firmId, firmId), folderCond) : folderCond) as typeof q;
+          }
+          return await q.orderBy(desc(platformDocumentsTable.createdAt));
+        });
+      },
+      { retry: true, allowUnsafe: true, ctx: { route: "GET /platform/documents", firmId: firmId ?? undefined } }
+    );
+    sendOk(res, { items: docs });
   } catch (err) {
     if (err instanceof RouteTimeoutError) {
-      logger.error({ err, firmId: firmId ?? null, folderId: folderId ?? null }, "platform.documents.timeout");
-      res.status(504).json({ error: "Request timed out", code: "TIMEOUT" });
+      logger.error({ err, firmId: req.query.firmId ?? null, folderId: req.query.folderId ?? null }, "platform.documents.timeout");
+      sendError(res, new ApiError({ status: 504, code: "QUERY_TIMEOUT", message: "Request timed out", retryable: true, stage: err.label }));
       return;
     }
-    logger.error({ err, firmId: firmId ?? null, folderId: folderId ?? null }, "platform.documents.error");
-    res.status(500).json({ error: "Failed to load documents" });
+    logger.error({ err, firmId: req.query.firmId ?? null, folderId: req.query.folderId ?? null }, "platform.documents.error");
+    sendError(res, err, { status: 500, code: "DOCUMENTS_QUERY_FAILED", message: "Failed to load documents" });
   }
 });
 
