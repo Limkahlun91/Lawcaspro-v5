@@ -10,6 +10,7 @@ import { useToast } from "@/hooks/use-toast";
 import { QueryFallback } from "@/components/query-fallback";
 import { apiFetchJson } from "@/lib/api-client";
 import { toastError } from "@/lib/toast-error";
+import { useReAuth } from "@/components/re-auth-dialog";
 
 function fmt(val: unknown) {
   return `RM ${Number(val ?? 0).toLocaleString("en-MY", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
@@ -72,6 +73,7 @@ export default function InvoiceDetail() {
   const [, setLocation] = useLocation();
   const { toast } = useToast();
   const qc = useQueryClient();
+  const { wrapWithReAuth } = useReAuth();
   const [showReceipt, setShowReceipt] = useState(false);
   const [receiptForm, setReceiptForm] = useState({
     amount: "", paymentMethod: "bank_transfer", receivedDate: new Date().toISOString().slice(0, 10), referenceNo: "",
@@ -99,7 +101,10 @@ export default function InvoiceDetail() {
   });
 
   const voidMut = useMutation({
-    mutationFn: () => apiFetchJson(`/invoices/${id}/void`, { method: "POST" }),
+    mutationFn: () => wrapWithReAuth(
+      (headers) => apiFetchJson(`/invoices/${id}/void`, { method: "POST", headers }),
+      "Voiding an invoice is a sensitive action and may affect financial records. Continue?"
+    ),
     onSuccess: () => { qc.invalidateQueries({ queryKey: ["invoice", id] }); toast({ title: "Invoice voided" }); },
     onError: (e) => toastError(toast, e, "Action failed"),
   });
@@ -173,7 +178,7 @@ export default function InvoiceDetail() {
           )}
           {voidable && (
             <Button size="sm" variant="outline" className="text-red-500 border-red-200 hover:bg-red-50 gap-1.5"
-              onClick={() => { if (confirm("Void this invoice?")) voidMut.mutate(); }}
+              onClick={() => voidMut.mutate()}
               disabled={voidMut.isPending || issueMut.isPending}
             >
               <XCircle className="w-4 h-4" /> Void

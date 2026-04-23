@@ -27,6 +27,7 @@ import {
   SupabaseStorageService,
   getSupabaseStorageConfigError,
 } from "../lib/objectStorage";
+import { assertActiveSupportSessionForFirm, assertFounderPermission, loadFounderGovernanceContext } from "../services/founder-governance";
 
 const one = (v: string | string[] | undefined): string | undefined => (Array.isArray(v) ? v[0] : v);
 const firstRow = (result: unknown): Record<string, unknown> | undefined => {
@@ -367,6 +368,10 @@ router.post("/platform/firms/:firmId/users/:userId/reset-password", requireAuth,
 
     const result = await withAuthSafeDb(
       async (authDb) => {
+        const ctx = await loadFounderGovernanceContext(authDb, req);
+        assertFounderPermission(ctx, "founder.maintenance.reset.firm");
+        assertActiveSupportSessionForFirm(ctx, firmId!);
+
         const [user] = await withTimeout("platform.reset_password.select_user", async () =>
           authDb.select({ id: usersTable.id, email: usersTable.email, firmId: usersTable.firmId }).from(usersTable).where(and(eq(usersTable.id, userId!), eq(usersTable.firmId, firmId!)))
         );

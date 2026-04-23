@@ -1,138 +1,314 @@
 import { Router, type IRouter } from "express";
-import { db, supportSessionsTable, firmsTable } from "@workspace/db";
-import { eq, desc, isNull } from "drizzle-orm";
-import { requireAuth, requireFounder, writeAuditLog, type AuthRequest } from "../lib/auth";
+import { db, supportSessionsTable, firmsTable, usersTable } from "@workspace/db";
+import { and, desc, eq, gt, isNull, or, sql } from "drizzle-orm";
+import { requireAuth, requireFirmUser, requireFounder, requirePartner, requireReAuth, writeAuditLog, type AuthRequest } from "../lib/auth";
 import { sensitiveRateLimiter } from "../lib/rate-limit";
+import { withAuthSafeDb } from "../lib/auth-safe-db";
+import { ApiError, parseIntParam, sendError, sendOk } from "../lib/api-response";
 
 const router: IRouter = Router();
 
 router.get("/support-sessions", requireAuth, requireFounder, async (req: AuthRequest, res): Promise<void> => {
-  const sessions = await db
-    .select()
-    .from(supportSessionsTable)
-    .orderBy(desc(supportSessionsTable.startedAt))
-    .limit(100);
-  res.json({ data: sessions });
+  try {
+    const firmIdFilter = (() => {
+      const raw = typeof req.query.firmId === "string" ? req.query.firmId : Array.isArray(req.query.firmId) ? req.query.firmId[0] : undefined;
+      if (!raw) return null;
+      const n = Number.parseInt(String(raw), 10);
+      return Number.isFinite(n) && n > 0 ? n : null;
+    })();
+    const sessions = await withAuthSafeDb(async (authDb) => {
+      const base = authDb.select({
+          id: supportSessionsTable.id,
+          founderId: supportSessionsTable.founderId,
+          targetFirmId: supportSessionsTable.targetFirmId,
+          status: supportSessionsTable.status,
+          reason: supportSessionsTable.reason,
+          startedAt: supportSessionsTable.startedAt,
+          endedAt: supportSessionsTable.endedAt,
+          approvedByUserId: supportSessionsTable.approvedByUserId,
+          approvedAt: supportSessionsTable.approvedAt,
+          rejectedByUserId: supportSessionsTable.rejectedByUserId,
+          rejectedAt: supportSessionsTable.rejectedAt,
+          decisionNote: supportSessionsTable.decisionNote,
+          expiresAt: supportSessionsTable.expiresAt,
+          ipAddress: supportSessionsTable.ipAddress,
+          userAgent: supportSessionsTable.userAgent,
+          actionLog: supportSessionsTable.actionLog,
+          firmName: firmsTable.name,
+          founderEmail: usersTable.email,
+        }).from(supportSessionsTable)
+        .leftJoin(firmsTable, eq(supportSessionsTable.targetFirmId, firmsTable.id))
+        .leftJoin(usersTable, eq(supportSessionsTable.founderId, usersTable.id));
+
+      const q = firmIdFilter ? base.where(eq(supportSessionsTable.targetFirmId, firmIdFilter)) : base;
+      return await q.orderBy(desc(supportSessionsTable.startedAt)).limit(100);
+    }, { retry: true, allowUnsafe: true, ctx: { route: "GET /support-sessions", userId: req.userId ?? null, firmId: firmIdFilter } });
+    sendOk(res, { items: sessions });
+  } catch (err) {
+    sendError(res, err);
+  }
 });
 
 router.get("/support-sessions/active", requireAuth, requireFounder, async (req: AuthRequest, res): Promise<void> => {
-  const sessions = await db
-    .select()
-    .from(supportSessionsTable)
-    .where(isNull(supportSessionsTable.endedAt))
-    .orderBy(desc(supportSessionsTable.startedAt));
-  res.json({ data: sessions });
+  try {
+    const now = new Date();
+    const sessions = await withAuthSafeDb(async (authDb) => {
+      return await authDb
+        .select()
+        .from(supportSessionsTable)
+        .where(and(
+          eq(supportSessionsTable.status, "approved"),
+          isNull(supportSessionsTable.endedAt),
+          or(isNull(supportSessionsTable.expiresAt), gt(supportSessionsTable.expiresAt, now)),
+        ))
+        .orderBy(desc(supportSessionsTable.startedAt));
+    }, { retry: true, allowUnsafe: true, ctx: { route: "GET /support-sessions/active" } });
+    sendOk(res, { items: sessions });
+  } catch (err) {
+    sendError(res, err);
+  }
 });
 
 router.post("/support-sessions", sensitiveRateLimiter, requireAuth, requireFounder, async (req: AuthRequest, res): Promise<void> => {
-  const { targetFirmId, reason } = req.body as { targetFirmId: number; reason: string };
+  try {
+    const targetFirmId = parseIntParam("targetFirmId", (req.body as any)?.targetFirmId, { required: true, min: 1 })!;
+    const reason = String((req.body as any)?.reason ?? "").trim();
+    if (reason.length < 10) {
+      throw new ApiError({ status: 422, code: "INVALID_INPUT", message: "Reason must be at least 10 characters", retryable: false });
+    }
 
-  if (!targetFirmId || !reason?.trim()) {
-    res.status(400).json({ error: "targetFirmId and reason are required" });
-    return;
+    const created = await withAuthSafeDb(async (authDb) => {
+      const [firm] = await authDb.select({ id: firmsTable.id, name: firmsTable.name }).from(firmsTable).where(eq(firmsTable.id, targetFirmId)).limit(1);
+      if (!firm) throw new ApiError({ status: 404, code: "NOT_FOUND", message: "Firm not found", retryable: false });
+
+      const [session] = await authDb
+        .insert(supportSessionsTable)
+        .values({
+          founderId: req.userId!,
+          targetFirmId,
+          reason,
+          status: "requested",
+          expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
+          ipAddress: req.ip ?? null,
+          userAgent: req.headers["user-agent"] ?? null,
+          actionLog: [],
+        })
+        .returning();
+
+      await writeAuditLog(
+        {
+          actorId: req.userId,
+          actorType: "founder",
+          action: "support_session.requested",
+          entityType: "firm",
+          entityId: targetFirmId,
+          detail: `session_id=${session.id}`,
+          ipAddress: req.ip,
+          userAgent: req.headers["user-agent"],
+        },
+        { db: authDb, strict: false }
+      );
+
+      return session;
+    }, { retry: true, allowUnsafe: true, ctx: { route: "POST /support-sessions", userId: req.userId ?? null, firmId: targetFirmId } });
+
+    sendOk(res, { item: created }, { status: 201 });
+  } catch (err) {
+    sendError(res, err);
   }
-
-  const [firm] = await db.select().from(firmsTable).where(eq(firmsTable.id, targetFirmId));
-  if (!firm) {
-    res.status(404).json({ error: "Firm not found" });
-    return;
-  }
-
-  const [session] = await db
-    .insert(supportSessionsTable)
-    .values({
-      founderId: req.userId!,
-      targetFirmId,
-      reason: reason.trim(),
-      ipAddress: req.ip ?? null,
-      userAgent: req.headers["user-agent"] ?? null,
-      actionLog: [],
-    })
-    .returning();
-
-  await writeAuditLog({
-    actorId: req.userId,
-    actorType: "founder",
-    action: "support_session.started",
-    entityType: "firm",
-    entityId: targetFirmId,
-    detail: `session_id=${session.id} reason="${reason.trim()}"`,
-    ipAddress: req.ip,
-    userAgent: req.headers["user-agent"],
-  });
-
-  res.status(201).json({ data: session });
 });
 
 router.patch("/support-sessions/:id/end", requireAuth, requireFounder, async (req: AuthRequest, res): Promise<void> => {
-  const sessionId = Number(req.params.id);
-  const [session] = await db
-    .select()
-    .from(supportSessionsTable)
-    .where(eq(supportSessionsTable.id, sessionId));
+  try {
+    const sessionId = parseIntParam("id", req.params.id, { required: true, min: 1 })!;
+    const updated = await withAuthSafeDb(async (authDb) => {
+      const [session] = await authDb.select().from(supportSessionsTable).where(eq(supportSessionsTable.id, sessionId)).limit(1);
+      if (!session) throw new ApiError({ status: 404, code: "NOT_FOUND", message: "Support session not found", retryable: false });
+      if (session.founderId !== req.userId) throw new ApiError({ status: 403, code: "FORBIDDEN", message: "Can only end your own support sessions", retryable: false });
+      if (session.endedAt) throw new ApiError({ status: 409, code: "TARGET_STATE_CONFLICT", message: "Session already ended", retryable: false });
 
-  if (!session) {
-    res.status(404).json({ error: "Support session not found" });
-    return;
+      const [row] = await authDb
+        .update(supportSessionsTable)
+        .set({ endedAt: new Date(), status: "ended" })
+        .where(eq(supportSessionsTable.id, sessionId))
+        .returning();
+
+      await writeAuditLog(
+        {
+          actorId: req.userId,
+          actorType: "founder",
+          action: "support_session.ended",
+          entityType: "firm",
+          entityId: session.targetFirmId,
+          detail: `session_id=${sessionId}`,
+          ipAddress: req.ip,
+          userAgent: req.headers["user-agent"],
+        },
+        { db: authDb, strict: false }
+      );
+
+      return row;
+    }, { retry: true, allowUnsafe: true, ctx: { route: "PATCH /support-sessions/:id/end", userId: req.userId ?? null } });
+    sendOk(res, { item: updated });
+  } catch (err) {
+    sendError(res, err);
   }
-
-  if (session.founderId !== req.userId) {
-    res.status(403).json({ error: "Can only end your own support sessions" });
-    return;
-  }
-
-  if (session.endedAt) {
-    res.status(400).json({ error: "Session already ended" });
-    return;
-  }
-
-  const [updated] = await db
-    .update(supportSessionsTable)
-    .set({ endedAt: new Date() })
-    .where(eq(supportSessionsTable.id, sessionId))
-    .returning();
-
-  await writeAuditLog({
-    actorId: req.userId,
-    actorType: "founder",
-    action: "support_session.ended",
-    entityType: "firm",
-    entityId: session.targetFirmId,
-    detail: `session_id=${sessionId}`,
-    ipAddress: req.ip,
-    userAgent: req.headers["user-agent"],
-  });
-
-  res.json({ data: updated });
 });
 
 router.post("/support-sessions/:id/log", sensitiveRateLimiter, requireAuth, requireFounder, async (req: AuthRequest, res): Promise<void> => {
-  const sessionId = Number(req.params.id);
-  const { action, detail } = req.body as { action: string; detail?: string };
+  try {
+    const sessionId = parseIntParam("id", req.params.id, { required: true, min: 1 })!;
+    const action = String((req.body as any)?.action ?? "").trim();
+    const detail = (req.body as any)?.detail ? String((req.body as any).detail) : null;
+    if (!action) throw new ApiError({ status: 400, code: "MISSING_REQUIRED_FIELD", message: "action is required", retryable: false });
 
-  const [session] = await db.select().from(supportSessionsTable).where(eq(supportSessionsTable.id, sessionId));
-  if (!session || session.founderId !== req.userId || session.endedAt) {
-    res.status(400).json({ error: "Invalid or ended support session" });
-    return;
+    await withAuthSafeDb(async (authDb) => {
+      const [session] = await authDb.select().from(supportSessionsTable).where(eq(supportSessionsTable.id, sessionId)).limit(1);
+      const now = new Date();
+      const expired = session?.expiresAt ? session.expiresAt < now : false;
+      const active = !!session && session.status === "approved" && !session.endedAt && !expired;
+      if (!active || session!.founderId !== req.userId) {
+        throw new ApiError({ status: 400, code: "INVALID_SUPPORT_SESSION", message: "Invalid or inactive support session", retryable: false });
+      }
+
+      const logEntry = { action, detail, at: new Date().toISOString() };
+      const currentLog = (session!.actionLog as object[]) ?? [];
+      const newLog = [...currentLog, logEntry];
+
+      await authDb.update(supportSessionsTable).set({ actionLog: newLog }).where(eq(supportSessionsTable.id, sessionId));
+
+      await writeAuditLog(
+        {
+          actorId: req.userId,
+          firmId: session!.targetFirmId,
+          actorType: "founder",
+          action: `support_session.action.${action}`,
+          detail: `session_id=${sessionId} ${detail ?? ""}`.trim(),
+          ipAddress: req.ip,
+          userAgent: req.headers["user-agent"],
+        },
+        { db: authDb, strict: false }
+      );
+    }, { retry: true, allowUnsafe: true, ctx: { route: "POST /support-sessions/:id/log", userId: req.userId ?? null } });
+
+    sendOk(res, { result: { logged: true } });
+  } catch (err) {
+    sendError(res, err);
   }
+});
 
-  const logEntry = { action, detail, at: new Date().toISOString() };
-  const currentLog = (session.actionLog as object[]) ?? [];
-  const newLog = [...currentLog, logEntry];
+router.get("/support-sessions/requests", requireAuth, requireFirmUser, requirePartner, async (req: AuthRequest, res): Promise<void> => {
+  try {
+    const now = new Date();
+    const executor = req.rlsDb;
+    if (!executor) throw new ApiError({ status: 500, code: "RLS_CONTEXT", message: "Missing tenant database context", retryable: true });
+    const rows: unknown = await executor.execute(sql`
+      SELECT ss.*, u.email as founder_email
+      FROM support_sessions ss
+      LEFT JOIN users u ON ss.founder_id = u.id
+      WHERE ss.target_firm_id = ${req.firmId!}
+        AND ss.status = 'requested'
+        AND ss.ended_at IS NULL
+        AND (ss.expires_at IS NULL OR ss.expires_at > ${now.toISOString()}::timestamptz)
+      ORDER BY ss.started_at DESC
+      LIMIT 100
+    `);
+    const items = Array.isArray(rows) ? (rows as any) : (rows as any)?.rows ?? [];
+    sendOk(res, { items });
+  } catch (err) {
+    sendError(res, err);
+  }
+});
 
-  await db.update(supportSessionsTable).set({ actionLog: newLog }).where(eq(supportSessionsTable.id, sessionId));
+router.post("/support-sessions/:id/approve", sensitiveRateLimiter, requireAuth, requireFirmUser, requirePartner, requireReAuth, async (req: AuthRequest, res): Promise<void> => {
+  try {
+    const sessionId = parseIntParam("id", req.params.id, { required: true, min: 1 })!;
+    const note = String((req.body as any)?.note ?? "").trim();
+    const now = new Date();
 
-  await writeAuditLog({
-    actorId: req.userId,
-    firmId: session.targetFirmId,
-    actorType: "founder",
-    action: `support_session.action.${action}`,
-    detail: `session_id=${sessionId} ${detail ?? ""}`,
-    ipAddress: req.ip,
-    userAgent: req.headers["user-agent"],
-  });
+    const r = req.rlsDb as any;
+    if (!r) throw new ApiError({ status: 500, code: "RLS_CONTEXT", message: "Missing tenant database context", retryable: true });
+    const updated = await r.transaction(async (tx: any) => {
+      const [session] = await tx.select().from(supportSessionsTable).where(eq(supportSessionsTable.id, sessionId)).limit(1);
+      if (!session) throw new ApiError({ status: 404, code: "NOT_FOUND", message: "Support session not found", retryable: false });
+      if (session.targetFirmId !== req.firmId) throw new ApiError({ status: 404, code: "NOT_FOUND", message: "Support session not found", retryable: false });
+      if (session.status !== "requested" || session.endedAt) throw new ApiError({ status: 409, code: "TARGET_STATE_CONFLICT", message: "Support session is not pending", retryable: false });
+      if (session.expiresAt && session.expiresAt < now) throw new ApiError({ status: 409, code: "REQUEST_EXPIRED", message: "Support session request expired", retryable: false });
 
-  res.json({ success: true });
+      const expiresAt = new Date(now.getTime() + 2 * 60 * 60 * 1000);
+      const [row] = await tx
+        .update(supportSessionsTable)
+        .set({ status: "approved", approvedByUserId: req.userId!, approvedAt: now, decisionNote: note || null, expiresAt })
+        .where(eq(supportSessionsTable.id, sessionId))
+        .returning();
+
+      await writeAuditLog(
+        {
+          firmId: req.firmId!,
+          actorId: req.userId,
+          actorType: req.userType,
+          action: "support_session.approved",
+          entityType: "support_session",
+          entityId: sessionId,
+          detail: `founder_id=${session.founderId} expires_at=${expiresAt.toISOString()}`,
+          ipAddress: req.ip,
+          userAgent: req.headers["user-agent"],
+        },
+        { db: tx, strict: false }
+      );
+
+      return row;
+    });
+
+    sendOk(res, { item: updated });
+  } catch (err) {
+    sendError(res, err);
+  }
+});
+
+router.post("/support-sessions/:id/reject", sensitiveRateLimiter, requireAuth, requireFirmUser, requirePartner, requireReAuth, async (req: AuthRequest, res): Promise<void> => {
+  try {
+    const sessionId = parseIntParam("id", req.params.id, { required: true, min: 1 })!;
+    const note = String((req.body as any)?.note ?? "").trim();
+    const now = new Date();
+
+    const r = req.rlsDb as any;
+    if (!r) throw new ApiError({ status: 500, code: "RLS_CONTEXT", message: "Missing tenant database context", retryable: true });
+    const updated = await r.transaction(async (tx: any) => {
+      const [session] = await tx.select().from(supportSessionsTable).where(eq(supportSessionsTable.id, sessionId)).limit(1);
+      if (!session) throw new ApiError({ status: 404, code: "NOT_FOUND", message: "Support session not found", retryable: false });
+      if (session.targetFirmId !== req.firmId) throw new ApiError({ status: 404, code: "NOT_FOUND", message: "Support session not found", retryable: false });
+      if (session.status !== "requested" || session.endedAt) throw new ApiError({ status: 409, code: "TARGET_STATE_CONFLICT", message: "Support session is not pending", retryable: false });
+      if (session.expiresAt && session.expiresAt < now) throw new ApiError({ status: 409, code: "REQUEST_EXPIRED", message: "Support session request expired", retryable: false });
+
+      const [row] = await tx
+        .update(supportSessionsTable)
+        .set({ status: "rejected", rejectedByUserId: req.userId!, rejectedAt: now, decisionNote: note || null, endedAt: now })
+        .where(eq(supportSessionsTable.id, sessionId))
+        .returning();
+
+      await writeAuditLog(
+        {
+          firmId: req.firmId!,
+          actorId: req.userId,
+          actorType: req.userType,
+          action: "support_session.rejected",
+          entityType: "support_session",
+          entityId: sessionId,
+          detail: `founder_id=${session.founderId}`,
+          ipAddress: req.ip,
+          userAgent: req.headers["user-agent"],
+        },
+        { db: tx, strict: false }
+      );
+
+      return row;
+    });
+
+    sendOk(res, { item: updated });
+  } catch (err) {
+    sendError(res, err);
+  }
 });
 
 export default router;

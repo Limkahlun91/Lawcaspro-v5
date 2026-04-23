@@ -5,7 +5,8 @@
   "type": "module",
   "exports": {
     "./app": {
-      "types": "./dist/app.d.ts",
+      "types": "./src/app.ts",
+      "workspace": "./src/app.ts",
       "default": "./dist/app.js"
     }
   },

@@ -16,6 +16,7 @@ import { apiFetchJson } from "@/lib/api-client";
 import { toastError } from "@/lib/toast-error";
 import { useListQuotations } from "@workspace/api-client-react";
 import { QueryFallback } from "@/components/query-fallback";
+import { useReAuth } from "@/components/re-auth-dialog";
 
 function fmt(val: unknown) {
   return `RM ${Number(val ?? 0).toLocaleString("en-MY", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
@@ -714,6 +715,7 @@ function PaymentVouchersTab() {
   const [showCreate, setShowCreate] = useState(false);
   const { toast } = useToast();
   const qc = useQueryClient();
+  const { wrapWithReAuth } = useReAuth();
   const [form, setForm] = useState({
     payeeName: "", payeeBank: "", payeeAccountNo: "",
     paymentMethod: "bank_transfer", accountType: "office",
@@ -745,9 +747,14 @@ function PaymentVouchersTab() {
 
   const transitionMut = useMutation({
     mutationFn: ({ id, toStatus }: { id: number; toStatus: string }) =>
-      apiFetchJson(`/payment-vouchers/${id}/transition`, {
-        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ toStatus }),
-      }),
+      wrapWithReAuth(
+        (headers) => apiFetchJson(`/payment-vouchers/${id}/transition`, {
+          method: "POST",
+          headers: { ...headers, "Content-Type": "application/json" },
+          body: JSON.stringify({ toStatus }),
+        }),
+        "Changing a payment voucher status is a sensitive action. Continue?"
+      ),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["payment-vouchers"] });
       qc.invalidateQueries({ queryKey: ["ledger-summary"] });

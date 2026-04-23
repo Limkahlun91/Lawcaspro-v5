@@ -1,4 +1,4 @@
-import express from "express";
+import express, { type Express } from "express";
 import cors from "cors";
 import helmet from "helmet";
 import cookieParser from "cookie-parser";
@@ -7,7 +7,7 @@ import router from "./routes/index.js";
 import { logger } from "./lib/logger.js";
 import { getApiMeta, requestMetaMiddleware, sendError } from "./lib/api-response.js";
 
-const app: ReturnType<typeof express> = express();
+const app: Express = express();
 
 app.set("trust proxy", 1);
 app.use(helmet());

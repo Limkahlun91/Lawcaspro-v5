@@ -3,6 +3,7 @@ import { db, sql } from "@workspace/db";
 import { requireAuth, requireFirmUser, requireFounder, requirePermission, type AuthRequest } from "../lib/auth";
 import { withAuthSafeDb } from "../lib/auth-safe-db";
 import { ApiError, sendError, sendOk } from "../lib/api-response";
+import { assertFounderPermission, loadFounderGovernanceContext } from "../services/founder-governance";
 
 const router: IRouter = Router();
 
@@ -84,6 +85,9 @@ router.get("/platform/audit-logs", requireAuth, requireFounder, async (req: Auth
 
     const result = await withAuthSafeDb(
       async (authDb) => {
+        const ctx = await loadFounderGovernanceContext(authDb, req);
+        assertFounderPermission(ctx, "founder.audit.read");
+
         const statementTimeoutMs = 8000;
         await authDb.execute(sql`SET LOCAL statement_timeout = ${statementTimeoutMs}`);
 

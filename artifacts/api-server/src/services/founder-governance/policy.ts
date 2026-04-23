@@ -50,26 +50,10 @@ export function evaluateGovernancePolicy(params: {
   const requiredPerm = requiredExecutePermission(params.actionCode);
   const missing = requiredPerm && !has(perms, requiredPerm) ? [requiredPerm] : [];
 
-  if (params.impersonation) {
-    if (params.riskLevel === "high" || params.riskLevel === "critical") {
-      return {
-        allowedDirectExecute: false,
-        approvalRequired: false,
-        requiredApprovalCount: 0,
-        selfApprovalAllowed: false,
-        typedConfirmationRequired: true,
-        challengePhraseRequired: params.riskLevel === "critical",
-        cooldownSecondsRequired: params.riskLevel === "critical" ? 10 : 0,
-        missingPermissions: missing.length ? missing : undefined,
-        blockedReason: { code: "IMPERSONATION_RESTRICTED", message: "High-risk actions are blocked while in impersonation/support mode. Exit support mode and retry." },
-        approvalPolicyCode: "impersonation_block",
-      };
-    }
-  }
-
   const typedRequired = params.riskLevel !== "low";
-  const challengeRequired = params.riskLevel === "critical";
-  const cooldown = params.riskLevel === "critical" ? 10 : 0;
+  const supportMode = params.impersonation;
+  const challengeRequired = params.riskLevel === "critical" || (supportMode && params.riskLevel === "high");
+  const cooldown = params.riskLevel === "critical" || (supportMode && params.riskLevel === "high") ? 10 : 0;
 
   if (missing.length && params.stage === "execute") {
     return {

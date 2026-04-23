@@ -45,6 +45,24 @@ export function FirmActionHistoryTab({ firmId }: { firmId: number }) {
 
   const items = historyQuery.data?.items ?? [];
 
+  const detailQuery = useQuery({
+    queryKey: ["platform-firm-history-detail", firmId, selected?.kind, selected?.id],
+    queryFn: async () => {
+      if (!selected?.id || !selected?.kind) return null;
+      if (selected.kind === "maintenance") {
+        const res = await apiFetchJson(`/platform/firms/${firmId}/maintenance/actions/${String(selected.id)}`);
+        return unwrapApiData<{ action: any; steps: any[]; approval: any | null }>(res);
+      }
+      if (selected.kind === "restore") {
+        const res = await apiFetchJson(`/platform/firms/${firmId}/restore/actions/${String(selected.id)}`);
+        return unwrapApiData<{ action: any; steps: any[]; approval: any | null }>(res);
+      }
+      return null;
+    },
+    enabled: !!selected && (selected.kind === "maintenance" || selected.kind === "restore"),
+    retry: false,
+  });
+
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
     return items.filter((it) => {
@@ -169,6 +187,38 @@ export function FirmActionHistoryTab({ firmId }: { firmId: number }) {
                   >
                     Reject
                   </Button>
+                </div>
+              ) : null}
+            </div>
+          ) : null}
+          {(selected?.kind === "maintenance" || selected?.kind === "restore") ? (
+            <div className="space-y-3">
+              {detailQuery.isError ? (
+                <QueryFallback title="Details unavailable" error={detailQuery.error} onRetry={() => detailQuery.refetch()} isRetrying={detailQuery.isFetching} />
+              ) : detailQuery.isLoading ? (
+                <div className="text-sm text-slate-500">Loading details...</div>
+              ) : detailQuery.data ? (
+                <div className="space-y-3">
+                  <div className="rounded border border-slate-200 p-3">
+                    <div className="text-xs text-slate-500 mb-1">Steps</div>
+                    <div className="rounded border border-slate-200 divide-y">
+                      {(detailQuery.data.steps ?? []).map((s: any) => (
+                        <div key={String(s.id)} className="p-2 text-xs flex items-center justify-between gap-3">
+                          <div className="min-w-0">
+                            <div className="font-mono text-slate-800">{String(s.stepCode ?? s.step_code)}</div>
+                            <div className="text-slate-500">{String(s.errorMessage ?? s.error_message ?? "")}</div>
+                          </div>
+                          <StatusBadge status={String(s.status ?? "")} />
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                  {detailQuery.data.approval ? (
+                    <div className="rounded border border-slate-200 p-3">
+                      <div className="text-xs text-slate-500 mb-1">Approval</div>
+                      <pre className="text-xs whitespace-pre-wrap break-words text-slate-700">{JSON.stringify(detailQuery.data.approval, null, 2)}</pre>
+                    </div>
+                  ) : null}
                 </div>
               ) : null}
             </div>

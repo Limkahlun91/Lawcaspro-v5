@@ -30,7 +30,13 @@ export async function getImpersonationContext(authDb: RlsDb, req: AuthRequest): 
   if (!Number.isFinite(id) || id <= 0) return { active: false, supportSessionId: null, targetFirmId: null };
 
   const [s] = await authDb.select().from(supportSessionsTable).where(eq(supportSessionsTable.id, id));
-  if (!s || s.endedAt) return { active: false, supportSessionId: id, targetFirmId: s?.targetFirmId ?? null };
+  const now = new Date();
+  const expired = s?.expiresAt ? s.expiresAt < now : false;
+  const approved = s?.status === "approved";
+  const ownedByCaller = !!s && s.founderId === req.userId;
+  const ended = !!s?.endedAt;
+  const active = !!s && approved && ownedByCaller && !ended && !expired;
+  if (!active) return { active: false, supportSessionId: id, targetFirmId: s?.targetFirmId ?? null };
 
   return { active: true, supportSessionId: s.id, targetFirmId: s.targetFirmId };
 }
@@ -72,6 +78,18 @@ export async function loadFounderGovernanceContext(authDb: RlsDb, req: AuthReque
 export function assertFounderPermission(ctx: FounderGovernanceContext, permissionCode: string): void {
   if (!ctx.permissions.has(permissionCode)) {
     throw new ApiError({ status: 403, code: "PERMISSION_DENIED", message: "Permission denied", retryable: false, details: { permission: permissionCode } });
+  }
+}
+
+export function assertActiveSupportSessionForFirm(ctx: FounderGovernanceContext, firmId: number): void {
+  if (!ctx.impersonation.active || ctx.impersonation.targetFirmId !== firmId) {
+    throw new ApiError({
+      status: 403,
+      code: "SUPPORT_SESSION_REQUIRED",
+      message: "Active, firm-approved support session is required for this action",
+      retryable: false,
+      details: { firm_id: firmId, support_session_id: ctx.impersonation.supportSessionId, target_firm_id: ctx.impersonation.targetFirmId },
+    });
   }
 }
 

@@ -17,6 +17,8 @@ import { unwrapApiData } from "@/lib/api-contract";
 import { FirmMaintenanceTab } from "@/pages/platform/firms/maintenance-tab";
 import { FirmSnapshotsTab } from "@/pages/platform/firms/snapshots-tab";
 import { FirmActionHistoryTab } from "@/pages/platform/firms/history-tab";
+import { Textarea } from "@/components/ui/textarea";
+import { getSupportSessionId, setSupportSessionId } from "@/lib/support-session";
 
 interface FirmUser {
   id: number;
@@ -27,6 +29,138 @@ interface FirmUser {
   status: string;
   lastLoginAt: string | null;
   createdAt: string;
+}
+
+function SupportSessionPanel({ firmId, firmName }: { firmId: number; firmName: string }) {
+  const { toast } = useToast();
+  const qc = useQueryClient();
+  const [reason, setReason] = useState("");
+  const [pendingSetId, setPendingSetId] = useState<string | null>(null);
+  const storedId = getSupportSessionId();
+
+  const sessionsQuery = useQuery({
+    queryKey: ["platform-support-sessions", firmId],
+    queryFn: async () => {
+      const res = await apiFetchJson(`/support-sessions?firmId=${firmId}`);
+      return unwrapApiData<{ items: any[] }>(res);
+    },
+    enabled: !!firmId,
+    retry: false,
+  });
+
+  const latest = (sessionsQuery.data?.items ?? [])[0] ?? null;
+  const latestId = latest?.id ? String(latest.id) : null;
+  const latestStatus = latest?.status ? String(latest.status) : "";
+  const latestActive =
+    latestStatus === "approved"
+    && !latest?.endedAt
+    && (!latest?.expiresAt || new Date(String(latest.expiresAt)).getTime() > Date.now());
+
+  const requestMutation = useMutation({
+    mutationFn: async () => {
+      const r = reason.trim();
+      if (r.length < 10) throw new Error("Reason must be at least 10 characters");
+      const res = await apiFetchJson("/support-sessions", {
+        method: "POST",
+        body: JSON.stringify({ targetFirmId: firmId, reason: r }),
+      });
+      return unwrapApiData<{ item: any }>(res);
+    },
+    onSuccess: async (data) => {
+      const id = data?.item?.id ? String(data.item.id) : null;
+      if (id) {
+        setSupportSessionId(id);
+        toast({ title: "Support session requested", description: "Waiting for firm Partner approval." });
+      } else {
+        toast({ title: "Support session requested" });
+      }
+      setReason("");
+      await qc.invalidateQueries({ queryKey: ["platform-support-sessions", firmId] });
+    },
+    onError: (e) => toastError(toast, e, "Request failed"),
+  });
+
+  const endMutation = useMutation({
+    mutationFn: async () => {
+      if (!latestId) throw new Error("No session");
+      const res = await apiFetchJson(`/support-sessions/${latestId}/end`, { method: "PATCH" });
+      return unwrapApiData(res);
+    },
+    onSuccess: async () => {
+      if (storedId && latestId && storedId === latestId) setSupportSessionId(null);
+      await qc.invalidateQueries({ queryKey: ["platform-support-sessions", firmId] });
+      toast({ title: "Support session ended" });
+    },
+    onError: (e) => toastError(toast, e, "End failed"),
+  });
+
+  const setActive = async () => {
+    if (!latestId) return;
+    setPendingSetId(latestId);
+    try {
+      setSupportSessionId(latestId);
+      toast({ title: "Support session set", description: `Active session: #${latestId}` });
+    } finally {
+      setPendingSetId(null);
+    }
+  };
+
+  return (
+    <Card className="border-slate-200">
+      <CardHeader>
+        <CardTitle className="text-base">Support Session</CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        {sessionsQuery.isError ? (
+          <QueryFallback title="Support sessions unavailable" error={sessionsQuery.error} onRetry={() => sessionsQuery.refetch()} isRetrying={sessionsQuery.isFetching} />
+        ) : (
+          <div className="text-sm text-slate-600">
+            {latest ? (
+              <div className="space-y-1">
+                <div>
+                  Latest: <span className="font-mono">#{String(latest.id)}</span> · <Badge variant="outline" className="text-xs">{latestStatus}</Badge>
+                  {latest?.expiresAt ? <span className="text-xs text-slate-500"> · expires {new Date(String(latest.expiresAt)).toLocaleString()}</span> : null}
+                </div>
+                <div className="text-xs text-slate-500">Stored session: {storedId ? <span className="font-mono">#{storedId}</span> : "—"}</div>
+              </div>
+            ) : (
+              <div>No support sessions for {firmName}.</div>
+            )}
+          </div>
+        )}
+
+        <div className="space-y-2">
+          <div className="text-xs text-slate-500">Reason (required, min 10 chars)</div>
+          <Textarea value={reason} onChange={(e) => setReason(e.target.value)} placeholder="Describe the support request and intended actions." className="min-h-[80px]" />
+          <div className="flex gap-2 flex-wrap">
+            <Button
+              onClick={() => requestMutation.mutate()}
+              disabled={requestMutation.isPending || reason.trim().length < 10}
+            >
+              {requestMutation.isPending ? "Requesting..." : "Request Session"}
+            </Button>
+            <Button
+              variant="outline"
+              onClick={() => setActive()}
+              disabled={!latestActive || pendingSetId === latestId}
+            >
+              Use Approved Session
+            </Button>
+            <Button
+              variant="outline"
+              onClick={() => endMutation.mutate()}
+              disabled={!latestId || endMutation.isPending || latestStatus === "ended"}
+            >
+              End Session
+            </Button>
+          </div>
+          <div className="text-xs text-slate-500">
+            Maintenance / snapshots / restore require an approved session. Partner approval happens inside the firm workspace settings.
+          </div>
+        </div>
+      </CardContent>
+    </Card>
+  );
 }
 
 function ResetPasswordRow({ user, firmId }: { user: FirmUser; firmId: number }) {
@@ -178,6 +312,16 @@ export default function FirmDetail() {
     retry: false,
   });
 
+  const opsSummaryQuery = useQuery({
+    queryKey: ["platform-firm-ops-summary", firmId],
+    queryFn: async () => {
+      const res = await apiFetchJson(`/platform/firms/${firmId}/ops/summary`);
+      return unwrapApiData<any>(res);
+    },
+    enabled: !!firmId,
+    retry: false,
+  });
+
   const lastMaintenanceAt = lastMaintenanceQuery.data?.items?.[0]?.createdAt ?? null;
   const lastSnapshotAt = lastSnapshotQuery.data?.items?.[0]?.createdAt ?? null;
 
@@ -217,7 +361,7 @@ export default function FirmDetail() {
         </div>
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-5 gap-4">
+      <div className="grid grid-cols-1 md:grid-cols-7 gap-4">
         <Card>
           <CardHeader className="flex flex-row items-center justify-between pb-2 space-y-0">
             <CardTitle className="text-sm font-medium text-slate-500">Total Users</CardTitle>
@@ -263,7 +407,29 @@ export default function FirmDetail() {
             <div className="text-sm font-bold">{lastSnapshotAt ? new Date(lastSnapshotAt).toLocaleString() : "—"}</div>
           </CardContent>
         </Card>
+        <Card>
+          <CardHeader className="flex flex-row items-center justify-between pb-2 space-y-0">
+            <CardTitle className="text-sm font-medium text-slate-500">Pending approvals</CardTitle>
+            <Key className="w-4 h-4 text-slate-400" />
+          </CardHeader>
+          <CardContent>
+            <div className="text-2xl font-bold">{opsSummaryQuery.data?.counts?.pending_approvals ?? "—"}</div>
+          </CardContent>
+        </Card>
+        <Card>
+          <CardHeader className="flex flex-row items-center justify-between pb-2 space-y-0">
+            <CardTitle className="text-sm font-medium text-slate-500">Running ops</CardTitle>
+            <RotateCcw className="w-4 h-4 text-slate-400" />
+          </CardHeader>
+          <CardContent>
+            <div className="text-sm font-bold">
+              M: {opsSummaryQuery.data?.counts?.running_maintenance ?? "—"} · R: {opsSummaryQuery.data?.counts?.running_restore ?? "—"}
+            </div>
+          </CardContent>
+        </Card>
       </div>
+
+      <SupportSessionPanel firmId={firmId} firmName={firm.name} />
 
       <Card className="border-amber-200 bg-amber-50">
         <CardContent className="py-4 text-sm text-amber-900">

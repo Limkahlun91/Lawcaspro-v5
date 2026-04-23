@@ -4,6 +4,7 @@ import { emitAuthUnauthorized } from "@/lib/auth-events";
 import { unwrapApiData } from "@/lib/api-contract";
 import { fetchWithTimeout } from "@/lib/fetch-with-timeout";
 import { apiErrorFromResponse } from "@/lib/http-error";
+import { getSupportSessionId } from "@/lib/support-session";
 
 type ApiResponseType = "json" | "text" | "blob";
 
@@ -51,6 +52,10 @@ export async function apiRequest(path: string, options: ApiFetchOptions = {}): P
   const token = getStoredAuthToken();
   const baseHeaders = token ? { Authorization: `Bearer ${token}` } : undefined;
   const headers = mergeHeaders(baseHeaders, options.headers);
+  const supportSessionId = getSupportSessionId();
+  if (supportSessionId && !headers.has("x-support-session-id")) {
+    headers.set("x-support-session-id", supportSessionId);
+  }
 
   const body = options.body;
   if (body != null && !isFormData(body) && !headers.has("content-type")) {

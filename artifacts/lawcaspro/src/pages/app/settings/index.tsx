@@ -17,6 +17,7 @@ import { apiFetchJson } from "@/lib/api-client";
 import { toastError } from "@/lib/toast-error";
 import { QueryFallback } from "@/components/query-fallback";
 import DocumentTemplates from "@/pages/app/settings/DocumentTemplates";
+import { useReAuth } from "@/components/re-auth-dialog";
 
 const apiFetch = apiFetchJson;
 
@@ -64,6 +65,7 @@ function SecurityTab() {
   const { user } = useAuth();
   const { toast } = useToast();
   const queryClient = useQueryClient();
+  const { wrapWithReAuth } = useReAuth();
 
   const [totpStep, setTotpStep] = useState<"idle" | "setup" | "confirm" | "disable">("idle");
   const [qrCodeUrl, setQrCodeUrl] = useState("");
@@ -106,11 +108,14 @@ function SecurityTab() {
   });
 
   const disableMutation = useMutation({
-    mutationFn: () => apiFetch("/auth/totp/disable", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ code: disableCode }),
-    }),
+    mutationFn: () => wrapWithReAuth(
+      (headers) => apiFetch("/auth/totp/disable", {
+        method: "POST",
+        headers: { ...headers, "Content-Type": "application/json" },
+        body: JSON.stringify({ code: disableCode }),
+      }),
+      "Disabling 2FA is a sensitive action. Continue?"
+    ),
     onSuccess: () => {
       setTotpStep("idle");
       setDisableCode("");
@@ -133,6 +138,38 @@ function SecurityTab() {
     user && typeof (user as TotpFlagUser).totpEnabled === "boolean"
       ? Boolean((user as TotpFlagUser).totpEnabled)
       : false;
+
+  const canReviewSupportRequests = hasPermission(user, "roles", "manage");
+  const supportRequestsQuery = useQuery<{ items: any[] }>({
+    queryKey: ["support-session-requests"],
+    queryFn: ({ signal }) => apiFetch<{ items: any[] }>("/support-sessions/requests", { signal }),
+    enabled: canReviewSupportRequests,
+    retry: false,
+  });
+
+  const approveSupportMutation = useMutation({
+    mutationFn: (id: number) => wrapWithReAuth(
+      (headers) => apiFetch(`/support-sessions/${id}/approve`, { method: "POST", headers, body: JSON.stringify({ note: "" }) }),
+      "Approve founder support session request?"
+    ),
+    onSuccess: () => {
+      supportRequestsQuery.refetch();
+      toast({ title: "Approved" });
+    },
+    onError: (e) => toastError(toast, e, "Approve failed"),
+  });
+
+  const rejectSupportMutation = useMutation({
+    mutationFn: (id: number) => wrapWithReAuth(
+      (headers) => apiFetch(`/support-sessions/${id}/reject`, { method: "POST", headers, body: JSON.stringify({ note: "" }) }),
+      "Reject founder support session request?"
+    ),
+    onSuccess: () => {
+      supportRequestsQuery.refetch();
+      toast({ title: "Rejected" });
+    },
+    onError: (e) => toastError(toast, e, "Reject failed"),
+  });
 
   return (
     <div className="space-y-6">
@@ -301,6 +338,60 @@ function SecurityTab() {
           )}
         </CardContent>
       </Card>
+
+      {canReviewSupportRequests && (
+        <Card className="border-amber-200">
+          <CardHeader>
+            <CardTitle className="text-base">Founder Support Requests</CardTitle>
+          </CardHeader>
+          <CardContent>
+            {supportRequestsQuery.isError ? (
+              <QueryFallback title="Support requests unavailable" error={supportRequestsQuery.error} onRetry={() => supportRequestsQuery.refetch()} isRetrying={supportRequestsQuery.isFetching} />
+            ) : supportRequestsQuery.isLoading ? (
+              <div className="text-slate-500 text-sm">Loading support requests...</div>
+            ) : (supportRequestsQuery.data?.items?.length ?? 0) === 0 ? (
+              <div className="text-slate-500 text-sm">No pending support requests.</div>
+            ) : (
+              <div className="space-y-2">
+                {(supportRequestsQuery.data?.items ?? []).map((s: any) => (
+                  <div key={String(s.id)} className="flex items-start justify-between gap-3 p-3 bg-amber-50 rounded-lg border border-amber-200">
+                    <div className="min-w-0">
+                      <div className="text-sm font-medium text-slate-900">
+                        Support session #{String(s.id)}
+                      </div>
+                      <div className="text-xs text-slate-600 mt-0.5">
+                        Requested: {s.started_at ? new Date(String(s.started_at)).toLocaleString() : "—"}
+                        {s.expires_at ? ` · expires ${new Date(String(s.expires_at)).toLocaleString()}` : ""}
+                      </div>
+                      <div className="text-xs text-slate-700 mt-1 whitespace-pre-wrap break-words">
+                        {String(s.reason ?? "")}
+                      </div>
+                    </div>
+                    <div className="flex gap-2 shrink-0">
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => approveSupportMutation.mutate(Number(s.id))}
+                        disabled={approveSupportMutation.isPending}
+                      >
+                        Approve
+                      </Button>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => rejectSupportMutation.mutate(Number(s.id))}
+                        disabled={rejectSupportMutation.isPending}
+                      >
+                        Reject
+                      </Button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      )}
     </div>
   );
 }

@@ -1,10 +1,11 @@
 import { Router, type IRouter } from "express";
-import { and, desc, eq } from "drizzle-orm";
-import { platformApprovalRequestsTable, platformMaintenanceActionsTable, platformRestoreActionsTable } from "@workspace/db";
+import { and, desc, eq, sql } from "drizzle-orm";
+import { platformApprovalRequestsTable, platformMaintenanceActionStepsTable, platformMaintenanceActionsTable, platformRestoreActionStepsTable, platformRestoreActionsTable } from "@workspace/db";
 import { withAuthSafeDb } from "../lib/auth-safe-db";
 import { requireAuth, requireFounder, type AuthRequest, writeAuditLog } from "../lib/auth";
 import { ApiError, parseIntParam, sendError, sendOk } from "../lib/api-response";
-import { assertFounderPermission, createApprovalRequest, createStepUpChallenge, defaultStepUpPhrase, evaluateDecisionForExecute, evaluateDecisionForPreview, loadFounderGovernanceContext } from "../services/founder-governance";
+import { assertActiveSupportSessionForFirm, assertFounderPermission, createApprovalRequest, createStepUpChallenge, defaultStepUpPhrase, evaluateDecisionForExecute, evaluateDecisionForPreview, loadFounderGovernanceContext } from "../services/founder-governance";
+import { FOUNDER_ACTION_REGISTRY } from "../services/platform-action-registry";
 import {
   createMaintenanceActionPreviewRecord,
   createRestorePreviewRecord,
@@ -32,6 +33,81 @@ import { SupabaseStorageService } from "../lib/objectStorage";
 
 const router: IRouter = Router();
 
+router.get("/platform/firms/:firmId/ops/summary", requireAuth, requireFounder, async (req: AuthRequest, res) => {
+  try {
+    const firmId = parseIntParam("firmId", req.params.firmId, { required: true, min: 1 })!;
+    const result = await withAuthSafeDb(async (authDb) => {
+      const ctx = await loadFounderGovernanceContext(authDb, req);
+      assertFounderPermission(ctx, "founder.maintenance.read");
+      assertActiveSupportSessionForFirm(ctx, firmId);
+
+      const [latestMaintenance] = await authDb
+        .select()
+        .from(platformMaintenanceActionsTable)
+        .where(eq(platformMaintenanceActionsTable.firmId, firmId))
+        .orderBy(desc(platformMaintenanceActionsTable.createdAt))
+        .limit(1);
+
+      const [latestRestore] = await authDb
+        .select()
+        .from(platformRestoreActionsTable)
+        .where(eq(platformRestoreActionsTable.firmId, firmId))
+        .orderBy(desc(platformRestoreActionsTable.createdAt))
+        .limit(1);
+
+      const [pendingApprovalsRow] = await authDb
+        .select({ c: sql<number>`COUNT(*)::int` })
+        .from(platformApprovalRequestsTable)
+        .where(and(eq(platformApprovalRequestsTable.firmId, firmId), eq(platformApprovalRequestsTable.status, "requested")));
+      const pendingApprovals = Number((pendingApprovalsRow as any)?.c ?? 0);
+
+      const [runningMaintenanceRow] = await authDb
+        .select({ c: sql<number>`COUNT(*)::int` })
+        .from(platformMaintenanceActionsTable)
+        .where(and(eq(platformMaintenanceActionsTable.firmId, firmId), sql`status IN ('queued','running','snapshotting')`));
+      const runningMaintenance = Number((runningMaintenanceRow as any)?.c ?? 0);
+
+      const [runningRestoreRow] = await authDb
+        .select({ c: sql<number>`COUNT(*)::int` })
+        .from(platformRestoreActionsTable)
+        .where(and(eq(platformRestoreActionsTable.firmId, firmId), sql`status IN ('queued','running')`));
+      const runningRestore = Number((runningRestoreRow as any)?.c ?? 0);
+
+      const snaps = await listSnapshots(authDb, firmId, 1);
+      const latestSnapshot = snaps[0] ?? null;
+
+      return {
+        latest_snapshot: latestSnapshot,
+        latest_maintenance: latestMaintenance ?? null,
+        latest_restore: latestRestore ?? null,
+        counts: {
+          pending_approvals: pendingApprovals,
+          running_maintenance: runningMaintenance,
+          running_restore: runningRestore,
+        },
+      };
+    }, { retry: true, allowUnsafe: true, ctx: { route: "GET /platform/firms/:firmId/ops/summary", firmId } });
+
+    sendOk(res, result);
+  } catch (err) {
+    sendError(res, err);
+  }
+});
+
+router.get("/platform/action-registry", requireAuth, requireFounder, async (req: AuthRequest, res) => {
+  try {
+    const result = await withAuthSafeDb(async (authDb) => {
+      const ctx = await loadFounderGovernanceContext(authDb, req);
+      assertFounderPermission(ctx, "founder.maintenance.read");
+      return { actions: FOUNDER_ACTION_REGISTRY };
+    }, { retry: true, allowUnsafe: true, ctx: { route: "GET /platform/action-registry", firmId: null } });
+
+    sendOk(res, result);
+  } catch (err) {
+    sendError(res, err);
+  }
+});
+
 router.get("/platform/firms/:firmId/maintenance/actions", requireAuth, requireFounder, async (req: AuthRequest, res) => {
   try {
     const firmId = parseIntParam("firmId", req.params.firmId, { required: true, min: 1 })!;
@@ -44,6 +120,7 @@ router.get("/platform/firms/:firmId/maintenance/actions", requireAuth, requireFo
     const items = await withAuthSafeDb(async (authDb) => {
       const ctx = await loadFounderGovernanceContext(authDb, req);
       assertFounderPermission(ctx, "founder.maintenance.read");
+      assertActiveSupportSessionForFirm(ctx, firmId);
       return await authDb
         .select()
         .from(platformMaintenanceActionsTable)
@@ -52,6 +129,74 @@ router.get("/platform/firms/:firmId/maintenance/actions", requireAuth, requireFo
         .limit(limit);
     }, { retry: true, allowUnsafe: true, ctx: { route: "GET /platform/firms/:firmId/maintenance/actions", firmId } });
     sendOk(res, { items });
+  } catch (err) {
+    sendError(res, err);
+  }
+});
+
+router.get("/platform/firms/:firmId/maintenance/actions/:actionId", requireAuth, requireFounder, async (req: AuthRequest, res) => {
+  try {
+    const firmId = parseIntParam("firmId", req.params.firmId, { required: true, min: 1 })!;
+    const actionId = String(req.params.actionId ?? "").trim();
+    if (!actionId) throw new ApiError({ status: 400, code: "MISSING_REQUIRED_FIELD", message: "actionId is required", retryable: false });
+
+    const result = await withAuthSafeDb(async (authDb) => {
+      const ctx = await loadFounderGovernanceContext(authDb, req);
+      assertFounderPermission(ctx, "founder.maintenance.read");
+      assertActiveSupportSessionForFirm(ctx, firmId);
+
+      const [action] = await authDb
+        .select()
+        .from(platformMaintenanceActionsTable)
+        .where(and(eq(platformMaintenanceActionsTable.id, actionId), eq(platformMaintenanceActionsTable.firmId, firmId)));
+      if (!action) throw new ApiError({ status: 404, code: "ACTION_NOT_FOUND", message: "Action not found", retryable: false });
+      const steps = await authDb
+        .select()
+        .from(platformMaintenanceActionStepsTable)
+        .where(eq(platformMaintenanceActionStepsTable.actionId, actionId))
+        .orderBy(desc(platformMaintenanceActionStepsTable.stepOrder), desc(platformMaintenanceActionStepsTable.id));
+
+      const approval = action.approvalRequestId
+        ? (await authDb.select().from(platformApprovalRequestsTable).where(eq(platformApprovalRequestsTable.id, action.approvalRequestId)))[0] ?? null
+        : null;
+      return { action, steps, approval };
+    }, { retry: true, allowUnsafe: true, ctx: { route: "GET /platform/firms/:firmId/maintenance/actions/:actionId", firmId } });
+
+    sendOk(res, result);
+  } catch (err) {
+    sendError(res, err);
+  }
+});
+
+router.get("/platform/firms/:firmId/restore/actions/:restoreActionId", requireAuth, requireFounder, async (req: AuthRequest, res) => {
+  try {
+    const firmId = parseIntParam("firmId", req.params.firmId, { required: true, min: 1 })!;
+    const restoreActionId = String(req.params.restoreActionId ?? "").trim();
+    if (!restoreActionId) throw new ApiError({ status: 400, code: "MISSING_REQUIRED_FIELD", message: "restoreActionId is required", retryable: false });
+
+    const result = await withAuthSafeDb(async (authDb) => {
+      const ctx = await loadFounderGovernanceContext(authDb, req);
+      assertFounderPermission(ctx, "founder.snapshot.restore.preview");
+      assertActiveSupportSessionForFirm(ctx, firmId);
+
+      const [action] = await authDb
+        .select()
+        .from(platformRestoreActionsTable)
+        .where(and(eq(platformRestoreActionsTable.id, restoreActionId), eq(platformRestoreActionsTable.firmId, firmId)));
+      if (!action) throw new ApiError({ status: 404, code: "ACTION_NOT_FOUND", message: "Restore action not found", retryable: false });
+      const steps = await authDb
+        .select()
+        .from(platformRestoreActionStepsTable)
+        .where(eq(platformRestoreActionStepsTable.restoreActionId, restoreActionId))
+        .orderBy(desc(platformRestoreActionStepsTable.stepOrder), desc(platformRestoreActionStepsTable.id));
+
+      const approval = action.approvalRequestId
+        ? (await authDb.select().from(platformApprovalRequestsTable).where(eq(platformApprovalRequestsTable.id, action.approvalRequestId)))[0] ?? null
+        : null;
+      return { action, steps, approval };
+    }, { retry: true, allowUnsafe: true, ctx: { route: "GET /platform/firms/:firmId/restore/actions/:restoreActionId", firmId } });
+
+    sendOk(res, result);
   } catch (err) {
     sendError(res, err);
   }
@@ -70,6 +215,7 @@ router.post("/platform/firms/:firmId/maintenance/preview", requireAuth, requireF
     const preview = await withAuthSafeDb(async (authDb) => {
       const ctx = await loadFounderGovernanceContext(authDb, req);
       assertFounderPermission(ctx, "founder.maintenance.read");
+      assertActiveSupportSessionForFirm(ctx, firmId);
 
       const p = await previewMaintenanceAction(authDb, { firmId, actionCode, target: body.target });
       const actionId = await createMaintenanceActionPreviewRecord(authDb, { firmId, preview: p, requestedByUserId: req.userId!, requestedByEmail: req.email ?? null });
@@ -145,6 +291,7 @@ router.post("/platform/firms/:firmId/maintenance/execute", requireAuth, requireF
     const result = await withAuthSafeDb(async (authDb) => {
       const ctx = await loadFounderGovernanceContext(authDb, req);
       assertFounderPermission(ctx, "founder.maintenance.read");
+      assertActiveSupportSessionForFirm(ctx, firmId);
       return await executeMaintenanceAction(authDb, {
         firmId,
         actionId,
@@ -192,6 +339,7 @@ router.get("/platform/firms/:firmId/maintenance/search", requireAuth, requireFou
     const items = await withAuthSafeDb(async (authDb) => {
       const ctx = await loadFounderGovernanceContext(authDb, req);
       assertFounderPermission(ctx, "founder.maintenance.read");
+      assertActiveSupportSessionForFirm(ctx, firmId);
       return await searchTargets(authDb, { firmId, entityType, keyword, limit });
     }, { retry: true, allowUnsafe: true, ctx: { route: "GET /platform/firms/:firmId/maintenance/search", firmId } });
     sendOk(res, { items, query: { keyword, entity_type: entityType } });
@@ -212,6 +360,7 @@ router.get("/platform/firms/:firmId/snapshots", requireAuth, requireFounder, asy
     const items = await withAuthSafeDb(async (authDb) => {
       const ctx = await loadFounderGovernanceContext(authDb, req);
       assertFounderPermission(ctx, "founder.snapshot.read");
+      assertActiveSupportSessionForFirm(ctx, firmId);
       return await listSnapshots(authDb, firmId, limit);
     }, { retry: true, allowUnsafe: true, ctx: { route: "GET /platform/firms/:firmId/snapshots", firmId } });
     sendOk(res, { items });
@@ -244,6 +393,7 @@ router.post("/platform/firms/:firmId/snapshots", requireAuth, requireFounder, as
     const result = await withAuthSafeDb(async (authDb) => {
       const ctx = await loadFounderGovernanceContext(authDb, req);
       assertFounderPermission(ctx, "founder.snapshot.create");
+      assertActiveSupportSessionForFirm(ctx, firmId);
       const snap = await createSnapshot(authDb, {
         firmId,
         snapshotType,
@@ -291,6 +441,7 @@ router.get("/platform/firms/:firmId/snapshots/:snapshotId", requireAuth, require
     const data = await withAuthSafeDb(async (authDb) => {
       const ctx = await loadFounderGovernanceContext(authDb, req);
       assertFounderPermission(ctx, "founder.snapshot.read");
+      assertActiveSupportSessionForFirm(ctx, firmId);
       return await getSnapshotDetail(authDb, firmId, snapshotId);
     }, { retry: true, allowUnsafe: true, ctx: { route: "GET /platform/firms/:firmId/snapshots/:snapshotId", firmId } });
     sendOk(res, { item: data.snapshot, items: data.items });
@@ -310,6 +461,7 @@ router.post("/platform/firms/:firmId/snapshots/:snapshotId/pin", requireAuth, re
     await withAuthSafeDb(async (authDb) => {
       const ctx = await loadFounderGovernanceContext(authDb, req);
       assertFounderPermission(ctx, "founder.snapshot.pin");
+      assertActiveSupportSessionForFirm(ctx, firmId);
       await pinSnapshot(authDb, { firmId, snapshotId, actorUserId: ctx.actorUserId, reason });
       await writeAuditLog({ firmId, actorId: ctx.actorUserId, actorType: "founder", action: "firm.snapshot.pinned", entityType: "platform_snapshot", detail: JSON.stringify({ snapshotId, reason }), ipAddress: req.ip, userAgent: req.headers["user-agent"] }, { db: authDb, strict: false });
     }, { retry: true, allowUnsafe: true, ctx: { route: "POST /platform/firms/:firmId/snapshots/:snapshotId/pin", firmId } });
@@ -329,6 +481,7 @@ router.post("/platform/firms/:firmId/snapshots/:snapshotId/unpin", requireAuth, 
     await withAuthSafeDb(async (authDb) => {
       const ctx = await loadFounderGovernanceContext(authDb, req);
       assertFounderPermission(ctx, "founder.snapshot.pin");
+      assertActiveSupportSessionForFirm(ctx, firmId);
       await unpinSnapshot(authDb, { firmId, snapshotId });
       await writeAuditLog({ firmId, actorId: ctx.actorUserId, actorType: "founder", action: "firm.snapshot.unpinned", entityType: "platform_snapshot", detail: JSON.stringify({ snapshotId }), ipAddress: req.ip, userAgent: req.headers["user-agent"] }, { db: authDb, strict: false });
     }, { retry: true, allowUnsafe: true, ctx: { route: "POST /platform/firms/:firmId/snapshots/:snapshotId/unpin", firmId } });
@@ -353,6 +506,7 @@ router.post("/platform/firms/:firmId/snapshots/:snapshotId/delete", requireAuth,
     const removed = await withAuthSafeDb(async (authDb) => {
       const ctx = await loadFounderGovernanceContext(authDb, req);
       assertFounderPermission(ctx, "founder.snapshot.delete");
+      assertActiveSupportSessionForFirm(ctx, firmId);
       const result = await softDeleteSnapshot(authDb, { firmId, snapshotId, actorUserId: ctx.actorUserId, reason });
       if (result.storageDriver === "supabase" && result.storagePath) {
         try {
@@ -380,6 +534,7 @@ router.post("/platform/firms/:firmId/restore/preview", requireAuth, requireFound
     const result = await withAuthSafeDb(async (authDb) => {
       const ctx = await loadFounderGovernanceContext(authDb, req);
       assertFounderPermission(ctx, "founder.snapshot.restore.preview");
+      assertActiveSupportSessionForFirm(ctx, firmId);
 
       const detail = await getSnapshotDetail(authDb, firmId, snapshotId);
       if ((detail.snapshot as any)?.deletedAt || String((detail.snapshot as any)?.status ?? "") === "deleted") {
@@ -491,6 +646,7 @@ router.post("/platform/firms/:firmId/restore/execute", requireAuth, requireFound
     const result = await withAuthSafeDb(async (authDb) => {
       const ctx = await loadFounderGovernanceContext(authDb, req);
       assertFounderPermission(ctx, "founder.snapshot.restore.execute");
+      assertActiveSupportSessionForFirm(ctx, firmId);
       const [op] = await authDb.select().from(platformRestoreActionsTable).where(and(eq(platformRestoreActionsTable.id, restoreActionId), eq(platformRestoreActionsTable.firmId, firmId)));
       if (!op) throw new ApiError({ status: 404, code: "ACTION_NOT_FOUND", message: "Restore action not found", retryable: false });
 
@@ -536,6 +692,7 @@ router.post("/platform/firms/:firmId/maintenance/request-approval", requireAuth,
       const ctx = await loadFounderGovernanceContext(authDb, req);
       assertFounderPermission(ctx, "founder.approval.request");
       assertFounderPermission(ctx, "founder.maintenance.read");
+      assertActiveSupportSessionForFirm(ctx, firmId);
 
       const [action] = await authDb.select().from(platformMaintenanceActionsTable).where(and(eq(platformMaintenanceActionsTable.id, actionId), eq(platformMaintenanceActionsTable.firmId, firmId)));
       if (!action) throw new ApiError({ status: 404, code: "ACTION_NOT_FOUND", message: "Action not found", retryable: false });
@@ -602,6 +759,7 @@ router.post("/platform/firms/:firmId/restore/request-approval", requireAuth, req
       const ctx = await loadFounderGovernanceContext(authDb, req);
       assertFounderPermission(ctx, "founder.approval.request");
       assertFounderPermission(ctx, "founder.snapshot.restore.preview");
+      assertActiveSupportSessionForFirm(ctx, firmId);
 
       const [op] = await authDb.select().from(platformRestoreActionsTable).where(and(eq(platformRestoreActionsTable.id, restoreActionId), eq(platformRestoreActionsTable.firmId, firmId)));
       if (!op) throw new ApiError({ status: 404, code: "ACTION_NOT_FOUND", message: "Restore action not found", retryable: false });
@@ -665,6 +823,7 @@ router.get("/platform/firms/:firmId/maintenance/history", requireAuth, requireFo
     const items = await withAuthSafeDb(async (authDb) => {
       const ctx = await loadFounderGovernanceContext(authDb, req);
       assertFounderPermission(ctx, "founder.maintenance.read");
+      assertActiveSupportSessionForFirm(ctx, firmId);
       const maint = await authDb.select().from(platformMaintenanceActionsTable).where(eq(platformMaintenanceActionsTable.firmId, firmId)).orderBy(desc(platformMaintenanceActionsTable.createdAt)).limit(limit);
       const restores = await authDb.select().from(platformRestoreActionsTable).where(eq(platformRestoreActionsTable.firmId, firmId)).orderBy(desc(platformRestoreActionsTable.createdAt)).limit(limit);
       const approvals = await authDb.select().from(platformApprovalRequestsTable).where(eq(platformApprovalRequestsTable.firmId, firmId)).orderBy(desc(platformApprovalRequestsTable.createdAt)).limit(limit);
