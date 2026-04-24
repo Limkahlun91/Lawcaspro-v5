@@ -145,7 +145,7 @@ router.get("/platform/operations/operations/:kind/:id", requireAuth, requireFoun
         return { kind, item, events, audit };
       }
       throw new Error("Unsupported kind");
-    }, { retry: true, allowUnsafe: true, ctx: { route: "GET /platform/operations/operations/:kind/:id", kind } });
+    }, { retry: true, allowUnsafe: true, ctx: { route: "GET /platform/operations/operations/:kind/:id" } });
 
     sendOk(res, data);
   } catch (err) {
@@ -207,7 +207,7 @@ router.get("/platform/operations/incidents/:id", requireAuth, requireFounder, re
       const d = await getIncidentDetail(authDb, id);
       const recommendations = await computeRecommendationsForIncident(authDb, d.incident);
       return { ...d, recommendations };
-    }, { retry: true, allowUnsafe: true, ctx: { route: "GET /platform/operations/incidents/:id", id } });
+    }, { retry: true, allowUnsafe: true, ctx: { route: "GET /platform/operations/incidents/:id" } });
     sendOk(res, data);
   } catch (err) {
     sendError(res, err);
@@ -274,7 +274,7 @@ router.post("/platform/operations/incidents/:id/acknowledge", requireAuth, requi
     const id = String(req.params.id ?? "");
     await withAuthSafeDb(async (authDb) => {
       await setIncidentStatus(authDb, { incidentId: id, status: "investigating", actorUserId: req.userId ?? 0, note: null });
-    }, { retry: true, allowUnsafe: true, ctx: { route: "POST /platform/operations/incidents/:id/acknowledge", id } });
+    }, { retry: true, allowUnsafe: true, ctx: { route: "POST /platform/operations/incidents/:id/acknowledge" } });
     sendOk(res, { result: { acknowledged: true } });
   } catch (err) {
     sendError(res, err);
@@ -287,7 +287,7 @@ router.post("/platform/operations/incidents/:id/resolve", requireAuth, requireFo
     const note = (req.body as any)?.note ? String((req.body as any).note) : null;
     await withAuthSafeDb(async (authDb) => {
       await setIncidentStatus(authDb, { incidentId: id, status: "resolved", actorUserId: req.userId ?? 0, note });
-    }, { retry: true, allowUnsafe: true, ctx: { route: "POST /platform/operations/incidents/:id/resolve", id } });
+    }, { retry: true, allowUnsafe: true, ctx: { route: "POST /platform/operations/incidents/:id/resolve" } });
     sendOk(res, { result: { resolved: true } });
   } catch (err) {
     sendError(res, err);
@@ -300,7 +300,7 @@ router.post("/platform/operations/incidents/:id/dismiss", requireAuth, requireFo
     const note = (req.body as any)?.note ? String((req.body as any).note) : null;
     await withAuthSafeDb(async (authDb) => {
       await setIncidentStatus(authDb, { incidentId: id, status: "dismissed", actorUserId: req.userId ?? 0, note });
-    }, { retry: true, allowUnsafe: true, ctx: { route: "POST /platform/operations/incidents/:id/dismiss", id } });
+    }, { retry: true, allowUnsafe: true, ctx: { route: "POST /platform/operations/incidents/:id/dismiss" } });
     sendOk(res, { result: { dismissed: true } });
   } catch (err) {
     sendError(res, err);
@@ -313,7 +313,7 @@ router.post("/platform/operations/incidents/:id/notes", requireAuth, requireFoun
     const note = String((req.body as any)?.note ?? "");
     await withAuthSafeDb(async (authDb) => {
       await addIncidentNote(authDb, { incidentId: id, authorUserId: req.userId ?? 0, note });
-    }, { retry: true, allowUnsafe: true, ctx: { route: "POST /platform/operations/incidents/:id/notes", id } });
+    }, { retry: true, allowUnsafe: true, ctx: { route: "POST /platform/operations/incidents/:id/notes" } });
     sendOk(res, { result: { created: true } });
   } catch (err) {
     sendError(res, err);

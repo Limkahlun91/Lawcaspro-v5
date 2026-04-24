@@ -110,6 +110,22 @@ export default function PlatformOperationsIncidentDetail() {
   const notes = ((incidentQuery.data as any)?.notes ?? []) as any[];
   const recs = ((incidentQuery.data as any)?.recommendations ?? []) as any[];
 
+  const relatedLogsQuery = useQuery({
+    queryKey: ["platform-ops-center-incident-related-logs", incident?.firmId, incident?.sourceOperationId, incident?.sourceEventId],
+    queryFn: async () => {
+      const firmId = Number(incident?.firmId);
+      const q = String(incident?.sourceOperationId ?? incident?.sourceEventId ?? "").trim();
+      if (!Number.isFinite(firmId) || firmId <= 0 || !q) return { items: [] as any[] };
+      const params = new URLSearchParams();
+      params.set("limit", "50");
+      params.set("firm_id", String(firmId));
+      params.set("q", q);
+      return await apiFetchJson(`/platform/operations/logs?${params.toString()}`);
+    },
+    enabled: canRead && !!incident,
+    retry: false,
+  });
+
   return (
     <div className="space-y-6">
       <div className="flex items-start justify-between gap-3 flex-wrap">
@@ -180,6 +196,39 @@ export default function PlatformOperationsIncidentDetail() {
                   <Link href={`/platform/operations/logs`}><a className="text-amber-700 hover:underline">Open in logs</a></Link>
                 </div>
               ) : null}
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader><CardTitle>Timeline (Related logs)</CardTitle></CardHeader>
+            <CardContent>
+              {relatedLogsQuery.isError ? (
+                <QueryFallback title="Related logs unavailable" error={relatedLogsQuery.error} onRetry={() => relatedLogsQuery.refetch()} isRetrying={relatedLogsQuery.isFetching} />
+              ) : relatedLogsQuery.isLoading ? (
+                <div className="text-sm text-slate-500 py-6 text-center">Loading timeline...</div>
+              ) : (
+                <div className="rounded border border-slate-200 divide-y">
+                  {(((relatedLogsQuery.data as any)?.items ?? []) as any[]).slice(0, 30).map((it: any) => (
+                    <div key={String(it.id)} className="p-2 text-sm">
+                      <div className="flex items-center justify-between gap-2 flex-wrap">
+                        <div className="min-w-0">
+                          <div className="text-xs text-slate-500 font-mono">{it.created_at ? new Date(String(it.created_at)).toLocaleString() : "—"}</div>
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <Badge variant="outline" className="text-xs">{String(it.event_category)}</Badge>
+                            <span className="font-mono text-xs text-slate-700">{String(it.event_code)}</span>
+                            <Badge variant="outline" className="text-xs">{String(it.status)}</Badge>
+                          </div>
+                          {it.summary ? <div className="text-xs text-slate-600 mt-1 whitespace-pre-wrap break-words">{String(it.summary)}</div> : null}
+                        </div>
+                        <Link href="/platform/operations/logs"><a className="text-amber-700 hover:underline text-xs">open logs</a></Link>
+                      </div>
+                    </div>
+                  ))}
+                  {(((relatedLogsQuery.data as any)?.items ?? []) as any[]).length === 0 ? (
+                    <div className="p-3 text-sm text-slate-500">No related logs.</div>
+                  ) : null}
+                </div>
+              )}
             </CardContent>
           </Card>
 
@@ -258,4 +307,3 @@ export default function PlatformOperationsIncidentDetail() {
     </div>
   );
 }
-

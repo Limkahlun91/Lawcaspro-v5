@@ -234,6 +234,8 @@ export interface CreateUserBody {
   password: string;
   roleId: number;
   department?: string;
+  barCouncilNo?: string;
+  nricNo?: string;
 }
 
 export interface UpdateUserBody {

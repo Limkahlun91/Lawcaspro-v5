@@ -458,7 +458,9 @@ export const CreateUserBody = zod.object({
   "name": zod.string(),
   "password": zod.string(),
   "roleId": zod.number(),
-  "department": zod.string().optional()
+  "department": zod.string().optional(),
+  "barCouncilNo": zod.string().optional(),
+  "nricNo": zod.string().optional()
 })
 
 

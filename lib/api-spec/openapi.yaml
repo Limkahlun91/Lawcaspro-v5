@@ -1575,6 +1575,10 @@ components:
           type: integer
         department:
           type: string
+        barCouncilNo:
+          type: string
+        nricNo:
+          type: string
       required:
         - email
         - name

@@ -14,6 +14,7 @@ import {
   getSnapshotDetail,
   listSnapshots,
   listSnapshotsPaged,
+  MODULE_CODES,
   pinSnapshot,
   previewMaintenanceAction,
   restoreCaseRecordFromSnapshot,
@@ -23,6 +24,7 @@ import {
   restoreSettingsFromSnapshot,
   searchTargets,
   softDeleteSnapshot,
+  TARGET_ENTITY_TYPES,
   type MaintenanceActionCode,
   type MaintenanceScopeType,
   type ModuleCode,
@@ -869,14 +871,25 @@ router.post("/platform/firms/:firmId/recovery/rollback/preview", requireAuth, re
         warnings: [{ code: "ROLLBACK_REPLACES_STATE", message: "Rollback will overwrite current state using the pre-restore snapshot." }],
       };
 
+      const moduleCode = (() => {
+        const v = source.moduleCode;
+        if (typeof v !== "string") return null;
+        return (MODULE_CODES as readonly string[]).includes(v) ? (v as ModuleCode) : null;
+      })();
+      const targetEntityType = (() => {
+        const v = source.targetEntityType;
+        if (typeof v !== "string") return null;
+        return (TARGET_ENTITY_TYPES as readonly string[]).includes(v) ? (v as TargetEntityType) : null;
+      })();
+
       const rollbackActionId = await createRestorePreviewRecord(authDb, {
         firmId,
         operationCode: "rollback_restore",
         snapshotId,
         rollbackSourceRestoreActionId: sourceRestoreActionId,
         restoreScopeType: source.restoreScopeType as MaintenanceScopeType,
-        moduleCode: source.moduleCode ?? null,
-        targetEntityType: source.targetEntityType ?? null,
+        moduleCode,
+        targetEntityType,
         targetEntityId: source.targetEntityId ?? null,
         targetLabel: source.targetLabel ?? null,
         riskLevel: "critical",
