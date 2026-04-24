@@ -1,7 +1,7 @@
 import { ReactNode } from "react";
 import { useAuth } from "@/lib/auth-context";
 import { Link, useLocation } from "wouter";
-import { LayoutDashboard, Building2, Activity, ScrollText, LogOut, FileText, MessageSquare } from "lucide-react";
+import { LayoutDashboard, Building2, Activity, ScrollText, LogOut, FileText, MessageSquare, AlertTriangle } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
 export function PlatformLayout({ children }: { children: ReactNode }) {
@@ -14,6 +14,7 @@ export function PlatformLayout({ children }: { children: ReactNode }) {
 
   const navItems = [
     { label: "Dashboard", href: "/platform/dashboard", icon: LayoutDashboard },
+    { label: "Operations Center", href: "/platform/operations", icon: AlertTriangle },
     { label: "Firms", href: "/platform/firms", icon: Building2 },
     { label: "System Documents", href: "/platform/documents", icon: FileText },
     { label: "Communication Hub", href: "/platform/messages", icon: MessageSquare },

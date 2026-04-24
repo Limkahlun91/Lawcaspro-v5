@@ -12,6 +12,7 @@ export * from "./dashboard-cache";
 export * from "./firm-documents";
 export * from "./accounting";
 export * from "./platform-governance";
+export * from "./platform-incident-center";
 export * from "./communications";
 export * from "./platform";
 export * from "./platform-ops";

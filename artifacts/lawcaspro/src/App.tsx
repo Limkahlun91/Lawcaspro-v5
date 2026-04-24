@@ -23,6 +23,13 @@ import FirmsList from "@/pages/platform/firms";
 import NewFirm from "@/pages/platform/firms/new";
 import FirmDetail from "@/pages/platform/firms/detail";
 import FirmHistoryDetailPage from "@/pages/platform/firms/history-detail";
+import PlatformOperationsOverview from "@/pages/platform/operations";
+import PlatformOperationsLogs from "@/pages/platform/operations/logs";
+import PlatformOperationsIncidents from "@/pages/platform/operations/incidents";
+import PlatformOperationsIncidentDetail from "@/pages/platform/operations/incident-detail";
+import PlatformOperationsRecommendations from "@/pages/platform/operations/recommendations";
+import PlatformOperationsReadiness from "@/pages/platform/operations/readiness";
+import PlatformOperationsPending from "@/pages/platform/operations/pending";
 import PlatformMonitoring from "@/pages/platform/monitoring";
 import PlatformAuditLogs from "@/pages/platform/audit-logs";
 import PlatformDocuments from "@/pages/platform/documents";
@@ -93,6 +100,13 @@ function PlatformRoutes() {
       <PlatformLayout>
         <Switch>
           <Route path="/platform/dashboard" component={PlatformDashboard} />
+          <Route path="/platform/operations/logs" component={PlatformOperationsLogs} />
+          <Route path="/platform/operations/incidents/:id" component={PlatformOperationsIncidentDetail} />
+          <Route path="/platform/operations/incidents" component={PlatformOperationsIncidents} />
+          <Route path="/platform/operations/recommendations" component={PlatformOperationsRecommendations} />
+          <Route path="/platform/operations/readiness" component={PlatformOperationsReadiness} />
+          <Route path="/platform/operations/pending" component={PlatformOperationsPending} />
+          <Route path="/platform/operations" component={PlatformOperationsOverview} />
           <Route path="/platform/firms/new" component={NewFirm} />
           <Route path="/platform/firms/:id/history/:kind/:historyId" component={FirmHistoryDetailPage} />
           <Route path="/platform/firms/:id" component={FirmDetail} />

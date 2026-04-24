@@ -32,6 +32,7 @@ import complianceRouter from "./compliance";
 import conflictRouter from "./conflict";
 import platformOpsRouter from "./platform-ops";
 import platformApprovalsRouter from "./platform-approvals";
+import platformOpsCenterRouter from "./platform-ops-center";
 
 const router: IRouter = Router();
 
@@ -54,6 +55,7 @@ router.use(reportsRouter);
 router.use(auditRouter);
 router.use(platformOpsRouter);
 router.use(platformApprovalsRouter);
+router.use(platformOpsCenterRouter);
 router.use(hubRouter);
 router.use(quotationsRouter);
 router.use(firmSettingsRouter);

@@ -33,6 +33,7 @@ import { SupabaseStorageService, getSupabaseStorageConfigError } from "../lib/ob
 import { ApiError } from "../lib/api-response";
 import { computeDashboardStats } from "./dashboard-stats";
 import { assertApprovalApproved, assertNoConcurrentDestructive, consumeStepUpChallenge, evaluateDecisionForExecute, markApprovalExecuted } from "./founder-governance";
+import { upsertIncidentFromFailure } from "./ops-center";
 
 export const RISK_LEVELS = ["low", "medium", "high", "critical"] as const;
 export type RiskLevel = (typeof RISK_LEVELS)[number];
@@ -918,6 +919,24 @@ export async function executeMaintenanceAction(
       ipAddress: opts.ipAddress ?? null,
       userAgent: opts.userAgent ?? null,
     });
+    await upsertIncidentFromFailure(authDb, {
+      firmId: opts.firmId,
+      moduleCode: preview.module_code ?? null,
+      incidentType: "maintenance_failed",
+      severity: (String(action.riskLevel) as any) ?? "high",
+      sourceEventId: `maintenance:${opts.actionId}`,
+      sourceOperationId: opts.actionId,
+      snapshotId,
+      relatedRequestId: approval?.id ?? null,
+      entityType: preview.target?.entity_type ?? null,
+      entityId: preview.target?.entity_id ?? null,
+      title: `Maintenance failed: ${preview.action_code}`,
+      summary: preview.target?.label ?? null,
+      technicalSummary: msg.slice(0, 400),
+      suggestedActionCode: "retry_operation",
+      suggestedSnapshotId: snapshotId,
+      aggregationKey: `firm:${opts.firmId}|maintenance|${preview.action_code}|${preview.module_code ?? ""}|${preview.target?.entity_type ?? ""}|${preview.target?.entity_id ?? ""}|RESET_EXECUTION_FAILED`,
+    });
     throw new ApiError({ status: 500, code: "RESET_EXECUTION_FAILED", message: "Maintenance action failed", retryable: true, details: { actionId: opts.actionId, snapshotId } });
   }
 }
@@ -1447,6 +1466,24 @@ export async function restoreSettingsFromSnapshot(
     const msg = err instanceof Error ? err.message : String(err ?? "");
     await authDb.update(platformRestoreActionsTable).set({ status: "failed", failedAt: new Date(), errorCode: "RESTORE_EXECUTION_FAILED", errorMessage: msg.slice(0, 400) }).where(eq(platformRestoreActionsTable.id, opts.restoreActionId));
     await authDb.update(platformRestoreActionStepsTable).set({ status: "failed", completedAt: new Date(), errorCode: "RESTORE_EXECUTION_FAILED", errorMessage: msg.slice(0, 400) }).where(and(eq(platformRestoreActionStepsTable.restoreActionId, opts.restoreActionId), eq(platformRestoreActionStepsTable.stepCode, "apply_restore")));
+    await upsertIncidentFromFailure(authDb, {
+      firmId: opts.firmId,
+      moduleCode: restore.moduleCode ?? null,
+      incidentType: `${opCode}_failed`,
+      severity: (String(restore.riskLevel) as any) ?? "high",
+      sourceEventId: `restore:${opts.restoreActionId}`,
+      sourceOperationId: opts.restoreActionId,
+      snapshotId: restore.snapshotId ? String(restore.snapshotId) : null,
+      relatedRequestId: approval?.id ?? null,
+      entityType: restore.targetEntityType ?? null,
+      entityId: restore.targetEntityId ?? null,
+      title: `Restore failed: ${opCode}`,
+      summary: restore.targetLabel ? String(restore.targetLabel) : null,
+      technicalSummary: msg.slice(0, 400),
+      suggestedActionCode: opCode === "rollback_restore" ? "manual_review_required" : "restore_from_snapshot",
+      suggestedSnapshotId: restore.snapshotId ? String(restore.snapshotId) : null,
+      aggregationKey: `firm:${opts.firmId}|restore|${opCode}|${restore.moduleCode ?? ""}|${restore.targetEntityType ?? ""}|${restore.targetEntityId ?? ""}|RESTORE_EXECUTION_FAILED`,
+    });
     throw new ApiError({ status: 500, code: "RESTORE_EXECUTION_FAILED", message: "Restore failed", retryable: true, details: { restoreActionId: opts.restoreActionId } });
   }
 }
@@ -2146,6 +2183,24 @@ export async function restoreProjectRecordFromSnapshot(
     const msg = err instanceof Error ? err.message : String(err ?? "");
     await authDb.update(platformRestoreActionsTable).set({ status: "failed", failedAt: new Date(), errorCode: "RESTORE_EXECUTION_FAILED", errorMessage: msg.slice(0, 400) }).where(eq(platformRestoreActionsTable.id, opts.restoreActionId));
     await authDb.update(platformRestoreActionStepsTable).set({ status: "failed", completedAt: new Date(), errorCode: "RESTORE_EXECUTION_FAILED", errorMessage: msg.slice(0, 400) }).where(and(eq(platformRestoreActionStepsTable.restoreActionId, opts.restoreActionId), eq(platformRestoreActionStepsTable.stepCode, "apply_restore")));
+    await upsertIncidentFromFailure(authDb, {
+      firmId: opts.firmId,
+      moduleCode: restore.moduleCode ?? null,
+      incidentType: `${opCode}_failed`,
+      severity: (String(restore.riskLevel) as any) ?? "high",
+      sourceEventId: `restore:${opts.restoreActionId}`,
+      sourceOperationId: opts.restoreActionId,
+      snapshotId: restore.snapshotId ? String(restore.snapshotId) : null,
+      relatedRequestId: approval?.id ?? null,
+      entityType: restore.targetEntityType ?? null,
+      entityId: restore.targetEntityId ?? null,
+      title: `Restore failed: ${opCode}`,
+      summary: restore.targetLabel ? String(restore.targetLabel) : null,
+      technicalSummary: msg.slice(0, 400),
+      suggestedActionCode: opCode === "rollback_restore" ? "manual_review_required" : "restore_from_snapshot",
+      suggestedSnapshotId: restore.snapshotId ? String(restore.snapshotId) : null,
+      aggregationKey: `firm:${opts.firmId}|restore|${opCode}|${restore.moduleCode ?? ""}|${restore.targetEntityType ?? ""}|${restore.targetEntityId ?? ""}|RESTORE_EXECUTION_FAILED`,
+    });
     throw new ApiError({ status: 500, code: "RESTORE_EXECUTION_FAILED", message: "Restore failed", retryable: true, details: { restoreActionId: opts.restoreActionId } });
   }
 }
@@ -2332,6 +2387,24 @@ export async function restoreDeveloperRecordFromSnapshot(
     const msg = err instanceof Error ? err.message : String(err ?? "");
     await authDb.update(platformRestoreActionsTable).set({ status: "failed", failedAt: new Date(), errorCode: "RESTORE_EXECUTION_FAILED", errorMessage: msg.slice(0, 400) }).where(eq(platformRestoreActionsTable.id, opts.restoreActionId));
     await authDb.update(platformRestoreActionStepsTable).set({ status: "failed", completedAt: new Date(), errorCode: "RESTORE_EXECUTION_FAILED", errorMessage: msg.slice(0, 400) }).where(and(eq(platformRestoreActionStepsTable.restoreActionId, opts.restoreActionId), eq(platformRestoreActionStepsTable.stepCode, "apply_restore")));
+    await upsertIncidentFromFailure(authDb, {
+      firmId: opts.firmId,
+      moduleCode: restore.moduleCode ?? null,
+      incidentType: `${opCode}_failed`,
+      severity: (String(restore.riskLevel) as any) ?? "high",
+      sourceEventId: `restore:${opts.restoreActionId}`,
+      sourceOperationId: opts.restoreActionId,
+      snapshotId: restore.snapshotId ? String(restore.snapshotId) : null,
+      relatedRequestId: approval?.id ?? null,
+      entityType: restore.targetEntityType ?? null,
+      entityId: restore.targetEntityId ?? null,
+      title: `Restore failed: ${opCode}`,
+      summary: restore.targetLabel ? String(restore.targetLabel) : null,
+      technicalSummary: msg.slice(0, 400),
+      suggestedActionCode: opCode === "rollback_restore" ? "manual_review_required" : "restore_from_snapshot",
+      suggestedSnapshotId: restore.snapshotId ? String(restore.snapshotId) : null,
+      aggregationKey: `firm:${opts.firmId}|restore|${opCode}|${restore.moduleCode ?? ""}|${restore.targetEntityType ?? ""}|${restore.targetEntityId ?? ""}|RESTORE_EXECUTION_FAILED`,
+    });
     throw new ApiError({ status: 500, code: "RESTORE_EXECUTION_FAILED", message: "Restore failed", retryable: true, details: { restoreActionId: opts.restoreActionId } });
   }
 }
