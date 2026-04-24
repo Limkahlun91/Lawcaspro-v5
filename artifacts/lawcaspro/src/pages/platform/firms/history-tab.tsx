@@ -1,18 +1,14 @@
-import { useMemo, useState } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useEffect, useMemo, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { QueryFallback } from "@/components/query-fallback";
 import { apiFetchJson } from "@/lib/api-client";
-import { unwrapApiData } from "@/lib/api-contract";
 import { RiskBadge, type RiskLevel } from "@/components/risk-badge";
-import { useAuth } from "@/lib/auth-context";
-import { hasFounderPermission } from "@/lib/founder-permissions";
-import { toastError } from "@/lib/toast-error";
-import { useToast } from "@/hooks/use-toast";
+import { useLocation } from "wouter";
+import { getSupportSessionId } from "@/lib/support-session";
 
 type HistoryItem = any;
 
@@ -27,84 +23,92 @@ function StatusBadge({ status }: { status: string }) {
 }
 
 export function FirmActionHistoryTab({ firmId }: { firmId: number }) {
-  const { toast } = useToast();
-  const qc = useQueryClient();
-  const { user } = useAuth();
+  const [, setLocation] = useLocation();
   const [search, setSearch] = useState("");
   const [kind, setKind] = useState<"all" | "maintenance" | "restore" | "approval">("all");
-  const [selected, setSelected] = useState<HistoryItem | null>(null);
+  const [status, setStatus] = useState("");
+  const [moduleCode, setModuleCode] = useState("");
+  const [actionCode, setActionCode] = useState("");
+  const [operationCode, setOperationCode] = useState("");
+  const [recordType, setRecordType] = useState("");
+  const [recordId, setRecordId] = useState("");
+  const [requesterEmail, setRequesterEmail] = useState("");
+  const [approverUserId, setApproverUserId] = useState("");
+  const [dateFrom, setDateFrom] = useState("");
+  const [dateTo, setDateTo] = useState("");
+
+  const [before, setBefore] = useState<string | null>(null);
+  const [items, setItems] = useState<HistoryItem[]>([]);
 
   const historyQuery = useQuery({
-    queryKey: ["platform-firm-history", firmId],
+    queryKey: ["platform-firm-history-v2", firmId, kind, status, moduleCode, actionCode, operationCode, recordType, recordId, requesterEmail, approverUserId, dateFrom, dateTo, before],
     queryFn: async () => {
-      const res = await apiFetchJson(`/platform/firms/${firmId}/maintenance/history?limit=100`);
-      return unwrapApiData<{ items: HistoryItem[] }>(res);
+      const params = new URLSearchParams();
+      params.set("limit", "50");
+      if (kind !== "all") params.set("kind", kind);
+      if (status.trim()) params.set("status", status.trim());
+      if (moduleCode.trim()) params.set("module_code", moduleCode.trim());
+      if (actionCode.trim()) params.set("action_code", actionCode.trim());
+      if (operationCode.trim()) params.set("operation_code", operationCode.trim());
+      if (recordType.trim()) params.set("record_type", recordType.trim());
+      if (recordId.trim()) params.set("record_id", recordId.trim());
+      if (requesterEmail.trim()) params.set("requester_email", requesterEmail.trim());
+      if (approverUserId.trim()) params.set("approver_user_id", approverUserId.trim());
+      if (dateFrom.trim()) params.set("date_from", dateFrom.trim());
+      if (dateTo.trim()) params.set("date_to", dateTo.trim());
+      if (before) params.set("before", before);
+      return await apiFetchJson<{ items: HistoryItem[]; page_info: { limit: number; has_more: boolean; next_before: string | null } }>(`/platform/firms/${firmId}/history?${params.toString()}`);
     },
     retry: false,
   });
 
-  const items = historyQuery.data?.items ?? [];
-
-  const detailQuery = useQuery({
-    queryKey: ["platform-firm-history-detail", firmId, selected?.kind, selected?.id],
+  const supportQuery = useQuery({
+    queryKey: ["platform-firm-history-support-session", firmId],
     queryFn: async () => {
-      if (!selected?.id || !selected?.kind) return null;
-      if (selected.kind === "maintenance") {
-        const res = await apiFetchJson(`/platform/firms/${firmId}/maintenance/actions/${String(selected.id)}`);
-        return unwrapApiData<{ action: any; steps: any[]; approval: any | null }>(res);
-      }
-      if (selected.kind === "restore") {
-        const res = await apiFetchJson(`/platform/firms/${firmId}/restore/actions/${String(selected.id)}`);
-        return unwrapApiData<{ action: any; steps: any[]; approval: any | null }>(res);
-      }
-      return null;
+      return await apiFetchJson<{ items: any[] }>(`/support-sessions?firmId=${firmId}`);
     },
-    enabled: !!selected && (selected.kind === "maintenance" || selected.kind === "restore"),
+    enabled: !!firmId,
     retry: false,
   });
+
+  useEffect(() => {
+    if (!historyQuery.data) return;
+    const next = historyQuery.data.items ?? [];
+    setItems((prev) => {
+      const base = before ? prev : [];
+      const seen = new Set(base.map((it: any) => `${String(it.kind)}:${String(it.id)}`));
+      const merged = [...base];
+      for (const it of next) {
+        const key = `${String((it as any).kind)}:${String((it as any).id)}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        merged.push(it);
+      }
+      return merged;
+    });
+  }, [before, historyQuery.data]);
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
     return items.filter((it) => {
-      if (kind !== "all" && String(it.kind) !== kind) return false;
       if (!q) return true;
       const hay = JSON.stringify(it).toLowerCase();
       return hay.includes(q);
     });
   }, [items, kind, search]);
 
-  const approveMutation = useMutation({
-    mutationFn: async (payload: { id: string; note?: string }) => {
-      const res = await apiFetchJson(`/platform/approvals/${payload.id}/approve`, { method: "POST", body: JSON.stringify({ note: payload.note ?? "" }) });
-      return unwrapApiData(res);
-    },
-    onSuccess: async () => {
-      toast({ title: "Approved" });
-      await qc.invalidateQueries({ queryKey: ["platform-firm-history", firmId] });
-      if (selected?.id) setSelected({ ...selected });
-    },
-    onError: (e) => toastError(toast, e, "Approve failed"),
-  });
-
-  const rejectMutation = useMutation({
-    mutationFn: async (payload: { id: string; note?: string }) => {
-      const res = await apiFetchJson(`/platform/approvals/${payload.id}/reject`, { method: "POST", body: JSON.stringify({ note: payload.note ?? "" }) });
-      return unwrapApiData(res);
-    },
-    onSuccess: async () => {
-      toast({ title: "Rejected" });
-      await qc.invalidateQueries({ queryKey: ["platform-firm-history", firmId] });
-      if (selected?.id) setSelected({ ...selected });
-    },
-    onError: (e) => toastError(toast, e, "Reject failed"),
-  });
+  const pageInfo = historyQuery.data?.page_info ?? null;
+  const storedSupportSessionId = getSupportSessionId();
+  const latestSupport = (supportQuery.data?.items ?? [])[0] ?? null;
+  const latestStatus = latestSupport?.status ? String(latestSupport.status) : "";
+  const latestExpiresAt = latestSupport?.expiresAt ? String(latestSupport.expiresAt) : "";
 
   return (
     <div className="space-y-6">
       <Card>
         <CardHeader className="flex flex-row items-center justify-between gap-3">
           <CardTitle>Action History</CardTitle>
-          <div className="flex gap-2">
+          <div className="flex gap-2 flex-wrap justify-end">
             <Select value={kind} onValueChange={(v) => setKind(v as any)}>
               <SelectTrigger className="w-36"><SelectValue /></SelectTrigger>
               <SelectContent>
@@ -114,10 +118,67 @@ export function FirmActionHistoryTab({ firmId }: { firmId: number }) {
                 <SelectItem value="approval">Approvals</SelectItem>
               </SelectContent>
             </Select>
-            <Input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search..." className="w-56" />
+            <Input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search (client-side)..." className="w-56" />
           </div>
         </CardHeader>
         <CardContent>
+          <div className="text-xs text-slate-600 mb-4">
+            Support session: {storedSupportSessionId ? <span className="font-mono">#{storedSupportSessionId}</span> : "—"}
+            {latestSupport ? (
+              <>
+                <span className="mx-2">·</span>
+                <StatusBadge status={latestStatus || "unknown"} />
+                {latestExpiresAt ? <span className="text-xs text-slate-500"> · expires {new Date(latestExpiresAt).toLocaleString()}</span> : null}
+              </>
+            ) : null}
+          </div>
+          <div className="mb-4 grid grid-cols-1 md:grid-cols-3 gap-2">
+            <Input value={status} onChange={(e) => setStatus(e.target.value)} placeholder="Status (e.g. completed/failed/requested)" />
+            <Input value={moduleCode} onChange={(e) => setModuleCode(e.target.value)} placeholder="Module (e.g. projects/settings)" />
+            <Input value={actionCode} onChange={(e) => setActionCode(e.target.value)} placeholder="Action code (maintenance/approval)" />
+            <Input value={operationCode} onChange={(e) => setOperationCode(e.target.value)} placeholder="Operation code (restore/rollback)" />
+            <Input value={recordType} onChange={(e) => setRecordType(e.target.value)} placeholder="Record type (case/project/developer/settings)" />
+            <Input value={recordId} onChange={(e) => setRecordId(e.target.value)} placeholder="Record id" />
+            <Input value={requesterEmail} onChange={(e) => setRequesterEmail(e.target.value)} placeholder="Requester email contains" />
+            <Input value={approverUserId} onChange={(e) => setApproverUserId(e.target.value)} placeholder="Approver user id (approvals only)" />
+            <Input value={dateFrom} onChange={(e) => setDateFrom(e.target.value)} placeholder="Date from (ISO)" />
+            <Input value={dateTo} onChange={(e) => setDateTo(e.target.value)} placeholder="Date to (ISO)" />
+          </div>
+          <div className="flex items-center gap-2 mb-4">
+            <Button
+              variant="outline"
+              onClick={() => {
+                setBefore(null);
+                setItems([]);
+                historyQuery.refetch();
+              }}
+              disabled={historyQuery.isFetching}
+            >
+              Apply filters
+            </Button>
+            <Button
+              variant="outline"
+              onClick={() => {
+                setSearch("");
+                setKind("all");
+                setStatus("");
+                setModuleCode("");
+                setActionCode("");
+                setOperationCode("");
+                setRecordType("");
+                setRecordId("");
+                setRequesterEmail("");
+                setApproverUserId("");
+                setDateFrom("");
+                setDateTo("");
+                setBefore(null);
+                setItems([]);
+              }}
+              disabled={historyQuery.isFetching}
+            >
+              Reset
+            </Button>
+          </div>
           {historyQuery.isError ? (
             <QueryFallback title="History unavailable" error={historyQuery.error} onRetry={() => historyQuery.refetch()} isRetrying={historyQuery.isFetching} />
           ) : historyQuery.isLoading ? (
@@ -130,22 +191,41 @@ export function FirmActionHistoryTab({ firmId }: { firmId: number }) {
                 const createdAt = new Date(String(it.createdAt ?? it.created_at ?? Date.now()));
                 const risk = (it.riskLevel ?? it.risk_level ?? "low") as RiskLevel;
                 const status = String(it.status ?? "");
-                const action = it.kind === "approval"
+                const actionType = it.kind === "approval"
+                  ? "approval"
+                  : it.kind === "restore"
+                    ? String(it.operationCode ?? it.operation_code ?? "restore_snapshot")
+                    : String(it.actionCode ?? it.action_code ?? "maintenance");
+                const label = it.kind === "approval"
                   ? `Approval ${String(it.requestCode ?? it.request_code ?? String(it.id).slice(0, 8))}`
-                  : String(it.actionCode ?? it.action_code ?? it.restoreScopeType ?? "action");
-                const snapshotId = it.preActionSnapshotId ?? it.snapshotId ?? null;
+                  : String(it.targetLabel ?? it.target_label ?? it.moduleCode ?? it.module_code ?? actionType);
+                const snapshotId = it.preActionSnapshotId ?? it.snapshotId ?? it.preRestoreSnapshotId ?? null;
+                const reversible = (() => {
+                  if (it.kind === "restore") return !!it.preRestoreSnapshotId || !!it.pre_restore_snapshot_id;
+                  if (it.kind === "maintenance") return !!it.preActionSnapshotId || !!it.pre_action_snapshot_id || !!it.requiresSnapshot;
+                  return false;
+                })();
+                const dangerCls = risk === "critical" ? "bg-red-50" : risk === "high" ? "bg-amber-50" : "";
                 return (
-                  <button key={`${it.kind}:${it.id}`} className="w-full text-left p-3 hover:bg-slate-50" onClick={() => setSelected(it)}>
+                  <button
+                    key={`${it.kind}:${it.id}`}
+                    className={`w-full text-left p-3 hover:bg-slate-50 ${dangerCls}`}
+                    onClick={() => setLocation(`/platform/firms/${firmId}/history/${String(it.kind)}/${String(it.id)}`)}
+                  >
                     <div className="flex items-center justify-between gap-3">
                       <div className="min-w-0">
                         <div className="flex items-center gap-2 flex-wrap">
-                          <span className="text-sm font-medium text-slate-900">{action}</span>
+                          <span className="text-sm font-medium text-slate-900">{label}</span>
                           <RiskBadge level={risk} />
                           <StatusBadge status={status} />
+                          <span className="text-xs px-2 py-0.5 rounded border border-slate-200 bg-white text-slate-700">{actionType}</span>
+                          <span className={`text-xs px-2 py-0.5 rounded border ${reversible ? "border-green-200 bg-green-50 text-green-800" : "border-slate-200 bg-slate-50 text-slate-700"}`}>
+                            {reversible ? "reversible" : "irreversible"}
+                          </span>
                           {snapshotId ? <span className="text-xs text-slate-500">snapshot: {String(snapshotId).slice(0, 8)}</span> : null}
                         </div>
                         <div className="text-xs text-slate-500 mt-0.5">
-                          {String(it.targetLabel ?? it.target_label ?? it.moduleCode ?? it.module_code ?? "")}
+                          {String(it.kind)} · id {String(it.id).slice(0, 8)}
                         </div>
                       </div>
                       <div className="text-xs text-slate-400 shrink-0 text-right">
@@ -158,79 +238,20 @@ export function FirmActionHistoryTab({ firmId }: { firmId: number }) {
               })}
             </div>
           )}
+          <div className="mt-4 flex items-center justify-center">
+            <Button
+              variant="outline"
+              onClick={() => {
+                const next = pageInfo?.next_before ?? null;
+                if (next) setBefore(next);
+              }}
+              disabled={!pageInfo?.has_more || historyQuery.isFetching}
+            >
+              {historyQuery.isFetching ? "Loading..." : pageInfo?.has_more ? "Load more" : "No more"}
+            </Button>
+          </div>
         </CardContent>
       </Card>
-
-      <Dialog open={!!selected} onOpenChange={(o) => { if (!o) setSelected(null); }}>
-        <DialogContent className="max-w-3xl">
-          <DialogHeader>
-            <DialogTitle>Action Detail</DialogTitle>
-          </DialogHeader>
-          {selected?.kind === "approval" ? (
-            <div className="flex items-center justify-between gap-3">
-              <div className="text-sm text-slate-700">
-                Status: <span className="font-medium">{String(selected.status)}</span>
-              </div>
-              {String(selected.status) === "requested" ? (
-                <div className="flex gap-2">
-                  <Button
-                    variant="outline"
-                    disabled={!hasFounderPermission(user, "founder.approval.approve") || approveMutation.isPending}
-                    onClick={() => approveMutation.mutate({ id: String(selected.id), note: "" })}
-                  >
-                    Approve
-                  </Button>
-                  <Button
-                    variant="outline"
-                    disabled={!hasFounderPermission(user, "founder.approval.reject") || rejectMutation.isPending}
-                    onClick={() => rejectMutation.mutate({ id: String(selected.id), note: "" })}
-                  >
-                    Reject
-                  </Button>
-                </div>
-              ) : null}
-            </div>
-          ) : null}
-          {(selected?.kind === "maintenance" || selected?.kind === "restore") ? (
-            <div className="space-y-3">
-              {detailQuery.isError ? (
-                <QueryFallback title="Details unavailable" error={detailQuery.error} onRetry={() => detailQuery.refetch()} isRetrying={detailQuery.isFetching} />
-              ) : detailQuery.isLoading ? (
-                <div className="text-sm text-slate-500">Loading details...</div>
-              ) : detailQuery.data ? (
-                <div className="space-y-3">
-                  <div className="rounded border border-slate-200 p-3">
-                    <div className="text-xs text-slate-500 mb-1">Steps</div>
-                    <div className="rounded border border-slate-200 divide-y">
-                      {(detailQuery.data.steps ?? []).map((s: any) => (
-                        <div key={String(s.id)} className="p-2 text-xs flex items-center justify-between gap-3">
-                          <div className="min-w-0">
-                            <div className="font-mono text-slate-800">{String(s.stepCode ?? s.step_code)}</div>
-                            <div className="text-slate-500">{String(s.errorMessage ?? s.error_message ?? "")}</div>
-                          </div>
-                          <StatusBadge status={String(s.status ?? "")} />
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                  {detailQuery.data.approval ? (
-                    <div className="rounded border border-slate-200 p-3">
-                      <div className="text-xs text-slate-500 mb-1">Approval</div>
-                      <pre className="text-xs whitespace-pre-wrap break-words text-slate-700">{JSON.stringify(detailQuery.data.approval, null, 2)}</pre>
-                    </div>
-                  ) : null}
-                </div>
-              ) : null}
-            </div>
-          ) : null}
-          <div className="rounded border border-slate-200 bg-slate-50 p-3">
-            <pre className="text-xs whitespace-pre-wrap break-words text-slate-700">{JSON.stringify(selected, null, 2)}</pre>
-          </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setSelected(null)}>Close</Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
     </div>
   );
 }

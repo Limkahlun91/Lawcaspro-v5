@@ -13,14 +13,14 @@ export default function PlatformMonitoring() {
   });
   const { data: stats, isLoading: statsLoading } = statsQuery;
 
-  const firmsQuery = useQuery<{ data: Record<string, unknown>[] }>({
+  const firmsQuery = useQuery<{ items: Record<string, unknown>[] }>({
     queryKey: ["platform-firms-monitoring"],
     queryFn: () => apiFetchJson("/platform/firms?limit=50"),
     retry: false,
   });
   const { data: firmsData, isLoading: firmsLoading } = firmsQuery;
 
-  const firms = firmsData?.data ?? [];
+  const firms = firmsData?.items ?? [];
   const isLoading = statsLoading || firmsLoading;
 
   return (

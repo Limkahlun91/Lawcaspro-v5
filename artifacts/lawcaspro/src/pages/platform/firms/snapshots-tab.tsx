@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -6,6 +6,7 @@ import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Badge } from "@/components/ui/badge";
 import { QueryFallback } from "@/components/query-fallback";
 import { apiFetchJson } from "@/lib/api-client";
 import { unwrapApiData } from "@/lib/api-contract";
@@ -14,6 +15,7 @@ import { useToast } from "@/hooks/use-toast";
 import { DangerActionDialog, type DangerPreview } from "@/components/danger-action-dialog";
 import { useAuth } from "@/lib/auth-context";
 import { hasFounderPermission } from "@/lib/founder-permissions";
+import { getSupportSessionId } from "@/lib/support-session";
 
 type SnapshotRow = any;
 
@@ -25,19 +27,86 @@ export function FirmSnapshotsTab({ firmId, firmName }: { firmId: number; firmNam
   const [snapshotType, setSnapshotType] = useState<"settings" | "record" | "module" | "firm">("settings");
   const [scopeType, setScopeType] = useState<"settings" | "record" | "module" | "firm">("settings");
   const [moduleCode, setModuleCode] = useState<string>("projects");
+  const [settingsGroup, setSettingsGroup] = useState<"all" | "firm_profile" | "bank_accounts">("all");
+  const [recordEntityType, setRecordEntityType] = useState<"case" | "project" | "developer">("case");
   const [targetEntityId, setTargetEntityId] = useState("");
   const [reason, setReason] = useState("");
   const [note, setNote] = useState("");
   const [typed, setTyped] = useState("");
 
+  const [snapBefore, setSnapBefore] = useState<string | null>(null);
+  const [snapItems, setSnapItems] = useState<SnapshotRow[]>([]);
+  const [filterSnapshotType, setFilterSnapshotType] = useState<"" | "settings" | "record" | "module" | "firm">("");
+  const [filterStatus, setFilterStatus] = useState("");
+  const [filterPinned, setFilterPinned] = useState<"" | "pinned" | "unpinned">("");
+  const [filterTargetType, setFilterTargetType] = useState("");
+  const [filterTargetId, setFilterTargetId] = useState("");
+
+  const [restoreTargetKind, setRestoreTargetKind] = useState<"case" | "project" | "developer" | "settings_group">("case");
+  const [restoreKeyword, setRestoreKeyword] = useState("");
+  const [restoreSearchResults, setRestoreSearchResults] = useState<Array<{ entity_type: string; entity_id: string; label: string }>>([]);
+  const [restoreSelected, setRestoreSelected] = useState<{ entity_type: string; entity_id: string; label: string } | null>(null);
+  const [restoreSettingsGroup, setRestoreSettingsGroup] = useState<"firm_profile" | "bank_accounts">("firm_profile");
+
   const snapshotsQuery = useQuery({
-    queryKey: ["platform-firm-snapshots", firmId],
+    queryKey: ["platform-firm-snapshots", firmId, filterSnapshotType, filterStatus, filterPinned, filterTargetType, filterTargetId, snapBefore],
     queryFn: async () => {
-      const res = await apiFetchJson(`/platform/firms/${firmId}/snapshots?limit=50`);
-      return unwrapApiData<{ items: SnapshotRow[] }>(res);
+      const params = new URLSearchParams();
+      params.set("limit", "50");
+      if (filterSnapshotType) params.set("snapshot_type", filterSnapshotType);
+      if (filterStatus.trim()) params.set("status", filterStatus.trim());
+      if (filterPinned === "pinned") params.set("pinned", "true");
+      if (filterPinned === "unpinned") params.set("pinned", "false");
+      if (filterTargetType.trim()) params.set("target_entity_type", filterTargetType.trim());
+      if (filterTargetId.trim()) params.set("target_entity_id", filterTargetId.trim());
+      if (snapBefore) params.set("before", snapBefore);
+      const res = await apiFetchJson(`/platform/firms/${firmId}/snapshots?${params.toString()}`);
+      return unwrapApiData<{ items: SnapshotRow[]; page_info?: { has_more?: boolean; next_before?: string | null } }>(res);
     },
     retry: false,
   });
+
+  useEffect(() => {
+    setSnapBefore(null);
+    setSnapItems([]);
+  }, [firmId, filterPinned, filterSnapshotType, filterStatus, filterTargetId, filterTargetType]);
+
+  const searchTargetsMutation = useMutation({
+    mutationFn: async () => {
+      const q = restoreKeyword.trim();
+      if (restoreTargetKind === "settings_group") return [];
+      if (q.length < 2) throw new Error("Keyword must be at least 2 characters");
+      const res = await apiFetchJson(`/platform/firms/${firmId}/maintenance/search?entity_type=${encodeURIComponent(restoreTargetKind)}&q=${encodeURIComponent(q)}&limit=10`);
+      const data = unwrapApiData<{ items: any[] }>(res);
+      return (data.items ?? []).map((it: any) => ({
+        entity_type: String(it.entity_type ?? it.entityType ?? restoreTargetKind),
+        entity_id: String(it.entity_id ?? it.entityId ?? it.id ?? ""),
+        label: String(it.label ?? it.name ?? it.entity_id ?? it.id ?? ""),
+      })).filter((it: any) => it.entity_id);
+    },
+    onSuccess: (rows) => {
+      setRestoreSearchResults(rows);
+      if (rows.length === 0) setRestoreSelected(null);
+    },
+    onError: (e) => toastError(toast, e, "Search failed"),
+  });
+
+  useEffect(() => {
+    if (!snapshotsQuery.data?.items) return;
+    const next = snapshotsQuery.data.items;
+    setSnapItems((prev) => {
+      const base = snapBefore ? prev : [];
+      const seen = new Set(base.map((s: any) => String(s.id)));
+      const merged = [...base];
+      for (const s of next) {
+        const id = String((s as any).id);
+        if (seen.has(id)) continue;
+        seen.add(id);
+        merged.push(s);
+      }
+      return merged;
+    });
+  }, [snapBefore, snapshotsQuery.data?.items]);
 
   const createMutation = useMutation({
     mutationFn: async () => {
@@ -52,9 +121,14 @@ export function FirmSnapshotsTab({ firmId, firmName }: { firmId: number; firmNam
       };
       if (snapshotType === "module") body.module_code = moduleCode;
       if (snapshotType === "record") {
-        body.target_entity_type = "case";
+        body.target_entity_type = recordEntityType;
         body.target_entity_id = targetEntityId.trim();
-        body.target_label = targetEntityId.trim();
+        body.target_label = `${recordEntityType}:${targetEntityId.trim()}`;
+      }
+      if (snapshotType === "settings" && settingsGroup !== "all") {
+        body.target_entity_type = "settings";
+        body.target_entity_id = settingsGroup;
+        body.target_label = `settings:${settingsGroup}`;
       }
       if (snapshotType === "firm") {
         body.target_entity_type = "firm";
@@ -70,8 +144,10 @@ export function FirmSnapshotsTab({ firmId, firmName }: { firmId: number; firmNam
       setReason("");
       setNote("");
       setTyped("");
+      setSnapBefore(null);
+      setSnapItems([]);
       await qc.invalidateQueries({ queryKey: ["platform-firm-snapshots", firmId] });
-      await qc.invalidateQueries({ queryKey: ["platform-firm-history", firmId] });
+      await qc.invalidateQueries({ queryKey: ["platform-firm-history-v2", firmId] });
     },
     onError: (e) => toastError(toast, e, "Snapshot failed"),
   });
@@ -111,11 +187,13 @@ export function FirmSnapshotsTab({ firmId, firmName }: { firmId: number; firmNam
       setRestoreRequiredText(data.required_confirmation ?? null);
       setRestoreGovernance(data.governance ?? null);
       setRestoreStepUp(data.step_up ?? null);
+      const scope = String(data.preview?.restore_scope_type ?? snap.snapshotType ?? "settings");
+      const inferredRisk = scope === "settings" ? "medium" : "high";
       const p: DangerPreview = {
         action_code: "restore_snapshot",
-        scope_type: String(data.preview?.restore_scope_type ?? snap.snapshotType ?? "settings") as any,
+        scope_type: scope as any,
         module_code: String(snap.moduleCode ?? "settings") as any,
-        risk_level: (String(data.preview?.restore_scope_type ?? snap.snapshotType) === "settings" ? "medium" : "high") as any,
+        risk_level: inferredRisk as any,
         requires_snapshot: true,
         snapshot_strategy: "pre_restore",
         impact_summary: data.preview?.impact_summary ?? { settings_to_restore: 1 },
@@ -130,6 +208,83 @@ export function FirmSnapshotsTab({ firmId, firmName }: { firmId: number; firmNam
       toastError(toast, e, "Restore preview failed");
     }
   };
+
+  const rollbackCandidatesQuery = useQuery({
+    queryKey: ["platform-firm-rollback-candidates", firmId],
+    queryFn: async () => {
+      const res = await apiFetchJson(`/platform/firms/${firmId}/history?kind=restore&status=completed&limit=50`);
+      return unwrapApiData<{ items: unknown[] }>(res);
+    },
+    retry: false,
+  });
+
+  const supportQuery = useQuery({
+    queryKey: ["platform-firm-snapshots-support-session", firmId],
+    queryFn: async () => {
+      return await apiFetchJson<{ items: any[] }>(`/support-sessions?firmId=${firmId}`);
+    },
+    enabled: !!firmId,
+    retry: false,
+  });
+
+  const [rollbackDialogOpen, setRollbackDialogOpen] = useState(false);
+  const [rollbackPreview, setRollbackPreview] = useState<DangerPreview | null>(null);
+  const [rollbackActionId, setRollbackActionId] = useState<string | null>(null);
+  const [rollbackRequiredText, setRollbackRequiredText] = useState<string | null>(null);
+  const [rollbackGovernance, setRollbackGovernance] = useState<any | null>(null);
+  const [rollbackStepUp, setRollbackStepUp] = useState<any | null>(null);
+
+  const openRollback = async (sourceRestoreActionId: string, targetLabel: string) => {
+    try {
+      const res = await apiFetchJson(`/platform/firms/${firmId}/recovery/rollback/preview`, {
+        method: "POST",
+        body: JSON.stringify({ source_restore_action_id: sourceRestoreActionId }),
+      });
+      const data = unwrapApiData<any>(res);
+      setRollbackActionId(String(data.rollback_action_id));
+      setRollbackRequiredText(data.required_confirmation ?? null);
+      setRollbackGovernance(data.governance ?? null);
+      setRollbackStepUp(data.step_up ?? null);
+      const p: DangerPreview = {
+        action_code: "rollback_restore",
+        scope_type: String(data.preview?.restore_scope_type ?? "firm") as any,
+        module_code: "recovery" as any,
+        risk_level: "critical" as any,
+        requires_snapshot: true,
+        snapshot_strategy: "pre_restore",
+        impact_summary: data.preview?.impact_summary ?? { rollback: 1 },
+        dependency_summary: { has_blockers: false, blocking_items: [] },
+        warnings: [{ code: "ROLLBACK_REPLACES_STATE", message: "Rollback will overwrite current state using the pre-restore snapshot." }],
+        restore_availability: { available: true, notes: "Rollback creates a pre-rollback snapshot for safety." },
+        target: { entity_type: "restore_action", entity_id: sourceRestoreActionId, label: targetLabel },
+      };
+      setRollbackPreview(p);
+      setRollbackDialogOpen(true);
+    } catch (e) {
+      toastError(toast, e, "Rollback preview failed");
+    }
+  };
+
+  const rollbackMutation = useMutation({
+    mutationFn: async (payload: { reason: string; typed_confirmation: string | null; approval_request_id: string | null; step_up_challenge_id: string | null; step_up_phrase: string | null; emergency_flag: boolean }) => {
+      if (!rollbackActionId) throw new Error("Missing rollback_action_id");
+      const res = await apiFetchJson(`/platform/firms/${firmId}/recovery/rollback/execute`, {
+        method: "POST",
+        body: JSON.stringify({ rollback_action_id: rollbackActionId, reason: payload.reason, typed_confirmation: payload.typed_confirmation, approval_request_id: payload.approval_request_id, step_up_challenge_id: payload.step_up_challenge_id, step_up_phrase: payload.step_up_phrase, emergency_flag: payload.emergency_flag }),
+      });
+      return unwrapApiData(res);
+    },
+    onSuccess: async () => {
+      toast({ title: "Rollback completed" });
+      setRollbackDialogOpen(false);
+      setSnapBefore(null);
+      setSnapItems([]);
+      await qc.invalidateQueries({ queryKey: ["platform-firm-snapshots", firmId] });
+      await qc.invalidateQueries({ queryKey: ["platform-firm-history-v2", firmId] });
+      await qc.invalidateQueries({ queryKey: ["platform-firm-rollback-candidates", firmId] });
+    },
+    onError: (e) => toastError(toast, e, "Rollback failed"),
+  });
 
   const openPin = (snap: SnapshotRow) => {
     setPinSnapshotId(String(snap.id));
@@ -179,13 +334,19 @@ export function FirmSnapshotsTab({ firmId, firmName }: { firmId: number; firmNam
     onSuccess: async () => {
       toast({ title: "Restore completed" });
       setRestoreDialogOpen(false);
+      setSnapBefore(null);
+      setSnapItems([]);
       await qc.invalidateQueries({ queryKey: ["platform-firm-snapshots", firmId] });
-      await qc.invalidateQueries({ queryKey: ["platform-firm-history", firmId] });
+      await qc.invalidateQueries({ queryKey: ["platform-firm-history-v2", firmId] });
     },
     onError: (e) => toastError(toast, e, "Restore failed"),
   });
 
-  const snapshots = snapshotsQuery.data?.items ?? [];
+  const snapshots = snapItems;
+  const storedSupportSessionId = getSupportSessionId();
+  const latestSupport = (supportQuery.data?.items ?? [])[0] ?? null;
+  const latestStatus = latestSupport?.status ? String(latestSupport.status) : "";
+  const latestExpiresAt = latestSupport?.expiresAt ? String(latestSupport.expiresAt) : "";
 
   return (
     <div className="space-y-6">
@@ -195,6 +356,67 @@ export function FirmSnapshotsTab({ firmId, firmName }: { firmId: number; firmNam
           <Button onClick={() => setCreateOpen(true)} disabled={!hasFounderPermission(user, "founder.snapshot.create")}>Create Snapshot</Button>
         </CardHeader>
         <CardContent>
+          <div className="text-xs text-slate-600 mb-4">
+            Support session: {storedSupportSessionId ? <span className="font-mono">#{storedSupportSessionId}</span> : "—"}
+            {latestSupport ? (
+              <>
+                <span className="mx-2">·</span>
+                <Badge variant="outline" className="text-xs">{latestStatus || "unknown"}</Badge>
+                {latestExpiresAt ? <span className="text-xs text-slate-500"> · expires {new Date(latestExpiresAt).toLocaleString()}</span> : null}
+              </>
+            ) : null}
+          </div>
+          <div className="mb-4 grid grid-cols-1 md:grid-cols-5 gap-2">
+            <Select value={filterSnapshotType} onValueChange={(v) => setFilterSnapshotType(v as any)}>
+              <SelectTrigger><SelectValue placeholder="Snapshot type" /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="">All types</SelectItem>
+                <SelectItem value="settings">Settings</SelectItem>
+                <SelectItem value="record">Record</SelectItem>
+                <SelectItem value="module">Module</SelectItem>
+                <SelectItem value="firm">Firm</SelectItem>
+              </SelectContent>
+            </Select>
+            <Input value={filterStatus} onChange={(e) => setFilterStatus(e.target.value)} placeholder="Status (completed/failed/...)" />
+            <Select value={filterPinned} onValueChange={(v) => setFilterPinned(v as any)}>
+              <SelectTrigger><SelectValue placeholder="Pinned" /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="">All</SelectItem>
+                <SelectItem value="pinned">Pinned</SelectItem>
+                <SelectItem value="unpinned">Unpinned</SelectItem>
+              </SelectContent>
+            </Select>
+            <Input value={filterTargetType} onChange={(e) => setFilterTargetType(e.target.value)} placeholder="Target type (case/project/...)" />
+            <Input value={filterTargetId} onChange={(e) => setFilterTargetId(e.target.value)} placeholder="Target id" />
+          </div>
+          <div className="flex items-center gap-2 mb-4">
+            <Button
+              variant="outline"
+              onClick={() => {
+                setSnapBefore(null);
+                setSnapItems([]);
+                snapshotsQuery.refetch();
+              }}
+              disabled={snapshotsQuery.isFetching}
+            >
+              Apply filters
+            </Button>
+            <Button
+              variant="outline"
+              onClick={() => {
+                setFilterSnapshotType("");
+                setFilterStatus("");
+                setFilterPinned("");
+                setFilterTargetType("");
+                setFilterTargetId("");
+                setSnapBefore(null);
+                setSnapItems([]);
+              }}
+              disabled={snapshotsQuery.isFetching}
+            >
+              Reset
+            </Button>
+          </div>
           {snapshotsQuery.isError ? (
             <QueryFallback title="Snapshots unavailable" error={snapshotsQuery.error} onRetry={() => snapshotsQuery.refetch()} isRetrying={snapshotsQuery.isFetching} />
           ) : snapshotsQuery.isLoading ? (
@@ -207,8 +429,13 @@ export function FirmSnapshotsTab({ firmId, firmName }: { firmId: number; firmNam
                 <div key={String(s.id)} className="p-3 flex items-start justify-between gap-3">
                   <button className="text-left min-w-0" onClick={() => setSelectedSnapshot(s)}>
                     <div className="text-sm font-medium text-slate-900 truncate">{String(s.targetLabel ?? s.snapshotType ?? s.id)}</div>
-                    <div className="text-xs text-slate-500">
-                      {String(s.snapshotType)} · {String(s.triggerType)} · {String(s.status)}{s.pinnedAt ? " · pinned" : ""} · {new Date(String(s.createdAt)).toLocaleString()}
+                    <div className="flex items-center gap-2 flex-wrap mt-1">
+                      <Badge variant="outline" className="text-xs">{String(s.snapshotType)}</Badge>
+                      <Badge variant="outline" className="text-xs">{String(s.triggerType)}</Badge>
+                      <Badge variant="outline" className="text-xs">{String(s.status)}</Badge>
+                      {s.pinnedAt ? <Badge variant="outline" className="text-xs">pinned</Badge> : null}
+                      {s.restorable === false ? <Badge variant="outline" className="text-xs">not restorable</Badge> : null}
+                      <span className="text-xs text-slate-500">{new Date(String(s.createdAt)).toLocaleString()}</span>
                     </div>
                   </button>
                   <div className="flex gap-2 shrink-0">
@@ -224,11 +451,7 @@ export function FirmSnapshotsTab({ firmId, firmName }: { firmId: number; firmNam
                         || (String(s.snapshotType) === "module" && String(s.moduleCode) !== "projects")
                       }
                     >
-                      {String(s.snapshotType) === "settings"
-                        ? "Restore settings"
-                        : String(s.snapshotType) === "module"
-                          ? "Restore projects"
-                          : "Restore"}
+                      {String(s.snapshotType) === "firm" ? "Restore" : "Restore"}
                     </Button>
                     <Button
                       variant="outline"
@@ -251,6 +474,223 @@ export function FirmSnapshotsTab({ firmId, firmName }: { firmId: number; firmNam
               ))}
             </div>
           )}
+          <div className="mt-4 flex items-center justify-center">
+            <Button
+              variant="outline"
+              onClick={() => {
+                const next = (snapshotsQuery.data as any)?.page_info?.next_before ?? null;
+                if (next) setSnapBefore(String(next));
+              }}
+              disabled={!((snapshotsQuery.data as any)?.page_info?.has_more) || snapshotsQuery.isFetching}
+            >
+              {snapshotsQuery.isFetching ? "Loading..." : ((snapshotsQuery.data as any)?.page_info?.has_more ? "Load more" : "No more")}
+            </Button>
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Record-level restore</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
+            <Select value={restoreTargetKind} onValueChange={(v) => {
+              setRestoreTargetKind(v as any);
+              setRestoreSearchResults([]);
+              setRestoreSelected(null);
+              setRestoreKeyword("");
+            }}>
+              <SelectTrigger><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="case">Case</SelectItem>
+                <SelectItem value="project">Project</SelectItem>
+                <SelectItem value="developer">Developer</SelectItem>
+                <SelectItem value="settings_group">Settings group</SelectItem>
+              </SelectContent>
+            </Select>
+
+            {restoreTargetKind === "settings_group" ? (
+              <Select value={restoreSettingsGroup} onValueChange={(v) => setRestoreSettingsGroup(v as any)}>
+                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="firm_profile">Firm profile</SelectItem>
+                  <SelectItem value="bank_accounts">Bank accounts</SelectItem>
+                </SelectContent>
+              </Select>
+            ) : (
+              <Input value={restoreKeyword} onChange={(e) => setRestoreKeyword(e.target.value)} placeholder="Search keyword (name/title)" />
+            )}
+
+            <Button
+              variant="outline"
+              onClick={() => searchTargetsMutation.mutate()}
+              disabled={restoreTargetKind === "settings_group" || searchTargetsMutation.isPending || restoreKeyword.trim().length < 2}
+            >
+              {searchTargetsMutation.isPending ? "Searching..." : "Search"}
+            </Button>
+          </div>
+
+          {restoreTargetKind !== "settings_group" ? (
+            <div className="rounded border border-slate-200 divide-y">
+              {(restoreSearchResults ?? []).length ? (
+                restoreSearchResults.map((r) => (
+                  <button
+                    key={`${r.entity_type}:${r.entity_id}`}
+                    className={`w-full text-left p-2 text-sm hover:bg-slate-50 ${restoreSelected?.entity_id === r.entity_id && restoreSelected?.entity_type === r.entity_type ? "bg-slate-50" : ""}`}
+                    onClick={() => setRestoreSelected(r)}
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="min-w-0">
+                        <div className="text-slate-900 truncate">{r.label}</div>
+                        <div className="text-xs text-slate-500 font-mono">{r.entity_type}:{r.entity_id}</div>
+                      </div>
+                      {restoreSelected?.entity_id === r.entity_id && restoreSelected?.entity_type === r.entity_type ? <Badge variant="outline" className="text-xs">selected</Badge> : null}
+                    </div>
+                  </button>
+                ))
+              ) : (
+                <div className="p-3 text-sm text-slate-500">Search a target to restore (case/project/developer).</div>
+              )}
+            </div>
+          ) : (
+            <div className="text-sm text-slate-600">
+              Selected group: <span className="font-mono">{restoreSettingsGroup}</span>
+            </div>
+          )}
+
+          <div className="flex gap-2 flex-wrap">
+            <Button
+              variant="outline"
+              onClick={() => {
+                setSnapBefore(null);
+                setSnapItems([]);
+                if (restoreTargetKind === "settings_group") {
+                  setFilterSnapshotType("settings");
+                  setFilterTargetType("settings");
+                  setFilterTargetId(restoreSettingsGroup);
+                  return;
+                }
+                if (!restoreSelected) return;
+                setFilterSnapshotType("record");
+                setFilterTargetType(restoreSelected.entity_type);
+                setFilterTargetId(restoreSelected.entity_id);
+              }}
+              disabled={restoreTargetKind !== "settings_group" && !restoreSelected}
+            >
+              Filter snapshots
+            </Button>
+            <Button
+              variant="outline"
+              onClick={() => {
+                if (restoreTargetKind === "settings_group") {
+                  setSnapshotType("settings");
+                  setScopeType("settings");
+                  setSettingsGroup(restoreSettingsGroup);
+                  setCreateOpen(true);
+                  return;
+                }
+                if (!restoreSelected) return;
+                setSnapshotType("record");
+                setScopeType("record");
+                setRecordEntityType(restoreSelected.entity_type as any);
+                setTargetEntityId(restoreSelected.entity_id);
+                setCreateOpen(true);
+              }}
+              disabled={restoreTargetKind !== "settings_group" && !restoreSelected}
+            >
+              Create snapshot
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={async () => {
+                const params = new URLSearchParams();
+                params.set("limit", "1");
+                if (restoreTargetKind === "settings_group") {
+                  params.set("snapshot_type", "settings");
+                  params.set("target_entity_type", "settings");
+                  params.set("target_entity_id", restoreSettingsGroup);
+                } else {
+                  if (!restoreSelected) throw new Error("Select a target first");
+                  params.set("snapshot_type", "record");
+                  params.set("target_entity_type", restoreSelected.entity_type);
+                  params.set("target_entity_id", restoreSelected.entity_id);
+                }
+                const res = await apiFetchJson(`/platform/firms/${firmId}/snapshots?${params.toString()}`);
+                const data = unwrapApiData<{ items: any[] }>(res);
+                const latest = (data.items ?? [])[0] ?? null;
+                if (!latest) throw new Error("No snapshots found for this target");
+                await openRestore(latest);
+              }}
+              disabled={!hasFounderPermission(user, "founder.snapshot.restore.preview")}
+            >
+              Preview restore latest
+            </Button>
+          </div>
+
+          <div className="text-xs text-slate-500">
+            Supported: settings group restore (firm_profile, bank_accounts) · record restore (case, project, developer) · module restore (projects).
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Rollback (Undo Restore)</CardTitle>
+        </CardHeader>
+        <CardContent>
+          {rollbackCandidatesQuery.isError ? (
+            <QueryFallback title="Rollback candidates unavailable" error={rollbackCandidatesQuery.error} onRetry={() => rollbackCandidatesQuery.refetch()} isRetrying={rollbackCandidatesQuery.isFetching} />
+          ) : rollbackCandidatesQuery.isLoading ? (
+            <div className="text-sm text-slate-500 py-6 text-center">Loading rollback candidates...</div>
+          ) : (
+            <div className="rounded border border-slate-200 divide-y">
+              {(rollbackCandidatesQuery.data?.items ?? [])
+                .filter((it: unknown) => {
+                  const o = it && typeof it === "object" && !Array.isArray(it) ? (it as Record<string, unknown>) : null;
+                  if (!o) return false;
+                  const kind = typeof o["kind"] === "string" ? o["kind"] : null;
+                  const operationCode = typeof o["operationCode"] === "string" ? o["operationCode"] : "restore_snapshot";
+                  const status = typeof o["status"] === "string" ? o["status"] : null;
+                  const preRestoreSnapshotId = o["preRestoreSnapshotId"];
+                  return kind === "restore" && operationCode === "restore_snapshot" && status === "completed" && !!preRestoreSnapshotId;
+                })
+                .slice(0, 10)
+                .map((it: unknown) => {
+                  const o = it && typeof it === "object" && !Array.isArray(it) ? (it as Record<string, unknown>) : null;
+                  if (!o) return null;
+                  const id = String(o["id"] ?? "");
+                  const label = String(o["targetLabel"] ?? o["id"] ?? "");
+                  const createdAt = String(o["createdAt"] ?? "");
+                  return (
+                    <div key={id} className="p-3 flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="text-sm font-medium text-slate-900 truncate">{label}</div>
+                      <div className="text-xs text-slate-500">restore_action · completed · {createdAt ? new Date(createdAt).toLocaleString() : "—"}</div>
+                    </div>
+                    <Button
+                      variant="destructive"
+                      size="sm"
+                      onClick={() => openRollback(id, label)}
+                      disabled={!hasFounderPermission(user, "founder.recovery.preview")}
+                    >
+                      Preview rollback
+                    </Button>
+                  </div>
+                  );
+                })}
+              {(rollbackCandidatesQuery.data?.items ?? []).filter((it: unknown) => {
+                const o = it && typeof it === "object" && !Array.isArray(it) ? (it as Record<string, unknown>) : null;
+                if (!o) return false;
+                const kind = typeof o["kind"] === "string" ? o["kind"] : null;
+                const status = typeof o["status"] === "string" ? o["status"] : null;
+                const preRestoreSnapshotId = o["preRestoreSnapshotId"];
+                return kind === "restore" && status === "completed" && !!preRestoreSnapshotId;
+              }).length === 0 ? (
+                <div className="text-sm text-slate-500 py-6 text-center">No completed restores with rollback available yet.</div>
+              ) : null}
+            </div>
+          )}
         </CardContent>
       </Card>
 
@@ -267,7 +707,7 @@ export function FirmSnapshotsTab({ firmId, firmName }: { firmId: number; firmNam
                   <SelectTrigger><SelectValue /></SelectTrigger>
                   <SelectContent>
                     <SelectItem value="settings">Settings</SelectItem>
-                    <SelectItem value="record">Single case</SelectItem>
+                    <SelectItem value="record">Single record</SelectItem>
                     <SelectItem value="module">Module snapshot</SelectItem>
                     <SelectItem value="firm">Firm summary</SelectItem>
                   </SelectContent>
@@ -287,8 +727,30 @@ export function FirmSnapshotsTab({ firmId, firmName }: { firmId: number; firmNam
                 </div>
               ) : snapshotType === "record" ? (
                 <div className="space-y-1">
-                  <div className="text-xs text-slate-500">Case ID</div>
-                  <Input value={targetEntityId} onChange={(e) => setTargetEntityId(e.target.value)} placeholder="Case ID" />
+                  <div className="text-xs text-slate-500">Record</div>
+                  <Select value={recordEntityType} onValueChange={(v) => setRecordEntityType(v as any)}>
+                    <SelectTrigger><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="case">Case</SelectItem>
+                      <SelectItem value="project">Project</SelectItem>
+                      <SelectItem value="developer">Developer</SelectItem>
+                    </SelectContent>
+                  </Select>
+                  <div className="mt-2">
+                    <Input value={targetEntityId} onChange={(e) => setTargetEntityId(e.target.value)} placeholder="Record ID" />
+                  </div>
+                </div>
+              ) : snapshotType === "settings" ? (
+                <div className="space-y-1">
+                  <div className="text-xs text-slate-500">Settings group</div>
+                  <Select value={settingsGroup} onValueChange={(v) => setSettingsGroup(v as any)}>
+                    <SelectTrigger><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="all">All</SelectItem>
+                      <SelectItem value="firm_profile">Firm profile</SelectItem>
+                      <SelectItem value="bank_accounts">Bank accounts</SelectItem>
+                    </SelectContent>
+                  </Select>
                 </div>
               ) : (
                 <div className="space-y-1">
@@ -376,6 +838,33 @@ export function FirmSnapshotsTab({ firmId, firmName }: { firmId: number; firmNam
         targetLabelHint={null}
         isExecuting={restoreMutation.isPending}
         onExecute={(payload) => restoreMutation.mutateAsync(payload)}
+      />
+
+      <DangerActionDialog
+        open={rollbackDialogOpen}
+        onOpenChange={setRollbackDialogOpen}
+        title="Rollback (undo restore)"
+        preview={rollbackPreview}
+        requiredConfirmationText={rollbackRequiredText}
+        governance={rollbackGovernance}
+        stepUp={rollbackStepUp}
+        canRequestApproval={hasFounderPermission(user, "founder.approval.request")}
+        onRequestApproval={async (payload) => {
+          if (!rollbackActionId) throw new Error("Missing rollback_action_id");
+          const res = await apiFetchJson(`/platform/firms/${firmId}/recovery/rollback/request-approval`, {
+            method: "POST",
+            body: JSON.stringify({ rollback_action_id: rollbackActionId, reason: payload.reason, detailed_note: payload.detailed_note, emergency_flag: payload.emergency_flag }),
+          });
+          const data = unwrapApiData<any>(res);
+          const approval = data.approval ?? data;
+          return { id: String(approval.id), requestCode: String(approval.requestCode ?? ""), status: String(approval.status ?? "") };
+        }}
+        requireFirmName={true}
+        firmNameHint={firmName}
+        requireTargetLabel={false}
+        targetLabelHint={null}
+        isExecuting={rollbackMutation.isPending}
+        onExecute={(payload) => rollbackMutation.mutateAsync(payload)}
       />
 
       <DangerActionDialog

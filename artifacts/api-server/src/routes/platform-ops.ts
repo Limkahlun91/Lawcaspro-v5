@@ -1,11 +1,11 @@
 import { Router, type IRouter } from "express";
-import { and, desc, eq, sql } from "drizzle-orm";
-import { platformApprovalRequestsTable, platformMaintenanceActionStepsTable, platformMaintenanceActionsTable, platformRestoreActionStepsTable, platformRestoreActionsTable } from "@workspace/db";
+import { and, desc, eq, ilike, sql } from "drizzle-orm";
+import { auditLogsTable, platformApprovalEventsTable, platformApprovalRequestsTable, platformMaintenanceActionStepsTable, platformMaintenanceActionsTable, platformRestoreActionStepsTable, platformRestoreActionsTable } from "@workspace/db";
 import { withAuthSafeDb } from "../lib/auth-safe-db";
 import { requireAuth, requireFounder, type AuthRequest, writeAuditLog } from "../lib/auth";
 import { ApiError, parseIntParam, sendError, sendOk } from "../lib/api-response";
 import { assertActiveSupportSessionForFirm, assertFounderPermission, createApprovalRequest, createStepUpChallenge, defaultStepUpPhrase, evaluateDecisionForExecute, evaluateDecisionForPreview, loadFounderGovernanceContext } from "../services/founder-governance";
-import { FOUNDER_ACTION_REGISTRY } from "../services/platform-action-registry";
+import { FOUNDER_ACTION_REGISTRY, FOUNDER_RESTORE_OPERATION_REGISTRY } from "../services/platform-action-registry";
 import {
   createMaintenanceActionPreviewRecord,
   createRestorePreviewRecord,
@@ -13,9 +13,12 @@ import {
   executeMaintenanceAction,
   getSnapshotDetail,
   listSnapshots,
+  listSnapshotsPaged,
   pinSnapshot,
   previewMaintenanceAction,
   restoreCaseRecordFromSnapshot,
+  restoreDeveloperRecordFromSnapshot,
+  restoreProjectRecordFromSnapshot,
   restoreProjectsModuleFromSnapshot,
   restoreSettingsFromSnapshot,
   searchTargets,
@@ -55,6 +58,13 @@ router.get("/platform/firms/:firmId/ops/summary", requireAuth, requireFounder, a
         .orderBy(desc(platformRestoreActionsTable.createdAt))
         .limit(1);
 
+      const [latestRollback] = await authDb
+        .select()
+        .from(platformRestoreActionsTable)
+        .where(and(eq(platformRestoreActionsTable.firmId, firmId), eq(platformRestoreActionsTable.operationCode, "rollback_restore")))
+        .orderBy(desc(platformRestoreActionsTable.createdAt))
+        .limit(1);
+
       const [pendingApprovalsRow] = await authDb
         .select({ c: sql<number>`COUNT(*)::int` })
         .from(platformApprovalRequestsTable)
@@ -80,6 +90,7 @@ router.get("/platform/firms/:firmId/ops/summary", requireAuth, requireFounder, a
         latest_snapshot: latestSnapshot,
         latest_maintenance: latestMaintenance ?? null,
         latest_restore: latestRestore ?? null,
+        latest_rollback: latestRollback ?? null,
         counts: {
           pending_approvals: pendingApprovals,
           running_maintenance: runningMaintenance,
@@ -99,7 +110,7 @@ router.get("/platform/action-registry", requireAuth, requireFounder, async (req:
     const result = await withAuthSafeDb(async (authDb) => {
       const ctx = await loadFounderGovernanceContext(authDb, req);
       assertFounderPermission(ctx, "founder.maintenance.read");
-      return { actions: FOUNDER_ACTION_REGISTRY };
+      return { actions: FOUNDER_ACTION_REGISTRY, restore_operations: FOUNDER_RESTORE_OPERATION_REGISTRY };
     }, { retry: true, allowUnsafe: true, ctx: { route: "GET /platform/action-registry", firmId: null } });
 
     sendOk(res, result);
@@ -159,7 +170,14 @@ router.get("/platform/firms/:firmId/maintenance/actions/:actionId", requireAuth,
       const approval = action.approvalRequestId
         ? (await authDb.select().from(platformApprovalRequestsTable).where(eq(platformApprovalRequestsTable.id, action.approvalRequestId)))[0] ?? null
         : null;
-      return { action, steps, approval };
+      const pattern = `%${actionId}%`;
+      const audit = await authDb
+        .select()
+        .from(auditLogsTable)
+        .where(and(eq(auditLogsTable.firmId, firmId), sql`COALESCE(${auditLogsTable.detail}, '') ILIKE ${pattern}`))
+        .orderBy(desc(auditLogsTable.createdAt))
+        .limit(50);
+      return { action, steps, approval, audit };
     }, { retry: true, allowUnsafe: true, ctx: { route: "GET /platform/firms/:firmId/maintenance/actions/:actionId", firmId } });
 
     sendOk(res, result);
@@ -193,7 +211,14 @@ router.get("/platform/firms/:firmId/restore/actions/:restoreActionId", requireAu
       const approval = action.approvalRequestId
         ? (await authDb.select().from(platformApprovalRequestsTable).where(eq(platformApprovalRequestsTable.id, action.approvalRequestId)))[0] ?? null
         : null;
-      return { action, steps, approval };
+      const pattern = `%${restoreActionId}%`;
+      const audit = await authDb
+        .select()
+        .from(auditLogsTable)
+        .where(and(eq(auditLogsTable.firmId, firmId), sql`COALESCE(${auditLogsTable.detail}, '') ILIKE ${pattern}`))
+        .orderBy(desc(auditLogsTable.createdAt))
+        .limit(50);
+      return { action, steps, approval, audit };
     }, { retry: true, allowUnsafe: true, ctx: { route: "GET /platform/firms/:firmId/restore/actions/:restoreActionId", firmId } });
 
     sendOk(res, result);
@@ -351,19 +376,60 @@ router.get("/platform/firms/:firmId/maintenance/search", requireAuth, requireFou
 router.get("/platform/firms/:firmId/snapshots", requireAuth, requireFounder, async (req: AuthRequest, res) => {
   try {
     const firmId = parseIntParam("firmId", req.params.firmId, { required: true, min: 1 })!;
+    const one = (v: unknown): string | undefined =>
+      typeof v === "string" ? v : Array.isArray(v) && typeof v[0] === "string" ? v[0] : undefined;
     const limit = (() => {
       const v = req.query.limit;
       const raw = typeof v === "string" ? v : Array.isArray(v) && typeof v[0] === "string" ? v[0] : undefined;
       const n = raw ? Number.parseInt(raw, 10) : 50;
       return Number.isFinite(n) ? Math.min(Math.max(n, 1), 100) : 50;
     })();
-    const items = await withAuthSafeDb(async (authDb) => {
+    const snapshotType = (() => {
+      const raw = one((req.query as any).snapshot_type);
+      return raw ? String(raw).trim() : null;
+    })();
+    const status = (() => {
+      const raw = one((req.query as any).status);
+      return raw ? String(raw).trim() : null;
+    })();
+    const triggerType = (() => {
+      const raw = one((req.query as any).trigger_type);
+      return raw ? String(raw).trim() : null;
+    })();
+    const pinned = (() => {
+      const raw = one((req.query as any).pinned);
+      if (!raw) return null;
+      const v = String(raw).trim().toLowerCase();
+      if (v === "true" || v === "1" || v === "yes") return true;
+      if (v === "false" || v === "0" || v === "no") return false;
+      return null;
+    })();
+    const targetEntityType = (() => {
+      const raw = one((req.query as any).target_entity_type);
+      return raw ? String(raw).trim() : null;
+    })();
+    const targetEntityId = (() => {
+      const raw = one((req.query as any).target_entity_id);
+      return raw ? String(raw).trim() : null;
+    })();
+    const before = (() => {
+      const raw = one((req.query as any).before);
+      if (!raw) return null;
+      const d = new Date(String(raw));
+      return Number.isFinite(d.getTime()) ? d : null;
+    })();
+
+    const result = await withAuthSafeDb(async (authDb) => {
       const ctx = await loadFounderGovernanceContext(authDb, req);
       assertFounderPermission(ctx, "founder.snapshot.read");
       assertActiveSupportSessionForFirm(ctx, firmId);
-      return await listSnapshots(authDb, firmId, limit);
+      const rows = await listSnapshotsPaged(authDb, { firmId, limit: Math.min(limit + 1, 101), before, snapshotType, status, pinned, targetEntityType, targetEntityId, triggerType });
+      const hasMore = rows.length > limit;
+      const items = rows.slice(0, limit);
+      const nextBefore = items.length ? (items[items.length - 1] as any).createdAt : null;
+      return { items, page_info: { limit, has_more: hasMore, next_before: nextBefore }, filters_applied: { snapshot_type: snapshotType, status, pinned, target_entity_type: targetEntityType, target_entity_id: targetEntityId, trigger_type: triggerType, before } };
     }, { retry: true, allowUnsafe: true, ctx: { route: "GET /platform/firms/:firmId/snapshots", firmId } });
-    sendOk(res, { items });
+    sendOk(res, result);
   } catch (err) {
     sendError(res, err);
   }
@@ -573,7 +639,9 @@ router.post("/platform/firms/:firmId/restore/preview", requireAuth, requireFound
 
       const restoreActionId = await createRestorePreviewRecord(authDb, {
         firmId,
+        operationCode: "restore_snapshot",
         snapshotId,
+        rollbackSourceRestoreActionId: null,
         restoreScopeType: scopeType,
         moduleCode: (detail.snapshot.moduleCode ?? null) as any,
         targetEntityType: (detail.snapshot.targetEntityType ?? null) as any,
@@ -670,6 +738,8 @@ router.post("/platform/firms/:firmId/restore/execute", requireAuth, requireFound
       if (op.restoreScopeType === "settings") return await restoreSettingsFromSnapshot(authDb, common);
       if (op.restoreScopeType === "module" && op.moduleCode === "projects") return await restoreProjectsModuleFromSnapshot(authDb, common);
       if (op.restoreScopeType === "record" && op.targetEntityType === "case") return await restoreCaseRecordFromSnapshot(authDb, common);
+      if (op.restoreScopeType === "record" && op.targetEntityType === "project") return await restoreProjectRecordFromSnapshot(authDb, common);
+      if (op.restoreScopeType === "record" && op.targetEntityType === "developer") return await restoreDeveloperRecordFromSnapshot(authDb, common);
       throw new ApiError({ status: 422, code: "UNSUPPORTED_OPERATION", message: "Restore scope not supported", retryable: false });
     }, { retry: true, allowUnsafe: true, ctx: { route: "POST /platform/firms/:firmId/restore/execute", firmId } });
 
@@ -746,6 +816,240 @@ router.post("/platform/firms/:firmId/maintenance/request-approval", requireAuth,
   }
 });
 
+router.post("/platform/firms/:firmId/recovery/rollback/preview", requireAuth, requireFounder, async (req: AuthRequest, res) => {
+  try {
+    const firmId = parseIntParam("firmId", req.params.firmId, { required: true, min: 1 })!;
+    const body = req.body as { source_restore_action_id?: string };
+    const sourceRestoreActionId = String(body.source_restore_action_id ?? "").trim();
+    if (!sourceRestoreActionId) throw new ApiError({ status: 400, code: "MISSING_REQUIRED_FIELD", message: "source_restore_action_id is required", retryable: false });
+
+    const result = await withAuthSafeDb(async (authDb) => {
+      const ctx = await loadFounderGovernanceContext(authDb, req);
+      assertFounderPermission(ctx, "founder.recovery.preview");
+      assertActiveSupportSessionForFirm(ctx, firmId);
+
+      const [source] = await authDb.select().from(platformRestoreActionsTable).where(and(eq(platformRestoreActionsTable.id, sourceRestoreActionId), eq(platformRestoreActionsTable.firmId, firmId)));
+      if (!source) throw new ApiError({ status: 404, code: "ACTION_NOT_FOUND", message: "Source restore action not found", retryable: false });
+      if (String(source.operationCode ?? "restore_snapshot") !== "restore_snapshot") {
+        throw new ApiError({ status: 422, code: "UNSUPPORTED_OPERATION", message: "Only snapshot restores can be rolled back", retryable: false });
+      }
+      if (source.status !== "completed") {
+        throw new ApiError({ status: 409, code: "TARGET_STATE_CONFLICT", message: "Source restore action is not completed", retryable: true, details: { status: source.status } });
+      }
+      if (!source.preRestoreSnapshotId) {
+        throw new ApiError({ status: 409, code: "ROLLBACK_UNAVAILABLE", message: "Pre-restore snapshot is missing; rollback unavailable", retryable: false });
+      }
+
+      const snapshotId = String(source.preRestoreSnapshotId);
+      const detail = await getSnapshotDetail(authDb, firmId, snapshotId);
+      if (String(detail.snapshot.status ?? "") !== "completed") {
+        throw new ApiError({ status: 409, code: "SNAPSHOT_NOT_RESTORABLE", message: "Pre-restore snapshot is not completed", retryable: false });
+      }
+      if (!detail.snapshot.restorable) {
+        throw new ApiError({ status: 409, code: "SNAPSHOT_NOT_RESTORABLE", message: "Pre-restore snapshot is not restorable", retryable: false });
+      }
+      if (String(detail.snapshot.integrityStatus ?? "valid") !== "valid") {
+        throw new ApiError({ status: 409, code: "SNAPSHOT_NOT_RESTORABLE", message: "Pre-restore snapshot integrity is not valid", retryable: false, details: { integrity_status: detail.snapshot.integrityStatus ?? null } });
+      }
+
+      const impact: Record<string, number> = { snapshot_items: detail.items.length };
+      for (const it of detail.items) {
+        const obj = it && typeof it === "object" && !Array.isArray(it) ? (it as Record<string, unknown>) : null;
+        const k = obj && typeof obj["itemType"] === "string" ? String(obj["itemType"]) : "";
+        if (!k) continue;
+        impact[`snapshot_${k}`] = (impact[`snapshot_${k}`] ?? 0) + 1;
+      }
+      const previewPayload = {
+        mode: "rollback",
+        operation_code: "rollback_restore",
+        source_restore_action_id: sourceRestoreActionId,
+        rollback_to_snapshot_id: snapshotId,
+        restore_scope_type: source.restoreScopeType,
+        impact_summary: impact,
+        warnings: [{ code: "ROLLBACK_REPLACES_STATE", message: "Rollback will overwrite current state using the pre-restore snapshot." }],
+      };
+
+      const rollbackActionId = await createRestorePreviewRecord(authDb, {
+        firmId,
+        operationCode: "rollback_restore",
+        snapshotId,
+        rollbackSourceRestoreActionId: sourceRestoreActionId,
+        restoreScopeType: source.restoreScopeType as MaintenanceScopeType,
+        moduleCode: source.moduleCode ?? null,
+        targetEntityType: source.targetEntityType ?? null,
+        targetEntityId: source.targetEntityId ?? null,
+        targetLabel: source.targetLabel ?? null,
+        riskLevel: "critical",
+        requestedByUserId: req.userId!,
+        requestedByEmail: req.email ?? null,
+        previewPayload,
+      });
+
+      const decision = evaluateDecisionForPreview({
+        actionCode: "rollback_restore",
+        riskLevel: "critical",
+        scopeType: source.restoreScopeType as MaintenanceScopeType,
+        moduleCode: source.moduleCode ?? null,
+        actorPermissions: ctx.permissions,
+        impersonation: ctx.impersonation.active,
+      });
+      const stepUp = decision.challengePhraseRequired || decision.cooldownSecondsRequired > 0
+        ? await createStepUpChallenge(authDb, {
+          firmId,
+          actionCode: "rollback_restore",
+          riskLevel: "critical",
+          scopeType: source.restoreScopeType as MaintenanceScopeType,
+          moduleCode: source.moduleCode ?? null,
+          targetEntityType: source.targetEntityType ?? null,
+          targetEntityId: source.targetEntityId ?? null,
+          requiredPhrase: defaultStepUpPhrase({ actionCode: "rollback_restore", firmSlugOrName: String(firmId) }),
+          cooldownSeconds: decision.cooldownSecondsRequired,
+          expiresInSeconds: 15 * 60,
+          issuedToUserId: req.userId!,
+          issuedToEmail: req.email ?? null,
+        })
+        : null;
+
+      await writeAuditLog(
+        {
+          firmId,
+          actorId: req.userId,
+          actorType: "founder",
+          action: "firm.recovery.rollback.previewed",
+          entityType: String(source.targetEntityType ?? source.moduleCode ?? "firm"),
+          entityId: source.targetEntityType === "case" ? Number(source.targetEntityId) : undefined,
+          detail: JSON.stringify({ rollbackActionId, sourceRestoreActionId, snapshotId, scopeType: source.restoreScopeType, policy: decision.approvalPolicyCode }),
+          ipAddress: req.ip,
+          userAgent: req.headers["user-agent"],
+        },
+        { db: authDb, strict: false }
+      );
+
+      return { preview: previewPayload, rollback_action_id: rollbackActionId, governance: decision, step_up: stepUp };
+    }, { retry: true, allowUnsafe: true, ctx: { route: "POST /platform/firms/:firmId/recovery/rollback/preview", firmId } });
+
+    sendOk(res, { preview: result.preview, rollback_action_id: result.rollback_action_id, required_confirmation: requiredTypedConfirmation("critical"), governance: result.governance, step_up: result.step_up });
+  } catch (err) {
+    sendError(res, err);
+  }
+});
+
+router.post("/platform/firms/:firmId/recovery/rollback/request-approval", requireAuth, requireFounder, async (req: AuthRequest, res) => {
+  try {
+    const firmId = parseIntParam("firmId", req.params.firmId, { required: true, min: 1 })!;
+    const body = req.body as { rollback_action_id?: string; reason?: string; detailed_note?: string; emergency_flag?: boolean };
+    const rollbackActionId = String(body.rollback_action_id ?? "").trim();
+    if (!rollbackActionId) throw new ApiError({ status: 400, code: "MISSING_REQUIRED_FIELD", message: "rollback_action_id is required", retryable: false });
+    const reason = String(body.reason ?? "").trim();
+    if (reason.length < 10) throw new ApiError({ status: 422, code: "INVALID_INPUT", message: "Reason must be at least 10 characters", retryable: false });
+
+    const result = await withAuthSafeDb(async (authDb) => {
+      const ctx = await loadFounderGovernanceContext(authDb, req);
+      assertFounderPermission(ctx, "founder.approval.request");
+      assertFounderPermission(ctx, "founder.recovery.preview");
+      assertActiveSupportSessionForFirm(ctx, firmId);
+
+      const [op] = await authDb.select().from(platformRestoreActionsTable).where(and(eq(platformRestoreActionsTable.id, rollbackActionId), eq(platformRestoreActionsTable.firmId, firmId)));
+      if (!op) throw new ApiError({ status: 404, code: "ACTION_NOT_FOUND", message: "Rollback action not found", retryable: false });
+      if (String(op.operationCode ?? "") !== "rollback_restore") throw new ApiError({ status: 422, code: "UNSUPPORTED_OPERATION", message: "Not a rollback action", retryable: false });
+      if (op.status !== "previewed") throw new ApiError({ status: 409, code: "TARGET_STATE_CONFLICT", message: "Rollback action is not in previewed state", retryable: true });
+
+      const decision = evaluateDecisionForPreview({
+        actionCode: "rollback_restore",
+        riskLevel: op.riskLevel as any,
+        scopeType: op.restoreScopeType as any,
+        moduleCode: op.moduleCode ?? null,
+        actorPermissions: ctx.permissions,
+        impersonation: ctx.impersonation.active,
+      });
+      if (!decision.approvalRequired) throw new ApiError({ status: 422, code: "UNSUPPORTED_OPERATION", message: "Approval is not required for this rollback", retryable: false });
+
+      const approval = await createApprovalRequest(authDb, {
+        firmId,
+        actionCode: "rollback_restore",
+        riskLevel: op.riskLevel as any,
+        scopeType: op.restoreScopeType as any,
+        moduleCode: op.moduleCode ?? null,
+        targetEntityType: op.targetEntityType ?? null,
+        targetEntityId: op.targetEntityId ?? null,
+        targetLabel: op.targetLabel ?? null,
+        snapshotId: op.snapshotId,
+        operationType: "restore_action",
+        operationId: op.id,
+        requestedByUserId: req.userId!,
+        requestedByEmail: req.email ?? null,
+        reason,
+        detailedNote: body.detailed_note ? String(body.detailed_note) : null,
+        approvalPolicyCode: (body.emergency_flag ? "emergency_request" : decision.approvalPolicyCode),
+        requiredApprovals: decision.requiredApprovalCount,
+        selfApprovalAllowed: decision.selfApprovalAllowed,
+        expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
+        emergencyFlag: !!body.emergency_flag,
+        impersonationFlag: ctx.impersonation.active,
+        policyResultJson: decision,
+      });
+
+      await authDb.update(platformRestoreActionsTable).set({ approvalRequestId: approval.id, updatedAt: new Date() }).where(eq(platformRestoreActionsTable.id, op.id));
+      await writeAuditLog({ firmId, actorId: req.userId, actorType: "founder", action: "founder.approval.requested", entityType: "platform_approval", detail: JSON.stringify({ approvalId: approval.id, approvalCode: approval.requestCode, operationType: "restore_action", operationId: op.id }), ipAddress: req.ip, userAgent: req.headers["user-agent"] }, { db: authDb, strict: false });
+      return approval;
+    }, { retry: true, allowUnsafe: true, ctx: { route: "POST /platform/firms/:firmId/recovery/rollback/request-approval", firmId } });
+
+    sendOk(res, { approval: result }, { status: 201 });
+  } catch (err) {
+    sendError(res, err);
+  }
+});
+
+router.post("/platform/firms/:firmId/recovery/rollback/execute", requireAuth, requireFounder, async (req: AuthRequest, res) => {
+  try {
+    const firmId = parseIntParam("firmId", req.params.firmId, { required: true, min: 1 })!;
+    const body = req.body as { rollback_action_id?: string; reason?: string; typed_confirmation?: string; approval_request_id?: string; step_up_challenge_id?: string; step_up_phrase?: string; emergency_flag?: boolean };
+    const rollbackActionId = String(body.rollback_action_id ?? "").trim();
+    if (!rollbackActionId) throw new ApiError({ status: 400, code: "MISSING_REQUIRED_FIELD", message: "rollback_action_id is required", retryable: false });
+    const reason = String(body.reason ?? "").trim();
+    const typed = body.typed_confirmation ? String(body.typed_confirmation) : null;
+
+    const result = await withAuthSafeDb(async (authDb) => {
+      const ctx = await loadFounderGovernanceContext(authDb, req);
+      assertFounderPermission(ctx, "founder.recovery.execute");
+      assertFounderPermission(ctx, "founder.recovery.rollback");
+      assertActiveSupportSessionForFirm(ctx, firmId);
+
+      const [op] = await authDb.select().from(platformRestoreActionsTable).where(and(eq(platformRestoreActionsTable.id, rollbackActionId), eq(platformRestoreActionsTable.firmId, firmId)));
+      if (!op) throw new ApiError({ status: 404, code: "ACTION_NOT_FOUND", message: "Rollback action not found", retryable: false });
+      if (String(op.operationCode ?? "") !== "rollback_restore") throw new ApiError({ status: 422, code: "UNSUPPORTED_OPERATION", message: "Not a rollback action", retryable: false });
+
+      const common = {
+        firmId,
+        restoreActionId: rollbackActionId,
+        reason,
+        typedConfirmation: typed,
+        approvalRequestId: body.approval_request_id ? String(body.approval_request_id) : null,
+        stepUpChallengeId: body.step_up_challenge_id ? String(body.step_up_challenge_id) : null,
+        stepUpPhrase: body.step_up_phrase ? String(body.step_up_phrase) : null,
+        emergencyFlag: !!body.emergency_flag,
+        actorPermissions: Array.from(ctx.permissions),
+        impersonationActive: ctx.impersonation.active,
+        requestedByUserId: req.userId!,
+        requestedByEmail: req.email ?? null,
+        ipAddress: req.ip,
+        userAgent: req.headers["user-agent"] ?? null,
+      };
+
+      if (op.restoreScopeType === "settings") return await restoreSettingsFromSnapshot(authDb, common);
+      if (op.restoreScopeType === "module" && op.moduleCode === "projects") return await restoreProjectsModuleFromSnapshot(authDb, common);
+      if (op.restoreScopeType === "record" && op.targetEntityType === "case") return await restoreCaseRecordFromSnapshot(authDb, common);
+      if (op.restoreScopeType === "record" && op.targetEntityType === "project") return await restoreProjectRecordFromSnapshot(authDb, common);
+      if (op.restoreScopeType === "record" && op.targetEntityType === "developer") return await restoreDeveloperRecordFromSnapshot(authDb, common);
+      throw new ApiError({ status: 422, code: "UNSUPPORTED_OPERATION", message: "Rollback scope not supported", retryable: false });
+    }, { retry: true, allowUnsafe: true, ctx: { route: "POST /platform/firms/:firmId/recovery/rollback/execute", firmId } });
+
+    sendOk(res, { operation: { id: result.restoreActionId, type: "restore_action", status: "completed" }, snapshot: { id: result.preRestoreSnapshotId, created: true }, result: result.result });
+  } catch (err) {
+    sendError(res, err);
+  }
+});
+
 router.post("/platform/firms/:firmId/restore/request-approval", requireAuth, requireFounder, async (req: AuthRequest, res) => {
   try {
     const firmId = parseIntParam("firmId", req.params.firmId, { required: true, min: 1 })!;
@@ -758,15 +1062,21 @@ router.post("/platform/firms/:firmId/restore/request-approval", requireAuth, req
     const result = await withAuthSafeDb(async (authDb) => {
       const ctx = await loadFounderGovernanceContext(authDb, req);
       assertFounderPermission(ctx, "founder.approval.request");
-      assertFounderPermission(ctx, "founder.snapshot.restore.preview");
       assertActiveSupportSessionForFirm(ctx, firmId);
 
       const [op] = await authDb.select().from(platformRestoreActionsTable).where(and(eq(platformRestoreActionsTable.id, restoreActionId), eq(platformRestoreActionsTable.firmId, firmId)));
       if (!op) throw new ApiError({ status: 404, code: "ACTION_NOT_FOUND", message: "Restore action not found", retryable: false });
       if (op.status !== "previewed") throw new ApiError({ status: 409, code: "TARGET_STATE_CONFLICT", message: "Restore action is not in previewed state", retryable: true });
 
+      const actionCode = String(op.operationCode ?? "restore_snapshot");
+      if (actionCode === "rollback_restore") {
+        assertFounderPermission(ctx, "founder.recovery.preview");
+      } else {
+        assertFounderPermission(ctx, "founder.snapshot.restore.preview");
+      }
+
       const decision = evaluateDecisionForPreview({
-        actionCode: "restore_snapshot",
+        actionCode,
         riskLevel: op.riskLevel as any,
         scopeType: op.restoreScopeType as any,
         moduleCode: op.moduleCode ?? null,
@@ -777,7 +1087,7 @@ router.post("/platform/firms/:firmId/restore/request-approval", requireAuth, req
 
       const approval = await createApprovalRequest(authDb, {
         firmId,
-        actionCode: "restore_snapshot",
+        actionCode,
         riskLevel: op.riskLevel as any,
         scopeType: op.restoreScopeType as any,
         moduleCode: op.moduleCode ?? null,
@@ -835,6 +1145,186 @@ router.get("/platform/firms/:firmId/maintenance/history", requireAuth, requireFo
       return merged;
     }, { retry: true, allowUnsafe: true, ctx: { route: "GET /platform/firms/:firmId/maintenance/history", firmId } });
     sendOk(res, { items });
+  } catch (err) {
+    sendError(res, err);
+  }
+});
+
+router.get("/platform/firms/:firmId/history", requireAuth, requireFounder, async (req: AuthRequest, res) => {
+  try {
+    const firmId = parseIntParam("firmId", req.params.firmId, { required: true, min: 1 })!;
+
+    const one = (v: unknown): string | undefined =>
+      typeof v === "string" ? v : Array.isArray(v) && typeof v[0] === "string" ? v[0] : undefined;
+
+    const limit = (() => {
+      const raw = one((req.query as any).limit);
+      const n = raw ? Number.parseInt(raw, 10) : 50;
+      return Number.isFinite(n) ? Math.min(Math.max(n, 1), 100) : 50;
+    })();
+
+    const kind = (() => {
+      const raw = one((req.query as any).kind);
+      const v = raw ? String(raw).trim() : "";
+      if (v === "maintenance" || v === "restore" || v === "approval") return v;
+      return null;
+    })();
+
+    const status = (() => {
+      const raw = one((req.query as any).status);
+      return raw ? String(raw).trim() : null;
+    })();
+    const moduleCode = (() => {
+      const raw = one((req.query as any).module_code);
+      return raw ? String(raw).trim() : null;
+    })();
+    const actionCode = (() => {
+      const raw = one((req.query as any).action_code);
+      return raw ? String(raw).trim() : null;
+    })();
+    const operationCode = (() => {
+      const raw = one((req.query as any).operation_code);
+      return raw ? String(raw).trim() : null;
+    })();
+    const recordType = (() => {
+      const raw = one((req.query as any).record_type);
+      return raw ? String(raw).trim() : null;
+    })();
+    const recordId = (() => {
+      const raw = one((req.query as any).record_id);
+      return raw ? String(raw).trim() : null;
+    })();
+    const requesterUserId = (() => {
+      const raw = one((req.query as any).requester_user_id);
+      if (!raw) return null;
+      const n = Number.parseInt(String(raw), 10);
+      return Number.isFinite(n) && n > 0 ? n : null;
+    })();
+    const requesterEmail = (() => {
+      const raw = one((req.query as any).requester_email);
+      return raw ? String(raw).trim() : null;
+    })();
+    const approverUserId = (() => {
+      const raw = one((req.query as any).approver_user_id);
+      if (!raw) return null;
+      const n = Number.parseInt(String(raw), 10);
+      return Number.isFinite(n) && n > 0 ? n : null;
+    })();
+    const before = (() => {
+      const raw = one((req.query as any).before);
+      if (!raw) return null;
+      const d = new Date(String(raw));
+      return Number.isFinite(d.getTime()) ? d : null;
+    })();
+    const dateFrom = (() => {
+      const raw = one((req.query as any).date_from);
+      if (!raw) return null;
+      const d = new Date(String(raw));
+      return Number.isFinite(d.getTime()) ? d : null;
+    })();
+    const dateTo = (() => {
+      const raw = one((req.query as any).date_to);
+      if (!raw) return null;
+      const d = new Date(String(raw));
+      return Number.isFinite(d.getTime()) ? d : null;
+    })();
+
+    const result = await withAuthSafeDb(async (authDb) => {
+      const ctx = await loadFounderGovernanceContext(authDb, req);
+      assertFounderPermission(ctx, "founder.maintenance.read");
+      assertActiveSupportSessionForFirm(ctx, firmId);
+
+      const perKindLimit = Math.min(limit * 2, 200);
+      const kinds: Array<"maintenance" | "restore" | "approval"> = kind ? [kind] : ["maintenance", "restore", "approval"];
+      if (approverUserId && !kind) {
+        kinds.splice(0, kinds.length, "approval");
+      }
+
+      const items: any[] = [];
+
+      if (kinds.includes("maintenance")) {
+        const where = [
+          eq(platformMaintenanceActionsTable.firmId, firmId),
+          status ? eq(platformMaintenanceActionsTable.status, status) : null,
+          moduleCode ? eq(platformMaintenanceActionsTable.moduleCode, moduleCode) : null,
+          actionCode ? eq(platformMaintenanceActionsTable.actionCode, actionCode) : null,
+          recordType ? eq(platformMaintenanceActionsTable.targetEntityType, recordType) : null,
+          recordId ? eq(platformMaintenanceActionsTable.targetEntityId, recordId) : null,
+          requesterUserId ? eq(platformMaintenanceActionsTable.requestedByUserId, requesterUserId) : null,
+          requesterEmail ? ilike(platformMaintenanceActionsTable.requestedByEmail, `%${requesterEmail}%`) : null,
+          before ? sql`${platformMaintenanceActionsTable.createdAt} < ${before}` : null,
+          dateFrom ? sql`${platformMaintenanceActionsTable.createdAt} >= ${dateFrom}` : null,
+          dateTo ? sql`${platformMaintenanceActionsTable.createdAt} <= ${dateTo}` : null,
+        ].filter(Boolean) as any[];
+        const rows = await authDb.select().from(platformMaintenanceActionsTable).where(and(...where)).orderBy(desc(platformMaintenanceActionsTable.createdAt)).limit(perKindLimit);
+        items.push(...rows.map((r) => ({ kind: "maintenance", ...r })));
+      }
+
+      if (kinds.includes("restore")) {
+        const where = [
+          eq(platformRestoreActionsTable.firmId, firmId),
+          status ? eq(platformRestoreActionsTable.status, status) : null,
+          moduleCode ? eq(platformRestoreActionsTable.moduleCode, moduleCode) : null,
+          operationCode ? eq(platformRestoreActionsTable.operationCode, operationCode) : null,
+          (!operationCode && actionCode) ? eq(platformRestoreActionsTable.operationCode, actionCode) : null,
+          recordType ? eq(platformRestoreActionsTable.targetEntityType, recordType) : null,
+          recordId ? eq(platformRestoreActionsTable.targetEntityId, recordId) : null,
+          requesterUserId ? eq(platformRestoreActionsTable.requestedByUserId, requesterUserId) : null,
+          requesterEmail ? ilike(platformRestoreActionsTable.requestedByEmail, `%${requesterEmail}%`) : null,
+          before ? sql`${platformRestoreActionsTable.createdAt} < ${before}` : null,
+          dateFrom ? sql`${platformRestoreActionsTable.createdAt} >= ${dateFrom}` : null,
+          dateTo ? sql`${platformRestoreActionsTable.createdAt} <= ${dateTo}` : null,
+        ].filter(Boolean) as any[];
+        const rows = await authDb.select().from(platformRestoreActionsTable).where(and(...where)).orderBy(desc(platformRestoreActionsTable.createdAt)).limit(perKindLimit);
+        items.push(...rows.map((r) => ({ kind: "restore", ...r })));
+      }
+
+      if (kinds.includes("approval")) {
+        const where = [
+          eq(platformApprovalRequestsTable.firmId, firmId),
+          status ? eq(platformApprovalRequestsTable.status, status) : null,
+          moduleCode ? eq(platformApprovalRequestsTable.moduleCode, moduleCode) : null,
+          actionCode ? eq(platformApprovalRequestsTable.actionCode, actionCode) : null,
+          recordType ? eq(platformApprovalRequestsTable.targetEntityType, recordType) : null,
+          recordId ? eq(platformApprovalRequestsTable.targetEntityId, recordId) : null,
+          requesterUserId ? eq(platformApprovalRequestsTable.requestedByUserId, requesterUserId) : null,
+          requesterEmail ? ilike(platformApprovalRequestsTable.requestedByEmail, `%${requesterEmail}%`) : null,
+          approverUserId ? sql`EXISTS (SELECT 1 FROM ${platformApprovalEventsTable} e WHERE e.request_id = ${platformApprovalRequestsTable.id} AND e.actor_user_id = ${approverUserId})` : null,
+          before ? sql`${platformApprovalRequestsTable.createdAt} < ${before}` : null,
+          dateFrom ? sql`${platformApprovalRequestsTable.createdAt} >= ${dateFrom}` : null,
+          dateTo ? sql`${platformApprovalRequestsTable.createdAt} <= ${dateTo}` : null,
+        ].filter(Boolean) as any[];
+        const rows = await authDb.select().from(platformApprovalRequestsTable).where(and(...where)).orderBy(desc(platformApprovalRequestsTable.createdAt)).limit(perKindLimit);
+        items.push(...rows.map((r) => ({ kind: "approval", ...r })));
+      }
+
+      const merged = items.sort((a: any, b: any) => new Date(b.createdAt as any).getTime() - new Date(a.createdAt as any).getTime());
+      const pageItems = merged.slice(0, limit);
+      const hasMore = merged.length > limit;
+      const nextBefore = pageItems.length ? pageItems[pageItems.length - 1].createdAt : null;
+
+      return {
+        items: pageItems,
+        page_info: { limit, has_more: hasMore, next_before: nextBefore },
+        filters_applied: {
+          kind: kind ?? "all",
+          status,
+          module_code: moduleCode,
+          action_code: actionCode,
+          operation_code: operationCode,
+          record_type: recordType,
+          record_id: recordId,
+          requester_user_id: requesterUserId,
+          requester_email: requesterEmail,
+          approver_user_id: approverUserId,
+          before,
+          date_from: dateFrom,
+          date_to: dateTo,
+        },
+      };
+    }, { retry: true, allowUnsafe: true, ctx: { route: "GET /platform/firms/:firmId/history", firmId } });
+
+    sendOk(res, result);
   } catch (err) {
     sendError(res, err);
   }

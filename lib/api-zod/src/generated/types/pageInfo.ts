@@ -6,10 +6,8 @@
  * OpenAPI spec version: 1.0.0
  */
 
-export interface CreateUserBody {
-  email: string;
-  name: string;
-  password: string;
-  roleId: number;
-  department?: string;
+export interface PageInfo {
+  total: number;
+  page: number;
+  limit: number;
 }

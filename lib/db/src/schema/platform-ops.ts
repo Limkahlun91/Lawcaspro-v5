@@ -130,7 +130,10 @@ export const platformMaintenanceActionStepsTable = pgTable("platform_maintenance
 export const platformRestoreActionsTable = pgTable("platform_restore_actions", {
   id: uuid("id").primaryKey(),
   firmId: integer("firm_id").notNull(),
+  operationCode: text("operation_code").notNull().default("restore_snapshot"),
   snapshotId: uuid("snapshot_id").notNull(),
+  preRestoreSnapshotId: uuid("pre_restore_snapshot_id"),
+  rollbackSourceRestoreActionId: uuid("rollback_source_restore_action_id"),
   restoreScopeType: text("restore_scope_type").notNull(),
   moduleCode: text("module_code"),
   targetEntityType: text("target_entity_type"),

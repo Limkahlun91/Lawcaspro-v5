@@ -170,6 +170,10 @@ export async function consumeStepUpChallenge(authDb: RlsDb, params: {
 }
 
 export function defaultStepUpPhrase(params: { actionCode: string; firmSlugOrName?: string | null; snapshotCodeOrId?: string | null }): string {
+  if (params.actionCode === "rollback_restore") {
+    const snap = params.snapshotCodeOrId ? String(params.snapshotCodeOrId) : "<snapshot>";
+    return `ROLLBACK TO SNAPSHOT ${snap}`;
+  }
   if (params.actionCode.includes("restore")) {
     const snap = params.snapshotCodeOrId ? String(params.snapshotCodeOrId) : "<snapshot>";
     return `RESTORE FROM SNAPSHOT ${snap}`;

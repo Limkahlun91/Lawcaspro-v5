@@ -262,3 +262,30 @@ export const FOUNDER_ACTION_REGISTRY: FounderActionRegistryItem[] = [
   },
 ];
 
+export type FounderRestoreOperationRegistryItem = {
+  operation_code: "restore_snapshot" | "rollback_restore";
+  label: string;
+  description: string;
+  risk_level: RiskLevel;
+  supports_preview: boolean;
+  supports_execute: boolean;
+};
+
+export const FOUNDER_RESTORE_OPERATION_REGISTRY: FounderRestoreOperationRegistryItem[] = [
+  {
+    operation_code: "restore_snapshot",
+    label: "Restore from snapshot",
+    description: "Applies a snapshot payload onto the current state for the selected scope.",
+    risk_level: "high",
+    supports_preview: true,
+    supports_execute: true,
+  },
+  {
+    operation_code: "rollback_restore",
+    label: "Rollback (undo restore)",
+    description: "Rolls back a completed restore by applying the recorded pre-restore snapshot. Always treated as critical.",
+    risk_level: "critical",
+    supports_preview: true,
+    supports_execute: true,
+  },
+];

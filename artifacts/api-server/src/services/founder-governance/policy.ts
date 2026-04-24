@@ -32,6 +32,7 @@ function requiredExecutePermission(actionCode: string): string | null {
   ) {
     return "founder.maintenance.rebuild";
   }
+  if (actionCode === "rollback_restore") return "founder.recovery.execute";
   if (actionCode.startsWith("restore") || actionCode === "restore_snapshot") return "founder.snapshot.restore.execute";
   return null;
 }

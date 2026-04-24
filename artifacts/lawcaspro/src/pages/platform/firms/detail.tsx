@@ -324,6 +324,8 @@ export default function FirmDetail() {
 
   const lastMaintenanceAt = lastMaintenanceQuery.data?.items?.[0]?.createdAt ?? null;
   const lastSnapshotAt = lastSnapshotQuery.data?.items?.[0]?.createdAt ?? null;
+  const lastRestoreAt = opsSummaryQuery.data?.latest_restore?.createdAt ?? null;
+  const lastRollbackAt = opsSummaryQuery.data?.latest_rollback?.createdAt ?? null;
 
   useEffect(() => {
     if (firm) {
@@ -361,7 +363,7 @@ export default function FirmDetail() {
         </div>
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-7 gap-4">
+      <div className="grid grid-cols-1 md:grid-cols-9 gap-4">
         <Card>
           <CardHeader className="flex flex-row items-center justify-between pb-2 space-y-0">
             <CardTitle className="text-sm font-medium text-slate-500">Total Users</CardTitle>
@@ -405,6 +407,24 @@ export default function FirmDetail() {
           </CardHeader>
           <CardContent>
             <div className="text-sm font-bold">{lastSnapshotAt ? new Date(lastSnapshotAt).toLocaleString() : "—"}</div>
+          </CardContent>
+        </Card>
+        <Card>
+          <CardHeader className="flex flex-row items-center justify-between pb-2 space-y-0">
+            <CardTitle className="text-sm font-medium text-slate-500">Last restore</CardTitle>
+            <RotateCcw className="w-4 h-4 text-slate-400" />
+          </CardHeader>
+          <CardContent>
+            <div className="text-sm font-bold">{lastRestoreAt ? new Date(lastRestoreAt).toLocaleString() : "—"}</div>
+          </CardContent>
+        </Card>
+        <Card>
+          <CardHeader className="flex flex-row items-center justify-between pb-2 space-y-0">
+            <CardTitle className="text-sm font-medium text-slate-500">Last rollback</CardTitle>
+            <RotateCcw className="w-4 h-4 text-slate-400" />
+          </CardHeader>
+          <CardContent>
+            <div className="text-sm font-bold">{lastRollbackAt ? new Date(lastRollbackAt).toLocaleString() : "—"}</div>
           </CardContent>
         </Card>
         <Card>

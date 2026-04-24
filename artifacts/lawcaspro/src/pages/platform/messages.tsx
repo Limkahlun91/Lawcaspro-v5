@@ -156,8 +156,8 @@ export default function PlatformMessages() {
   const firmsQuery = useQuery<Firm[]>({
     queryKey: ["platform-firms-list"],
     queryFn: async () => {
-      const data = await apiFetchJson<{ data?: Firm[] }>("/platform/firms?limit=100");
-      return data.data ?? [];
+      const data = await apiFetchJson<{ items?: Firm[] }>("/platform/firms?limit=100");
+      return data.items ?? [];
     },
     retry: false,
   });

@@ -110,6 +110,9 @@ export const MAINTENANCE_ACTION_CODES = [
 ] as const;
 export type MaintenanceActionCode = (typeof MAINTENANCE_ACTION_CODES)[number];
 
+export const RESTORE_OPERATION_CODES = ["restore_snapshot", "rollback_restore"] as const;
+export type RestoreOperationCode = (typeof RESTORE_OPERATION_CODES)[number];
+
 export type MaintenanceTarget = {
   entity_type?: TargetEntityType;
   entity_id?: string;
@@ -172,7 +175,7 @@ export async function createSnapshot(
     targetEntityId?: string;
     targetLabel?: string;
     triggerType: SnapshotTriggerType;
-    triggerActionCode?: MaintenanceActionCode;
+    triggerActionCode?: MaintenanceActionCode | RestoreOperationCode;
     createdByUserId?: number | null;
     createdByEmail?: string | null;
     reason?: string | null;
@@ -300,6 +303,40 @@ type SnapshotBuildOpts = {
   targetEntityId?: string;
 };
 
+function asPlainObject(v: unknown): Record<string, unknown> | null {
+  if (!v || typeof v !== "object") return null;
+  if (Array.isArray(v)) return null;
+  return v as Record<string, unknown>;
+}
+
+function readString(obj: Record<string, unknown>, key: string): string | null {
+  const v = obj[key];
+  if (typeof v !== "string") return null;
+  const s = v.trim();
+  return s ? s : null;
+}
+
+function readNumber(obj: Record<string, unknown>, key: string): number | null {
+  const v = obj[key];
+  const n = typeof v === "number" ? v : typeof v === "string" ? Number.parseInt(v, 10) : NaN;
+  return Number.isFinite(n) ? n : null;
+}
+
+function readArray(obj: Record<string, unknown>, key: string): unknown[] {
+  const v = obj[key];
+  return Array.isArray(v) ? v : [];
+}
+
+function readDate(obj: Record<string, unknown>, key: string): Date | null {
+  const v = obj[key];
+  if (v instanceof Date) return v;
+  if (typeof v === "string") {
+    const d = new Date(v);
+    return Number.isFinite(d.getTime()) ? d : null;
+  }
+  return null;
+}
+
 async function buildSnapshotPayload(
   authDb: RlsDb,
   firmId: number,
@@ -318,13 +355,25 @@ async function buildSnapshotPayload(
     const [firm] = await authDb.select().from(firmsTable).where(eq(firmsTable.id, firmId));
     if (!firm) throw new ApiError({ status: 404, code: "FIRM_NOT_FOUND", message: "Firm not found", retryable: false });
     const bankAccounts = await authDb.select().from(firmBankAccountsTable).where(eq(firmBankAccountsTable.firmId, firmId));
-    itemCounts.firm = 1;
-    itemCounts.bank_accounts = bankAccounts.length;
-    items.push({ itemType: "firm", itemId: String(firm.id), itemLabel: firm.name, moduleCode: "settings", payloadFragment: { firm } });
-    for (const b of bankAccounts) {
-      items.push({ itemType: "bank_account", itemId: String(b.id), itemLabel: b.bankName, moduleCode: "settings", payloadFragment: { bankAccount: b } });
+    const settingsGroup = opts.targetEntityType === "settings" && opts.targetEntityId ? String(opts.targetEntityId) : null;
+    metadata.settingsGroup = settingsGroup;
+
+    const includeFirm = !settingsGroup || settingsGroup === "firm_profile";
+    const includeBankAccounts = !settingsGroup || settingsGroup === "bank_accounts";
+
+    itemCounts.firm = includeFirm ? 1 : 0;
+    itemCounts.bank_accounts = includeBankAccounts ? bankAccounts.length : 0;
+
+    if (includeFirm) {
+      items.push({ itemType: "firm", itemId: String(firm.id), itemLabel: firm.name, moduleCode: "settings", payloadFragment: { firm } });
     }
-    const payload = { kind: "settings", firm, bankAccounts };
+    if (includeBankAccounts) {
+      for (const b of bankAccounts) {
+        items.push({ itemType: "bank_account", itemId: String(b.id), itemLabel: b.bankName, moduleCode: "settings", payloadFragment: { bankAccount: b } });
+      }
+    }
+
+    const payload = { kind: "settings", firm, bankAccounts, settingsGroup };
     return { payload, items, itemCounts, metadata };
   }
 
@@ -362,6 +411,28 @@ async function buildSnapshotPayload(
       loanStampingItems: stampingItems,
     };
     return { payload, items, itemCounts, metadata: { ...metadata, caseId: c.id, referenceNo: c.referenceNo } };
+  }
+
+  if (opts.snapshotType === "record" && opts.targetEntityType === "project") {
+    const projectId = Number.parseInt(opts.targetEntityId ?? "", 10);
+    if (!Number.isFinite(projectId)) throw new ApiError({ status: 400, code: "INVALID_INPUT", message: "Invalid project id", retryable: false });
+    const [p] = await authDb.select().from(projectsTable).where(and(eq(projectsTable.id, projectId), eq(projectsTable.firmId, firmId)));
+    if (!p) throw new ApiError({ status: 404, code: "PROJECT_NOT_FOUND", message: "Project not found", retryable: false });
+    itemCounts.project = 1;
+    items.push({ itemType: "project", itemId: String(p.id), itemLabel: p.name, moduleCode: "projects", payloadFragment: { project: p } });
+    const payload = { kind: "project", firmId, project: p };
+    return { payload, items, itemCounts, metadata: { ...metadata, projectId: p.id } };
+  }
+
+  if (opts.snapshotType === "record" && opts.targetEntityType === "developer") {
+    const developerId = Number.parseInt(opts.targetEntityId ?? "", 10);
+    if (!Number.isFinite(developerId)) throw new ApiError({ status: 400, code: "INVALID_INPUT", message: "Invalid developer id", retryable: false });
+    const [d] = await authDb.select().from(developersTable).where(and(eq(developersTable.id, developerId), eq(developersTable.firmId, firmId)));
+    if (!d) throw new ApiError({ status: 404, code: "DEVELOPER_NOT_FOUND", message: "Developer not found", retryable: false });
+    itemCounts.developer = 1;
+    items.push({ itemType: "developer", itemId: String(d.id), itemLabel: d.name, moduleCode: "developers", payloadFragment: { developer: d } });
+    const payload = { kind: "developer", firmId, developer: d };
+    return { payload, items, itemCounts, metadata: { ...metadata, developerId: d.id } };
   }
 
   if (opts.snapshotType === "module" && opts.moduleCode === "projects") {
@@ -1060,6 +1131,35 @@ export async function listSnapshots(authDb: RlsDb, firmId: number, limit: number
   return await authDb.select().from(platformSnapshotsTable).where(eq(platformSnapshotsTable.firmId, firmId)).orderBy(desc(platformSnapshotsTable.createdAt)).limit(n);
 }
 
+export async function listSnapshotsPaged(
+  authDb: RlsDb,
+  opts: {
+    firmId: number;
+    limit: number;
+    before?: Date | null;
+    snapshotType?: string | null;
+    status?: string | null;
+    pinned?: boolean | null;
+    targetEntityType?: string | null;
+    targetEntityId?: string | null;
+    triggerType?: string | null;
+  }
+): Promise<any[]> {
+  const n = Math.min(Math.max(opts.limit, 1), 100);
+  const where = [
+    eq(platformSnapshotsTable.firmId, opts.firmId),
+    opts.snapshotType ? eq(platformSnapshotsTable.snapshotType, opts.snapshotType) : null,
+    opts.status ? eq(platformSnapshotsTable.status, opts.status) : null,
+    opts.triggerType ? eq(platformSnapshotsTable.triggerType, opts.triggerType) : null,
+    opts.targetEntityType ? eq(platformSnapshotsTable.targetEntityType, opts.targetEntityType) : null,
+    opts.targetEntityId ? eq(platformSnapshotsTable.targetEntityId, opts.targetEntityId) : null,
+    opts.pinned === true ? sql`${platformSnapshotsTable.pinnedAt} IS NOT NULL` : null,
+    opts.pinned === false ? sql`${platformSnapshotsTable.pinnedAt} IS NULL` : null,
+    opts.before ? sql`${platformSnapshotsTable.createdAt} < ${opts.before}` : null,
+  ].filter(Boolean) as any[];
+  return await authDb.select().from(platformSnapshotsTable).where(and(...where)).orderBy(desc(platformSnapshotsTable.createdAt)).limit(n);
+}
+
 export async function getSnapshotDetail(authDb: RlsDb, firmId: number, snapshotId: string): Promise<{ snapshot: any; items: any[] }> {
   const [snapshot] = await authDb.select().from(platformSnapshotsTable).where(and(eq(platformSnapshotsTable.id, snapshotId), eq(platformSnapshotsTable.firmId, firmId)));
   if (!snapshot) throw new ApiError({ status: 404, code: "SNAPSHOT_NOT_FOUND", message: "Snapshot not found", retryable: false });
@@ -1122,7 +1222,9 @@ export async function createRestorePreviewRecord(
   authDb: RlsDb,
   opts: {
     firmId: number;
+    operationCode?: RestoreOperationCode;
     snapshotId: string;
+    rollbackSourceRestoreActionId?: string | null;
     restoreScopeType: MaintenanceScopeType;
     moduleCode?: ModuleCode;
     targetEntityType?: TargetEntityType;
@@ -1138,7 +1240,9 @@ export async function createRestorePreviewRecord(
   await authDb.insert(platformRestoreActionsTable).values({
     id,
     firmId: opts.firmId,
+    operationCode: opts.operationCode ?? "restore_snapshot",
     snapshotId: opts.snapshotId,
+    rollbackSourceRestoreActionId: opts.rollbackSourceRestoreActionId ?? null,
     restoreScopeType: opts.restoreScopeType,
     moduleCode: opts.moduleCode ?? null,
     targetEntityType: opts.targetEntityType ?? null,
@@ -1148,7 +1252,7 @@ export async function createRestorePreviewRecord(
     status: "previewed",
     reason: "preview_only",
     typedConfirmation: null,
-    previewPayload: opts.previewPayload as any,
+    previewPayload: opts.previewPayload,
     requestedByUserId: opts.requestedByUserId,
     requestedByEmail: opts.requestedByEmail ?? null,
   });
@@ -1187,8 +1291,9 @@ export async function restoreSettingsFromSnapshot(
     if (typed !== required) throw new ApiError({ status: 400, code: "INVALID_CONFIRMATION_TEXT", message: "Typed confirmation does not match required text", retryable: false, details: { required } });
   }
 
+  const opCode = String(restore.operationCode ?? "restore_snapshot");
   const decision = evaluateDecisionForExecute({
-    actionCode: "restore_snapshot",
+    actionCode: opCode,
     riskLevel: restore.riskLevel as RiskLevel,
     scopeType: restore.restoreScopeType as MaintenanceScopeType,
     moduleCode: restore.moduleCode ?? null,
@@ -1202,7 +1307,7 @@ export async function restoreSettingsFromSnapshot(
       code: decision.blockedReason.code === "IMPERSONATION_RESTRICTED" ? "IMPERSONATION_RESTRICTED" : "POLICY_BLOCKED",
       message: decision.blockedReason.message,
       retryable: false,
-      details: { policy: decision.approvalPolicyCode, risk_level: restore.riskLevel, action_code: "restore_snapshot" },
+      details: { policy: decision.approvalPolicyCode, risk_level: restore.riskLevel, action_code: opCode },
     });
   }
 
@@ -1237,7 +1342,7 @@ export async function restoreSettingsFromSnapshot(
         stage: "step_up",
       });
     }
-    await consumeStepUpChallenge(authDb, { challengeId, firmId: opts.firmId, actionCode: "restore_snapshot", actorUserId: opts.requestedByUserId, providedPhrase: phrase });
+    await consumeStepUpChallenge(authDb, { challengeId, firmId: opts.firmId, actionCode: opCode, actorUserId: opts.requestedByUserId, providedPhrase: phrase });
     stepUpConfirmation = phrase;
   }
 
@@ -1263,9 +1368,9 @@ export async function restoreSettingsFromSnapshot(
     moduleCode: "settings",
     targetEntityType: "settings",
     targetEntityId: String(opts.firmId),
-    targetLabel: "pre_restore_settings",
+    targetLabel: opCode === "rollback_restore" ? "pre_rollback_settings" : "pre_restore_settings",
     triggerType: "pre_restore",
-    triggerActionCode: "restore_snapshot",
+    triggerActionCode: opCode as RestoreOperationCode,
     createdByUserId: opts.requestedByUserId,
     createdByEmail: opts.requestedByEmail ?? null,
     reason,
@@ -1273,6 +1378,8 @@ export async function restoreSettingsFromSnapshot(
     retentionPolicyCode: "pre_restore",
     storage,
   });
+
+  await authDb.update(platformRestoreActionsTable).set({ preRestoreSnapshotId: preRestoreSnapshot.snapshotId }).where(eq(platformRestoreActionsTable.id, opts.restoreActionId));
 
   await authDb.update(platformRestoreActionStepsTable).set({ status: "completed", completedAt: new Date(), resultPayload: { snapshotId: preRestoreSnapshot.snapshotId } }).where(and(eq(platformRestoreActionStepsTable.restoreActionId, opts.restoreActionId), eq(platformRestoreActionStepsTable.stepCode, "create_pre_restore_snapshot")));
 
@@ -1283,40 +1390,54 @@ export async function restoreSettingsFromSnapshot(
     if (kind !== "settings") throw new ApiError({ status: 422, code: "SNAPSHOT_NOT_RESTORABLE", message: "Snapshot does not contain settings payload", retryable: false });
     const firm = (payload as any)?.firm;
     const bankAccounts = Array.isArray((payload as any)?.bankAccounts) ? (payload as any).bankAccounts : [];
+    const settingsGroupRaw = (payload as any)?.settingsGroup;
+    const settingsGroup = typeof settingsGroupRaw === "string" && settingsGroupRaw.trim() ? settingsGroupRaw.trim() : null;
 
-    await authDb.update(firmsTable).set({
-      name: typeof firm?.name === "string" ? firm.name : undefined,
-      address: firm?.address ?? null,
-      stNumber: firm?.stNumber ?? null,
-      tinNumber: firm?.tinNumber ?? null,
-      subscriptionPlan: typeof firm?.subscriptionPlan === "string" ? firm.subscriptionPlan : undefined,
-      status: typeof firm?.status === "string" ? firm.status : undefined,
-    }).where(eq(firmsTable.id, opts.firmId));
-
-    await authDb.delete(firmBankAccountsTable).where(eq(firmBankAccountsTable.firmId, opts.firmId));
-    for (const b of bankAccounts) {
-      if (!b || typeof b !== "object") continue;
-      if (typeof (b as any).bankName !== "string" || typeof (b as any).accountNo !== "string") continue;
-      await authDb.insert(firmBankAccountsTable).values({
-        firmId: opts.firmId,
-        bankName: String((b as any).bankName),
-        accountNo: String((b as any).accountNo),
-        accountType: typeof (b as any).accountType === "string" ? String((b as any).accountType) : "office",
-        isDefault: !!(b as any).isDefault,
-      });
+    if (!settingsGroup || settingsGroup === "firm_profile") {
+      await authDb.update(firmsTable).set({
+        ...(settingsGroup ? {} : { name: typeof firm?.name === "string" ? firm.name : undefined }),
+        address: firm?.address ?? null,
+        stNumber: firm?.stNumber ?? null,
+        tinNumber: firm?.tinNumber ?? null,
+        ...(settingsGroup ? {} : {
+          subscriptionPlan: typeof firm?.subscriptionPlan === "string" ? firm.subscriptionPlan : undefined,
+          status: typeof firm?.status === "string" ? firm.status : undefined,
+        }),
+      }).where(eq(firmsTable.id, opts.firmId));
     }
 
-    const result = { summary: "Settings restored", restored: { bank_accounts: bankAccounts.length } };
-    await authDb.update(platformRestoreActionsTable).set({ status: "completed", completedAt: new Date(), resultPayload: result as any }).where(eq(platformRestoreActionsTable.id, opts.restoreActionId));
-    await authDb.update(platformRestoreActionStepsTable).set({ status: "completed", completedAt: new Date(), resultPayload: result as any }).where(and(eq(platformRestoreActionStepsTable.restoreActionId, opts.restoreActionId), eq(platformRestoreActionStepsTable.stepCode, "apply_restore")));
+    if (!settingsGroup || settingsGroup === "bank_accounts") {
+      await authDb.delete(firmBankAccountsTable).where(eq(firmBankAccountsTable.firmId, opts.firmId));
+      for (const b of bankAccounts) {
+        if (!b || typeof b !== "object") continue;
+        if (typeof (b as any).bankName !== "string" || typeof (b as any).accountNo !== "string") continue;
+        await authDb.insert(firmBankAccountsTable).values({
+          firmId: opts.firmId,
+          bankName: String((b as any).bankName),
+          accountNo: String((b as any).accountNo),
+          accountType: typeof (b as any).accountType === "string" ? String((b as any).accountType) : "office",
+          isDefault: !!(b as any).isDefault,
+        });
+      }
+    }
+
+    const result = {
+      summary: settingsGroup ? `Settings group restored: ${settingsGroup}` : "Settings restored",
+      restored: {
+        settings_group: settingsGroup,
+        bank_accounts: (!settingsGroup || settingsGroup === "bank_accounts") ? bankAccounts.length : 0,
+      },
+    };
+    await authDb.update(platformRestoreActionsTable).set({ status: "completed", completedAt: new Date(), resultPayload: result }).where(eq(platformRestoreActionsTable.id, opts.restoreActionId));
+    await authDb.update(platformRestoreActionStepsTable).set({ status: "completed", completedAt: new Date(), resultPayload: result }).where(and(eq(platformRestoreActionStepsTable.restoreActionId, opts.restoreActionId), eq(platformRestoreActionStepsTable.stepCode, "apply_restore")));
     await authDb.insert(auditLogsTable).values({
       firmId: opts.firmId,
       actorId: opts.requestedByUserId,
       actorType: "founder",
-      action: "firm.restore.settings",
+      action: opCode === "rollback_restore" ? "firm.recovery.rollback.settings" : "firm.restore.settings",
       entityType: "firm",
       entityId: opts.firmId,
-      detail: JSON.stringify({ reason, restoreActionId: opts.restoreActionId, snapshotId: restore.snapshotId, preRestoreSnapshotId: preRestoreSnapshot.snapshotId, approvalRequestId: approval?.id ?? null }),
+      detail: JSON.stringify({ reason, restoreActionId: opts.restoreActionId, operationCode: opCode, snapshotId: restore.snapshotId, preRestoreSnapshotId: preRestoreSnapshot.snapshotId, approvalRequestId: approval?.id ?? null }),
       ipAddress: opts.ipAddress ?? null,
       userAgent: opts.userAgent ?? null,
     });
@@ -1364,8 +1485,9 @@ export async function restoreProjectsModuleFromSnapshot(
     if (typed !== required) throw new ApiError({ status: 400, code: "INVALID_CONFIRMATION_TEXT", message: "Typed confirmation does not match required text", retryable: false, details: { required } });
   }
 
+  const opCode = String(restore.operationCode ?? "restore_snapshot");
   const decision = evaluateDecisionForExecute({
-    actionCode: "restore_snapshot",
+    actionCode: opCode,
     riskLevel: restore.riskLevel as RiskLevel,
     scopeType: restore.restoreScopeType as MaintenanceScopeType,
     moduleCode: restore.moduleCode ?? null,
@@ -1379,7 +1501,7 @@ export async function restoreProjectsModuleFromSnapshot(
       code: decision.blockedReason.code === "IMPERSONATION_RESTRICTED" ? "IMPERSONATION_RESTRICTED" : "POLICY_BLOCKED",
       message: decision.blockedReason.message,
       retryable: false,
-      details: { policy: decision.approvalPolicyCode, risk_level: restore.riskLevel, action_code: "restore_snapshot" },
+      details: { policy: decision.approvalPolicyCode, risk_level: restore.riskLevel, action_code: opCode },
     });
   }
 
@@ -1414,7 +1536,7 @@ export async function restoreProjectsModuleFromSnapshot(
         stage: "step_up",
       });
     }
-    await consumeStepUpChallenge(authDb, { challengeId, firmId: opts.firmId, actionCode: "restore_snapshot", actorUserId: opts.requestedByUserId, providedPhrase: phrase });
+    await consumeStepUpChallenge(authDb, { challengeId, firmId: opts.firmId, actionCode: opCode, actorUserId: opts.requestedByUserId, providedPhrase: phrase });
     stepUpConfirmation = phrase;
   }
 
@@ -1440,9 +1562,9 @@ export async function restoreProjectsModuleFromSnapshot(
     moduleCode: "projects",
     targetEntityType: "firm",
     targetEntityId: String(opts.firmId),
-    targetLabel: "pre_restore_projects_module",
+    targetLabel: opCode === "rollback_restore" ? "pre_rollback_projects_module" : "pre_restore_projects_module",
     triggerType: "pre_restore",
-    triggerActionCode: "restore_snapshot",
+    triggerActionCode: opCode as RestoreOperationCode,
     createdByUserId: opts.requestedByUserId,
     createdByEmail: opts.requestedByEmail ?? null,
     reason,
@@ -1450,6 +1572,8 @@ export async function restoreProjectsModuleFromSnapshot(
     retentionPolicyCode: "pre_restore",
     storage,
   });
+
+  await authDb.update(platformRestoreActionsTable).set({ preRestoreSnapshotId: preRestoreSnapshot.snapshotId }).where(eq(platformRestoreActionsTable.id, opts.restoreActionId));
 
   await authDb.update(platformRestoreActionStepsTable).set({ status: "completed", completedAt: new Date(), resultPayload: { snapshotId: preRestoreSnapshot.snapshotId } }).where(and(eq(platformRestoreActionStepsTable.restoreActionId, opts.restoreActionId), eq(platformRestoreActionStepsTable.stepCode, "create_pre_restore_snapshot")));
   await authDb.insert(platformRestoreActionStepsTable).values({ restoreActionId: opts.restoreActionId, stepCode: "apply_restore", stepOrder: 30, status: "running", startedAt: new Date() });
@@ -1507,16 +1631,16 @@ export async function restoreProjectsModuleFromSnapshot(
         projects_archived_not_in_snapshot: toArchive.length,
       },
     };
-    await authDb.update(platformRestoreActionsTable).set({ status: "completed", completedAt: new Date(), resultPayload: result as any }).where(eq(platformRestoreActionsTable.id, opts.restoreActionId));
-    await authDb.update(platformRestoreActionStepsTable).set({ status: "completed", completedAt: new Date(), resultPayload: result as any }).where(and(eq(platformRestoreActionStepsTable.restoreActionId, opts.restoreActionId), eq(platformRestoreActionStepsTable.stepCode, "apply_restore")));
+    await authDb.update(platformRestoreActionsTable).set({ status: "completed", completedAt: new Date(), resultPayload: result }).where(eq(platformRestoreActionsTable.id, opts.restoreActionId));
+    await authDb.update(platformRestoreActionStepsTable).set({ status: "completed", completedAt: new Date(), resultPayload: result }).where(and(eq(platformRestoreActionStepsTable.restoreActionId, opts.restoreActionId), eq(platformRestoreActionStepsTable.stepCode, "apply_restore")));
     await authDb.insert(auditLogsTable).values({
       firmId: opts.firmId,
       actorId: opts.requestedByUserId,
       actorType: "founder",
-      action: "firm.restore.projects_module",
+      action: opCode === "rollback_restore" ? "firm.recovery.rollback.projects_module" : "firm.restore.projects_module",
       entityType: "firm",
       entityId: opts.firmId,
-      detail: JSON.stringify({ reason, restoreActionId: opts.restoreActionId, snapshotId: restore.snapshotId, preRestoreSnapshotId: preRestoreSnapshot.snapshotId, approvalRequestId: approval?.id ?? null }),
+      detail: JSON.stringify({ reason, restoreActionId: opts.restoreActionId, operationCode: opCode, snapshotId: restore.snapshotId, preRestoreSnapshotId: preRestoreSnapshot.snapshotId, approvalRequestId: approval?.id ?? null }),
       ipAddress: opts.ipAddress ?? null,
       userAgent: opts.userAgent ?? null,
     });
@@ -1564,8 +1688,9 @@ export async function restoreCaseRecordFromSnapshot(
     if (typed !== required) throw new ApiError({ status: 400, code: "INVALID_CONFIRMATION_TEXT", message: "Typed confirmation does not match required text", retryable: false, details: { required } });
   }
 
+  const opCode = String(restore.operationCode ?? "restore_snapshot");
   const decision = evaluateDecisionForExecute({
-    actionCode: "restore_snapshot",
+    actionCode: opCode,
     riskLevel: restore.riskLevel as RiskLevel,
     scopeType: restore.restoreScopeType as MaintenanceScopeType,
     moduleCode: restore.moduleCode ?? null,
@@ -1579,7 +1704,7 @@ export async function restoreCaseRecordFromSnapshot(
       code: decision.blockedReason.code === "IMPERSONATION_RESTRICTED" ? "IMPERSONATION_RESTRICTED" : "POLICY_BLOCKED",
       message: decision.blockedReason.message,
       retryable: false,
-      details: { policy: decision.approvalPolicyCode, risk_level: restore.riskLevel, action_code: "restore_snapshot" },
+      details: { policy: decision.approvalPolicyCode, risk_level: restore.riskLevel, action_code: opCode },
     });
   }
 
@@ -1614,7 +1739,7 @@ export async function restoreCaseRecordFromSnapshot(
         stage: "step_up",
       });
     }
-    await consumeStepUpChallenge(authDb, { challengeId, firmId: opts.firmId, actionCode: "restore_snapshot", actorUserId: opts.requestedByUserId, providedPhrase: phrase });
+    await consumeStepUpChallenge(authDb, { challengeId, firmId: opts.firmId, actionCode: opCode, actorUserId: opts.requestedByUserId, providedPhrase: phrase });
     stepUpConfirmation = phrase;
   }
 
@@ -1640,9 +1765,9 @@ export async function restoreCaseRecordFromSnapshot(
     moduleCode: "cases",
     targetEntityType: "case",
     targetEntityId: String(restore.targetEntityId),
-    targetLabel: "pre_restore_case",
+    targetLabel: opCode === "rollback_restore" ? "pre_rollback_case" : "pre_restore_case",
     triggerType: "pre_restore",
-    triggerActionCode: "restore_snapshot",
+    triggerActionCode: opCode as RestoreOperationCode,
     createdByUserId: opts.requestedByUserId,
     createdByEmail: opts.requestedByEmail ?? null,
     reason,
@@ -1650,6 +1775,8 @@ export async function restoreCaseRecordFromSnapshot(
     retentionPolicyCode: "pre_restore",
     storage,
   });
+
+  await authDb.update(platformRestoreActionsTable).set({ preRestoreSnapshotId: preRestoreSnapshot.snapshotId }).where(eq(platformRestoreActionsTable.id, opts.restoreActionId));
 
   await authDb.update(platformRestoreActionStepsTable).set({ status: "completed", completedAt: new Date(), resultPayload: { snapshotId: preRestoreSnapshot.snapshotId } }).where(and(eq(platformRestoreActionStepsTable.restoreActionId, opts.restoreActionId), eq(platformRestoreActionStepsTable.stepCode, "create_pre_restore_snapshot")));
   await authDb.insert(platformRestoreActionStepsTable).values({ restoreActionId: opts.restoreActionId, stepCode: "apply_restore", stepOrder: 30, status: "running", startedAt: new Date() });
@@ -1775,16 +1902,427 @@ export async function restoreCaseRecordFromSnapshot(
         key_dates_updated: keyDates ? 1 : 0,
       },
     };
-    await authDb.update(platformRestoreActionsTable).set({ status: "completed", completedAt: new Date(), resultPayload: result as any }).where(eq(platformRestoreActionsTable.id, opts.restoreActionId));
-    await authDb.update(platformRestoreActionStepsTable).set({ status: "completed", completedAt: new Date(), resultPayload: result as any }).where(and(eq(platformRestoreActionStepsTable.restoreActionId, opts.restoreActionId), eq(platformRestoreActionStepsTable.stepCode, "apply_restore")));
+    await authDb.update(platformRestoreActionsTable).set({ status: "completed", completedAt: new Date(), resultPayload: result }).where(eq(platformRestoreActionsTable.id, opts.restoreActionId));
+    await authDb.update(platformRestoreActionStepsTable).set({ status: "completed", completedAt: new Date(), resultPayload: result }).where(and(eq(platformRestoreActionStepsTable.restoreActionId, opts.restoreActionId), eq(platformRestoreActionStepsTable.stepCode, "apply_restore")));
     await authDb.insert(auditLogsTable).values({
       firmId: opts.firmId,
       actorId: opts.requestedByUserId,
       actorType: "founder",
-      action: "firm.restore.case",
+      action: opCode === "rollback_restore" ? "firm.recovery.rollback.case" : "firm.restore.case",
       entityType: "case",
       entityId: caseId,
-      detail: JSON.stringify({ reason, restoreActionId: opts.restoreActionId, snapshotId: restore.snapshotId, preRestoreSnapshotId: preRestoreSnapshot.snapshotId, approvalRequestId: approval?.id ?? null }),
+      detail: JSON.stringify({ reason, restoreActionId: opts.restoreActionId, operationCode: opCode, snapshotId: restore.snapshotId, preRestoreSnapshotId: preRestoreSnapshot.snapshotId, approvalRequestId: approval?.id ?? null }),
+      ipAddress: opts.ipAddress ?? null,
+      userAgent: opts.userAgent ?? null,
+    });
+    if (approval?.id) await markApprovalExecuted(authDb, approval.id);
+    return { restoreActionId: opts.restoreActionId, preRestoreSnapshotId: preRestoreSnapshot.snapshotId, result };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err ?? "");
+    await authDb.update(platformRestoreActionsTable).set({ status: "failed", failedAt: new Date(), errorCode: "RESTORE_EXECUTION_FAILED", errorMessage: msg.slice(0, 400) }).where(eq(platformRestoreActionsTable.id, opts.restoreActionId));
+    await authDb.update(platformRestoreActionStepsTable).set({ status: "failed", completedAt: new Date(), errorCode: "RESTORE_EXECUTION_FAILED", errorMessage: msg.slice(0, 400) }).where(and(eq(platformRestoreActionStepsTable.restoreActionId, opts.restoreActionId), eq(platformRestoreActionStepsTable.stepCode, "apply_restore")));
+    throw new ApiError({ status: 500, code: "RESTORE_EXECUTION_FAILED", message: "Restore failed", retryable: true, details: { restoreActionId: opts.restoreActionId } });
+  }
+}
+
+export async function restoreProjectRecordFromSnapshot(
+  authDb: RlsDb,
+  opts: {
+    firmId: number;
+    restoreActionId: string;
+    reason: string;
+    typedConfirmation: string | null;
+    approvalRequestId?: string | null;
+    stepUpChallengeId?: string | null;
+    stepUpPhrase?: string | null;
+    emergencyFlag?: boolean;
+    actorPermissions: string[];
+    impersonationActive: boolean;
+    requestedByUserId: number;
+    requestedByEmail?: string | null;
+    ipAddress?: string | null;
+    userAgent?: string | null;
+  }
+): Promise<{ restoreActionId: string; preRestoreSnapshotId: string; result: unknown }> {
+  const [restore] = await authDb.select().from(platformRestoreActionsTable).where(and(eq(platformRestoreActionsTable.id, opts.restoreActionId), eq(platformRestoreActionsTable.firmId, opts.firmId)));
+  if (!restore) throw new ApiError({ status: 404, code: "ACTION_NOT_FOUND", message: "Restore action not found", retryable: false });
+  if (restore.status !== "previewed") throw new ApiError({ status: 409, code: "TARGET_STATE_CONFLICT", message: "Restore action is not in previewed state", retryable: true });
+  if (restore.restoreScopeType !== "record" || restore.targetEntityType !== "project" || !restore.targetEntityId) {
+    throw new ApiError({ status: 422, code: "UNSUPPORTED_OPERATION", message: "Restore action is not a project record restore", retryable: false });
+  }
+
+  const reason = String(opts.reason ?? "").trim();
+  if (reason.length < 10) throw new ApiError({ status: 422, code: "INVALID_INPUT", message: "Reason must be at least 10 characters", retryable: false });
+  const required = requiredTypedConfirmation(restore.riskLevel as RiskLevel);
+  if (required) {
+    const typed = String(opts.typedConfirmation ?? "").trim();
+    if (typed !== required) throw new ApiError({ status: 400, code: "INVALID_CONFIRMATION_TEXT", message: "Typed confirmation does not match required text", retryable: false, details: { required } });
+  }
+
+  const opCode = String(restore.operationCode ?? "restore_snapshot");
+  const decision = evaluateDecisionForExecute({
+    actionCode: opCode,
+    riskLevel: restore.riskLevel as RiskLevel,
+    scopeType: restore.restoreScopeType as MaintenanceScopeType,
+    moduleCode: restore.moduleCode ?? null,
+    actorPermissions: new Set(opts.actorPermissions ?? []),
+    impersonation: Boolean(opts.impersonationActive),
+    emergency: Boolean(opts.emergencyFlag),
+  });
+  if (decision.blockedReason) {
+    throw new ApiError({
+      status: 403,
+      code: decision.blockedReason.code === "IMPERSONATION_RESTRICTED" ? "IMPERSONATION_RESTRICTED" : "POLICY_BLOCKED",
+      message: decision.blockedReason.message,
+      retryable: false,
+      details: { policy: decision.approvalPolicyCode, risk_level: restore.riskLevel, action_code: opCode },
+    });
+  }
+
+  let approval: { id: string } | null = null;
+  if (decision.approvalRequired) {
+    const id = String(opts.approvalRequestId ?? "").trim();
+    if (!id) {
+      throw new ApiError({
+        status: 409,
+        code: "APPROVAL_REQUIRED",
+        message: "Approval required before executing this restore",
+        retryable: false,
+        stage: "approval",
+        details: { required_approvals: decision.requiredApprovalCount, approval_policy_code: decision.approvalPolicyCode },
+        suggestion: "Submit an approval request, then execute again after it is approved.",
+      });
+    }
+    await assertApprovalApproved(authDb, { approvalRequestId: id, operationType: "restore_action", operationId: opts.restoreActionId, now: new Date() });
+    approval = { id };
+  }
+
+  let stepUpConfirmation: string | null = null;
+  if (decision.challengePhraseRequired || decision.cooldownSecondsRequired > 0) {
+    const challengeId = String(opts.stepUpChallengeId ?? "").trim();
+    const phrase = String(opts.stepUpPhrase ?? "").trim();
+    if (!challengeId || !phrase) {
+      throw new ApiError({
+        status: 409,
+        code: "STEP_UP_REQUIRED",
+        message: "Step-up verification required",
+        retryable: false,
+        stage: "step_up",
+      });
+    }
+    await consumeStepUpChallenge(authDb, { challengeId, firmId: opts.firmId, actionCode: opCode, actorUserId: opts.requestedByUserId, providedPhrase: phrase });
+    stepUpConfirmation = phrase;
+  }
+
+  if (restore.riskLevel === "high" || restore.riskLevel === "critical") {
+    await assertNoConcurrentDestructive(authDb, { firmId: opts.firmId, table: "restore", currentId: opts.restoreActionId });
+  }
+
+  const storage = new SupabaseStorageService();
+  await authDb.update(platformRestoreActionsTable).set({
+    status: "running",
+    reason,
+    typedConfirmation: opts.typedConfirmation ?? null,
+    stepUpConfirmation,
+    approvalRequestId: approval?.id ?? null,
+    startedAt: new Date(),
+  }).where(eq(platformRestoreActionsTable.id, opts.restoreActionId));
+  await authDb.insert(platformRestoreActionStepsTable).values({ restoreActionId: opts.restoreActionId, stepCode: "create_pre_restore_snapshot", stepOrder: 20, status: "running", startedAt: new Date() });
+
+  const preRestoreSnapshot = await createSnapshot(authDb, {
+    firmId: opts.firmId,
+    snapshotType: "record",
+    scopeType: "record",
+    moduleCode: "projects",
+    targetEntityType: "project",
+    targetEntityId: String(restore.targetEntityId),
+    targetLabel: opCode === "rollback_restore" ? "pre_rollback_project" : "pre_restore_project",
+    triggerType: "pre_restore",
+    triggerActionCode: opCode as RestoreOperationCode,
+    createdByUserId: opts.requestedByUserId,
+    createdByEmail: opts.requestedByEmail ?? null,
+    reason,
+    note: null,
+    retentionPolicyCode: "pre_restore",
+    storage,
+  });
+  await authDb.update(platformRestoreActionsTable).set({ preRestoreSnapshotId: preRestoreSnapshot.snapshotId }).where(eq(platformRestoreActionsTable.id, opts.restoreActionId));
+
+  await authDb.update(platformRestoreActionStepsTable).set({ status: "completed", completedAt: new Date(), resultPayload: { snapshotId: preRestoreSnapshot.snapshotId } }).where(and(eq(platformRestoreActionStepsTable.restoreActionId, opts.restoreActionId), eq(platformRestoreActionStepsTable.stepCode, "create_pre_restore_snapshot")));
+  await authDb.insert(platformRestoreActionStepsTable).values({ restoreActionId: opts.restoreActionId, stepCode: "apply_restore", stepOrder: 30, status: "running", startedAt: new Date() });
+
+  try {
+    const payload = await readSnapshotPayload(authDb, restore.snapshotId, storage);
+    const payloadObj = asPlainObject(payload);
+    if (!payloadObj) throw new ApiError({ status: 422, code: "SNAPSHOT_NOT_RESTORABLE", message: "Snapshot payload invalid", retryable: false });
+    const kind = readString(payloadObj, "kind");
+    if (kind !== "project") throw new ApiError({ status: 422, code: "SNAPSHOT_NOT_RESTORABLE", message: "Snapshot does not contain project payload", retryable: false });
+    const snapProjectObj = asPlainObject(payloadObj["project"]);
+    if (!snapProjectObj) throw new ApiError({ status: 422, code: "SNAPSHOT_NOT_RESTORABLE", message: "Snapshot project payload missing", retryable: false });
+    const projectId = readNumber(snapProjectObj, "id");
+    if (!projectId) throw new ApiError({ status: 422, code: "SNAPSHOT_NOT_RESTORABLE", message: "Snapshot project id missing", retryable: false });
+    if (String(projectId) !== String(restore.targetEntityId)) throw new ApiError({ status: 409, code: "TARGET_MISMATCH", message: "Snapshot project id does not match restore target", retryable: false });
+
+    const [current] = await authDb.select().from(projectsTable).where(and(eq(projectsTable.firmId, opts.firmId), eq(projectsTable.id, projectId)));
+    if (!current) throw new ApiError({ status: 404, code: "PROJECT_NOT_FOUND", message: "Project not found", retryable: false });
+
+    const snapDeveloperId = readNumber(snapProjectObj, "developerId");
+    const useDeveloperId = snapDeveloperId
+      ? (await authDb.select({ id: developersTable.id }).from(developersTable).where(and(eq(developersTable.firmId, opts.firmId), eq(developersTable.id, snapDeveloperId)))).length
+        ? snapDeveloperId
+        : current.developerId
+      : current.developerId;
+
+    const name = readString(snapProjectObj, "name") ?? current.name;
+    const phase = readString(snapProjectObj, "phase");
+    const developerName = readString(snapProjectObj, "developerName");
+    const projectType = readString(snapProjectObj, "projectType") ?? current.projectType;
+    const titleType = readString(snapProjectObj, "titleType") ?? current.titleType;
+    const titleSubtype = readString(snapProjectObj, "titleSubtype");
+    const masterTitleNumber = readString(snapProjectObj, "masterTitleNumber");
+    const masterTitleLandSize = readString(snapProjectObj, "masterTitleLandSize");
+    const mukim = readString(snapProjectObj, "mukim");
+    const daerah = readString(snapProjectObj, "daerah");
+    const negeri = readString(snapProjectObj, "negeri");
+    const landUse = readString(snapProjectObj, "landUse");
+    const developmentCondition = readString(snapProjectObj, "developmentCondition");
+    const unitCategory = readString(snapProjectObj, "unitCategory");
+    const archivedAt = readDate(snapProjectObj, "archivedAt");
+    const archivedBy = (() => {
+      const v = readNumber(snapProjectObj, "archivedBy");
+      return v ? v : null;
+    })();
+    const archivedReason = readString(snapProjectObj, "archivedReason");
+    const extraFieldsVal = snapProjectObj["extraFields"];
+    const extraFields = extraFieldsVal && typeof extraFieldsVal === "object" ? extraFieldsVal : current.extraFields;
+
+    await authDb.update(projectsTable).set({
+      developerId: useDeveloperId,
+      name,
+      phase,
+      developerName,
+      projectType,
+      titleType,
+      titleSubtype,
+      masterTitleNumber,
+      masterTitleLandSize,
+      mukim,
+      daerah,
+      negeri,
+      landUse,
+      developmentCondition,
+      unitCategory,
+      extraFields,
+      archivedAt,
+      archivedBy,
+      archivedReason,
+      updatedAt: new Date(),
+    }).where(and(eq(projectsTable.firmId, opts.firmId), eq(projectsTable.id, projectId)));
+
+    const result = {
+      summary: "Project restored",
+      restored: {
+        project_id: projectId,
+        developer_id: useDeveloperId,
+        note: snapDeveloperId && useDeveloperId !== snapDeveloperId ? "Developer id in snapshot not found; kept current developerId" : null,
+      },
+    };
+    await authDb.update(platformRestoreActionsTable).set({ status: "completed", completedAt: new Date(), resultPayload: result }).where(eq(platformRestoreActionsTable.id, opts.restoreActionId));
+    await authDb.update(platformRestoreActionStepsTable).set({ status: "completed", completedAt: new Date(), resultPayload: result }).where(and(eq(platformRestoreActionStepsTable.restoreActionId, opts.restoreActionId), eq(platformRestoreActionStepsTable.stepCode, "apply_restore")));
+    await authDb.insert(auditLogsTable).values({
+      firmId: opts.firmId,
+      actorId: opts.requestedByUserId,
+      actorType: "founder",
+      action: opCode === "rollback_restore" ? "firm.recovery.rollback.project" : "firm.restore.project",
+      entityType: "project",
+      entityId: projectId,
+      detail: JSON.stringify({ reason, restoreActionId: opts.restoreActionId, operationCode: opCode, snapshotId: restore.snapshotId, preRestoreSnapshotId: preRestoreSnapshot.snapshotId, approvalRequestId: approval?.id ?? null }),
+      ipAddress: opts.ipAddress ?? null,
+      userAgent: opts.userAgent ?? null,
+    });
+    if (approval?.id) await markApprovalExecuted(authDb, approval.id);
+    return { restoreActionId: opts.restoreActionId, preRestoreSnapshotId: preRestoreSnapshot.snapshotId, result };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err ?? "");
+    await authDb.update(platformRestoreActionsTable).set({ status: "failed", failedAt: new Date(), errorCode: "RESTORE_EXECUTION_FAILED", errorMessage: msg.slice(0, 400) }).where(eq(platformRestoreActionsTable.id, opts.restoreActionId));
+    await authDb.update(platformRestoreActionStepsTable).set({ status: "failed", completedAt: new Date(), errorCode: "RESTORE_EXECUTION_FAILED", errorMessage: msg.slice(0, 400) }).where(and(eq(platformRestoreActionStepsTable.restoreActionId, opts.restoreActionId), eq(platformRestoreActionStepsTable.stepCode, "apply_restore")));
+    throw new ApiError({ status: 500, code: "RESTORE_EXECUTION_FAILED", message: "Restore failed", retryable: true, details: { restoreActionId: opts.restoreActionId } });
+  }
+}
+
+export async function restoreDeveloperRecordFromSnapshot(
+  authDb: RlsDb,
+  opts: {
+    firmId: number;
+    restoreActionId: string;
+    reason: string;
+    typedConfirmation: string | null;
+    approvalRequestId?: string | null;
+    stepUpChallengeId?: string | null;
+    stepUpPhrase?: string | null;
+    emergencyFlag?: boolean;
+    actorPermissions: string[];
+    impersonationActive: boolean;
+    requestedByUserId: number;
+    requestedByEmail?: string | null;
+    ipAddress?: string | null;
+    userAgent?: string | null;
+  }
+): Promise<{ restoreActionId: string; preRestoreSnapshotId: string; result: unknown }> {
+  const [restore] = await authDb.select().from(platformRestoreActionsTable).where(and(eq(platformRestoreActionsTable.id, opts.restoreActionId), eq(platformRestoreActionsTable.firmId, opts.firmId)));
+  if (!restore) throw new ApiError({ status: 404, code: "ACTION_NOT_FOUND", message: "Restore action not found", retryable: false });
+  if (restore.status !== "previewed") throw new ApiError({ status: 409, code: "TARGET_STATE_CONFLICT", message: "Restore action is not in previewed state", retryable: true });
+  if (restore.restoreScopeType !== "record" || restore.targetEntityType !== "developer" || !restore.targetEntityId) {
+    throw new ApiError({ status: 422, code: "UNSUPPORTED_OPERATION", message: "Restore action is not a developer record restore", retryable: false });
+  }
+
+  const reason = String(opts.reason ?? "").trim();
+  if (reason.length < 10) throw new ApiError({ status: 422, code: "INVALID_INPUT", message: "Reason must be at least 10 characters", retryable: false });
+  const required = requiredTypedConfirmation(restore.riskLevel as RiskLevel);
+  if (required) {
+    const typed = String(opts.typedConfirmation ?? "").trim();
+    if (typed !== required) throw new ApiError({ status: 400, code: "INVALID_CONFIRMATION_TEXT", message: "Typed confirmation does not match required text", retryable: false, details: { required } });
+  }
+
+  const opCode = String(restore.operationCode ?? "restore_snapshot");
+  const decision = evaluateDecisionForExecute({
+    actionCode: opCode,
+    riskLevel: restore.riskLevel as RiskLevel,
+    scopeType: restore.restoreScopeType as MaintenanceScopeType,
+    moduleCode: restore.moduleCode ?? null,
+    actorPermissions: new Set(opts.actorPermissions ?? []),
+    impersonation: Boolean(opts.impersonationActive),
+    emergency: Boolean(opts.emergencyFlag),
+  });
+  if (decision.blockedReason) {
+    throw new ApiError({
+      status: 403,
+      code: decision.blockedReason.code === "IMPERSONATION_RESTRICTED" ? "IMPERSONATION_RESTRICTED" : "POLICY_BLOCKED",
+      message: decision.blockedReason.message,
+      retryable: false,
+      details: { policy: decision.approvalPolicyCode, risk_level: restore.riskLevel, action_code: opCode },
+    });
+  }
+
+  let approval: { id: string } | null = null;
+  if (decision.approvalRequired) {
+    const id = String(opts.approvalRequestId ?? "").trim();
+    if (!id) {
+      throw new ApiError({
+        status: 409,
+        code: "APPROVAL_REQUIRED",
+        message: "Approval required before executing this restore",
+        retryable: false,
+        stage: "approval",
+        details: { required_approvals: decision.requiredApprovalCount, approval_policy_code: decision.approvalPolicyCode },
+        suggestion: "Submit an approval request, then execute again after it is approved.",
+      });
+    }
+    await assertApprovalApproved(authDb, { approvalRequestId: id, operationType: "restore_action", operationId: opts.restoreActionId, now: new Date() });
+    approval = { id };
+  }
+
+  let stepUpConfirmation: string | null = null;
+  if (decision.challengePhraseRequired || decision.cooldownSecondsRequired > 0) {
+    const challengeId = String(opts.stepUpChallengeId ?? "").trim();
+    const phrase = String(opts.stepUpPhrase ?? "").trim();
+    if (!challengeId || !phrase) {
+      throw new ApiError({
+        status: 409,
+        code: "STEP_UP_REQUIRED",
+        message: "Step-up verification required",
+        retryable: false,
+        stage: "step_up",
+      });
+    }
+    await consumeStepUpChallenge(authDb, { challengeId, firmId: opts.firmId, actionCode: opCode, actorUserId: opts.requestedByUserId, providedPhrase: phrase });
+    stepUpConfirmation = phrase;
+  }
+
+  if (restore.riskLevel === "high" || restore.riskLevel === "critical") {
+    await assertNoConcurrentDestructive(authDb, { firmId: opts.firmId, table: "restore", currentId: opts.restoreActionId });
+  }
+
+  const storage = new SupabaseStorageService();
+  await authDb.update(platformRestoreActionsTable).set({
+    status: "running",
+    reason,
+    typedConfirmation: opts.typedConfirmation ?? null,
+    stepUpConfirmation,
+    approvalRequestId: approval?.id ?? null,
+    startedAt: new Date(),
+  }).where(eq(platformRestoreActionsTable.id, opts.restoreActionId));
+  await authDb.insert(platformRestoreActionStepsTable).values({ restoreActionId: opts.restoreActionId, stepCode: "create_pre_restore_snapshot", stepOrder: 20, status: "running", startedAt: new Date() });
+
+  const preRestoreSnapshot = await createSnapshot(authDb, {
+    firmId: opts.firmId,
+    snapshotType: "record",
+    scopeType: "record",
+    moduleCode: "developers",
+    targetEntityType: "developer",
+    targetEntityId: String(restore.targetEntityId),
+    targetLabel: opCode === "rollback_restore" ? "pre_rollback_developer" : "pre_restore_developer",
+    triggerType: "pre_restore",
+    triggerActionCode: opCode as RestoreOperationCode,
+    createdByUserId: opts.requestedByUserId,
+    createdByEmail: opts.requestedByEmail ?? null,
+    reason,
+    note: null,
+    retentionPolicyCode: "pre_restore",
+    storage,
+  });
+  await authDb.update(platformRestoreActionsTable).set({ preRestoreSnapshotId: preRestoreSnapshot.snapshotId }).where(eq(platformRestoreActionsTable.id, opts.restoreActionId));
+
+  await authDb.update(platformRestoreActionStepsTable).set({ status: "completed", completedAt: new Date(), resultPayload: { snapshotId: preRestoreSnapshot.snapshotId } }).where(and(eq(platformRestoreActionStepsTable.restoreActionId, opts.restoreActionId), eq(platformRestoreActionStepsTable.stepCode, "create_pre_restore_snapshot")));
+  await authDb.insert(platformRestoreActionStepsTable).values({ restoreActionId: opts.restoreActionId, stepCode: "apply_restore", stepOrder: 30, status: "running", startedAt: new Date() });
+
+  try {
+    const payload = await readSnapshotPayload(authDb, restore.snapshotId, storage);
+    const payloadObj = asPlainObject(payload);
+    if (!payloadObj) throw new ApiError({ status: 422, code: "SNAPSHOT_NOT_RESTORABLE", message: "Snapshot payload invalid", retryable: false });
+    const kind = readString(payloadObj, "kind");
+    if (kind !== "developer") throw new ApiError({ status: 422, code: "SNAPSHOT_NOT_RESTORABLE", message: "Snapshot does not contain developer payload", retryable: false });
+    const snapDeveloperObj = asPlainObject(payloadObj["developer"]);
+    if (!snapDeveloperObj) throw new ApiError({ status: 422, code: "SNAPSHOT_NOT_RESTORABLE", message: "Snapshot developer payload missing", retryable: false });
+    const developerId = readNumber(snapDeveloperObj, "id");
+    if (!developerId) throw new ApiError({ status: 422, code: "SNAPSHOT_NOT_RESTORABLE", message: "Snapshot developer id missing", retryable: false });
+    if (String(developerId) !== String(restore.targetEntityId)) throw new ApiError({ status: 409, code: "TARGET_MISMATCH", message: "Snapshot developer id does not match restore target", retryable: false });
+
+    const [current] = await authDb.select().from(developersTable).where(and(eq(developersTable.firmId, opts.firmId), eq(developersTable.id, developerId)));
+    if (!current) throw new ApiError({ status: 404, code: "DEVELOPER_NOT_FOUND", message: "Developer not found", retryable: false });
+
+    const name = readString(snapDeveloperObj, "name") ?? current.name;
+    const companyRegNo = readString(snapDeveloperObj, "companyRegNo");
+    const address = readString(snapDeveloperObj, "address");
+    const businessAddress = readString(snapDeveloperObj, "businessAddress");
+    const contacts = readString(snapDeveloperObj, "contacts");
+    const contactPerson = readString(snapDeveloperObj, "contactPerson");
+    const phone = readString(snapDeveloperObj, "phone");
+    const email = readString(snapDeveloperObj, "email");
+
+    await authDb.update(developersTable).set({
+      name,
+      companyRegNo,
+      address,
+      businessAddress,
+      contacts,
+      contactPerson,
+      phone,
+      email,
+      updatedAt: new Date(),
+    }).where(and(eq(developersTable.firmId, opts.firmId), eq(developersTable.id, developerId)));
+
+    const result = { summary: "Developer restored", restored: { developer_id: developerId } };
+    await authDb.update(platformRestoreActionsTable).set({ status: "completed", completedAt: new Date(), resultPayload: result }).where(eq(platformRestoreActionsTable.id, opts.restoreActionId));
+    await authDb.update(platformRestoreActionStepsTable).set({ status: "completed", completedAt: new Date(), resultPayload: result }).where(and(eq(platformRestoreActionStepsTable.restoreActionId, opts.restoreActionId), eq(platformRestoreActionStepsTable.stepCode, "apply_restore")));
+    await authDb.insert(auditLogsTable).values({
+      firmId: opts.firmId,
+      actorId: opts.requestedByUserId,
+      actorType: "founder",
+      action: opCode === "rollback_restore" ? "firm.recovery.rollback.developer" : "firm.restore.developer",
+      entityType: "developer",
+      entityId: developerId,
+      detail: JSON.stringify({ reason, restoreActionId: opts.restoreActionId, operationCode: opCode, snapshotId: restore.snapshotId, preRestoreSnapshotId: preRestoreSnapshot.snapshotId, approvalRequestId: approval?.id ?? null }),
       ipAddress: opts.ipAddress ?? null,
       userAgent: opts.userAgent ?? null,
     });

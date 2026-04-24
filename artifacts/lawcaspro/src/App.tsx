@@ -22,6 +22,7 @@ import PlatformDashboard from "@/pages/platform/dashboard";
 import FirmsList from "@/pages/platform/firms";
 import NewFirm from "@/pages/platform/firms/new";
 import FirmDetail from "@/pages/platform/firms/detail";
+import FirmHistoryDetailPage from "@/pages/platform/firms/history-detail";
 import PlatformMonitoring from "@/pages/platform/monitoring";
 import PlatformAuditLogs from "@/pages/platform/audit-logs";
 import PlatformDocuments from "@/pages/platform/documents";
@@ -93,6 +94,7 @@ function PlatformRoutes() {
         <Switch>
           <Route path="/platform/dashboard" component={PlatformDashboard} />
           <Route path="/platform/firms/new" component={NewFirm} />
+          <Route path="/platform/firms/:id/history/:kind/:historyId" component={FirmHistoryDetailPage} />
           <Route path="/platform/firms/:id" component={FirmDetail} />
           <Route path="/platform/firms" component={FirmsList} />
           <Route path="/platform/documents" component={PlatformDocuments} />

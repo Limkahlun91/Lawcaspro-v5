@@ -34,12 +34,12 @@ export default function PlatformAuditLogs() {
   const [search, setSearch] = useState("");
   const [firmFilter, setFirmFilter] = useState("all");
 
-  const firmsQuery = useQuery<{ data: Record<string, unknown>[] }>({
+  const firmsQuery = useQuery<{ items: Record<string, unknown>[] }>({
     queryKey: ["platform-firms-audit"],
     queryFn: () => apiFetchJson("/platform/firms?limit=100"),
     retry: false,
   });
-  const firms = firmsQuery.data?.data ?? [];
+  const firms = firmsQuery.data?.items ?? [];
 
   const params = new URLSearchParams({ limit: "150", includeTotal: "0" });
   if (firmFilter !== "all") params.set("firmId", firmFilter);

@@ -18,6 +18,23 @@ export default function FirmsList() {
     status: status !== "all" ? status : undefined
   });
 
+  const firms = (() => {
+    const r: unknown = response;
+    if (!r || typeof r !== "object") return [];
+    if (!("items" in r)) return [];
+    const items = (r as { items?: unknown }).items;
+    if (!Array.isArray(items)) return [];
+    return items as Array<{
+      id: number;
+      name: string;
+      slug: string;
+      status: string;
+      subscriptionPlan: string;
+      userCount: number;
+      caseCount: number;
+    }>;
+  })();
+
   return (
     <div className="space-y-6">
       <div className="flex justify-between items-center">
@@ -72,7 +89,7 @@ export default function FirmsList() {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
-                  {response?.data.map((firm) => (
+                  {firms.map((firm) => (
                     <tr key={firm.id} className="hover:bg-slate-50/50">
                       <td className="px-6 py-4">
                         <Link href={`/platform/firms/${firm.id}`}>
@@ -100,7 +117,7 @@ export default function FirmsList() {
                       </td>
                     </tr>
                   ))}
-                  {response?.data.length === 0 && (
+                  {firms.length === 0 && (
                     <tr>
                       <td colSpan={5} className="px-6 py-8 text-center text-slate-500">
                         No firms found.

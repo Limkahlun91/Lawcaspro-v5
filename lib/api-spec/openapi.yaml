@@ -1289,10 +1289,19 @@ components:
     FirmListResponse:
       type: object
       properties:
-        data:
+        items:
           type: array
           items:
             $ref: "#/components/schemas/Firm"
+        page_info:
+          $ref: "#/components/schemas/PageInfo"
+      required:
+        - items
+        - page_info
+
+    PageInfo:
+      type: object
+      properties:
         total:
           type: integer
         page:
@@ -1300,7 +1309,6 @@ components:
         limit:
           type: integer
       required:
-        - data
         - total
         - page
         - limit

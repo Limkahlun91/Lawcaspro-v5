@@ -26,6 +26,45 @@ app.use((req, res, next) => {
     return;
   }
 
+  const toNumber = (v: unknown): number | null => {
+    if (typeof v === "number" && Number.isFinite(v)) return v;
+    if (typeof v === "string" && v.trim()) {
+      const n = Number(v);
+      if (Number.isFinite(n)) return n;
+    }
+    return null;
+  };
+
+  const normalizeOkBody = (body: unknown): unknown => {
+    if (Array.isArray(body)) return { items: body };
+    if (!body || typeof body !== "object") return body ?? null;
+
+    const o = body as Record<string, unknown>;
+    if ("items" in o || "item" in o || "result" in o || "page_info" in o) return o;
+
+    const data = (o as any).data;
+    const total = (o as any).total;
+    const page = (o as any).page;
+    const limit = (o as any).limit;
+    if (Array.isArray(data) && (total != null || page != null || limit != null)) {
+      const pageInfo = {
+        total: toNumber(total),
+        page: toNumber(page),
+        limit: toNumber(limit),
+      };
+      const rest: Record<string, unknown> = { ...o };
+      delete (rest as any).data;
+      delete (rest as any).total;
+      delete (rest as any).page;
+      delete (rest as any).limit;
+      return { items: data, page_info: pageInfo, ...rest };
+    }
+
+    if ((o as any).success === true && Object.keys(o).length === 1) return { result: { success: true } };
+
+    return o;
+  };
+
   const originalJson = res.json.bind(res);
   res.json = ((body: unknown) => {
     if (body && typeof body === "object" && "ok" in (body as any) && typeof (body as any).ok === "boolean") {
@@ -72,7 +111,7 @@ app.use((req, res, next) => {
     }
 
     if (status === 204) res.status(200);
-    return originalJson({ ok: true, data: body ?? null, meta });
+    return originalJson({ ok: true, data: normalizeOkBody(body), meta });
   }) as typeof res.json;
 
   next();
