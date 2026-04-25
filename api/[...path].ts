@@ -49,7 +49,6 @@ import {
 } from "./_lib";
 import apiServerApp from "../artifacts/api-server/src/app";
 import type { IncomingMessage, ServerResponse } from "node:http";
-import type { VercelRequest, VercelResponse } from "@vercel/node";
 
 type AuthContext = {
   userId: number;
@@ -1044,10 +1043,10 @@ const ensureApiPrefix: RequestHandler = (req, _res, next) => {
 app.use(ensureApiPrefix);
 app.use(apiServerApp as unknown as RequestHandler);
 
-export default function handler(req: VercelRequest, res: VercelResponse): unknown {
-  // Vercel <-> Express bridge: keep casts at the boundary only.
-  return app.handle(
-    req as unknown as IncomingMessage,
-    res as unknown as ServerResponse,
-  );
+type NodeServerlessHandler = (req: IncomingMessage, res: ServerResponse) => void | Promise<void>;
+
+const invokeExpress = app as unknown as NodeServerlessHandler;
+
+export default function handler(req: IncomingMessage, res: ServerResponse): void | Promise<void> {
+  return invokeExpress(req, res);
 }
