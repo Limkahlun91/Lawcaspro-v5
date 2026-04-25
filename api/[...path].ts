@@ -1038,4 +1038,11 @@ app.use((req: Request, res: Response, next: NextFunction) => {
   return (apiServerApp as unknown as { handle: (req: Request, res: Response, next: NextFunction) => unknown }).handle(req, res, next);
 });
 
-export default app;
+export default function handler(req: ApiRequest, res: ApiResponse): unknown {
+  const expressReq = req as unknown as Request;
+  const expressRes = res as unknown as Response;
+  const next: NextFunction = (err?: unknown) => {
+    if (err) throw err;
+  };
+  return (app as unknown as { handle: (req: Request, res: Response, next: NextFunction) => unknown }).handle(expressReq, expressRes, next);
+}
