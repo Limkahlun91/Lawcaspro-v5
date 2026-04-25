@@ -1,4 +1,4 @@
-import express, { type Express } from "express";
+import express from "express";
 import cors from "cors";
 import helmet from "helmet";
 import cookieParser from "cookie-parser";
@@ -6,8 +6,47 @@ import pinoHttp from "pino-http";
 import router from "./routes/index.js";
 import { logger } from "./lib/logger.js";
 import { getApiMeta, requestMetaMiddleware, sendError } from "./lib/api-response.js";
+import type { IncomingMessage, ServerResponse } from "node:http";
 
-const app: Express = express();
+type Next = (error?: unknown) => void;
+
+type ReqLike = IncomingMessage & {
+  url?: string;
+  originalUrl?: string;
+  path?: string;
+  method?: string;
+  ip?: string;
+  body?: unknown;
+  params?: Record<string, string>;
+  query?: Record<string, unknown>;
+  headers: IncomingMessage["headers"];
+  log?: {
+    error?: (...args: unknown[]) => void;
+    warn?: (...args: unknown[]) => void;
+    info?: (...args: unknown[]) => void;
+  };
+};
+
+type ResLike = ServerResponse & {
+  locals: Record<string, unknown>;
+  status: (code: number) => ResLike;
+  json: (body: unknown) => ResLike;
+  send: (body?: unknown) => ResLike;
+};
+
+type MiddlewareLike = (req: ReqLike, res: ResLike, next: Next) => void | Promise<void>;
+type ErrorMiddlewareLike = (err: unknown, req: ReqLike, res: ResLike, next: Next) => void | Promise<void>;
+
+type ExpressAppLike = {
+  set: (...args: unknown[]) => unknown;
+  use: (...args: unknown[]) => unknown;
+  get: (...args: unknown[]) => unknown;
+};
+
+const app = express() as unknown as ExpressAppLike;
+
+const getApiMetaUnsafe = getApiMeta as unknown as (res: ResLike) => ReturnType<typeof getApiMeta>;
+const sendErrorUnsafe = sendError as unknown as (res: ResLike, err: unknown, fallback?: { status?: number; code?: string; message?: string }) => void;
 
 app.set("trust proxy", 1);
 app.use(helmet());
@@ -15,10 +54,12 @@ app.use(cors());
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
-app.use(requestMetaMiddleware());
-const requestLogger: express.RequestHandler = pinoHttp({ logger });
-app.use(requestLogger);
-app.use((req, res, next) => {
+app.use(requestMetaMiddleware() as unknown as MiddlewareLike);
+
+const createPinoHttpMiddleware = pinoHttp as unknown as (options: unknown) => MiddlewareLike;
+app.use(createPinoHttpMiddleware({ logger }));
+
+app.use((req: ReqLike, res: ResLike, next: Next) => {
   const path = req.path ?? "";
   const shouldWrap = path.startsWith("/api/auth") || path.startsWith("/api/platform");
   if (!shouldWrap) {
@@ -72,7 +113,7 @@ app.use((req, res, next) => {
     }
 
     const status = res.statusCode;
-    const meta = getApiMeta(res);
+    const meta = getApiMetaUnsafe(res);
 
     if (status >= 400) {
       const message =
@@ -117,23 +158,23 @@ app.use((req, res, next) => {
   next();
 });
 
-const healthHandler: express.RequestHandler = (_req, res): void => {
+const healthHandler: MiddlewareLike = (_req: ReqLike, res: ResLike): void => {
   res.status(200).json({ ok: true });
 };
 
-const notFoundHandler: express.RequestHandler = (req, res): void => {
+const notFoundHandler: MiddlewareLike = (req: ReqLike, res: ResLike): void => {
   logger.warn({ path: req.path, method: req.method, status: 404 }, "Route not found");
-  sendError(res, null, { status: 404, code: "NOT_FOUND", message: "Not found" });
+  sendErrorUnsafe(res, null, { status: 404, code: "NOT_FOUND", message: "Not found" });
 };
 
-const errorHandler: express.ErrorRequestHandler = (err, req, res, next): void => {
+const errorHandler: ErrorMiddlewareLike = (err: unknown, req: ReqLike, res: ResLike, next: Next): void => {
   if (res.headersSent) {
     next(err);
     return;
   }
 
   logger.error({ err, path: req.path, method: req.method, status: 500 }, "Unhandled error");
-  sendError(res, err, { status: 500, code: "INTERNAL_SERVER_ERROR", message: "Internal server error" });
+  sendErrorUnsafe(res, err, { status: 500, code: "INTERNAL_SERVER_ERROR", message: "Internal server error" });
 };
 
 app.get("/api/health", healthHandler);
