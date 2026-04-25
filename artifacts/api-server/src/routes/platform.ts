@@ -368,6 +368,9 @@ router.post("/platform/firms/:firmId/users/:userId/reset-password", requireAuth,
 
     const result = await withAuthSafeDb(
       async (authDb) => {
+        const statementTimeoutMs = 8000;
+        await authDb.execute(sql`SET LOCAL statement_timeout = ${statementTimeoutMs}`);
+
         const ctx = await loadFounderGovernanceContext(authDb, req);
         assertFounderPermission(ctx, "founder.maintenance.reset.firm");
         assertActiveSupportSessionForFirm(ctx, firmId!);
@@ -409,6 +412,18 @@ router.post("/platform/firms/:firmId/users/:userId/reset-password", requireAuth,
     if (err instanceof RouteTimeoutError) {
       logger.error({ err, firmId: req.params.firmId, userId: req.params.userId }, "platform.reset_password.timeout");
       sendError(res, new ApiError({ status: 504, code: "QUERY_TIMEOUT", message: "Request timed out", retryable: true, stage: err.label }));
+      return;
+    }
+    const code = typeof (err as any)?.code === "string" ? String((err as any).code) : undefined;
+    const message = err instanceof Error ? err.message : String(err ?? "");
+    if (code === "57014" || message.toLowerCase().includes("statement timeout")) {
+      sendError(res, new ApiError({
+        status: 504,
+        code: "QUERY_TIMEOUT",
+        message: "Password reset query timed out. Please retry.",
+        retryable: true,
+        stage: "reset_password",
+      }));
       return;
     }
     logger.error({ err, firmId: req.params.firmId, userId: req.params.userId }, "platform.reset_password.error");
@@ -651,26 +666,50 @@ router.get("/platform/documents", requireAuth, requireFounder, async (req: AuthR
       if (!Number.isFinite(n) || n < 1) throw new ApiError({ status: 400, code: "INVALID_INPUT", message: "Invalid folderId", retryable: false });
       return n;
     })();
+    const limit = (() => {
+      const raw = one(req.query.limit as any);
+      if (raw === undefined) return 200;
+      if (!String(raw).trim()) return 200;
+      const n = Number.parseInt(String(raw), 10);
+      if (!Number.isFinite(n) || n < 1) throw new ApiError({ status: 400, code: "INVALID_INPUT", message: "Invalid limit", retryable: false });
+      return Math.min(Math.max(n, 1), 500);
+    })();
 
     const docs = await withAuthSafeDb(
       async (authDb) => {
         return await withTimeout("platform.documents.list", async () => {
+          const statementTimeoutMs = 8000;
+          await authDb.execute(sql`SET LOCAL statement_timeout = ${statementTimeoutMs}`);
+
           let q = authDb.select().from(platformDocumentsTable);
           if (firmId !== null) q = q.where(eq(platformDocumentsTable.firmId, firmId)) as typeof q;
           if (folderId !== null) {
             const folderCond = eq(platformDocumentsTable.folderId, folderId);
             q = q.where(firmId !== null ? and(eq(platformDocumentsTable.firmId, firmId), folderCond) : folderCond) as typeof q;
           }
-          return await q.orderBy(desc(platformDocumentsTable.createdAt));
+          return await q.orderBy(desc(platformDocumentsTable.createdAt), desc(platformDocumentsTable.id)).limit(limit);
         });
       },
       { retry: true, allowUnsafe: true, ctx: { route: "GET /platform/documents", firmId: firmId ?? undefined } }
     );
-    sendOk(res, { items: docs });
+    sendOk(res, { items: docs, page_info: { limit, has_more: docs.length === limit } });
   } catch (err) {
     if (err instanceof RouteTimeoutError) {
       logger.error({ err, firmId: req.query.firmId ?? null, folderId: req.query.folderId ?? null }, "platform.documents.timeout");
       sendError(res, new ApiError({ status: 504, code: "QUERY_TIMEOUT", message: "Request timed out", retryable: true, stage: err.label }));
+      return;
+    }
+    const code = typeof (err as any)?.code === "string" ? String((err as any).code) : undefined;
+    const message = err instanceof Error ? err.message : String(err ?? "");
+    if (code === "57014" || message.toLowerCase().includes("statement timeout")) {
+      sendError(res, new ApiError({
+        status: 504,
+        code: "QUERY_TIMEOUT",
+        message: "Documents query timed out. Try filtering by folder or reducing limit.",
+        retryable: true,
+        stage: "platform.documents.list",
+        suggestion: "Filter by folder or pass a smaller limit.",
+      }));
       return;
     }
     logger.error({ err, firmId: req.query.firmId ?? null, folderId: req.query.folderId ?? null }, "platform.documents.error");

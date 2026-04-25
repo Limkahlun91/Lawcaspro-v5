@@ -88,7 +88,7 @@ router.get("/platform/audit-logs", requireAuth, requireFounder, async (req: Auth
         const ctx = await loadFounderGovernanceContext(authDb, req);
         assertFounderPermission(ctx, "founder.audit.read");
 
-        const statementTimeoutMs = 8000;
+        const statementTimeoutMs = 12000;
         await authDb.execute(sql`SET LOCAL statement_timeout = ${statementTimeoutMs}`);
 
         const rows = await queryRows(authDb, sql`
