@@ -1,4 +1,4 @@
-import express, { type RequestHandler } from "express";
+import express from "express";
 import bcrypt from "bcryptjs";
 import * as OTPAuth from "otpauth";
 import { and, count, desc, eq, ilike } from "drizzle-orm";
@@ -1031,17 +1031,20 @@ async function handleUserDelete(req: ApiRequest, res: ApiResponse, auth: AuthCon
 
 const app = express();
 
-const ensureApiPrefix: RequestHandler = (req, _res, next) => {
-  const mutableReq = req as unknown as { url?: string };
-  const rawUrl = mutableReq.url ?? "/";
+type MiddlewareNext = (error?: unknown) => void;
+type MutableUrlRequest = IncomingMessage & { url?: string };
+type NodeMiddleware = (req: MutableUrlRequest, res: ServerResponse, next: MiddlewareNext) => void;
+
+const ensureApiPrefix: NodeMiddleware = (req: MutableUrlRequest, _res: ServerResponse, next: MiddlewareNext): void => {
+  const rawUrl = req.url ?? "/";
   if (!rawUrl.startsWith("/api")) {
-    mutableReq.url = rawUrl.startsWith("/") ? `/api${rawUrl}` : `/api/${rawUrl}`;
+    req.url = rawUrl.startsWith("/") ? `/api${rawUrl}` : `/api/${rawUrl}`;
   }
   next();
 };
 
-app.use(ensureApiPrefix);
-app.use(apiServerApp as unknown as RequestHandler);
+app.use(ensureApiPrefix as unknown as Parameters<typeof app.use>[0]);
+app.use(apiServerApp as unknown as Parameters<typeof app.use>[0]);
 
 type NodeServerlessHandler = (req: IncomingMessage, res: ServerResponse) => void | Promise<void>;
 
