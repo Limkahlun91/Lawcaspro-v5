@@ -1,4 +1,4 @@
-import express, { type Application, type NextFunction, type Request, type Response } from "express";
+import express, { type RequestHandler } from "express";
 import bcrypt from "bcryptjs";
 import * as OTPAuth from "otpauth";
 import { and, count, desc, eq, ilike } from "drizzle-orm";
@@ -48,6 +48,8 @@ import {
   readJsonBody,
 } from "./_lib";
 import apiServerApp from "../artifacts/api-server/src/app";
+import type { IncomingMessage, ServerResponse } from "node:http";
+import type { VercelRequest, VercelResponse } from "@vercel/node";
 
 type AuthContext = {
   userId: number;
@@ -1028,21 +1030,24 @@ async function handleUserDelete(req: ApiRequest, res: ApiResponse, auth: AuthCon
   });
 }
 
-const app: Application = express();
-app.use((req: Request, res: Response, next: NextFunction) => {
-  const rawUrl = req.url ?? "/";
-  if (!rawUrl.startsWith("/api")) {
-    req.url = rawUrl.startsWith("/") ? `/api${rawUrl}` : `/api/${rawUrl}`;
-  }
-  // Vercel <-> Express bridge: imported app typing may lose call signature; use .handle at boundary.
-  return (apiServerApp as unknown as { handle: (req: Request, res: Response, next: NextFunction) => unknown }).handle(req, res, next);
-});
+const app = express();
 
-export default function handler(req: ApiRequest, res: ApiResponse): unknown {
-  const expressReq = req as unknown as Request;
-  const expressRes = res as unknown as Response;
-  const next: NextFunction = (err?: unknown) => {
-    if (err) throw err;
-  };
-  return (app as unknown as { handle: (req: Request, res: Response, next: NextFunction) => unknown }).handle(expressReq, expressRes, next);
+const ensureApiPrefix: RequestHandler = (req, _res, next) => {
+  const mutableReq = req as unknown as { url?: string };
+  const rawUrl = mutableReq.url ?? "/";
+  if (!rawUrl.startsWith("/api")) {
+    mutableReq.url = rawUrl.startsWith("/") ? `/api${rawUrl}` : `/api/${rawUrl}`;
+  }
+  next();
+};
+
+app.use(ensureApiPrefix);
+app.use(apiServerApp as unknown as RequestHandler);
+
+export default function handler(req: VercelRequest, res: VercelResponse): unknown {
+  // Vercel <-> Express bridge: keep casts at the boundary only.
+  return app.handle(
+    req as unknown as IncomingMessage,
+    res as unknown as ServerResponse,
+  );
 }
