@@ -1,4 +1,4 @@
-import express from "express";
+import express, { type Express as ExpressApplication } from "express";
 import cors from "cors";
 import helmet from "helmet";
 import cookieParser from "cookie-parser";
@@ -43,7 +43,8 @@ type ExpressAppLike = {
   get: (...args: unknown[]) => unknown;
 };
 
-const app = express() as unknown as ExpressAppLike;
+const expressApp = express();
+const app = expressApp as unknown as ExpressAppLike;
 
 const getApiMetaUnsafe = getApiMeta as unknown as (res: ResLike) => ReturnType<typeof getApiMeta>;
 const sendErrorUnsafe = sendError as unknown as (res: ResLike, err: unknown, fallback?: { status?: number; code?: string; message?: string }) => void;
@@ -182,4 +183,5 @@ app.use("/api", router);
 app.use(notFoundHandler);
 app.use(errorHandler);
 
-export default app;
+const exportedApp = expressApp as unknown as ExpressApplication;
+export default exportedApp;
