@@ -1,4 +1,4 @@
-import express, { type Express } from "express";
+import express, { type Application, type NextFunction, type Request, type Response } from "express";
 import bcrypt from "bcryptjs";
 import * as OTPAuth from "otpauth";
 import { and, count, desc, eq, ilike } from "drizzle-orm";
@@ -1028,13 +1028,14 @@ async function handleUserDelete(req: ApiRequest, res: ApiResponse, auth: AuthCon
   });
 }
 
-const app: Express = express();
-app.use((req, res, next) => {
+const app: Application = express();
+app.use((req: Request, res: Response, next: NextFunction) => {
   const rawUrl = req.url ?? "/";
   if (!rawUrl.startsWith("/api")) {
     req.url = rawUrl.startsWith("/") ? `/api${rawUrl}` : `/api/${rawUrl}`;
   }
-  return apiServerApp(req, res, next);
+  // Vercel <-> Express bridge: imported app typing may lose call signature; use .handle at boundary.
+  return (apiServerApp as unknown as { handle: (req: Request, res: Response, next: NextFunction) => unknown }).handle(req, res, next);
 });
 
 export default app;
