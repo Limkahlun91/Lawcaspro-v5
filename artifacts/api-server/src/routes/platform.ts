@@ -5,20 +5,18 @@ import { eq, ilike, count, desc, and, isNull, or } from "drizzle-orm";
 import type { IncomingHttpHeaders, IncomingMessage } from "node:http";
 import {
   db,
-  firmsTable,
-  usersTable,
-  rolesTable,
-  sql,
-  type SQL,
-} from "@workspace/db";
-import {
   casesTable,
+  firmsTable,
   platformClausesTable,
   platformDocumentsTable,
   platformMessageAttachmentsTable,
   platformMessagesTable,
+  usersTable,
+  rolesTable,
   systemFoldersTable,
-} from "@workspace/db/schema";
+  sql,
+  type SQL,
+} from "@workspace/db";
 import { CreateFirmBody, UpdateFirmBody, ListFirmsQueryParams, GetFirmParams, UpdateFirmParams } from "@workspace/api-zod";
 import { requireAuth, requireFounder, writeAuditLog, type AuthRequest } from "../lib/auth.js";
 import { withAuthSafeDb } from "../lib/auth-safe-db.js";
@@ -55,6 +53,14 @@ type ReqLike = IncomingMessage & {
 };
 
 type RouteResLike = ResLike;
+
+type FetchResponseLike = {
+  ok: boolean;
+  status: number;
+  headers: { forEach: (callback: (value: string, key: string) => void) => void };
+  arrayBuffer: () => Promise<ArrayBuffer>;
+  body?: ReadableStream<Uint8Array> | null;
+};
 
 type RouterInternalLike = {
   get: (path: string, ...handlers: unknown[]) => unknown;
@@ -1050,7 +1056,7 @@ routerInternal.get("/platform/documents/:docId/download", requireAuth, requireFo
   const [doc] = await withAuthSafeDb(async (authDb) => authDb.select().from(platformDocumentsTable).where(eq(platformDocumentsTable.id, docId)));
   if (!doc) { res.status(404).json({ error: "Document not found" }); return; }
   try {
-    const response = await storage.fetchPrivateObjectResponse(doc.objectPath);
+    const response = (await storage.fetchPrivateObjectResponse(doc.objectPath)) as unknown as FetchResponseLike;
     await writeAuditLog(
       {
         firmId: doc.firmId ?? null,
@@ -1106,7 +1112,7 @@ routerInternal.get("/platform/documents/:docId/clause-placeholders", requireAuth
     return;
   }
   try {
-    const response = await storage.fetchPrivateObjectResponse(doc.objectPath);
+    const response = (await storage.fetchPrivateObjectResponse(doc.objectPath)) as unknown as FetchResponseLike;
     if (!response.ok) {
       res.status(response.status).json({ error: "Failed to download document" });
       return;

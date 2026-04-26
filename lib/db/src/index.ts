@@ -109,5 +109,14 @@ export {
   usersTable,
 } from "./schema";
 
+export {
+  casesTable,
+  systemFoldersTable,
+  platformDocumentsTable,
+  platformClausesTable,
+  platformMessagesTable,
+  platformMessageAttachmentsTable,
+} from "./schema";
+
 export { sql } from "drizzle-orm";
 export type { SQL } from "drizzle-orm";
