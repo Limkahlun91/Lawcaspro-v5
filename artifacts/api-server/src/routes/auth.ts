@@ -1,18 +1,49 @@
-import { Router, type IRouter } from "express";
+import express, { type Router as ExpressRouter } from "express";
 import bcrypt from "bcryptjs";
 import crypto from "crypto";
 import { and, eq } from "drizzle-orm";
 import { auditLogsTable, db, firmsTable, permissionsTable, rolesTable, sessionsTable, sql, type SQL, usersTable } from "@workspace/db";
 import { LoginBody } from "@workspace/api-zod";
-import { loadFounderPermissions, requireAuth, requireReAuth, issueReauthToken, type AuthRequest, writeAuditLog } from "../lib/auth";
-import { ApiError, sendError, sendOk } from "../lib/api-response";
-import { authRateLimiter, sensitiveRateLimiter } from "../lib/rate-limit";
-import { logger } from "../lib/logger";
-import { isTransientDbConnectionError } from "../lib/auth-safe-db";
+import { loadFounderPermissions, requireAuth, requireReAuth, issueReauthToken, type AuthRequest, writeAuditLog } from "../lib/auth.js";
+import { ApiError, sendError, sendOk } from "../lib/api-response.js";
+import { authRateLimiter, sensitiveRateLimiter } from "../lib/rate-limit.js";
+import { logger } from "../lib/logger.js";
+import { isTransientDbConnectionError } from "../lib/auth-safe-db.js";
 import * as OTPAuth from "otpauth";
 import QRCode from "qrcode";
 
-const router: IRouter = Router();
+type ReqLike = {
+  body?: unknown;
+  query?: Record<string, unknown>;
+  params?: Record<string, string>;
+  headers?: Record<string, string | string[] | undefined>;
+  cookies?: Record<string, string>;
+  user?: unknown;
+  firmId?: string;
+  requestId?: string;
+  [key: string]: unknown;
+};
+
+type ResLike = {
+  status: (code: number) => ResLike;
+  json: (body: unknown) => ResLike;
+  cookie?: (...args: unknown[]) => ResLike;
+  clearCookie?: (...args: unknown[]) => ResLike;
+  setHeader?: (name: string, value: string | number | readonly string[]) => void;
+  locals?: Record<string, unknown>;
+  [key: string]: unknown;
+};
+
+type HandlerLike = (req: ReqLike, res: ResLike) => unknown;
+
+type RouterInternalLike = {
+  get: (path: string, ...handlers: HandlerLike[]) => unknown;
+  post: (path: string, ...handlers: HandlerLike[]) => unknown;
+  delete: (path: string, ...handlers: HandlerLike[]) => unknown;
+};
+
+const expressRouter = express.Router();
+const routerInternal = expressRouter as unknown as RouterInternalLike;
 
 const FOUNDER_EMAIL = "lun.6923@hotmail.com";
 
@@ -99,7 +130,7 @@ async function tableExistsAuthDb(
   return Boolean(rows[0]?.reg);
 }
 
-router.post("/auth/login", authRateLimiter, async (req, res): Promise<void> => {
+routerInternal.post("/auth/login", authRateLimiter as unknown as HandlerLike, async (req: ReqLike, res: ResLike): Promise<void> => {
   const debugHeader = req.headers["x-lawcaspro-debug"] ?? req.headers["x-debug-bridge"] ?? req.headers["x-debug"];
   const shouldDebug =
     process.env.DEBUG_VERCEL_BRIDGE === "1" ||
@@ -134,7 +165,7 @@ router.post("/auth/login", authRateLimiter, async (req, res): Promise<void> => {
       .update(emailNormalized)
       .digest("hex")
       .slice(0, 12);
-    const ip = req.ip;
+    const ip = (req as unknown as { ip?: unknown }).ip;
     const ua = req.headers["user-agent"];
     const reqId = getReqId(req);
 
@@ -507,7 +538,10 @@ router.post("/auth/login", authRateLimiter, async (req, res): Promise<void> => {
   }
 });
 
-router.post("/auth/logout", requireAuth, async (req: AuthRequest, res): Promise<void> => {
+routerInternal.post(
+  "/auth/logout",
+  requireAuth as unknown as HandlerLike,
+  async (req: AuthRequest, res: ResLike): Promise<void> => {
   let token = req.cookies?.["auth_token"] as string | undefined;
   if (!token) {
     const authHeader = req.headers["authorization"];
@@ -522,9 +556,10 @@ router.post("/auth/logout", requireAuth, async (req: AuthRequest, res): Promise<
   await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "auth.logout", ipAddress: req.ip, userAgent: req.headers["user-agent"] });
   res.clearCookie("auth_token");
   sendOk(res, { success: true });
-});
+  },
+);
 
-router.get("/auth/me", async (req, res): Promise<void> => {
+routerInternal.get("/auth/me", async (req: ReqLike, res: ResLike): Promise<void> => {
   const startedAt = Date.now();
   const reqId = getReqId(req);
   const cookieToken = getCookieToken(req);
@@ -653,7 +688,10 @@ router.get("/auth/me", async (req, res): Promise<void> => {
   }
 });
 
-router.get("/auth/permissions", requireAuth, async (req: AuthRequest, res): Promise<void> => {
+routerInternal.get(
+  "/auth/permissions",
+  requireAuth as unknown as HandlerLike,
+  async (req: AuthRequest, res: ResLike): Promise<void> => {
   const startedAt = Date.now();
   const reqId = getReqId(req);
   const ctx = { route: req.path, reqId, userId: req.userId ?? null, firmId: req.firmId ?? null, roleId: req.roleId ?? null };
@@ -676,9 +714,13 @@ router.get("/auth/permissions", requireAuth, async (req: AuthRequest, res): Prom
     logger.error({ ...ctx, err }, "auth.permissions_failed");
     sendError(res, err, { status: 503, code: "AUTH_ADMIN_UNAVAILABLE", message: "Auth temporarily unavailable" });
   }
-});
+  },
+);
 
-router.get("/auth/sessions", requireAuth, async (req: AuthRequest, res): Promise<void> => {
+routerInternal.get(
+  "/auth/sessions",
+  requireAuth as unknown as HandlerLike,
+  async (req: AuthRequest, res: ResLike): Promise<void> => {
   const sessions = await db.select({
     id: sessionsTable.id,
     createdAt: sessionsTable.createdAt,
@@ -687,19 +729,27 @@ router.get("/auth/sessions", requireAuth, async (req: AuthRequest, res): Promise
     ipAddress: sessionsTable.ipAddress,
   }).from(sessionsTable).where(eq(sessionsTable.userId, req.userId!));
   sendOk(res, { data: sessions });
-});
+  },
+);
 
-router.delete("/auth/sessions/:id", requireAuth, async (req: AuthRequest, res): Promise<void> => {
+routerInternal.delete(
+  "/auth/sessions/:id",
+  requireAuth as unknown as HandlerLike,
+  async (req: AuthRequest, res: ResLike): Promise<void> => {
   const sessionId = Number(req.params.id);
   await db.delete(sessionsTable).where(eq(sessionsTable.id, sessionId));
   await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "auth.session_revoked", entityType: "session", entityId: sessionId, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
   sendOk(res, { success: true });
-});
+  },
+);
 
 // Issue a short-lived (5 min, single-use) re-auth token.
 // The client calls this when the user initiates a sensitive action.
 // The returned token is stored in React state (memory only — never localStorage/sessionStorage).
-router.post("/auth/reauth-token", requireAuth, async (req: AuthRequest, res): Promise<void> => {
+routerInternal.post(
+  "/auth/reauth-token",
+  requireAuth as unknown as HandlerLike,
+  async (req: AuthRequest, res: ResLike): Promise<void> => {
   const token = issueReauthToken(req.userId!);
   await writeAuditLog({
     actorId: req.userId, firmId: req.firmId, actorType: req.userType ?? "firm_user",
@@ -707,9 +757,14 @@ router.post("/auth/reauth-token", requireAuth, async (req: AuthRequest, res): Pr
     ipAddress: req.ip, userAgent: req.headers["user-agent"],
   });
   res.json({ reAuthToken: token });
-});
+  },
+);
 
-router.post("/auth/totp/setup", sensitiveRateLimiter, requireAuth, async (req: AuthRequest, res): Promise<void> => {
+routerInternal.post(
+  "/auth/totp/setup",
+  sensitiveRateLimiter as unknown as HandlerLike,
+  requireAuth as unknown as HandlerLike,
+  async (req: AuthRequest, res: ResLike): Promise<void> => {
   const [user] = await db.select({
     id: usersTable.id,
     email: usersTable.email,
@@ -727,9 +782,14 @@ router.post("/auth/totp/setup", sensitiveRateLimiter, requireAuth, async (req: A
   const qrCodeDataUrl = await QRCode.toDataURL(otpAuthUrl);
 
   res.json({ secret, qrCodeDataUrl, otpAuthUrl });
-});
+  },
+);
 
-router.post("/auth/totp/confirm", sensitiveRateLimiter, requireAuth, async (req: AuthRequest, res): Promise<void> => {
+routerInternal.post(
+  "/auth/totp/confirm",
+  sensitiveRateLimiter as unknown as HandlerLike,
+  requireAuth as unknown as HandlerLike,
+  async (req: AuthRequest, res: ResLike): Promise<void> => {
   const { code } = req.body as { code: string };
   if (!code) { res.status(400).json({ error: "Code is required" }); return; }
 
@@ -749,9 +809,15 @@ router.post("/auth/totp/confirm", sensitiveRateLimiter, requireAuth, async (req:
   await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "auth.totp_enabled", ipAddress: req.ip, userAgent: req.headers["user-agent"] });
 
   res.json({ success: true });
-});
+  },
+);
 
-router.post("/auth/totp/disable", sensitiveRateLimiter, requireAuth, requireReAuth, async (req: AuthRequest, res): Promise<void> => {
+routerInternal.post(
+  "/auth/totp/disable",
+  sensitiveRateLimiter as unknown as HandlerLike,
+  requireAuth as unknown as HandlerLike,
+  requireReAuth as unknown as HandlerLike,
+  async (req: AuthRequest, res: ResLike): Promise<void> => {
   const { code } = req.body as { code: string };
   if (!code) { res.status(400).json({ error: "Code is required to disable TOTP" }); return; }
 
@@ -770,6 +836,9 @@ router.post("/auth/totp/disable", sensitiveRateLimiter, requireAuth, requireReAu
   await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "auth.totp_disabled", ipAddress: req.ip, userAgent: req.headers["user-agent"] });
 
   res.json({ success: true });
-});
+  },
+);
 
-export default router;
+const exportedRouter = expressRouter as unknown as ExpressRouter;
+export { exportedRouter as router };
+export default exportedRouter;
