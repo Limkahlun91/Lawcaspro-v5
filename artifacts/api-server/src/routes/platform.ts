@@ -1,35 +1,107 @@
-import { Router, type IRouter } from "express";
+import express, { type Router as ExpressRouter } from "express";
 import { Readable } from "stream";
 import PizZip from "pizzip";
 import { eq, ilike, count, desc, and, isNull, or } from "drizzle-orm";
+import type { IncomingHttpHeaders, IncomingMessage, ServerResponse } from "node:http";
 import {
   db,
   firmsTable,
   usersTable,
-  casesTable,
   rolesTable,
-  systemFoldersTable,
-  platformDocumentsTable,
-  platformClausesTable,
-  platformMessagesTable,
-  platformMessageAttachmentsTable,
   sql,
   type SQL,
 } from "@workspace/db";
+import {
+  casesTable,
+  platformClausesTable,
+  platformDocumentsTable,
+  platformMessageAttachmentsTable,
+  platformMessagesTable,
+  systemFoldersTable,
+} from "@workspace/db/schema";
 import { CreateFirmBody, UpdateFirmBody, ListFirmsQueryParams, GetFirmParams, UpdateFirmParams } from "@workspace/api-zod";
-import { requireAuth, requireFounder, writeAuditLog, type AuthRequest } from "../lib/auth";
-import { withAuthSafeDb } from "../lib/auth-safe-db";
-import { logger } from "../lib/logger";
+import { requireAuth, requireFounder, writeAuditLog, type AuthRequest } from "../lib/auth.js";
+import { withAuthSafeDb } from "../lib/auth-safe-db.js";
+import { logger } from "../lib/logger.js";
 import bcrypt from "bcryptjs";
-import { ApiError, sendError, sendOk, parseIntParam } from "../lib/api-response";
+import { ApiError, sendError, sendOk, parseIntParam } from "../lib/api-response.js";
 import {
   ObjectNotFoundError,
   SupabaseStorageService,
   getSupabaseStorageConfigError,
-} from "../lib/objectStorage";
-import { assertActiveSupportSessionForFirm, assertFounderPermission, loadFounderGovernanceContext } from "../services/founder-governance";
+} from "../lib/objectStorage.js";
+import { assertActiveSupportSessionForFirm, assertFounderPermission, loadFounderGovernanceContext } from "../services/founder-governance/index.js";
 
-const one = (v: string | string[] | undefined): string | undefined => (Array.isArray(v) ? v[0] : v);
+type NextLike = (error?: unknown) => void;
+
+type ReqLike = IncomingMessage & {
+  body?: unknown;
+  cookies?: Record<string, unknown>;
+  headers: IncomingHttpHeaders & Record<string, string | string[] | undefined>;
+  ip?: string;
+  log?: {
+    error?: (...args: unknown[]) => void;
+    warn?: (...args: unknown[]) => void;
+    info?: (...args: unknown[]) => void;
+  };
+  originalUrl?: string;
+  params?: Record<string, unknown>;
+  path?: string;
+  query?: Record<string, unknown>;
+  url?: string;
+  userId?: number | null;
+  userType?: string | null;
+  [key: string]: unknown;
+};
+
+type RouteResLike = ServerResponse & {
+  end: (...args: unknown[]) => unknown;
+  json: (body: unknown) => RouteResLike;
+  send: (body?: unknown) => RouteResLike;
+  setHeader: (name: string, value: number | string | readonly string[]) => RouteResLike;
+  status: (code: number) => RouteResLike;
+  [key: string]: unknown;
+};
+
+type RouterInternalLike = {
+  get: (path: string, ...handlers: unknown[]) => unknown;
+  post: (path: string, ...handlers: unknown[]) => unknown;
+  patch: (path: string, ...handlers: unknown[]) => unknown;
+  put: (path: string, ...handlers: unknown[]) => unknown;
+  delete: (path: string, ...handlers: unknown[]) => unknown;
+};
+
+const expressRouter = express.Router();
+const routerInternal = expressRouter as unknown as RouterInternalLike;
+
+type AuthRequestLike = AuthRequest & ReqLike;
+
+const one = (v: unknown): unknown => (Array.isArray(v) ? v[0] : v);
+
+const asOptionalString = (value: unknown): string | undefined => {
+  return typeof value === "string" ? value : undefined;
+};
+
+const asRecord = (value: unknown): Record<string, unknown> => {
+  return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
+};
+
+const getParam = (req: AuthRequestLike, key: string): string | undefined => {
+  return asOptionalString(req.params?.[key]);
+};
+
+const getQuery = (req: AuthRequestLike, key: string): string | undefined => {
+  const raw = (req.query as Record<string, unknown> | undefined)?.[key];
+  return asOptionalString(one(raw));
+};
+
+const getHeader = (req: AuthRequestLike, key: string): string | undefined => {
+  const lower = key.toLowerCase();
+  const value = req.headers?.[lower] ?? req.headers?.[key];
+  if (Array.isArray(value)) return typeof value[0] === "string" ? value[0] : undefined;
+  return asOptionalString(value);
+};
+
 const firstRow = (result: unknown): Record<string, unknown> | undefined => {
   if (Array.isArray(result)) {
     const row = result[0];
@@ -90,7 +162,6 @@ function mapCreateFirmError(err: unknown): { status: number; body: Record<string
   return { status: 500, body: { error: "Failed to create firm", code: "INTERNAL_ERROR" } };
 }
 
-const router: IRouter = Router();
 const storage = new SupabaseStorageService();
 
 class RouteTimeoutError extends Error {
@@ -145,7 +216,7 @@ function scanClausePlaceholdersInDocx(bytes: Buffer): { hasClausesPlaceholder: b
 
 // ─── Firms ────────────────────────────────────────────────────────────────────
 
-router.get("/platform/firms", requireAuth, requireFounder, async (req: AuthRequest, res): Promise<void> => {
+routerInternal.get("/platform/firms", requireAuth, requireFounder, async (req: AuthRequestLike, res: RouteResLike): Promise<void> => {
   const params = ListFirmsQueryParams.safeParse(req.query);
   const search = params.success ? params.data.search : undefined;
   const status = params.success ? params.data.status : undefined;
@@ -192,7 +263,7 @@ router.get("/platform/firms", requireAuth, requireFounder, async (req: AuthReque
   res.json({ data: enriched, total: Number(total), page, limit });
 });
 
-router.post("/platform/firms", requireAuth, requireFounder, async (req: AuthRequest, res): Promise<void> => {
+routerInternal.post("/platform/firms", requireAuth, requireFounder, async (req: AuthRequestLike, res: RouteResLike): Promise<void> => {
   const parsed = CreateFirmBody.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: parsed.error.message, code: "VALIDATION_ERROR" });
@@ -253,7 +324,7 @@ router.post("/platform/firms", requireAuth, requireFounder, async (req: AuthRequ
           entityId: firm.id,
           detail: `slug=${firm.slug} partnerEmail=${emailNormalized}`,
           ipAddress: req.ip,
-          userAgent: req.headers["user-agent"],
+          userAgent: getHeader(req, "user-agent"),
         },
         { db: authDb }
       );
@@ -274,7 +345,7 @@ router.post("/platform/firms", requireAuth, requireFounder, async (req: AuthRequ
   }
 });
 
-router.get("/platform/firms/:firmId", requireAuth, requireFounder, async (req: AuthRequest, res): Promise<void> => {
+routerInternal.get("/platform/firms/:firmId", requireAuth, requireFounder, async (req: AuthRequestLike, res: RouteResLike): Promise<void> => {
   const params = GetFirmParams.safeParse(req.params);
   if (!params.success) {
     res.status(400).json({ error: params.error.message });
@@ -290,7 +361,7 @@ router.get("/platform/firms/:firmId", requireAuth, requireFounder, async (req: A
   res.json({ ...firm, userCount: Number(userCountRes?.c ?? 0), partnerCount: 0, caseCount: Number(caseCountRes?.c ?? 0) });
 });
 
-router.patch("/platform/firms/:firmId", requireAuth, requireFounder, async (req: AuthRequest, res): Promise<void> => {
+routerInternal.patch("/platform/firms/:firmId", requireAuth, requireFounder, async (req: AuthRequestLike, res: RouteResLike): Promise<void> => {
   const params = UpdateFirmParams.safeParse(req.params);
   if (!params.success) {
     res.status(400).json({ error: params.error.message });
@@ -315,8 +386,8 @@ router.patch("/platform/firms/:firmId", requireAuth, requireFounder, async (req:
 
 // ─── Firm Users ───────────────────────────────────────────────────────────────
 
-router.get("/platform/firms/:firmId/users", requireAuth, requireFounder, async (req: AuthRequest, res): Promise<void> => {
-  const firmIdStr = one(req.params.firmId);
+routerInternal.get("/platform/firms/:firmId/users", requireAuth, requireFounder, async (req: AuthRequestLike, res: RouteResLike): Promise<void> => {
+  const firmIdStr = getParam(req, "firmId");
   const firmId = firmIdStr ? parseInt(firmIdStr, 10) : NaN;
   if (isNaN(firmId)) {
     res.status(400).json({ error: "Invalid firm ID" });
@@ -351,11 +422,12 @@ router.get("/platform/firms/:firmId/users", requireAuth, requireFounder, async (
   res.json(withRoles);
 });
 
-router.post("/platform/firms/:firmId/users/:userId/reset-password", requireAuth, requireFounder, async (req: AuthRequest, res): Promise<void> => {
+routerInternal.post("/platform/firms/:firmId/users/:userId/reset-password", requireAuth, requireFounder, async (req: AuthRequestLike, res: RouteResLike): Promise<void> => {
   try {
-    const firmId = parseIntParam("firmId", req.params.firmId, { required: true, min: 1 });
-    const userId = parseIntParam("userId", req.params.userId, { required: true, min: 1 });
-    const { newPassword } = req.body as { newPassword?: string };
+    const firmId = parseIntParam("firmId", getParam(req, "firmId"), { required: true, min: 1 });
+    const userId = parseIntParam("userId", getParam(req, "userId"), { required: true, min: 1 });
+    const body = asRecord(req.body);
+    const newPassword = asOptionalString(body.newPassword);
     if (!newPassword || typeof newPassword !== "string" || newPassword.trim().length < 6) {
       throw new ApiError({
         status: 422,
@@ -398,7 +470,7 @@ router.post("/platform/firms/:firmId/users/:userId/reset-password", requireAuth,
             entityId: userId!,
             detail: `email=${user.email}`,
             ipAddress: req.ip,
-            userAgent: req.headers["user-agent"],
+            userAgent: getHeader(req, "user-agent"),
           },
           { db: authDb, strict: false }
         );
@@ -410,7 +482,7 @@ router.post("/platform/firms/:firmId/users/:userId/reset-password", requireAuth,
     sendOk(res, { result: { user_id: result.userId, password_reset: true } });
   } catch (err) {
     if (err instanceof RouteTimeoutError) {
-      logger.error({ err, firmId: req.params.firmId, userId: req.params.userId }, "platform.reset_password.timeout");
+      logger.error({ err, firmId: getParam(req, "firmId"), userId: getParam(req, "userId") }, "platform.reset_password.timeout");
       sendError(res, new ApiError({ status: 504, code: "QUERY_TIMEOUT", message: "Request timed out", retryable: true, stage: err.label }));
       return;
     }
@@ -426,14 +498,14 @@ router.post("/platform/firms/:firmId/users/:userId/reset-password", requireAuth,
       }));
       return;
     }
-    logger.error({ err, firmId: req.params.firmId, userId: req.params.userId }, "platform.reset_password.error");
+    logger.error({ err, firmId: getParam(req, "firmId"), userId: getParam(req, "userId") }, "platform.reset_password.error");
     sendError(res, err);
   }
 });
 
 // ─── Platform Stats ───────────────────────────────────────────────────────────
 
-router.get("/platform/stats", requireAuth, requireFounder, async (_req, res): Promise<void> => {
+routerInternal.get("/platform/stats", requireAuth, requireFounder, async (_req: AuthRequestLike, res: RouteResLike): Promise<void> => {
   const [totalFirmsRes] = await db.select({ c: count() }).from(firmsTable);
   const [activeFirmsRes] = await db.select({ c: count() }).from(firmsTable).where(eq(firmsTable.status, "active"));
   const [totalUsersRes] = await db.select({ c: count() }).from(usersTable).where(eq(usersTable.userType, "firm_user"));
@@ -446,7 +518,7 @@ router.get("/platform/stats", requireAuth, requireFounder, async (_req, res): Pr
 
 // ─── System Folders ───────────────────────────────────────────────────────────
 
-router.get("/platform/folders", requireAuth, requireFounder, async (_req: AuthRequest, res): Promise<void> => {
+routerInternal.get("/platform/folders", requireAuth, requireFounder, async (_req: AuthRequestLike, res: RouteResLike): Promise<void> => {
   try {
     const folders = await withTimeout("platform.folders.list", async () =>
       db.select().from(systemFoldersTable).orderBy(systemFoldersTable.sortOrder, systemFoldersTable.name)
@@ -463,9 +535,16 @@ router.get("/platform/folders", requireAuth, requireFounder, async (_req: AuthRe
   }
 });
 
-router.post("/platform/folders", requireAuth, requireFounder, async (req: AuthRequest, res): Promise<void> => {
-  const { name, parentId } = req.body as { name: string; parentId?: number | null };
-  if (!name || !name.trim()) {
+routerInternal.post("/platform/folders", requireAuth, requireFounder, async (req: AuthRequestLike, res: RouteResLike): Promise<void> => {
+  const body = asRecord(req.body);
+  const name = asOptionalString(body.name) ?? "";
+  const parentId =
+    typeof body.parentId === "number" && Number.isFinite(body.parentId)
+      ? body.parentId
+      : body.parentId === null
+        ? null
+        : undefined;
+  if (!name.trim()) {
     res.status(400).json({ error: "Folder name is required" });
     return;
   }
@@ -489,7 +568,7 @@ router.post("/platform/folders", requireAuth, requireFounder, async (req: AuthRe
         entityId: folder.id,
         detail: `name=${folder.name} parentId=${folder.parentId ?? ""}`,
         ipAddress: req.ip,
-        userAgent: req.headers["user-agent"],
+        userAgent: getHeader(req, "user-agent"),
       },
       { db: authDb, strict: true }
     );
@@ -498,11 +577,13 @@ router.post("/platform/folders", requireAuth, requireFounder, async (req: AuthRe
   res.status(201).json(folder);
 });
 
-router.patch("/platform/folders/:folderId", requireAuth, requireFounder, async (req: AuthRequest, res): Promise<void> => {
-  const folderIdStr = one(req.params.folderId);
+routerInternal.patch("/platform/folders/:folderId", requireAuth, requireFounder, async (req: AuthRequestLike, res: RouteResLike): Promise<void> => {
+  const folderIdStr = getParam(req, "folderId");
   const folderId = folderIdStr ? parseInt(folderIdStr, 10) : NaN;
   if (isNaN(folderId)) { res.status(400).json({ error: "Invalid folder ID" }); return; }
-  const { name, isDisabled } = req.body as { name?: string; isDisabled?: boolean };
+  const body = asRecord(req.body);
+  const name = Object.prototype.hasOwnProperty.call(body, "name") ? asOptionalString(body.name) : undefined;
+  const isDisabled = Object.prototype.hasOwnProperty.call(body, "isDisabled") ? (typeof body.isDisabled === "boolean" ? body.isDisabled : undefined) : undefined;
   const wantName = name !== undefined;
   const wantDisabled = isDisabled !== undefined;
   if (!wantName && !wantDisabled) { res.status(400).json({ error: "No fields to update" }); return; }
@@ -537,7 +618,7 @@ router.patch("/platform/folders/:folderId", requireAuth, requireFounder, async (
         entityId: folderId,
         detail: detailParts.join(" "),
         ipAddress: req.ip,
-        userAgent: req.headers["user-agent"],
+        userAgent: getHeader(req, "user-agent"),
       },
       { db: authDb, strict: true }
     );
@@ -548,8 +629,8 @@ router.patch("/platform/folders/:folderId", requireAuth, requireFounder, async (
   res.json(result.folder);
 });
 
-router.delete("/platform/folders/:folderId", requireAuth, requireFounder, async (req: AuthRequest, res): Promise<void> => {
-  const folderIdStr = one(req.params.folderId);
+routerInternal.delete("/platform/folders/:folderId", requireAuth, requireFounder, async (req: AuthRequestLike, res: RouteResLike): Promise<void> => {
+  const folderIdStr = getParam(req, "folderId");
   const folderId = folderIdStr ? parseInt(folderIdStr, 10) : NaN;
   if (isNaN(folderId)) { res.status(400).json({ error: "Invalid folder ID" }); return; }
   const result = await withAuthSafeDb(async (authDb) => {
@@ -577,7 +658,7 @@ router.delete("/platform/folders/:folderId", requireAuth, requireFounder, async 
         entityId: folderId,
         detail: `name=${folder.name}`,
         ipAddress: req.ip,
-        userAgent: req.headers["user-agent"],
+        userAgent: getHeader(req, "user-agent"),
       },
       { db: authDb, strict: true }
     );
@@ -589,9 +670,11 @@ router.delete("/platform/folders/:folderId", requireAuth, requireFounder, async 
   res.json({ success: true });
 });
 
-router.post("/platform/folders/reorder", requireAuth, requireFounder, async (req: AuthRequest, res): Promise<void> => {
-  const { folderId, direction } = req.body as { folderId: number; direction: "up" | "down" };
-  if (!folderId || !direction) { res.status(400).json({ error: "folderId and direction required" }); return; }
+routerInternal.post("/platform/folders/reorder", requireAuth, requireFounder, async (req: AuthRequestLike, res: RouteResLike): Promise<void> => {
+  const body = asRecord(req.body);
+  const folderId = typeof body.folderId === "number" && Number.isFinite(body.folderId) ? Math.floor(body.folderId) : NaN;
+  const direction = body.direction === "up" || body.direction === "down" ? body.direction : undefined;
+  if (!Number.isFinite(folderId) || !direction) { res.status(400).json({ error: "folderId and direction required" }); return; }
   const result = await withAuthSafeDb(async (authDb) => {
     const [folder] = await authDb.select().from(systemFoldersTable).where(eq(systemFoldersTable.id, folderId));
     if (!folder) return { kind: "not_found" as const };
@@ -602,7 +685,7 @@ router.post("/platform/folders/reorder", requireAuth, requireFounder, async (req
       .where(folder.parentId ? eq(systemFoldersTable.parentId, folder.parentId) : isNull(systemFoldersTable.parentId))
       .orderBy(systemFoldersTable.sortOrder);
 
-    const idx = siblings.findIndex(s => s.id === folderId);
+    const idx = siblings.findIndex((s: { id: number }) => s.id === folderId);
     const swapIdx = direction === "up" ? idx - 1 : idx + 1;
     if (swapIdx < 0 || swapIdx >= siblings.length) {
       await writeAuditLog(
@@ -615,7 +698,7 @@ router.post("/platform/folders/reorder", requireAuth, requireFounder, async (req
           entityId: folderId,
           detail: `direction=${direction} noop=true parentId=${folder.parentId ?? ""}`,
           ipAddress: req.ip,
-          userAgent: req.headers["user-agent"],
+        userAgent: getHeader(req, "user-agent"),
         },
         { db: authDb, strict: true }
       );
@@ -635,7 +718,7 @@ router.post("/platform/folders/reorder", requireAuth, requireFounder, async (req
         entityId: folderId,
         detail: `direction=${direction} swapWith=${swapFolder.id} parentId=${folder.parentId ?? ""}`,
         ipAddress: req.ip,
-        userAgent: req.headers["user-agent"],
+      userAgent: getHeader(req, "user-agent"),
       },
       { db: authDb, strict: true }
     );
@@ -648,10 +731,10 @@ router.post("/platform/folders/reorder", requireAuth, requireFounder, async (req
 
 // ─── Platform Documents ───────────────────────────────────────────────────────
 
-router.get("/platform/documents", requireAuth, requireFounder, async (req: AuthRequest, res): Promise<void> => {
+routerInternal.get("/platform/documents", requireAuth, requireFounder, async (req: AuthRequestLike, res: RouteResLike): Promise<void> => {
   try {
     const firmId = (() => {
-      const raw = one(req.query.firmId as any);
+      const raw = getQuery(req, "firmId");
       if (raw === undefined) return null;
       if (!String(raw).trim()) return null;
       const n = Number.parseInt(String(raw), 10);
@@ -659,7 +742,7 @@ router.get("/platform/documents", requireAuth, requireFounder, async (req: AuthR
       return n;
     })();
     const folderId = (() => {
-      const raw = one(req.query.folderId as any);
+      const raw = getQuery(req, "folderId");
       if (raw === undefined) return null;
       if (!String(raw).trim()) return null;
       const n = Number.parseInt(String(raw), 10);
@@ -667,7 +750,7 @@ router.get("/platform/documents", requireAuth, requireFounder, async (req: AuthR
       return n;
     })();
     const limit = (() => {
-      const raw = one(req.query.limit as any);
+      const raw = getQuery(req, "limit");
       if (raw === undefined) return 200;
       if (!String(raw).trim()) return 200;
       const n = Number.parseInt(String(raw), 10);
@@ -695,7 +778,7 @@ router.get("/platform/documents", requireAuth, requireFounder, async (req: AuthR
     sendOk(res, { items: docs, page_info: { limit, has_more: docs.length === limit } });
   } catch (err) {
     if (err instanceof RouteTimeoutError) {
-      logger.error({ err, firmId: req.query.firmId ?? null, folderId: req.query.folderId ?? null }, "platform.documents.timeout");
+      logger.error({ err, firmId: getQuery(req, "firmId") ?? null, folderId: getQuery(req, "folderId") ?? null }, "platform.documents.timeout");
       sendError(res, new ApiError({ status: 504, code: "QUERY_TIMEOUT", message: "Request timed out", retryable: true, stage: err.label }));
       return;
     }
@@ -712,23 +795,22 @@ router.get("/platform/documents", requireAuth, requireFounder, async (req: AuthR
       }));
       return;
     }
-    logger.error({ err, firmId: req.query.firmId ?? null, folderId: req.query.folderId ?? null }, "platform.documents.error");
+    logger.error({ err, firmId: getQuery(req, "firmId") ?? null, folderId: getQuery(req, "folderId") ?? null }, "platform.documents.error");
     sendError(res, err, { status: 500, code: "DOCUMENTS_QUERY_FAILED", message: "Failed to load documents" });
   }
 });
 
-router.post("/platform/documents", requireAuth, requireFounder, async (req: AuthRequest, res): Promise<void> => {
-  const { name, description, category, fileName, fileType, fileSize, objectPath, firmId, folderId } = req.body as {
-    name: string;
-    description?: string;
-    category?: string;
-    fileName: string;
-    fileType: string;
-    fileSize?: number;
-    objectPath: string;
-    firmId?: number | null;
-    folderId?: number | null;
-  };
+routerInternal.post("/platform/documents", requireAuth, requireFounder, async (req: AuthRequestLike, res: RouteResLike): Promise<void> => {
+  const body = asRecord(req.body);
+  const name = asOptionalString(body.name) ?? "";
+  const description = asOptionalString(body.description);
+  const category = asOptionalString(body.category);
+  const fileName = asOptionalString(body.fileName) ?? "";
+  const fileType = asOptionalString(body.fileType) ?? "";
+  const fileSize = typeof body.fileSize === "number" && Number.isFinite(body.fileSize) ? Math.floor(body.fileSize) : undefined;
+  const objectPath = asOptionalString(body.objectPath) ?? "";
+  const firmId = typeof body.firmId === "number" && Number.isFinite(body.firmId) ? Math.floor(body.firmId) : body.firmId === null ? null : undefined;
+  const folderId = typeof body.folderId === "number" && Number.isFinite(body.folderId) ? Math.floor(body.folderId) : body.folderId === null ? null : undefined;
   if (!name || !fileName || !fileType || !objectPath) {
     res.status(400).json({ error: "Missing required fields" });
     return;
@@ -759,7 +841,7 @@ router.post("/platform/documents", requireAuth, requireFounder, async (req: Auth
         entityId: doc.id,
         detail: `name=${doc.name} category=${doc.category} folderId=${doc.folderId ?? ""}`,
         ipAddress: req.ip,
-        userAgent: req.headers["user-agent"],
+        userAgent: getHeader(req, "user-agent"),
       },
       { db: authDb, strict: true }
     );
@@ -768,12 +850,12 @@ router.post("/platform/documents", requireAuth, requireFounder, async (req: Auth
   res.status(201).json(doc);
 });
 
-router.patch("/platform/documents/:docId", requireAuth, requireFounder, async (req: AuthRequest, res): Promise<void> => {
-  const docIdStr = one(req.params.docId);
+routerInternal.patch("/platform/documents/:docId", requireAuth, requireFounder, async (req: AuthRequestLike, res: RouteResLike): Promise<void> => {
+  const docIdStr = getParam(req, "docId");
   const docId = docIdStr ? parseInt(docIdStr, 10) : NaN;
   if (isNaN(docId)) { res.status(400).json({ error: "Invalid document ID" }); return; }
 
-  const body = req.body as Record<string, unknown>;
+  const body = asRecord(req.body);
   const hasIsActive = Object.prototype.hasOwnProperty.call(body, "isActive");
   const hasAppliesToPurchaseMode = Object.prototype.hasOwnProperty.call(body, "appliesToPurchaseMode");
   const hasAppliesToTitleType = Object.prototype.hasOwnProperty.call(body, "appliesToTitleType");
@@ -908,7 +990,7 @@ router.patch("/platform/documents/:docId", requireAuth, requireFounder, async (r
         entityId: docId,
         detail: changed.length ? changed.join(" ") : undefined,
         ipAddress: req.ip,
-        userAgent: req.headers["user-agent"],
+        userAgent: getHeader(req, "user-agent"),
       },
       { db: authDb, strict: true }
     );
@@ -920,8 +1002,8 @@ router.patch("/platform/documents/:docId", requireAuth, requireFounder, async (r
   res.json(updated);
 });
 
-router.delete("/platform/documents/:docId", requireAuth, requireFounder, async (req: AuthRequest, res): Promise<void> => {
-  const docIdStr = one(req.params.docId);
+routerInternal.delete("/platform/documents/:docId", requireAuth, requireFounder, async (req: AuthRequestLike, res: RouteResLike): Promise<void> => {
+  const docIdStr = getParam(req, "docId");
   const docId = docIdStr ? parseInt(docIdStr, 10) : NaN;
   if (isNaN(docId)) { res.status(400).json({ error: "Invalid document ID" }); return; }
   const fetched = await withAuthSafeDb(async (authDb) => {
@@ -959,7 +1041,7 @@ router.delete("/platform/documents/:docId", requireAuth, requireFounder, async (
         entityId: docId,
         detail: `name=${fetched.name}`,
         ipAddress: req.ip,
-        userAgent: req.headers["user-agent"],
+        userAgent: getHeader(req, "user-agent"),
       },
       { db: authDb, strict: true }
     );
@@ -968,8 +1050,8 @@ router.delete("/platform/documents/:docId", requireAuth, requireFounder, async (
   res.json({ success: true });
 });
 
-router.get("/platform/documents/:docId/download", requireAuth, requireFounder, async (req: AuthRequest, res): Promise<void> => {
-  const docIdStr = one(req.params.docId);
+routerInternal.get("/platform/documents/:docId/download", requireAuth, requireFounder, async (req: AuthRequestLike, res: RouteResLike): Promise<void> => {
+  const docIdStr = getParam(req, "docId");
   const docId = docIdStr ? parseInt(docIdStr, 10) : NaN;
   if (isNaN(docId)) { res.status(400).json({ error: "Invalid document ID" }); return; }
   const [doc] = await withAuthSafeDb(async (authDb) => authDb.select().from(platformDocumentsTable).where(eq(platformDocumentsTable.id, docId)));
@@ -986,12 +1068,12 @@ router.get("/platform/documents/:docId/download", requireAuth, requireFounder, a
         entityId: docId,
         detail: `name=${doc.name} fileName=${doc.fileName}`,
         ipAddress: req.ip,
-        userAgent: req.headers["user-agent"],
+        userAgent: getHeader(req, "user-agent"),
       },
       { strict: true }
     );
     res.status(response.status);
-    response.headers.forEach((value, key) => res.setHeader(key, value));
+    response.headers.forEach((value: string, key: string) => res.setHeader(key, value));
     const ascii = String(doc.fileName ?? "download").replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 120) || "download";
     const encoded = encodeURIComponent(String(doc.fileName ?? ascii));
     res.setHeader("Content-Disposition", `attachment; filename="${ascii}"; filename*=UTF-8''${encoded}`);
@@ -1017,8 +1099,8 @@ router.get("/platform/documents/:docId/download", requireAuth, requireFounder, a
   }
 });
 
-router.get("/platform/documents/:docId/clause-placeholders", requireAuth, requireFounder, async (req: AuthRequest, res): Promise<void> => {
-  const docIdStr = one(req.params.docId);
+routerInternal.get("/platform/documents/:docId/clause-placeholders", requireAuth, requireFounder, async (req: AuthRequestLike, res: RouteResLike): Promise<void> => {
+  const docIdStr = getParam(req, "docId");
   const docId = docIdStr ? parseInt(docIdStr, 10) : NaN;
   if (isNaN(docId)) { res.status(400).json({ error: "Invalid document ID" }); return; }
   const [doc] = await withAuthSafeDb(async (authDb) => authDb.select().from(platformDocumentsTable).where(eq(platformDocumentsTable.id, docId)));
@@ -1051,8 +1133,8 @@ router.get("/platform/documents/:docId/clause-placeholders", requireAuth, requir
 
 // ─── PDF Mappings ─────────────────────────────────────────────────────────────
 
-router.get("/platform/documents/:docId/pdf-mappings", requireAuth, requireFounder, async (req: AuthRequest, res): Promise<void> => {
-  const docIdStr = one(req.params.docId);
+routerInternal.get("/platform/documents/:docId/pdf-mappings", requireAuth, requireFounder, async (req: AuthRequestLike, res: RouteResLike): Promise<void> => {
+  const docIdStr = getParam(req, "docId");
   const docId = docIdStr ? parseInt(docIdStr, 10) : NaN;
   if (isNaN(docId)) { res.status(400).json({ error: "Invalid document ID" }); return; }
   const [doc] = await db.select().from(platformDocumentsTable).where(eq(platformDocumentsTable.id, docId));
@@ -1063,11 +1145,12 @@ router.get("/platform/documents/:docId/pdf-mappings", requireAuth, requireFounde
   res.json({ mappings: doc.pdfMappings ?? { pages: [] } });
 });
 
-router.put("/platform/documents/:docId/pdf-mappings", requireAuth, requireFounder, async (req: AuthRequest, res): Promise<void> => {
-  const docIdStr = one(req.params.docId);
+routerInternal.put("/platform/documents/:docId/pdf-mappings", requireAuth, requireFounder, async (req: AuthRequestLike, res: RouteResLike): Promise<void> => {
+  const docIdStr = getParam(req, "docId");
   const docId = docIdStr ? parseInt(docIdStr, 10) : NaN;
   if (isNaN(docId)) { res.status(400).json({ error: "Invalid document ID" }); return; }
-  const mappings = (req.body as { mappings?: unknown }).mappings;
+  const body = asRecord(req.body);
+  const mappings = body.mappings;
   if (!mappings || typeof mappings !== "object") { res.status(400).json({ error: "Invalid mappings" }); return; }
 
   const result = await withAuthSafeDb(async (authDb) => {
@@ -1084,7 +1167,7 @@ router.put("/platform/documents/:docId/pdf-mappings", requireAuth, requireFounde
         entityId: docId,
         detail: `name=${doc.name}`,
         ipAddress: req.ip,
-        userAgent: req.headers["user-agent"],
+        userAgent: getHeader(req, "user-agent"),
       },
       { db: authDb, strict: true }
     );
@@ -1095,12 +1178,12 @@ router.put("/platform/documents/:docId/pdf-mappings", requireAuth, requireFounde
   res.json({ success: true });
 });
 
-router.get("/platform/clauses", requireAuth, requireFounder, async (req: AuthRequest, res): Promise<void> => {
-  const q = typeof req.query.q === "string" ? req.query.q.trim() : "";
-  const status = typeof req.query.status === "string" ? req.query.status.trim() : "";
-  const category = typeof req.query.category === "string" ? req.query.category.trim() : "";
-  const tag = typeof req.query.tag === "string" ? req.query.tag.trim() : "";
-  const language = typeof req.query.language === "string" ? req.query.language.trim() : "";
+routerInternal.get("/platform/clauses", requireAuth, requireFounder, async (req: AuthRequestLike, res: RouteResLike): Promise<void> => {
+  const q = (getQuery(req, "q") ?? "").trim();
+  const status = (getQuery(req, "status") ?? "").trim();
+  const category = (getQuery(req, "category") ?? "").trim();
+  const tag = (getQuery(req, "tag") ?? "").trim();
+  const language = (getQuery(req, "language") ?? "").trim();
 
   const where: SQL[] = [];
   if (status) where.push(eq(platformClausesTable.status, status));
@@ -1123,7 +1206,7 @@ router.get("/platform/clauses", requireAuth, requireFounder, async (req: AuthReq
   res.json(rows);
 });
 
-router.post("/platform/clauses", requireAuth, requireFounder, async (req: AuthRequest, res): Promise<void> => {
+routerInternal.post("/platform/clauses", requireAuth, requireFounder, async (req: AuthRequestLike, res: RouteResLike): Promise<void> => {
   const body = (req.body && typeof req.body === "object") ? (req.body as Record<string, unknown>) : {};
   const title = typeof body.title === "string" ? body.title.trim() : "";
   const clauseCodeRaw = typeof body.clauseCode === "string" ? body.clauseCode.trim() : "";
@@ -1160,14 +1243,14 @@ router.post("/platform/clauses", requireAuth, requireFounder, async (req: AuthRe
         updatedBy: req.userId ?? null,
       })
       .returning();
-    await writeAuditLog({ firmId: null, actorId: req.userId, actorType: req.userType, action: "clauses.platform.create", entityType: "platform_clause", entityId: row.id, detail: `clauseCode=${finalCode}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] }, { db: authDb, strict: true });
+    await writeAuditLog({ firmId: null, actorId: req.userId, actorType: req.userType, action: "clauses.platform.create", entityType: "platform_clause", entityId: row.id, detail: `clauseCode=${finalCode}`, ipAddress: req.ip, userAgent: getHeader(req, "user-agent") }, { db: authDb, strict: true });
     return row;
   });
   res.status(201).json(created);
 });
 
-router.put("/platform/clauses/:id", requireAuth, requireFounder, async (req: AuthRequest, res): Promise<void> => {
-  const idStr = one(req.params.id);
+routerInternal.put("/platform/clauses/:id", requireAuth, requireFounder, async (req: AuthRequestLike, res: RouteResLike): Promise<void> => {
+  const idStr = getParam(req, "id");
   const id = idStr ? parseInt(idStr, 10) : NaN;
   if (!Number.isFinite(id)) { res.status(400).json({ error: "Invalid id" }); return; }
   const body = (req.body && typeof req.body === "object") ? (req.body as Record<string, unknown>) : {};
@@ -1193,7 +1276,7 @@ router.put("/platform/clauses/:id", requireAuth, requireFounder, async (req: Aut
   const updated = await withAuthSafeDb(async (authDb) => {
     const [row] = await authDb.update(platformClausesTable).set(patch).where(eq(platformClausesTable.id, id)).returning();
     if (!row) return null;
-    await writeAuditLog({ firmId: null, actorId: req.userId, actorType: req.userType, action: "clauses.platform.update", entityType: "platform_clause", entityId: id, detail: `clauseId=${id}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] }, { db: authDb, strict: true });
+    await writeAuditLog({ firmId: null, actorId: req.userId, actorType: req.userType, action: "clauses.platform.update", entityType: "platform_clause", entityId: id, detail: `clauseId=${id}`, ipAddress: req.ip, userAgent: getHeader(req, "user-agent") }, { db: authDb, strict: true });
     return row;
   });
   if (!updated) { res.status(404).json({ error: "Clause not found" }); return; }
@@ -1202,8 +1285,8 @@ router.put("/platform/clauses/:id", requireAuth, requireFounder, async (req: Aut
 
 // ─── Platform Messages (Communication Hub) ───────────────────────────────────
 
-router.get("/platform/messages", requireAuth, requireFounder, async (req: AuthRequest, res): Promise<void> => {
-  const firmIdStr = one(req.query.firmId as any);
+routerInternal.get("/platform/messages", requireAuth, requireFounder, async (req: AuthRequestLike, res: RouteResLike): Promise<void> => {
+  const firmIdStr = getQuery(req, "firmId");
   const firmId = firmIdStr ? parseInt(firmIdStr, 10) : undefined;
 
   const msgs = await db
@@ -1236,15 +1319,14 @@ router.get("/platform/messages", requireAuth, requireFounder, async (req: AuthRe
   res.json(enriched);
 });
 
-router.post("/platform/messages", requireAuth, requireFounder, async (req: AuthRequest, res): Promise<void> => {
-  const { subject, body, toFirmId, parentId, attachments } = req.body as {
-    subject: string;
-    body: string;
-    toFirmId: number;
-    parentId?: number;
-    attachments?: Array<{ fileName: string; fileType: string; fileSize?: number; objectPath: string }>;
-  };
-  if (!subject || !body || !toFirmId) {
+routerInternal.post("/platform/messages", requireAuth, requireFounder, async (req: AuthRequestLike, res: RouteResLike): Promise<void> => {
+  const body = asRecord(req.body);
+  const subject = asOptionalString(body.subject) ?? "";
+  const messageBody = asOptionalString(body.body) ?? "";
+  const toFirmId = typeof body.toFirmId === "number" && Number.isFinite(body.toFirmId) ? Math.floor(body.toFirmId) : NaN;
+  const parentId = typeof body.parentId === "number" && Number.isFinite(body.parentId) ? Math.floor(body.parentId) : undefined;
+  const attachments = Array.isArray(body.attachments) ? body.attachments : undefined;
+  if (!subject || !messageBody || !Number.isFinite(toFirmId) || toFirmId < 1) {
     res.status(400).json({ error: "subject, body and toFirmId are required" });
     return;
   }
@@ -1252,7 +1334,7 @@ router.post("/platform/messages", requireAuth, requireFounder, async (req: AuthR
     .insert(platformMessagesTable)
     .values({
       subject,
-      body,
+      body: messageBody,
       fromFirmId: null,
       fromUserId: req.userId!,
       toFirmId,
@@ -1262,24 +1344,32 @@ router.post("/platform/messages", requireAuth, requireFounder, async (req: AuthR
 
   if (attachments && attachments.length > 0) {
     await db.insert(platformMessageAttachmentsTable).values(
-      attachments.map((a) => ({ messageId: msg.id, fileName: a.fileName, fileType: a.fileType, fileSize: a.fileSize ?? null, objectPath: a.objectPath }))
+      attachments
+        .map((a) => (a && typeof a === "object" ? (a as Record<string, unknown>) : {}))
+        .map((a) => ({
+          messageId: msg.id,
+          fileName: asOptionalString(a.fileName) ?? "",
+          fileType: asOptionalString(a.fileType) ?? "",
+          fileSize: typeof a.fileSize === "number" && Number.isFinite(a.fileSize) ? Math.floor(a.fileSize) : null,
+          objectPath: asOptionalString(a.objectPath) ?? "",
+        }))
     );
   }
 
   res.status(201).json(msg);
 });
 
-router.patch("/platform/messages/:msgId/read", requireAuth, requireFounder, async (req: AuthRequest, res): Promise<void> => {
-  const msgIdStr = one(req.params.msgId);
+routerInternal.patch("/platform/messages/:msgId/read", requireAuth, requireFounder, async (req: AuthRequestLike, res: RouteResLike): Promise<void> => {
+  const msgIdStr = getParam(req, "msgId");
   const msgId = msgIdStr ? parseInt(msgIdStr, 10) : NaN;
   if (isNaN(msgId)) { res.status(400).json({ error: "Invalid message ID" }); return; }
   await db.update(platformMessagesTable).set({ readAt: new Date() }).where(eq(platformMessagesTable.id, msgId));
   res.json({ success: true });
 });
 
-router.get("/platform/messages/:msgId/attachments/:attachmentId/download", requireAuth, requireFounder, async (req: AuthRequest, res): Promise<void> => {
-  const msgIdStr = one(req.params.msgId);
-  const attachmentIdStr = one(req.params.attachmentId);
+routerInternal.get("/platform/messages/:msgId/attachments/:attachmentId/download", requireAuth, requireFounder, async (req: AuthRequestLike, res: RouteResLike): Promise<void> => {
+  const msgIdStr = getParam(req, "msgId");
+  const attachmentIdStr = getParam(req, "attachmentId");
   const msgId = msgIdStr ? parseInt(msgIdStr, 10) : NaN;
   const attachmentId = attachmentIdStr ? parseInt(attachmentIdStr, 10) : NaN;
   if (!Number.isFinite(msgId) || !Number.isFinite(attachmentId)) {
@@ -1307,11 +1397,11 @@ router.get("/platform/messages/:msgId/attachments/:attachmentId/download", requi
       entityId: attachmentId,
       detail: `messageId=${msgId} fileName=${att.fileName}`,
       ipAddress: req.ip,
-      userAgent: req.headers["user-agent"],
+      userAgent: getHeader(req, "user-agent"),
     }, { strict: true });
 
     res.status(response.status);
-    response.headers.forEach((value, key) => res.setHeader(key, value));
+    response.headers.forEach((value: string, key: string) => res.setHeader(key, value));
     const ascii = String(att.fileName ?? "download").replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 120) || "download";
     const encoded = encodeURIComponent(String(att.fileName ?? ascii));
     res.setHeader("Content-Disposition", `attachment; filename="${ascii}"; filename*=UTF-8''${encoded}`);
@@ -1330,4 +1420,5 @@ router.get("/platform/messages/:msgId/attachments/:attachmentId/download", requi
   }
 });
 
-export default router;
+const exportedRouter = expressRouter as unknown as ExpressRouter;
+export default exportedRouter;
