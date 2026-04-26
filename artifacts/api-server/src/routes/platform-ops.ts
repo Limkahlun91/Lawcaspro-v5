@@ -1,11 +1,11 @@
-import { Router, type IRouter } from "express";
+import express, { type Router as ExpressRouter } from "express";
 import { and, desc, eq, ilike, sql } from "drizzle-orm";
 import { auditLogsTable, platformApprovalEventsTable, platformApprovalRequestsTable, platformMaintenanceActionStepsTable, platformMaintenanceActionsTable, platformRestoreActionStepsTable, platformRestoreActionsTable } from "@workspace/db";
-import { withAuthSafeDb } from "../lib/auth-safe-db";
-import { requireAuth, requireFounder, type AuthRequest, writeAuditLog } from "../lib/auth";
-import { ApiError, parseIntParam, sendError, sendOk } from "../lib/api-response";
-import { assertActiveSupportSessionForFirm, assertFounderPermission, createApprovalRequest, createStepUpChallenge, defaultStepUpPhrase, evaluateDecisionForExecute, evaluateDecisionForPreview, loadFounderGovernanceContext } from "../services/founder-governance";
-import { FOUNDER_ACTION_REGISTRY, FOUNDER_RESTORE_OPERATION_REGISTRY } from "../services/platform-action-registry";
+import { withAuthSafeDb } from "../lib/auth-safe-db.js";
+import { requireAuth, requireFounder, type AuthRequest, writeAuditLog } from "../lib/auth.js";
+import { ApiError, parseIntParam, sendError, sendOk } from "../lib/api-response.js";
+import { assertActiveSupportSessionForFirm, assertFounderPermission, createApprovalRequest, createStepUpChallenge, defaultStepUpPhrase, evaluateDecisionForExecute, evaluateDecisionForPreview, loadFounderGovernanceContext } from "../services/founder-governance/index.js";
+import { FOUNDER_ACTION_REGISTRY, FOUNDER_RESTORE_OPERATION_REGISTRY } from "../services/platform-action-registry.js";
 import {
   createMaintenanceActionPreviewRecord,
   createRestorePreviewRecord,
@@ -33,10 +33,19 @@ import {
   type TargetEntityType,
   unpinSnapshot,
   requiredTypedConfirmation,
-} from "../services/platform-ops";
-import { SupabaseStorageService } from "../lib/objectStorage";
+} from "../services/platform-ops.js";
+import { SupabaseStorageService } from "../lib/objectStorage.js";
 
-const router: IRouter = Router();
+type RouterInternalLike = {
+  get: (path: string, ...handlers: unknown[]) => unknown;
+  post: (path: string, ...handlers: unknown[]) => unknown;
+  patch: (path: string, ...handlers: unknown[]) => unknown;
+  put: (path: string, ...handlers: unknown[]) => unknown;
+  delete: (path: string, ...handlers: unknown[]) => unknown;
+};
+
+const expressRouter = express.Router();
+const router = expressRouter as unknown as RouterInternalLike;
 
 router.get("/platform/firms/:firmId/ops/summary", requireAuth, requireFounder, async (req: AuthRequest, res) => {
   try {
@@ -1343,4 +1352,6 @@ router.get("/platform/firms/:firmId/history", requireAuth, requireFounder, async
   }
 });
 
-export default router;
+const exportedRouter = expressRouter as unknown as ExpressRouter;
+export { exportedRouter as router };
+export default exportedRouter;

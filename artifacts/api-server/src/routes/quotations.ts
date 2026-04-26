@@ -1,13 +1,22 @@
-import { Router, type IRouter } from "express";
+import express, { type Router as ExpressRouter } from "express";
 import { eq, desc, and, count } from "drizzle-orm";
 import { db, quotationItemsTable, quotationsTable, regulatoryRuleSetsTable, regulatoryRuleVersionsTable, sql } from "@workspace/db";
-import { requireAuth, requireFirmUser, type AuthRequest } from "../lib/auth";
-import { applyRule } from "./regulatory";
-import { logger } from "../lib/logger";
+import { requireAuth, requireFirmUser, type AuthRequest } from "../lib/auth.js";
+import { applyRule } from "./regulatory.js";
+import { logger } from "../lib/logger.js";
 
 const one = (v: string | string[] | undefined): string | undefined => (Array.isArray(v) ? v[0] : v);
 
-const router: IRouter = Router();
+type RouterInternalLike = {
+  get: (path: string, ...handlers: unknown[]) => unknown;
+  post: (path: string, ...handlers: unknown[]) => unknown;
+  patch: (path: string, ...handlers: unknown[]) => unknown;
+  put: (path: string, ...handlers: unknown[]) => unknown;
+  delete: (path: string, ...handlers: unknown[]) => unknown;
+};
+
+const expressRouter = express.Router();
+const router = expressRouter as unknown as RouterInternalLike;
 
 const DEFAULT_TAX_RATE = 8;
 
@@ -457,4 +466,6 @@ function formatItem(item: typeof quotationItemsTable.$inferSelect) {
   };
 }
 
-export default router;
+const exportedRouter = expressRouter as unknown as ExpressRouter;
+export { exportedRouter as router };
+export default exportedRouter;

@@ -1,11 +1,20 @@
-import { Router, type IRouter } from "express";
+import express, { type Router as ExpressRouter } from "express";
 import { eq, desc } from "drizzle-orm";
 import { db, regulatoryRuleSetsTable, regulatoryRuleVersionsTable } from "@workspace/db";
-import { requireAuth, requireFirmUser, requireFounder, type AuthRequest } from "../lib/auth";
+import { requireAuth, requireFirmUser, requireFounder, type AuthRequest } from "../lib/auth.js";
 
 const one = (v: string | string[] | undefined): string | undefined => (Array.isArray(v) ? v[0] : v);
 
-const router: IRouter = Router();
+type RouterInternalLike = {
+  get: (path: string, ...handlers: unknown[]) => unknown;
+  post: (path: string, ...handlers: unknown[]) => unknown;
+  patch: (path: string, ...handlers: unknown[]) => unknown;
+  put: (path: string, ...handlers: unknown[]) => unknown;
+  delete: (path: string, ...handlers: unknown[]) => unknown;
+};
+
+const expressRouter = express.Router();
+const router = expressRouter as unknown as RouterInternalLike;
 
 // ── Public read (any authenticated user) ────────────────────────────────────
 
@@ -76,7 +85,9 @@ router.post("/regulatory/rule-sets/:code/versions", requireAuth, requireFounder,
   res.status(201).json(row);
 });
 
-export default router;
+const exportedRouter = expressRouter as unknown as ExpressRouter;
+export { exportedRouter as router };
+export default exportedRouter;
 
 // ── Fee calculation engine ─────────────────────────────────────────────────
 

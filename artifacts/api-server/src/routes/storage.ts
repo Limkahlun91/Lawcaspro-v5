@@ -1,4 +1,4 @@
-import { Router, type IRouter, type Request, type Response } from "express";
+import express, { type Router as ExpressRouter, type Request as ExpressRequest, type Response as ExpressResponse } from "express";
 import { Readable } from "stream";
 import multer from "multer";
 import {
@@ -10,16 +10,34 @@ import {
   ObjectStorageService,
   SupabaseStorageService,
   getSupabaseStorageConfigError,
-} from "../lib/objectStorage";
-import { requireAuth, requireFounder, type AuthRequest } from "../lib/auth";
-import { queryOne } from "../lib/http";
+} from "../lib/objectStorage.js";
+import { requireAuth, requireFounder, type AuthRequest } from "../lib/auth.js";
+import { queryOne } from "../lib/http.js";
 
-const router: IRouter = Router();
+type RouterInternalLike = {
+  get: (path: string, ...handlers: unknown[]) => unknown;
+  post: (path: string, ...handlers: unknown[]) => unknown;
+  patch: (path: string, ...handlers: unknown[]) => unknown;
+  put: (path: string, ...handlers: unknown[]) => unknown;
+  delete: (path: string, ...handlers: unknown[]) => unknown;
+};
+
+type FetchObjectResponseLike = {
+  status: number;
+  headers: { forEach?: (callback: (value: string, key: string) => void) => void };
+  body: unknown | null;
+  ok?: boolean;
+};
+
+const asFetchObjectResponse = (value: unknown): FetchObjectResponseLike => value as FetchObjectResponseLike;
+
+const expressRouter = express.Router();
+const router = expressRouter as unknown as RouterInternalLike;
 const objectStorageService = new ObjectStorageService();
 const supabaseStorage = new SupabaseStorageService();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 * 1024 * 1024 } });
 
-router.post("/storage/uploads/request-url", requireAuth, async (req: AuthRequest, res: Response) => {
+router.post("/storage/uploads/request-url", requireAuth, async (req: AuthRequest, res: ExpressResponse) => {
   const parsed = RequestUploadUrlBody.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: "Missing or invalid required fields" });
@@ -52,7 +70,7 @@ router.post("/storage/uploads/request-url", requireAuth, async (req: AuthRequest
   }
 });
 
-router.get("/storage/public-objects/*filePath", async (req: Request, res: Response) => {
+router.get("/storage/public-objects/*filePath", async (req: ExpressRequest, res: ExpressResponse) => {
   try {
     const raw = req.params.filePath;
     const filePath = Array.isArray(raw) ? raw.join("/") : raw;
@@ -62,10 +80,10 @@ router.get("/storage/public-objects/*filePath", async (req: Request, res: Respon
       return;
     }
 
-    const response = await objectStorageService.downloadObject(file);
+    const response = asFetchObjectResponse(await objectStorageService.downloadObject(file));
 
     res.status(response.status);
-    response.headers.forEach((value, key) => res.setHeader(key, value));
+    response.headers.forEach?.((value, key) => res.setHeader(key, value));
 
     if (response.body) {
       const nodeStream = Readable.fromWeb(response.body as ReadableStream<Uint8Array>);
@@ -79,15 +97,15 @@ router.get("/storage/public-objects/*filePath", async (req: Request, res: Respon
   }
 });
 
-router.get("/storage/objects/*path", requireAuth, requireFounder, async (req: AuthRequest, res: Response) => {
+router.get("/storage/objects/*path", requireAuth, requireFounder, async (req: AuthRequest, res: ExpressResponse) => {
   try {
     const raw = req.params.path;
     const wildcardPath = Array.isArray(raw) ? raw.join("/") : raw;
     const objectPath = `/objects/${wildcardPath}`;
-    const response = await supabaseStorage.fetchPrivateObjectResponse(objectPath);
+    const response = asFetchObjectResponse(await supabaseStorage.fetchPrivateObjectResponse(objectPath));
 
     res.status(response.status);
-    response.headers.forEach((value, key) => res.setHeader(key, value));
+    response.headers.forEach?.((value, key) => res.setHeader(key, value));
 
     if (response.body) {
       const nodeStream = Readable.fromWeb(response.body as ReadableStream<Uint8Array>);
@@ -112,7 +130,7 @@ router.get("/storage/objects/*path", requireAuth, requireFounder, async (req: Au
   }
 });
 
-router.post("/storage/upload", requireAuth, upload.single("file"), async (req: AuthRequest, res: Response) => {
+router.post("/storage/upload", requireAuth, upload.single("file"), async (req: AuthRequest, res: ExpressResponse) => {
   try {
     if (!req.file) {
       res.status(400).json({ error: "No file provided" });
@@ -162,4 +180,6 @@ router.post("/storage/upload", requireAuth, upload.single("file"), async (req: A
   }
 });
 
-export default router;
+const exportedRouter = expressRouter as unknown as ExpressRouter;
+export { exportedRouter as router };
+export default exportedRouter;

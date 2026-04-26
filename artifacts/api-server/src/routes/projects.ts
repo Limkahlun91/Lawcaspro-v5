@@ -1,21 +1,106 @@
-import { Router, type IRouter } from "express";
+import express, { type Router as ExpressRouter } from "express";
 import { eq, ilike, count, desc, and, isNull } from "drizzle-orm";
-import { casesTable, db, developersTable, projectsTable, sql, type Project } from "@workspace/db";
-import {
-  CreateProjectBody, UpdateProjectBody, ListProjectsQueryParams,
-  GetProjectParams, UpdateProjectParams, DeleteProjectParams
-} from "@workspace/api-zod";
-import { requireAuth, requireFirmUser, requirePermission, writeAuditLog, type AuthRequest } from "../lib/auth";
-import { logger } from "../lib/logger";
+import type { IncomingHttpHeaders, IncomingMessage } from "node:http";
+import { z } from "zod/v4";
+import { casesTable, db, developersTable, projectsTable, sql } from "@workspace/db";
+import { requireAuth, requireFirmUser, requirePermission, writeAuditLog, type AuthRequest } from "../lib/auth.js";
+import { logger } from "../lib/logger.js";
 
-const router: IRouter = Router();
+type ReqLike = IncomingMessage & {
+  body?: unknown;
+  headers: IncomingHttpHeaders & Record<string, string | string[] | undefined>;
+  ip?: string;
+  originalUrl?: string;
+  params?: Record<string, unknown>;
+  path?: string;
+  query?: Record<string, unknown>;
+  firmId?: number | null;
+  userId?: number | null;
+  userType?: string | null;
+  roleId?: number | null;
+  log?: { error?: (...args: unknown[]) => void; info?: (...args: unknown[]) => void };
+  rlsDb?: unknown;
+  [key: string]: unknown;
+};
+
+type RouteResLike = {
+  status: (code: number) => RouteResLike;
+  json: (body: unknown) => unknown;
+  sendStatus: (code: number) => unknown;
+  [key: string]: unknown;
+};
+
+type RouterInternalLike = {
+  get: (path: string, ...handlers: unknown[]) => unknown;
+  post: (path: string, ...handlers: unknown[]) => unknown;
+  patch: (path: string, ...handlers: unknown[]) => unknown;
+  delete: (path: string, ...handlers: unknown[]) => unknown;
+};
+
+const expressRouter = express.Router();
+const routerInternal = expressRouter as unknown as RouterInternalLike;
+
+type AuthRequestLike = AuthRequest & ReqLike;
+
+const asOptionalString = (value: unknown): string | undefined => (typeof value === "string" ? value : undefined);
+const asRecord = (value: unknown): Record<string, unknown> =>
+  value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
+
+const getHeader = (req: AuthRequestLike, key: string): string | undefined => {
+  const lower = key.toLowerCase();
+  const value = req.headers?.[lower] ?? req.headers?.[key];
+  if (Array.isArray(value)) return typeof value[0] === "string" ? value[0] : undefined;
+  return asOptionalString(value);
+};
+
+const ListProjectsQuerySchema = z.object({
+  search: z.string().optional(),
+  developerId: z.coerce.number().int().min(1).optional(),
+  projectType: z.string().optional(),
+  titleType: z.string().optional(),
+  page: z.coerce.number().int().min(1).optional(),
+  limit: z.coerce.number().int().min(1).max(200).optional(),
+});
+
+const ProjectIdParamsSchema = z.object({ projectId: z.coerce.number().int().min(1) });
+
+const CreateProjectBodySchema = z.object({
+  developerId: z.coerce.number().int().min(1),
+  name: z.string().min(1),
+  projectType: z.string().min(1),
+  titleType: z.string().min(1),
+  landUse: z.string().optional().nullable(),
+  developmentCondition: z.string().optional().nullable(),
+  unitCategory: z.string().optional().nullable(),
+  extraFields: z.record(z.string(), z.unknown()).optional(),
+});
+
+const UpdateProjectBodySchema = z.object({
+  name: z.string().optional(),
+  developerId: z.coerce.number().int().min(1).optional().nullable(),
+  projectType: z.string().optional(),
+  titleType: z.string().optional(),
+  titleSubtype: z.string().optional().nullable(),
+  masterTitleNumber: z.string().optional().nullable(),
+  masterTitleLandSize: z.string().optional().nullable(),
+  mukim: z.string().optional().nullable(),
+  daerah: z.string().optional().nullable(),
+  negeri: z.string().optional().nullable(),
+  phase: z.string().optional().nullable(),
+  developerName: z.string().optional().nullable(),
+  landUse: z.string().optional().nullable(),
+  developmentCondition: z.string().optional().nullable(),
+  unitCategory: z.string().optional().nullable(),
+  extraFields: z.record(z.string(), z.unknown()).optional(),
+});
 
 type DbConn = typeof db | NonNullable<AuthRequest["rlsDb"]>;
-const rdb = (req: AuthRequest): DbConn => req.rlsDb ?? db;
+const rdb = (req: AuthRequestLike): DbConn => req.rlsDb ?? db;
 
 type ProjectInsert = typeof projectsTable.$inferInsert;
+type ProjectRow = typeof projectsTable.$inferSelect;
 
-async function enrichProject(r: DbConn, proj: Project) {
+async function enrichProject(r: DbConn, proj: ProjectRow) {
   const [devRow] = await r.select().from(developersTable).where(eq(developersTable.id, proj.developerId));
   const [ccRes] = await r.select({ c: count() }).from(casesTable).where(eq(casesTable.projectId, proj.id));
   return {
@@ -42,10 +127,10 @@ async function enrichProject(r: DbConn, proj: Project) {
   };
 }
 
-router.get("/projects", requireAuth, requireFirmUser, requirePermission("projects", "read"), async (req: AuthRequest, res): Promise<void> => {
+routerInternal.get("/projects", requireAuth, requireFirmUser, requirePermission("projects", "read"), async (req: AuthRequestLike, res: RouteResLike): Promise<void> => {
   try {
     const r = rdb(req);
-    const params = ListProjectsQueryParams.safeParse(req.query);
+    const params = ListProjectsQuerySchema.safeParse(req.query);
     const search = params.success ? params.data.search : undefined;
     const developerId = params.success ? params.data.developerId : undefined;
     const projectType = params.success ? params.data.projectType : undefined;
@@ -67,7 +152,7 @@ router.get("/projects", requireAuth, requireFirmUser, requirePermission("project
 
     const [totalRes] = await r.select({ c: count() }).from(projectsTable).where(and(...conditions));
 
-    const enriched = await Promise.all(projs.map((p) => enrichProject(r, p)));
+    const enriched = await Promise.all(projs.map((p: ProjectRow) => enrichProject(r, p)));
     res.json({ data: enriched, total: Number(totalRes?.c ?? 0), page, limit });
   } catch (err) {
     logger.error({ err, path: req.path, firmId: req.firmId, userId: req.userId }, "[projects]");
@@ -75,7 +160,7 @@ router.get("/projects", requireAuth, requireFirmUser, requirePermission("project
   }
 });
 
-router.post("/projects", requireAuth, requireFirmUser, requirePermission("projects", "create"), async (req: AuthRequest, res): Promise<void> => {
+routerInternal.post("/projects", requireAuth, requireFirmUser, requirePermission("projects", "create"), async (req: AuthRequestLike, res: RouteResLike): Promise<void> => {
   try {
     const r = req.rlsDb;
     if (!r) {
@@ -83,23 +168,22 @@ router.post("/projects", requireAuth, requireFirmUser, requirePermission("projec
       res.status(500).json({ error: "Internal Server Error" });
       return;
     }
-    const parsed = CreateProjectBody.safeParse(req.body);
+    const parsed = CreateProjectBodySchema.safeParse(req.body);
     if (!parsed.success) {
       res.status(400).json({ error: parsed.error.message });
       return;
     }
 
     const { developerId, name, projectType, titleType, landUse, developmentCondition, unitCategory, extraFields } = parsed.data;
-    const { phase, developerName, titleSubtype, masterTitleNumber, masterTitleLandSize, mukim, daerah, negeri } = req.body as {
-      phase?: string;
-      developerName?: string;
-      titleSubtype?: string;
-      masterTitleNumber?: string;
-      masterTitleLandSize?: string;
-      mukim?: string;
-      daerah?: string;
-      negeri?: string;
-    };
+    const rawBody = asRecord(req.body);
+    const phase = asOptionalString(rawBody.phase);
+    const developerName = asOptionalString(rawBody.developerName);
+    const titleSubtype = asOptionalString(rawBody.titleSubtype);
+    const masterTitleNumber = asOptionalString(rawBody.masterTitleNumber);
+    const masterTitleLandSize = asOptionalString(rawBody.masterTitleLandSize);
+    const mukim = asOptionalString(rawBody.mukim);
+    const daerah = asOptionalString(rawBody.daerah);
+    const negeri = asOptionalString(rawBody.negeri);
 
     const [dev] = await r.select().from(developersTable).where(eq(developersTable.id, developerId));
     if (!dev || dev.firmId !== req.firmId) {
@@ -152,7 +236,7 @@ router.post("/projects", requireAuth, requireFirmUser, requirePermission("projec
       ctxIsFounder,
     }, "create route tenant context");
 
-    let proj: Project;
+    let proj: ProjectRow;
     [proj] = await r
       .insert(projectsTable)
       .values(insertBase)
@@ -167,7 +251,7 @@ router.post("/projects", requireAuth, requireFirmUser, requirePermission("projec
     } catch {
     }
 
-    await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "projects.create", entityType: "project", entityId: proj.id, detail: `name=${proj.name}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+    await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "projects.create", entityType: "project", entityId: proj.id, detail: `name=${proj.name}`, ipAddress: req.ip, userAgent: getHeader(req, "user-agent") });
     res.status(201).json(await enrichProject(r, proj));
     return;
   } catch (e) {
@@ -191,9 +275,9 @@ router.post("/projects", requireAuth, requireFirmUser, requirePermission("projec
   }
 });
 
-router.get("/projects/:projectId", requireAuth, requireFirmUser, requirePermission("projects", "read"), async (req: AuthRequest, res): Promise<void> => {
+routerInternal.get("/projects/:projectId", requireAuth, requireFirmUser, requirePermission("projects", "read"), async (req: AuthRequestLike, res: RouteResLike): Promise<void> => {
   const r = rdb(req);
-  const params = GetProjectParams.safeParse(req.params);
+  const params = ProjectIdParamsSchema.safeParse(req.params);
   if (!params.success) {
     res.status(400).json({ error: params.error.message });
     return;
@@ -208,9 +292,9 @@ router.get("/projects/:projectId", requireAuth, requireFirmUser, requirePermissi
   res.json(await enrichProject(r, proj));
 });
 
-router.patch("/projects/:projectId", requireAuth, requireFirmUser, requirePermission("projects", "update"), async (req: AuthRequest, res): Promise<void> => {
+routerInternal.patch("/projects/:projectId", requireAuth, requireFirmUser, requirePermission("projects", "update"), async (req: AuthRequestLike, res: RouteResLike): Promise<void> => {
   const r = rdb(req);
-  const params = UpdateProjectParams.safeParse(req.params);
+  const params = ProjectIdParamsSchema.safeParse(req.params);
   if (!params.success) {
     res.status(400).json({ error: params.error.message });
     return;
@@ -224,8 +308,13 @@ router.patch("/projects/:projectId", requireAuth, requireFirmUser, requirePermis
     return;
   }
 
+  const parsed = UpdateProjectBodySchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: parsed.error.message });
+    return;
+  }
   const { name, developerId, projectType, titleType, titleSubtype, masterTitleNumber, masterTitleLandSize,
-    mukim, daerah, negeri, phase, developerName, landUse, developmentCondition, unitCategory, extraFields } = req.body;
+    mukim, daerah, negeri, phase, developerName, landUse, developmentCondition, unitCategory, extraFields } = parsed.data;
 
   if (developerId !== undefined && developerId !== null) {
     const [dev] = await r.select().from(developersTable).where(
@@ -262,12 +351,12 @@ router.patch("/projects/:projectId", requireAuth, requireFirmUser, requirePermis
     .where(and(eq(projectsTable.id, params.data.projectId), eq(projectsTable.firmId, req.firmId!)))
     .returning();
 
-  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "projects.update", entityType: "project", entityId: proj.id, detail: `fields=${Object.keys(updateData).join(",")}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "projects.update", entityType: "project", entityId: proj.id, detail: `fields=${Object.keys(updateData).join(",")}`, ipAddress: req.ip, userAgent: getHeader(req, "user-agent") });
   res.json(await enrichProject(r, proj));
 });
 
-router.delete("/projects/:projectId", requireAuth, requireFirmUser, requirePermission("projects", "delete"), async (req: AuthRequest, res): Promise<void> => {
-  const params = DeleteProjectParams.safeParse(req.params);
+routerInternal.delete("/projects/:projectId", requireAuth, requireFirmUser, requirePermission("projects", "delete"), async (req: AuthRequestLike, res: RouteResLike): Promise<void> => {
+  const params = ProjectIdParamsSchema.safeParse(req.params);
   if (!params.success) {
     res.status(400).json({ error: params.error.message });
     return;
@@ -300,8 +389,10 @@ router.delete("/projects/:projectId", requireAuth, requireFirmUser, requirePermi
     return;
   }
 
-  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "projects.archive", entityType: "project", entityId: proj.id, detail: `name=${proj.name}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "projects.archive", entityType: "project", entityId: proj.id, detail: `name=${proj.name}`, ipAddress: req.ip, userAgent: getHeader(req, "user-agent") });
   res.sendStatus(204);
 });
 
-export default router;
+const exportedRouter = expressRouter as unknown as ExpressRouter;
+export { exportedRouter as router };
+export default exportedRouter;
