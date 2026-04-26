@@ -16,36 +16,68 @@ type ReqLike = {
   body?: unknown;
   query?: Record<string, unknown>;
   params?: Record<string, string>;
-  headers?: Record<string, string | string[] | undefined>;
+  headers?: Record<string, unknown>;
   cookies?: Record<string, string>;
+  method?: unknown;
+  url?: unknown;
+  originalUrl?: unknown;
+  path?: unknown;
+  ip?: unknown;
   user?: unknown;
-  firmId?: string;
-  requestId?: string;
+  firmId?: unknown;
+  requestId?: unknown;
   [key: string]: unknown;
 };
 
-type ResLike = {
-  status: (code: number) => ResLike;
-  json: (body: unknown) => ResLike;
-  cookie?: (...args: unknown[]) => ResLike;
-  clearCookie?: (...args: unknown[]) => ResLike;
+type RouteResLike = import("node:http").ServerResponse & {
+  locals: Record<string, unknown>;
+  status: (code: number) => RouteResLike;
+  json: (body: unknown) => RouteResLike;
+  cookie?: (...args: unknown[]) => RouteResLike;
+  clearCookie?: (...args: unknown[]) => RouteResLike;
   setHeader?: (name: string, value: string | number | readonly string[]) => void;
-  locals?: Record<string, unknown>;
   [key: string]: unknown;
 };
-
-type HandlerLike = (req: ReqLike, res: ResLike) => unknown;
 
 type RouterInternalLike = {
-  get: (path: string, ...handlers: HandlerLike[]) => unknown;
-  post: (path: string, ...handlers: HandlerLike[]) => unknown;
-  delete: (path: string, ...handlers: HandlerLike[]) => unknown;
+  get: (path: string, ...handlers: unknown[]) => unknown;
+  post: (path: string, ...handlers: unknown[]) => unknown;
+  put: (path: string, ...handlers: unknown[]) => unknown;
+  patch: (path: string, ...handlers: unknown[]) => unknown;
+  delete: (path: string, ...handlers: unknown[]) => unknown;
+  use: (...handlers: unknown[]) => unknown;
 };
 
 const expressRouter = express.Router();
 const routerInternal = expressRouter as unknown as RouterInternalLike;
 
 const FOUNDER_EMAIL = "lun.6923@hotmail.com";
+
+const getRoute = (req: unknown): string => {
+  const r = req as { path?: unknown; originalUrl?: unknown; url?: unknown } | null;
+  if (typeof r?.path === "string" && r.path.length > 0) return r.path;
+  if (typeof r?.originalUrl === "string" && r.originalUrl.length > 0) return r.originalUrl;
+  if (typeof r?.url === "string" && r.url.length > 0) return r.url;
+  return "unknown";
+};
+
+const asRecord = (value: unknown): Record<string, unknown> => {
+  return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
+};
+
+const asNullableString = (value: unknown): string | null => {
+  if (typeof value === "string") return value;
+  if (Array.isArray(value) && typeof value[0] === "string") return value[0];
+  return null;
+};
+
+const optionalString = (value: unknown): string | undefined => {
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+};
+
+const optionalNumber = (value: unknown): number | undefined => {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+};
 
 const getReqId = (req: unknown): string | undefined => {
   const id = (req as { id?: unknown } | null)?.id;
@@ -130,19 +162,21 @@ async function tableExistsAuthDb(
   return Boolean(rows[0]?.reg);
 }
 
-routerInternal.post("/auth/login", authRateLimiter as unknown as HandlerLike, async (req: ReqLike, res: ResLike): Promise<void> => {
-  const debugHeader = req.headers["x-lawcaspro-debug"] ?? req.headers["x-debug-bridge"] ?? req.headers["x-debug"];
+routerInternal.post("/auth/login", authRateLimiter, async (req: ReqLike, res: RouteResLike): Promise<void> => {
+  const debugHeader = (req.headers?.["x-lawcaspro-debug"] ??
+    req.headers?.["x-debug-bridge"] ??
+    req.headers?.["x-debug"]) as unknown;
   const shouldDebug =
     process.env.DEBUG_VERCEL_BRIDGE === "1" ||
     debugHeader === "1" ||
     (Array.isArray(debugHeader) && debugHeader[0] === "1") ||
-    /[?&]__debug=1(?:&|$)/.test(req.originalUrl ?? "");
+    /[?&]__debug=1(?:&|$)/.test(typeof req.originalUrl === "string" ? req.originalUrl : "");
 
   if (shouldDebug) {
     logger.info(
       {
-        method: req.method,
-        url: req.originalUrl ?? req.url,
+        method: typeof req.method === "string" ? req.method : undefined,
+        url: typeof req.originalUrl === "string" ? req.originalUrl : typeof req.url === "string" ? req.url : undefined,
       },
       "AUTH LOGIN HIT",
     );
@@ -165,11 +199,18 @@ routerInternal.post("/auth/login", authRateLimiter as unknown as HandlerLike, as
       .update(emailNormalized)
       .digest("hex")
       .slice(0, 12);
-    const ip = (req as unknown as { ip?: unknown }).ip;
-    const ua = req.headers["user-agent"];
+    const ip = (req as { ip?: unknown } | null)?.ip;
+    const ua = req.headers?.["user-agent"];
     const reqId = getReqId(req);
 
-    const ctx = { route: req.path, stage, reqId, emailHash, firmId: null as number | null, userId: null as number | null };
+    const ctx = {
+      route: getRoute(req),
+      stage,
+      reqId,
+      emailHash,
+      firmId: undefined as number | undefined,
+      userId: undefined as number | undefined,
+    };
 
     stage = "login_start";
     ctx.stage = stage;
@@ -272,15 +313,17 @@ routerInternal.post("/auth/login", authRateLimiter as unknown as HandlerLike, as
       try {
         const hasAuditLogs = await tableExistsAuthDb(db, "public.audit_logs");
         if (hasAuditLogs) {
-          await db.insert(auditLogsTable).values({
+          type AuditLogInsert = typeof auditLogsTable.$inferInsert;
+          const row: AuditLogInsert = {
             firmId: null,
             actorId: null,
             actorType: "firm_user",
             action: "auth.login_failed",
             detail: `email=${emailNormalized} reason=user_not_found`,
-            ipAddress: ip ?? null,
-            userAgent: ua ?? null,
-          });
+            ipAddress: asNullableString(ip),
+            userAgent: asNullableString(ua),
+          };
+          await db.insert(auditLogsTable).values(row);
         }
       } catch (err) {
         logger.error({ emailHash, stage: "audit_log_user_not_found", err }, "auth.login.audit_log_error");
@@ -291,7 +334,7 @@ routerInternal.post("/auth/login", authRateLimiter as unknown as HandlerLike, as
 
     userId = user.id;
     ctx.userId = user.id;
-    ctx.firmId = user.firmId;
+    ctx.firmId = optionalNumber(user.firmId) ?? undefined;
     const userLookupMs = Date.now() - userLookupStartedAt;
     logger.info({ ...ctx, ms: userLookupMs }, "auth.login.stage.user_lookup_done");
 
@@ -300,15 +343,17 @@ routerInternal.post("/auth/login", authRateLimiter as unknown as HandlerLike, as
       try {
         const hasAuditLogs = await tableExistsAuthDb(db, "public.audit_logs");
         if (hasAuditLogs) {
-          await db.insert(auditLogsTable).values({
+          type AuditLogInsert = typeof auditLogsTable.$inferInsert;
+          const row: AuditLogInsert = {
             firmId: null,
             actorId: user.id,
             actorType: "founder",
             action: "auth.login_failed",
             detail: "reason=founder_email_mismatch",
-            ipAddress: ip ?? null,
-            userAgent: ua ?? null,
-          });
+            ipAddress: asNullableString(ip),
+            userAgent: asNullableString(ua),
+          };
+          await db.insert(auditLogsTable).values(row);
         }
       } catch (err) {
         logger.error({ emailHash, userId: user.id, stage: "audit_log_founder_email_mismatch", err }, "auth.login.audit_log_error");
@@ -326,15 +371,17 @@ routerInternal.post("/auth/login", authRateLimiter as unknown as HandlerLike, as
       try {
         const hasAuditLogs = await tableExistsAuthDb(db, "public.audit_logs");
         if (hasAuditLogs) {
-          await db.insert(auditLogsTable).values({
+          type AuditLogInsert = typeof auditLogsTable.$inferInsert;
+          const row: AuditLogInsert = {
             firmId: user.firmId,
             actorId: user.id,
             actorType: user.userType,
             action: "auth.login_failed",
             detail: "reason=wrong_password",
-            ipAddress: ip ?? null,
-            userAgent: ua ?? null,
-          });
+            ipAddress: asNullableString(ip),
+            userAgent: asNullableString(ua),
+          };
+          await db.insert(auditLogsTable).values(row);
         }
       } catch (err) {
         logger.error({ emailHash, userId: user.id, stage: "audit_log_wrong_password", err }, "auth.login.audit_log_error");
@@ -348,15 +395,17 @@ routerInternal.post("/auth/login", authRateLimiter as unknown as HandlerLike, as
       try {
         const hasAuditLogs = await tableExistsAuthDb(db, "public.audit_logs");
         if (hasAuditLogs) {
-          await db.insert(auditLogsTable).values({
+          type AuditLogInsert = typeof auditLogsTable.$inferInsert;
+          const row: AuditLogInsert = {
             firmId: user.firmId,
             actorId: user.id,
             actorType: user.userType,
             action: "auth.login_failed",
             detail: "reason=inactive_account",
-            ipAddress: ip ?? null,
-            userAgent: ua ?? null,
-          });
+            ipAddress: asNullableString(ip),
+            userAgent: asNullableString(ua),
+          };
+          await db.insert(auditLogsTable).values(row);
         }
       } catch (err) {
         logger.error({ emailHash, userId: user.id, stage: "audit_log_inactive", err }, "auth.login.audit_log_error");
@@ -370,7 +419,8 @@ routerInternal.post("/auth/login", authRateLimiter as unknown as HandlerLike, as
       stage = "totp";
       ctx.stage = stage;
       logger.info({ ...ctx }, "auth.login.stage");
-      const totpCode = req.body.totpCode as string | undefined;
+      const body = asRecord(req.body);
+      const totpCode = optionalString(body.totpCode);
       if (!totpCode) {
         logger.info({ emailHash, userId: user.id, ms: Date.now() - startedAt }, "auth.login.totp_required");
         res.status(200).json({ needsTotp: true });
@@ -383,15 +433,17 @@ routerInternal.post("/auth/login", authRateLimiter as unknown as HandlerLike, as
         try {
           const hasAuditLogs = await tableExistsAuthDb(db, "public.audit_logs");
           if (hasAuditLogs) {
-            await db.insert(auditLogsTable).values({
+            type AuditLogInsert = typeof auditLogsTable.$inferInsert;
+            const row: AuditLogInsert = {
               firmId: user.firmId,
               actorId: user.id,
               actorType: user.userType,
               action: "auth.totp_failed",
               detail: "reason=invalid_totp_code",
-              ipAddress: ip ?? null,
-              userAgent: ua ?? null,
-            });
+              ipAddress: asNullableString(ip),
+              userAgent: asNullableString(ua),
+            };
+            await db.insert(auditLogsTable).values(row);
           }
         } catch (err) {
           logger.error({ emailHash, userId: user.id, stage: "audit_log_totp_failed", err }, "auth.login.audit_log_error");
@@ -414,13 +466,15 @@ routerInternal.post("/auth/login", authRateLimiter as unknown as HandlerLike, as
     logger.info({ ...ctx }, "auth.login.stage");
     await withTransientDbRetry(
       async () => {
-        await db.insert(sessionsTable).values({
+        type SessionInsert = typeof sessionsTable.$inferInsert;
+        const row: SessionInsert = {
           userId: user.id,
           tokenHash,
           expiresAt,
-          userAgent: ua ?? null,
-          ipAddress: ip ?? null,
-        });
+          userAgent: asNullableString(ua),
+          ipAddress: asNullableString(ip),
+        };
+        await db.insert(sessionsTable).values(row);
       },
       { ...ctx, stage: "session_persist.query" },
       2,
@@ -437,21 +491,23 @@ routerInternal.post("/auth/login", authRateLimiter as unknown as HandlerLike, as
 
         const hasAuditLogs = await tableExistsAuthDb(db, "public.audit_logs");
         if (!hasAuditLogs) return;
-        await db.insert(auditLogsTable).values({
+        type AuditLogInsert = typeof auditLogsTable.$inferInsert;
+        const row: AuditLogInsert = {
           firmId: user.firmId,
           actorId: user.id,
           actorType: user.userType,
           action: "auth.login_success",
           detail: null,
-          ipAddress: ip ?? null,
-          userAgent: ua ?? null,
-        });
+          ipAddress: asNullableString(ip),
+          userAgent: asNullableString(ua),
+        };
+        await db.insert(auditLogsTable).values(row);
       } catch (err) {
         logger.error(
           {
             emailHash,
             userId: user.id,
-            route: req.path,
+            route: getRoute(req),
             reqId: getReqId(req) ?? null,
             firmId: user.firmId ?? null,
             stage: "side_effects",
@@ -540,8 +596,8 @@ routerInternal.post("/auth/login", authRateLimiter as unknown as HandlerLike, as
 
 routerInternal.post(
   "/auth/logout",
-  requireAuth as unknown as HandlerLike,
-  async (req: AuthRequest, res: ResLike): Promise<void> => {
+  requireAuth,
+  async (req: AuthRequest, res: RouteResLike): Promise<void> => {
   let token = req.cookies?.["auth_token"] as string | undefined;
   if (!token) {
     const authHeader = req.headers["authorization"];
@@ -559,7 +615,7 @@ routerInternal.post(
   },
 );
 
-routerInternal.get("/auth/me", async (req: ReqLike, res: ResLike): Promise<void> => {
+routerInternal.get("/auth/me", async (req: ReqLike, res: RouteResLike): Promise<void> => {
   const startedAt = Date.now();
   const reqId = getReqId(req);
   const cookieToken = getCookieToken(req);
@@ -570,12 +626,12 @@ routerInternal.get("/auth/me", async (req: ReqLike, res: ResLike): Promise<void>
 
   if (!token) {
     sendOk(res, null);
-    logger.info({ route: req.path, reqId, stage: "no_token", ms: Date.now() - startedAt }, "auth.me");
+    logger.info({ route: getRoute(req), reqId, stage: "no_token", ms: Date.now() - startedAt }, "auth.me");
     return;
   }
 
   const tokenHash = crypto.createHash("sha256").update(token).digest("hex");
-  const ctxBase = { route: req.path, reqId, stage: "start" };
+  const ctxBase = { route: getRoute(req), reqId, stage: "start" };
 
   try {
     const [s] = await db
@@ -624,7 +680,7 @@ routerInternal.get("/auth/me", async (req: ReqLike, res: ResLike): Promise<void>
         const [role] = await db.select().from(rolesTable).where(eq(rolesTable.id, user.roleId));
         roleName = (role as { name?: unknown } | undefined)?.name as string | undefined ?? null;
       } catch (err) {
-        logger.error({ route: req.path, reqId, stage: "role_lookup", err }, "auth.me.degraded");
+        logger.error({ route: getRoute(req), reqId, stage: "role_lookup", err }, "auth.me.degraded");
       }
     }
 
@@ -634,7 +690,7 @@ routerInternal.get("/auth/me", async (req: ReqLike, res: ResLike): Promise<void>
         const [firm] = await db.select().from(firmsTable).where(eq(firmsTable.id, user.firmId));
         firmName = (firm as { name?: unknown } | undefined)?.name as string | undefined ?? null;
       } catch (err) {
-        logger.error({ route: req.path, reqId, stage: "firm_lookup", err }, "auth.me.degraded");
+        logger.error({ route: getRoute(req), reqId, stage: "firm_lookup", err }, "auth.me.degraded");
       }
     }
 
@@ -646,7 +702,7 @@ routerInternal.get("/auth/me", async (req: ReqLike, res: ResLike): Promise<void>
           .from(permissionsTable)
           .where(and(eq(permissionsTable.roleId, user.roleId), eq(permissionsTable.allowed, true)));
       } catch (err) {
-        logger.error({ route: req.path, reqId, stage: "permissions_lookup", err }, "auth.me.degraded");
+        logger.error({ route: getRoute(req), reqId, stage: "permissions_lookup", err }, "auth.me.degraded");
         permissions = [];
       }
     }
@@ -690,8 +746,8 @@ routerInternal.get("/auth/me", async (req: ReqLike, res: ResLike): Promise<void>
 
 routerInternal.get(
   "/auth/permissions",
-  requireAuth as unknown as HandlerLike,
-  async (req: AuthRequest, res: ResLike): Promise<void> => {
+  requireAuth,
+  async (req: AuthRequest, res: RouteResLike): Promise<void> => {
   const startedAt = Date.now();
   const reqId = getReqId(req);
   const ctx = { route: req.path, reqId, userId: req.userId ?? null, firmId: req.firmId ?? null, roleId: req.roleId ?? null };
@@ -719,8 +775,8 @@ routerInternal.get(
 
 routerInternal.get(
   "/auth/sessions",
-  requireAuth as unknown as HandlerLike,
-  async (req: AuthRequest, res: ResLike): Promise<void> => {
+  requireAuth,
+  async (req: AuthRequest, res: RouteResLike): Promise<void> => {
   const sessions = await db.select({
     id: sessionsTable.id,
     createdAt: sessionsTable.createdAt,
@@ -734,8 +790,8 @@ routerInternal.get(
 
 routerInternal.delete(
   "/auth/sessions/:id",
-  requireAuth as unknown as HandlerLike,
-  async (req: AuthRequest, res: ResLike): Promise<void> => {
+  requireAuth,
+  async (req: AuthRequest, res: RouteResLike): Promise<void> => {
   const sessionId = Number(req.params.id);
   await db.delete(sessionsTable).where(eq(sessionsTable.id, sessionId));
   await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "auth.session_revoked", entityType: "session", entityId: sessionId, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
@@ -748,8 +804,8 @@ routerInternal.delete(
 // The returned token is stored in React state (memory only — never localStorage/sessionStorage).
 routerInternal.post(
   "/auth/reauth-token",
-  requireAuth as unknown as HandlerLike,
-  async (req: AuthRequest, res: ResLike): Promise<void> => {
+  requireAuth,
+  async (req: AuthRequest, res: RouteResLike): Promise<void> => {
   const token = issueReauthToken(req.userId!);
   await writeAuditLog({
     actorId: req.userId, firmId: req.firmId, actorType: req.userType ?? "firm_user",
@@ -762,9 +818,9 @@ routerInternal.post(
 
 routerInternal.post(
   "/auth/totp/setup",
-  sensitiveRateLimiter as unknown as HandlerLike,
-  requireAuth as unknown as HandlerLike,
-  async (req: AuthRequest, res: ResLike): Promise<void> => {
+  sensitiveRateLimiter,
+  requireAuth,
+  async (req: AuthRequest, res: RouteResLike): Promise<void> => {
   const [user] = await db.select({
     id: usersTable.id,
     email: usersTable.email,
@@ -787,9 +843,9 @@ routerInternal.post(
 
 routerInternal.post(
   "/auth/totp/confirm",
-  sensitiveRateLimiter as unknown as HandlerLike,
-  requireAuth as unknown as HandlerLike,
-  async (req: AuthRequest, res: ResLike): Promise<void> => {
+  sensitiveRateLimiter,
+  requireAuth,
+  async (req: AuthRequest, res: RouteResLike): Promise<void> => {
   const { code } = req.body as { code: string };
   if (!code) { res.status(400).json({ error: "Code is required" }); return; }
 
@@ -814,10 +870,10 @@ routerInternal.post(
 
 routerInternal.post(
   "/auth/totp/disable",
-  sensitiveRateLimiter as unknown as HandlerLike,
-  requireAuth as unknown as HandlerLike,
-  requireReAuth as unknown as HandlerLike,
-  async (req: AuthRequest, res: ResLike): Promise<void> => {
+  sensitiveRateLimiter,
+  requireAuth,
+  requireReAuth,
+  async (req: AuthRequest, res: RouteResLike): Promise<void> => {
   const { code } = req.body as { code: string };
   if (!code) { res.status(400).json({ error: "Code is required to disable TOTP" }); return; }
 
