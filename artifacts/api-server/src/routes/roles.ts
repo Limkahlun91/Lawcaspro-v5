@@ -1,16 +1,81 @@
-import { Router, type IRouter } from "express";
+import express, { type Router as ExpressRouter } from "express";
 import { and, count, eq, or } from "drizzle-orm";
 import { db, permissionsTable, rolesTable, sql, usersTable } from "@workspace/db";
-import {
-  CreateRoleBody, UpdateRoleBody,
-  GetRoleParams, UpdateRoleParams, DeleteRoleParams
-} from "@workspace/api-zod";
-import { requireAuth, requireFirmUser, requirePermission, type AuthRequest, writeAuditLog } from "../lib/auth";
+import type { IncomingHttpHeaders, IncomingMessage } from "node:http";
+import { z } from "zod/v4";
+import { requireAuth, requireFirmUser, requirePermission, type AuthRequest, writeAuditLog } from "../lib/auth.js";
 
-const router: IRouter = Router();
+type ReqLike = IncomingMessage & {
+  body?: unknown;
+  headers: IncomingHttpHeaders & Record<string, string | string[] | undefined>;
+  ip?: string;
+  originalUrl?: string;
+  params?: Record<string, unknown>;
+  path?: string;
+  query?: Record<string, unknown>;
+  roleId?: number | null;
+  userId?: number | null;
+  userType?: string | null;
+  firmId?: number | null;
+  [key: string]: unknown;
+};
+
+type RouteResLike = {
+  status: (code: number) => RouteResLike;
+  json: (body: unknown) => unknown;
+  sendStatus: (code: number) => unknown;
+  [key: string]: unknown;
+};
+
+type RouterInternalLike = {
+  get: (path: string, ...handlers: unknown[]) => unknown;
+  post: (path: string, ...handlers: unknown[]) => unknown;
+  patch: (path: string, ...handlers: unknown[]) => unknown;
+  delete: (path: string, ...handlers: unknown[]) => unknown;
+};
+
+const expressRouter = express.Router();
+const routerInternal = expressRouter as unknown as RouterInternalLike;
+
+type AuthRequestLike = AuthRequest & ReqLike;
+
+const asOptionalString = (value: unknown): string | undefined => (typeof value === "string" ? value : undefined);
+
+const getHeader = (req: AuthRequestLike, key: string): string | undefined => {
+  const lower = key.toLowerCase();
+  const value = req.headers?.[lower] ?? req.headers?.[key];
+  if (Array.isArray(value)) return typeof value[0] === "string" ? value[0] : undefined;
+  return asOptionalString(value);
+};
+
+const RoleIdParamsSchema = z.object({ roleId: z.coerce.number().int().min(1) });
+type RoleIdParams = z.infer<typeof RoleIdParamsSchema>;
+
+const PermissionItemSchema = z.object({
+  module: z.string().min(1),
+  action: z.string().min(1),
+  allowed: z.boolean(),
+});
+
+const CreateRoleBodySchema = z.object({
+  name: z.string().min(1),
+  permissions: z.array(PermissionItemSchema).optional(),
+});
+type CreateRoleBody = z.infer<typeof CreateRoleBodySchema>;
+
+const UpdateRoleBodySchema = z.object({
+  name: z.string().min(1).optional(),
+  permissions: z.array(PermissionItemSchema).optional(),
+});
+type UpdateRoleBody = z.infer<typeof UpdateRoleBodySchema>;
 
 type DbConn = typeof db | NonNullable<AuthRequest["rlsDb"]>;
-const rdb = (req: AuthRequest): DbConn => req.rlsDb ?? db;
+const rdb = (req: AuthRequestLike): DbConn => req.rlsDb ?? db;
+
+type TransactionCapable = {
+  transaction: <T>(fn: (tx: DbConn) => Promise<T>) => Promise<T>;
+};
+const asTransactionCapable = (conn: DbConn): TransactionCapable => conn as unknown as TransactionCapable;
 
 const standardRoleNames = ["Partner", "Senior Lawyer", "Lawyer", "Senior Clerk", "Clerk", "Manager", "Admin", "Viewer"] as const;
 
@@ -31,13 +96,13 @@ async function canBackfillStandardRoles(r: DbConn, req: AuthRequest): Promise<bo
 }
 
 async function backfillStandardRoles(r: DbConn, firmId: number): Promise<string[]> {
-  return r.transaction(async (tx) => {
+  return asTransactionCapable(r).transaction(async (tx: DbConn) => {
     await tx.execute(sql`SELECT pg_advisory_xact_lock(${firmId})`);
     const existing = await tx
       .select({ name: rolesTable.name })
       .from(rolesTable)
       .where(eq(rolesTable.firmId, firmId));
-    const existingNames = new Set(existing.map((x) => x.name));
+    const existingNames = new Set(existing.map((x: { name: string }) => x.name));
     const missing = standardRoleNames.filter((name) => !existingNames.has(name));
     if (missing.length === 0) return [];
     await tx.insert(rolesTable).values(missing.map((name) => ({ firmId, name })));
@@ -54,12 +119,12 @@ async function enrichRole(r: DbConn, role: typeof rolesTable.$inferSelect) {
     name: role.name,
     isSystemRole: role.isSystemRole,
     userCount: Number(userCountRes?.c ?? 0),
-    permissions: perms.map(p => ({ id: p.id, module: p.module, action: p.action, allowed: p.allowed })),
+    permissions: perms.map((p: typeof permissionsTable.$inferSelect) => ({ id: p.id, module: p.module, action: p.action, allowed: p.allowed })),
     createdAt: role.createdAt.toISOString(),
   };
 }
 
-router.get("/roles", requireAuth, requireFirmUser, requirePermission("roles", "read"), async (req: AuthRequest, res): Promise<void> => {
+routerInternal.get("/roles", requireAuth, requireFirmUser, requirePermission("roles", "read"), async (req: AuthRequestLike, res: RouteResLike): Promise<void> => {
   const r = rdb(req);
   if (req.firmId) {
     const allowed = await canBackfillStandardRoles(r, req);
@@ -73,32 +138,33 @@ router.get("/roles", requireAuth, requireFirmUser, requirePermission("roles", "r
           action: "roles.standard_roles_backfilled",
           detail: `created=${created.join(",")}`,
           ipAddress: req.ip,
-          userAgent: req.headers["user-agent"],
+          userAgent: getHeader(req, "user-agent"),
         }, { db: req.rlsDb });
       }
     }
   }
   const roles = await r.select().from(rolesTable).where(eq(rolesTable.firmId, req.firmId!));
-  const enriched = await Promise.all(roles.map((role) => enrichRole(r, role)));
+  const enriched = await Promise.all(roles.map((role: typeof rolesTable.$inferSelect) => enrichRole(r, role)));
   res.json(enriched);
 });
 
-router.post("/roles", requireAuth, requireFirmUser, requirePermission("roles", "create"), async (req: AuthRequest, res): Promise<void> => {
-  const parsed = CreateRoleBody.safeParse(req.body);
+routerInternal.post("/roles", requireAuth, requireFirmUser, requirePermission("roles", "create"), async (req: AuthRequestLike, res: RouteResLike): Promise<void> => {
+  const parsed = CreateRoleBodySchema.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: parsed.error.message });
     return;
   }
+  const body: CreateRoleBody = parsed.data;
 
   const r = rdb(req);
   const [role] = await r
     .insert(rolesTable)
-    .values({ firmId: req.firmId!, name: parsed.data.name })
+    .values({ firmId: req.firmId!, name: body.name })
     .returning();
 
-  if (parsed.data.permissions?.length) {
+  if (body.permissions?.length) {
     await r.insert(permissionsTable).values(
-      parsed.data.permissions.map((p) => ({
+      body.permissions.map((p) => ({
         roleId: role.id,
         module: p.module,
         action: p.action,
@@ -107,19 +173,20 @@ router.post("/roles", requireAuth, requireFirmUser, requirePermission("roles", "
     );
   }
 
-  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "roles.create", entityType: "role", entityId: role.id, detail: `name=${role.name}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "roles.create", entityType: "role", entityId: role.id, detail: `name=${role.name}`, ipAddress: req.ip, userAgent: getHeader(req, "user-agent") });
   res.status(201).json(await enrichRole(r, role));
 });
 
-router.get("/roles/:roleId", requireAuth, requireFirmUser, requirePermission("roles", "read"), async (req: AuthRequest, res): Promise<void> => {
-  const params = GetRoleParams.safeParse(req.params);
+routerInternal.get("/roles/:roleId", requireAuth, requireFirmUser, requirePermission("roles", "read"), async (req: AuthRequestLike, res: RouteResLike): Promise<void> => {
+  const params = RoleIdParamsSchema.safeParse(req.params);
   if (!params.success) {
     res.status(400).json({ error: params.error.message });
     return;
   }
+  const p: RoleIdParams = params.data;
 
   const r = rdb(req);
-  const [role] = await r.select().from(rolesTable).where(eq(rolesTable.id, params.data.roleId));
+  const [role] = await r.select().from(rolesTable).where(eq(rolesTable.id, p.roleId));
   if (!role || role.firmId !== req.firmId) {
     res.status(404).json({ error: "Role not found" });
     return;
@@ -128,27 +195,29 @@ router.get("/roles/:roleId", requireAuth, requireFirmUser, requirePermission("ro
   res.json(await enrichRole(r, role));
 });
 
-router.patch("/roles/:roleId", requireAuth, requireFirmUser, requirePermission("roles", "update"), async (req: AuthRequest, res): Promise<void> => {
-  const params = UpdateRoleParams.safeParse(req.params);
+routerInternal.patch("/roles/:roleId", requireAuth, requireFirmUser, requirePermission("roles", "update"), async (req: AuthRequestLike, res: RouteResLike): Promise<void> => {
+  const params = RoleIdParamsSchema.safeParse(req.params);
   if (!params.success) {
     res.status(400).json({ error: params.error.message });
     return;
   }
+  const p: RoleIdParams = params.data;
 
-  const parsed = UpdateRoleBody.safeParse(req.body);
+  const parsed = UpdateRoleBodySchema.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: parsed.error.message });
     return;
   }
+  const body: UpdateRoleBody = parsed.data;
 
   const updates: Record<string, unknown> = {};
-  if (parsed.data.name !== undefined) updates.name = parsed.data.name;
+  if (body.name !== undefined) updates.name = body.name;
 
   const r = rdb(req);
   const [role] = await r
     .update(rolesTable)
     .set(updates)
-    .where(eq(rolesTable.id, params.data.roleId))
+    .where(eq(rolesTable.id, p.roleId))
     .returning();
 
   if (!role || role.firmId !== req.firmId) {
@@ -156,11 +225,11 @@ router.patch("/roles/:roleId", requireAuth, requireFirmUser, requirePermission("
     return;
   }
 
-  if (parsed.data.permissions) {
+  if (body.permissions) {
     await r.delete(permissionsTable).where(eq(permissionsTable.roleId, role.id));
-    if (parsed.data.permissions.length > 0) {
+    if (body.permissions.length > 0) {
       await r.insert(permissionsTable).values(
-        parsed.data.permissions.map((p) => ({
+        body.permissions.map((p) => ({
           roleId: role.id,
           module: p.module,
           action: p.action,
@@ -170,31 +239,32 @@ router.patch("/roles/:roleId", requireAuth, requireFirmUser, requirePermission("
     }
   }
 
-  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "roles.update", entityType: "role", entityId: role.id, detail: `fields=${Object.keys(updates).join(",")}${parsed.data.permissions ? " permissions=replaced" : ""}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "roles.update", entityType: "role", entityId: role.id, detail: `fields=${Object.keys(updates).join(",")}${body.permissions ? " permissions=replaced" : ""}`, ipAddress: req.ip, userAgent: getHeader(req, "user-agent") });
   res.json(await enrichRole(r, role));
 });
 
-router.delete("/roles/:roleId", requireAuth, requireFirmUser, requirePermission("roles", "delete"), async (req: AuthRequest, res): Promise<void> => {
-  const params = DeleteRoleParams.safeParse(req.params);
+routerInternal.delete("/roles/:roleId", requireAuth, requireFirmUser, requirePermission("roles", "delete"), async (req: AuthRequestLike, res: RouteResLike): Promise<void> => {
+  const params = RoleIdParamsSchema.safeParse(req.params);
   if (!params.success) {
     res.status(400).json({ error: params.error.message });
     return;
   }
+  const p: RoleIdParams = params.data;
 
   const r = rdb(req);
-  await r.delete(permissionsTable).where(eq(permissionsTable.roleId, params.data.roleId));
-  const [role] = await r.delete(rolesTable).where(eq(rolesTable.id, params.data.roleId)).returning();
+  await r.delete(permissionsTable).where(eq(permissionsTable.roleId, p.roleId));
+  const [role] = await r.delete(rolesTable).where(eq(rolesTable.id, p.roleId)).returning();
 
   if (!role || role.firmId !== req.firmId) {
     res.status(404).json({ error: "Role not found" });
     return;
   }
 
-  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "roles.delete", entityType: "role", entityId: role.id, detail: `name=${role.name}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "roles.delete", entityType: "role", entityId: role.id, detail: `name=${role.name}`, ipAddress: req.ip, userAgent: getHeader(req, "user-agent") });
   res.sendStatus(204);
 });
 
-router.post("/roles/bootstrap", requireAuth, requireFirmUser, requirePermission("roles", "create"), async (req: AuthRequest, res): Promise<void> => {
+routerInternal.post("/roles/bootstrap", requireAuth, requireFirmUser, requirePermission("roles", "create"), async (req: AuthRequestLike, res: RouteResLike): Promise<void> => {
   const r = rdb(req);
   const created = await backfillStandardRoles(r, req.firmId!);
   if (created.length > 0) {
@@ -205,10 +275,12 @@ router.post("/roles/bootstrap", requireAuth, requireFirmUser, requirePermission(
       action: "roles.bootstrap",
       detail: `created=${created.join(",")}`,
       ipAddress: req.ip,
-      userAgent: req.headers["user-agent"],
+      userAgent: getHeader(req, "user-agent"),
     }, { db: req.rlsDb });
   }
   res.json({ message: `Bootstrapped ${created.length} roles` });
 });
 
-export default router;
+const exportedRouter = expressRouter as unknown as ExpressRouter;
+export { exportedRouter as router };
+export default exportedRouter;
