@@ -16,7 +16,7 @@ type ReqLike = {
   body?: unknown;
   query?: Record<string, unknown>;
   params?: Record<string, string>;
-  headers?: Record<string, unknown>;
+  headers: Record<string, unknown>;
   cookies?: Record<string, string>;
   method?: unknown;
   url?: unknown;
@@ -33,8 +33,8 @@ type RouteResLike = import("node:http").ServerResponse & {
   locals: Record<string, unknown>;
   status: (code: number) => RouteResLike;
   json: (body: unknown) => RouteResLike;
-  cookie?: (...args: unknown[]) => RouteResLike;
-  clearCookie?: (...args: unknown[]) => RouteResLike;
+  cookie: (...args: unknown[]) => RouteResLike;
+  clearCookie: (...args: unknown[]) => RouteResLike;
   setHeader?: (name: string, value: string | number | readonly string[]) => void;
   [key: string]: unknown;
 };
@@ -52,6 +52,8 @@ const expressRouter = express.Router();
 const routerInternal = expressRouter as unknown as RouterInternalLike;
 
 const FOUNDER_EMAIL = "lun.6923@hotmail.com";
+
+type AuthRequestLike = AuthRequest & ReqLike;
 
 const getRoute = (req: unknown): string => {
   const r = req as { path?: unknown; originalUrl?: unknown; url?: unknown } | null;
@@ -575,7 +577,7 @@ routerInternal.post("/auth/login", authRateLimiter, async (req: ReqLike, res: Ro
       {
         emailHash,
         userId,
-        route: req.path,
+        route: getRoute(req),
         reqId: getReqId(req) ?? null,
         stage,
         durationMs: Date.now() - startedAt,
@@ -597,7 +599,7 @@ routerInternal.post("/auth/login", authRateLimiter, async (req: ReqLike, res: Ro
 routerInternal.post(
   "/auth/logout",
   requireAuth,
-  async (req: AuthRequest, res: RouteResLike): Promise<void> => {
+  async (req: AuthRequestLike, res: RouteResLike): Promise<void> => {
   let token = req.cookies?.["auth_token"] as string | undefined;
   if (!token) {
     const authHeader = req.headers["authorization"];
@@ -609,7 +611,14 @@ routerInternal.post(
     const tokenHash = crypto.createHash("sha256").update(token).digest("hex");
     await db.delete(sessionsTable).where(eq(sessionsTable.tokenHash, tokenHash));
   }
-  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "auth.logout", ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+  await writeAuditLog({
+    firmId: typeof req.firmId === "number" ? req.firmId : req.firmId ?? null,
+    actorId: typeof req.userId === "number" ? req.userId : req.userId ?? null,
+    actorType: typeof req.userType === "string" ? req.userType : undefined,
+    action: "auth.logout",
+    ipAddress: typeof req.ip === "string" ? req.ip : undefined,
+    userAgent: asNullableString(req.headers["user-agent"]) ?? undefined,
+  });
   res.clearCookie("auth_token");
   sendOk(res, { success: true });
   },
@@ -747,7 +756,7 @@ routerInternal.get("/auth/me", async (req: ReqLike, res: RouteResLike): Promise<
 routerInternal.get(
   "/auth/permissions",
   requireAuth,
-  async (req: AuthRequest, res: RouteResLike): Promise<void> => {
+  async (req: AuthRequestLike, res: RouteResLike): Promise<void> => {
   const startedAt = Date.now();
   const reqId = getReqId(req);
   const ctx = { route: req.path, reqId, userId: req.userId ?? null, firmId: req.firmId ?? null, roleId: req.roleId ?? null };
@@ -776,7 +785,7 @@ routerInternal.get(
 routerInternal.get(
   "/auth/sessions",
   requireAuth,
-  async (req: AuthRequest, res: RouteResLike): Promise<void> => {
+  async (req: AuthRequestLike, res: RouteResLike): Promise<void> => {
   const sessions = await db.select({
     id: sessionsTable.id,
     createdAt: sessionsTable.createdAt,
@@ -791,7 +800,7 @@ routerInternal.get(
 routerInternal.delete(
   "/auth/sessions/:id",
   requireAuth,
-  async (req: AuthRequest, res: RouteResLike): Promise<void> => {
+  async (req: AuthRequestLike, res: RouteResLike): Promise<void> => {
   const sessionId = Number(req.params.id);
   await db.delete(sessionsTable).where(eq(sessionsTable.id, sessionId));
   await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "auth.session_revoked", entityType: "session", entityId: sessionId, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
@@ -805,7 +814,7 @@ routerInternal.delete(
 routerInternal.post(
   "/auth/reauth-token",
   requireAuth,
-  async (req: AuthRequest, res: RouteResLike): Promise<void> => {
+  async (req: AuthRequestLike, res: RouteResLike): Promise<void> => {
   const token = issueReauthToken(req.userId!);
   await writeAuditLog({
     actorId: req.userId, firmId: req.firmId, actorType: req.userType ?? "firm_user",
@@ -820,7 +829,7 @@ routerInternal.post(
   "/auth/totp/setup",
   sensitiveRateLimiter,
   requireAuth,
-  async (req: AuthRequest, res: RouteResLike): Promise<void> => {
+  async (req: AuthRequestLike, res: RouteResLike): Promise<void> => {
   const [user] = await db.select({
     id: usersTable.id,
     email: usersTable.email,
@@ -845,7 +854,7 @@ routerInternal.post(
   "/auth/totp/confirm",
   sensitiveRateLimiter,
   requireAuth,
-  async (req: AuthRequest, res: RouteResLike): Promise<void> => {
+  async (req: AuthRequestLike, res: RouteResLike): Promise<void> => {
   const { code } = req.body as { code: string };
   if (!code) { res.status(400).json({ error: "Code is required" }); return; }
 
@@ -873,7 +882,7 @@ routerInternal.post(
   sensitiveRateLimiter,
   requireAuth,
   requireReAuth,
-  async (req: AuthRequest, res: RouteResLike): Promise<void> => {
+  async (req: AuthRequestLike, res: RouteResLike): Promise<void> => {
   const { code } = req.body as { code: string };
   if (!code) { res.status(400).json({ error: "Code is required to disable TOTP" }); return; }
 
