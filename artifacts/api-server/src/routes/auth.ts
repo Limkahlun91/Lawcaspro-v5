@@ -55,6 +55,21 @@ const FOUNDER_EMAIL = "lun.6923@hotmail.com";
 
 type AuthRequestLike = AuthRequest & ReqLike;
 
+const asOptionalString = (value: unknown): string | undefined => {
+  return typeof value === "string" ? value : undefined;
+};
+
+const getParam = (req: AuthRequestLike, key: string): string | undefined => {
+  return asOptionalString(req.params?.[key]);
+};
+
+const getHeader = (req: AuthRequestLike, key: string): string | undefined => {
+  const lower = key.toLowerCase();
+  const value = req.headers?.[lower] ?? req.headers?.[key];
+  if (Array.isArray(value)) return typeof value[0] === "string" ? value[0] : undefined;
+  return asOptionalString(value);
+};
+
 const getRoute = (req: unknown): string => {
   const r = req as { path?: unknown; originalUrl?: unknown; url?: unknown } | null;
   if (typeof r?.path === "string" && r.path.length > 0) return r.path;
@@ -801,9 +816,20 @@ routerInternal.delete(
   "/auth/sessions/:id",
   requireAuth,
   async (req: AuthRequestLike, res: RouteResLike): Promise<void> => {
-  const sessionId = Number(req.params.id);
+  const id = getParam(req, "id");
+  if (!id) { res.status(400).json({ error: "Missing id" }); return; }
+  const sessionId = Number(id);
   await db.delete(sessionsTable).where(eq(sessionsTable.id, sessionId));
-  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "auth.session_revoked", entityType: "session", entityId: sessionId, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+  await writeAuditLog({
+    firmId: req.firmId,
+    actorId: req.userId,
+    actorType: req.userType,
+    action: "auth.session_revoked",
+    entityType: "session",
+    entityId: sessionId,
+    ipAddress: asOptionalString(req.ip),
+    userAgent: getHeader(req, "user-agent"),
+  });
   sendOk(res, { success: true });
   },
 );
@@ -818,8 +844,8 @@ routerInternal.post(
   const token = issueReauthToken(req.userId!);
   await writeAuditLog({
     actorId: req.userId, firmId: req.firmId, actorType: req.userType ?? "firm_user",
-    action: "auth.reauth_token_issued", detail: req.path,
-    ipAddress: req.ip, userAgent: req.headers["user-agent"],
+    action: "auth.reauth_token_issued", detail: getRoute(req),
+    ipAddress: asOptionalString(req.ip), userAgent: getHeader(req, "user-agent"),
   });
   res.json({ reAuthToken: token });
   },
@@ -871,7 +897,14 @@ routerInternal.post(
   if (!isValid) { res.status(400).json({ error: "Invalid code — check your authenticator app" }); return; }
 
   await db.update(usersTable).set({ totpEnabled: true, totpLastUsedAt: new Date() }).where(eq(usersTable.id, req.userId!));
-  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "auth.totp_enabled", ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+  await writeAuditLog({
+    firmId: req.firmId,
+    actorId: req.userId,
+    actorType: req.userType,
+    action: "auth.totp_enabled",
+    ipAddress: asOptionalString(req.ip),
+    userAgent: getHeader(req, "user-agent"),
+  });
 
   res.json({ success: true });
   },
@@ -898,7 +931,14 @@ routerInternal.post(
   if (!isValid) { res.status(400).json({ error: "Invalid code" }); return; }
 
   await db.update(usersTable).set({ totpEnabled: false, totpSecret: null, totpLastUsedAt: null }).where(eq(usersTable.id, req.userId!));
-  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "auth.totp_disabled", ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+  await writeAuditLog({
+    firmId: req.firmId,
+    actorId: req.userId,
+    actorType: req.userType,
+    action: "auth.totp_disabled",
+    ipAddress: asOptionalString(req.ip),
+    userAgent: getHeader(req, "user-agent"),
+  });
 
   res.json({ success: true });
   },
