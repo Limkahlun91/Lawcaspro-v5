@@ -1,6 +1,24 @@
-import type { Request, Response, NextFunction, RequestHandler } from "express";
+import type { RequestHandler } from "express";
 import crypto from "crypto";
-import { logger } from "./logger";
+import type { IncomingMessage, ServerResponse } from "node:http";
+import { logger } from "./logger.js";
+
+type NextLike = (error?: unknown) => void;
+
+type ReqLike = IncomingMessage & {
+  headers: IncomingMessage["headers"];
+  path?: string;
+  method?: string;
+  userId?: unknown;
+  firmId?: unknown;
+  requestId?: string;
+};
+
+type ResLike = ServerResponse & {
+  locals: Record<string, unknown>;
+  status: (code: number) => ResLike;
+  json: (body: unknown) => ResLike;
+};
 
 export type ApiMeta = {
   request_id: string;
@@ -65,19 +83,20 @@ export class ApiError extends Error {
 }
 
 export function requestMetaMiddleware(): RequestHandler {
-  return (req: Request, res: Response, next: NextFunction): void => {
+  const middleware = (req: ReqLike, res: ResLike, next: NextLike): void => {
     const header = req.headers["x-request-id"];
     const existing = Array.isArray(header) ? header[0] : header;
     const requestId = (existing && String(existing).trim()) ? String(existing).trim() : crypto.randomUUID();
     res.setHeader("x-request-id", requestId);
-    (req as Request & { requestId?: string }).requestId = requestId;
+    req.requestId = requestId;
     res.locals.requestId = requestId;
     res.locals.startedAtMs = Date.now();
     next();
   };
+  return middleware as unknown as RequestHandler;
 }
 
-export function getApiMeta(res: Response): ApiMeta {
+export function getApiMeta(res: ResLike): ApiMeta {
   const requestId = typeof res.locals.requestId === "string" ? res.locals.requestId : "unknown";
   const startedAtMs = typeof res.locals.startedAtMs === "number" ? res.locals.startedAtMs : Date.now();
   const durationMs = Math.max(0, Date.now() - startedAtMs);
@@ -88,13 +107,13 @@ export function getApiMeta(res: Response): ApiMeta {
   };
 }
 
-export function sendOk<T>(res: Response, data: T, opts?: { status?: number; warnings?: ApiWarning[] }): void {
+export function sendOk<T>(res: ResLike, data: T, opts?: { status?: number; warnings?: ApiWarning[] }): void {
   const body: ApiSuccess<T> = { ok: true, data, meta: getApiMeta(res) };
   if (opts?.warnings?.length) body.warnings = opts.warnings;
   res.status(opts?.status ?? 200).json(body);
 }
 
-export function sendError(res: Response, err: unknown, fallback?: { status?: number; code?: string; message?: string }): void {
+export function sendError(res: ResLike, err: unknown, fallback?: { status?: number; code?: string; message?: string }): void {
   const meta = getApiMeta(res);
   if (err instanceof ApiError) {
     const body: ApiFailure = {
@@ -126,8 +145,8 @@ export function sendError(res: Response, err: unknown, fallback?: { status?: num
   res.status(status).json(body);
 }
 
-export function wrap(handler: (req: Request, res: Response) => Promise<void> | void): RequestHandler {
-  return async (req: Request, res: Response): Promise<void> => {
+export function wrap(handler: (req: ReqLike, res: ResLike) => Promise<void> | void): RequestHandler {
+  const wrapped = async (req: ReqLike, res: ResLike): Promise<void> => {
     try {
       await handler(req, res);
     } catch (err) {
@@ -137,14 +156,15 @@ export function wrap(handler: (req: Request, res: Response) => Promise<void> | v
           requestId: res.locals.requestId,
           path: req.path,
           method: req.method,
-          userId: (req as any)?.userId,
-          firmId: (req as any)?.firmId,
+          userId: req.userId,
+          firmId: req.firmId,
         },
         "api.unhandled",
       );
       sendError(res, err);
     }
   };
+  return wrapped as unknown as RequestHandler;
 }
 
 export function one(v: string | string[] | undefined): string | undefined {
