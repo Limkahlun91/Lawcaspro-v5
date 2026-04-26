@@ -1,18 +1,56 @@
-import { Router, type IRouter } from "express";
+import express, { type Router as ExpressRouter } from "express";
 import bcrypt from "bcryptjs";
 import { and, count, desc, eq, ilike } from "drizzle-orm";
+import type { IncomingHttpHeaders, IncomingMessage } from "node:http";
 import { db, rolesTable, sql, usersTable } from "@workspace/db";
 import {
   CreateUserBody, UpdateUserBody, ListUsersQueryParams,
-  GetUserParams, UpdateUserParams, DeleteUserParams
+  GetUserParams, UpdateUserParams
 } from "@workspace/api-zod";
-import { requireAuth, requireFirmUser, requirePermission, type AuthRequest, writeAuditLog } from "../lib/auth";
-import { logger } from "../lib/logger";
+import { requireAuth, requireFirmUser, requirePermission, type AuthRequest, writeAuditLog } from "../lib/auth.js";
+import { logger } from "../lib/logger.js";
 
-const router: IRouter = Router();
+type ReqLike = IncomingMessage & {
+  body?: unknown;
+  headers: IncomingHttpHeaders & Record<string, string | string[] | undefined>;
+  ip?: string;
+  originalUrl?: string;
+  params?: Record<string, unknown>;
+  path?: string;
+  query?: Record<string, unknown>;
+  [key: string]: unknown;
+};
+
+type RouteResLike = {
+  status: (code: number) => RouteResLike;
+  json: (body: unknown) => unknown;
+  sendStatus: (code: number) => unknown;
+  [key: string]: unknown;
+};
+
+type RouterInternalLike = {
+  get: (path: string, ...handlers: unknown[]) => unknown;
+  post: (path: string, ...handlers: unknown[]) => unknown;
+  patch: (path: string, ...handlers: unknown[]) => unknown;
+  delete: (path: string, ...handlers: unknown[]) => unknown;
+};
+
+const expressRouter = express.Router();
+const routerInternal = expressRouter as unknown as RouterInternalLike;
+
+type AuthRequestLike = AuthRequest & ReqLike;
+
+const asOptionalString = (value: unknown): string | undefined => (typeof value === "string" ? value : undefined);
+
+const getHeader = (req: AuthRequestLike, key: string): string | undefined => {
+  const lower = key.toLowerCase();
+  const value = req.headers?.[lower] ?? req.headers?.[key];
+  if (Array.isArray(value)) return typeof value[0] === "string" ? value[0] : undefined;
+  return asOptionalString(value);
+};
 
 type DbConn = typeof db | NonNullable<AuthRequest["rlsDb"]>;
-const rdb = (req: AuthRequest): DbConn => req.rlsDb ?? db;
+const rdb = (req: AuthRequestLike): DbConn => req.rlsDb ?? db;
 
 async function queryRows(r: DbConn, query: ReturnType<typeof sql>): Promise<Record<string, unknown>[]> {
   const result = await r.execute(query);
@@ -89,7 +127,7 @@ async function enrichUser(r: DbConn, firmId: number, user: UserRow) {
   };
 }
 
-router.get("/users", requireAuth, requireFirmUser, requirePermission("users", "read"), async (req: AuthRequest, res): Promise<void> => {
+routerInternal.get("/users", requireAuth, requireFirmUser, requirePermission("users", "read"), async (req: AuthRequestLike, res: RouteResLike): Promise<void> => {
   const r = rdb(req);
   const params = ListUsersQueryParams.safeParse(req.query);
   const search = params.success ? params.data.search : undefined;
@@ -140,15 +178,15 @@ router.get("/users", requireAuth, requireFirmUser, requirePermission("users", "r
     .from(usersTable)
     .where(and(...where));
 
-  const enriched = await Promise.all(users.map((u) => enrichUser(r, req.firmId!, u)));
+  const enriched = await Promise.all(users.map((u: UserRow) => enrichUser(r, req.firmId!, u)));
   res.json({ data: enriched, total: Number(totalRes?.c ?? 0), page, limit });
 });
 
-router.post("/users", requireAuth, requireFirmUser, requirePermission("users", "create"), async (req: AuthRequest, res): Promise<void> => {
+routerInternal.post("/users", requireAuth, requireFirmUser, requirePermission("users", "create"), async (req: AuthRequestLike, res: RouteResLike): Promise<void> => {
   const startedAt = Date.now();
   const r = rdb(req);
   const reqId = (req as { id?: unknown } | null)?.id;
-  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "users.create.attempt", detail: req.path, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "users.create.attempt", detail: req.path, ipAddress: req.ip, userAgent: getHeader(req, "user-agent") });
   const parsed = CreateUserBody.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: parsed.error.message });
@@ -219,7 +257,7 @@ router.post("/users", requireAuth, requireFirmUser, requirePermission("users", "
       return;
     }
 
-    await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "users.create", entityType: "user", entityId: created.user.id, detail: `email=${created.user.email}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+    await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "users.create", entityType: "user", entityId: created.user.id, detail: `email=${created.user.email}`, ipAddress: req.ip, userAgent: getHeader(req, "user-agent") });
     res.status(201).json(await enrichUser(r, req.firmId!, created.user));
   } catch (err) {
     const code = (err as any)?.code;
@@ -244,7 +282,7 @@ router.post("/users", requireAuth, requireFirmUser, requirePermission("users", "
   }
 });
 
-router.get("/users/:userId", requireAuth, requireFirmUser, requirePermission("users", "read"), async (req: AuthRequest, res): Promise<void> => {
+routerInternal.get("/users/:userId", requireAuth, requireFirmUser, requirePermission("users", "read"), async (req: AuthRequestLike, res: RouteResLike): Promise<void> => {
   const r = rdb(req);
   const params = GetUserParams.safeParse(req.params);
   if (!params.success) {
@@ -281,7 +319,7 @@ router.get("/users/:userId", requireAuth, requireFirmUser, requirePermission("us
   res.json(await enrichUser(r, req.firmId!, user));
 });
 
-router.patch("/users/:userId", requireAuth, requireFirmUser, requirePermission("users", "update"), async (req: AuthRequest, res): Promise<void> => {
+routerInternal.patch("/users/:userId", requireAuth, requireFirmUser, requirePermission("users", "update"), async (req: AuthRequestLike, res: RouteResLike): Promise<void> => {
   const r = rdb(req);
   const params = UpdateUserParams.safeParse(req.params);
   if (!params.success) {
@@ -312,13 +350,13 @@ router.patch("/users/:userId", requireAuth, requireFirmUser, requirePermission("
     return;
   }
 
-  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "users.update", entityType: "user", entityId: user.id, detail: `fields=${Object.keys(updates).join(",")}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "users.update", entityType: "user", entityId: user.id, detail: `fields=${Object.keys(updates).join(",")}`, ipAddress: req.ip, userAgent: getHeader(req, "user-agent") });
   res.json(await enrichUser(r, req.firmId!, user));
 });
 
-router.delete("/users/:userId", requireAuth, requireFirmUser, requirePermission("users", "delete"), async (req: AuthRequest, res): Promise<void> => {
+routerInternal.delete("/users/:userId", requireAuth, requireFirmUser, requirePermission("users", "delete"), async (req: AuthRequestLike, res: RouteResLike): Promise<void> => {
   const r = rdb(req);
-  const params = DeleteUserParams.safeParse(req.params);
+  const params = GetUserParams.safeParse(req.params);
   if (!params.success) {
     res.status(400).json({ error: params.error.message });
     return;
@@ -333,8 +371,10 @@ router.delete("/users/:userId", requireAuth, requireFirmUser, requirePermission(
     return;
   }
 
-  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "users.delete", entityType: "user", entityId: user.id, detail: `email=${user.email}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "users.delete", entityType: "user", entityId: user.id, detail: `email=${user.email}`, ipAddress: req.ip, userAgent: getHeader(req, "user-agent") });
   res.sendStatus(204);
 });
 
-export default router;
+const exportedRouter = expressRouter as unknown as ExpressRouter;
+export { exportedRouter as router };
+export default exportedRouter;
