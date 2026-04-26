@@ -2,7 +2,7 @@ import express, { type Router as ExpressRouter } from "express";
 import { Readable } from "stream";
 import PizZip from "pizzip";
 import { eq, ilike, count, desc, and, isNull, or } from "drizzle-orm";
-import type { IncomingHttpHeaders, IncomingMessage, ServerResponse } from "node:http";
+import type { IncomingHttpHeaders, IncomingMessage } from "node:http";
 import {
   db,
   firmsTable,
@@ -24,7 +24,7 @@ import { requireAuth, requireFounder, writeAuditLog, type AuthRequest } from "..
 import { withAuthSafeDb } from "../lib/auth-safe-db.js";
 import { logger } from "../lib/logger.js";
 import bcrypt from "bcryptjs";
-import { ApiError, sendError, sendOk, parseIntParam } from "../lib/api-response.js";
+import { ApiError, sendError, sendOk, parseIntParam, type ResLike } from "../lib/api-response.js";
 import {
   ObjectNotFoundError,
   SupabaseStorageService,
@@ -54,14 +54,7 @@ type ReqLike = IncomingMessage & {
   [key: string]: unknown;
 };
 
-type RouteResLike = ServerResponse & {
-  end: (...args: unknown[]) => unknown;
-  json: (body: unknown) => RouteResLike;
-  send: (body?: unknown) => RouteResLike;
-  setHeader: (name: string, value: number | string | readonly string[]) => RouteResLike;
-  status: (code: number) => RouteResLike;
-  [key: string]: unknown;
-};
+type RouteResLike = ResLike;
 
 type RouterInternalLike = {
   get: (path: string, ...handlers: unknown[]) => unknown;

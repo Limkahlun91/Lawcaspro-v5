@@ -14,7 +14,7 @@ type ReqLike = IncomingMessage & {
   requestId?: string;
 };
 
-type ResLike = ServerResponse & {
+export type ResLike = ServerResponse & {
   locals: Record<string, unknown>;
   status: (code: number) => ResLike;
   json: (body: unknown) => ResLike;
