@@ -118,5 +118,7 @@ export {
   platformMessageAttachmentsTable,
 } from "./schema";
 
+export { developersTable, projectsTable } from "./schema";
+
 export { sql } from "drizzle-orm";
 export type { SQL } from "drizzle-orm";

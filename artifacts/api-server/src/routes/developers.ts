@@ -1,17 +1,67 @@
-import { Router, type IRouter } from "express";
+import express, { type Router as ExpressRouter } from "express";
 import { eq, ilike, count, desc, and } from "drizzle-orm";
-import { db, developersTable, projectsTable, sql, type Developer } from "@workspace/db";
-import {
-  ListDevelopersQueryParams,
-  GetDeveloperParams, UpdateDeveloperParams, DeleteDeveloperParams
-} from "@workspace/api-zod";
-import { requireAuth, requireFirmUser, requirePermission, writeAuditLog, type AuthRequest } from "../lib/auth";
-import { logger } from "../lib/logger";
+import type { IncomingHttpHeaders, IncomingMessage } from "node:http";
+import { z } from "zod/v4";
+import { db, developersTable, projectsTable, sql } from "@workspace/db";
+import { requireAuth, requireFirmUser, requirePermission, writeAuditLog, type AuthRequest } from "../lib/auth.js";
+import { logger } from "../lib/logger.js";
 
-const router: IRouter = Router();
+type ReqLike = IncomingMessage & {
+  body?: unknown;
+  headers: IncomingHttpHeaders & Record<string, string | string[] | undefined>;
+  ip?: string;
+  originalUrl?: string;
+  params?: Record<string, unknown>;
+  path?: string;
+  query?: Record<string, unknown>;
+  firmId?: number | null;
+  userId?: number | null;
+  userType?: string | null;
+  roleId?: number | null;
+  log?: { error?: (...args: unknown[]) => void; info?: (...args: unknown[]) => void };
+  rlsDb?: unknown;
+  [key: string]: unknown;
+};
+
+type RouteResLike = {
+  status: (code: number) => RouteResLike;
+  json: (body: unknown) => unknown;
+  sendStatus: (code: number) => unknown;
+  [key: string]: unknown;
+};
+
+type RouterInternalLike = {
+  get: (path: string, ...handlers: unknown[]) => unknown;
+  post: (path: string, ...handlers: unknown[]) => unknown;
+  patch: (path: string, ...handlers: unknown[]) => unknown;
+  delete: (path: string, ...handlers: unknown[]) => unknown;
+};
+
+const expressRouter = express.Router();
+const routerInternal = expressRouter as unknown as RouterInternalLike;
+
+type AuthRequestLike = AuthRequest & ReqLike;
+
+const asOptionalString = (value: unknown): string | undefined => (typeof value === "string" ? value : undefined);
+const asRecord = (value: unknown): Record<string, unknown> =>
+  value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
+
+const getHeader = (req: AuthRequestLike, key: string): string | undefined => {
+  const lower = key.toLowerCase();
+  const value = req.headers?.[lower] ?? req.headers?.[key];
+  if (Array.isArray(value)) return typeof value[0] === "string" ? value[0] : undefined;
+  return asOptionalString(value);
+};
+
+const DeveloperIdParamsSchema = z.object({ developerId: z.coerce.number().int().min(1) });
+const ListDevelopersQuerySchema = z.object({
+  search: z.string().optional(),
+  page: z.coerce.number().int().min(1).optional(),
+  limit: z.coerce.number().int().min(1).max(200).optional(),
+});
 
 type DbConn = typeof db | NonNullable<AuthRequest["rlsDb"]>;
-const rdb = (req: AuthRequest): DbConn => req.rlsDb ?? db;
+const rdb = (req: AuthRequestLike): DbConn => req.rlsDb ?? db;
 
 type DeveloperInsert = typeof developersTable.$inferInsert;
 type DeveloperInsertPayload = Pick<DeveloperInsert, "firmId" | "name"> & Partial<Omit<
@@ -37,7 +87,9 @@ function parseContacts(raw: string | null | undefined): DeveloperContact[] {
   }
 }
 
-async function enrichDeveloper(r: DbConn, dev: Developer) {
+type DeveloperRow = typeof developersTable.$inferSelect;
+
+async function enrichDeveloper(r: DbConn, dev: DeveloperRow) {
   const [pcRes] = await r.select({ c: count() }).from(projectsTable).where(eq(projectsTable.developerId, dev.id));
   return {
     id: dev.id,
@@ -55,10 +107,10 @@ async function enrichDeveloper(r: DbConn, dev: Developer) {
   };
 }
 
-router.get("/developers", requireAuth, requireFirmUser, requirePermission("developers", "read"), async (req: AuthRequest, res): Promise<void> => {
+routerInternal.get("/developers", requireAuth, requireFirmUser, requirePermission("developers", "read"), async (req: AuthRequestLike, res: RouteResLike): Promise<void> => {
   try {
     const r = rdb(req);
-    const params = ListDevelopersQueryParams.safeParse(req.query);
+    const params = ListDevelopersQuerySchema.safeParse(req.query);
     const search = params.success ? params.data.search : undefined;
     const page = params.success ? (params.data.page ?? 1) : 1;
     const limit = params.success ? (params.data.limit ?? 20) : 20;
@@ -84,7 +136,7 @@ router.get("/developers", requireAuth, requireFirmUser, requirePermission("devel
       totalRes = t;
     }
 
-    const enriched = await Promise.all(devs.map((d) => enrichDeveloper(r, d)));
+    const enriched = await Promise.all(devs.map((d: DeveloperRow) => enrichDeveloper(r, d)));
     res.json({ data: enriched, total: Number(totalRes?.c ?? 0), page, limit });
   } catch (err) {
     logger.error({ err, path: req.path, firmId: req.firmId, userId: req.userId }, "[developers]");
@@ -92,7 +144,7 @@ router.get("/developers", requireAuth, requireFirmUser, requirePermission("devel
   }
 });
 
-router.post("/developers", requireAuth, requireFirmUser, requirePermission("developers", "create"), async (req: AuthRequest, res): Promise<void> => {
+routerInternal.post("/developers", requireAuth, requireFirmUser, requirePermission("developers", "create"), async (req: AuthRequestLike, res: RouteResLike): Promise<void> => {
   try {
     const r = req.rlsDb;
     if (!r) {
@@ -100,16 +152,15 @@ router.post("/developers", requireAuth, requireFirmUser, requirePermission("deve
       res.status(500).json({ error: "Internal Server Error" });
       return;
     }
-    const { name, companyRegNo, address, businessAddress, contacts, contactPerson, phone, email } = req.body as {
-      name: string;
-      companyRegNo?: string;
-      address?: string;
-      businessAddress?: string;
-      contacts?: DeveloperContact[];
-      contactPerson?: string;
-      phone?: string;
-      email?: string;
-    };
+    const body = asRecord(req.body);
+    const name = asOptionalString(body.name);
+    const companyRegNo = asOptionalString(body.companyRegNo);
+    const address = asOptionalString(body.address);
+    const businessAddress = asOptionalString(body.businessAddress);
+    const contactPerson = asOptionalString(body.contactPerson);
+    const phone = asOptionalString(body.phone);
+    const email = asOptionalString(body.email);
+    const contacts = Array.isArray(body.contacts) ? (body.contacts as unknown[]) : undefined;
     if (!name) {
       res.status(400).json({ error: "Company name is required" });
       return;
@@ -152,7 +203,7 @@ router.post("/developers", requireAuth, requireFirmUser, requirePermission("deve
       ctxIsFounder,
     }, "create route tenant context");
 
-    let dev: Developer;
+    let dev: DeveloperRow;
     const getErrorMessage = (e: unknown): string => {
       const err = e as { message?: unknown; cause?: unknown };
       const msg =
@@ -203,7 +254,7 @@ router.post("/developers", requireAuth, requireFirmUser, requirePermission("deve
     } catch {
     }
 
-    await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "developers.create", entityType: "developer", entityId: dev.id, detail: `name=${dev.name}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+    await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "developers.create", entityType: "developer", entityId: dev.id, detail: `name=${dev.name}`, ipAddress: req.ip, userAgent: getHeader(req, "user-agent") });
     res.status(201).json(await enrichDeveloper(r, dev));
     return;
   } catch (e) {
@@ -227,9 +278,9 @@ router.post("/developers", requireAuth, requireFirmUser, requirePermission("deve
   }
 });
 
-router.get("/developers/:developerId", requireAuth, requireFirmUser, requirePermission("developers", "read"), async (req: AuthRequest, res): Promise<void> => {
+routerInternal.get("/developers/:developerId", requireAuth, requireFirmUser, requirePermission("developers", "read"), async (req: AuthRequestLike, res: RouteResLike): Promise<void> => {
   const r = rdb(req);
-  const params = GetDeveloperParams.safeParse(req.params);
+  const params = DeveloperIdParamsSchema.safeParse(req.params);
   if (!params.success) {
     res.status(400).json({ error: params.error.message });
     return;
@@ -244,24 +295,23 @@ router.get("/developers/:developerId", requireAuth, requireFirmUser, requirePerm
   res.json(await enrichDeveloper(r, dev));
 });
 
-router.patch("/developers/:developerId", requireAuth, requireFirmUser, requirePermission("developers", "update"), async (req: AuthRequest, res): Promise<void> => {
+routerInternal.patch("/developers/:developerId", requireAuth, requireFirmUser, requirePermission("developers", "update"), async (req: AuthRequestLike, res: RouteResLike): Promise<void> => {
   const r = rdb(req);
-  const params = UpdateDeveloperParams.safeParse(req.params);
+  const params = DeveloperIdParamsSchema.safeParse(req.params);
   if (!params.success) {
     res.status(400).json({ error: params.error.message });
     return;
   }
 
-  const { name, companyRegNo, address, businessAddress, contacts, contactPerson, phone, email } = req.body as {
-    name?: string;
-    companyRegNo?: string;
-    address?: string;
-    businessAddress?: string;
-    contacts?: DeveloperContact[];
-    contactPerson?: string;
-    phone?: string;
-    email?: string;
-  };
+  const body = asRecord(req.body);
+  const name = asOptionalString(body.name);
+  const companyRegNo = asOptionalString(body.companyRegNo);
+  const address = asOptionalString(body.address);
+  const businessAddress = asOptionalString(body.businessAddress);
+  const contactPerson = asOptionalString(body.contactPerson);
+  const phone = asOptionalString(body.phone);
+  const email = asOptionalString(body.email);
+  const contacts = Array.isArray(body.contacts) ? (body.contacts as unknown[]) : undefined;
 
   const updateData: Partial<typeof developersTable.$inferInsert> = {};
   if (name !== undefined) updateData.name = name;
@@ -284,12 +334,12 @@ router.patch("/developers/:developerId", requireAuth, requireFirmUser, requirePe
     return;
   }
 
-  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "developers.update", entityType: "developer", entityId: dev.id, detail: `fields=${Object.keys(updateData).join(",")}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "developers.update", entityType: "developer", entityId: dev.id, detail: `fields=${Object.keys(updateData).join(",")}`, ipAddress: req.ip, userAgent: getHeader(req, "user-agent") });
   res.json(await enrichDeveloper(r, dev));
 });
 
-router.delete("/developers/:developerId", requireAuth, requireFirmUser, requirePermission("developers", "delete"), async (req: AuthRequest, res): Promise<void> => {
-  const params = DeleteDeveloperParams.safeParse(req.params);
+routerInternal.delete("/developers/:developerId", requireAuth, requireFirmUser, requirePermission("developers", "delete"), async (req: AuthRequestLike, res: RouteResLike): Promise<void> => {
+  const params = DeveloperIdParamsSchema.safeParse(req.params);
   if (!params.success) {
     res.status(400).json({ error: params.error.message });
     return;
@@ -311,8 +361,10 @@ router.delete("/developers/:developerId", requireAuth, requireFirmUser, requireP
     return;
   }
 
-  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "developers.delete", entityType: "developer", entityId: dev.id, detail: `name=${dev.name}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "developers.delete", entityType: "developer", entityId: dev.id, detail: `name=${dev.name}`, ipAddress: req.ip, userAgent: getHeader(req, "user-agent") });
   res.sendStatus(204);
 });
 
-export default router;
+const exportedRouter = expressRouter as unknown as ExpressRouter;
+export { exportedRouter as router };
+export default exportedRouter;
