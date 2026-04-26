@@ -1,11 +1,32 @@
-import { Router, type IRouter } from "express";
-import { HealthCheckResponse } from "@workspace/api-zod";
+import express, { type Router as ExpressRouter } from "express";
 import { pool } from "@workspace/db";
 import crypto from "crypto";
 import { db, sql, usersTable } from "@workspace/db";
 import { and, eq } from "drizzle-orm";
+import type { IncomingHttpHeaders, IncomingMessage, ServerResponse } from "node:http";
 
-const router: IRouter = Router();
+type ReqLike = IncomingMessage & {
+  headers: IncomingHttpHeaders;
+  path?: string;
+  method?: string;
+  query?: Record<string, unknown>;
+};
+
+type ResLike = ServerResponse & {
+  locals?: Record<string, unknown>;
+  status: (code: number) => ResLike;
+  json: (body: unknown) => ResLike;
+  setHeader: (name: string, value: number | string | readonly string[]) => ResLike;
+};
+
+type HandlerLike = (req: ReqLike, res: ResLike) => void | Promise<void>;
+
+type RouterInternalLike = {
+  get: (path: string, handler: HandlerLike) => RouterInternalLike;
+};
+
+const expressRouter = express.Router();
+const routerInternal = expressRouter as unknown as RouterInternalLike;
 
 const hash10 = (v: string): string => crypto.createHash("sha256").update(v).digest("hex").slice(0, 10);
 const maskEmail = (email: string): string => {
@@ -15,12 +36,14 @@ const maskEmail = (email: string): string => {
   return `${localMasked}@${domain}`;
 };
 
-router.get("/healthz", (_req, res) => {
-  const data = HealthCheckResponse.parse({ status: "ok" });
+type HealthCheckResponseBody = { status: string };
+
+routerInternal.get("/healthz", (_req: ReqLike, res: ResLike) => {
+  const data: HealthCheckResponseBody = { status: "ok" };
   res.json(data);
 });
 
-router.get("/healthz/dbinfo", async (_req, res) => {
+routerInternal.get("/healthz/dbinfo", async (_req: ReqLike, res: ResLike) => {
   const databaseUrl = process.env.DATABASE_URL ?? null;
   const isPostgresUrl = typeof databaseUrl === "string" && (databaseUrl.startsWith("postgres://") || databaseUrl.startsWith("postgresql://"));
   const sanitized = (() => {
@@ -78,8 +101,8 @@ router.get("/healthz/dbinfo", async (_req, res) => {
   }
 });
 
-router.get("/healthz/founder-exists", async (req, res) => {
-  const emailRaw = req.query.email;
+routerInternal.get("/healthz/founder-exists", async (req: ReqLike, res: ResLike) => {
+  const emailRaw = req.query?.email;
   const email = typeof emailRaw === "string" ? emailRaw.trim().toLowerCase() : "";
   if (!email) {
     res.status(400).json({ error: "Missing email" });
@@ -98,7 +121,7 @@ router.get("/healthz/founder-exists", async (req, res) => {
   }
 });
 
-router.get("/healthz/founder-status", async (_req, res) => {
+routerInternal.get("/healthz/founder-status", async (_req: ReqLike, res: ResLike) => {
   const expectedEmail = "lun.6923@hotmail.com";
   const client = await pool.connect();
   let destroyClient = false;
@@ -168,7 +191,7 @@ router.get("/healthz/founder-status", async (_req, res) => {
   }
 });
 
-router.get("/healthz/version", (_req, res) => {
+routerInternal.get("/healthz/version", (_req: ReqLike, res: ResLike) => {
   const commit =
     process.env.VERCEL_GIT_COMMIT_SHA ??
     process.env.GIT_COMMIT_SHA ??
@@ -177,7 +200,7 @@ router.get("/healthz/version", (_req, res) => {
   res.json({ status: "ok", commit });
 });
 
-router.get("/healthz/db", async (_req, res) => {
+routerInternal.get("/healthz/db", async (_req: ReqLike, res: ResLike) => {
   try {
     await pool.query("select 1 as ok");
     res.json({ status: "ok", db: "ok" });
@@ -187,7 +210,7 @@ router.get("/healthz/db", async (_req, res) => {
   }
 });
 
-router.get("/healthz/schema", async (_req, res) => {
+routerInternal.get("/healthz/schema", async (_req: ReqLike, res: ResLike) => {
   if (process.env.NODE_ENV === "production") {
     res.status(404).json({ error: "Not found" });
     return;
@@ -249,4 +272,6 @@ router.get("/healthz/schema", async (_req, res) => {
   }
 });
 
-export default router;
+const exportedRouter = expressRouter as unknown as ExpressRouter;
+export { exportedRouter as router };
+export default exportedRouter;
