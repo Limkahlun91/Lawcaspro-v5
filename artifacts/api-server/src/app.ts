@@ -184,4 +184,5 @@ app.use(notFoundHandler);
 app.use(errorHandler);
 
 const exportedApp = expressApp as unknown as ExpressApplication;
+export { exportedApp as app };
 export default exportedApp;
