@@ -54,13 +54,18 @@ type ReqLike = IncomingMessage & {
 
 type RouteResLike = ResLike;
 
-type FetchResponseLike = {
-  ok: boolean;
+type FetchObjectResponseLike = {
+  ok?: boolean;
   status: number;
-  headers: { forEach: (callback: (value: string, key: string) => void) => void };
-  arrayBuffer: () => Promise<ArrayBuffer>;
-  body?: ReadableStream<Uint8Array> | null;
+  headers: {
+    get?: (name: string) => string | null;
+    forEach?: (callback: (value: string, key: string) => void) => void;
+  };
+  body: unknown | null;
+  arrayBuffer?: () => Promise<ArrayBuffer>;
 };
+
+const asFetchObjectResponse = (value: unknown): FetchObjectResponseLike => value as FetchObjectResponseLike;
 
 type RouterInternalLike = {
   get: (path: string, ...handlers: unknown[]) => unknown;
@@ -1056,7 +1061,7 @@ routerInternal.get("/platform/documents/:docId/download", requireAuth, requireFo
   const [doc] = await withAuthSafeDb(async (authDb) => authDb.select().from(platformDocumentsTable).where(eq(platformDocumentsTable.id, docId)));
   if (!doc) { res.status(404).json({ error: "Document not found" }); return; }
   try {
-    const response = (await storage.fetchPrivateObjectResponse(doc.objectPath)) as unknown as FetchResponseLike;
+    const response = asFetchObjectResponse(await storage.fetchPrivateObjectResponse(doc.objectPath));
     await writeAuditLog(
       {
         firmId: doc.firmId ?? null,
@@ -1072,7 +1077,7 @@ routerInternal.get("/platform/documents/:docId/download", requireAuth, requireFo
       { strict: true }
     );
     res.status(response.status);
-    response.headers.forEach((value: string, key: string) => res.setHeader(key, value));
+    response.headers.forEach?.((value: string, key: string) => res.setHeader(key, value));
     const ascii = String(doc.fileName ?? "download").replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 120) || "download";
     const encoded = encodeURIComponent(String(doc.fileName ?? ascii));
     res.setHeader("Content-Disposition", `attachment; filename="${ascii}"; filename*=UTF-8''${encoded}`);
@@ -1112,11 +1117,12 @@ routerInternal.get("/platform/documents/:docId/clause-placeholders", requireAuth
     return;
   }
   try {
-    const response = (await storage.fetchPrivateObjectResponse(doc.objectPath)) as unknown as FetchResponseLike;
-    if (!response.ok) {
+    const response = asFetchObjectResponse(await storage.fetchPrivateObjectResponse(doc.objectPath));
+    if (response.ok === false) {
       res.status(response.status).json({ error: "Failed to download document" });
       return;
     }
+    if (!response.arrayBuffer) throw new Error("Storage response does not support arrayBuffer()");
     const ab = await response.arrayBuffer();
     const bytes = Buffer.from(ab);
     const scan = scanClausePlaceholdersInDocx(bytes);
@@ -1386,7 +1392,7 @@ routerInternal.get("/platform/messages/:msgId/attachments/:attachmentId/download
   }
 
   try {
-    const response = await storage.fetchPrivateObjectResponse(att.objectPath);
+    const response = asFetchObjectResponse(await storage.fetchPrivateObjectResponse(att.objectPath));
     await writeAuditLog({
       firmId: null,
       actorId: req.userId,
@@ -1400,7 +1406,7 @@ routerInternal.get("/platform/messages/:msgId/attachments/:attachmentId/download
     }, { strict: true });
 
     res.status(response.status);
-    response.headers.forEach((value: string, key: string) => res.setHeader(key, value));
+    response.headers.forEach?.((value: string, key: string) => res.setHeader(key, value));
     const ascii = String(att.fileName ?? "download").replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 120) || "download";
     const encoded = encodeURIComponent(String(att.fileName ?? ascii));
     res.setHeader("Content-Disposition", `attachment; filename="${ascii}"; filename*=UTF-8''${encoded}`);
