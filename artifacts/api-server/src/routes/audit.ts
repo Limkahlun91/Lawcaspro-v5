@@ -22,35 +22,81 @@ async function queryRows(executor: DbExec, query: ReturnType<typeof sql>): Promi
 }
 
 router.get("/audit-logs", requireAuth, requireFirmUser, requirePermission("audit", "read"), async (req: AuthRequest, res: ResLike): Promise<void> => {
-  const { action, entityType, actorId, limit = "100", offset = "0" } = req.query as Record<string, string>;
-  const executor = req.rlsDb ?? db;
+  try {
+    const one = (v: unknown): string | undefined => (typeof v === "string" ? v : Array.isArray(v) ? (typeof v[0] === "string" ? v[0] : undefined) : undefined);
 
-  const rows = await queryRows(executor, sql`
-    SELECT al.*, u.name as actor_name, u.email as actor_email
-    FROM audit_logs al
-    LEFT JOIN users u ON al.actor_id = u.id
-    WHERE al.firm_id = ${req.firmId!}
-    ${action ? sql`AND al.action = ${action}` : sql``}
-    ${entityType ? sql`AND al.entity_type = ${entityType}` : sql``}
-    ${actorId ? sql`AND al.actor_id = ${Number(actorId)}` : sql``}
-    ORDER BY al.created_at DESC
-    LIMIT ${Number(limit)}
-    OFFSET ${Number(offset)}
-  `);
+    const q = req.query as Record<string, unknown>;
+    const action = one(q.action);
+    const entityType = one(q.entityType);
+    const actorId = (() => {
+      const raw = one(q.actorId);
+      if (!raw) return null;
+      const n = Number.parseInt(raw, 10);
+      if (!Number.isFinite(n) || n < 1) throw new ApiError({ status: 400, code: "INVALID_INPUT", message: "Invalid actorId", retryable: false });
+      return n;
+    })();
+    const limit = (() => {
+      const raw = one(q.limit);
+      const n = raw ? Number.parseInt(raw, 10) : 100;
+      if (!Number.isFinite(n) || n < 1) throw new ApiError({ status: 400, code: "INVALID_INPUT", message: "Invalid limit", retryable: false });
+      return Math.min(Math.max(n, 1), 150);
+    })();
+    const offset = (() => {
+      const raw = one(q.offset);
+      const n = raw ? Number.parseInt(raw, 10) : 0;
+      if (!Number.isFinite(n) || n < 0) throw new ApiError({ status: 400, code: "INVALID_INPUT", message: "Invalid offset", retryable: false });
+      return n;
+    })();
 
-  const countRows = await queryRows(executor, sql`
-    SELECT COUNT(*) as total
-    FROM audit_logs al
-    WHERE al.firm_id = ${req.firmId!}
-    ${action ? sql`AND al.action = ${action}` : sql``}
-    ${entityType ? sql`AND al.entity_type = ${entityType}` : sql``}
-    ${actorId ? sql`AND al.actor_id = ${Number(actorId)}` : sql``}
-  `);
+    const firmId = req.firmId;
+    if (!firmId) throw new ApiError({ status: 400, code: "INVALID_INPUT", message: "Missing firm context", retryable: false });
 
-  res.json({
-    data: rows,
-    total: Number(countRows[0]?.total ?? 0),
-  });
+    const executor = req.rlsDb ?? db;
+
+    const rows = await queryRows(executor, sql`
+      SELECT al.*, u.name as actor_name, u.email as actor_email
+      FROM audit_logs al
+      LEFT JOIN users u ON al.actor_id = u.id
+      WHERE al.firm_id = ${firmId}
+      ${action ? sql`AND al.action = ${action}` : sql``}
+      ${entityType ? sql`AND al.entity_type = ${entityType}` : sql``}
+      ${actorId ? sql`AND al.actor_id = ${actorId}` : sql``}
+      ORDER BY al.created_at DESC
+      LIMIT ${limit}
+      OFFSET ${offset}
+    `);
+
+    const countRows = await queryRows(executor, sql`
+      SELECT COUNT(*) as total
+      FROM audit_logs al
+      WHERE al.firm_id = ${firmId}
+      ${action ? sql`AND al.action = ${action}` : sql``}
+      ${entityType ? sql`AND al.entity_type = ${entityType}` : sql``}
+      ${actorId ? sql`AND al.actor_id = ${actorId}` : sql``}
+    `);
+
+    sendOk(res, {
+      data: rows,
+      total: Number(countRows[0]?.total ?? 0),
+      pagination: { limit, offset },
+      filters_applied: { action: action ?? null, entityType: entityType ?? null, actorId },
+    });
+  } catch (err: any) {
+    const code = typeof err?.code === "string" ? err.code : undefined;
+    if (code === "42P01" || code === "42703") {
+      sendOk(
+        res,
+        { data: [], total: 0, pagination: { limit: 100, offset: 0 }, filters_applied: { action: null, entityType: null, actorId: null } },
+        { warnings: [{ code: "DB_FEATURE_UNAVAILABLE", message: "Audit logs store is unavailable; returned empty list." }] },
+      );
+      return;
+    }
+    if (code === "42501") {
+      sendError(res, new ApiError({ status: 503, code: "AUDIT_LOGS_UNAVAILABLE", message: "Audit logs are temporarily unavailable", retryable: true }));
+      return;
+    }
+    sendError(res, err, { status: 500, code: "AUDIT_LOGS_QUERY_FAILED", message: "Failed to load audit logs" });
+  }
 });
 
 router.get("/platform/audit-logs", requireAuth, requireFounder, async (req: AuthRequest, res: ResLike): Promise<void> => {
@@ -125,7 +171,12 @@ router.get("/platform/audit-logs", requireAuth, requireFounder, async (req: Auth
         const last = rows.length ? rows[rows.length - 1] : null;
         const nextCursor = (() => {
           if (!last) return null;
-          const createdAt = typeof last.created_at === "string" ? last.created_at : null;
+          const createdAt =
+            typeof last.created_at === "string"
+              ? last.created_at
+              : last.created_at instanceof Date
+                ? last.created_at.toISOString()
+                : null;
           const id = typeof last.id === "number" ? last.id : null;
           if (!createdAt || !id) return null;
           return Buffer.from(JSON.stringify({ createdAt, id }), "utf8").toString("base64");
@@ -145,6 +196,14 @@ router.get("/platform/audit-logs", requireAuth, requireFounder, async (req: Auth
     const code = typeof err?.code === "string" ? err.code : undefined;
     const message = err instanceof Error ? err.message : String(err ?? "");
     const lowered = message.toLowerCase();
+    if (code === "42P01" || code === "42703" || code === "42501") {
+      sendOk(
+        res,
+        { items: [], pagination: { limit: 50, has_more: false, next_cursor: null } },
+        { warnings: [{ code: "DB_FEATURE_UNAVAILABLE", message: "Audit logs store is unavailable; returned empty list." }] },
+      );
+      return;
+    }
     if (code === "57014" || lowered.includes("statement timeout")) {
       sendError(res, new ApiError({
         status: 504,

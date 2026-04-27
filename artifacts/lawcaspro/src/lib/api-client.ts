@@ -71,7 +71,7 @@ export async function apiRequest(path: string, options: ApiFetchOptions = {}): P
   });
 
   const allow = new Set(options.allowStatuses ?? []);
-  if (res.status === 401) handleUnauthorized();
+  if (res.status === 401 && !allow.has(401)) handleUnauthorized();
   if (!res.ok && !allow.has(res.status)) throw await apiErrorFromResponse(res);
   return res;
 }
