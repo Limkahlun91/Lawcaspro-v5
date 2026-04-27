@@ -7,6 +7,7 @@ import { ScrollText, Search } from "lucide-react";
 import { QueryFallback } from "@/components/query-fallback";
 import { apiFetchJson } from "@/lib/api-client";
 import { unwrapApiData } from "@/lib/api-contract";
+import { listItems } from "@/lib/list-items";
 
 const ACTION_LABELS: Record<string, string> = {
   case_created: "Case Created",
@@ -34,17 +35,17 @@ export default function PlatformAuditLogs() {
   const [search, setSearch] = useState("");
   const [firmFilter, setFirmFilter] = useState("all");
 
-  const firmsQuery = useQuery<{ items: Record<string, unknown>[] }>({
+  const firmsQuery = useQuery<Record<string, unknown>[]>({
     queryKey: ["platform-firms-audit"],
-    queryFn: () => apiFetchJson("/platform/firms?limit=100"),
+    queryFn: async () => listItems<Record<string, unknown>>(await apiFetchJson("/platform/firms?limit=100")),
     retry: false,
   });
-  const firms = firmsQuery.data?.items ?? [];
+  const firms = firmsQuery.data ?? [];
 
   const params = new URLSearchParams({ limit: "150", includeTotal: "0" });
   if (firmFilter !== "all") params.set("firmId", firmFilter);
 
-  const logsQuery = useQuery<{ items: Record<string, unknown>[]; total?: number; pagination?: { limit: number; has_more: boolean; next_cursor: string | null } } | { data: Record<string, unknown>[]; total: number }>({
+  const logsQuery = useQuery<{ items?: Record<string, unknown>[]; data?: Record<string, unknown>[]; total?: number; pagination?: { limit: number; has_more: boolean; next_cursor: string | null } }>({
     queryKey: ["platform-audit-logs", firmFilter],
     queryFn: async () => {
       const res = await apiFetchJson(`/platform/audit-logs?${params.toString()}`);
@@ -54,8 +55,8 @@ export default function PlatformAuditLogs() {
   });
   const { data, isLoading } = logsQuery;
 
-  const rawLogs = (data as any)?.items ?? (data as any)?.data ?? [];
-  const logs = (rawLogs as Record<string, unknown>[]).filter((log) => {
+  const rawLogs = listItems<Record<string, unknown>>(data);
+  const logs = rawLogs.filter((log) => {
     if (!search) return true;
     const q = search.toLowerCase();
     return (

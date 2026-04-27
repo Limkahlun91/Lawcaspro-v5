@@ -3,6 +3,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Activity, Building2, Users, Briefcase, FileText } from "lucide-react";
 import { QueryFallback } from "@/components/query-fallback";
 import { apiFetchJson } from "@/lib/api-client";
+import { listItems } from "@/lib/list-items";
 
 export default function PlatformMonitoring() {
   const statsQuery = useQuery({
@@ -13,14 +14,14 @@ export default function PlatformMonitoring() {
   });
   const { data: stats, isLoading: statsLoading } = statsQuery;
 
-  const firmsQuery = useQuery<{ items: Record<string, unknown>[] }>({
+  const firmsQuery = useQuery<Record<string, unknown>[]>({
     queryKey: ["platform-firms-monitoring"],
-    queryFn: () => apiFetchJson("/platform/firms?limit=50"),
+    queryFn: async () => listItems<Record<string, unknown>>(await apiFetchJson("/platform/firms?limit=50")),
     retry: false,
   });
   const { data: firmsData, isLoading: firmsLoading } = firmsQuery;
 
-  const firms = firmsData?.items ?? [];
+  const firms = firmsData ?? [];
   const isLoading = statsLoading || firmsLoading;
 
   return (

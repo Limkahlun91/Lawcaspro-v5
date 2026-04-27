@@ -25,6 +25,7 @@ import { apiFetchBlob, apiFetchJson } from "@/lib/api-client";
 import { downloadBlob } from "@/lib/download";
 import { toastError } from "@/lib/toast-error";
 import { unwrapApiData } from "@/lib/api-contract";
+import { listItems } from "@/lib/list-items";
 
 const ALLOWED_TYPES: Record<string, string> = {
   "application/pdf": "PDF",
@@ -388,7 +389,7 @@ export default function PlatformDocuments() {
 
   const foldersQuery = useQuery<SystemFolder[]>({
     queryKey: ["system-folders"],
-    queryFn: () => apiFetchJson("/platform/folders"),
+    queryFn: async () => listItems<SystemFolder>(await apiFetchJson("/platform/folders")),
     retry: false,
   });
   const folders = foldersQuery.data ?? [];
@@ -400,8 +401,7 @@ export default function PlatformDocuments() {
         ? `/platform/documents?folderId=${selectedFolderId}`
         : "/platform/documents";
       const res = await apiFetchJson(url);
-      const data = unwrapApiData<{ items: PlatformDoc[] }>(res);
-      return (data as any)?.items ?? (res as PlatformDoc[]);
+      return listItems<PlatformDoc>(res);
     },
     retry: false,
   });

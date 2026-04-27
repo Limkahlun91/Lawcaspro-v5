@@ -732,7 +732,7 @@ routerInternal.get("/auth/me", async (req: ReqLike, res: RouteResLike): Promise<
     }
 
     const founder = user.userType === "founder"
-      ? await loadFounderPermissions({ userId: user.id, userType: "founder" } as AuthRequest)
+      ? await loadFounderPermissions({ userId: user.id, userType: "founder", email: user.email } as AuthRequest)
       : { permissions: [], highestLevel: null };
 
     sendOk(res, {
@@ -763,6 +763,10 @@ routerInternal.get("/auth/me", async (req: ReqLike, res: RouteResLike): Promise<
       },
       "auth.me_error",
     );
+    if (isTransientDbConnectionError(err)) {
+      sendError(res, new ApiError({ status: 503, code: "AUTH_TEMPORARILY_UNAVAILABLE", message: "Auth temporarily unavailable", retryable: true }));
+      return;
+    }
     if (typeof cookieToken === "string") res.clearCookie("auth_token");
     sendError(res, err, { status: 401, code: "UNAUTHORIZED", message: "Not authenticated" });
   }

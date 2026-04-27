@@ -17,6 +17,7 @@ import { useToast } from "@/hooks/use-toast";
 import { QueryFallback } from "@/components/query-fallback";
 import { apiFetchBlob, apiFetchJson } from "@/lib/api-client";
 import { toastError } from "@/lib/toast-error";
+import { listItems } from "@/lib/list-items";
 
 const ALLOWED_TYPES: Record<string, string> = {
   "application/pdf": "PDF",
@@ -146,7 +147,7 @@ export default function PlatformMessages() {
       const url = firmFilter !== "all"
         ? `/platform/messages?firmId=${firmFilter}`
         : "/platform/messages";
-      return await apiFetchJson(url);
+      return listItems<Message>(await apiFetchJson(url));
     },
     refetchInterval: 15000,
     retry: false,
@@ -156,8 +157,7 @@ export default function PlatformMessages() {
   const firmsQuery = useQuery<Firm[]>({
     queryKey: ["platform-firms-list"],
     queryFn: async () => {
-      const data = await apiFetchJson<{ items?: Firm[] }>("/platform/firms?limit=100");
-      return data.items ?? [];
+      return listItems<Firm>(await apiFetchJson("/platform/firms?limit=100"));
     },
     retry: false,
   });

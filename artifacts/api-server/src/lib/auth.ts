@@ -34,6 +34,35 @@ const FOUNDER_EMAILS = (process.env.FOUNDER_EMAILS ?? FOUNDER_EMAIL)
   .map((s) => s.trim().toLowerCase())
   .filter(Boolean);
 
+const DEFAULT_FOUNDER_PERMISSION_CODES = [
+  "platform.read",
+  "platform.manage",
+  "system.documents.read",
+  "system.documents.manage",
+  "founder.ops.read",
+  "founder.firms.read",
+  "founder.firms.manage",
+  "founder.documents.read",
+  "founder.documents.manage",
+  "founder.audit.read",
+  "founder.messages.read",
+  "founder.support.read",
+  "founder.support.manage",
+  "founder.maintenance.reset.firm",
+  "founder.maintenance.restore.snapshot",
+  "founder.maintenance.rollback.snapshot",
+];
+
+export function isFounderAllowlistedEmail(email: string | null | undefined): boolean {
+  const e = String(email ?? "").trim().toLowerCase();
+  return !!e && FOUNDER_EMAILS.includes(e);
+}
+
+export function getFounderFallbackPermissions(email: string | null | undefined): { permissions: string[]; highestLevel: string | null } | null {
+  if (!isFounderAllowlistedEmail(email)) return null;
+  return { permissions: [...DEFAULT_FOUNDER_PERMISSION_CODES], highestLevel: "super_admin" };
+}
+
 export async function writeAuditLog(params: {
   firmId?: number | null;
   actorId?: number | null;
@@ -214,7 +243,11 @@ export async function loadFounderPermissions(req: AuthRequest): Promise<{ permis
       .where(eq(platformFounderUserRolesTable.userId, req.userId));
   } catch (err) {
     const code = err && typeof err === "object" ? (err as { code?: unknown }).code : undefined;
-    if (code === "42P01") return { permissions: [], highestLevel: null };
+    if (code === "42P01") {
+      const fallback = getFounderFallbackPermissions(req.email);
+      if (fallback) return fallback;
+      return { permissions: [], highestLevel: null };
+    }
     throw err;
   }
 
@@ -224,6 +257,11 @@ export async function loadFounderPermissions(req: AuthRequest): Promise<{ permis
     if (!acc) return lvl;
     return founderLevelRank(lvl) > founderLevelRank(acc) ? lvl : acc;
   }, null);
+
+  if (perms.length === 0) {
+    const fallback = getFounderFallbackPermissions(req.email);
+    if (fallback) return fallback;
+  }
 
   return { permissions: perms, highestLevel: highest };
 }

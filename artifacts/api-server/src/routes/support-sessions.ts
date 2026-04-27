@@ -15,6 +15,11 @@ type RouterInternalLike = {
 const expressRouter = express.Router();
 const router = expressRouter as unknown as RouterInternalLike;
 
+const isUndefinedTableError = (err: unknown): boolean => {
+  const code = err && typeof err === "object" ? (err as { code?: unknown }).code : undefined;
+  return code === "42P01";
+};
+
 router.get("/support-sessions", requireAuth, requireFounder, async (req: AuthRequest, res: ResLike): Promise<void> => {
   try {
     const firmIdFilter = (() => {
@@ -52,6 +57,10 @@ router.get("/support-sessions", requireAuth, requireFounder, async (req: AuthReq
     }, { retry: true, allowUnsafe: true, ctx: { route: "GET /support-sessions", userId: req.userId ?? null, firmId: firmIdFilter } });
     sendOk(res, { items: sessions });
   } catch (err) {
+    if (isUndefinedTableError(err)) {
+      sendOk(res, { items: [] });
+      return;
+    }
     sendError(res, err);
   }
 });
@@ -72,6 +81,10 @@ router.get("/support-sessions/active", requireAuth, requireFounder, async (req: 
     }, { retry: true, allowUnsafe: true, ctx: { route: "GET /support-sessions/active" } });
     sendOk(res, { items: sessions });
   } catch (err) {
+    if (isUndefinedTableError(err)) {
+      sendOk(res, { items: [] });
+      return;
+    }
     sendError(res, err);
   }
 });
@@ -223,6 +236,10 @@ router.get("/support-sessions/requests", requireAuth, requireFirmUser, requirePa
     const items = Array.isArray(rows) ? (rows as any) : (rows as any)?.rows ?? [];
     sendOk(res, { items });
   } catch (err) {
+    if (isUndefinedTableError(err)) {
+      sendOk(res, { items: [] });
+      return;
+    }
     sendError(res, err);
   }
 });

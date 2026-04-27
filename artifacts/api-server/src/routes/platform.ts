@@ -19,7 +19,7 @@ import {
 } from "@workspace/db";
 import { CreateFirmBody, UpdateFirmBody, ListFirmsQueryParams, GetFirmParams, UpdateFirmParams } from "@workspace/api-zod";
 import { requireAuth, requireFounder, writeAuditLog, type AuthRequest } from "../lib/auth.js";
-import { withAuthSafeDb } from "../lib/auth-safe-db.js";
+import { withAuthSafeDb, isTransientDbConnectionError } from "../lib/auth-safe-db.js";
 import { logger } from "../lib/logger.js";
 import bcrypt from "bcryptjs";
 import { ApiError, sendError, sendOk, parseIntParam, type ResLike } from "../lib/api-response.js";
@@ -131,6 +131,11 @@ type PgError = {
 const isPgError = (err: unknown): err is PgError =>
   typeof err === "object" && err !== null && ("code" in err || "constraint" in err || "detail" in err);
 
+const isUndefinedTableError = (err: unknown): boolean => {
+  const code = err && typeof err === "object" ? (err as { code?: unknown }).code : undefined;
+  return code === "42P01";
+};
+
 function mapCreateFirmError(err: unknown): { status: number; body: Record<string, unknown> } {
   const message = err instanceof Error ? err.message : String(err);
   const pg = isPgError(err) ? err : undefined;
@@ -241,13 +246,34 @@ routerInternal.get("/platform/firms", requireAuth, requireFounder, async (req: A
       const [userCountRes] = await db.select({ c: count() }).from(usersTable).where(eq(usersTable.firmId, firm.id));
       const [partnerCountRes] = await db.select({ c: count() }).from(usersTable).where(sql`firm_id = ${firm.id} AND user_type = 'firm_user'`);
       const [caseCountRes] = await db.select({ c: count() }).from(casesTable).where(eq(casesTable.firmId, firm.id));
-      const docRes = await db.execute(sql`SELECT COUNT(*) as c FROM case_documents WHERE firm_id = ${firm.id}`);
+      const docRes = await (async () => {
+        try {
+          return await db.execute(sql`SELECT COUNT(*) as c FROM case_documents WHERE firm_id = ${firm.id}`);
+        } catch (err) {
+          if (isUndefinedTableError(err)) return [];
+          throw err;
+        }
+      })();
       const docC = firstRow(docRes)?.c;
       const docCount = typeof docC === "string" || typeof docC === "number" ? Number(docC) : 0;
-      const billingRes = await db.execute(sql`SELECT COUNT(*) as c FROM case_billing_entries WHERE firm_id = ${firm.id}`);
+      const billingRes = await (async () => {
+        try {
+          return await db.execute(sql`SELECT COUNT(*) as c FROM case_billing_entries WHERE firm_id = ${firm.id}`);
+        } catch (err) {
+          if (isUndefinedTableError(err)) return [];
+          throw err;
+        }
+      })();
       const billingC = firstRow(billingRes)?.c;
       const billingCount = typeof billingC === "string" || typeof billingC === "number" ? Number(billingC) : 0;
-      const commRes = await db.execute(sql`SELECT COUNT(*) as c FROM case_communications WHERE firm_id = ${firm.id}`);
+      const commRes = await (async () => {
+        try {
+          return await db.execute(sql`SELECT COUNT(*) as c FROM case_communications WHERE firm_id = ${firm.id}`);
+        } catch (err) {
+          if (isUndefinedTableError(err)) return [];
+          throw err;
+        }
+      })();
       const commC = firstRow(commRes)?.c;
       const commCount = typeof commC === "string" || typeof commC === "number" ? Number(commC) : 0;
       return {
@@ -514,7 +540,14 @@ routerInternal.get("/platform/stats", requireAuth, requireFounder, async (_req: 
   const [activeFirmsRes] = await db.select({ c: count() }).from(firmsTable).where(eq(firmsTable.status, "active"));
   const [totalUsersRes] = await db.select({ c: count() }).from(usersTable).where(eq(usersTable.userType, "firm_user"));
   const [totalCasesRes] = await db.select({ c: count() }).from(casesTable);
-  const docsRes = await db.execute(sql`SELECT COUNT(*) as c FROM case_documents`);
+  const docsRes = await (async () => {
+    try {
+      return await db.execute(sql`SELECT COUNT(*) as c FROM case_documents`);
+    } catch (err) {
+      if (isUndefinedTableError(err)) return [];
+      throw err;
+    }
+  })();
   const docsC = firstRow(docsRes)?.c;
   const totalDocuments = typeof docsC === "string" || typeof docsC === "number" ? Number(docsC) : 0;
   res.json({ totalFirms: Number(totalFirmsRes?.c ?? 0), activeFirms: Number(activeFirmsRes?.c ?? 0), totalUsers: Number(totalUsersRes?.c ?? 0), totalCases: Number(totalCasesRes?.c ?? 0), totalDocuments });
@@ -532,6 +565,14 @@ routerInternal.get("/platform/folders", requireAuth, requireFounder, async (_req
     if (err instanceof RouteTimeoutError) {
       logger.error({ err }, "platform.folders.timeout");
       res.status(504).json({ error: "Request timed out", code: "TIMEOUT" });
+      return;
+    }
+    if (isUndefinedTableError(err)) {
+      res.json([]);
+      return;
+    }
+    if (isTransientDbConnectionError(err)) {
+      res.status(503).json({ error: "Service temporarily unavailable" });
       return;
     }
     logger.error({ err }, "platform.folders.error");
@@ -781,6 +822,14 @@ routerInternal.get("/platform/documents", requireAuth, requireFounder, async (re
     );
     sendOk(res, { items: docs, page_info: { limit, has_more: docs.length === limit } });
   } catch (err) {
+    if (isUndefinedTableError(err)) {
+      sendOk(res, { items: [], page_info: { limit: 200, has_more: false } });
+      return;
+    }
+    if (isTransientDbConnectionError(err)) {
+      sendError(res, new ApiError({ status: 503, code: "SERVICE_UNAVAILABLE", message: "Service temporarily unavailable", retryable: true }));
+      return;
+    }
     if (err instanceof RouteTimeoutError) {
       logger.error({ err, firmId: getQuery(req, "firmId") ?? null, folderId: getQuery(req, "folderId") ?? null }, "platform.documents.timeout");
       sendError(res, new ApiError({ status: 504, code: "QUERY_TIMEOUT", message: "Request timed out", retryable: true, stage: err.label }));
@@ -1291,37 +1340,49 @@ routerInternal.put("/platform/clauses/:id", requireAuth, requireFounder, async (
 // ─── Platform Messages (Communication Hub) ───────────────────────────────────
 
 routerInternal.get("/platform/messages", requireAuth, requireFounder, async (req: AuthRequestLike, res: RouteResLike): Promise<void> => {
-  const firmIdStr = getQuery(req, "firmId");
-  const firmId = firmIdStr ? parseInt(firmIdStr, 10) : undefined;
+  try {
+    const firmIdStr = getQuery(req, "firmId");
+    const firmId = firmIdStr ? parseInt(firmIdStr, 10) : undefined;
 
-  const msgs = await db
-    .select()
-    .from(platformMessagesTable)
-    .where(
-      firmId
-        ? or(eq(platformMessagesTable.fromFirmId, firmId), eq(platformMessagesTable.toFirmId, firmId))
-        : undefined
-    )
-    .orderBy(desc(platformMessagesTable.createdAt))
-    .limit(100);
+    const msgs = await db
+      .select()
+      .from(platformMessagesTable)
+      .where(
+        firmId
+          ? or(eq(platformMessagesTable.fromFirmId, firmId), eq(platformMessagesTable.toFirmId, firmId))
+          : undefined
+      )
+      .orderBy(desc(platformMessagesTable.createdAt))
+      .limit(100);
 
-  const enriched = await Promise.all(
-    msgs.map(async (m) => {
-      const [sender] = await db.select({ name: usersTable.name, email: usersTable.email }).from(usersTable).where(eq(usersTable.id, m.fromUserId));
-      const attachments = await db.select().from(platformMessageAttachmentsTable).where(eq(platformMessageAttachmentsTable.messageId, m.id));
-      let firmName: string | null = null;
-      if (m.fromFirmId) {
-        const [f] = await db.select({ name: firmsTable.name }).from(firmsTable).where(eq(firmsTable.id, m.fromFirmId));
-        firmName = f?.name ?? null;
-      } else if (m.toFirmId) {
-        const [f] = await db.select({ name: firmsTable.name }).from(firmsTable).where(eq(firmsTable.id, m.toFirmId));
-        firmName = f?.name ?? null;
-      }
-      return { ...m, senderName: sender?.name ?? "Unknown", senderEmail: sender?.email ?? "", firmName, attachments };
-    })
-  );
+    const enriched = await Promise.all(
+      msgs.map(async (m) => {
+        const [sender] = await db.select({ name: usersTable.name, email: usersTable.email }).from(usersTable).where(eq(usersTable.id, m.fromUserId));
+        const attachments = await db.select().from(platformMessageAttachmentsTable).where(eq(platformMessageAttachmentsTable.messageId, m.id));
+        let firmName: string | null = null;
+        if (m.fromFirmId) {
+          const [f] = await db.select({ name: firmsTable.name }).from(firmsTable).where(eq(firmsTable.id, m.fromFirmId));
+          firmName = f?.name ?? null;
+        } else if (m.toFirmId) {
+          const [f] = await db.select({ name: firmsTable.name }).from(firmsTable).where(eq(firmsTable.id, m.toFirmId));
+          firmName = f?.name ?? null;
+        }
+        return { ...m, senderName: sender?.name ?? "Unknown", senderEmail: sender?.email ?? "", firmName, attachments };
+      })
+    );
 
-  res.json(enriched);
+    sendOk(res, { items: enriched });
+  } catch (err) {
+    if (isUndefinedTableError(err)) {
+      sendOk(res, { items: [] });
+      return;
+    }
+    if (isTransientDbConnectionError(err)) {
+      sendError(res, new ApiError({ status: 503, code: "SERVICE_UNAVAILABLE", message: "Service temporarily unavailable", retryable: true }));
+      return;
+    }
+    sendError(res, err);
+  }
 });
 
 routerInternal.post("/platform/messages", requireAuth, requireFounder, async (req: AuthRequestLike, res: RouteResLike): Promise<void> => {

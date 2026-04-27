@@ -19,6 +19,7 @@ import { FirmSnapshotsTab } from "@/pages/platform/firms/snapshots-tab";
 import { FirmActionHistoryTab } from "@/pages/platform/firms/history-tab";
 import { Textarea } from "@/components/ui/textarea";
 import { getSupportSessionId, setSupportSessionId } from "@/lib/support-session";
+import { listItems } from "@/lib/list-items";
 
 interface FirmUser {
   id: number;
@@ -42,7 +43,8 @@ function SupportSessionPanel({ firmId, firmName }: { firmId: number; firmName: s
     queryKey: ["platform-support-sessions", firmId],
     queryFn: async () => {
       const res = await apiFetchJson(`/support-sessions?firmId=${firmId}`);
-      return unwrapApiData<{ items: any[] }>(res);
+      const items = listItems<any>(res);
+      return { items };
     },
     enabled: !!firmId,
     retry: false,

@@ -17,6 +17,7 @@ type AuthDbState = {
   rolesById: Map<number, unknown>;
   firmsById: Map<number, unknown>;
   throwPermissionsSelect: boolean;
+  throwSessionSelectTransient: boolean;
   throwUndefinedColumnOnUserLookup: boolean;
   throwSideEffects: boolean;
 };
@@ -28,6 +29,7 @@ const state: AuthDbState = {
   rolesById: new Map(),
   firmsById: new Map(),
   throwPermissionsSelect: false,
+  throwSessionSelectTransient: false,
   throwUndefinedColumnOnUserLookup: false,
   throwSideEffects: false,
 };
@@ -53,6 +55,11 @@ vi.mock("@workspace/db", async (orig) => {
       from: (table: unknown) => ({
         where: async () => {
           if (table === actual.sessionsTable) {
+            if (state.throwSessionSelectTransient) {
+              const e = new Error("connect timeout") as Error & { code?: string };
+              e.code = "ETIMEDOUT";
+              throw e;
+            }
             const s = Array.from(state.sessionsByTokenHash.values())[0] ?? null;
             return s ? [s] : emptyRows();
           }
@@ -187,6 +194,18 @@ describe("Auth mocked regressions", () => {
     expect(res.status).toBe(200);
     expect(res.body?.ok).toBe(true);
     expect(res.body?.data).toBeNull();
+  });
+
+  it("auth/me transient DB error returns 503 without clearing cookie", async () => {
+    state.sessionsByTokenHash.clear();
+    state.throwSessionSelectTransient = true;
+    const res = await request(app).get("/api/auth/me").set("Cookie", "auth_token=maybe");
+    expect(res.status).toBe(503);
+    expect(res.body?.ok).toBe(false);
+    const scHeader = (res.headers as Record<string, unknown>)["set-cookie"];
+    const sc = Array.isArray(scHeader) ? scHeader.join(";") : String(scHeader ?? "");
+    expect(sc).not.toMatch(/auth_token=/);
+    state.throwSessionSelectTransient = false;
   });
 
   it("auth/me invalid token returns 401 and clears cookie", async () => {

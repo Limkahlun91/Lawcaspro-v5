@@ -11,7 +11,7 @@ import {
   type RlsDb,
 } from "@workspace/db";
 import { ApiError } from "../../lib/api-response";
-import { writeAuditLog, type AuthRequest } from "../../lib/auth";
+import { getFounderFallbackPermissions, writeAuditLog, type AuthRequest } from "../../lib/auth";
 import { evaluateGovernancePolicy, type GovernanceDecision, type RiskLevel, type ScopeType } from "./policy";
 
 export type FounderGovernanceContext = {
@@ -29,7 +29,15 @@ export async function getImpersonationContext(authDb: RlsDb, req: AuthRequest): 
   const id = raw ? Number.parseInt(String(raw), 10) : NaN;
   if (!Number.isFinite(id) || id <= 0) return { active: false, supportSessionId: null, targetFirmId: null };
 
-  const [s] = await authDb.select().from(supportSessionsTable).where(eq(supportSessionsTable.id, id));
+  const s = await (async () => {
+    try {
+      return (await authDb.select().from(supportSessionsTable).where(eq(supportSessionsTable.id, id)))[0] ?? null;
+    } catch (err) {
+      const code = err && typeof err === "object" ? (err as { code?: unknown }).code : undefined;
+      if (code === "42P01") return null;
+      throw err;
+    }
+  })();
   const now = new Date();
   const expired = s?.expiresAt ? s.expiresAt < now : false;
   const approved = s?.status === "approved";
@@ -46,23 +54,38 @@ export async function loadFounderGovernanceContext(authDb: RlsDb, req: AuthReque
     throw new ApiError({ status: 403, code: "FOUNDER_ROLE_REQUIRED", message: "Founder access required", retryable: false });
   }
 
-  const rows = await authDb
-    .select({
-      perm: platformFounderRolePermissionsTable.permissionCode,
-      level: platformFounderRolesTable.level,
-    })
-    .from(platformFounderUserRolesTable)
-    .innerJoin(platformFounderRolesTable, eq(platformFounderUserRolesTable.roleId, platformFounderRolesTable.id))
-    .innerJoin(platformFounderRolePermissionsTable, eq(platformFounderRolesTable.id, platformFounderRolePermissionsTable.roleId))
-    .where(eq(platformFounderUserRolesTable.userId, req.userId));
+  const rows = await (async () => {
+    try {
+      return await authDb
+        .select({
+          perm: platformFounderRolePermissionsTable.permissionCode,
+          level: platformFounderRolesTable.level,
+        })
+        .from(platformFounderUserRolesTable)
+        .innerJoin(platformFounderRolesTable, eq(platformFounderUserRolesTable.roleId, platformFounderRolesTable.id))
+        .innerJoin(platformFounderRolePermissionsTable, eq(platformFounderRolesTable.id, platformFounderRolePermissionsTable.roleId))
+        .where(eq(platformFounderUserRolesTable.userId, req.userId));
+    } catch (err) {
+      const code = err && typeof err === "object" ? (err as { code?: unknown }).code : undefined;
+      if (code === "42P01") return null;
+      throw err;
+    }
+  })();
 
-  const permissions = new Set(rows.map((r) => r.perm).filter((p): p is string => typeof p === "string" && p.length > 0));
-  const highestRoleLevel = rows.reduce<string | null>((acc, r) => {
-    const lvl = typeof r.level === "string" ? r.level : null;
-    if (!acc) return lvl;
-    const rank = (x: string | null): number => x === "super_admin" ? 4 : x === "admin" ? 3 : x === "operator" ? 2 : x === "viewer" ? 1 : 0;
-    return rank(lvl) > rank(acc) ? lvl : acc;
-  }, null);
+  const fallback = rows === null ? getFounderFallbackPermissions(req.email) : null;
+  const permissions = new Set((rows ?? []).map((r) => r.perm).filter((p): p is string => typeof p === "string" && p.length > 0));
+  const highestRoleLevel = (() => {
+    if (fallback) return fallback.highestLevel;
+    return (rows ?? []).reduce<string | null>((acc, r) => {
+      const lvl = typeof r.level === "string" ? r.level : null;
+      if (!acc) return lvl;
+      const rank = (x: string | null): number => x === "super_admin" ? 4 : x === "admin" ? 3 : x === "operator" ? 2 : x === "viewer" ? 1 : 0;
+      return rank(lvl) > rank(acc) ? lvl : acc;
+    }, null);
+  })();
+  if (fallback) {
+    for (const p of fallback.permissions) permissions.add(p);
+  }
 
   const impersonation = await getImpersonationContext(authDb, req);
 
