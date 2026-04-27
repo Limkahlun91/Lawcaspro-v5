@@ -35,6 +35,7 @@ const FOUNDER_EMAILS = (process.env.FOUNDER_EMAILS ?? FOUNDER_EMAIL)
   .filter(Boolean);
 
 const DEFAULT_FOUNDER_PERMISSION_CODES = [
+  "founder.dashboard.read",
   "platform.read",
   "platform.manage",
   "system.documents.read",
@@ -46,6 +47,7 @@ const DEFAULT_FOUNDER_PERMISSION_CODES = [
   "founder.documents.manage",
   "founder.audit.read",
   "founder.messages.read",
+  "founder.monitoring.read",
   "founder.support.read",
   "founder.support.manage",
   "founder.maintenance.reset.firm",
