@@ -1,4 +1,4 @@
-import { Router, type IRouter } from "express";
+import express, { type Router as ExpressRouter } from "express";
 import { eq, count, desc, and, or, asc, inArray } from "drizzle-orm";
 import {
   db, casesTable, casePurchasersTable, caseAssignmentsTable,
@@ -17,28 +17,67 @@ import {
   GetCaseWorkflowParams, UpdateWorkflowStepParams, UpdateWorkflowStepBody,
   GetCaseNotesParams, CreateCaseNoteParams, CreateCaseNoteBody
 } from "@workspace/api-zod";
-import { requireAuth, requireFirmUser, requirePermission, writeAuditLog, type AuthRequest } from "../lib/auth";
-import { buildWorkflowSteps } from "../lib/workflow";
-import { KEY_DATE_FIELD_TO_STEP_KEY, WORKFLOW_STEP_KEY_TO_KEY_DATE_FIELD, type KeyDateField } from "../lib/keyDatesWorkflow";
-import { loanStatusSql, milestoneDateSql, milestoneDateYmdSql, milestonePresenceWhereSql, spaStatusSql, type CaseMilestoneKey, type MilestonePresence } from "../lib/caseListLogic";
-import { daysAgoSql } from "../lib/dateSql";
-import { parseDateOnlyInput } from "../lib/dateOnly";
-import { logger } from "../lib/logger";
-import { isTransientDbConnectionError } from "../lib/auth-safe-db";
+import type { IncomingHttpHeaders, IncomingMessage } from "node:http";
+import { requireAuth, requireFirmUser, requirePermission, writeAuditLog, type AuthRequest } from "../lib/auth.js";
+import { buildWorkflowSteps } from "../lib/workflow.js";
+import { KEY_DATE_FIELD_TO_STEP_KEY, WORKFLOW_STEP_KEY_TO_KEY_DATE_FIELD, type KeyDateField } from "../lib/keyDatesWorkflow.js";
+import { loanStatusSql, milestoneDateSql, milestoneDateYmdSql, milestonePresenceWhereSql, spaStatusSql, type CaseMilestoneKey, type MilestonePresence } from "../lib/caseListLogic.js";
+import { daysAgoSql } from "../lib/dateSql.js";
+import { parseDateOnlyInput } from "../lib/dateOnly.js";
+import { logger } from "../lib/logger.js";
+import { isTransientDbConnectionError } from "../lib/auth-safe-db.js";
 import { Readable } from "stream";
-import { ObjectNotFoundError, SupabaseStorageService, getSupabaseStorageConfigError } from "../lib/objectStorage";
-import { CASE_ATTACHMENT_ALLOWED_EXTENSIONS, WORKFLOW_DOCUMENT_ALLOWED_KEYS, fileExtLower, workflowDocumentLabel, workflowDocumentLegacyKeys, normalizeWorkflowDocumentKeyFromDb, type WorkflowDocumentMilestoneKey } from "../lib/caseWorkflowDocuments";
-import { LOAN_STAMPING_ITEM_KEYS, type LoanStampingItemKey, isLoanStampingItemKeyAllowedForTitleType, normalizeTitleType } from "../lib/loanStamping";
-import { ensureCaseWorkflowSteps, syncWorkflowStepsFromCaseState } from "../lib/workflowAutomationService";
-import { WORKFLOW_AUTOMATION_RULE_BY_STEP_KEY, deriveStatusFromRequirement } from "../lib/workflowAutomation";
-import { computeStampingSummary, deriveStampingItemStatus, type StampingItemInput } from "../lib/stampingProgress";
-import { resolveSmartFilename } from "../lib/smartFileNaming";
+import { ObjectNotFoundError, SupabaseStorageService, getSupabaseStorageConfigError } from "../lib/objectStorage.js";
+import { CASE_ATTACHMENT_ALLOWED_EXTENSIONS, WORKFLOW_DOCUMENT_ALLOWED_KEYS, fileExtLower, workflowDocumentLabel, workflowDocumentLegacyKeys, normalizeWorkflowDocumentKeyFromDb, type WorkflowDocumentMilestoneKey } from "../lib/caseWorkflowDocuments.js";
+import { LOAN_STAMPING_ITEM_KEYS, type LoanStampingItemKey, isLoanStampingItemKeyAllowedForTitleType, normalizeTitleType } from "../lib/loanStamping.js";
+import { ensureCaseWorkflowSteps, syncWorkflowStepsFromCaseState } from "../lib/workflowAutomationService.js";
+import { WORKFLOW_AUTOMATION_RULE_BY_STEP_KEY, deriveStatusFromRequirement } from "../lib/workflowAutomation.js";
+import { computeStampingSummary, deriveStampingItemStatus, type StampingItemInput } from "../lib/stampingProgress.js";
+import { resolveSmartFilename } from "../lib/smartFileNaming.js";
 
-const router: IRouter = Router();
+type ReqLike = IncomingMessage & {
+  body?: unknown;
+  headers: IncomingHttpHeaders & Record<string, string | string[] | undefined>;
+  ip?: string;
+  originalUrl?: string;
+  params?: Record<string, unknown>;
+  path?: string;
+  query?: Record<string, unknown>;
+  firmId?: number | null;
+  userId?: number | null;
+  userType?: string | null;
+  roleId?: number | null;
+  log?: { error?: (...args: unknown[]) => void; info?: (...args: unknown[]) => void };
+  rlsDb?: AuthRequest["rlsDb"];
+  [key: string]: unknown;
+};
+
+type RouteResLike = {
+  status: (code: number) => RouteResLike;
+  json: (body: unknown) => unknown;
+  sendStatus: (code: number) => unknown;
+  setHeader?: (name: string, value: string) => unknown;
+  set?: (field: string, value: string) => unknown;
+  write?: (chunk: any) => unknown;
+  end?: () => unknown;
+  [key: string]: unknown;
+};
+
+type RouterInternalLike = {
+  get: (path: string, ...handlers: unknown[]) => unknown;
+  post: (path: string, ...handlers: unknown[]) => unknown;
+  put: (path: string, ...handlers: unknown[]) => unknown;
+  patch: (path: string, ...handlers: unknown[]) => unknown;
+  delete: (path: string, ...handlers: unknown[]) => unknown;
+};
+
+const expressRouter = express.Router();
+const router = expressRouter as unknown as RouterInternalLike;
 const supabaseStorage = new SupabaseStorageService();
 
 type DbConn = typeof db | NonNullable<AuthRequest["rlsDb"]>;
-const rdb = (req: AuthRequest): DbConn => req.rlsDb ?? db;
+type AuthRequestLike = AuthRequest & ReqLike;
+const rdb = (req: AuthRequestLike): DbConn => req.rlsDb ?? db;
 
 type CaseKeyDatesInsert = typeof caseKeyDatesTable.$inferInsert;
 
@@ -458,7 +497,7 @@ async function formatCaseSummary(r: DbConn, c: typeof casesTable.$inferSelect) {
   };
 }
 
-router.get("/cases/stats/by-status", requireAuth, requireFirmUser, requirePermission("cases", "read"), async (req: AuthRequest, res): Promise<void> => {
+router.get("/cases/stats/by-status", requireAuth, requireFirmUser, requirePermission("cases", "read"), async (req: AuthRequestLike, res: RouteResLike): Promise<void> => {
   const rows = await db
     .select({ status: casesTable.status, count: count() })
     .from(casesTable)
@@ -467,7 +506,7 @@ router.get("/cases/stats/by-status", requireAuth, requireFirmUser, requirePermis
   res.json(rows.map(r => ({ status: r.status, count: Number(r.count) })));
 });
 
-router.get("/cases/stats/by-type", requireAuth, requireFirmUser, requirePermission("cases", "read"), async (req: AuthRequest, res): Promise<void> => {
+router.get("/cases/stats/by-type", requireAuth, requireFirmUser, requirePermission("cases", "read"), async (req: AuthRequestLike, res: RouteResLike): Promise<void> => {
   const rows = await db
     .select({ purchaseMode: casesTable.purchaseMode, count: count() })
     .from(casesTable)
@@ -476,7 +515,7 @@ router.get("/cases/stats/by-type", requireAuth, requireFirmUser, requirePermissi
   res.json(rows.map(r => ({ purchaseMode: r.purchaseMode, count: Number(r.count) })));
 });
 
-router.get("/cases/recent", requireAuth, requireFirmUser, requirePermission("cases", "read"), async (req: AuthRequest, res): Promise<void> => {
+router.get("/cases/recent", requireAuth, requireFirmUser, requirePermission("cases", "read"), async (req: AuthRequestLike, res: RouteResLike): Promise<void> => {
   const r = rdb(req);
   const limitParam = req.query.limit ? Number(req.query.limit) : 5;
   const cases = await r.select().from(casesTable)
@@ -487,7 +526,7 @@ router.get("/cases/recent", requireAuth, requireFirmUser, requirePermission("cas
   res.json(summaries);
 });
 
-router.get("/cases/filter-options", requireAuth, requireFirmUser, requirePermission("cases", "read"), async (req: AuthRequest, res): Promise<void> => {
+router.get("/cases/filter-options", requireAuth, requireFirmUser, requirePermission("cases", "read"), async (req: AuthRequestLike, res: RouteResLike): Promise<void> => {
   const r = rdb(req);
 
   const stepDefs = buildWorkflowSteps("loan", "individual");
@@ -523,7 +562,7 @@ router.get("/cases/filter-options", requireAuth, requireFirmUser, requirePermiss
   });
 });
 
-router.get("/case-list-views", requireAuth, requireFirmUser, requirePermission("cases", "read"), async (req: AuthRequest, res): Promise<void> => {
+router.get("/case-list-views", requireAuth, requireFirmUser, requirePermission("cases", "read"), async (req: AuthRequestLike, res: RouteResLike): Promise<void> => {
   const r = rdb(req);
 
   const rows = await r
@@ -548,7 +587,7 @@ router.get("/case-list-views", requireAuth, requireFirmUser, requirePermission("
   })));
 });
 
-router.post("/case-list-views", requireAuth, requireFirmUser, requirePermission("cases", "update"), async (req: AuthRequest, res): Promise<void> => {
+router.post("/case-list-views", requireAuth, requireFirmUser, requirePermission("cases", "update"), async (req: AuthRequestLike, res: RouteResLike): Promise<void> => {
   const r = req.rlsDb;
   if (!r) {
     res.status(500).json({ error: "Internal Server Error" });
@@ -614,7 +653,7 @@ router.post("/case-list-views", requireAuth, requireFirmUser, requirePermission(
   }
 });
 
-router.patch("/case-list-views/:id", requireAuth, requireFirmUser, requirePermission("cases", "update"), async (req: AuthRequest, res): Promise<void> => {
+router.patch("/case-list-views/:id", requireAuth, requireFirmUser, requirePermission("cases", "update"), async (req: AuthRequestLike, res: RouteResLike): Promise<void> => {
   const r = req.rlsDb;
   if (!r) {
     res.status(500).json({ error: "Internal Server Error" });
@@ -695,7 +734,7 @@ router.patch("/case-list-views/:id", requireAuth, requireFirmUser, requirePermis
   }
 });
 
-router.delete("/case-list-views/:id", requireAuth, requireFirmUser, requirePermission("cases", "update"), async (req: AuthRequest, res): Promise<void> => {
+router.delete("/case-list-views/:id", requireAuth, requireFirmUser, requirePermission("cases", "update"), async (req: AuthRequestLike, res: RouteResLike): Promise<void> => {
   const r = req.rlsDb;
   if (!r) {
     res.status(500).json({ error: "Internal Server Error" });
@@ -738,7 +777,7 @@ router.delete("/case-list-views/:id", requireAuth, requireFirmUser, requirePermi
   res.status(204).end();
 });
 
-router.get("/cases/views", requireAuth, requireFirmUser, requirePermission("cases", "read"), async (req: AuthRequest, res): Promise<void> => {
+router.get("/cases/views", requireAuth, requireFirmUser, requirePermission("cases", "read"), async (req: AuthRequestLike, res: RouteResLike): Promise<void> => {
   const r = rdb(req);
   const rows = await r
     .select()
@@ -760,7 +799,7 @@ router.get("/cases/views", requireAuth, requireFirmUser, requirePermission("case
   })));
 });
 
-router.post("/cases/views", requireAuth, requireFirmUser, requirePermission("cases", "update"), async (req: AuthRequest, res): Promise<void> => {
+router.post("/cases/views", requireAuth, requireFirmUser, requirePermission("cases", "update"), async (req: AuthRequestLike, res: RouteResLike): Promise<void> => {
   const r = req.rlsDb;
   if (!r) {
     res.status(500).json({ error: "Internal Server Error" });
@@ -818,7 +857,7 @@ router.post("/cases/views", requireAuth, requireFirmUser, requirePermission("cas
   });
 });
 
-router.patch("/cases/views/:viewId", requireAuth, requireFirmUser, requirePermission("cases", "update"), async (req: AuthRequest, res): Promise<void> => {
+router.patch("/cases/views/:viewId", requireAuth, requireFirmUser, requirePermission("cases", "update"), async (req: AuthRequestLike, res: RouteResLike): Promise<void> => {
   const r = req.rlsDb;
   if (!r) {
     res.status(500).json({ error: "Internal Server Error" });
@@ -913,7 +952,7 @@ router.patch("/cases/views/:viewId", requireAuth, requireFirmUser, requirePermis
   });
 });
 
-router.delete("/cases/views/:viewId", requireAuth, requireFirmUser, requirePermission("cases", "update"), async (req: AuthRequest, res): Promise<void> => {
+router.delete("/cases/views/:viewId", requireAuth, requireFirmUser, requirePermission("cases", "update"), async (req: AuthRequestLike, res: RouteResLike): Promise<void> => {
   const r = req.rlsDb;
   if (!r) {
     res.status(500).json({ error: "Internal Server Error" });
@@ -955,7 +994,7 @@ router.delete("/cases/views/:viewId", requireAuth, requireFirmUser, requirePermi
   res.status(204).end();
 });
 
-router.post("/cases/bulk/assign", requireAuth, requireFirmUser, requirePermission("cases", "update"), async (req: AuthRequest, res): Promise<void> => {
+router.post("/cases/bulk/assign", requireAuth, requireFirmUser, requirePermission("cases", "update"), async (req: AuthRequestLike, res: RouteResLike): Promise<void> => {
   const r = req.rlsDb;
   if (!r) {
     res.status(500).json({ error: "Internal Server Error" });
@@ -1111,7 +1150,7 @@ function overdueAnySql(thresholdDays: number) {
   );
 }
 
-router.get("/cases/workbench", requireAuth, requireFirmUser, requirePermission("cases", "read"), async (req: AuthRequest, res): Promise<void> => {
+router.get("/cases/workbench", requireAuth, requireFirmUser, requirePermission("cases", "read"), async (req: AuthRequestLike, res: RouteResLike): Promise<void> => {
   try {
     const r = rdb(req);
     const hasKeyDates = await tableExists(r, "public.case_key_dates");
@@ -1361,7 +1400,7 @@ function sanitizeCsvCell(v: unknown): string {
   return s;
 }
 
-router.get("/cases/export.csv", requireAuth, requireFirmUser, requirePermission("cases", "read"), async (req: AuthRequest, res): Promise<void> => {
+router.get("/cases/export.csv", requireAuth, requireFirmUser, requirePermission("cases", "read"), async (req: AuthRequestLike, res: RouteResLike): Promise<void> => {
   const r = rdb(req);
 
   const params = ListCasesQueryParams.safeParse(req.query);
@@ -1596,7 +1635,7 @@ router.get("/cases/export.csv", requireAuth, requireFirmUser, requirePermission(
   res.end();
 });
 
-router.get("/cases", requireAuth, requireFirmUser, requirePermission("cases", "read"), async (req: AuthRequest, res): Promise<void> => {
+router.get("/cases", requireAuth, requireFirmUser, requirePermission("cases", "read"), async (req: AuthRequestLike, res: RouteResLike): Promise<void> => {
   try {
     const r = rdb(req);
     const hasKeyDates = await tableExists(r, "public.case_key_dates");
@@ -1882,7 +1921,7 @@ router.get("/cases", requireAuth, requireFirmUser, requirePermission("cases", "r
   }
 });
 
-router.post("/cases", requireAuth, requireFirmUser, requirePermission("cases", "create"), async (req: AuthRequest, res): Promise<void> => {
+router.post("/cases", requireAuth, requireFirmUser, requirePermission("cases", "create"), async (req: AuthRequestLike, res: RouteResLike): Promise<void> => {
   try {
     const r = req.rlsDb;
     if (!r) {
@@ -2134,7 +2173,7 @@ router.post("/cases", requireAuth, requireFirmUser, requirePermission("cases", "
   }
 });
 
-router.get("/cases/:caseId", requireAuth, requireFirmUser, requirePermission("cases", "read"), async (req: AuthRequest, res): Promise<void> => {
+router.get("/cases/:caseId", requireAuth, requireFirmUser, requirePermission("cases", "read"), async (req: AuthRequestLike, res: RouteResLike): Promise<void> => {
   const r = req.rlsDb;
   if (!r) {
     logger.error({ path: req.path, firmId: req.firmId, userId: req.userId }, "[cases] missing tenant database context");
@@ -2164,7 +2203,7 @@ router.get("/cases/:caseId", requireAuth, requireFirmUser, requirePermission("ca
   }
 });
 
-router.get("/cases/:caseId/key-dates", requireAuth, requireFirmUser, requirePermission("cases", "read"), async (req: AuthRequest, res): Promise<void> => {
+router.get("/cases/:caseId/key-dates", requireAuth, requireFirmUser, requirePermission("cases", "read"), async (req: AuthRequestLike, res: RouteResLike): Promise<void> => {
   const r = req.rlsDb;
   if (!r) {
     logger.error({ path: req.path, firmId: req.firmId, userId: req.userId }, "[cases] missing tenant database context");
@@ -2256,7 +2295,7 @@ router.get("/cases/:caseId/key-dates", requireAuth, requireFirmUser, requirePerm
   res.json(out);
 });
 
-router.get("/cases/:caseId/progress", requireAuth, requireFirmUser, requirePermission("cases", "read"), async (req: AuthRequest, res): Promise<void> => {
+router.get("/cases/:caseId/progress", requireAuth, requireFirmUser, requirePermission("cases", "read"), async (req: AuthRequestLike, res: RouteResLike): Promise<void> => {
   const r = req.rlsDb;
   if (!r) {
     logger.error({ path: req.path, firmId: req.firmId, userId: req.userId }, "[cases] missing tenant database context");
@@ -2470,7 +2509,7 @@ router.get("/cases/:caseId/progress", requireAuth, requireFirmUser, requirePermi
   });
 });
 
-router.patch("/cases/:caseId/key-dates", requireAuth, requireFirmUser, requirePermission("cases", "update"), async (req: AuthRequest, res): Promise<void> => {
+router.patch("/cases/:caseId/key-dates", requireAuth, requireFirmUser, requirePermission("cases", "update"), async (req: AuthRequestLike, res: RouteResLike): Promise<void> => {
   const r = req.rlsDb;
   if (!r) {
     logger.error({ path: req.path, firmId: req.firmId, userId: req.userId }, "[cases] missing tenant database context");
@@ -2690,7 +2729,7 @@ router.patch("/cases/:caseId/key-dates", requireAuth, requireFirmUser, requirePe
   } : {});
 });
 
-router.patch("/cases/:caseId", requireAuth, requireFirmUser, requirePermission("cases", "update"), async (req: AuthRequest, res): Promise<void> => {
+router.patch("/cases/:caseId", requireAuth, requireFirmUser, requirePermission("cases", "update"), async (req: AuthRequestLike, res: RouteResLike): Promise<void> => {
   const r = req.rlsDb;
   if (!r) {
     logger.error({ path: req.path, firmId: req.firmId, userId: req.userId }, "[cases] missing tenant database context");
@@ -2760,7 +2799,7 @@ router.patch("/cases/:caseId", requireAuth, requireFirmUser, requirePermission("
   res.json(await formatCaseDetail(r, c));
 });
 
-router.get("/cases/:caseId/workflow-documents", requireAuth, requireFirmUser, requirePermission("documents", "read"), async (req: AuthRequest, res): Promise<void> => {
+router.get("/cases/:caseId/workflow-documents", requireAuth, requireFirmUser, requirePermission("documents", "read"), async (req: AuthRequestLike, res: RouteResLike): Promise<void> => {
   const r = req.rlsDb;
   if (!r) {
     logger.error({ path: req.path, firmId: req.firmId, userId: req.userId }, "[cases] missing tenant database context");
@@ -2834,7 +2873,7 @@ router.get("/cases/:caseId/workflow-documents", requireAuth, requireFirmUser, re
   res.json(out);
 });
 
-router.post("/cases/:caseId/workflow-documents", requireAuth, requireFirmUser, requirePermission("documents", "update"), async (req: AuthRequest, res): Promise<void> => {
+router.post("/cases/:caseId/workflow-documents", requireAuth, requireFirmUser, requirePermission("documents", "update"), async (req: AuthRequestLike, res: RouteResLike): Promise<void> => {
   const r = req.rlsDb;
   if (!r) {
     logger.error({ path: req.path, firmId: req.firmId, userId: req.userId }, "[cases] missing tenant database context");
@@ -3010,7 +3049,7 @@ router.post("/cases/:caseId/workflow-documents", requireAuth, requireFirmUser, r
   });
 });
 
-router.delete("/cases/:caseId/workflow-documents/:id", requireAuth, requireFirmUser, requirePermission("documents", "delete"), async (req: AuthRequest, res): Promise<void> => {
+router.delete("/cases/:caseId/workflow-documents/:id", requireAuth, requireFirmUser, requirePermission("documents", "delete"), async (req: AuthRequestLike, res: RouteResLike): Promise<void> => {
   const r = req.rlsDb;
   if (!r) {
     logger.error({ path: req.path, firmId: req.firmId, userId: req.userId }, "[cases] missing tenant database context");
@@ -3099,7 +3138,7 @@ router.delete("/cases/:caseId/workflow-documents/:id", requireAuth, requireFirmU
   res.status(204).end();
 });
 
-router.get("/cases/:caseId/workflow-documents/:id/download", requireAuth, requireFirmUser, requirePermission("documents", "read"), async (req: AuthRequest, res): Promise<void> => {
+router.get("/cases/:caseId/workflow-documents/:id/download", requireAuth, requireFirmUser, requirePermission("documents", "read"), async (req: AuthRequestLike, res: RouteResLike): Promise<void> => {
   const r = req.rlsDb;
   if (!r) {
     logger.error({ path: req.path, firmId: req.firmId, userId: req.userId }, "[cases] missing tenant database context");
@@ -3172,7 +3211,7 @@ router.get("/cases/:caseId/workflow-documents/:id/download", requireAuth, requir
 
 const ALLOWED_LOAN_STAMPING_ITEM_KEYS = new Set<string>(LOAN_STAMPING_ITEM_KEYS);
 
-router.get("/cases/:caseId/loan-stamping", requireAuth, requireFirmUser, requirePermission("documents", "read"), async (req: AuthRequest, res): Promise<void> => {
+router.get("/cases/:caseId/loan-stamping", requireAuth, requireFirmUser, requirePermission("documents", "read"), async (req: AuthRequestLike, res: RouteResLike): Promise<void> => {
   const r = req.rlsDb;
   if (!r) {
     logger.error({ path: req.path, firmId: req.firmId, userId: req.userId }, "[cases] missing tenant database context");
@@ -3228,7 +3267,7 @@ router.get("/cases/:caseId/loan-stamping", requireAuth, requireFirmUser, require
   })));
 });
 
-router.post("/cases/:caseId/loan-stamping/ensure", requireAuth, requireFirmUser, requirePermission("documents", "update"), async (req: AuthRequest, res): Promise<void> => {
+router.post("/cases/:caseId/loan-stamping/ensure", requireAuth, requireFirmUser, requirePermission("documents", "update"), async (req: AuthRequestLike, res: RouteResLike): Promise<void> => {
   const r = req.rlsDb;
   if (!r) {
     logger.error({ path: req.path, firmId: req.firmId, userId: req.userId }, "[cases] missing tenant database context");
@@ -3368,7 +3407,7 @@ router.post("/cases/:caseId/loan-stamping/ensure", requireAuth, requireFirmUser,
   });
 });
 
-router.put("/cases/:caseId/loan-stamping", requireAuth, requireFirmUser, requirePermission("documents", "update"), async (req: AuthRequest, res): Promise<void> => {
+router.put("/cases/:caseId/loan-stamping", requireAuth, requireFirmUser, requirePermission("documents", "update"), async (req: AuthRequestLike, res: RouteResLike): Promise<void> => {
   const r = req.rlsDb;
   if (!r) {
     logger.error({ path: req.path, firmId: req.firmId, userId: req.userId }, "[cases] missing tenant database context");
@@ -3498,7 +3537,7 @@ router.put("/cases/:caseId/loan-stamping", requireAuth, requireFirmUser, require
   })));
 });
 
-router.delete("/cases/:caseId/loan-stamping/:id", requireAuth, requireFirmUser, requirePermission("documents", "delete"), async (req: AuthRequest, res): Promise<void> => {
+router.delete("/cases/:caseId/loan-stamping/:id", requireAuth, requireFirmUser, requirePermission("documents", "delete"), async (req: AuthRequestLike, res: RouteResLike): Promise<void> => {
   const r = req.rlsDb;
   if (!r) {
     logger.error({ path: req.path, firmId: req.firmId, userId: req.userId }, "[cases] missing tenant database context");
@@ -3582,7 +3621,7 @@ router.delete("/cases/:caseId/loan-stamping/:id", requireAuth, requireFirmUser, 
   res.status(204).end();
 });
 
-router.post("/cases/:caseId/loan-stamping/:id/file", requireAuth, requireFirmUser, requirePermission("documents", "update"), async (req: AuthRequest, res): Promise<void> => {
+router.post("/cases/:caseId/loan-stamping/:id/file", requireAuth, requireFirmUser, requirePermission("documents", "update"), async (req: AuthRequestLike, res: RouteResLike): Promise<void> => {
   const r = req.rlsDb;
   if (!r) {
     logger.error({ path: req.path, firmId: req.firmId, userId: req.userId }, "[cases] missing tenant database context");
@@ -3710,7 +3749,7 @@ router.post("/cases/:caseId/loan-stamping/:id/file", requireAuth, requireFirmUse
   res.json({ ok: true });
 });
 
-router.delete("/cases/:caseId/loan-stamping/:id/file", requireAuth, requireFirmUser, requirePermission("documents", "update"), async (req: AuthRequest, res): Promise<void> => {
+router.delete("/cases/:caseId/loan-stamping/:id/file", requireAuth, requireFirmUser, requirePermission("documents", "update"), async (req: AuthRequestLike, res: RouteResLike): Promise<void> => {
   const r = req.rlsDb;
   if (!r) {
     logger.error({ path: req.path, firmId: req.firmId, userId: req.userId }, "[cases] missing tenant database context");
@@ -3789,7 +3828,7 @@ router.delete("/cases/:caseId/loan-stamping/:id/file", requireAuth, requireFirmU
   res.status(204).end();
 });
 
-router.get("/cases/:caseId/loan-stamping/:id/download", requireAuth, requireFirmUser, requirePermission("documents", "read"), async (req: AuthRequest, res): Promise<void> => {
+router.get("/cases/:caseId/loan-stamping/:id/download", requireAuth, requireFirmUser, requirePermission("documents", "read"), async (req: AuthRequestLike, res: RouteResLike): Promise<void> => {
   const r = req.rlsDb;
   if (!r) {
     logger.error({ path: req.path, firmId: req.firmId, userId: req.userId }, "[cases] missing tenant database context");
@@ -3863,7 +3902,7 @@ router.get("/cases/:caseId/loan-stamping/:id/download", requireAuth, requireFirm
   }
 });
 
-router.get("/cases/:caseId/workflow", requireAuth, requireFirmUser, requirePermission("cases", "read"), async (req: AuthRequest, res): Promise<void> => {
+router.get("/cases/:caseId/workflow", requireAuth, requireFirmUser, requirePermission("cases", "read"), async (req: AuthRequestLike, res: RouteResLike): Promise<void> => {
   const r = req.rlsDb;
   if (!r) {
     logger.error({ path: req.path, firmId: req.firmId, userId: req.userId }, "[cases] missing tenant database context");
@@ -3931,7 +3970,7 @@ router.get("/cases/:caseId/workflow", requireAuth, requireFirmUser, requirePermi
   }
 });
 
-router.patch("/cases/:caseId/workflow/:stepId", requireAuth, requireFirmUser, requirePermission("cases", "update"), async (req: AuthRequest, res): Promise<void> => {
+router.patch("/cases/:caseId/workflow/:stepId", requireAuth, requireFirmUser, requirePermission("cases", "update"), async (req: AuthRequestLike, res: RouteResLike): Promise<void> => {
   const r = req.rlsDb;
   if (!r) {
     logger.error({ path: req.path, firmId: req.firmId, userId: req.userId }, "[cases] missing tenant database context");
@@ -4066,7 +4105,7 @@ router.patch("/cases/:caseId/workflow/:stepId", requireAuth, requireFirmUser, re
   });
 });
 
-router.get("/cases/:caseId/notes", requireAuth, requireFirmUser, requirePermission("cases", "read"), async (req: AuthRequest, res): Promise<void> => {
+router.get("/cases/:caseId/notes", requireAuth, requireFirmUser, requirePermission("cases", "read"), async (req: AuthRequestLike, res: RouteResLike): Promise<void> => {
   const r = req.rlsDb;
   if (!r) {
     logger.error({ path: req.path, firmId: req.firmId, userId: req.userId }, "[cases] missing tenant database context");
@@ -4112,7 +4151,7 @@ router.get("/cases/:caseId/notes", requireAuth, requireFirmUser, requirePermissi
   res.json(enriched);
 });
 
-router.post("/cases/:caseId/notes", requireAuth, requireFirmUser, requirePermission("cases", "update"), async (req: AuthRequest, res): Promise<void> => {
+router.post("/cases/:caseId/notes", requireAuth, requireFirmUser, requirePermission("cases", "update"), async (req: AuthRequestLike, res: RouteResLike): Promise<void> => {
   const r = req.rlsDb;
   if (!r) {
     logger.error({ path: req.path, firmId: req.firmId, userId: req.userId }, "[cases] missing tenant database context");
@@ -4164,4 +4203,6 @@ router.post("/cases/:caseId/notes", requireAuth, requireFirmUser, requirePermiss
   });
 });
 
-export default router;
+const exportedRouter = expressRouter as unknown as ExpressRouter;
+export { exportedRouter as router };
+export default exportedRouter;

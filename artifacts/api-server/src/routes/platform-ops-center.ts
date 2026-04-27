@@ -1,14 +1,20 @@
-import { Router, type IRouter } from "express";
+import express, { type Router as ExpressRouter } from "express";
 import { and, eq, sql } from "drizzle-orm";
 import { platformApprovalRequestsTable, platformIncidentsTable, platformMaintenanceActionStepsTable, platformMaintenanceActionsTable, platformRestoreActionStepsTable, platformRestoreActionsTable, auditLogsTable } from "@workspace/db";
-import { requireAuth, requireFounder, requireFounderPermission, type AuthRequest } from "../lib/auth";
-import { withAuthSafeDb } from "../lib/auth-safe-db";
-import { one, sendError, sendOk } from "../lib/api-response";
-import { computeOverview, computePending, computeReadiness, computeRecommendationsForIncident, getApprovalEventActors, getIncidentDetail, listIncidents, listOpsLogs, recomputeIncidents, setIncidentStatus, addIncidentNote } from "../services/ops-center";
+import { requireAuth, requireFounder, requireFounderPermission, type AuthRequest } from "../lib/auth.js";
+import { withAuthSafeDb } from "../lib/auth-safe-db.js";
+import { one, sendError, sendOk, type ResLike } from "../lib/api-response.js";
+import { computeOverview, computePending, computeReadiness, computeRecommendationsForIncident, getApprovalEventActors, getIncidentDetail, listIncidents, listOpsLogs, recomputeIncidents, setIncidentStatus, addIncidentNote } from "../services/ops-center.js";
 
-const router: IRouter = Router();
+type RouterInternalLike = {
+  get: (path: string, ...handlers: unknown[]) => unknown;
+  post: (path: string, ...handlers: unknown[]) => unknown;
+};
 
-router.get("/platform/operations/overview", requireAuth, requireFounder, requireFounderPermission("founder.ops.read"), async (req: AuthRequest, res) => {
+const expressRouter = express.Router();
+const router = expressRouter as unknown as RouterInternalLike;
+
+router.get("/platform/operations/overview", requireAuth, requireFounder, requireFounderPermission("founder.ops.read"), async (req: AuthRequest, res: ResLike) => {
   try {
     const range = (() => {
       const v = one((req.query as any).range);
@@ -24,7 +30,7 @@ router.get("/platform/operations/overview", requireAuth, requireFounder, require
   }
 });
 
-router.get("/platform/operations/logs", requireAuth, requireFounder, requireFounderPermission("founder.ops.read"), async (req: AuthRequest, res) => {
+router.get("/platform/operations/logs", requireAuth, requireFounder, requireFounderPermission("founder.ops.read"), async (req: AuthRequest, res: ResLike) => {
   try {
     const limit = (() => {
       const raw = one((req.query as any).limit);
@@ -111,7 +117,7 @@ router.get("/platform/operations/logs", requireAuth, requireFounder, requireFoun
   }
 });
 
-router.get("/platform/operations/operations/:kind/:id", requireAuth, requireFounder, requireFounderPermission("founder.ops.read"), async (req: AuthRequest, res) => {
+router.get("/platform/operations/operations/:kind/:id", requireAuth, requireFounder, requireFounderPermission("founder.ops.read"), async (req: AuthRequest, res: ResLike) => {
   try {
     const kind = String(req.params.kind ?? "");
     const id = String(req.params.id ?? "");
@@ -153,7 +159,7 @@ router.get("/platform/operations/operations/:kind/:id", requireAuth, requireFoun
   }
 });
 
-router.get("/platform/operations/incidents", requireAuth, requireFounder, requireFounderPermission("founder.ops.read"), async (req: AuthRequest, res) => {
+router.get("/platform/operations/incidents", requireAuth, requireFounder, requireFounderPermission("founder.ops.read"), async (req: AuthRequest, res: ResLike) => {
   try {
     const limit = (() => {
       const raw = one((req.query as any).limit);
@@ -200,7 +206,7 @@ router.get("/platform/operations/incidents", requireAuth, requireFounder, requir
   }
 });
 
-router.get("/platform/operations/incidents/:id", requireAuth, requireFounder, requireFounderPermission("founder.ops.read"), async (req: AuthRequest, res) => {
+router.get("/platform/operations/incidents/:id", requireAuth, requireFounder, requireFounderPermission("founder.ops.read"), async (req: AuthRequest, res: ResLike) => {
   try {
     const id = String(req.params.id ?? "");
     const data = await withAuthSafeDb(async (authDb) => {
@@ -214,7 +220,7 @@ router.get("/platform/operations/incidents/:id", requireAuth, requireFounder, re
   }
 });
 
-router.get("/platform/operations/recommendations", requireAuth, requireFounder, requireFounderPermission("founder.ops.read"), async (req: AuthRequest, res) => {
+router.get("/platform/operations/recommendations", requireAuth, requireFounder, requireFounderPermission("founder.ops.read"), async (req: AuthRequest, res: ResLike) => {
   try {
     const limit = (() => {
       const raw = one((req.query as any).limit);
@@ -269,7 +275,7 @@ router.get("/platform/operations/recommendations", requireAuth, requireFounder, 
   }
 });
 
-router.post("/platform/operations/incidents/:id/acknowledge", requireAuth, requireFounder, requireFounderPermission("founder.ops.incident.ack"), async (req: AuthRequest, res) => {
+router.post("/platform/operations/incidents/:id/acknowledge", requireAuth, requireFounder, requireFounderPermission("founder.ops.incident.ack"), async (req: AuthRequest, res: ResLike) => {
   try {
     const id = String(req.params.id ?? "");
     await withAuthSafeDb(async (authDb) => {
@@ -281,7 +287,7 @@ router.post("/platform/operations/incidents/:id/acknowledge", requireAuth, requi
   }
 });
 
-router.post("/platform/operations/incidents/:id/resolve", requireAuth, requireFounder, requireFounderPermission("founder.ops.incident.resolve"), async (req: AuthRequest, res) => {
+router.post("/platform/operations/incidents/:id/resolve", requireAuth, requireFounder, requireFounderPermission("founder.ops.incident.resolve"), async (req: AuthRequest, res: ResLike) => {
   try {
     const id = String(req.params.id ?? "");
     const note = (req.body as any)?.note ? String((req.body as any).note) : null;
@@ -294,7 +300,7 @@ router.post("/platform/operations/incidents/:id/resolve", requireAuth, requireFo
   }
 });
 
-router.post("/platform/operations/incidents/:id/dismiss", requireAuth, requireFounder, requireFounderPermission("founder.ops.incident.dismiss"), async (req: AuthRequest, res) => {
+router.post("/platform/operations/incidents/:id/dismiss", requireAuth, requireFounder, requireFounderPermission("founder.ops.incident.dismiss"), async (req: AuthRequest, res: ResLike) => {
   try {
     const id = String(req.params.id ?? "");
     const note = (req.body as any)?.note ? String((req.body as any).note) : null;
@@ -307,7 +313,7 @@ router.post("/platform/operations/incidents/:id/dismiss", requireAuth, requireFo
   }
 });
 
-router.post("/platform/operations/incidents/:id/notes", requireAuth, requireFounder, requireFounderPermission("founder.ops.incident.note"), async (req: AuthRequest, res) => {
+router.post("/platform/operations/incidents/:id/notes", requireAuth, requireFounder, requireFounderPermission("founder.ops.incident.note"), async (req: AuthRequest, res: ResLike) => {
   try {
     const id = String(req.params.id ?? "");
     const note = String((req.body as any)?.note ?? "");
@@ -320,7 +326,7 @@ router.post("/platform/operations/incidents/:id/notes", requireAuth, requireFoun
   }
 });
 
-router.post("/platform/operations/incidents/recompute", requireAuth, requireFounder, requireFounderPermission("founder.ops.recommendation.recompute"), async (req: AuthRequest, res) => {
+router.post("/platform/operations/incidents/recompute", requireAuth, requireFounder, requireFounderPermission("founder.ops.recommendation.recompute"), async (req: AuthRequest, res: ResLike) => {
   try {
     const days = (() => {
       const raw = one((req.query as any).days);
@@ -342,7 +348,7 @@ router.post("/platform/operations/incidents/recompute", requireAuth, requireFoun
   }
 });
 
-router.get("/platform/operations/readiness", requireAuth, requireFounder, requireFounderPermission("founder.ops.read"), async (req: AuthRequest, res) => {
+router.get("/platform/operations/readiness", requireAuth, requireFounder, requireFounderPermission("founder.ops.read"), async (req: AuthRequest, res: ResLike) => {
   try {
     const limit = (() => {
       const raw = one((req.query as any).limit);
@@ -364,7 +370,7 @@ router.get("/platform/operations/readiness", requireAuth, requireFounder, requir
   }
 });
 
-router.get("/platform/operations/pending", requireAuth, requireFounder, requireFounderPermission("founder.ops.read"), async (req: AuthRequest, res) => {
+router.get("/platform/operations/pending", requireAuth, requireFounder, requireFounderPermission("founder.ops.read"), async (req: AuthRequest, res: ResLike) => {
   try {
     const limit = (() => {
       const raw = one((req.query as any).limit);
@@ -380,4 +386,5 @@ router.get("/platform/operations/pending", requireAuth, requireFounder, requireF
   }
 });
 
-export default router;
+const exportedRouter = expressRouter as unknown as ExpressRouter;
+export default exportedRouter;

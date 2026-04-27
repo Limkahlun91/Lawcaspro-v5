@@ -1,11 +1,16 @@
-import { Router, type IRouter } from "express";
+import express, { type Router as ExpressRouter } from "express";
 import { db, sql } from "@workspace/db";
-import { requireAuth, requireFirmUser, requireFounder, requirePermission, type AuthRequest } from "../lib/auth";
-import { withAuthSafeDb } from "../lib/auth-safe-db";
-import { ApiError, sendError, sendOk } from "../lib/api-response";
-import { assertFounderPermission, loadFounderGovernanceContext } from "../services/founder-governance";
+import { requireAuth, requireFirmUser, requireFounder, requirePermission, type AuthRequest } from "../lib/auth.js";
+import { withAuthSafeDb } from "../lib/auth-safe-db.js";
+import { ApiError, sendError, sendOk, type ResLike } from "../lib/api-response.js";
+import { assertFounderPermission, loadFounderGovernanceContext } from "../services/founder-governance/index.js";
 
-const router: IRouter = Router();
+type RouterInternalLike = {
+  get: (path: string, ...handlers: unknown[]) => unknown;
+};
+
+const expressRouter = express.Router();
+const router = expressRouter as unknown as RouterInternalLike;
 
 type DbExec = { execute: (q: ReturnType<typeof sql>) => Promise<unknown> };
 
@@ -16,7 +21,7 @@ async function queryRows(executor: DbExec, query: ReturnType<typeof sql>): Promi
   return [];
 }
 
-router.get("/audit-logs", requireAuth, requireFirmUser, requirePermission("audit", "read"), async (req: AuthRequest, res): Promise<void> => {
+router.get("/audit-logs", requireAuth, requireFirmUser, requirePermission("audit", "read"), async (req: AuthRequest, res: ResLike): Promise<void> => {
   const { action, entityType, actorId, limit = "100", offset = "0" } = req.query as Record<string, string>;
   const executor = req.rlsDb ?? db;
 
@@ -48,7 +53,7 @@ router.get("/audit-logs", requireAuth, requireFirmUser, requirePermission("audit
   });
 });
 
-router.get("/platform/audit-logs", requireAuth, requireFounder, async (req: AuthRequest, res): Promise<void> => {
+router.get("/platform/audit-logs", requireAuth, requireFounder, async (req: AuthRequest, res: ResLike): Promise<void> => {
   try {
     const q = req.query as Record<string, string | undefined>;
     const action = q.action ? String(q.action) : undefined;
@@ -155,4 +160,5 @@ router.get("/platform/audit-logs", requireAuth, requireFounder, async (req: Auth
   }
 });
 
-export default router;
+const exportedRouter = expressRouter as unknown as ExpressRouter;
+export default exportedRouter;

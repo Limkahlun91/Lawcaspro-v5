@@ -1,15 +1,21 @@
-import { Router, type IRouter } from "express";
+import express, { type Response, type Router as ExpressRouter } from "express";
 import { eq, and, desc } from "drizzle-orm";
 import {
   db, invoicesTable, invoiceItemsTable, quotationsTable, quotationItemsTable,
   casesTable, clientsTable, casePurchasersTable, ledgerEntriesTable,
   sql,
 } from "@workspace/db";
-import { requireAuth, requireFirmUser, requirePermission, requireReAuth, type AuthRequest, writeAuditLog } from "../lib/auth";
-import { sensitiveRateLimiter } from "../lib/rate-limit";
-import { one, queryOne } from "../lib/http";
+import { requireAuth, requireFirmUser, requirePermission, requireReAuth, type AuthRequest, writeAuditLog } from "../lib/auth.js";
+import { sensitiveRateLimiter } from "../lib/rate-limit.js";
+import { one, queryOne } from "../lib/http.js";
 
-const router: IRouter = Router();
+type RouterInternalLike = {
+  get: (path: string, ...handlers: unknown[]) => unknown;
+  post: (path: string, ...handlers: unknown[]) => unknown;
+};
+
+const expressRouter = express.Router();
+const router = expressRouter as unknown as RouterInternalLike;
 
 type DbConn = typeof db | NonNullable<AuthRequest["rlsDb"]>;
 const rdb = (req: AuthRequest): DbConn => req.rlsDb ?? db;
@@ -26,7 +32,7 @@ async function nextInvoiceNo(r: DbConn, firmId: number): Promise<string> {
 }
 
 // List
-router.get("/invoices", requireAuth, requireFirmUser, requirePermission("accounting", "read"), async (req: AuthRequest, res): Promise<void> => {
+router.get("/invoices", requireAuth, requireFirmUser, requirePermission("accounting", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const r = rdb(req);
     const caseIdStr = queryOne(req.query, "caseId");
@@ -48,7 +54,7 @@ router.get("/invoices", requireAuth, requireFirmUser, requirePermission("account
 });
 
 // Detail
-router.get("/invoices/:id", requireAuth, requireFirmUser, requirePermission("accounting", "read"), async (req: AuthRequest, res): Promise<void> => {
+router.get("/invoices/:id", requireAuth, requireFirmUser, requirePermission("accounting", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const r = rdb(req);
     const idStr = one(req.params.id);
@@ -65,7 +71,7 @@ router.get("/invoices/:id", requireAuth, requireFirmUser, requirePermission("acc
 });
 
 // Create from quotation
-router.post("/invoices/from-quotation/:quotationId", sensitiveRateLimiter, requireAuth, requireFirmUser, requirePermission("accounting", "write"), async (req: AuthRequest, res): Promise<void> => {
+router.post("/invoices/from-quotation/:quotationId", sensitiveRateLimiter, requireAuth, requireFirmUser, requirePermission("accounting", "write"), async (req: AuthRequest, res: Response): Promise<void> => {
   const r = rdb(req);
   const quotationIdStr = one(req.params.quotationId);
   const quotationId = quotationIdStr ? parseInt(quotationIdStr) : NaN;
@@ -108,7 +114,7 @@ router.post("/invoices/from-quotation/:quotationId", sensitiveRateLimiter, requi
 });
 
 // Create manually
-router.post("/invoices", sensitiveRateLimiter, requireAuth, requireFirmUser, requirePermission("accounting", "write"), async (req: AuthRequest, res): Promise<void> => {
+router.post("/invoices", sensitiveRateLimiter, requireAuth, requireFirmUser, requirePermission("accounting", "write"), async (req: AuthRequest, res: Response): Promise<void> => {
   const r = rdb(req);
   const { caseId, quotationId, items, notes, issuedDate, dueDate } = req.body;
   const rawItems = Array.isArray(items) ? items : [];
@@ -158,7 +164,7 @@ router.post("/invoices", sensitiveRateLimiter, requireAuth, requireFirmUser, req
 });
 
 // Issue invoice (draft → issued)
-router.post("/invoices/:id/issue", sensitiveRateLimiter, requireAuth, requireFirmUser, requirePermission("accounting", "write"), async (req: AuthRequest, res): Promise<void> => {
+router.post("/invoices/:id/issue", sensitiveRateLimiter, requireAuth, requireFirmUser, requirePermission("accounting", "write"), async (req: AuthRequest, res: Response): Promise<void> => {
   const r = rdb(req);
   const idStr = one(req.params.id);
   const id = idStr ? parseInt(idStr) : NaN;
@@ -173,7 +179,7 @@ router.post("/invoices/:id/issue", sensitiveRateLimiter, requireAuth, requireFir
 });
 
 // Void invoice
-router.post("/invoices/:id/void", sensitiveRateLimiter, requireAuth, requireFirmUser, requirePermission("accounting", "write"), requireReAuth, async (req: AuthRequest, res): Promise<void> => {
+router.post("/invoices/:id/void", sensitiveRateLimiter, requireAuth, requireFirmUser, requirePermission("accounting", "write"), requireReAuth, async (req: AuthRequest, res: Response): Promise<void> => {
   const r = rdb(req);
   const idStr = one(req.params.id);
   const id = idStr ? parseInt(idStr) : NaN;
@@ -186,4 +192,5 @@ router.post("/invoices/:id/void", sensitiveRateLimiter, requireAuth, requireFirm
   res.json(updated);
 });
 
-export default router;
+const exportedRouter = expressRouter as unknown as ExpressRouter;
+export default exportedRouter;

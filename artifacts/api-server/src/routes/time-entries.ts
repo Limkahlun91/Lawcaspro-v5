@@ -1,13 +1,21 @@
-import { Router, type IRouter } from "express";
+import express, { type Response, type Router as ExpressRouter } from "express";
 import { eq, and, desc } from "drizzle-orm";
 import { db, sql, timeEntriesTable, usersTable } from "@workspace/db";
-import { requireAuth, requireFirmUser, type AuthRequest } from "../lib/auth";
+import { requireAuth, requireFirmUser, type AuthRequest } from "../lib/auth.js";
 
 const one = (v: string | string[] | undefined): string | undefined => (Array.isArray(v) ? v[0] : v);
 
-const router: IRouter = Router();
+type RouterInternalLike = {
+  get: (path: string, ...handlers: unknown[]) => unknown;
+  post: (path: string, ...handlers: unknown[]) => unknown;
+  put: (path: string, ...handlers: unknown[]) => unknown;
+  delete: (path: string, ...handlers: unknown[]) => unknown;
+};
 
-router.get("/time-entries", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+const expressRouter = express.Router();
+const router = expressRouter as unknown as RouterInternalLike;
+
+router.get("/time-entries", requireAuth, requireFirmUser, async (req: AuthRequest, res: Response): Promise<void> => {
   const caseId = one((req.query as any).caseId);
   const conds = [eq(timeEntriesTable.firmId, req.firmId!)];
   if (caseId) conds.push(eq(timeEntriesTable.caseId, parseInt(caseId, 10)));
@@ -15,7 +23,7 @@ router.get("/time-entries", requireAuth, requireFirmUser, async (req: AuthReques
   res.json(rows);
 });
 
-router.get("/time-entries/summary", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+router.get("/time-entries/summary", requireAuth, requireFirmUser, async (req: AuthRequest, res: Response): Promise<void> => {
   const caseId = one((req.query as any).caseId);
   const conds = [eq(timeEntriesTable.firmId, req.firmId!)];
   if (caseId) conds.push(eq(timeEntriesTable.caseId, parseInt(caseId, 10)));
@@ -29,7 +37,7 @@ router.get("/time-entries/summary", requireAuth, requireFirmUser, async (req: Au
   res.json(row);
 });
 
-router.post("/time-entries", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+router.post("/time-entries", requireAuth, requireFirmUser, async (req: AuthRequest, res: Response): Promise<void> => {
   const { caseId, entryDate, description, hours, ratePerHour, isBillable } = req.body;
   if (!caseId || !entryDate || !description || hours === undefined) {
     res.status(400).json({ error: "caseId, entryDate, description, hours required" }); return;
@@ -62,7 +70,7 @@ router.post("/time-entries", requireAuth, requireFirmUser, async (req: AuthReque
   res.status(201).json(row);
 });
 
-router.put("/time-entries/:id", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+router.put("/time-entries/:id", requireAuth, requireFirmUser, async (req: AuthRequest, res: Response): Promise<void> => {
   const idStr = one(req.params.id);
   const id = idStr ? parseInt(idStr) : NaN;
   if (isNaN(id)) { res.status(400).json({ error: "Invalid time entry ID" }); return; }
@@ -91,7 +99,7 @@ router.put("/time-entries/:id", requireAuth, requireFirmUser, async (req: AuthRe
   res.json(row);
 });
 
-router.delete("/time-entries/:id", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+router.delete("/time-entries/:id", requireAuth, requireFirmUser, async (req: AuthRequest, res: Response): Promise<void> => {
   const idStr = one(req.params.id);
   const id = idStr ? parseInt(idStr) : NaN;
   if (isNaN(id)) { res.status(400).json({ error: "Invalid time entry ID" }); return; }
@@ -99,4 +107,5 @@ router.delete("/time-entries/:id", requireAuth, requireFirmUser, async (req: Aut
   res.json({ success: true });
 });
 
-export default router;
+const exportedRouter = expressRouter as unknown as ExpressRouter;
+export default exportedRouter;

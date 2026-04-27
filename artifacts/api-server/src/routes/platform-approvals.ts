@@ -1,12 +1,18 @@
-import { Router, type IRouter } from "express";
-import { withAuthSafeDb } from "../lib/auth-safe-db";
-import { requireAuth, requireFounder, type AuthRequest, writeAuditLog } from "../lib/auth";
-import { ApiError, parseIntParam, sendError, sendOk } from "../lib/api-response";
-import { assertFounderPermission, getApprovalRequest, listApprovalRequests, loadFounderGovernanceContext, rejectRequest, approveRequest } from "../services/founder-governance";
+import express, { type Router as ExpressRouter } from "express";
+import { withAuthSafeDb } from "../lib/auth-safe-db.js";
+import { requireAuth, requireFounder, type AuthRequest, writeAuditLog } from "../lib/auth.js";
+import { ApiError, parseIntParam, sendError, sendOk, type ResLike } from "../lib/api-response.js";
+import { assertFounderPermission, getApprovalRequest, listApprovalRequests, loadFounderGovernanceContext, rejectRequest, approveRequest } from "../services/founder-governance/index.js";
 
-const router: IRouter = Router();
+type RouterInternalLike = {
+  get: (path: string, ...handlers: unknown[]) => unknown;
+  post: (path: string, ...handlers: unknown[]) => unknown;
+};
 
-router.get("/platform/firms/:firmId/approvals", requireAuth, requireFounder, async (req: AuthRequest, res) => {
+const expressRouter = express.Router();
+const router = expressRouter as unknown as RouterInternalLike;
+
+router.get("/platform/firms/:firmId/approvals", requireAuth, requireFounder, async (req: AuthRequest, res: ResLike) => {
   try {
     const firmId = parseIntParam("firmId", req.params.firmId, { required: true, min: 1 })!;
     const status = (() => {
@@ -32,7 +38,7 @@ router.get("/platform/firms/:firmId/approvals", requireAuth, requireFounder, asy
   }
 });
 
-router.get("/platform/approvals/:id", requireAuth, requireFounder, async (req: AuthRequest, res) => {
+router.get("/platform/approvals/:id", requireAuth, requireFounder, async (req: AuthRequest, res: ResLike) => {
   try {
     const id = String(req.params.id ?? "").trim();
     if (!id) throw new ApiError({ status: 400, code: "MISSING_REQUIRED_FIELD", message: "id is required", retryable: false });
@@ -49,7 +55,7 @@ router.get("/platform/approvals/:id", requireAuth, requireFounder, async (req: A
   }
 });
 
-router.post("/platform/approvals/:id/approve", requireAuth, requireFounder, async (req: AuthRequest, res) => {
+router.post("/platform/approvals/:id/approve", requireAuth, requireFounder, async (req: AuthRequest, res: ResLike) => {
   try {
     const id = String(req.params.id ?? "").trim();
     if (!id) throw new ApiError({ status: 400, code: "MISSING_REQUIRED_FIELD", message: "id is required", retryable: false });
@@ -69,7 +75,7 @@ router.post("/platform/approvals/:id/approve", requireAuth, requireFounder, asyn
   }
 });
 
-router.post("/platform/approvals/:id/reject", requireAuth, requireFounder, async (req: AuthRequest, res) => {
+router.post("/platform/approvals/:id/reject", requireAuth, requireFounder, async (req: AuthRequest, res: ResLike) => {
   try {
     const id = String(req.params.id ?? "").trim();
     if (!id) throw new ApiError({ status: 400, code: "MISSING_REQUIRED_FIELD", message: "id is required", retryable: false });
@@ -89,5 +95,5 @@ router.post("/platform/approvals/:id/reject", requireAuth, requireFounder, async
   }
 });
 
-export default router;
-
+const exportedRouter = expressRouter as unknown as ExpressRouter;
+export default exportedRouter;

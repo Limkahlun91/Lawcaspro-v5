@@ -1,17 +1,25 @@
-import { Router, type IRouter } from "express";
+import express, { type Response, type Router as ExpressRouter } from "express";
 import { eq, and } from "drizzle-orm";
 import { db, firmBankAccountsTable, firmsTable, sql } from "@workspace/db";
-import { requireAuth, requireFirmUser, requirePermission, type AuthRequest, writeAuditLog } from "../lib/auth";
-import { one } from "../lib/http";
+import { requireAuth, requireFirmUser, requirePermission, type AuthRequest, writeAuditLog } from "../lib/auth.js";
+import { one } from "../lib/http.js";
 
 const VALID_ACCOUNT_TYPES = ["office", "client"];
 
-const router: IRouter = Router();
+type RouterInternalLike = {
+  get: (path: string, ...handlers: unknown[]) => unknown;
+  post: (path: string, ...handlers: unknown[]) => unknown;
+  patch: (path: string, ...handlers: unknown[]) => unknown;
+  delete: (path: string, ...handlers: unknown[]) => unknown;
+};
+
+const expressRouter = express.Router();
+const router = expressRouter as unknown as RouterInternalLike;
 
 type DbConn = typeof db | NonNullable<AuthRequest["rlsDb"]>;
 const rdb = (req: AuthRequest): DbConn => req.rlsDb ?? db;
 
-router.get("/firm-settings", requireAuth, requireFirmUser, async (req: AuthRequest, res) => {
+router.get("/firm-settings", requireAuth, requireFirmUser, async (req: AuthRequest, res: Response) => {
   try {
     const r = rdb(req);
     const firmId = req.firmId!;
@@ -44,7 +52,7 @@ router.get("/firm-settings", requireAuth, requireFirmUser, async (req: AuthReque
   }
 });
 
-router.patch("/firm-settings", requireAuth, requireFirmUser, requirePermission("settings", "update"), async (req: AuthRequest, res): Promise<void> => {
+router.patch("/firm-settings", requireAuth, requireFirmUser, requirePermission("settings", "update"), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const r = rdb(req);
     const firmId = req.firmId!;
@@ -88,7 +96,7 @@ router.patch("/firm-settings", requireAuth, requireFirmUser, requirePermission("
   }
 });
 
-router.post("/firm-settings/bank-accounts", requireAuth, requireFirmUser, requirePermission("settings", "update"), async (req: AuthRequest, res): Promise<void> => {
+router.post("/firm-settings/bank-accounts", requireAuth, requireFirmUser, requirePermission("settings", "update"), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const r = req.rlsDb;
     if (!r) {
@@ -177,7 +185,7 @@ router.post("/firm-settings/bank-accounts", requireAuth, requireFirmUser, requir
   }
 });
 
-router.patch("/firm-settings/bank-accounts/:id", requireAuth, requireFirmUser, requirePermission("settings", "update"), async (req: AuthRequest, res): Promise<void> => {
+router.patch("/firm-settings/bank-accounts/:id", requireAuth, requireFirmUser, requirePermission("settings", "update"), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const r = req.rlsDb;
     if (!r) {
@@ -280,7 +288,7 @@ router.patch("/firm-settings/bank-accounts/:id", requireAuth, requireFirmUser, r
   }
 });
 
-router.delete("/firm-settings/bank-accounts/:id", requireAuth, requireFirmUser, requirePermission("settings", "update"), async (req: AuthRequest, res): Promise<void> => {
+router.delete("/firm-settings/bank-accounts/:id", requireAuth, requireFirmUser, requirePermission("settings", "update"), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const r = req.rlsDb;
     if (!r) {
@@ -332,4 +340,5 @@ router.delete("/firm-settings/bank-accounts/:id", requireAuth, requireFirmUser, 
   }
 });
 
-export default router;
+const exportedRouter = expressRouter as unknown as ExpressRouter;
+export default exportedRouter;

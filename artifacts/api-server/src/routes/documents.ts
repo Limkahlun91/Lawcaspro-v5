@@ -1,10 +1,10 @@
-import { Router, type IRouter } from "express";
+import express, { type Response, type Router as ExpressRouter } from "express";
 import { caseDocumentsTable, db, documentTemplatesTable, sql } from "@workspace/db";
 import { PRINT_ACTIONS, isLetterheadApplicableDocumentType, isMasterDocumentLetterLike } from "@workspace/documents-registry";
-import { requireAuth, requireFirmUser, requireFounder, requirePermission, writeAuditLog, type AuthRequest } from "../lib/auth";
-import { logger } from "../lib/logger";
-import { withAuthSafeDb } from "../lib/auth-safe-db";
-import { getSupabaseStorageConfigError, ObjectNotFoundError, ObjectStorageService, SupabaseStorageService } from "../lib/objectStorage";
+import { requireAuth, requireFirmUser, requireFounder, requirePermission, writeAuditLog, type AuthRequest } from "../lib/auth.js";
+import { logger } from "../lib/logger.js";
+import { withAuthSafeDb } from "../lib/auth-safe-db.js";
+import { getSupabaseStorageConfigError, ObjectNotFoundError, ObjectStorageService, SupabaseStorageService } from "../lib/objectStorage.js";
 import { Readable } from "stream";
 import { randomUUID } from "crypto";
 import Docxtemplater from "docxtemplater";
@@ -13,25 +13,34 @@ import * as yazl from "yazl";
 import { PDFDocument, rgb, StandardFonts } from "pdf-lib";
 import fontkit from "@pdf-lib/fontkit";
 import { z } from "zod";
-import { normalizePurchaseMode, normalizeTitleType } from "../lib/documentApplicability";
-import { evaluateTemplateApplicabilityV2 } from "../lib/templateApplicabilityEngine";
-import { evaluateTemplateChecklist, normalizeChecklistMode } from "../lib/templateChecklistEngine";
-import { evaluateTemplateReadiness, type TemplateReadinessInputs } from "../lib/documentReadiness";
-import { resolveSmartFilename } from "../lib/smartFileNaming";
-import { ensureUniqueCaseDocumentFileName, resolveDocumentFileName } from "../lib/documentFileName";
-import { normalizeWorkflowDocumentKeyFromDb, workflowDocumentLabel } from "../lib/caseWorkflowDocuments";
-import { LOAN_STAMPING_ITEM_KEYS, isLoanStampingItemKeyAllowedForTitleType, normalizeTitleType as normalizeLoanTitleType, type LoanStampingItemKey } from "../lib/loanStamping";
-import { listDocumentVariables, resolveVariablesForTemplate, type PlaceholderWarning } from "../lib/documentVariables";
-import { getFirmTemplateBindings, getPlatformDocumentBindings, replaceFirmTemplateBindings, replacePlatformDocumentBindings } from "../lib/documentBindings";
-import { getFirmTemplateApplicabilityRules, getPlatformDocumentApplicabilityRules, upsertFirmTemplateApplicabilityRules, upsertPlatformDocumentApplicabilityRules } from "../lib/documentApplicabilityRules";
-import { runDocumentPreview } from "../lib/documentPreview";
-import { findUnknownVariablesInClause, getFirmClauseById, getPlatformClauseById, isClauseApplicable, normalizeClauseCode } from "../lib/clauseLibrary";
-import { applyClauseInsertionToDocx, buildClauseInsertion, decideClauseInsertion, normalizeClauseInsertionMode, type SelectedClauseRef } from "../lib/documentClauses";
-import { detectClausePlaceholders } from "../lib/docxPlaceholder";
-import { classifyDocumentForExtraction, extractDocumentText, guessDocumentTypeFromText, mapExtractedTextToSuggestions } from "../lib/documentExtraction";
-import { applyExtractionSuggestion } from "../lib/extractionWriteback";
+import { normalizePurchaseMode, normalizeTitleType } from "../lib/documentApplicability.js";
+import { evaluateTemplateApplicabilityV2 } from "../lib/templateApplicabilityEngine.js";
+import { evaluateTemplateChecklist, normalizeChecklistMode } from "../lib/templateChecklistEngine.js";
+import { evaluateTemplateReadiness, type TemplateReadinessInputs } from "../lib/documentReadiness.js";
+import { resolveSmartFilename } from "../lib/smartFileNaming.js";
+import { ensureUniqueCaseDocumentFileName, resolveDocumentFileName } from "../lib/documentFileName.js";
+import { normalizeWorkflowDocumentKeyFromDb, workflowDocumentLabel } from "../lib/caseWorkflowDocuments.js";
+import { LOAN_STAMPING_ITEM_KEYS, isLoanStampingItemKeyAllowedForTitleType, normalizeTitleType as normalizeLoanTitleType, type LoanStampingItemKey } from "../lib/loanStamping.js";
+import { listDocumentVariables, resolveVariablesForTemplate, type PlaceholderWarning } from "../lib/documentVariables.js";
+import { getFirmTemplateBindings, getPlatformDocumentBindings, replaceFirmTemplateBindings, replacePlatformDocumentBindings } from "../lib/documentBindings.js";
+import { getFirmTemplateApplicabilityRules, getPlatformDocumentApplicabilityRules, upsertFirmTemplateApplicabilityRules, upsertPlatformDocumentApplicabilityRules } from "../lib/documentApplicabilityRules.js";
+import { runDocumentPreview } from "../lib/documentPreview.js";
+import { findUnknownVariablesInClause, getFirmClauseById, getPlatformClauseById, isClauseApplicable, normalizeClauseCode } from "../lib/clauseLibrary.js";
+import { applyClauseInsertionToDocx, buildClauseInsertion, decideClauseInsertion, normalizeClauseInsertionMode, type SelectedClauseRef } from "../lib/documentClauses.js";
+import { detectClausePlaceholders } from "../lib/docxPlaceholder.js";
+import { classifyDocumentForExtraction, extractDocumentText, guessDocumentTypeFromText, mapExtractedTextToSuggestions } from "../lib/documentExtraction.js";
+import { applyExtractionSuggestion } from "../lib/extractionWriteback.js";
 
-const router: IRouter = Router();
+type RouterInternalLike = {
+  get: (path: string, ...handlers: unknown[]) => unknown;
+  post: (path: string, ...handlers: unknown[]) => unknown;
+  patch: (path: string, ...handlers: unknown[]) => unknown;
+  put: (path: string, ...handlers: unknown[]) => unknown;
+  delete: (path: string, ...handlers: unknown[]) => unknown;
+};
+
+const expressRouter = express.Router();
+const router = expressRouter as unknown as RouterInternalLike;
 const storage = new ObjectStorageService();
 const supabaseStorage = new SupabaseStorageService();
 
@@ -7225,4 +7234,5 @@ router.delete("/cases/:caseId/documents/:docId", requireAuth, requireFirmUser, r
   res.sendStatus(204);
 });
 
-export default router;
+const exportedRouter = expressRouter as unknown as ExpressRouter;
+export default exportedRouter;

@@ -1,10 +1,18 @@
-import { Router, type IRouter } from "express";
+import express, { type Response, type Router as ExpressRouter } from "express";
 import { db, sql } from "@workspace/db";
-import { requireAuth, requireFirmUser, requirePermission, type AuthRequest, writeAuditLog } from "../lib/auth";
+import { requireAuth, requireFirmUser, requirePermission, type AuthRequest, writeAuditLog } from "../lib/auth.js";
 
 type SqlChunk = ReturnType<typeof sql>;
 
-const router: IRouter = Router();
+type RouterInternalLike = {
+  get: (path: string, ...handlers: unknown[]) => unknown;
+  post: (path: string, ...handlers: unknown[]) => unknown;
+  patch: (path: string, ...handlers: unknown[]) => unknown;
+  delete: (path: string, ...handlers: unknown[]) => unknown;
+};
+
+const expressRouter = express.Router();
+const router = expressRouter as unknown as RouterInternalLike;
 
 async function queryRows(query: ReturnType<typeof sql>): Promise<Record<string, unknown>[]> {
   const result = await db.execute(query);
@@ -15,7 +23,7 @@ async function queryRows(query: ReturnType<typeof sql>): Promise<Record<string, 
 
 const CATEGORIES = ["legal_fee", "disbursement", "stamp_duty", "professional_fee", "other"] as const;
 
-router.get("/accounting", requireAuth, requireFirmUser, requirePermission("accounting", "read"), async (req: AuthRequest, res): Promise<void> => {
+router.get("/accounting", requireAuth, requireFirmUser, requirePermission("accounting", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
   const rows = await queryRows(sql`
     SELECT be.id, be.case_id, be.description, be.amount, be.quantity,
       be.is_paid as "isPaid", be.created_at as "billedAt",
@@ -29,7 +37,7 @@ router.get("/accounting", requireAuth, requireFirmUser, requirePermission("accou
   res.json(rows);
 });
 
-router.get("/cases/:caseId/billing", requireAuth, requireFirmUser, requirePermission("accounting", "read"), async (req: AuthRequest, res): Promise<void> => {
+router.get("/cases/:caseId/billing", requireAuth, requireFirmUser, requirePermission("accounting", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
   const caseId = Number(req.params.caseId);
   const rows = await queryRows(sql`
     SELECT be.*, u.name as created_by_name
@@ -41,7 +49,7 @@ router.get("/cases/:caseId/billing", requireAuth, requireFirmUser, requirePermis
   res.json(rows);
 });
 
-router.post("/cases/:caseId/billing", requireAuth, requireFirmUser, requirePermission("accounting", "write"), async (req: AuthRequest, res): Promise<void> => {
+router.post("/cases/:caseId/billing", requireAuth, requireFirmUser, requirePermission("accounting", "write"), async (req: AuthRequest, res: Response): Promise<void> => {
   const caseId = Number(req.params.caseId);
   const { category, description, amount, quantity, isPaid } = req.body as {
     category: string;
@@ -70,7 +78,7 @@ router.post("/cases/:caseId/billing", requireAuth, requireFirmUser, requirePermi
   await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "accounting.billing.create", entityType: "case_billing_entry", entityId: createdId, detail: `caseId=${caseId} amount=${amount}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
 });
 
-router.patch("/cases/:caseId/billing/:entryId", requireAuth, requireFirmUser, requirePermission("accounting", "write"), async (req: AuthRequest, res): Promise<void> => {
+router.patch("/cases/:caseId/billing/:entryId", requireAuth, requireFirmUser, requirePermission("accounting", "write"), async (req: AuthRequest, res: Response): Promise<void> => {
   const caseId = Number(req.params.caseId);
   const entryId = Number(req.params.entryId);
   const { category, description, amount, quantity, isPaid } = req.body as Partial<{
@@ -115,7 +123,7 @@ router.patch("/cases/:caseId/billing/:entryId", requireAuth, requireFirmUser, re
   await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "accounting.billing.update", entityType: "case_billing_entry", entityId: entryId, detail: `caseId=${caseId}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
 });
 
-router.delete("/cases/:caseId/billing/:entryId", requireAuth, requireFirmUser, requirePermission("accounting", "write"), async (req: AuthRequest, res): Promise<void> => {
+router.delete("/cases/:caseId/billing/:entryId", requireAuth, requireFirmUser, requirePermission("accounting", "write"), async (req: AuthRequest, res: Response): Promise<void> => {
   const caseId = Number(req.params.caseId);
   const entryId = Number(req.params.entryId);
 
@@ -134,7 +142,7 @@ router.delete("/cases/:caseId/billing/:entryId", requireAuth, requireFirmUser, r
   await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "accounting.billing.delete", entityType: "case_billing_entry", entityId: entryId, detail: `caseId=${caseId}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
 });
 
-router.get("/cases/:caseId/billing/summary", requireAuth, requireFirmUser, requirePermission("accounting", "read"), async (req: AuthRequest, res): Promise<void> => {
+router.get("/cases/:caseId/billing/summary", requireAuth, requireFirmUser, requirePermission("accounting", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
   const caseId = Number(req.params.caseId);
   const rows = await queryRows(sql`
     SELECT 
@@ -162,7 +170,7 @@ router.get("/cases/:caseId/billing/summary", requireAuth, requireFirmUser, requi
   res.json({ byCategory: rows, overall: overall[0] ?? { total: 0, paid: 0, outstanding: 0 } });
 });
 
-router.get("/accounting/summary", requireAuth, requireFirmUser, requirePermission("accounting", "read"), async (req: AuthRequest, res): Promise<void> => {
+router.get("/accounting/summary", requireAuth, requireFirmUser, requirePermission("accounting", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
   const topCases = await queryRows(sql`
     SELECT c.reference_no, c.id as case_id,
       SUM(be.amount * be.quantity) as total,
@@ -214,4 +222,5 @@ router.get("/accounting/summary", requireAuth, requireFirmUser, requirePermissio
   });
 });
 
-export default router;
+const exportedRouter = expressRouter as unknown as ExpressRouter;
+export default exportedRouter;

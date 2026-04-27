@@ -1,14 +1,22 @@
-import { Router, type IRouter } from "express";
+import express, { type Response, type Router as ExpressRouter } from "express";
 import { eq, and, or, ilike, isNull, desc } from "drizzle-orm";
 import { z } from "zod";
 import {
   db, partiesTable, complianceProfilesTable, casePartiesTable,
   beneficialOwnersTable,
 } from "@workspace/db";
-import { requireAuth, requireFirmUser, type AuthRequest, writeAuditLog } from "../lib/auth";
-import { sensitiveRateLimiter } from "../lib/rate-limit";
+import { requireAuth, requireFirmUser, type AuthRequest, writeAuditLog } from "../lib/auth.js";
+import { sensitiveRateLimiter } from "../lib/rate-limit.js";
 
-const router: IRouter = Router();
+type RouterInternalLike = {
+  get: (path: string, ...handlers: unknown[]) => unknown;
+  post: (path: string, ...handlers: unknown[]) => unknown;
+  patch: (path: string, ...handlers: unknown[]) => unknown;
+  delete: (path: string, ...handlers: unknown[]) => unknown;
+};
+
+const expressRouter = express.Router();
+const router = expressRouter as unknown as RouterInternalLike;
 
 function rdb(req: AuthRequest) { return req.rlsDb ?? db; }
 
@@ -58,7 +66,7 @@ const CreateBeneficialOwnerBody = z.object({
 // ---------------------------------------------------------------------------
 // GET /parties — list firm parties with optional search
 // ---------------------------------------------------------------------------
-router.get("/parties", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+router.get("/parties", requireAuth, requireFirmUser, async (req: AuthRequest, res: Response): Promise<void> => {
   const { q, type } = req.query as Record<string, string>;
   let query = db.select().from(partiesTable)
     .where(and(
@@ -82,7 +90,7 @@ router.get("/parties", requireAuth, requireFirmUser, async (req: AuthRequest, re
 // ---------------------------------------------------------------------------
 // POST /parties — create a party
 // ---------------------------------------------------------------------------
-router.post("/parties", sensitiveRateLimiter, requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+router.post("/parties", sensitiveRateLimiter, requireAuth, requireFirmUser, async (req: AuthRequest, res: Response): Promise<void> => {
   const parsed = CreatePartyBody.safeParse(req.body);
   if (!parsed.success) { res.status(400).json({ error: parsed.error.issues }); return; }
 
@@ -139,7 +147,7 @@ router.post("/parties", sensitiveRateLimiter, requireAuth, requireFirmUser, asyn
 // ---------------------------------------------------------------------------
 // GET /parties/:id — get party detail with compliance profile
 // ---------------------------------------------------------------------------
-router.get("/parties/:id", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+router.get("/parties/:id", requireAuth, requireFirmUser, async (req: AuthRequest, res: Response): Promise<void> => {
   const id = Number(req.params.id);
   const [party] = await rdb(req).select().from(partiesTable)
     .where(and(eq(partiesTable.id, id), eq(partiesTable.firmId, req.firmId!), isNull(partiesTable.deletedAt)));
@@ -160,7 +168,7 @@ router.get("/parties/:id", requireAuth, requireFirmUser, async (req: AuthRequest
 // ---------------------------------------------------------------------------
 // PATCH /parties/:id — update party
 // ---------------------------------------------------------------------------
-router.patch("/parties/:id", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+router.patch("/parties/:id", requireAuth, requireFirmUser, async (req: AuthRequest, res: Response): Promise<void> => {
   const id = Number(req.params.id);
   const [party] = await rdb(req).select().from(partiesTable)
     .where(and(eq(partiesTable.id, id), eq(partiesTable.firmId, req.firmId!), isNull(partiesTable.deletedAt)));
@@ -206,7 +214,7 @@ router.patch("/parties/:id", requireAuth, requireFirmUser, async (req: AuthReque
 // ---------------------------------------------------------------------------
 // DELETE /parties/:id — soft-delete party
 // ---------------------------------------------------------------------------
-router.delete("/parties/:id", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+router.delete("/parties/:id", requireAuth, requireFirmUser, async (req: AuthRequest, res: Response): Promise<void> => {
   const id = Number(req.params.id);
   const [party] = await rdb(req).select().from(partiesTable)
     .where(and(eq(partiesTable.id, id), eq(partiesTable.firmId, req.firmId!), isNull(partiesTable.deletedAt)));
@@ -224,7 +232,7 @@ router.delete("/parties/:id", requireAuth, requireFirmUser, async (req: AuthRequ
 // ---------------------------------------------------------------------------
 // POST /parties/:id/beneficial-owners — add a beneficial owner
 // ---------------------------------------------------------------------------
-router.post("/parties/:id/beneficial-owners", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+router.post("/parties/:id/beneficial-owners", requireAuth, requireFirmUser, async (req: AuthRequest, res: Response): Promise<void> => {
   const partyId = Number(req.params.id);
   const [party] = await rdb(req).select().from(partiesTable)
     .where(and(eq(partiesTable.id, partyId), eq(partiesTable.firmId, req.firmId!), isNull(partiesTable.deletedAt)));
@@ -262,7 +270,7 @@ router.post("/parties/:id/beneficial-owners", requireAuth, requireFirmUser, asyn
 // ---------------------------------------------------------------------------
 // DELETE /parties/:id/beneficial-owners/:boId
 // ---------------------------------------------------------------------------
-router.delete("/parties/:id/beneficial-owners/:boId", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+router.delete("/parties/:id/beneficial-owners/:boId", requireAuth, requireFirmUser, async (req: AuthRequest, res: Response): Promise<void> => {
   const boId = Number(req.params.boId);
   await rdb(req).delete(beneficialOwnersTable).where(
     and(eq(beneficialOwnersTable.id, boId), eq(beneficialOwnersTable.firmId, req.firmId!))
@@ -278,7 +286,7 @@ router.delete("/parties/:id/beneficial-owners/:boId", requireAuth, requireFirmUs
 // ---------------------------------------------------------------------------
 // GET /cases/:caseId/parties — list parties linked to a case
 // ---------------------------------------------------------------------------
-router.get("/cases/:caseId/parties", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+router.get("/cases/:caseId/parties", requireAuth, requireFirmUser, async (req: AuthRequest, res: Response): Promise<void> => {
   const caseId = Number(req.params.caseId);
   const links = await rdb(req).select({
     id: casePartiesTable.id,
@@ -293,7 +301,7 @@ router.get("/cases/:caseId/parties", requireAuth, requireFirmUser, async (req: A
 // ---------------------------------------------------------------------------
 // POST /cases/:caseId/parties — link a party to a case
 // ---------------------------------------------------------------------------
-router.post("/cases/:caseId/parties", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+router.post("/cases/:caseId/parties", requireAuth, requireFirmUser, async (req: AuthRequest, res: Response): Promise<void> => {
   const caseId = Number(req.params.caseId);
   const parsed = z.object({
     partyId: z.number().int(),
@@ -331,7 +339,7 @@ router.post("/cases/:caseId/parties", requireAuth, requireFirmUser, async (req: 
 // ---------------------------------------------------------------------------
 // DELETE /cases/:caseId/parties/:partyId — unlink a party from a case
 // ---------------------------------------------------------------------------
-router.delete("/cases/:caseId/parties/:partyId", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+router.delete("/cases/:caseId/parties/:partyId", requireAuth, requireFirmUser, async (req: AuthRequest, res: Response): Promise<void> => {
   const caseId = Number(req.params.caseId);
   const partyId = Number(req.params.partyId);
   await rdb(req).delete(casePartiesTable)
@@ -350,4 +358,5 @@ router.delete("/cases/:caseId/parties/:partyId", requireAuth, requireFirmUser, a
   res.json({ success: true });
 });
 
-export default router;
+const exportedRouter = expressRouter as unknown as ExpressRouter;
+export default exportedRouter;

@@ -1,4 +1,4 @@
-import { Router, type IRouter } from "express";
+import express, { type Response, type Router as ExpressRouter } from "express";
 import { eq, and, desc } from "drizzle-orm";
 import { z } from "zod";
 import {
@@ -9,11 +9,19 @@ import {
   suspiciousReviewNotesTable, complianceRetentionRecordsTable,
   partiesTable,
 } from "@workspace/db";
-import { requireAuth, requireFirmUser, type AuthRequest, writeAuditLog } from "../lib/auth";
-import { sensitiveRateLimiter } from "../lib/rate-limit";
-import { queryOne } from "../lib/http";
+import { requireAuth, requireFirmUser, type AuthRequest, writeAuditLog } from "../lib/auth.js";
+import { sensitiveRateLimiter } from "../lib/rate-limit.js";
+import { queryOne } from "../lib/http.js";
 
-const router: IRouter = Router();
+type RouterInternalLike = {
+  get: (path: string, ...handlers: unknown[]) => unknown;
+  post: (path: string, ...handlers: unknown[]) => unknown;
+  patch: (path: string, ...handlers: unknown[]) => unknown;
+  delete: (path: string, ...handlers: unknown[]) => unknown;
+};
+
+const expressRouter = express.Router();
+const router = expressRouter as unknown as RouterInternalLike;
 
 function rdb(req: AuthRequest) { return req.rlsDb ?? db; }
 
@@ -64,7 +72,7 @@ function computeRiskScore(factors: {
 // ---------------------------------------------------------------------------
 // GET /compliance/profiles — list profiles for the firm
 // ---------------------------------------------------------------------------
-router.get("/compliance/profiles", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+router.get("/compliance/profiles", requireAuth, requireFirmUser, async (req: AuthRequest, res: Response): Promise<void> => {
   const status = queryOne(req.query, "status");
   const profiles = await rdb(req).select({
     id: complianceProfilesTable.id,
@@ -91,7 +99,7 @@ router.get("/compliance/profiles", requireAuth, requireFirmUser, async (req: Aut
 // ---------------------------------------------------------------------------
 // GET /compliance/profiles/:id — full profile detail
 // ---------------------------------------------------------------------------
-router.get("/compliance/profiles/:id", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+router.get("/compliance/profiles/:id", requireAuth, requireFirmUser, async (req: AuthRequest, res: Response): Promise<void> => {
   const id = Number(req.params.id);
   const [profile] = await rdb(req).select().from(complianceProfilesTable)
     .where(and(eq(complianceProfilesTable.id, id), eq(complianceProfilesTable.firmId, req.firmId!)));
@@ -125,7 +133,7 @@ router.get("/compliance/profiles/:id", requireAuth, requireFirmUser, async (req:
 // ---------------------------------------------------------------------------
 // PATCH /compliance/profiles/:id/status — update CDD status
 // ---------------------------------------------------------------------------
-router.patch("/compliance/profiles/:id/status", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+router.patch("/compliance/profiles/:id/status", requireAuth, requireFirmUser, async (req: AuthRequest, res: Response): Promise<void> => {
   const id = Number(req.params.id);
   const parsed = z.object({
     cddStatus: z.enum(["not_started","in_progress","pending_review","approved","rejected","enhanced_due_diligence_required"]),
@@ -163,7 +171,7 @@ router.patch("/compliance/profiles/:id/status", requireAuth, requireFirmUser, as
 // ---------------------------------------------------------------------------
 // POST /compliance/profiles/:id/cdd-checks — add a CDD check
 // ---------------------------------------------------------------------------
-router.post("/compliance/profiles/:id/cdd-checks", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+router.post("/compliance/profiles/:id/cdd-checks", requireAuth, requireFirmUser, async (req: AuthRequest, res: Response): Promise<void> => {
   const profileId = Number(req.params.id);
   const parsed = z.object({
     checkType: z.enum(["identity","address","source_of_funds","beneficial_ownership","sanctions","pep","other"]),
@@ -204,7 +212,7 @@ router.post("/compliance/profiles/:id/cdd-checks", requireAuth, requireFirmUser,
 // ---------------------------------------------------------------------------
 // POST /compliance/profiles/:id/risk-assessment — run risk scoring
 // ---------------------------------------------------------------------------
-router.post("/compliance/profiles/:id/risk-assessment", sensitiveRateLimiter, requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+router.post("/compliance/profiles/:id/risk-assessment", sensitiveRateLimiter, requireAuth, requireFirmUser, async (req: AuthRequest, res: Response): Promise<void> => {
   const profileId = Number(req.params.id);
   const parsed = z.object({
     factorIsPep: z.boolean().default(false),
@@ -275,7 +283,7 @@ router.post("/compliance/profiles/:id/risk-assessment", sensitiveRateLimiter, re
 // ---------------------------------------------------------------------------
 // POST /compliance/profiles/:id/sanctions-screening
 // ---------------------------------------------------------------------------
-router.post("/compliance/profiles/:id/sanctions-screening", sensitiveRateLimiter, requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+router.post("/compliance/profiles/:id/sanctions-screening", sensitiveRateLimiter, requireAuth, requireFirmUser, async (req: AuthRequest, res: Response): Promise<void> => {
   const profileId = Number(req.params.id);
   const parsed = z.object({
     screeningSource: z.enum(["OFAC","UN","INTERPOL","Malaysia_BNM","manual"]).default("manual"),
@@ -314,7 +322,7 @@ router.post("/compliance/profiles/:id/sanctions-screening", sensitiveRateLimiter
 // ---------------------------------------------------------------------------
 // POST /compliance/profiles/:id/pep-flags
 // ---------------------------------------------------------------------------
-router.post("/compliance/profiles/:id/pep-flags", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+router.post("/compliance/profiles/:id/pep-flags", requireAuth, requireFirmUser, async (req: AuthRequest, res: Response): Promise<void> => {
   const profileId = Number(req.params.id);
   const parsed = z.object({
     position: z.string().min(1),
@@ -361,7 +369,7 @@ router.post("/compliance/profiles/:id/pep-flags", requireAuth, requireFirmUser, 
 // ---------------------------------------------------------------------------
 // DELETE /compliance/profiles/:id/pep-flags/:flagId
 // ---------------------------------------------------------------------------
-router.delete("/compliance/profiles/:id/pep-flags/:flagId", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+router.delete("/compliance/profiles/:id/pep-flags/:flagId", requireAuth, requireFirmUser, async (req: AuthRequest, res: Response): Promise<void> => {
   const flagId = Number(req.params.flagId);
   const profileId = Number(req.params.id);
   await rdb(req).update(pepFlagsTable).set({ isActive: false }).where(
@@ -379,7 +387,7 @@ router.delete("/compliance/profiles/:id/pep-flags/:flagId", requireAuth, require
 // ---------------------------------------------------------------------------
 // POST /compliance/profiles/:id/source-of-funds
 // ---------------------------------------------------------------------------
-router.post("/compliance/profiles/:id/source-of-funds", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+router.post("/compliance/profiles/:id/source-of-funds", requireAuth, requireFirmUser, async (req: AuthRequest, res: Response): Promise<void> => {
   const profileId = Number(req.params.id);
   const parsed = z.object({
     sourceType: z.enum(["employment","business_income","investment","inheritance","gift","loan","sale_of_asset","other"]),
@@ -419,7 +427,7 @@ router.post("/compliance/profiles/:id/source-of-funds", requireAuth, requireFirm
 // ---------------------------------------------------------------------------
 // POST /compliance/profiles/:id/source-of-wealth
 // ---------------------------------------------------------------------------
-router.post("/compliance/profiles/:id/source-of-wealth", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+router.post("/compliance/profiles/:id/source-of-wealth", requireAuth, requireFirmUser, async (req: AuthRequest, res: Response): Promise<void> => {
   const profileId = Number(req.params.id);
   const parsed = z.object({
     wealthType: z.enum(["employment","business","investment","inheritance","other"]),
@@ -459,7 +467,7 @@ router.post("/compliance/profiles/:id/source-of-wealth", requireAuth, requireFir
 // ---------------------------------------------------------------------------
 // POST /compliance/profiles/:id/suspicious-notes
 // ---------------------------------------------------------------------------
-router.post("/compliance/profiles/:id/suspicious-notes", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+router.post("/compliance/profiles/:id/suspicious-notes", requireAuth, requireFirmUser, async (req: AuthRequest, res: Response): Promise<void> => {
   const profileId = Number(req.params.id);
   const parsed = z.object({
     noteType: z.enum(["internal","str_consideration","escalated"]).default("internal"),
@@ -495,7 +503,7 @@ router.post("/compliance/profiles/:id/suspicious-notes", requireAuth, requireFir
 // ---------------------------------------------------------------------------
 // POST /compliance/profiles/:id/retention — set retention record
 // ---------------------------------------------------------------------------
-router.post("/compliance/profiles/:id/retention", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+router.post("/compliance/profiles/:id/retention", requireAuth, requireFirmUser, async (req: AuthRequest, res: Response): Promise<void> => {
   const profileId = Number(req.params.id);
   const parsed = z.object({
     retentionPeriodYears: z.number().int().min(1).max(99).default(7),
@@ -532,4 +540,5 @@ router.post("/compliance/profiles/:id/retention", requireAuth, requireFirmUser, 
   res.status(201).json(record);
 });
 
-export default router;
+const exportedRouter = expressRouter as unknown as ExpressRouter;
+export default exportedRouter;

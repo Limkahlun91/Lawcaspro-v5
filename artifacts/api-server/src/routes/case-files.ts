@@ -1,4 +1,4 @@
-import { Router, type IRouter } from "express";
+import express, { type Response, type Router as ExpressRouter } from "express";
 import { z } from "zod/v4";
 import { and, desc, eq, inArray } from "drizzle-orm";
 import {
@@ -17,9 +17,14 @@ import {
   quotationsTable,
   invoicesTable,
 } from "@workspace/db";
-import { requireAuth, requireFirmUser, type AuthRequest, writeAuditLog } from "../lib/auth";
+import { requireAuth, requireFirmUser, type AuthRequest, writeAuditLog } from "../lib/auth.js";
 
-const router: IRouter = Router();
+type RouterInternalLike = {
+  get: (path: string, ...handlers: unknown[]) => unknown;
+};
+
+const expressRouter = express.Router();
+const router = expressRouter as unknown as RouterInternalLike;
 
 const listQuerySchema = z.object({
   q: z.string().trim().optional().default(""),
@@ -56,7 +61,7 @@ function firstNumber(...vals: unknown[]): number | null {
   return null;
 }
 
-router.get("/case-files", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+router.get("/case-files", requireAuth, requireFirmUser, async (req: AuthRequest, res: Response): Promise<void> => {
   const r = rdb(req);
   const parsed = listQuerySchema.safeParse(req.query);
   if (!parsed.success) {
@@ -345,4 +350,5 @@ router.get("/case-files", requireAuth, requireFirmUser, async (req: AuthRequest,
   res.json({ data, page, limit, total: Number(count) });
 });
 
-export default router;
+const exportedRouter = expressRouter as unknown as ExpressRouter;
+export default exportedRouter;

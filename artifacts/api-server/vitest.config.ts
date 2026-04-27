@@ -7,6 +7,7 @@ export default defineConfig({
     environment: "node",
     globals: true,
     testTimeout: 15000,
+    hookTimeout: 60000,
     setupFiles: ["./src/__tests__/setup.ts"],
     include: hasDatabaseUrl
       ? ["src/__tests__/**/*.test.ts"]

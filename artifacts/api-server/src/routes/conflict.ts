@@ -1,4 +1,4 @@
-import { Router, type IRouter } from "express";
+import express, { type Response, type Router as ExpressRouter } from "express";
 import { eq, and, or, ilike, ne, isNull, desc } from "drizzle-orm";
 import { z } from "zod";
 import {
@@ -8,11 +8,17 @@ import {
 import {
   requireAuth, requireFirmUser, requirePartner, requireReAuth,
   type AuthRequest, writeAuditLog,
-} from "../lib/auth";
-import { sensitiveRateLimiter } from "../lib/rate-limit";
-import { queryOne } from "../lib/http";
+} from "../lib/auth.js";
+import { sensitiveRateLimiter } from "../lib/rate-limit.js";
+import { queryOne } from "../lib/http.js";
 
-const router: IRouter = Router();
+type RouterInternalLike = {
+  get: (path: string, ...handlers: unknown[]) => unknown;
+  post: (path: string, ...handlers: unknown[]) => unknown;
+};
+
+const expressRouter = express.Router();
+const router = expressRouter as unknown as RouterInternalLike;
 
 function rdb(req: AuthRequest) { return req.rlsDb ?? db; }
 
@@ -232,7 +238,7 @@ async function runConflictEngine(
 // ---------------------------------------------------------------------------
 // POST /conflict/check — run conflict check for a case
 // ---------------------------------------------------------------------------
-router.post("/conflict/check", sensitiveRateLimiter, requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+router.post("/conflict/check", sensitiveRateLimiter, requireAuth, requireFirmUser, async (req: AuthRequest, res: Response): Promise<void> => {
   const parsed = z.object({
     caseId: z.number().int(),
     parties: z.array(z.object({
@@ -325,7 +331,7 @@ router.post("/conflict/check", sensitiveRateLimiter, requireAuth, requireFirmUse
 // ---------------------------------------------------------------------------
 // GET /conflict/checks — list conflict checks for the firm
 // ---------------------------------------------------------------------------
-router.get("/conflict/checks", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+router.get("/conflict/checks", requireAuth, requireFirmUser, async (req: AuthRequest, res: Response): Promise<void> => {
   const caseIdStr = queryOne(req.query, "caseId");
   const caseId = caseIdStr ? Number.parseInt(caseIdStr, 10) : undefined;
   if (caseIdStr && Number.isNaN(caseId)) {
@@ -345,7 +351,7 @@ router.get("/conflict/checks", requireAuth, requireFirmUser, async (req: AuthReq
 // ---------------------------------------------------------------------------
 // GET /conflict/checks/:id — get check detail with matches
 // ---------------------------------------------------------------------------
-router.get("/conflict/checks/:id", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+router.get("/conflict/checks/:id", requireAuth, requireFirmUser, async (req: AuthRequest, res: Response): Promise<void> => {
   const id = Number(req.params.id);
   const [check] = await rdb(req).select().from(conflictChecksTable)
     .where(and(eq(conflictChecksTable.id, id), eq(conflictChecksTable.firmId, req.firmId!)));
@@ -371,7 +377,7 @@ router.post(
   requireFirmUser,
   requirePartner,
   requireReAuth,
-  async (req: AuthRequest, res): Promise<void> => {
+  async (req: AuthRequest, res: Response): Promise<void> => {
     const checkId = Number(req.params.id);
     const parsed = z.object({
       conflictMatchId: z.number().int(),
@@ -436,4 +442,5 @@ router.post(
   }
 );
 
-export default router;
+const exportedRouter = expressRouter as unknown as ExpressRouter;
+export default exportedRouter;

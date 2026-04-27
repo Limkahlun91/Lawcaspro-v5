@@ -1,4 +1,4 @@
-import { Router, type IRouter } from "express";
+import express, { type Response, type Router as ExpressRouter } from "express";
 import { eq, or, desc, isNull, and, inArray } from "drizzle-orm";
 import {
   usersTable,
@@ -7,10 +7,10 @@ import {
   platformMessageAttachmentsTable,
   platformDocumentsTable,
 } from "@workspace/db";
-import { requireAuth, requireFirmUser, requirePermission, writeAuditLog, type AuthRequest } from "../lib/auth";
+import { requireAuth, requireFirmUser, requirePermission, writeAuditLog, type AuthRequest } from "../lib/auth.js";
 import { Readable } from "stream";
-import { getSupabaseStorageConfigError, ObjectNotFoundError, SupabaseStorageService } from "../lib/objectStorage";
-import { logger } from "../lib/logger";
+import { getSupabaseStorageConfigError, ObjectNotFoundError, SupabaseStorageService } from "../lib/objectStorage.js";
+import { logger } from "../lib/logger.js";
 
 const one = (v: unknown): string | undefined => {
   if (typeof v === "string") return v;
@@ -18,7 +18,7 @@ const one = (v: unknown): string | undefined => {
   return undefined;
 };
 
-const getRlsDb = (req: AuthRequest, res: any): NonNullable<AuthRequest["rlsDb"]> | null => {
+const getRlsDb = (req: AuthRequest, res: Response): NonNullable<AuthRequest["rlsDb"]> | null => {
   const r = req.rlsDb;
   if (!r) {
     logger.error(
@@ -38,7 +38,14 @@ const getRlsDb = (req: AuthRequest, res: any): NonNullable<AuthRequest["rlsDb"]>
   return r;
 };
 
-const router: IRouter = Router();
+type RouterInternalLike = {
+  get: (path: string, ...handlers: unknown[]) => unknown;
+  post: (path: string, ...handlers: unknown[]) => unknown;
+  patch: (path: string, ...handlers: unknown[]) => unknown;
+};
+
+const expressRouter = express.Router();
+const router = expressRouter as unknown as RouterInternalLike;
 const supabaseStorage = new SupabaseStorageService();
 
 function safeFilenameAscii(filename: string): string {
@@ -62,7 +69,7 @@ function contentDispositionAttachment(filename: string): string {
 
 // ─── Firm → Founder messages ──────────────────────────────────────────────────
 
-router.get("/hub/messages", requireAuth, requireFirmUser, requirePermission("communications", "read"), async (req: AuthRequest, res): Promise<void> => {
+router.get("/hub/messages", requireAuth, requireFirmUser, requirePermission("communications", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
   const startedAt = Date.now();
   const r = getRlsDb(req, res);
   if (!r) return;
@@ -109,7 +116,7 @@ router.get("/hub/messages", requireAuth, requireFirmUser, requirePermission("com
   }
 });
 
-router.post("/hub/messages", requireAuth, requireFirmUser, requirePermission("communications", "create"), async (req: AuthRequest, res): Promise<void> => {
+router.post("/hub/messages", requireAuth, requireFirmUser, requirePermission("communications", "create"), async (req: AuthRequest, res: Response): Promise<void> => {
   const r = getRlsDb(req, res);
   if (!r) return;
   const firmId = req.firmId!;
@@ -144,7 +151,7 @@ router.post("/hub/messages", requireAuth, requireFirmUser, requirePermission("co
   res.status(201).json(msg);
 });
 
-router.patch("/hub/messages/:msgId/read", requireAuth, requireFirmUser, requirePermission("communications", "update"), async (req: AuthRequest, res): Promise<void> => {
+router.patch("/hub/messages/:msgId/read", requireAuth, requireFirmUser, requirePermission("communications", "update"), async (req: AuthRequest, res: Response): Promise<void> => {
   const r = getRlsDb(req, res);
   if (!r) return;
   const firmId = req.firmId!;
@@ -160,7 +167,7 @@ router.patch("/hub/messages/:msgId/read", requireAuth, requireFirmUser, requireP
   res.json({ success: true });
 });
 
-router.get("/hub/messages/:msgId/attachments/:attachmentId/download", requireAuth, requireFirmUser, requirePermission("communications", "read"), async (req: AuthRequest, res): Promise<void> => {
+router.get("/hub/messages/:msgId/attachments/:attachmentId/download", requireAuth, requireFirmUser, requirePermission("communications", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
   const r = getRlsDb(req, res);
   if (!r) return;
   const firmId = req.firmId!;
@@ -227,7 +234,7 @@ router.get("/hub/messages/:msgId/attachments/:attachmentId/download", requireAut
 
 // ─── System Folders (visible to firm, read-only) ────────────────────────────
 
-router.get("/hub/folders", requireAuth, requireFirmUser, requirePermission("documents", "read"), async (req: AuthRequest, res): Promise<void> => {
+router.get("/hub/folders", requireAuth, requireFirmUser, requirePermission("documents", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
   const r = getRlsDb(req, res);
   if (!r) return;
   const folders = await r
@@ -240,7 +247,7 @@ router.get("/hub/folders", requireAuth, requireFirmUser, requirePermission("docu
 
 // ─── System Documents (visible to firm) ──────────────────────────────────────
 
-router.get("/hub/documents", requireAuth, requireFirmUser, requirePermission("documents", "read"), async (req: AuthRequest, res): Promise<void> => {
+router.get("/hub/documents", requireAuth, requireFirmUser, requirePermission("documents", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
   const startedAt = Date.now();
   const r = getRlsDb(req, res);
   if (!r) return;
@@ -293,7 +300,7 @@ router.get("/hub/documents", requireAuth, requireFirmUser, requirePermission("do
   }
 });
 
-router.get("/hub/documents/:docId/download", requireAuth, requireFirmUser, requirePermission("documents", "read"), async (req: AuthRequest, res): Promise<void> => {
+router.get("/hub/documents/:docId/download", requireAuth, requireFirmUser, requirePermission("documents", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
   const r = getRlsDb(req, res);
   if (!r) return;
   const firmId = req.firmId!;
@@ -354,4 +361,5 @@ router.get("/hub/documents/:docId/download", requireAuth, requireFirmUser, requi
   }
 });
 
-export default router;
+const exportedRouter = expressRouter as unknown as ExpressRouter;
+export default exportedRouter;

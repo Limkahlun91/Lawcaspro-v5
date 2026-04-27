@@ -1,13 +1,21 @@
-import { Router, type IRouter } from "express";
+import express, { type Response, type Router as ExpressRouter } from "express";
 import { eq, and, desc, lte } from "drizzle-orm";
 import { caseTasksTable, casesTable, db, sql } from "@workspace/db";
-import { requireAuth, requireFirmUser, requirePermission, type AuthRequest, writeAuditLog } from "../lib/auth";
+import { requireAuth, requireFirmUser, requirePermission, type AuthRequest, writeAuditLog } from "../lib/auth.js";
 
 const one = (v: string | string[] | undefined): string | undefined => (Array.isArray(v) ? v[0] : v);
 
-const router: IRouter = Router();
+type RouterInternalLike = {
+  get: (path: string, ...handlers: unknown[]) => unknown;
+  post: (path: string, ...handlers: unknown[]) => unknown;
+  put: (path: string, ...handlers: unknown[]) => unknown;
+  delete: (path: string, ...handlers: unknown[]) => unknown;
+};
 
-router.get("/case-tasks", requireAuth, requireFirmUser, requirePermission("cases", "read"), async (req: AuthRequest, res): Promise<void> => {
+const expressRouter = express.Router();
+const router = expressRouter as unknown as RouterInternalLike;
+
+router.get("/case-tasks", requireAuth, requireFirmUser, requirePermission("cases", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
   const caseId = one((req.query as any).caseId);
   const status = one((req.query as any).status);
   const r = req.rlsDb;
@@ -24,7 +32,7 @@ router.get("/case-tasks", requireAuth, requireFirmUser, requirePermission("cases
 });
 
 // Firm-wide upcoming tasks (for dashboard)
-router.get("/case-tasks/upcoming", requireAuth, requireFirmUser, requirePermission("cases", "read"), async (req: AuthRequest, res): Promise<void> => {
+router.get("/case-tasks/upcoming", requireAuth, requireFirmUser, requirePermission("cases", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
   const r = req.rlsDb;
   if (!r) { res.status(500).json({ error: "Internal Server Error" }); return; }
   const limitStr = one((req.query as any).limit);
@@ -38,7 +46,7 @@ router.get("/case-tasks/upcoming", requireAuth, requireFirmUser, requirePermissi
   res.json(rows);
 });
 
-router.post("/case-tasks", requireAuth, requireFirmUser, requirePermission("cases", "update"), async (req: AuthRequest, res): Promise<void> => {
+router.post("/case-tasks", requireAuth, requireFirmUser, requirePermission("cases", "update"), async (req: AuthRequest, res: Response): Promise<void> => {
   const r = req.rlsDb;
   if (!r) { res.status(500).json({ error: "Internal Server Error" }); return; }
   const { caseId, title, description, assignedTo, dueDate, priority } = req.body;
@@ -64,7 +72,7 @@ router.post("/case-tasks", requireAuth, requireFirmUser, requirePermission("case
   res.status(201).json(row);
 });
 
-router.put("/case-tasks/:id", requireAuth, requireFirmUser, requirePermission("cases", "update"), async (req: AuthRequest, res): Promise<void> => {
+router.put("/case-tasks/:id", requireAuth, requireFirmUser, requirePermission("cases", "update"), async (req: AuthRequest, res: Response): Promise<void> => {
   const idStr = one(req.params.id);
   if (!idStr) { res.status(400).json({ error: "id required" }); return; }
   const id = parseInt(idStr, 10);
@@ -94,7 +102,7 @@ router.put("/case-tasks/:id", requireAuth, requireFirmUser, requirePermission("c
   res.json(row);
 });
 
-router.delete("/case-tasks/:id", requireAuth, requireFirmUser, requirePermission("cases", "update"), async (req: AuthRequest, res): Promise<void> => {
+router.delete("/case-tasks/:id", requireAuth, requireFirmUser, requirePermission("cases", "update"), async (req: AuthRequest, res: Response): Promise<void> => {
   const idStr = one(req.params.id);
   if (!idStr) { res.status(400).json({ error: "id required" }); return; }
   const id = parseInt(idStr, 10);
@@ -107,4 +115,5 @@ router.delete("/case-tasks/:id", requireAuth, requireFirmUser, requirePermission
   res.json({ success: true });
 });
 
-export default router;
+const exportedRouter = expressRouter as unknown as ExpressRouter;
+export default exportedRouter;

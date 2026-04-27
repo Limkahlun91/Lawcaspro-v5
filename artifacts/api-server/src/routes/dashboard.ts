@@ -1,8 +1,8 @@
-import { Router, type IRouter } from "express";
+import express, { type Response, type Router as ExpressRouter } from "express";
 import { db, sql } from "@workspace/db";
-import { requireAuth, requireFirmUser, requirePermission, type AuthRequest } from "../lib/auth";
-import { logger } from "../lib/logger";
-import { computeDashboardStats } from "../services/dashboard-stats";
+import { requireAuth, requireFirmUser, requirePermission, type AuthRequest } from "../lib/auth.js";
+import { logger } from "../lib/logger.js";
+import { computeDashboardStats } from "../services/dashboard-stats.js";
 
 type DbConn = typeof db | NonNullable<AuthRequest["rlsDb"]>;
 const rdb = (req: AuthRequest): DbConn => req.rlsDb ?? db;
@@ -19,9 +19,14 @@ async function tableExists(r: DbConn, reg: string): Promise<boolean> {
   return Boolean(rows[0]?.reg);
 }
 
-const router: IRouter = Router();
+type RouterInternalLike = {
+  get: (path: string, ...handlers: unknown[]) => unknown;
+};
 
-router.get("/dashboard", requireAuth, requireFirmUser, requirePermission("dashboard", "read"), async (req: AuthRequest, res): Promise<void> => {
+const expressRouter = express.Router();
+const router = expressRouter as unknown as RouterInternalLike;
+
+router.get("/dashboard", requireAuth, requireFirmUser, requirePermission("dashboard", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const firmId = req.firmId!;
     const r = rdb(req);
@@ -64,4 +69,5 @@ router.get("/dashboard", requireAuth, requireFirmUser, requirePermission("dashbo
   }
 });
 
-export default router;
+const exportedRouter = expressRouter as unknown as ExpressRouter;
+export default exportedRouter;

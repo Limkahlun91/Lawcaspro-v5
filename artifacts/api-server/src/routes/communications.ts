@@ -1,8 +1,15 @@
-import { Router, type IRouter } from "express";
+import express, { type Response, type Router as ExpressRouter } from "express";
 import { db, sql } from "@workspace/db";
-import { requireAuth, requireFirmUser, requirePermission, writeAuditLog, type AuthRequest } from "../lib/auth";
+import { requireAuth, requireFirmUser, requirePermission, writeAuditLog, type AuthRequest } from "../lib/auth.js";
 
-const router: IRouter = Router();
+type RouterInternalLike = {
+  get: (path: string, ...handlers: unknown[]) => unknown;
+  post: (path: string, ...handlers: unknown[]) => unknown;
+  delete: (path: string, ...handlers: unknown[]) => unknown;
+};
+
+const expressRouter = express.Router();
+const router = expressRouter as unknown as RouterInternalLike;
 
 const one = (v: string | string[] | undefined): string | undefined => (Array.isArray(v) ? v[0] : v);
 
@@ -15,7 +22,7 @@ async function queryRows(r: DbConn, query: ReturnType<typeof sql>): Promise<Reco
   return [];
 }
 
-const getRlsDb = (req: AuthRequest, res: any): NonNullable<AuthRequest["rlsDb"]> | null => {
+const getRlsDb = (req: AuthRequest, res: Response): NonNullable<AuthRequest["rlsDb"]> | null => {
   const r = req.rlsDb;
   if (!r) {
     res.status(500).json({ error: "Internal Server Error" });
@@ -24,7 +31,7 @@ const getRlsDb = (req: AuthRequest, res: any): NonNullable<AuthRequest["rlsDb"]>
   return r;
 };
 
-router.get("/cases/:caseId/threads", requireAuth, requireFirmUser, requirePermission("communications", "read"), async (req: AuthRequest, res): Promise<void> => {
+router.get("/cases/:caseId/threads", requireAuth, requireFirmUser, requirePermission("communications", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
   const r = getRlsDb(req, res);
   if (!r) return;
   const caseIdStr = one((req.params as any).caseId);
@@ -51,7 +58,7 @@ router.get("/cases/:caseId/threads", requireAuth, requireFirmUser, requirePermis
   res.json(rows);
 });
 
-router.post("/cases/:caseId/threads", requireAuth, requireFirmUser, requirePermission("communications", "create"), async (req: AuthRequest, res): Promise<void> => {
+router.post("/cases/:caseId/threads", requireAuth, requireFirmUser, requirePermission("communications", "create"), async (req: AuthRequest, res: Response): Promise<void> => {
   const r = getRlsDb(req, res);
   if (!r) return;
   const caseIdStr = one((req.params as any).caseId);
@@ -77,7 +84,7 @@ router.post("/cases/:caseId/threads", requireAuth, requireFirmUser, requirePermi
   res.status(201).json(rows[0]);
 });
 
-router.delete("/cases/:caseId/threads/:threadId", requireAuth, requireFirmUser, requirePermission("communications", "delete"), async (req: AuthRequest, res): Promise<void> => {
+router.delete("/cases/:caseId/threads/:threadId", requireAuth, requireFirmUser, requirePermission("communications", "delete"), async (req: AuthRequest, res: Response): Promise<void> => {
   const r = getRlsDb(req, res);
   if (!r) return;
   const threadIdStr = one((req.params as any).threadId);
@@ -101,7 +108,7 @@ router.delete("/cases/:caseId/threads/:threadId", requireAuth, requireFirmUser, 
   res.sendStatus(204);
 });
 
-router.get("/cases/:caseId/threads/:threadId/messages", requireAuth, requireFirmUser, requirePermission("communications", "read"), async (req: AuthRequest, res): Promise<void> => {
+router.get("/cases/:caseId/threads/:threadId/messages", requireAuth, requireFirmUser, requirePermission("communications", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
   const r = getRlsDb(req, res);
   if (!r) return;
   const threadIdStr = one((req.params as any).threadId);
@@ -117,7 +124,7 @@ router.get("/cases/:caseId/threads/:threadId/messages", requireAuth, requireFirm
   res.json(rows);
 });
 
-router.post("/cases/:caseId/threads/:threadId/messages", requireAuth, requireFirmUser, requirePermission("communications", "create"), async (req: AuthRequest, res): Promise<void> => {
+router.post("/cases/:caseId/threads/:threadId/messages", requireAuth, requireFirmUser, requirePermission("communications", "create"), async (req: AuthRequest, res: Response): Promise<void> => {
   const r = getRlsDb(req, res);
   if (!r) return;
   const caseIdStr = one((req.params as any).caseId);
@@ -152,7 +159,7 @@ router.post("/cases/:caseId/threads/:threadId/messages", requireAuth, requireFir
   res.status(201).json(rows[0]);
 });
 
-router.post("/cases/:caseId/threads/:threadId/read", requireAuth, requireFirmUser, requirePermission("communications", "update"), async (req: AuthRequest, res): Promise<void> => {
+router.post("/cases/:caseId/threads/:threadId/read", requireAuth, requireFirmUser, requirePermission("communications", "update"), async (req: AuthRequest, res: Response): Promise<void> => {
   const r = getRlsDb(req, res);
   if (!r) return;
   const threadIdStr = one((req.params as any).threadId);
@@ -168,7 +175,7 @@ router.post("/cases/:caseId/threads/:threadId/read", requireAuth, requireFirmUse
   res.json({ success: true });
 });
 
-router.get("/communications/unread-count", requireAuth, requireFirmUser, requirePermission("communications", "read"), async (req: AuthRequest, res): Promise<void> => {
+router.get("/communications/unread-count", requireAuth, requireFirmUser, requirePermission("communications", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
   const r = getRlsDb(req, res);
   if (!r) return;
   const firmId = req.firmId!;
@@ -196,7 +203,7 @@ router.get("/communications/unread-count", requireAuth, requireFirmUser, require
   res.json({ count: Number(rows[0]?.count ?? 0) });
 });
 
-router.get("/communications", requireAuth, requireFirmUser, requirePermission("communications", "read"), async (req: AuthRequest, res): Promise<void> => {
+router.get("/communications", requireAuth, requireFirmUser, requirePermission("communications", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
   const r = getRlsDb(req, res);
   if (!r) return;
   const firmId = req.firmId!;
@@ -244,7 +251,7 @@ router.get("/communications", requireAuth, requireFirmUser, requirePermission("c
   res.json(rows);
 });
 
-router.get("/communications/threads/:threadId", requireAuth, requireFirmUser, requirePermission("communications", "read"), async (req: AuthRequest, res): Promise<void> => {
+router.get("/communications/threads/:threadId", requireAuth, requireFirmUser, requirePermission("communications", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
   const r = getRlsDb(req, res);
   if (!r) return;
   const threadIdStr = one((req.params as any).threadId);
@@ -275,7 +282,7 @@ router.get("/communications/threads/:threadId", requireAuth, requireFirmUser, re
   res.json(rows[0]);
 });
 
-router.get("/communications/threads/:threadId/messages", requireAuth, requireFirmUser, requirePermission("communications", "read"), async (req: AuthRequest, res): Promise<void> => {
+router.get("/communications/threads/:threadId/messages", requireAuth, requireFirmUser, requirePermission("communications", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
   const r = getRlsDb(req, res);
   if (!r) return;
   const threadIdStr = one((req.params as any).threadId);
@@ -292,4 +299,5 @@ router.get("/communications/threads/:threadId/messages", requireAuth, requireFir
   res.json(rows);
 });
 
-export default router;
+const exportedRouter = expressRouter as unknown as ExpressRouter;
+export default exportedRouter;

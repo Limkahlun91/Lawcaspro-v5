@@ -1,9 +1,14 @@
-import { Router, type IRouter } from "express";
+import express, { type Response, type Router as ExpressRouter } from "express";
 import { eq, and, desc, gte, lte, lt, isNull } from "drizzle-orm";
 import { casesTable, casePurchasersTable, clientsTable, db, invoiceItemsTable, invoicesTable, ledgerEntriesTable, receiptsTable, sql, usersTable } from "@workspace/db";
-import { requireAuth, requireFirmUser, requirePermission, type AuthRequest } from "../lib/auth";
+import { requireAuth, requireFirmUser, requirePermission, type AuthRequest } from "../lib/auth.js";
 
-const router: IRouter = Router();
+type RouterInternalLike = {
+  get: (path: string, ...handlers: unknown[]) => unknown;
+};
+
+const expressRouter = express.Router();
+const router = expressRouter as unknown as RouterInternalLike;
 
 const one = (v: string | string[] | undefined): string | undefined => (Array.isArray(v) ? v[0] : v);
 const isYmd = (v: string): boolean => /^\d{4}-\d{2}-\d{2}$/.test(v);
@@ -17,7 +22,7 @@ const csvCell = (v: unknown): string => {
 
 // ── Bills Delivered Book ──────────────────────────────────────────────────────
 // Malaysian Solicitors' Accounts Rules: firms must maintain a bills-delivered book
-router.get("/reports/bills-delivered-book", requireAuth, requireFirmUser, requirePermission("reports", "read"), async (req: AuthRequest, res): Promise<void> => {
+router.get("/reports/bills-delivered-book", requireAuth, requireFirmUser, requirePermission("reports", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
   const r = req.rlsDb;
   if (!r) { res.status(500).json({ error: "Internal Server Error" }); return; }
   const from = one((req.query as any).from);
@@ -99,7 +104,7 @@ router.get("/reports/bills-delivered-book", requireAuth, requireFirmUser, requir
 });
 
 // ── Trust Account Statement (per case or firm-wide) ───────────────────────────
-router.get("/reports/trust-account-statement", requireAuth, requireFirmUser, requirePermission("reports", "read"), async (req: AuthRequest, res): Promise<void> => {
+router.get("/reports/trust-account-statement", requireAuth, requireFirmUser, requirePermission("reports", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
   const r = req.rlsDb;
   if (!r) { res.status(500).json({ error: "Internal Server Error" }); return; }
   const caseId = one((req.query as any).caseId);
@@ -135,7 +140,7 @@ router.get("/reports/trust-account-statement", requireAuth, requireFirmUser, req
 });
 
 // ── Client Account Statement ──────────────────────────────────────────────────
-router.get("/reports/client-account-statement", requireAuth, requireFirmUser, requirePermission("reports", "read"), async (req: AuthRequest, res): Promise<void> => {
+router.get("/reports/client-account-statement", requireAuth, requireFirmUser, requirePermission("reports", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
   const r = req.rlsDb ?? db;
   const caseId = one((req.query as any).caseId);
   let cond = and(eq(ledgerEntriesTable.firmId, req.firmId!), eq(ledgerEntriesTable.accountType, "client"));
@@ -150,7 +155,7 @@ router.get("/reports/client-account-statement", requireAuth, requireFirmUser, re
 });
 
 // ── Matter Aging Report ───────────────────────────────────────────────────────
-router.get("/reports/matter-aging", requireAuth, requireFirmUser, requirePermission("reports", "read"), async (req: AuthRequest, res): Promise<void> => {
+router.get("/reports/matter-aging", requireAuth, requireFirmUser, requirePermission("reports", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
   const r = req.rlsDb;
   if (!r) { res.status(500).json({ error: "Internal Server Error" }); return; }
   const format = one((req.query as any).format);
@@ -211,7 +216,7 @@ router.get("/reports/matter-aging", requireAuth, requireFirmUser, requirePermiss
 });
 
 // ── Time Summary Report ────────────────────────────────────────────────────────
-router.get("/reports/time-summary", requireAuth, requireFirmUser, requirePermission("reports", "read"), async (req: AuthRequest, res): Promise<void> => {
+router.get("/reports/time-summary", requireAuth, requireFirmUser, requirePermission("reports", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
   const r = req.rlsDb ?? db;
   const from = one((req.query as any).from);
   const to = one((req.query as any).to);
@@ -239,4 +244,5 @@ router.get("/reports/time-summary", requireAuth, requireFirmUser, requirePermiss
   res.json({ summary, byUser });
 });
 
-export default router;
+const exportedRouter = expressRouter as unknown as ExpressRouter;
+export default exportedRouter;

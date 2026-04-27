@@ -1,14 +1,21 @@
-import { Router, type IRouter } from "express";
+import express, { type Router as ExpressRouter } from "express";
 import { db, supportSessionsTable, firmsTable, usersTable } from "@workspace/db";
 import { and, desc, eq, gt, isNull, or, sql } from "drizzle-orm";
-import { requireAuth, requireFirmUser, requireFounder, requirePartner, requireReAuth, writeAuditLog, type AuthRequest } from "../lib/auth";
-import { sensitiveRateLimiter } from "../lib/rate-limit";
-import { withAuthSafeDb } from "../lib/auth-safe-db";
-import { ApiError, parseIntParam, sendError, sendOk } from "../lib/api-response";
+import { requireAuth, requireFirmUser, requireFounder, requirePartner, requireReAuth, writeAuditLog, type AuthRequest } from "../lib/auth.js";
+import { sensitiveRateLimiter } from "../lib/rate-limit.js";
+import { withAuthSafeDb } from "../lib/auth-safe-db.js";
+import { ApiError, parseIntParam, sendError, sendOk, type ResLike } from "../lib/api-response.js";
 
-const router: IRouter = Router();
+type RouterInternalLike = {
+  get: (path: string, ...handlers: unknown[]) => unknown;
+  post: (path: string, ...handlers: unknown[]) => unknown;
+  patch: (path: string, ...handlers: unknown[]) => unknown;
+};
 
-router.get("/support-sessions", requireAuth, requireFounder, async (req: AuthRequest, res): Promise<void> => {
+const expressRouter = express.Router();
+const router = expressRouter as unknown as RouterInternalLike;
+
+router.get("/support-sessions", requireAuth, requireFounder, async (req: AuthRequest, res: ResLike): Promise<void> => {
   try {
     const firmIdFilter = (() => {
       const raw = typeof req.query.firmId === "string" ? req.query.firmId : Array.isArray(req.query.firmId) ? req.query.firmId[0] : undefined;
@@ -49,7 +56,7 @@ router.get("/support-sessions", requireAuth, requireFounder, async (req: AuthReq
   }
 });
 
-router.get("/support-sessions/active", requireAuth, requireFounder, async (req: AuthRequest, res): Promise<void> => {
+router.get("/support-sessions/active", requireAuth, requireFounder, async (req: AuthRequest, res: ResLike): Promise<void> => {
   try {
     const now = new Date();
     const sessions = await withAuthSafeDb(async (authDb) => {
@@ -69,7 +76,7 @@ router.get("/support-sessions/active", requireAuth, requireFounder, async (req: 
   }
 });
 
-router.post("/support-sessions", sensitiveRateLimiter, requireAuth, requireFounder, async (req: AuthRequest, res): Promise<void> => {
+router.post("/support-sessions", sensitiveRateLimiter, requireAuth, requireFounder, async (req: AuthRequest, res: ResLike): Promise<void> => {
   try {
     const targetFirmId = parseIntParam("targetFirmId", (req.body as any)?.targetFirmId, { required: true, min: 1 })!;
     const reason = String((req.body as any)?.reason ?? "").trim();
@@ -118,7 +125,7 @@ router.post("/support-sessions", sensitiveRateLimiter, requireAuth, requireFound
   }
 });
 
-router.patch("/support-sessions/:id/end", requireAuth, requireFounder, async (req: AuthRequest, res): Promise<void> => {
+router.patch("/support-sessions/:id/end", requireAuth, requireFounder, async (req: AuthRequest, res: ResLike): Promise<void> => {
   try {
     const sessionId = parseIntParam("id", req.params.id, { required: true, min: 1 })!;
     const updated = await withAuthSafeDb(async (authDb) => {
@@ -155,7 +162,7 @@ router.patch("/support-sessions/:id/end", requireAuth, requireFounder, async (re
   }
 });
 
-router.post("/support-sessions/:id/log", sensitiveRateLimiter, requireAuth, requireFounder, async (req: AuthRequest, res): Promise<void> => {
+router.post("/support-sessions/:id/log", sensitiveRateLimiter, requireAuth, requireFounder, async (req: AuthRequest, res: ResLike): Promise<void> => {
   try {
     const sessionId = parseIntParam("id", req.params.id, { required: true, min: 1 })!;
     const action = String((req.body as any)?.action ?? "").trim();
@@ -197,7 +204,7 @@ router.post("/support-sessions/:id/log", sensitiveRateLimiter, requireAuth, requ
   }
 });
 
-router.get("/support-sessions/requests", requireAuth, requireFirmUser, requirePartner, async (req: AuthRequest, res): Promise<void> => {
+router.get("/support-sessions/requests", requireAuth, requireFirmUser, requirePartner, async (req: AuthRequest, res: ResLike): Promise<void> => {
   try {
     const now = new Date();
     const executor = req.rlsDb;
@@ -220,7 +227,7 @@ router.get("/support-sessions/requests", requireAuth, requireFirmUser, requirePa
   }
 });
 
-router.post("/support-sessions/:id/approve", sensitiveRateLimiter, requireAuth, requireFirmUser, requirePartner, requireReAuth, async (req: AuthRequest, res): Promise<void> => {
+router.post("/support-sessions/:id/approve", sensitiveRateLimiter, requireAuth, requireFirmUser, requirePartner, requireReAuth, async (req: AuthRequest, res: ResLike): Promise<void> => {
   try {
     const sessionId = parseIntParam("id", req.params.id, { required: true, min: 1 })!;
     const note = String((req.body as any)?.note ?? "").trim();
@@ -266,7 +273,7 @@ router.post("/support-sessions/:id/approve", sensitiveRateLimiter, requireAuth, 
   }
 });
 
-router.post("/support-sessions/:id/reject", sensitiveRateLimiter, requireAuth, requireFirmUser, requirePartner, requireReAuth, async (req: AuthRequest, res): Promise<void> => {
+router.post("/support-sessions/:id/reject", sensitiveRateLimiter, requireAuth, requireFirmUser, requirePartner, requireReAuth, async (req: AuthRequest, res: ResLike): Promise<void> => {
   try {
     const sessionId = parseIntParam("id", req.params.id, { required: true, min: 1 })!;
     const note = String((req.body as any)?.note ?? "").trim();
@@ -311,4 +318,5 @@ router.post("/support-sessions/:id/reject", sensitiveRateLimiter, requireAuth, r
   }
 });
 
-export default router;
+const exportedRouter = expressRouter as unknown as ExpressRouter;
+export default exportedRouter;

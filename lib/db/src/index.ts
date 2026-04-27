@@ -111,6 +111,12 @@ export {
 
 export {
   casesTable,
+  casePurchasersTable,
+  caseAssignmentsTable,
+  caseWorkflowStepsTable,
+  caseNotesTable,
+  caseKeyDatesTable,
+  caseListSavedViewsTable,
   systemFoldersTable,
   platformDocumentsTable,
   platformClausesTable,
@@ -118,7 +124,9 @@ export {
   platformMessageAttachmentsTable,
 } from "./schema";
 
-export { developersTable, projectsTable, clientsTable, casePurchasersTable } from "./schema";
+export { developersTable, projectsTable, clientsTable } from "./schema";
+
+export { caseWorkflowDocumentsTable, caseLoanStampingItemsTable } from "./schema";
 
 export { sql } from "drizzle-orm";
 export type { SQL } from "drizzle-orm";
