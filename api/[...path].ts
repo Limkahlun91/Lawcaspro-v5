@@ -47,8 +47,30 @@ import {
   writeAuditLog,
   readJsonBody,
 } from "./_lib";
-import apiServerApp from "../artifacts/api-server/src/app";
 import type { IncomingMessage, ServerResponse } from "node:http";
+
+type ExpressLikeHandler = (req: unknown, res: unknown, next: (err?: unknown) => void) => unknown;
+let cachedApiServerApp: ExpressLikeHandler | null = null;
+let loadingApiServerApp: Promise<ExpressLikeHandler> | null = null;
+
+const getApiServerApp = async (): Promise<ExpressLikeHandler> => {
+  if (cachedApiServerApp) return cachedApiServerApp;
+  const modPath = "../artifacts/api-server/dist/" + "app.js";
+  const mod = (await import(modPath)) as unknown as { default?: unknown };
+  const handler = ((mod as any)?.default ?? mod) as ExpressLikeHandler;
+  cachedApiServerApp = handler;
+  return handler;
+};
+
+const apiServerBridge: ExpressLikeHandler = (req, res, next) => {
+  if (cachedApiServerApp) return cachedApiServerApp(req, res, next);
+  const p = loadingApiServerApp ?? (loadingApiServerApp = getApiServerApp());
+  p.then((h) => {
+    cachedApiServerApp = h;
+    h(req, res, next);
+  }).catch(next);
+  return undefined;
+};
 
 type AuthContext = {
   userId: number;
@@ -1044,7 +1066,7 @@ const ensureApiPrefix: NodeMiddleware = (req: MutableUrlRequest, _res: ServerRes
 };
 
 app.use(ensureApiPrefix as unknown as Parameters<typeof app.use>[0]);
-app.use(apiServerApp as unknown as Parameters<typeof app.use>[0]);
+app.use(apiServerBridge as unknown as Parameters<typeof app.use>[0]);
 
 type NodeServerlessHandler = (req: IncomingMessage, res: ServerResponse) => void | Promise<void>;
 

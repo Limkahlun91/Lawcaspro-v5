@@ -57,7 +57,8 @@ const normalizeApiUrl = (rawUrl: unknown): string => {
 
 const getHandler = async (): Promise<ExpressLikeHandler> => {
   if (cachedHandler) return cachedHandler;
-  const mod = (await import("@workspace/api-server/app")) as unknown as {
+  const modPath = "../artifacts/api-server/dist/" + "app.js";
+  const mod = (await import(modPath)) as unknown as {
     default?: unknown;
   };
   const h = (mod as any)?.default ?? (mod as any);
