@@ -235,7 +235,7 @@ export class SupabaseStorageService {
     return signedUrl;
   }
 
-  async fetchPrivateObjectResponse(objectPath: string): Promise<Response> {
+  async fetchPrivateObjectResponse(objectPath: string): Promise<globalThis.Response> {
     const cfg = getSupabaseStorageConfig();
     const key = normalizeObjectKeyFromPath(objectPath);
     const encodedKey = key.split("/").map(encodeURIComponent).join("/");
