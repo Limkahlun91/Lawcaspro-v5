@@ -37,6 +37,9 @@ yarn-error.log
 testem.log
 /typings
 
+# local build logs
+.tmp-*.log
+
 # System Files
 .DS_Store
 Thumbs.db
