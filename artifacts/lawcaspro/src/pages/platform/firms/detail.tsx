@@ -369,7 +369,7 @@ export default function FirmDetail() {
         }
       />
 
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-5 gap-4 auto-rows-fr">
+      <div className="grid gap-4 auto-rows-fr [grid-template-columns:repeat(auto-fit,minmax(220px,1fr))]">
         <StatCard title="Total Users" value={firm.userCount} icon={<Users className="w-4 h-4" />} />
         <StatCard title="Total Cases" value={firm.caseCount} icon={<Briefcase className="w-4 h-4" />} />
         <StatCard title="Created" value={new Date(firm.createdAt).toLocaleDateString()} icon={<Building2 className="w-4 h-4" />} valueClassName="text-sm font-semibold leading-snug" />
@@ -385,21 +385,22 @@ export default function FirmDetail() {
       <SupportSessionPanel firmId={firmId} firmName={firm.name} />
 
       <Card className="border-amber-200 bg-amber-50">
-        <CardContent className="py-4 text-sm text-amber-900">
-          <div className="font-medium">Safety notice</div>
-          <div className="text-amber-800 mt-1">
+        <CardContent className="p-4 text-sm text-amber-900 space-y-1">
+          <div className="font-medium leading-snug">Safety notice</div>
+          <div className="text-amber-800 leading-snug">
             High-risk actions require typed confirmation. Destructive actions automatically create a pre-action snapshot before execution.
           </div>
         </CardContent>
       </Card>
 
       <div className="border-b border-slate-200">
-        <div className="flex gap-0">
+        <div className="overflow-x-auto -mx-2 px-2">
+          <div className="flex gap-0 min-w-max">
           {(["settings", "users", "maintenance", "snapshots", "history"] as const).map((tab) => (
             <button
               key={tab}
               onClick={() => setActiveTab(tab)}
-              className={`px-5 py-2.5 text-sm font-medium border-b-2 transition-colors ${
+              className={`px-5 py-2.5 text-sm font-medium border-b-2 transition-colors whitespace-nowrap ${
                 activeTab === tab
                   ? "border-amber-500 text-amber-600"
                   : "border-transparent text-slate-500 hover:text-slate-700"
@@ -416,6 +417,7 @@ export default function FirmDetail() {
                       : "Action History"}
             </button>
           ))}
+          </div>
         </div>
       </div>
 

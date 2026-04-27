@@ -76,7 +76,7 @@ export function PlatformLayout({ children }: { children: ReactNode }) {
       </div>
       
       <main className="flex-1 overflow-auto">
-        <div className="max-w-7xl mx-auto w-full p-6 md:p-8">
+        <div className="max-w-[1440px] mx-auto w-full px-6 py-6 md:px-8 md:py-8 min-w-0">
           {children}
         </div>
       </main>

@@ -17,11 +17,11 @@ export function StatCard({
   return (
     <Card className="h-full">
       <CardHeader className="flex flex-row items-center justify-between pb-2 space-y-0">
-        <CardTitle className="text-xs font-medium text-slate-500">{title}</CardTitle>
+        <CardTitle className="text-xs font-medium text-slate-500 min-w-0 pr-2 break-words leading-snug">{title}</CardTitle>
         {icon ? <div className="text-slate-400 shrink-0">{icon}</div> : null}
       </CardHeader>
-      <CardContent className="space-y-1">
-        <div className={["text-2xl font-bold text-slate-900 leading-none", valueClassName].filter(Boolean).join(" ")}>{value}</div>
+      <CardContent className="space-y-1 min-w-0">
+        <div className={["text-2xl font-bold text-slate-900 leading-tight min-w-0 break-words", valueClassName].filter(Boolean).join(" ")}>{value}</div>
         {subtext ? <div className="text-xs text-slate-500">{subtext}</div> : null}
       </CardContent>
     </Card>
