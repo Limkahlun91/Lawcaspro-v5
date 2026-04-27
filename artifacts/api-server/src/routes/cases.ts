@@ -1,4 +1,9 @@
-import express, { type Router as ExpressRouter, type Response as ExpressResponse } from "express";
+import express, {
+  type NextFunction,
+  type RequestHandler,
+  type Response as ExpressResponse,
+  type Router as ExpressRouter,
+} from "express";
 import { eq, count, desc, and, or, asc, inArray } from "drizzle-orm";
 import {
   db, casesTable, casePurchasersTable, caseAssignmentsTable,
@@ -25,7 +30,6 @@ import { daysAgoSql } from "../lib/dateSql.js";
 import { parseDateOnlyInput } from "../lib/dateOnly.js";
 import { logger } from "../lib/logger.js";
 import { isTransientDbConnectionError } from "../lib/auth-safe-db.js";
-import { Readable } from "stream";
 import { ObjectNotFoundError, SupabaseStorageService, getSupabaseStorageConfigError } from "../lib/objectStorage.js";
 import { CASE_ATTACHMENT_ALLOWED_EXTENSIONS, WORKFLOW_DOCUMENT_ALLOWED_KEYS, fileExtLower, workflowDocumentLabel, workflowDocumentLegacyKeys, normalizeWorkflowDocumentKeyFromDb, type WorkflowDocumentMilestoneKey } from "../lib/caseWorkflowDocuments.js";
 import { LOAN_STAMPING_ITEM_KEYS, type LoanStampingItemKey, isLoanStampingItemKeyAllowedForTitleType, normalizeTitleType } from "../lib/loanStamping.js";
@@ -41,6 +45,21 @@ type DbConn = typeof db | NonNullable<AuthRequest["rlsDb"]>;
 const rdb = (req: AuthRequest): DbConn => req.rlsDb ?? db;
 
 type CaseKeyDatesInsert = typeof caseKeyDatesTable.$inferInsert;
+
+type AuthedHandler = (
+  req: AuthRequest,
+  res: ExpressResponse,
+  next: NextFunction
+) => void | Promise<void>;
+
+const requireAuthHandler = requireAuth as RequestHandler;
+const requireFirmUserHandler = requireFirmUser as RequestHandler;
+
+const authed = (handler: AuthedHandler): RequestHandler => {
+  return (req, res, next) => {
+    Promise.resolve(handler(req as AuthRequest, res as ExpressResponse, next)).catch(next);
+  };
+};
 
 async function tableExists(r: DbConn, reg: string): Promise<boolean> {
   const result = await r.execute(sql`SELECT to_regclass(${reg}) AS reg`);
@@ -145,31 +164,31 @@ async function streamSupabasePrivateObjectToResponse({
 
   type FetchResponseLike = {
     headers: { get: (name: string) => string | null };
-    body: ReadableStream<Uint8Array> | null;
+    arrayBuffer: () => Promise<ArrayBuffer>;
   };
   const isFetchResponseLike = (v: unknown): v is FetchResponseLike => {
     if (!v || typeof v !== "object") return false;
-    if (!("headers" in v) || !("body" in v)) return false;
+    if (!("headers" in v) || !("arrayBuffer" in v)) return false;
     const headers = (v as { headers?: unknown }).headers;
     if (!headers || typeof headers !== "object") return false;
-    return typeof (headers as { get?: unknown }).get === "function";
+    return (
+      typeof (headers as { get?: unknown }).get === "function" &&
+      typeof (v as { arrayBuffer?: unknown }).arrayBuffer === "function"
+    );
   };
 
   if (!isFetchResponseLike(raw)) throw new Error("Invalid storage response");
   const response = raw;
 
-  const ct = response.headers.get("content-type") || fallbackContentType;
-  const cl = response.headers.get("content-length");
-  if (ct) res.setHeader("Content-Type", ct);
-  if (cl) res.setHeader("Content-Length", cl);
-  res.setHeader("Content-Disposition", contentDispositionAttachment(fileName));
-  if (!response.body) throw new Error("Failed to stream file");
-  const nodeStream = Readable.fromWeb(response.body);
-  await new Promise<void>((resolve, reject) => {
-    nodeStream.on("error", reject);
-    res.on("finish", resolve);
-    nodeStream.pipe(res);
-  });
+  const contentType = response.headers.get("content-type") ?? fallbackContentType;
+  const contentLength = response.headers.get("content-length");
+
+  res.set("Content-Type", contentType);
+  if (contentLength) res.set("Content-Length", contentLength);
+  res.set("Content-Disposition", contentDispositionAttachment(fileName));
+
+  const arrayBuffer = await response.arrayBuffer();
+  res.send(Buffer.from(arrayBuffer));
 }
 
 function asObject(v: unknown): Record<string, unknown> | null {
@@ -474,25 +493,25 @@ async function formatCaseSummary(r: DbConn, c: typeof casesTable.$inferSelect) {
   };
 }
 
-router.get("/cases/stats/by-status", requireAuth, requireFirmUser, requirePermission("cases", "read"), async (req: AuthRequest, res: ExpressResponse): Promise<void> => {
+router.get("/cases/stats/by-status", requireAuthHandler, requireFirmUserHandler, requirePermission("cases", "read") as RequestHandler, authed(async (req, res) => {
   const rows = await db
     .select({ status: casesTable.status, count: count() })
     .from(casesTable)
     .where(eq(casesTable.firmId, req.firmId!))
     .groupBy(casesTable.status);
   res.json(rows.map(r => ({ status: r.status, count: Number(r.count) })));
-});
+}));
 
-router.get("/cases/stats/by-type", requireAuth, requireFirmUser, requirePermission("cases", "read"), async (req: AuthRequest, res: ExpressResponse): Promise<void> => {
+router.get("/cases/stats/by-type", requireAuthHandler, requireFirmUserHandler, requirePermission("cases", "read") as RequestHandler, authed(async (req, res) => {
   const rows = await db
     .select({ purchaseMode: casesTable.purchaseMode, count: count() })
     .from(casesTable)
     .where(eq(casesTable.firmId, req.firmId!))
     .groupBy(casesTable.purchaseMode);
   res.json(rows.map(r => ({ purchaseMode: r.purchaseMode, count: Number(r.count) })));
-});
+}));
 
-router.get("/cases/recent", requireAuth, requireFirmUser, requirePermission("cases", "read"), async (req: AuthRequest, res: ExpressResponse): Promise<void> => {
+router.get("/cases/recent", requireAuthHandler, requireFirmUserHandler, requirePermission("cases", "read") as RequestHandler, authed(async (req, res) => {
   const r = rdb(req);
   const limitParam = req.query.limit ? Number(req.query.limit) : 5;
   const cases = await r.select().from(casesTable)
@@ -501,9 +520,9 @@ router.get("/cases/recent", requireAuth, requireFirmUser, requirePermission("cas
     .limit(limitParam);
   const summaries = await Promise.all(cases.map((c) => formatCaseSummary(r, c)));
   res.json(summaries);
-});
+}));
 
-router.get("/cases/filter-options", requireAuth, requireFirmUser, requirePermission("cases", "read"), async (req: AuthRequest, res: ExpressResponse): Promise<void> => {
+router.get("/cases/filter-options", requireAuthHandler, requireFirmUserHandler, requirePermission("cases", "read") as RequestHandler, authed(async (req, res) => {
   const r = rdb(req);
 
   const stepDefs = buildWorkflowSteps("loan", "individual");
@@ -537,9 +556,9 @@ router.get("/cases/filter-options", requireAuth, requireFirmUser, requirePermiss
       { key: "completion_date", label: "Completion Date" },
     ],
   });
-});
+}));
 
-router.get("/case-list-views", requireAuth, requireFirmUser, requirePermission("cases", "read"), async (req: AuthRequest, res: ExpressResponse): Promise<void> => {
+router.get("/case-list-views", requireAuthHandler, requireFirmUserHandler, requirePermission("cases", "read") as RequestHandler, authed(async (req, res) => {
   const r = rdb(req);
 
   const rows = await r
@@ -562,9 +581,9 @@ router.get("/case-list-views", requireAuth, requireFirmUser, requirePermission("
     createdAt: v.createdAt.toISOString(),
     updatedAt: v.updatedAt.toISOString(),
   })));
-});
+}));
 
-router.post("/case-list-views", requireAuth, requireFirmUser, requirePermission("cases", "update"), async (req: AuthRequest, res: ExpressResponse): Promise<void> => {
+router.post("/case-list-views", requireAuthHandler, requireFirmUserHandler, requirePermission("cases", "update") as RequestHandler, authed(async (req, res) => {
   const r = req.rlsDb;
   if (!r) {
     res.status(500).json({ error: "Internal Server Error" });
@@ -628,9 +647,9 @@ router.post("/case-list-views", requireAuth, requireFirmUser, requirePermission(
     }
     throw err;
   }
-});
+}));
 
-router.patch("/case-list-views/:id", requireAuth, requireFirmUser, requirePermission("cases", "update"), async (req: AuthRequest, res: ExpressResponse): Promise<void> => {
+router.patch("/case-list-views/:id", requireAuthHandler, requireFirmUserHandler, requirePermission("cases", "update") as RequestHandler, authed(async (req, res) => {
   const r = req.rlsDb;
   if (!r) {
     res.status(500).json({ error: "Internal Server Error" });
@@ -709,9 +728,9 @@ router.patch("/case-list-views/:id", requireAuth, requireFirmUser, requirePermis
     }
     throw err;
   }
-});
+}));
 
-router.delete("/case-list-views/:id", requireAuth, requireFirmUser, requirePermission("cases", "update"), async (req: AuthRequest, res: ExpressResponse): Promise<void> => {
+router.delete("/case-list-views/:id", requireAuthHandler, requireFirmUserHandler, requirePermission("cases", "update") as RequestHandler, authed(async (req, res) => {
   const r = req.rlsDb;
   if (!r) {
     res.status(500).json({ error: "Internal Server Error" });
@@ -752,9 +771,9 @@ router.delete("/case-list-views/:id", requireAuth, requireFirmUser, requirePermi
   });
 
   res.status(204).end();
-});
+}));
 
-router.get("/cases/views", requireAuth, requireFirmUser, requirePermission("cases", "read"), async (req: AuthRequest, res: ExpressResponse): Promise<void> => {
+router.get("/cases/views", requireAuthHandler, requireFirmUserHandler, requirePermission("cases", "read") as RequestHandler, authed(async (req, res) => {
   const r = rdb(req);
   const rows = await r
     .select()
@@ -774,9 +793,9 @@ router.get("/cases/views", requireAuth, requireFirmUser, requirePermission("case
     createdAt: v.createdAt.toISOString(),
     updatedAt: v.updatedAt.toISOString(),
   })));
-});
+}));
 
-router.post("/cases/views", requireAuth, requireFirmUser, requirePermission("cases", "update"), async (req: AuthRequest, res: ExpressResponse): Promise<void> => {
+router.post("/cases/views", requireAuthHandler, requireFirmUserHandler, requirePermission("cases", "update") as RequestHandler, authed(async (req, res) => {
   const r = req.rlsDb;
   if (!r) {
     res.status(500).json({ error: "Internal Server Error" });
@@ -832,9 +851,9 @@ router.post("/cases/views", requireAuth, requireFirmUser, requirePermission("cas
     createdAt: created.createdAt.toISOString(),
     updatedAt: created.updatedAt.toISOString(),
   });
-});
+}));
 
-router.patch("/cases/views/:viewId", requireAuth, requireFirmUser, requirePermission("cases", "update"), async (req: AuthRequest, res: ExpressResponse): Promise<void> => {
+router.patch("/cases/views/:viewId", requireAuthHandler, requireFirmUserHandler, requirePermission("cases", "update") as RequestHandler, authed(async (req, res) => {
   const r = req.rlsDb;
   if (!r) {
     res.status(500).json({ error: "Internal Server Error" });
@@ -927,9 +946,9 @@ router.patch("/cases/views/:viewId", requireAuth, requireFirmUser, requirePermis
     createdAt: updated.createdAt.toISOString(),
     updatedAt: updated.updatedAt.toISOString(),
   });
-});
+}));
 
-router.delete("/cases/views/:viewId", requireAuth, requireFirmUser, requirePermission("cases", "update"), async (req: AuthRequest, res: ExpressResponse): Promise<void> => {
+router.delete("/cases/views/:viewId", requireAuthHandler, requireFirmUserHandler, requirePermission("cases", "update") as RequestHandler, authed(async (req, res) => {
   const r = req.rlsDb;
   if (!r) {
     res.status(500).json({ error: "Internal Server Error" });
@@ -969,9 +988,9 @@ router.delete("/cases/views/:viewId", requireAuth, requireFirmUser, requirePermi
   });
 
   res.status(204).end();
-});
+}));
 
-router.post("/cases/bulk/assign", requireAuth, requireFirmUser, requirePermission("cases", "update"), async (req: AuthRequest, res: ExpressResponse): Promise<void> => {
+router.post("/cases/bulk/assign", requireAuthHandler, requireFirmUserHandler, requirePermission("cases", "update") as RequestHandler, authed(async (req, res) => {
   const r = req.rlsDb;
   if (!r) {
     res.status(500).json({ error: "Internal Server Error" });
@@ -1065,7 +1084,7 @@ router.post("/cases/bulk/assign", requireAuth, requireFirmUser, requirePermissio
   });
 
   res.json({ requested: normalizedCaseIds.length, succeeded, failed: failures.length, failures });
-});
+}));
 
 function hasLoanOnlyMilestone(milestone: CaseMilestoneKey): boolean {
   return (
@@ -1127,7 +1146,7 @@ function overdueAnySql(thresholdDays: number) {
   );
 }
 
-router.get("/cases/workbench", requireAuth, requireFirmUser, requirePermission("cases", "read"), async (req: AuthRequest, res: ExpressResponse): Promise<void> => {
+router.get("/cases/workbench", requireAuthHandler, requireFirmUserHandler, requirePermission("cases", "read") as RequestHandler, authed(async (req, res) => {
   try {
     const r = rdb(req);
     const hasKeyDates = await tableExists(r, "public.case_key_dates");
@@ -1366,7 +1385,7 @@ router.get("/cases/workbench", requireAuth, requireFirmUser, requirePermission("
     logger.error({ err, path: req.path, firmId: req.firmId, userId: req.userId }, "[cases-workbench]");
     res.status(isTransientDbConnectionError(err) ? 503 : 500).json({ error: isTransientDbConnectionError(err) ? "Workbench temporarily unavailable" : "Internal Server Error" });
   }
-});
+}));
 
 function sanitizeCsvCell(v: unknown): string {
   const s = v === null || v === undefined ? "" : String(v);
@@ -1377,7 +1396,7 @@ function sanitizeCsvCell(v: unknown): string {
   return s;
 }
 
-router.get("/cases/export.csv", requireAuth, requireFirmUser, requirePermission("cases", "read"), async (req: AuthRequest, res: ExpressResponse): Promise<void> => {
+router.get("/cases/export.csv", requireAuthHandler, requireFirmUserHandler, requirePermission("cases", "read") as RequestHandler, authed(async (req, res) => {
   const r = rdb(req);
 
   const params = ListCasesQueryParams.safeParse(req.query);
@@ -1566,8 +1585,8 @@ router.get("/cases/export.csv", requireAuth, requireFirmUser, requirePermission(
     .where(and(...conditions))
     .orderBy(primaryOrder, desc(casesTable.updatedAt));
 
-  res.setHeader("Content-Type", "text/csv; charset=utf-8");
-  res.setHeader("Content-Disposition", `attachment; filename="cases_export.csv"`);
+  res.set("Content-Type", "text/csv; charset=utf-8");
+  res.set("Content-Disposition", `attachment; filename="cases_export.csv"`);
 
   const header = [
     "Our Reference",
@@ -1610,9 +1629,9 @@ router.get("/cases/export.csv", requireAuth, requireFirmUser, requirePermission(
     res.write(line);
   }
   res.end();
-});
+}));
 
-router.get("/cases", requireAuth, requireFirmUser, requirePermission("cases", "read"), async (req: AuthRequest, res: ExpressResponse): Promise<void> => {
+router.get("/cases", requireAuthHandler, requireFirmUserHandler, requirePermission("cases", "read") as RequestHandler, authed(async (req, res) => {
   try {
     const r = rdb(req);
     const hasKeyDates = await tableExists(r, "public.case_key_dates");
@@ -1896,9 +1915,9 @@ router.get("/cases", requireAuth, requireFirmUser, requirePermission("cases", "r
     logger.error({ err, path: req.path, firmId: req.firmId, userId: req.userId, query: req.query }, "[cases]");
     res.status(500).json({ error: "Internal Server Error" });
   }
-});
+}));
 
-router.post("/cases", requireAuth, requireFirmUser, requirePermission("cases", "create"), async (req: AuthRequest, res: ExpressResponse): Promise<void> => {
+router.post("/cases", requireAuthHandler, requireFirmUserHandler, requirePermission("cases", "create") as RequestHandler, authed(async (req, res) => {
   try {
     const r = req.rlsDb;
     if (!r) {
@@ -2148,9 +2167,9 @@ router.post("/cases", requireAuth, requireFirmUser, requirePermission("cases", "
     res.status(500).json({ error: "Internal Server Error" });
     return;
   }
-});
+}));
 
-router.get("/cases/:caseId", requireAuth, requireFirmUser, requirePermission("cases", "read"), async (req: AuthRequest, res: ExpressResponse): Promise<void> => {
+router.get("/cases/:caseId", requireAuthHandler, requireFirmUserHandler, requirePermission("cases", "read") as RequestHandler, authed(async (req, res) => {
   const r = req.rlsDb;
   if (!r) {
     logger.error({ path: req.path, firmId: req.firmId, userId: req.userId }, "[cases] missing tenant database context");
@@ -2178,9 +2197,9 @@ router.get("/cases/:caseId", requireAuth, requireFirmUser, requirePermission("ca
     logger.error({ err: e, firmId: req.firmId, userId: req.userId, caseId: params.data.caseId }, "[cases] get case failed");
     res.status(500).json({ error: "Internal Server Error" });
   }
-});
+}));
 
-router.get("/cases/:caseId/key-dates", requireAuth, requireFirmUser, requirePermission("cases", "read"), async (req: AuthRequest, res: ExpressResponse): Promise<void> => {
+router.get("/cases/:caseId/key-dates", requireAuthHandler, requireFirmUserHandler, requirePermission("cases", "read") as RequestHandler, authed(async (req, res) => {
   const r = req.rlsDb;
   if (!r) {
     logger.error({ path: req.path, firmId: req.firmId, userId: req.userId }, "[cases] missing tenant database context");
@@ -2270,9 +2289,9 @@ router.get("/cases/:caseId/key-dates", requireAuth, requireFirmUser, requirePerm
   }
 
   res.json(out);
-});
+}));
 
-router.get("/cases/:caseId/progress", requireAuth, requireFirmUser, requirePermission("cases", "read"), async (req: AuthRequest, res: ExpressResponse): Promise<void> => {
+router.get("/cases/:caseId/progress", requireAuthHandler, requireFirmUserHandler, requirePermission("cases", "read") as RequestHandler, authed(async (req, res) => {
   const r = req.rlsDb;
   if (!r) {
     logger.error({ path: req.path, firmId: req.firmId, userId: req.userId }, "[cases] missing tenant database context");
@@ -2484,9 +2503,9 @@ router.get("/cases/:caseId/progress", requireAuth, requireFirmUser, requirePermi
       ? [...fixed, ...others].map((x) => ({ id: x.id, itemKey: x.itemKey, sortOrder: x.sortOrder, status: deriveStampingItemStatus(x) }))
       : [],
   });
-});
+}));
 
-router.patch("/cases/:caseId/key-dates", requireAuth, requireFirmUser, requirePermission("cases", "update"), async (req: AuthRequest, res: ExpressResponse): Promise<void> => {
+router.patch("/cases/:caseId/key-dates", requireAuthHandler, requireFirmUserHandler, requirePermission("cases", "update") as RequestHandler, authed(async (req, res) => {
   const r = req.rlsDb;
   if (!r) {
     logger.error({ path: req.path, firmId: req.firmId, userId: req.userId }, "[cases] missing tenant database context");
@@ -2704,9 +2723,9 @@ router.patch("/cases/:caseId/key-dates", requireAuth, requireFirmUser, requirePe
     full_settlement_date: kd.fullSettlementDate ? String(kd.fullSettlementDate) : null,
     completion_date: kd.completionDate ? String(kd.completionDate) : null,
   } : {});
-});
+}));
 
-router.patch("/cases/:caseId", requireAuth, requireFirmUser, requirePermission("cases", "update"), async (req: AuthRequest, res: ExpressResponse): Promise<void> => {
+router.patch("/cases/:caseId", requireAuthHandler, requireFirmUserHandler, requirePermission("cases", "update") as RequestHandler, authed(async (req, res) => {
   const r = req.rlsDb;
   if (!r) {
     logger.error({ path: req.path, firmId: req.firmId, userId: req.userId }, "[cases] missing tenant database context");
@@ -2774,9 +2793,9 @@ router.patch("/cases/:caseId", requireAuth, requireFirmUser, requirePermission("
   });
 
   res.json(await formatCaseDetail(r, c));
-});
+}));
 
-router.get("/cases/:caseId/workflow-documents", requireAuth, requireFirmUser, requirePermission("documents", "read"), async (req: AuthRequest, res: ExpressResponse): Promise<void> => {
+router.get("/cases/:caseId/workflow-documents", requireAuthHandler, requireFirmUserHandler, requirePermission("documents", "read") as RequestHandler, authed(async (req, res) => {
   const r = req.rlsDb;
   if (!r) {
     logger.error({ path: req.path, firmId: req.firmId, userId: req.userId }, "[cases] missing tenant database context");
@@ -2848,9 +2867,9 @@ router.get("/cases/:caseId/workflow-documents", requireAuth, requireFirmUser, re
     });
   }
   res.json(out);
-});
+}));
 
-router.post("/cases/:caseId/workflow-documents", requireAuth, requireFirmUser, requirePermission("documents", "update"), async (req: AuthRequest, res: ExpressResponse): Promise<void> => {
+router.post("/cases/:caseId/workflow-documents", requireAuthHandler, requireFirmUserHandler, requirePermission("documents", "update") as RequestHandler, authed(async (req, res) => {
   const r = req.rlsDb;
   if (!r) {
     logger.error({ path: req.path, firmId: req.firmId, userId: req.userId }, "[cases] missing tenant database context");
@@ -3024,9 +3043,9 @@ router.post("/cases/:caseId/workflow-documents", requireAuth, requireFirmUser, r
     createdAt: toIsoStringSafeOrNull(row.createdAt),
     updatedAt: toIsoStringSafeOrNull(row.updatedAt),
   });
-});
+}));
 
-router.delete("/cases/:caseId/workflow-documents/:id", requireAuth, requireFirmUser, requirePermission("documents", "delete"), async (req: AuthRequest, res: ExpressResponse): Promise<void> => {
+router.delete("/cases/:caseId/workflow-documents/:id", requireAuthHandler, requireFirmUserHandler, requirePermission("documents", "delete") as RequestHandler, authed(async (req, res) => {
   const r = req.rlsDb;
   if (!r) {
     logger.error({ path: req.path, firmId: req.firmId, userId: req.userId }, "[cases] missing tenant database context");
@@ -3113,9 +3132,9 @@ router.delete("/cases/:caseId/workflow-documents/:id", requireAuth, requireFirmU
     userAgent: req.headers["user-agent"],
   });
   res.status(204).end();
-});
+}));
 
-router.get("/cases/:caseId/workflow-documents/:id/download", requireAuth, requireFirmUser, requirePermission("documents", "read"), async (req: AuthRequest, res: ExpressResponse): Promise<void> => {
+router.get("/cases/:caseId/workflow-documents/:id/download", requireAuthHandler, requireFirmUserHandler, requirePermission("documents", "read") as RequestHandler, authed(async (req, res) => {
   const r = req.rlsDb;
   if (!r) {
     logger.error({ path: req.path, firmId: req.firmId, userId: req.userId }, "[cases] missing tenant database context");
@@ -3184,11 +3203,11 @@ router.get("/cases/:caseId/workflow-documents/:id/download", requireAuth, requir
     logger.error({ err, path: req.path, firmId: req.firmId, userId: req.userId, caseId, id }, "[cases] workflow_document_download_failed");
     res.status(500).json({ error: "Failed to download file" });
   }
-});
+}));
 
 const ALLOWED_LOAN_STAMPING_ITEM_KEYS = new Set<string>(LOAN_STAMPING_ITEM_KEYS);
 
-router.get("/cases/:caseId/loan-stamping", requireAuth, requireFirmUser, requirePermission("documents", "read"), async (req: AuthRequest, res: ExpressResponse): Promise<void> => {
+router.get("/cases/:caseId/loan-stamping", requireAuthHandler, requireFirmUserHandler, requirePermission("documents", "read") as RequestHandler, authed(async (req, res) => {
   const r = req.rlsDb;
   if (!r) {
     logger.error({ path: req.path, firmId: req.firmId, userId: req.userId }, "[cases] missing tenant database context");
@@ -3242,9 +3261,9 @@ router.get("/cases/:caseId/loan-stamping", requireAuth, requireFirmUser, require
     createdAt: toIsoStringSafeOrNull(x.createdAt),
     updatedAt: toIsoStringSafeOrNull(x.updatedAt),
   })));
-});
+}));
 
-router.post("/cases/:caseId/loan-stamping/ensure", requireAuth, requireFirmUser, requirePermission("documents", "update"), async (req: AuthRequest, res: ExpressResponse): Promise<void> => {
+router.post("/cases/:caseId/loan-stamping/ensure", requireAuthHandler, requireFirmUserHandler, requirePermission("documents", "update") as RequestHandler, authed(async (req, res) => {
   const r = req.rlsDb;
   if (!r) {
     logger.error({ path: req.path, firmId: req.firmId, userId: req.userId }, "[cases] missing tenant database context");
@@ -3382,9 +3401,9 @@ router.post("/cases/:caseId/loan-stamping/ensure", requireAuth, requireFirmUser,
     createdAt: toIsoStringSafeOrNull(row.createdAt),
     updatedAt: toIsoStringSafeOrNull(row.updatedAt),
   });
-});
+}));
 
-router.put("/cases/:caseId/loan-stamping", requireAuth, requireFirmUser, requirePermission("documents", "update"), async (req: AuthRequest, res: ExpressResponse): Promise<void> => {
+router.put("/cases/:caseId/loan-stamping", requireAuthHandler, requireFirmUserHandler, requirePermission("documents", "update") as RequestHandler, authed(async (req, res) => {
   const r = req.rlsDb;
   if (!r) {
     logger.error({ path: req.path, firmId: req.firmId, userId: req.userId }, "[cases] missing tenant database context");
@@ -3512,9 +3531,9 @@ router.put("/cases/:caseId/loan-stamping", requireAuth, requireFirmUser, require
     createdAt: toIsoStringSafeOrNull(x.createdAt),
     updatedAt: toIsoStringSafeOrNull(x.updatedAt),
   })));
-});
+}));
 
-router.delete("/cases/:caseId/loan-stamping/:id", requireAuth, requireFirmUser, requirePermission("documents", "delete"), async (req: AuthRequest, res: ExpressResponse): Promise<void> => {
+router.delete("/cases/:caseId/loan-stamping/:id", requireAuthHandler, requireFirmUserHandler, requirePermission("documents", "delete") as RequestHandler, authed(async (req, res) => {
   const r = req.rlsDb;
   if (!r) {
     logger.error({ path: req.path, firmId: req.firmId, userId: req.userId }, "[cases] missing tenant database context");
@@ -3596,9 +3615,9 @@ router.delete("/cases/:caseId/loan-stamping/:id", requireAuth, requireFirmUser, 
     userAgent: req.headers["user-agent"],
   });
   res.status(204).end();
-});
+}));
 
-router.post("/cases/:caseId/loan-stamping/:id/file", requireAuth, requireFirmUser, requirePermission("documents", "update"), async (req: AuthRequest, res: ExpressResponse): Promise<void> => {
+router.post("/cases/:caseId/loan-stamping/:id/file", requireAuthHandler, requireFirmUserHandler, requirePermission("documents", "update") as RequestHandler, authed(async (req, res) => {
   const r = req.rlsDb;
   if (!r) {
     logger.error({ path: req.path, firmId: req.firmId, userId: req.userId }, "[cases] missing tenant database context");
@@ -3724,9 +3743,9 @@ router.post("/cases/:caseId/loan-stamping/:id/file", requireAuth, requireFirmUse
     userAgent: req.headers["user-agent"],
   });
   res.json({ ok: true });
-});
+}));
 
-router.delete("/cases/:caseId/loan-stamping/:id/file", requireAuth, requireFirmUser, requirePermission("documents", "update"), async (req: AuthRequest, res: ExpressResponse): Promise<void> => {
+router.delete("/cases/:caseId/loan-stamping/:id/file", requireAuthHandler, requireFirmUserHandler, requirePermission("documents", "update") as RequestHandler, authed(async (req, res) => {
   const r = req.rlsDb;
   if (!r) {
     logger.error({ path: req.path, firmId: req.firmId, userId: req.userId }, "[cases] missing tenant database context");
@@ -3803,9 +3822,9 @@ router.delete("/cases/:caseId/loan-stamping/:id/file", requireAuth, requireFirmU
     userAgent: req.headers["user-agent"],
   });
   res.status(204).end();
-});
+}));
 
-router.get("/cases/:caseId/loan-stamping/:id/download", requireAuth, requireFirmUser, requirePermission("documents", "read"), async (req: AuthRequest, res: ExpressResponse): Promise<void> => {
+router.get("/cases/:caseId/loan-stamping/:id/download", requireAuthHandler, requireFirmUserHandler, requirePermission("documents", "read") as RequestHandler, authed(async (req, res) => {
   const r = req.rlsDb;
   if (!r) {
     logger.error({ path: req.path, firmId: req.firmId, userId: req.userId }, "[cases] missing tenant database context");
@@ -3877,9 +3896,9 @@ router.get("/cases/:caseId/loan-stamping/:id/download", requireAuth, requireFirm
     logger.error({ err, path: req.path, firmId: req.firmId, userId: req.userId, caseId, id }, "[cases] loan_stamping_download_failed");
     res.status(500).json({ error: "Failed to download file" });
   }
-});
+}));
 
-router.get("/cases/:caseId/workflow", requireAuth, requireFirmUser, requirePermission("cases", "read"), async (req: AuthRequest, res: ExpressResponse): Promise<void> => {
+router.get("/cases/:caseId/workflow", requireAuthHandler, requireFirmUserHandler, requirePermission("cases", "read") as RequestHandler, authed(async (req, res) => {
   const r = req.rlsDb;
   if (!r) {
     logger.error({ path: req.path, firmId: req.firmId, userId: req.userId }, "[cases] missing tenant database context");
@@ -3945,9 +3964,9 @@ router.get("/cases/:caseId/workflow", requireAuth, requireFirmUser, requirePermi
     logger.error({ err: e, firmId: req.firmId, userId: req.userId, caseId: params.data.caseId }, "[cases] get workflow failed");
     res.status(500).json({ error: "Internal Server Error" });
   }
-});
+}));
 
-router.patch("/cases/:caseId/workflow/:stepId", requireAuth, requireFirmUser, requirePermission("cases", "update"), async (req: AuthRequest, res: ExpressResponse): Promise<void> => {
+router.patch("/cases/:caseId/workflow/:stepId", requireAuthHandler, requireFirmUserHandler, requirePermission("cases", "update") as RequestHandler, authed(async (req, res) => {
   const r = req.rlsDb;
   if (!r) {
     logger.error({ path: req.path, firmId: req.firmId, userId: req.userId }, "[cases] missing tenant database context");
@@ -4080,9 +4099,9 @@ router.patch("/cases/:caseId/workflow/:stepId", requireAuth, requireFirmUser, re
     notes: step.notes ?? null,
     syncedKeyDateField,
   });
-});
+}));
 
-router.get("/cases/:caseId/notes", requireAuth, requireFirmUser, requirePermission("cases", "read"), async (req: AuthRequest, res: ExpressResponse): Promise<void> => {
+router.get("/cases/:caseId/notes", requireAuthHandler, requireFirmUserHandler, requirePermission("cases", "read") as RequestHandler, authed(async (req, res) => {
   const r = req.rlsDb;
   if (!r) {
     logger.error({ path: req.path, firmId: req.firmId, userId: req.userId }, "[cases] missing tenant database context");
@@ -4126,9 +4145,9 @@ router.get("/cases/:caseId/notes", requireAuth, requireFirmUser, requirePermissi
   );
 
   res.json(enriched);
-});
+}));
 
-router.post("/cases/:caseId/notes", requireAuth, requireFirmUser, requirePermission("cases", "update"), async (req: AuthRequest, res: ExpressResponse): Promise<void> => {
+router.post("/cases/:caseId/notes", requireAuthHandler, requireFirmUserHandler, requirePermission("cases", "update") as RequestHandler, authed(async (req, res) => {
   const r = req.rlsDb;
   if (!r) {
     logger.error({ path: req.path, firmId: req.firmId, userId: req.userId }, "[cases] missing tenant database context");
@@ -4178,7 +4197,7 @@ router.post("/cases/:caseId/notes", requireAuth, requireFirmUser, requirePermiss
     content: note.content,
     createdAt: note.createdAt instanceof Date ? note.createdAt.toISOString() : new Date(note.createdAt).toISOString(),
   });
-});
+}));
 
 export { router };
 export default router;
