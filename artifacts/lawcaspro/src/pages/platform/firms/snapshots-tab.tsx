@@ -16,6 +16,7 @@ import { DangerActionDialog, type DangerPreview } from "@/components/danger-acti
 import { useAuth } from "@/lib/auth-context";
 import { hasFounderPermission } from "@/lib/founder-permissions";
 import { getSupportSessionId } from "@/lib/support-session";
+import { listItems } from "@/lib/list-items";
 
 type SnapshotRow = any;
 
@@ -221,7 +222,8 @@ export function FirmSnapshotsTab({ firmId, firmName }: { firmId: number; firmNam
   const supportQuery = useQuery({
     queryKey: ["platform-firm-snapshots-support-session", firmId],
     queryFn: async () => {
-      return await apiFetchJson<{ items: any[] }>(`/support-sessions?firmId=${firmId}`);
+      const res = await apiFetchJson(`/support-sessions?firmId=${firmId}`);
+      return { items: listItems<any>(res) };
     },
     enabled: !!firmId,
     retry: false,

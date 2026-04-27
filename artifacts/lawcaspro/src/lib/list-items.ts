@@ -10,3 +10,7 @@ export function listItems<T = unknown>(value: unknown): T[] {
   if (Array.isArray(nestedItems)) return nestedItems as T[];
   return [];
 }
+
+export function ensureArray<T = unknown>(value: unknown): T[] {
+  return Array.isArray(value) ? (value as T[]) : [];
+}

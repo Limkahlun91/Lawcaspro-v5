@@ -18,6 +18,8 @@ import { QueryFallback } from "@/components/query-fallback";
 import { apiFetchBlob, apiFetchJson } from "@/lib/api-client";
 import { toastError } from "@/lib/toast-error";
 import { listItems } from "@/lib/list-items";
+import { PlatformPage, PlatformPageHeader } from "@/components/platform/page";
+import { PlatformEmptyState, PlatformLoadingState } from "@/components/platform/states";
 
 const ALLOWED_TYPES: Record<string, string> = {
   "application/pdf": "PDF",
@@ -226,22 +228,22 @@ export default function PlatformMessages() {
   const unreadCount = messages.filter((m) => m.fromFirmId && !m.readAt).length;
 
   return (
-    <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-3xl font-bold text-slate-900 tracking-tight flex items-center gap-3">
-            Communication Hub
-            {unreadCount > 0 && (
+    <PlatformPage>
+      <PlatformPageHeader
+        title="Communication Hub"
+        description="Direct messaging between Lawcaspro and law firms"
+        actions={
+          <>
+            {unreadCount > 0 ? (
               <Badge className="bg-amber-500 text-white text-xs">{unreadCount} unread</Badge>
-            )}
-          </h1>
-          <p className="text-slate-500 mt-1">Direct messaging between Lawcaspro and law firms</p>
-        </div>
-        <Button onClick={() => setShowCompose(true)} className="gap-2" disabled={sending}>
-          <Plus className="w-4 h-4" />
-          Compose Message
-        </Button>
-      </div>
+            ) : null}
+            <Button onClick={() => setShowCompose(true)} className="gap-2" disabled={sending}>
+              <Plus className="w-4 h-4" />
+              Compose Message
+            </Button>
+          </>
+        }
+      />
 
       <div className="flex items-center gap-3">
         <MessageSquare className="w-4 h-4 text-slate-400 shrink-0" />
@@ -261,13 +263,14 @@ export default function PlatformMessages() {
       {messagesQuery.isError ? (
         <QueryFallback title="Messages unavailable" error={messagesQuery.error} onRetry={() => messagesQuery.refetch()} isRetrying={messagesQuery.isFetching} />
       ) : isLoading ? (
-        <div className="text-slate-500 text-sm py-8 text-center">Loading messages...</div>
+        <PlatformLoadingState title="Loading messages..." />
       ) : messages.length === 0 ? (
-        <div className="text-center py-16">
-          <MessageSquare className="w-10 h-10 text-slate-300 mx-auto mb-3" />
-          <p className="text-slate-500 font-medium">No messages yet</p>
-          <p className="text-slate-400 text-sm mt-1">Compose a message to a firm to get started</p>
-        </div>
+        <PlatformEmptyState
+          icon={<MessageSquare className="w-5 h-5" />}
+          title="No messages yet"
+          description="Compose a message to a firm to get started."
+          primaryAction={{ label: "Compose Message", onClick: () => setShowCompose(true) }}
+        />
       ) : (
         <div className="space-y-3">
           {messages.map((msg) => (
@@ -368,6 +371,6 @@ export default function PlatformMessages() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
-    </div>
+    </PlatformPage>
   );
 }

@@ -8,6 +8,7 @@ import { QueryFallback } from "@/components/query-fallback";
 import { apiFetchJson } from "@/lib/api-client";
 import { useAuth } from "@/lib/auth-context";
 import { hasFounderPermission } from "@/lib/founder-permissions";
+import { ensureArray } from "@/lib/list-items";
 
 export default function PlatformOperationsPending() {
   const { user } = useAuth();
@@ -22,11 +23,11 @@ export default function PlatformOperationsPending() {
     retry: false,
   });
 
-  const approvalsRequested = useMemo(() => (pendingQuery.data as any)?.approvals?.requested ?? [], [pendingQuery.data]);
-  const approvalsApproved = useMemo(() => (pendingQuery.data as any)?.approvals?.approved ?? [], [pendingQuery.data]);
-  const maint = useMemo(() => (pendingQuery.data as any)?.operations?.maintenance ?? [], [pendingQuery.data]);
-  const restore = useMemo(() => (pendingQuery.data as any)?.operations?.restore ?? [], [pendingQuery.data]);
-  const cooldown = useMemo(() => (pendingQuery.data as any)?.cooldown ?? [], [pendingQuery.data]);
+  const approvalsRequested = useMemo(() => ensureArray<any>((pendingQuery.data as any)?.approvals?.requested), [pendingQuery.data]);
+  const approvalsApproved = useMemo(() => ensureArray<any>((pendingQuery.data as any)?.approvals?.approved), [pendingQuery.data]);
+  const maint = useMemo(() => ensureArray<any>((pendingQuery.data as any)?.operations?.maintenance), [pendingQuery.data]);
+  const restore = useMemo(() => ensureArray<any>((pendingQuery.data as any)?.operations?.restore), [pendingQuery.data]);
+  const cooldown = useMemo(() => ensureArray<any>((pendingQuery.data as any)?.cooldown), [pendingQuery.data]);
 
   if (!canRead) {
     return (

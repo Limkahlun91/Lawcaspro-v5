@@ -767,6 +767,11 @@ routerInternal.get("/auth/me", async (req: ReqLike, res: RouteResLike): Promise<
       sendError(res, new ApiError({ status: 503, code: "AUTH_TEMPORARILY_UNAVAILABLE", message: "Auth temporarily unavailable", retryable: true }));
       return;
     }
+    const sqlState = getSqlState(err);
+    if (!(err instanceof ApiError) && (sqlState === "42P01" || sqlState === "42703" || sqlState === "42501")) {
+      sendError(res, new ApiError({ status: 503, code: "AUTH_TEMPORARILY_UNAVAILABLE", message: "Auth temporarily unavailable", retryable: true }));
+      return;
+    }
     if (typeof cookieToken === "string") res.clearCookie("auth_token");
     sendError(res, err, { status: 401, code: "UNAUTHORIZED", message: "Not authenticated" });
   }

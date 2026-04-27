@@ -3,7 +3,7 @@ import { db, supportSessionsTable, firmsTable, usersTable } from "@workspace/db"
 import { and, desc, eq, gt, isNull, or, sql } from "drizzle-orm";
 import { requireAuth, requireFirmUser, requireFounder, requirePartner, requireReAuth, writeAuditLog, type AuthRequest } from "../lib/auth.js";
 import { sensitiveRateLimiter } from "../lib/rate-limit.js";
-import { withAuthSafeDb } from "../lib/auth-safe-db.js";
+import { isTransientDbConnectionError, withAuthSafeDb } from "../lib/auth-safe-db.js";
 import { ApiError, parseIntParam, sendError, sendOk, type ResLike } from "../lib/api-response.js";
 
 type RouterInternalLike = {
@@ -18,6 +18,16 @@ const router = expressRouter as unknown as RouterInternalLike;
 const isUndefinedTableError = (err: unknown): boolean => {
   const code = err && typeof err === "object" ? (err as { code?: unknown }).code : undefined;
   return code === "42P01";
+};
+
+const isUndefinedColumnError = (err: unknown): boolean => {
+  const code = err && typeof err === "object" ? (err as { code?: unknown }).code : undefined;
+  return code === "42703";
+};
+
+const isPermissionDeniedError = (err: unknown): boolean => {
+  const code = err && typeof err === "object" ? (err as { code?: unknown }).code : undefined;
+  return code === "42501" || (err instanceof Error && /permission denied/i.test(err.message));
 };
 
 router.get("/support-sessions", requireAuth, requireFounder, async (req: AuthRequest, res: ResLike): Promise<void> => {
@@ -57,8 +67,16 @@ router.get("/support-sessions", requireAuth, requireFounder, async (req: AuthReq
     }, { retry: true, allowUnsafe: true, ctx: { route: "GET /support-sessions", userId: req.userId ?? null, firmId: firmIdFilter } });
     sendOk(res, { items: sessions });
   } catch (err) {
-    if (isUndefinedTableError(err)) {
+    if (isUndefinedTableError(err) || isUndefinedColumnError(err)) {
       sendOk(res, { items: [] });
+      return;
+    }
+    if (isPermissionDeniedError(err)) {
+      sendError(res, new ApiError({ status: 503, code: "SUPPORT_SESSIONS_UNAVAILABLE", message: "Support sessions are temporarily unavailable", retryable: true }));
+      return;
+    }
+    if (isTransientDbConnectionError(err)) {
+      sendError(res, new ApiError({ status: 503, code: "SERVICE_UNAVAILABLE", message: "Service temporarily unavailable", retryable: true }));
       return;
     }
     sendError(res, err);
@@ -81,8 +99,16 @@ router.get("/support-sessions/active", requireAuth, requireFounder, async (req: 
     }, { retry: true, allowUnsafe: true, ctx: { route: "GET /support-sessions/active" } });
     sendOk(res, { items: sessions });
   } catch (err) {
-    if (isUndefinedTableError(err)) {
+    if (isUndefinedTableError(err) || isUndefinedColumnError(err)) {
       sendOk(res, { items: [] });
+      return;
+    }
+    if (isPermissionDeniedError(err)) {
+      sendError(res, new ApiError({ status: 503, code: "SUPPORT_SESSIONS_UNAVAILABLE", message: "Support sessions are temporarily unavailable", retryable: true }));
+      return;
+    }
+    if (isTransientDbConnectionError(err)) {
+      sendError(res, new ApiError({ status: 503, code: "SERVICE_UNAVAILABLE", message: "Service temporarily unavailable", retryable: true }));
       return;
     }
     sendError(res, err);
@@ -221,7 +247,7 @@ router.get("/support-sessions/requests", requireAuth, requireFirmUser, requirePa
   try {
     const now = new Date();
     const executor = req.rlsDb;
-    if (!executor) throw new ApiError({ status: 500, code: "RLS_CONTEXT", message: "Missing tenant database context", retryable: true });
+    if (!executor) throw new ApiError({ status: 503, code: "SERVICE_UNAVAILABLE", message: "Service temporarily unavailable", retryable: true });
     const rows: unknown = await executor.execute(sql`
       SELECT ss.*, u.email as founder_email
       FROM support_sessions ss
@@ -238,6 +264,14 @@ router.get("/support-sessions/requests", requireAuth, requireFirmUser, requirePa
   } catch (err) {
     if (isUndefinedTableError(err)) {
       sendOk(res, { items: [] });
+      return;
+    }
+    if (isPermissionDeniedError(err)) {
+      sendError(res, new ApiError({ status: 503, code: "SUPPORT_SESSIONS_UNAVAILABLE", message: "Support sessions are temporarily unavailable", retryable: true }));
+      return;
+    }
+    if (isTransientDbConnectionError(err)) {
+      sendError(res, new ApiError({ status: 503, code: "SERVICE_UNAVAILABLE", message: "Service temporarily unavailable", retryable: true }));
       return;
     }
     sendError(res, err);

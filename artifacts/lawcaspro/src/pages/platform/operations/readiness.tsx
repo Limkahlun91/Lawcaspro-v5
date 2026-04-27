@@ -7,6 +7,7 @@ import { QueryFallback } from "@/components/query-fallback";
 import { apiFetchJson } from "@/lib/api-client";
 import { useAuth } from "@/lib/auth-context";
 import { hasFounderPermission } from "@/lib/founder-permissions";
+import { ensureArray } from "@/lib/list-items";
 
 function ReadinessBadge({ status }: { status: string }) {
   const cls = (() => {
@@ -31,7 +32,7 @@ export default function PlatformOperationsReadiness() {
     retry: false,
   });
 
-  const items = ((readinessQuery.data as any)?.items ?? []) as any[];
+  const items = ensureArray<any>((readinessQuery.data as any)?.items);
 
   if (!canRead) {
     return (
@@ -104,8 +105,8 @@ export default function PlatformOperationsReadiness() {
                       </td>
                       <td className="px-3 py-2 text-xs">
                         <div className="flex items-center gap-1 flex-wrap">
-                          {(r.blockers ?? []).slice(0, 3).map((b: any) => <Badge key={String(b)} variant="outline" className="text-xs">{String(b)}</Badge>)}
-                          {(r.warnings ?? []).slice(0, 2).map((w: any) => <Badge key={String(w)} variant="outline" className="text-xs">{String(w)}</Badge>)}
+                          {ensureArray<any>(r.blockers).slice(0, 3).map((b: any) => <Badge key={String(b)} variant="outline" className="text-xs">{String(b)}</Badge>)}
+                          {ensureArray<any>(r.warnings).slice(0, 2).map((w: any) => <Badge key={String(w)} variant="outline" className="text-xs">{String(w)}</Badge>)}
                         </div>
                       </td>
                       <td className="px-3 py-2 text-xs">

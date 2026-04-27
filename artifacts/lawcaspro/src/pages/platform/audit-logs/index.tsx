@@ -8,6 +8,8 @@ import { QueryFallback } from "@/components/query-fallback";
 import { apiFetchJson } from "@/lib/api-client";
 import { unwrapApiData } from "@/lib/api-contract";
 import { listItems } from "@/lib/list-items";
+import { PlatformPage, PlatformPageHeader } from "@/components/platform/page";
+import { PlatformEmptyState, PlatformLoadingState } from "@/components/platform/states";
 
 const ACTION_LABELS: Record<string, string> = {
   case_created: "Case Created",
@@ -68,11 +70,11 @@ export default function PlatformAuditLogs() {
   });
 
   return (
-    <div className="space-y-6">
-      <div>
-        <h1 className="text-3xl font-bold text-slate-900 tracking-tight">Platform Audit Logs</h1>
-        <p className="text-slate-500 mt-1">Cross-tenant security and activity events across all firms</p>
-      </div>
+    <PlatformPage>
+      <PlatformPageHeader
+        title="Platform Audit Logs"
+        description="Cross-tenant security and activity events across all firms"
+      />
 
       <div className="flex items-center gap-3 flex-wrap">
         <div className="relative flex-1 min-w-[200px]">
@@ -109,13 +111,14 @@ export default function PlatformAuditLogs() {
           {logsQuery.isError ? (
             <QueryFallback title="Audit logs unavailable" error={logsQuery.error} onRetry={() => logsQuery.refetch()} isRetrying={logsQuery.isFetching} />
           ) : isLoading ? (
-            <div className="text-slate-500 py-8 text-center">Loading audit logs...</div>
+            <PlatformLoadingState title="Loading audit logs..." className="border-none bg-transparent" />
           ) : logs.length === 0 ? (
-            <div className="text-center py-12 text-slate-500">
-              <ScrollText className="w-10 h-10 text-slate-300 mx-auto mb-3" />
-              <p className="font-medium text-slate-600 mb-1">No activity recorded yet</p>
-              <p className="text-sm">User actions within firm workspaces (case creation, workflow updates, document generation) will appear here.</p>
-            </div>
+            <PlatformEmptyState
+              icon={<ScrollText className="w-5 h-5" />}
+              title="No activity recorded yet"
+              description="User actions within firm workspaces (case creation, workflow updates, document generation) will appear here."
+              className="border-none bg-transparent"
+            />
           ) : (
             <div className="divide-y divide-slate-50">
               {logs.map((log: any) => {
@@ -165,6 +168,6 @@ export default function PlatformAuditLogs() {
           )}
         </CardContent>
       </Card>
-    </div>
+    </PlatformPage>
   );
 }

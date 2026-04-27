@@ -8,21 +8,13 @@ import { QueryFallback } from "@/components/query-fallback";
 import { apiFetchJson } from "@/lib/api-client";
 import { hasFounderPermission } from "@/lib/founder-permissions";
 import { useAuth } from "@/lib/auth-context";
+import { ensureArray } from "@/lib/list-items";
+import { PlatformPage, PlatformPageHeader } from "@/components/platform/page";
+import { StatCard } from "@/components/platform/stat-card";
+import { PlatformEmptyState, PlatformLoadingState } from "@/components/platform/states";
+import { AlertTriangle } from "lucide-react";
 
 type Range = "24h" | "7d" | "30d";
-
-function KpiCard({ title, value }: { title: string; value: string | number }) {
-  return (
-    <Card>
-      <CardHeader className="pb-2">
-        <CardTitle className="text-sm font-medium text-slate-500">{title}</CardTitle>
-      </CardHeader>
-      <CardContent>
-        <div className="text-2xl font-bold text-slate-900">{value}</div>
-      </CardContent>
-    </Card>
-  );
-}
 
 export default function PlatformOperationsOverview() {
   const { user } = useAuth();
@@ -53,54 +45,59 @@ export default function PlatformOperationsOverview() {
 
   if (!canRead) {
     return (
-      <Card>
-        <CardHeader>
-          <CardTitle>Operations Center</CardTitle>
-        </CardHeader>
-        <CardContent className="text-sm text-slate-600">Missing permission: founder.ops.read</CardContent>
-      </Card>
+      <PlatformPage>
+        <PlatformPageHeader
+          title="Founder Operations Center"
+          description="Incidents, operations log, recommendations, readiness, and pending queue."
+        />
+        <PlatformEmptyState
+          icon={<AlertTriangle className="w-5 h-5" />}
+          title="Missing permission"
+          description="Required: founder.ops.read"
+        />
+      </PlatformPage>
     );
   }
 
   return (
-    <div className="space-y-6">
-      <div className="flex items-start justify-between gap-3 flex-wrap">
-        <div>
-          <div className="text-2xl font-bold text-slate-900">Founder Operations Center</div>
-          <div className="text-sm text-slate-600">Incidents, operations log, recommendations, readiness, and pending queue.</div>
-        </div>
-        <div className="flex items-center gap-2">
-          <Select value={range} onValueChange={(v) => setRange(v as Range)}>
-            <SelectTrigger className="w-28"><SelectValue /></SelectTrigger>
-            <SelectContent>
-              <SelectItem value="24h">24h</SelectItem>
-              <SelectItem value="7d">7d</SelectItem>
-              <SelectItem value="30d">30d</SelectItem>
-            </SelectContent>
-          </Select>
-          <Button variant="outline" onClick={() => overviewQuery.refetch()} disabled={overviewQuery.isFetching}>
-            Refresh
-          </Button>
-        </div>
-      </div>
+    <PlatformPage>
+      <PlatformPageHeader
+        title="Founder Operations Center"
+        description="Incidents, operations log, recommendations, readiness, and pending queue."
+        actions={
+          <>
+            <Select value={range} onValueChange={(v) => setRange(v as Range)}>
+              <SelectTrigger className="w-28"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="24h">24h</SelectItem>
+                <SelectItem value="7d">7d</SelectItem>
+                <SelectItem value="30d">30d</SelectItem>
+              </SelectContent>
+            </Select>
+            <Button variant="outline" onClick={() => overviewQuery.refetch()} disabled={overviewQuery.isFetching}>
+              Refresh
+            </Button>
+          </>
+        }
+      />
 
       {overviewQuery.isError ? (
         <QueryFallback title="Overview unavailable" error={overviewQuery.error} onRetry={() => overviewQuery.refetch()} isRetrying={overviewQuery.isFetching} />
       ) : overviewQuery.isLoading ? (
-        <div className="text-sm text-slate-500 py-10 text-center">Loading overview...</div>
+        <PlatformLoadingState title="Loading overview..." />
       ) : (
         <div className="space-y-6">
           <div className="grid grid-cols-1 md:grid-cols-5 gap-4">
-            <KpiCard title="Total operations" value={kpi?.total_operations ?? "—"} />
-            <KpiCard title="Failed operations" value={kpi?.failed_operations ?? "—"} />
-            <KpiCard title="Open incidents" value={kpi?.open_incidents ?? "—"} />
-            <KpiCard title="Critical incidents" value={kpi?.critical_incidents ?? "—"} />
-            <KpiCard title="Pending approvals" value={kpi?.pending_approvals ?? "—"} />
-            <KpiCard title="Pending recoveries" value={kpi?.pending_recoveries ?? "—"} />
-            <KpiCard title="High-risk actions" value={kpi?.high_risk_actions ?? "—"} />
-            <KpiCard title="Restore-ready firms" value={kpi?.restore_ready_firms ?? "—"} />
-            <KpiCard title="No valid snapshot" value={kpi?.firms_with_no_valid_snapshot ?? "—"} />
-            <KpiCard title="Emergency overrides (7d)" value={kpi?.emergency_overrides_7d ?? "—"} />
+            <StatCard title="Total operations" value={kpi?.total_operations ?? "—"} />
+            <StatCard title="Failed operations" value={kpi?.failed_operations ?? "—"} />
+            <StatCard title="Open incidents" value={kpi?.open_incidents ?? "—"} />
+            <StatCard title="Critical incidents" value={kpi?.critical_incidents ?? "—"} />
+            <StatCard title="Pending approvals" value={kpi?.pending_approvals ?? "—"} />
+            <StatCard title="Pending recoveries" value={kpi?.pending_recoveries ?? "—"} />
+            <StatCard title="High-risk actions" value={kpi?.high_risk_actions ?? "—"} />
+            <StatCard title="Restore-ready firms" value={kpi?.restore_ready_firms ?? "—"} />
+            <StatCard title="No valid snapshot" value={kpi?.firms_with_no_valid_snapshot ?? "—"} />
+            <StatCard title="Emergency overrides (7d)" value={kpi?.emergency_overrides_7d ?? "—"} />
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -186,7 +183,7 @@ export default function PlatformOperationsOverview() {
                         </tr>
                       </thead>
                       <tbody>
-                        {((riskLists?.top_failing_firms ?? []) as any[]).map((r: any) => (
+                        {ensureArray<any>(riskLists?.top_failing_firms).map((r: any) => (
                           <tr key={String(r.firm_id)} className="border-t">
                             <td className="px-3 py-2">
                               <Link href={`/platform/firms/${String(r.firm_id)}`}><a className="text-amber-700 hover:underline">Firm #{String(r.firm_id)}</a></Link>
@@ -194,7 +191,7 @@ export default function PlatformOperationsOverview() {
                             <td className="px-3 py-2">{String(r.c)}</td>
                           </tr>
                         ))}
-                        {((riskLists?.top_failing_firms ?? []) as any[]).length === 0 ? (
+                        {ensureArray<any>(riskLists?.top_failing_firms).length === 0 ? (
                           <tr><td className="px-3 py-4 text-slate-500" colSpan={2}>No data</td></tr>
                         ) : null}
                       </tbody>
@@ -212,13 +209,13 @@ export default function PlatformOperationsOverview() {
                         </tr>
                       </thead>
                       <tbody>
-                        {((riskLists?.top_failing_modules ?? []) as any[]).map((r: any, idx: number) => (
+                        {ensureArray<any>(riskLists?.top_failing_modules).map((r: any, idx: number) => (
                           <tr key={`${String(r.module_code)}:${idx}`} className="border-t">
                             <td className="px-3 py-2 font-mono">{String(r.module_code)}</td>
                             <td className="px-3 py-2">{String(r.c)}</td>
                           </tr>
                         ))}
-                        {((riskLists?.top_failing_modules ?? []) as any[]).length === 0 ? (
+                        {ensureArray<any>(riskLists?.top_failing_modules).length === 0 ? (
                           <tr><td className="px-3 py-4 text-slate-500" colSpan={2}>No data</td></tr>
                         ) : null}
                       </tbody>
@@ -230,7 +227,7 @@ export default function PlatformOperationsOverview() {
           </div>
         </div>
       )}
-    </div>
+    </PlatformPage>
   );
 }
 

@@ -245,7 +245,7 @@ export async function loadFounderPermissions(req: AuthRequest): Promise<{ permis
       .where(eq(platformFounderUserRolesTable.userId, req.userId));
   } catch (err) {
     const code = err && typeof err === "object" ? (err as { code?: unknown }).code : undefined;
-    if (code === "42P01") {
+    if (code === "42P01" || code === "42703" || code === "42501") {
       const fallback = getFounderFallbackPermissions(req.email);
       if (fallback) return fallback;
       return { permissions: [], highestLevel: null };

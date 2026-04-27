@@ -136,6 +136,11 @@ const isUndefinedTableError = (err: unknown): boolean => {
   return code === "42P01";
 };
 
+const isUndefinedColumnError = (err: unknown): boolean => {
+  const code = err && typeof err === "object" ? (err as { code?: unknown }).code : undefined;
+  return code === "42703";
+};
+
 function mapCreateFirmError(err: unknown): { status: number; body: Record<string, unknown> } {
   const message = err instanceof Error ? err.message : String(err);
   const pg = isPgError(err) ? err : undefined;
@@ -822,7 +827,7 @@ routerInternal.get("/platform/documents", requireAuth, requireFounder, async (re
     );
     sendOk(res, { items: docs, page_info: { limit, has_more: docs.length === limit } });
   } catch (err) {
-    if (isUndefinedTableError(err)) {
+    if (isUndefinedTableError(err) || isUndefinedColumnError(err)) {
       sendOk(res, { items: [], page_info: { limit: 200, has_more: false } });
       return;
     }

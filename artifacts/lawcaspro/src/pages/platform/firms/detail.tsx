@@ -20,6 +20,9 @@ import { FirmActionHistoryTab } from "@/pages/platform/firms/history-tab";
 import { Textarea } from "@/components/ui/textarea";
 import { getSupportSessionId, setSupportSessionId } from "@/lib/support-session";
 import { listItems } from "@/lib/list-items";
+import { PlatformPage, PlatformPageHeader } from "@/components/platform/page";
+import { StatCard } from "@/components/platform/stat-card";
+import { PlatformEmptyState, PlatformLoadingState } from "@/components/platform/states";
 
 interface FirmUser {
   id: number;
@@ -288,7 +291,7 @@ export default function FirmDetail() {
 
   const usersQuery = useQuery<FirmUser[]>({
     queryKey: ["platform-firm-users", firmId],
-    queryFn: () => apiFetchJson(`/platform/firms/${firmId}/users`),
+    queryFn: async () => listItems<FirmUser>(await apiFetchJson(`/platform/firms/${firmId}/users`)),
     enabled: !!firmId && activeTab === "users",
     retry: false,
   });
@@ -350,105 +353,33 @@ export default function FirmDetail() {
     );
   };
 
-  if (isLoading) return <div className="p-8 text-slate-500">Loading firm details...</div>;
-  if (!firm) return <div className="p-8 text-slate-500">Firm not found</div>;
+  if (isLoading) return <PlatformLoadingState title="Loading firm details..." />;
+  if (!firm) return <PlatformEmptyState title="Firm not found" description="The requested firm does not exist or you do not have access." icon={<Building2 className="w-5 h-5" />} />;
 
   return (
-    <div className="space-y-6">
-      <div className="flex items-center gap-4">
-        <Button variant="outline" size="icon" onClick={() => setLocation("/platform/firms")}>
-          <ArrowLeft className="w-4 h-4" />
-        </Button>
-        <div>
-          <h1 className="text-3xl font-bold text-slate-900 tracking-tight">{firm.name}</h1>
-          <p className="text-slate-500 mt-1">Workspace: {firm.slug}</p>
-        </div>
-      </div>
+    <PlatformPage>
+      <PlatformPageHeader
+        title={firm.name}
+        description={`Workspace: ${firm.slug}`}
+        actions={
+          <Button variant="outline" onClick={() => setLocation("/platform/firms")} className="gap-2">
+            <ArrowLeft className="w-4 h-4" />
+            Back to Firms
+          </Button>
+        }
+      />
 
-      <div className="grid grid-cols-1 md:grid-cols-9 gap-4">
-        <Card>
-          <CardHeader className="flex flex-row items-center justify-between pb-2 space-y-0">
-            <CardTitle className="text-sm font-medium text-slate-500">Total Users</CardTitle>
-            <Users className="w-4 h-4 text-slate-400" />
-          </CardHeader>
-          <CardContent>
-            <div className="text-2xl font-bold">{firm.userCount}</div>
-          </CardContent>
-        </Card>
-        <Card>
-          <CardHeader className="flex flex-row items-center justify-between pb-2 space-y-0">
-            <CardTitle className="text-sm font-medium text-slate-500">Total Cases</CardTitle>
-            <Briefcase className="w-4 h-4 text-slate-400" />
-          </CardHeader>
-          <CardContent>
-            <div className="text-2xl font-bold">{firm.caseCount}</div>
-          </CardContent>
-        </Card>
-        <Card>
-          <CardHeader className="flex flex-row items-center justify-between pb-2 space-y-0">
-            <CardTitle className="text-sm font-medium text-slate-500">Created</CardTitle>
-            <Building2 className="w-4 h-4 text-slate-400" />
-          </CardHeader>
-          <CardContent>
-            <div className="text-lg font-bold">{new Date(firm.createdAt).toLocaleDateString()}</div>
-          </CardContent>
-        </Card>
-        <Card>
-          <CardHeader className="flex flex-row items-center justify-between pb-2 space-y-0">
-            <CardTitle className="text-sm font-medium text-slate-500">Last maintenance</CardTitle>
-            <RotateCcw className="w-4 h-4 text-slate-400" />
-          </CardHeader>
-          <CardContent>
-            <div className="text-sm font-bold">{lastMaintenanceAt ? new Date(lastMaintenanceAt).toLocaleString() : "—"}</div>
-          </CardContent>
-        </Card>
-        <Card>
-          <CardHeader className="flex flex-row items-center justify-between pb-2 space-y-0">
-            <CardTitle className="text-sm font-medium text-slate-500">Last snapshot</CardTitle>
-            <Building2 className="w-4 h-4 text-slate-400" />
-          </CardHeader>
-          <CardContent>
-            <div className="text-sm font-bold">{lastSnapshotAt ? new Date(lastSnapshotAt).toLocaleString() : "—"}</div>
-          </CardContent>
-        </Card>
-        <Card>
-          <CardHeader className="flex flex-row items-center justify-between pb-2 space-y-0">
-            <CardTitle className="text-sm font-medium text-slate-500">Last restore</CardTitle>
-            <RotateCcw className="w-4 h-4 text-slate-400" />
-          </CardHeader>
-          <CardContent>
-            <div className="text-sm font-bold">{lastRestoreAt ? new Date(lastRestoreAt).toLocaleString() : "—"}</div>
-          </CardContent>
-        </Card>
-        <Card>
-          <CardHeader className="flex flex-row items-center justify-between pb-2 space-y-0">
-            <CardTitle className="text-sm font-medium text-slate-500">Last rollback</CardTitle>
-            <RotateCcw className="w-4 h-4 text-slate-400" />
-          </CardHeader>
-          <CardContent>
-            <div className="text-sm font-bold">{lastRollbackAt ? new Date(lastRollbackAt).toLocaleString() : "—"}</div>
-          </CardContent>
-        </Card>
-        <Card>
-          <CardHeader className="flex flex-row items-center justify-between pb-2 space-y-0">
-            <CardTitle className="text-sm font-medium text-slate-500">Pending approvals</CardTitle>
-            <Key className="w-4 h-4 text-slate-400" />
-          </CardHeader>
-          <CardContent>
-            <div className="text-2xl font-bold">{opsSummaryQuery.data?.counts?.pending_approvals ?? "—"}</div>
-          </CardContent>
-        </Card>
-        <Card>
-          <CardHeader className="flex flex-row items-center justify-between pb-2 space-y-0">
-            <CardTitle className="text-sm font-medium text-slate-500">Running ops</CardTitle>
-            <RotateCcw className="w-4 h-4 text-slate-400" />
-          </CardHeader>
-          <CardContent>
-            <div className="text-sm font-bold">
-              M: {opsSummaryQuery.data?.counts?.running_maintenance ?? "—"} · R: {opsSummaryQuery.data?.counts?.running_restore ?? "—"}
-            </div>
-          </CardContent>
-        </Card>
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-5 gap-4 auto-rows-fr">
+        <StatCard title="Total Users" value={firm.userCount} icon={<Users className="w-4 h-4" />} />
+        <StatCard title="Total Cases" value={firm.caseCount} icon={<Briefcase className="w-4 h-4" />} />
+        <StatCard title="Created" value={new Date(firm.createdAt).toLocaleDateString()} icon={<Building2 className="w-4 h-4" />} valueClassName="text-sm font-semibold leading-snug" />
+        <StatCard title="Last maintenance" value={lastMaintenanceAt ? new Date(lastMaintenanceAt).toLocaleString() : "—"} icon={<RotateCcw className="w-4 h-4" />} valueClassName="text-sm font-semibold leading-snug" />
+        <StatCard title="Last snapshot" value={lastSnapshotAt ? new Date(lastSnapshotAt).toLocaleString() : "—"} icon={<Building2 className="w-4 h-4" />} valueClassName="text-sm font-semibold leading-snug" />
+        <StatCard title="Last restore" value={lastRestoreAt ? new Date(lastRestoreAt).toLocaleString() : "—"} icon={<RotateCcw className="w-4 h-4" />} valueClassName="text-sm font-semibold leading-snug" />
+        <StatCard title="Last rollback" value={lastRollbackAt ? new Date(lastRollbackAt).toLocaleString() : "—"} icon={<RotateCcw className="w-4 h-4" />} valueClassName="text-sm font-semibold leading-snug" />
+        <StatCard title="Pending approvals" value={opsSummaryQuery.data?.counts?.pending_approvals ?? "—"} icon={<Key className="w-4 h-4" />} />
+        <StatCard title="Running maintenance" value={opsSummaryQuery.data?.counts?.running_maintenance ?? "—"} icon={<RotateCcw className="w-4 h-4" />} />
+        <StatCard title="Running restore" value={opsSummaryQuery.data?.counts?.running_restore ?? "—"} icon={<RotateCcw className="w-4 h-4" />} />
       </div>
 
       <SupportSessionPanel firmId={firmId} firmName={firm.name} />
@@ -562,6 +493,6 @@ export default function FirmDetail() {
       {activeTab === "history" && (
         <FirmActionHistoryTab firmId={firmId} />
       )}
-    </div>
+    </PlatformPage>
   );
 }

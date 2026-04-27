@@ -4,6 +4,9 @@ import { Activity, Building2, Users, Briefcase, FileText } from "lucide-react";
 import { QueryFallback } from "@/components/query-fallback";
 import { apiFetchJson } from "@/lib/api-client";
 import { listItems } from "@/lib/list-items";
+import { PlatformPage, PlatformPageHeader } from "@/components/platform/page";
+import { StatCard } from "@/components/platform/stat-card";
+import { PlatformEmptyState, PlatformLoadingState } from "@/components/platform/states";
 
 export default function PlatformMonitoring() {
   const statsQuery = useQuery({
@@ -25,14 +28,14 @@ export default function PlatformMonitoring() {
   const isLoading = statsLoading || firmsLoading;
 
   return (
-    <div className="space-y-6">
-      <div>
-        <h1 className="text-3xl font-bold text-slate-900 tracking-tight">Platform Monitoring</h1>
-        <p className="text-slate-500 mt-1">System health and tenant resource overview</p>
-      </div>
+    <PlatformPage>
+      <PlatformPageHeader
+        title="Platform Monitoring"
+        description="System health and tenant resource overview"
+      />
 
       {isLoading ? (
-        <div className="text-slate-500 py-12 text-center">Loading platform data...</div>
+        <PlatformLoadingState title="Loading platform data..." />
       ) : statsQuery.isError || firmsQuery.isError ? (
         <QueryFallback
           title="Platform monitoring unavailable"
@@ -49,19 +52,17 @@ export default function PlatformMonitoring() {
               { label: "Total Cases", value: String((stats as any)?.totalCases ?? 0), icon: Briefcase, color: "bg-green-50 text-green-600" },
               { label: "Documents Generated", value: String((stats as any)?.totalDocuments ?? 0), icon: FileText, color: "bg-purple-50 text-purple-600" },
             ].map((item) => (
-              <Card key={item.label}>
-                <CardContent className="pt-6">
-                  <div className="flex items-center gap-3">
-                    <div className={`w-10 h-10 rounded-lg flex items-center justify-center ${item.color}`}>
-                      <item.icon className="w-5 h-5" />
-                    </div>
-                    <div>
-                      <div className="text-xs text-slate-500">{item.label}</div>
-                      <div className="text-xl font-bold text-slate-900">{item.value}</div>
-                    </div>
+              <StatCard
+                key={item.label}
+                title={item.label}
+                value={item.value}
+                icon={
+                  <div className={`w-8 h-8 rounded-lg flex items-center justify-center ${item.color}`}>
+                    <item.icon className="w-4 h-4" />
                   </div>
-                </CardContent>
-              </Card>
+                }
+                valueClassName="text-xl"
+              />
             ))}
           </div>
 
@@ -74,7 +75,7 @@ export default function PlatformMonitoring() {
             </CardHeader>
             <CardContent>
               {firms.length === 0 ? (
-                <div className="text-center py-8 text-slate-400">No firms found</div>
+                <PlatformEmptyState title="No firms found" description="No tenants are available to show yet." icon={<Building2 className="w-5 h-5" />} />
               ) : (
                 <table className="w-full text-sm">
                   <thead>
@@ -120,6 +121,6 @@ export default function PlatformMonitoring() {
           </Card>
         </>
       )}
-    </div>
+    </PlatformPage>
   );
 }

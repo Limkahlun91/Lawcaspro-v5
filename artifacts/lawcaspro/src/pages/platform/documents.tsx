@@ -26,6 +26,8 @@ import { downloadBlob } from "@/lib/download";
 import { toastError } from "@/lib/toast-error";
 import { unwrapApiData } from "@/lib/api-contract";
 import { listItems } from "@/lib/list-items";
+import { PlatformPage, PlatformPageHeader } from "@/components/platform/page";
+import { PlatformEmptyState, PlatformLoadingState } from "@/components/platform/states";
 
 const ALLOWED_TYPES: Record<string, string> = {
   "application/pdf": "PDF",
@@ -725,22 +727,20 @@ export default function PlatformDocuments() {
   };
 
   return (
-    <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-3xl font-bold text-slate-900 tracking-tight">System Documents</h1>
-          <p className="text-slate-500 mt-1">Manage global system folders and master documents for all firms</p>
-        </div>
-        <div className="flex items-center gap-2">
+    <PlatformPage>
+      <PlatformPageHeader
+        title="System Documents"
+        description="Manage global system folders and master documents for all firms"
+        actions={
           <Button variant="outline" onClick={() => setClausesOpen(true)} className="gap-2">
             <BookOpen className="w-4 h-4" />
             Clauses
           </Button>
-        </div>
-      </div>
+        }
+      />
 
-      <div className="flex gap-6 min-h-[500px]">
-        <div className="w-80 shrink-0">
+      <div className="grid grid-cols-1 lg:grid-cols-[320px_1fr] gap-6 min-h-[500px]">
+        <div className="min-w-0">
           <Card>
             <CardContent className="p-4">
               <div className="flex items-center justify-between mb-3">
@@ -772,7 +772,7 @@ export default function PlatformDocuments() {
               {foldersQuery.isError ? (
                 <QueryFallback title="Folders unavailable" error={foldersQuery.error} onRetry={() => foldersQuery.refetch()} isRetrying={foldersQuery.isFetching} />
               ) : foldersQuery.isLoading ? (
-                <div className="text-slate-500 text-sm py-6 text-center">Loading folders...</div>
+                <PlatformLoadingState title="Loading folders..." className="border-none bg-transparent" />
               ) : (
                 <>
                   <div className="space-y-0.5">
@@ -793,7 +793,13 @@ export default function PlatformDocuments() {
                   </div>
 
                   {rootFolders.length === 0 && (
-                    <p className="text-xs text-slate-400 text-center py-4">No folders yet</p>
+                    <PlatformEmptyState
+                      icon={<FolderOpen className="w-5 h-5" />}
+                      title="No folders yet"
+                      description="Create a folder to organize system documents."
+                      primaryAction={{ label: "New Folder", onClick: () => { setNewFolderParentId(null); setNewFolderName(""); setShowNewFolder(true); } }}
+                      className="border-none bg-transparent"
+                    />
                   )}
                 </>
               )}
@@ -839,15 +845,15 @@ export default function PlatformDocuments() {
               {docsQuery.isError ? (
                 <QueryFallback title="Documents unavailable" error={docsQuery.error} onRetry={() => docsQuery.refetch()} isRetrying={docsQuery.isFetching} />
               ) : docsLoading ? (
-                <div className="text-slate-500 text-sm py-12 text-center">Loading documents...</div>
+                <PlatformLoadingState title="Loading documents..." className="border-none bg-transparent" />
               ) : docs.length === 0 ? (
-                <div className="text-center py-12">
-                  <FileText className="w-10 h-10 text-slate-300 mx-auto mb-3" />
-                  <p className="text-slate-500 font-medium">No documents</p>
-                  <p className="text-slate-400 text-sm mt-1">
-                    {selectedFolder ? `Upload a document to "${selectedFolder.name}"` : "Upload a document to get started"}
-                  </p>
-                </div>
+                <PlatformEmptyState
+                  icon={<FileText className="w-5 h-5" />}
+                  title="No documents"
+                  description={selectedFolder ? `Upload a document to "${selectedFolder.name}".` : "Upload a document to get started."}
+                  primaryAction={{ label: "Upload Document", onClick: () => setShowUpload(true) }}
+                  className="border-none bg-transparent"
+                />
               ) : (
                 <table className="w-full text-sm">
                   <thead>
@@ -1980,6 +1986,6 @@ export default function PlatformDocuments() {
           />
         </Suspense>
       )}
-    </div>
+    </PlatformPage>
   );
 }

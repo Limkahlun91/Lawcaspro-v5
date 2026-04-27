@@ -1,7 +1,7 @@
 import express, { type Router as ExpressRouter } from "express";
 import { and, desc, eq, ilike, sql } from "drizzle-orm";
 import { auditLogsTable, platformApprovalEventsTable, platformApprovalRequestsTable, platformMaintenanceActionStepsTable, platformMaintenanceActionsTable, platformRestoreActionStepsTable, platformRestoreActionsTable } from "@workspace/db";
-import { withAuthSafeDb } from "../lib/auth-safe-db.js";
+import { isTransientDbConnectionError, withAuthSafeDb } from "../lib/auth-safe-db.js";
 import { requireAuth, requireFounder, type AuthRequest, writeAuditLog } from "../lib/auth.js";
 import { ApiError, parseIntParam, sendError, sendOk } from "../lib/api-response.js";
 import { assertActiveSupportSessionForFirm, assertFounderPermission, createApprovalRequest, createStepUpChallenge, defaultStepUpPhrase, evaluateDecisionForExecute, evaluateDecisionForPreview, loadFounderGovernanceContext } from "../services/founder-governance/index.js";
@@ -46,6 +46,16 @@ type RouterInternalLike = {
 
 const expressRouter = express.Router();
 const router = expressRouter as unknown as RouterInternalLike;
+
+const getPgCode = (err: unknown): string | null => {
+  const code = err && typeof err === "object" ? (err as { code?: unknown }).code : undefined;
+  if (typeof code === "string" && code) return code;
+  return null;
+};
+
+const isUndefinedTableError = (err: unknown): boolean => getPgCode(err) === "42P01";
+const isUndefinedColumnError = (err: unknown): boolean => getPgCode(err) === "42703";
+const isPermissionDeniedError = (err: unknown): boolean => getPgCode(err) === "42501" || (err instanceof Error && /permission denied/i.test(err.message));
 
 router.get("/platform/firms/:firmId/ops/summary", requireAuth, requireFounder, async (req: AuthRequest, res) => {
   try {
@@ -112,6 +122,24 @@ router.get("/platform/firms/:firmId/ops/summary", requireAuth, requireFounder, a
 
     sendOk(res, result);
   } catch (err) {
+    if (isUndefinedTableError(err) || isUndefinedColumnError(err) || isPermissionDeniedError(err)) {
+      sendOk(
+        res,
+        {
+          latest_snapshot: null,
+          latest_maintenance: null,
+          latest_restore: null,
+          latest_rollback: null,
+          counts: { pending_approvals: 0, running_maintenance: 0, running_restore: 0 },
+        },
+        { warnings: [{ code: "DB_FEATURE_UNAVAILABLE", message: "Platform ops data store is unavailable; returned degraded summary." }] },
+      );
+      return;
+    }
+    if (isTransientDbConnectionError(err)) {
+      sendError(res, new ApiError({ status: 503, code: "SERVICE_UNAVAILABLE", message: "Service temporarily unavailable", retryable: true }));
+      return;
+    }
     sendError(res, err);
   }
 });
@@ -152,6 +180,48 @@ router.get("/platform/firms/:firmId/maintenance/actions", requireAuth, requireFo
     }, { retry: true, allowUnsafe: true, ctx: { route: "GET /platform/firms/:firmId/maintenance/actions", firmId } });
     sendOk(res, { items });
   } catch (err) {
+    if (isUndefinedTableError(err) || isPermissionDeniedError(err)) {
+      sendOk(res, { items: [] }, { warnings: [{ code: "DB_FEATURE_UNAVAILABLE", message: "Maintenance actions store is unavailable; returned empty list." }] });
+      return;
+    }
+    if (isTransientDbConnectionError(err)) {
+      sendError(res, new ApiError({ status: 503, code: "SERVICE_UNAVAILABLE", message: "Service temporarily unavailable", retryable: true }));
+      return;
+    }
+    sendError(res, err);
+  }
+});
+
+router.get("/platform/firms/:firmId/actions", requireAuth, requireFounder, async (req: AuthRequest, res) => {
+  try {
+    const firmId = parseIntParam("firmId", req.params.firmId, { required: true, min: 1 })!;
+    const limit = (() => {
+      const v = req.query.limit;
+      const raw = typeof v === "string" ? v : Array.isArray(v) && typeof v[0] === "string" ? v[0] : undefined;
+      const n = raw ? Number.parseInt(raw, 10) : 50;
+      return Number.isFinite(n) ? Math.min(Math.max(n, 1), 100) : 50;
+    })();
+    const items = await withAuthSafeDb(async (authDb) => {
+      const ctx = await loadFounderGovernanceContext(authDb, req);
+      assertFounderPermission(ctx, "founder.maintenance.read");
+      assertActiveSupportSessionForFirm(ctx, firmId);
+      return await authDb
+        .select()
+        .from(platformMaintenanceActionsTable)
+        .where(eq(platformMaintenanceActionsTable.firmId, firmId))
+        .orderBy(desc(platformMaintenanceActionsTable.createdAt))
+        .limit(limit);
+    }, { retry: true, allowUnsafe: true, ctx: { route: "GET /platform/firms/:firmId/actions", firmId } });
+    sendOk(res, { items });
+  } catch (err) {
+    if (isUndefinedTableError(err) || isUndefinedColumnError(err) || isPermissionDeniedError(err)) {
+      sendOk(res, { items: [] }, { warnings: [{ code: "DB_FEATURE_UNAVAILABLE", message: "Maintenance actions store is unavailable; returned empty list." }] });
+      return;
+    }
+    if (isTransientDbConnectionError(err)) {
+      sendError(res, new ApiError({ status: 503, code: "SERVICE_UNAVAILABLE", message: "Service temporarily unavailable", retryable: true }));
+      return;
+    }
     sendError(res, err);
   }
 });
@@ -193,6 +263,14 @@ router.get("/platform/firms/:firmId/maintenance/actions/:actionId", requireAuth,
 
     sendOk(res, result);
   } catch (err) {
+    if (isUndefinedTableError(err) || isPermissionDeniedError(err)) {
+      sendError(res, new ApiError({ status: 503, code: "MAINTENANCE_ACTIONS_UNAVAILABLE", message: "Maintenance actions are temporarily unavailable", retryable: true }));
+      return;
+    }
+    if (isTransientDbConnectionError(err)) {
+      sendError(res, new ApiError({ status: 503, code: "SERVICE_UNAVAILABLE", message: "Service temporarily unavailable", retryable: true }));
+      return;
+    }
     sendError(res, err);
   }
 });
@@ -234,6 +312,14 @@ router.get("/platform/firms/:firmId/restore/actions/:restoreActionId", requireAu
 
     sendOk(res, result);
   } catch (err) {
+    if (isUndefinedTableError(err) || isPermissionDeniedError(err)) {
+      sendError(res, new ApiError({ status: 503, code: "RESTORE_ACTIONS_UNAVAILABLE", message: "Restore actions are temporarily unavailable", retryable: true }));
+      return;
+    }
+    if (isTransientDbConnectionError(err)) {
+      sendError(res, new ApiError({ status: 503, code: "SERVICE_UNAVAILABLE", message: "Service temporarily unavailable", retryable: true }));
+      return;
+    }
     sendError(res, err);
   }
 });
@@ -442,6 +528,18 @@ router.get("/platform/firms/:firmId/snapshots", requireAuth, requireFounder, asy
     }, { retry: true, allowUnsafe: true, ctx: { route: "GET /platform/firms/:firmId/snapshots", firmId } });
     sendOk(res, result);
   } catch (err) {
+    if (isUndefinedTableError(err) || isUndefinedColumnError(err) || isPermissionDeniedError(err)) {
+      sendOk(
+        res,
+        { items: [], page_info: { limit: 50, has_more: false, next_before: null }, filters_applied: { snapshot_type: null, status: null, pinned: null, target_entity_type: null, target_entity_id: null, trigger_type: null, before: null } },
+        { warnings: [{ code: "DB_FEATURE_UNAVAILABLE", message: "Snapshots store is unavailable; returned empty list." }] },
+      );
+      return;
+    }
+    if (isTransientDbConnectionError(err)) {
+      sendError(res, new ApiError({ status: 503, code: "SERVICE_UNAVAILABLE", message: "Service temporarily unavailable", retryable: true }));
+      return;
+    }
     sendError(res, err);
   }
 });
@@ -506,6 +604,14 @@ router.post("/platform/firms/:firmId/snapshots", requireAuth, requireFounder, as
     }, { retry: true, allowUnsafe: true, ctx: { route: "POST /platform/firms/:firmId/snapshots", firmId } });
     sendOk(res, { snapshot: { id: result.snapshotId, storage_driver: result.storageDriver, storage_path: result.storagePath, checksum: result.checksum, size_bytes: result.sizeBytes } }, { status: 201 });
   } catch (err) {
+    if (isUndefinedTableError(err) || isPermissionDeniedError(err)) {
+      sendError(res, new ApiError({ status: 503, code: "SNAPSHOT_STORE_UNAVAILABLE", message: "Snapshots are temporarily unavailable", retryable: true }));
+      return;
+    }
+    if (isTransientDbConnectionError(err)) {
+      sendError(res, new ApiError({ status: 503, code: "SERVICE_UNAVAILABLE", message: "Service temporarily unavailable", retryable: true }));
+      return;
+    }
     sendError(res, err, { status: 500, code: "SNAPSHOT_CREATE_FAILED", message: "Snapshot creation failed" });
   }
 });
@@ -523,6 +629,14 @@ router.get("/platform/firms/:firmId/snapshots/:snapshotId", requireAuth, require
     }, { retry: true, allowUnsafe: true, ctx: { route: "GET /platform/firms/:firmId/snapshots/:snapshotId", firmId } });
     sendOk(res, { item: data.snapshot, items: data.items });
   } catch (err) {
+    if (isUndefinedTableError(err) || isPermissionDeniedError(err)) {
+      sendError(res, new ApiError({ status: 503, code: "SNAPSHOT_STORE_UNAVAILABLE", message: "Snapshots are temporarily unavailable", retryable: true }));
+      return;
+    }
+    if (isTransientDbConnectionError(err)) {
+      sendError(res, new ApiError({ status: 503, code: "SERVICE_UNAVAILABLE", message: "Service temporarily unavailable", retryable: true }));
+      return;
+    }
     sendError(res, err);
   }
 });
