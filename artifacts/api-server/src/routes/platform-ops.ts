@@ -122,6 +122,20 @@ router.get("/platform/firms/:firmId/ops/summary", requireAuth, requireFounder, a
 
     sendOk(res, result);
   } catch (err) {
+    if (err instanceof ApiError && (err.code === "PERMISSION_DENIED" || err.code === "SUPPORT_SESSION_REQUIRED")) {
+      sendOk(
+        res,
+        {
+          latest_snapshot: null,
+          latest_maintenance: null,
+          latest_restore: null,
+          latest_rollback: null,
+          counts: { pending_approvals: 0, running_maintenance: 0, running_restore: 0 },
+        },
+        { warnings: [{ code: err.code, message: err.message }] },
+      );
+      return;
+    }
     if (isUndefinedTableError(err) || isUndefinedColumnError(err) || isPermissionDeniedError(err)) {
       sendOk(
         res,
@@ -214,6 +228,10 @@ router.get("/platform/firms/:firmId/actions", requireAuth, requireFounder, async
     }, { retry: true, allowUnsafe: true, ctx: { route: "GET /platform/firms/:firmId/actions", firmId } });
     sendOk(res, { items });
   } catch (err) {
+    if (err instanceof ApiError && (err.code === "PERMISSION_DENIED" || err.code === "SUPPORT_SESSION_REQUIRED")) {
+      sendOk(res, { items: [] }, { warnings: [{ code: err.code, message: err.message }] });
+      return;
+    }
     if (isUndefinedTableError(err) || isUndefinedColumnError(err) || isPermissionDeniedError(err)) {
       sendOk(res, { items: [] }, { warnings: [{ code: "DB_FEATURE_UNAVAILABLE", message: "Maintenance actions store is unavailable; returned empty list." }] });
       return;
@@ -528,6 +546,14 @@ router.get("/platform/firms/:firmId/snapshots", requireAuth, requireFounder, asy
     }, { retry: true, allowUnsafe: true, ctx: { route: "GET /platform/firms/:firmId/snapshots", firmId } });
     sendOk(res, result);
   } catch (err) {
+    if (err instanceof ApiError && (err.code === "PERMISSION_DENIED" || err.code === "SUPPORT_SESSION_REQUIRED")) {
+      sendOk(
+        res,
+        { items: [], page_info: { limit: 50, has_more: false, next_before: null }, filters_applied: { snapshot_type: null, status: null, pinned: null, target_entity_type: null, target_entity_id: null, trigger_type: null, before: null } },
+        { warnings: [{ code: err.code, message: err.message }] },
+      );
+      return;
+    }
     if (isUndefinedTableError(err) || isUndefinedColumnError(err) || isPermissionDeniedError(err)) {
       sendOk(
         res,

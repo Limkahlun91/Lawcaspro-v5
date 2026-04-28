@@ -79,7 +79,7 @@ router.get("/support-sessions", requireAuth, requireFounder, async (req: AuthReq
       sendError(res, new ApiError({ status: 503, code: "SERVICE_UNAVAILABLE", message: "Service temporarily unavailable", retryable: true }));
       return;
     }
-    sendError(res, err);
+    sendError(res, err, { status: 503, code: "SUPPORT_SESSIONS_QUERY_FAILED", message: "Support sessions are temporarily unavailable" });
   }
 });
 
@@ -111,7 +111,7 @@ router.get("/support-sessions/active", requireAuth, requireFounder, async (req: 
       sendError(res, new ApiError({ status: 503, code: "SERVICE_UNAVAILABLE", message: "Service temporarily unavailable", retryable: true }));
       return;
     }
-    sendError(res, err);
+    sendError(res, err, { status: 503, code: "SUPPORT_SESSIONS_QUERY_FAILED", message: "Support sessions are temporarily unavailable" });
   }
 });
 

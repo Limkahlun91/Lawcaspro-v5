@@ -164,7 +164,7 @@ export async function requireAuth(
     }
   } catch (err) {
     logger.error({ err }, "auth.require_auth.db_error");
-    res.status(503).json({ error: "Auth temporarily unavailable" });
+    res.status(503).json({ error: "Auth temporarily unavailable", code: "AUTH_TEMPORARILY_UNAVAILABLE" });
     return;
   }
 
@@ -208,25 +208,36 @@ export async function lookupSessionAndUserByTokenHash(
     }
   | null
 > {
-  for (let attempt = 1; attempt <= 2; attempt++) {
-    const [s] = await db.select().from(sessionsTable).where(eq(sessionsTable.tokenHash, tokenHash));
-    if (!s) {
-      if (attempt === 1) continue;
-      return null;
+  const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      const [s] = await db.select().from(sessionsTable).where(eq(sessionsTable.tokenHash, tokenHash));
+      if (!s) {
+        if (attempt < 2) continue;
+        return null;
+      }
+      const [u] = await db
+        .select({
+          id: usersTable.id,
+          email: usersTable.email,
+          name: usersTable.name,
+          userType: usersTable.userType,
+          firmId: usersTable.firmId,
+          roleId: usersTable.roleId,
+          status: usersTable.status,
+        })
+        .from(usersTable)
+        .where(eq(usersTable.id, s.userId));
+      return { session: s, user: u };
+    } catch (err) {
+      const shouldRetry = isTransientDbConnectionError(err);
+      if (shouldRetry && attempt < 3) {
+        await sleep(50 * attempt);
+        continue;
+      }
+      throw err;
     }
-    const [u] = await db
-      .select({
-        id: usersTable.id,
-        email: usersTable.email,
-        name: usersTable.name,
-        userType: usersTable.userType,
-        firmId: usersTable.firmId,
-        roleId: usersTable.roleId,
-        status: usersTable.status,
-      })
-      .from(usersTable)
-      .where(eq(usersTable.id, s.userId));
-    return { session: s, user: u };
   }
   return null;
 }
@@ -274,12 +285,10 @@ export async function loadFounderPermissions(req: AuthRequest): Promise<{ permis
       .where(eq(platformFounderUserRolesTable.userId, req.userId));
   } catch (err) {
     const code = err && typeof err === "object" ? (err as { code?: unknown }).code : undefined;
-    if (code === "42P01" || code === "42703" || code === "42501") {
-      const fallback = getFounderFallbackPermissions(req.email);
-      if (fallback) return fallback;
-      return { permissions: [], highestLevel: null };
-    }
-    throw err;
+    logger.error({ err, userId: req.userId ?? null, code: typeof code === "string" ? code : null }, "auth.founder_permissions.degraded");
+    const fallback = getFounderFallbackPermissions(req.email);
+    if (fallback) return fallback;
+    return { permissions: [], highestLevel: null };
   }
 
   const perms = Array.from(new Set(rows.map((r) => r.perm).filter((p): p is string => typeof p === "string" && p.length > 0)));

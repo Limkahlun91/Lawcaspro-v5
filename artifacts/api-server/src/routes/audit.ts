@@ -21,7 +21,36 @@ async function queryRows(executor: DbExec, query: ReturnType<typeof sql>): Promi
   return [];
 }
 
-router.get("/audit-logs", requireAuth, requireFirmUser, requirePermission("audit", "read"), async (req: AuthRequest, res: ResLike): Promise<void> => {
+router.get(
+  "/audit-logs",
+  requireAuth,
+  async (req: AuthRequest, res: ResLike, next: unknown): Promise<void> => {
+    if (req.userType !== "founder") {
+      (next as any)();
+      return;
+    }
+    const one = (v: unknown): string | undefined =>
+      typeof v === "string" ? v : Array.isArray(v) ? (typeof v[0] === "string" ? v[0] : undefined) : undefined;
+    const q = req.query as Record<string, unknown>;
+    const limit = (() => {
+      const raw = one(q.limit);
+      const n = raw ? Number.parseInt(raw, 10) : 100;
+      return Number.isFinite(n) ? Math.min(Math.max(n, 1), 150) : 100;
+    })();
+    const offset = (() => {
+      const raw = one(q.offset);
+      const n = raw ? Number.parseInt(raw, 10) : 0;
+      return Number.isFinite(n) ? Math.max(n, 0) : 0;
+    })();
+    sendOk(
+      res,
+      { data: [], total: 0, pagination: { limit, offset }, filters_applied: { action: null, entityType: null, actorId: null } },
+      { warnings: [{ code: "FOUNDER_AUDIT_LOGS_NOT_APPLICABLE", message: "Firm audit logs are not available in founder context; returned empty list." }] },
+    );
+  },
+  requireFirmUser,
+  requirePermission("audit", "read"),
+  async (req: AuthRequest, res: ResLike): Promise<void> => {
   try {
     const one = (v: unknown): string | undefined => (typeof v === "string" ? v : Array.isArray(v) ? (typeof v[0] === "string" ? v[0] : undefined) : undefined);
 
@@ -97,7 +126,8 @@ router.get("/audit-logs", requireAuth, requireFirmUser, requirePermission("audit
     }
     sendError(res, err, { status: 500, code: "AUDIT_LOGS_QUERY_FAILED", message: "Failed to load audit logs" });
   }
-});
+  }
+);
 
 router.get("/platform/audit-logs", requireAuth, requireFounder, async (req: AuthRequest, res: ResLike): Promise<void> => {
   try {
@@ -193,6 +223,14 @@ router.get("/platform/audit-logs", requireAuth, requireFounder, async (req: Auth
 
     sendOk(res, { items: result.items, pagination: result.pagination, ...(result.total !== null ? { total: result.total } : {}) });
   } catch (err: any) {
+    if (err instanceof ApiError && err.code === "PERMISSION_DENIED") {
+      sendOk(
+        res,
+        { items: [], pagination: { limit: 50, has_more: false, next_cursor: null } },
+        { warnings: [{ code: err.code, message: err.message }] },
+      );
+      return;
+    }
     const code = typeof err?.code === "string" ? err.code : undefined;
     const message = err instanceof Error ? err.message : String(err ?? "");
     const lowered = message.toLowerCase();

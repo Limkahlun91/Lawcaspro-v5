@@ -854,7 +854,7 @@ routerInternal.get("/platform/documents", requireAuth, requireFounder, async (re
       return;
     }
     logger.error({ err, firmId: getQuery(req, "firmId") ?? null, folderId: getQuery(req, "folderId") ?? null }, "platform.documents.error");
-    sendError(res, err, { status: 500, code: "DOCUMENTS_QUERY_FAILED", message: "Failed to load documents" });
+    sendError(res, err, { status: 503, code: "DOCUMENTS_QUERY_FAILED", message: "Failed to load documents" });
   }
 });
 
