@@ -115,20 +115,47 @@ export function sendOk<T>(res: ResLike, data: T, opts?: { status?: number; warni
 
 export function sendError(res: ResLike, err: unknown, fallback?: { status?: number; code?: string; message?: string }): void {
   const meta = getApiMeta(res);
-  if (err instanceof ApiError) {
+  const isApiErrorLike = (value: unknown): value is {
+    status: number;
+    code: string;
+    message: string;
+    retryable?: boolean;
+    details?: unknown;
+    stage?: string;
+    suggestion?: string;
+  } => {
+    if (!value || typeof value !== "object") return false;
+    const v = value as Record<string, unknown>;
+    const status = v.status;
+    const code = v.code;
+    const message = (v as any).message;
+    return (
+      typeof status === "number" &&
+      Number.isFinite(status) &&
+      status >= 100 &&
+      status <= 599 &&
+      typeof code === "string" &&
+      code.length > 0 &&
+      typeof message === "string" &&
+      message.length > 0
+    );
+  };
+
+  if (err instanceof ApiError || isApiErrorLike(err)) {
+    const e = err as ApiError;
     const body: ApiFailure = {
       ok: false,
       error: {
-        code: err.code,
-        message: err.message,
-        retryable: err.retryable,
-        ...(err.details !== undefined ? { details: err.details } : {}),
-        ...(err.stage ? { stage: err.stage } : {}),
-        ...(err.suggestion ? { suggestion: err.suggestion } : {}),
+        code: (e as any).code,
+        message: (e as any).message,
+        retryable: Boolean((e as any).retryable),
+        ...((e as any).details !== undefined ? { details: (e as any).details } : {}),
+        ...((e as any).stage ? { stage: (e as any).stage } : {}),
+        ...((e as any).suggestion ? { suggestion: (e as any).suggestion } : {}),
       },
       meta,
     };
-    res.status(err.status).json(body);
+    res.status((e as any).status).json(body);
     return;
   }
 

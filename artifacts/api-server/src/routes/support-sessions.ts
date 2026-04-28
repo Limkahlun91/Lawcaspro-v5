@@ -72,14 +72,22 @@ router.get("/support-sessions", requireAuth, requireFounder, async (req: AuthReq
       return;
     }
     if (isPermissionDeniedError(err)) {
-      sendError(res, new ApiError({ status: 503, code: "SUPPORT_SESSIONS_UNAVAILABLE", message: "Support sessions are temporarily unavailable", retryable: true }));
+      sendOk(
+        res,
+        { items: [] },
+        { warnings: [{ code: "SUPPORT_SESSIONS_UNAVAILABLE", message: "Support sessions unavailable; returned empty list." }] },
+      );
       return;
     }
     if (isTransientDbConnectionError(err)) {
-      sendError(res, new ApiError({ status: 503, code: "SERVICE_UNAVAILABLE", message: "Service temporarily unavailable", retryable: true }));
+      sendOk(res, { items: [] }, { warnings: [{ code: "SERVICE_UNAVAILABLE", message: "Service unavailable; returned empty list." }] });
       return;
     }
-    sendError(res, err, { status: 503, code: "SUPPORT_SESSIONS_QUERY_FAILED", message: "Support sessions are temporarily unavailable" });
+    sendOk(
+      res,
+      { items: [] },
+      { warnings: [{ code: "SUPPORT_SESSIONS_QUERY_FAILED", message: "Support sessions query failed; returned empty list." }] },
+    );
   }
 });
 
@@ -104,14 +112,22 @@ router.get("/support-sessions/active", requireAuth, requireFounder, async (req: 
       return;
     }
     if (isPermissionDeniedError(err)) {
-      sendError(res, new ApiError({ status: 503, code: "SUPPORT_SESSIONS_UNAVAILABLE", message: "Support sessions are temporarily unavailable", retryable: true }));
+      sendOk(
+        res,
+        { items: [] },
+        { warnings: [{ code: "SUPPORT_SESSIONS_UNAVAILABLE", message: "Support sessions unavailable; returned empty list." }] },
+      );
       return;
     }
     if (isTransientDbConnectionError(err)) {
-      sendError(res, new ApiError({ status: 503, code: "SERVICE_UNAVAILABLE", message: "Service temporarily unavailable", retryable: true }));
+      sendOk(res, { items: [] }, { warnings: [{ code: "SERVICE_UNAVAILABLE", message: "Service unavailable; returned empty list." }] });
       return;
     }
-    sendError(res, err, { status: 503, code: "SUPPORT_SESSIONS_QUERY_FAILED", message: "Support sessions are temporarily unavailable" });
+    sendOk(
+      res,
+      { items: [] },
+      { warnings: [{ code: "SUPPORT_SESSIONS_QUERY_FAILED", message: "Support sessions query failed; returned empty list." }] },
+    );
   }
 });
 

@@ -832,29 +832,38 @@ routerInternal.get("/platform/documents", requireAuth, requireFounder, async (re
       return;
     }
     if (isTransientDbConnectionError(err)) {
-      sendError(res, new ApiError({ status: 503, code: "SERVICE_UNAVAILABLE", message: "Service temporarily unavailable", retryable: true }));
+      sendOk(
+        res,
+        { items: [], page_info: { limit: 200, has_more: false } },
+        { warnings: [{ code: "SERVICE_UNAVAILABLE", message: "Documents temporarily unavailable; returned empty list." }] },
+      );
       return;
     }
     if (err instanceof RouteTimeoutError) {
       logger.error({ err, firmId: getQuery(req, "firmId") ?? null, folderId: getQuery(req, "folderId") ?? null }, "platform.documents.timeout");
-      sendError(res, new ApiError({ status: 504, code: "QUERY_TIMEOUT", message: "Request timed out", retryable: true, stage: err.label }));
+      sendOk(
+        res,
+        { items: [], page_info: { limit: 200, has_more: false } },
+        { warnings: [{ code: "QUERY_TIMEOUT", message: "Documents query timed out; returned empty list." }] },
+      );
       return;
     }
     const code = typeof (err as any)?.code === "string" ? String((err as any).code) : undefined;
     const message = err instanceof Error ? err.message : String(err ?? "");
     if (code === "57014" || message.toLowerCase().includes("statement timeout")) {
-      sendError(res, new ApiError({
-        status: 504,
-        code: "QUERY_TIMEOUT",
-        message: "Documents query timed out. Try filtering by folder or reducing limit.",
-        retryable: true,
-        stage: "platform.documents.list",
-        suggestion: "Filter by folder or pass a smaller limit.",
-      }));
+      sendOk(
+        res,
+        { items: [], page_info: { limit: 200, has_more: false } },
+        { warnings: [{ code: "QUERY_TIMEOUT", message: "Documents query timed out; returned empty list." }] },
+      );
       return;
     }
     logger.error({ err, firmId: getQuery(req, "firmId") ?? null, folderId: getQuery(req, "folderId") ?? null }, "platform.documents.error");
-    sendError(res, err, { status: 503, code: "DOCUMENTS_QUERY_FAILED", message: "Failed to load documents" });
+    sendOk(
+      res,
+      { items: [], page_info: { limit: 200, has_more: false } },
+      { warnings: [{ code: "DOCUMENTS_QUERY_FAILED", message: "Failed to load documents; returned empty list." }] },
+    );
   }
 });
 

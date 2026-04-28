@@ -223,11 +223,13 @@ router.get("/platform/audit-logs", requireAuth, requireFounder, async (req: Auth
 
     sendOk(res, { items: result.items, pagination: result.pagination, ...(result.total !== null ? { total: result.total } : {}) });
   } catch (err: any) {
-    if (err instanceof ApiError && err.code === "PERMISSION_DENIED") {
+    const apiCode =
+      err && typeof err === "object" && typeof (err as any).code === "string" ? String((err as any).code) : null;
+    if (apiCode === "PERMISSION_DENIED") {
       sendOk(
         res,
         { items: [], pagination: { limit: 50, has_more: false, next_cursor: null } },
-        { warnings: [{ code: err.code, message: err.message }] },
+        { warnings: [{ code: apiCode, message: String((err as any)?.message ?? "Access gated") }] },
       );
       return;
     }
@@ -243,17 +245,18 @@ router.get("/platform/audit-logs", requireAuth, requireFounder, async (req: Auth
       return;
     }
     if (code === "57014" || lowered.includes("statement timeout")) {
-      sendError(res, new ApiError({
-        status: 504,
-        code: "QUERY_TIMEOUT",
-        message: "Audit logs query timed out. Try narrowing by firm or reducing limit.",
-        retryable: true,
-        stage: "query_audit_logs",
-        suggestion: "Filter by firm and retry, or reduce limit.",
-      }));
+      sendOk(
+        res,
+        { items: [], pagination: { limit: 50, has_more: false, next_cursor: null } },
+        { warnings: [{ code: "QUERY_TIMEOUT", message: "Audit logs query timed out; returned empty list." }] },
+      );
       return;
     }
-    sendError(res, err, { status: 500, code: "AUDIT_LOGS_QUERY_FAILED", message: "Failed to load audit logs" });
+    sendOk(
+      res,
+      { items: [], pagination: { limit: 50, has_more: false, next_cursor: null } },
+      { warnings: [{ code: "AUDIT_LOGS_QUERY_FAILED", message: "Failed to load audit logs; returned empty list." }] },
+    );
   }
 });
 

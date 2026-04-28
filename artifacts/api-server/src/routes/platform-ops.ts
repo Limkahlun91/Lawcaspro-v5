@@ -122,7 +122,9 @@ router.get("/platform/firms/:firmId/ops/summary", requireAuth, requireFounder, a
 
     sendOk(res, result);
   } catch (err) {
-    if (err instanceof ApiError && (err.code === "PERMISSION_DENIED" || err.code === "SUPPORT_SESSION_REQUIRED")) {
+    const apiCode =
+      err && typeof err === "object" && typeof (err as any).code === "string" ? String((err as any).code) : null;
+    if (apiCode === "PERMISSION_DENIED" || apiCode === "SUPPORT_SESSION_REQUIRED") {
       sendOk(
         res,
         {
@@ -132,7 +134,7 @@ router.get("/platform/firms/:firmId/ops/summary", requireAuth, requireFounder, a
           latest_rollback: null,
           counts: { pending_approvals: 0, running_maintenance: 0, running_restore: 0 },
         },
-        { warnings: [{ code: err.code, message: err.message }] },
+        { warnings: [{ code: apiCode, message: String((err as any)?.message ?? "Access gated") }] },
       );
       return;
     }
@@ -151,10 +153,30 @@ router.get("/platform/firms/:firmId/ops/summary", requireAuth, requireFounder, a
       return;
     }
     if (isTransientDbConnectionError(err)) {
-      sendError(res, new ApiError({ status: 503, code: "SERVICE_UNAVAILABLE", message: "Service temporarily unavailable", retryable: true }));
+      sendOk(
+        res,
+        {
+          latest_snapshot: null,
+          latest_maintenance: null,
+          latest_restore: null,
+          latest_rollback: null,
+          counts: { pending_approvals: 0, running_maintenance: 0, running_restore: 0 },
+        },
+        { warnings: [{ code: "SERVICE_UNAVAILABLE", message: "Service unavailable; returned degraded summary." }] },
+      );
       return;
     }
-    sendError(res, err);
+    sendOk(
+      res,
+      {
+        latest_snapshot: null,
+        latest_maintenance: null,
+        latest_restore: null,
+        latest_rollback: null,
+        counts: { pending_approvals: 0, running_maintenance: 0, running_restore: 0 },
+      },
+      { warnings: [{ code: "OPS_SUMMARY_UNAVAILABLE", message: "Ops summary unavailable; returned degraded summary." }] },
+    );
   }
 });
 
@@ -228,8 +250,10 @@ router.get("/platform/firms/:firmId/actions", requireAuth, requireFounder, async
     }, { retry: true, allowUnsafe: true, ctx: { route: "GET /platform/firms/:firmId/actions", firmId } });
     sendOk(res, { items });
   } catch (err) {
-    if (err instanceof ApiError && (err.code === "PERMISSION_DENIED" || err.code === "SUPPORT_SESSION_REQUIRED")) {
-      sendOk(res, { items: [] }, { warnings: [{ code: err.code, message: err.message }] });
+    const apiCode =
+      err && typeof err === "object" && typeof (err as any).code === "string" ? String((err as any).code) : null;
+    if (apiCode === "PERMISSION_DENIED" || apiCode === "SUPPORT_SESSION_REQUIRED") {
+      sendOk(res, { items: [] }, { warnings: [{ code: apiCode, message: String((err as any)?.message ?? "Access gated") }] });
       return;
     }
     if (isUndefinedTableError(err) || isUndefinedColumnError(err) || isPermissionDeniedError(err)) {
@@ -237,10 +261,10 @@ router.get("/platform/firms/:firmId/actions", requireAuth, requireFounder, async
       return;
     }
     if (isTransientDbConnectionError(err)) {
-      sendError(res, new ApiError({ status: 503, code: "SERVICE_UNAVAILABLE", message: "Service temporarily unavailable", retryable: true }));
+      sendOk(res, { items: [] }, { warnings: [{ code: "SERVICE_UNAVAILABLE", message: "Service unavailable; returned empty list." }] });
       return;
     }
-    sendError(res, err);
+    sendOk(res, { items: [] }, { warnings: [{ code: "ACTIONS_UNAVAILABLE", message: "Actions unavailable; returned empty list." }] });
   }
 });
 
@@ -546,11 +570,13 @@ router.get("/platform/firms/:firmId/snapshots", requireAuth, requireFounder, asy
     }, { retry: true, allowUnsafe: true, ctx: { route: "GET /platform/firms/:firmId/snapshots", firmId } });
     sendOk(res, result);
   } catch (err) {
-    if (err instanceof ApiError && (err.code === "PERMISSION_DENIED" || err.code === "SUPPORT_SESSION_REQUIRED")) {
+    const apiCode =
+      err && typeof err === "object" && typeof (err as any).code === "string" ? String((err as any).code) : null;
+    if (apiCode === "PERMISSION_DENIED" || apiCode === "SUPPORT_SESSION_REQUIRED") {
       sendOk(
         res,
         { items: [], page_info: { limit: 50, has_more: false, next_before: null }, filters_applied: { snapshot_type: null, status: null, pinned: null, target_entity_type: null, target_entity_id: null, trigger_type: null, before: null } },
-        { warnings: [{ code: err.code, message: err.message }] },
+        { warnings: [{ code: apiCode, message: String((err as any)?.message ?? "Access gated") }] },
       );
       return;
     }
@@ -563,10 +589,18 @@ router.get("/platform/firms/:firmId/snapshots", requireAuth, requireFounder, asy
       return;
     }
     if (isTransientDbConnectionError(err)) {
-      sendError(res, new ApiError({ status: 503, code: "SERVICE_UNAVAILABLE", message: "Service temporarily unavailable", retryable: true }));
+      sendOk(
+        res,
+        { items: [], page_info: { limit: 50, has_more: false, next_before: null }, filters_applied: { snapshot_type: null, status: null, pinned: null, target_entity_type: null, target_entity_id: null, trigger_type: null, before: null } },
+        { warnings: [{ code: "SERVICE_UNAVAILABLE", message: "Service unavailable; returned empty list." }] },
+      );
       return;
     }
-    sendError(res, err);
+    sendOk(
+      res,
+      { items: [], page_info: { limit: 50, has_more: false, next_before: null }, filters_applied: { snapshot_type: null, status: null, pinned: null, target_entity_type: null, target_entity_id: null, trigger_type: null, before: null } },
+      { warnings: [{ code: "SNAPSHOTS_UNAVAILABLE", message: "Snapshots unavailable; returned empty list." }] },
+    );
   }
 });
 
