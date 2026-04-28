@@ -55,6 +55,12 @@ const normalizeApiUrl = (rawUrl: unknown): string => {
   return `/api/${url}`;
 };
 
+const getQueryString = (url: unknown): string => {
+  const u = typeof url === "string" ? url : "";
+  const idx = u.indexOf("?");
+  return idx >= 0 ? u.slice(idx) : "";
+};
+
 const getHandler = async (): Promise<ExpressLikeHandler> => {
   if (cachedHandler) return cachedHandler;
   const modPath = "../artifacts/api-server/dist/" + "app.js";
@@ -68,6 +74,7 @@ const getHandler = async (): Promise<ExpressLikeHandler> => {
 
 export default async function vercelHandler(req: any, res: any): Promise<void> {
   const originalUrl = req?.url;
+  const queryString = getQueryString(originalUrl);
   const pathFromRewrite = one(req?.query?.__path);
   const rewrittenUrl = pathFromRewrite ? `/api/${pathFromRewrite}` : "/api";
   const normalizedUrl = normalizeApiUrl(rewrittenUrl);
@@ -81,7 +88,7 @@ export default async function vercelHandler(req: any, res: any): Promise<void> {
     });
   }
 
-  req.url = normalizedUrl;
+  req.url = normalizedUrl + queryString;
 
   try {
     const handler = await getHandler();

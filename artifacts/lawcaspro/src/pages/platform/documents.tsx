@@ -419,8 +419,10 @@ export default function PlatformDocuments() {
 
   const platformVariablesQuery = useQuery<DocumentVariableDefinition[]>({
     queryKey: ["platform-document-variables", includeInactiveVariables],
-    queryFn: ({ signal }) =>
-      apiFetchJson(`/platform/document-variables${includeInactiveVariables ? "" : "?active=1"}`, { signal }),
+    queryFn: async ({ signal }) =>
+      ensureArray<DocumentVariableDefinition>(
+        await apiFetchJson(`/platform/document-variables${includeInactiveVariables ? "" : "?active=1"}`, { signal }),
+      ),
     enabled: variableRegistryOpen,
     retry: false,
   });
@@ -1648,7 +1650,7 @@ export default function PlatformDocuments() {
                       </tr>
                     </thead>
                     <tbody className="divide-y">
-                      {(platformVariablesQuery.data ?? [])
+                      {ensureArray(platformVariablesQuery.data)
                         .filter((v) => {
                           const q = variableSearch.trim().toLowerCase();
                           if (!q) return true;
@@ -1696,7 +1698,7 @@ export default function PlatformDocuments() {
                             </td>
                           </tr>
                         ))}
-                      {(platformVariablesQuery.data ?? []).length === 0 ? (
+                      {ensureArray(platformVariablesQuery.data).length === 0 ? (
                         <tr>
                           <td colSpan={9} className="px-3 py-10 text-center text-slate-500">No variables found.</td>
                         </tr>

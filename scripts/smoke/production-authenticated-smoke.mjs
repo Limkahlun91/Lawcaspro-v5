@@ -40,6 +40,13 @@ const parseSetCookieHeader = (value) => {
   return [];
 };
 
+const findAuthCookie = (setCookieHeaders) => {
+  const list = Array.isArray(setCookieHeaders) ? setCookieHeaders : [];
+  return list.find((h) => String(h).trim().toLowerCase().startsWith("auth_token=")) ?? null;
+};
+
+const hasAttr = (cookieHeader, attr) => String(cookieHeader).toLowerCase().includes(String(attr).toLowerCase());
+
 const cookieJarFromSetCookie = (setCookieHeaders) => {
   const parts = [];
   for (const raw of setCookieHeaders) {
@@ -136,6 +143,7 @@ const run = async () => {
   });
 
   const loginSetCookie = parseSetCookieHeader(login.headers.getSetCookie?.() ?? login.headers.get("set-cookie"));
+  const authCookieHeader = findAuthCookie(loginSetCookie);
   const authCookieJar = cookieJarFromSetCookie(loginSetCookie);
   const cookieJar = mergeCookieJars(bypassCookieJar, authCookieJar);
 
@@ -148,6 +156,37 @@ const run = async () => {
   if (login.status !== 200) {
     const t = await login.text();
     console.error("Login failed:", cut(redactTokenFields(t)));
+    process.exit(1);
+  }
+
+  if (!authCookieHeader) {
+    console.error("Login did not return auth_token Set-Cookie.");
+    process.exit(1);
+  }
+  if (!hasAttr(authCookieHeader, "httponly")) {
+    console.error("auth_token cookie missing HttpOnly.");
+    process.exit(1);
+  }
+  if (!hasAttr(authCookieHeader, "path=/")) {
+    console.error("auth_token cookie missing Path=/.");
+    process.exit(1);
+  }
+  if (!hasAttr(authCookieHeader, "samesite=lax")) {
+    console.error("auth_token cookie missing SameSite=Lax.");
+    process.exit(1);
+  }
+  const requiresSecure = (() => {
+    try {
+      const u = new URL(baseUrl);
+      if (u.protocol !== "https:") return false;
+      if (u.hostname === "localhost" || u.hostname === "127.0.0.1") return false;
+      return true;
+    } catch {
+      return baseUrl.startsWith("https://");
+    }
+  })();
+  if (requiresSecure && !hasAttr(authCookieHeader, "secure")) {
+    console.error("auth_token cookie missing Secure (required for HTTPS).");
     process.exit(1);
   }
 

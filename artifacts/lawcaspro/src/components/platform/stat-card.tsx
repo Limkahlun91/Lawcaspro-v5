@@ -15,7 +15,7 @@ export function StatCard({
   valueClassName?: string;
 }) {
   return (
-    <Card className="h-full">
+    <Card className="h-full min-w-0">
       <CardHeader className="flex flex-row items-center justify-between pb-2 space-y-0">
         <CardTitle className="text-xs font-medium text-slate-500 min-w-0 pr-2 break-words leading-snug">{title}</CardTitle>
         {icon ? <div className="text-slate-400 shrink-0">{icon}</div> : null}
