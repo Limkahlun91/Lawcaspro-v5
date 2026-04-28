@@ -661,12 +661,9 @@ routerInternal.get("/auth/me", async (req: ReqLike, res: RouteResLike): Promise<
   try {
     let s: { userId: number; expiresAt: Date } | undefined;
     for (let attempt = 1; attempt <= 2; attempt++) {
-      const [row] = await db
-        .select({ userId: sessionsTable.userId, expiresAt: sessionsTable.expiresAt })
-        .from(sessionsTable)
-        .where(eq(sessionsTable.tokenHash, tokenHash));
+      const [row] = await db.select().from(sessionsTable).where(eq(sessionsTable.tokenHash, tokenHash));
       if (row) {
-        s = row;
+        s = { userId: (row as { userId: number }).userId, expiresAt: (row as { expiresAt: Date }).expiresAt };
         break;
       }
     }
