@@ -102,7 +102,7 @@ export default function PlatformOperationsOverview() {
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <Card>
-              <CardHeader className="flex flex-row items-center justify-between">
+              <CardHeader className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                 <CardTitle>Trends</CardTitle>
                 <div className="flex items-center gap-2 text-sm">
                   <Link href="/platform/operations/logs"><a className="text-amber-700 hover:underline">Logs</a></Link>
@@ -113,7 +113,7 @@ export default function PlatformOperationsOverview() {
               <CardContent className="space-y-4">
                 <div>
                   <div className="text-xs text-slate-500 mb-1">Operations by day</div>
-                  <div className="rounded border border-slate-200 overflow-hidden">
+                  <div className="rounded border border-slate-200 overflow-x-auto overflow-y-hidden">
                     <table className="w-full text-xs">
                       <thead className="bg-slate-50 sticky top-0">
                         <tr className="text-left">
@@ -137,7 +137,7 @@ export default function PlatformOperationsOverview() {
                 </div>
                 <div>
                   <div className="text-xs text-slate-500 mb-1">Incidents by day</div>
-                  <div className="rounded border border-slate-200 overflow-hidden">
+                  <div className="rounded border border-slate-200 overflow-x-auto overflow-y-hidden">
                     <table className="w-full text-xs">
                       <thead className="bg-slate-50 sticky top-0">
                         <tr className="text-left">
@@ -163,7 +163,7 @@ export default function PlatformOperationsOverview() {
             </Card>
 
             <Card>
-              <CardHeader className="flex flex-row items-center justify-between">
+              <CardHeader className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                 <CardTitle>Risk Lists</CardTitle>
                 <div className="flex items-center gap-2 text-sm">
                   <Link href="/platform/operations/readiness"><a className="text-amber-700 hover:underline">Readiness</a></Link>
@@ -174,7 +174,7 @@ export default function PlatformOperationsOverview() {
               <CardContent className="space-y-4">
                 <div>
                   <div className="text-xs text-slate-500 mb-1">Top failing firms</div>
-                  <div className="rounded border border-slate-200 overflow-hidden">
+                  <div className="rounded border border-slate-200 overflow-x-auto overflow-y-hidden">
                     <table className="w-full text-xs">
                       <thead className="bg-slate-50 sticky top-0">
                         <tr className="text-left">
@@ -200,7 +200,7 @@ export default function PlatformOperationsOverview() {
                 </div>
                 <div>
                   <div className="text-xs text-slate-500 mb-1">Top failing modules</div>
-                  <div className="rounded border border-slate-200 overflow-hidden">
+                  <div className="rounded border border-slate-200 overflow-x-auto overflow-y-hidden">
                     <table className="w-full text-xs">
                       <thead className="bg-slate-50 sticky top-0">
                         <tr className="text-left">

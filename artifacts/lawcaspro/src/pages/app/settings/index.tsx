@@ -566,113 +566,115 @@ function FirmInfoTab() {
         </CardHeader>
         <CardContent>
           {(settings?.bankAccounts ?? []).length > 0 && (
-            <table className="w-full text-sm mb-4">
-              <thead>
-                <tr className="border-b border-slate-200 bg-slate-50">
-                  <th className="text-left px-4 py-2 font-medium text-slate-600">Bank Name</th>
-                  <th className="text-left px-4 py-2 font-medium text-slate-600">Account No.</th>
-                  <th className="text-left px-4 py-2 font-medium text-slate-600">Type</th>
-                  <th className="w-24"></th>
-                </tr>
-              </thead>
-              <tbody>
-                {(settings?.bankAccounts ?? []).map((acc: FirmBankAccount) => (
-                  <tr key={acc.id} className="border-b border-slate-100">
-                    {editingBankId === acc.id ? (
-                      <>
-                        <td className="px-4 py-2">
-                          <Input value={editBankName} onChange={(e) => setEditBankName(e.target.value)} disabled={!canUpdate} />
-                        </td>
-                        <td className="px-4 py-2">
-                          <Input value={editAccountNo} onChange={(e) => setEditAccountNo(e.target.value)} disabled={!canUpdate} />
-                        </td>
-                        <td className="px-4 py-2">
-                          <select
-                            value={editAccountType}
-                            onChange={(e) => setEditAccountType(e.target.value)}
-                            disabled={!canUpdate}
-                            className="w-full h-9 border rounded-md px-3 text-sm bg-white"
-                          >
-                            <option value="office">Office</option>
-                            <option value="client">Client</option>
-                          </select>
-                        </td>
-                        <td className="px-4 py-2">
-                          <div className="flex justify-end gap-1">
-                            <Button
-                              variant="ghost"
-                              size="sm"
-                              disabled={!canUpdate || updateBankMutation.isPending}
-                              onClick={() => {
-                                if (!editBankName.trim() || !editAccountNo.trim()) {
-                                  toast({ title: "Bank name and account number are required", variant: "destructive" });
-                                  return;
-                                }
-                                updateBankMutation.mutate({
-                                  id: acc.id,
-                                  data: { bankName: editBankName, accountNo: editAccountNo, accountType: editAccountType },
-                                });
-                              }}
-                              className="h-7 w-7 p-0"
-                            >
-                              <Save className="w-3.5 h-3.5" />
-                            </Button>
-                            <Button
-                              variant="ghost"
-                              size="sm"
-                              disabled={!canUpdate || updateBankMutation.isPending}
-                              onClick={() => setEditingBankId(null)}
-                              className="h-7 w-7 p-0"
-                            >
-                              <X className="w-3.5 h-3.5" />
-                            </Button>
-                          </div>
-                        </td>
-                      </>
-                    ) : (
-                      <>
-                        <td className="px-4 py-3 font-medium">{acc.bankName}</td>
-                        <td className="px-4 py-3 text-slate-600">{acc.accountNo}</td>
-                        <td className="px-4 py-3">
-                          <span className={`inline-block px-2 py-0.5 rounded text-xs font-medium capitalize ${
-                            acc.accountType === "client" ? "bg-blue-100 text-blue-700" : "bg-green-100 text-green-700"
-                          }`}>
-                            {acc.accountType}
-                          </span>
-                        </td>
-                        <td className="px-4 py-3">
-                          <div className="flex justify-end gap-1">
-                            <Button
-                              variant="ghost"
-                              size="sm"
-                              disabled={!canUpdate}
-                              onClick={() => {
-                                setEditingBankId(acc.id);
-                                setEditBankName(acc.bankName || "");
-                                setEditAccountNo(acc.accountNo || "");
-                                setEditAccountType(acc.accountType || "office");
-                              }}
-                              className="h-7 w-7 p-0"
-                            >
-                              <Pencil className="w-3.5 h-3.5" />
-                            </Button>
-                            <Button
-                              variant="ghost"
-                              size="sm"
-                              disabled={!canUpdate || deleteBankMutation.isPending}
-                              onClick={() => deleteBankMutation.mutate(acc.id)}
-                              className="text-red-500 h-7 w-7 p-0"
-                            >
-                              <Trash2 className="w-3.5 h-3.5" />
-                            </Button>
-                          </div>
-                        </td>
-                      </>
-                    )}
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm mb-4 min-w-[720px]">
+                <thead>
+                  <tr className="border-b border-slate-200 bg-slate-50">
+                    <th className="text-left px-4 py-2 font-medium text-slate-600">Bank Name</th>
+                    <th className="text-left px-4 py-2 font-medium text-slate-600">Account No.</th>
+                    <th className="text-left px-4 py-2 font-medium text-slate-600">Type</th>
+                    <th className="w-24"></th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
+                </thead>
+                <tbody>
+                  {(settings?.bankAccounts ?? []).map((acc: FirmBankAccount) => (
+                    <tr key={acc.id} className="border-b border-slate-100">
+                      {editingBankId === acc.id ? (
+                        <>
+                          <td className="px-4 py-2">
+                            <Input value={editBankName} onChange={(e) => setEditBankName(e.target.value)} disabled={!canUpdate} />
+                          </td>
+                          <td className="px-4 py-2">
+                            <Input value={editAccountNo} onChange={(e) => setEditAccountNo(e.target.value)} disabled={!canUpdate} />
+                          </td>
+                          <td className="px-4 py-2">
+                            <select
+                              value={editAccountType}
+                              onChange={(e) => setEditAccountType(e.target.value)}
+                              disabled={!canUpdate}
+                              className="w-full h-9 border rounded-md px-3 text-sm bg-white"
+                            >
+                              <option value="office">Office</option>
+                              <option value="client">Client</option>
+                            </select>
+                          </td>
+                          <td className="px-4 py-2">
+                            <div className="flex justify-end gap-1">
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                disabled={!canUpdate || updateBankMutation.isPending}
+                                onClick={() => {
+                                  if (!editBankName.trim() || !editAccountNo.trim()) {
+                                    toast({ title: "Bank name and account number are required", variant: "destructive" });
+                                    return;
+                                  }
+                                  updateBankMutation.mutate({
+                                    id: acc.id,
+                                    data: { bankName: editBankName, accountNo: editAccountNo, accountType: editAccountType },
+                                  });
+                                }}
+                                className="h-7 w-7 p-0"
+                              >
+                                <Save className="w-3.5 h-3.5" />
+                              </Button>
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                disabled={!canUpdate || updateBankMutation.isPending}
+                                onClick={() => setEditingBankId(null)}
+                                className="h-7 w-7 p-0"
+                              >
+                                <X className="w-3.5 h-3.5" />
+                              </Button>
+                            </div>
+                          </td>
+                        </>
+                      ) : (
+                        <>
+                          <td className="px-4 py-3 font-medium">{acc.bankName}</td>
+                          <td className="px-4 py-3 text-slate-600">{acc.accountNo}</td>
+                          <td className="px-4 py-3">
+                            <span className={`inline-block px-2 py-0.5 rounded text-xs font-medium capitalize ${
+                              acc.accountType === "client" ? "bg-blue-100 text-blue-700" : "bg-green-100 text-green-700"
+                            }`}>
+                              {acc.accountType}
+                            </span>
+                          </td>
+                          <td className="px-4 py-3">
+                            <div className="flex justify-end gap-1">
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                disabled={!canUpdate}
+                                onClick={() => {
+                                  setEditingBankId(acc.id);
+                                  setEditBankName(acc.bankName || "");
+                                  setEditAccountNo(acc.accountNo || "");
+                                  setEditAccountType(acc.accountType || "office");
+                                }}
+                                className="h-7 w-7 p-0"
+                              >
+                                <Pencil className="w-3.5 h-3.5" />
+                              </Button>
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                disabled={!canUpdate || deleteBankMutation.isPending}
+                                onClick={() => deleteBankMutation.mutate(acc.id)}
+                                className="text-red-500 h-7 w-7 p-0"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                              </Button>
+                            </div>
+                          </td>
+                        </>
+                      )}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           )}
 
           <div className="flex gap-3 items-end">

@@ -133,7 +133,7 @@ export default function InvoiceDetail() {
   });
 
   if (isLoading) return <div className="py-16 text-center text-slate-400">Loading invoice…</div>;
-  if (invQuery.isError) return <div className="p-6"><QueryFallback title="Invoice unavailable" error={invQuery.error} onRetry={() => invQuery.refetch()} isRetrying={invQuery.isFetching} /></div>;
+  if (invQuery.isError) return <div className="py-10"><QueryFallback title="Invoice unavailable" error={invQuery.error} onRetry={() => invQuery.refetch()} isRetrying={invQuery.isFetching} /></div>;
   if (!inv) return <div className="py-16 text-center text-slate-400">Invoice not found</div>;
 
   const items = inv.items ?? [];
@@ -147,12 +147,12 @@ export default function InvoiceDetail() {
   const canRecord = inv.status === "issued" || inv.status === "partially_paid";
 
   return (
-    <div className="max-w-4xl mx-auto space-y-6">
-      <div className="flex items-center gap-4">
+    <div className="space-y-6 min-w-0">
+      <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
         <Button variant="ghost" size="sm" onClick={() => setLocation("/app/accounting?tab=invoices")} className="gap-1.5">
           <ArrowLeft className="w-4 h-4" /> Back
         </Button>
-        <div className="flex-1">
+        <div className="flex-1 min-w-0">
           <h1 className="text-2xl font-bold text-slate-900">{inv.invoiceNo}</h1>
           <div className="flex items-center gap-3 mt-1">
             <span className={cn("px-2 py-0.5 rounded-full text-xs font-medium", STATUS_COLORS[inv.status] ?? "bg-slate-100 text-slate-600")}>
@@ -162,7 +162,7 @@ export default function InvoiceDetail() {
             {inv.dueDate && <span className="text-sm text-slate-400">Due: {inv.dueDate}</span>}
           </div>
         </div>
-        <div className="flex gap-2">
+        <div className="flex gap-2 flex-wrap">
           <Button variant="outline" size="sm" className="gap-1.5" onClick={() => window.print()}>
             <Printer className="w-4 h-4" /> Print
           </Button>
@@ -269,32 +269,34 @@ export default function InvoiceDetail() {
               <div className="px-4 py-2 bg-slate-50 border-y text-xs font-semibold text-slate-500 uppercase tracking-wide">
                 {group.label}
               </div>
-              <table className="w-full text-sm">
-                <thead>
-                  <tr className="text-slate-400 text-xs">
-                    <th className="px-4 py-2 text-left font-medium">Description</th>
-                    <th className="px-4 py-2 text-left font-medium">Type</th>
-                    <th className="px-4 py-2 text-right font-medium">Excl. Tax</th>
-                    <th className="px-4 py-2 text-right font-medium">Tax</th>
-                    <th className="px-4 py-2 text-right font-medium">Total</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {group.items.map((item: InvoiceItem) => (
-                    <tr key={item.id} className="border-t border-slate-100 hover:bg-slate-50">
-                      <td className="px-4 py-2.5 text-slate-800">{item.description}</td>
-                      <td className="px-4 py-2.5">
-                        <span className="text-xs text-slate-400">{ITEM_TYPE_LABELS[item.itemType] ?? item.itemType}</span>
-                      </td>
-                      <td className="px-4 py-2.5 text-right text-slate-600 font-mono text-xs">{fmt(item.amountExclTax)}</td>
-                      <td className="px-4 py-2.5 text-right text-slate-400 font-mono text-xs">
-                        {Number(item.taxAmount) > 0 ? `${fmt(item.taxAmount)} (${Number(item.taxRate).toFixed(0)}%)` : "—"}
-                      </td>
-                      <td className="px-4 py-2.5 text-right font-semibold text-slate-800 font-mono text-xs">{fmt(item.amountInclTax)}</td>
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm min-w-[900px]">
+                  <thead>
+                    <tr className="text-slate-400 text-xs">
+                      <th className="px-4 py-2 text-left font-medium">Description</th>
+                      <th className="px-4 py-2 text-left font-medium">Type</th>
+                      <th className="px-4 py-2 text-right font-medium">Excl. Tax</th>
+                      <th className="px-4 py-2 text-right font-medium">Tax</th>
+                      <th className="px-4 py-2 text-right font-medium">Total</th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
+                  </thead>
+                  <tbody>
+                    {group.items.map((item: InvoiceItem) => (
+                      <tr key={item.id} className="border-t border-slate-100 hover:bg-slate-50">
+                        <td className="px-4 py-2.5 text-slate-800">{item.description}</td>
+                        <td className="px-4 py-2.5">
+                          <span className="text-xs text-slate-400">{ITEM_TYPE_LABELS[item.itemType] ?? item.itemType}</span>
+                        </td>
+                        <td className="px-4 py-2.5 text-right text-slate-600 font-mono text-xs">{fmt(item.amountExclTax)}</td>
+                        <td className="px-4 py-2.5 text-right text-slate-400 font-mono text-xs">
+                          {Number(item.taxAmount) > 0 ? `${fmt(item.taxAmount)} (${Number(item.taxRate).toFixed(0)}%)` : "—"}
+                        </td>
+                        <td className="px-4 py-2.5 text-right font-semibold text-slate-800 font-mono text-xs">{fmt(item.amountInclTax)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
             </div>
           ))}
 

@@ -270,8 +270,7 @@ export default function NewCasePage() {
   const currentTabIndex = TABS.indexOf(activeTab);
 
   return (
-    <div className="min-h-screen bg-[#f7f9fc]">
-      <div className="max-w-5xl mx-auto px-6 py-8">
+    <div className="space-y-6 min-w-0">
         {/* Header */}
         <div className="mb-6">
           <button
@@ -844,7 +843,6 @@ export default function NewCasePage() {
             </div>
           </div>
         </div>
-      </div>
     </div>
   );
 }

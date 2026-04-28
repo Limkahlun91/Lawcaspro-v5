@@ -101,7 +101,7 @@ export default function CaseBillingTab({ caseId }: { caseId: number }) {
   return (
     <div className="space-y-6">
       {/* Summary */}
-      <div className="grid grid-cols-3 gap-4">
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
         {[
           { label: "Total Billed", value: fmt(Number(overall.total ?? 0)), color: "text-slate-900" },
           { label: "Paid", value: fmt(Number(overall.paid ?? 0)), color: "text-green-600" },
@@ -117,7 +117,7 @@ export default function CaseBillingTab({ caseId }: { caseId: number }) {
       </div>
 
       <Card>
-        <CardHeader className="flex flex-row items-center justify-between pb-4">
+        <CardHeader className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between pb-4">
           <CardTitle>Billing Entries</CardTitle>
           <Button size="sm" className="bg-amber-500 hover:bg-amber-600 gap-1.5" onClick={() => setAddOpen(true)}>
             <Plus className="w-3.5 h-3.5" />
@@ -136,77 +136,79 @@ export default function CaseBillingTab({ caseId }: { caseId: number }) {
               <p className="text-sm">Add legal fees, disbursements, stamp duty, and other charges.</p>
             </div>
           ) : (
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="border-b border-slate-100 text-slate-500 text-left">
-                  <th className="py-2 font-medium">Description</th>
-                  <th className="py-2 font-medium">Category</th>
-                  <th className="py-2 font-medium text-right">Qty</th>
-                  <th className="py-2 font-medium text-right">Amount</th>
-                  <th className="py-2 font-medium text-right">Total</th>
-                  <th className="py-2 font-medium text-center">Paid</th>
-                  <th className="py-2" />
-                </tr>
-              </thead>
-              <tbody>
-                {entries.map((entry) => {
-                  const total = Number(entry.amount ?? 0) * Number(entry.quantity ?? 1);
-                  const isPaid = Boolean(entry.is_paid);
-                  const createdByName =
-                    typeof entry.created_by_name === "string" && entry.created_by_name.trim()
-                      ? entry.created_by_name.trim()
-                      : null;
-                  return (
-                    <tr key={String(entry.id)} className={`border-b border-slate-50 ${isPaid ? "opacity-60" : ""}`}>
-                      <td className="py-3">
-                        <div className={`font-medium text-slate-900 ${isPaid ? "line-through" : ""}`}>{String(entry.description)}</div>
-                        {createdByName && <div className="text-xs text-slate-400">{createdByName}</div>}
-                      </td>
-                      <td className="py-3">
-                        <span className={`text-xs px-1.5 py-0.5 rounded font-medium ${CATEGORY_COLORS[entry.category as string] ?? "bg-slate-100 text-slate-600"}`}>
-                          {CATEGORY_LABELS[entry.category as string] ?? String(entry.category)}
-                        </span>
-                      </td>
-                      <td className="py-3 text-right text-slate-600">{String(entry.quantity)}</td>
-                      <td className="py-3 text-right text-slate-700">{fmt(entry.amount)}</td>
-                      <td className="py-3 text-right font-semibold text-slate-900">{fmt(total)}</td>
-                      <td className="py-3 text-center">
-                        <button
-                          onClick={() => togglePaidMutation.mutate({ entryId: Number(entry.id), isPaid: !isPaid })}
-                          disabled={togglePaidMutation.isPending || deleteMutation.isPending}
-                        >
-                          {isPaid
-                            ? <CheckCircle2 className="w-5 h-5 text-green-500" />
-                            : <Circle className="w-5 h-5 text-slate-300 hover:text-green-400" />
-                          }
-                        </button>
-                      </td>
-                      <td className="py-3">
-                        <Button
-                          size="icon"
-                          variant="ghost"
-                          className="h-7 w-7 text-slate-300 hover:text-red-500"
-                          onClick={() => {
-                            if (!confirm("Delete this billing entry?")) return;
-                            deleteMutation.mutate(Number(entry.id));
-                          }}
-                          disabled={deleteMutation.isPending || togglePaidMutation.isPending}
-                        >
-                          <Trash2 className="w-3.5 h-3.5" />
-                        </Button>
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-              <tfoot>
-                <tr className="border-t border-slate-200">
-                  <td colSpan={4} className="py-3 font-semibold text-slate-600 text-right">Grand Total</td>
-                  <td className="py-3 text-right font-bold text-slate-900">{fmt(overall.total ?? 0)}</td>
-                  <td colSpan={2} />
-                </tr>
-              </tfoot>
-            </table>
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm min-w-[900px]">
+                <thead>
+                  <tr className="border-b border-slate-100 text-slate-500 text-left">
+                    <th className="py-2 font-medium">Description</th>
+                    <th className="py-2 font-medium">Category</th>
+                    <th className="py-2 font-medium text-right">Qty</th>
+                    <th className="py-2 font-medium text-right">Amount</th>
+                    <th className="py-2 font-medium text-right">Total</th>
+                    <th className="py-2 font-medium text-center">Paid</th>
+                    <th className="py-2" />
+                  </tr>
+                </thead>
+                <tbody>
+                  {entries.map((entry) => {
+                    const total = Number(entry.amount ?? 0) * Number(entry.quantity ?? 1);
+                    const isPaid = Boolean(entry.is_paid);
+                    const createdByName =
+                      typeof entry.created_by_name === "string" && entry.created_by_name.trim()
+                        ? entry.created_by_name.trim()
+                        : null;
+                    return (
+                      <tr key={String(entry.id)} className={`border-b border-slate-50 ${isPaid ? "opacity-60" : ""}`}>
+                        <td className="py-3">
+                          <div className={`font-medium text-slate-900 ${isPaid ? "line-through" : ""}`}>{String(entry.description)}</div>
+                          {createdByName && <div className="text-xs text-slate-400">{createdByName}</div>}
+                        </td>
+                        <td className="py-3">
+                          <span className={`text-xs px-1.5 py-0.5 rounded font-medium ${CATEGORY_COLORS[entry.category as string] ?? "bg-slate-100 text-slate-600"}`}>
+                            {CATEGORY_LABELS[entry.category as string] ?? String(entry.category)}
+                          </span>
+                        </td>
+                        <td className="py-3 text-right text-slate-600">{String(entry.quantity)}</td>
+                        <td className="py-3 text-right text-slate-700">{fmt(entry.amount)}</td>
+                        <td className="py-3 text-right font-semibold text-slate-900">{fmt(total)}</td>
+                        <td className="py-3 text-center">
+                          <button
+                            onClick={() => togglePaidMutation.mutate({ entryId: Number(entry.id), isPaid: !isPaid })}
+                            disabled={togglePaidMutation.isPending || deleteMutation.isPending}
+                          >
+                            {isPaid
+                              ? <CheckCircle2 className="w-5 h-5 text-green-500" />
+                              : <Circle className="w-5 h-5 text-slate-300 hover:text-green-400" />
+                            }
+                          </button>
+                        </td>
+                        <td className="py-3">
+                          <Button
+                            size="icon"
+                            variant="ghost"
+                            className="h-7 w-7 text-slate-300 hover:text-red-500"
+                            onClick={() => {
+                              if (!confirm("Delete this billing entry?")) return;
+                              deleteMutation.mutate(Number(entry.id));
+                            }}
+                            disabled={deleteMutation.isPending || togglePaidMutation.isPending}
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </Button>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+                <tfoot>
+                  <tr className="border-t border-slate-200">
+                    <td colSpan={4} className="py-3 font-semibold text-slate-600 text-right">Grand Total</td>
+                    <td className="py-3 text-right font-bold text-slate-900">{fmt(overall.total ?? 0)}</td>
+                    <td colSpan={2} />
+                  </tr>
+                </tfoot>
+              </table>
+            </div>
           )}
         </CardContent>
       </Card>

@@ -206,8 +206,8 @@ export default function PlatformOperationsLogs() {
           ) : items.length === 0 ? (
             <div className="text-sm text-slate-500 py-10 text-center">No logs.</div>
           ) : (
-            <div className="rounded border border-slate-200 overflow-hidden">
-              <table className="w-full text-sm">
+            <div className="rounded border border-slate-200 overflow-x-auto overflow-y-hidden">
+              <table className="w-full text-sm min-w-[900px]">
                 <thead className="bg-slate-50 sticky top-0">
                   <tr className="text-left">
                     <th className="px-3 py-2">Time</th>

@@ -857,18 +857,19 @@ export default function PlatformDocuments() {
                   className="border-none bg-transparent"
                 />
               ) : (
-                <table className="w-full text-sm">
-                  <thead>
-                    <tr className="border-b border-slate-200">
-                      <th className="text-left px-3 py-2 font-medium text-slate-600">Name</th>
-                      <th className="text-left px-3 py-2 font-medium text-slate-600 w-20">Type</th>
-                      <th className="text-left px-3 py-2 font-medium text-slate-600 w-20">Size</th>
-                      <th className="text-left px-3 py-2 font-medium text-slate-600 w-28">Category</th>
-                      <th className="text-right px-3 py-2 font-medium text-slate-600 w-32">Action</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {docs.map(doc => (
+                <div className="overflow-x-auto">
+                  <table className="w-full text-sm min-w-[900px]">
+                    <thead>
+                      <tr className="border-b border-slate-200">
+                        <th className="text-left px-3 py-2 font-medium text-slate-600">Name</th>
+                        <th className="text-left px-3 py-2 font-medium text-slate-600 w-20">Type</th>
+                        <th className="text-left px-3 py-2 font-medium text-slate-600 w-20">Size</th>
+                        <th className="text-left px-3 py-2 font-medium text-slate-600 w-28">Category</th>
+                        <th className="text-right px-3 py-2 font-medium text-slate-600 w-32">Action</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {docs.map(doc => (
                       <tr key={doc.id} className="border-b border-slate-100 hover:bg-slate-50/50">
                         <td className="px-3 py-2.5">
                           <div className="flex items-center gap-2">
@@ -945,8 +946,9 @@ export default function PlatformDocuments() {
                         </td>
                       </tr>
                     ))}
-                  </tbody>
-                </table>
+                    </tbody>
+                  </table>
+                </div>
               )}
             </CardContent>
           </Card>

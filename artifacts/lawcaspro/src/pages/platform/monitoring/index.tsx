@@ -77,45 +77,47 @@ export default function PlatformMonitoring() {
               {firms.length === 0 ? (
                 <PlatformEmptyState title="No firms found" description="No tenants are available to show yet." icon={<Building2 className="w-5 h-5" />} />
               ) : (
-                <table className="w-full text-sm">
-                  <thead>
-                    <tr className="border-b border-slate-100 text-slate-500 text-left">
-                      <th className="py-2 font-medium">Firm</th>
-                      <th className="py-2 font-medium">Plan</th>
-                      <th className="py-2 font-medium text-right">Users</th>
-                      <th className="py-2 font-medium text-right">Cases</th>
-                      <th className="py-2 font-medium text-right">Documents</th>
-                      <th className="py-2 font-medium text-right">Billing</th>
-                      <th className="py-2 font-medium text-right">Comms</th>
-                      <th className="py-2 font-medium text-right">Status</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {firms.map((firm) => (
-                      <tr key={String(firm.id)} className="border-b border-slate-50 hover:bg-slate-50">
-                        <td className="py-3">
-                          <div className="font-medium text-slate-900">{String(firm.name)}</div>
-                          <div className="text-xs text-slate-400">{String(firm.slug ?? "")}</div>
-                        </td>
-                        <td className="py-3">
-                          <span className="text-xs px-1.5 py-0.5 rounded bg-amber-50 text-amber-700 capitalize font-medium">
-                            {String(firm.subscriptionPlan ?? firm.subscription_plan ?? "starter")}
-                          </span>
-                        </td>
-                        <td className="py-3 text-right text-slate-700">{String(firm.user_count ?? 0)}</td>
-                        <td className="py-3 text-right text-slate-700">{String(firm.case_count ?? 0)}</td>
-                        <td className="py-3 text-right text-slate-700">{String(firm.document_count ?? 0)}</td>
-                        <td className="py-3 text-right text-slate-700">{String(firm.billing_entry_count ?? 0)}</td>
-                        <td className="py-3 text-right text-slate-700">{String(firm.comm_count ?? 0)}</td>
-                        <td className="py-3 text-right">
-                          <span className={`text-xs px-1.5 py-0.5 rounded font-medium ${firm.status === "active" ? "bg-green-50 text-green-700" : "bg-red-50 text-red-600"}`}>
-                            {String(firm.status ?? "active")}
-                          </span>
-                        </td>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-sm min-w-[900px]">
+                    <thead>
+                      <tr className="border-b border-slate-100 text-slate-500 text-left">
+                        <th className="py-2 font-medium">Firm</th>
+                        <th className="py-2 font-medium">Plan</th>
+                        <th className="py-2 font-medium text-right">Users</th>
+                        <th className="py-2 font-medium text-right">Cases</th>
+                        <th className="py-2 font-medium text-right">Documents</th>
+                        <th className="py-2 font-medium text-right">Billing</th>
+                        <th className="py-2 font-medium text-right">Comms</th>
+                        <th className="py-2 font-medium text-right">Status</th>
                       </tr>
-                    ))}
-                  </tbody>
-                </table>
+                    </thead>
+                    <tbody>
+                      {firms.map((firm) => (
+                        <tr key={String(firm.id)} className="border-b border-slate-50 hover:bg-slate-50">
+                          <td className="py-3">
+                            <div className="font-medium text-slate-900">{String(firm.name)}</div>
+                            <div className="text-xs text-slate-400">{String(firm.slug ?? "")}</div>
+                          </td>
+                          <td className="py-3">
+                            <span className="text-xs px-1.5 py-0.5 rounded bg-amber-50 text-amber-700 capitalize font-medium">
+                              {String(firm.subscriptionPlan ?? firm.subscription_plan ?? "starter")}
+                            </span>
+                          </td>
+                          <td className="py-3 text-right text-slate-700">{String(firm.user_count ?? 0)}</td>
+                          <td className="py-3 text-right text-slate-700">{String(firm.case_count ?? 0)}</td>
+                          <td className="py-3 text-right text-slate-700">{String(firm.document_count ?? 0)}</td>
+                          <td className="py-3 text-right text-slate-700">{String(firm.billing_entry_count ?? 0)}</td>
+                          <td className="py-3 text-right text-slate-700">{String(firm.comm_count ?? 0)}</td>
+                          <td className="py-3 text-right">
+                            <span className={`text-xs px-1.5 py-0.5 rounded font-medium ${firm.status === "active" ? "bg-green-50 text-green-700" : "bg-red-50 text-red-600"}`}>
+                              {String(firm.status ?? "active")}
+                            </span>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
               )}
             </CardContent>
           </Card>
