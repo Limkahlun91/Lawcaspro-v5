@@ -62,7 +62,11 @@ app.use(createPinoHttpMiddleware({ logger }));
 
 app.use((req: ReqLike, res: ResLike, next: Next) => {
   const path = req.path ?? "";
-  const shouldWrap = path.startsWith("/api/auth") || path.startsWith("/api/platform");
+  const shouldWrap =
+    path.startsWith("/api/auth") ||
+    path.startsWith("/api/platform") ||
+    path.startsWith("/api/support-sessions") ||
+    path.startsWith("/api/audit-logs");
   if (!shouldWrap) {
     next();
     return;

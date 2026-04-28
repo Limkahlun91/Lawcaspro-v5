@@ -369,7 +369,7 @@ export default function FirmDetail() {
         }
       />
 
-      <div className="grid gap-4 auto-rows-fr [grid-template-columns:repeat(auto-fit,minmax(220px,1fr))]">
+      <div className="grid gap-4 auto-rows-fr [grid-template-columns:repeat(auto-fit,minmax(min(220px,100%),1fr))]">
         <StatCard title="Total Users" value={firm.userCount} icon={<Users className="w-4 h-4" />} />
         <StatCard title="Total Cases" value={firm.caseCount} icon={<Briefcase className="w-4 h-4" />} />
         <StatCard title="Created" value={new Date(firm.createdAt).toLocaleDateString()} icon={<Building2 className="w-4 h-4" />} valueClassName="text-sm font-semibold leading-snug" />

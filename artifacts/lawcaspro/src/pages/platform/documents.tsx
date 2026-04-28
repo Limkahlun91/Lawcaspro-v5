@@ -25,7 +25,7 @@ import { apiFetchBlob, apiFetchJson } from "@/lib/api-client";
 import { downloadBlob } from "@/lib/download";
 import { toastError } from "@/lib/toast-error";
 import { unwrapApiData } from "@/lib/api-contract";
-import { listItems } from "@/lib/list-items";
+import { ensureArray, listItems } from "@/lib/list-items";
 import { PlatformPage, PlatformPageHeader } from "@/components/platform/page";
 import { PlatformEmptyState, PlatformLoadingState } from "@/components/platform/states";
 
@@ -412,7 +412,7 @@ export default function PlatformDocuments() {
 
   const varGroupsQuery = useQuery<DocumentVariableDefinition[]>({
     queryKey: ["document-variables"],
-    queryFn: () => apiFetchJson("/document-variables?active=1"),
+    queryFn: async () => ensureArray<DocumentVariableDefinition>(await apiFetchJson("/document-variables?active=1")),
     enabled: showVarRef,
     retry: false,
   });
@@ -441,7 +441,7 @@ export default function PlatformDocuments() {
     onError: (e) => toastError(toast, e, "Save variable failed"),
   });
   const varGroups = (() => {
-    const vars = varGroupsQuery.data ?? [];
+    const vars = ensureArray(varGroupsQuery.data);
     const byGroup: Record<string, { group: string; vars: { key: string; label: string }[] }> = {};
     for (const v of vars) {
       const g = v.category || "other";

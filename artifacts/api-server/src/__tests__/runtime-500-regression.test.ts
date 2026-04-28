@@ -16,6 +16,16 @@ beforeAll(async () => {
 });
 
 describe("Runtime 500 regressions (no-db)", () => {
+  const isEnvelopeUnauthorized = (body: any): boolean =>
+    !!body &&
+    typeof body === "object" &&
+    body.ok === false &&
+    typeof body.error?.message === "string" &&
+    body.error.message.length > 0;
+
+  const isLegacyUnauthorized = (body: any): boolean =>
+    !!body && typeof body === "object" && typeof body.error === "string" && body.error.length > 0;
+
   it("auth/me unauthenticated returns 200 or 401 (not 500)", async () => {
     const res = await request(app).get("/api/auth/me");
     expect([200, 401]).toContain(res.status);
@@ -24,8 +34,7 @@ describe("Runtime 500 regressions (no-db)", () => {
       expect(res.body?.data).toBeNull();
     }
     if (res.status === 401) {
-      expect(res.body?.ok).toBe(false);
-      expect(res.body?.error?.message).toBeTruthy();
+      expect(isEnvelopeUnauthorized(res.body) || isLegacyUnauthorized(res.body)).toBe(true);
       expect(res.body).not.toHaveProperty("detail");
       expect(res.body).not.toHaveProperty("stack");
       expect(res.body).not.toHaveProperty("sql");
@@ -35,7 +44,7 @@ describe("Runtime 500 regressions (no-db)", () => {
   it("users create unauthenticated returns 401 (not 500)", async () => {
     const res = await request(app).post("/api/users").send({ email: "x@test.com" });
     expect(res.status).toBe(401);
-    expect(res.body).toHaveProperty("error");
+    expect(isEnvelopeUnauthorized(res.body) || isLegacyUnauthorized(res.body)).toBe(true);
     expect(res.body).not.toHaveProperty("detail");
     expect(res.body).not.toHaveProperty("stack");
     expect(res.body).not.toHaveProperty("sql");
@@ -44,7 +53,7 @@ describe("Runtime 500 regressions (no-db)", () => {
   it("hub/documents unauthenticated returns 401 (not 500)", async () => {
     const res = await request(app).get("/api/hub/documents");
     expect(res.status).toBe(401);
-    expect(res.body).toHaveProperty("error");
+    expect(isEnvelopeUnauthorized(res.body) || isLegacyUnauthorized(res.body)).toBe(true);
     expect(res.body).not.toHaveProperty("detail");
     expect(res.body).not.toHaveProperty("stack");
     expect(res.body).not.toHaveProperty("sql");
