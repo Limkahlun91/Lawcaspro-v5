@@ -1,6 +1,7 @@
 const baseUrl = process.env.SMOKE_BASE_URL;
 const email = process.env.SMOKE_FOUNDER_EMAIL;
 const password = process.env.SMOKE_FOUNDER_PASSWORD;
+const vercelBypassToken = process.env.SMOKE_VERCEL_PROTECTION_BYPASS;
 
 if (!baseUrl) {
   console.error("Missing env: SMOKE_BASE_URL");
@@ -48,6 +49,28 @@ const cookieJarFromSetCookie = (setCookieHeaders) => {
   return parts.join("; ");
 };
 
+const mergeCookieJars = (...jars) => {
+  const pairs = new Map();
+  for (const jar of jars) {
+    if (!jar) continue;
+    const items = String(jar)
+      .split(";")
+      .map((x) => x.trim())
+      .filter(Boolean);
+    for (const kv of items) {
+      const idx = kv.indexOf("=");
+      if (idx <= 0) continue;
+      const k = kv.slice(0, idx).trim();
+      const v = kv.slice(idx + 1).trim();
+      if (!k) continue;
+      pairs.set(k, v);
+    }
+  }
+  return Array.from(pairs.entries())
+    .map(([k, v]) => `${k}=${v}`)
+    .join("; ");
+};
+
 const fetchJson = async (path, { method = "GET", headers = {}, body, cookieJar } = {}) => {
   const res = await fetch(urlJoin(baseUrl, path), {
     method,
@@ -84,15 +107,37 @@ const endpoints = [
 const run = async () => {
   console.log(`SMOKE_BASE_URL=${baseUrl}`);
 
+  let bypassCookieJar = "";
+  if (vercelBypassToken) {
+    const bypassUrl = urlJoin(
+      baseUrl,
+      `/api/healthz/version?x-vercel-set-bypass-cookie=true&x-vercel-protection-bypass=${encodeURIComponent(vercelBypassToken)}`,
+    );
+    const bypassRes = await fetch(bypassUrl, { method: "GET", redirect: "manual" });
+    const bypassSetCookie = parseSetCookieHeader(bypassRes.headers.getSetCookie?.() ?? bypassRes.headers.get("set-cookie"));
+    bypassCookieJar = cookieJarFromSetCookie(bypassSetCookie);
+    if (!bypassCookieJar) {
+      console.error("Vercel deployment protection bypass failed (no bypass Set-Cookie).");
+      process.exit(1);
+    }
+  }
+
+  const loginHeaders = {
+    "content-type": "application/json",
+    accept: "application/json",
+    ...(bypassCookieJar ? { cookie: bypassCookieJar } : {}),
+  };
+
   const login = await fetch(urlJoin(baseUrl, "/api/auth/login"), {
     method: "POST",
-    headers: { "content-type": "application/json", accept: "application/json" },
+    headers: loginHeaders,
     body: JSON.stringify({ email, password }),
     redirect: "manual",
   });
 
   const loginSetCookie = parseSetCookieHeader(login.headers.getSetCookie?.() ?? login.headers.get("set-cookie"));
-  const cookieJar = cookieJarFromSetCookie(loginSetCookie);
+  const authCookieJar = cookieJarFromSetCookie(loginSetCookie);
+  const cookieJar = mergeCookieJars(bypassCookieJar, authCookieJar);
 
   if (!cookieJar) {
     console.error("Login did not return Set-Cookie (auth_token).");
@@ -139,4 +184,3 @@ run().catch((err) => {
   console.error("SMOKE FAILED:", err?.message ?? String(err));
   process.exit(1);
 });
-

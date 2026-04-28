@@ -155,8 +155,12 @@ export async function requireAuth(
   try {
     const reqId = getReqId(req);
     const lookupStartedAt = Date.now();
-    const [s] = await db.select().from(sessionsTable).where(eq(sessionsTable.tokenHash, tokenHash));
-    if (s) {
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      const [s] = await db.select().from(sessionsTable).where(eq(sessionsTable.tokenHash, tokenHash));
+      if (!s) {
+        if (attempt === 1) continue;
+        break;
+      }
       const [u] = await db
         .select({
           id: usersTable.id,
@@ -170,6 +174,7 @@ export async function requireAuth(
         .where(eq(usersTable.id, s.userId));
       session = s;
       user = u;
+      break;
     }
     const ms = Date.now() - lookupStartedAt;
     if (ms > 1000) {

@@ -659,10 +659,17 @@ routerInternal.get("/auth/me", async (req: ReqLike, res: RouteResLike): Promise<
   const ctxBase = { route: getRoute(req), reqId, stage: "start" };
 
   try {
-    const [s] = await db
-      .select({ userId: sessionsTable.userId, expiresAt: sessionsTable.expiresAt })
-      .from(sessionsTable)
-      .where(eq(sessionsTable.tokenHash, tokenHash));
+    let s: { userId: number; expiresAt: Date } | undefined;
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      const [row] = await db
+        .select({ userId: sessionsTable.userId, expiresAt: sessionsTable.expiresAt })
+        .from(sessionsTable)
+        .where(eq(sessionsTable.tokenHash, tokenHash));
+      if (row) {
+        s = row;
+        break;
+      }
+    }
     if (!s) {
       if (typeof cookieToken === "string") res.clearCookie("auth_token", { path: "/" });
       throw new ApiError({ status: 401, code: "UNAUTHORIZED", message: "Not authenticated", retryable: false });

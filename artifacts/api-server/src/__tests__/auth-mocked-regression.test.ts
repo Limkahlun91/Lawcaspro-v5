@@ -18,6 +18,8 @@ type AuthDbState = {
   firmsById: Map<number, unknown>;
   throwPermissionsSelect: boolean;
   throwSessionSelectTransient: boolean;
+  sessionSelectEmptyOnce: boolean;
+  sessionSelectCalls: number;
   throwUndefinedColumnOnUserLookup: boolean;
   throwSideEffects: boolean;
 };
@@ -30,6 +32,8 @@ const state: AuthDbState = {
   firmsById: new Map(),
   throwPermissionsSelect: false,
   throwSessionSelectTransient: false,
+  sessionSelectEmptyOnce: false,
+  sessionSelectCalls: 0,
   throwUndefinedColumnOnUserLookup: false,
   throwSideEffects: false,
 };
@@ -60,6 +64,8 @@ vi.mock("@workspace/db", async (orig) => {
               e.code = "ETIMEDOUT";
               throw e;
             }
+            state.sessionSelectCalls += 1;
+            if (state.sessionSelectEmptyOnce && state.sessionSelectCalls === 1) return emptyRows();
             const s = Array.from(state.sessionsByTokenHash.values())[0] ?? null;
             return s ? [s] : emptyRows();
           }
@@ -139,6 +145,39 @@ beforeAll(async () => {
 });
 
 describe("Auth mocked regressions", () => {
+  it("auth/permissions retries once when session is temporarily not visible", async () => {
+    state.usersByEmail.clear();
+    state.usersById.clear();
+    state.sessionsByTokenHash.clear();
+    state.rolesById.clear();
+    state.firmsById.clear();
+    state.throwPermissionsSelect = false;
+    state.throwSessionSelectTransient = false;
+    state.sessionSelectEmptyOnce = true;
+    state.sessionSelectCalls = 0;
+    state.throwUndefinedColumnOnUserLookup = false;
+    state.throwSideEffects = false;
+
+    const user = {
+      id: 10,
+      firmId: null,
+      email: "founder@test.com",
+      name: "Founder",
+      passwordHash: "hash",
+      userType: "founder",
+      roleId: null,
+      status: "active",
+      totpSecret: null,
+      totpEnabled: false,
+    };
+    state.usersById.set(10, user);
+    state.sessionsByTokenHash.set("any", { userId: 10, expiresAt: new Date(Date.now() + 60_000) });
+
+    const res = await request(app).get("/api/auth/permissions").set("Cookie", "auth_token=any");
+    expect(res.status).toBe(200);
+    expect(res.body?.ok).toBe(true);
+  });
+
   it("login succeeds even if side effects fail", async () => {
     state.usersByEmail.clear();
     state.usersById.clear();
@@ -148,6 +187,9 @@ describe("Auth mocked regressions", () => {
     state.throwPermissionsSelect = false;
     state.throwUndefinedColumnOnUserLookup = false;
     state.throwSideEffects = true;
+    state.throwSessionSelectTransient = false;
+    state.sessionSelectEmptyOnce = false;
+    state.sessionSelectCalls = 0;
 
     const user = {
       id: 10,
@@ -182,6 +224,9 @@ describe("Auth mocked regressions", () => {
     state.throwPermissionsSelect = false;
     state.throwUndefinedColumnOnUserLookup = true;
     state.throwSideEffects = false;
+    state.throwSessionSelectTransient = false;
+    state.sessionSelectEmptyOnce = false;
+    state.sessionSelectCalls = 0;
 
     const res = await request(app)
       .post("/api/auth/login")
