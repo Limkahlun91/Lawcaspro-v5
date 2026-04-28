@@ -719,7 +719,7 @@ routerInternal.get("/auth/me", async (req: ReqLike, res: RouteResLike): Promise<
       founderRoleLevel: founder.highestLevel,
       email: user.email,
       name: user.name,
-      department: user.department ?? null,
+      department: null,
       status: user.status,
     });
     logger.info({ ...ctxBase, stage: "ok", ms: Date.now() - startedAt }, "auth.me");

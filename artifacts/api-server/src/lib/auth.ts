@@ -202,7 +202,6 @@ export async function lookupSessionAndUserByTokenHash(
             userType: string;
             firmId: number | null;
             roleId: number | null;
-            department: string | null;
             status: string;
           }
         | undefined;
@@ -223,7 +222,6 @@ export async function lookupSessionAndUserByTokenHash(
         userType: usersTable.userType,
         firmId: usersTable.firmId,
         roleId: usersTable.roleId,
-        department: usersTable.department,
         status: usersTable.status,
       })
       .from(usersTable)
