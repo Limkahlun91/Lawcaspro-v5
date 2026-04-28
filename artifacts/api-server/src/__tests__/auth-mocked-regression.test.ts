@@ -253,12 +253,12 @@ describe("Auth mocked regressions", () => {
     state.throwSessionSelectTransient = false;
   });
 
-  it("auth/me invalid token returns 401 and clears cookie", async () => {
+  it("auth/me invalid token returns 200 null and clears cookie", async () => {
     state.sessionsByTokenHash.clear();
     const res = await request(app).get("/api/auth/me").set("Cookie", "auth_token=invalid");
-    expect(res.status).toBe(401);
-    expect(res.body?.ok).toBe(false);
-    expect(res.body?.error?.code).toBeTruthy();
+    expect(res.status).toBe(200);
+    expect(res.body?.ok).toBe(true);
+    expect(res.body?.data).toBeNull();
     const scHeader = (res.headers as Record<string, unknown>)["set-cookie"];
     const sc = Array.isArray(scHeader) ? scHeader.join(";") : String(scHeader ?? "");
     expect(sc).toMatch(/auth_token=/);

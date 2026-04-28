@@ -155,27 +155,9 @@ export async function requireAuth(
   try {
     const reqId = getReqId(req);
     const lookupStartedAt = Date.now();
-    for (let attempt = 1; attempt <= 2; attempt++) {
-      const [s] = await db.select().from(sessionsTable).where(eq(sessionsTable.tokenHash, tokenHash));
-      if (!s) {
-        if (attempt === 1) continue;
-        break;
-      }
-      const [u] = await db
-        .select({
-          id: usersTable.id,
-          email: usersTable.email,
-          userType: usersTable.userType,
-          firmId: usersTable.firmId,
-          roleId: usersTable.roleId,
-          status: usersTable.status,
-        })
-        .from(usersTable)
-        .where(eq(usersTable.id, s.userId));
-      session = s;
-      user = u;
-      break;
-    }
+    const result = await lookupSessionAndUserByTokenHash(tokenHash);
+    session = result?.session;
+    user = result?.user;
     const ms = Date.now() - lookupStartedAt;
     if (ms > 1000) {
       logger.warn({ route: req.path, reqId, ms }, "auth.require_auth.slow");
@@ -205,6 +187,50 @@ export async function requireAuth(
   req.roleId = user.roleId;
 
   next();
+}
+
+export async function lookupSessionAndUserByTokenHash(
+  tokenHash: string,
+): Promise<
+  | {
+      session: typeof sessionsTable.$inferSelect;
+      user:
+        | {
+            id: number;
+            email: string;
+            name: string;
+            userType: string;
+            firmId: number | null;
+            roleId: number | null;
+            department: string | null;
+            status: string;
+          }
+        | undefined;
+    }
+  | null
+> {
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    const [s] = await db.select().from(sessionsTable).where(eq(sessionsTable.tokenHash, tokenHash));
+    if (!s) {
+      if (attempt === 1) continue;
+      return null;
+    }
+    const [u] = await db
+      .select({
+        id: usersTable.id,
+        email: usersTable.email,
+        name: usersTable.name,
+        userType: usersTable.userType,
+        firmId: usersTable.firmId,
+        roleId: usersTable.roleId,
+        department: usersTable.department,
+        status: usersTable.status,
+      })
+      .from(usersTable)
+      .where(eq(usersTable.id, s.userId));
+    return { session: s, user: u };
+  }
+  return null;
 }
 
 export async function requireFounder(

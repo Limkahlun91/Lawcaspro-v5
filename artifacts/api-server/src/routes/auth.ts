@@ -4,7 +4,7 @@ import crypto from "crypto";
 import { and, eq } from "drizzle-orm";
 import { auditLogsTable, db, firmsTable, permissionsTable, rolesTable, sessionsTable, sql, type SQL, usersTable } from "@workspace/db";
 import { LoginBody } from "@workspace/api-zod";
-import { loadFounderPermissions, requireAuth, requireReAuth, issueReauthToken, type AuthRequest, writeAuditLog } from "../lib/auth.js";
+import { loadFounderPermissions, lookupSessionAndUserByTokenHash, requireAuth, requireReAuth, issueReauthToken, type AuthRequest, writeAuditLog } from "../lib/auth.js";
 import { ApiError, sendError, sendOk } from "../lib/api-response.js";
 import { authRateLimiter, sensitiveRateLimiter } from "../lib/rate-limit.js";
 import { logger } from "../lib/logger.js";
@@ -659,48 +659,15 @@ routerInternal.get("/auth/me", async (req: ReqLike, res: RouteResLike): Promise<
   const ctxBase = { route: getRoute(req), reqId, stage: "start" };
 
   try {
-    let s: { userId: number; expiresAt: Date } | undefined;
-    for (let attempt = 1; attempt <= 2; attempt++) {
-      const [row] = await db.select().from(sessionsTable).where(eq(sessionsTable.tokenHash, tokenHash));
-      if (row) {
-        s = { userId: (row as { userId: number }).userId, expiresAt: (row as { expiresAt: Date }).expiresAt };
-        break;
-      }
-    }
-    if (!s) {
-      if (typeof cookieToken === "string") res.clearCookie("auth_token", { path: "/" });
-      throw new ApiError({ status: 401, code: "UNAUTHORIZED", message: "Not authenticated", retryable: false });
-      logger.info({ ...ctxBase, stage: "no_session", ms: Date.now() - startedAt }, "auth.me");
-    }
-    if (s.expiresAt < new Date()) {
-      if (typeof cookieToken === "string") res.clearCookie("auth_token", { path: "/" });
-      throw new ApiError({ status: 401, code: "SESSION_EXPIRED", message: "Not authenticated", retryable: false });
-      logger.info({ ...ctxBase, stage: "expired", ms: Date.now() - startedAt }, "auth.me");
-    }
+    const result = await lookupSessionAndUserByTokenHash(tokenHash);
+    const session = result?.session;
+    const user = result?.user;
 
-    const [user] = await db
-      .select({
-        id: usersTable.id,
-        email: usersTable.email,
-        name: usersTable.name,
-        userType: usersTable.userType,
-        firmId: usersTable.firmId,
-        roleId: usersTable.roleId,
-        department: usersTable.department,
-        status: usersTable.status,
-      })
-      .from(usersTable)
-      .where(eq(usersTable.id, s.userId));
-
-    if (!user) {
+    if (!session || !user || session.expiresAt < new Date() || user.status !== "active") {
       if (typeof cookieToken === "string") res.clearCookie("auth_token", { path: "/" });
-      throw new ApiError({ status: 404, code: "USER_NOT_FOUND", message: "User not found", retryable: false });
-      logger.warn({ ...ctxBase, stage: "missing_user", ms: Date.now() - startedAt }, "auth.me");
-    }
-    if (user.status !== "active") {
-      if (typeof cookieToken === "string") res.clearCookie("auth_token", { path: "/" });
-      throw new ApiError({ status: 401, code: "UNAUTHORIZED", message: "Not authenticated", retryable: false });
-      logger.warn({ ...ctxBase, stage: "inactive_user", ms: Date.now() - startedAt }, "auth.me");
+      sendOk(res, null);
+      logger.info({ ...ctxBase, stage: "not_authenticated", ms: Date.now() - startedAt }, "auth.me");
+      return;
     }
 
     let roleName: string | null = null;
@@ -777,8 +744,7 @@ routerInternal.get("/auth/me", async (req: ReqLike, res: RouteResLike): Promise<
       sendError(res, new ApiError({ status: 503, code: "AUTH_TEMPORARILY_UNAVAILABLE", message: "Auth temporarily unavailable", retryable: true }));
       return;
     }
-    if (typeof cookieToken === "string") res.clearCookie("auth_token", { path: "/" });
-    sendError(res, err, { status: 401, code: "UNAUTHORIZED", message: "Not authenticated" });
+    sendError(res, err, { status: 503, code: "AUTH_TEMPORARILY_UNAVAILABLE", message: "Auth temporarily unavailable" });
   }
 });
 
