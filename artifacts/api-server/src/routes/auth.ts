@@ -564,6 +564,7 @@ routerInternal.post("/auth/login", authRateLimiter, async (req: ReqLike, res: Ro
       httpOnly: true,
       secure: process.env.NODE_ENV === "production",
       sameSite: "lax",
+      path: "/",
       maxAge: 7 * 24 * 60 * 60 * 1000,
     });
 
@@ -634,7 +635,7 @@ routerInternal.post(
     ipAddress: typeof req.ip === "string" ? req.ip : undefined,
     userAgent: asNullableString(req.headers["user-agent"]) ?? undefined,
   });
-  res.clearCookie("auth_token");
+  res.clearCookie("auth_token", { path: "/" });
   sendOk(res, { success: true });
   },
 );
@@ -663,12 +664,12 @@ routerInternal.get("/auth/me", async (req: ReqLike, res: RouteResLike): Promise<
       .from(sessionsTable)
       .where(eq(sessionsTable.tokenHash, tokenHash));
     if (!s) {
-      if (typeof cookieToken === "string") res.clearCookie("auth_token");
+      if (typeof cookieToken === "string") res.clearCookie("auth_token", { path: "/" });
       throw new ApiError({ status: 401, code: "UNAUTHORIZED", message: "Not authenticated", retryable: false });
       logger.info({ ...ctxBase, stage: "no_session", ms: Date.now() - startedAt }, "auth.me");
     }
     if (s.expiresAt < new Date()) {
-      if (typeof cookieToken === "string") res.clearCookie("auth_token");
+      if (typeof cookieToken === "string") res.clearCookie("auth_token", { path: "/" });
       throw new ApiError({ status: 401, code: "SESSION_EXPIRED", message: "Not authenticated", retryable: false });
       logger.info({ ...ctxBase, stage: "expired", ms: Date.now() - startedAt }, "auth.me");
     }
@@ -688,12 +689,12 @@ routerInternal.get("/auth/me", async (req: ReqLike, res: RouteResLike): Promise<
       .where(eq(usersTable.id, s.userId));
 
     if (!user) {
-      if (typeof cookieToken === "string") res.clearCookie("auth_token");
+      if (typeof cookieToken === "string") res.clearCookie("auth_token", { path: "/" });
       throw new ApiError({ status: 404, code: "USER_NOT_FOUND", message: "User not found", retryable: false });
       logger.warn({ ...ctxBase, stage: "missing_user", ms: Date.now() - startedAt }, "auth.me");
     }
     if (user.status !== "active") {
-      if (typeof cookieToken === "string") res.clearCookie("auth_token");
+      if (typeof cookieToken === "string") res.clearCookie("auth_token", { path: "/" });
       throw new ApiError({ status: 401, code: "UNAUTHORIZED", message: "Not authenticated", retryable: false });
       logger.warn({ ...ctxBase, stage: "inactive_user", ms: Date.now() - startedAt }, "auth.me");
     }
@@ -772,7 +773,7 @@ routerInternal.get("/auth/me", async (req: ReqLike, res: RouteResLike): Promise<
       sendError(res, new ApiError({ status: 503, code: "AUTH_TEMPORARILY_UNAVAILABLE", message: "Auth temporarily unavailable", retryable: true }));
       return;
     }
-    if (typeof cookieToken === "string") res.clearCookie("auth_token");
+    if (typeof cookieToken === "string") res.clearCookie("auth_token", { path: "/" });
     sendError(res, err, { status: 401, code: "UNAUTHORIZED", message: "Not authenticated" });
   }
 });

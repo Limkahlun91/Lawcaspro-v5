@@ -20,6 +20,10 @@ describe("POST /api/auth/login", () => {
     expect(res.body.data.userType).toBe("founder");
     expect(res.body.data).toHaveProperty("totpEnabled");
     expect(res.headers["set-cookie"]).toBeDefined();
+    const setCookies = res.headers["set-cookie"] as unknown;
+    const joined = Array.isArray(setCookies) ? setCookies.join("; ") : String(setCookies ?? "");
+    expect(joined).toMatch(/auth_token=/);
+    expect(joined).toMatch(/Path=\//);
   });
 
   it("returns 401 on wrong password", async () => {
