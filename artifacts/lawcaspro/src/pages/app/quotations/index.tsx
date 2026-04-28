@@ -54,8 +54,8 @@ export default function QuotationsList() {
   };
 
   return (
-    <div className="p-6 max-w-7xl mx-auto">
-      <div className="flex items-center justify-between mb-6">
+    <div className="space-y-6">
+      <div className="flex items-start justify-between gap-3 flex-wrap">
         <div>
           <h1 className="text-2xl font-bold text-slate-900">Quotations</h1>
           <p className="text-sm text-slate-500 mt-1">Manage fee quotations for legal services</p>
@@ -82,7 +82,8 @@ export default function QuotationsList() {
         </Card>
       ) : (
         <div className="bg-white border border-slate-200 rounded-lg overflow-hidden">
-          <table className="w-full text-sm">
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm min-w-[900px]">
             <thead>
               <tr className="border-b border-slate-200 bg-slate-50">
                 <th className="text-left px-4 py-3 font-medium text-slate-600">Reference</th>
@@ -151,7 +152,8 @@ export default function QuotationsList() {
                 </tr>
               ))}
             </tbody>
-          </table>
+            </table>
+          </div>
         </div>
       )}
     </div>

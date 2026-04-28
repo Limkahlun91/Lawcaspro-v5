@@ -204,9 +204,9 @@ export default function QuotationDetail() {
     window.print();
   };
 
-  if (isLoading) return <div className="p-6">Loading quotation...</div>;
-  if (isError) return <div className="p-6"><QueryFallback title="Quotation unavailable" error={error} onRetry={() => refetch()} isRetrying={isFetching} /></div>;
-  if (!quotation) return <div className="p-6">Quotation not found</div>;
+  if (isLoading) return <div className="py-10 text-sm text-slate-500">Loading quotation...</div>;
+  if (isError) return <div className="py-10"><QueryFallback title="Quotation unavailable" error={error} onRetry={() => refetch()} isRetrying={isFetching} /></div>;
+  if (!quotation) return <div className="py-10 text-sm text-slate-500">Quotation not found</div>;
 
   const items = isEditing ? editItems : (quotation.items || []).map((item: any, idx: number) => ({
     id: String(item.id || idx),
@@ -259,7 +259,8 @@ export default function QuotationDetail() {
     return (
       <div className="mb-6">
         <h3 className="text-sm font-semibold text-slate-800 mb-2 uppercase">{sectionLabel}</h3>
-        <table className="w-full text-sm">
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm min-w-[900px]">
           <thead>
             <tr className="border-b border-slate-200 bg-slate-50">
               <th className="text-left px-3 py-2 font-medium text-slate-600 w-10">No.</th>
@@ -337,7 +338,8 @@ export default function QuotationDetail() {
               {isEditing && sectionLabel === "ATTACHMENT I" && <td></td>}
             </tr>
           </tfoot>
-        </table>
+          </table>
+        </div>
         {isEditing && sectionLabel === "ATTACHMENT I" && (
           <div className="mt-2">
             <Button size="sm" variant="outline" onClick={addAttachmentItem}>
@@ -350,8 +352,8 @@ export default function QuotationDetail() {
   };
 
   return (
-    <div className="p-6 max-w-7xl mx-auto">
-      <div className="flex items-center justify-between mb-6 print:hidden">
+    <div className="space-y-6">
+      <div className="flex items-start justify-between gap-3 flex-wrap print:hidden">
         <div className="flex items-center gap-3">
           <Button variant="ghost" size="sm" onClick={() => setLocation("/app/accounting?tab=quotations")}>
             <ArrowLeft className="w-4 h-4" />
@@ -364,7 +366,7 @@ export default function QuotationDetail() {
             {data.status}
           </span>
         </div>
-        <div className="flex gap-2">
+        <div className="flex gap-2 flex-wrap">
           {isEditing ? (
             <>
               <Button variant="outline" onClick={cancelEditing}>Cancel</Button>

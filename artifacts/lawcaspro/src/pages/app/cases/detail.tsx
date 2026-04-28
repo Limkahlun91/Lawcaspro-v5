@@ -364,11 +364,11 @@ export default function CaseDetail() {
     setActiveTab(tabFromUrl);
   }, [tabFromUrl]);
 
-  if (!caseId) return <div className="p-6 text-slate-500">Case not found</div>;
-  if (isLoadingCase || isLoadingWorkflow) return <div className="p-6 text-slate-500">Loading case details...</div>;
-  if (isCaseError) return <div className="p-6"><QueryFallback title="Case unavailable" error={caseError} onRetry={() => refetchCase()} isRetrying={isFetchingCase} /></div>;
-  if (isWorkflowError) return <div className="p-6"><QueryFallback title="Workflow unavailable" error={workflowError} onRetry={() => refetchWorkflow()} isRetrying={isFetchingWorkflow} /></div>;
-  if (!caseInfo) return <div className="p-6 text-slate-500">Case not found</div>;
+  if (!caseId) return <div className="py-10 text-sm text-slate-500">Case not found</div>;
+  if (isLoadingCase || isLoadingWorkflow) return <div className="py-10 text-sm text-slate-500">Loading case details...</div>;
+  if (isCaseError) return <div className="py-10"><QueryFallback title="Case unavailable" error={caseError} onRetry={() => refetchCase()} isRetrying={isFetchingCase} /></div>;
+  if (isWorkflowError) return <div className="py-10"><QueryFallback title="Workflow unavailable" error={workflowError} onRetry={() => refetchWorkflow()} isRetrying={isFetchingWorkflow} /></div>;
+  if (!caseInfo) return <div className="py-10 text-sm text-slate-500">Case not found</div>;
 
   const handleCompleteStep = (stepId: number) => {
     updateStepMutation.mutate(

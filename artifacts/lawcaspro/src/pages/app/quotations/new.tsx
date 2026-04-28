@@ -315,7 +315,7 @@ export default function NewQuotation() {
   const currentSection = sections.find(s => s.key === activeSection)!;
 
   return (
-    <div className="p-6 max-w-7xl mx-auto">
+    <div className="space-y-6">
       <div className="flex items-center gap-3 mb-6">
         <Button variant="ghost" size="sm" onClick={() => setLocation("/app/accounting?tab=quotations")}>
           <ArrowLeft className="w-4 h-4" />
@@ -411,76 +411,78 @@ export default function NewQuotation() {
               {attachmentItems.length === 0 ? (
                 <p className="text-sm text-slate-400 text-center py-8">No attachment items. Click "Add Item" to add.</p>
               ) : (
-                <table className="w-full text-sm">
-                  <thead>
-                    <tr className="border-b border-slate-200 bg-slate-50">
-                      <th className="text-left px-3 py-2 font-medium text-slate-600 w-10">No.</th>
-                      <th className="text-left px-3 py-2 font-medium text-slate-600">Description</th>
-                      <th className="text-center px-3 py-2 font-medium text-slate-600 w-20">Tax Code</th>
-                      <th className="text-right px-3 py-2 font-medium text-slate-600 w-32">Total Excl. ST (RM)</th>
-                      <th className="text-right px-3 py-2 font-medium text-slate-600 w-28">ST @ {TAX_RATE}% (RM)</th>
-                      <th className="text-right px-3 py-2 font-medium text-slate-600 w-32">Total Incl. ST (RM)</th>
-                      <th className="w-10"></th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {attachmentItems.map((item, idx) => (
-                      <tr key={item.id} className="border-b border-slate-100">
-                        <td className="px-3 py-2 text-slate-500">{idx + 1}</td>
-                        <td className="px-3 py-2">
-                          <Input
-                            value={item.description}
-                            onChange={e => updateAttachmentDesc(item.id, e.target.value)}
-                            placeholder="Description"
-                            className="h-8"
-                          />
-                        </td>
-                        <td className="px-3 py-2 text-center">
-                          <select
-                            value={item.taxCode}
-                            onChange={e => updateItemTaxCode(setAttachmentItems, item.id, e.target.value)}
-                            className="h-7 text-xs border rounded px-1 bg-white"
-                          >
-                            <option value="T">T</option>
-                            <option value="NT">NT</option>
-                            <option value="ZR">ZR</option>
-                            <option value="SR">SR</option>
-                          </select>
-                        </td>
-                        <td className="px-3 py-2">
-                          <Input
-                            type="number"
-                            value={item.amountExclTax || ""}
-                            onChange={e => updateItemAmount(setAttachmentItems, item.id, parseFloat(e.target.value) || 0)}
-                            className="h-8 text-right"
-                            placeholder="0.00"
-                          />
-                        </td>
-                        <td className="px-3 py-2 text-right text-slate-500">{item.taxAmount.toFixed(2)}</td>
-                        <td className="px-3 py-2 text-right font-medium">{item.amountInclTax.toFixed(2)}</td>
-                        <td className="px-3 py-2">
-                          <Button variant="ghost" size="sm" onClick={() => removeAttachmentItem(item.id)} className="text-red-500">
-                            <Trash2 className="w-3 h-3" />
-                          </Button>
-                        </td>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-sm min-w-[900px]">
+                    <thead>
+                      <tr className="border-b border-slate-200 bg-slate-50">
+                        <th className="text-left px-3 py-2 font-medium text-slate-600 w-10">No.</th>
+                        <th className="text-left px-3 py-2 font-medium text-slate-600">Description</th>
+                        <th className="text-center px-3 py-2 font-medium text-slate-600 w-20">Tax Code</th>
+                        <th className="text-right px-3 py-2 font-medium text-slate-600 w-32">Total Excl. ST (RM)</th>
+                        <th className="text-right px-3 py-2 font-medium text-slate-600 w-28">ST @ {TAX_RATE}% (RM)</th>
+                        <th className="text-right px-3 py-2 font-medium text-slate-600 w-32">Total Incl. ST (RM)</th>
+                        <th className="w-10"></th>
                       </tr>
-                    ))}
-                  </tbody>
-                  <tfoot>
-                    <tr className="bg-slate-50 font-medium">
-                      <td colSpan={3} className="px-3 py-2 text-right">Total</td>
-                      <td className="px-3 py-2 text-right">{formatRM(attTotals.totalExclTax)}</td>
-                      <td className="px-3 py-2 text-right">{formatRM(attTotals.totalTax)}</td>
-                      <td className="px-3 py-2 text-right">{formatRM(attTotals.totalInclTax)}</td>
-                      <td></td>
-                    </tr>
-                  </tfoot>
-                </table>
+                    </thead>
+                    <tbody>
+                      {attachmentItems.map((item, idx) => (
+                        <tr key={item.id} className="border-b border-slate-100">
+                          <td className="px-3 py-2 text-slate-500">{idx + 1}</td>
+                          <td className="px-3 py-2">
+                            <Input
+                              value={item.description}
+                              onChange={e => updateAttachmentDesc(item.id, e.target.value)}
+                              placeholder="Description"
+                              className="h-8"
+                            />
+                          </td>
+                          <td className="px-3 py-2 text-center">
+                            <select
+                              value={item.taxCode}
+                              onChange={e => updateItemTaxCode(setAttachmentItems, item.id, e.target.value)}
+                              className="h-7 text-xs border rounded px-1 bg-white"
+                            >
+                              <option value="T">T</option>
+                              <option value="NT">NT</option>
+                              <option value="ZR">ZR</option>
+                              <option value="SR">SR</option>
+                            </select>
+                          </td>
+                          <td className="px-3 py-2">
+                            <Input
+                              type="number"
+                              value={item.amountExclTax || ""}
+                              onChange={e => updateItemAmount(setAttachmentItems, item.id, parseFloat(e.target.value) || 0)}
+                              className="h-8 text-right"
+                              placeholder="0.00"
+                            />
+                          </td>
+                          <td className="px-3 py-2 text-right text-slate-500">{item.taxAmount.toFixed(2)}</td>
+                          <td className="px-3 py-2 text-right font-medium">{item.amountInclTax.toFixed(2)}</td>
+                          <td className="px-3 py-2">
+                            <Button variant="ghost" size="sm" onClick={() => removeAttachmentItem(item.id)} className="text-red-500">
+                              <Trash2 className="w-3 h-3" />
+                            </Button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                    <tfoot>
+                      <tr className="bg-slate-50 font-medium">
+                        <td colSpan={3} className="px-3 py-2 text-right">Total</td>
+                        <td className="px-3 py-2 text-right">{formatRM(attTotals.totalExclTax)}</td>
+                        <td className="px-3 py-2 text-right">{formatRM(attTotals.totalTax)}</td>
+                        <td className="px-3 py-2 text-right">{formatRM(attTotals.totalInclTax)}</td>
+                        <td></td>
+                      </tr>
+                    </tfoot>
+                  </table>
+                </div>
               )}
             </div>
           ) : (
             <div className="overflow-x-auto">
-              <table className="w-full text-sm">
+              <table className="w-full text-sm min-w-[900px]">
                 <thead>
                   <tr className="border-b border-slate-200 bg-slate-50">
                     <th className="text-left px-3 py-2 font-medium text-slate-600 w-10">No.</th>

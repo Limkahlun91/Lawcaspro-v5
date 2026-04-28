@@ -54,7 +54,7 @@ export function AppLayout({ children }: { children: ReactNode }) {
   const visibleNavItems = navItems.filter((i) => hasPermission(user, i.perm[0], i.perm[1]));
 
   return (
-    <div className="flex min-h-screen w-full bg-slate-50">
+    <div className="flex min-h-screen w-full bg-slate-50 overflow-x-hidden">
       <div className="w-64 bg-slate-900 text-slate-100 flex flex-col shrink-0 sticky top-0 h-screen overflow-y-auto">
         <div className="p-6 border-b border-slate-800">
           <div className="flex items-center gap-2 font-bold text-xl text-amber-500">
@@ -107,8 +107,8 @@ export function AppLayout({ children }: { children: ReactNode }) {
         </div>
       </div>
       
-      <main className="flex-1 overflow-auto">
-        <div className="max-w-6xl mx-auto p-8">
+      <main className="flex-1 overflow-auto min-w-0">
+        <div className="max-w-[1440px] mx-auto w-full px-6 py-6 md:px-8 md:py-8 min-w-0">
           {children}
         </div>
       </main>
