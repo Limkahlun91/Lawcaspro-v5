@@ -19,7 +19,7 @@ export function PlatformPageHeader({
         <h1 className="text-2xl font-bold text-slate-900 tracking-tight">{title}</h1>
         {description ? <div className="text-sm text-slate-600 mt-1">{description}</div> : null}
       </div>
-      {actions ? <div className="flex items-center gap-2">{actions}</div> : null}
+      {actions ? <div className="flex flex-wrap items-center justify-end gap-2">{actions}</div> : null}
     </div>
   );
 }

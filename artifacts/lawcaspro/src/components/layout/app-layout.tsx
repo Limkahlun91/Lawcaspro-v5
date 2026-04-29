@@ -108,7 +108,7 @@ export function AppLayout({ children }: { children: ReactNode }) {
       </div>
       
       <main className="flex-1 overflow-auto min-w-0">
-        <div className="max-w-[1440px] mx-auto w-full px-6 py-6 md:px-8 md:py-8 min-w-0">
+        <div className="max-w-[1440px] mx-auto w-full px-6 py-6 md:px-8 md:py-8 min-w-0 space-y-6">
           {children}
         </div>
       </main>
