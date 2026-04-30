@@ -8,7 +8,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import {
-  Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
+  Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription,
 } from "@/components/ui/dialog";
 import {
   MessageSquare, Send, Plus, Paperclip, X, File, Building2, ArrowRight, ArrowLeft, Download,
@@ -283,6 +283,7 @@ export default function PlatformMessages() {
         <DialogContent className="max-w-2xl">
           <DialogHeader>
             <DialogTitle>Compose Message to Firm</DialogTitle>
+            <DialogDescription className="sr-only">Compose and send a message to a firm.</DialogDescription>
           </DialogHeader>
           <div className="space-y-4 py-2">
             <div className="space-y-2">

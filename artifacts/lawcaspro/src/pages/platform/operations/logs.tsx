@@ -5,7 +5,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog";
 import { Badge } from "@/components/ui/badge";
 import { QueryFallback } from "@/components/query-fallback";
 import { apiFetchJson } from "@/lib/api-client";
@@ -275,6 +275,7 @@ export default function PlatformOperationsLogs() {
         <DialogContent className="max-w-4xl">
           <DialogHeader>
             <DialogTitle>Operation Detail</DialogTitle>
+            <DialogDescription className="sr-only">View operation detail.</DialogDescription>
           </DialogHeader>
           {detailQuery.isError ? (
             <QueryFallback title="Detail unavailable" error={detailQuery.error} onRetry={() => detailQuery.refetch()} isRetrying={detailQuery.isFetching} />

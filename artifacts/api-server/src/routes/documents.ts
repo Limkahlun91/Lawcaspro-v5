@@ -1449,7 +1449,7 @@ router.get("/platform/document-variables", requireAuth, requireFounder, requireF
       return;
     }
     logger.error({ err, userId: req.userId }, "[platform-document-variables]");
-    res.status(500).json({ error: "Variables unavailable", code: "DOC_VARIABLES_UNAVAILABLE" });
+    res.status(503).json({ error: "Variables unavailable", code: "DOC_VARIABLES_UNAVAILABLE" });
   }
 });
 
@@ -1487,7 +1487,7 @@ router.post("/platform/document-variables", requireAuth, requireFounder, require
       return;
     }
     logger.error({ err, userId: req.userId }, "[platform-document-variables-create]");
-    res.status(500).json({ error: "Variables unavailable", code: "DOC_VARIABLES_UNAVAILABLE" });
+    res.status(503).json({ error: "Variables unavailable", code: "DOC_VARIABLES_UNAVAILABLE" });
   }
 });
 
@@ -1557,7 +1557,7 @@ router.put("/platform/document-variables/:id", requireAuth, requireFounder, requ
       return;
     }
     logger.error({ err, userId: req.userId, variableId: id }, "[platform-document-variables-update]");
-    res.status(500).json({ error: "Variables unavailable", code: "DOC_VARIABLES_UNAVAILABLE" });
+    res.status(503).json({ error: "Variables unavailable", code: "DOC_VARIABLES_UNAVAILABLE" });
   }
 });
 

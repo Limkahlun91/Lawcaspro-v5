@@ -9,7 +9,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Textarea } from "@/components/ui/textarea";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
-  Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
+  Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription,
 } from "@/components/ui/dialog";
 import {
   FileText, Upload, Trash2, Download, Plus, File, Search,
@@ -959,6 +959,7 @@ export default function PlatformDocuments() {
         <DialogContent className="max-w-md max-h-[80vh] flex flex-col overflow-hidden">
           <DialogHeader>
             <DialogTitle>Upload Document{selectedFolder ? ` to "${selectedFolder.name}"` : ""}</DialogTitle>
+            <DialogDescription className="sr-only">Upload a new platform document.</DialogDescription>
           </DialogHeader>
           <div className="flex-1 overflow-y-auto space-y-4 py-2 pr-1">
             <div
@@ -1043,6 +1044,7 @@ export default function PlatformDocuments() {
         <DialogContent className="max-w-lg">
           <DialogHeader>
             <DialogTitle>Document Rules</DialogTitle>
+            <DialogDescription className="sr-only">Edit document rule settings.</DialogDescription>
           </DialogHeader>
           {editingDoc && (
             <div className="space-y-4 py-1">
@@ -1294,6 +1296,7 @@ export default function PlatformDocuments() {
         <DialogContent className="max-w-3xl max-h-[80vh] flex flex-col">
           <DialogHeader>
             <DialogTitle>Document Bindings</DialogTitle>
+            <DialogDescription className="sr-only">Configure variable bindings for the selected document.</DialogDescription>
           </DialogHeader>
           {!editingDoc ? (
             <div className="text-slate-500 py-6">No document selected.</div>
@@ -1429,6 +1432,7 @@ export default function PlatformDocuments() {
         <DialogContent className="max-w-sm">
           <DialogHeader>
             <DialogTitle>{newFolderParentId ? "New Subfolder" : "New Folder"}</DialogTitle>
+            <DialogDescription className="sr-only">Create a new folder.</DialogDescription>
           </DialogHeader>
           <div className="space-y-4 py-2">
             {newFolderParentId && (
@@ -1467,6 +1471,7 @@ export default function PlatformDocuments() {
         <DialogContent className="max-w-sm">
           <DialogHeader>
             <DialogTitle>Edit Folder</DialogTitle>
+            <DialogDescription className="sr-only">Edit the selected folder.</DialogDescription>
           </DialogHeader>
           <div className="space-y-4 py-2">
             <div className="space-y-2">
@@ -1499,6 +1504,7 @@ export default function PlatformDocuments() {
         <DialogContent className="max-w-2xl max-h-[80vh] flex flex-col">
           <DialogHeader>
             <DialogTitle>Template Variable Reference</DialogTitle>
+            <DialogDescription className="sr-only">View and copy available template variables.</DialogDescription>
             <p className="text-sm text-slate-500 mt-1">
               Use these variables in DOCX templates. Click to copy. Variables use {"{{variable_name}}"} syntax.
             </p>
@@ -1583,6 +1589,7 @@ export default function PlatformDocuments() {
         <DialogContent className="max-w-5xl max-h-[85vh] flex flex-col">
           <DialogHeader>
             <DialogTitle>Variable Registry</DialogTitle>
+            <DialogDescription className="sr-only">Manage system-level document variables.</DialogDescription>
             <p className="text-sm text-slate-500 mt-1">
               Manage system-level document variables used for template bindings and preview.
             </p>
@@ -1722,6 +1729,7 @@ export default function PlatformDocuments() {
         <DialogContent className="max-w-2xl">
           <DialogHeader>
             <DialogTitle>{editVariableId ? "Edit Variable" : "New Variable"}</DialogTitle>
+            <DialogDescription className="sr-only">Create or edit a document variable definition.</DialogDescription>
           </DialogHeader>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4 py-2">
             <div className="space-y-1.5">
@@ -1847,6 +1855,7 @@ export default function PlatformDocuments() {
         <DialogContent className="max-w-4xl max-h-[85vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle>Platform Clauses</DialogTitle>
+            <DialogDescription className="sr-only">Browse and manage platform clauses.</DialogDescription>
           </DialogHeader>
           <div className="space-y-3">
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
@@ -1913,6 +1922,7 @@ export default function PlatformDocuments() {
             <DialogContent className="sm:max-w-lg">
               <DialogHeader>
                 <DialogTitle>{editingClause ? "Edit Clause" : "New Clause"}</DialogTitle>
+                <DialogDescription className="sr-only">Create or edit a clause.</DialogDescription>
               </DialogHeader>
               <div className="space-y-3 py-2">
                 <div className="space-y-1.5">

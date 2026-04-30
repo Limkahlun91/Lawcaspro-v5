@@ -218,7 +218,7 @@ router.get("/platform/firms/:firmId/maintenance/actions", requireAuth, requireFo
     }, { retry: true, allowUnsafe: true, ctx: { route: "GET /platform/firms/:firmId/maintenance/actions", firmId } });
     sendOk(res, { items });
   } catch (err) {
-    if (isUndefinedTableError(err) || isPermissionDeniedError(err)) {
+    if (isUndefinedTableError(err) || isUndefinedColumnError(err) || isPermissionDeniedError(err)) {
       sendOk(res, { items: [] }, { warnings: [{ code: "DB_FEATURE_UNAVAILABLE", message: "Maintenance actions store is unavailable; returned empty list." }] });
       return;
     }
@@ -226,7 +226,11 @@ router.get("/platform/firms/:firmId/maintenance/actions", requireAuth, requireFo
       sendError(res, new ApiError({ status: 503, code: "SERVICE_UNAVAILABLE", message: "Service temporarily unavailable", retryable: true }));
       return;
     }
-    sendError(res, err);
+    if (err instanceof ApiError) {
+      sendError(res, err);
+      return;
+    }
+    sendError(res, new ApiError({ status: 503, code: "MAINTENANCE_ACTIONS_UNAVAILABLE", message: "Maintenance actions are temporarily unavailable", retryable: true }));
   }
 });
 
@@ -443,7 +447,11 @@ router.post("/platform/firms/:firmId/maintenance/preview", requireAuth, requireF
       sendError(res, new ApiError({ status: 503, code: "SERVICE_UNAVAILABLE", message: "Service temporarily unavailable", retryable: true }));
       return;
     }
-    sendError(res, err);
+    if (err instanceof ApiError) {
+      sendError(res, err);
+      return;
+    }
+    sendError(res, new ApiError({ status: 503, code: "MAINTENANCE_PREVIEW_UNAVAILABLE", message: "Maintenance preview unavailable", retryable: true }));
   }
 });
 
@@ -509,7 +517,11 @@ router.post("/platform/firms/:firmId/maintenance/execute", requireAuth, requireF
       sendError(res, new ApiError({ status: 503, code: "SERVICE_UNAVAILABLE", message: "Service temporarily unavailable", retryable: true }));
       return;
     }
-    sendError(res, err);
+    if (err instanceof ApiError) {
+      sendError(res, err);
+      return;
+    }
+    sendError(res, new ApiError({ status: 503, code: "MAINTENANCE_EXECUTION_UNAVAILABLE", message: "Maintenance execution unavailable", retryable: true }));
   }
 });
 
@@ -1376,7 +1388,11 @@ router.get("/platform/firms/:firmId/maintenance/history", requireAuth, requireFo
       sendOk(res, { items: [] }, { warnings: [{ code: "SERVICE_UNAVAILABLE", message: "Service unavailable; returned empty list." }] });
       return;
     }
-    sendError(res, err);
+    if (err instanceof ApiError) {
+      sendError(res, err);
+      return;
+    }
+    sendOk(res, { items: [] }, { warnings: [{ code: "MAINTENANCE_HISTORY_UNAVAILABLE", message: "Maintenance history unavailable; returned empty list." }] });
   }
 });
 
@@ -1606,7 +1622,33 @@ router.get("/platform/firms/:firmId/history", requireAuth, requireFounder, async
       );
       return;
     }
-    sendError(res, err);
+    if (err instanceof ApiError) {
+      sendError(res, err);
+      return;
+    }
+    sendOk(
+      res,
+      {
+        items: [],
+        page_info: { limit, has_more: false, next_before: null },
+        filters_applied: {
+          kind: "all",
+          status: null,
+          module_code: null,
+          action_code: null,
+          operation_code: null,
+          record_type: null,
+          record_id: null,
+          requester_user_id: null,
+          requester_email: null,
+          approver_user_id: null,
+          before: null,
+          date_from: null,
+          date_to: null,
+        },
+      },
+      { warnings: [{ code: "HISTORY_UNAVAILABLE", message: "Firm ops history unavailable; returned empty list." }] },
+    );
   }
 });
 

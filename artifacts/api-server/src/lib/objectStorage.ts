@@ -126,20 +126,21 @@ function getSupabaseStorageConfig(): SupabaseStorageConfig {
     process.env.SUPABASE_BUCKET_PRIVATE,
     process.env.SUPABASE_PRIVATE_BUCKET,
     process.env.SUPABASE_STORAGE_BUCKET,
+    process.env.SUPABASE_STORAGE_BUCKET,
   );
 
   const missing: string[] = [];
   if (!supabaseUrl) missing.push("SUPABASE_URL");
   if (!serviceRoleKey) missing.push("SUPABASE_SERVICE_ROLE_KEY");
-  if (!bucketPrivate) missing.push("SUPABASE_STORAGE_BUCKET_PRIVATE");
   if (missing.length) {
     throw new Error(`Supabase storage not configured: missing ${missing.join(", ")}`);
   }
 
+  const effectiveBucketPrivate = bucketPrivate || "lawcaspro-private";
   const normalized = supabaseUrl.replace(/\/+$/, "");
   const storageUrl = `${normalized}/storage/v1`;
 
-  return { supabaseUrl: normalized, serviceRoleKey, bucketPrivate, storageUrl };
+  return { supabaseUrl: normalized, serviceRoleKey, bucketPrivate: effectiveBucketPrivate, storageUrl };
 }
 
 export function getSupabaseStorageConfigError(
@@ -158,6 +159,14 @@ export function getSupabaseStorageConfigError(
     if (vars.length && /not set|missing/i.test(message)) return vars;
     return undefined;
   };
+
+  if (message.toLowerCase().includes("private storage bucket unavailable")) {
+    return {
+      statusCode: 503,
+      code: "STORAGE_BUCKET_UNAVAILABLE",
+      error: message,
+    };
+  }
 
   if (message.toLowerCase().includes("supabase storage not configured") || /SUPABASE_[A-Z0-9_]+/.test(message)) {
     const missing = (() => {
@@ -226,7 +235,13 @@ export class SupabaseStorageService {
       contentType,
       upsert: false,
     });
-    if (error) throw new Error(error.message);
+    if (error) {
+      const msg = String(error.message || "");
+      if (/bucket/i.test(msg) && /not found|missing/i.test(msg)) {
+        throw new Error("Private storage bucket unavailable. Please create bucket lawcaspro-private or set SUPABASE_STORAGE_BUCKET_PRIVATE.");
+      }
+      throw new Error(msg || "Upload failed");
+    }
   }
 
   async deletePrivateObject(objectPath: string): Promise<void> {

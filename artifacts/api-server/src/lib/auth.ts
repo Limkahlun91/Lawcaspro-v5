@@ -298,13 +298,9 @@ export async function loadFounderPermissions(req: AuthRequest): Promise<{ permis
     return founderLevelRank(lvl) > founderLevelRank(acc) ? lvl : acc;
   }, null);
 
-  const fallback = getFounderFallbackPermissions(req.email);
-  if (fallback) {
-    const merged = Array.from(new Set([...fallback.permissions, ...perms]));
-    return { permissions: merged, highestLevel: highest ?? fallback.highestLevel };
-  }
-
-  return { permissions: perms, highestLevel: highest };
+  const merged = Array.from(new Set([...DEFAULT_FOUNDER_PERMISSION_CODES, ...perms]));
+  const highestLevel = highest ?? (isFounderAllowlistedEmail(req.email) ? "super_admin" : null);
+  return { permissions: merged, highestLevel };
 }
 
 export function requireFounderPermission(permissionCode: string) {
