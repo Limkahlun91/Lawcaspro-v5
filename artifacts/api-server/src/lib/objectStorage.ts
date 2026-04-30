@@ -144,12 +144,31 @@ function getSupabaseStorageConfig(): SupabaseStorageConfig {
 
 export function getSupabaseStorageConfigError(
   err: unknown
-): { statusCode: number; error: string } | null {
+): { statusCode: number; code: string; error: string; missing?: string[] } | null {
   const message = err instanceof Error ? err.message : "";
   if (!message) return null;
 
-  if (message.toLowerCase().includes("supabase storage not configured")) {
-    return { statusCode: 503, error: message };
+  const missingFromMessage = (): string[] | undefined => {
+    const m = message.match(/missing\s+(.+)$/i);
+    if (m?.[1]) {
+      const parts = m[1].split(",").map((s) => s.trim()).filter(Boolean);
+      if (parts.length) return parts;
+    }
+    const vars = Array.from(new Set(message.match(/SUPABASE_[A-Z0-9_]+/g) ?? []));
+    if (vars.length && /not set|missing/i.test(message)) return vars;
+    return undefined;
+  };
+
+  if (message.toLowerCase().includes("supabase storage not configured") || /SUPABASE_[A-Z0-9_]+/.test(message)) {
+    const missing = (() => {
+      const vars = missingFromMessage();
+      return vars?.length ? vars : undefined;
+    })();
+    const code =
+      missing?.includes("SUPABASE_STORAGE_BUCKET_PRIVATE")
+        ? "STORAGE_BUCKET_MISSING"
+        : "STORAGE_CONFIG_MISSING";
+    return { statusCode: 503, code, error: message, missing };
   }
   return null;
 }

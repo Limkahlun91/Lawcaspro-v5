@@ -298,9 +298,10 @@ export async function loadFounderPermissions(req: AuthRequest): Promise<{ permis
     return founderLevelRank(lvl) > founderLevelRank(acc) ? lvl : acc;
   }, null);
 
-  if (perms.length === 0) {
-    const fallback = getFounderFallbackPermissions(req.email);
-    if (fallback) return fallback;
+  const fallback = getFounderFallbackPermissions(req.email);
+  if (fallback) {
+    const merged = Array.from(new Set([...fallback.permissions, ...perms]));
+    return { permissions: merged, highestLevel: highest ?? fallback.highestLevel };
   }
 
   return { permissions: perms, highestLevel: highest };

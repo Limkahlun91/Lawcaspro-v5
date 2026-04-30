@@ -1,7 +1,7 @@
 import express, { type Response, type Router as ExpressRouter } from "express";
 import { caseDocumentsTable, db, documentTemplatesTable, sql } from "@workspace/db";
 import { PRINT_ACTIONS, isLetterheadApplicableDocumentType, isMasterDocumentLetterLike } from "@workspace/documents-registry";
-import { requireAuth, requireFirmUser, requireFounder, requirePermission, writeAuditLog, type AuthRequest } from "../lib/auth.js";
+import { requireAuth, requireFirmUser, requireFounder, requireFounderPermission, requirePermission, writeAuditLog, type AuthRequest } from "../lib/auth.js";
 import { logger } from "../lib/logger.js";
 import { withAuthSafeDb } from "../lib/auth-safe-db.js";
 import { getSupabaseStorageConfigError, ObjectNotFoundError, ObjectStorageService, SupabaseStorageService } from "../lib/objectStorage.js";
@@ -53,6 +53,14 @@ const truthy = (v: string | string[] | undefined): boolean => {
   if (!s) return false;
   return s === "1" || s.toLowerCase() === "true" || s.toLowerCase() === "yes";
 };
+
+const getPgCode = (err: unknown): string | null => {
+  const code = err && typeof err === "object" ? (err as { code?: unknown }).code : undefined;
+  return typeof code === "string" && code ? code : null;
+};
+const isUndefinedTableError = (err: unknown): boolean => getPgCode(err) === "42P01";
+const isUndefinedColumnError = (err: unknown): boolean => getPgCode(err) === "42703";
+const isPermissionDeniedError = (err: unknown): boolean => getPgCode(err) === "42501" || (err instanceof Error && /permission denied/i.test(err.message));
 
 async function nextCaseDocumentSequence(r: DbConn, firmId: number, caseId: number): Promise<number> {
   const rows = await queryRows(r, sql`
@@ -1420,7 +1428,7 @@ const updateVariableBodySchema = createVariableBodySchema
   .extend({ key: z.string().trim().min(1).max(120).regex(/^[a-z0-9_]+$/i).optional() })
   .partial();
 
-router.get("/platform/document-variables", requireAuth, requireFounder, async (req: AuthRequest, res): Promise<void> => {
+router.get("/platform/document-variables", requireAuth, requireFounder, requireFounderPermission("founder.documents.read"), async (req: AuthRequest, res): Promise<void> => {
   const category = one((req.query as any).category);
   const activeRaw = one((req.query as any).active);
   const active =
@@ -1436,12 +1444,16 @@ router.get("/platform/document-variables", requireAuth, requireFounder, async (r
     );
     res.json(vars);
   } catch (err) {
+    if (isUndefinedTableError(err) || isUndefinedColumnError(err) || isPermissionDeniedError(err)) {
+      res.status(503).json({ error: "Variables unavailable", code: "DOC_VARIABLES_STORE_UNAVAILABLE" });
+      return;
+    }
     logger.error({ err, userId: req.userId }, "[platform-document-variables]");
-    res.status(500).json({ error: "Internal Server Error" });
+    res.status(500).json({ error: "Variables unavailable", code: "DOC_VARIABLES_UNAVAILABLE" });
   }
 });
 
-router.post("/platform/document-variables", requireAuth, requireFounder, async (req: AuthRequest, res): Promise<void> => {
+router.post("/platform/document-variables", requireAuth, requireFounder, requireFounderPermission("founder.documents.manage"), async (req: AuthRequest, res): Promise<void> => {
   const parsed = createVariableBodySchema.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: "Invalid request" });
@@ -1470,12 +1482,16 @@ router.post("/platform/document-variables", requireAuth, requireFounder, async (
 
     res.status(201).json(created);
   } catch (err) {
+    if (isUndefinedTableError(err) || isUndefinedColumnError(err) || isPermissionDeniedError(err)) {
+      res.status(503).json({ error: "Variables unavailable", code: "DOC_VARIABLES_STORE_UNAVAILABLE" });
+      return;
+    }
     logger.error({ err, userId: req.userId }, "[platform-document-variables-create]");
-    res.status(500).json({ error: "Internal Server Error" });
+    res.status(500).json({ error: "Variables unavailable", code: "DOC_VARIABLES_UNAVAILABLE" });
   }
 });
 
-router.put("/platform/document-variables/:id", requireAuth, requireFounder, async (req: AuthRequest, res): Promise<void> => {
+router.put("/platform/document-variables/:id", requireAuth, requireFounder, requireFounderPermission("founder.documents.manage"), async (req: AuthRequest, res): Promise<void> => {
   const idStr = one((req.params as any).id);
   const id = idStr ? parseInt(idStr, 10) : NaN;
   if (Number.isNaN(id)) {
@@ -1536,8 +1552,12 @@ router.put("/platform/document-variables/:id", requireAuth, requireFounder, asyn
     }
     res.status(updated.status).json(updated.body);
   } catch (err) {
+    if (isUndefinedTableError(err) || isUndefinedColumnError(err) || isPermissionDeniedError(err)) {
+      res.status(503).json({ error: "Variables unavailable", code: "DOC_VARIABLES_STORE_UNAVAILABLE" });
+      return;
+    }
     logger.error({ err, userId: req.userId, variableId: id }, "[platform-document-variables-update]");
-    res.status(500).json({ error: "Internal Server Error" });
+    res.status(500).json({ error: "Variables unavailable", code: "DOC_VARIABLES_UNAVAILABLE" });
   }
 });
 

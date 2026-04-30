@@ -12,9 +12,10 @@ import { apiFetchJson } from "@/lib/api-client";
 import { hasFounderPermission } from "@/lib/founder-permissions";
 import { useAuth } from "@/lib/auth-context";
 
-type Category = "" | "maintenance" | "governance" | "safety" | "system" | "incident";
-type Severity = "" | "low" | "medium" | "high" | "critical";
-type Status = "" | "success" | "failed" | "blocked" | "pending";
+const ALL = "__all__";
+type Category = typeof ALL | "maintenance" | "governance" | "safety" | "system" | "incident";
+type Severity = typeof ALL | "low" | "medium" | "high" | "critical";
+type Status = typeof ALL | "success" | "failed" | "blocked" | "pending";
 
 function StatusPill({ status }: { status: string }) {
   const cls = (() => {
@@ -30,10 +31,10 @@ export default function PlatformOperationsLogs() {
   const { user } = useAuth();
   const canRead = hasFounderPermission(user, "founder.ops.read");
 
-  const [category, setCategory] = useState<Category>("");
-  const [severity, setSeverity] = useState<Severity>("");
-  const [riskLevel, setRiskLevel] = useState<Severity>("");
-  const [status, setStatus] = useState<Status>("");
+  const [category, setCategory] = useState<Category>(ALL);
+  const [severity, setSeverity] = useState<Severity>(ALL);
+  const [riskLevel, setRiskLevel] = useState<Severity>(ALL);
+  const [status, setStatus] = useState<Status>(ALL);
   const [firmId, setFirmId] = useState("");
   const [moduleCode, setModuleCode] = useState("");
   const [actorUserId, setActorUserId] = useState("");
@@ -60,10 +61,10 @@ export default function PlatformOperationsLogs() {
     queryFn: async () => {
       const params = new URLSearchParams();
       params.set("limit", "50");
-      if (category) params.set("event_category", category);
-      if (severity) params.set("severity", severity);
-      if (riskLevel) params.set("risk_level", riskLevel);
-      if (status) params.set("status", status);
+      if (category !== ALL) params.set("event_category", category);
+      if (severity !== ALL) params.set("severity", severity);
+      if (riskLevel !== ALL) params.set("risk_level", riskLevel);
+      if (status !== ALL) params.set("status", status);
       if (firmId.trim()) params.set("firm_id", firmId.trim());
       if (moduleCode.trim()) params.set("module_code", moduleCode.trim());
       if (actorUserId.trim()) params.set("actor_user_id", actorUserId.trim());
@@ -134,10 +135,10 @@ export default function PlatformOperationsLogs() {
           <div className="flex gap-2">
             <Button variant="outline" onClick={() => { setBefore(null); setItems([]); logsQuery.refetch(); }} disabled={logsQuery.isFetching}>Apply</Button>
             <Button variant="outline" onClick={() => {
-              setCategory("");
-              setSeverity("");
-              setRiskLevel("");
-              setStatus("");
+              setCategory(ALL);
+              setSeverity(ALL);
+              setRiskLevel(ALL);
+              setStatus(ALL);
               setFirmId("");
               setModuleCode("");
               setActorUserId("");
@@ -151,7 +152,7 @@ export default function PlatformOperationsLogs() {
           <Select value={category} onValueChange={(v) => setCategory(v as Category)}>
             <SelectTrigger><SelectValue placeholder="Category" /></SelectTrigger>
             <SelectContent>
-              <SelectItem value="">All</SelectItem>
+              <SelectItem value={ALL}>All</SelectItem>
               <SelectItem value="maintenance">Maintenance</SelectItem>
               <SelectItem value="governance">Governance</SelectItem>
               <SelectItem value="safety">Safety</SelectItem>
@@ -162,7 +163,7 @@ export default function PlatformOperationsLogs() {
           <Select value={severity} onValueChange={(v) => setSeverity(v as Severity)}>
             <SelectTrigger><SelectValue placeholder="Severity" /></SelectTrigger>
             <SelectContent>
-              <SelectItem value="">All</SelectItem>
+              <SelectItem value={ALL}>All</SelectItem>
               <SelectItem value="low">Low</SelectItem>
               <SelectItem value="medium">Medium</SelectItem>
               <SelectItem value="high">High</SelectItem>
@@ -172,7 +173,7 @@ export default function PlatformOperationsLogs() {
           <Select value={riskLevel} onValueChange={(v) => setRiskLevel(v as Severity)}>
             <SelectTrigger><SelectValue placeholder="Risk level" /></SelectTrigger>
             <SelectContent>
-              <SelectItem value="">All</SelectItem>
+              <SelectItem value={ALL}>All</SelectItem>
               <SelectItem value="low">Low</SelectItem>
               <SelectItem value="medium">Medium</SelectItem>
               <SelectItem value="high">High</SelectItem>
@@ -182,7 +183,7 @@ export default function PlatformOperationsLogs() {
           <Select value={status} onValueChange={(v) => setStatus(v as Status)}>
             <SelectTrigger><SelectValue placeholder="Status" /></SelectTrigger>
             <SelectContent>
-              <SelectItem value="">All</SelectItem>
+              <SelectItem value={ALL}>All</SelectItem>
               <SelectItem value="success">Success</SelectItem>
               <SelectItem value="pending">Pending</SelectItem>
               <SelectItem value="blocked">Blocked</SelectItem>

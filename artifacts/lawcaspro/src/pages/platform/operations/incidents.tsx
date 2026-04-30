@@ -13,8 +13,9 @@ import { useAuth } from "@/lib/auth-context";
 import { useToast } from "@/hooks/use-toast";
 import { toastError } from "@/lib/toast-error";
 
-type Severity = "" | "low" | "medium" | "high" | "critical";
-type Status = "" | "open" | "investigating" | "awaiting-approval" | "awaiting-execution" | "mitigated" | "resolved" | "dismissed";
+const ALL = "__all__";
+type Severity = typeof ALL | "low" | "medium" | "high" | "critical";
+type Status = typeof ALL | "open" | "investigating" | "awaiting-approval" | "awaiting-execution" | "mitigated" | "resolved" | "dismissed";
 
 function SeverityBadge({ sev }: { sev: string }) {
   const cls = (() => {
@@ -34,7 +35,7 @@ export default function PlatformOperationsIncidents() {
   const canRecompute = hasFounderPermission(user, "founder.ops.recommendation.recompute");
 
   const [status, setStatus] = useState<Status>("open");
-  const [severity, setSeverity] = useState<Severity>("");
+  const [severity, setSeverity] = useState<Severity>(ALL);
   const [firmId, setFirmId] = useState("");
   const [moduleCode, setModuleCode] = useState("");
   const [q, setQ] = useState("");
@@ -55,8 +56,8 @@ export default function PlatformOperationsIncidents() {
     queryFn: async () => {
       const params = new URLSearchParams();
       params.set("limit", "50");
-      if (status) params.set("status", status);
-      if (severity) params.set("severity", severity);
+      if (status !== ALL) params.set("status", status);
+      if (severity !== ALL) params.set("severity", severity);
       if (firmId.trim()) params.set("firm_id", firmId.trim());
       if (moduleCode.trim()) params.set("module_code", moduleCode.trim());
       if (q.trim()) params.set("q", q.trim());
@@ -135,14 +136,14 @@ export default function PlatformOperationsIncidents() {
           <CardTitle>Filters</CardTitle>
           <div className="flex gap-2">
             <Button variant="outline" onClick={() => { setBefore(null); setItems([]); incidentsQuery.refetch(); }} disabled={incidentsQuery.isFetching}>Apply</Button>
-            <Button variant="outline" onClick={() => { setStatus("open"); setSeverity(""); setFirmId(""); setModuleCode(""); setQ(""); setBefore(null); setItems([]); }} disabled={incidentsQuery.isFetching}>Reset</Button>
+            <Button variant="outline" onClick={() => { setStatus("open"); setSeverity(ALL); setFirmId(""); setModuleCode(""); setQ(""); setBefore(null); setItems([]); }} disabled={incidentsQuery.isFetching}>Reset</Button>
           </div>
         </CardHeader>
         <CardContent className="grid grid-cols-1 md:grid-cols-5 gap-2">
           <Select value={status} onValueChange={(v) => setStatus(v as Status)}>
             <SelectTrigger><SelectValue placeholder="Status" /></SelectTrigger>
             <SelectContent>
-              <SelectItem value="">All</SelectItem>
+              <SelectItem value={ALL}>All</SelectItem>
               <SelectItem value="open">Open</SelectItem>
               <SelectItem value="investigating">Investigating</SelectItem>
               <SelectItem value="awaiting-approval">Awaiting approval</SelectItem>
@@ -155,7 +156,7 @@ export default function PlatformOperationsIncidents() {
           <Select value={severity} onValueChange={(v) => setSeverity(v as Severity)}>
             <SelectTrigger><SelectValue placeholder="Severity" /></SelectTrigger>
             <SelectContent>
-              <SelectItem value="">All</SelectItem>
+              <SelectItem value={ALL}>All</SelectItem>
               <SelectItem value="low">Low</SelectItem>
               <SelectItem value="medium">Medium</SelectItem>
               <SelectItem value="high">High</SelectItem>

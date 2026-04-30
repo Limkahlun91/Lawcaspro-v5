@@ -3,7 +3,7 @@ import { and, desc, eq, ilike, sql } from "drizzle-orm";
 import { auditLogsTable, platformApprovalEventsTable, platformApprovalRequestsTable, platformMaintenanceActionStepsTable, platformMaintenanceActionsTable, platformRestoreActionStepsTable, platformRestoreActionsTable } from "@workspace/db";
 import { isTransientDbConnectionError, withAuthSafeDb } from "../lib/auth-safe-db.js";
 import { requireAuth, requireFounder, type AuthRequest, writeAuditLog } from "../lib/auth.js";
-import { ApiError, parseIntParam, sendError, sendOk } from "../lib/api-response.js";
+import { ApiError, one, parseIntParam, sendError, sendOk } from "../lib/api-response.js";
 import { assertActiveSupportSessionForFirm, assertFounderPermission, createApprovalRequest, createStepUpChallenge, defaultStepUpPhrase, evaluateDecisionForExecute, evaluateDecisionForPreview, loadFounderGovernanceContext } from "../services/founder-governance/index.js";
 import { FOUNDER_ACTION_REGISTRY, FOUNDER_RESTORE_OPERATION_REGISTRY } from "../services/platform-action-registry.js";
 import {
@@ -56,6 +56,13 @@ const getPgCode = (err: unknown): string | null => {
 const isUndefinedTableError = (err: unknown): boolean => getPgCode(err) === "42P01";
 const isUndefinedColumnError = (err: unknown): boolean => getPgCode(err) === "42703";
 const isPermissionDeniedError = (err: unknown): boolean => getPgCode(err) === "42501" || (err instanceof Error && /permission denied/i.test(err.message));
+
+const parseLimit = (raw: unknown, fallback = 50): number => {
+  const v = one(raw as any);
+  const n = v ? Number.parseInt(String(v), 10) : fallback;
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(Math.max(n, 1), 100);
+};
 
 router.get("/platform/firms/:firmId/ops/summary", requireAuth, requireFounder, async (req: AuthRequest, res) => {
   try {
@@ -197,12 +204,7 @@ router.get("/platform/action-registry", requireAuth, requireFounder, async (req:
 router.get("/platform/firms/:firmId/maintenance/actions", requireAuth, requireFounder, async (req: AuthRequest, res) => {
   try {
     const firmId = parseIntParam("firmId", req.params.firmId, { required: true, min: 1 })!;
-    const limit = (() => {
-      const v = req.query.limit;
-      const raw = typeof v === "string" ? v : Array.isArray(v) && typeof v[0] === "string" ? v[0] : undefined;
-      const n = raw ? Number.parseInt(raw, 10) : 50;
-      return Number.isFinite(n) ? Math.min(Math.max(n, 1), 100) : 50;
-    })();
+    const limit = parseLimit((req.query as any).limit, 50);
     const items = await withAuthSafeDb(async (authDb) => {
       const ctx = await loadFounderGovernanceContext(authDb, req);
       assertFounderPermission(ctx, "founder.maintenance.read");
@@ -231,12 +233,7 @@ router.get("/platform/firms/:firmId/maintenance/actions", requireAuth, requireFo
 router.get("/platform/firms/:firmId/actions", requireAuth, requireFounder, async (req: AuthRequest, res) => {
   try {
     const firmId = parseIntParam("firmId", req.params.firmId, { required: true, min: 1 })!;
-    const limit = (() => {
-      const v = req.query.limit;
-      const raw = typeof v === "string" ? v : Array.isArray(v) && typeof v[0] === "string" ? v[0] : undefined;
-      const n = raw ? Number.parseInt(raw, 10) : 50;
-      return Number.isFinite(n) ? Math.min(Math.max(n, 1), 100) : 50;
-    })();
+    const limit = parseLimit((req.query as any).limit, 50);
     const items = await withAuthSafeDb(async (authDb) => {
       const ctx = await loadFounderGovernanceContext(authDb, req);
       assertFounderPermission(ctx, "founder.maintenance.read");
@@ -429,6 +426,23 @@ router.post("/platform/firms/:firmId/maintenance/preview", requireAuth, requireF
 
     sendOk(res, { preview: preview.preview, action_id: preview.action_id, required_confirmation: requiredTypedConfirmation(preview.preview.risk_level), governance: preview.governance, step_up: preview.step_up });
   } catch (err) {
+    if (isUndefinedTableError(err) || isUndefinedColumnError(err) || isPermissionDeniedError(err)) {
+      sendError(
+        res,
+        new ApiError({
+          status: 503,
+          code: "MAINTENANCE_PREVIEW_UNAVAILABLE",
+          message: "Maintenance preview unavailable",
+          retryable: true,
+          suggestion: "Apply platform ops DB migrations (platform maintenance/snapshot/restore tables) and retry.",
+        }),
+      );
+      return;
+    }
+    if (isTransientDbConnectionError(err)) {
+      sendError(res, new ApiError({ status: 503, code: "SERVICE_UNAVAILABLE", message: "Service temporarily unavailable", retryable: true }));
+      return;
+    }
     sendError(res, err);
   }
 });
@@ -478,6 +492,23 @@ router.post("/platform/firms/:firmId/maintenance/execute", requireAuth, requireF
 
     sendOk(res, { operation: { id: result.actionId, type: "maintenance_action", status: result.status }, snapshot: { id: result.snapshotId, created: !!result.snapshotId }, result: result.result });
   } catch (err) {
+    if (isUndefinedTableError(err) || isUndefinedColumnError(err) || isPermissionDeniedError(err)) {
+      sendError(
+        res,
+        new ApiError({
+          status: 503,
+          code: "MAINTENANCE_EXECUTION_UNAVAILABLE",
+          message: "Maintenance execution unavailable",
+          retryable: true,
+          suggestion: "Apply platform ops DB migrations (platform maintenance/snapshot/restore tables) and retry.",
+        }),
+      );
+      return;
+    }
+    if (isTransientDbConnectionError(err)) {
+      sendError(res, new ApiError({ status: 503, code: "SERVICE_UNAVAILABLE", message: "Service temporarily unavailable", retryable: true }));
+      return;
+    }
     sendError(res, err);
   }
 });
@@ -1320,12 +1351,7 @@ router.post("/platform/firms/:firmId/restore/request-approval", requireAuth, req
 router.get("/platform/firms/:firmId/maintenance/history", requireAuth, requireFounder, async (req: AuthRequest, res) => {
   try {
     const firmId = parseIntParam("firmId", req.params.firmId, { required: true, min: 1 })!;
-    const limit = (() => {
-      const v = req.query.limit;
-      const raw = typeof v === "string" ? v : Array.isArray(v) && typeof v[0] === "string" ? v[0] : undefined;
-      const n = raw ? Number.parseInt(raw, 10) : 50;
-      return Number.isFinite(n) ? Math.min(Math.max(n, 1), 100) : 50;
-    })();
+    const limit = parseLimit((req.query as any).limit, 50);
     const items = await withAuthSafeDb(async (authDb) => {
       const ctx = await loadFounderGovernanceContext(authDb, req);
       assertFounderPermission(ctx, "founder.maintenance.read");
@@ -1342,6 +1368,14 @@ router.get("/platform/firms/:firmId/maintenance/history", requireAuth, requireFo
     }, { retry: true, allowUnsafe: true, ctx: { route: "GET /platform/firms/:firmId/maintenance/history", firmId } });
     sendOk(res, { items });
   } catch (err) {
+    if (isUndefinedTableError(err) || isUndefinedColumnError(err) || isPermissionDeniedError(err)) {
+      sendOk(res, { items: [] }, { warnings: [{ code: "DB_FEATURE_UNAVAILABLE", message: "Maintenance history store is unavailable; returned empty list." }] });
+      return;
+    }
+    if (isTransientDbConnectionError(err)) {
+      sendOk(res, { items: [] }, { warnings: [{ code: "SERVICE_UNAVAILABLE", message: "Service unavailable; returned empty list." }] });
+      return;
+    }
     sendError(res, err);
   }
 });
@@ -1349,9 +1383,6 @@ router.get("/platform/firms/:firmId/maintenance/history", requireAuth, requireFo
 router.get("/platform/firms/:firmId/history", requireAuth, requireFounder, async (req: AuthRequest, res) => {
   try {
     const firmId = parseIntParam("firmId", req.params.firmId, { required: true, min: 1 })!;
-
-    const one = (v: unknown): string | undefined =>
-      typeof v === "string" ? v : Array.isArray(v) && typeof v[0] === "string" ? v[0] : undefined;
 
     const limit = (() => {
       const raw = one((req.query as any).limit);
@@ -1522,6 +1553,59 @@ router.get("/platform/firms/:firmId/history", requireAuth, requireFounder, async
 
     sendOk(res, result);
   } catch (err) {
+    const limit = parseLimit((req.query as any).limit, 50);
+    if (isUndefinedTableError(err) || isUndefinedColumnError(err) || isPermissionDeniedError(err)) {
+      sendOk(
+        res,
+        {
+          items: [],
+          page_info: { limit, has_more: false, next_before: null },
+          filters_applied: {
+            kind: "all",
+            status: null,
+            module_code: null,
+            action_code: null,
+            operation_code: null,
+            record_type: null,
+            record_id: null,
+            requester_user_id: null,
+            requester_email: null,
+            approver_user_id: null,
+            before: null,
+            date_from: null,
+            date_to: null,
+          },
+        },
+        { warnings: [{ code: "DB_FEATURE_UNAVAILABLE", message: "Firm ops history store is unavailable; returned empty list." }] },
+      );
+      return;
+    }
+    if (isTransientDbConnectionError(err)) {
+      sendOk(
+        res,
+        {
+          items: [],
+          page_info: { limit, has_more: false, next_before: null },
+          filters_applied: {
+            kind: "all",
+            status: null,
+            module_code: null,
+            action_code: null,
+            operation_code: null,
+            record_type: null,
+            record_id: null,
+            requester_user_id: null,
+            requester_email: null,
+            approver_user_id: null,
+            before: null,
+            date_from: null,
+            date_to: null,
+          },
+        },
+        { warnings: [{ code: "SERVICE_UNAVAILABLE", message: "Service unavailable; returned empty list." }] },
+      );
+      return;
+    }
     sendError(res, err);
   }
 });

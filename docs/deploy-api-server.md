@@ -50,7 +50,7 @@ Supabase Storage (required for private document/object routes):
 
 - `SUPABASE_URL`
 - `SUPABASE_SERVICE_ROLE_KEY`
-- `SUPABASE_STORAGE_BUCKET_PRIVATE`
+- `SUPABASE_STORAGE_BUCKET_PRIVATE` (recommended: `private` or `lawcaspro-private`)
 
 Legacy Object Storage (only used by endpoints that still rely on @google-cloud/storage / sidecar):
 

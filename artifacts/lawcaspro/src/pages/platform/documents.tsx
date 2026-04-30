@@ -411,8 +411,8 @@ export default function PlatformDocuments() {
   const docsLoading = docsQuery.isLoading;
 
   const varGroupsQuery = useQuery<DocumentVariableDefinition[]>({
-    queryKey: ["document-variables"],
-    queryFn: async () => ensureArray<DocumentVariableDefinition>(await apiFetchJson("/document-variables?active=1")),
+    queryKey: ["platform-document-variables-ref"],
+    queryFn: async () => ensureArray<DocumentVariableDefinition>(await apiFetchJson("/platform/document-variables?active=1")),
     enabled: showVarRef,
     retry: false,
   });

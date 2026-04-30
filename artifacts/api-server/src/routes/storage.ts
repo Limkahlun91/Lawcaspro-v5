@@ -62,7 +62,7 @@ router.post("/storage/uploads/request-url", requireAuth, async (req: AuthRequest
     const configErr = getSupabaseStorageConfigError(error);
     if (configErr) {
       req.log.warn({ err: error }, configErr.error);
-      res.status(configErr.statusCode).json({ error: configErr.error });
+      res.status(configErr.statusCode).json({ error: configErr.error, code: configErr.code, missing: configErr.missing });
       return;
     }
     req.log.error({ err: error }, "Error generating upload URL");
@@ -122,7 +122,7 @@ router.get("/storage/objects/*path", requireAuth, requireFounder, async (req: Au
     const configErr = getSupabaseStorageConfigError(error);
     if (configErr) {
       req.log.warn({ err: error }, configErr.error);
-      res.status(configErr.statusCode).json({ error: configErr.error });
+      res.status(configErr.statusCode).json({ error: configErr.error, code: configErr.code, missing: configErr.missing });
       return;
     }
     req.log.error({ err: error }, "Error serving object");
@@ -172,7 +172,7 @@ router.post("/storage/upload", requireAuth, upload.single("file"), async (req: A
     const configErr = getSupabaseStorageConfigError(error);
     if (configErr) {
       req.log.warn({ err: error }, configErr.error);
-      res.status(configErr.statusCode).json({ error: configErr.error });
+      res.status(configErr.statusCode).json({ error: configErr.error, code: configErr.code, missing: configErr.missing });
       return;
     }
     req.log.error({ err: error }, "Error uploading file");

@@ -37,9 +37,10 @@ export function FirmSnapshotsTab({ firmId, firmName }: { firmId: number; firmNam
 
   const [snapBefore, setSnapBefore] = useState<string | null>(null);
   const [snapItems, setSnapItems] = useState<SnapshotRow[]>([]);
-  const [filterSnapshotType, setFilterSnapshotType] = useState<"" | "settings" | "record" | "module" | "firm">("");
+  const ALL = "__all__";
+  const [filterSnapshotType, setFilterSnapshotType] = useState<typeof ALL | "settings" | "record" | "module" | "firm">(ALL);
   const [filterStatus, setFilterStatus] = useState("");
-  const [filterPinned, setFilterPinned] = useState<"" | "pinned" | "unpinned">("");
+  const [filterPinned, setFilterPinned] = useState<typeof ALL | "pinned" | "unpinned">(ALL);
   const [filterTargetType, setFilterTargetType] = useState("");
   const [filterTargetId, setFilterTargetId] = useState("");
 
@@ -54,7 +55,7 @@ export function FirmSnapshotsTab({ firmId, firmName }: { firmId: number; firmNam
     queryFn: async () => {
       const params = new URLSearchParams();
       params.set("limit", "50");
-      if (filterSnapshotType) params.set("snapshot_type", filterSnapshotType);
+      if (filterSnapshotType !== ALL) params.set("snapshot_type", filterSnapshotType);
       if (filterStatus.trim()) params.set("status", filterStatus.trim());
       if (filterPinned === "pinned") params.set("pinned", "true");
       if (filterPinned === "unpinned") params.set("pinned", "false");
@@ -372,7 +373,7 @@ export function FirmSnapshotsTab({ firmId, firmName }: { firmId: number; firmNam
             <Select value={filterSnapshotType} onValueChange={(v) => setFilterSnapshotType(v as any)}>
               <SelectTrigger><SelectValue placeholder="Snapshot type" /></SelectTrigger>
               <SelectContent>
-                <SelectItem value="">All types</SelectItem>
+                <SelectItem value={ALL}>All types</SelectItem>
                 <SelectItem value="settings">Settings</SelectItem>
                 <SelectItem value="record">Record</SelectItem>
                 <SelectItem value="module">Module</SelectItem>
@@ -383,7 +384,7 @@ export function FirmSnapshotsTab({ firmId, firmName }: { firmId: number; firmNam
             <Select value={filterPinned} onValueChange={(v) => setFilterPinned(v as any)}>
               <SelectTrigger><SelectValue placeholder="Pinned" /></SelectTrigger>
               <SelectContent>
-                <SelectItem value="">All</SelectItem>
+                <SelectItem value={ALL}>All</SelectItem>
                 <SelectItem value="pinned">Pinned</SelectItem>
                 <SelectItem value="unpinned">Unpinned</SelectItem>
               </SelectContent>
@@ -406,9 +407,9 @@ export function FirmSnapshotsTab({ firmId, firmName }: { firmId: number; firmNam
             <Button
               variant="outline"
               onClick={() => {
-                setFilterSnapshotType("");
+                setFilterSnapshotType(ALL);
                 setFilterStatus("");
-                setFilterPinned("");
+                setFilterPinned(ALL);
                 setFilterTargetType("");
                 setFilterTargetId("");
                 setSnapBefore(null);
