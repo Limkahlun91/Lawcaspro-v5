@@ -5,6 +5,7 @@ import { Plus, Search } from "lucide-react";
 import { Link } from "wouter";
 import { Input } from "@/components/ui/input";
 import { useState } from "react";
+import { listItems } from "@/lib/list-items";
 
 export default function UsersList() {
   const [search, setSearch] = useState("");
@@ -14,6 +15,8 @@ export default function UsersList() {
     limit: 50,
     search: search || undefined
   });
+
+  const items = listItems<any>(response);
 
   return (
     <div className="space-y-6">
@@ -58,7 +61,7 @@ export default function UsersList() {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
-                  {response?.data.map((user) => (
+                  {items.map((user) => (
                     <tr key={user.id} className="hover:bg-slate-50/50">
                       <td className="px-6 py-4">
                         <div className="font-medium text-slate-900">{user.name}</div>
@@ -81,7 +84,7 @@ export default function UsersList() {
                       </td>
                     </tr>
                   ))}
-                  {response?.data.length === 0 && (
+                  {items.length === 0 && (
                     <tr>
                       <td colSpan={4} className="px-6 py-8 text-center text-slate-500">
                         No users found.

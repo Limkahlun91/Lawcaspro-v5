@@ -6,6 +6,7 @@
   "scripts": {
     "hello": "tsx ./src/hello.ts",
     "platform:documents:e2e": "tsx ./src/platform-documents-e2e.ts",
+    "smoke:production": "tsx ./src/smoke-production.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {

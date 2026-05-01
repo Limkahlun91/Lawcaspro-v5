@@ -197,6 +197,9 @@ routerInternal.get("/healthz/version", (_req: ReqLike, res: ResLike) => {
     process.env.GIT_COMMIT_SHA ??
     process.env.COMMIT_SHA ??
     null;
+  res.setHeader("cache-control", "no-store, max-age=0");
+  res.setHeader("pragma", "no-cache");
+  res.setHeader("expires", "0");
   res.json({ status: "ok", commit });
 });
 

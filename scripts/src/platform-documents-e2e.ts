@@ -1,3 +1,5 @@
+export {};
+
 const BASE_URL = process.env.E2E_BASE_URL || "https://lawcaspro-v5.vercel.app";
 const EMAIL = process.env.E2E_FOUNDER_EMAIL;
 const PASSWORD = process.env.E2E_FOUNDER_PASSWORD;
