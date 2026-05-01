@@ -4,6 +4,7 @@ import { PRINT_ACTIONS, isLetterheadApplicableDocumentType, isMasterDocumentLett
 import { requireAuth, requireFirmUser, requireFounder, requireFounderPermission, requirePermission, writeAuditLog, type AuthRequest } from "../lib/auth.js";
 import { logger } from "../lib/logger.js";
 import { withAuthSafeDb } from "../lib/auth-safe-db.js";
+import { sendOk } from "../lib/api-response.js";
 import { getSupabaseStorageConfigError, ObjectNotFoundError, ObjectStorageService, SupabaseStorageService } from "../lib/objectStorage.js";
 import { Readable } from "stream";
 import { randomUUID } from "crypto";
@@ -1403,8 +1404,16 @@ router.get("/document-variables", requireAuth, requireFirmUser, requirePermissio
     activeRaw === undefined ? undefined
     : activeRaw === "0" || activeRaw.toLowerCase() === "false" || activeRaw.toLowerCase() === "no" ? false
     : true;
-  const vars = await listDocumentVariables(r, { category: category || undefined, active });
-  res.json(vars);
+  try {
+    const vars = await listDocumentVariables(r, { category: category || undefined, active });
+    sendOk(res as any, vars);
+  } catch (err) {
+    if (isUndefinedTableError(err) || isUndefinedColumnError(err) || isPermissionDeniedError(err)) {
+      sendOk(res as any, []);
+      return;
+    }
+    sendOk(res as any, []);
+  }
 });
 
 const variableCategorySchema = z.enum(["case", "purchaser", "property", "loan", "developer", "project", "workflow", "custom"]);
@@ -1442,14 +1451,22 @@ router.get("/platform/document-variables", requireAuth, requireFounder, requireF
       async (authDb) => await listDocumentVariables(authDb, { category: category || undefined, active }),
       { retry: true, ctx: { route: req.path, stage: "platform_document_variables.list", reqId, firmId: null, userId: req.userId ?? null } },
     );
-    res.json(vars);
+    sendOk(res as any, vars);
   } catch (err) {
     if (isUndefinedTableError(err) || isUndefinedColumnError(err) || isPermissionDeniedError(err)) {
-      res.status(503).json({ error: "Variables unavailable", code: "DOC_VARIABLES_STORE_UNAVAILABLE" });
+      sendOk(
+        res as any,
+        [],
+        { warnings: [{ code: "DOC_VARIABLES_STORE_UNAVAILABLE", message: "Variables store unavailable; returned empty list." }] },
+      );
       return;
     }
     logger.error({ err, userId: req.userId }, "[platform-document-variables]");
-    res.status(503).json({ error: "Variables unavailable", code: "DOC_VARIABLES_UNAVAILABLE" });
+    sendOk(
+      res as any,
+      [],
+      { warnings: [{ code: "DOC_VARIABLES_UNAVAILABLE", message: "Variables unavailable; returned empty list." }] },
+    );
   }
 });
 

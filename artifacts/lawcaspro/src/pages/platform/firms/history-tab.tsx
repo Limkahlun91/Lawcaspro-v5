@@ -110,7 +110,7 @@ export function FirmActionHistoryTab({ firmId }: { firmId: number }) {
           <CardTitle>Action History</CardTitle>
           <div className="flex gap-2 flex-wrap justify-end">
             <Select value={kind} onValueChange={(v) => setKind(v as any)}>
-              <SelectTrigger className="w-36"><SelectValue /></SelectTrigger>
+              <SelectTrigger className="w-full sm:w-36"><SelectValue /></SelectTrigger>
               <SelectContent>
                 <SelectItem value="all">All</SelectItem>
                 <SelectItem value="maintenance">Maintenance</SelectItem>
@@ -118,7 +118,7 @@ export function FirmActionHistoryTab({ firmId }: { firmId: number }) {
                 <SelectItem value="approval">Approvals</SelectItem>
               </SelectContent>
             </Select>
-            <Input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search (client-side)..." className="w-56" />
+            <Input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search (client-side)..." className="w-full sm:w-56" />
           </div>
         </CardHeader>
         <CardContent>
@@ -132,7 +132,7 @@ export function FirmActionHistoryTab({ firmId }: { firmId: number }) {
               </>
             ) : null}
           </div>
-          <div className="mb-4 grid grid-cols-1 md:grid-cols-3 gap-2">
+          <div className="mb-4 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
             <Input value={status} onChange={(e) => setStatus(e.target.value)} placeholder="Status (e.g. completed/failed/requested)" />
             <Input value={moduleCode} onChange={(e) => setModuleCode(e.target.value)} placeholder="Module (e.g. projects/settings)" />
             <Input value={actionCode} onChange={(e) => setActionCode(e.target.value)} placeholder="Action code (maintenance/approval)" />

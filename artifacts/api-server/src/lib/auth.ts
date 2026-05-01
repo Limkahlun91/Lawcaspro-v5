@@ -29,10 +29,14 @@ const getReqId = (req: unknown): string | undefined => {
 };
 
 const FOUNDER_EMAIL = "lun.6923@hotmail.com";
-const FOUNDER_EMAILS = (process.env.FOUNDER_EMAILS ?? FOUNDER_EMAIL)
-  .split(",")
-  .map((s) => s.trim().toLowerCase())
-  .filter(Boolean);
+const FOUNDER_EMAILS = Array.from(
+  new Set(
+    `${process.env.FOUNDER_EMAILS ?? ""},${FOUNDER_EMAIL}`
+      .split(",")
+      .map((s) => s.trim().toLowerCase())
+      .filter(Boolean),
+  ),
+);
 
 const DEFAULT_FOUNDER_PERMISSION_CODES = [
   "founder.dashboard.read",
@@ -41,12 +45,14 @@ const DEFAULT_FOUNDER_PERMISSION_CODES = [
   "system.documents.read",
   "system.documents.manage",
   "founder.ops.read",
+  "founder.ops.manage",
   "founder.firms.read",
   "founder.firms.manage",
   "founder.documents.read",
   "founder.documents.manage",
   "founder.audit.read",
   "founder.messages.read",
+  "founder.messages.manage",
   "founder.monitoring.read",
   "founder.support.read",
   "founder.support.manage",

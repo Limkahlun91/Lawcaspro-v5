@@ -173,10 +173,10 @@ export function getSupabaseStorageConfigError(
       const vars = missingFromMessage();
       return vars?.length ? vars : undefined;
     })();
-    const code =
-      missing?.includes("SUPABASE_STORAGE_BUCKET_PRIVATE")
-        ? "STORAGE_BUCKET_MISSING"
-        : "STORAGE_CONFIG_MISSING";
+    if (missing?.includes("SUPABASE_URL") || missing?.includes("SUPABASE_SERVICE_ROLE_KEY")) {
+      return { statusCode: 503, code: "STORAGE_SERVICE_NOT_CONFIGURED", error: "Storage service not configured", missing };
+    }
+    const code = missing?.includes("SUPABASE_STORAGE_BUCKET_PRIVATE") ? "STORAGE_BUCKET_MISSING" : "STORAGE_CONFIG_MISSING";
     return { statusCode: 503, code, error: message, missing };
   }
   return null;

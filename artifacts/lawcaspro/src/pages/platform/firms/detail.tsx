@@ -369,7 +369,7 @@ export default function FirmDetail() {
         }
       />
 
-      <div className="grid w-full min-w-0 gap-4 auto-rows-fr [grid-template-columns:repeat(auto-fit,minmax(min(220px,100%),1fr))]">
+      <div className="grid w-full min-w-0 gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
         <StatCard title="Total Users" value={firm.userCount} icon={<Users className="w-4 h-4" />} />
         <StatCard title="Total Cases" value={firm.caseCount} icon={<Briefcase className="w-4 h-4" />} />
         <StatCard title="Created" value={new Date(firm.createdAt).toLocaleDateString()} icon={<Building2 className="w-4 h-4" />} valueClassName="text-sm font-semibold leading-snug" />
@@ -393,30 +393,30 @@ export default function FirmDetail() {
         </CardContent>
       </Card>
 
-      <div className="border-b border-slate-200">
-        <div className="overflow-x-auto -mx-2 px-2">
-          <div className="flex gap-0 min-w-max">
-          {(["settings", "users", "maintenance", "snapshots", "history"] as const).map((tab) => (
-            <button
-              key={tab}
-              onClick={() => setActiveTab(tab)}
-              className={`px-5 py-2.5 text-sm font-medium border-b-2 transition-colors whitespace-nowrap ${
-                activeTab === tab
-                  ? "border-amber-500 text-amber-600"
-                  : "border-transparent text-slate-500 hover:text-slate-700"
-              }`}
-            >
-              {tab === "settings"
-                ? "Settings"
-                : tab === "users"
-                  ? `Users (${firm.userCount})`
-                  : tab === "maintenance"
-                    ? "Maintenance"
-                    : tab === "snapshots"
-                      ? "Backups / Restore"
-                      : "Action History"}
-            </button>
-          ))}
+      <div className="rounded-lg border border-slate-200 bg-slate-50">
+        <div className="overflow-x-auto md:overflow-visible">
+          <div className="flex gap-1 p-1 min-w-max md:min-w-0 md:flex-wrap">
+            {(["settings", "users", "maintenance", "snapshots", "history"] as const).map((tab) => (
+              <button
+                key={tab}
+                onClick={() => setActiveTab(tab)}
+                className={`px-4 py-2 text-sm font-medium rounded-md transition-colors whitespace-nowrap ${
+                  activeTab === tab
+                    ? "bg-white text-slate-900 shadow-sm"
+                    : "text-slate-600 hover:text-slate-900 hover:bg-white/60"
+                }`}
+              >
+                {tab === "settings"
+                  ? "Settings"
+                  : tab === "users"
+                    ? `Users (${firm.userCount})`
+                    : tab === "maintenance"
+                      ? "Maintenance"
+                      : tab === "snapshots"
+                        ? "Backups / Restore"
+                        : "Action History"}
+              </button>
+            ))}
           </div>
         </div>
       </div>

@@ -58,6 +58,13 @@ export function useUpload(options: UseUploadOptions = {}) {
   const [isUploading, setIsUploading] = useState(false);
   const [error, setError] = useState<Error | null>(null);
   const [progress, setProgress] = useState(0);
+  const unwrap = (body: any) => (body && typeof body === "object" && body.ok === true && "data" in body ? body.data : body);
+  const unwrapErrorMessage = (body: any) =>
+    body && typeof body === "object" && body.ok === false && body.error && typeof body.error.message === "string"
+      ? body.error.message
+      : body && typeof body === "object" && typeof body.error === "string"
+        ? body.error
+        : undefined;
 
   const requestUploadUrl = useCallback(
     async (file: File): Promise<UploadResponse> => {
@@ -75,10 +82,11 @@ export function useUpload(options: UseUploadOptions = {}) {
 
       if (!response.ok) {
         const errorData = await response.json().catch(() => ({}));
-        throw new Error(errorData.error || "Failed to get upload URL");
+        throw new Error(unwrapErrorMessage(errorData) || "Failed to get upload URL");
       }
 
-      return response.json();
+      const data = await response.json();
+      return unwrap(data);
     },
     []
   );
@@ -152,7 +160,8 @@ export function useUpload(options: UseUploadOptions = {}) {
         throw new Error("Failed to get upload URL");
       }
 
-      const data = await response.json();
+      const raw = await response.json();
+      const data = unwrap(raw);
       return {
         method: "PUT",
         url: data.uploadURL,
