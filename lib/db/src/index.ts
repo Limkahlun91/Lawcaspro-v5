@@ -106,8 +106,28 @@ const normalizeSupabaseDatabaseUrlHost = (databaseUrl: string): string => {
   return databaseUrl;
 };
 
-const databaseUrl = normalizeSupabaseDatabaseUrlHost(
-  process.env.DATABASE_URL ?? "postgres://127.0.0.1:1/postgres",
+const normalizeSupabasePoolerToDirect = (databaseUrl: string): string => {
+  try {
+    const u = new URL(databaseUrl);
+    const hostname = u.hostname.toLowerCase();
+    if (!hostname.includes("pooler.supabase.com")) return databaseUrl;
+
+    const user = u.username.toLowerCase();
+    const m = /^postgres\.([a-z0-9]{10,})$/.exec(user);
+    if (!m) return databaseUrl;
+
+    const ref = m[1];
+    u.hostname = `db.${ref}.supabase.co`;
+    u.port = "5432";
+    u.username = "postgres";
+    return u.toString();
+  } catch {
+    return databaseUrl;
+  }
+};
+
+const databaseUrl = normalizeSupabasePoolerToDirect(
+  normalizeSupabaseDatabaseUrlHost(process.env.DATABASE_URL ?? "postgres://127.0.0.1:1/postgres"),
 );
 const isPooler = isSupabasePoolerDatabaseUrl(databaseUrl);
 const loweredDatabaseUrl = databaseUrl.toLowerCase();
