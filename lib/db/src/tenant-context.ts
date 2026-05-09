@@ -49,7 +49,20 @@ function isSetRoleFallbackSafeError(message: string): boolean {
   );
 }
 
-async function trySetRoleAppUser(client: PoolClient, context: "firm" | "founder" | "auth"): Promise<void> {
+async function trySetRoleAppUserLocal(client: PoolClient, context: "firm" | "founder" | "auth"): Promise<void> {
+  try {
+    await client.query("SET LOCAL ROLE app_user");
+    return;
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err ?? "");
+    if (isSetRoleFallbackSafeError(message)) {
+      return;
+    }
+    throw new Error(`Cannot enforce RLS safely: failed to SET ROLE app_user (${message})`);
+  }
+}
+
+async function trySetRoleAppUserSession(client: PoolClient, context: "firm" | "founder" | "auth"): Promise<void> {
   try {
     await client.query("SET ROLE app_user");
     return;
@@ -91,7 +104,7 @@ export async function setTenantContextSession(
   firmId: number,
   userId?: number
 ): Promise<void> {
-  await trySetRoleAppUser(client, "firm");
+  await trySetRoleAppUserSession(client, "firm");
   await assertSafeRlsRole(client, "firm");
 
   await client.query(`SET app.current_firm_id = '${firmId}'`);
@@ -113,7 +126,7 @@ export async function setTenantContext(
   firmId: number,
   userId?: number
 ): Promise<void> {
-  await trySetRoleAppUser(client, "firm");
+  await trySetRoleAppUserLocal(client, "firm");
   await assertSafeRlsRole(client, "firm");
 
   await client.query(`SET LOCAL app.current_firm_id = '${firmId}'`);
@@ -124,7 +137,7 @@ export async function setTenantContext(
 }
 
 export async function setFounderContext(client: PoolClient): Promise<void> {
-  await trySetRoleAppUser(client, "founder");
+  await trySetRoleAppUserLocal(client, "founder");
   await assertSafeRlsRole(client, "founder");
   await client.query("SET LOCAL app.is_founder = 'true'");
   await client.query("SET LOCAL app.current_firm_id = '0'");
@@ -138,7 +151,7 @@ export async function setFounderContext(client: PoolClient): Promise<void> {
 export async function setFounderContextSession(
   client: PoolClient
 ): Promise<void> {
-  await trySetRoleAppUser(client, "founder");
+  await trySetRoleAppUserSession(client, "founder");
   await assertSafeRlsRole(client, "founder");
 
   await client.query("SET app.is_founder = 'true'");
