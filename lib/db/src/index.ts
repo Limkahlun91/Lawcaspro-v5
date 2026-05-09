@@ -68,7 +68,36 @@ const stripSslmodeFromDatabaseUrl = (
   return { url: hash ? `${rebuilt}#${hash}` : rebuilt, hadSslmode };
 };
 
-const databaseUrl = process.env.DATABASE_URL ?? "postgres://127.0.0.1:1/postgres";
+const normalizeSupabaseDatabaseUrlHost = (databaseUrl: string): string => {
+  try {
+    const u = new URL(databaseUrl);
+    const hostname = u.hostname.toLowerCase();
+    if (hostname.endsWith(".supabase.co") || hostname.endsWith(".supabase.com")) return databaseUrl;
+
+    const supabaseUrl = process.env.SUPABASE_URL;
+    if (!supabaseUrl) return databaseUrl;
+    const supaHost = new URL(supabaseUrl).hostname.toLowerCase();
+    const suffix =
+      supaHost.endsWith(".supabase.co") ? ".supabase.co"
+      : supaHost.endsWith(".supabase.com") ? ".supabase.com"
+      : null;
+    if (!suffix) return databaseUrl;
+
+    const ref = supaHost.slice(0, -suffix.length);
+    if (!ref) return databaseUrl;
+
+    if (hostname === `postgres.${ref}` || hostname === `db.${ref}`) {
+      u.hostname = `${hostname}${suffix}`;
+      return u.toString();
+    }
+  } catch {
+  }
+  return databaseUrl;
+};
+
+const databaseUrl = normalizeSupabaseDatabaseUrlHost(
+  process.env.DATABASE_URL ?? "postgres://127.0.0.1:1/postgres",
+);
 const isPooler = isSupabasePoolerDatabaseUrl(databaseUrl);
 const loweredDatabaseUrl = databaseUrl.toLowerCase();
 const stripped = stripSslmodeFromDatabaseUrl(databaseUrl);
