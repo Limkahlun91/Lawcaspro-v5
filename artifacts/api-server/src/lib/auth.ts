@@ -1,5 +1,5 @@
 import { Request, Response, NextFunction } from "express";
-import { clearTenantContext, db, makeRlsDb, permissionsTable, pool, RlsDb, rolesTable, sessionsTable, setTenantContextSession, sql, usersTable, auditLogsTable, platformFounderRolePermissionsTable, platformFounderRolesTable, platformFounderUserRolesTable } from "@workspace/db";
+import { clearTenantContext, db, makeRlsDb, permissionsTable, pool, RlsDb, rolesTable, sessionsTable, setTenantContext, sql, usersTable, auditLogsTable, platformFounderRolePermissionsTable, platformFounderRolesTable, platformFounderUserRolesTable } from "@workspace/db";
 import { and, eq } from "drizzle-orm";
 import crypto from "crypto";
 import { logger } from "./logger";
@@ -375,6 +375,14 @@ export async function requireFirmUser(
     if (released) return;
     released = true;
     try {
+      if (ok) {
+        await client.query("COMMIT");
+      } else {
+        await client.query("ROLLBACK");
+      }
+    } catch {
+    }
+    try {
       await clearTenantContext(client);
     } catch {
     } finally {
@@ -383,7 +391,8 @@ export async function requireFirmUser(
   };
 
   try {
-    await setTenantContextSession(client, req.firmId, req.userId ?? undefined);
+    await client.query("BEGIN");
+    await setTenantContext(client, req.firmId, req.userId ?? undefined);
     req.rlsDb = makeRlsDb(client);
   } catch (err) {
     try {

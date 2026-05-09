@@ -21,7 +21,7 @@
     "migrate": "drizzle-kit migrate --config ./drizzle.config.ts",
     "studio": "drizzle-kit studio --config ./drizzle.config.ts",
     "reconcile": "node scripts/reconcile-live-db.mjs",
-    "apply-rls": "psql \"$DATABASE_URL\" -f scripts/apply-rls.sql"
+    "apply-rls": "node scripts/apply-rls.mjs"
   },
   "dependencies": {
     "drizzle-zod": "^0.8.3",

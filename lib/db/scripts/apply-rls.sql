@@ -26,6 +26,16 @@ DO $do$ BEGIN
   END IF;
 END $do$;
 
+-- If the current connection role has BYPASSRLS/superuser, ensure it can SET ROLE app_user.
+-- This keeps production safe even when DATABASE_URL points at a privileged role, by forcing
+-- the app to drop privileges per request via SET ROLE app_user.
+DO $do$ DECLARE r record; BEGIN
+  SELECT rolname, rolbypassrls, rolsuper INTO r FROM pg_roles WHERE rolname = current_user;
+  IF r.rolname IS NOT NULL AND (r.rolbypassrls OR r.rolsuper) THEN
+    EXECUTE format('GRANT app_user TO %I', r.rolname);
+  END IF;
+END $do$;
+
 -- No hard-coded database name — use GRANT on schema + tables instead.
 GRANT USAGE ON SCHEMA public TO app_user;
 
