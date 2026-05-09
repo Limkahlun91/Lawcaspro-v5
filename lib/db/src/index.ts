@@ -75,18 +75,29 @@ const normalizeSupabaseDatabaseUrlHost = (databaseUrl: string): string => {
     if (hostname.endsWith(".supabase.co") || hostname.endsWith(".supabase.com")) return databaseUrl;
 
     const supabaseUrl = process.env.SUPABASE_URL;
-    if (!supabaseUrl) return databaseUrl;
-    const supaHost = new URL(supabaseUrl).hostname.toLowerCase();
-    const suffix =
-      supaHost.endsWith(".supabase.co") ? ".supabase.co"
-      : supaHost.endsWith(".supabase.com") ? ".supabase.com"
-      : null;
+    const suffixFromSupabaseUrl = (() => {
+      if (!supabaseUrl) return null;
+      try {
+        const supaHost = new URL(supabaseUrl).hostname.toLowerCase();
+        if (supaHost.endsWith(".supabase.co")) return ".supabase.co";
+        if (supaHost.endsWith(".supabase.com")) return ".supabase.com";
+      } catch {
+      }
+      return null;
+    })();
+
+    const isTruncatedSupabaseHost = (() => {
+      const parts = hostname.split(".").filter(Boolean);
+      if (parts.length !== 2) return false;
+      const [prefix, ref] = parts;
+      if (prefix !== "postgres" && prefix !== "db") return false;
+      return /^[a-z0-9]{10,}$/i.test(ref);
+    })();
+
+    const suffix = suffixFromSupabaseUrl ?? (isTruncatedSupabaseHost ? ".supabase.co" : null);
     if (!suffix) return databaseUrl;
 
-    const ref = supaHost.slice(0, -suffix.length);
-    if (!ref) return databaseUrl;
-
-    if (hostname === `postgres.${ref}` || hostname === `db.${ref}`) {
+    if (isTruncatedSupabaseHost) {
       u.hostname = `${hostname}${suffix}`;
       return u.toString();
     }
