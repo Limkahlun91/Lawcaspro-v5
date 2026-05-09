@@ -33,7 +33,7 @@ GRANT USAGE ON SCHEMA public TO app_user;
 GRANT SELECT, INSERT, UPDATE, DELETE ON
   audit_logs, case_billing_entries, case_communications, case_documents,
   case_tasks, cases, clients, communication_threads, credit_notes,
-  developers, document_templates, document_template_versions, document_generation_runs, document_batch_jobs, document_batch_job_items, document_variable_definitions, document_template_bindings, document_template_applicability_rules, firm_document_folders, firm_letterheads, firm_bank_accounts, invoices,
+  developers, document_templates, templates, document_template_versions, document_generation_runs, document_batch_jobs, document_batch_job_items, document_variable_definitions, document_template_bindings, document_template_applicability_rules, firm_document_folders, firm_letterheads, firm_bank_accounts, invoices,
   ledger_entries, payment_vouchers, platform_documents, projects,
   quotations, receipts, roles, time_entries, users
 TO app_user;
@@ -88,6 +88,8 @@ ALTER TABLE developers             ENABLE ROW LEVEL SECURITY;
 ALTER TABLE developers             FORCE ROW LEVEL SECURITY;
 ALTER TABLE document_templates     ENABLE ROW LEVEL SECURITY;
 ALTER TABLE document_templates     FORCE ROW LEVEL SECURITY;
+ALTER TABLE templates              ENABLE ROW LEVEL SECURITY;
+ALTER TABLE templates              FORCE ROW LEVEL SECURITY;
 ALTER TABLE document_template_versions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE document_template_versions FORCE ROW LEVEL SECURITY;
 ALTER TABLE document_generation_runs ENABLE ROW LEVEL SECURITY;
@@ -179,6 +181,11 @@ DROP POLICY IF EXISTS tenant_isolation ON communication_threads;
 DROP POLICY IF EXISTS tenant_isolation ON credit_notes;
 DROP POLICY IF EXISTS tenant_isolation ON developers;
 DROP POLICY IF EXISTS tenant_isolation ON document_templates;
+DROP POLICY IF EXISTS tenant_isolation ON templates;
+DROP POLICY IF EXISTS templates_read ON templates;
+DROP POLICY IF EXISTS templates_insert ON templates;
+DROP POLICY IF EXISTS templates_update ON templates;
+DROP POLICY IF EXISTS templates_delete ON templates;
 DROP POLICY IF EXISTS tenant_isolation ON document_template_versions;
 DROP POLICY IF EXISTS tenant_isolation ON document_generation_runs;
 DROP POLICY IF EXISTS tenant_isolation ON document_batch_jobs;
@@ -269,6 +276,35 @@ CREATE POLICY tenant_isolation ON developers FOR ALL TO PUBLIC
 CREATE POLICY tenant_isolation ON document_templates FOR ALL TO PUBLIC
   USING ((firm_id = NULLIF(current_setting('app.current_firm_id',true),'')::integer) OR current_setting('app.is_founder',true)='true')
   WITH CHECK ((firm_id = NULLIF(current_setting('app.current_firm_id',true),'')::integer) OR current_setting('app.is_founder',true)='true');
+
+CREATE POLICY templates_read ON templates FOR SELECT TO PUBLIC
+  USING (
+    current_setting('app.is_founder', true) = 'true'
+    OR firm_id = NULLIF(current_setting('app.current_firm_id', true), '')::integer
+    OR (firm_id IS NULL AND NULLIF(current_setting('app.current_firm_id', true), '') IS NOT NULL)
+  );
+
+CREATE POLICY templates_insert ON templates FOR INSERT TO PUBLIC
+  WITH CHECK (
+    current_setting('app.is_founder', true) = 'true'
+    OR firm_id = NULLIF(current_setting('app.current_firm_id', true), '')::integer
+  );
+
+CREATE POLICY templates_update ON templates FOR UPDATE TO PUBLIC
+  USING (
+    current_setting('app.is_founder', true) = 'true'
+    OR firm_id = NULLIF(current_setting('app.current_firm_id', true), '')::integer
+  )
+  WITH CHECK (
+    current_setting('app.is_founder', true) = 'true'
+    OR firm_id = NULLIF(current_setting('app.current_firm_id', true), '')::integer
+  );
+
+CREATE POLICY templates_delete ON templates FOR DELETE TO PUBLIC
+  USING (
+    current_setting('app.is_founder', true) = 'true'
+    OR firm_id = NULLIF(current_setting('app.current_firm_id', true), '')::integer
+  );
 
 CREATE POLICY tenant_isolation ON document_template_versions FOR ALL TO PUBLIC
   USING ((firm_id = NULLIF(current_setting('app.current_firm_id',true),'')::integer) OR current_setting('app.is_founder',true)='true')

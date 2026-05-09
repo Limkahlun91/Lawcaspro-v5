@@ -167,8 +167,11 @@ router.post("/storage/upload", requireAuth, upload.single("file"), async (req: A
           sendError(res as any, new ApiError({ status: 403, code: "FORBIDDEN", message: "Firm context required", retryable: false }));
           return;
         }
-        const allowedPrefix = `/objects/cases/${req.firmId}/`;
-        if (!requestedObjectPath.startsWith(allowedPrefix)) {
+        const allowedPrefixes = [
+          `/objects/cases/${req.firmId}/`,
+          `/objects/templates/firms/${req.firmId}/`,
+        ];
+        if (!allowedPrefixes.some((p) => requestedObjectPath.startsWith(p))) {
           sendError(res as any, new ApiError({ status: 403, code: "FORBIDDEN", message: "Invalid objectPath", retryable: false }));
           return;
         }

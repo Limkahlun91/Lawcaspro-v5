@@ -30,6 +30,7 @@ import PlatformOperationsIncidentDetail from "@/pages/platform/operations/incide
 import PlatformOperationsRecommendations from "@/pages/platform/operations/recommendations";
 import PlatformOperationsReadiness from "@/pages/platform/operations/readiness";
 import PlatformOperationsPending from "@/pages/platform/operations/pending";
+import PlatformTemplates from "@/pages/platform/operations/templates";
 import PlatformMonitoring from "@/pages/platform/monitoring";
 import PlatformAuditLogs from "@/pages/platform/audit-logs";
 import PlatformDocuments from "@/pages/platform/documents";
@@ -58,6 +59,7 @@ import NewClient from "@/pages/app/clients/new";
 import ClientDetail from "@/pages/app/clients/detail";
 
 import AuditLogs from "@/pages/app/audit-logs";
+import FirmTemplatesSettingsPage from "@/pages/app/settings/templates";
 import Settings from "@/pages/app/settings";
 import DocumentsPage from "@/pages/app/documents";
 import Accounting from "@/pages/app/accounting";
@@ -106,6 +108,7 @@ function PlatformRoutes() {
           <Route path="/platform/operations/recommendations" component={PlatformOperationsRecommendations} />
           <Route path="/platform/operations/readiness" component={PlatformOperationsReadiness} />
           <Route path="/platform/operations/pending" component={PlatformOperationsPending} />
+          <Route path="/platform/operations/templates" component={PlatformTemplates} />
           <Route path="/platform/operations" component={PlatformOperationsOverview} />
           <Route path="/platform/firms/new" component={NewFirm} />
           <Route path="/platform/firms/:id/history/:kind/:historyId" component={FirmHistoryDetailPage} />
@@ -270,6 +273,11 @@ function AppRoutes() {
           <Route path="/app/audit-logs" component={() => (
             <PermissionGuard module="audit" action="read">
               <AuditLogs />
+            </PermissionGuard>
+          )} />
+          <Route path="/app/settings/templates" component={() => (
+            <PermissionGuard module="documents" action="read">
+              <FirmTemplatesSettingsPage />
             </PermissionGuard>
           )} />
           <Route path="/app/settings" component={() => (
