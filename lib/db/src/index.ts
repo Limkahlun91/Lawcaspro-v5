@@ -68,67 +68,7 @@ const stripSslmodeFromDatabaseUrl = (
   return { url: hash ? `${rebuilt}#${hash}` : rebuilt, hadSslmode };
 };
 
-const normalizeSupabaseDatabaseUrlHost = (databaseUrl: string): string => {
-  try {
-    const u = new URL(databaseUrl);
-    const hostname = u.hostname.toLowerCase();
-    if (hostname.endsWith(".supabase.co") || hostname.endsWith(".supabase.com")) return databaseUrl;
-
-    const supabaseUrl = process.env.SUPABASE_URL;
-    const suffixFromSupabaseUrl = (() => {
-      if (!supabaseUrl) return null;
-      try {
-        const supaHost = new URL(supabaseUrl).hostname.toLowerCase();
-        if (supaHost.endsWith(".supabase.co")) return ".supabase.co";
-        if (supaHost.endsWith(".supabase.com")) return ".supabase.com";
-      } catch {
-      }
-      return null;
-    })();
-
-    const isTruncatedSupabaseHost = (() => {
-      const parts = hostname.split(".").filter(Boolean);
-      if (parts.length !== 2) return false;
-      const [prefix, ref] = parts;
-      if (prefix !== "postgres" && prefix !== "db") return false;
-      return /^[a-z0-9]{10,}$/i.test(ref);
-    })();
-
-    const suffix = suffixFromSupabaseUrl ?? (isTruncatedSupabaseHost ? ".supabase.co" : null);
-    if (!suffix) return databaseUrl;
-
-    if (isTruncatedSupabaseHost) {
-      u.hostname = `${hostname}${suffix}`;
-      return u.toString();
-    }
-  } catch {
-  }
-  return databaseUrl;
-};
-
-const normalizeSupabasePoolerToDirect = (databaseUrl: string): string => {
-  try {
-    const u = new URL(databaseUrl);
-    const hostname = u.hostname.toLowerCase();
-    if (!hostname.includes("pooler.supabase.com")) return databaseUrl;
-
-    const user = u.username.toLowerCase();
-    const m = /^postgres\.([a-z0-9]{10,})$/.exec(user);
-    if (!m) return databaseUrl;
-
-    const ref = m[1];
-    u.hostname = `db.${ref}.supabase.co`;
-    u.port = "5432";
-    u.username = "postgres";
-    return u.toString();
-  } catch {
-    return databaseUrl;
-  }
-};
-
-const databaseUrl = normalizeSupabasePoolerToDirect(
-  normalizeSupabaseDatabaseUrlHost(process.env.DATABASE_URL ?? "postgres://127.0.0.1:1/postgres"),
-);
+const databaseUrl = process.env.DATABASE_URL ?? "postgres://127.0.0.1:1/postgres";
 const isPooler = isSupabasePoolerDatabaseUrl(databaseUrl);
 const loweredDatabaseUrl = databaseUrl.toLowerCase();
 const stripped = stripSslmodeFromDatabaseUrl(databaseUrl);
