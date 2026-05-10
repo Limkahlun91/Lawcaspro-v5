@@ -23,6 +23,7 @@ import { ensureUniqueCaseDocumentFileName, resolveDocumentFileName } from "../li
 import { normalizeWorkflowDocumentKeyFromDb, workflowDocumentLabel } from "../lib/caseWorkflowDocuments.js";
 import { LOAN_STAMPING_ITEM_KEYS, isLoanStampingItemKeyAllowedForTitleType, normalizeTitleType as normalizeLoanTitleType, type LoanStampingItemKey } from "../lib/loanStamping.js";
 import { listDocumentVariables, resolveVariablesForTemplate, type PlaceholderWarning } from "../lib/documentVariables.js";
+import { DEFAULT_DOCUMENT_VARIABLES } from "../lib/default-document-variables.js";
 import { getFirmTemplateBindings, getPlatformDocumentBindings, replaceFirmTemplateBindings, replacePlatformDocumentBindings } from "../lib/documentBindings.js";
 import { getFirmTemplateApplicabilityRules, getPlatformDocumentApplicabilityRules, upsertFirmTemplateApplicabilityRules, upsertPlatformDocumentApplicabilityRules } from "../lib/documentApplicabilityRules.js";
 import { runDocumentPreview } from "../lib/documentPreview.js";
@@ -1601,7 +1602,7 @@ router.get("/platform/document-variables", requireAuth, requireFounder, requireF
   const category = one((req.query as any).category);
   const activeRaw = one((req.query as any).active);
   const active =
-    activeRaw === undefined ? undefined
+    activeRaw === undefined ? true
     : activeRaw === "0" || activeRaw.toLowerCase() === "false" || activeRaw.toLowerCase() === "no" ? false
     : true;
 
@@ -6340,6 +6341,84 @@ router.post("/cases/:id/generate-document", requireAuth, requireFirmUser, requir
     logger.error({ err, path: req.path, firmId: req.firmId, userId: req.userId, caseId, templateId: tid }, "[documents] generate_document_failed");
     await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.generate_document.failed", entityType: "case", entityId: caseId, detail: `templateId=${tid} code=INTERNAL_ERROR`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
     res.status(503).json({ error: "Failed to generate document", code: "DOCUMENT_GENERATION_FAILED" });
+  }
+});
+
+router.post("/platform/document-variables/restore-defaults", requireAuth, requireFounder, requireFounderPermission("founder.documents.manage"), async (req: AuthRequest, res): Promise<void> => {
+  try {
+    const reqId = (req as any).id;
+    const result = await withAuthSafeDb(async (authDb) => {
+      const rowsBefore = await queryRows(authDb, sql`SELECT COUNT(*)::int AS c FROM document_variable_definitions WHERE is_active = true`);
+      const before = typeof rowsBefore[0]?.c === "number" ? rowsBefore[0]!.c : Number(rowsBefore[0]?.c ?? 0);
+
+      let inserted = 0;
+      let updated = 0;
+      for (const v of DEFAULT_DOCUMENT_VARIABLES) {
+        const r = await queryRows(authDb, sql`
+          INSERT INTO document_variable_definitions
+            (key, label, description, category, value_type, source_path, formatter, example_value, is_system, is_active, sort_order, updated_at)
+          VALUES
+            (
+              ${v.key},
+              ${v.label},
+              ${v.description ?? null},
+              ${v.category},
+              ${v.valueType},
+              ${v.sourcePath ?? v.key},
+              ${v.formatter ?? null},
+              ${v.exampleValue ?? null},
+              TRUE,
+              TRUE,
+              ${v.sortOrder},
+              now()
+            )
+          ON CONFLICT (key) DO UPDATE SET
+            label = EXCLUDED.label,
+            description = EXCLUDED.description,
+            category = EXCLUDED.category,
+            value_type = EXCLUDED.value_type,
+            source_path = EXCLUDED.source_path,
+            formatter = EXCLUDED.formatter,
+            example_value = EXCLUDED.example_value,
+            is_system = TRUE,
+            is_active = TRUE,
+            sort_order = EXCLUDED.sort_order,
+            updated_at = now()
+          RETURNING (xmax = 0) AS inserted
+        `);
+        const wasInserted = Boolean((r[0] as any)?.inserted);
+        if (wasInserted) inserted += 1;
+        else updated += 1;
+      }
+
+      const rowsAfter = await queryRows(authDb, sql`SELECT COUNT(*)::int AS c FROM document_variable_definitions WHERE is_active = true`);
+      const after = typeof rowsAfter[0]?.c === "number" ? rowsAfter[0]!.c : Number(rowsAfter[0]?.c ?? 0);
+
+      await writeAuditLog(
+        {
+          firmId: null,
+          actorId: req.userId,
+          actorType: req.userType,
+          action: "documents.variable_registry.restore_defaults",
+          entityType: "document_variable_definition",
+          detail: `before=${before} inserted=${inserted} updated=${updated} after=${after}`,
+          ipAddress: req.ip,
+          userAgent: req.headers["user-agent"],
+        },
+        { db: authDb, strict: true }
+      );
+
+      return { before, inserted, updated, after };
+    }, { retry: true, ctx: { route: req.path, stage: "platform_document_variables.restore_defaults", reqId, firmId: null, userId: req.userId ?? null } });
+
+    sendOk(res as any, result);
+  } catch (err) {
+    if (isUndefinedTableError(err) || isUndefinedColumnError(err) || isPermissionDeniedError(err)) {
+      res.status(503).json({ error: "Variables unavailable", code: "DOC_VARIABLES_STORE_UNAVAILABLE" });
+      return;
+    }
+    logger.error({ err, userId: req.userId }, "[platform-document-variables-restore-defaults]");
+    res.status(503).json({ error: "Variables unavailable", code: "DOC_VARIABLES_UNAVAILABLE" });
   }
 });
 
