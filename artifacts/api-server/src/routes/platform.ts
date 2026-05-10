@@ -476,7 +476,7 @@ routerInternal.post("/platform/firms/:firmId/users/:userId/reset-password", requ
     const result = await withAuthSafeDb(
       async (authDb) => {
         const statementTimeoutMs = 8000;
-        await authDb.execute(sql`SET LOCAL statement_timeout = ${statementTimeoutMs}`);
+        await authDb.execute(sql.raw(`SET LOCAL statement_timeout = ${statementTimeoutMs}`));
 
         const ctx = await loadFounderGovernanceContext(authDb, req);
         assertFounderPermission(ctx, "founder.maintenance.reset.firm");

@@ -36,6 +36,14 @@ DO $do$ DECLARE r record; BEGIN
   END IF;
 END $do$;
 
+DO $do$ BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'postgres') THEN
+    EXECUTE 'GRANT app_user TO postgres';
+  END IF;
+EXCEPTION WHEN insufficient_privilege THEN
+  NULL;
+END $do$;
+
 -- No hard-coded database name — use GRANT on schema + tables instead.
 GRANT USAGE ON SCHEMA public TO app_user;
 

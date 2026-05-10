@@ -364,6 +364,181 @@ export default function CaseDetail() {
     setActiveTab(tabFromUrl);
   }, [tabFromUrl]);
 
+  const workflowDocsByKey = useMemo(() => {
+    const rows = Array.isArray(workflowDocsQuery.data) ? workflowDocsQuery.data : [];
+    const map = new Map<WorkflowAttachmentDocKey, WorkflowDocument>();
+    for (const r of rows) {
+      if (r && (r.milestoneKey as any)) map.set(r.milestoneKey as WorkflowAttachmentDocKey, r);
+    }
+    return map;
+  }, [workflowDocsQuery.data]);
+
+  const toastDownloadError = (err: unknown) => {
+    const status = (err as any)?.status;
+    if (status === 404) toastError(toast, err, "File not found");
+    else if (status === 403) toastError(toast, err, "Permission denied");
+    else if (status === 503) toastError(toast, err, "Storage unavailable");
+    else toastError(toast, err, "Download failed");
+  };
+
+  const uploadWorkflowDocMutation = useMutation({
+    mutationFn: (vars: { milestoneKey: WorkflowAttachmentDocKey; objectPath: string; file: File; dateYmd: string }) => {
+      if (!caseId) throw new Error("Missing caseId");
+      return apiFetchJson(`/cases/${caseId}/workflow-documents`, {
+        method: "POST",
+        body: JSON.stringify({
+          milestoneKey: vars.milestoneKey,
+          objectPath: vars.objectPath,
+          fileName: vars.file.name,
+          mimeType: vars.file.type || null,
+          fileSize: vars.file.size,
+          dateYmd: vars.dateYmd || null,
+        }),
+      });
+    },
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ["case-workflow-documents", caseId] });
+      await queryClient.invalidateQueries({ queryKey: ["case-progress", caseId] });
+      await queryClient.invalidateQueries({ queryKey: getGetCaseWorkflowQueryKey(caseId) });
+    },
+    onError: (err) => toastError(toast, err, "Upload failed"),
+  });
+
+  const deleteWorkflowDocMutation = useMutation({
+    mutationFn: (id: number) => {
+      if (!caseId) throw new Error("Missing caseId");
+      return apiFetchJson(`/cases/${caseId}/workflow-documents/${id}`, { method: "DELETE", allowStatuses: [204] });
+    },
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ["case-workflow-documents", caseId] });
+      await queryClient.invalidateQueries({ queryKey: ["case-progress", caseId] });
+      await queryClient.invalidateQueries({ queryKey: getGetCaseWorkflowQueryKey(caseId) });
+      toast({ title: "Deleted" });
+    },
+    onError: (err) => toastError(toast, err, "Delete failed"),
+  });
+
+  const saveStampingMutation = useMutation({
+    mutationFn: (items: LoanStampingSaveItem[]) => {
+      if (!caseId) throw new Error("Missing caseId");
+      return apiFetchJson(`/cases/${caseId}/loan-stamping`, { method: "PUT", body: JSON.stringify({ items }) });
+    },
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ["case-loan-stamping", caseId] });
+      await queryClient.invalidateQueries({ queryKey: ["case-progress", caseId] });
+      setStampingDirty(false);
+      toast({ title: "Stamping saved" });
+    },
+    onError: (err) => toastError(toast, err, "Save failed"),
+  });
+
+  const deleteStampingRowMutation = useMutation({
+    mutationFn: (id: number) => {
+      if (!caseId) throw new Error("Missing caseId");
+      return apiFetchJson(`/cases/${caseId}/loan-stamping/${id}`, { method: "DELETE", allowStatuses: [204] });
+    },
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ["case-loan-stamping", caseId] });
+      await queryClient.invalidateQueries({ queryKey: ["case-progress", caseId] });
+      setStampingDirty(false);
+      toast({ title: "Deleted" });
+    },
+    onError: (err) => toastError(toast, err, "Delete failed"),
+  });
+
+  const bindStampingFileMutation = useMutation({
+    mutationFn: (vars: { id: number; objectPath: string; file: File }) => {
+      if (!caseId) throw new Error("Missing caseId");
+      return apiFetchJson(`/cases/${caseId}/loan-stamping/${vars.id}/file`, {
+        method: "POST",
+        body: JSON.stringify({
+          objectPath: vars.objectPath,
+          fileName: vars.file.name,
+          mimeType: vars.file.type || null,
+          fileSize: vars.file.size,
+        }),
+      });
+    },
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ["case-loan-stamping", caseId] });
+      await queryClient.invalidateQueries({ queryKey: ["case-progress", caseId] });
+      setStampingDirty(false);
+    },
+    onError: (err) => toastError(toast, err, "Upload failed"),
+  });
+
+  const clearStampingFileMutation = useMutation({
+    mutationFn: (id: number) => {
+      if (!caseId) throw new Error("Missing caseId");
+      return apiFetchJson(`/cases/${caseId}/loan-stamping/${id}/file`, { method: "DELETE", allowStatuses: [204] });
+    },
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ["case-loan-stamping", caseId] });
+      await queryClient.invalidateQueries({ queryKey: ["case-progress", caseId] });
+      setStampingDirty(false);
+      toast({ title: "Deleted" });
+    },
+    onError: (err) => toastError(toast, err, "Delete failed"),
+  });
+
+  const ensureStampingItemMutation = useMutation({
+    mutationFn: (payload: { itemKey: LoanStampingItemKey; customName?: string | null; sortOrder?: number; datedOn?: string | null; stampedOn?: string | null }) => {
+      if (!caseId) throw new Error("Missing caseId");
+      return apiFetchJson(`/cases/${caseId}/loan-stamping/ensure`, { method: "POST", body: JSON.stringify(payload) });
+    },
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ["case-loan-stamping", caseId] });
+      await queryClient.invalidateQueries({ queryKey: ["case-progress", caseId] });
+    },
+    onError: (err) => toastError(toast, err, "Failed to prepare upload"),
+  });
+
+  const normalizeTitleType = (raw: string): "master" | "strata" | "individual" | "unknown" => {
+    const s = (raw || "").trim().toLowerCase();
+    if (!s) return "unknown";
+    if (s === "master" || s === "master title" || s === "master_title") return "master";
+    if (s === "strata" || s === "strata title" || s === "strata_title") return "strata";
+    if (s === "individual" || s === "individual title" || s === "individual_title") return "individual";
+    return "unknown";
+  };
+  const titleType = normalizeTitleType(String(caseInfo?.titleType ?? ""));
+  const isMasterTitle = titleType === "master";
+  const isStrataOrIndividual = titleType === "strata" || titleType === "individual";
+
+  const fixedStampingKeys: Array<{ key: LoanStampingItemKey; label: string; visible: boolean }> = [
+    { key: "facility_agreement", label: "Facility Agreement", visible: true },
+    { key: "deed_of_assignment", label: "Deed of Assignment", visible: isMasterTitle },
+    { key: "power_of_attorney", label: "Power of Attorney", visible: isMasterTitle },
+    { key: "charge_annexure", label: "Charge Annexure", visible: isStrataOrIndividual },
+  ];
+
+  const visibleStampingItems = useMemo(() => {
+    const existing = stampingDraft.slice().sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0));
+    const fixed: LoanStampingItem[] = [];
+    let order = 0;
+    for (const k of fixedStampingKeys) {
+      if (!k.visible) continue;
+      const row = existing.find((x) => x.itemKey === k.key && x.customName == null);
+      fixed.push({
+        id: row?.id,
+        itemKey: k.key,
+        customName: null,
+        datedOn: row?.datedOn ?? null,
+        stampedOn: row?.stampedOn ?? null,
+        fileName: row?.fileName ?? null,
+        mimeType: row?.mimeType ?? null,
+        fileSize: row?.fileSize ?? null,
+        sortOrder: row?.sortOrder ?? order,
+      });
+      order += 10;
+    }
+    const others = existing.filter((x) => x.itemKey === "other").map((x, idx) => ({
+      ...x,
+      sortOrder: Number.isFinite(x.sortOrder) ? x.sortOrder : 1000 + idx,
+    }));
+    return { fixed, others };
+  }, [stampingDraft, fixedStampingKeys.map((x) => x.visible).join("|")]);
+
   if (!caseId) return <div className="py-10 text-sm text-slate-500">Case not found</div>;
   if (isLoadingCase || isLoadingWorkflow) return <div className="py-10 text-sm text-slate-500">Loading case details...</div>;
   if (isCaseError) return <div className="py-10"><QueryFallback title="Case unavailable" error={caseError} onRetry={() => refetchCase()} isRetrying={isFetchingCase} /></div>;
@@ -443,55 +618,6 @@ export default function CaseDetail() {
     saveKeyDatesMutation.mutate({ scope, payload, keys: keys as string[] });
   };
 
-  const workflowDocsByKey = useMemo(() => {
-    const rows = Array.isArray(workflowDocsQuery.data) ? workflowDocsQuery.data : [];
-    const map = new Map<WorkflowAttachmentDocKey, WorkflowDocument>();
-    for (const r of rows) {
-      if (r && (r.milestoneKey as any)) map.set(r.milestoneKey as WorkflowAttachmentDocKey, r);
-    }
-    return map;
-  }, [workflowDocsQuery.data]);
-
-  const toastDownloadError = (err: unknown) => {
-    const status = (err as any)?.status;
-    if (status === 404) toastError(toast, err, "File not found");
-    else if (status === 403) toastError(toast, err, "Permission denied");
-    else if (status === 503) toastError(toast, err, "Storage unavailable");
-    else toastError(toast, err, "Download failed");
-  };
-
-  const uploadWorkflowDocMutation = useMutation({
-    mutationFn: (vars: { milestoneKey: WorkflowAttachmentDocKey; objectPath: string; file: File; dateYmd: string }) =>
-      apiFetchJson(`/cases/${caseId}/workflow-documents`, {
-        method: "POST",
-        body: JSON.stringify({
-          milestoneKey: vars.milestoneKey,
-          objectPath: vars.objectPath,
-          fileName: vars.file.name,
-          mimeType: vars.file.type || null,
-          fileSize: vars.file.size,
-          dateYmd: vars.dateYmd || null,
-        }),
-      }),
-    onSuccess: async () => {
-      await queryClient.invalidateQueries({ queryKey: ["case-workflow-documents", caseId] });
-      await queryClient.invalidateQueries({ queryKey: ["case-progress", caseId] });
-      await queryClient.invalidateQueries({ queryKey: getGetCaseWorkflowQueryKey(caseId) });
-    },
-    onError: (err) => toastError(toast, err, "Upload failed"),
-  });
-
-  const deleteWorkflowDocMutation = useMutation({
-    mutationFn: (id: number) => apiFetchJson(`/cases/${caseId}/workflow-documents/${id}`, { method: "DELETE", allowStatuses: [204] }),
-    onSuccess: async () => {
-      await queryClient.invalidateQueries({ queryKey: ["case-workflow-documents", caseId] });
-      await queryClient.invalidateQueries({ queryKey: ["case-progress", caseId] });
-      await queryClient.invalidateQueries({ queryKey: getGetCaseWorkflowQueryKey(caseId) });
-      toast({ title: "Deleted" });
-    },
-    onError: (err) => toastError(toast, err, "Delete failed"),
-  });
-
   async function uploadToPrivateCasePath(objectPath: string, file: File) {
     const fd = new FormData();
     fd.append("file", file);
@@ -560,73 +686,10 @@ export default function CaseDetail() {
     }
   }
 
-  const saveStampingMutation = useMutation({
-    mutationFn: (items: LoanStampingSaveItem[]) =>
-      apiFetchJson(`/cases/${caseId}/loan-stamping`, { method: "PUT", body: JSON.stringify({ items }) }),
-    onSuccess: async () => {
-      await queryClient.invalidateQueries({ queryKey: ["case-loan-stamping", caseId] });
-      await queryClient.invalidateQueries({ queryKey: ["case-progress", caseId] });
-      setStampingDirty(false);
-      toast({ title: "Stamping saved" });
-    },
-    onError: (err) => toastError(toast, err, "Save failed"),
-  });
-
-  const deleteStampingRowMutation = useMutation({
-    mutationFn: (id: number) => apiFetchJson(`/cases/${caseId}/loan-stamping/${id}`, { method: "DELETE", allowStatuses: [204] }),
-    onSuccess: async () => {
-      await queryClient.invalidateQueries({ queryKey: ["case-loan-stamping", caseId] });
-      await queryClient.invalidateQueries({ queryKey: ["case-progress", caseId] });
-      setStampingDirty(false);
-      toast({ title: "Deleted" });
-    },
-    onError: (err) => toastError(toast, err, "Delete failed"),
-  });
-
-  const bindStampingFileMutation = useMutation({
-    mutationFn: (vars: { id: number; objectPath: string; file: File }) =>
-      apiFetchJson(`/cases/${caseId}/loan-stamping/${vars.id}/file`, {
-        method: "POST",
-        body: JSON.stringify({
-          objectPath: vars.objectPath,
-          fileName: vars.file.name,
-          mimeType: vars.file.type || null,
-          fileSize: vars.file.size,
-        }),
-      }),
-    onSuccess: async () => {
-      await queryClient.invalidateQueries({ queryKey: ["case-loan-stamping", caseId] });
-      await queryClient.invalidateQueries({ queryKey: ["case-progress", caseId] });
-      setStampingDirty(false);
-    },
-    onError: (err) => toastError(toast, err, "Upload failed"),
-  });
-
-  const clearStampingFileMutation = useMutation({
-    mutationFn: (id: number) => apiFetchJson(`/cases/${caseId}/loan-stamping/${id}/file`, { method: "DELETE", allowStatuses: [204] }),
-    onSuccess: async () => {
-      await queryClient.invalidateQueries({ queryKey: ["case-loan-stamping", caseId] });
-      await queryClient.invalidateQueries({ queryKey: ["case-progress", caseId] });
-      setStampingDirty(false);
-      toast({ title: "Deleted" });
-    },
-    onError: (err) => toastError(toast, err, "Delete failed"),
-  });
-
   function stampingObjectPath(file: File): string {
     const firmId = user?.firmId;
     return `/objects/cases/${firmId}/case-${caseId}/loan-stamping/${crypto.randomUUID()}-${safeFileNamePart(file.name)}`;
   }
-
-  const ensureStampingItemMutation = useMutation({
-    mutationFn: (payload: { itemKey: LoanStampingItemKey; customName?: string | null; sortOrder?: number; datedOn?: string | null; stampedOn?: string | null }) =>
-      apiFetchJson(`/cases/${caseId}/loan-stamping/ensure`, { method: "POST", body: JSON.stringify(payload) }),
-    onSuccess: async () => {
-      await queryClient.invalidateQueries({ queryKey: ["case-loan-stamping", caseId] });
-      await queryClient.invalidateQueries({ queryKey: ["case-progress", caseId] });
-    },
-    onError: (err) => toastError(toast, err, "Failed to prepare upload"),
-  });
 
   async function ensureStampingRowForUpload(row: LoanStampingItem): Promise<number | null> {
     if (!canDocsUpdate) return null;
@@ -910,52 +973,6 @@ export default function CaseDetail() {
       </div>
     );
   };
-
-  const normalizeTitleType = (raw: string): "master" | "strata" | "individual" | "unknown" => {
-    const s = (raw || "").trim().toLowerCase();
-    if (!s) return "unknown";
-    if (s === "master" || s === "master title" || s === "master_title") return "master";
-    if (s === "strata" || s === "strata title" || s === "strata_title") return "strata";
-    if (s === "individual" || s === "individual title" || s === "individual_title") return "individual";
-    return "unknown";
-  };
-  const titleType = normalizeTitleType(String(caseInfo.titleType ?? ""));
-  const isMasterTitle = titleType === "master";
-  const isStrataOrIndividual = titleType === "strata" || titleType === "individual";
-
-  const fixedStampingKeys: Array<{ key: LoanStampingItemKey; label: string; visible: boolean }> = [
-    { key: "facility_agreement", label: "Facility Agreement", visible: true },
-    { key: "deed_of_assignment", label: "Deed of Assignment", visible: isMasterTitle },
-    { key: "power_of_attorney", label: "Power of Attorney", visible: isMasterTitle },
-    { key: "charge_annexure", label: "Charge Annexure", visible: isStrataOrIndividual },
-  ];
-
-  const visibleStampingItems = useMemo(() => {
-    const existing = stampingDraft.slice().sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0));
-    const fixed: LoanStampingItem[] = [];
-    let order = 0;
-    for (const k of fixedStampingKeys) {
-      if (!k.visible) continue;
-      const row = existing.find((x) => x.itemKey === k.key && x.customName == null);
-      fixed.push({
-        id: row?.id,
-        itemKey: k.key,
-        customName: null,
-        datedOn: row?.datedOn ?? null,
-        stampedOn: row?.stampedOn ?? null,
-        fileName: row?.fileName ?? null,
-        mimeType: row?.mimeType ?? null,
-        fileSize: row?.fileSize ?? null,
-        sortOrder: row?.sortOrder ?? order,
-      });
-      order += 10;
-    }
-    const others = existing.filter((x) => x.itemKey === "other").map((x, idx) => ({
-      ...x,
-      sortOrder: Number.isFinite(x.sortOrder) ? x.sortOrder : 1000 + idx,
-    }));
-    return { fixed, others };
-  }, [stampingDraft, fixedStampingKeys.map((x) => x.visible).join("|")]);
 
   const upsertStampingItem = (next: LoanStampingItem) => {
     setStampingDirty(true);
