@@ -223,17 +223,19 @@ export class SupabaseStorageService {
     objectPath,
     fileBytes,
     contentType,
+    upsert,
   }: {
     objectPath: string;
     fileBytes: Uint8Array;
     contentType: string;
+    upsert?: boolean;
   }): Promise<void> {
     const key = normalizeObjectKeyFromPath(objectPath);
     const { client, bucketPrivate } = this.getClient();
     const body = Buffer.isBuffer(fileBytes) ? fileBytes : Buffer.from(fileBytes);
     const { error } = await client.from(bucketPrivate).upload(key, body, {
       contentType,
-      upsert: false,
+      upsert: upsert ?? false,
     });
     if (error) {
       const msg = String(error.message || "");

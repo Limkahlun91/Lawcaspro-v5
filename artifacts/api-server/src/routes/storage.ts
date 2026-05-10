@@ -182,6 +182,7 @@ router.post("/storage/upload", requireAuth, upload.single("file"), async (req: A
       objectPath,
       fileBytes: req.file.buffer,
       contentType: req.file.mimetype || "application/octet-stream",
+      upsert: objectPath.startsWith("/objects/templates/"),
     });
 
     sendOk(res as any, { objectPath });
