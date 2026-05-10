@@ -1927,14 +1927,14 @@ router.post("/cases", requireAuthHandler, requireFirmUserHandler, requirePermiss
       return;
     }
     const createCaseSchema = z.object({
-      projectId: z.number(),
-      developerId: z.number().optional(),
+      projectId: z.coerce.number().int().positive(),
+      developerId: z.coerce.number().int().positive().optional(),
       purchaseMode: z.string(),
       titleType: z.string(),
-      spaPrice: z.number().optional(),
-      assignedLawyerId: z.number(),
-      assignedClerkId: z.number().optional(),
-      purchaserIds: z.array(z.number()).optional(),
+      spaPrice: z.coerce.number().optional(),
+      assignedLawyerId: z.coerce.number().int().positive(),
+      assignedClerkId: z.coerce.number().int().positive().optional(),
+      purchaserIds: z.array(z.coerce.number().int().positive()).optional(),
       purchasers: z.array(z.object({
         name: z.string(),
         ic: z.string().nullish(),
@@ -2092,7 +2092,7 @@ router.post("/cases", requireAuthHandler, requireFirmUserHandler, requirePermiss
       referenceNo: refNo,
       purchaseMode,
       titleType,
-      spaPrice: spaPrice ? String(spaPrice) : null,
+      spaPrice: spaPrice !== undefined ? String(spaPrice) : null,
       status: "File Opened / SPA Pending Signing",
       caseType: caseType ?? null,
       parcelNo: parcelNo ?? null,
@@ -2161,16 +2161,19 @@ router.post("/cases", requireAuthHandler, requireFirmUserHandler, requirePermiss
 
     const workflowSteps = buildWorkflowSteps(purchaseMode, titleType);
     if (workflowSteps.length > 0) {
-      await r.insert(caseWorkflowStepsTable).values(
-        workflowSteps.map((s) => ({
-          caseId: newCase.id,
-          stepKey: s.stepKey,
-          stepName: s.stepName,
-          stepOrder: s.stepOrder,
-          pathType: s.pathType,
-          status: "pending",
-        }))
-      );
+      const wfExists = await tableExists(r, "public.case_workflow_steps");
+      if (wfExists) {
+        await r.insert(caseWorkflowStepsTable).values(
+          workflowSteps.map((s) => ({
+            caseId: newCase.id,
+            stepKey: s.stepKey,
+            stepName: s.stepName,
+            stepOrder: s.stepOrder,
+            pathType: s.pathType,
+            status: "pending",
+          }))
+        );
+      }
     }
 
     await writeAuditLog({
@@ -2332,34 +2335,39 @@ router.get("/cases/:caseId/key-dates", requireAuthHandler, requireFirmUserHandle
 }));
 
 router.get("/cases/:caseId/progress", requireAuthHandler, requireFirmUserHandler, requirePermission("cases", "read") as RequestHandler, authed(async (req, res) => {
-  const r = req.rlsDb;
-  if (!r) {
-    logger.error({ path: req.path, firmId: req.firmId, userId: req.userId }, "[cases] missing tenant database context");
-    res.status(500).json({ error: "Internal Server Error" });
-    return;
-  }
-  const caseIdStr = one((req.params as any).caseId);
-  const caseId = caseIdStr ? Number(caseIdStr) : NaN;
-  if (!Number.isFinite(caseId)) {
-    res.status(400).json({ error: "Invalid caseId" });
-    return;
-  }
+  try {
+    const r = req.rlsDb;
+    if (!r) {
+      logger.error({ path: req.path, firmId: req.firmId, userId: req.userId }, "[cases] missing tenant database context");
+      res.status(500).json({ error: "Internal Server Error" });
+      return;
+    }
+    const caseIdStr = one((req.params as any).caseId);
+    const caseId = caseIdStr ? Number(caseIdStr) : NaN;
+    if (!Number.isInteger(caseId) || caseId <= 0) {
+      res.status(400).json({ error: "Invalid caseId" });
+      return;
+    }
 
-  const [caseRow] = await r
-    .select({ purchaseMode: casesTable.purchaseMode, titleType: casesTable.titleType })
-    .from(casesTable)
-    .where(and(eq(casesTable.id, caseId), eq(casesTable.firmId, req.firmId!)));
-  if (!caseRow) {
-    res.status(404).json({ error: "Case not found" });
-    return;
-  }
+    const [caseRow] = await r
+      .select({ purchaseMode: casesTable.purchaseMode, titleType: casesTable.titleType })
+      .from(casesTable)
+      .where(and(eq(casesTable.id, caseId), eq(casesTable.firmId, req.firmId!)));
+    if (!caseRow) {
+      res.status(404).json({ error: "Case not found" });
+      return;
+    }
 
-  await ensureCaseWorkflowSteps(r, req.firmId!, caseId);
+    await ensureCaseWorkflowSteps(r, req.firmId!, caseId);
 
-  const [kd] = await r
-    .select()
-    .from(caseKeyDatesTable)
-    .where(and(eq(caseKeyDatesTable.caseId, caseId), eq(caseKeyDatesTable.firmId, req.firmId!)));
+    const kdExists = await tableExists(r, "public.case_key_dates");
+    let kd: typeof caseKeyDatesTable.$inferSelect | undefined;
+    if (kdExists) {
+      [kd] = await r
+        .select()
+        .from(caseKeyDatesTable)
+        .where(and(eq(caseKeyDatesTable.caseId, caseId), eq(caseKeyDatesTable.firmId, req.firmId!)));
+    }
 
   const docsExists = await tableExists(r, "public.case_workflow_documents");
   const workflowDocsRows = docsExists
@@ -2543,6 +2551,11 @@ router.get("/cases/:caseId/progress", requireAuthHandler, requireFirmUserHandler
       ? [...fixed, ...others].map((x) => ({ id: x.id, itemKey: x.itemKey, sortOrder: x.sortOrder, status: deriveStampingItemStatus(x) }))
       : [],
   });
+  } catch (err) {
+    logger.error({ err, path: req.path, firmId: req.firmId, userId: req.userId }, "[cases] progress failed");
+    res.status(500).json({ error: "Internal Server Error" });
+    return;
+  }
 }));
 
 router.patch("/cases/:caseId/key-dates", requireAuthHandler, requireFirmUserHandler, requirePermission("cases", "update") as RequestHandler, authed(async (req, res) => {
