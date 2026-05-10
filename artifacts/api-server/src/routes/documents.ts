@@ -5,7 +5,7 @@ import { requireAuth, requireFirmUser, requireFounder, requireFounderPermission,
 import { logger } from "../lib/logger.js";
 import { withAuthSafeDb } from "../lib/auth-safe-db.js";
 import { sendOk } from "../lib/api-response.js";
-import { getSupabaseStorageConfigError, ObjectNotFoundError, ObjectStorageService, SupabaseStorageService } from "../lib/objectStorage.js";
+import { getSupabaseStorageConfigError, ObjectNotFoundError, ObjectStorageService, StorageRequestTimeoutError, SupabaseStorageService } from "../lib/objectStorage.js";
 import { Readable } from "stream";
 import { randomUUID } from "crypto";
 import Docxtemplater from "docxtemplater";
@@ -32,7 +32,7 @@ import { applyClauseInsertionToDocx, buildClauseInsertion, decideClauseInsertion
 import { detectClausePlaceholders } from "../lib/docxPlaceholder.js";
 import { classifyDocumentForExtraction, extractDocumentText, guessDocumentTypeFromText, mapExtractedTextToSuggestions } from "../lib/documentExtraction.js";
 import { applyExtractionSuggestion } from "../lib/extractionWriteback.js";
-import { DocumentEngineService } from "../services/document-engine.service.js";
+import { DataFetchTimeoutError, DocumentEngineService } from "../services/document-engine.service.js";
 
 type RouterInternalLike = {
   get: (path: string, ...handlers: unknown[]) => unknown;
@@ -510,7 +510,9 @@ function stripSectPrRefs(sectPrXml: string): string {
 }
 
 async function downloadPrivateObjectBytes(objectPath: string): Promise<Buffer> {
-  const response = await supabaseStorage.fetchPrivateObjectResponse(objectPath);
+  const exists = await supabaseStorage.privateObjectExists(objectPath, { timeoutMs: 2_000 });
+  if (!exists) throw new ObjectNotFoundError();
+  const response = await supabaseStorage.fetchPrivateObjectResponse(objectPath, { timeoutMs: 8_000 });
   const ab = await response.arrayBuffer();
   return Buffer.from(ab);
 }
@@ -1223,6 +1225,36 @@ router.post(
           userAgent: req.headers["user-agent"],
         });
         res.status(cfgErr.statusCode).json({ error: cfgErr.error, code: "STORAGE_NOT_CONFIGURED" });
+        return;
+      }
+      if (err instanceof DataFetchTimeoutError) {
+        await writeAuditLog({
+          firmId: caseFirmId,
+          actorId: req.userId,
+          actorType: req.userType,
+          action: "documents.generate.failed",
+          entityType: "case",
+          entityId: caseId,
+          detail: `templateId=${templateId} code=DATA_FETCH_TIMEOUT`,
+          ipAddress: req.ip,
+          userAgent: req.headers["user-agent"],
+        });
+        res.status(504).json({ error: "資料抓取過久，請稍後再試", code: "DATA_FETCH_TIMEOUT" });
+        return;
+      }
+      if (err instanceof StorageRequestTimeoutError) {
+        await writeAuditLog({
+          firmId: caseFirmId,
+          actorId: req.userId,
+          actorType: req.userType,
+          action: "documents.generate.failed",
+          entityType: "case",
+          entityId: caseId,
+          detail: `templateId=${templateId} code=DATA_FETCH_TIMEOUT`,
+          ipAddress: req.ip,
+          userAgent: req.headers["user-agent"],
+        });
+        res.status(504).json({ error: "資料抓取過久，請稍後再試", code: "DATA_FETCH_TIMEOUT" });
         return;
       }
       if (err instanceof ObjectNotFoundError) {
@@ -6812,6 +6844,12 @@ router.post("/cases/:caseId/documents/print", requireAuth, requireFirmUser, requ
       res.status(cfgErr.statusCode).json({ error: cfgErr.error });
       await finishGenerationRunFailed(r, req.firmId!, runId, "STORAGE_NOT_CONFIGURED", cfgErr.error);
       await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.generation.failed", entityType: "document_generation_run", entityId: runId, detail: `caseId=${caseId} templateSource=firm templateId=${templateId} code=STORAGE_NOT_CONFIGURED`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+      return;
+    }
+    if (err instanceof StorageRequestTimeoutError) {
+      res.status(504).json({ error: "資料抓取過久，請稍後再試", code: "DATA_FETCH_TIMEOUT" });
+      await finishGenerationRunFailed(r, req.firmId!, runId, "DATA_FETCH_TIMEOUT", "資料抓取過久，請稍後再試");
+      await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.generation.failed", entityType: "document_generation_run", entityId: runId, detail: `caseId=${caseId} templateSource=firm templateId=${templateId} code=DATA_FETCH_TIMEOUT`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
       return;
     }
     if (err instanceof ObjectNotFoundError) {

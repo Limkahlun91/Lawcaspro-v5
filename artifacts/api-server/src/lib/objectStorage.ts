@@ -90,6 +90,14 @@ export class ObjectNotFoundError extends Error {
   }
 }
 
+export class StorageRequestTimeoutError extends Error {
+  constructor() {
+    super("Storage request timed out");
+    this.name = "StorageRequestTimeoutError";
+    Object.setPrototypeOf(this, StorageRequestTimeoutError.prototype);
+  }
+}
+
 type SupabaseStorageConfig = {
   supabaseUrl: string;
   serviceRoleKey: string;
@@ -271,23 +279,68 @@ export class SupabaseStorageService {
     return signedUrl;
   }
 
-  async fetchPrivateObjectResponse(objectPath: string): Promise<globalThis.Response> {
+  async fetchPrivateObjectResponse(objectPath: string, opts?: { timeoutMs?: number }): Promise<globalThis.Response> {
     const cfg = getSupabaseStorageConfig();
     const key = normalizeObjectKeyFromPath(objectPath);
     const encodedKey = key.split("/").map(encodeURIComponent).join("/");
     const url = `${cfg.storageUrl}/object/${encodeURIComponent(cfg.bucketPrivate)}/${encodedKey}`;
-    const response = await fetch(url, {
-      method: "GET",
-      headers: {
-        Authorization: `Bearer ${cfg.serviceRoleKey}`,
-        apikey: cfg.serviceRoleKey,
-      },
-    });
+    const timeoutMs = typeof opts?.timeoutMs === "number" && opts.timeoutMs > 0 ? opts.timeoutMs : 15_000;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    let response: globalThis.Response;
+    try {
+      response = await fetch(url, {
+        method: "GET",
+        headers: {
+          Authorization: `Bearer ${cfg.serviceRoleKey}`,
+          apikey: cfg.serviceRoleKey,
+        },
+        signal: controller.signal,
+      });
+    } catch (err) {
+      const name = err && typeof err === "object" && "name" in err ? String((err as any).name) : "";
+      if (name === "AbortError") throw new StorageRequestTimeoutError();
+      throw err;
+    } finally {
+      clearTimeout(timer);
+    }
     if (response.status === 404) throw new ObjectNotFoundError();
     if (!response.ok) {
       throw new Error(`Supabase storage download failed (${response.status})`);
     }
     return response;
+  }
+
+  async privateObjectExists(objectPath: string, opts?: { timeoutMs?: number }): Promise<boolean> {
+    const cfg = getSupabaseStorageConfig();
+    const key = normalizeObjectKeyFromPath(objectPath);
+    const encodedKey = key.split("/").map(encodeURIComponent).join("/");
+    const url = `${cfg.storageUrl}/object/${encodeURIComponent(cfg.bucketPrivate)}/${encodedKey}`;
+    const timeoutMs = typeof opts?.timeoutMs === "number" && opts.timeoutMs > 0 ? opts.timeoutMs : 2_000;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    let response: globalThis.Response;
+    try {
+      response = await fetch(url, {
+        method: "HEAD",
+        headers: {
+          Authorization: `Bearer ${cfg.serviceRoleKey}`,
+          apikey: cfg.serviceRoleKey,
+        },
+        signal: controller.signal,
+      });
+    } catch (err) {
+      const name = err && typeof err === "object" && "name" in err ? String((err as any).name) : "";
+      if (name === "AbortError") throw new StorageRequestTimeoutError();
+      throw err;
+    } finally {
+      clearTimeout(timer);
+    }
+    if (response.status === 404) return false;
+    if (!response.ok) {
+      throw new Error(`Supabase storage HEAD failed (${response.status})`);
+    }
+    return true;
   }
 }
 

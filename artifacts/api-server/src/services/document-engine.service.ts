@@ -4,7 +4,28 @@ import { PDFDocument, rgb, StandardFonts } from "pdf-lib";
 import { db, casesTable, templatesTable } from "@workspace/db";
 import { and, eq, isNull, or } from "drizzle-orm";
 
+export class DataFetchTimeoutError extends Error {
+  constructor() {
+    super("Data fetch timed out");
+    this.name = "DataFetchTimeoutError";
+    Object.setPrototypeOf(this, DataFetchTimeoutError.prototype);
+  }
+}
+
 export class DocumentEngineService {
+  private static withTimeout<T>(p: Promise<T>, timeoutMs: number): Promise<T> {
+    if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) return p;
+    return new Promise<T>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new DataFetchTimeoutError()), timeoutMs);
+      p.then((v) => {
+        clearTimeout(timer);
+        resolve(v);
+      }).catch((e) => {
+        clearTimeout(timer);
+        reject(e);
+      });
+    });
+  }
   private static buildCaseVariables(caseData: {
     id: number;
     referenceNo: string;
@@ -187,7 +208,8 @@ export class DocumentEngineService {
       throw new Error("firmId is required");
     }
 
-    const [tpl] = await db
+    const timeoutMs = 10_000;
+    const tplRes = db
       .select({
         id: templatesTable.id,
         firmId: templatesTable.firmId,
@@ -202,6 +224,7 @@ export class DocumentEngineService {
           : and(eq(templatesTable.id, templateId), or(eq(templatesTable.firmId, fid), isNull(templatesTable.firmId)))
       )
       .limit(1);
+    const [tpl] = await this.withTimeout(tplRes, timeoutMs);
 
     if (!tpl || tpl.isActive === false) {
       throw new Error(`Template with ID ${templateId} not found`);
@@ -211,7 +234,7 @@ export class DocumentEngineService {
       throw new Error(`Unsupported template file_type: ${String(tpl.fileType)}`);
     }
 
-    const [caseData] = await db
+    const caseRes = db
       .select({
         id: casesTable.id,
         referenceNo: casesTable.referenceNo,
@@ -224,6 +247,7 @@ export class DocumentEngineService {
       .from(casesTable)
       .where(and(eq(casesTable.id, caseId), eq(casesTable.firmId, fid)))
       .limit(1);
+    const [caseData] = await this.withTimeout(caseRes, timeoutMs);
 
     if (!caseData) {
       throw new Error(`Case with ID ${caseId} not found`);

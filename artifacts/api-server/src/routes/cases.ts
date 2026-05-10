@@ -90,51 +90,76 @@ async function buildSmartNamingContext(r: DbConn, firmId: number, caseId: number
   clientName: string;
   loanBank: string;
 }> {
-  const [base] = await r
-    .select({
-      referenceNo: casesTable.referenceNo,
-      parcelNo: casesTable.parcelNo,
-      status: casesTable.status,
-      titleType: casesTable.titleType,
-      projectName: projectsTable.name,
-      developerName: developersTable.name,
-      loanDetails: casesTable.loanDetails,
-    })
-    .from(casesTable)
-    .innerJoin(projectsTable, eq(projectsTable.id, casesTable.projectId))
-    .innerJoin(developersTable, eq(developersTable.id, casesTable.developerId))
-    .where(and(eq(casesTable.id, caseId), eq(casesTable.firmId, firmId)));
-
-  const [purchaser] = await r
-    .select({ name: clientsTable.name })
-    .from(casePurchasersTable)
-    .innerJoin(clientsTable, eq(clientsTable.id, casePurchasersTable.clientId))
-    .where(and(eq(casePurchasersTable.caseId, caseId), eq(casePurchasersTable.role, "main")))
-    .orderBy(asc(casePurchasersTable.orderNo))
-    .limit(1);
-
-  const loanBank = (() => {
-    const raw = base?.loanDetails ? String(base.loanDetails) : "";
-    if (!raw) return "";
-    try {
-      const obj = JSON.parse(raw) as Record<string, unknown>;
-      const v = obj["end_financier"] ?? obj["endFinancier"] ?? obj["bank"] ?? obj["financier"];
-      return v ? String(v) : "";
-    } catch {
-      return "";
-    }
-  })();
-
-  return {
-    referenceNo: String(base?.referenceNo ?? ""),
-    parcelNo: base?.parcelNo ? String(base.parcelNo) : null,
-    status: String(base?.status ?? ""),
-    titleType: String(base?.titleType ?? ""),
-    projectName: String(base?.projectName ?? ""),
-    developerName: String(base?.developerName ?? ""),
-    clientName: String(purchaser?.name ?? ""),
-    loanBank,
+  const fallback = {
+    referenceNo: "",
+    parcelNo: null,
+    status: "",
+    titleType: "",
+    projectName: "",
+    developerName: "",
+    clientName: "",
+    loanBank: "",
   };
+
+  try {
+    const baseExists = await tableExists(r, "public.cases")
+      && await tableExists(r, "public.projects")
+      && await tableExists(r, "public.developers");
+    if (!baseExists) return fallback;
+
+    const [base] = await r
+      .select({
+        referenceNo: casesTable.referenceNo,
+        parcelNo: casesTable.parcelNo,
+        status: casesTable.status,
+        titleType: casesTable.titleType,
+        projectName: projectsTable.name,
+        developerName: developersTable.name,
+        loanDetails: casesTable.loanDetails,
+      })
+      .from(casesTable)
+      .innerJoin(projectsTable, eq(projectsTable.id, casesTable.projectId))
+      .innerJoin(developersTable, eq(developersTable.id, casesTable.developerId))
+      .where(and(eq(casesTable.id, caseId), eq(casesTable.firmId, firmId)));
+
+    const purchaserExists = await tableExists(r, "public.case_purchasers")
+      && await tableExists(r, "public.clients");
+    const [purchaser] = purchaserExists
+      ? await r
+          .select({ name: clientsTable.name })
+          .from(casePurchasersTable)
+          .innerJoin(clientsTable, eq(clientsTable.id, casePurchasersTable.clientId))
+          .where(and(eq(casePurchasersTable.caseId, caseId), eq(casePurchasersTable.role, "main")))
+          .orderBy(asc(casePurchasersTable.orderNo))
+          .limit(1)
+      : [undefined];
+
+    const loanBank = (() => {
+      const raw = base?.loanDetails ? String(base.loanDetails) : "";
+      if (!raw) return "";
+      try {
+        const obj = JSON.parse(raw) as Record<string, unknown>;
+        const v = obj["end_financier"] ?? obj["endFinancier"] ?? obj["bank"] ?? obj["financier"];
+        return v ? String(v) : "";
+      } catch {
+        return "";
+      }
+    })();
+
+    return {
+      referenceNo: String(base?.referenceNo ?? ""),
+      parcelNo: base?.parcelNo ? String(base.parcelNo) : null,
+      status: String(base?.status ?? ""),
+      titleType: String(base?.titleType ?? ""),
+      projectName: String(base?.projectName ?? ""),
+      developerName: String(base?.developerName ?? ""),
+      clientName: String(purchaser?.name ?? ""),
+      loanBank,
+    };
+  } catch (err) {
+    logger.warn({ err, firmId, caseId }, "[cases] smart naming context unavailable");
+    return fallback;
+  }
 }
 
 function encodeRFC5987ValueChars(str: string): string {
@@ -1929,8 +1954,8 @@ router.post("/cases", requireAuthHandler, requireFirmUserHandler, requirePermiss
     const createCaseSchema = z.object({
       projectId: z.coerce.number().int().positive(),
       developerId: z.coerce.number().int().positive().optional(),
-      purchaseMode: z.string(),
-      titleType: z.string(),
+      purchaseMode: z.string().transform((v) => v.trim().toLowerCase()),
+      titleType: z.string().transform((v) => v.trim().toLowerCase()),
       spaPrice: z.coerce.number().optional(),
       assignedLawyerId: z.coerce.number().int().positive(),
       assignedClerkId: z.coerce.number().int().positive().optional(),
@@ -1940,6 +1965,13 @@ router.post("/cases", requireAuthHandler, requireFirmUserHandler, requirePermiss
         ic: z.string().nullish(),
       })).optional(),
     }).superRefine((v, ctx) => {
+      if (v.purchaseMode !== "loan" && v.purchaseMode !== "cash") {
+        ctx.addIssue({ code: "custom", path: ["purchaseMode"], message: "Invalid purchaseMode" });
+      }
+      const normalizedTitleType = normalizeTitleType(v.titleType);
+      if (!normalizedTitleType) {
+        ctx.addIssue({ code: "custom", path: ["titleType"], message: "Invalid titleType" });
+      }
       const purchaserIds = v.purchaserIds ?? [];
       const hasPurchaserIds = purchaserIds.length > 0;
       const hasInlinePurchasers = Array.isArray(v.purchasers) && v.purchasers.some((p) => (p?.name ?? "").trim().length > 0);
@@ -1950,11 +1982,18 @@ router.post("/cases", requireAuthHandler, requireFirmUserHandler, requirePermiss
 
     const parsed = createCaseSchema.safeParse(req.body);
     if (!parsed.success) {
+      req.log.warn({
+        route: "POST /api/cases",
+        firmId: req.firmId,
+        userId: req.userId,
+        fields: parsed.error.flatten().fieldErrors,
+      }, "cases.create validation failed");
       res.status(400).json({ error: "Validation failed", fields: parsed.error.flatten().fieldErrors });
       return;
     }
 
     const { projectId, developerId: clientDeveloperId, purchaseMode, titleType, spaPrice, assignedLawyerId, assignedClerkId, purchaserIds, purchasers } = parsed.data;
+    const normalizedTitleType = normalizeTitleType(titleType) ?? "master";
 
     // ── 1. Resolve developerId server-side from projectId ─────────────────────
     const [project] = await r.select().from(projectsTable).where(eq(projectsTable.id, projectId));
@@ -2091,7 +2130,7 @@ router.post("/cases", requireAuthHandler, requireFirmUserHandler, requirePermiss
       developerId,
       referenceNo: refNo,
       purchaseMode,
-      titleType,
+      titleType: normalizedTitleType,
       spaPrice: spaPrice !== undefined ? String(spaPrice) : null,
       status: "File Opened / SPA Pending Signing",
       caseType: caseType ?? null,
@@ -2159,7 +2198,7 @@ router.post("/cases", requireAuthHandler, requireFirmUserHandler, requirePermiss
       });
     }
 
-    const workflowSteps = buildWorkflowSteps(purchaseMode, titleType);
+    const workflowSteps = buildWorkflowSteps(purchaseMode, normalizedTitleType);
     if (workflowSteps.length > 0) {
       const wfExists = await tableExists(r, "public.case_workflow_steps");
       if (wfExists) {
