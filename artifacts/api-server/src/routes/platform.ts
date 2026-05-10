@@ -812,7 +812,7 @@ routerInternal.get("/platform/documents", requireAuth, requireFounder, async (re
       async (authDb) => {
         return await withTimeout("platform.documents.list", async () => {
           const statementTimeoutMs = 8000;
-          await authDb.execute(sql`SET LOCAL statement_timeout = ${statementTimeoutMs}`);
+          await authDb.execute(sql.raw(`SET LOCAL statement_timeout = ${statementTimeoutMs}`));
 
           let q = authDb.select().from(platformDocumentsTable);
           if (firmId !== null) q = q.where(eq(platformDocumentsTable.firmId, firmId)) as typeof q;

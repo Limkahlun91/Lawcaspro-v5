@@ -170,7 +170,7 @@ router.get("/platform/audit-logs", requireAuth, requireFounder, async (req: Auth
         assertFounderPermission(ctx, "founder.audit.read");
 
         const statementTimeoutMs = 12000;
-        await authDb.execute(sql`SET LOCAL statement_timeout = ${statementTimeoutMs}`);
+        await authDb.execute(sql.raw(`SET LOCAL statement_timeout = ${statementTimeoutMs}`));
 
         const rows = await queryRows(authDb, sql`
           SELECT al.*, u.name as actor_name, u.email as actor_email, f.name as firm_name
