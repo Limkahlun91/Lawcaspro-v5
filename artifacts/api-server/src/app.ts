@@ -52,21 +52,30 @@ const sendErrorUnsafe = sendError as unknown as (res: ResLike, err: unknown, fal
 app.set("trust proxy", 1);
 app.use(helmet());
 app.use(cors());
-const jsonParser = express.json({ limit: "10mb" });
+app.use(cookieParser());
+app.use(requestMetaMiddleware() as unknown as MiddlewareLike);
+
+const createPinoHttpMiddleware = pinoHttp as unknown as (options: unknown) => MiddlewareLike;
+app.use(createPinoHttpMiddleware({ logger }));
+
 app.use(((req: ReqLike, res: ResLike, next: Next) => {
   const contentType = req.headers?.["content-type"];
   const isJson = typeof contentType === "string" && contentType.toLowerCase().includes("application/json");
+  if (!isJson) {
+    next();
+    return;
+  }
 
-  const body = (req as any)?.body;
-  if (body != null) {
-    if (isJson && typeof body === "string") {
+  const existing = (req as any)?.body;
+  if (existing != null) {
+    if (typeof existing === "string") {
       try {
-        (req as any).body = JSON.parse(body);
+        (req as any).body = JSON.parse(existing);
       } catch {
       }
-    } else if (isJson && typeof Buffer !== "undefined" && Buffer.isBuffer(body)) {
+    } else if (typeof Buffer !== "undefined" && Buffer.isBuffer(existing)) {
       try {
-        (req as any).body = JSON.parse(body.toString("utf8"));
+        (req as any).body = JSON.parse(existing.toString("utf8"));
       } catch {
       }
     }
@@ -74,14 +83,38 @@ app.use(((req: ReqLike, res: ResLike, next: Next) => {
     return;
   }
 
-  (jsonParser as unknown as MiddlewareLike)(req, res, next);
-}) as unknown as MiddlewareLike);
-app.use(express.urlencoded({ extended: true }));
-app.use(cookieParser());
-app.use(requestMetaMiddleware() as unknown as MiddlewareLike);
+  let raw = "";
+  let size = 0;
+  const limit = 10 * 1024 * 1024;
+  if (typeof (req as any).setEncoding === "function") (req as any).setEncoding("utf8");
 
-const createPinoHttpMiddleware = pinoHttp as unknown as (options: unknown) => MiddlewareLike;
-app.use(createPinoHttpMiddleware({ logger }));
+  (req as any).on("data", (chunk: string) => {
+    size += chunk.length;
+    if (size > limit) {
+      res.status(413).json({ error: "Payload too large" });
+      return;
+    }
+    raw += chunk;
+  });
+
+  (req as any).on("end", () => {
+    if (res.headersSent) return;
+    if (raw) {
+      try {
+        (req as any).body = JSON.parse(raw);
+      } catch {
+      }
+    }
+    next();
+  });
+
+  (req as any).on("error", (err: unknown) => {
+    if (res.headersSent) return;
+    next(err);
+  });
+}) as unknown as MiddlewareLike);
+
+app.use(express.urlencoded({ extended: true }));
 
 app.use((req: ReqLike, res: ResLike, next: Next) => {
   const path = req.path ?? "";
