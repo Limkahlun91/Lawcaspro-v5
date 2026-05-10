@@ -52,7 +52,30 @@ const sendErrorUnsafe = sendError as unknown as (res: ResLike, err: unknown, fal
 app.set("trust proxy", 1);
 app.use(helmet());
 app.use(cors());
-app.use(express.json({ limit: "10mb" }));
+const jsonParser = express.json({ limit: "10mb" });
+app.use(((req: ReqLike, res: ResLike, next: Next) => {
+  const contentType = req.headers?.["content-type"];
+  const isJson = typeof contentType === "string" && contentType.toLowerCase().includes("application/json");
+
+  const body = (req as any)?.body;
+  if (body != null) {
+    if (isJson && typeof body === "string") {
+      try {
+        (req as any).body = JSON.parse(body);
+      } catch {
+      }
+    } else if (isJson && typeof Buffer !== "undefined" && Buffer.isBuffer(body)) {
+      try {
+        (req as any).body = JSON.parse(body.toString("utf8"));
+      } catch {
+      }
+    }
+    next();
+    return;
+  }
+
+  (jsonParser as unknown as MiddlewareLike)(req, res, next);
+}) as unknown as MiddlewareLike);
 app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
 app.use(requestMetaMiddleware() as unknown as MiddlewareLike);
