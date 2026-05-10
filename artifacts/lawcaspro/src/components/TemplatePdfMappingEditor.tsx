@@ -11,7 +11,7 @@ import { apiFetchJson } from "@/lib/api-client";
 import { toastError } from "@/lib/toast-error";
 import { useToast } from "@/hooks/use-toast";
 import { ensureArray } from "@/lib/list-items";
-import { Trash2, Save, ChevronLeft, ChevronRight } from "lucide-react";
+import { Trash2, Save, ChevronLeft, ChevronRight, AlignLeft, AlignCenter, AlignRight } from "lucide-react";
 
 pdfjs.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjs.version}/build/pdf.worker.min.mjs`;
 
@@ -32,7 +32,10 @@ type VarGroup = {
   vars: { key: string; label: string }[];
 };
 
-export type PdfMappingConfig = Record<string, { page: number; x: number; y: number; size: number; maxWidth?: number; lineHeight?: number }>;
+type PdfFontFamily = "Helvetica" | "Times-Roman" | "Courier";
+type TextAlignment = "left" | "center" | "right";
+
+export type PdfMappingConfig = Record<string, { page: number; x: number; y: number; size: number; maxWidth?: number; lineHeight?: number; fontFamily?: PdfFontFamily; alignment?: TextAlignment }>;
 
 const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null;
 
@@ -83,7 +86,15 @@ function normalizeMappingConfig(raw: unknown): PdfMappingConfig {
       if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
       const maxWidth = typeof item.maxWidth === "number" && Number.isFinite(item.maxWidth) ? item.maxWidth : undefined;
       const lineHeight = typeof item.lineHeight === "number" && Number.isFinite(item.lineHeight) ? item.lineHeight : undefined;
-      out[key] = { page, x, y, size, ...(maxWidth ? { maxWidth } : {}), ...(lineHeight ? { lineHeight } : {}) };
+      const fontFamily =
+        item.fontFamily === "Helvetica" || item.fontFamily === "Times-Roman" || item.fontFamily === "Courier"
+          ? item.fontFamily
+          : undefined;
+      const alignment =
+        item.alignment === "left" || item.alignment === "center" || item.alignment === "right"
+          ? item.alignment
+          : undefined;
+      out[key] = { page, x, y, size, ...(maxWidth ? { maxWidth } : {}), ...(lineHeight ? { lineHeight } : {}), ...(fontFamily ? { fontFamily } : {}), ...(alignment ? { alignment } : {}) };
     }
     return out;
   }
@@ -97,7 +108,15 @@ function normalizeMappingConfig(raw: unknown): PdfMappingConfig {
     if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
     const maxWidth = typeof v.maxWidth === "number" && Number.isFinite(v.maxWidth) ? v.maxWidth : undefined;
     const lineHeight = typeof v.lineHeight === "number" && Number.isFinite(v.lineHeight) ? v.lineHeight : undefined;
-    out[k] = { page, x, y, size, ...(maxWidth ? { maxWidth } : {}), ...(lineHeight ? { lineHeight } : {}) };
+    const fontFamily =
+      v.fontFamily === "Helvetica" || v.fontFamily === "Times-Roman" || v.fontFamily === "Courier"
+        ? v.fontFamily
+        : undefined;
+    const alignment =
+      v.alignment === "left" || v.alignment === "center" || v.alignment === "right"
+        ? v.alignment
+        : undefined;
+    out[k] = { page, x, y, size, ...(maxWidth ? { maxWidth } : {}), ...(lineHeight ? { lineHeight } : {}), ...(fontFamily ? { fontFamily } : {}), ...(alignment ? { alignment } : {}) };
   }
   return out;
 }
@@ -190,6 +209,8 @@ export function TemplatePdfMappingEditor(props: Props) {
         size: prev[selectedVarKey]?.size ?? 12,
         ...(prev[selectedVarKey]?.maxWidth ? { maxWidth: prev[selectedVarKey]?.maxWidth } : {}),
         ...(prev[selectedVarKey]?.lineHeight ? { lineHeight: prev[selectedVarKey]?.lineHeight } : {}),
+        ...(prev[selectedVarKey]?.fontFamily ? { fontFamily: prev[selectedVarKey]?.fontFamily } : {}),
+        ...(prev[selectedVarKey]?.alignment ? { alignment: prev[selectedVarKey]?.alignment } : {}),
       },
     }));
   };
@@ -307,6 +328,55 @@ export function TemplatePdfMappingEditor(props: Props) {
                       <div>
                         <div className="text-xs text-slate-500 mb-1">Font size</div>
                         <Input value={String(v.size)} onChange={(e) => updateEntry(key, { size: Math.max(1, Number(e.target.value) || 12) })} />
+                      </div>
+                      <div>
+                        <div className="text-xs text-slate-500 mb-1">Font</div>
+                        <Select
+                          value={v.fontFamily ?? "Helvetica"}
+                          onValueChange={(val) => updateEntry(key, { fontFamily: val as PdfFontFamily })}
+                        >
+                          <SelectTrigger className="h-9"><SelectValue placeholder="Font" /></SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="Helvetica">Helvetica</SelectItem>
+                            <SelectItem value="Times-Roman">Times-Roman</SelectItem>
+                            <SelectItem value="Courier">Courier</SelectItem>
+                          </SelectContent>
+                        </Select>
+                      </div>
+                      <div>
+                        <div className="text-xs text-slate-500 mb-1">Alignment</div>
+                        <div className="flex items-center gap-1">
+                          <Button
+                            type="button"
+                            variant={(v.alignment ?? "left") === "left" ? "default" : "outline"}
+                            size="sm"
+                            className="h-9 w-10 p-0"
+                            onClick={() => updateEntry(key, { alignment: "left" })}
+                            title="Left"
+                          >
+                            <AlignLeft className="w-4 h-4" />
+                          </Button>
+                          <Button
+                            type="button"
+                            variant={(v.alignment ?? "left") === "center" ? "default" : "outline"}
+                            size="sm"
+                            className="h-9 w-10 p-0"
+                            onClick={() => updateEntry(key, { alignment: "center" })}
+                            title="Center"
+                          >
+                            <AlignCenter className="w-4 h-4" />
+                          </Button>
+                          <Button
+                            type="button"
+                            variant={(v.alignment ?? "left") === "right" ? "default" : "outline"}
+                            size="sm"
+                            className="h-9 w-10 p-0"
+                            onClick={() => updateEntry(key, { alignment: "right" })}
+                            title="Right"
+                          >
+                            <AlignRight className="w-4 h-4" />
+                          </Button>
+                        </div>
                       </div>
                       <div>
                         <div className="text-xs text-slate-500 mb-1">X</div>

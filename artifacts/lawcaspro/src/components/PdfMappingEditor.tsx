@@ -1,16 +1,19 @@
-import { useState, useRef, useEffect, useCallback } from "react";
+import { useMemo, useState, useRef, useEffect, useCallback } from "react";
 import { Document, Page, pdfjs } from "react-pdf";
 import "react-pdf/dist/Page/AnnotationLayer.css";
 import "react-pdf/dist/Page/TextLayer.css";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList } from "@/components/ui/command";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
 } from "@/components/ui/dialog";
 import {
   ChevronLeft, ChevronRight, Plus, Trash2, Save, X, GripVertical,
-  Type, BookOpen, Copy, Check, Minus,
+  Type, BookOpen, Check, Minus, ChevronsUpDown, AlignLeft, AlignCenter, AlignRight,
 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import { cn } from "@/lib/utils";
@@ -19,6 +22,9 @@ import { toastError } from "@/lib/toast-error";
 
 pdfjs.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjs.version}/build/pdf.worker.min.mjs`;
 
+type TextAlignment = "left" | "center" | "right";
+type PdfFontFamily = "Helvetica" | "Times-Roman" | "Courier";
+
 interface TextBox {
   id: string;
   x: number;
@@ -26,6 +32,8 @@ interface TextBox {
   width: number;
   height: number;
   fontSize: number;
+  alignment: TextAlignment;
+  fontFamily: PdfFontFamily;
   content: string;
 }
 
@@ -73,6 +81,7 @@ interface Props {
 export default function PdfMappingEditor({ docId, docName, pdfUrl, onClose }: Props) {
   const { toast } = useToast();
   const containerRef = useRef<HTMLDivElement>(null);
+  const contentTextareaRef = useRef<HTMLTextAreaElement | null>(null);
 
   const [numPages, setNumPages] = useState(0);
   const [currentPage, setCurrentPage] = useState(0);
@@ -82,7 +91,7 @@ export default function PdfMappingEditor({ docId, docName, pdfUrl, onClose }: Pr
   const [loading, setLoading] = useState(true);
   const [showVarPanel, setShowVarPanel] = useState(false);
   const [varGroups, setVarGroups] = useState<VarGroup[]>([]);
-  const [copiedKey, setCopiedKey] = useState<string | null>(null);
+  const [varPickerOpen, setVarPickerOpen] = useState(false);
   const [pdfScale, setPdfScale] = useState(1);
   const [pdfDimensions, setPdfDimensions] = useState({ width: 0, height: 0 });
 
@@ -193,6 +202,8 @@ export default function PdfMappingEditor({ docId, docName, pdfUrl, onClose }: Pr
       width: 200,
       height: 30,
       fontSize: 10,
+      alignment: "left",
+      fontFamily: "Helvetica",
       content: "",
     };
     updateCurrentPageBoxes([...getCurrentPageBoxes(), newBox]);
@@ -211,6 +222,33 @@ export default function PdfMappingEditor({ docId, docName, pdfUrl, onClose }: Pr
   };
 
   const selectedBox = getCurrentPageBoxes().find(b => b.id === selectedBoxId);
+
+  const cssFontFamily = (font: PdfFontFamily): string => {
+    if (font === "Times-Roman") return "Times New Roman, Times, serif";
+    if (font === "Courier") return "Courier New, Courier, monospace";
+    return "Helvetica, Arial, sans-serif";
+  };
+
+  const insertIntoSelectedContentAtCursor = (insertText: string) => {
+    if (!selectedBoxId) return;
+    const box = getCurrentPageBoxes().find(b => b.id === selectedBoxId);
+    if (!box) return;
+    const el = contentTextareaRef.current;
+    const start = el && typeof el.selectionStart === "number" ? el.selectionStart : box.content.length;
+    const end = el && typeof el.selectionEnd === "number" ? el.selectionEnd : start;
+    const next = box.content.slice(0, start) + insertText + box.content.slice(end);
+    const nextCursor = start + insertText.length;
+    updateTextBox(selectedBoxId, { content: next });
+    setTimeout(() => {
+      const target = contentTextareaRef.current;
+      if (!target) return;
+      try {
+        target.focus();
+        target.setSelectionRange(nextCursor, nextCursor);
+      } catch {
+      }
+    }, 0);
+  };
 
   const handleCanvasClick = (e: React.MouseEvent<HTMLDivElement>) => {
     const target = e.target as HTMLElement;
@@ -266,9 +304,6 @@ export default function PdfMappingEditor({ docId, docName, pdfUrl, onClose }: Pr
   }, [dragging, resizing, handleMouseMove, handleMouseUp]);
 
   const insertVariable = (key: string, type?: string) => {
-    if (!selectedBoxId) return;
-    const box = getCurrentPageBoxes().find(b => b.id === selectedBoxId);
-    if (!box) return;
     let varText: string;
     if (type === "loop") {
       varText = `{#${key}}...{/${key}}`;
@@ -277,9 +312,7 @@ export default function PdfMappingEditor({ docId, docName, pdfUrl, onClose }: Pr
     } else {
       varText = `{{${key}}}`;
     }
-    updateTextBox(selectedBoxId, { content: box.content + varText });
-    setCopiedKey(key);
-    setTimeout(() => setCopiedKey(null), 1000);
+    insertIntoSelectedContentAtCursor(varText);
   };
 
   const onDocLoad = ({ numPages: n }: { numPages: number }) => {
@@ -382,8 +415,13 @@ export default function PdfMappingEditor({ docId, docName, pdfUrl, onClose }: Pr
                 >
                   <div className="absolute inset-0 overflow-hidden px-1 flex items-start">
                     <span
-                      className="text-slate-700 leading-tight break-words whitespace-pre-wrap"
-                      style={{ fontSize: box.fontSize * pdfScale }}
+                      className="text-slate-700 leading-tight break-words whitespace-pre-wrap block"
+                      style={{
+                        fontSize: box.fontSize * pdfScale,
+                        textAlign: box.alignment,
+                        width: "100%",
+                        fontFamily: cssFontFamily(box.fontFamily),
+                      }}
                     >
                       {box.content || "..."}
                     </span>
@@ -411,10 +449,10 @@ export default function PdfMappingEditor({ docId, docName, pdfUrl, onClose }: Pr
         <div className="w-72 border-l flex flex-col bg-white shrink-0">
           {selectedBox ? (
             <div className="flex-1 overflow-y-auto">
-              <div className="p-3 border-b bg-slate-50">
+              <div className="p-4 border-b bg-slate-50">
                 <h3 className="text-xs font-semibold text-slate-700 uppercase tracking-wider">Text Box Properties</h3>
               </div>
-              <div className="p-3 space-y-3">
+              <div className="p-4 space-y-4">
                 <div>
                   <label className="text-xs font-medium text-slate-600 mb-1 block">Content</label>
                   <textarea
@@ -423,8 +461,62 @@ export default function PdfMappingEditor({ docId, docName, pdfUrl, onClose }: Pr
                     value={selectedBox.content}
                     onChange={e => updateTextBox(selectedBox.id, { content: e.target.value })}
                     placeholder="Type text and/or {{variables}} here..."
+                    ref={contentTextareaRef}
                   />
                   <p className="text-xs text-slate-400 mt-1">Use {"{{variable_name}}"} for variables</p>
+                </div>
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="text-xs font-medium text-slate-600 mb-1 block">Font</label>
+                    <Select
+                      value={selectedBox.fontFamily}
+                      onValueChange={(v) => updateTextBox(selectedBox.id, { fontFamily: v as PdfFontFamily })}
+                    >
+                      <SelectTrigger className="h-8 text-xs">
+                        <SelectValue placeholder="Font" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="Helvetica">Helvetica</SelectItem>
+                        <SelectItem value="Times-Roman">Times-Roman</SelectItem>
+                        <SelectItem value="Courier">Courier</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div>
+                    <label className="text-xs font-medium text-slate-600 mb-1 block">Alignment</label>
+                    <div className="flex items-center gap-1">
+                      <Button
+                        type="button"
+                        variant={selectedBox.alignment === "left" ? "default" : "outline"}
+                        size="sm"
+                        className="h-8 w-10 p-0"
+                        onClick={() => updateTextBox(selectedBox.id, { alignment: "left" })}
+                        title="Left"
+                      >
+                        <AlignLeft className="w-4 h-4" />
+                      </Button>
+                      <Button
+                        type="button"
+                        variant={selectedBox.alignment === "center" ? "default" : "outline"}
+                        size="sm"
+                        className="h-8 w-10 p-0"
+                        onClick={() => updateTextBox(selectedBox.id, { alignment: "center" })}
+                        title="Center"
+                      >
+                        <AlignCenter className="w-4 h-4" />
+                      </Button>
+                      <Button
+                        type="button"
+                        variant={selectedBox.alignment === "right" ? "default" : "outline"}
+                        size="sm"
+                        className="h-8 w-10 p-0"
+                        onClick={() => updateTextBox(selectedBox.id, { alignment: "right" })}
+                        title="Right"
+                      >
+                        <AlignRight className="w-4 h-4" />
+                      </Button>
+                    </div>
+                  </div>
                 </div>
                 <div className="grid grid-cols-2 gap-2">
                   <div>
@@ -489,42 +581,44 @@ export default function PdfMappingEditor({ docId, docName, pdfUrl, onClose }: Pr
 
               {showVarPanel && (
                 <div className="border-t">
-                  <div className="p-3 bg-blue-50 border-b">
+                  <div className="p-4 bg-blue-50 border-b">
                     <h3 className="text-xs font-semibold text-blue-800 uppercase tracking-wider">Insert Variable</h3>
-                    <p className="text-xs text-blue-600 mt-0.5">Click to insert into content</p>
+                    <p className="text-xs text-blue-600 mt-0.5">Search and insert into content at cursor</p>
                   </div>
-                  <div className="max-h-[300px] overflow-y-auto">
-                    {varGroups.map(group => (
-                      <div key={group.group}>
-                        <div className="px-3 py-1.5 bg-slate-50 text-xs font-medium text-slate-500 uppercase tracking-wider">
-                          {group.group}
-                        </div>
-                        {group.vars.map((v: any) => (
-                          <button
-                            key={v.key}
-                            className="w-full text-left px-3 py-1.5 text-xs hover:bg-blue-50 flex items-center justify-between group border-b border-slate-50"
-                            onClick={() => insertVariable(v.key, v.type)}
-                          >
-                            <div className="min-w-0 flex-1">
-                              <span className="text-slate-600">{v.label}</span>
-                              <div className="mt-0.5">
-                                <code className={cn(
-                                  "text-xs px-1 py-0.5 rounded font-mono",
-                                  v.type === "loop" ? "bg-blue-100 text-blue-700" : v.type === "loopField" ? "bg-blue-50 text-blue-600" : "bg-amber-50 text-amber-700"
-                                )}>
-                                  {v.type === "loop" ? `{#${v.key}}...{/${v.key}}` : v.type === "loopField" ? `{${v.key}}` : `{{${v.key}}}`}
-                                </code>
-                              </div>
-                            </div>
-                            {copiedKey === v.key ? (
-                              <Check className="w-3 h-3 text-green-500 shrink-0" />
-                            ) : (
-                              <Plus className="w-3 h-3 text-slate-300 group-hover:text-blue-500 shrink-0" />
-                            )}
-                          </button>
-                        ))}
-                      </div>
-                    ))}
+                  <div className="p-4">
+                    <Popover open={varPickerOpen} onOpenChange={setVarPickerOpen}>
+                      <PopoverTrigger asChild>
+                        <Button variant="outline" className="w-full justify-between h-8 text-xs">
+                          Select variable…
+                          <ChevronsUpDown className="w-4 h-4 opacity-60" />
+                        </Button>
+                      </PopoverTrigger>
+                      <PopoverContent className="w-[260px] p-0" align="start">
+                        <Command>
+                          <CommandInput placeholder="Search variables…" />
+                          <CommandList>
+                            <CommandEmpty>No results.</CommandEmpty>
+                            {varGroups.map((g) => (
+                              <CommandGroup key={g.group} heading={g.group}>
+                                {g.vars.map((v) => (
+                                  <CommandItem
+                                    key={v.key}
+                                    value={`${g.group} ${v.label} ${v.key}`}
+                                    onSelect={() => {
+                                      insertVariable(v.key, (v as any).type);
+                                      setVarPickerOpen(false);
+                                    }}
+                                  >
+                                    <span className="truncate">{v.label}</span>
+                                    <span className="ml-auto text-xs text-slate-400">{v.key}</span>
+                                  </CommandItem>
+                                ))}
+                              </CommandGroup>
+                            ))}
+                          </CommandList>
+                        </Command>
+                      </PopoverContent>
+                    </Popover>
                   </div>
                 </div>
               )}

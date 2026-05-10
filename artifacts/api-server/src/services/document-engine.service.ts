@@ -58,6 +58,8 @@ export class DocumentEngineService {
     size: number;
     maxWidth?: number;
     lineHeight?: number;
+    alignment?: "left" | "center" | "right";
+    fontFamily?: "Helvetica" | "Times-Roman" | "Courier";
   }> {
     const out: Array<{
       key: string;
@@ -67,6 +69,8 @@ export class DocumentEngineService {
       size: number;
       maxWidth?: number;
       lineHeight?: number;
+      alignment?: "left" | "center" | "right";
+      fontFamily?: "Helvetica" | "Times-Roman" | "Courier";
     }> = [];
 
     const pushOne = (key: unknown, coord: any) => {
@@ -78,7 +82,15 @@ export class DocumentEngineService {
       const size = typeof coord?.size === "number" && Number.isFinite(coord.size) ? Math.max(1, coord.size) : 12;
       const maxWidth = typeof coord?.maxWidth === "number" && Number.isFinite(coord.maxWidth) ? Math.max(1, coord.maxWidth) : undefined;
       const lineHeight = typeof coord?.lineHeight === "number" && Number.isFinite(coord.lineHeight) ? Math.max(1, coord.lineHeight) : undefined;
-      out.push({ key: key.trim(), page, x, y, size, ...(maxWidth ? { maxWidth } : {}), ...(lineHeight ? { lineHeight } : {}) });
+      const alignment =
+        coord?.alignment === "left" || coord?.alignment === "center" || coord?.alignment === "right"
+          ? coord.alignment
+          : undefined;
+      const fontFamily =
+        coord?.fontFamily === "Helvetica" || coord?.fontFamily === "Times-Roman" || coord?.fontFamily === "Courier"
+          ? coord.fontFamily
+          : undefined;
+      out.push({ key: key.trim(), page, x, y, size, ...(maxWidth ? { maxWidth } : {}), ...(lineHeight ? { lineHeight } : {}), ...(alignment ? { alignment } : {}), ...(fontFamily ? { fontFamily } : {}) });
     };
 
     if (Array.isArray(raw)) {
@@ -122,7 +134,23 @@ export class DocumentEngineService {
 
   private static async renderPdf(templateBuffer: Buffer, variables: Record<string, unknown>, mappingConfig: unknown): Promise<Buffer> {
     const pdf = await PDFDocument.load(templateBuffer);
-    const font = await pdf.embedFont(StandardFonts.Helvetica);
+    const fontCache = new Map<"Helvetica" | "Times-Roman" | "Courier", any>();
+    const getFont = async (family?: string) => {
+      const f =
+        family === "Times-Roman" || family === "Courier" || family === "Helvetica"
+          ? (family as "Helvetica" | "Times-Roman" | "Courier")
+          : "Helvetica";
+      const cached = fontCache.get(f);
+      if (cached) return cached;
+      const font =
+        f === "Times-Roman"
+          ? await pdf.embedFont(StandardFonts.TimesRoman)
+          : f === "Courier"
+            ? await pdf.embedFont(StandardFonts.Courier)
+            : await pdf.embedFont(StandardFonts.Helvetica);
+      fontCache.set(f, font);
+      return font;
+    };
     const mappings = this.normalizePdfMappingConfig(mappingConfig);
 
     for (const m of mappings) {
@@ -130,12 +158,22 @@ export class DocumentEngineService {
       const value = raw === null || raw === undefined ? "" : String(raw);
       const page = pdf.getPage(m.page - 1);
       if (!page) continue;
+      const font = await getFont(m.fontFamily);
       const fontSize = m.size;
       const lineHeight = m.lineHeight ?? Math.ceil(fontSize * 1.2);
       const lines = m.maxWidth ? this.wrapLines(value, font, fontSize, m.maxWidth) : value.split(/\r?\n/);
+      const align = m.alignment === "center" || m.alignment === "right" ? m.alignment : "left";
       for (let i = 0; i < lines.length; i++) {
         const y = m.y - i * lineHeight;
-        page.drawText(lines[i] ?? "", { x: m.x, y, size: fontSize, font, color: rgb(0, 0, 0) });
+        const line = lines[i] ?? "";
+        const x = (() => {
+          if (!m.maxWidth) return m.x;
+          const textWidth = font.widthOfTextAtSize(line, fontSize);
+          if (align === "center") return Math.max(m.x, m.x + (m.maxWidth - textWidth) / 2);
+          if (align === "right") return Math.max(m.x, m.x + (m.maxWidth - textWidth));
+          return m.x;
+        })();
+        page.drawText(line, { x, y, size: fontSize, font, color: rgb(0, 0, 0) });
       }
     }
 

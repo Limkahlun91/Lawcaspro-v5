@@ -5002,34 +5002,74 @@ async function generateMasterDocument({
     outputExt = ".docx";
     renderMode = "docx";
   } else if (isPdf && (masterDoc as any).pdf_mappings) {
-    const mappings = (masterDoc as any).pdf_mappings as { pages: Array<{ pageIndex: number; textBoxes: Array<{ id: string; x: number; y: number; width: number; height: number; fontSize: number; content: string }> }> };
+    const mappings = (masterDoc as any).pdf_mappings as {
+      pages: Array<{
+        pageIndex: number;
+        textBoxes: Array<{
+          id: string;
+          x: number;
+          y: number;
+          width: number;
+          height: number;
+          fontSize: number;
+          content: string;
+          alignment?: "left" | "center" | "right";
+          fontFamily?: "Helvetica" | "Times-Roman" | "Courier";
+        }>;
+      }>;
+    };
     const pdfDoc = await PDFDocument.load(fileContents);
     pdfDoc.registerFontkit(fontkit);
-    const helvetica = await pdfDoc.embedFont(StandardFonts.Helvetica);
+    const fontCache = new Map<"Helvetica" | "Times-Roman" | "Courier", any>();
+    const getFont = async (family?: string) => {
+      const f =
+        family === "Times-Roman" || family === "Courier" || family === "Helvetica"
+          ? (family as "Helvetica" | "Times-Roman" | "Courier")
+          : "Helvetica";
+      const cached = fontCache.get(f);
+      if (cached) return cached;
+      const font =
+        f === "Times-Roman"
+          ? await pdfDoc.embedFont(StandardFonts.TimesRoman)
+          : f === "Courier"
+            ? await pdfDoc.embedFont(StandardFonts.Courier)
+            : await pdfDoc.embedFont(StandardFonts.Helvetica);
+      fontCache.set(f, font);
+      return font;
+    };
     const pages = pdfDoc.getPages();
     for (const pageMapping of mappings.pages) {
       const page = pages[pageMapping.pageIndex];
       if (!page) continue;
       const pageHeight = page.getHeight();
       for (const tb of pageMapping.textBoxes) {
+        const font = await getFont(tb.fontFamily);
         let text = tb.content || "";
-        text = text.replace(/\{\{(\w+)\}\}/g, (_m: string, key: string) => {
-            const val = (renderInput as Record<string, unknown>)[key];
+        text = text.replace(/\{\{\s*([a-zA-Z0-9_.-]+)\s*\}\}/g, (_m: string, key: string) => {
+          const val = (renderInput as Record<string, unknown>)[key];
           if (val === undefined || val === null) return "";
           return String(val);
         });
         const fontSize = tb.fontSize || 10;
         const pdfY = pageHeight - tb.y - fontSize;
         const pdfYBottom = pageHeight - tb.y - tb.height;
-        const lines = wrapText(text, helvetica, fontSize, tb.width);
+        const lines = wrapText(text, font, fontSize, tb.width);
         let currentY = pdfY;
+        const align = tb.alignment === "center" || tb.alignment === "right" ? tb.alignment : "left";
         for (const line of lines) {
           if (currentY < pdfYBottom) break;
+          const textWidth = font.widthOfTextAtSize(line, fontSize);
+          const x =
+            align === "center"
+              ? Math.max(tb.x, tb.x + (tb.width - textWidth) / 2)
+              : align === "right"
+                ? Math.max(tb.x, tb.x + (tb.width - textWidth))
+                : tb.x;
           page.drawText(line, {
-            x: tb.x,
+            x,
             y: currentY,
             size: fontSize,
-            font: helvetica,
+            font,
             color: rgb(0, 0, 0),
           });
           currentY -= fontSize * 1.3;
