@@ -13,6 +13,8 @@ import { ensureArray } from "@/lib/list-items";
 import { toastError } from "@/lib/toast-error";
 import { useToast } from "@/hooks/use-toast";
 import { TemplatePdfMappingEditor } from "@/components/TemplatePdfMappingEditor";
+import { throwIfApiFailure, getApiFailureCodeFromError } from "@/lib/api-failure";
+import { SupportSessionRequired } from "@/components/support-session-required";
 
 type TemplateRow = {
   id: number;
@@ -47,7 +49,9 @@ export default function PlatformTemplates() {
   const templatesQuery = useQuery<TemplateRow[]>({
     queryKey: ["templates"],
     queryFn: async () => {
-      return ensureArray<TemplateRow>(await apiFetchJson("/templates"));
+      const res = await apiFetchJson("/templates");
+      throwIfApiFailure(res);
+      return ensureArray<TemplateRow>(res);
     },
     retry: false,
   });
@@ -55,7 +59,9 @@ export default function PlatformTemplates() {
   const firmsQuery = useQuery<Firm[]>({
     queryKey: ["platform-firms-list"],
     queryFn: async () => {
-      return ensureArray<Firm>(await apiFetchJson("/platform/firms?limit=100"));
+      const res = await apiFetchJson("/platform/firms?limit=100");
+      throwIfApiFailure(res);
+      return ensureArray<Firm>(res);
     },
     retry: false,
   });
@@ -166,7 +172,11 @@ export default function PlatformTemplates() {
       />
 
       {templatesQuery.isError ? (
-        <QueryFallback title="Templates unavailable" error={templatesQuery.error} onRetry={() => templatesQuery.refetch()} isRetrying={templatesQuery.isFetching} />
+        getApiFailureCodeFromError(templatesQuery.error) === "SUPPORT_SESSION_REQUIRED" ? (
+          <SupportSessionRequired title="Support session required" />
+        ) : (
+          <QueryFallback title="Templates unavailable" error={templatesQuery.error} onRetry={() => templatesQuery.refetch()} isRetrying={templatesQuery.isFetching} />
+        )
       ) : (
         <Card>
           <CardHeader>

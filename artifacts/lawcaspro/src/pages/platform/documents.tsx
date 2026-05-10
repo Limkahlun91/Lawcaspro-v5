@@ -21,13 +21,15 @@ const PdfMappingEditor = lazy(() => import("@/components/PdfMappingEditor"));
 import { useToast } from "@/hooks/use-toast";
 import { cn } from "@/lib/utils";
 import { QueryFallback } from "@/components/query-fallback";
-import { apiFetchBlob, apiFetchJson } from "@/lib/api-client";
+import { apiFetchBlob, apiFetchJson, apiRequest } from "@/lib/api-client";
 import { downloadBlob } from "@/lib/download";
 import { toastError } from "@/lib/toast-error";
 import { unwrapApiData } from "@/lib/api-contract";
 import { ensureArray, listItems } from "@/lib/list-items";
 import { PlatformPage, PlatformPageHeader } from "@/components/platform/page";
 import { PlatformEmptyState, PlatformLoadingState } from "@/components/platform/states";
+import { throwIfApiFailure, getApiFailureCodeFromError } from "@/lib/api-failure";
+import { SupportSessionRequired } from "@/components/support-session-required";
 
 const ALLOWED_TYPES: Record<string, string> = {
   "application/pdf": "PDF",
@@ -361,7 +363,11 @@ export default function PlatformDocuments() {
 
   const platformClausesQuery = useQuery<PlatformClauseRow[]>({
     queryKey: ["platform-clauses", clausesOpen, clauseSearch],
-    queryFn: ({ signal }) => apiFetchJson(`/platform/clauses?q=${encodeURIComponent(clauseSearch)}`, { signal }),
+    queryFn: async ({ signal }) => {
+      const res = await apiFetchJson(`/platform/clauses?q=${encodeURIComponent(clauseSearch)}`, { signal });
+      throwIfApiFailure(res);
+      return listItems<PlatformClauseRow>(res);
+    },
     enabled: clausesOpen,
     retry: false,
   });
@@ -391,7 +397,11 @@ export default function PlatformDocuments() {
 
   const foldersQuery = useQuery<SystemFolder[]>({
     queryKey: ["system-folders"],
-    queryFn: async () => listItems<SystemFolder>(await apiFetchJson("/platform/folders")),
+    queryFn: async () => {
+      const res = await apiFetchJson("/platform/folders");
+      throwIfApiFailure(res);
+      return listItems<SystemFolder>(res);
+    },
     retry: false,
   });
   const folders = foldersQuery.data ?? [];
@@ -403,6 +413,7 @@ export default function PlatformDocuments() {
         ? `/platform/documents?folderId=${selectedFolderId}`
         : "/platform/documents";
       const res = await apiFetchJson(url);
+      throwIfApiFailure(res);
       return listItems<PlatformDoc>(res);
     },
     retry: false,
@@ -412,17 +423,22 @@ export default function PlatformDocuments() {
 
   const varGroupsQuery = useQuery<DocumentVariableDefinition[]>({
     queryKey: ["platform-document-variables-ref"],
-    queryFn: async () => ensureArray<DocumentVariableDefinition>(await apiFetchJson("/platform/document-variables?active=1")),
+    queryFn: async () => {
+      const res = await apiFetchJson("/platform/document-variables?active=1");
+      throwIfApiFailure(res);
+      return ensureArray<DocumentVariableDefinition>(res);
+    },
     enabled: showVarRef,
     retry: false,
   });
 
   const platformVariablesQuery = useQuery<DocumentVariableDefinition[]>({
     queryKey: ["platform-document-variables", includeInactiveVariables],
-    queryFn: async ({ signal }) =>
-      ensureArray<DocumentVariableDefinition>(
-        await apiFetchJson(`/platform/document-variables${includeInactiveVariables ? "" : "?active=1"}`, { signal }),
-      ),
+    queryFn: async ({ signal }) => {
+      const res = await apiFetchJson(`/platform/document-variables${includeInactiveVariables ? "" : "?active=1"}`, { signal });
+      throwIfApiFailure(res);
+      return ensureArray<DocumentVariableDefinition>(res);
+    },
     enabled: variableRegistryOpen,
     retry: false,
   });
@@ -559,8 +575,9 @@ export default function PlatformDocuments() {
 
   const deleteFolderMutation = useMutation({
     mutationFn: async (folderId: number) => {
-      await apiFetchJson(`/platform/folders/${folderId}`, { method: "DELETE" });
+      await apiRequest(`/platform/folders/${folderId}`, { method: "DELETE", allowStatuses: [404] });
     },
+    retry: false,
     onSuccess: (_: any, folderId: number) => {
       queryClient.invalidateQueries({ queryKey: ["system-folders"] });
       if (selectedFolderId === folderId) setSelectedFolderId(null);
@@ -772,7 +789,11 @@ export default function PlatformDocuments() {
               </button>
 
               {foldersQuery.isError ? (
-                <QueryFallback title="Folders unavailable" error={foldersQuery.error} onRetry={() => foldersQuery.refetch()} isRetrying={foldersQuery.isFetching} />
+                getApiFailureCodeFromError(foldersQuery.error) === "SUPPORT_SESSION_REQUIRED" ? (
+                  <SupportSessionRequired title="Support session required" />
+                ) : (
+                  <QueryFallback title="Folders unavailable" error={foldersQuery.error} onRetry={() => foldersQuery.refetch()} isRetrying={foldersQuery.isFetching} />
+                )
               ) : foldersQuery.isLoading ? (
                 <PlatformLoadingState title="Loading folders..." className="border-none bg-transparent" />
               ) : (
@@ -845,7 +866,11 @@ export default function PlatformDocuments() {
               </div>
 
               {docsQuery.isError ? (
-                <QueryFallback title="Documents unavailable" error={docsQuery.error} onRetry={() => docsQuery.refetch()} isRetrying={docsQuery.isFetching} />
+                getApiFailureCodeFromError(docsQuery.error) === "SUPPORT_SESSION_REQUIRED" ? (
+                  <SupportSessionRequired title="Support session required" />
+                ) : (
+                  <QueryFallback title="Documents unavailable" error={docsQuery.error} onRetry={() => docsQuery.refetch()} isRetrying={docsQuery.isFetching} />
+                )
               ) : docsLoading ? (
                 <PlatformLoadingState title="Loading documents..." className="border-none bg-transparent" />
               ) : docs.length === 0 ? (
@@ -1879,12 +1904,16 @@ export default function PlatformDocuments() {
             </div>
 
             {platformClausesQuery.isError ? (
-              <QueryFallback title="Clauses unavailable" error={platformClausesQuery.error} onRetry={() => platformClausesQuery.refetch()} isRetrying={platformClausesQuery.isFetching} />
+              getApiFailureCodeFromError(platformClausesQuery.error) === "SUPPORT_SESSION_REQUIRED" ? (
+                <SupportSessionRequired title="Support session required" />
+              ) : (
+                <QueryFallback title="Clauses unavailable" error={platformClausesQuery.error} onRetry={() => platformClausesQuery.refetch()} isRetrying={platformClausesQuery.isFetching} />
+              )
             ) : platformClausesQuery.isLoading ? (
               <div className="text-slate-500 text-sm py-6">Loading clauses...</div>
             ) : (
               <div className="space-y-2">
-                {(platformClausesQuery.data ?? []).map((c) => (
+                {ensureArray(platformClausesQuery.data).map((c) => (
                   <div key={c.id} className="rounded border bg-white p-2">
                     <div className="flex items-start justify-between gap-2">
                       <div className="min-w-0">
@@ -1913,7 +1942,7 @@ export default function PlatformDocuments() {
                     </div>
                   </div>
                 ))}
-                {(platformClausesQuery.data ?? []).length === 0 ? <div className="text-sm text-slate-500 py-6">No clauses.</div> : null}
+                {ensureArray(platformClausesQuery.data).length === 0 ? <div className="text-sm text-slate-500 py-6">No clauses.</div> : null}
               </div>
             )}
           </div>

@@ -12,6 +12,8 @@ import { toastError } from "@/lib/toast-error";
 import { useToast } from "@/hooks/use-toast";
 import { useAuth } from "@/lib/auth-context";
 import { TemplatePdfMappingEditor } from "@/components/TemplatePdfMappingEditor";
+import { throwIfApiFailure, getApiFailureCodeFromError } from "@/lib/api-failure";
+import { SupportSessionRequired } from "@/components/support-session-required";
 
 type TemplateRow = {
   id: number;
@@ -42,7 +44,9 @@ export default function FirmTemplatesSettingsPage() {
   const templatesQuery = useQuery<TemplateRow[]>({
     queryKey: ["templates"],
     queryFn: async () => {
-      return ensureArray<TemplateRow>(await apiFetchJson("/templates"));
+      const res = await apiFetchJson("/templates");
+      throwIfApiFailure(res);
+      return ensureArray<TemplateRow>(res);
     },
     enabled: Boolean(firmId),
     retry: false,
@@ -146,7 +150,11 @@ export default function FirmTemplatesSettingsPage() {
 
         {templatesQuery.isError ? (
           <CardContent>
-            <QueryFallback title="Templates unavailable" error={templatesQuery.error} onRetry={() => templatesQuery.refetch()} isRetrying={templatesQuery.isFetching} />
+            {getApiFailureCodeFromError(templatesQuery.error) === "SUPPORT_SESSION_REQUIRED" ? (
+              <SupportSessionRequired title="Support session required" />
+            ) : (
+              <QueryFallback title="Templates unavailable" error={templatesQuery.error} onRetry={() => templatesQuery.refetch()} isRetrying={templatesQuery.isFetching} />
+            )}
           </CardContent>
         ) : (
           <CardContent className="overflow-x-auto">
@@ -242,4 +250,3 @@ export default function FirmTemplatesSettingsPage() {
     </div>
   );
 }
-
