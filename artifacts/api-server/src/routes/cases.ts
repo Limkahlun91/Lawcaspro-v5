@@ -22,6 +22,7 @@ import {
   GetCaseWorkflowParams, UpdateWorkflowStepParams, UpdateWorkflowStepBody,
   GetCaseNotesParams, CreateCaseNoteParams, CreateCaseNoteBody
 } from "@workspace/api-zod";
+import { z } from "zod/v4";
 import { requireAuth, requireFirmUser, requirePermission, writeAuditLog, type AuthRequest } from "../lib/auth.js";
 import { buildWorkflowSteps } from "../lib/workflow.js";
 import { KEY_DATE_FIELD_TO_STEP_KEY, WORKFLOW_STEP_KEY_TO_KEY_DATE_FIELD, type KeyDateField } from "../lib/keyDatesWorkflow.js";
@@ -1925,7 +1926,29 @@ router.post("/cases", requireAuthHandler, requireFirmUserHandler, requirePermiss
       res.status(500).json({ error: "Internal Server Error" });
       return;
     }
-    const parsed = CreateCaseBody.safeParse(req.body);
+    const createCaseSchema = z.object({
+      projectId: z.number(),
+      developerId: z.number().optional(),
+      purchaseMode: z.string(),
+      titleType: z.string(),
+      spaPrice: z.number().optional(),
+      assignedLawyerId: z.number(),
+      assignedClerkId: z.number().optional(),
+      purchaserIds: z.array(z.number()).optional(),
+      purchasers: z.array(z.object({
+        name: z.string(),
+        ic: z.string().nullish(),
+      })).optional(),
+    }).superRefine((v, ctx) => {
+      const purchaserIds = v.purchaserIds ?? [];
+      const hasPurchaserIds = purchaserIds.length > 0;
+      const hasInlinePurchasers = Array.isArray(v.purchasers) && v.purchasers.some((p) => (p?.name ?? "").trim().length > 0);
+      if (!hasPurchaserIds && !hasInlinePurchasers) {
+        ctx.addIssue({ code: "custom", path: ["purchasers"], message: "At least one purchaser name is required" });
+      }
+    });
+
+    const parsed = createCaseSchema.safeParse(req.body);
     if (!parsed.success) {
       res.status(400).json({ error: "Validation failed", fields: parsed.error.flatten().fieldErrors });
       return;
@@ -1957,6 +1980,23 @@ router.post("/cases", requireAuthHandler, requireFirmUserHandler, requirePermiss
       return;
     }
     const developerId = project.developerId;
+
+    const usersToCheck = [assignedLawyerId, ...(assignedClerkId ? [assignedClerkId] : [])].filter((x): x is number => Number.isFinite(x));
+    if (usersToCheck.length > 0) {
+      const found = await r
+        .select({ id: usersTable.id })
+        .from(usersTable)
+        .where(and(eq(usersTable.firmId, req.firmId!), inArray(usersTable.id, usersToCheck)));
+      const foundIds = new Set(found.map((u) => u.id));
+      if (!foundIds.has(assignedLawyerId)) {
+        res.status(400).json({ error: "Assigned lawyer not found" });
+        return;
+      }
+      if (assignedClerkId && !foundIds.has(assignedClerkId)) {
+        res.status(400).json({ error: "Assigned clerk not found" });
+        return;
+      }
+    }
 
     // ── 2. Resolve purchaser client IDs with dedupe ───────────────────────────
     let resolvedPurchaserIds: number[] = purchaserIds ?? [];

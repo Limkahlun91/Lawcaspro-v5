@@ -46,33 +46,62 @@ export type WorkflowStepSyncChange = {
 };
 
 export async function ensureCaseWorkflowSteps(r: RlsDb, firmId: number, caseId: number): Promise<void> {
-  const [caseRow] = await r
-    .select({ purchaseMode: casesTable.purchaseMode, titleType: casesTable.titleType })
-    .from(casesTable)
-    .where(and(eq(casesTable.id, caseId), eq(casesTable.firmId, firmId)));
+  let caseRow: { purchaseMode: string | null; titleType: string | null } | undefined;
+  try {
+    [caseRow] = await r
+      .select({ purchaseMode: casesTable.purchaseMode, titleType: casesTable.titleType })
+      .from(casesTable)
+      .where(and(eq(casesTable.id, caseId), eq(casesTable.firmId, firmId)));
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err ?? "");
+    const low = msg.toLowerCase();
+    if (low.includes("does not exist") || low.includes("undefined_table") || low.includes("unrecognized configuration parameter")) {
+      return;
+    }
+    throw err;
+  }
   if (!caseRow) return;
 
   const purchaseMode = String(caseRow.purchaseMode || "").trim().toLowerCase();
   const titleType = normalizeCaseTitleType(caseRow.titleType);
   const defs = buildWorkflowSteps(purchaseMode, titleType);
-  const existing = await r
-    .select({ stepKey: caseWorkflowStepsTable.stepKey })
-    .from(caseWorkflowStepsTable)
-    .where(eq(caseWorkflowStepsTable.caseId, caseId));
+  let existing: Array<{ stepKey: string }> = [];
+  try {
+    existing = await r
+      .select({ stepKey: caseWorkflowStepsTable.stepKey })
+      .from(caseWorkflowStepsTable)
+      .where(eq(caseWorkflowStepsTable.caseId, caseId));
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err ?? "");
+    const low = msg.toLowerCase();
+    if (low.includes("does not exist") || low.includes("undefined_table") || low.includes("unrecognized configuration parameter")) {
+      return;
+    }
+    throw err;
+  }
   const existingKeys = new Set(existing.map((x) => x.stepKey));
   const missing = defs.filter((d) => !existingKeys.has(d.stepKey));
   if (missing.length === 0) return;
 
-  await r.insert(caseWorkflowStepsTable).values(missing.map((d) => ({
-    caseId,
-    stepKey: d.stepKey,
-    stepName: d.stepName,
-    stepOrder: d.stepOrder,
-    pathType: d.pathType,
-    status: "pending",
-    createdAt: new Date(),
-    updatedAt: new Date(),
-  })));
+  try {
+    await r.insert(caseWorkflowStepsTable).values(missing.map((d) => ({
+      caseId,
+      stepKey: d.stepKey,
+      stepName: d.stepName,
+      stepOrder: d.stepOrder,
+      pathType: d.pathType,
+      status: "pending",
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    })));
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err ?? "");
+    const low = msg.toLowerCase();
+    if (low.includes("does not exist") || low.includes("undefined_table") || low.includes("unrecognized configuration parameter")) {
+      return;
+    }
+    throw err;
+  }
 }
 
 export async function syncWorkflowStepsFromCaseState(
