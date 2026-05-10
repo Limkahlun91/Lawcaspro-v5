@@ -113,7 +113,13 @@ export default function PdfMappingEditor({ docId, docName, pdfUrl, onClose }: Pr
 
   const loadVarGroups = async () => {
     try {
-      const data = await apiFetchJson<unknown>("/document-variables");
+      const data = await (async () => {
+        try {
+          return await apiFetchJson<unknown>("/platform/document-variables?active=1");
+        } catch {
+          return await apiFetchJson<unknown>("/document-variables?active=1");
+        }
+      })();
       const isLegacyGroups = (v: unknown): v is LegacyVarGroup[] => {
         if (!Array.isArray(v)) return false;
         const first = v[0] as any;

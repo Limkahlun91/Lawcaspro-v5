@@ -162,7 +162,13 @@ export function TemplatePdfMappingEditor(props: Props) {
 
   const loadVarGroups = async () => {
     try {
-      const data = await apiFetchJson<unknown>("/document-variables?active=1");
+      const data = await (async () => {
+        try {
+          return await apiFetchJson<unknown>("/document-variables?active=1");
+        } catch {
+          return await apiFetchJson<unknown>("/platform/document-variables?active=1");
+        }
+      })();
       if (isLegacyGroups(data)) {
         setVarGroups(data.map((g) => ({ group: g.group, vars: ensureArray(g.vars).map((v) => ({ key: v.key, label: v.label })) })));
         return;
