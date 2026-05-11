@@ -1,5 +1,5 @@
 import type { TemplateBinding, VariableDefinition } from "./documentVariables";
-import { listDocumentVariables, resolveVariablesForTemplate } from "./documentVariables";
+import { listDocumentVariablesByKeys, resolveVariablesForTemplate } from "./documentVariables";
 import { getFirmTemplateBindings, getPlatformDocumentBindings } from "./documentBindings";
 
 type DbConn = { execute: (q: any) => any };
@@ -25,11 +25,15 @@ export type PreviewResult = {
 };
 
 export async function runDocumentPreview(r: DbConn, input: PreviewInput): Promise<PreviewResult> {
-  const registry = await listDocumentVariables(r, { active: true });
   const bindings =
     input.templateRef.kind === "firm"
       ? await getFirmTemplateBindings(r, input.firmId, input.templateRef.templateId)
       : await getPlatformDocumentBindings(r, input.firmId, input.templateRef.documentId);
+
+  const keys = new Set<string>();
+  for (const p of input.placeholders ?? []) if (typeof p === "string" && p.trim()) keys.add(p.trim());
+  for (const b of bindings ?? []) if (typeof b?.variableKey === "string" && b.variableKey.trim()) keys.add(b.variableKey.trim());
+  const registry = await listDocumentVariablesByKeys(r, Array.from(keys), { active: true });
 
   const resolved = resolveVariablesForTemplate({
     registry,

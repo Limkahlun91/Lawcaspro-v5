@@ -107,6 +107,43 @@ export async function listDocumentVariables(r: DbConn, filters: { category?: str
   }));
 }
 
+export async function listDocumentVariablesByKeys(
+  r: DbConn,
+  keys: string[],
+  filters: { active?: boolean } = {}
+): Promise<VariableDefinition[]> {
+  const cleaned = Array.from(new Set(keys.filter((k) => typeof k === "string" && Boolean(k.trim())).map((k) => k.trim())));
+  if (cleaned.length === 0) return [];
+  const where: any[] = [sql`key = ANY(${cleaned}::text[])`];
+  if (typeof filters.active === "boolean") where.push(sql`is_active = ${filters.active}`);
+  const rows = await queryRows(
+    r,
+    sql`
+      SELECT
+        id, key, label, description, category, value_type,
+        source_path, formatter, example_value,
+        is_system, is_active, sort_order
+      FROM document_variable_definitions
+      WHERE ${sql.join(where, sql` AND `)}
+      ORDER BY category ASC, sort_order ASC, key ASC
+    `
+  );
+  return rows.map((x) => ({
+    id: Number(x.id),
+    key: String(x.key),
+    label: String(x.label),
+    description: typeof x.description === "string" ? x.description : null,
+    category: String(x.category) as VariableCategory,
+    valueType: String(x.value_type) as VariableValueType,
+    sourcePath: typeof x.source_path === "string" ? x.source_path : null,
+    formatter: typeof x.formatter === "string" ? x.formatter : null,
+    exampleValue: typeof x.example_value === "string" ? x.example_value : null,
+    isSystem: Boolean(x.is_system),
+    isActive: Boolean(x.is_active),
+    sortOrder: typeof x.sort_order === "number" ? x.sort_order : Number(x.sort_order ?? 0),
+  }));
+}
+
 function asRecord(v: unknown): Record<string, unknown> | null {
   return v && typeof v === "object" ? (v as Record<string, unknown>) : null;
 }

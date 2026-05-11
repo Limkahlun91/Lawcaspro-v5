@@ -25,7 +25,7 @@ import CaseTimeTab from "./components/CaseTimeTab";
 import CaseComplianceTab from "./components/CaseComplianceTab";
 import { QueryFallback } from "@/components/query-fallback";
 import { toastError } from "@/lib/toast-error";
-import { apiFetchBlob, apiFetchJson } from "@/lib/api-client";
+import { apiFetchBlob, apiFetchJson, apiRequest } from "@/lib/api-client";
 import { DateOnlyInput, formatYmdToDmy, normalizeDateOnlyFromApi } from "@/components/date-only-input";
 import { downloadBlob } from "@/lib/download";
 import { useAuth } from "@/lib/auth-context";
@@ -128,25 +128,26 @@ export default function CaseDetail() {
     onError: (err) => toastError(toast, err, "Save failed"),
   });
   const printMutation = useMutation({
-    mutationFn: (payload: { printKey: string }) =>
-      apiFetchJson<{ id: number; file_name?: string; name?: string }>(`/cases/${caseId}/documents/print`, {
+    mutationFn: async (payload: { printKey: string }) => {
+      const res = await apiRequest(`/cases/${caseId}/documents/print`, {
         method: "POST",
         timeoutMs: 60000,
         body: JSON.stringify(payload),
-      }),
-    onSuccess: async (doc) => {
+      });
+      const blob = await res.blob();
+      const cd = res.headers.get("content-disposition") ?? "";
+      const m = /filename\*=UTF-8''([^;]+)|filename=\"?([^\";]+)\"?/i.exec(cd);
+      const fileNameRaw = m?.[1] ?? m?.[2] ?? "download.pdf";
+      const fileName = decodeURIComponent(String(fileNameRaw).trim());
+      const docId = Number(res.headers.get("x-case-document-id") ?? NaN);
+      return { blob, fileName, docId };
+    },
+    onSuccess: async ({ blob, fileName, docId }) => {
       queryClient.invalidateQueries({ queryKey: ["case-documents", caseId] });
-      const id = doc && typeof doc === "object" && typeof doc.id === "number" ? doc.id : null;
-      if (!id) {
-        toast({ title: "Document generated" });
-        return;
+      if (Number.isFinite(docId)) {
+        queryClient.invalidateQueries({ queryKey: ["case-documents", caseId] });
       }
-      const blob = await apiFetchBlob(`/cases/${caseId}/documents/${id}/download`, { timeoutMs: 120000 });
-      const filename =
-        (doc.file_name && String(doc.file_name).trim()) ? String(doc.file_name)
-          : (doc.name && String(doc.name).trim()) ? `${String(doc.name)}.docx`
-            : "download.docx";
-      downloadBlob(blob, filename);
+      downloadBlob(blob, fileName);
       toast({ title: "Download started" });
     },
     onError: (err) => toastError(toast, err, "Print failed"),

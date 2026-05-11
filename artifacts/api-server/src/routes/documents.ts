@@ -7355,8 +7355,21 @@ router.post("/cases/:caseId/documents/print", requireAuth, requireFirmUser, requ
     if (!templateObjectPath) {
       fail(404, "TEMPLATE_FILE_MISSING", "Template file missing");
     }
+    const fileContents = await downloadPrivateObjectBytes(templateObjectPath);
     const placeholders = placeholdersFromVariablesSnapshot((v as any)?.variables_snapshot);
-    const input = placeholders.length > 0 ? fillMissingScalarsForRender(placeholders, context as any) : (context as any);
+    const storedOverrides = await getCaseVariableOverrides(r, cache, req.firmId!, caseId);
+    const effectivePlaceholders =
+      placeholders.length > 0
+        ? placeholders
+        : detectDocxVariables(fileContents);
+    const preview = await runDocumentPreview(r, {
+      firmId: req.firmId!,
+      caseContext: context as any,
+      templateRef: { kind: "firm", templateId },
+      placeholders: effectivePlaceholders,
+      overrides: storedOverrides,
+    });
+    const input = fillMissingScalarsForRender(placeholders, preview.usedMode === "bindings" ? preview.resolvedVariables : (context as any));
 
     const templateDocType = template && typeof template === "object" && "document_type" in template ? String((template as any).document_type) : "other";
     const isLetterLike = isLetterheadApplicableDocumentType(templateDocType);
@@ -7410,10 +7423,7 @@ router.post("/cases/:caseId/documents/print", requireAuth, requireFirmUser, requ
       }
     })() : Promise.resolve(null);
 
-    const [fileContents, letterheadBytes] = await Promise.all([
-      downloadPrivateObjectBytes(templateObjectPath),
-      letterheadBytesPromise,
-    ]);
+    const letterheadBytes = await letterheadBytesPromise;
 
     const zip = new PizZip(fileContents);
     const doc = new Docxtemplater(zip, { paragraphLoop: true, linebreaks: true });
@@ -7438,14 +7448,15 @@ router.post("/cases/:caseId/documents/print", requireAuth, requireFirmUser, requ
       });
     }
 
-    const normalizedPath = newGeneratedDocObjectPath(req.firmId!, caseId, "docx");
+    buffer = await convertDocxToPdf(buffer);
+    const normalizedPath = newGeneratedDocObjectPath(req.firmId!, caseId, "pdf");
     await supabaseStorage.uploadPrivateObject({
       objectPath: normalizedPath,
       fileBytes: buffer,
-      contentType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      contentType: "application/pdf",
     });
     const nameToUse = documentName || `${cfg.label} - ${context.reference_no}`;
-    const fileName = `${nameToUse.replace(/[^a-zA-Z0-9 \-_]/g, "_")}.docx`;
+    const fileName = `${nameToUse.replace(/[^a-zA-Z0-9 \-_]/g, "_")}.pdf`;
 
     const docRows = await queryRows(r, sql`
       INSERT INTO case_documents (case_id, firm_id, template_id, name, document_type, status, object_path, file_name, generated_by)
@@ -7460,7 +7471,10 @@ router.post("/cases/:caseId/documents/print", requireAuth, requireFirmUser, requ
     await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.case.print", entityType: "case_document", entityId: createdId, detail: `caseId=${caseId} printKey=${printKey} templateId=${(template as any).id} name=${nameToUse} letterhead=${isLetterLike ? (usedLetterheadId ?? "default") : "n/a"}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
     await finishGenerationRunSuccess(r, req.firmId!, runId, createdId ?? null, context, null, null);
     await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.generation.succeeded", entityType: "document_generation_run", entityId: runId, detail: `caseId=${caseId} templateSource=firm templateId=${templateId} renderMode=print`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
-    res.status(201).json({ ...(docRows[0] as any), ...(warnings.length ? { warnings } : {}) });
+    if (createdId) res.setHeader("x-case-document-id", String(createdId));
+    res.setHeader("Content-Disposition", contentDispositionAttachment(fileName));
+    res.setHeader("Content-Type", "application/pdf");
+    res.status(201).send(buffer);
   } catch (err: unknown) {
     const cfgErr = getSupabaseStorageConfigError(err);
     if (cfgErr) {

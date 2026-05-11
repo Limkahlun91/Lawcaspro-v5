@@ -788,9 +788,9 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
         body: JSON.stringify({ overrides: outgoing }),
       });
       await qc.invalidateQueries({ queryKey: ["case-documents-variable-overrides", caseId] });
-      toast({ title: "Saved to case", description: `${Object.keys(outgoing).length} variables` });
+      toast({ title: "Saved & updated", description: `${Object.keys(outgoing).length} variables` });
     } catch (err) {
-      toastError(toast, err, "Save to case failed");
+      toastError(toast, err, "Save & update failed");
     }
   }
 
@@ -831,8 +831,13 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
           : { masterDocId: Number(it.templateId), letterheadId: letterheadIdToSend, bypassApplicability, clauses: selectedClauses, overrides };
 
         const res = await apiRequest(endpoint, { method: "POST", body: JSON.stringify(payload), timeoutMs: 60000 });
+        const blob = await res.blob();
+        const cd = res.headers.get("content-disposition") ?? "";
+        const m = /filename\*=UTF-8''([^;]+)|filename=\"?([^\";]+)\"?/i.exec(cd);
+        const fileNameRaw = m?.[1] ?? m?.[2] ?? `case-${caseId}-document-${i + 1}.pdf`;
+        const fileName = decodeURIComponent(String(fileNameRaw).trim());
+        downloadBlob(blob, fileName);
         const docId = Number(res.headers.get("x-case-document-id") ?? NaN);
-        await res.blob();
         if (Number.isFinite(docId)) ids.push(docId);
       }
       setBatchGeneratedPdfDocIds(ids);
@@ -1175,6 +1180,16 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
 
   return (
     <div className="space-y-6">
+      {batchLoopGenerating ? (
+        <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
+          <div className="text-sm font-medium text-slate-900">
+            正在生成 {batchLoopProgress.current}/{batchLoopProgress.total} 份文件...
+          </div>
+          <div className="mt-2">
+            <Progress value={batchLoopProgress.total ? (batchLoopProgress.current / batchLoopProgress.total) * 100 : 5} />
+          </div>
+        </div>
+      ) : null}
       <Card>
         <CardHeader className="flex flex-row items-center justify-between pb-4">
           <CardTitle>Case Documents</CardTitle>
@@ -2168,14 +2183,14 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
                           body: JSON.stringify({ overrides: outgoing }),
                         });
                         await qc.invalidateQueries({ queryKey: ["case-documents-variable-overrides", caseId] });
-                        toast({ title: "Saved to case", description: `${Object.keys(outgoing).length} variables` });
+                        toast({ title: "Saved & updated", description: `${Object.keys(outgoing).length} variables` });
                       } catch (err) {
-                        toastError(toast, err, "Save to case failed");
+                        toastError(toast, err, "Save & update failed");
                       }
                     }}
                     disabled={variableChecklistGenerating || isGenerating}
                   >
-                    Save to Case
+                    Save & Update All
                   </Button>
                   <Button
                     onClick={async () => {
@@ -2358,7 +2373,7 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
                     Close
                   </Button>
                   <Button variant="outline" onClick={saveBatchOverridesToCase} disabled={batchLoopGenerating || batchMergePrinting}>
-                    Save to Case
+                    Save & Update All
                   </Button>
                   <Button onClick={runBatchGeneratePdf} disabled={!canGenerate || batchLoopGenerating || batchMergePrinting || batchVariableChecklistItems.length === 0}>
                     Batch Generate (PDF)
