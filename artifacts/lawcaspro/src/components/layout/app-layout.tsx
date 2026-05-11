@@ -57,8 +57,8 @@ export function AppLayout({ children }: { children: ReactNode }) {
     <div className="flex min-h-screen w-full bg-slate-50 overflow-x-hidden">
       <div className="w-64 bg-slate-900 text-slate-100 flex flex-col shrink-0 sticky top-0 h-screen overflow-y-auto">
         <div className="p-6 border-b border-slate-800">
-          <div className="flex items-center gap-2 font-bold text-xl text-amber-500">
-            <div className="w-6 h-6 bg-amber-500 rounded-sm"></div>
+          <div className="flex items-center gap-2 font-bold text-xl text-blue-300">
+            <div className="w-6 h-6 bg-blue-500 rounded-sm"></div>
             Lawcaspro
           </div>
           <div className="mt-4">
@@ -74,13 +74,13 @@ export function AppLayout({ children }: { children: ReactNode }) {
               <Link key={item.href} href={item.href}>
                 <div className={`flex items-center gap-3 px-3 py-2.5 rounded-md text-sm font-medium transition-colors ${
                   isActive 
-                    ? "bg-amber-500/10 text-amber-500" 
+                    ? "bg-blue-500/10 text-blue-200" 
                     : "text-slate-300 hover:bg-slate-800 hover:text-slate-100 cursor-pointer"
                 }`}>
                   <item.icon className="w-4 h-4 shrink-0" />
                   <span className="truncate flex-1">{item.label}</span>
                   {item.label === "Communications" && unreadCount > 0 && (
-                    <span className="inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 text-[10px] font-bold text-white bg-amber-500 rounded-full">
+                    <span className="inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 text-[10px] font-bold text-white bg-blue-500 rounded-full">
                       {unreadCount}
                     </span>
                   )}

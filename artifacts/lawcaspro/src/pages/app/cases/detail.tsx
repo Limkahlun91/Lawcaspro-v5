@@ -1,4 +1,4 @@
-import { useParams, useLocation, useSearch } from "wouter";
+import { Link, useParams, useLocation, useSearch } from "wouter";
 import { 
   useGetCase, getGetCaseQueryKey, 
   useGetCaseWorkflow, getGetCaseWorkflowQueryKey, 
@@ -8,7 +8,7 @@ import {
 } from "@workspace/api-client-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { ArrowLeft, CheckCircle2, Clock, User, Building2, MapPin, Tag, Receipt, Printer, Upload, Download, Trash2, Plus, X } from "lucide-react";
+import { ArrowLeft, CheckCircle2, Clock, User, Building2, MapPin, Tag, Receipt, Printer, Upload, Download, Trash2, Plus, X, MoreHorizontal } from "lucide-react";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useToast } from "@/hooks/use-toast";
@@ -17,6 +17,8 @@ import { Textarea } from "@/components/ui/textarea";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
+import { Breadcrumb, BreadcrumbItem, BreadcrumbLink, BreadcrumbList, BreadcrumbPage, BreadcrumbSeparator } from "@/components/ui/breadcrumb";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import CaseDocumentsTab from "./components/CaseDocumentsTab";
 import CaseBillingTab from "./components/CaseBillingTab";
 import CaseCommunicationsTab from "./components/CaseCommunicationsTab";
@@ -828,7 +830,7 @@ export default function CaseDetail() {
     const statusLabel = showStatus ? printStatusLabel(st) : "";
 
     return (
-      <div className="rounded-lg border border-slate-200 bg-white p-3">
+      <div className="group rounded-lg border border-slate-200 bg-white p-3">
         <div className="flex items-center justify-between gap-2">
           <Label className="text-xs text-slate-600">{props.label}</Label>
           {showStatus && (
@@ -853,16 +855,18 @@ export default function CaseDetail() {
             />
           )}
           {showPrinter && (
-            <Button
-              size="icon"
-              variant={canPrint(printerKey, dateVal) ? "default" : "outline"}
-              className={canPrint(printerKey, dateVal) ? "bg-slate-900 hover:bg-slate-800" : undefined}
-              title={printTitle(printerKey, dateVal)}
-              onClick={() => printMutation.mutate({ printKey: printerKey })}
-              disabled={printMutation.isPending || !canPrint(printerKey, dateVal)}
-            >
-              <Printer className="w-4 h-4" />
-            </Button>
+            <div className="opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity">
+              <Button
+                size="icon"
+                variant={canPrint(printerKey, dateVal) ? "default" : "outline"}
+                className={canPrint(printerKey, dateVal) ? "bg-slate-900 hover:bg-slate-800" : undefined}
+                title={printTitle(printerKey, dateVal)}
+                onClick={() => printMutation.mutate({ printKey: printerKey })}
+                disabled={printMutation.isPending || !canPrint(printerKey, dateVal)}
+              >
+                <Printer className="w-4 h-4" />
+              </Button>
+            </div>
           )}
         </div>
       </div>
@@ -889,7 +893,7 @@ export default function CaseDetail() {
     const statusLabel = showStatus ? printStatusLabel(st) : "";
 
     return (
-      <div className="rounded-lg border border-slate-200 bg-white p-3">
+      <div className="group rounded-lg border border-slate-200 bg-white p-3">
         <div className="flex items-center justify-between gap-2">
           <Label className="text-xs text-slate-600">{props.label}</Label>
           <div className="flex items-center gap-1">
@@ -919,23 +923,25 @@ export default function CaseDetail() {
             onChangeYmd={(v) => setKeyDatesDraft((d) => ({ ...d, [props.dateKey]: v }))}
           />
           {showPrinter && (
-            <Button
-              size="icon"
-              variant={canPrint(printerKey, value) ? "default" : "outline"}
-              className={canPrint(printerKey, value) ? "bg-slate-900 hover:bg-slate-800" : undefined}
-              title={printTitle(printerKey, value)}
-              onClick={() => printMutation.mutate({ printKey: printerKey })}
-              disabled={printMutation.isPending || !canPrint(printerKey, value)}
-            >
-              <Printer className="w-4 h-4" />
-            </Button>
+            <div className="opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity">
+              <Button
+                size="icon"
+                variant={canPrint(printerKey, value) ? "default" : "outline"}
+                className={canPrint(printerKey, value) ? "bg-slate-900 hover:bg-slate-800" : undefined}
+                title={printTitle(printerKey, value)}
+                onClick={() => printMutation.mutate({ printKey: printerKey })}
+                disabled={printMutation.isPending || !canPrint(printerKey, value)}
+              >
+                <Printer className="w-4 h-4" />
+              </Button>
+            </div>
           )}
         </div>
         <div className="mt-2 flex items-center justify-between gap-2 min-w-0">
           <div className="text-xs text-slate-600 truncate min-w-0" title={doc?.fileName ?? "No file uploaded"}>
             {doc ? doc.fileName : "No file uploaded"}
           </div>
-          <div className="flex items-center gap-1 shrink-0">
+          <div className="flex items-center gap-1 shrink-0 opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity">
             {doc ? (
               <>
                 <Button
@@ -1048,9 +1054,30 @@ export default function CaseDetail() {
             <ArrowLeft className="w-4 h-4" />
           </Button>
           <div className="min-w-0">
+            <Breadcrumb className="mb-1">
+              <BreadcrumbList>
+                <BreadcrumbItem>
+                  <BreadcrumbLink asChild>
+                    <Link href={returnTo}>Cases</Link>
+                  </BreadcrumbLink>
+                </BreadcrumbItem>
+                <BreadcrumbSeparator />
+                <BreadcrumbItem>
+                  <BreadcrumbLink asChild>
+                    <Link href={`/app/projects/${String((caseInfo as any)?.projectId ?? "")}`}>
+                      {String((caseInfo as any)?.projectName ?? "Project")}
+                    </Link>
+                  </BreadcrumbLink>
+                </BreadcrumbItem>
+                <BreadcrumbSeparator />
+                <BreadcrumbItem>
+                  <BreadcrumbPage>{String((caseInfo as any).referenceNo ?? "")}</BreadcrumbPage>
+                </BreadcrumbItem>
+              </BreadcrumbList>
+            </Breadcrumb>
             <div className="flex flex-wrap items-center gap-3">
               <h1 className="text-3xl font-bold text-slate-900 tracking-tight break-words">{String((caseInfo as any).referenceNo ?? "")}</h1>
-              <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-bold uppercase tracking-wider bg-amber-100 text-amber-800">
+              <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-bold uppercase tracking-wider bg-slate-100 text-slate-700 border border-slate-200">
                 {String((caseInfo as any).status ?? "").replace(/_/g, " ")}
               </span>
             </div>
@@ -1059,28 +1086,41 @@ export default function CaseDetail() {
             </p>
           </div>
         </div>
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={() => {
-            const purchaserNames = safePurchasers
-              .map((p) => (p as any)?.clientName)
-              .filter(Boolean)
-              .join(", ");
-            const params = new URLSearchParams();
-            params.set("caseId", String((caseInfo as any).id ?? ""));
-            params.set("ref", String((caseInfo as any).referenceNo ?? ""));
-            if (purchaserNames) params.set("client", purchaserNames);
-            if ((caseInfo as any).spaPrice) params.set("price", String((caseInfo as any).spaPrice));
-            const propDesc = [String((caseInfo as any).projectName ?? ""), String((caseInfo as any).developerName ?? "")].filter((x) => x.trim()).join(" • ");
-            if (propDesc) params.set("property", propDesc);
-            setLocation(`/app/quotations/new?${params.toString()}`);
-          }}
-          className="text-amber-600 border-amber-300 hover:bg-amber-50"
-        >
-          <Receipt className="w-4 h-4 mr-2" />
-          Generate Quotation
-        </Button>
+        <div className="flex items-center gap-2">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => {
+              const purchaserNames = safePurchasers
+                .map((p) => (p as any)?.clientName)
+                .filter(Boolean)
+                .join(", ");
+              const params = new URLSearchParams();
+              params.set("caseId", String((caseInfo as any).id ?? ""));
+              params.set("ref", String((caseInfo as any).referenceNo ?? ""));
+              if (purchaserNames) params.set("client", purchaserNames);
+              if ((caseInfo as any).spaPrice) params.set("price", String((caseInfo as any).spaPrice));
+              const propDesc = [String((caseInfo as any).projectName ?? ""), String((caseInfo as any).developerName ?? "")].filter((x) => x.trim()).join(" • ");
+              if (propDesc) params.set("property", propDesc);
+              setLocation(`/app/quotations/new?${params.toString()}`);
+            }}
+          >
+            <Receipt className="w-4 h-4 mr-2" />
+            Generate Quotation
+          </Button>
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button variant="outline" size="icon" aria-label="More actions">
+                <MoreHorizontal className="w-4 h-4" />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end">
+              <DropdownMenuItem onClick={() => setLocation("/app/documents?tab=firm")}>
+                Configure Templates
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+        </div>
       </div>
 
       {!progressQuery.isError && Array.isArray(progressQuery.data?.sections) && progressQuery.data.sections.length > 0 && (
@@ -1186,11 +1226,11 @@ export default function CaseDetail() {
           </div>
 
           <Card>
-            <CardHeader className="flex flex-row items-center justify-between">
+            <CardHeader>
               <div className="space-y-1">
                 <CardTitle>Key Dates & Milestones</CardTitle>
                 <div className="flex flex-wrap items-center gap-2 text-xs text-slate-600">
-                  <Badge variant="outline" className="border-amber-200 text-amber-800">SPA: {spaStatus}</Badge>
+                  <Badge variant="outline" className="border-slate-200 text-slate-700">SPA: {spaStatus}</Badge>
                   <Badge variant="outline" className="border-slate-200 text-slate-700">Loan: {loanStatus}</Badge>
                   <Badge variant="outline" className={templateIssuesCount ? "border-red-200 text-red-700" : "border-emerald-200 text-emerald-700"}>
                     Print templates: {templateIssuesCount ? `${templateIssuesCount} issue(s)` : "All ready"}
@@ -1209,15 +1249,6 @@ export default function CaseDetail() {
                   </Badge>
                 </div>
               </div>
-              <div className="flex items-center gap-2">
-                <Button
-                  size="sm"
-                  variant="outline"
-                  onClick={() => setLocation("/app/documents?tab=firm")}
-                >
-                  Configure Templates
-                </Button>
-              </div>
             </CardHeader>
             <CardContent>
               {keyDatesQuery.isError ? (
@@ -1226,16 +1257,16 @@ export default function CaseDetail() {
               <Tabs value={milestoneTab} onValueChange={(v) => setMilestoneTab(v as "spa" | "loan" | "bank" | "mot")} className="w-full">
                 <TabsList className="grid w-full grid-cols-2 md:grid-cols-4 bg-slate-100 p-1">
                   <TabsTrigger value="spa">
-                    <span className="flex items-center gap-1">SPA{dirtySpa && <span className="h-1.5 w-1.5 rounded-full bg-amber-500" />}</span>
+                    <span className="flex items-center gap-1">SPA{dirtySpa && <span className="h-1.5 w-1.5 rounded-full bg-slate-600" />}</span>
                   </TabsTrigger>
                   <TabsTrigger value="loan">
-                    <span className="flex items-center gap-1">Loan{dirtyLoan && <span className="h-1.5 w-1.5 rounded-full bg-amber-500" />}</span>
+                    <span className="flex items-center gap-1">Loan{dirtyLoan && <span className="h-1.5 w-1.5 rounded-full bg-slate-600" />}</span>
                   </TabsTrigger>
                   <TabsTrigger value="bank">
-                    <span className="flex items-center gap-1">Bank / LU / NOA{dirtyBank && <span className="h-1.5 w-1.5 rounded-full bg-amber-500" />}</span>
+                    <span className="flex items-center gap-1">Bank / LU / NOA{dirtyBank && <span className="h-1.5 w-1.5 rounded-full bg-slate-600" />}</span>
                   </TabsTrigger>
                   <TabsTrigger value="mot">
-                    <span className="flex items-center gap-1">MOT / Completion{dirtyMot && <span className="h-1.5 w-1.5 rounded-full bg-amber-500" />}</span>
+                    <span className="flex items-center gap-1">MOT / Completion{dirtyMot && <span className="h-1.5 w-1.5 rounded-full bg-slate-600" />}</span>
                   </TabsTrigger>
                 </TabsList>
 

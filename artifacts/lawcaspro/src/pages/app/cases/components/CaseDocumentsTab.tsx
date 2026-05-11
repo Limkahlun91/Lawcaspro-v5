@@ -2460,7 +2460,7 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
 
             <div className="flex-1 min-h-0 overflow-y-auto rounded-lg border border-slate-200 bg-white">
               {selectedClauses.length > 0 ? (
-                <div className="m-3 rounded border border-amber-200 bg-amber-50 p-2 text-xs text-amber-900">
+                <div className="m-3 rounded border border-slate-200 bg-slate-50 p-2 text-xs text-slate-700">
                   Clauses selected. Use Preview to confirm insertion target before generating.
                 </div>
               ) : null}
@@ -2494,9 +2494,25 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
                               : !ready
                                 ? (it.readiness?.missing ?? []).map((m) => m.message).filter(Boolean).slice(0, 3).join(", ")
                                 : "";
+                            const statusLabel =
+                              it.applicability?.status === "warning"
+                                ? "Warning"
+                                : !applicable
+                                  ? "Blocked"
+                                  : ready
+                                    ? "Ready"
+                                    : "Incomplete";
+                            const statusDotClass =
+                              it.applicability?.status === "warning"
+                                ? "bg-sky-600"
+                                : !applicable
+                                  ? "bg-rose-600"
+                                  : ready
+                                    ? "bg-emerald-600"
+                                    : "bg-slate-400";
                             return (
                               <div key={`${it.source}-${it.templateId}`} className="px-3 py-2">
-                                <div className="grid grid-cols-[minmax(0,1fr)_minmax(0,320px)_auto] items-center gap-3">
+                                <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_minmax(0,320px)_auto] items-start lg:items-center gap-2 lg:gap-3">
                                   <div className="min-w-0">
                                     <div className="text-sm font-medium text-slate-900 truncate" title={it.name}>{it.name}</div>
                                     <div className="mt-1 text-xs text-slate-600 truncate">
@@ -2505,17 +2521,13 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
                                     </div>
                                   </div>
                                   <div className="min-w-0">
-                                    <div className="flex items-center gap-2 flex-wrap justify-start">
-                                      <span className={cn("text-[10px] px-1.5 py-0.5 rounded font-medium", it.applicability?.status === "warning" ? "bg-amber-50 text-amber-800" : applicable ? "bg-emerald-50 text-emerald-700" : "bg-slate-100 text-slate-500")}>
-                                        {it.applicability?.status === "warning" ? "Warning" : overridable ? "Override" : applicable ? "Applicable" : "Not applicable"}
-                                      </span>
-                                      <span className={cn("text-[10px] px-1.5 py-0.5 rounded font-medium", ready ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-800")}>
-                                        {ready ? "Ready" : (it.readiness?.status || "Incomplete")}
-                                      </span>
+                                    <div className="flex items-center gap-2">
+                                      <span className={cn("h-2 w-2 rounded-full", statusDotClass)} title={statusLabel} />
+                                      <span className="text-xs text-slate-700">{statusLabel}</span>
                                     </div>
                                     {reason ? <div className="mt-1 text-xs text-slate-600 truncate" title={reason}>{reason}</div> : null}
                                   </div>
-                                  <div className="flex items-center gap-2 justify-end">
+                                  <div className="flex items-center gap-2 justify-start lg:justify-end flex-wrap">
                                     <Button size="sm" variant="outline" onClick={() => previewFileNameForItem(it)} disabled={!applicable || !ready}>
                                       Filename
                                     </Button>

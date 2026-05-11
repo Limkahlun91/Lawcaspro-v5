@@ -1,6 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Briefcase, Users, Building2, HardHat, DollarSign, TrendingUp, MessageSquare, ArrowRight } from "lucide-react";
+import { Table, TableBody, TableCell, TableRow } from "@/components/ui/table";
+import { Briefcase, Users, Building2, HardHat, DollarSign, TrendingUp, MessageSquare } from "lucide-react";
 import { useLocation } from "wouter";
 import { apiFetchJson } from "@/lib/api-client";
 import { QueryFallback } from "@/components/query-fallback";
@@ -32,6 +33,14 @@ function StatusBadge({ status }: { status: string }) {
   return (
     <span className={`text-xs font-medium px-2 py-0.5 rounded ${colorClass}`}>{short}</span>
   );
+}
+
+function buildCasesHref(filter: { milestone: string; milestonePresence: string; purchaseMode?: string | null }) {
+  const qs = new URLSearchParams();
+  qs.set("milestone", filter.milestone);
+  qs.set("milestonePresence", filter.milestonePresence);
+  if (filter.purchaseMode) qs.set("purchaseMode", filter.purchaseMode);
+  return `/app/cases?${qs.toString()}`;
 }
 
 export default function AppDashboard() {
@@ -146,26 +155,32 @@ export default function AppDashboard() {
             <CardTitle>Milestones</CardTitle>
           </CardHeader>
           <CardContent>
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-              {milestoneCards.map((card) => {
-                const qs = new URLSearchParams();
-                qs.set("milestone", card.filter.milestone);
-                qs.set("milestonePresence", card.filter.milestonePresence);
-                if (card.filter.purchaseMode) qs.set("purchaseMode", card.filter.purchaseMode);
-                const href = `/app/cases?${qs.toString()}`;
-                return (
-                  <div
-                    key={card.key}
-                    className="border rounded-lg bg-white p-4 cursor-pointer hover:shadow-sm transition-shadow"
-                    onClick={() => setLocation(href)}
-                  >
-                    <div className="text-xs text-slate-500">{card.label}</div>
-                    <div className="text-2xl font-bold text-slate-900 leading-tight mt-1">{card.count}</div>
-                    <div className="text-xs text-amber-600 mt-2">View cases</div>
-                  </div>
-                );
-              })}
-            </div>
+            <Table>
+              <TableBody>
+                {milestoneCards.map((card) => {
+                  const href = buildCasesHref(card.filter);
+                  return (
+                    <TableRow
+                      key={card.key}
+                      className="cursor-pointer"
+                      role="button"
+                      tabIndex={0}
+                      onClick={() => setLocation(href)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" || e.key === " ") setLocation(href);
+                      }}
+                    >
+                      <TableCell className="py-3">
+                        <div className="text-sm font-medium text-slate-900">{card.label}</div>
+                      </TableCell>
+                      <TableCell className="py-3 text-right">
+                        <span className="font-semibold text-slate-900">{card.count}</span>
+                      </TableCell>
+                    </TableRow>
+                  );
+                })}
+              </TableBody>
+            </Table>
           </CardContent>
         </Card>
       )}
@@ -175,8 +190,8 @@ export default function AppDashboard() {
         <Card className="cursor-pointer hover:shadow-md transition-shadow" onClick={() => setLocation("/app/accounting")}>
           <CardContent className="pt-5 pb-4">
             <div className="flex items-center gap-3">
-              <div className="w-10 h-10 rounded-lg bg-amber-50 flex items-center justify-center">
-                <DollarSign className="w-5 h-5 text-amber-600" />
+              <div className="w-10 h-10 rounded-lg bg-slate-100 flex items-center justify-center">
+                <DollarSign className="w-5 h-5 text-slate-700" />
               </div>
               <div>
                 <div className="text-xs text-slate-500">Total Billed</div>
