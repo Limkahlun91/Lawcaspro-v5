@@ -105,7 +105,7 @@ async function backfillStandardRoles(r: DbConn, firmId: number): Promise<string[
     const existingNames = new Set(existing.map((x: { name: string }) => x.name));
     const missing = standardRoleNames.filter((name) => !existingNames.has(name));
     if (missing.length === 0) return [];
-    await tx.insert(rolesTable).values(missing.map((name) => ({ firmId, name })));
+    await tx.insert(rolesTable).values(missing.map((name) => ({ firmId, name, isSystemRole: true })));
     return [...missing];
   });
 }

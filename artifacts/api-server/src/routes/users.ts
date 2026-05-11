@@ -197,21 +197,18 @@ routerInternal.post("/users", requireAuth, requireFirmUser, requirePermission("u
   const normalizedEmail = email.toLowerCase();
 
   try {
-    const [row] = await db
-      .select({ id: usersTable.id })
-      .from(usersTable)
-      .where(eq(usersTable.email, normalizedEmail))
-      .limit(1);
-    const emailTaken = Boolean(row);
-
-    if (emailTaken) {
-      res.status(400).json({ error: "Email already in use" });
-      return;
-    }
-
     const passwordHash = await bcrypt.hash(password, 10);
 
     const created = await (r as any).transaction(async (tx: DbConn) => {
+      const [row] = await tx
+        .select({ id: usersTable.id })
+        .from(usersTable)
+        .where(eq(usersTable.email, normalizedEmail))
+        .limit(1);
+      if (row) {
+        return { kind: "email_taken" as const };
+      }
+
       const [role] = await tx
         .select({ id: rolesTable.id, name: rolesTable.name })
         .from(rolesTable)
@@ -245,9 +242,14 @@ routerInternal.post("/users", requireAuth, requireFirmUser, requirePermission("u
       if (hasNricNo) values.nricNo = nricNo?.trim() ? nricNo.trim() : null;
 
       const [user] = await tx.insert(usersTable).values(values).returning();
+      await ensureRolePermissionsInitialized(tx as any, req.firmId!, roleId);
       return { kind: "ok" as const, user };
     });
 
+    if (created.kind === "email_taken") {
+      res.status(400).json({ error: "Email already in use" });
+      return;
+    }
     if (created.kind === "bad_role") {
       res.status(400).json({ error: "Invalid roleId" });
       return;
@@ -255,12 +257,6 @@ routerInternal.post("/users", requireAuth, requireFirmUser, requirePermission("u
     if (created.kind === "missing_bar_council") {
       res.status(400).json({ error: "Bar Council No. is required for legal roles" });
       return;
-    }
-
-    try {
-      await ensureRolePermissionsInitialized(db as any, req.firmId!, roleId);
-    } catch (err) {
-      logger.error({ err, firmId: req.firmId ?? null, roleId }, "users.create_permissions_init_failed");
     }
 
     await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "users.create", entityType: "user", entityId: created.user.id, detail: `email=${created.user.email}`, ipAddress: req.ip, userAgent: getHeader(req, "user-agent") });
@@ -345,26 +341,26 @@ routerInternal.patch("/users/:userId", requireAuth, requireFirmUser, requirePerm
   if (parsed.data.department !== undefined && await usersDepartmentExists(r)) updates.department = parsed.data.department;
   if (parsed.data.status !== undefined) updates.status = parsed.data.status;
 
-  const [user] = await r
-    .update(usersTable)
-    .set(updates)
-    .where(eq(usersTable.id, params.data.userId))
-    .returning();
+  const result = await (r as any).transaction(async (tx: DbConn) => {
+    const [user] = await tx
+      .update(usersTable)
+      .set(updates)
+      .where(eq(usersTable.id, params.data.userId))
+      .returning();
+    if (!user || user.firmId !== req.firmId) return { kind: "not_found" as const };
+    if (typeof updates.roleId === "number") {
+      await ensureRolePermissionsInitialized(tx as any, req.firmId!, updates.roleId);
+    }
+    return { kind: "ok" as const, user };
+  });
 
-  if (!user || user.firmId !== req.firmId) {
+  if (result.kind === "not_found") {
     res.status(404).json({ error: "User not found" });
     return;
   }
 
-  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "users.update", entityType: "user", entityId: user.id, detail: `fields=${Object.keys(updates).join(",")}`, ipAddress: req.ip, userAgent: getHeader(req, "user-agent") });
-  if (typeof updates.roleId === "number") {
-    try {
-      await ensureRolePermissionsInitialized(db as any, req.firmId!, updates.roleId);
-    } catch (err) {
-      logger.error({ err, firmId: req.firmId ?? null, roleId: updates.roleId }, "users.update_permissions_init_failed");
-    }
-  }
-  res.json(await enrichUser(r, req.firmId!, user));
+  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "users.update", entityType: "user", entityId: result.user.id, detail: `fields=${Object.keys(updates).join(",")}`, ipAddress: req.ip, userAgent: getHeader(req, "user-agent") });
+  res.json(await enrichUser(r, req.firmId!, result.user));
 });
 
 routerInternal.delete("/users/:userId", requireAuth, requireFirmUser, requirePermission("users", "delete"), async (req: AuthRequestLike, res: RouteResLike): Promise<void> => {

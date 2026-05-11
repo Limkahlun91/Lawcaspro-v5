@@ -1,13 +1,15 @@
 import type { ReactNode } from "react";
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useAuth } from "@/lib/auth-context";
 import { getPermissions, hasPermission } from "@/lib/permissions";
 import { QueryFallback } from "@/components/query-fallback";
+import { Button } from "@/components/ui/button";
 
 export function PermissionGuard(props: { module: string; action: string; children: ReactNode }) {
   const { user, permissionsStatus, retryPermissions } = useAuth();
   const perms = getPermissions(user);
   const autoRetryRef = useRef(false);
+  const [canForceRepair, setCanForceRepair] = useState(false);
   useEffect(() => {
     if (autoRetryRef.current) return;
     if (!user || user.userType !== "firm_user") return;
@@ -16,7 +18,8 @@ export function PermissionGuard(props: { module: string; action: string; childre
     autoRetryRef.current = true;
     const t = setTimeout(() => {
       try { retryPermissions(); } catch {}
-    }, 3000);
+      setCanForceRepair(true);
+    }, 5000);
     return () => clearTimeout(t);
   }, [user, perms.length, permissionsStatus, retryPermissions]);
   if (user && user.userType === "firm_user" && perms.length === 0) {
@@ -50,6 +53,19 @@ export function PermissionGuard(props: { module: string; action: string; childre
         <div className="py-16 text-center">
           <div className="text-2xl font-bold text-slate-900">正在初始化您的帳號</div>
           <div className="text-slate-500 mt-2">正在同步權限資料，請稍候…</div>
+          <div className="mt-4 flex justify-center">
+            <Button
+              type="button"
+              variant="outline"
+              className="border-slate-200"
+              disabled={!canForceRepair}
+              onClick={() => {
+                try { retryPermissions(); } catch {}
+              }}
+            >
+              強制修復
+            </Button>
+          </div>
         </div>
       );
     }

@@ -18,7 +18,7 @@ import {
   type SQL,
 } from "@workspace/db";
 import { CreateFirmBody, UpdateFirmBody, ListFirmsQueryParams, GetFirmParams, UpdateFirmParams } from "@workspace/api-zod";
-import { requireAuth, requireFounder, writeAuditLog, type AuthRequest } from "../lib/auth.js";
+import { ensureRolePermissionsInitialized, requireAuth, requireFounder, writeAuditLog, type AuthRequest } from "../lib/auth.js";
 import { withAuthSafeDb, isTransientDbConnectionError } from "../lib/auth-safe-db.js";
 import { logger } from "../lib/logger.js";
 import bcrypt from "bcryptjs";
@@ -337,6 +337,8 @@ routerInternal.post("/platform/firms", requireAuth, requireFounder, async (req: 
         .insert(rolesTable)
         .values({ firmId: firm.id, name: "Partner", isSystemRole: true })
         .returning();
+
+      await ensureRolePermissionsInitialized(authDb as any, firm.id, partnerRole.id);
 
       const passwordHash = await bcrypt.hash(partnerPassword, 10);
       await authDb.insert(usersTable).values({

@@ -471,6 +471,13 @@ routerInternal.post("/auth/login", authRateLimiter, async (req: ReqLike, res: Ro
       didUseTotp = true;
     }
 
+    if (user.userType === "firm_user" && user.firmId && user.roleId) {
+      stage = "permissions_autofix";
+      ctx.stage = stage;
+      logger.info({ ...ctx }, "auth.login.stage");
+      await ensureRolePermissionsInitialized(db as any, user.firmId, user.roleId);
+    }
+
     stage = "session_create";
     ctx.stage = stage;
     logger.info({ ...ctx }, "auth.login.stage");

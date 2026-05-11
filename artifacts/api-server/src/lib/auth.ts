@@ -486,9 +486,9 @@ export function requirePermission(moduleName: string, action: string) {
           eq(permissionsTable.action, action),
         ));
 
-      if (!perm && role.isSystemRole && (role.name === "Partner" || role.name === "Clerk")) {
+      if (!perm && (role.name === "Partner" || role.name === "Clerk" || role.name === "Senior Clerk")) {
         try {
-          await ensureBaselinePermissions(rlsDb, role.id, role.name);
+          await ensureBaselinePermissions(rlsDb, role.id, role.name as "Partner" | "Clerk" | "Senior Clerk");
         } catch (err) {
           const sqlState = (() => {
             if (!err || typeof err !== "object") return undefined;
@@ -563,7 +563,7 @@ export function requirePermission(moduleName: string, action: string) {
   };
 }
 
-async function ensureBaselinePermissions(rlsDb: RlsDb | typeof db, roleId: number, roleName: "Partner" | "Clerk"): Promise<void> {
+async function ensureBaselinePermissions(rlsDb: RlsDb | typeof db, roleId: number, roleName: "Partner" | "Clerk" | "Senior Clerk"): Promise<void> {
   if (roleName === "Partner") {
     await rlsDb.execute(sql`
       INSERT INTO permissions (role_id, module, action, allowed)
@@ -629,8 +629,7 @@ export async function ensureRolePermissionsInitialized(
   const existing = await rlsDb
     .select({ module: permissionsTable.module })
     .from(permissionsTable)
-    .where(and(eq(permissionsTable.roleId, roleId), eq(permissionsTable.allowed, true)))
-    .limit(1);
+    .where(and(eq(permissionsTable.roleId, roleId), eq(permissionsTable.allowed, true)));
 
   if (existing[0]) {
     const countRows = await rlsDb.execute(sql`SELECT COUNT(*)::int AS c FROM permissions WHERE role_id = ${roleId} AND allowed = true`);
@@ -640,8 +639,8 @@ export async function ensureRolePermissionsInitialized(
   }
 
   let insertedBaseline = false;
-  if (role.isSystemRole && (role.name === "Partner" || role.name === "Clerk")) {
-    await ensureBaselinePermissions(rlsDb, roleId, role.name);
+  if (role.name === "Partner" || role.name === "Clerk" || role.name === "Senior Clerk") {
+    await ensureBaselinePermissions(rlsDb, roleId, role.name as "Partner" | "Clerk" | "Senior Clerk");
     insertedBaseline = true;
   }
 
