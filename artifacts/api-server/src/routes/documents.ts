@@ -763,57 +763,123 @@ async function buildCaseContext(r: DbConn, caseId: number, firmId: number, cache
   if (!caseRows[0]) return null;
   const c = caseRows[0];
 
-  const firmRows = await queryRowsCached(
-    r,
-    cache,
-    `firms:${firmId}`,
-    sql`SELECT name, address, st_number, tin_number FROM firms WHERE id = ${firmId} LIMIT 1`
-  );
-  const bankRows = await queryRowsCached(
-    r,
-    cache,
-    `firm_bank_accounts:${firmId}`,
-    sql`
-      SELECT account_type, bank_name, account_no, is_default
-      FROM firm_bank_accounts
-      WHERE firm_id = ${firmId}
-      ORDER BY is_default DESC
-    `
-  );
-  const purchaserRows = await queryRowsCached(
-    r,
-    cache,
-    `case_purchasers:${firmId}:${caseId}`,
-    sql`
-      SELECT
-        cp.role,
-        cp.order_no,
-        cl.name,
-        cl.ic_no,
-        cl.nationality,
-        cl.address,
-        cl.phone,
-        cl.email
-      FROM case_purchasers cp
-      JOIN clients cl ON cp.client_id = cl.id
-      WHERE cp.case_id = ${caseId} AND cl.firm_id = ${firmId}
-      ORDER BY cp.order_no
-    `
-  );
-  const assignmentRows = await queryRowsCached(
-    r,
-    cache,
-    `case_assignments:${caseId}`,
-    sql`
-      SELECT ca.role_in_case, u.name as user_name, u.email as user_email
-      FROM case_assignments ca
-      JOIN users u ON ca.user_id = u.id
-      WHERE ca.case_id = ${caseId}
-        AND ca.role_in_case IN ('lawyer', 'clerk')
-        AND ca.unassigned_at IS NULL
-      LIMIT 10
-    `
-  );
+  const [
+    firmRows,
+    bankRows,
+    purchaserRows,
+    assignmentRows,
+    workflowRows,
+    kdRows,
+  ] = await Promise.all([
+    queryRowsCached(
+      r,
+      cache,
+      `firms:${firmId}`,
+      sql`SELECT name, address, st_number, tin_number FROM firms WHERE id = ${firmId} LIMIT 1`
+    ),
+    queryRowsCached(
+      r,
+      cache,
+      `firm_bank_accounts:${firmId}`,
+      sql`
+        SELECT account_type, bank_name, account_no, is_default
+        FROM firm_bank_accounts
+        WHERE firm_id = ${firmId}
+        ORDER BY is_default DESC
+      `
+    ),
+    queryRowsCached(
+      r,
+      cache,
+      `case_purchasers:${firmId}:${caseId}`,
+      sql`
+        SELECT
+          cp.role,
+          cp.order_no,
+          cl.name,
+          cl.ic_no,
+          cl.nationality,
+          cl.address,
+          cl.phone,
+          cl.email
+        FROM case_purchasers cp
+        JOIN clients cl ON cp.client_id = cl.id
+        WHERE cp.case_id = ${caseId} AND cl.firm_id = ${firmId}
+        ORDER BY cp.order_no
+      `
+    ),
+    queryRowsCached(
+      r,
+      cache,
+      `case_assignments:${caseId}`,
+      sql`
+        SELECT ca.role_in_case, u.name as user_name, u.email as user_email
+        FROM case_assignments ca
+        JOIN users u ON ca.user_id = u.id
+        WHERE ca.case_id = ${caseId}
+          AND ca.role_in_case IN ('lawyer', 'clerk')
+          AND ca.unassigned_at IS NULL
+        LIMIT 10
+      `
+    ),
+    queryRowsCached(r, cache, `case_workflow_steps:${firmId}:${caseId}`, sql`
+      SELECT ws.step_key, ws.step_name, ws.step_order, ws.path_type, ws.status, ws.completed_at
+      FROM case_workflow_steps ws
+      JOIN cases cc ON cc.id = ws.case_id
+      WHERE ws.case_id = ${caseId} AND cc.firm_id = ${firmId}
+      ORDER BY ws.step_order ASC
+    `),
+    queryRowsCached(
+      r,
+      cache,
+      `case_key_dates:${firmId}:${caseId}`,
+      sql`
+        SELECT
+          spa_signed_date,
+          spa_forward_to_developer_execution_on,
+          spa_date,
+          spa_stamped_date,
+          stamped_spa_send_to_developer_on,
+          stamped_spa_received_from_developer_on,
+          letter_of_offer_date,
+          letter_of_offer_stamped_date,
+          loan_docs_pending_date,
+          loan_docs_signed_date,
+          acting_letter_issued_date,
+          developer_confirmation_received_on,
+          developer_confirmation_date,
+          loan_sent_bank_execution_date,
+          loan_bank_executed_date,
+          bank_lu_received_date,
+          bank_lu_forward_to_developer_on,
+          developer_lu_received_on,
+          developer_lu_dated,
+          letter_disclaimer_received_on,
+          letter_disclaimer_dated,
+          loan_agreement_dated,
+          loan_agreement_submitted_stamping_date,
+          loan_agreement_stamped_date,
+          register_poa_on,
+          noa_served_on,
+          advice_to_bank_date,
+          bank_1st_release_on,
+          mot_received_date,
+          mot_signed_date,
+          mot_stamped_date,
+          mot_registered_date,
+          progressive_payment_date,
+          full_settlement_date,
+          completion_date,
+          letter_disclaimer_reference_nos,
+          registered_poa_registration_number,
+          redemption_sum,
+          first_release_amount_rm
+        FROM case_key_dates
+        WHERE firm_id = ${firmId} AND case_id = ${caseId}
+        LIMIT 1
+      `
+    ),
+  ]);
 
   const firm = firmRows[0] ?? {};
   const lawyer = assignmentRows.find((x) => x.role_in_case === "lawyer") ?? {};
@@ -835,13 +901,6 @@ async function buildCaseContext(r: DbConn, caseId: number, firmId: number, cache
   const dateStr = today.toLocaleDateString("en-MY", { day: "2-digit", month: "long", year: "numeric" });
   const dateShort = today.toLocaleDateString("en-MY", { day: "2-digit", month: "2-digit", year: "numeric" });
 
-  const workflowRows = await queryRowsCached(r, cache, `case_workflow_steps:${firmId}:${caseId}`, sql`
-    SELECT ws.step_key, ws.step_name, ws.step_order, ws.path_type, ws.status, ws.completed_at
-    FROM case_workflow_steps ws
-    JOIN cases cc ON cc.id = ws.case_id
-    WHERE ws.case_id = ${caseId} AND cc.firm_id = ${firmId}
-    ORDER BY ws.step_order ASC
-  `);
   const workflowSteps = workflowRows
     .map((row) => {
       const stepKey = typeof (row as any).step_key === "string" ? String((row as any).step_key) : "";
@@ -877,56 +936,6 @@ async function buildCaseContext(r: DbConn, caseId: number, firmId: number, cache
     workflowDebugVars[`workflow_${key}_date_long`] = fmtDateLong(s.completedAt);
   }
 
-  const kdRows = await queryRowsCached(
-    r,
-    cache,
-    `case_key_dates:${firmId}:${caseId}`,
-    sql`
-      SELECT
-        spa_signed_date,
-        spa_forward_to_developer_execution_on,
-        spa_date,
-        spa_stamped_date,
-        stamped_spa_send_to_developer_on,
-        stamped_spa_received_from_developer_on,
-        letter_of_offer_date,
-        letter_of_offer_stamped_date,
-        loan_docs_pending_date,
-        loan_docs_signed_date,
-        acting_letter_issued_date,
-        developer_confirmation_received_on,
-        developer_confirmation_date,
-        loan_sent_bank_execution_date,
-        loan_bank_executed_date,
-        bank_lu_received_date,
-        bank_lu_forward_to_developer_on,
-        developer_lu_received_on,
-        developer_lu_dated,
-        letter_disclaimer_received_on,
-        letter_disclaimer_dated,
-        loan_agreement_dated,
-        loan_agreement_submitted_stamping_date,
-        loan_agreement_stamped_date,
-        register_poa_on,
-        noa_served_on,
-        advice_to_bank_date,
-        bank_1st_release_on,
-        mot_received_date,
-        mot_signed_date,
-        mot_stamped_date,
-        mot_registered_date,
-        progressive_payment_date,
-        full_settlement_date,
-        completion_date,
-        letter_disclaimer_reference_nos,
-        registered_poa_registration_number,
-        redemption_sum,
-        first_release_amount_rm
-      FROM case_key_dates
-      WHERE firm_id = ${firmId} AND case_id = ${caseId}
-      LIMIT 1
-    `
-  );
   const kd = kdRows[0] ?? null;
 
   const pickDate = (structured: unknown, fallback: unknown): unknown => {

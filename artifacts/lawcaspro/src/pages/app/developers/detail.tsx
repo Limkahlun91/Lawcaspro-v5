@@ -310,7 +310,7 @@ export default function DeveloperDetail() {
           <Card>
             <CardHeader className="flex flex-row items-center justify-between">
               <CardTitle>Contact Persons</CardTitle>
-              {contacts.length < 5 && (
+              {(contacts ?? []).length < 5 && (
                 <Button type="button" variant="outline" size="sm" onClick={addContact} className="gap-1.5">
                   <Plus className="w-3.5 h-3.5" /> Add Contact
                 </Button>
@@ -377,13 +377,13 @@ export default function DeveloperDetail() {
                   </div>
                 </div>
               ))}
-              {contacts.length < 5 && (
+              {(contacts ?? []).length < 5 && (
                 <button
                   type="button"
                   onClick={addContact}
                   className="w-full py-2 border-2 border-dashed border-slate-200 rounded-lg text-sm text-slate-400 hover:border-slate-300 hover:text-slate-500 transition-colors"
                 >
-                  + Add another contact person ({contacts.length}/5)
+                  + Add another contact person ({(contacts ?? []).length}/5)
                 </button>
               )}
             </CardContent>

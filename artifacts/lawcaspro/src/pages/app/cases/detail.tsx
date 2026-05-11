@@ -610,6 +610,9 @@ export default function CaseDetail() {
   const workflowDone = safeWorkflow.filter((s) => s?.status === "completed").length;
   const workflowTotal = safeWorkflow.length;
 
+  const safeAssignments = Array.isArray((caseInfo as any)?.assignments) ? ((caseInfo as any).assignments as any[]) : [];
+  const safePurchasers = Array.isArray((caseInfo as any)?.purchasers) ? ((caseInfo as any).purchasers as any[]) : [];
+
   const saveScope = (scope: "SPA" | "Loan" | "Bank / LU / NOA" | "MOT / Completion") => {
     const tab: keyof typeof scopeKeys =
       scope === "SPA" ? "spa" :
@@ -1045,28 +1048,30 @@ export default function CaseDetail() {
           </Button>
           <div className="min-w-0">
             <div className="flex flex-wrap items-center gap-3">
-              <h1 className="text-3xl font-bold text-slate-900 tracking-tight break-words">{caseInfo.referenceNo}</h1>
+              <h1 className="text-3xl font-bold text-slate-900 tracking-tight break-words">{String((caseInfo as any).referenceNo ?? "")}</h1>
               <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-bold uppercase tracking-wider bg-amber-100 text-amber-800">
-                {caseInfo.status.replace(/_/g, ' ')}
+                {String((caseInfo as any).status ?? "").replace(/_/g, " ")}
               </span>
             </div>
-            <p className="text-slate-500 mt-1 break-words">{caseInfo.projectName} • {caseInfo.developerName}</p>
+            <p className="text-slate-500 mt-1 break-words">
+              {[String((caseInfo as any).projectName ?? ""), String((caseInfo as any).developerName ?? "")].filter((x) => x.trim()).join(" • ")}
+            </p>
           </div>
         </div>
         <Button
           variant="outline"
           size="sm"
           onClick={() => {
-            const purchaserNames = (Array.isArray(caseInfo.purchasers) ? caseInfo.purchasers : [])
-              .map((p) => p.clientName)
+            const purchaserNames = safePurchasers
+              .map((p) => (p as any)?.clientName)
               .filter(Boolean)
               .join(", ");
             const params = new URLSearchParams();
-            params.set("caseId", String(caseInfo.id));
-            params.set("ref", caseInfo.referenceNo);
+            params.set("caseId", String((caseInfo as any).id ?? ""));
+            params.set("ref", String((caseInfo as any).referenceNo ?? ""));
             if (purchaserNames) params.set("client", purchaserNames);
-            if (caseInfo.spaPrice) params.set("price", String(caseInfo.spaPrice));
-            const propDesc = [caseInfo.projectName, caseInfo.developerName].filter(Boolean).join(" • ");
+            if ((caseInfo as any).spaPrice) params.set("price", String((caseInfo as any).spaPrice));
+            const propDesc = [String((caseInfo as any).projectName ?? ""), String((caseInfo as any).developerName ?? "")].filter((x) => x.trim()).join(" • ");
             if (propDesc) params.set("property", propDesc);
             setLocation(`/app/quotations/new?${params.toString()}`);
           }}
@@ -1146,7 +1151,7 @@ export default function CaseDetail() {
                   <div>
                     <div className="text-sm font-medium text-slate-500">Assigned Lawyer</div>
                     <div className="text-slate-900 font-medium">
-                      {caseInfo.assignments.find((a) => a.roleInCase === "lawyer")?.userName ?? "Unassigned"}
+                      {(safeAssignments.find((a) => (a as any)?.roleInCase === "lawyer") as any)?.userName ?? "Unassigned"}
                     </div>
                   </div>
                 </div>
@@ -1159,19 +1164,19 @@ export default function CaseDetail() {
               </CardHeader>
               <CardContent>
                 <div className="space-y-4">
-                  {(Array.isArray(caseInfo.purchasers) ? caseInfo.purchasers : []).map((p) => (
-                    <div key={p.id} className="flex items-start gap-3 p-3 bg-slate-50 rounded-lg border border-slate-100">
+                  {safePurchasers.map((p: any, idx: number) => (
+                    <div key={p?.id ?? `p-${idx}`} className="flex items-start gap-3 p-3 bg-slate-50 rounded-lg border border-slate-100">
                       <User className="w-5 h-5 text-slate-400 mt-0.5" />
                       <div>
-                        <div className="font-medium text-slate-900">{p.clientName}</div>
-                        <div className="text-xs text-slate-500">{p.icNo}</div>
+                        <div className="font-medium text-slate-900">{String(p?.clientName ?? "")}</div>
+                        <div className="text-xs text-slate-500">{String(p?.icNo ?? "")}</div>
                         <span className="inline-block mt-1 px-2 py-0.5 text-[10px] uppercase font-semibold bg-white border border-slate-200 rounded text-slate-600">
-                          {p.role} Purchaser
+                          {String(p?.role ?? "")} Purchaser
                         </span>
                       </div>
                     </div>
                   ))}
-                  {!Array.isArray(caseInfo.purchasers) || caseInfo.purchasers.length === 0 ? (
+                  {safePurchasers.length === 0 ? (
                     <div className="text-sm text-slate-500">No purchasers.</div>
                   ) : null}
                 </div>

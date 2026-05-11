@@ -102,12 +102,15 @@ async function buildSmartNamingContext(r: DbConn, firmId: number, caseId: number
   };
 
   try {
-    const baseExists = await tableExists(r, "public.cases")
-      && await tableExists(r, "public.projects")
-      && await tableExists(r, "public.developers");
+    const [hasCases, hasProjects, hasDevelopers] = await Promise.all([
+      tableExists(r, "public.cases"),
+      tableExists(r, "public.projects"),
+      tableExists(r, "public.developers"),
+    ]);
+    const baseExists = hasCases && hasProjects && hasDevelopers;
     if (!baseExists) return fallback;
 
-    const [base] = await r
+    const basePromise = r
       .select({
         referenceNo: casesTable.referenceNo,
         parcelNo: casesTable.parcelNo,
@@ -122,8 +125,13 @@ async function buildSmartNamingContext(r: DbConn, firmId: number, caseId: number
       .innerJoin(developersTable, eq(developersTable.id, casesTable.developerId))
       .where(and(eq(casesTable.id, caseId), eq(casesTable.firmId, firmId)));
 
-    const purchaserExists = await tableExists(r, "public.case_purchasers")
-      && await tableExists(r, "public.clients");
+    const purchaserExistsPromise = Promise.all([
+      tableExists(r, "public.case_purchasers"),
+      tableExists(r, "public.clients"),
+    ]).then(([hasCasePurchasers, hasClients]) => hasCasePurchasers && hasClients);
+
+    const [baseRows, purchaserExists] = await Promise.all([basePromise, purchaserExistsPromise]);
+    const base = baseRows[0];
     const [purchaser] = purchaserExists
       ? await r
           .select({ name: clientsTable.name })
