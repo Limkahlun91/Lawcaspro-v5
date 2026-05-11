@@ -643,41 +643,111 @@ async function applyLetterheadToDocxBuffer({
 }
 
 async function buildCaseContext(r: DbConn, caseId: number, firmId: number): Promise<Record<string, unknown> | null> {
-  const caseRows = await queryRows(r, sql`SELECT * FROM cases WHERE id = ${caseId} AND firm_id = ${firmId}`);
+  const caseRows = await queryRows(
+    r,
+    sql`
+      SELECT
+        c.id,
+        c.reference_no,
+        c.case_type,
+        c.parcel_no,
+        c.spa_price,
+        c.purchase_mode,
+        c.title_type,
+        c.status,
+        c.spa_details,
+        c.property_details,
+        c.loan_details,
+        c.company_details,
+        p.name as project_name,
+        p.phase as project_phase,
+        p.project_type,
+        p.title_type as project_title_type,
+        p.title_subtype as project_title_subtype,
+        p.master_title_number as project_master_title_no,
+        p.master_title_land_size as project_master_title_size,
+        p.mukim as project_mukim,
+        p.daerah as project_daerah,
+        p.negeri as project_negeri,
+        p.land_use as project_land_use,
+        p.development_condition as project_development_condition,
+        p.developer_name as project_developer_name,
+        p.unit_category,
+        p.extra_fields as project_extra_fields,
+        d.name as developer_name,
+        d.company_reg_no as developer_reg_no,
+        d.address as developer_address,
+        d.business_address as developer_business_address,
+        d.contact_person as developer_contact,
+        d.phone as developer_phone,
+        d.email as developer_email,
+        d.contacts as developer_contacts_json
+      FROM cases c
+      LEFT JOIN projects p ON p.id = c.project_id AND p.firm_id = c.firm_id
+      LEFT JOIN developers d ON d.id = c.developer_id AND d.firm_id = c.firm_id
+      WHERE c.id = ${caseId} AND c.firm_id = ${firmId}
+      LIMIT 1
+    `
+  );
   if (!caseRows[0]) return null;
   const c = caseRows[0];
 
-  const projectRows = await queryRows(r, sql`SELECT * FROM projects WHERE id = ${c.project_id} AND firm_id = ${firmId}`);
-  const developerRows = await queryRows(r, sql`SELECT * FROM developers WHERE id = ${c.developer_id} AND firm_id = ${firmId}`);
-  const firmRows = await queryRows(r, sql`SELECT * FROM firms WHERE id = ${firmId}`);
-  const bankRows = await queryRows(r, sql`SELECT * FROM firm_bank_accounts WHERE firm_id = ${firmId} ORDER BY is_default DESC`);
-  const purchaserRows = await queryRows(r, sql`
-    SELECT cp.*, cl.name, cl.ic_no, cl.nationality, cl.address, cl.phone, cl.email
-    FROM case_purchasers cp JOIN clients cl ON cp.client_id = cl.id
-    WHERE cp.case_id = ${caseId} AND cl.firm_id = ${firmId} ORDER BY cp.order_no`);
-  const lawyerRows = await queryRows(r, sql`
-    SELECT ca.*, u.name as user_name, u.email as user_email
-    FROM case_assignments ca JOIN users u ON ca.user_id = u.id
-    WHERE ca.case_id = ${caseId} AND ca.role_in_case = 'lawyer' AND ca.unassigned_at IS NULL
-    LIMIT 1`);
-  const clerkRows = await queryRows(r, sql`
-    SELECT ca.*, u.name as user_name
-    FROM case_assignments ca JOIN users u ON ca.user_id = u.id
-    WHERE ca.case_id = ${caseId} AND ca.role_in_case = 'clerk' AND ca.unassigned_at IS NULL
-    LIMIT 1`);
+  const firmRows = await queryRows(
+    r,
+    sql`SELECT name, address, st_number, tin_number FROM firms WHERE id = ${firmId} LIMIT 1`
+  );
+  const bankRows = await queryRows(
+    r,
+    sql`
+      SELECT account_type, bank_name, account_no, is_default
+      FROM firm_bank_accounts
+      WHERE firm_id = ${firmId}
+      ORDER BY is_default DESC
+    `
+  );
+  const purchaserRows = await queryRows(
+    r,
+    sql`
+      SELECT
+        cp.role,
+        cp.order_no,
+        cl.name,
+        cl.ic_no,
+        cl.nationality,
+        cl.address,
+        cl.phone,
+        cl.email
+      FROM case_purchasers cp
+      JOIN clients cl ON cp.client_id = cl.id
+      WHERE cp.case_id = ${caseId} AND cl.firm_id = ${firmId}
+      ORDER BY cp.order_no
+    `
+  );
+  const assignmentRows = await queryRows(
+    r,
+    sql`
+      SELECT ca.role_in_case, u.name as user_name, u.email as user_email
+      FROM case_assignments ca
+      JOIN users u ON ca.user_id = u.id
+      WHERE ca.case_id = ${caseId}
+        AND ca.role_in_case IN ('lawyer', 'clerk')
+        AND ca.unassigned_at IS NULL
+      LIMIT 10
+    `
+  );
 
-  const proj = projectRows[0] ?? {};
-  const dev = developerRows[0] ?? {};
   const firm = firmRows[0] ?? {};
-  const lawyer = lawyerRows[0] ?? {};
-  const clerk = clerkRows[0] ?? {};
+  const lawyer = assignmentRows.find((x) => x.role_in_case === "lawyer") ?? {};
+  const clerk = assignmentRows.find((x) => x.role_in_case === "clerk") ?? {};
   const mainPurchaser = purchaserRows.find((p) => p.role === "main") ?? purchaserRows[0] ?? {};
 
-  const spa = safeJson(c.spa_details);
-  const prop = safeJson(c.property_details);
-  const loan = safeJson(c.loan_details);
-  const comp = safeJson(c.company_details);
-  const devContacts = typeof dev.contacts === "string" ? (() => { try { return JSON.parse(dev.contacts as string); } catch { return []; } })() : [];
+  const spa = safeJson((c as any).spa_details);
+  const prop = safeJson((c as any).property_details);
+  const loan = safeJson((c as any).loan_details);
+  const comp = safeJson((c as any).company_details);
+  const devContacts = typeof (c as any).developer_contacts_json === "string"
+    ? (() => { try { return JSON.parse(String((c as any).developer_contacts_json)); } catch { return []; } })()
+    : [];
 
   const today = new Date();
   const dateStr = today.toLocaleDateString("en-MY", { day: "2-digit", month: "long", year: "numeric" });
@@ -725,7 +795,54 @@ async function buildCaseContext(r: DbConn, caseId: number, firmId: number): Prom
     workflowDebugVars[`workflow_${key}_date_long`] = fmtDateLong(s.completedAt);
   }
 
-  const kdRows = await queryRows(r, sql`SELECT * FROM case_key_dates WHERE firm_id = ${firmId} AND case_id = ${caseId} LIMIT 1`);
+  const kdRows = await queryRows(
+    r,
+    sql`
+      SELECT
+        spa_signed_date,
+        spa_forward_to_developer_execution_on,
+        spa_date,
+        spa_stamped_date,
+        stamped_spa_send_to_developer_on,
+        stamped_spa_received_from_developer_on,
+        letter_of_offer_date,
+        letter_of_offer_stamped_date,
+        loan_docs_pending_date,
+        loan_docs_signed_date,
+        acting_letter_issued_date,
+        developer_confirmation_received_on,
+        developer_confirmation_date,
+        loan_sent_bank_execution_date,
+        loan_bank_executed_date,
+        bank_lu_received_date,
+        bank_lu_forward_to_developer_on,
+        developer_lu_received_on,
+        developer_lu_dated,
+        letter_disclaimer_received_on,
+        letter_disclaimer_dated,
+        loan_agreement_dated,
+        loan_agreement_submitted_stamping_date,
+        loan_agreement_stamped_date,
+        register_poa_on,
+        noa_served_on,
+        advice_to_bank_date,
+        bank_1st_release_on,
+        mot_received_date,
+        mot_signed_date,
+        mot_stamped_date,
+        mot_registered_date,
+        progressive_payment_date,
+        full_settlement_date,
+        completion_date,
+        letter_disclaimer_reference_nos,
+        registered_poa_registration_number,
+        redemption_sum,
+        first_release_amount_rm
+      FROM case_key_dates
+      WHERE firm_id = ${firmId} AND case_id = ${caseId}
+      LIMIT 1
+    `
+  );
   const kd = kdRows[0] ?? null;
 
   const pickDate = (structured: unknown, fallback: unknown): unknown => {
@@ -800,16 +917,16 @@ async function buildCaseContext(r: DbConn, caseId: number, firmId: number): Prom
 
   return {
     case_id: caseId,
-    reference_no: c.reference_no ?? "",
+    reference_no: (c as any).reference_no ?? "",
     date: dateStr,
     date_short: dateShort,
-    case_type: c.case_type ?? "",
-    parcel_no: c.parcel_no ?? "",
-    spa_price: fmtRM(c.spa_price),
-    spa_price_raw: c.spa_price ?? "",
-    purchase_mode: c.purchase_mode ?? "",
-    title_type: c.title_type ?? "",
-    status: c.status ?? "",
+    case_type: (c as any).case_type ?? "",
+    parcel_no: (c as any).parcel_no ?? "",
+    spa_price: fmtRM((c as any).spa_price),
+    spa_price_raw: (c as any).spa_price ?? "",
+    purchase_mode: (c as any).purchase_mode ?? "",
+    title_type: (c as any).title_type ?? "",
+    status: (c as any).status ?? "",
     spa_status: currentStepNameForPath("common"),
     loan_status: currentStepNameForPath("loan"),
 
@@ -866,35 +983,35 @@ async function buildCaseContext(r: DbConn, caseId: number, firmId: number): Prom
     director2_ic: comp.director2Ic ?? "",
 
     // Project Details
-    project_name: proj.name ?? "",
-    project_phase: proj.phase ?? "",
-    project_type: proj.project_type ?? "",
-    project_title_type: proj.title_type ?? "",
-    project_title_subtype: proj.title_subtype ?? "",
-    project_master_title_no: proj.master_title_number ?? "",
-    project_master_title_size: proj.master_title_land_size ?? "",
-    project_mukim: proj.mukim ?? "",
-    project_daerah: proj.daerah ?? "",
-    project_negeri: proj.negeri ?? "",
-    project_land_use: proj.land_use ?? "",
-    project_development_condition: proj.development_condition ?? "",
-    project_developer_name: proj.developer_name ?? "",
-    unit_category: proj.unit_category ?? "",
+    project_name: (c as any).project_name ?? "",
+    project_phase: (c as any).project_phase ?? "",
+    project_type: (c as any).project_type ?? "",
+    project_title_type: (c as any).project_title_type ?? "",
+    project_title_subtype: (c as any).project_title_subtype ?? "",
+    project_master_title_no: (c as any).project_master_title_no ?? "",
+    project_master_title_size: (c as any).project_master_title_size ?? "",
+    project_mukim: (c as any).project_mukim ?? "",
+    project_daerah: (c as any).project_daerah ?? "",
+    project_negeri: (c as any).project_negeri ?? "",
+    project_land_use: (c as any).project_land_use ?? "",
+    project_development_condition: (c as any).project_development_condition ?? "",
+    project_developer_name: (c as any).project_developer_name ?? "",
+    unit_category: (c as any).unit_category ?? "",
     project_property_types: (() => {
-      const ef = proj.extra_fields;
+      const ef = (c as any).project_extra_fields;
       const parsed = typeof ef === "string" ? (() => { try { return JSON.parse(ef); } catch { return {}; } })() : (ef ?? {});
       const pts = Array.isArray(parsed.propertyTypes) ? parsed.propertyTypes : [];
       return pts.map((pt: any, i: number) => ({ index: i + 1, building_type: pt.buildingType ?? "" }));
     })(),
 
     // Developer Details
-    developer_name: dev.name ?? "",
-    developer_reg_no: dev.company_reg_no ?? "",
-    developer_address: dev.address ?? "",
-    developer_business_address: dev.business_address ?? "",
-    developer_contact: dev.contact_person ?? "",
-    developer_phone: dev.phone ?? "",
-    developer_email: dev.email ?? "",
+    developer_name: (c as any).developer_name ?? "",
+    developer_reg_no: (c as any).developer_reg_no ?? "",
+    developer_address: (c as any).developer_address ?? "",
+    developer_business_address: (c as any).developer_business_address ?? "",
+    developer_contact: (c as any).developer_contact ?? "",
+    developer_phone: (c as any).developer_phone ?? "",
+    developer_email: (c as any).developer_email ?? "",
     developer_contacts: Array.isArray(devContacts) ? devContacts.map((dc: any, i: number) => ({
       index: i + 1,
       department: dc.department ?? "",
@@ -4372,6 +4489,7 @@ async function generateFirmDocument({
   runId,
   bypassApplicability,
   clauses,
+  overrides,
 }: {
   r: DbConn;
   firmId: number;
@@ -4386,6 +4504,7 @@ async function generateFirmDocument({
   runId: number;
   bypassApplicability?: boolean;
   clauses?: SelectedClauseRef[];
+  overrides?: Record<string, unknown> | null;
 }): Promise<{ caseDocument: Record<string, unknown>; caseDocumentId: number | null; templateVersionId: number | null; checklistSnapshot: unknown; readinessSnapshot: unknown; renderedVars: unknown; }> {
   const templateRows = await queryRows(r, sql`SELECT * FROM document_templates WHERE id = ${templateId} AND firm_id = ${firmId}`);
   const template = templateRows[0];
@@ -4509,7 +4628,7 @@ async function generateFirmDocument({
     caseContext: context,
     templateRef: { kind: "firm", templateId },
     placeholders: effectivePlaceholders,
-    overrides: null,
+    overrides: overrides ?? null,
   });
   if (preview.usedMode === "bindings" && preview.missingRequiredVariables.length > 0) {
     throw new DocumentGenerationError(422, "TEMPLATE_BINDING_MISSING", "Missing required variables", { missingRequiredVariables: preview.missingRequiredVariables });
@@ -4752,6 +4871,7 @@ async function generateMasterDocument({
   runId,
   bypassApplicability,
   clauses,
+  overrides,
 }: {
   r: DbConn;
   firmId: number;
@@ -4766,6 +4886,7 @@ async function generateMasterDocument({
   runId: number;
   bypassApplicability?: boolean;
   clauses?: SelectedClauseRef[];
+  overrides?: Record<string, unknown> | null;
 }): Promise<{ caseDocument: Record<string, unknown>; caseDocumentId: number | null; templateVersionId: number | null; checklistSnapshot: unknown; readinessSnapshot: unknown; renderedVars: unknown; renderMode: "docx" | "pdf" }> {
   const docRows2 = await queryRows(r, sql`SELECT * FROM platform_documents WHERE id = ${masterDocId} AND (firm_id IS NULL OR firm_id = ${firmId})`);
   const masterDoc = docRows2[0];
@@ -4886,7 +5007,7 @@ async function generateMasterDocument({
     caseContext: context,
     templateRef: { kind: "platform", documentId: masterDocId },
     placeholders,
-    overrides: null,
+    overrides: overrides ?? null,
   });
   if (preview.usedMode === "bindings" && preview.missingRequiredVariables.length > 0) {
     throw new DocumentGenerationError(422, "TEMPLATE_BINDING_MISSING", "Missing required variables", { missingRequiredVariables: preview.missingRequiredVariables });
@@ -6463,12 +6584,13 @@ router.post("/cases/:caseId/documents/generate", requireAuth, requireFirmUser, r
     res.status(400).json({ error: "Invalid case ID" });
     return;
   }
-  const { templateId, documentName, letterheadId, bypassApplicability, clauses } = req.body as { templateId: number; documentName?: string; letterheadId?: number | null; bypassApplicability?: boolean; clauses?: SelectedClauseRef[] };
+  const { templateId, documentName, letterheadId, bypassApplicability, clauses, overrides } = req.body as { templateId: number; documentName?: string; letterheadId?: number | null; bypassApplicability?: boolean; clauses?: SelectedClauseRef[]; overrides?: Record<string, unknown> | null };
   const tid = typeof templateId === "number" ? templateId : NaN;
   if (Number.isNaN(tid)) {
     res.status(422).json({ error: "templateId is required", code: "TEMPLATE_ID_REQUIRED" });
     return;
   }
+  const safeOverrides = (overrides && typeof overrides === "object" && !Array.isArray(overrides)) ? overrides : null;
 
   const runId = await createGenerationRun(r, {
     firm_id: req.firmId!,
@@ -6504,6 +6626,7 @@ router.post("/cases/:caseId/documents/generate", requireAuth, requireFirmUser, r
       runId,
       bypassApplicability: bypass,
       clauses,
+      overrides: safeOverrides,
     });
     await finishGenerationRunSuccess(r, req.firmId!, runId, out.caseDocumentId, out.renderedVars, out.checklistSnapshot, out.readinessSnapshot);
     await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.generation.succeeded", entityType: "document_generation_run", entityId: runId, detail: `caseId=${caseId} templateSource=firm templateId=${tid}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
@@ -6538,12 +6661,13 @@ router.post("/cases/:caseId/documents/generate-from-master", requireAuth, requir
     res.status(400).json({ error: "Invalid case ID" });
     return;
   }
-  const { masterDocId, documentName, letterheadId, bypassApplicability, clauses } = req.body as { masterDocId: number; documentName?: string; letterheadId?: number | null; bypassApplicability?: boolean; clauses?: SelectedClauseRef[] };
+  const { masterDocId, documentName, letterheadId, bypassApplicability, clauses, overrides } = req.body as { masterDocId: number; documentName?: string; letterheadId?: number | null; bypassApplicability?: boolean; clauses?: SelectedClauseRef[]; overrides?: Record<string, unknown> | null };
   const mid = typeof masterDocId === "number" ? masterDocId : NaN;
   if (Number.isNaN(mid)) {
     res.status(422).json({ error: "masterDocId is required", code: "MASTER_DOC_ID_REQUIRED" });
     return;
   }
+  const safeOverrides = (overrides && typeof overrides === "object" && !Array.isArray(overrides)) ? overrides : null;
 
   const runId = await createGenerationRun(r, {
     firm_id: req.firmId!,
@@ -6579,6 +6703,7 @@ router.post("/cases/:caseId/documents/generate-from-master", requireAuth, requir
       runId,
       bypassApplicability: bypass,
       clauses,
+      overrides: safeOverrides,
     });
     await finishGenerationRunSuccess(r, req.firmId!, runId, out.caseDocumentId, out.renderedVars, out.checklistSnapshot, out.readinessSnapshot);
     await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.generation.succeeded", entityType: "document_generation_run", entityId: runId, detail: `caseId=${caseId} templateSource=master templateId=${mid}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });

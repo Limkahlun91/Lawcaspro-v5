@@ -1,7 +1,8 @@
 import { Button } from "@/components/ui/button";
-import { Empty, EmptyContent, EmptyDescription, EmptyHeader, EmptyTitle } from "@/components/ui/empty";
+import { Empty, EmptyContent, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty";
 import { Spinner } from "@/components/ui/spinner";
 import { getErrorMessage, getFriendlyErrorTitle } from "@/lib/error-message";
+import { CloudOff } from "lucide-react";
 
 export function QueryFallback({
   title,
@@ -20,6 +21,9 @@ export function QueryFallback({
   return (
     <Empty>
       <EmptyHeader>
+        <EmptyMedia variant="icon">
+          <CloudOff />
+        </EmptyMedia>
         <EmptyTitle>{t}</EmptyTitle>
         <EmptyDescription>{d}</EmptyDescription>
       </EmptyHeader>

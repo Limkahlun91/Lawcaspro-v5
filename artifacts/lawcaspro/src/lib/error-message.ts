@@ -73,6 +73,7 @@ export function getErrorMessage(err: unknown): string {
   if (status === 401) return "Session expired. Please sign in again.";
   if (status === 403) return "You do not have permission to perform this action.";
   if (status === 404) return "File or template not found.";
+  if (status === 400 || status === 422) return "Request invalid. Please check your input and retry.";
   if (status === 503) {
     const raw = isApiErrorLike(err) && typeof err.message === "string" ? err.message.trim() : "";
     return raw || "Service temporarily unavailable. Please retry.";
@@ -115,6 +116,7 @@ export function getFriendlyErrorTitle(err: unknown): string {
   if (status === 401) return "Not authenticated";
   if (status === 403) return "Forbidden";
   if (status === 404) return "Not found";
+  if (status === 400 || status === 422) return "Invalid request";
   return "Request failed";
 }
 

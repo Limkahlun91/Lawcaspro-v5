@@ -1,5 +1,5 @@
 import { detectClausePlaceholders, ensureDocxHasPlaceholderAtEnd } from "./docxPlaceholder";
-import { getFirmClauseById, getPlatformClauseById, renderClauseBodyWithResolvedVariables, scanPlaceholdersInText } from "./clauseLibrary";
+import { getFirmClausesByIds, getPlatformClausesByIds, renderClauseBodyWithResolvedVariables, scanPlaceholdersInText } from "./clauseLibrary";
 
 export type SelectedClauseRef = { scope: "platform" | "firm"; id: number; includeTitle?: boolean };
 
@@ -85,10 +85,18 @@ export async function buildClauseInsertion(params: {
 
   const selectedClausesResolved: SelectedClauseResolved[] = [];
   const blocks: string[] = [];
+
+  const platformIds = clauseOrder.filter((x) => x.scope === "platform").map((x) => x.id);
+  const firmIds = clauseOrder.filter((x) => x.scope === "firm").map((x) => x.id);
+  const [platformRows, firmRows] = await Promise.all([
+    getPlatformClausesByIds(params.r, platformIds),
+    getFirmClausesByIds(params.r, params.firmId, firmIds),
+  ]);
+  const platformById = new Map(platformRows.map((r) => [Number((r as any).id), r]));
+  const firmById = new Map(firmRows.map((r) => [Number((r as any).id), r]));
+
   for (const ref of clauseOrder) {
-    const row = ref.scope === "platform"
-      ? await getPlatformClauseById(params.r, ref.id)
-      : await getFirmClauseById(params.r, params.firmId, ref.id);
+    const row = ref.scope === "platform" ? (platformById.get(ref.id) ?? null) : (firmById.get(ref.id) ?? null);
     if (!row) continue;
     const clauseCode = typeof (row as any).clause_code === "string" ? String((row as any).clause_code) : String((row as any).clauseCode ?? "");
     const title = typeof (row as any).title === "string" ? String((row as any).title) : "";

@@ -15,6 +15,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Progress } from "@/components/ui/progress";
 import { isFirmDocumentTypeLetterLike, isMasterDocumentLetterLike } from "@/lib/documents/letterLike";
 import { DOCUMENT_TYPE_LABELS } from "@workspace/documents-registry";
 import { QueryFallback } from "@/components/query-fallback";
@@ -384,7 +385,70 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
     return v && typeof v === "object" ? (v as Record<string, unknown>) : null;
   }
 
-  async function handleGenerate(item: ChecklistItem) {
+  function labelFromKey(key: string): string {
+    const pretty = String(key ?? "")
+      .replace(/_raw$/, "")
+      .replace(/_long$/, "")
+      .replace(/_rm$/, " RM")
+      .replace(/_/g, " ")
+      .trim();
+    return pretty.length ? pretty.replace(/\b\w/g, (m) => m.toUpperCase()) : key;
+  }
+
+  const [variableChecklistOpen, setVariableChecklistOpen] = useState(false);
+  const [variableChecklistLoading, setVariableChecklistLoading] = useState(false);
+  const [variableChecklistItem, setVariableChecklistItem] = useState<ChecklistItem | null>(null);
+  const [variableChecklistResult, setVariableChecklistResult] = useState<DocumentPreviewResponse | null>(null);
+  const [variableChecklistOverrides, setVariableChecklistOverrides] = useState<Record<string, string>>({});
+  const [variableChecklistQuery, setVariableChecklistQuery] = useState("");
+  const [variableChecklistShowOnlyMissing, setVariableChecklistShowOnlyMissing] = useState(true);
+  const [variableChecklistGenerating, setVariableChecklistGenerating] = useState(false);
+  const [variableChecklistLongRunning, setVariableChecklistLongRunning] = useState(false);
+  const [variableChecklistProgress, setVariableChecklistProgress] = useState(0);
+
+  const closeVariableChecklist = () => {
+    setVariableChecklistOpen(false);
+    setVariableChecklistLoading(false);
+    setVariableChecklistItem(null);
+    setVariableChecklistResult(null);
+    setVariableChecklistOverrides({});
+    setVariableChecklistQuery("");
+    setVariableChecklistShowOnlyMissing(true);
+    setVariableChecklistGenerating(false);
+    setVariableChecklistLongRunning(false);
+    setVariableChecklistProgress(0);
+  };
+
+  async function openVariableChecklist(item: ChecklistItem) {
+    if (!canGenerate) return;
+    if (item.kind !== "template" || typeof item.templateId !== "number" || (item.source !== "firm" && item.source !== "master")) return;
+    setVariableChecklistOpen(true);
+    setVariableChecklistLoading(true);
+    setVariableChecklistItem(item);
+    setVariableChecklistResult(null);
+    setVariableChecklistOverrides({});
+    setVariableChecklistLongRunning(false);
+    setVariableChecklistProgress(0);
+    try {
+      const bypassApplicability = Boolean(showAllTemplates && canBypassApplicability);
+      const result = await apiFetchJson<DocumentPreviewResponse>(`/cases/${caseId}/documents/preview`, {
+        method: "POST",
+        body: JSON.stringify(
+          item.source === "firm"
+            ? { templateId: Number(item.templateId), bypassApplicability, clauses: selectedClauses }
+            : { platformDocumentId: Number(item.templateId), bypassApplicability, clauses: selectedClauses }
+        ),
+      });
+      setVariableChecklistResult(result);
+    } catch (err) {
+      toastError(toast, err, "Preview failed");
+      closeVariableChecklist();
+    } finally {
+      setVariableChecklistLoading(false);
+    }
+  }
+
+  async function handleGenerate(item: ChecklistItem, overrides?: Record<string, string>) {
     const isLetterLike = item.source === "firm"
       ? isFirmDocumentTypeLetterLike(item.documentType)
       : isMasterDocumentLetterLike({ name: item.name, category: item.documentType, fileName: item.fileName ?? undefined });
@@ -397,34 +461,74 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
       ? (selectedLetterheadId ? Number(selectedLetterheadId) : defaultLetterhead?.id)
       : undefined;
 
+    const startedAt = Date.now();
+    let interval: any = null;
+    let longTimer: any = null;
     setIsGenerating(true);
     try {
       let created: CaseDocument;
       const bypassApplicability = Boolean(showAllTemplates && canBypassApplicability);
+      try {
+        setVariableChecklistProgress(5);
+        setVariableChecklistLongRunning(false);
+        longTimer = setTimeout(() => setVariableChecklistLongRunning(true), 15000);
+        interval = setInterval(() => {
+          const elapsed = Date.now() - startedAt;
+          const next = Math.max(5, Math.min(95, Math.round((elapsed / 60000) * 90) + 5));
+          setVariableChecklistProgress(next);
+        }, 400);
+      } catch {
+      }
       if (item.source === "firm") {
         created = await apiFetchJson(`/cases/${caseId}/documents/generate`, {
           method: "POST",
-          body: JSON.stringify({ templateId: Number(item.templateId), documentName: documentName || undefined, letterheadId: letterheadIdToSend, bypassApplicability, clauses: selectedClauses }),
+          timeoutMs: 120000,
+          body: JSON.stringify({
+            templateId: Number(item.templateId),
+            documentName: documentName || undefined,
+            letterheadId: letterheadIdToSend,
+            bypassApplicability,
+            clauses: selectedClauses,
+            overrides: overrides && Object.keys(overrides).length ? overrides : null,
+          }),
         });
       } else {
         created = await apiFetchJson(`/cases/${caseId}/documents/generate-from-master`, {
           method: "POST",
-          body: JSON.stringify({ masterDocId: Number(item.templateId), documentName: documentName || undefined, letterheadId: letterheadIdToSend, bypassApplicability, clauses: selectedClauses }),
+          timeoutMs: 120000,
+          body: JSON.stringify({
+            masterDocId: Number(item.templateId),
+            documentName: documentName || undefined,
+            letterheadId: letterheadIdToSend,
+            bypassApplicability,
+            clauses: selectedClauses,
+            overrides: overrides && Object.keys(overrides).length ? overrides : null,
+          }),
         });
       }
+      setVariableChecklistProgress(100);
       await qc.invalidateQueries({ queryKey: ["case-documents", caseId] });
       await qc.invalidateQueries({ queryKey: ["case-documents-checklist", caseId] });
-      toast({
-        title: "Document generated successfully",
-        description: created?.name ? String(created.name) : undefined,
-        action: (
-          <ToastAction altText="Download" onClick={() => handleDownload(created)}>
-            Download
-          </ToastAction>
-        ),
-      });
+      if (variableChecklistLongRunning) {
+        try {
+          await handleDownload(created);
+        } catch {
+        }
+        toast({ title: "Document generated", description: created?.name ? String(created.name) : undefined });
+      } else {
+        toast({
+          title: "Document generated successfully",
+          description: created?.name ? String(created.name) : undefined,
+          action: (
+            <ToastAction altText="Download" onClick={() => handleDownload(created)}>
+              Download
+            </ToastAction>
+          ),
+        });
+      }
       setViewTab("list");
       closeGenerateDialog();
+      closeVariableChecklist();
     } catch (err: unknown) {
       const errRec = asRecord(err);
       const data = asRecord(errRec?.data);
@@ -457,6 +561,11 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
         toastError(toast, err, "Generation failed");
       }
     } finally {
+      try {
+        if (interval) clearInterval(interval);
+        if (longTimer) clearTimeout(longTimer);
+      } catch {
+      }
       setIsGenerating(false);
     }
   }
@@ -1241,7 +1350,7 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
                                         Download
                                       </Button>
                                     ) : it.kind === "template" ? (
-                                      <Button size="sm" onClick={() => handleGenerate(it)} disabled={!canGenerate || !applicable || !ready || isGenerating}>
+                                      <Button size="sm" onClick={() => openVariableChecklist(it)} disabled={!canGenerate || !applicable || !ready || isGenerating}>
                                         Generate
                                       </Button>
                                     ) : null}
@@ -1658,7 +1767,7 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
                   onClick={() => {
                     if (!previewItem) return;
                     setPreviewOpen(false);
-                    handleGenerate(previewItem);
+                    openVariableChecklist(previewItem);
                   }}
                   disabled={
                     !previewItem
@@ -1677,12 +1786,152 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
         </DialogContent>
       </Dialog>
 
+      <Dialog open={variableChecklistOpen} onOpenChange={(v) => { if (!v) closeVariableChecklist(); else setVariableChecklistOpen(true); }}>
+        <DialogContent className="sm:max-w-4xl max-h-[80vh] overflow-hidden">
+          <DialogHeader>
+            <DialogTitle>Variable Checklist</DialogTitle>
+          </DialogHeader>
+          <div className="flex flex-col gap-3 h-full">
+            {variableChecklistItem ? (
+              <div className="text-sm text-slate-600 truncate">
+                {variableChecklistItem.name}
+              </div>
+            ) : null}
+
+            {variableChecklistLoading ? (
+              <div className="text-sm text-slate-500 py-8 text-center">Loading variables…</div>
+            ) : !variableChecklistResult ? (
+              <div className="text-sm text-slate-500 py-8 text-center">No preview available.</div>
+            ) : (
+              <>
+                <div className="flex items-center justify-between gap-3">
+                  <Input
+                    value={variableChecklistQuery}
+                    onChange={(e) => setVariableChecklistQuery(e.target.value)}
+                    placeholder="Search variables…"
+                    className="max-w-sm"
+                    disabled={variableChecklistGenerating || isGenerating}
+                  />
+                  <div className="flex items-center gap-2">
+                    <Button
+                      size="sm"
+                      variant={variableChecklistShowOnlyMissing ? "default" : "outline"}
+                      onClick={() => setVariableChecklistShowOnlyMissing(true)}
+                      disabled={variableChecklistGenerating || isGenerating}
+                    >
+                      Missing only
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant={!variableChecklistShowOnlyMissing ? "default" : "outline"}
+                      onClick={() => setVariableChecklistShowOnlyMissing(false)}
+                      disabled={variableChecklistGenerating || isGenerating}
+                    >
+                      All
+                    </Button>
+                  </div>
+                </div>
+
+                <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
+                  <div className="text-sm font-medium text-slate-900">Review before generating</div>
+                  <div className="mt-1 text-xs text-slate-600">
+                    Placeholders: {variableChecklistResult.previewSummary.placeholdersCount} · Missing required: {variableChecklistResult.previewSummary.missingRequiredCount}
+                  </div>
+                  {variableChecklistLongRunning ? (
+                    <div className="mt-2 text-xs text-slate-600">
+                      Still generating… download will start automatically when ready.
+                    </div>
+                  ) : null}
+                  {(variableChecklistGenerating || isGenerating) ? (
+                    <div className="mt-2">
+                      <Progress value={variableChecklistProgress || 5} />
+                    </div>
+                  ) : null}
+                </div>
+
+                <div className="flex-1 min-h-0 overflow-y-auto rounded-lg border border-slate-200 bg-white">
+                  <div className="divide-y divide-slate-100">
+                    {Object.entries(variableChecklistResult.resolvedVariables)
+                      .map(([key, value]) => {
+                        const label = labelFromKey(key);
+                        const override = Object.prototype.hasOwnProperty.call(variableChecklistOverrides, key) ? variableChecklistOverrides[key] : "";
+                        const base = value === null || value === undefined ? "" : String(value);
+                        const effective = override !== "" ? override : base;
+                        const isEmpty = !String(effective ?? "").trim();
+                        const q = variableChecklistQuery.trim().toLowerCase();
+                        const matches = !q || key.toLowerCase().includes(q) || label.toLowerCase().includes(q);
+                        if (!matches) return null;
+                        if (variableChecklistShowOnlyMissing && !isEmpty) return null;
+                        return (
+                          <div key={key} className="p-3">
+                            <div className="flex items-start justify-between gap-3">
+                              <div className="min-w-0">
+                                <div className="text-sm font-medium text-slate-900 truncate" title={key}>{label}</div>
+                                <div className="text-xs text-slate-500 truncate" title={key}>{key}</div>
+                              </div>
+                              <div className="w-[360px] shrink-0">
+                                <Input
+                                  value={override !== "" ? override : (base || "")}
+                                  onChange={(e) => {
+                                    const v = e.target.value;
+                                    setVariableChecklistOverrides((prev) => {
+                                      const next = { ...prev };
+                                      if (v === "") delete next[key];
+                                      else next[key] = v;
+                                      return next;
+                                    });
+                                  }}
+                                  placeholder={base ? "Override value (optional)" : "Fill missing value…"}
+                                  disabled={variableChecklistGenerating || isGenerating}
+                                />
+                                <div className="mt-1 flex items-center gap-2">
+                                  <span className={cn("text-[10px] px-1.5 py-0.5 rounded font-medium", isEmpty ? "bg-rose-50 text-rose-700" : "bg-emerald-50 text-emerald-700")}>
+                                    {isEmpty ? "Empty" : "OK"}
+                                  </span>
+                                  {override !== "" ? (
+                                    <span className="text-[10px] px-1.5 py-0.5 rounded font-medium bg-blue-50 text-blue-700">Edited</span>
+                                  ) : null}
+                                </div>
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      })
+                      .filter(Boolean)}
+                  </div>
+                </div>
+
+                <div className="flex justify-end gap-2 pt-1">
+                  <Button variant="outline" onClick={closeVariableChecklist} disabled={variableChecklistGenerating || isGenerating}>
+                    Close
+                  </Button>
+                  <Button
+                    onClick={async () => {
+                      if (!variableChecklistItem || !variableChecklistResult) return;
+                      setVariableChecklistGenerating(true);
+                      try {
+                        await handleGenerate(variableChecklistItem, variableChecklistOverrides);
+                      } finally {
+                        setVariableChecklistGenerating(false);
+                      }
+                    }}
+                    disabled={!variableChecklistItem || !canGenerate || variableChecklistGenerating || isGenerating}
+                  >
+                    Confirm & Generate
+                  </Button>
+                </div>
+              </>
+            )}
+          </div>
+        </DialogContent>
+      </Dialog>
+
       <Dialog open={generateDialogOpen} onOpenChange={(v) => { if (!v) closeGenerateDialog(); else setGenerateDialogOpen(true); }}>
-        <DialogContent className="sm:max-w-2xl">
+        <DialogContent className="sm:max-w-5xl max-h-[80vh] overflow-hidden">
           <DialogHeader>
             <DialogTitle>Generate Document from Template</DialogTitle>
           </DialogHeader>
-          <div className="space-y-4">
+          <div className="flex flex-col gap-4 h-full">
             <div className="flex items-center justify-between gap-3">
               {canBypassApplicability ? (
                 <div className="flex items-center gap-2">
@@ -1743,9 +1992,9 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
               </div>
             )}
 
-            <div className="border rounded-lg p-3 max-h-[340px] overflow-y-auto">
+            <div className="flex-1 min-h-0 overflow-y-auto rounded-lg border border-slate-200 bg-white">
               {selectedClauses.length > 0 ? (
-                <div className="mb-3 rounded border border-amber-200 bg-amber-50 p-2 text-xs text-amber-900">
+                <div className="m-3 rounded border border-amber-200 bg-amber-50 p-2 text-xs text-amber-900">
                   Clauses selected. Use Preview to confirm insertion target before generating.
                 </div>
               ) : null}
@@ -1754,7 +2003,7 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
               ) : checklistQuery.isError ? (
                 <QueryFallback title="Templates unavailable" error={checklistQuery.error} onRetry={() => checklistQuery.refetch()} isRetrying={checklistQuery.isFetching} />
               ) : (
-                <div className="space-y-4">
+                <div className="p-3 space-y-4">
                   {(checklistQuery.data?.sections ?? []).map((sec) => {
                     const filtered = (sec.items ?? []).filter((it) => {
                       if (it.kind !== "template") return false;
@@ -1767,7 +2016,7 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
                     return (
                       <div key={sec.section} className="space-y-2">
                         <div className="text-xs font-semibold text-slate-700">{sec.section}</div>
-                        <div className="space-y-2">
+                        <div className="rounded-md border border-slate-200 divide-y divide-slate-100 bg-white">
                           {filtered.map((it) => {
                             const overridable = Boolean(it.applicability?.status === "not_applicable" && it.applicability?.manuallyOverridable && canBypassApplicability && showAllTemplates);
                             const checklistOverridable = Boolean(it.checklistResult?.checklistStatus === "blocked" && it.checklistResult?.manuallyOverridable && canBypassApplicability && showAllTemplates);
@@ -1780,70 +2029,51 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
                                 ? (it.readiness?.missing ?? []).map((m) => m.message).filter(Boolean).slice(0, 3).join(", ")
                                 : "";
                             return (
-                              <div key={`${it.source}-${it.templateId}`} className="flex items-start justify-between gap-3 rounded-md border border-slate-200 bg-white p-2">
-                                <div className="min-w-0">
-                                  <div className="text-sm font-medium text-slate-900 truncate" title={it.name}>{it.name}</div>
-                                  <div className="mt-1 flex items-center gap-2 flex-wrap">
-                                    <span className={cn("text-[10px] px-1.5 py-0.5 rounded font-medium", it.source === "firm" ? "bg-slate-100 text-slate-700" : "bg-purple-50 text-purple-700")}>
-                                      {it.source}
-                                    </span>
-                                    <span className={cn("text-[10px] px-1.5 py-0.5 rounded font-medium", it.applicability?.status === "warning" ? "bg-amber-50 text-amber-800" : applicable ? "bg-emerald-50 text-emerald-700" : "bg-slate-100 text-slate-500")}>
-                                      {it.applicability?.status === "warning" ? "Warning" : overridable ? "Override" : applicable ? "Applicable" : "Not applicable"}
-                                    </span>
-                                    {it.checklistResult ? (
-                                      <span className={cn("text-[10px] px-1.5 py-0.5 rounded font-medium", it.checklistResult.checklistStatus === "ready" ? "bg-emerald-50 text-emerald-700" : it.checklistResult.checklistStatus === "warning" ? "bg-amber-50 text-amber-800" : "bg-rose-50 text-rose-700")}>
-                                        Checklist {it.checklistResult.checklistStatus}
-                                      </span>
-                                    ) : null}
-                                    <span className={cn("text-[10px] px-1.5 py-0.5 rounded font-medium", ready ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-800")}>
-                                      {ready ? "Ready" : (it.readiness?.status || "Incomplete")}
-                                    </span>
-                                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-50 text-blue-700 font-medium">
-                                      {it.documentGroup}
-                                    </span>
-                                  </div>
-                                  {reason && <div className="mt-1 text-xs text-slate-600 break-words">{reason}</div>}
-                                  {it.checklistResult ? <div className="mt-1 text-xs text-slate-600">{it.checklistResult.passedItems}/{it.checklistResult.totalItems} passed, missing {it.checklistResult.missingRequiredItems}{it.checklistResult.manuallyOverridable ? ", override available" : ""}</div> : null}
-                                  {rowNamingPreview[`${it.source}-${it.templateId}`] ? (
-                                    <div className="mt-1 text-xs text-slate-600 break-words">
-                                      Rule: {rowNamingPreview[`${it.source}-${it.templateId}`].ruleUsed}
-                                      <br />
-                                      Name: {rowNamingPreview[`${it.source}-${it.templateId}`].fileName}
-                                      {rowNamingPreview[`${it.source}-${it.templateId}`].warnings?.length ? (
-                                        <>
-                                          <br />
-                                          Warning: {rowNamingPreview[`${it.source}-${it.templateId}`].warnings?.join(", ")}
-                                        </>
-                                      ) : null}
+                              <div key={`${it.source}-${it.templateId}`} className="px-3 py-2">
+                                <div className="grid grid-cols-[minmax(0,1fr)_minmax(0,320px)_auto] items-center gap-3">
+                                  <div className="min-w-0">
+                                    <div className="text-sm font-medium text-slate-900 truncate" title={it.name}>{it.name}</div>
+                                    <div className="mt-1 text-xs text-slate-600 truncate">
+                                      {it.source} · {it.documentGroup}
+                                      {it.checklistResult ? ` · Checklist ${it.checklistResult.checklistStatus}` : ""}
                                     </div>
-                                  ) : null}
-                                </div>
-                                <div className="shrink-0">
-                                  <div className="flex items-center gap-2">
-                                    <Button
-                                      size="sm"
-                                      variant="outline"
-                                      onClick={() => previewFileNameForItem(it)}
-                                      disabled={!applicable || !ready}
-                                    >
+                                  </div>
+                                  <div className="min-w-0">
+                                    <div className="flex items-center gap-2 flex-wrap justify-start">
+                                      <span className={cn("text-[10px] px-1.5 py-0.5 rounded font-medium", it.applicability?.status === "warning" ? "bg-amber-50 text-amber-800" : applicable ? "bg-emerald-50 text-emerald-700" : "bg-slate-100 text-slate-500")}>
+                                        {it.applicability?.status === "warning" ? "Warning" : overridable ? "Override" : applicable ? "Applicable" : "Not applicable"}
+                                      </span>
+                                      <span className={cn("text-[10px] px-1.5 py-0.5 rounded font-medium", ready ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-800")}>
+                                        {ready ? "Ready" : (it.readiness?.status || "Incomplete")}
+                                      </span>
+                                    </div>
+                                    {reason ? <div className="mt-1 text-xs text-slate-600 truncate" title={reason}>{reason}</div> : null}
+                                  </div>
+                                  <div className="flex items-center gap-2 justify-end">
+                                    <Button size="sm" variant="outline" onClick={() => previewFileNameForItem(it)} disabled={!applicable || !ready}>
                                       Filename
                                     </Button>
-                                    {selectedClauses.length > 0 ? (
-                                      <Button
-                                        size="sm"
-                                        variant="outline"
-                                        onClick={() => { closeGenerateDialog(); handlePreview(it); }}
-                                        disabled={!applicable || !ready || previewLoading}
-                                      >
-                                        Preview
-                                      </Button>
-                                    ) : (
-                                      <Button size="sm" onClick={() => handleGenerate(it)} disabled={!applicable || !ready || isGenerating}>
-                                        Generate
-                                      </Button>
-                                    )}
+                                    <Button size="sm" variant="outline" onClick={() => { closeGenerateDialog(); handlePreview(it); }} disabled={!applicable || !ready || previewLoading}>
+                                      Preview
+                                    </Button>
+                                    <Button size="sm" onClick={() => openVariableChecklist(it)} disabled={!applicable || !ready || isGenerating}>
+                                      Generate
+                                    </Button>
                                   </div>
                                 </div>
+                                {rowNamingPreview[`${it.source}-${it.templateId}`] ? (
+                                  <div className="mt-2 text-xs text-slate-600 break-words">
+                                    Rule: {rowNamingPreview[`${it.source}-${it.templateId}`].ruleUsed}
+                                    <br />
+                                    Name: {rowNamingPreview[`${it.source}-${it.templateId}`].fileName}
+                                    {rowNamingPreview[`${it.source}-${it.templateId}`].warnings?.length ? (
+                                      <>
+                                        <br />
+                                        Warning: {rowNamingPreview[`${it.source}-${it.templateId}`].warnings?.join(", ")}
+                                      </>
+                                    ) : null}
+                                  </div>
+                                ) : null}
                               </div>
                             );
                           })}

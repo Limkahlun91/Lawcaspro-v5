@@ -124,3 +124,21 @@ export async function getFirmClauseById(r: DbConn, firmId: number, id: number): 
   const rows = await queryRows(r, sql`SELECT * FROM firm_clauses WHERE firm_id = ${firmId} AND id = ${id} LIMIT 1`);
   return rows[0] ?? null;
 }
+
+export async function getPlatformClausesByIds(r: DbConn, ids: number[]): Promise<Record<string, unknown>[]> {
+  const unique = Array.from(new Set(ids.filter((x) => Number.isFinite(x) && x > 0)));
+  if (unique.length === 0) return [];
+  return await queryRows(
+    r,
+    sql`SELECT * FROM platform_clauses WHERE id IN (${sql.join(unique.map((id) => sql`${id}`), sql`, `)})`
+  );
+}
+
+export async function getFirmClausesByIds(r: DbConn, firmId: number, ids: number[]): Promise<Record<string, unknown>[]> {
+  const unique = Array.from(new Set(ids.filter((x) => Number.isFinite(x) && x > 0)));
+  if (unique.length === 0) return [];
+  return await queryRows(
+    r,
+    sql`SELECT * FROM firm_clauses WHERE firm_id = ${firmId} AND id IN (${sql.join(unique.map((id) => sql`${id}`), sql`, `)})`
+  );
+}
