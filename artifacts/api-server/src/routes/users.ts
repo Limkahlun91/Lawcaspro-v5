@@ -7,7 +7,7 @@ import {
   CreateUserBody, UpdateUserBody, ListUsersQueryParams,
   GetUserParams, UpdateUserParams
 } from "@workspace/api-zod";
-import { requireAuth, requireFirmUser, requirePermission, type AuthRequest, writeAuditLog } from "../lib/auth.js";
+import { ensureRolePermissionsInitialized, requireAuth, requireFirmUser, requirePermission, type AuthRequest, writeAuditLog } from "../lib/auth.js";
 import { logger } from "../lib/logger.js";
 
 type ReqLike = IncomingMessage & {
@@ -257,6 +257,12 @@ routerInternal.post("/users", requireAuth, requireFirmUser, requirePermission("u
       return;
     }
 
+    try {
+      await ensureRolePermissionsInitialized(db as any, req.firmId!, roleId);
+    } catch (err) {
+      logger.error({ err, firmId: req.firmId ?? null, roleId }, "users.create_permissions_init_failed");
+    }
+
     await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "users.create", entityType: "user", entityId: created.user.id, detail: `email=${created.user.email}`, ipAddress: req.ip, userAgent: getHeader(req, "user-agent") });
     res.status(201).json(await enrichUser(r, req.firmId!, created.user));
   } catch (err) {
@@ -351,6 +357,13 @@ routerInternal.patch("/users/:userId", requireAuth, requireFirmUser, requirePerm
   }
 
   await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "users.update", entityType: "user", entityId: user.id, detail: `fields=${Object.keys(updates).join(",")}`, ipAddress: req.ip, userAgent: getHeader(req, "user-agent") });
+  if (typeof updates.roleId === "number") {
+    try {
+      await ensureRolePermissionsInitialized(db as any, req.firmId!, updates.roleId);
+    } catch (err) {
+      logger.error({ err, firmId: req.firmId ?? null, roleId: updates.roleId }, "users.update_permissions_init_failed");
+    }
+  }
   res.json(await enrichUser(r, req.firmId!, user));
 });
 

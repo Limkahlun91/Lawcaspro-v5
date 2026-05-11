@@ -4,7 +4,7 @@ import crypto from "crypto";
 import { and, eq } from "drizzle-orm";
 import { auditLogsTable, db, firmsTable, permissionsTable, rolesTable, sessionsTable, sql, type SQL, usersTable } from "@workspace/db";
 import { LoginBody } from "@workspace/api-zod";
-import { loadFounderPermissions, lookupSessionAndUserByTokenHash, requireAuth, requireReAuth, issueReauthToken, type AuthRequest, writeAuditLog } from "../lib/auth.js";
+import { ensureRolePermissionsInitialized, loadFounderPermissions, lookupSessionAndUserByTokenHash, requireAuth, requireReAuth, issueReauthToken, type AuthRequest, writeAuditLog } from "../lib/auth.js";
 import { ApiError, sendError, sendOk } from "../lib/api-response.js";
 import { authRateLimiter, sensitiveRateLimiter } from "../lib/rate-limit.js";
 import { logger } from "../lib/logger.js";
@@ -763,6 +763,13 @@ routerInternal.get(
     }
 
     const started = Date.now();
+    try {
+      if (req.firmId && req.roleId) {
+        await ensureRolePermissionsInitialized(db as any, req.firmId, req.roleId);
+      }
+    } catch (err) {
+      logger.error({ ...ctx, err }, "auth.permissions_seed_failed");
+    }
     const rows = await db
       .select({ module: permissionsTable.module, action: permissionsTable.action })
       .from(permissionsTable)

@@ -614,6 +614,42 @@ async function ensureBaselinePermissions(rlsDb: RlsDb | typeof db, roleId: numbe
   `);
 }
 
+export async function ensureRolePermissionsInitialized(
+  rlsDb: RlsDb | typeof db,
+  firmId: number,
+  roleId: number,
+): Promise<{ ensured: boolean; insertedBaseline: boolean; permissionsCount: number }> {
+  const [role] = await rlsDb
+    .select()
+    .from(rolesTable)
+    .where(and(eq(rolesTable.id, roleId), eq(rolesTable.firmId, firmId)));
+  if (!role) return { ensured: false, insertedBaseline: false, permissionsCount: 0 };
+
+  const existing = await rlsDb
+    .select({ module: permissionsTable.module })
+    .from(permissionsTable)
+    .where(and(eq(permissionsTable.roleId, roleId), eq(permissionsTable.allowed, true)))
+    .limit(1);
+
+  if (existing[0]) {
+    const countRows = await rlsDb.execute(sql`SELECT COUNT(*)::int AS c FROM permissions WHERE role_id = ${roleId} AND allowed = true`);
+    const rows = Array.isArray(countRows) ? (countRows as any[]) : ((countRows as any)?.rows ?? []);
+    const c = typeof rows?.[0]?.c === "number" ? rows[0].c : Number(rows?.[0]?.c ?? 0);
+    return { ensured: true, insertedBaseline: false, permissionsCount: c };
+  }
+
+  let insertedBaseline = false;
+  if (role.isSystemRole && (role.name === "Partner" || role.name === "Clerk")) {
+    await ensureBaselinePermissions(rlsDb, roleId, role.name);
+    insertedBaseline = true;
+  }
+
+  const countRows2 = await rlsDb.execute(sql`SELECT COUNT(*)::int AS c FROM permissions WHERE role_id = ${roleId} AND allowed = true`);
+  const rows2 = Array.isArray(countRows2) ? (countRows2 as any[]) : ((countRows2 as any)?.rows ?? []);
+  const c2 = typeof rows2?.[0]?.c === "number" ? rows2[0].c : Number(rows2?.[0]?.c ?? 0);
+  return { ensured: true, insertedBaseline, permissionsCount: c2 };
+}
+
 /**
  * Restricts access to users with the Partner role (role_id = 1).
  * Must be used after requireAuth + requireFirmUser.
