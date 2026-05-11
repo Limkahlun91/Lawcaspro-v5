@@ -15,8 +15,12 @@ import { getListDevelopersQueryKey } from "@workspace/api-client-react";
 import { QueryFallback } from "@/components/query-fallback";
 import { toastError } from "@/lib/toast-error";
 import { apiFetchJson, apiRequest } from "@/lib/api-client";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+
+type Salutation = "" | "MR." | "MS." | "MRS." | "MDM." | "DR." | "DATUK";
 
 interface Contact {
+  salutation: Salutation;
   name: string;
   department: string;
   phone: string;
@@ -38,7 +42,7 @@ interface Developer {
   createdAt: string;
 }
 
-const emptyContact = (): Contact => ({ name: "", department: "", phone: "", phoneExt: "", email: "" });
+const emptyContact = (): Contact => ({ salutation: "", name: "", department: "", phone: "", phoneExt: "", email: "" });
 
 export default function DeveloperDetail() {
   const { id } = useParams<{ id: string }>();
@@ -79,7 +83,7 @@ export default function DeveloperDetail() {
       setContacts(
         data.contacts && data.contacts.length > 0
           ? data.contacts
-          : [{ name: data.contactPerson ?? "", department: "", phone: data.phone ?? "", phoneExt: "", email: data.email ?? "" }]
+          : [{ salutation: "", name: data.contactPerson ?? "", department: "", phone: data.phone ?? "", phoneExt: "", email: data.email ?? "" }]
       );
     } catch (err) {
       setLoadError(err);
@@ -167,7 +171,7 @@ export default function DeveloperDetail() {
     setContacts(
       developer.contacts && developer.contacts.length > 0
         ? developer.contacts
-        : [{ name: developer.contactPerson ?? "", department: "", phone: developer.phone ?? "", phoneExt: "", email: developer.email ?? "" }]
+        : [{ salutation: "", name: developer.contactPerson ?? "", department: "", phone: developer.phone ?? "", phoneExt: "", email: developer.email ?? "" }]
     );
     setEditing(false);
   };
@@ -307,7 +311,23 @@ export default function DeveloperDetail() {
                   <div className="grid grid-cols-2 gap-3">
                     <div className="space-y-1.5">
                       <Label className="text-xs">Name</Label>
-                      <Input className="bg-white" value={contact.name} onChange={(e) => updateContact(index, "name", e.target.value)} placeholder="Full name" />
+                      <div className="grid grid-cols-[120px_1fr] gap-2">
+                        <Select value={contact.salutation} onValueChange={(v) => updateContact(index, "salutation", v as Salutation)}>
+                          <SelectTrigger className="bg-white">
+                            <SelectValue placeholder="Title" />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="">—</SelectItem>
+                            <SelectItem value="MR.">MR.</SelectItem>
+                            <SelectItem value="MS.">MS.</SelectItem>
+                            <SelectItem value="MRS.">MRS.</SelectItem>
+                            <SelectItem value="MDM.">MDM.</SelectItem>
+                            <SelectItem value="DR.">DR.</SelectItem>
+                            <SelectItem value="DATUK">DATUK</SelectItem>
+                          </SelectContent>
+                        </Select>
+                        <Input className="bg-white" value={contact.name} onChange={(e) => updateContact(index, "name", e.target.value)} placeholder="Full name" />
+                      </div>
                     </div>
                     <div className="space-y-1.5">
                       <Label className="text-xs">Department</Label>
@@ -395,7 +415,9 @@ export default function DeveloperDetail() {
                     <div className="flex items-center gap-2">
                       <User className="w-4 h-4 text-slate-400 shrink-0" />
                       <div>
-                        <div className="text-sm font-semibold text-slate-900">{c.name || "—"}</div>
+                        <div className="text-sm font-semibold text-slate-900">
+                          {`${c.salutation ? `${c.salutation} ` : ""}${c.name || ""}`.trim() || "—"}
+                        </div>
                         {c.department && (
                           <div className="text-xs text-slate-500">{c.department}</div>
                         )}

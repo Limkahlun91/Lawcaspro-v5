@@ -117,6 +117,7 @@ export const DEFAULT_DOCUMENT_VARIABLES: DefaultDocumentVariable[] = [
   { key: "developer_address", label: "Developer Address", category: "developer", valueType: "string", sourcePath: "developer_address", sortOrder: 520 },
   { key: "developer_phone", label: "Developer Phone", category: "developer", valueType: "string", sourcePath: "developer_phone", sortOrder: 530 },
   { key: "developer_email", label: "Developer Email", category: "developer", valueType: "string", sourcePath: "developer_email", sortOrder: 540 },
+  { key: "contact_1_salutation", label: "Contact 1 Salutation", category: "developer", valueType: "string", sourcePath: "contact_1_salutation", sortOrder: 545 },
 
   { key: "project_name", label: "Project Name", category: "project", valueType: "string", sourcePath: "project_name", sortOrder: 600 },
   { key: "project_type", label: "Project Type", category: "project", valueType: "string", sourcePath: "project_type", sortOrder: 610 },

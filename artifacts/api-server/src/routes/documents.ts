@@ -827,6 +827,9 @@ async function buildCaseContext(r: DbConn, caseId: number, firmId: number, cache
   const devContacts = typeof (c as any).developer_contacts_json === "string"
     ? (() => { try { return JSON.parse(String((c as any).developer_contacts_json)); } catch { return []; } })()
     : [];
+  const firstDevContact = Array.isArray(devContacts)
+    ? (devContacts.find((dc: any) => dc && typeof dc === "object" && typeof dc.name === "string" && dc.name.trim()) ?? devContacts[0] ?? null)
+    : null;
 
   const today = new Date();
   const dateStr = today.toLocaleDateString("en-MY", { day: "2-digit", month: "long", year: "numeric" });
@@ -1095,11 +1098,14 @@ async function buildCaseContext(r: DbConn, caseId: number, firmId: number, cache
     developer_email: (c as any).developer_email ?? "",
     developer_contacts: Array.isArray(devContacts) ? devContacts.map((dc: any, i: number) => ({
       index: i + 1,
+      salutation: typeof dc.salutation === "string" ? dc.salutation : "",
+      name: typeof dc.name === "string" ? dc.name : "",
       department: dc.department ?? "",
       phone: dc.phone ?? "",
-      ext: dc.ext ?? "",
+      ext: dc.phoneExt ?? dc.ext ?? "",
       email: dc.email ?? "",
     })) : [],
+    contact_1_salutation: firstDevContact && typeof (firstDevContact as any).salutation === "string" ? String((firstDevContact as any).salutation) : "",
 
     // Purchaser (Main)
     purchaser_name: mainPurchaser.name ?? "",
@@ -7403,7 +7409,7 @@ router.get("/document-variables-legacy", requireAuth, async (_req: AuthRequest, 
     { group: "Loops (use with {#name}...{/name})", vars: [
       { key: "purchasers", label: "All Purchasers", type: "loop", fields: "index, name, ic, nationality, address, phone, email, role" },
       { key: "bank_accounts", label: "All Bank Accounts", type: "loop", fields: "index, bank_name, account_no, account_type" },
-      { key: "developer_contacts", label: "Developer Contacts", type: "loop", fields: "index, department, phone, ext, email" },
+      { key: "developer_contacts", label: "Developer Contacts", type: "loop", fields: "index, salutation, name, department, phone, ext, email" },
     ]},
     { group: "Case Key Dates (Structured; falls back to workflow)", vars: [
       { key: "spa_signed_date_raw", label: "SPA Signed Date (raw)" },

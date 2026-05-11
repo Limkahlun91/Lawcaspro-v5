@@ -6,13 +6,17 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { ArrowLeft, Plus, Trash2 } from "lucide-react";
 import { useQueryClient } from "@tanstack/react-query";
 import { getListDevelopersQueryKey } from "@workspace/api-client-react";
 import { toastError } from "@/lib/toast-error";
 import { apiRequest } from "@/lib/api-client";
 
+type Salutation = "" | "MR." | "MS." | "MRS." | "MDM." | "DR." | "DATUK";
+
 interface Contact {
+  salutation: Salutation;
   name: string;
   department: string;
   phone: string;
@@ -20,7 +24,7 @@ interface Contact {
   email: string;
 }
 
-const emptyContact = (): Contact => ({ name: "", department: "", phone: "", phoneExt: "", email: "" });
+const emptyContact = (): Contact => ({ salutation: "", name: "", department: "", phone: "", phoneExt: "", email: "" });
 
 export default function NewDeveloper() {
   const [, setLocation] = useLocation();
@@ -187,12 +191,28 @@ export default function NewDeveloper() {
                 <div className="grid grid-cols-2 gap-3">
                   <div className="space-y-1.5">
                     <Label className="text-xs">Name</Label>
-                    <Input
-                      placeholder="e.g. MS. VIVIEN CHOR"
-                      value={contact.name}
-                      onChange={(e) => updateContact(index, "name", e.target.value)}
-                      className="bg-white"
-                    />
+                    <div className="grid grid-cols-[120px_1fr] gap-2">
+                      <Select value={contact.salutation} onValueChange={(v) => updateContact(index, "salutation", v as Salutation)}>
+                        <SelectTrigger className="bg-white">
+                          <SelectValue placeholder="Title" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="">—</SelectItem>
+                          <SelectItem value="MR.">MR.</SelectItem>
+                          <SelectItem value="MS.">MS.</SelectItem>
+                          <SelectItem value="MRS.">MRS.</SelectItem>
+                          <SelectItem value="MDM.">MDM.</SelectItem>
+                          <SelectItem value="DR.">DR.</SelectItem>
+                          <SelectItem value="DATUK">DATUK</SelectItem>
+                        </SelectContent>
+                      </Select>
+                      <Input
+                        placeholder="e.g. VIVIEN CHOR"
+                        value={contact.name}
+                        onChange={(e) => updateContact(index, "name", e.target.value)}
+                        className="bg-white"
+                      />
+                    </div>
                   </div>
                   <div className="space-y-1.5">
                     <Label className="text-xs">Department</Label>

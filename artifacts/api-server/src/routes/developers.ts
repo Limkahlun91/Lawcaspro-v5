@@ -70,6 +70,7 @@ type DeveloperInsertPayload = Pick<DeveloperInsert, "firmId" | "name"> & Partial
 >>;
 
 interface DeveloperContact {
+  salutation?: string;
   name: string;
   department: string;
   phone: string;
@@ -77,11 +78,37 @@ interface DeveloperContact {
   email: string;
 }
 
+const SALUTATIONS = new Set(["MR.", "MS.", "MRS.", "MDM.", "DR.", "DATUK"]);
+
+function normalizeSalutation(value: unknown): string {
+  const s = typeof value === "string" ? value.trim().toUpperCase() : "";
+  return SALUTATIONS.has(s) ? s : "";
+}
+
+function normalizeContacts(value: unknown): DeveloperContact[] {
+  if (!Array.isArray(value)) return [];
+  const out: DeveloperContact[] = [];
+  for (const item of value) {
+    const rec = asRecord(item);
+    const name = typeof rec.name === "string" ? rec.name.trim() : "";
+    if (!name) continue;
+    out.push({
+      salutation: normalizeSalutation(rec.salutation),
+      name,
+      department: typeof rec.department === "string" ? rec.department.trim() : "",
+      phone: typeof rec.phone === "string" ? rec.phone.trim() : "",
+      phoneExt: typeof rec.phoneExt === "string" ? rec.phoneExt.trim() : "",
+      email: typeof rec.email === "string" ? rec.email.trim() : "",
+    });
+    if (out.length >= 5) break;
+  }
+  return out;
+}
+
 function parseContacts(raw: string | null | undefined): DeveloperContact[] {
   if (!raw) return [];
   try {
-    const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed : [];
+    return normalizeContacts(JSON.parse(raw));
   } catch {
     return [];
   }
@@ -160,7 +187,7 @@ routerInternal.post("/developers", requireAuth, requireFirmUser, requirePermissi
     const contactPerson = asOptionalString(body.contactPerson);
     const phone = asOptionalString(body.phone);
     const email = asOptionalString(body.email);
-    const contacts = Array.isArray(body.contacts) ? (body.contacts as unknown[]) : undefined;
+    const contacts = body.contacts !== undefined ? normalizeContacts(body.contacts) : undefined;
     if (!name) {
       res.status(400).json({ error: "Company name is required" });
       return;
@@ -311,7 +338,7 @@ routerInternal.patch("/developers/:developerId", requireAuth, requireFirmUser, r
   const contactPerson = asOptionalString(body.contactPerson);
   const phone = asOptionalString(body.phone);
   const email = asOptionalString(body.email);
-  const contacts = Array.isArray(body.contacts) ? (body.contacts as unknown[]) : undefined;
+  const contacts = body.contacts !== undefined ? normalizeContacts(body.contacts) : undefined;
 
   const updateData: Partial<typeof developersTable.$inferInsert> = {};
   if (name !== undefined) updateData.name = name;

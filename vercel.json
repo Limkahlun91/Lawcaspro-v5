@@ -1,4 +1,14 @@
 {
+  "version": 2,
+  "framework": "vite",
+  "installCommand": "pnpm install",
+  "buildCommand": "pnpm run build",
+  "outputDirectory": "artifacts/lawcaspro/dist/public",
+  "rewrites": [
+    { "source": "/api", "destination": "/api" },
+    { "source": "/api/(.*)", "destination": "/api?__path=$1" },
+    { "source": "/((?!api(?:/|$)).*)", "destination": "/index.html" }
+  ],
   "functions": {
     "api/[...path].ts": {
       "maxDuration": 60
