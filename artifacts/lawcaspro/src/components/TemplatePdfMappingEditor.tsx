@@ -255,7 +255,7 @@ export function TemplatePdfMappingEditor(props: Props) {
 
   return (
     <Dialog open={props.open} onOpenChange={(v) => { if (!v) props.onClose(); }}>
-      <DialogContent className="max-w-[1200px] w-[95vw] h-[90vh] flex flex-col p-0">
+      <DialogContent className="max-w-[1200px] w-[95vw] max-h-[100dvh] h-[100dvh] flex flex-col p-0 overflow-hidden">
         <DialogHeader className="px-6 py-4 border-b">
           <DialogTitle className="flex items-center gap-2">
             PDF Mapping · {props.templateName}
@@ -306,7 +306,7 @@ export function TemplatePdfMappingEditor(props: Props) {
             </div>
           </div>
 
-          <div className="border-l bg-white overflow-auto">
+          <div className="border-l bg-white h-full max-h-full overflow-y-auto">
             <div className="p-4 border-b">
               <div className="text-sm font-medium">Mappings</div>
               <div className="text-xs text-slate-500 mt-1">
@@ -408,7 +408,7 @@ export function TemplatePdfMappingEditor(props: Props) {
           </div>
         </div>
 
-        <DialogFooter className="px-6 py-4 border-t flex items-center justify-between">
+        <DialogFooter className="px-6 py-4 border-t flex items-center justify-between sticky bottom-0 bg-white">
           <div className="text-xs text-slate-500">
             Click mapping uses PDF points (origin bottom-left).
           </div>

@@ -7128,6 +7128,7 @@ router.post("/cases/:caseId/documents/print", requireAuth, requireFirmUser, requ
     const fail = (statusCode: number, code: string, message: string, payload?: Record<string, unknown>) => {
       throw new DocumentGenerationError(statusCode, code, message, payload);
     };
+    const warnings: Array<{ code: string; message: string }> = [];
 
     const templateVersionId = Number.isNaN(templateId) ? null : await ensureFirmTemplatePublishedVersionId(r, req.firmId!, templateId, req.userId!);
     if (templateVersionId) {
@@ -7150,30 +7151,53 @@ router.post("/cases/:caseId/documents/print", requireAuth, requireFirmUser, requ
     const templateDocType = template && typeof template === "object" && "document_type" in template ? String((template as any).document_type) : "other";
     const isLetterLike = isLetterheadApplicableDocumentType(templateDocType);
     const letterheadBytesPromise = isLetterLike ? (async () => {
-      const lhIdNum = letterheadId;
-      let lh: Record<string, unknown> | undefined;
-      if (lhIdNum !== null) {
-        const byId = await queryRows(r, sql`SELECT * FROM firm_letterheads WHERE id = ${lhIdNum} AND firm_id = ${req.firmId!}`);
-        const candidate = byId[0];
-        if (!candidate) fail(404, "LETTERHEAD_NOT_FOUND", "Letterhead not found");
-        if (String((candidate as any).status ?? "active") !== "active") fail(409, "LETTERHEAD_INACTIVE", "Selected letterhead is inactive");
-        lh = candidate;
-      } else {
-        const defaults = await queryRows(r, sql`SELECT * FROM firm_letterheads WHERE firm_id = ${req.firmId!} AND status = 'active' ORDER BY is_default DESC, created_at DESC LIMIT 1`);
-        lh = defaults[0];
-        if (!lh) fail(422, "NO_LETTERHEAD", "No active firm letterhead configured");
+      try {
+        const lhIdNum = letterheadId;
+        let lh: Record<string, unknown> | undefined;
+        if (lhIdNum !== null) {
+          const byId = await queryRows(r, sql`SELECT * FROM firm_letterheads WHERE id = ${lhIdNum} AND firm_id = ${req.firmId!}`);
+          const candidate = byId[0];
+          if (!candidate) {
+            warnings.push({ code: "LETTERHEAD_NOT_FOUND", message: "Selected letterhead not found; generated without letterhead." });
+            return null;
+          }
+          if (String((candidate as any).status ?? "active") !== "active") {
+            warnings.push({ code: "LETTERHEAD_INACTIVE", message: "Selected letterhead inactive; generated without letterhead." });
+            return null;
+          }
+          lh = candidate;
+        } else {
+          const defaults = await queryRows(r, sql`SELECT * FROM firm_letterheads WHERE firm_id = ${req.firmId!} AND status = 'active' ORDER BY is_default DESC, created_at DESC LIMIT 1`);
+          lh = defaults[0];
+          if (!lh) {
+            warnings.push({ code: "NO_LETTERHEAD", message: "No active firm letterhead configured; generated without letterhead." });
+            return null;
+          }
+        }
+        const usedLetterheadId = typeof (lh as any).id === "number" ? Number((lh as any).id) : null;
+        const firstPath = decodeStoragePath(String((lh as any).first_page_object_path));
+        const contPath = decodeStoragePath(String((lh as any).continuation_header_object_path));
+        const footerPath = (lh as any).footer_object_path ? decodeStoragePath(String((lh as any).footer_object_path)) : null;
+        const footerMode = (lh as any).footer_mode === "last_page_only" ? "last_page_only" : "every_page";
+        const [firstBytes, contBytes, footerBytes] = await Promise.all([
+          downloadPrivateObjectBytes(firstPath),
+          downloadPrivateObjectBytes(contPath),
+          footerPath ? downloadPrivateObjectBytes(footerPath) : Promise.resolve(null),
+        ]);
+        return { usedLetterheadId, footerMode, firstBytes, contBytes, footerBytes };
+      } catch (err) {
+        if (err instanceof StorageRequestTimeoutError) {
+          warnings.push({ code: "LETTERHEAD_TIMEOUT", message: "Letterhead download timed out; generated without letterhead." });
+          return null;
+        }
+        if (err instanceof ObjectNotFoundError) {
+          warnings.push({ code: "LETTERHEAD_FILE_NOT_FOUND", message: "Letterhead file not found; generated without letterhead." });
+          return null;
+        }
+        logger.warn({ err, firmId: req.firmId, caseId, printKey }, "[documents.print] letterhead_apply_skipped");
+        warnings.push({ code: "LETTERHEAD_SKIPPED", message: "Letterhead skipped due to an error; generated without letterhead." });
+        return null;
       }
-      const usedLetterheadId = typeof (lh as any).id === "number" ? Number((lh as any).id) : null;
-      const firstPath = decodeStoragePath(String((lh as any).first_page_object_path));
-      const contPath = decodeStoragePath(String((lh as any).continuation_header_object_path));
-      const footerPath = (lh as any).footer_object_path ? decodeStoragePath(String((lh as any).footer_object_path)) : null;
-      const footerMode = (lh as any).footer_mode === "last_page_only" ? "last_page_only" : "every_page";
-      const [firstBytes, contBytes, footerBytes] = await Promise.all([
-        downloadPrivateObjectBytes(firstPath),
-        downloadPrivateObjectBytes(contPath),
-        footerPath ? downloadPrivateObjectBytes(footerPath) : Promise.resolve(null),
-      ]);
-      return { usedLetterheadId, footerMode, firstBytes, contBytes, footerBytes };
     })() : Promise.resolve(null);
 
     const [fileContents, letterheadBytes] = await Promise.all([
@@ -7226,7 +7250,7 @@ router.post("/cases/:caseId/documents/print", requireAuth, requireFirmUser, requ
     await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.case.print", entityType: "case_document", entityId: createdId, detail: `caseId=${caseId} printKey=${printKey} templateId=${(template as any).id} name=${nameToUse} letterhead=${isLetterLike ? (usedLetterheadId ?? "default") : "n/a"}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
     await finishGenerationRunSuccess(r, req.firmId!, runId, createdId ?? null, context, null, null);
     await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.generation.succeeded", entityType: "document_generation_run", entityId: runId, detail: `caseId=${caseId} templateSource=firm templateId=${templateId} renderMode=print`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
-    res.status(201).json(docRows[0]);
+    res.status(201).json({ ...(docRows[0] as any), ...(warnings.length ? { warnings } : {}) });
   } catch (err: unknown) {
     const cfgErr = getSupabaseStorageConfigError(err);
     if (cfgErr) {
