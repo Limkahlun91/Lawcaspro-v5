@@ -20,7 +20,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 type Salutation = "" | "MR." | "MS." | "MRS." | "MDM." | "DR." | "DATUK";
 
 interface Contact {
-  salutation: Salutation;
+  salutation?: Salutation;
   name: string;
   department: string;
   phone: string;
@@ -34,13 +34,34 @@ interface Developer {
   companyRegNo: string | null;
   address: string | null;
   businessAddress: string | null;
-  contacts: Contact[];
+  contacts?: Contact[];
   contactPerson: string | null;
   phone: string | null;
   email: string | null;
   projectCount: number;
   createdAt: string;
 }
+
+const SALUTATIONS = new Set<Salutation>(["", "MR.", "MS.", "MRS.", "MDM.", "DR.", "DATUK"]);
+
+const normalizeContact = (value: unknown): Contact => {
+  const rec = value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
+  const rawSal = typeof rec.salutation === "string" ? rec.salutation.trim().toUpperCase() : "";
+  const salutation = (SALUTATIONS.has(rawSal as Salutation) ? (rawSal as Salutation) : "") as Salutation;
+  return {
+    salutation,
+    name: typeof rec.name === "string" ? rec.name : "",
+    department: typeof rec.department === "string" ? rec.department : "",
+    phone: typeof rec.phone === "string" ? rec.phone : "",
+    phoneExt: typeof rec.phoneExt === "string" ? rec.phoneExt : "",
+    email: typeof rec.email === "string" ? rec.email : "",
+  };
+};
+
+const normalizeContacts = (value: unknown): Contact[] => {
+  if (!Array.isArray(value)) return [];
+  return value.map(normalizeContact);
+};
 
 const emptyContact = (): Contact => ({ salutation: "", name: "", department: "", phone: "", phoneExt: "", email: "" });
 
@@ -72,18 +93,19 @@ export default function DeveloperDetail() {
     setLoadError(null);
     try {
       const data = await apiFetchJson<Developer>(`/developers/${developerId}`);
-      setDeveloper(data);
+      const normalized = normalizeContacts((data as any).contacts);
+      setDeveloper({ ...(data as any), contacts: normalized });
       setForm({
-        name: data.name,
+        name: typeof (data as any).name === "string" ? (data as any).name : "",
         companyRegNo: data.companyRegNo ?? "",
         address: data.address ?? "",
         businessAddress: data.businessAddress ?? "",
         email: data.email ?? "",
       });
       setContacts(
-        data.contacts && data.contacts.length > 0
-          ? data.contacts
-          : [{ salutation: "", name: data.contactPerson ?? "", department: "", phone: data.phone ?? "", phoneExt: "", email: data.email ?? "" }]
+        normalized.length > 0
+          ? normalized
+          : [normalizeContact({ salutation: "", name: data.contactPerson ?? "", department: "", phone: data.phone ?? "", phoneExt: "", email: data.email ?? "" })]
       );
     } catch (err) {
       setLoadError(err);
@@ -99,7 +121,8 @@ export default function DeveloperDetail() {
   const updateContact = (index: number, field: keyof Contact, value: string) => {
     setContacts((prev) => {
       const updated = [...prev];
-      updated[index] = { ...updated[index], [field]: value };
+      const base = updated[index] ?? emptyContact();
+      updated[index] = { ...base, [field]: value };
       return updated;
     });
   };
@@ -117,7 +140,8 @@ export default function DeveloperDetail() {
       toast({ title: "Company name is required", variant: "destructive" });
       return;
     }
-    const primaryContact = contacts.find((c) => c.name.trim()) ?? emptyContact();
+    const safeContacts = (contacts ?? []).map(normalizeContact);
+    const primaryContact = safeContacts.find((c) => c.name.trim()) ?? emptyContact();
     setSaving(true);
     try {
       const updated = await apiFetchJson<Developer>(`/developers/${developerId}`, {
@@ -128,13 +152,15 @@ export default function DeveloperDetail() {
           companyRegNo: form.companyRegNo || null,
           address: form.address || null,
           businessAddress: form.businessAddress || null,
-          contacts: contacts.filter((c) => c.name.trim()),
+          contacts: safeContacts.filter((c) => c.name.trim()),
           contactPerson: primaryContact.name || null,
           phone: primaryContact.phone || null,
           email: form.email || primaryContact.email || null,
         }),
       });
-      setDeveloper(updated);
+      const normalized = normalizeContacts((updated as any).contacts);
+      setDeveloper({ ...(updated as any), contacts: normalized });
+      setContacts(normalized.length > 0 ? normalized : [emptyContact()]);
       queryClient.invalidateQueries({ queryKey: getListDevelopersQueryKey() });
       toast({ title: "Developer updated" });
     } catch (e) {
@@ -161,6 +187,7 @@ export default function DeveloperDetail() {
 
   const handleCancelEdit = () => {
     if (!developer) return;
+    const normalized = normalizeContacts((developer as any).contacts);
     setForm({
       name: developer.name,
       companyRegNo: developer.companyRegNo ?? "",
@@ -169,9 +196,9 @@ export default function DeveloperDetail() {
       email: developer.email ?? "",
     });
     setContacts(
-      developer.contacts && developer.contacts.length > 0
-        ? developer.contacts
-        : [{ salutation: "", name: developer.contactPerson ?? "", department: "", phone: developer.phone ?? "", phoneExt: "", email: developer.email ?? "" }]
+      normalized.length > 0
+        ? normalized
+        : [normalizeContact({ salutation: "", name: developer.contactPerson ?? "", department: "", phone: developer.phone ?? "", phoneExt: "", email: developer.email ?? "" })]
     );
     setEditing(false);
   };
@@ -290,13 +317,13 @@ export default function DeveloperDetail() {
               )}
             </CardHeader>
             <CardContent className="space-y-4">
-              {contacts.map((contact, index) => (
+              {(contacts ?? []).map((contact, index) => (
                 <div key={index} className="p-4 border border-slate-200 rounded-lg bg-slate-50 space-y-3">
                   <div className="flex items-center justify-between">
                     <span className="text-sm font-semibold text-slate-600">
                       Contact {index + 1} {index === 0 ? "(Primary)" : ""}
                     </span>
-                    {contacts.length > 1 && (
+                    {(contacts ?? []).length > 1 && (
                       <Button
                         type="button"
                         variant="ghost"
@@ -312,7 +339,7 @@ export default function DeveloperDetail() {
                     <div className="space-y-1.5">
                       <Label className="text-xs">Name</Label>
                       <div className="grid grid-cols-[120px_1fr] gap-2">
-                        <Select value={contact.salutation} onValueChange={(v) => updateContact(index, "salutation", v as Salutation)}>
+                        <Select value={contact.salutation ?? ""} onValueChange={(v) => updateContact(index, "salutation", v as Salutation)}>
                           <SelectTrigger className="bg-white">
                             <SelectValue placeholder="Title" />
                           </SelectTrigger>
@@ -409,16 +436,16 @@ export default function DeveloperDetail() {
               <CardTitle>Contact Persons</CardTitle>
             </CardHeader>
             <CardContent className="space-y-4">
-              {developer.contacts && developer.contacts.length > 0 ? (
-                developer.contacts.map((c, i) => (
+              {developer.contacts?.length ? (
+                developer.contacts?.map((c, i) => (
                   <div key={i} className={`space-y-2 ${i > 0 ? "pt-4 border-t border-slate-100" : ""}`}>
                     <div className="flex items-center gap-2">
                       <User className="w-4 h-4 text-slate-400 shrink-0" />
                       <div>
                         <div className="text-sm font-semibold text-slate-900">
-                          {`${c.salutation ? `${c.salutation} ` : ""}${c.name || ""}`.trim() || "—"}
+                          {`${c?.salutation ? `${c.salutation} ` : ""}${c?.name || ""}`.trim() || "—"}
                         </div>
-                        {c.department && (
+                        {c?.department && (
                           <div className="text-xs text-slate-500">{c.department}</div>
                         )}
                       </div>
@@ -426,15 +453,15 @@ export default function DeveloperDetail() {
                         <Badge variant="outline" className="text-xs ml-auto">Primary</Badge>
                       )}
                     </div>
-                    {(c.phone || c.phoneExt) && (
+                    {(c?.phone || c?.phoneExt) && (
                       <div className="flex items-center gap-2 ml-6">
                         <Phone className="w-3.5 h-3.5 text-slate-400" />
                         <span className="text-sm text-slate-700">
-                          {c.phone}{c.phoneExt ? ` Ext: ${c.phoneExt}` : ""}
+                          {c?.phone}{c?.phoneExt ? ` Ext: ${c.phoneExt}` : ""}
                         </span>
                       </div>
                     )}
-                    {c.email && (
+                    {c?.email && (
                       <div className="flex items-center gap-2 ml-6">
                         <Mail className="w-3.5 h-3.5 text-slate-400" />
                         <a href={`mailto:${c.email}`} className="text-sm text-amber-600 hover:underline">{c.email}</a>

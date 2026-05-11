@@ -118,6 +118,14 @@ type DeveloperRow = typeof developersTable.$inferSelect;
 
 async function enrichDeveloper(r: DbConn, dev: DeveloperRow) {
   const [pcRes] = await r.select({ c: count() }).from(projectsTable).where(eq(projectsTable.developerId, dev.id));
+  const contacts = (() => {
+    try {
+      return parseContacts(dev.contacts);
+    } catch (err) {
+      logger.warn({ err, developerId: dev.id, firmId: dev.firmId }, "[developers] contacts_parse_failed");
+      return [];
+    }
+  })();
   return {
     id: dev.id,
     firmId: dev.firmId,
@@ -125,7 +133,7 @@ async function enrichDeveloper(r: DbConn, dev: DeveloperRow) {
     companyRegNo: dev.companyRegNo ?? null,
     address: dev.address ?? null,
     businessAddress: dev.businessAddress ?? null,
-    contacts: parseContacts(dev.contacts),
+    contacts,
     contactPerson: dev.contactPerson ?? null,
     phone: dev.phone ?? null,
     email: dev.email ?? null,
@@ -394,4 +402,5 @@ routerInternal.delete("/developers/:developerId", requireAuth, requireFirmUser, 
 
 const exportedRouter = expressRouter as unknown as ExpressRouter;
 export { exportedRouter as router };
+export const __test__ = { normalizeSalutation, normalizeContacts, parseContacts };
 export default exportedRouter;
