@@ -177,6 +177,26 @@ async function tableExists(r: DbConn, fullName: string): Promise<boolean> {
   return Boolean(rows[0]?.reg);
 }
 
+type RequestCache = Map<string, unknown>;
+
+const createRequestCache = (): RequestCache => new Map<string, unknown>();
+
+async function cacheGetOrSet<T>(cache: RequestCache | undefined, key: string, fn: () => Promise<T>): Promise<T> {
+  if (!cache) return await fn();
+  if (cache.has(key)) return cache.get(key) as T;
+  const val = await fn();
+  cache.set(key, val as unknown);
+  return val;
+}
+
+async function tableExistsCached(r: DbConn, cache: RequestCache | undefined, fullName: string): Promise<boolean> {
+  return await cacheGetOrSet(cache, `tableExists:${fullName}`, async () => await tableExists(r, fullName));
+}
+
+async function queryRowsCached(r: DbConn, cache: RequestCache | undefined, key: string, query: ReturnType<typeof sql>): Promise<Record<string, unknown>[]> {
+  return await cacheGetOrSet(cache, `queryRows:${key}`, async () => await queryRows(r, query));
+}
+
 function safeJson(str: unknown): Record<string, unknown> {
   if (!str || typeof str !== "string") return {};
   try { return JSON.parse(str); } catch { return {}; }
@@ -207,6 +227,44 @@ function isDocxTemplateRenderError(err: unknown): boolean {
   if (rec.name === "TemplateError") return true;
   const msg = typeof rec.message === "string" ? rec.message.toLowerCase() : "";
   return msg.includes("docxtemplater") || msg.includes("template");
+}
+
+function extractDocxTemplateErrorDetail(err: unknown): { message: string; tags: string[] } {
+  const tags: string[] = [];
+  const rec = (err && typeof err === "object") ? (err as Record<string, unknown>) : {};
+  const msg = typeof rec.message === "string" ? rec.message : "";
+  const props = (rec as any).properties;
+  const errors = Array.isArray(props?.errors) ? props.errors : [];
+  for (const e of errors) {
+    const p = (e && typeof e === "object") ? (e as any).properties : null;
+    const rawTag = typeof p?.xtag === "string" ? p.xtag : (typeof p?.tag === "string" ? p.tag : "");
+    const cleaned = rawTag.replace(/[{}]/g, "").trim();
+    if (cleaned) tags.push(cleaned);
+  }
+  const uniqueTags = Array.from(new Set(tags)).slice(0, 20);
+  const base =
+    uniqueTags.length > 0
+      ? `Unresolved placeholders: ${uniqueTags.join(", ")}`
+      : (msg ? msg : "Docx template render failed");
+  return { message: base.slice(0, 300), tags: uniqueTags };
+}
+
+function fillMissingScalarsForRender(placeholders: string[], input: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = { ...input };
+  for (const k of placeholders) {
+    if (!k) continue;
+    const v = out[k];
+    if (Array.isArray(v)) continue;
+    if (v === null || v === undefined) {
+      out[k] = "____";
+      continue;
+    }
+    if (typeof v === "string" && v.trim() === "") {
+      out[k] = "____";
+      continue;
+    }
+  }
+  return out;
 }
 
 function newGeneratedDocObjectPath(firmId: number, caseId: number, extension: string): string {
@@ -642,9 +700,11 @@ async function applyLetterheadToDocxBuffer({
   return baseZip.generate({ type: "nodebuffer", compression: "DEFLATE" });
 }
 
-async function buildCaseContext(r: DbConn, caseId: number, firmId: number): Promise<Record<string, unknown> | null> {
-  const caseRows = await queryRows(
+async function buildCaseContext(r: DbConn, caseId: number, firmId: number, cache?: RequestCache): Promise<Record<string, unknown> | null> {
+  const caseRows = await queryRowsCached(
     r,
+    cache,
+    `cases:${firmId}:${caseId}`,
     sql`
       SELECT
         c.id,
@@ -692,12 +752,16 @@ async function buildCaseContext(r: DbConn, caseId: number, firmId: number): Prom
   if (!caseRows[0]) return null;
   const c = caseRows[0];
 
-  const firmRows = await queryRows(
+  const firmRows = await queryRowsCached(
     r,
+    cache,
+    `firms:${firmId}`,
     sql`SELECT name, address, st_number, tin_number FROM firms WHERE id = ${firmId} LIMIT 1`
   );
-  const bankRows = await queryRows(
+  const bankRows = await queryRowsCached(
     r,
+    cache,
+    `firm_bank_accounts:${firmId}`,
     sql`
       SELECT account_type, bank_name, account_no, is_default
       FROM firm_bank_accounts
@@ -705,8 +769,10 @@ async function buildCaseContext(r: DbConn, caseId: number, firmId: number): Prom
       ORDER BY is_default DESC
     `
   );
-  const purchaserRows = await queryRows(
+  const purchaserRows = await queryRowsCached(
     r,
+    cache,
+    `case_purchasers:${firmId}:${caseId}`,
     sql`
       SELECT
         cp.role,
@@ -723,8 +789,10 @@ async function buildCaseContext(r: DbConn, caseId: number, firmId: number): Prom
       ORDER BY cp.order_no
     `
   );
-  const assignmentRows = await queryRows(
+  const assignmentRows = await queryRowsCached(
     r,
+    cache,
+    `case_assignments:${caseId}`,
     sql`
       SELECT ca.role_in_case, u.name as user_name, u.email as user_email
       FROM case_assignments ca
@@ -753,7 +821,7 @@ async function buildCaseContext(r: DbConn, caseId: number, firmId: number): Prom
   const dateStr = today.toLocaleDateString("en-MY", { day: "2-digit", month: "long", year: "numeric" });
   const dateShort = today.toLocaleDateString("en-MY", { day: "2-digit", month: "2-digit", year: "numeric" });
 
-  const workflowRows = await queryRows(r, sql`
+  const workflowRows = await queryRowsCached(r, cache, `case_workflow_steps:${firmId}:${caseId}`, sql`
     SELECT ws.step_key, ws.step_name, ws.step_order, ws.path_type, ws.status, ws.completed_at
     FROM case_workflow_steps ws
     JOIN cases cc ON cc.id = ws.case_id
@@ -795,8 +863,10 @@ async function buildCaseContext(r: DbConn, caseId: number, firmId: number): Prom
     workflowDebugVars[`workflow_${key}_date_long`] = fmtDateLong(s.completedAt);
   }
 
-  const kdRows = await queryRows(
+  const kdRows = await queryRowsCached(
     r,
+    cache,
+    `case_key_dates:${firmId}:${caseId}`,
     sql`
       SELECT
         spa_signed_date,
@@ -4506,17 +4576,41 @@ async function generateFirmDocument({
   clauses?: SelectedClauseRef[];
   overrides?: Record<string, unknown> | null;
 }): Promise<{ caseDocument: Record<string, unknown>; caseDocumentId: number | null; templateVersionId: number | null; checklistSnapshot: unknown; readinessSnapshot: unknown; renderedVars: unknown; }> {
-  const templateRows = await queryRows(r, sql`SELECT * FROM document_templates WHERE id = ${templateId} AND firm_id = ${firmId}`);
+  const cache = createRequestCache();
+  const [templateRows, context] = await Promise.all([
+    queryRowsCached(r, cache, `document_templates:${firmId}:${templateId}`, sql`SELECT * FROM document_templates WHERE id = ${templateId} AND firm_id = ${firmId}`),
+    buildCaseContext(r, caseId, firmId, cache),
+  ]);
   const template = templateRows[0];
   if (!template) throw new DocumentGenerationError(404, "TEMPLATE_NOT_FOUND", "Template not found");
   const templateCapable = Boolean((template as any).is_template_capable ?? true);
   const templateDocType = String((template as any).document_type ?? "other");
   if (!templateCapable) throw new DocumentGenerationError(422, "NOT_TEMPLATE_CAPABLE", "Selected document is not template-capable");
-
-  const context = await buildCaseContext(r, caseId, firmId);
   if (!context) throw new DocumentGenerationError(404, "CASE_NOT_FOUND", "Case not found");
 
-  const extraRules = await getFirmTemplateApplicabilityRules(r, firmId, templateId);
+  const [extraRules, wfDocs, stampingRows] = await Promise.all([
+    getFirmTemplateApplicabilityRules(r, firmId, templateId),
+    (async () => {
+      const exists = await tableExistsCached(r, cache, "public.case_workflow_documents");
+      if (!exists) return [];
+      return await queryRows(r, sql`
+        SELECT milestone_key, object_path, file_name, updated_at
+        FROM case_workflow_documents
+        WHERE firm_id = ${firmId} AND case_id = ${caseId} AND deleted_at IS NULL
+        ORDER BY updated_at DESC
+      `);
+    })(),
+    (async () => {
+      const exists = await tableExistsCached(r, cache, "public.case_loan_stamping_items");
+      if (!exists) return [];
+      return await queryRows(r, sql`
+        SELECT item_key, custom_name, dated_on, stamped_on, object_path, file_name, sort_order
+        FROM case_loan_stamping_items
+        WHERE firm_id = ${firmId} AND case_id = ${caseId} AND deleted_at IS NULL
+        ORDER BY sort_order ASC, id ASC
+      `);
+    })(),
+  ]);
   const applicability = evaluateTemplateApplicabilityV2({
     legacyTemplate: {
       isActive: extraRules?.isActive ?? Boolean((template as any).is_active ?? true),
@@ -4553,15 +4647,6 @@ async function generateFirmDocument({
       throw new DocumentGenerationError(422, "TEMPLATE_APPLICABILITY_OVERRIDE_REQUIRED", "Template requires manual override", { reasons: applicability.applicabilityReasons, mode: applicability.modeUsed });
     }
   }
-
-  const wfDocs = (await tableExists(r, "public.case_workflow_documents"))
-    ? await queryRows(r, sql`
-      SELECT milestone_key, object_path, file_name, updated_at
-      FROM case_workflow_documents
-      WHERE firm_id = ${firmId} AND case_id = ${caseId} AND deleted_at IS NULL
-      ORDER BY updated_at DESC
-    `)
-    : [];
   const workflowDocs: Record<string, { hasFile: boolean }> = {};
   for (const d of wfDocs) {
     const k = normalizeWorkflowDocumentKeyFromDb(String(d.milestone_key ?? ""));
@@ -4569,14 +4654,6 @@ async function generateFirmDocument({
     if (workflowDocs[k]) continue;
     workflowDocs[k] = { hasFile: Boolean(d.object_path && d.file_name) };
   }
-  const stampingRows = (await tableExists(r, "public.case_loan_stamping_items"))
-    ? await queryRows(r, sql`
-      SELECT item_key, custom_name, dated_on, stamped_on, object_path, file_name, sort_order
-      FROM case_loan_stamping_items
-      WHERE firm_id = ${firmId} AND case_id = ${caseId} AND deleted_at IS NULL
-      ORDER BY sort_order ASC, id ASC
-    `)
-    : [];
   const keyDates = Object.fromEntries(
     Object.entries(context as Record<string, unknown>)
       .filter(([k]) => k.endsWith("_ymd"))
@@ -4612,6 +4689,34 @@ async function generateFirmDocument({
   });
   if (readiness.status !== "ready") throw new DocumentGenerationError(422, "TEMPLATE_NOT_READY", "Template not ready", { status: readiness.status, missing: readiness.missing });
 
+  const isLetterLike = isLetterheadApplicableDocumentType(templateDocType);
+  const letterheadBytesPromise = isLetterLike ? (async () => {
+    const letterheadIdNum = typeof letterheadId === "number" ? letterheadId : null;
+    let lh: Record<string, unknown> | undefined;
+    if (letterheadIdNum !== null) {
+      const byId = await queryRows(r, sql`SELECT * FROM firm_letterheads WHERE id = ${letterheadIdNum} AND firm_id = ${firmId}`);
+      const candidate = byId[0];
+      if (!candidate) throw new DocumentGenerationError(404, "LETTERHEAD_NOT_FOUND", "Letterhead not found");
+      if (String((candidate as any).status ?? "active") !== "active") throw new DocumentGenerationError(409, "LETTERHEAD_INACTIVE", "Selected letterhead is inactive");
+      lh = candidate;
+    } else {
+      const defaults = await queryRows(r, sql`SELECT * FROM firm_letterheads WHERE firm_id = ${firmId} AND status = 'active' ORDER BY is_default DESC, created_at DESC LIMIT 1`);
+      lh = defaults[0];
+      if (!lh) throw new DocumentGenerationError(422, "NO_LETTERHEAD", "No active firm letterhead configured");
+    }
+    const usedLetterheadId = typeof (lh as any).id === "number" ? Number((lh as any).id) : null;
+    const firstPath = String((lh as any).first_page_object_path);
+    const contPath = String((lh as any).continuation_header_object_path);
+    const footerPath = (lh as any).footer_object_path ? String((lh as any).footer_object_path) : null;
+    const footerMode = (lh as any).footer_mode === "last_page_only" ? "last_page_only" : "every_page";
+    const [firstBytes, contBytes, footerBytes] = await Promise.all([
+      downloadPrivateObjectBytes(firstPath),
+      downloadPrivateObjectBytes(contPath),
+      footerPath ? downloadPrivateObjectBytes(footerPath) : Promise.resolve(null),
+    ]);
+    return { usedLetterheadId, footerMode, firstBytes, contBytes, footerBytes };
+  })() : Promise.resolve(null);
+
   const templateVersionId = await ensureFirmTemplatePublishedVersionId(r, firmId, templateId, actorId);
   await queryRows(r, sql`UPDATE document_generation_runs SET template_version_id = ${templateVersionId} WHERE id = ${runId} AND firm_id = ${firmId}`);
 
@@ -4620,7 +4725,13 @@ async function generateFirmDocument({
   const templateObjectPath = String((version as any)?.source_object_path ?? "");
   if (!templateObjectPath) throw new DocumentGenerationError(404, "TEMPLATE_FILE_MISSING", "Template file missing");
 
-  let fileContents = await downloadPrivateObjectBytes(templateObjectPath);
+  let usedLetterheadId: number | null = null;
+  const [fileContentsRaw, letterheadBytes] = await Promise.all([
+    downloadPrivateObjectBytes(templateObjectPath),
+    letterheadBytesPromise,
+  ]);
+  if (letterheadBytes) usedLetterheadId = letterheadBytes.usedLetterheadId ?? null;
+  let fileContents = fileContentsRaw;
   const placeholders = placeholdersFromVariablesSnapshot((version as any)?.variables_snapshot);
   const effectivePlaceholders = placeholders.length > 0 ? placeholders : detectDocxVariables(fileContents);
   const preview = await runDocumentPreview(r, {
@@ -4634,6 +4745,7 @@ async function generateFirmDocument({
     throw new DocumentGenerationError(422, "TEMPLATE_BINDING_MISSING", "Missing required variables", { missingRequiredVariables: preview.missingRequiredVariables });
   }
   let input: Record<string, unknown> = preview.usedMode === "bindings" ? preview.resolvedVariables : (context as any);
+  input = fillMissingScalarsForRender(effectivePlaceholders, input);
   let clauseSnapshot: Record<string, unknown> | null = null;
   let checklistEval = evaluateTemplateChecklist({
     checklistMode: (template as any).checklist_mode,
@@ -4669,6 +4781,7 @@ async function generateFirmDocument({
     });
     fileContents = applied.docxBytes;
     input = applied.data;
+    input = fillMissingScalarsForRender(effectivePlaceholders, input);
     clauseSnapshot = {
       insertionModeUsed: decision.insertionModeUsed,
       insertionTarget: decision.insertionTarget,
@@ -4693,7 +4806,7 @@ async function generateFirmDocument({
       WHERE firm_id = ${firmId} AND case_id = ${caseId}
     `);
     const confirmPrefix = `tpl:firm:${templateId}:confirm:`;
-    const confirmationRows = (await tableExists(r, "public.case_document_checklist_items"))
+    const confirmationRows = (await tableExistsCached(r, cache, "public.case_document_checklist_items"))
       ? await queryRows(r, sql`
         SELECT checklist_key, status, completed_at, completed_by, received_at, received_by
         FROM case_document_checklist_items
@@ -4757,41 +4870,20 @@ async function generateFirmDocument({
   const doc = new Docxtemplater(zip, { paragraphLoop: true, linebreaks: true });
   try {
     doc.render(input);
-  } catch {
-    throw new DocumentGenerationError(422, "TEMPLATE_RENDER_FAILED", "Template render failed");
+  } catch (err) {
+    const detail = extractDocxTemplateErrorDetail(err);
+    logger.error({ err, firmId, caseId, templateId }, "[documents.generate] docx render failed");
+    throw new DocumentGenerationError(422, "TEMPLATE_RENDER_FAILED", detail.message, { tags: detail.tags });
   }
 
   let buffer = doc.getZip().generate({ type: "nodebuffer", compression: "DEFLATE" }) as Buffer;
-  const isLetterLike = isLetterheadApplicableDocumentType(templateDocType);
-  let usedLetterheadId: number | null = null;
-  if (isLetterLike) {
-    const letterheadIdNum = typeof letterheadId === "number" ? letterheadId : null;
-    let lh: Record<string, unknown> | undefined;
-    if (letterheadIdNum !== null) {
-      const byId = await queryRows(r, sql`SELECT * FROM firm_letterheads WHERE id = ${letterheadIdNum} AND firm_id = ${firmId}`);
-      const candidate = byId[0];
-      if (!candidate) throw new DocumentGenerationError(404, "LETTERHEAD_NOT_FOUND", "Letterhead not found");
-      if (String((candidate as any).status ?? "active") !== "active") throw new DocumentGenerationError(409, "LETTERHEAD_INACTIVE", "Selected letterhead is inactive");
-      lh = candidate;
-    } else {
-      const defaults = await queryRows(r, sql`SELECT * FROM firm_letterheads WHERE firm_id = ${firmId} AND status = 'active' ORDER BY is_default DESC, created_at DESC LIMIT 1`);
-      lh = defaults[0];
-      if (!lh) throw new DocumentGenerationError(422, "NO_LETTERHEAD", "No active firm letterhead configured");
-    }
-    usedLetterheadId = typeof (lh as any).id === "number" ? Number((lh as any).id) : null;
-    const firstPath = String((lh as any).first_page_object_path);
-    const contPath = String((lh as any).continuation_header_object_path);
-    const footerPath = (lh as any).footer_object_path ? String((lh as any).footer_object_path) : null;
-    const footerMode = (lh as any).footer_mode === "last_page_only" ? "last_page_only" : "every_page";
-    const firstBytes = await downloadPrivateObjectBytes(firstPath);
-    const contBytes = await downloadPrivateObjectBytes(contPath);
-    const footerBytes = footerPath ? await downloadPrivateObjectBytes(footerPath) : null;
+  if (letterheadBytes) {
     buffer = await applyLetterheadToDocxBuffer({
       baseDocx: buffer,
-      firstPageTemplateDocx: firstBytes,
-      continuationHeaderTemplateDocx: contBytes,
-      footerTemplateDocx: footerBytes,
-      footerMode,
+      firstPageTemplateDocx: letterheadBytes.firstBytes,
+      continuationHeaderTemplateDocx: letterheadBytes.contBytes,
+      footerTemplateDocx: letterheadBytes.footerBytes,
+      footerMode: letterheadBytes.footerMode,
     });
   }
 
@@ -5148,93 +5240,102 @@ async function generateMasterDocument({
     const doc = new Docxtemplater(zip, { paragraphLoop: true, linebreaks: true });
     try {
       doc.render(renderInput);
-    } catch {
-      throw new DocumentGenerationError(422, "TEMPLATE_RENDER_FAILED", "Template render failed");
+    } catch (err) {
+      const detail = extractDocxTemplateErrorDetail(err);
+      logger.error({ err, firmId, caseId, masterDocId }, "[documents.generate] docx render failed (master)");
+      throw new DocumentGenerationError(422, "TEMPLATE_RENDER_FAILED", detail.message, { tags: detail.tags });
     }
     buffer = doc.getZip().generate({ type: "nodebuffer", compression: "DEFLATE" }) as Buffer;
     outputMime = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
     outputExt = ".docx";
     renderMode = "docx";
   } else if (isPdf && (masterDoc as any).pdf_mappings) {
-    const mappings = (masterDoc as any).pdf_mappings as {
-      pages: Array<{
-        pageIndex: number;
-        textBoxes: Array<{
-          id: string;
-          x: number;
-          y: number;
-          width: number;
-          height: number;
-          fontSize: number;
-          content: string;
-          alignment?: "left" | "center" | "right";
-          fontFamily?: "Helvetica" | "Times-Roman" | "Courier";
+    try {
+      const mappings = (masterDoc as any).pdf_mappings as {
+        pages: Array<{
+          pageIndex: number;
+          textBoxes: Array<{
+            id: string;
+            x: number;
+            y: number;
+            width: number;
+            height: number;
+            fontSize: number;
+            content: string;
+            alignment?: "left" | "center" | "right";
+            fontFamily?: "Helvetica" | "Times-Roman" | "Courier";
+          }>;
         }>;
-      }>;
-    };
-    const pdfDoc = await PDFDocument.load(fileContents);
-    pdfDoc.registerFontkit(fontkit);
-    const fontCache = new Map<"Helvetica" | "Times-Roman" | "Courier", any>();
-    const getFont = async (family?: string) => {
-      const f =
-        family === "Times-Roman" || family === "Courier" || family === "Helvetica"
-          ? (family as "Helvetica" | "Times-Roman" | "Courier")
-          : "Helvetica";
-      const cached = fontCache.get(f);
-      if (cached) return cached;
-      const font =
-        f === "Times-Roman"
-          ? await pdfDoc.embedFont(StandardFonts.TimesRoman)
-          : f === "Courier"
-            ? await pdfDoc.embedFont(StandardFonts.Courier)
-            : await pdfDoc.embedFont(StandardFonts.Helvetica);
-      fontCache.set(f, font);
-      return font;
-    };
-    const pages = pdfDoc.getPages();
-    for (const pageMapping of mappings.pages) {
-      const page = pages[pageMapping.pageIndex];
-      if (!page) continue;
-      const pageHeight = page.getHeight();
-      for (const tb of pageMapping.textBoxes) {
-        const font = await getFont(tb.fontFamily);
-        let text = tb.content || "";
-        text = text.replace(/\{\{\s*([a-zA-Z0-9_.-]+)\s*\}\}/g, (_m: string, key: string) => {
-          const val = (renderInput as Record<string, unknown>)[key];
-          if (val === undefined || val === null) return "";
-          return String(val);
-        });
-        const fontSize = tb.fontSize || 10;
-        const pdfY = pageHeight - tb.y - fontSize;
-        const pdfYBottom = pageHeight - tb.y - tb.height;
-        const lines = wrapText(text, font, fontSize, tb.width);
-        let currentY = pdfY;
-        const align = tb.alignment === "center" || tb.alignment === "right" ? tb.alignment : "left";
-        for (const line of lines) {
-          if (currentY < pdfYBottom) break;
-          const textWidth = font.widthOfTextAtSize(line, fontSize);
-          const x =
-            align === "center"
-              ? Math.max(tb.x, tb.x + (tb.width - textWidth) / 2)
-              : align === "right"
-                ? Math.max(tb.x, tb.x + (tb.width - textWidth))
-                : tb.x;
-          page.drawText(line, {
-            x,
-            y: currentY,
-            size: fontSize,
-            font,
-            color: rgb(0, 0, 0),
+      };
+      const pdfDoc = await PDFDocument.load(fileContents);
+      pdfDoc.registerFontkit(fontkit);
+      const fontCache = new Map<"Helvetica" | "Times-Roman" | "Courier", any>();
+      const getFont = async (family?: string) => {
+        const f =
+          family === "Times-Roman" || family === "Courier" || family === "Helvetica"
+            ? (family as "Helvetica" | "Times-Roman" | "Courier")
+            : "Helvetica";
+        const cached = fontCache.get(f);
+        if (cached) return cached;
+        const font =
+          f === "Times-Roman"
+            ? await pdfDoc.embedFont(StandardFonts.TimesRoman)
+            : f === "Courier"
+              ? await pdfDoc.embedFont(StandardFonts.Courier)
+              : await pdfDoc.embedFont(StandardFonts.Helvetica);
+        fontCache.set(f, font);
+        return font;
+      };
+      const pages = pdfDoc.getPages();
+      for (const pageMapping of mappings.pages) {
+        const page = pages[pageMapping.pageIndex];
+        if (!page) continue;
+        const pageHeight = page.getHeight();
+        for (const tb of pageMapping.textBoxes) {
+          const font = await getFont(tb.fontFamily);
+          let text = tb.content || "";
+          text = text.replace(/\{\{\s*([a-zA-Z0-9_.-]+)\s*\}\}/g, (_m: string, key: string) => {
+            const val = (renderInput as Record<string, unknown>)[key];
+            if (val === undefined || val === null) return "____";
+            const s = String(val);
+            return s.trim() ? s : "____";
           });
-          currentY -= fontSize * 1.3;
+          const fontSize = tb.fontSize || 10;
+          const pdfY = pageHeight - tb.y - fontSize;
+          const pdfYBottom = pageHeight - tb.y - tb.height;
+          const lines = wrapText(text, font, fontSize, tb.width);
+          let currentY = pdfY;
+          const align = tb.alignment === "center" || tb.alignment === "right" ? tb.alignment : "left";
+          for (const line of lines) {
+            if (currentY < pdfYBottom) break;
+            const textWidth = font.widthOfTextAtSize(line, fontSize);
+            const x =
+              align === "center"
+                ? Math.max(tb.x, tb.x + (tb.width - textWidth) / 2)
+                : align === "right"
+                  ? Math.max(tb.x, tb.x + (tb.width - textWidth))
+                  : tb.x;
+            page.drawText(line, {
+              x,
+              y: currentY,
+              size: fontSize,
+              font,
+              color: rgb(0, 0, 0),
+            });
+            currentY -= fontSize * 1.3;
+          }
         }
       }
+      const pdfBytes = await pdfDoc.save();
+      buffer = Buffer.from(pdfBytes);
+      outputMime = "application/pdf";
+      outputExt = ".pdf";
+      renderMode = "pdf";
+    } catch (err) {
+      logger.error({ err, firmId, caseId, masterDocId }, "[documents.generate] pdf render failed");
+      const msg = err instanceof Error ? err.message : String(err ?? "");
+      throw new DocumentGenerationError(422, "PDF_RENDER_FAILED", msg.slice(0, 300) || "PDF render failed");
     }
-    const pdfBytes = await pdfDoc.save();
-    buffer = Buffer.from(pdfBytes);
-    outputMime = "application/pdf";
-    outputExt = ".pdf";
-    renderMode = "pdf";
   } else {
     buffer = Buffer.from(fileContents);
     outputMime = String((masterDoc as any).file_type ?? "application/octet-stream");
@@ -5938,6 +6039,106 @@ router.post("/clauses/platform/:id/copy", requireAuth, requireFirmUser, requireP
   const created = rows[0];
   await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "clauses.platform.copy_to_firm", entityType: "platform_clause", entityId: id, detail: `firmClauseCode=${clauseCode}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
   res.status(201).json(created);
+});
+
+router.post("/cases/:caseId/documents/preview-variables", requireAuth, requireFirmUser, requirePermission("documents", "generate"), async (req: AuthRequest, res): Promise<void> => {
+  const r = getRlsDb(req, res);
+  if (!r) return;
+  const caseIdStr = one((req.params as any).caseId);
+  const caseId = caseIdStr ? parseInt(caseIdStr, 10) : NaN;
+  if (Number.isNaN(caseId)) { res.status(400).json({ error: "Invalid case ID" }); return; }
+
+  const body = req.body as Record<string, unknown>;
+  const templateId = typeof body.templateId === "number" ? body.templateId : null;
+  const platformDocumentId = typeof body.platformDocumentId === "number" ? body.platformDocumentId : null;
+  const overrides = (body.overrides && typeof body.overrides === "object" && !Array.isArray(body.overrides)) ? (body.overrides as Record<string, unknown>) : null;
+  if (!templateId && !platformDocumentId) { res.status(422).json({ error: "templateId or platformDocumentId is required", code: "TEMPLATE_ID_REQUIRED" }); return; }
+  if (templateId && platformDocumentId) { res.status(422).json({ error: "Provide only one of templateId or platformDocumentId", code: "TEMPLATE_ID_CONFLICT" }); return; }
+
+  const cache = createRequestCache();
+  const context = await buildCaseContext(r, caseId, req.firmId!, cache);
+  if (!context) { res.status(404).json({ error: "Case not found" }); return; }
+
+  try {
+    let placeholders: string[] = [];
+    if (templateId) {
+      const [tplRows, vRows] = await Promise.all([
+        queryRowsCached(r, cache, `document_templates:${req.firmId!}:${templateId}`, sql`SELECT * FROM document_templates WHERE id = ${templateId} AND firm_id = ${req.firmId!}`),
+        queryRows(r, sql`
+          SELECT * FROM document_template_versions
+          WHERE firm_id = ${req.firmId!} AND template_id = ${templateId} AND status = 'published'
+          ORDER BY published_at DESC NULLS LAST, version_no DESC
+          LIMIT 1
+        `),
+      ]);
+      const tpl = tplRows[0];
+      if (!tpl) { res.status(404).json({ error: "Template not found" }); return; }
+      const v = vRows[0];
+      const obj = typeof (v as any)?.source_object_path === "string" ? String((v as any).source_object_path) : String((tpl as any).object_path ?? "");
+      const filename = typeof (v as any)?.filename === "string" ? String((v as any).filename) : String((tpl as any).file_name ?? "");
+      if (!obj) { res.status(404).json({ error: "Template file missing", code: "TEMPLATE_FILE_MISSING" }); return; }
+      const ext = fileExtensionFromName(filename);
+      if (ext !== "docx") {
+        res.json({ resolvedVariables: {}, missingRequiredVariables: [], unusedBindings: [], placeholderWarnings: [], usedMode: "bindings", previewSummary: { placeholdersCount: 0, missingRequiredCount: 0, resolvedCount: 0, renderable: true } });
+        return;
+      }
+      placeholders = placeholdersFromVariablesSnapshot((v as any)?.variables_snapshot);
+      if (placeholders.length === 0) {
+        const bytes = await downloadPrivateObjectBytes(obj);
+        placeholders = detectDocxVariables(bytes);
+      }
+      const preview = await runDocumentPreview(r, { firmId: req.firmId!, caseContext: context, templateRef: { kind: "firm", templateId }, placeholders, overrides });
+      res.json({
+        resolvedVariables: preview.resolvedVariables,
+        missingRequiredVariables: preview.missingRequiredVariables,
+        unusedBindings: preview.unusedBindings,
+        placeholderWarnings: preview.placeholderWarnings,
+        usedMode: preview.usedMode,
+        previewSummary: { placeholdersCount: placeholders.length, missingRequiredCount: preview.missingRequiredVariables.length, resolvedCount: Object.keys(preview.resolvedVariables).length, renderable: true },
+      });
+      return;
+    }
+
+    const docRows = await queryRows(r, sql`SELECT * FROM platform_documents WHERE id = ${platformDocumentId!} AND (firm_id IS NULL OR firm_id = ${req.firmId!})`);
+    const doc = docRows[0];
+    if (!doc) { res.status(404).json({ error: "Document not found" }); return; }
+    const fileName = String((doc as any).file_name ?? "");
+    const isDocx = fileName.toLowerCase().endsWith(".docx") || fileName.toLowerCase().endsWith(".doc");
+    const isPdf = fileName.toLowerCase().endsWith(".pdf");
+    if (isPdf && (doc as any).pdf_mappings) {
+      const mappings = (doc as any).pdf_mappings as any;
+      const keys = new Set<string>();
+      const pages = Array.isArray(mappings?.pages) ? mappings.pages : [];
+      for (const p of pages) {
+        const tbs = Array.isArray(p?.textBoxes) ? p.textBoxes : [];
+        for (const tb of tbs) {
+          const content = typeof tb?.content === "string" ? tb.content : "";
+          content.replace(/\{\{\s*([a-zA-Z0-9_.-]+)\s*\}\}/g, (_m: string, k: string) => { keys.add(k); return ""; });
+        }
+      }
+      placeholders = Array.from(keys);
+    } else if (isDocx) {
+      const obj = String((doc as any).object_path ?? "");
+      if (!obj) { res.status(404).json({ error: "Template file missing", code: "TEMPLATE_FILE_MISSING" }); return; }
+      const bytes = await downloadPrivateObjectBytes(obj);
+      placeholders = detectDocxVariables(bytes);
+    } else {
+      placeholders = [];
+    }
+    const preview = await runDocumentPreview(r, { firmId: req.firmId!, caseContext: context, templateRef: { kind: "platform", documentId: platformDocumentId! }, placeholders, overrides });
+    res.json({
+      resolvedVariables: preview.resolvedVariables,
+      missingRequiredVariables: preview.missingRequiredVariables,
+      unusedBindings: preview.unusedBindings,
+      placeholderWarnings: preview.placeholderWarnings,
+      usedMode: preview.usedMode,
+      previewSummary: { placeholdersCount: placeholders.length, missingRequiredCount: preview.missingRequiredVariables.length, resolvedCount: Object.keys(preview.resolvedVariables).length, renderable: true },
+    });
+  } catch (err) {
+    logger.error({ err, firmId: req.firmId, userId: req.userId, caseId }, "[documents.preview-variables]");
+    const detail = isDocxTemplateRenderError(err) ? extractDocxTemplateErrorDetail(err) : null;
+    res.status(422).json({ error: detail?.message ?? "Template preview failed", code: "TEMPLATE_PREVIEW_FAILED", tags: detail?.tags ?? [] });
+  }
 });
 
 router.post("/cases/:caseId/documents/preview", requireAuth, requireFirmUser, requirePermission("documents", "generate"), async (req: AuthRequest, res): Promise<void> => {

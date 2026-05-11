@@ -234,6 +234,20 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
     retry: false,
   });
 
+  type DocumentVariableDef = {
+    key: string;
+    label: string;
+    category: "case" | "purchaser" | "property" | "loan" | "developer" | "project" | "workflow" | "custom";
+    isActive?: boolean;
+  };
+
+  const variableDefsQuery = useQuery<DocumentVariableDef[]>({
+    queryKey: ["document-variables", "active"],
+    queryFn: ({ signal }) => apiFetchJson(`/document-variables?active=1`, { signal }),
+    enabled: variableChecklistOpen,
+    retry: false,
+  });
+
   type ClauseListItem = {
     id: number;
     scope: "firm" | "platform";
@@ -431,7 +445,7 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
     setVariableChecklistProgress(0);
     try {
       const bypassApplicability = Boolean(showAllTemplates && canBypassApplicability);
-      const result = await apiFetchJson<DocumentPreviewResponse>(`/cases/${caseId}/documents/preview`, {
+      const result = await apiFetchJson<DocumentPreviewResponse>(`/cases/${caseId}/documents/preview-variables`, {
         method: "POST",
         body: JSON.stringify(
           item.source === "firm"
@@ -1787,7 +1801,7 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
       </Dialog>
 
       <Dialog open={variableChecklistOpen} onOpenChange={(v) => { if (!v) closeVariableChecklist(); else setVariableChecklistOpen(true); }}>
-        <DialogContent className="sm:max-w-4xl max-h-[80vh] overflow-hidden">
+        <DialogContent className="w-[95vw] sm:w-[80vw] max-w-[95vw] sm:max-w-[80vw] max-h-[80vh] overflow-hidden">
           <DialogHeader>
             <DialogTitle>Variable Checklist</DialogTitle>
           </DialogHeader>
@@ -1850,55 +1864,105 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
                 </div>
 
                 <div className="flex-1 min-h-0 overflow-y-auto rounded-lg border border-slate-200 bg-white">
-                  <div className="divide-y divide-slate-100">
-                    {Object.entries(variableChecklistResult.resolvedVariables)
+                  {(() => {
+                    const defs = variableDefsQuery.data ?? [];
+                    const metaByKey = new Map(defs.map((d) => [d.key, d]));
+                    const categoryLabel = (cat: string): string => {
+                      if (cat === "purchaser") return "Purchaser";
+                      if (cat === "property") return "Property";
+                      if (cat === "loan") return "Bank / Loan";
+                      if (cat === "developer") return "Developer";
+                      if (cat === "project") return "Project";
+                      if (cat === "workflow") return "Workflow";
+                      if (cat === "case") return "Case";
+                      return "Other";
+                    };
+                    const order = ["Purchaser", "Property", "Bank / Loan", "Project", "Developer", "Workflow", "Case", "Other"];
+                    const q = variableChecklistQuery.trim().toLowerCase();
+                    const items = Object.entries(variableChecklistResult.resolvedVariables)
                       .map(([key, value]) => {
-                        const label = labelFromKey(key);
+                        const def = metaByKey.get(key);
+                        const label = (def?.label && String(def.label).trim()) ? String(def.label) : labelFromKey(key);
+                        const category = categoryLabel(def?.category ?? "custom");
                         const override = Object.prototype.hasOwnProperty.call(variableChecklistOverrides, key) ? variableChecklistOverrides[key] : "";
                         const base = value === null || value === undefined ? "" : String(value);
                         const effective = override !== "" ? override : base;
                         const isEmpty = !String(effective ?? "").trim();
-                        const q = variableChecklistQuery.trim().toLowerCase();
                         const matches = !q || key.toLowerCase().includes(q) || label.toLowerCase().includes(q);
-                        if (!matches) return null;
-                        if (variableChecklistShowOnlyMissing && !isEmpty) return null;
-                        return (
-                          <div key={key} className="p-3">
-                            <div className="flex items-start justify-between gap-3">
-                              <div className="min-w-0">
-                                <div className="text-sm font-medium text-slate-900 truncate" title={key}>{label}</div>
-                                <div className="text-xs text-slate-500 truncate" title={key}>{key}</div>
-                              </div>
-                              <div className="w-[360px] shrink-0">
-                                <Input
-                                  value={override !== "" ? override : (base || "")}
-                                  onChange={(e) => {
-                                    const v = e.target.value;
-                                    setVariableChecklistOverrides((prev) => {
-                                      const next = { ...prev };
-                                      if (v === "") delete next[key];
-                                      else next[key] = v;
-                                      return next;
-                                    });
-                                  }}
-                                  placeholder={base ? "Override value (optional)" : "Fill missing value…"}
-                                  disabled={variableChecklistGenerating || isGenerating}
-                                />
-                                <div className="mt-1 flex items-center gap-2">
-                                  <span className={cn("text-[10px] px-1.5 py-0.5 rounded font-medium", isEmpty ? "bg-rose-50 text-rose-700" : "bg-emerald-50 text-emerald-700")}>
-                                    {isEmpty ? "Empty" : "OK"}
-                                  </span>
-                                  {override !== "" ? (
-                                    <span className="text-[10px] px-1.5 py-0.5 rounded font-medium bg-blue-50 text-blue-700">Edited</span>
-                                  ) : null}
+                        return { key, label, category, base, override, isEmpty, matches };
+                      })
+                      .filter((x) => x.matches)
+                      .filter((x) => (variableChecklistShowOnlyMissing ? x.isEmpty : true));
+                    const grouped = new Map<string, typeof items>();
+                    for (const it of items) {
+                      const arr = grouped.get(it.category) ?? [];
+                      arr.push(it);
+                      grouped.set(it.category, arr);
+                    }
+                    return (
+                      <div className="divide-y divide-slate-100">
+                        {order
+                          .map((cat) => {
+                            const group = grouped.get(cat) ?? [];
+                            if (group.length === 0) return null;
+                            return (
+                              <div key={cat}>
+                                <div className="sticky top-0 z-10 bg-white px-3 py-2 border-b border-slate-100">
+                                  <div className="text-xs font-semibold text-slate-700">{cat}</div>
+                                </div>
+                                <div className="divide-y divide-slate-100">
+                                  {group.map((it) => (
+                                    <div key={it.key} className="px-3 py-2">
+                                      <div className="grid grid-cols-[72px_minmax(0,1fr)_minmax(0,280px)] items-start gap-3">
+                                        <div className="pt-0.5">
+                                          <span
+                                            className={cn(
+                                              "inline-flex w-[64px] justify-center text-[10px] px-1.5 py-0.5 rounded font-semibold",
+                                              it.isEmpty ? "bg-amber-50 text-amber-900" : "bg-emerald-50 text-emerald-800"
+                                            )}
+                                          >
+                                            {it.isEmpty ? "EMPTY" : "OK"}
+                                          </span>
+                                        </div>
+                                        <div className="min-w-0">
+                                          <div className="text-sm font-medium text-slate-900 truncate" title={it.key}>{it.label}</div>
+                                          <div className="mt-0.5 text-xs text-slate-500 truncate" title={it.key}>{it.key}</div>
+                                          {it.base ? (
+                                            <div className="mt-1 text-xs text-slate-600 truncate" title={it.base}>
+                                              Current: {it.base}
+                                            </div>
+                                          ) : null}
+                                        </div>
+                                        <div className="min-w-0">
+                                          <Input
+                                            value={it.override}
+                                            onChange={(e) => {
+                                              const v = e.target.value;
+                                              setVariableChecklistOverrides((prev) => {
+                                                const next = { ...prev };
+                                                if (v === "") delete next[it.key];
+                                                else next[it.key] = v;
+                                                return next;
+                                              });
+                                            }}
+                                            placeholder={it.base ? "Override (optional)" : "Fill missing value…"}
+                                            disabled={variableChecklistGenerating || isGenerating}
+                                          />
+                                          {it.override !== "" ? (
+                                            <div className="mt-1 text-[10px] font-medium text-blue-700">Edited</div>
+                                          ) : null}
+                                        </div>
+                                      </div>
+                                    </div>
+                                  ))}
                                 </div>
                               </div>
-                            </div>
-                          </div>
-                        );
-                      })
-                      .filter(Boolean)}
-                  </div>
+                            );
+                          })
+                          .filter(Boolean)}
+                      </div>
+                    );
+                  })()}
                 </div>
 
                 <div className="flex justify-end gap-2 pt-1">
@@ -1927,7 +1991,7 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
       </Dialog>
 
       <Dialog open={generateDialogOpen} onOpenChange={(v) => { if (!v) closeGenerateDialog(); else setGenerateDialogOpen(true); }}>
-        <DialogContent className="sm:max-w-5xl max-h-[80vh] overflow-hidden">
+        <DialogContent className="w-[95vw] sm:w-[80vw] max-w-[95vw] sm:max-w-[80vw] max-h-[80vh] overflow-hidden">
           <DialogHeader>
             <DialogTitle>Generate Document from Template</DialogTitle>
           </DialogHeader>
