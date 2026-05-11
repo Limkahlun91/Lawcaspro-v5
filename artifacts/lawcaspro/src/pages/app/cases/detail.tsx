@@ -81,6 +81,7 @@ export default function CaseDetail() {
   const queryClient = useQueryClient();
   const { toast } = useToast();
   const { user } = useAuth();
+  const canAssignAny = hasPermission(user, "cases", "assign_any");
 
   const {
     data: caseInfo,
@@ -92,6 +93,15 @@ export default function CaseDetail() {
   } = useGetCase(caseId, {
     query: { enabled: !!caseId, queryKey: getGetCaseQueryKey(caseId) }
   });
+
+  const { data: usersRes } = useListUsers({ limit: 200 });
+  const users = usersRes?.data || [];
+  const lawyerOptions = users.filter((u) => ["Partner", "Senior Lawyer", "Lawyer"].includes(String(u.roleName ?? "").trim()));
+  const clerkOptions = users.filter((u) => ["Senior Clerk", "Clerk"].includes(String(u.roleName ?? "").trim()));
+  const currentLawyerId = (Array.isArray((caseInfo as any)?.assignments) ? (caseInfo as any).assignments : [])
+    .find((a: any) => a?.roleInCase === "lawyer")?.userId as number | undefined;
+  const currentClerkId = (Array.isArray((caseInfo as any)?.assignments) ? (caseInfo as any).assignments : [])
+    .find((a: any) => a?.roleInCase === "clerk")?.userId as number | undefined;
 
   const {
     data: workflow,
@@ -110,6 +120,18 @@ export default function CaseDetail() {
 
   const updateStepMutation = useUpdateWorkflowStep();
   const createNoteMutation = useCreateCaseNote();
+  const updateCaseMutation = useMutation({
+    mutationFn: async (payload: Record<string, unknown>) => {
+      return apiFetchJson(`/cases/${caseId}`, { method: "PATCH", body: JSON.stringify(payload) });
+    },
+    onSuccess: async () => {
+      queryClient.invalidateQueries({ queryKey: getListCasesQueryKey() });
+      queryClient.invalidateQueries({ queryKey: getGetCaseQueryKey(caseId) });
+    },
+    onError: (err) => {
+      toastError(toast, err, { fallback: "Failed to update case" });
+    },
+  });
   const saveKeyDatesMutation = useMutation({
     mutationFn: (vars: { scope: string; payload: Record<string, unknown>; keys: string[] }) =>
       apiFetchJson(`/cases/${caseId}/key-dates`, { method: "PATCH", body: JSON.stringify(vars.payload) }),
@@ -1192,7 +1214,58 @@ export default function CaseDetail() {
                   <div>
                     <div className="text-sm font-medium text-slate-500">Assigned Lawyer</div>
                     <div className="text-slate-900 font-medium">
-                      {(safeAssignments.find((a) => (a as any)?.roleInCase === "lawyer") as any)?.userName ?? "Unassigned"}
+                      {canAssignAny ? (
+                        <Select
+                          value={currentLawyerId ? String(currentLawyerId) : ""}
+                          onValueChange={(v) => {
+                            const id = Number(v);
+                            if (!Number.isInteger(id) || id <= 0) return;
+                            updateCaseMutation.mutate({ assignedLawyerId: id });
+                          }}
+                        >
+                          <SelectTrigger className="h-9 text-sm border-slate-200 bg-white">
+                            <SelectValue placeholder="Select lawyer" />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {lawyerOptions.map((u) => (
+                              <SelectItem key={u.id} value={String(u.id)}>{u.name}</SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                      ) : (
+                        (safeAssignments.find((a) => (a as any)?.roleInCase === "lawyer") as any)?.userName ?? "Unassigned"
+                      )}
+                    </div>
+                  </div>
+                  <div>
+                    <div className="text-sm font-medium text-slate-500">Assigned Clerk</div>
+                    <div className="text-slate-900 font-medium">
+                      {canAssignAny ? (
+                        <Select
+                          value={currentClerkId ? String(currentClerkId) : "__none__"}
+                          onValueChange={(v) => {
+                            if (v === "__none__") {
+                              updateCaseMutation.mutate({ assignedClerkId: null });
+                              return;
+                            }
+                            const id = Number(v);
+                            if (!Number.isInteger(id) || id <= 0) return;
+                            updateCaseMutation.mutate({ assignedClerkId: id });
+                          }}
+                        >
+                          <SelectTrigger className="h-9 text-sm border-slate-200 bg-white">
+                            <SelectValue placeholder="Select clerk" />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="__none__">None</SelectItem>
+                            {clerkOptions.map((u) => (
+                              <SelectItem key={u.id} value={String(u.id)}>{u.name}</SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                      ) : (
+                        (safeAssignments.find((a) => (a as any)?.roleInCase === "clerk") as any)?.userName ?? "Unassigned"
+                      )}
                     </div>
                   </div>
                 </div>

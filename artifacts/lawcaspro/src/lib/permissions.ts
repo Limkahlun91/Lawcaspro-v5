@@ -24,6 +24,7 @@ export function hasPermission(user: AuthUser | null, module: string, action: str
   const partner = new Set<string>([
     "dashboard:read",
     "cases:read", "cases:create", "cases:update", "cases:delete",
+    "cases:assign_any",
     "projects:read", "projects:create", "projects:update", "projects:delete",
     "developers:read", "developers:create", "developers:update", "developers:delete",
     "documents:read", "documents:create", "documents:update", "documents:delete", "documents:generate", "documents:export",

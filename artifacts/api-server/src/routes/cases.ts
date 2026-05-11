@@ -47,6 +47,37 @@ const rdb = (req: AuthRequest): DbConn => req.rlsDb ?? db;
 
 type CaseKeyDatesInsert = typeof caseKeyDatesTable.$inferInsert;
 
+async function hasRolePermission(
+  r: DbConn,
+  firmId: number,
+  roleId: number | null | undefined,
+  module: string,
+  action: string,
+): Promise<boolean> {
+  if (!roleId) return false;
+  const [role] = await r
+    .select({ id: rolesTable.id })
+    .from(rolesTable)
+    .where(and(eq(rolesTable.id, roleId), eq(rolesTable.firmId, firmId)));
+  if (!role) return false;
+  const [perm] = await r
+    .select({ allowed: permissionsTable.allowed })
+    .from(permissionsTable)
+    .where(and(
+      eq(permissionsTable.roleId, roleId),
+      eq(permissionsTable.module, module),
+      eq(permissionsTable.action, action),
+    ));
+  return Boolean(perm?.allowed);
+}
+
+async function enforcePermission(req: AuthRequest, res: ExpressResponse, module: string, action: string): Promise<boolean> {
+  let ok = false;
+  const mw = requirePermission(module, action) as unknown as RequestHandler;
+  await (mw as any)(req, res, () => { ok = true; });
+  return ok;
+}
+
 type AuthedHandler = (
   req: AuthRequest,
   res: ExpressResponse,
@@ -1031,6 +1062,9 @@ router.post("/cases/bulk/assign", requireAuthHandler, requireFirmUserHandler, re
     return;
   }
 
+  const ok = await enforcePermission(req, res, "cases", "assign_any");
+  if (!ok) return;
+
   const body = asObject(req.body);
   const rawCaseIds = Array.isArray(body?.caseIds) ? body!.caseIds : [];
   const roleInCase = asString(body?.roleInCase);
@@ -1196,6 +1230,11 @@ router.get("/cases/workbench", requireAuthHandler, requireFirmUserHandler, requi
   const wantsOtherUser = staffUserId !== req.userId;
   let canViewUsers = false;
   if (wantsOtherUser) {
+    const canAssignAny = await hasRolePermission(r, req.firmId!, req.roleId, "cases", "assign_any");
+    if (!canAssignAny) {
+      res.status(403).json({ error: "Permission denied" });
+      return;
+    }
     if (!req.roleId) {
       res.status(403).json({ error: "Permission denied" });
       return;
@@ -1719,6 +1758,16 @@ router.get("/cases", requireAuthHandler, requireFirmUserHandler, requirePermissi
   ]);
 
   const conditions = [eq(casesTable.firmId, req.firmId!)];
+  const canAssignAny = await hasRolePermission(r, req.firmId!, req.roleId, "cases", "assign_any");
+  if (!canAssignAny) {
+    conditions.push(sql`EXISTS (
+      SELECT 1
+      FROM ${caseAssignmentsTable}
+      WHERE ${caseAssignmentsTable.caseId} = ${casesTable.id}
+        AND ${caseAssignmentsTable.userId} = ${req.userId}
+        AND ${caseAssignmentsTable.unassignedAt} IS NULL
+    )`);
+  }
   if (status) conditions.push(eq(casesTable.status, status));
   if (projectId) conditions.push(eq(casesTable.projectId, projectId));
   if (developerId) conditions.push(eq(casesTable.developerId, developerId));
@@ -1965,7 +2014,7 @@ router.post("/cases", requireAuthHandler, requireFirmUserHandler, requirePermiss
       purchaseMode: z.string().transform((v) => v.trim().toLowerCase()),
       titleType: z.string().transform((v) => v.trim().toLowerCase()),
       spaPrice: z.coerce.number().optional(),
-      assignedLawyerId: z.coerce.number().int().positive(),
+      assignedLawyerId: z.coerce.number().int().positive().optional(),
       assignedClerkId: z.coerce.number().int().positive().optional(),
       purchaserIds: z.array(z.coerce.number().int().positive()).optional(),
       purchasers: z.array(z.object({
@@ -2002,6 +2051,23 @@ router.post("/cases", requireAuthHandler, requireFirmUserHandler, requirePermiss
 
     const { projectId, developerId: clientDeveloperId, purchaseMode, titleType, spaPrice, assignedLawyerId, assignedClerkId, purchaserIds, purchasers } = parsed.data;
     const normalizedTitleType = normalizeTitleType(titleType) ?? "master";
+    const canAssignAny = await hasRolePermission(r, req.firmId!, req.roleId, "cases", "assign_any");
+    const normalizedAssignedLawyerId = assignedLawyerId ?? undefined;
+    const normalizedAssignedClerkId = assignedClerkId ?? undefined;
+    if (canAssignAny && !normalizedAssignedLawyerId) {
+      res.status(400).json({ error: "assignedLawyerId is required" });
+      return;
+    }
+    if (!canAssignAny) {
+      if (normalizedAssignedLawyerId !== undefined && normalizedAssignedLawyerId !== req.userId) {
+        res.status(403).json({ error: "You cannot assign cases to other users" });
+        return;
+      }
+      if (normalizedAssignedClerkId !== undefined && normalizedAssignedClerkId !== req.userId) {
+        res.status(403).json({ error: "You cannot assign cases to other users" });
+        return;
+      }
+    }
 
     // ── 1. Resolve developerId server-side from projectId ─────────────────────
     const [project] = await r.select().from(projectsTable).where(eq(projectsTable.id, projectId));
@@ -2028,18 +2094,18 @@ router.post("/cases", requireAuthHandler, requireFirmUserHandler, requirePermiss
     }
     const developerId = project.developerId;
 
-    const usersToCheck = [assignedLawyerId, ...(assignedClerkId ? [assignedClerkId] : [])].filter((x): x is number => Number.isFinite(x));
+    const usersToCheck = [normalizedAssignedLawyerId, ...(normalizedAssignedClerkId ? [normalizedAssignedClerkId] : [])].filter((x): x is number => Number.isFinite(x));
     if (usersToCheck.length > 0) {
       const found = await r
         .select({ id: usersTable.id })
         .from(usersTable)
         .where(and(eq(usersTable.firmId, req.firmId!), inArray(usersTable.id, usersToCheck)));
       const foundIds = new Set(found.map((u) => u.id));
-      if (!foundIds.has(assignedLawyerId)) {
+      if (normalizedAssignedLawyerId !== undefined && !foundIds.has(normalizedAssignedLawyerId)) {
         res.status(400).json({ error: "Assigned lawyer not found" });
         return;
       }
-      if (assignedClerkId && !foundIds.has(assignedClerkId)) {
+      if (normalizedAssignedClerkId && !foundIds.has(normalizedAssignedClerkId)) {
         res.status(400).json({ error: "Assigned clerk not found" });
         return;
       }
@@ -2190,20 +2256,33 @@ router.post("/cases", requireAuthHandler, requireFirmUserHandler, requirePermiss
       });
     }
 
-    await r.insert(caseAssignmentsTable).values({
-      caseId: newCase.id,
-      userId: assignedLawyerId,
-      roleInCase: "lawyer",
-      assignedBy: req.userId,
-    });
-
-    if (assignedClerkId) {
+    const isSelfAssignOnly = !canAssignAny;
+    if (isSelfAssignOnly) {
       await r.insert(caseAssignmentsTable).values({
         caseId: newCase.id,
-        userId: assignedClerkId,
+        userId: req.userId!,
         roleInCase: "clerk",
         assignedBy: req.userId,
       });
+    } else {
+      if (!normalizedAssignedLawyerId) {
+        res.status(400).json({ error: "assignedLawyerId is required" });
+        return;
+      }
+      await r.insert(caseAssignmentsTable).values({
+        caseId: newCase.id,
+        userId: normalizedAssignedLawyerId,
+        roleInCase: "lawyer",
+        assignedBy: req.userId,
+      });
+      if (normalizedAssignedClerkId) {
+        await r.insert(caseAssignmentsTable).values({
+          caseId: newCase.id,
+          userId: normalizedAssignedClerkId,
+          roleInCase: "clerk",
+          assignedBy: req.userId,
+        });
+      }
     }
 
     const workflowSteps = buildWorkflowSteps(purchaseMode, normalizedTitleType);
@@ -2273,6 +2352,7 @@ router.get("/cases/:caseId", requireAuthHandler, requireFirmUserHandler, require
   }
 
   try {
+    const canAssignAny = await hasRolePermission(r, req.firmId!, req.roleId, "cases", "assign_any");
     const [c] = await r
       .select()
       .from(casesTable)
@@ -2280,6 +2360,21 @@ router.get("/cases/:caseId", requireAuthHandler, requireFirmUserHandler, require
     if (!c) {
       res.status(404).json({ error: "Case not found" });
       return;
+    }
+    if (!canAssignAny) {
+      const check = await r.execute(sql`
+        SELECT 1
+        FROM ${caseAssignmentsTable}
+        WHERE ${caseAssignmentsTable.caseId} = ${params.data.caseId}
+          AND ${caseAssignmentsTable.userId} = ${req.userId}
+          AND ${caseAssignmentsTable.unassignedAt} IS NULL
+        LIMIT 1
+      `);
+      const rows = Array.isArray(check) ? (check as any[]) : ((check as any)?.rows ?? []);
+      if (!rows?.[0]) {
+        res.status(404).json({ error: "Case not found" });
+        return;
+      }
     }
 
     res.json(await formatCaseDetail(r, c));
@@ -2859,7 +2954,14 @@ router.patch("/cases/:caseId", requireAuthHandler, requireFirmUserHandler, requi
     return;
   }
 
-  if (parsed.data.assignedLawyerId !== undefined) {
+  const wantsAssignLawyer = parsed.data.assignedLawyerId !== undefined;
+  const wantsAssignClerk = (parsed.data as any)?.assignedClerkId !== undefined;
+  if (wantsAssignLawyer || wantsAssignClerk) {
+    const ok = await enforcePermission(req as AuthRequest, res as ExpressResponse, "cases", "assign_any");
+    if (!ok) return;
+  }
+
+  if (wantsAssignLawyer) {
     await r.update(caseAssignmentsTable)
       .set({ unassignedAt: new Date() })
       .where(and(eq(caseAssignmentsTable.caseId, params.data.caseId), eq(caseAssignmentsTable.roleInCase, "lawyer"), sql`${caseAssignmentsTable.unassignedAt} IS NULL`));
@@ -2869,6 +2971,20 @@ router.patch("/cases/:caseId", requireAuthHandler, requireFirmUserHandler, requi
       roleInCase: "lawyer",
       assignedBy: req.userId,
     });
+  }
+  if (wantsAssignClerk) {
+    const assignedClerkId = (parsed.data as any).assignedClerkId as number | null | undefined;
+    await r.update(caseAssignmentsTable)
+      .set({ unassignedAt: new Date() })
+      .where(and(eq(caseAssignmentsTable.caseId, params.data.caseId), eq(caseAssignmentsTable.roleInCase, "clerk"), sql`${caseAssignmentsTable.unassignedAt} IS NULL`));
+    if (assignedClerkId !== null && assignedClerkId !== undefined) {
+      await r.insert(caseAssignmentsTable).values({
+        caseId: params.data.caseId,
+        userId: assignedClerkId,
+        roleInCase: "clerk",
+        assignedBy: req.userId,
+      });
+    }
   }
 
   const [c] = await r

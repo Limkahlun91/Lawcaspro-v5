@@ -13,6 +13,8 @@ import { Label } from "@/components/ui/label";
 import { cn } from "@/lib/utils";
 import { Plus, X } from "lucide-react";
 import { apiFetchJson } from "@/lib/api-client";
+import { useAuth } from "@/lib/auth-context";
+import { hasPermission } from "@/lib/permissions";
 
 const TABS = ["SPA Details", "Property", "Loan", "Lawyer", "Title", "Company"] as const;
 type Tab = typeof TABS[number];
@@ -27,6 +29,7 @@ export default function NewCasePage() {
   const [, navigate] = useLocation();
   const queryClient = useQueryClient();
   const { toast } = useToast();
+  const { user } = useAuth();
   const [isSubmitting, setIsSubmitting] = useState(false);
 
   const { data: projectsRes } = useListProjects({ limit: 100 });
@@ -154,12 +157,13 @@ export default function NewCasePage() {
 
   async function handleSubmit() {
     setFormError(null);
+    const canAssignAny = hasPermission(user, "cases", "assign_any");
 
     // Inline field validation — show errors beside each field, navigate to first failing tab
     const nextFieldErrors: { project?: string; purchaser?: string; lawyer?: string } = {};
     if (!projectId) nextFieldErrors.project = "Please select a project";
     if (!purchasers[0]?.name.trim()) nextFieldErrors.purchaser = "At least one purchaser name is required";
-    if (!assignedLawyerId) nextFieldErrors.lawyer = "Please assign a lawyer";
+    if (canAssignAny && !assignedLawyerId) nextFieldErrors.lawyer = "Please assign a lawyer";
 
     if (Object.keys(nextFieldErrors).length > 0) {
       setFieldErrors(nextFieldErrors);
@@ -175,6 +179,12 @@ export default function NewCasePage() {
       ? Number(assignedClerkId)
       : undefined;
 
+    const selfUserId = Number(user?.id ?? 0);
+    if (!canAssignAny && (!selfUserId || !Number.isFinite(selfUserId))) {
+      setFormError("Your account is still initializing. Please refresh and try again.");
+      return;
+    }
+
     // developerId is intentionally omitted — server derives it from projectId
     const payload = {
       referenceNo: ourReference.trim() || undefined,
@@ -182,8 +192,8 @@ export default function NewCasePage() {
       purchaseMode,
       titleType: titleTypeApiMap[titleType] ?? "master",
       spaPrice: purchasePrice ? Number(purchasePrice) : undefined,
-      assignedLawyerId: Number(assignedLawyerId),
-      assignedClerkId: resolvedClerkId,
+      assignedLawyerId: canAssignAny ? Number(assignedLawyerId) : selfUserId,
+      assignedClerkId: canAssignAny ? resolvedClerkId : undefined,
       purchasers: validPurchasers.map(p => ({ name: p.name.trim(), ic: p.ic.trim() || undefined })),
       caseType,
       parcelNo,
@@ -237,10 +247,10 @@ export default function NewCasePage() {
         director2Ic,
       },
       lawyerDetails: {
-        lawyerName: selectedLawyer?.name ?? "",
+        lawyerName: (canAssignAny ? selectedLawyer?.name : user?.name) ?? "",
         lawyerNric,
         lawyerBcNo,
-        clerkName: selectedClerk?.name ?? "",
+        clerkName: (canAssignAny ? selectedClerk?.name : user?.name) ?? "",
       },
     };
 
@@ -662,11 +672,17 @@ export default function NewCasePage() {
                   <h3 className="font-semibold text-sm text-[#0f1729]">Lawyer Information</h3>
                   <p className="text-xs text-gray-500">Lawyer in charge of this case</p>
                 </div>
+                {!hasPermission(user, "cases", "assign_any") ? (
+                  <div className="rounded-lg border border-slate-200 bg-slate-50 p-4 text-sm text-slate-700">
+                    Responsible person will be set to your account automatically.
+                  </div>
+                ) : null}
                 <div className="grid grid-cols-2 gap-x-6 gap-y-4">
                   <div className="space-y-1">
                     <Label className="text-xs font-medium text-gray-600">
                       Select Lawyer <span className="text-red-500">*</span>
                     </Label>
+                    {hasPermission(user, "cases", "assign_any") ? (
                     <Select value={assignedLawyerId} onValueChange={v => { setAssignedLawyerId(v); setFieldErrors(fe => ({ ...fe, lawyer: undefined })); }}>
                       <SelectTrigger className={cn("h-9 text-sm", fieldErrors.lawyer ? "border-red-400" : "border-gray-300")}>
                         <SelectValue placeholder="Choose a lawyer" />
@@ -677,6 +693,9 @@ export default function NewCasePage() {
                         ))}
                       </SelectContent>
                     </Select>
+                    ) : (
+                      <Input className="h-9 text-sm border-gray-300 bg-gray-50" readOnly value={user?.name ?? ""} />
+                    )}
                     {fieldErrors.lawyer
                       ? <p className="text-xs text-red-500">{fieldErrors.lawyer}</p>
                       : <p className="text-xs text-gray-400">Select a lawyer to auto-fill their details</p>
@@ -684,18 +703,24 @@ export default function NewCasePage() {
                   </div>
                   <div className="space-y-1">
                     <Label className="text-xs font-medium text-gray-600">Select Clerk Person in Charge</Label>
-                    <Select value={assignedClerkId} onValueChange={setAssignedClerkId}>
-                      <SelectTrigger className="h-9 text-sm border-gray-300">
-                        <SelectValue placeholder="Choose a clerk" />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="__none__">None</SelectItem>
-                        {(clerks.length > 0 ? clerks : users).map(c => (
-                          <SelectItem key={c.id} value={String(c.id)}>{c.name}</SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                    <p className="text-xs text-gray-400">Select a clerk to auto-fill their name</p>
+                    {hasPermission(user, "cases", "assign_any") ? (
+                      <>
+                        <Select value={assignedClerkId} onValueChange={setAssignedClerkId}>
+                          <SelectTrigger className="h-9 text-sm border-gray-300">
+                            <SelectValue placeholder="Choose a clerk" />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="__none__">None</SelectItem>
+                            {(clerks.length > 0 ? clerks : users).map(c => (
+                              <SelectItem key={c.id} value={String(c.id)}>{c.name}</SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                        <p className="text-xs text-gray-400">Select a clerk to auto-fill their name</p>
+                      </>
+                    ) : (
+                      <Input className="h-9 text-sm border-gray-300 bg-gray-50" readOnly value={user?.name ?? ""} />
+                    )}
                   </div>
 
                   <div className="space-y-1">
@@ -703,7 +728,7 @@ export default function NewCasePage() {
                     <Input
                       className="h-9 text-sm border-gray-300 bg-gray-50"
                       readOnly
-                      value={selectedLawyer?.name ?? ""}
+                      value={(hasPermission(user, "cases", "assign_any") ? selectedLawyer?.name : user?.name) ?? ""}
                       placeholder="Lawyer name"
                     />
                   </div>
@@ -720,7 +745,7 @@ export default function NewCasePage() {
                     <Input
                       className="h-9 text-sm border-gray-300 bg-gray-50"
                       readOnly
-                      value={(assignedClerkId && assignedClerkId !== "__none__") ? (selectedClerk?.name ?? "") : ""}
+                      value={hasPermission(user, "cases", "assign_any") ? ((assignedClerkId && assignedClerkId !== "__none__") ? (selectedClerk?.name ?? "") : "") : (user?.name ?? "")}
                       placeholder="Clerk name"
                     />
                   </div>
