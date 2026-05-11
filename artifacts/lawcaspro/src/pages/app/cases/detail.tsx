@@ -128,10 +128,26 @@ export default function CaseDetail() {
     onError: (err) => toastError(toast, err, "Save failed"),
   });
   const printMutation = useMutation({
-    mutationFn: (payload: { printKey: string }) => apiFetchJson(`/cases/${caseId}/documents/print`, { method: "POST", body: JSON.stringify(payload) }),
-    onSuccess: () => {
+    mutationFn: (payload: { printKey: string }) =>
+      apiFetchJson<{ id: number; file_name?: string; name?: string }>(`/cases/${caseId}/documents/print`, {
+        method: "POST",
+        timeoutMs: 60000,
+        body: JSON.stringify(payload),
+      }),
+    onSuccess: async (doc) => {
       queryClient.invalidateQueries({ queryKey: ["case-documents", caseId] });
-      toast({ title: "Document generated" });
+      const id = doc && typeof doc === "object" && typeof doc.id === "number" ? doc.id : null;
+      if (!id) {
+        toast({ title: "Document generated" });
+        return;
+      }
+      const blob = await apiFetchBlob(`/cases/${caseId}/documents/${id}/download`, { timeoutMs: 120000 });
+      const filename =
+        (doc.file_name && String(doc.file_name).trim()) ? String(doc.file_name)
+          : (doc.name && String(doc.name).trim()) ? `${String(doc.name)}.docx`
+            : "download.docx";
+      downloadBlob(blob, filename);
+      toast({ title: "Download started" });
     },
     onError: (err) => toastError(toast, err, "Print failed"),
   });

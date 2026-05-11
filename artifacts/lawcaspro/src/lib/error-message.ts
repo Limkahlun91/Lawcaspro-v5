@@ -69,11 +69,34 @@ export function getErrorMessage(err: unknown): string {
       return `${base}${suggestion}`.trim();
     }
   }
+  const apiCode = isApiErrorLike(err) && typeof err.code === "string" ? err.code.trim() : "";
+  const apiMsg = isApiErrorLike(err) && typeof err.message === "string" ? err.message.trim() : "";
+  const allowDetailedCodes = new Set([
+    "TEMPLATE_NOT_CONFIGURED",
+    "TEMPLATE_FILE_MISSING",
+    "TEMPLATE_FILE_NOT_FOUND",
+    "TEMPLATE_RENDER_FAILED",
+    "PDF_RENDER_FAILED",
+    "STORAGE_TIMEOUT",
+    "STORAGE_NOT_CONFIGURED",
+    "NO_LETTERHEAD",
+    "LETTERHEAD_NOT_FOUND",
+    "LETTERHEAD_INACTIVE",
+    "PRINT_FAILED",
+    "DATA_FETCH_TIMEOUT",
+  ]);
   const status = getHttpStatus(err);
   if (status === 401) return "Session expired. Please sign in again.";
   if (status === 403) return "You do not have permission to perform this action.";
-  if (status === 404) return "File or template not found.";
-  if (status === 400 || status === 422) return "Request invalid. Please check your input and retry.";
+  if (status === 404) {
+    if (apiMsg && (allowDetailedCodes.has(apiCode) || apiMsg.includes("找不到"))) return apiMsg;
+    return "File or template not found.";
+  }
+  if (status === 400) return "Request invalid. Please check your input and retry.";
+  if (status === 422) {
+    if (apiMsg && allowDetailedCodes.has(apiCode)) return apiMsg;
+    return "Request invalid. Please check your input and retry.";
+  }
   if (status === 503) {
     const raw = isApiErrorLike(err) && typeof err.message === "string" ? err.message.trim() : "";
     return raw || "Service temporarily unavailable. Please retry.";

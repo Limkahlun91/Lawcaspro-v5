@@ -208,6 +208,17 @@ function safeFilenameAscii(filename: string): string {
   return base.replace(/[^\x20-\x7E]/g, "_");
 }
 
+function decodeStoragePath(rawPath: unknown): string {
+  const v = typeof rawPath === "string" ? rawPath.trim() : "";
+  if (!v) return "";
+  if (!v.includes("%") && !v.includes("+")) return v;
+  try {
+    return decodeURIComponent(v.replace(/\+/g, "%20"));
+  } catch {
+    return v;
+  }
+}
+
 function encodeRFC5987ValueChars(str: string): string {
   return encodeURIComponent(str)
     .replace(/['()]/g, escape)
@@ -1150,9 +1161,17 @@ router.get("/firm-document-folders", requireAuth, requireFirmUser, requirePermis
 router.post("/firm-document-folders", requireAuth, requireFirmUser, requirePermission("documents", "create"), async (req: AuthRequest, res): Promise<void> => {
   const r = getRlsDb(req, res);
   if (!r) return;
-  const { name, parentId } = req.body as { name: string; parentId?: number | null };
+  const { name, parentId } = req.body as { name: string; parentId?: number | string | null };
   const folderName = typeof name === "string" ? name.trim() : "";
-  const pid = typeof parentId === "number" ? parentId : null;
+  const pidRaw =
+    typeof parentId === "number"
+      ? parentId
+      : (typeof parentId === "string" && parentId.trim() ? parseInt(parentId, 10) : null);
+  const pid = pidRaw !== null && Number.isFinite(pidRaw) ? Math.trunc(pidRaw) : null;
+  if (parentId !== undefined && parentId !== null && pid === null) {
+    res.status(400).json({ error: "Invalid parentId" });
+    return;
+  }
   if (!folderName) {
     res.status(400).json({ error: "name is required" });
     return;
@@ -1167,6 +1186,18 @@ router.post("/firm-document-folders", requireAuth, requireFirmUser, requirePermi
       return;
     }
   }
+  const existingRows = await queryRows(
+    r,
+    sql`SELECT * FROM firm_document_folders
+        WHERE firm_id = ${req.firmId!}
+          AND name = ${folderName}
+          AND parent_id IS NOT DISTINCT FROM ${pid}
+        LIMIT 1`
+  );
+  if (existingRows[0]) {
+    res.json(existingRows[0]);
+    return;
+  }
   try {
     const rows = await queryRows(
       r,
@@ -1180,10 +1211,23 @@ router.post("/firm-document-folders", requireAuth, requireFirmUser, requirePermi
     res.status(201).json(rows[0]);
   } catch (err: any) {
     if (err?.code === "23505") {
+      const rows = await queryRows(
+        r,
+        sql`SELECT * FROM firm_document_folders
+            WHERE firm_id = ${req.firmId!}
+              AND name = ${folderName}
+              AND parent_id IS NOT DISTINCT FROM ${pid}
+            LIMIT 1`
+      );
+      if (rows[0]) {
+        res.json(rows[0]);
+        return;
+      }
       res.status(409).json({ error: "Folder name already exists", code: "DUPLICATE_FOLDER_NAME" });
       return;
     }
-    res.status(500).json({ error: "Failed to create folder" });
+    logger.error({ err, firmId: req.firmId, userId: req.userId, folderName, pid }, "[documents] firm_folder_create_failed");
+    res.status(503).json({ error: "Failed to create folder. Please retry.", code: "FOLDER_CREATE_FAILED" });
   }
 });
 
@@ -7025,25 +7069,39 @@ router.post("/cases/:caseId/documents/print", requireAuth, requireFirmUser, requ
   const documentName = typeof body.documentName === "string" ? body.documentName.trim() : "";
   const letterheadId = typeof body.letterheadId === "number" ? body.letterheadId : null;
 
-  const templateRows = await queryRows(
-    r,
-    sql`SELECT * FROM document_templates
-        WHERE firm_id = ${req.firmId!}
-          AND kind = 'template'
-          AND is_template_capable = true
-          AND document_type = ${cfg.documentType}
-        ORDER BY created_at DESC
-        LIMIT 1`
-  );
-  const template = templateRows[0];
-  if (!template) {
-    res.status(404).json({ error: "No firm template configured for this print action", code: "TEMPLATE_NOT_CONFIGURED", documentType: cfg.documentType });
+  const cache = createRequestCache();
+  const [context, templateRows] = await Promise.all([
+    buildCaseContext(r, caseId, req.firmId!, cache),
+    queryRows(
+      r,
+      sql`SELECT *
+          FROM document_templates
+          WHERE firm_id = ${req.firmId!}
+            AND kind = 'template'
+            AND is_template_capable = true
+            AND (
+              document_type = ${cfg.documentType}
+              OR LOWER(REPLACE(document_type, ' ', '_')) = LOWER(${cfg.documentType})
+            )
+          ORDER BY created_at DESC
+          LIMIT 20`
+    ),
+  ]);
+  if (!context) {
+    res.status(404).json({ error: "Case not found", code: "CASE_NOT_FOUND" });
     return;
   }
-
-  const context = await buildCaseContext(r, caseId, req.firmId!);
-  if (!context) {
-    res.status(404).json({ error: "Case not found" });
+  const caseType = typeof (context as any).case_type === "string" ? String((context as any).case_type) : "";
+  const template = templateRows.find((t) => {
+    const applies = (t as any).applies_to_case_type;
+    if (applies === null || applies === undefined) return true;
+    const s = String(applies);
+    if (!s || s.toLowerCase() === "any") return true;
+    return caseType ? s === caseType : false;
+  });
+  if (!template) {
+    const msg = `找不到對應的 ${cfg.label} 模板` + (caseType ? `（Case Type=${caseType}）` : "");
+    res.status(404).json({ error: msg, code: "TEMPLATE_NOT_CONFIGURED", documentType: cfg.documentType, caseType });
     return;
   }
 
@@ -7067,6 +7125,10 @@ router.post("/cases/:caseId/documents/print", requireAuth, requireFirmUser, requ
   });
 
   try {
+    const fail = (statusCode: number, code: string, message: string, payload?: Record<string, unknown>) => {
+      throw new DocumentGenerationError(statusCode, code, message, payload);
+    };
+
     const templateVersionId = Number.isNaN(templateId) ? null : await ensureFirmTemplatePublishedVersionId(r, req.firmId!, templateId, req.userId!);
     if (templateVersionId) {
       await queryRows(r, sql`UPDATE document_generation_runs SET template_version_id = ${templateVersionId} WHERE id = ${runId} AND firm_id = ${req.firmId!}`);
@@ -7075,68 +7137,70 @@ router.post("/cases/:caseId/documents/print", requireAuth, requireFirmUser, requ
       ? await queryRows(r, sql`SELECT * FROM document_template_versions WHERE id = ${templateVersionId} AND firm_id = ${req.firmId!}`)
       : [];
     const v = vRows[0];
-    const templateObjectPath = typeof (v as any)?.source_object_path === "string"
+    const templateObjectPathRaw = typeof (v as any)?.source_object_path === "string"
       ? String((v as any).source_object_path)
       : (typeof (template as any).object_path === "string" ? String((template as any).object_path) : "");
+    const templateObjectPath = decodeStoragePath(templateObjectPathRaw);
     if (!templateObjectPath) {
-      res.status(404).json({ error: "Template file missing" });
-      await finishGenerationRunFailed(r, req.firmId!, runId, "TEMPLATE_FILE_MISSING", "Template file missing");
-      await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.generation.failed", entityType: "document_generation_run", entityId: runId, detail: `caseId=${caseId} templateSource=firm templateId=${templateId} code=TEMPLATE_FILE_MISSING`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
-      return;
+      fail(404, "TEMPLATE_FILE_MISSING", "Template file missing");
     }
-    const fileContents = await downloadPrivateObjectBytes(templateObjectPath);
-
-    const zip = new PizZip(fileContents);
-    const doc = new Docxtemplater(zip, { paragraphLoop: true, linebreaks: true });
-    try {
-      doc.render(context);
-    } catch (err) {
-      logger.warn({ err, path: req.path, firmId: req.firmId, userId: req.userId, caseId, templateId: (template as any).id, printKey }, "[documents] template_render_failed");
-      res.status(422).json({ error: "Template render failed", code: "TEMPLATE_RENDER_FAILED" });
-      await finishGenerationRunFailed(r, req.firmId!, runId, "TEMPLATE_RENDER_FAILED", "Template render failed");
-      await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.generation.failed", entityType: "document_generation_run", entityId: runId, detail: `caseId=${caseId} templateSource=firm templateId=${templateId} code=TEMPLATE_RENDER_FAILED`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
-      return;
-    }
-    let buffer = doc.getZip().generate({ type: "nodebuffer", compression: "DEFLATE" }) as Buffer;
+    const placeholders = placeholdersFromVariablesSnapshot((v as any)?.variables_snapshot);
+    const input = placeholders.length > 0 ? fillMissingScalarsForRender(placeholders, context as any) : (context as any);
 
     const templateDocType = template && typeof template === "object" && "document_type" in template ? String((template as any).document_type) : "other";
     const isLetterLike = isLetterheadApplicableDocumentType(templateDocType);
-    let usedLetterheadId: number | null = null;
-    if (isLetterLike) {
+    const letterheadBytesPromise = isLetterLike ? (async () => {
       const lhIdNum = letterheadId;
       let lh: Record<string, unknown> | undefined;
       if (lhIdNum !== null) {
         const byId = await queryRows(r, sql`SELECT * FROM firm_letterheads WHERE id = ${lhIdNum} AND firm_id = ${req.firmId!}`);
         const candidate = byId[0];
-        if (!candidate) {
-          res.status(404).json({ error: "Letterhead not found", code: "LETTERHEAD_NOT_FOUND" });
-          return;
-        }
-        if (String((candidate as any).status ?? "active") !== "active") {
-          res.status(409).json({ error: "Selected letterhead is inactive", code: "LETTERHEAD_INACTIVE" });
-          return;
-        }
+        if (!candidate) fail(404, "LETTERHEAD_NOT_FOUND", "Letterhead not found");
+        if (String((candidate as any).status ?? "active") !== "active") fail(409, "LETTERHEAD_INACTIVE", "Selected letterhead is inactive");
         lh = candidate;
       } else {
         const defaults = await queryRows(r, sql`SELECT * FROM firm_letterheads WHERE firm_id = ${req.firmId!} AND status = 'active' ORDER BY is_default DESC, created_at DESC LIMIT 1`);
         lh = defaults[0];
-        if (!lh) {
-          res.status(422).json({ error: "No active firm letterhead configured", code: "NO_LETTERHEAD" });
-          return;
-        }
+        if (!lh) fail(422, "NO_LETTERHEAD", "No active firm letterhead configured");
       }
-      usedLetterheadId = typeof (lh as any).id === "number" ? Number((lh as any).id) : null;
-      const firstBytes = await downloadPrivateObjectBytes(String((lh as any).first_page_object_path));
-      const contBytes = await downloadPrivateObjectBytes(String((lh as any).continuation_header_object_path));
-      const footerPath = (lh as any).footer_object_path ? String((lh as any).footer_object_path) : null;
-      const footerBytes = footerPath ? await downloadPrivateObjectBytes(footerPath) : null;
+      const usedLetterheadId = typeof (lh as any).id === "number" ? Number((lh as any).id) : null;
+      const firstPath = decodeStoragePath(String((lh as any).first_page_object_path));
+      const contPath = decodeStoragePath(String((lh as any).continuation_header_object_path));
+      const footerPath = (lh as any).footer_object_path ? decodeStoragePath(String((lh as any).footer_object_path)) : null;
       const footerMode = (lh as any).footer_mode === "last_page_only" ? "last_page_only" : "every_page";
+      const [firstBytes, contBytes, footerBytes] = await Promise.all([
+        downloadPrivateObjectBytes(firstPath),
+        downloadPrivateObjectBytes(contPath),
+        footerPath ? downloadPrivateObjectBytes(footerPath) : Promise.resolve(null),
+      ]);
+      return { usedLetterheadId, footerMode, firstBytes, contBytes, footerBytes };
+    })() : Promise.resolve(null);
+
+    const [fileContents, letterheadBytes] = await Promise.all([
+      downloadPrivateObjectBytes(templateObjectPath),
+      letterheadBytesPromise,
+    ]);
+
+    const zip = new PizZip(fileContents);
+    const doc = new Docxtemplater(zip, { paragraphLoop: true, linebreaks: true });
+    try {
+      doc.render(input);
+    } catch (err) {
+      const detail = extractDocxTemplateErrorDetail(err);
+      logger.error({ err, path: req.path, firmId: req.firmId, userId: req.userId, caseId, templateId: (template as any).id, printKey }, "[documents] template_render_failed");
+      fail(422, "TEMPLATE_RENDER_FAILED", detail.message, { tags: detail.tags });
+    }
+    let buffer = doc.getZip().generate({ type: "nodebuffer", compression: "DEFLATE" }) as Buffer;
+
+    let usedLetterheadId: number | null = null;
+    if (letterheadBytes) {
+      usedLetterheadId = letterheadBytes.usedLetterheadId ?? null;
       buffer = await applyLetterheadToDocxBuffer({
         baseDocx: buffer,
-        firstPageTemplateDocx: firstBytes,
-        continuationHeaderTemplateDocx: contBytes,
-        footerTemplateDocx: footerBytes,
-        footerMode,
+        firstPageTemplateDocx: letterheadBytes.firstBytes,
+        continuationHeaderTemplateDocx: letterheadBytes.contBytes,
+        footerTemplateDocx: letterheadBytes.footerBytes,
+        footerMode: letterheadBytes.footerMode,
       });
     }
 
@@ -7167,33 +7231,33 @@ router.post("/cases/:caseId/documents/print", requireAuth, requireFirmUser, requ
     const cfgErr = getSupabaseStorageConfigError(err);
     if (cfgErr) {
       logger.error({ err, path: req.path, firmId: req.firmId, userId: req.userId, caseId, printKey }, "[documents] supabase_storage_not_configured");
-      res.status(cfgErr.statusCode).json({ error: cfgErr.error });
+      res.status(cfgErr.statusCode).json({ error: cfgErr.error, code: "STORAGE_NOT_CONFIGURED" });
       await finishGenerationRunFailed(r, req.firmId!, runId, "STORAGE_NOT_CONFIGURED", cfgErr.error);
       await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.generation.failed", entityType: "document_generation_run", entityId: runId, detail: `caseId=${caseId} templateSource=firm templateId=${templateId} code=STORAGE_NOT_CONFIGURED`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
       return;
     }
     if (err instanceof StorageRequestTimeoutError) {
-      res.status(504).json({ error: "資料抓取過久，請稍後再試", code: "DATA_FETCH_TIMEOUT" });
-      await finishGenerationRunFailed(r, req.firmId!, runId, "DATA_FETCH_TIMEOUT", "資料抓取過久，請稍後再試");
-      await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.generation.failed", entityType: "document_generation_run", entityId: runId, detail: `caseId=${caseId} templateSource=firm templateId=${templateId} code=DATA_FETCH_TIMEOUT`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+      res.status(503).json({ error: "連線至 Supabase 儲存空間超時", code: "STORAGE_TIMEOUT" });
+      await finishGenerationRunFailed(r, req.firmId!, runId, "STORAGE_TIMEOUT", "連線至 Supabase 儲存空間超時");
+      await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.generation.failed", entityType: "document_generation_run", entityId: runId, detail: `caseId=${caseId} templateSource=firm templateId=${templateId} code=STORAGE_TIMEOUT`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
       return;
     }
     if (err instanceof ObjectNotFoundError) {
-      res.status(404).json({ error: "Template file not found" });
+      res.status(404).json({ error: "Template file not found", code: "TEMPLATE_FILE_NOT_FOUND" });
       await finishGenerationRunFailed(r, req.firmId!, runId, "TEMPLATE_FILE_NOT_FOUND", "Template file not found");
       await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.generation.failed", entityType: "document_generation_run", entityId: runId, detail: `caseId=${caseId} templateSource=firm templateId=${templateId} code=TEMPLATE_FILE_NOT_FOUND`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
       return;
     }
-    if (isDocxTemplateRenderError(err)) {
-      res.status(422).json({ error: "Template render failed", code: "TEMPLATE_RENDER_FAILED" });
-      await finishGenerationRunFailed(r, req.firmId!, runId, "TEMPLATE_RENDER_FAILED", "Template render failed");
-      await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.generation.failed", entityType: "document_generation_run", entityId: runId, detail: `caseId=${caseId} templateSource=firm templateId=${templateId} code=TEMPLATE_RENDER_FAILED`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+    if (err instanceof DocumentGenerationError) {
+      res.status(err.statusCode).json({ error: err.message, code: err.code, ...(err.payload ? err.payload : {}) });
+      await finishGenerationRunFailed(r, req.firmId!, runId, err.code, err.message);
+      await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.generation.failed", entityType: "document_generation_run", entityId: runId, detail: `caseId=${caseId} templateSource=firm templateId=${templateId} code=${err.code}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
       return;
     }
     logger.error({ err, path: req.path, firmId: req.firmId, userId: req.userId, caseId, printKey }, "[documents] print_failed");
-    res.status(500).json({ error: "Internal Server Error" });
-    await finishGenerationRunFailed(r, req.firmId!, runId, "INTERNAL_ERROR", "Internal Server Error");
-    await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.generation.failed", entityType: "document_generation_run", entityId: runId, detail: `caseId=${caseId} templateSource=firm templateId=${templateId} code=INTERNAL_ERROR`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+    res.status(503).json({ error: "Service temporarily unavailable. Please retry.", code: "PRINT_FAILED" });
+    await finishGenerationRunFailed(r, req.firmId!, runId, "PRINT_FAILED", "Service temporarily unavailable. Please retry.");
+    await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.generation.failed", entityType: "document_generation_run", entityId: runId, detail: `caseId=${caseId} templateSource=firm templateId=${templateId} code=PRINT_FAILED`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
   }
 });
 
