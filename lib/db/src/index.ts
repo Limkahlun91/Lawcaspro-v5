@@ -128,5 +128,7 @@ export { developersTable, projectsTable, clientsTable } from "./schema";
 
 export { caseWorkflowDocumentsTable, caseLoanStampingItemsTable } from "./schema";
 
+export { caseDocumentVariableOverridesTable } from "./schema";
+
 export { sql } from "drizzle-orm";
 export type { SQL } from "drizzle-orm";

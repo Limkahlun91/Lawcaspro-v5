@@ -65,6 +65,17 @@ export const caseDocumentsTable = pgTable("case_documents", {
   statusIdx:   index("idx_case_docs_status").on(t.status),
 }));
 
+export const caseDocumentVariableOverridesTable = pgTable("case_document_variable_overrides", {
+  firmId: integer("firm_id").notNull(),
+  caseId: integer("case_id").notNull(),
+  overridesJson: jsonb("overrides_json").notNull().default({}),
+  updatedBy: integer("updated_by"),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow().$onUpdate(() => new Date()),
+}, (t) => ({
+  pk: uniqueIndex("pk_case_document_variable_overrides").on(t.firmId, t.caseId),
+  firmCaseIdx: index("idx_case_document_variable_overrides_case").on(t.firmId, t.caseId),
+}));
+
 export const caseWorkflowDocumentsTable = pgTable("case_workflow_documents", {
   id: serial("id").primaryKey(),
   firmId: integer("firm_id").notNull(),

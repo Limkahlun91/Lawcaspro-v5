@@ -197,6 +197,28 @@ async function queryRowsCached(r: DbConn, cache: RequestCache | undefined, key: 
   return await cacheGetOrSet(cache, `queryRows:${key}`, async () => await queryRows(r, query));
 }
 
+function asObjectRecord(v: unknown): Record<string, unknown> | null {
+  return v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : null;
+}
+
+function mergeOverrides(base: Record<string, unknown> | null, extra: Record<string, unknown> | null): Record<string, unknown> | null {
+  if (!base && !extra) return null;
+  return { ...(base ?? {}), ...(extra ?? {}) };
+}
+
+async function getCaseVariableOverrides(r: DbConn, cache: RequestCache | undefined, firmId: number, caseId: number): Promise<Record<string, unknown> | null> {
+  const exists = await tableExistsCached(r, cache, "public.case_document_variable_overrides");
+  if (!exists) return null;
+  const rows = await queryRowsCached(
+    r,
+    cache,
+    `case_document_variable_overrides:${firmId}:${caseId}`,
+    sql`SELECT overrides_json FROM case_document_variable_overrides WHERE firm_id = ${firmId} AND case_id = ${caseId} LIMIT 1`
+  );
+  const raw = rows[0]?.overrides_json;
+  return asObjectRecord(raw);
+}
+
 function safeJson(str: unknown): Record<string, unknown> {
   if (!str || typeof str !== "string") return {};
   try { return JSON.parse(str); } catch { return {}; }
@@ -4604,6 +4626,47 @@ async function finishGenerationRunFailed(r: DbConn, firmId: number, runId: numbe
   `);
 }
 
+async function convertDocxToPdf(docxBytes: Buffer): Promise<Buffer> {
+  const baseUrl = typeof process.env.GOTENBERG_URL === "string" ? process.env.GOTENBERG_URL.trim().replace(/\/+$/, "") : "";
+  if (!baseUrl) throw new DocumentGenerationError(501, "DOCX_TO_PDF_UNAVAILABLE", "PDF conversion is not configured");
+
+  const controller = new AbortController();
+  const timeoutMs = 25000;
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const url = `${baseUrl}/forms/libreoffice/convert`;
+    const boundary = `----lawcaspro-${randomUUID()}`;
+    const head = Buffer.from(
+      `--${boundary}\r\n` +
+      `Content-Disposition: form-data; name="files"; filename="document.docx"\r\n` +
+      `Content-Type: application/vnd.openxmlformats-officedocument.wordprocessingml.document\r\n\r\n`,
+      "utf8"
+    );
+    const tail = Buffer.from(`\r\n--${boundary}--\r\n`, "utf8");
+    const body = Buffer.concat([head, docxBytes, tail]);
+    const resp = await fetch(url, {
+      method: "POST",
+      headers: { "content-type": `multipart/form-data; boundary=${boundary}` },
+      body,
+      signal: controller.signal,
+    });
+    if (!resp.ok) {
+      const txt = await resp.text().catch(() => "");
+      const short = txt && txt.length ? txt.slice(0, 200) : "";
+      throw new DocumentGenerationError(503, "DOCX_TO_PDF_FAILED", "PDF conversion failed", { status: resp.status, detail: short });
+    }
+    const ab = await resp.arrayBuffer();
+    return Buffer.from(ab);
+  } catch (err) {
+    if (err instanceof DocumentGenerationError) throw err;
+    const aborted = err instanceof Error && err.name === "AbortError";
+    if (aborted) throw new DocumentGenerationError(503, "DOCX_TO_PDF_TIMEOUT", "PDF conversion timed out");
+    throw new DocumentGenerationError(503, "DOCX_TO_PDF_FAILED", "PDF conversion failed");
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 async function generateFirmDocument({
   r,
   firmId,
@@ -4619,6 +4682,7 @@ async function generateFirmDocument({
   bypassApplicability,
   clauses,
   overrides,
+  outputFormat,
 }: {
   r: DbConn;
   firmId: number;
@@ -4634,7 +4698,8 @@ async function generateFirmDocument({
   bypassApplicability?: boolean;
   clauses?: SelectedClauseRef[];
   overrides?: Record<string, unknown> | null;
-}): Promise<{ caseDocument: Record<string, unknown>; caseDocumentId: number | null; templateVersionId: number | null; checklistSnapshot: unknown; readinessSnapshot: unknown; renderedVars: unknown; }> {
+  outputFormat?: "docx" | "pdf";
+}): Promise<{ caseDocument: Record<string, unknown>; caseDocumentId: number | null; templateVersionId: number | null; checklistSnapshot: unknown; readinessSnapshot: unknown; renderedVars: unknown; outputBytes?: Buffer; outputContentType?: string; }> {
   const cache = createRequestCache();
   const [templateRows, context] = await Promise.all([
     queryRowsCached(r, cache, `document_templates:${firmId}:${templateId}`, sql`SELECT * FROM document_templates WHERE id = ${templateId} AND firm_id = ${firmId}`),
@@ -4793,12 +4858,14 @@ async function generateFirmDocument({
   let fileContents = fileContentsRaw;
   const placeholders = placeholdersFromVariablesSnapshot((version as any)?.variables_snapshot);
   const effectivePlaceholders = placeholders.length > 0 ? placeholders : detectDocxVariables(fileContents);
+  const storedOverrides = await getCaseVariableOverrides(r, cache, firmId, caseId);
+  const mergedOverrides = mergeOverrides(storedOverrides, overrides ?? null);
   const preview = await runDocumentPreview(r, {
     firmId,
     caseContext: context,
     templateRef: { kind: "firm", templateId },
     placeholders: effectivePlaceholders,
-    overrides: overrides ?? null,
+    overrides: mergedOverrides,
   });
   if (preview.usedMode === "bindings" && preview.missingRequiredVariables.length > 0) {
     throw new DocumentGenerationError(422, "TEMPLATE_BINDING_MISSING", "Missing required variables", { missingRequiredVariables: preview.missingRequiredVariables });
@@ -4946,11 +5013,18 @@ async function generateFirmDocument({
     });
   }
 
-  const normalizedPath = newGeneratedDocObjectPath(firmId, caseId, "docx");
+  const outFormat: "docx" | "pdf" = outputFormat === "pdf" ? "pdf" : "docx";
+  const outputBytes = outFormat === "pdf" ? await convertDocxToPdf(buffer) : buffer;
+  const outputContentType =
+    outFormat === "pdf"
+      ? "application/pdf"
+      : "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+
+  const normalizedPath = newGeneratedDocObjectPath(firmId, caseId, outFormat);
   await supabaseStorage.uploadPrivateObject({
     objectPath: normalizedPath,
-    fileBytes: buffer,
-    contentType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    fileBytes: outputBytes,
+    contentType: outputContentType,
   });
   const docName = documentName ?? String((template as any).name ?? "Generated document");
   const templateCode = String((template as any).document_type ?? "DOC");
@@ -4966,8 +5040,8 @@ async function generateFirmDocument({
       sequence,
     }),
     rule: namingRule,
-    originalFileNameOrExt: "docx",
-    fallbackExt: "docx",
+    originalFileNameOrExt: outFormat,
+    fallbackExt: outFormat,
   });
   const uniq = await ensureUniqueCaseDocumentFileName({
     r,
@@ -5005,6 +5079,8 @@ async function generateFirmDocument({
     checklistSnapshot: { applicability, checklist: checklistEval, checklistOverrideUsed, bindingMode: preview.usedMode, placeholderWarnings: preview.placeholderWarnings },
     readinessSnapshot: { readiness },
     renderedVars: preview.usedMode === "bindings" ? preview.resolvedVariables : context,
+    outputBytes: outputFormat ? outputBytes : undefined,
+    outputContentType: outputFormat ? outputContentType : undefined,
   };
 }
 
@@ -5023,6 +5099,7 @@ async function generateMasterDocument({
   bypassApplicability,
   clauses,
   overrides,
+  outputFormat,
 }: {
   r: DbConn;
   firmId: number;
@@ -5038,7 +5115,9 @@ async function generateMasterDocument({
   bypassApplicability?: boolean;
   clauses?: SelectedClauseRef[];
   overrides?: Record<string, unknown> | null;
-}): Promise<{ caseDocument: Record<string, unknown>; caseDocumentId: number | null; templateVersionId: number | null; checklistSnapshot: unknown; readinessSnapshot: unknown; renderedVars: unknown; renderMode: "docx" | "pdf" }> {
+  outputFormat?: "docx" | "pdf";
+}): Promise<{ caseDocument: Record<string, unknown>; caseDocumentId: number | null; templateVersionId: number | null; checklistSnapshot: unknown; readinessSnapshot: unknown; renderedVars: unknown; renderMode: "docx" | "pdf"; outputBytes?: Buffer; outputContentType?: string; }> {
+  const cache = createRequestCache();
   const docRows2 = await queryRows(r, sql`SELECT * FROM platform_documents WHERE id = ${masterDocId} AND (firm_id IS NULL OR firm_id = ${firmId})`);
   const masterDoc = docRows2[0];
   if (!masterDoc) throw new DocumentGenerationError(404, "MASTER_DOCUMENT_NOT_FOUND", "Master document not found");
@@ -5046,7 +5125,7 @@ async function generateMasterDocument({
   const isDocx = masterFileName.toLowerCase().endsWith(".docx") || masterFileName.toLowerCase().endsWith(".doc");
   const isPdf = masterFileName.toLowerCase().endsWith(".pdf");
 
-  const context = await buildCaseContext(r, caseId, firmId);
+  const context = await buildCaseContext(r, caseId, firmId, cache);
   if (!context) throw new DocumentGenerationError(404, "CASE_NOT_FOUND", "Case not found");
 
   const extraRules = await getPlatformDocumentApplicabilityRules(r, firmId, masterDocId);
@@ -5087,7 +5166,7 @@ async function generateMasterDocument({
     }
   }
 
-  const wfDocs = (await tableExists(r, "public.case_workflow_documents"))
+  const wfDocs = (await tableExistsCached(r, cache, "public.case_workflow_documents"))
     ? await queryRows(r, sql`
       SELECT milestone_key, object_path, file_name, updated_at
       FROM case_workflow_documents
@@ -5102,7 +5181,7 @@ async function generateMasterDocument({
     if (workflowDocs[k]) continue;
     workflowDocs[k] = { hasFile: Boolean(d.object_path && d.file_name) };
   }
-  const stampingRows = (await tableExists(r, "public.case_loan_stamping_items"))
+  const stampingRows = (await tableExistsCached(r, cache, "public.case_loan_stamping_items"))
     ? await queryRows(r, sql`
       SELECT item_key, custom_name, dated_on, stamped_on, object_path, file_name, sort_order
       FROM case_loan_stamping_items
@@ -5153,12 +5232,14 @@ async function generateMasterDocument({
     isDocx ? detectDocxVariables(fileContents)
     : isPdf ? extractPdfMappingPlaceholders((masterDoc as any).pdf_mappings)
     : [];
+  const storedOverrides = await getCaseVariableOverrides(r, cache, firmId, caseId);
+  const mergedOverrides = mergeOverrides(storedOverrides, overrides ?? null);
   const preview = await runDocumentPreview(r, {
     firmId,
     caseContext: context,
     templateRef: { kind: "platform", documentId: masterDocId },
     placeholders,
-    overrides: overrides ?? null,
+    overrides: mergedOverrides,
   });
   if (preview.usedMode === "bindings" && preview.missingRequiredVariables.length > 0) {
     throw new DocumentGenerationError(422, "TEMPLATE_BINDING_MISSING", "Missing required variables", { missingRequiredVariables: preview.missingRequiredVariables });
@@ -5402,8 +5483,6 @@ async function generateMasterDocument({
     renderMode = "docx";
   }
 
-  await queryRows(r, sql`UPDATE document_generation_runs SET render_mode = ${renderMode} WHERE id = ${runId} AND firm_id = ${firmId}`);
-
   if (isDocx) {
     const lhIdNum = typeof letterheadId === "number" ? letterheadId : null;
     const shouldApply = lhIdNum !== null || isMasterDocumentLetterLike({ name: (masterDoc as any).name, category: (masterDoc as any).category, fileName: masterFileName });
@@ -5434,6 +5513,15 @@ async function generateMasterDocument({
       });
     }
   }
+
+  if (outputFormat === "pdf" && isDocx && renderMode === "docx") {
+    buffer = await convertDocxToPdf(buffer);
+    outputMime = "application/pdf";
+    outputExt = ".pdf";
+    renderMode = "pdf";
+  }
+
+  await queryRows(r, sql`UPDATE document_generation_runs SET render_mode = ${renderMode} WHERE id = ${runId} AND firm_id = ${firmId}`);
 
   const normalizedPath = newGeneratedDocObjectPath(firmId, caseId, outputExt);
   await supabaseStorage.uploadPrivateObject({
@@ -5494,6 +5582,8 @@ async function generateMasterDocument({
     readinessSnapshot: { readiness },
     renderedVars: preview.usedMode === "bindings" ? preview.resolvedVariables : context,
     renderMode,
+    outputBytes: outputFormat ? buffer : undefined,
+    outputContentType: outputFormat ? outputMime : undefined,
   };
 }
 
@@ -6100,6 +6190,64 @@ router.post("/clauses/platform/:id/copy", requireAuth, requireFirmUser, requireP
   res.status(201).json(created);
 });
 
+router.get("/cases/:caseId/documents/variable-overrides", requireAuth, requireFirmUser, requirePermission("documents", "read"), async (req: AuthRequest, res): Promise<void> => {
+  const r = getRlsDb(req, res);
+  if (!r) return;
+  const caseIdStr = one((req.params as any).caseId);
+  const caseId = caseIdStr ? parseInt(caseIdStr, 10) : NaN;
+  if (Number.isNaN(caseId)) { res.status(400).json({ error: "Invalid case ID" }); return; }
+
+  const guard = await queryRows(r, sql`SELECT 1 FROM cases WHERE id = ${caseId} AND firm_id = ${req.firmId!}`);
+  if (!guard[0]) { res.status(404).json({ error: "Case not found" }); return; }
+
+  const cache = createRequestCache();
+  const exists = await tableExistsCached(r, cache, "public.case_document_variable_overrides");
+  if (!exists) { res.json({ overrides: {} }); return; }
+
+  const row = await queryRows(r, sql`SELECT overrides_json FROM case_document_variable_overrides WHERE firm_id = ${req.firmId!} AND case_id = ${caseId} LIMIT 1`);
+  res.json({ overrides: asObjectRecord(row[0]?.overrides_json) ?? {} });
+});
+
+router.put("/cases/:caseId/documents/variable-overrides", requireAuth, requireFirmUser, requirePermission("documents", "update"), async (req: AuthRequest, res): Promise<void> => {
+  const r = getRlsDb(req, res);
+  if (!r) return;
+  const caseIdStr = one((req.params as any).caseId);
+  const caseId = caseIdStr ? parseInt(caseIdStr, 10) : NaN;
+  if (Number.isNaN(caseId)) { res.status(400).json({ error: "Invalid case ID" }); return; }
+
+  const guard = await queryRows(r, sql`SELECT 1 FROM cases WHERE id = ${caseId} AND firm_id = ${req.firmId!}`);
+  if (!guard[0]) { res.status(404).json({ error: "Case not found" }); return; }
+
+  const body = req.body as Record<string, unknown>;
+  const incoming = asObjectRecord(body?.overrides);
+  if (!incoming) { res.status(422).json({ error: "overrides must be an object", code: "OVERRIDES_INVALID" }); return; }
+
+  const normalized: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(incoming)) {
+    const key = String(k ?? "").trim();
+    if (!key) continue;
+    if (v === null) { normalized[key] = null; continue; }
+    if (typeof v === "string") { normalized[key] = v; continue; }
+    if (typeof v === "number" && Number.isFinite(v)) { normalized[key] = v; continue; }
+    if (typeof v === "boolean") { normalized[key] = v; continue; }
+  }
+
+  const cache = createRequestCache();
+  const exists = await tableExistsCached(r, cache, "public.case_document_variable_overrides");
+  if (!exists) { res.status(503).json({ error: "Overrides store unavailable", code: "OVERRIDES_STORE_UNAVAILABLE" }); return; }
+
+  await queryRows(r, sql`
+    INSERT INTO case_document_variable_overrides (firm_id, case_id, overrides_json, updated_by, updated_at)
+    VALUES (${req.firmId!}, ${caseId}, ${normalized as any}, ${req.userId ?? null}, now())
+    ON CONFLICT (firm_id, case_id) DO UPDATE SET
+      overrides_json = EXCLUDED.overrides_json,
+      updated_by = EXCLUDED.updated_by,
+      updated_at = now()
+  `);
+  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.variable_overrides.upsert", entityType: "case", entityId: caseId, detail: `keys=${Object.keys(normalized).length}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+  res.json({ ok: true, overrides: normalized });
+});
+
 router.post("/cases/:caseId/documents/preview-variables", requireAuth, requireFirmUser, requirePermission("documents", "generate"), async (req: AuthRequest, res): Promise<void> => {
   const r = getRlsDb(req, res);
   if (!r) return;
@@ -6119,6 +6267,8 @@ router.post("/cases/:caseId/documents/preview-variables", requireAuth, requireFi
   if (!context) { res.status(404).json({ error: "Case not found" }); return; }
 
   try {
+    const storedOverrides = await getCaseVariableOverrides(r, cache, req.firmId!, caseId);
+    const mergedOverrides = mergeOverrides(storedOverrides, overrides);
     let placeholders: string[] = [];
     if (templateId) {
       const [tplRows, vRows] = await Promise.all([
@@ -6146,7 +6296,7 @@ router.post("/cases/:caseId/documents/preview-variables", requireAuth, requireFi
         const bytes = await downloadPrivateObjectBytes(obj);
         placeholders = detectDocxVariables(bytes);
       }
-      const preview = await runDocumentPreview(r, { firmId: req.firmId!, caseContext: context, templateRef: { kind: "firm", templateId }, placeholders, overrides });
+      const preview = await runDocumentPreview(r, { firmId: req.firmId!, caseContext: context, templateRef: { kind: "firm", templateId }, placeholders, overrides: mergedOverrides });
       res.json({
         resolvedVariables: preview.resolvedVariables,
         missingRequiredVariables: preview.missingRequiredVariables,
@@ -6184,7 +6334,7 @@ router.post("/cases/:caseId/documents/preview-variables", requireAuth, requireFi
     } else {
       placeholders = [];
     }
-    const preview = await runDocumentPreview(r, { firmId: req.firmId!, caseContext: context, templateRef: { kind: "platform", documentId: platformDocumentId! }, placeholders, overrides });
+    const preview = await runDocumentPreview(r, { firmId: req.firmId!, caseContext: context, templateRef: { kind: "platform", documentId: platformDocumentId! }, placeholders, overrides: mergedOverrides });
     res.json({
       resolvedVariables: preview.resolvedVariables,
       missingRequiredVariables: preview.missingRequiredVariables,
@@ -6213,7 +6363,7 @@ router.post("/cases/:caseId/documents/preview", requireAuth, requireFirmUser, re
   const body = req.body as Record<string, unknown>;
   const templateId = typeof body.templateId === "number" ? body.templateId : null;
   const platformDocumentId = typeof body.platformDocumentId === "number" ? body.platformDocumentId : null;
-  const overrides = (body.overrides && typeof body.overrides === "object") ? (body.overrides as Record<string, unknown>) : null;
+  const overrides = asObjectRecord(body.overrides);
   const clauseRefsRaw = Array.isArray(body.clauses) ? body.clauses : [];
   const clauseRefs: SelectedClauseRef[] = clauseRefsRaw
     .map((x) => (x && typeof x === "object") ? (x as Record<string, unknown>) : null)
@@ -6241,6 +6391,10 @@ router.post("/cases/:caseId/documents/preview", requireAuth, requireFirmUser, re
     res.status(404).json({ error: "Case not found" });
     return;
   }
+
+  const cache = createRequestCache();
+  const storedOverrides = await getCaseVariableOverrides(r, cache, req.firmId!, caseId);
+  const mergedOverrides = mergeOverrides(storedOverrides, overrides);
 
   try {
     if (templateId) {
@@ -6313,7 +6467,7 @@ router.post("/cases/:caseId/documents/preview", requireAuth, requireFirmUser, re
           caseContext: context,
           templateRef: { kind: "firm", templateId },
           placeholders,
-          overrides,
+          overrides: mergedOverrides,
         });
         placeholderWarnings = preview.placeholderWarnings;
         let input: Record<string, unknown> = preview.usedMode === "bindings" ? preview.resolvedVariables : (context as any);
@@ -6528,7 +6682,7 @@ router.post("/cases/:caseId/documents/preview", requireAuth, requireFirmUser, re
       caseContext: context,
       templateRef: { kind: "platform", documentId: platformDocumentId! },
       placeholders,
-      overrides,
+      overrides: mergedOverrides,
     });
     let clausePreviewText = "";
     let clauseWarnings: unknown[] = [];
@@ -6731,12 +6885,17 @@ router.post("/cases/:id/generate-document", requireAuth, requireFirmUser, requir
     }
 
     const templateBuffer = await downloadPrivateObjectBytes(objectPath);
-    const outputBuffer = await DocumentEngineService.generateDocxForCase(req.firmId!, caseId, templateBuffer);
-    const baseName = typeof fileName === "string" && fileName.trim() ? fileName.trim() : `Case_${caseId}_Document.docx`;
-    const finalName = baseName.toLowerCase().endsWith(".docx") ? baseName : `${baseName}.docx`;
+    const fmt = String(one((req.query as any).format) ?? "").trim().toLowerCase();
+    const wantPdf = fmt === "pdf";
+    const outputDocx = await DocumentEngineService.generateDocxForCase(req.firmId!, caseId, templateBuffer);
+    const outputBuffer = wantPdf ? await convertDocxToPdf(outputDocx) : outputDocx;
+    const baseName = typeof fileName === "string" && fileName.trim() ? fileName.trim() : `Case_${caseId}_Document`;
+    const finalName = wantPdf
+      ? (baseName.toLowerCase().endsWith(".pdf") ? baseName : `${baseName}.pdf`)
+      : (baseName.toLowerCase().endsWith(".docx") ? baseName : `${baseName}.docx`);
 
     res.setHeader("Content-Disposition", contentDispositionAttachment(finalName));
-    res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.wordprocessingml.document");
+    res.setHeader("Content-Type", wantPdf ? "application/pdf" : "application/vnd.openxmlformats-officedocument.wordprocessingml.document");
     await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.generate_document.succeeded", entityType: "case", entityId: caseId, detail: `templateId=${tid}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
     res.status(200).send(outputBuffer);
   } catch (err: unknown) {
@@ -6851,6 +7010,8 @@ router.post("/cases/:caseId/documents/generate", requireAuth, requireFirmUser, r
     return;
   }
   const safeOverrides = (overrides && typeof overrides === "object" && !Array.isArray(overrides)) ? overrides : null;
+  const fmt = String(one((req.query as any).format) ?? "").trim().toLowerCase();
+  const wantPdf = fmt === "pdf";
 
   const runId = await createGenerationRun(r, {
     firm_id: req.firmId!,
@@ -6860,7 +7021,7 @@ router.post("/cases/:caseId/documents/generate", requireAuth, requireFirmUser, r
     template_version_id: null,
     platform_document_id: null,
     document_name: documentName ?? "Generated document",
-    render_mode: "docx",
+    render_mode: wantPdf ? "pdf" : "docx",
     status: "running",
     rendered_variables_snapshot: null,
     checklist_snapshot: null,
@@ -6887,9 +7048,25 @@ router.post("/cases/:caseId/documents/generate", requireAuth, requireFirmUser, r
       bypassApplicability: bypass,
       clauses,
       overrides: safeOverrides,
+      outputFormat: wantPdf ? "pdf" : undefined,
     });
     await finishGenerationRunSuccess(r, req.firmId!, runId, out.caseDocumentId, out.renderedVars, out.checklistSnapshot, out.readinessSnapshot);
     await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.generation.succeeded", entityType: "document_generation_run", entityId: runId, detail: `caseId=${caseId} templateSource=firm templateId=${tid}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+    if (wantPdf) {
+      const bytes = out.outputBytes;
+      const ct = out.outputContentType ?? "application/pdf";
+      if (!bytes) {
+        res.status(503).json({ error: "PDF conversion failed", code: "DOCX_TO_PDF_FAILED" });
+        return;
+      }
+      const fileName = typeof (out.caseDocument as any)?.file_name === "string" ? String((out.caseDocument as any).file_name) : `case-${caseId}-document.pdf`;
+      const docId = typeof (out.caseDocument as any)?.id === "number" ? String((out.caseDocument as any).id) : "";
+      if (docId) res.setHeader("x-case-document-id", docId);
+      res.setHeader("Content-Disposition", contentDispositionAttachment(fileName));
+      res.setHeader("Content-Type", ct);
+      res.status(201).send(bytes);
+      return;
+    }
     res.status(201).json(out.caseDocument);
   } catch (err: unknown) {
     const cfgErr = getSupabaseStorageConfigError(err);
@@ -6928,6 +7105,8 @@ router.post("/cases/:caseId/documents/generate-from-master", requireAuth, requir
     return;
   }
   const safeOverrides = (overrides && typeof overrides === "object" && !Array.isArray(overrides)) ? overrides : null;
+  const fmt = String(one((req.query as any).format) ?? "").trim().toLowerCase();
+  const wantPdf = fmt === "pdf";
 
   const runId = await createGenerationRun(r, {
     firm_id: req.firmId!,
@@ -6937,7 +7116,7 @@ router.post("/cases/:caseId/documents/generate-from-master", requireAuth, requir
     template_version_id: null,
     platform_document_id: mid,
     document_name: documentName ?? "Generated document",
-    render_mode: "docx",
+    render_mode: wantPdf ? "pdf" : "docx",
     status: "running",
     rendered_variables_snapshot: null,
     checklist_snapshot: null,
@@ -6964,9 +7143,25 @@ router.post("/cases/:caseId/documents/generate-from-master", requireAuth, requir
       bypassApplicability: bypass,
       clauses,
       overrides: safeOverrides,
+      outputFormat: wantPdf ? "pdf" : undefined,
     });
     await finishGenerationRunSuccess(r, req.firmId!, runId, out.caseDocumentId, out.renderedVars, out.checklistSnapshot, out.readinessSnapshot);
     await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.generation.succeeded", entityType: "document_generation_run", entityId: runId, detail: `caseId=${caseId} templateSource=master templateId=${mid}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+    if (wantPdf) {
+      const bytes = out.outputBytes;
+      const ct = out.outputContentType ?? "application/pdf";
+      if (!bytes) {
+        res.status(503).json({ error: "PDF conversion failed", code: "DOCX_TO_PDF_FAILED" });
+        return;
+      }
+      const fileName = typeof (out.caseDocument as any)?.file_name === "string" ? String((out.caseDocument as any).file_name) : `case-${caseId}-document.pdf`;
+      const docId = typeof (out.caseDocument as any)?.id === "number" ? String((out.caseDocument as any).id) : "";
+      if (docId) res.setHeader("x-case-document-id", docId);
+      res.setHeader("Content-Disposition", contentDispositionAttachment(fileName));
+      res.setHeader("Content-Type", ct);
+      res.status(201).send(bytes);
+      return;
+    }
     res.status(201).json(out.caseDocument);
   } catch (err: unknown) {
     const cfgErr = getSupabaseStorageConfigError(err);
@@ -7638,6 +7833,49 @@ router.post("/cases/:caseId/documents/upload", requireAuth, requireFirmUser, req
     : undefined;
   await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.case.upload", entityType: "case_document", entityId: createdId, detail: `caseId=${caseId} name=${name} fileName=${smartName}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
   res.status(201).json(rows[0]);
+});
+
+router.post("/cases/:caseId/documents/merge-pdf", requireAuth, requireFirmUser, requirePermission("documents", "read"), async (req: AuthRequest, res): Promise<void> => {
+  const r = getRlsDb(req, res);
+  if (!r) return;
+  const caseIdStr = one((req.params as any).caseId);
+  const caseId = caseIdStr ? parseInt(caseIdStr, 10) : NaN;
+  if (Number.isNaN(caseId)) { res.status(400).json({ error: "Invalid case ID" }); return; }
+
+  const body = req.body && typeof req.body === "object" ? (req.body as Record<string, unknown>) : {};
+  const rawIds = Array.isArray(body.documentIds) ? body.documentIds : [];
+  const docIds = Array.from(new Set(rawIds.filter((x): x is number => typeof x === "number" && Number.isFinite(x)).map((x) => Math.floor(x))));
+  if (docIds.length === 0) { res.status(422).json({ error: "documentIds is required", code: "DOCUMENT_IDS_REQUIRED" }); return; }
+  if (docIds.length > 20) { res.status(422).json({ error: "Too many documents", code: "TOO_MANY_DOCUMENTS" }); return; }
+
+  const rows = await queryRows(r, sql`
+    SELECT id, object_path, file_name
+    FROM case_documents
+    WHERE firm_id = ${req.firmId!} AND case_id = ${caseId} AND id = ANY(${docIds}::int[])
+  `);
+  if (rows.length !== docIds.length) { res.status(404).json({ error: "One or more documents not found", code: "DOCUMENT_NOT_FOUND" }); return; }
+
+  const ordered = docIds.map((id) => rows.find((r2) => Number((r2 as any).id) === id)).filter(Boolean) as any[];
+  for (const d of ordered) {
+    const fn = typeof d.file_name === "string" ? d.file_name.toLowerCase() : "";
+    if (!fn.endsWith(".pdf")) { res.status(422).json({ error: "All documents must be PDFs", code: "NON_PDF_DOCUMENT" }); return; }
+    if (!d.object_path) { res.status(422).json({ error: "Document missing file", code: "DOCUMENT_FILE_MISSING" }); return; }
+  }
+
+  const merged = await PDFDocument.create();
+  for (const d of ordered) {
+    const objectPath = String(d.object_path ?? "");
+    const bytes = await fetchCaseDocumentBytes(objectPath);
+    const src = await PDFDocument.load(bytes);
+    const pages = await merged.copyPages(src, src.getPageIndices());
+    for (const p of pages) merged.addPage(p);
+  }
+  const outBytes = await merged.save();
+  const fileName = `case-${caseId}-merged.pdf`;
+  res.setHeader("Content-Disposition", contentDispositionAttachment(fileName));
+  res.setHeader("Content-Type", "application/pdf");
+  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.case.merge_pdf", entityType: "case", entityId: caseId, detail: `count=${docIds.length}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+  res.status(200).send(Buffer.from(outBytes));
 });
 
 router.get("/cases/:caseId/documents/:docId/download", requireAuth, requireFirmUser, requirePermission("documents", "read"), async (req: AuthRequest, res): Promise<void> => {

@@ -19,7 +19,7 @@ import { Progress } from "@/components/ui/progress";
 import { isFirmDocumentTypeLetterLike, isMasterDocumentLetterLike } from "@/lib/documents/letterLike";
 import { DOCUMENT_TYPE_LABELS } from "@workspace/documents-registry";
 import { QueryFallback } from "@/components/query-fallback";
-import { apiFetchBlob, apiFetchJson } from "@/lib/api-client";
+import { apiFetchBlob, apiFetchJson, apiRequest } from "@/lib/api-client";
 import { downloadBlob } from "@/lib/download";
 import { toastError } from "@/lib/toast-error";
 import { useAuth } from "@/lib/auth-context";
@@ -171,9 +171,21 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [isUploading, setIsUploading] = useState(false);
   const [isGenerating, setIsGenerating] = useState(false);
-  const [isBatchGenerating, setIsBatchGenerating] = useState(false);
   const [batchGenerateResult, setBatchGenerateResult] = useState<null | { jobId: string; items: Array<Record<string, unknown>> }>(null);
   const [selectedChecklistKeys, setSelectedChecklistKeys] = useState<Set<string>>(new Set());
+
+  const [batchVariableChecklistOpen, setBatchVariableChecklistOpen] = useState(false);
+  const [batchVariableChecklistLoading, setBatchVariableChecklistLoading] = useState(false);
+  const [batchVariableChecklistItems, setBatchVariableChecklistItems] = useState<ChecklistItem[]>([]);
+  const [batchVariableChecklistUnionKeys, setBatchVariableChecklistUnionKeys] = useState<string[]>([]);
+  const [batchVariableChecklistMissingKeys, setBatchVariableChecklistMissingKeys] = useState<Set<string>>(new Set());
+  const [batchVariableChecklistOverrides, setBatchVariableChecklistOverrides] = useState<Record<string, string>>({});
+  const [batchVariableChecklistQuery, setBatchVariableChecklistQuery] = useState("");
+  const [batchVariableChecklistShowOnlyMissing, setBatchVariableChecklistShowOnlyMissing] = useState(true);
+  const [batchLoopGenerating, setBatchLoopGenerating] = useState(false);
+  const [batchLoopProgress, setBatchLoopProgress] = useState<{ current: number; total: number }>({ current: 0, total: 0 });
+  const [batchGeneratedPdfDocIds, setBatchGeneratedPdfDocIds] = useState<number[]>([]);
+  const [batchMergePrinting, setBatchMergePrinting] = useState(false);
 
   const [selectedDocIds, setSelectedDocIds] = useState<Set<number>>(new Set());
   const [isBatchExporting, setIsBatchExporting] = useState(false);
@@ -244,7 +256,14 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
   const variableDefsQuery = useQuery<DocumentVariableDef[]>({
     queryKey: ["document-variables", "active"],
     queryFn: ({ signal }) => apiFetchJson(`/document-variables?active=1`, { signal }),
-    enabled: variableChecklistOpen,
+    enabled: variableChecklistOpen || batchVariableChecklistOpen,
+    retry: false,
+  });
+
+  const caseVariableOverridesQuery = useQuery<{ overrides: Record<string, unknown> }>({
+    queryKey: ["case-documents-variable-overrides", caseId],
+    queryFn: ({ signal }) => apiFetchJson(`/cases/${caseId}/documents/variable-overrides`, { signal }),
+    enabled: variableChecklistOpen || batchVariableChecklistOpen,
     retry: false,
   });
 
@@ -674,6 +693,198 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
     });
   }
 
+  function savedOverridesAsStrings(): Record<string, string> {
+    const raw = asRecord(caseVariableOverridesQuery.data?.overrides) ?? {};
+    const out: Record<string, string> = {};
+    for (const [k, v] of Object.entries(raw)) {
+      const key = String(k ?? "").trim();
+      if (!key) continue;
+      if (v === null || v === undefined) continue;
+      if (typeof v === "string") {
+        if (v.trim()) out[key] = v;
+        continue;
+      }
+      if (typeof v === "number" && Number.isFinite(v)) { out[key] = String(v); continue; }
+      if (typeof v === "boolean") { out[key] = v ? "true" : "false"; continue; }
+    }
+    return out;
+  }
+
+  async function openBatchVariableChecklist(items: ChecklistItem[]) {
+    if (!canGenerate) return;
+    setBatchVariableChecklistOpen(true);
+    setBatchVariableChecklistLoading(true);
+    setBatchVariableChecklistItems(items);
+    setBatchVariableChecklistUnionKeys([]);
+    setBatchVariableChecklistMissingKeys(new Set());
+    setBatchVariableChecklistOverrides({});
+    setBatchGeneratedPdfDocIds([]);
+    setBatchLoopProgress({ current: 0, total: 0 });
+    try {
+      const bypassApplicability = Boolean(showAllTemplates && canBypassApplicability);
+      const previews = await Promise.all(items.map((it) => {
+        const payload =
+          it.source === "firm"
+            ? { templateId: Number(it.templateId), bypassApplicability, clauses: selectedClauses }
+            : { platformDocumentId: Number(it.templateId), bypassApplicability, clauses: selectedClauses };
+        return apiFetchJson<DocumentPreviewResponse>(`/cases/${caseId}/documents/preview-variables`, {
+          method: "POST",
+          body: JSON.stringify(payload),
+        });
+      }));
+
+      const union = new Set<string>();
+      const missing = new Set<string>();
+      for (const p of previews) {
+        for (const k of Object.keys(p.resolvedVariables ?? {})) union.add(k);
+        for (const m of Array.isArray(p.missingRequiredVariables) ? p.missingRequiredVariables : []) {
+          if (m && typeof (m as any).variableKey === "string") {
+            const k = String((m as any).variableKey);
+            union.add(k);
+            missing.add(k);
+          }
+        }
+      }
+
+      const saved = savedOverridesAsStrings();
+      const initial: Record<string, string> = { ...saved };
+      for (const k of union) {
+        if (Object.prototype.hasOwnProperty.call(initial, k)) continue;
+        for (const p of previews) {
+          const v = (p.resolvedVariables ?? {})[k];
+          const s = v === null || v === undefined ? "" : String(v);
+          if (s.trim()) { initial[k] = s; break; }
+        }
+      }
+
+      setBatchVariableChecklistUnionKeys(Array.from(union).sort());
+      setBatchVariableChecklistMissingKeys(missing);
+      setBatchVariableChecklistOverrides(initial);
+    } catch (err) {
+      toastError(toast, err, "Batch preview failed");
+      setBatchVariableChecklistOpen(false);
+    } finally {
+      setBatchVariableChecklistLoading(false);
+    }
+  }
+
+  function compactStringOverrides(input: Record<string, string>): Record<string, string> {
+    const out: Record<string, string> = {};
+    for (const [k, v] of Object.entries(input)) {
+      const key = String(k ?? "").trim();
+      const val = typeof v === "string" ? v : String(v ?? "");
+      if (!key) continue;
+      if (!val.trim()) continue;
+      out[key] = val;
+    }
+    return out;
+  }
+
+  async function saveBatchOverridesToCase(): Promise<void> {
+    const outgoing = compactStringOverrides(batchVariableChecklistOverrides);
+    try {
+      await apiFetchJson(`/cases/${caseId}/documents/variable-overrides`, {
+        method: "PUT",
+        body: JSON.stringify({ overrides: outgoing }),
+      });
+      await qc.invalidateQueries({ queryKey: ["case-documents-variable-overrides", caseId] });
+      toast({ title: "Saved to case", description: `${Object.keys(outgoing).length} variables` });
+    } catch (err) {
+      toastError(toast, err, "Save to case failed");
+    }
+  }
+
+  async function runBatchGeneratePdf(): Promise<void> {
+    if (!canGenerate) return;
+    const items = batchVariableChecklistItems;
+    if (!items.length) return;
+
+    const overrides = compactStringOverrides(batchVariableChecklistOverrides);
+    const bypassApplicability = Boolean(showAllTemplates && canBypassApplicability);
+    setBatchLoopGenerating(true);
+    setBatchLoopProgress({ current: 0, total: items.length });
+    setBatchGeneratedPdfDocIds([]);
+    try {
+      const ids: number[] = [];
+      for (let i = 0; i < items.length; i++) {
+        const it = items[i]!;
+        setBatchLoopProgress({ current: i + 1, total: items.length });
+
+        const isLetterLike = it.source === "firm"
+          ? isFirmDocumentTypeLetterLike(it.documentType)
+          : isMasterDocumentLetterLike({ name: it.name, category: it.documentType, fileName: it.fileName ?? undefined });
+
+        if (isLetterLike && activeLetterheads.length === 0) {
+          throw new Error("Missing firm letterhead");
+        }
+
+        const letterheadIdToSend = isLetterLike
+          ? (selectedLetterheadId ? Number(selectedLetterheadId) : defaultLetterhead?.id)
+          : undefined;
+
+        const endpoint = it.source === "firm"
+          ? `/cases/${caseId}/documents/generate?format=pdf`
+          : `/cases/${caseId}/documents/generate-from-master?format=pdf`;
+
+        const payload = it.source === "firm"
+          ? { templateId: Number(it.templateId), letterheadId: letterheadIdToSend, bypassApplicability, clauses: selectedClauses, overrides }
+          : { masterDocId: Number(it.templateId), letterheadId: letterheadIdToSend, bypassApplicability, clauses: selectedClauses, overrides };
+
+        const res = await apiRequest(endpoint, { method: "POST", body: JSON.stringify(payload), timeoutMs: 60000 });
+        const docId = Number(res.headers.get("x-case-document-id") ?? NaN);
+        await res.blob();
+        if (Number.isFinite(docId)) ids.push(docId);
+      }
+      setBatchGeneratedPdfDocIds(ids);
+      setSelectedChecklistKeys(new Set());
+      await qc.invalidateQueries({ queryKey: ["case-documents", caseId] });
+      await qc.invalidateQueries({ queryKey: ["case-documents-checklist", caseId] });
+      await qc.invalidateQueries({ queryKey: ["case-documents-instances", caseId] });
+      toast({ title: "Batch PDFs generated", description: `${items.length} documents` });
+      setViewTab("list");
+    } catch (err) {
+      if (err instanceof Error && err.message === "Missing firm letterhead") {
+        toast({ title: "Missing firm letterhead", description: "Please configure a Firm Letter Head before generating letter-like documents.", variant: "destructive" });
+      } else {
+        toastError(toast, err, "Batch generate failed");
+      }
+    } finally {
+      setBatchLoopGenerating(false);
+      setBatchLoopProgress((prev) => ({ ...prev, current: 0 }));
+    }
+  }
+
+  async function mergeAndPrintBatch(): Promise<void> {
+    const ids = batchGeneratedPdfDocIds;
+    if (!ids.length) return;
+    setBatchMergePrinting(true);
+    try {
+      const blob = await apiFetchBlob(`/cases/${caseId}/documents/merge-pdf`, {
+        method: "POST",
+        body: JSON.stringify({ documentIds: ids }),
+        timeoutMs: 60000,
+      });
+      const url = URL.createObjectURL(blob);
+      const iframe = document.createElement("iframe");
+      iframe.style.position = "fixed";
+      iframe.style.right = "0";
+      iframe.style.bottom = "0";
+      iframe.style.width = "0";
+      iframe.style.height = "0";
+      iframe.src = url;
+      iframe.onload = () => {
+        try { iframe.contentWindow?.focus(); iframe.contentWindow?.print(); } catch {}
+        setTimeout(() => { URL.revokeObjectURL(url); iframe.remove(); }, 60000);
+      };
+      document.body.appendChild(iframe);
+      toast({ title: "Merged PDF ready", description: "Print dialog will open shortly." });
+    } catch (err) {
+      toastError(toast, err, "Merge & print failed");
+    } finally {
+      setBatchMergePrinting(false);
+    }
+  }
+
   async function handleBatchGenerate() {
     const keys = selectedChecklistKeys;
     if (!canGenerate || keys.size === 0) return;
@@ -682,31 +893,7 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
       .filter((it) => it.kind === "template" && (it.source === "firm" || it.source === "master") && typeof it.templateId === "number")
       .filter((it) => keys.has(it.checklistKey));
     if (selected.length === 0) return;
-
-    const letterheadIdToSend = selectedLetterheadId ? Number(selectedLetterheadId) : defaultLetterhead?.id ?? null;
-    setIsBatchGenerating(true);
-    setBatchGenerateResult(null);
-    try {
-      const result = await apiFetchJson<{ jobId: string; items: Array<Record<string, unknown>> }>(`/cases/${caseId}/documents/batch-generate`, {
-        method: "POST",
-        body: JSON.stringify({
-          items: selected.map((it) => ({ source: it.source, templateId: Number(it.templateId) })),
-          letterheadId: letterheadIdToSend,
-          bypassApplicability: Boolean(showAllTemplates && canBypassApplicability),
-        }),
-      });
-      setBatchGenerateResult(result);
-      setSelectedChecklistKeys(new Set());
-      await qc.invalidateQueries({ queryKey: ["case-documents", caseId] });
-      await qc.invalidateQueries({ queryKey: ["case-documents-checklist", caseId] });
-      await qc.invalidateQueries({ queryKey: ["case-documents-instances", caseId] });
-      toast({ title: "Batch generate completed", description: `Job ${result.jobId}` });
-      setViewTab("list");
-    } catch (err) {
-      toastError(toast, err, "Batch generate failed");
-    } finally {
-      setIsBatchGenerating(false);
-    }
+    await openBatchVariableChecklist(selected);
   }
 
   async function handleBatchExport() {
@@ -1182,11 +1369,11 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
                       <Button
                         size="sm"
                         onClick={handleBatchGenerate}
-                        disabled={!canGenerate || selectedChecklistKeys.size === 0 || isBatchGenerating}
+                        disabled={!canGenerate || selectedChecklistKeys.size === 0 || batchLoopGenerating || batchVariableChecklistLoading}
                         className="gap-1.5"
                       >
                         <Plus className="w-4 h-4" />
-                        {isBatchGenerating ? "Generating..." : "Batch Generate"}
+                        {batchLoopGenerating ? "Generating..." : "Batch Generate"}
                       </Button>
                     </div>
                   </div>
@@ -1970,6 +2157,27 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
                     Close
                   </Button>
                   <Button
+                    variant="outline"
+                    onClick={async () => {
+                      const base = savedOverridesAsStrings();
+                      const edited = compactStringOverrides(variableChecklistOverrides);
+                      const outgoing = { ...base, ...edited };
+                      try {
+                        await apiFetchJson(`/cases/${caseId}/documents/variable-overrides`, {
+                          method: "PUT",
+                          body: JSON.stringify({ overrides: outgoing }),
+                        });
+                        await qc.invalidateQueries({ queryKey: ["case-documents-variable-overrides", caseId] });
+                        toast({ title: "Saved to case", description: `${Object.keys(outgoing).length} variables` });
+                      } catch (err) {
+                        toastError(toast, err, "Save to case failed");
+                      }
+                    }}
+                    disabled={variableChecklistGenerating || isGenerating}
+                  >
+                    Save to Case
+                  </Button>
+                  <Button
                     onClick={async () => {
                       if (!variableChecklistItem || !variableChecklistResult) return;
                       setVariableChecklistGenerating(true);
@@ -1982,6 +2190,185 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
                     disabled={!variableChecklistItem || !canGenerate || variableChecklistGenerating || isGenerating}
                   >
                     Confirm & Generate
+                  </Button>
+                </div>
+              </>
+            )}
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={batchVariableChecklistOpen} onOpenChange={(v) => { if (!v) setBatchVariableChecklistOpen(false); else setBatchVariableChecklistOpen(true); }}>
+        <DialogContent className="w-[95vw] sm:w-[80vw] max-w-[95vw] sm:max-w-[80vw] max-h-[80vh] overflow-hidden">
+          <DialogHeader>
+            <DialogTitle>Batch Variable Checklist</DialogTitle>
+          </DialogHeader>
+          <div className="flex flex-col gap-3 h-full">
+            <div className="text-sm text-slate-600">
+              Selected templates: <span className="font-medium text-slate-900">{batchVariableChecklistItems.length}</span>
+            </div>
+
+            {batchVariableChecklistLoading ? (
+              <div className="text-sm text-slate-500 py-8 text-center">Loading variables…</div>
+            ) : (
+              <>
+                <div className="flex items-center justify-between gap-3">
+                  <Input
+                    value={batchVariableChecklistQuery}
+                    onChange={(e) => setBatchVariableChecklistQuery(e.target.value)}
+                    placeholder="Search variables…"
+                    className="max-w-sm"
+                    disabled={batchLoopGenerating}
+                  />
+                  <div className="flex items-center gap-2">
+                    <Button
+                      size="sm"
+                      variant={batchVariableChecklistShowOnlyMissing ? "default" : "outline"}
+                      onClick={() => setBatchVariableChecklistShowOnlyMissing(true)}
+                      disabled={batchLoopGenerating}
+                    >
+                      Missing only
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant={!batchVariableChecklistShowOnlyMissing ? "default" : "outline"}
+                      onClick={() => setBatchVariableChecklistShowOnlyMissing(false)}
+                      disabled={batchLoopGenerating}
+                    >
+                      All
+                    </Button>
+                  </div>
+                </div>
+
+                <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
+                  <div className="text-sm font-medium text-slate-900">One input, applied to all selected templates</div>
+                  <div className="mt-1 text-xs text-slate-600">
+                    Variables: {batchVariableChecklistUnionKeys.length} · Required-missing union: {batchVariableChecklistMissingKeys.size}
+                  </div>
+                  {batchLoopGenerating ? (
+                    <div className="mt-2">
+                      <div className="text-xs text-slate-600 mb-2">
+                        Generating {batchLoopProgress.current}/{batchLoopProgress.total}…
+                      </div>
+                      <Progress value={batchLoopProgress.total ? (batchLoopProgress.current / batchLoopProgress.total) * 100 : 5} />
+                    </div>
+                  ) : null}
+                </div>
+
+                <div className="flex-1 min-h-0 overflow-y-auto rounded-lg border border-slate-200 bg-white">
+                  {(() => {
+                    const defs = variableDefsQuery.data ?? [];
+                    const metaByKey = new Map(defs.map((d) => [d.key, d]));
+                    const categoryLabel = (cat: string): string => {
+                      if (cat === "purchaser") return "Purchaser";
+                      if (cat === "property") return "Property";
+                      if (cat === "loan") return "Bank / Loan";
+                      if (cat === "developer") return "Developer";
+                      if (cat === "project") return "Project";
+                      if (cat === "workflow") return "Workflow";
+                      if (cat === "case") return "Case";
+                      return "Other";
+                    };
+                    const order = ["Purchaser", "Property", "Bank / Loan", "Project", "Developer", "Workflow", "Case", "Other"];
+                    const q = batchVariableChecklistQuery.trim().toLowerCase();
+                    const items = batchVariableChecklistUnionKeys
+                      .map((key) => {
+                        const def = metaByKey.get(key);
+                        const label = (def?.label && String(def.label).trim()) ? String(def.label) : labelFromKey(key);
+                        const category = categoryLabel(def?.category ?? "custom");
+                        const override = Object.prototype.hasOwnProperty.call(batchVariableChecklistOverrides, key) ? batchVariableChecklistOverrides[key] : "";
+                        const isEmpty = !String(override ?? "").trim();
+                        const isReqMissing = batchVariableChecklistMissingKeys.has(key);
+                        const matches = !q || key.toLowerCase().includes(q) || label.toLowerCase().includes(q);
+                        return { key, label, category, override, isEmpty, isReqMissing, matches };
+                      })
+                      .filter((x) => x.matches)
+                      .filter((x) => (batchVariableChecklistShowOnlyMissing ? (x.isEmpty || x.isReqMissing) : true));
+                    const grouped = new Map<string, typeof items>();
+                    for (const it of items) {
+                      const arr = grouped.get(it.category) ?? [];
+                      arr.push(it);
+                      grouped.set(it.category, arr);
+                    }
+                    return (
+                      <div className="divide-y divide-slate-100">
+                        {order
+                          .map((cat) => {
+                            const group = grouped.get(cat) ?? [];
+                            if (group.length === 0) return null;
+                            return (
+                              <div key={cat}>
+                                <div className="sticky top-0 z-10 bg-white px-3 py-2 border-b border-slate-100">
+                                  <div className="text-xs font-semibold text-slate-700">{cat}</div>
+                                </div>
+                                <div className="divide-y divide-slate-100">
+                                  {group.map((it) => (
+                                    <div key={it.key} className="px-3 py-2">
+                                      <div className="grid grid-cols-[84px_minmax(0,1fr)_minmax(0,280px)] items-start gap-3">
+                                        <div className="pt-0.5 flex flex-col gap-1">
+                                          <span
+                                            className={cn(
+                                              "inline-flex w-[76px] justify-center text-[10px] px-1.5 py-0.5 rounded font-semibold",
+                                              it.isEmpty ? "bg-amber-50 text-amber-900" : "bg-emerald-50 text-emerald-800"
+                                            )}
+                                          >
+                                            {it.isEmpty ? "EMPTY" : "OK"}
+                                          </span>
+                                          {it.isReqMissing ? (
+                                            <span className="inline-flex w-[76px] justify-center text-[10px] px-1.5 py-0.5 rounded font-semibold bg-rose-50 text-rose-800">
+                                              REQUIRED
+                                            </span>
+                                          ) : null}
+                                        </div>
+                                        <div className="min-w-0">
+                                          <div className="text-sm font-medium text-slate-900 truncate" title={it.key}>{it.label}</div>
+                                          <div className="mt-0.5 text-xs text-slate-500 truncate" title={it.key}>{it.key}</div>
+                                        </div>
+                                        <div className="min-w-0">
+                                          <Input
+                                            value={it.override}
+                                            onChange={(e) => {
+                                              const v = e.target.value;
+                                              setBatchVariableChecklistOverrides((prev) => {
+                                                const next = { ...prev };
+                                                if (v === "") delete next[it.key];
+                                                else next[it.key] = v;
+                                                return next;
+                                              });
+                                            }}
+                                            placeholder={it.isReqMissing ? "Fill required value…" : "Optional override…"}
+                                            disabled={batchLoopGenerating}
+                                          />
+                                        </div>
+                                      </div>
+                                    </div>
+                                  ))}
+                                </div>
+                              </div>
+                            );
+                          })
+                          .filter(Boolean)}
+                      </div>
+                    );
+                  })()}
+                </div>
+
+                <div className="flex justify-end gap-2 pt-1">
+                  <Button variant="outline" onClick={() => setBatchVariableChecklistOpen(false)} disabled={batchLoopGenerating || batchMergePrinting}>
+                    Close
+                  </Button>
+                  <Button variant="outline" onClick={saveBatchOverridesToCase} disabled={batchLoopGenerating || batchMergePrinting}>
+                    Save to Case
+                  </Button>
+                  <Button onClick={runBatchGeneratePdf} disabled={!canGenerate || batchLoopGenerating || batchMergePrinting || batchVariableChecklistItems.length === 0}>
+                    Batch Generate (PDF)
+                  </Button>
+                  <Button
+                    variant="secondary"
+                    onClick={mergeAndPrintBatch}
+                    disabled={batchLoopGenerating || batchMergePrinting || batchGeneratedPdfDocIds.length === 0}
+                  >
+                    Merge & Print
                   </Button>
                 </div>
               </>
