@@ -177,6 +177,11 @@
 }
 
 @media print {
+  @page {
+    size: A4;
+    margin: 12mm;
+  }
+
   body {
     background: white !important;
     -webkit-print-color-adjust: exact;
@@ -184,6 +189,10 @@
   }
 
   .print\:hidden {
+    display: none !important;
+  }
+
+  button, [role="button"], [data-radix-collection-item], [data-sonner-toaster], [data-radix-portal] {
     display: none !important;
   }
 

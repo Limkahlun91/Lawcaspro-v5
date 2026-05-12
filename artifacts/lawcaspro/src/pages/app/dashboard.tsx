@@ -1,7 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableRow } from "@/components/ui/table";
-import { Briefcase, Users, Building2, HardHat, DollarSign, TrendingUp, MessageSquare } from "lucide-react";
+import { Briefcase, Users, Building2, HardHat, DollarSign, TrendingUp, MessageSquare, ArrowRight } from "lucide-react";
 import { useLocation } from "wouter";
 import { apiFetchJson } from "@/lib/api-client";
 import { QueryFallback } from "@/components/query-fallback";

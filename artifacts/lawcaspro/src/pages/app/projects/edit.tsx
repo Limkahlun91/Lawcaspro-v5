@@ -28,14 +28,17 @@ export default function EditProject() {
     query: { enabled: !!projectId, queryKey: getGetProjectQueryKey(projectId) },
   });
 
-  const { data: devsResponse } = useListDevelopers({ limit: 100 });
+  const { data: devsResponse } = useListDevelopers({ limit: 100 }, { query: { staleTime: 5 * 60 * 1000 } });
   const developers = devsResponse?.data || [];
 
   const [name, setName] = useState("");
   const [phase, setPhase] = useState("");
   const [selectedDevId, setSelectedDevId] = useState("");
   const [developerName, setDeveloperName] = useState("");
-  const [titleType, setTitleType] = useState("");
+  const [titleType, setTitleType] = useState<"master" | "individual" | "strata" | "">("");
+  const [isEncumbered, setIsEncumbered] = useState<"yes" | "no">("no");
+  const [tenure, setTenure] = useState<"freehold" | "leasehold" | "">("");
+  const [masterChargeeBank, setMasterChargeeBank] = useState("");
   const [titleSubtype, setTitleSubtype] = useState("");
   const [masterTitleNumber, setMasterTitleNumber] = useState("");
   const [masterTitleLandSize, setMasterTitleLandSize] = useState("");
@@ -50,13 +53,19 @@ export default function EditProject() {
 
   useEffect(() => {
     if (project && !initialized) {
+      const proj = project as unknown as Record<string, unknown>;
       setName(project.name || "");
       setSelectedDevId(project.developerId?.toString() || "");
-      setTitleType(project.titleType || "");
+      const tt = typeof proj.titleType === "string" ? proj.titleType : "";
+      setTitleType(tt === "master" || tt === "strata" || tt === "individual" ? tt : "");
+      setIsEncumbered(proj.isEncumbered === true ? "yes" : "no");
+      const ten = typeof proj.tenure === "string" ? proj.tenure : "";
+      setTenure(ten === "freehold" || ten === "leasehold" ? ten : "");
+      setMasterChargeeBank(typeof proj.masterChargeeBank === "string" ? proj.masterChargeeBank : "");
 
       const extra = project.extraFields as Record<string, unknown> | undefined;
-      setPhase(typeof extra?.phase === "string" ? extra.phase : "");
-      setDeveloperName(typeof extra?.developerName === "string" ? extra.developerName : "");
+      setPhase(typeof proj.phase === "string" ? proj.phase : (typeof extra?.phase === "string" ? extra.phase : ""));
+      setDeveloperName(typeof proj.developerName === "string" ? proj.developerName : (typeof extra?.developerName === "string" ? extra.developerName : ""));
       setTitleSubtype(typeof extra?.titleSubtype === "string" ? extra.titleSubtype : "");
       setMasterTitleNumber(typeof extra?.masterTitleNumber === "string" ? extra.masterTitleNumber : "");
       setMasterTitleLandSize(typeof extra?.masterTitleLandSize === "string" ? extra.masterTitleLandSize : "");
@@ -95,6 +104,14 @@ export default function EditProject() {
       toast({ title: "Project name is required", variant: "destructive" });
       return;
     }
+    if (!titleType) {
+      toast({ title: "Please select a title type", variant: "destructive" });
+      return;
+    }
+    if (!tenure) {
+      toast({ title: "Please select tenure", variant: "destructive" });
+      return;
+    }
 
     setSaving(true);
     try {
@@ -106,7 +123,10 @@ export default function EditProject() {
           name,
           developerId: selectedDevId ? parseInt(selectedDevId) : undefined,
           projectType: projectTypeValue,
-          titleType: titleType || "master",
+          titleType,
+          isEncumbered: isEncumbered === "yes",
+          tenure,
+          masterChargeeBank: isEncumbered === "yes" ? (masterChargeeBank.trim() || null) : null,
           extraFields: {
             propertyTypes: propertyTypes.filter(p => p.buildingType.trim()),
             phase,
@@ -205,10 +225,13 @@ export default function EditProject() {
 
           <div className="grid grid-cols-2 gap-6">
             <div>
-              <Label className="text-sm font-semibold text-slate-700">Title Type</Label>
+              <Label className="text-sm font-semibold text-slate-700">Title Type *</Label>
               <select
                 value={titleType}
-                onChange={e => setTitleType(e.target.value)}
+                onChange={e => {
+                  const v = e.target.value;
+                  setTitleType(v === "master" || v === "strata" || v === "individual" ? v : "");
+                }}
                 className="w-full h-10 mt-1.5 border border-slate-200 rounded-md px-3 text-sm bg-white"
               >
                 <option value="">Select Title Type</option>
@@ -218,17 +241,42 @@ export default function EditProject() {
               </select>
             </div>
             <div>
-              <Label className="text-sm font-semibold text-slate-700">Title Subtype</Label>
+              <Label className="text-sm font-semibold text-slate-700">Tenure *</Label>
               <select
-                value={titleSubtype}
-                onChange={e => setTitleSubtype(e.target.value)}
+                value={tenure}
+                onChange={e => {
+                  const v = e.target.value;
+                  setTenure(v === "freehold" || v === "leasehold" ? v : "");
+                }}
                 className="w-full h-10 mt-1.5 border border-slate-200 rounded-md px-3 text-sm bg-white"
               >
-                <option value="">Select Subtype</option>
                 <option value="freehold">Freehold</option>
                 <option value="leasehold">Leasehold</option>
-                <option value="malay_reserve">Malay Reserve</option>
               </select>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-2 gap-6">
+            <div>
+              <Label className="text-sm font-semibold text-slate-700">Encumbered *</Label>
+              <select
+                value={isEncumbered}
+                onChange={e => setIsEncumbered(e.target.value === "yes" ? "yes" : "no")}
+                className="w-full h-10 mt-1.5 border border-slate-200 rounded-md px-3 text-sm bg-white"
+              >
+                <option value="no">No</option>
+                <option value="yes">Yes</option>
+              </select>
+            </div>
+            <div>
+              <Label className="text-sm font-semibold text-slate-700">Master Chargee Bank</Label>
+              <Input
+                value={masterChargeeBank}
+                onChange={e => setMasterChargeeBank(e.target.value)}
+                disabled={isEncumbered !== "yes"}
+                placeholder={isEncumbered === "yes" ? "e.g., Maybank" : "Enable Encumbered = Yes"}
+                className="mt-1.5"
+              />
             </div>
           </div>
 

@@ -13,7 +13,7 @@ import { getListDevelopersQueryKey } from "@workspace/api-client-react";
 import { toastError } from "@/lib/toast-error";
 import { apiRequest } from "@/lib/api-client";
 
-type Salutation = "" | "MR." | "MS." | "MRS." | "MDM." | "DR." | "DATUK";
+type Salutation = "__none__" | "MR." | "MS." | "MRS." | "MDM." | "DR." | "DATUK";
 
 interface Contact {
   salutation: Salutation;
@@ -24,7 +24,7 @@ interface Contact {
   email: string;
 }
 
-const emptyContact = (): Contact => ({ salutation: "", name: "", department: "", phone: "", phoneExt: "", email: "" });
+const emptyContact = (): Contact => ({ salutation: "__none__", name: "", department: "", phone: "", phoneExt: "", email: "" });
 
 export default function NewDeveloper() {
   const [, setLocation] = useLocation();
@@ -74,7 +74,9 @@ export default function NewDeveloper() {
           companyRegNo: form.companyRegNo || null,
           address: form.address || null,
           businessAddress: form.businessAddress || null,
-          contacts: contacts.filter((c) => c.name.trim()),
+          contacts: contacts
+            .filter((c) => c.name.trim())
+            .map((c) => ({ ...c, salutation: c.salutation === "__none__" ? "" : c.salutation })),
           contactPerson: primaryContact.name || null,
           phone: primaryContact.phone || null,
           email: form.email || primaryContact.email || null,
@@ -197,7 +199,7 @@ export default function NewDeveloper() {
                           <SelectValue placeholder="Title" />
                         </SelectTrigger>
                         <SelectContent>
-                          <SelectItem value="">—</SelectItem>
+                          <SelectItem value="__none__">—</SelectItem>
                           <SelectItem value="MR.">MR.</SelectItem>
                           <SelectItem value="MS.">MS.</SelectItem>
                           <SelectItem value="MRS.">MRS.</SelectItem>

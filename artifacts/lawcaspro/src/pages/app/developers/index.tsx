@@ -14,7 +14,7 @@ export default function DevelopersList() {
     page: 1, 
     limit: 50,
     search: search || undefined
-  });
+  }, { query: { staleTime: 5 * 60 * 1000 } });
   const developers = response?.data ?? [];
 
   return (

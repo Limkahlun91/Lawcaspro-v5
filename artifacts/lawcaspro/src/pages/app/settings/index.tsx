@@ -755,6 +755,7 @@ export default function Settings() {
       query: {
         queryKey: getListUsersQueryKey(userParams),
         enabled: canManageUsers,
+        staleTime: 5 * 60 * 1000,
       },
     }
   );

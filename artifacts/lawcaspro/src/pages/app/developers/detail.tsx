@@ -17,7 +17,7 @@ import { toastError } from "@/lib/toast-error";
 import { apiFetchJson, apiRequest } from "@/lib/api-client";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 
-type Salutation = "" | "MR." | "MS." | "MRS." | "MDM." | "DR." | "DATUK";
+type Salutation = "__none__" | "MR." | "MS." | "MRS." | "MDM." | "DR." | "DATUK";
 
 interface Contact {
   salutation?: Salutation;
@@ -42,12 +42,12 @@ interface Developer {
   createdAt: string;
 }
 
-const SALUTATIONS = new Set<Salutation>(["", "MR.", "MS.", "MRS.", "MDM.", "DR.", "DATUK"]);
+const SALUTATIONS = new Set<Salutation>(["__none__", "MR.", "MS.", "MRS.", "MDM.", "DR.", "DATUK"]);
 
 const normalizeContact = (value: unknown): Contact => {
   const rec = value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
   const rawSal = typeof rec.salutation === "string" ? rec.salutation.trim().toUpperCase() : "";
-  const salutation = (SALUTATIONS.has(rawSal as Salutation) ? (rawSal as Salutation) : "") as Salutation;
+  const salutation = (SALUTATIONS.has((rawSal || "__none__") as Salutation) ? ((rawSal || "__none__") as Salutation) : "__none__") as Salutation;
   return {
     salutation,
     name: typeof rec.name === "string" ? rec.name : "",
@@ -63,7 +63,7 @@ const normalizeContacts = (value: unknown): Contact[] => {
   return value.map(normalizeContact);
 };
 
-const emptyContact = (): Contact => ({ salutation: "", name: "", department: "", phone: "", phoneExt: "", email: "" });
+const emptyContact = (): Contact => ({ salutation: "__none__", name: "", department: "", phone: "", phoneExt: "", email: "" });
 
 export default function DeveloperDetail() {
   const { id } = useParams<{ id: string }>();
@@ -105,7 +105,7 @@ export default function DeveloperDetail() {
       setContacts(
         normalized.length > 0
           ? normalized
-          : [normalizeContact({ salutation: "", name: data.contactPerson ?? "", department: "", phone: data.phone ?? "", phoneExt: "", email: data.email ?? "" })]
+          : [normalizeContact({ salutation: "__none__", name: data.contactPerson ?? "", department: "", phone: data.phone ?? "", phoneExt: "", email: data.email ?? "" })]
       );
     } catch (err) {
       setLoadError(err);
@@ -140,7 +140,7 @@ export default function DeveloperDetail() {
       toast({ title: "Company name is required", variant: "destructive" });
       return;
     }
-    const safeContacts = (contacts ?? []).map(normalizeContact);
+    const safeContacts = (contacts ?? []).map(normalizeContact).map((c) => ({ ...c, salutation: c.salutation === "__none__" ? "" : c.salutation }));
     const primaryContact = safeContacts.find((c) => c.name.trim()) ?? emptyContact();
     setSaving(true);
     try {
@@ -339,12 +339,12 @@ export default function DeveloperDetail() {
                     <div className="space-y-1.5">
                       <Label className="text-xs">Name</Label>
                       <div className="grid grid-cols-[120px_1fr] gap-2">
-                        <Select value={contact.salutation ?? ""} onValueChange={(v) => updateContact(index, "salutation", v as Salutation)}>
+                        <Select value={contact.salutation ?? "__none__"} onValueChange={(v) => updateContact(index, "salutation", v as Salutation)}>
                           <SelectTrigger className="bg-white">
                             <SelectValue placeholder="Title" />
                           </SelectTrigger>
                           <SelectContent>
-                            <SelectItem value="">—</SelectItem>
+                            <SelectItem value="__none__">—</SelectItem>
                             <SelectItem value="MR.">MR.</SelectItem>
                             <SelectItem value="MS.">MS.</SelectItem>
                             <SelectItem value="MRS.">MRS.</SelectItem>

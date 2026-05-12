@@ -32,9 +32,9 @@ export default function NewCasePage() {
   const { user } = useAuth();
   const [isSubmitting, setIsSubmitting] = useState(false);
 
-  const { data: projectsRes } = useListProjects({ limit: 100 });
+  const { data: projectsRes } = useListProjects({ limit: 100 }, { query: { staleTime: 5 * 60 * 1000 } });
   const projects = projectsRes?.data || [];
-  const { data: usersRes } = useListUsers({ limit: 100 });
+  const { data: usersRes } = useListUsers({ limit: 100 }, { query: { staleTime: 5 * 60 * 1000 } });
   const users = usersRes?.data || [];
   const lawyers = users.filter(u => {
     const role = u.roleName?.trim() || "";
@@ -66,6 +66,8 @@ export default function NewCasePage() {
   const [addrLine3, setAddrLine3] = useState("");
   const [addrLine4, setAddrLine4] = useState("");
   const [addrLine5, setAddrLine5] = useState("");
+  const [projectAddressAutofilledForProjectId, setProjectAddressAutofilledForProjectId] = useState<string>("");
+  const [projectAddressManuallyEdited, setProjectAddressManuallyEdited] = useState(false);
   const [mailingAddress, setMailingAddress] = useState("");
   const [mailingManuallyEdited, setMailingManuallyEdited] = useState(false);
   const [contactNumber, setContactNumber] = useState("");
@@ -85,6 +87,7 @@ export default function NewCasePage() {
 
   // Loan
   const [purchaseMode, setPurchaseMode] = useState("loan");
+  const [loanPartyType, setLoanPartyType] = useState<"1st_party" | "3rd_party">("1st_party");
   const [borrower1Name, setBorrower1Name] = useState("");
   const [borrower1Ic, setBorrower1Ic] = useState("");
   const [borrower2Name, setBorrower2Name] = useState("");
@@ -104,6 +107,9 @@ export default function NewCasePage() {
 
   // Title
   const [titleType, setTitleType] = useState("Master Title");
+  const [isTitleInherited, setIsTitleInherited] = useState(false);
+  const [isEncumbered, setIsEncumbered] = useState(false);
+  const [tenure, setTenure] = useState<"freehold" | "leasehold">("freehold");
   const [titleNo, setTitleNo] = useState("");
   const [lotNo, setLotNo] = useState("");
   const [mukim, setMukim] = useState("");
@@ -122,6 +128,56 @@ export default function NewCasePage() {
   const selectedProject = projects.find(p => String(p.id) === projectId);
   const developerId = selectedProject?.developerId ? String(selectedProject.developerId) : "";
 
+  useEffect(() => {
+    if (!selectedProject) {
+      setIsTitleInherited(false);
+      return;
+    }
+    const proj = selectedProject as unknown as Record<string, unknown>;
+    const tt = typeof proj.titleType === "string" ? proj.titleType.trim().toLowerCase() : "";
+    setTitleType(tt === "individual" ? "Individual Title" : tt === "strata" ? "Strata Title" : "Master Title");
+    setIsEncumbered(proj.isEncumbered === true);
+    const t = typeof proj.tenure === "string" ? proj.tenure.trim().toLowerCase() : "";
+    setTenure(t === "leasehold" ? "leasehold" : "freehold");
+    setIsTitleInherited(true);
+  }, [selectedProject]);
+
+  useEffect(() => {
+    if (!selectedProject) return;
+    const pid = String(selectedProject.id);
+    if (projectAddressAutofilledForProjectId === pid) return;
+    const ef = (selectedProject.extraFields ?? {}) as Record<string, unknown>;
+    const str = (v: unknown): string => (typeof v === "string" ? v.trim() : "");
+    const l1 =
+      str(ef.addressLine1) || str(ef.address_line1) || str(ef.address_line_1) || str(ef.addrLine1) || str(ef.addr_line1);
+    const l2 =
+      str(ef.addressLine2) || str(ef.address_line2) || str(ef.address_line_2) || str(ef.addrLine2) || str(ef.addr_line2);
+    const l3 =
+      str(ef.addressLine3) || str(ef.address_line3) || str(ef.address_line_3) || str(ef.addrLine3) || str(ef.addr_line3);
+    const l4 =
+      str(ef.addressLine4) || str(ef.address_line4) || str(ef.address_line_4) || str(ef.addrLine4) || str(ef.addr_line4);
+    const l5 =
+      str(ef.addressLine5) || str(ef.address_line5) || str(ef.address_line_5) || str(ef.addrLine5) || str(ef.addr_line5);
+    const oneLine = str(ef.address) || str(ef.projectAddress) || str(ef.fullAddress);
+    const hasLines = Boolean(l1 || l2 || l3 || l4 || l5);
+    if (!hasLines && !oneLine) return;
+    if (projectAddressManuallyEdited) setProjectAddressManuallyEdited(false);
+    if (hasLines) {
+      setAddrLine1(l1);
+      setAddrLine2(l2);
+      setAddrLine3(l3);
+      setAddrLine4(l4);
+      setAddrLine5(l5);
+    } else {
+      setAddrLine1(oneLine);
+      setAddrLine2("");
+      setAddrLine3("");
+      setAddrLine4("");
+      setAddrLine5("");
+    }
+    setProjectAddressAutofilledForProjectId(pid);
+  }, [projectId, selectedProject, projectAddressAutofilledForProjectId, projectAddressManuallyEdited]);
+
   // Auto-compute approved purchase price
   useEffect(() => {
     const price = parseFloat(purchasePrice) || 0;
@@ -136,6 +192,17 @@ export default function NewCasePage() {
     const lines = [addrLine1, addrLine2, addrLine3, addrLine4, addrLine5].filter(l => l.trim());
     setMailingAddress(lines.join(", "));
   }, [addrLine1, addrLine2, addrLine3, addrLine4, addrLine5, mailingManuallyEdited]);
+
+  useEffect(() => {
+    if (purchaseMode !== "loan") return;
+    if (loanPartyType !== "1st_party") return;
+    const p1 = purchasers[0] ?? { name: "", ic: "" };
+    const p2 = purchasers[1] ?? { name: "", ic: "" };
+    setBorrower1Name(p1.name ?? "");
+    setBorrower1Ic(p1.ic ?? "");
+    setBorrower2Name(p2.name ?? "");
+    setBorrower2Ic(p2.ic ?? "");
+  }, [purchaseMode, loanPartyType, purchasers]);
 
   function addPurchaser() {
     setPurchasers(prev => [...prev, { name: "", ic: "" }]);
@@ -190,6 +257,7 @@ export default function NewCasePage() {
       referenceNo: ourReference.trim() || undefined,
       projectId: Number(projectId),
       purchaseMode,
+      loanPartyType: purchaseMode === "loan" ? loanPartyType : "1st_party",
       titleType: titleTypeApiMap[titleType] ?? "master",
       spaPrice: purchasePrice ? Number(purchasePrice) : undefined,
       assignedLawyerId: canAssignAny ? Number(assignedLawyerId) : selfUserId,
@@ -459,7 +527,10 @@ export default function NewCasePage() {
                       className="h-9 text-sm border-gray-300"
                       placeholder={ph}
                       value={val}
-                      onChange={e => setter(e.target.value)}
+                      onChange={e => {
+                        setProjectAddressManuallyEdited(true);
+                        setter(e.target.value);
+                      }}
                     />
                   ))}
                 </div>
@@ -586,25 +657,49 @@ export default function NewCasePage() {
                     <h3 className="font-semibold text-sm text-[#0f1729]">Loan Details</h3>
                     <p className="text-xs text-gray-500">Financing and loan information</p>
                   </div>
-                  <div className="flex items-center gap-3">
-                    <Label className="text-xs font-medium text-gray-600">Purchase Mode</Label>
-                    <div className="flex rounded-md border border-gray-300 overflow-hidden text-sm">
-                      {["loan", "cash"].map(m => (
-                        <button
-                          key={m}
-                          type="button"
-                          onClick={() => setPurchaseMode(m)}
-                          className={cn(
-                            "px-4 py-1.5 font-medium capitalize transition-colors",
-                            purchaseMode === m
-                              ? "bg-[#f5a623] text-white"
-                              : "bg-white text-gray-600 hover:bg-gray-50"
-                          )}
-                        >
-                          {m === "loan" ? "Loan" : "Cash"}
-                        </button>
-                      ))}
+                  <div className="flex flex-col items-end gap-2">
+                    <div className="flex items-center gap-3">
+                      <Label className="text-xs font-medium text-gray-600">Purchase Mode</Label>
+                      <div className="flex rounded-md border border-gray-300 overflow-hidden text-sm">
+                        {["loan", "cash"].map(m => (
+                          <button
+                            key={m}
+                            type="button"
+                            onClick={() => setPurchaseMode(m)}
+                            className={cn(
+                              "px-4 py-1.5 font-medium capitalize transition-colors",
+                              purchaseMode === m
+                                ? "bg-[#f5a623] text-white"
+                                : "bg-white text-gray-600 hover:bg-gray-50"
+                            )}
+                          >
+                            {m === "loan" ? "Loan" : "Cash"}
+                          </button>
+                        ))}
+                      </div>
                     </div>
+                    {purchaseMode === "loan" ? (
+                      <div className="flex items-center gap-3">
+                        <Label className="text-xs font-medium text-gray-600">Loan Party</Label>
+                        <div className="flex rounded-md border border-gray-300 overflow-hidden text-xs">
+                          {(["1st_party", "3rd_party"] as const).map((t) => (
+                            <button
+                              key={t}
+                              type="button"
+                              onClick={() => setLoanPartyType(t)}
+                              className={cn(
+                                "px-3 py-1.5 font-semibold uppercase transition-colors",
+                                loanPartyType === t
+                                  ? "bg-[#0f1729] text-white"
+                                  : "bg-white text-gray-600 hover:bg-gray-50"
+                              )}
+                            >
+                              {t === "1st_party" ? "1ST PARTY LOAN" : "3RD PARTY LOAN"}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    ) : null}
                   </div>
                 </div>
 
@@ -614,22 +709,33 @@ export default function NewCasePage() {
                   </p>
                 )}
 
+                {purchaseMode === "loan" && loanPartyType === "1st_party" ? (
+                  <p className="text-sm text-slate-700 bg-slate-50 border border-slate-200 px-3 py-2 rounded">
+                    1ST PARTY LOAN: Borrowers will mirror Purchasers exactly (read-only).
+                  </p>
+                ) : null}
+                {purchaseMode === "loan" && loanPartyType === "3rd_party" ? (
+                  <p className="text-sm text-amber-700 bg-amber-50 border border-amber-100 px-3 py-2 rounded">
+                    3RD PARTY LOAN: Use this when borrowers differ from purchasers (editable).
+                  </p>
+                ) : null}
+
                 <div className="grid grid-cols-2 gap-x-6 gap-y-4">
                   <div className="space-y-1">
                     <Label className="text-xs font-medium text-gray-600">Borrower 1 Name</Label>
-                    <Input className="h-9 text-sm border-gray-300" placeholder="Enter borrower 1 name" value={borrower1Name} onChange={e => setBorrower1Name(e.target.value)} />
+                    <Input className={cn("h-9 text-sm border-gray-300", purchaseMode === "loan" && loanPartyType === "1st_party" ? "bg-gray-50" : "")} placeholder="Enter borrower 1 name" value={borrower1Name} onChange={e => setBorrower1Name(e.target.value)} readOnly={purchaseMode === "loan" && loanPartyType === "1st_party"} disabled={purchaseMode !== "loan" || (purchaseMode === "loan" && loanPartyType === "1st_party")} />
                   </div>
                   <div className="space-y-1">
                     <Label className="text-xs font-medium text-gray-600">Borrower 1 IC</Label>
-                    <Input className="h-9 text-sm border-gray-300" placeholder="Enter IC" value={borrower1Ic} onChange={e => setBorrower1Ic(e.target.value)} />
+                    <Input className={cn("h-9 text-sm border-gray-300", purchaseMode === "loan" && loanPartyType === "1st_party" ? "bg-gray-50" : "")} placeholder="Enter IC" value={borrower1Ic} onChange={e => setBorrower1Ic(e.target.value)} readOnly={purchaseMode === "loan" && loanPartyType === "1st_party"} disabled={purchaseMode !== "loan" || (purchaseMode === "loan" && loanPartyType === "1st_party")} />
                   </div>
                   <div className="space-y-1">
                     <Label className="text-xs font-medium text-gray-600">Borrower 2 Name</Label>
-                    <Input className="h-9 text-sm border-gray-300" placeholder="Enter borrower 2 name" value={borrower2Name} onChange={e => setBorrower2Name(e.target.value)} />
+                    <Input className={cn("h-9 text-sm border-gray-300", purchaseMode === "loan" && loanPartyType === "1st_party" ? "bg-gray-50" : "")} placeholder="Enter borrower 2 name" value={borrower2Name} onChange={e => setBorrower2Name(e.target.value)} readOnly={purchaseMode === "loan" && loanPartyType === "1st_party"} disabled={purchaseMode !== "loan" || (purchaseMode === "loan" && loanPartyType === "1st_party")} />
                   </div>
                   <div className="space-y-1">
                     <Label className="text-xs font-medium text-gray-600">Borrower 2 IC</Label>
-                    <Input className="h-9 text-sm border-gray-300" placeholder="Enter IC" value={borrower2Ic} onChange={e => setBorrower2Ic(e.target.value)} />
+                    <Input className={cn("h-9 text-sm border-gray-300", purchaseMode === "loan" && loanPartyType === "1st_party" ? "bg-gray-50" : "")} placeholder="Enter IC" value={borrower2Ic} onChange={e => setBorrower2Ic(e.target.value)} readOnly={purchaseMode === "loan" && loanPartyType === "1st_party"} disabled={purchaseMode !== "loan" || (purchaseMode === "loan" && loanPartyType === "1st_party")} />
                   </div>
                   <div className="space-y-1">
                     <Label className="text-xs font-medium text-gray-600">End Financier (Bank)</Label>
@@ -763,14 +869,31 @@ export default function NewCasePage() {
                 <div className="grid grid-cols-2 gap-x-6 gap-y-4">
                   <div className="space-y-1">
                     <Label className="text-xs font-medium text-gray-600">Title Type</Label>
-                    <Select value={titleType} onValueChange={setTitleType}>
-                      <SelectTrigger className="h-9 text-sm border-gray-300">
+                    <Select value={titleType} onValueChange={setTitleType} disabled={isTitleInherited}>
+                      <SelectTrigger className={cn("h-9 text-sm border-gray-300", isTitleInherited ? "bg-gray-50" : "")}>
                         <SelectValue placeholder="Select title type" />
                       </SelectTrigger>
                       <SelectContent>
                         {TITLE_TYPES.map(t => <SelectItem key={t} value={t}>{t}</SelectItem>)}
                       </SelectContent>
                     </Select>
+                    {isTitleInherited ? (
+                      <div className="text-[11px] text-slate-500">Inherited from Project (read-only)</div>
+                    ) : null}
+                  </div>
+                  <div className="space-y-1">
+                    <Label className="text-xs font-medium text-gray-600">Encumbered</Label>
+                    <Input className="h-9 text-sm border-gray-300 bg-gray-50" readOnly value={isEncumbered ? "Yes" : "No"} />
+                    {isTitleInherited ? (
+                      <div className="text-[11px] text-slate-500">Inherited from Project (read-only)</div>
+                    ) : null}
+                  </div>
+                  <div className="space-y-1">
+                    <Label className="text-xs font-medium text-gray-600">Tenure</Label>
+                    <Input className="h-9 text-sm border-gray-300 bg-gray-50" readOnly value={tenure === "leasehold" ? "Leasehold" : "Freehold"} />
+                    {isTitleInherited ? (
+                      <div className="text-[11px] text-slate-500">Inherited from Project (read-only)</div>
+                    ) : null}
                   </div>
                   <div className="space-y-1">
                     <Label className="text-xs font-medium text-gray-600">Title No</Label>

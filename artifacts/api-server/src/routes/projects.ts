@@ -69,6 +69,9 @@ const CreateProjectBodySchema = z.object({
   name: z.string().min(1),
   projectType: z.string().min(1),
   titleType: z.string().min(1),
+  isEncumbered: z.boolean().optional(),
+  tenure: z.enum(["freehold", "leasehold"]).optional(),
+  masterChargeeBank: z.string().optional().nullable(),
   landUse: z.string().optional().nullable(),
   developmentCondition: z.string().optional().nullable(),
   unitCategory: z.string().optional().nullable(),
@@ -80,6 +83,9 @@ const UpdateProjectBodySchema = z.object({
   developerId: z.coerce.number().int().min(1).optional().nullable(),
   projectType: z.string().optional(),
   titleType: z.string().optional(),
+  isEncumbered: z.boolean().optional(),
+  tenure: z.enum(["freehold", "leasehold"]).optional(),
+  masterChargeeBank: z.string().optional().nullable(),
   titleSubtype: z.string().optional().nullable(),
   masterTitleNumber: z.string().optional().nullable(),
   masterTitleLandSize: z.string().optional().nullable(),
@@ -112,6 +118,9 @@ async function enrichProject(r: DbConn, proj: ProjectRow) {
     phase: proj.phase ?? null,
     projectType: proj.projectType,
     titleType: proj.titleType,
+    isEncumbered: proj.isEncumbered,
+    tenure: proj.tenure,
+    masterChargeeBank: proj.masterChargeeBank ?? null,
     titleSubtype: proj.titleSubtype ?? null,
     masterTitleNumber: proj.masterTitleNumber ?? null,
     masterTitleLandSize: proj.masterTitleLandSize ?? null,
@@ -174,7 +183,7 @@ routerInternal.post("/projects", requireAuth, requireFirmUser, requirePermission
       return;
     }
 
-    const { developerId, name, projectType, titleType, landUse, developmentCondition, unitCategory, extraFields } = parsed.data;
+    const { developerId, name, projectType, titleType, isEncumbered, tenure, masterChargeeBank, landUse, developmentCondition, unitCategory, extraFields } = parsed.data;
     const rawBody = asRecord(req.body);
     const phase = asOptionalString(rawBody.phase);
     const developerName = asOptionalString(rawBody.developerName);
@@ -199,6 +208,9 @@ routerInternal.post("/projects", requireAuth, requireFirmUser, requirePermission
       developerName: typeof developerName === "string" && developerName.trim() ? developerName : dev.name,
       projectType,
       titleType,
+      isEncumbered: Boolean(isEncumbered ?? false),
+      tenure: tenure ?? "freehold",
+      masterChargeeBank: (isEncumbered ?? false) ? (typeof masterChargeeBank === "string" && masterChargeeBank.trim() ? masterChargeeBank.trim() : null) : null,
       titleSubtype: typeof titleSubtype === "string" && titleSubtype.trim() ? titleSubtype : null,
       masterTitleNumber: typeof masterTitleNumber === "string" && masterTitleNumber.trim() ? masterTitleNumber : null,
       masterTitleLandSize: typeof masterTitleLandSize === "string" && masterTitleLandSize.trim() ? masterTitleLandSize : null,
@@ -313,8 +325,27 @@ routerInternal.patch("/projects/:projectId", requireAuth, requireFirmUser, requi
     res.status(400).json({ error: parsed.error.message });
     return;
   }
-  const { name, developerId, projectType, titleType, titleSubtype, masterTitleNumber, masterTitleLandSize,
-    mukim, daerah, negeri, phase, developerName, landUse, developmentCondition, unitCategory, extraFields } = parsed.data;
+  const {
+    name,
+    developerId,
+    projectType,
+    titleType,
+    isEncumbered,
+    tenure,
+    masterChargeeBank,
+    titleSubtype,
+    masterTitleNumber,
+    masterTitleLandSize,
+    mukim,
+    daerah,
+    negeri,
+    phase,
+    developerName,
+    landUse,
+    developmentCondition,
+    unitCategory,
+    extraFields,
+  } = parsed.data;
 
   if (developerId !== undefined && developerId !== null) {
     const [dev] = await r.select().from(developersTable).where(
@@ -331,6 +362,9 @@ routerInternal.patch("/projects/:projectId", requireAuth, requireFirmUser, requi
   if (developerId !== undefined) updateData.developerId = developerId;
   if (projectType !== undefined) updateData.projectType = projectType;
   if (titleType !== undefined) updateData.titleType = titleType;
+  if (isEncumbered !== undefined) updateData.isEncumbered = Boolean(isEncumbered);
+  if (tenure !== undefined) updateData.tenure = tenure;
+  if (masterChargeeBank !== undefined) updateData.masterChargeeBank = (updateData.isEncumbered ?? existing.isEncumbered) ? (typeof masterChargeeBank === "string" && masterChargeeBank.trim() ? masterChargeeBank.trim() : null) : null;
   if (titleSubtype !== undefined) updateData.titleSubtype = titleSubtype || null;
   if (masterTitleNumber !== undefined) updateData.masterTitleNumber = masterTitleNumber || null;
   if (masterTitleLandSize !== undefined) updateData.masterTitleLandSize = masterTitleLandSize || null;

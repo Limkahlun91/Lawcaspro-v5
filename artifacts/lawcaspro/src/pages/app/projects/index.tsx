@@ -21,9 +21,9 @@ export default function ProjectsList() {
     developerId: developerId !== "all" ? parseInt(developerId) : undefined,
     projectType: projectType !== "all" ? projectType : undefined,
     titleType: titleType !== "all" ? titleType : undefined,
-  });
+  }, { query: { staleTime: 5 * 60 * 1000 } });
 
-  const { data: devsRes } = useListDevelopers({ limit: 100 });
+  const { data: devsRes } = useListDevelopers({ limit: 100 }, { query: { staleTime: 5 * 60 * 1000 } });
   const developers = devsRes?.data || [];
   const projects = response?.data ?? [];
 

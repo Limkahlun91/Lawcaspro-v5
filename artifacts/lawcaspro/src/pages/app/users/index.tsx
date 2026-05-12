@@ -14,7 +14,7 @@ export default function UsersList() {
     page: 1, 
     limit: 50,
     search: search || undefined
-  });
+  }, { query: { staleTime: 5 * 60 * 1000 } });
 
   const items = listItems<any>(response);
 

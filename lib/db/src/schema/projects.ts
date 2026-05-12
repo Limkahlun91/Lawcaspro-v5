@@ -1,4 +1,4 @@
-import { pgTable, serial, text, integer, timestamp, jsonb } from "drizzle-orm/pg-core";
+import { pgTable, serial, text, integer, timestamp, jsonb, boolean } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod/v4";
 
@@ -11,6 +11,9 @@ export const projectsTable = pgTable("projects", {
   developerName: text("developer_name"),
   projectType: text("project_type").notNull().default("highrise"),
   titleType: text("title_type").notNull().default("master"),
+  isEncumbered: boolean("is_encumbered").notNull().default(false),
+  tenure: text("tenure").notNull().default("freehold"),
+  masterChargeeBank: text("master_chargee_bank"),
   titleSubtype: text("title_subtype"),
   masterTitleNumber: text("master_title_number"),
   masterTitleLandSize: text("master_title_land_size"),

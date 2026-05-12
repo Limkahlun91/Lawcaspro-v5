@@ -474,7 +474,10 @@ async function formatCaseDetail(r: DbConn, c: typeof casesTable.$inferSelect) {
     developerId: c.developerId,
     developerName: dev?.name ?? "Unknown",
     purchaseMode: c.purchaseMode,
+    loanPartyType: c.loanPartyType ?? "1st_party",
     titleType: c.titleType,
+    isEncumbered: c.isEncumbered,
+    tenure: c.tenure,
     spaPrice: c.spaPrice ? Number(c.spaPrice) : null,
     status: c.status,
     caseType: c.caseType,
@@ -516,6 +519,9 @@ async function formatCaseDetail(r: DbConn, c: typeof casesTable.$inferSelect) {
       advice_to_bank_date: kd.adviceToBankDate ? String(kd.adviceToBankDate) : null,
       bank_1st_release_on: kd.bank1stReleaseOn ? String(kd.bank1stReleaseOn) : null,
       first_release_amount_rm: kd.firstReleaseAmountRm ? Number(kd.firstReleaseAmountRm) : null,
+      discharge_date: kd.dischargeDate ? String(kd.dischargeDate) : null,
+      consent_to_transfer_date: kd.consentToTransferDate ? String(kd.consentToTransferDate) : null,
+      consent_to_charge_date: kd.consentToChargeDate ? String(kd.consentToChargeDate) : null,
       mot_received_date: kd.motReceivedDate ? String(kd.motReceivedDate) : null,
       mot_signed_date: kd.motSignedDate ? String(kd.motSignedDate) : null,
       mot_stamped_date: kd.motStampedDate ? String(kd.motStampedDate) : null,
@@ -2021,6 +2027,7 @@ router.post("/cases", requireAuthHandler, requireFirmUserHandler, requirePermiss
         name: z.string(),
         ic: z.string().nullish(),
       })).optional(),
+      loanPartyType: z.enum(["1st_party", "3rd_party"]).optional(),
     }).superRefine((v, ctx) => {
       if (v.purchaseMode !== "loan" && v.purchaseMode !== "cash") {
         ctx.addIssue({ code: "custom", path: ["purchaseMode"], message: "Invalid purchaseMode" });
@@ -2049,8 +2056,7 @@ router.post("/cases", requireAuthHandler, requireFirmUserHandler, requirePermiss
       return;
     }
 
-    const { projectId, developerId: clientDeveloperId, purchaseMode, titleType, spaPrice, assignedLawyerId, assignedClerkId, purchaserIds, purchasers } = parsed.data;
-    const normalizedTitleType = normalizeTitleType(titleType) ?? "master";
+    const { projectId, developerId: clientDeveloperId, purchaseMode, titleType, spaPrice, assignedLawyerId, assignedClerkId, purchaserIds, purchasers, loanPartyType } = parsed.data;
     const canAssignAny = await hasRolePermission(r, req.firmId!, req.roleId, "cases", "assign_any");
     const normalizedAssignedLawyerId = assignedLawyerId ?? undefined;
     const normalizedAssignedClerkId = assignedClerkId ?? undefined;
@@ -2093,6 +2099,12 @@ router.post("/cases", requireAuthHandler, requireFirmUserHandler, requirePermiss
       return;
     }
     const developerId = project.developerId;
+    const projectTitleType = normalizeTitleType(String((project as any).titleType ?? "")) ?? "master";
+    const projectIsEncumbered = Boolean((project as any).isEncumbered ?? false);
+    const projectTenure = (typeof (project as any).tenure === "string" && (String((project as any).tenure) === "leasehold" || String((project as any).tenure) === "freehold"))
+      ? String((project as any).tenure)
+      : "freehold";
+    const normalizedTitleType = projectTitleType;
 
     const usersToCheck = [normalizedAssignedLawyerId, ...(normalizedAssignedClerkId ? [normalizedAssignedClerkId] : [])].filter((x): x is number => Number.isFinite(x));
     if (usersToCheck.length > 0) {
@@ -2205,6 +2217,8 @@ router.post("/cases", requireAuthHandler, requireFirmUserHandler, requirePermiss
       referenceNo: refNo,
       purchaseMode,
       titleType: normalizedTitleType,
+      isEncumbered: projectIsEncumbered,
+      tenure: projectTenure,
       spaPrice: spaPrice !== undefined ? String(spaPrice) : null,
       status: "File Opened / SPA Pending Signing",
       caseType: caseType ?? null,
@@ -2212,6 +2226,7 @@ router.post("/cases", requireAuthHandler, requireFirmUserHandler, requirePermiss
       spaDetails: spaDetails ? JSON.stringify(spaDetails) : null,
       propertyDetails: propertyDetails ? JSON.stringify(propertyDetails) : null,
       loanDetails: loanDetails ? JSON.stringify(loanDetails) : null,
+      loanPartyType: purchaseMode === "loan" ? (loanPartyType ?? "1st_party") : "1st_party",
       companyDetails: companyDetails ? JSON.stringify(companyDetails) : null,
       createdBy: req.userId ?? null,
     } satisfies typeof casesTable.$inferInsert;
@@ -2446,6 +2461,9 @@ router.get("/cases/:caseId/key-dates", requireAuthHandler, requireFirmUserHandle
     advice_to_bank_date: kd.adviceToBankDate ? String(kd.adviceToBankDate) : null,
     bank_1st_release_on: kd.bank1stReleaseOn ? String(kd.bank1stReleaseOn) : null,
     first_release_amount_rm: kd.firstReleaseAmountRm ? Number(kd.firstReleaseAmountRm) : null,
+    discharge_date: kd.dischargeDate ? String(kd.dischargeDate) : null,
+    consent_to_transfer_date: kd.consentToTransferDate ? String(kd.consentToTransferDate) : null,
+    consent_to_charge_date: kd.consentToChargeDate ? String(kd.consentToChargeDate) : null,
     mot_received_date: kd.motReceivedDate ? String(kd.motReceivedDate) : null,
     mot_signed_date: kd.motSignedDate ? String(kd.motSignedDate) : null,
     mot_stamped_date: kd.motStampedDate ? String(kd.motStampedDate) : null,
@@ -2751,6 +2769,9 @@ router.patch("/cases/:caseId/key-dates", requireAuthHandler, requireFirmUserHand
     noa_served_on: "noaServedOn",
     advice_to_bank_date: "adviceToBankDate",
     bank_1st_release_on: "bank1stReleaseOn",
+    discharge_date: "dischargeDate",
+    consent_to_transfer_date: "consentToTransferDate",
+    consent_to_charge_date: "consentToChargeDate",
     mot_received_date: "motReceivedDate",
     mot_signed_date: "motSignedDate",
     mot_stamped_date: "motStampedDate",
