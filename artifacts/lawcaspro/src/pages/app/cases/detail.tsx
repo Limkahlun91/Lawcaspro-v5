@@ -589,7 +589,7 @@ export default function CaseDetail() {
   const titleType = normalizeTitleType(String(caseInfo?.titleType ?? ""));
   const isMasterTitle = titleType === "master";
   const isStrataOrIndividual = titleType === "strata" || titleType === "individual";
-  const caseMeta = caseInfo as unknown as Record<string, unknown>;
+  const caseMeta: Record<string, unknown> = caseInfo && typeof caseInfo === "object" ? (caseInfo as unknown as Record<string, unknown>) : {};
   const isEncumbered = caseMeta.isEncumbered === true || caseMeta.is_encumbered === true;
   const tenureRaw = typeof caseMeta.tenure === "string" ? caseMeta.tenure.trim().toLowerCase() : "";
   const tenure = tenureRaw === "leasehold" ? "leasehold" : "freehold";

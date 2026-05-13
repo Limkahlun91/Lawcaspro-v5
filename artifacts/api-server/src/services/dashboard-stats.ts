@@ -136,7 +136,7 @@ export async function computeDashboardStats(r: DbConn, firmId: number): Promise<
         noaServed: milestoneCountSql("noa_served_on", "filled", false),
         completion: milestoneCountSql("completion_date", "filled", false),
 
-        spaDateMissing: milestoneCountSql("spa_date", "missing", false),
+        spaDateMissing: milestoneCountSql("spa_stamped_date", "missing", false),
         lofDateMissing: milestoneCountSql("letter_of_offer_date", "missing", false),
         loanDocsSignedMissing: milestoneCountSql("loan_docs_signed_date", "missing", true),
         completionDateMissing: milestoneCountSql("completion_date", "missing", false),
@@ -156,7 +156,7 @@ export async function computeDashboardStats(r: DbConn, firmId: number): Promise<
     { key: "noa_served", label: "NOA Served", count: Number(milestoneCounts?.noaServed ?? 0), filter: { milestone: "noa_served_on", milestonePresence: "filled" } },
     { key: "completion", label: "Completion", count: Number(milestoneCounts?.completion ?? 0), filter: { milestone: "completion_date", milestonePresence: "filled" } },
 
-    { key: "spa_date_missing", label: "SPA Date Missing", count: Number(milestoneCounts?.spaDateMissing ?? 0), filter: { milestone: "spa_date", milestonePresence: "missing" } },
+    { key: "spa_date_missing", label: "SPA Date Missing", count: Number(milestoneCounts?.spaDateMissing ?? 0), filter: { milestone: "spa_stamped_date", milestonePresence: "missing" } },
     { key: "lof_date_missing", label: "LOF Date Missing", count: Number(milestoneCounts?.lofDateMissing ?? 0), filter: { milestone: "letter_of_offer_date", milestonePresence: "missing" } },
     { key: "loan_docs_signed_missing", label: "Loan Docs Signed Missing", count: Number(milestoneCounts?.loanDocsSignedMissing ?? 0), filter: { milestone: "loan_docs_signed_date", milestonePresence: "missing", purchaseMode: "loan" } },
     { key: "completion_date_missing", label: "Completion Date Missing", count: Number(milestoneCounts?.completionDateMissing ?? 0), filter: { milestone: "completion_date", milestonePresence: "missing" } },
@@ -184,4 +184,3 @@ export async function computeDashboardStats(r: DbConn, firmId: number): Promise<
     milestoneCards,
   };
 }
-

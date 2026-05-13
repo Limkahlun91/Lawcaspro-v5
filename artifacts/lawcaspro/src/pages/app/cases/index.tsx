@@ -1,4 +1,4 @@
-import { getListCasesQueryKey, useListCases, useListProjects, useListUsers } from "@workspace/api-client-react";
+import { CaseMilestoneKey, MilestonePresence, getListCasesQueryKey, useListCases, useListProjects, useListUsers } from "@workspace/api-client-react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Download, Plus, Search } from "lucide-react";
@@ -44,12 +44,20 @@ export default function CasesList() {
   const initialPage = initialPageRaw ? Number(initialPageRaw) : 1;
   const initialLimit = initialLimitRaw ? Number(initialLimitRaw) : 50;
 
-  const [search, setSearch] = useState(() => sp.get("search") ?? "");
-  const [spaStatus, setSpaStatus] = useState<string>(() => sp.get("spaStatus") ?? "all");
-  const [loanStatus, setLoanStatus] = useState<string>(() => sp.get("loanStatus") ?? "all");
-  const [lawyerId, setLawyerId] = useState<string>(() => sp.get("assignedLawyerId") ?? "all");
-  const [clerkId, setClerkId] = useState<string>(() => sp.get("assignedClerkId") ?? "all");
-  const [projectId, setProjectId] = useState<string>(() => sp.get("projectId") ?? "all");
+  const [search, setSearch] = useState(() => (typeof window !== "undefined" ? (new URLSearchParams(window.location.search).get("search") ?? "") : (sp.get("search") ?? "")));
+  const [spaStatus, setSpaStatus] = useState<string>(() => (typeof window !== "undefined" ? (new URLSearchParams(window.location.search).get("spaStatus") ?? "all") : (sp.get("spaStatus") ?? "all")));
+  const [loanStatus, setLoanStatus] = useState<string>(() => (typeof window !== "undefined" ? (new URLSearchParams(window.location.search).get("loanStatus") ?? "all") : (sp.get("loanStatus") ?? "all")));
+  const [lawyerId, setLawyerId] = useState<string>(() => (typeof window !== "undefined" ? (new URLSearchParams(window.location.search).get("assignedLawyerId") ?? "all") : (sp.get("assignedLawyerId") ?? "all")));
+  const [clerkId, setClerkId] = useState<string>(() => (typeof window !== "undefined" ? (new URLSearchParams(window.location.search).get("assignedClerkId") ?? "all") : (sp.get("assignedClerkId") ?? "all")));
+  const [projectId, setProjectId] = useState<string>(() => (typeof window !== "undefined" ? (new URLSearchParams(window.location.search).get("projectId") ?? "all") : (sp.get("projectId") ?? "all")));
+  const [milestone, setMilestone] = useState<CaseMilestoneKey | "all">(() => {
+    const raw = typeof window !== "undefined" ? new URLSearchParams(window.location.search).get("milestone") : sp.get("milestone");
+    return raw && Object.values(CaseMilestoneKey).includes(raw as any) ? (raw as CaseMilestoneKey) : "all";
+  });
+  const [milestonePresence, setMilestonePresence] = useState<MilestonePresence>(() => {
+    const raw = typeof window !== "undefined" ? new URLSearchParams(window.location.search).get("milestonePresence") : sp.get("milestonePresence");
+    return raw && Object.values(MilestonePresence).includes(raw as any) ? (raw as MilestonePresence) : "filled";
+  });
   const [page, setPage] = useState<number>(() => Number.isInteger(initialPage) && initialPage > 0 ? initialPage : 1);
   const [limit, setLimit] = useState<number>(() => Number.isInteger(initialLimit) && initialLimit > 0 ? initialLimit : 50);
 
@@ -67,6 +75,16 @@ export default function CasesList() {
     const nextLawyerId = sp.get("assignedLawyerId") ?? "all";
     const nextClerkId = sp.get("assignedClerkId") ?? "all";
     const nextProjectId = sp.get("projectId") ?? "all";
+    const nextMilestoneRaw = sp.get("milestone");
+    const nextMilestone: CaseMilestoneKey | "all" =
+      nextMilestoneRaw && Object.values(CaseMilestoneKey).includes(nextMilestoneRaw as any)
+        ? (nextMilestoneRaw as CaseMilestoneKey)
+        : "all";
+    const nextPresenceRaw = sp.get("milestonePresence");
+    const nextPresence: MilestonePresence =
+      nextPresenceRaw && Object.values(MilestonePresence).includes(nextPresenceRaw as any)
+        ? (nextPresenceRaw as MilestonePresence)
+        : "filled";
 
     setSearch((prev) => prev === nextSearch ? prev : nextSearch);
     setSpaStatus((prev) => prev === nextSpaStatus ? prev : nextSpaStatus);
@@ -74,6 +92,8 @@ export default function CasesList() {
     setLawyerId((prev) => prev === nextLawyerId ? prev : nextLawyerId);
     setClerkId((prev) => prev === nextClerkId ? prev : nextClerkId);
     setProjectId((prev) => prev === nextProjectId ? prev : nextProjectId);
+    setMilestone((prev) => prev === nextMilestone ? prev : nextMilestone);
+    setMilestonePresence((prev) => prev === nextPresence ? prev : nextPresence);
     setPage((prev) => prev === (Number.isInteger(nextPage) && nextPage > 0 ? nextPage : 1) ? prev : (Number.isInteger(nextPage) && nextPage > 0 ? nextPage : 1));
     setLimit((prev) => prev === (Number.isInteger(nextLimit) && nextLimit > 0 ? nextLimit : 50) ? prev : (Number.isInteger(nextLimit) && nextLimit > 0 ? nextLimit : 50));
 
@@ -94,6 +114,8 @@ export default function CasesList() {
     setIf("assignedLawyerId", lawyerId);
     setIf("assignedClerkId", clerkId);
     setIf("projectId", projectId);
+    setIf("milestone", milestone === "all" ? undefined : milestone);
+    if (milestone !== "all") nextSp.set("milestonePresence", milestonePresence);
     nextSp.set("page", String(page));
     nextSp.set("limit", String(limit));
 
@@ -107,6 +129,8 @@ export default function CasesList() {
     lawyerId,
     clerkId,
     projectId,
+    milestone,
+    milestonePresence,
     page,
     limit,
     sp,
@@ -122,6 +146,8 @@ export default function CasesList() {
     assignedClerkId: clerkId !== "all" ? parseInt(clerkId) : undefined,
     spaStatus: spaStatus !== "all" ? spaStatus : undefined,
     loanStatus: loanStatus !== "all" ? loanStatus : undefined,
+    milestone: milestone !== "all" ? milestone : undefined,
+    milestonePresence: milestone !== "all" ? milestonePresence : undefined,
   });
 
   type CaseFilterOptionsResponse = {
@@ -143,6 +169,7 @@ export default function CasesList() {
   const loanStatuses: string[] = Array.isArray(filterOptions?.loanStatuses) ? filterOptions.loanStatuses : ["Pending"];
   const lawyers: Array<{ id: number; name: string }> = Array.isArray(filterOptions?.assignees?.lawyers) ? filterOptions.assignees.lawyers : [];
   const clerks: Array<{ id: number; name: string }> = Array.isArray(filterOptions?.assignees?.clerks) ? filterOptions.assignees.clerks : [];
+  const milestoneOptions: Array<{ key: CaseMilestoneKey; label: string }> = Array.isArray(filterOptions?.milestones) ? filterOptions.milestones : [];
 
   const { data: projectsRes } = useListProjects({ page: 1, limit: 200 }, { query: { staleTime: 5 * 60 * 1000 } });
   const { data: usersRes } = useListUsers({ page: 1, limit: 200 }, { query: { staleTime: 5 * 60 * 1000 } });
@@ -163,6 +190,7 @@ export default function CasesList() {
   const lawyerNameById = useMemo(() => new Map(lawyers.map(u => [String(u.id), u.name])), [lawyers]);
   const clerkNameById = useMemo(() => new Map(clerks.map(u => [String(u.id), u.name])), [clerks]);
   const projectNameById = useMemo(() => new Map(projects.map(p => [String(p.id), p.name])), [projects]);
+  const milestoneLabelByKey = useMemo(() => new Map(milestoneOptions.map(m => [m.key, m.label])), [milestoneOptions]);
 
   useEffect(() => {
     if (spaStatus !== "all" && spaStatuses.length > 0 && !spaStatuses.includes(spaStatus)) {
@@ -180,6 +208,14 @@ export default function CasesList() {
     if (search.trim()) chips.push({ key: "search", label: `Search: ${search.trim()}`, onClear: () => { setSearch(""); setPage(1); } });
     if (spaStatus !== "all") chips.push({ key: "spaStatus", label: `SPA: ${spaStatus}`, onClear: () => { setSpaStatus("all"); setPage(1); } });
     if (loanStatus !== "all") chips.push({ key: "loanStatus", label: `Loan: ${loanStatus}`, onClear: () => { setLoanStatus("all"); setPage(1); } });
+    if (milestone !== "all") {
+      const label = milestoneLabelByKey.get(milestone) ?? milestone;
+      chips.push({
+        key: "milestone",
+        label: `${label}: ${milestonePresence === "missing" ? "Missing" : "Filled"}`,
+        onClear: () => { setMilestone("all"); setMilestonePresence("filled"); setPage(1); },
+      });
+    }
     if (lawyerId !== "all") chips.push({ key: "assignedLawyerId", label: `Lawyer: ${lawyerNameById.get(lawyerId) ?? lawyerId}`, onClear: () => { setLawyerId("all"); setPage(1); } });
     if (clerkId !== "all") chips.push({ key: "assignedClerkId", label: `Clerk: ${clerkNameById.get(clerkId) ?? clerkId}`, onClear: () => { setClerkId("all"); setPage(1); } });
     if (projectId !== "all") chips.push({ key: "projectId", label: `Project: ${projectNameById.get(projectId) ?? projectId}`, onClear: () => { setProjectId("all"); setPage(1); } });
@@ -188,12 +224,15 @@ export default function CasesList() {
     search,
     spaStatus,
     loanStatus,
+    milestone,
+    milestonePresence,
     lawyerId,
     clerkId,
     projectId,
     lawyerNameById,
     clerkNameById,
     projectNameById,
+    milestoneLabelByKey,
   ]);
 
   const [selectedCaseIds, setSelectedCaseIds] = useState<Set<number>>(new Set());
@@ -355,6 +394,8 @@ export default function CasesList() {
               setSearch("");
               setSpaStatus("all");
               setLoanStatus("all");
+              setMilestone("all");
+              setMilestonePresence("filled");
               setLawyerId("all");
               setClerkId("all");
               setProjectId("all");
