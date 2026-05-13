@@ -1,7 +1,8 @@
+import { useEffect } from "react";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
-import { useCreateUser, useListRoles } from "@workspace/api-client-react";
+import { useCreateUser, useListDevelopers, useListRoles } from "@workspace/api-client-react";
 import { useLocation } from "wouter";
 import { useToast } from "@/hooks/use-toast";
 import { Button } from "@/components/ui/button";
@@ -18,6 +19,7 @@ const createUserSchema = z.object({
   email: z.string().email("Valid email is required"),
   password: z.string().min(8, "Password must be at least 8 characters"),
   roleId: z.coerce.number().min(1, "Role is required"),
+  developerId: z.coerce.number().int().positive().optional(),
   department: z.string().optional(),
   barCouncilNo: z.string().optional(),
   nricNo: z.string().optional(),
@@ -40,6 +42,7 @@ export default function NewUser() {
       email: "",
       password: "",
       roleId: 0,
+      developerId: undefined,
       department: "",
       barCouncilNo: "",
       nricNo: "",
@@ -50,6 +53,16 @@ export default function NewUser() {
   const selectedRole = roles.find((r) => r.id === selectedRoleId);
   const showDepartment = selectedRole && (selectedRole.name === "Manager" || selectedRole.name === "Admin");
   const showProfessionalFields = selectedRole && (selectedRole.name === "Partner" || selectedRole.name === "Lawyer" || selectedRole.name === "Senior Lawyer");
+  const showDeveloperField = selectedRole && selectedRole.name === "Developer_User";
+
+  const developersQuery = useListDevelopers({ page: 1, limit: 200 }, { query: { enabled: !!showDeveloperField, staleTime: 5 * 60 * 1000 } });
+  const developers = developersQuery.data?.data ?? [];
+
+  useEffect(() => {
+    if (!showDeveloperField) {
+      form.setValue("developerId", undefined);
+    }
+  }, [showDeveloperField, form]);
 
   const createUserMutation = useCreateUser();
 
@@ -57,6 +70,9 @@ export default function NewUser() {
     const payload: FormValues = showProfessionalFields
       ? data
       : { ...data, barCouncilNo: undefined, nricNo: undefined };
+    if (!showDeveloperField) {
+      (payload as any).developerId = undefined;
+    }
     createUserMutation.mutate(
       { data: payload },
       {
@@ -209,6 +225,36 @@ export default function NewUser() {
                     )}
                   />
                 </div>
+              )}
+              {showDeveloperField && (
+                <FormField
+                  control={form.control}
+                  name="developerId"
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormLabel>Assigned Developer</FormLabel>
+                      <Select value={field.value ? String(field.value) : ""} onValueChange={(v) => field.onChange(Number(v))}>
+                        <FormControl>
+                          <SelectTrigger>
+                            <SelectValue placeholder={developersQuery.isLoading ? "Loading developers..." : "Select developer"} />
+                          </SelectTrigger>
+                        </FormControl>
+                        <SelectContent>
+                          {developersQuery.isLoading ? (
+                            <div className="px-3 py-2 text-sm text-slate-500">Loading developers...</div>
+                          ) : developersQuery.isError ? (
+                            <div className="px-3 py-2 text-sm text-red-600">Failed to load developers</div>
+                          ) : developers.length === 0 ? (
+                            <div className="px-3 py-2 text-sm text-slate-500">No developers available</div>
+                          ) : developers.map((d: any) => (
+                            <SelectItem key={d.id} value={String(d.id)}>{d.name}</SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
               )}
               <div className="pt-4 flex justify-end gap-4">
                 <Button type="button" variant="outline" onClick={() => setLocation("/app/users")}>

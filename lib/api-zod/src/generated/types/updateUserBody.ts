@@ -9,6 +9,8 @@
 export interface UpdateUserBody {
   name?: string;
   roleId?: number;
+  /** @nullable */
+  developerId?: number | null;
   department?: string;
   status?: string;
 }

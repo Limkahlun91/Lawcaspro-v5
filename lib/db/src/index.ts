@@ -16,19 +16,25 @@ const rawConnectTimeoutMs = process.env.PG_CONNECT_TIMEOUT_MS;
 const connectTimeoutMs =
   rawConnectTimeoutMs && !Number.isNaN(Number(rawConnectTimeoutMs))
     ? Number(rawConnectTimeoutMs)
-    : 10_000;
+    : (process.env.VERCEL === "1" || Boolean(process.env.AWS_LAMBDA_FUNCTION_NAME))
+      ? 5_000
+      : 10_000;
 
 const rawPoolMax = process.env.PG_POOL_MAX;
 const poolMax =
   rawPoolMax && !Number.isNaN(Number(rawPoolMax)) && Number(rawPoolMax) > 0
     ? Number(rawPoolMax)
-    : undefined;
+    : (process.env.VERCEL === "1" || Boolean(process.env.AWS_LAMBDA_FUNCTION_NAME))
+      ? 10
+      : undefined;
 
 const rawIdleTimeoutMs = process.env.PG_IDLE_TIMEOUT_MS;
 const idleTimeoutMs =
   rawIdleTimeoutMs && !Number.isNaN(Number(rawIdleTimeoutMs)) && Number(rawIdleTimeoutMs) >= 0
     ? Number(rawIdleTimeoutMs)
-    : 30_000;
+    : (process.env.VERCEL === "1" || Boolean(process.env.AWS_LAMBDA_FUNCTION_NAME))
+      ? 5_000
+      : 30_000;
 
 const rawKeepAlive = process.env.PG_KEEPALIVE;
 const keepAlive =

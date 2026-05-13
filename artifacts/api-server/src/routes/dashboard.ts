@@ -1,4 +1,4 @@
-import express, { type Response, type Router as ExpressRouter } from "express";
+import express, { type NextFunction, type Response, type Router as ExpressRouter } from "express";
 import { db, sql } from "@workspace/db";
 import { requireAuth, requireFirmUser, requirePermission, type AuthRequest } from "../lib/auth.js";
 import { logger } from "../lib/logger.js";
@@ -27,7 +27,7 @@ type RouterInternalLike = {
 const expressRouter = express.Router();
 const router = expressRouter as unknown as RouterInternalLike;
 
-router.get("/dashboard", requireAuth, requireFirmUser, requirePermission("dashboard", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
+router.get("/dashboard", requireAuth, requireFirmUser, requirePermission("dashboard", "read"), async (req: AuthRequest, res: Response, next: NextFunction): Promise<void> => {
   try {
     const firmId = req.firmId!;
     const r = rdb(req);
@@ -70,7 +70,7 @@ router.get("/dashboard", requireAuth, requireFirmUser, requirePermission("dashbo
       res.status(503).json({ error: "Dashboard temporarily unavailable" });
       return;
     }
-    res.status(500).json({ error: "Internal Server Error" });
+    next(err);
   }
 });
 

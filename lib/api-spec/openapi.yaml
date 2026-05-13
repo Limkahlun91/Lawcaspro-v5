@@ -1598,6 +1598,8 @@ components:
           type: string
         roleId:
           type: integer
+        developerId:
+          type: ["integer", "null"]
         department:
           type: string
         barCouncilNo:
@@ -1617,6 +1619,8 @@ components:
           type: string
         roleId:
           type: integer
+        developerId:
+          type: ["integer", "null"]
         department:
           type: string
         status:

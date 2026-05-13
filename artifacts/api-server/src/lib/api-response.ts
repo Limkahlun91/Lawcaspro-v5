@@ -162,10 +162,20 @@ export function sendError(res: ResLike, err: unknown, fallback?: { status?: numb
   const status = fallback?.status ?? 500;
   const code = fallback?.code ?? "INTERNAL_SERVER_ERROR";
   const message = fallback?.message ?? "Internal server error";
+  const allowDetails = process.env.API_ERROR_DETAILS === "1" || process.env.NODE_ENV !== "production";
+  const details =
+    allowDetails && err instanceof Error && typeof err.message === "string" && err.message.trim()
+      ? err.message
+      : undefined;
 
   const body: ApiFailure = {
     ok: false,
-    error: { code, message, retryable: status >= 500 },
+    error: {
+      code,
+      message,
+      retryable: status >= 500,
+      ...(details ? { details } : {}),
+    },
     meta,
   };
 

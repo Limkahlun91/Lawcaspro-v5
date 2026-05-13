@@ -257,6 +257,8 @@ export interface CreateUserBody {
   name: string;
   password: string;
   roleId: number;
+  /** @nullable */
+  developerId?: number | null;
   department?: string;
   barCouncilNo?: string;
   nricNo?: string;
@@ -265,6 +267,8 @@ export interface CreateUserBody {
 export interface UpdateUserBody {
   name?: string;
   roleId?: number;
+  /** @nullable */
+  developerId?: number | null;
   department?: string;
   status?: string;
 }

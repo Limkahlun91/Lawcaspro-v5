@@ -459,6 +459,7 @@ export const CreateUserBody = zod.object({
   "name": zod.string(),
   "password": zod.string(),
   "roleId": zod.number(),
+  "developerId": zod.number().nullish(),
   "department": zod.string().optional(),
   "barCouncilNo": zod.string().optional(),
   "nricNo": zod.string().optional()
@@ -496,6 +497,7 @@ export const UpdateUserParams = zod.object({
 export const UpdateUserBody = zod.object({
   "name": zod.string().optional(),
   "roleId": zod.number().optional(),
+  "developerId": zod.number().nullish(),
   "department": zod.string().optional(),
   "status": zod.string().optional()
 })

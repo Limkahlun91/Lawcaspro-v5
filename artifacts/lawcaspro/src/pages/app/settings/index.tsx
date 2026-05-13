@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { getListRolesQueryKey, getListUsersQueryKey, useDeleteUser, useListRoles, useListUsers, useUpdateUser } from "@workspace/api-client-react";
+import { getListRolesQueryKey, getListUsersQueryKey, useDeleteUser, useListDevelopers, useListRoles, useListUsers, useUpdateUser } from "@workspace/api-client-react";
 import { useQuery, useQueryClient, useMutation } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -770,6 +770,13 @@ export default function Settings() {
   const [editUser, setEditUser] = useState<any | null>(null);
   const [editName, setEditName] = useState("");
   const [editRoleId, setEditRoleId] = useState("");
+  const [editDeveloperId, setEditDeveloperId] = useState("");
+
+  const developersQuery = useListDevelopers(
+    { page: 1, limit: 200 },
+    { query: { enabled: canManageUsers && editUserOpen, staleTime: 5 * 60 * 1000 } }
+  );
+  const developers = developersQuery.data?.data ?? [];
 
   const [deleteUserOpen, setDeleteUserOpen] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<any | null>(null);
@@ -908,6 +915,7 @@ export default function Settings() {
                                   setEditUser(user);
                                   setEditName(user.name || "");
                                   setEditRoleId(user.roleId ? String(user.roleId) : "");
+                                  setEditDeveloperId(user.developerId ? String(user.developerId) : "");
                                   setEditUserOpen(true);
                                 }}
                               >
@@ -972,6 +980,7 @@ export default function Settings() {
               setEditUser(null);
               setEditName("");
               setEditRoleId("");
+              setEditDeveloperId("");
             }
           }}>
             <DialogContent>
@@ -997,6 +1006,31 @@ export default function Settings() {
                     ))}
                   </select>
                 </div>
+                {(() => {
+                  if (!editRoleId) return null;
+                  const roleId = Number(editRoleId);
+                  const roleName = (rolesRes ?? []).find((r: any) => r.id === roleId)?.name;
+                  if (roleName !== "Developer_User") return null;
+                  return (
+                    <div className="space-y-2">
+                      <Label>Assigned Developer</Label>
+                      <select
+                        value={editDeveloperId}
+                        onChange={(e) => setEditDeveloperId(e.target.value)}
+                        className="w-full h-10 border border-slate-200 rounded-md px-3 text-sm bg-white"
+                        disabled={developersQuery.isLoading}
+                      >
+                        <option value="">Select developer</option>
+                        {(developers ?? []).map((d: any) => (
+                          <option key={d.id} value={String(d.id)}>{d.name}</option>
+                        ))}
+                      </select>
+                      {developersQuery.isError ? (
+                        <div className="text-xs text-red-600">Failed to load developers</div>
+                      ) : null}
+                    </div>
+                  );
+                })()}
               </div>
               <DialogFooter>
                 <Button
@@ -1016,6 +1050,20 @@ export default function Settings() {
                     }
                     const payload: any = { name };
                     if (editRoleId) payload.roleId = Number(editRoleId);
+                    if (editRoleId) {
+                      const roleId = Number(editRoleId);
+                      const roleName = (rolesRes ?? []).find((r: any) => r.id === roleId)?.name;
+                      if (roleName === "Developer_User") {
+                        const did = Number(editDeveloperId);
+                        if (!Number.isInteger(did) || did <= 0) {
+                          toast({ title: "Assigned Developer is required", variant: "destructive" });
+                          return;
+                        }
+                        payload.developerId = did;
+                      } else {
+                        payload.developerId = null;
+                      }
+                    }
                     updateUserMutation.mutate(
                       { userId: editUser.id, data: payload },
                       {

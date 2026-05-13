@@ -98,6 +98,7 @@ type UserRow = {
   email: string;
   name: string;
   roleId: number | null;
+  developerId?: number | null;
   department?: string | null;
   status: string;
   lastLoginAt: Date | null;
@@ -120,6 +121,7 @@ async function enrichUser(r: DbConn, firmId: number, user: UserRow) {
     name: user.name,
     roleId: user.roleId ?? null,
     roleName,
+    developerId: user.developerId ?? null,
     department: user.department ?? null,
     status: user.status,
     lastLoginAt: user.lastLoginAt?.toISOString() ?? null,
@@ -152,6 +154,7 @@ routerInternal.get("/users", requireAuth, requireFirmUser, requirePermission("us
     email: usersTable.email,
     name: usersTable.name,
     roleId: usersTable.roleId,
+    developerId: usersTable.developerId,
     status: usersTable.status,
     lastLoginAt: usersTable.lastLoginAt,
     createdAt: usersTable.createdAt,
@@ -193,7 +196,7 @@ routerInternal.post("/users", requireAuth, requireFirmUser, requirePermission("u
     return;
   }
 
-  const { email, name, password, roleId, department, barCouncilNo, nricNo } = parsed.data;
+  const { email, name, password, roleId, developerId, department, barCouncilNo, nricNo } = parsed.data;
   const normalizedEmail = email.toLowerCase();
 
   try {
@@ -216,6 +219,20 @@ routerInternal.post("/users", requireAuth, requireFirmUser, requirePermission("u
       if (!role) {
         return { kind: "bad_role" as const };
       }
+      const isDeveloperUser = role.name === "Developer_User";
+      if (isDeveloperUser) {
+        const normalizedDeveloperId = developerId === null || developerId === undefined ? null : Number(developerId);
+        if (!normalizedDeveloperId || !Number.isInteger(normalizedDeveloperId) || normalizedDeveloperId <= 0) {
+          return { kind: "missing_developer_id" as const };
+        }
+        const devRows = await queryRows(
+          tx,
+          sql`SELECT 1 FROM developers WHERE firm_id = ${req.firmId!} AND id = ${normalizedDeveloperId} LIMIT 1`
+        );
+        if (!devRows[0]) {
+          return { kind: "invalid_developer_id" as const };
+        }
+      }
 
       const legalRoleNames = new Set(["Lawyer", "Senior Lawyer", "Partner"]);
       const isLegalRole = legalRoleNames.has(role.name);
@@ -234,6 +251,7 @@ routerInternal.post("/users", requireAuth, requireFirmUser, requirePermission("u
         name,
         passwordHash,
         roleId,
+        developerId: developerId ?? null,
         userType: "firm_user",
         status: "active",
       };
@@ -252,6 +270,14 @@ routerInternal.post("/users", requireAuth, requireFirmUser, requirePermission("u
     }
     if (created.kind === "bad_role") {
       res.status(400).json({ error: "Invalid roleId" });
+      return;
+    }
+    if (created.kind === "missing_developer_id") {
+      res.status(400).json({ error: "developerId is required for Developer_User" });
+      return;
+    }
+    if (created.kind === "invalid_developer_id") {
+      res.status(400).json({ error: "Invalid developerId" });
       return;
     }
     if (created.kind === "missing_bar_council") {
@@ -338,10 +364,33 @@ routerInternal.patch("/users/:userId", requireAuth, requireFirmUser, requirePerm
   const updates: Record<string, unknown> = {};
   if (parsed.data.name !== undefined) updates.name = parsed.data.name;
   if (parsed.data.roleId !== undefined) updates.roleId = parsed.data.roleId;
+  if (Object.prototype.hasOwnProperty.call(parsed.data, "developerId")) {
+    updates.developerId = (parsed.data as any).developerId;
+  }
   if (parsed.data.department !== undefined && await usersDepartmentExists(r)) updates.department = parsed.data.department;
   if (parsed.data.status !== undefined) updates.status = parsed.data.status;
 
   const result = await (r as any).transaction(async (tx: DbConn) => {
+    if (typeof updates.roleId === "number") {
+      const [role] = await tx
+        .select({ name: rolesTable.name })
+        .from(rolesTable)
+        .where(and(eq(rolesTable.id, updates.roleId), eq(rolesTable.firmId, req.firmId!)))
+        .limit(1);
+      if (role?.name === "Developer_User") {
+        const normalizedDeveloperId = updates.developerId === null || updates.developerId === undefined ? null : Number(updates.developerId);
+        if (!normalizedDeveloperId || !Number.isInteger(normalizedDeveloperId) || normalizedDeveloperId <= 0) {
+          return { kind: "missing_developer_id" as const };
+        }
+        const devRows = await queryRows(
+          tx,
+          sql`SELECT 1 FROM developers WHERE firm_id = ${req.firmId!} AND id = ${normalizedDeveloperId} LIMIT 1`
+        );
+        if (!devRows[0]) return { kind: "invalid_developer_id" as const };
+      } else if (Object.prototype.hasOwnProperty.call(updates, "developerId")) {
+        updates.developerId = null;
+      }
+    }
     const [user] = await tx
       .update(usersTable)
       .set(updates)
@@ -354,6 +403,14 @@ routerInternal.patch("/users/:userId", requireAuth, requireFirmUser, requirePerm
     return { kind: "ok" as const, user };
   });
 
+  if (result.kind === "missing_developer_id") {
+    res.status(400).json({ error: "developerId is required for Developer_User" });
+    return;
+  }
+  if (result.kind === "invalid_developer_id") {
+    res.status(400).json({ error: "Invalid developerId" });
+    return;
+  }
   if (result.kind === "not_found") {
     res.status(404).json({ error: "User not found" });
     return;

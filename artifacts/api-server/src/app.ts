@@ -234,7 +234,11 @@ const errorHandler: ErrorMiddlewareLike = (err: unknown, req: ReqLike, res: ResL
     return;
   }
 
-  logger.error({ err, path: req.path, method: req.method, status: 500 }, "Unhandled error");
+  const stack = err instanceof Error ? err.stack : undefined;
+  const message = err instanceof Error ? err.message : String(err);
+  const requestId = typeof (res.locals as any)?.requestId === "string" ? String((res.locals as any).requestId) : "unknown";
+  console.error("[api.unhandled]", { requestId, method: req.method, path: req.path, message, stack });
+  logger.error({ err, path: req.path, method: req.method, status: 500, requestId }, "Unhandled error");
   sendErrorUnsafe(res, err, { status: 500, code: "INTERNAL_SERVER_ERROR", message: "Internal server error" });
 };
 
