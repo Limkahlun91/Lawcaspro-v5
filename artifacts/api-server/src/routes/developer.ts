@@ -47,6 +47,7 @@ type RouteResLike = {
 type RouterInternalLike = {
   get: (path: string, ...handlers: unknown[]) => unknown;
   post: (path: string, ...handlers: unknown[]) => unknown;
+  patch: (path: string, ...handlers: unknown[]) => unknown;
 };
 
 const expressRouter = express.Router();
@@ -241,6 +242,10 @@ routerInternal.get("/developer/inventory", requireAuth, requireFirmUser, async (
       spaStatus: spaStatusSql(),
       loanStatus: loanStatusSql(),
       updatedAt: casesTable.updatedAt,
+      lawyerStatus: casesTable.lawyerStatus,
+      lawyerStatusUpdatedAt: casesTable.lawyerStatusUpdatedAt,
+      developerStatus: casesTable.developerStatus,
+      developerStatusUpdatedAt: casesTable.developerStatusUpdatedAt,
     })
     .from(casesTable)
     .innerJoin(projectsTable, eq(casesTable.projectId, projectsTable.id))
@@ -259,10 +264,73 @@ routerInternal.get("/developer/inventory", requireAuth, requireFirmUser, async (
       spaStatus: String(c.spaStatus ?? "Pending"),
       loanStatus: c.loanStatus == null ? null : String(c.loanStatus),
       updatedAt: toIsoStringSafe(c.updatedAt),
+      lawyerStatus: c.lawyerStatus ?? null,
+      lawyerStatusUpdatedAt: c.lawyerStatusUpdatedAt ? toIsoStringSafe(c.lawyerStatusUpdatedAt) : null,
+      developerStatus: c.developerStatus ?? null,
+      developerStatusUpdatedAt: c.developerStatusUpdatedAt ? toIsoStringSafe(c.developerStatusUpdatedAt) : null,
     })),
     total: Number(totalRes?.c ?? 0),
     page: q.page,
     limit: q.limit,
+  });
+});
+
+routerInternal.patch("/developer/cases/:caseId/status", requireAuth, requireFirmUser, async (req: AuthRequestLike, res: RouteResLike) => {
+  const ctx = await requireDeveloperUser(req, res);
+  if (!ctx) return;
+  const r = rdb(req);
+  const caseId = Number((req.params as any)?.caseId);
+  if (!Number.isFinite(caseId) || caseId <= 0) {
+    res.status(400).json({ error: "Invalid caseId" });
+    return;
+  }
+  const body = req.body as any;
+  const rawStatus = body?.developerStatus;
+  const developerStatus =
+    rawStatus === null
+      ? null
+      : typeof rawStatus === "string"
+          ? (rawStatus.trim() ? rawStatus.trim() : null)
+          : undefined;
+  if (developerStatus === undefined || (typeof developerStatus === "string" && developerStatus.length > 2000)) {
+    res.status(400).json({ error: "Invalid body" });
+    return;
+  }
+
+  const now = new Date();
+  const [updated] = await r
+    .update(casesTable)
+    .set({
+      developerStatus,
+      developerStatusUpdatedAt: now,
+    })
+    .where(and(eq(casesTable.id, caseId), eq(casesTable.firmId, ctx.firmId), eq(casesTable.developerId, ctx.developerId)))
+    .returning({
+      id: casesTable.id,
+      developerStatus: casesTable.developerStatus,
+      developerStatusUpdatedAt: casesTable.developerStatusUpdatedAt,
+    });
+
+  if (!updated) {
+    res.status(404).json({ error: "Not found" });
+    return;
+  }
+
+  await writeAuditLog({
+    firmId: ctx.firmId,
+    actorId: ctx.userId,
+    actorType: "developer_user",
+    action: "developer_portal.case_status.update",
+    entityType: "case",
+    entityId: caseId,
+    detail: JSON.stringify({ developerStatus }),
+    ipAddress: req.ip,
+    userAgent: req.headers["user-agent"],
+  }, { db: req.rlsDb as RlsDb | undefined });
+
+  res.json({
+    developerStatus: updated.developerStatus ?? null,
+    developerStatusUpdatedAt: updated.developerStatusUpdatedAt ? toIsoStringSafe(updated.developerStatusUpdatedAt) : null,
   });
 });
 
@@ -432,7 +500,59 @@ routerInternal.post("/developer/cases/:caseId/messages", requireAuth, requireFir
   res.status(201).json({ id: String(created?.id ?? ""), createdAt: toIsoStringSafe(created?.createdAt) });
 });
 
+routerInternal.get("/developer/cases/:caseId/progress", requireAuth, requireFirmUser, async (req: AuthRequestLike, res: RouteResLike) => {
+  const ctx = await requireDeveloperUser(req, res);
+  if (!ctx) return;
+  const r = rdb(req);
+  const caseId = Number((req.params as any)?.caseId);
+  if (!Number.isFinite(caseId) || caseId <= 0) {
+    res.status(400).json({ error: "Invalid caseId" });
+    return;
+  }
+  const [c] = await r
+    .select({ id: casesTable.id })
+    .from(casesTable)
+    .where(and(eq(casesTable.id, caseId), eq(casesTable.firmId, ctx.firmId), eq(casesTable.developerId, ctx.developerId)))
+    .limit(1);
+  if (!c) {
+    res.status(404).json({ error: "Not found" });
+    return;
+  }
+
+  const [kd] = await r
+    .select({
+      spaSignedDate: caseKeyDatesTable.spaSignedDate,
+      spaDate: caseKeyDatesTable.spaDate,
+      spaStampedDate: caseKeyDatesTable.spaStampedDate,
+      letterOfOfferDate: caseKeyDatesTable.letterOfOfferDate,
+      letterOfOfferStampedDate: caseKeyDatesTable.letterOfOfferStampedDate,
+      bankLuReceivedDate: caseKeyDatesTable.bankLuReceivedDate,
+      motSignedDate: caseKeyDatesTable.motSignedDate,
+      motStampedDate: caseKeyDatesTable.motStampedDate,
+      motRegisteredDate: caseKeyDatesTable.motRegisteredDate,
+      completionDate: caseKeyDatesTable.completionDate,
+    })
+    .from(caseKeyDatesTable)
+    .where(and(eq(caseKeyDatesTable.firmId, ctx.firmId), eq(caseKeyDatesTable.caseId, caseId)))
+    .limit(1);
+
+  res.setHeader("Cache-Control", "no-store");
+  res.json({
+    keyDates: {
+      spa_signed_date: kd?.spaSignedDate ? String(kd.spaSignedDate) : null,
+      spa_date: kd?.spaDate ? String(kd.spaDate) : null,
+      spa_stamped_date: kd?.spaStampedDate ? String(kd.spaStampedDate) : null,
+      letter_of_offer_date: kd?.letterOfOfferDate ? String(kd.letterOfOfferDate) : null,
+      letter_of_offer_stamped_date: kd?.letterOfOfferStampedDate ? String(kd.letterOfOfferStampedDate) : null,
+      bank_lu_received_date: kd?.bankLuReceivedDate ? String(kd.bankLuReceivedDate) : null,
+      mot_signed_date: kd?.motSignedDate ? String(kd.motSignedDate) : null,
+      mot_stamped_date: kd?.motStampedDate ? String(kd.motStampedDate) : null,
+      mot_registered_date: kd?.motRegisteredDate ? String(kd.motRegisteredDate) : null,
+      completion_date: kd?.completionDate ? String(kd.completionDate) : null,
+    },
+  });
+});
+
 const exportedRouter = expressRouter as unknown as ExpressRouter;
 export { exportedRouter as router };
 export default exportedRouter;
-

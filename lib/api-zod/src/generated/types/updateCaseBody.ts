@@ -13,4 +13,6 @@ export interface UpdateCaseBody {
   spaPrice?: number;
   assignedLawyerId?: number;
   assignedClerkId?: number;
+  /** @nullable */
+  lawyerStatus?: string | null;
 }

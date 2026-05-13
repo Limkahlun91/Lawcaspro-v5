@@ -1,9 +1,14 @@
-import { useQuery } from "@tanstack/react-query";
-import { Bar, BarChart, CartesianGrid, Pie, PieChart, XAxis, YAxis } from "recharts";
+import { Fragment, useMemo, useState } from "react";
+import { useMutation, useQuery, useQueryClient, type UseMutationResult, type UseQueryResult } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
 import { QueryFallback } from "@/components/query-fallback";
 import { apiFetchJson } from "@/lib/api-client";
-import { ChartContainer, ChartTooltip, ChartTooltipContent } from "@/components/ui/chart";
+import { cn } from "@/lib/utils";
+import { downloadFromApi } from "@/lib/download";
+import { formatYmdToDmy, normalizeDateOnlyFromApi } from "@/components/date-only-input";
 
 type DashboardResponse = {
   kpis: { spaSigned: number; loanApproved: number; handover: number };
@@ -20,136 +25,231 @@ type DashboardResponse = {
   }>;
 };
 
+type InventoryItem = {
+  id: number;
+  referenceNo: string;
+  unitNo: string | null;
+  purchaserName: string | null;
+  projectName: string;
+  spaStatus: string;
+  loanStatus: string | null;
+  updatedAt: string;
+  lawyerStatus: string | null;
+  lawyerStatusUpdatedAt: string | null;
+  developerStatus: string | null;
+  developerStatusUpdatedAt: string | null;
+};
+
+type InventoryResponse = { data: InventoryItem[]; total: number; page: number; limit: number };
+
+type DevMessage = {
+  id: string;
+  senderType: "developer" | "staff";
+  senderName: string;
+  messageText: string;
+  attachments: unknown;
+  createdAt: string;
+};
+
+type CaseProgressResponse = {
+  keyDates: Record<string, string | null>;
+};
+
 export default function DeveloperDashboardPage() {
-  const query = useQuery<DashboardResponse>({
+  const queryClient = useQueryClient();
+  const [search, setSearch] = useState("");
+  const [page, setPage] = useState(1);
+  const limit = 50;
+  const [expandedCaseId, setExpandedCaseId] = useState<number | null>(null);
+  const [messageDraft, setMessageDraft] = useState("");
+
+  const qs = useMemo(() => {
+    const sp = new URLSearchParams();
+    sp.set("page", String(page));
+    sp.set("limit", String(limit));
+    if (search.trim()) sp.set("search", search.trim());
+    return sp.toString();
+  }, [page, limit, search]);
+
+  const dashboardQuery = useQuery<DashboardResponse>({
     queryKey: ["developer-dashboard"],
     queryFn: ({ signal }) => apiFetchJson("/developer/dashboard", { signal }),
     retry: false,
   });
 
-  if (query.isLoading) {
-    return <div className="text-slate-500 py-12 text-center text-sm">Loading developer dashboard...</div>;
+  const invQuery = useQuery<InventoryResponse>({
+    queryKey: ["developer-inventory", qs],
+    queryFn: ({ signal }) => apiFetchJson(`/developer/inventory?${qs}`, { signal }),
+    retry: false,
+  });
+
+  const progressQuery = useQuery<CaseProgressResponse>({
+    queryKey: ["developer-case-progress", expandedCaseId],
+    queryFn: ({ signal }) => apiFetchJson(`/developer/cases/${expandedCaseId}/progress`, { signal }),
+    enabled: typeof expandedCaseId === "number" && expandedCaseId > 0,
+    retry: false,
+    staleTime: 30_000,
+  });
+
+  const messagesQuery = useQuery<{ data: DevMessage[] }>({
+    queryKey: ["developer-case-messages", expandedCaseId],
+    queryFn: ({ signal }) => apiFetchJson(`/developer/cases/${expandedCaseId}/messages`, { signal }),
+    enabled: typeof expandedCaseId === "number" && expandedCaseId > 0,
+    retry: false,
+  });
+
+  const sendMutation = useMutation<unknown, unknown, { caseId: number; messageText: string }>({
+    mutationFn: async ({ caseId, messageText }) => {
+      return await apiFetchJson(`/developer/cases/${caseId}/messages`, {
+        method: "POST",
+        body: JSON.stringify({ messageText }),
+      });
+    },
+    onSuccess: async () => {
+      setMessageDraft("");
+      await queryClient.invalidateQueries({ queryKey: ["developer-case-messages", expandedCaseId] });
+    },
+  });
+
+  const isLoading = dashboardQuery.isLoading || invQuery.isLoading;
+  if (isLoading) {
+    return <div className="text-slate-500 py-12 text-center text-sm">Loading developer portal...</div>;
   }
 
-  if (query.isError) {
+  if (dashboardQuery.isError) {
     return (
       <div className="py-12 flex justify-center">
         <div className="max-w-lg w-full px-4">
-          <QueryFallback title="Developer dashboard unavailable" error={query.error} onRetry={() => query.refetch()} />
+          <QueryFallback title="Developer portal unavailable" error={dashboardQuery.error} onRetry={() => dashboardQuery.refetch()} />
+        </div>
+      </div>
+    );
+  }
+  if (invQuery.isError) {
+    return (
+      <div className="py-12 flex justify-center">
+        <div className="max-w-lg w-full px-4">
+          <QueryFallback title="Inventory unavailable" error={invQuery.error} onRetry={() => invQuery.refetch()} />
         </div>
       </div>
     );
   }
 
-  const data = query.data;
-  if (!data) {
-    return <div className="text-slate-500 py-12 text-center text-sm">No dashboard data available.</div>;
-  }
-
-  const stages = Array.isArray(data.stageDistribution) ? data.stageDistribution : [];
-  const stagnant = Array.isArray(data.stagnantCases) ? data.stagnantCases : [];
-  const kpis = data.kpis ?? { spaSigned: 0, loanApproved: 0, handover: 0 };
+  const kpis = dashboardQuery.data?.kpis ?? { spaSigned: 0, loanApproved: 0, handover: 0 };
+  const items = Array.isArray(invQuery.data?.data) ? invQuery.data!.data : [];
+  const totalUnits = Number(invQuery.data?.total ?? 0);
+  const totalPages = Math.max(1, Math.ceil(totalUnits / limit));
 
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="text-3xl font-bold text-slate-900 tracking-tight">Developer Dashboard</h1>
-        <p className="text-slate-500 mt-1">Project portfolio overview</p>
+        <h1 className="text-2xl font-semibold text-slate-900 tracking-tight">Project Overview</h1>
+        <p className="text-slate-500 mt-1 text-sm">Single-page developer portal</p>
       </div>
 
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-        {[
-          { label: "SPA Signed", value: kpis.spaSigned },
-          { label: "Loan Approved", value: kpis.loanApproved },
-          { label: "Handover Completed", value: kpis.handover },
-        ].map((item) => (
-          <Card key={item.label}>
-            <CardContent className="pt-5 pb-4">
-              <div className="text-xs text-slate-500">{item.label}</div>
-              <div className="text-2xl font-bold text-slate-900 leading-tight">{Number(item.value ?? 0)}</div>
-            </CardContent>
-          </Card>
-        ))}
-      </div>
-
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-        <Card>
-          <CardHeader className="pb-2">
-            <CardTitle>Stage Distribution</CardTitle>
-          </CardHeader>
-          <CardContent className="pt-2">
-            <ChartContainer
-              className="h-64 w-full"
-              config={{
-                count: { label: "Cases", color: "hsl(var(--chart-1))" },
-              }}
-            >
-              <PieChart>
-                <ChartTooltip content={<ChartTooltipContent />} />
-                <Pie data={stages} dataKey="count" nameKey="stage" innerRadius={55} outerRadius={85} fill="var(--color-count)" />
-              </PieChart>
-            </ChartContainer>
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader className="pb-2">
-            <CardTitle>Stage Breakdown</CardTitle>
-          </CardHeader>
-          <CardContent className="pt-2">
-            <ChartContainer
-              className="h-64 w-full"
-              config={{
-                count: { label: "Cases", color: "hsl(var(--chart-2))" },
-              }}
-            >
-              <BarChart data={stages} margin={{ left: 12, right: 12 }}>
-                <CartesianGrid vertical={false} />
-                <XAxis dataKey="stage" tickLine={false} axisLine={false} />
-                <YAxis allowDecimals={false} tickLine={false} axisLine={false} width={30} />
-                <ChartTooltip content={<ChartTooltipContent />} />
-                <Bar dataKey="count" fill="var(--color-count)" radius={[6, 6, 0, 0]} />
-              </BarChart>
-            </ChartContainer>
-          </CardContent>
-        </Card>
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+        <KpiCard label="Total Units" value={totalUnits} />
+        <KpiCard label="SPA Signed" value={kpis.spaSigned} />
+        <KpiCard label="Loan Approved" value={kpis.loanApproved} />
+        <KpiCard label="Completed / Handed Over" value={kpis.handover} />
       </div>
 
       <Card>
-        <CardHeader className="pb-2">
-          <CardTitle>Stagnant Cases (No update for 21+ days)</CardTitle>
+        <CardHeader className="pb-3">
+          <div className="flex items-center justify-between gap-3 flex-wrap">
+            <CardTitle>Units</CardTitle>
+            <Button
+              variant="outline"
+              onClick={async () => {
+                const fileName = `developer_inventory_${new Date().toISOString().slice(0, 10)}.xlsx`;
+                await downloadFromApi(`/developer/inventory/export.xlsx?${qs}`, fileName);
+              }}
+            >
+              Export Excel
+            </Button>
+          </div>
         </CardHeader>
-        <CardContent className="pt-2">
-          <div className="overflow-x-auto">
+        <CardContent className="space-y-3">
+          <div className="flex items-center justify-between gap-2 flex-wrap">
+            <Input
+              value={search}
+              onChange={(e) => {
+                setSearch(e.target.value);
+                setPage(1);
+              }}
+              placeholder="Search unit / purchaser / reference..."
+              className="w-full sm:w-96"
+            />
+            <div className="text-sm text-slate-500">Total: {totalUnits}</div>
+          </div>
+
+          <div className="overflow-x-auto rounded-md border border-slate-200 bg-white">
             <table className="w-full text-sm">
-              <thead>
-                <tr className="text-left text-slate-500 border-b">
-                  <th className="py-2 pr-3">Unit No</th>
-                  <th className="py-2 pr-3">Purchaser</th>
-                  <th className="py-2 pr-3">Project</th>
-                  <th className="py-2 pr-3">SPA</th>
-                  <th className="py-2 pr-3">Loan</th>
-                  <th className="py-2 pr-3">Last Updated</th>
+              <thead className="bg-slate-50 border-b border-slate-200">
+                <tr className="text-left text-slate-600">
+                  <th className="py-3 px-4 font-medium">Unit No</th>
+                  <th className="py-3 px-4 font-medium">Purchaser</th>
+                  <th className="py-3 px-4 font-medium">SPA Status</th>
+                  <th className="py-3 px-4 font-medium">Loan Status</th>
                 </tr>
               </thead>
               <tbody>
-                {stagnant.map((c) => (
-                  <tr key={c.id} className="border-b last:border-b-0">
-                    <td className="py-2 pr-3 text-slate-900">{c.unitNo ?? "—"}</td>
-                    <td className="py-2 pr-3 text-slate-900">{c.purchaserName ?? "—"}</td>
-                    <td className="py-2 pr-3 text-slate-700">{c.projectName}</td>
-                    <td className="py-2 pr-3 text-slate-700">{c.spaStatus}</td>
-                    <td className="py-2 pr-3 text-slate-700">{c.loanStatus ?? "—"}</td>
-                    <td className="py-2 pr-3 text-slate-600">{c.updatedAt ? new Date(c.updatedAt).toLocaleDateString() : "—"}</td>
-                  </tr>
-                ))}
-                {stagnant.length === 0 && (
+                {items.map((c) => {
+                  const isOpen = expandedCaseId === c.id;
+                  return (
+                    <Fragment key={c.id}>
+                      <tr
+                        className={cn("border-b border-slate-100 cursor-pointer hover:bg-slate-50/60", isOpen && "bg-slate-50")}
+                        onClick={() => {
+                          setExpandedCaseId((prev) => (prev === c.id ? null : c.id));
+                          setMessageDraft("");
+                        }}
+                      >
+                        <td className="py-3 px-4 text-slate-900 font-medium">{c.unitNo ?? "—"}</td>
+                        <td className="py-3 px-4 text-slate-900">{c.purchaserName ?? "—"}</td>
+                        <td className="py-3 px-4 text-slate-700">{c.spaStatus}</td>
+                        <td className="py-3 px-4 text-slate-700">{c.loanStatus ?? "—"}</td>
+                      </tr>
+
+                      {isOpen ? (
+                        <tr className="border-b border-slate-100">
+                          <td colSpan={4} className="px-4 py-4">
+                            <ExpandedUnitPanel
+                              item={c}
+                              progressQuery={progressQuery}
+                              messagesQuery={messagesQuery}
+                              messageDraft={messageDraft}
+                              setMessageDraft={setMessageDraft}
+                              sendMutation={sendMutation}
+                            />
+                          </td>
+                        </tr>
+                      ) : null}
+                    </Fragment>
+                  );
+                })}
+
+                {items.length === 0 ? (
                   <tr>
-                    <td colSpan={6} className="py-6 text-center text-slate-500">No stagnant cases.</td>
+                    <td colSpan={4} className="py-8 text-center text-slate-500">No units found.</td>
                   </tr>
-                )}
+                ) : null}
               </tbody>
             </table>
+          </div>
+
+          <div className="flex items-center justify-between gap-2">
+            <div className="text-sm text-slate-500">
+              Page {page} / {totalPages}
+            </div>
+            <div className="flex items-center gap-2">
+              <Button variant="outline" size="sm" disabled={page <= 1} onClick={() => setPage((p) => Math.max(1, p - 1))}>
+                Prev
+              </Button>
+              <Button variant="outline" size="sm" disabled={page >= totalPages} onClick={() => setPage((p) => Math.min(totalPages, p + 1))}>
+                Next
+              </Button>
+            </div>
           </div>
         </CardContent>
       </Card>
@@ -157,3 +257,244 @@ export default function DeveloperDashboardPage() {
   );
 }
 
+function KpiCard(props: { label: string; value: number }) {
+  return (
+    <Card>
+      <CardContent className="pt-5 pb-4">
+        <div className="text-xs text-slate-500">{props.label}</div>
+        <div className="text-3xl font-semibold text-slate-900 leading-tight">{Number(props.value ?? 0)}</div>
+      </CardContent>
+    </Card>
+  );
+}
+
+function ExpandedUnitPanel(props: {
+  item: InventoryItem;
+  progressQuery: UseQueryResult<CaseProgressResponse>;
+  messagesQuery: UseQueryResult<{ data: DevMessage[] }>;
+  messageDraft: string;
+  setMessageDraft: (v: string) => void;
+  sendMutation: UseMutationResult<unknown, unknown, { caseId: number; messageText: string }>;
+}) {
+  const { item, progressQuery, messagesQuery, messageDraft, setMessageDraft, sendMutation } = props;
+  const queryClient = useQueryClient();
+  const [editingDevStatus, setEditingDevStatus] = useState(false);
+  const [devStatusDraft, setDevStatusDraft] = useState(() => item.developerStatus ?? "");
+
+  const updateStatusMutation = useMutation<unknown, unknown, { caseId: number; developerStatus: string | null }>({
+    mutationFn: async ({ caseId, developerStatus }) => {
+      return await apiFetchJson(`/developer/cases/${caseId}/status`, {
+        method: "PATCH",
+        body: JSON.stringify({ developerStatus }),
+      });
+    },
+    onSuccess: async () => {
+      setEditingDevStatus(false);
+      await queryClient.invalidateQueries({ queryKey: ["developer-inventory"] });
+    },
+  });
+
+  const formatBillboardTs = (ts: string | null | undefined): string | null => {
+    if (!ts) return null;
+    const d = new Date(ts);
+    if (Number.isNaN(d.getTime())) return null;
+    return d.toLocaleString(undefined, { day: "2-digit", month: "short", year: "numeric", hour: "numeric", minute: "2-digit" });
+  };
+
+  const keyDates = progressQuery.data?.keyDates ?? {};
+  const getYmd = (k: string) => normalizeDateOnlyFromApi(keyDates[k]);
+  const spaSigned = getYmd("spa_signed_date");
+  const loa = getYmd("letter_of_offer_date");
+  const bankLu = getYmd("bank_lu_received_date");
+  const mot = getYmd("mot_stamped_date") || getYmd("mot_registered_date");
+  const completion = getYmd("completion_date");
+
+  const stage = completion ? "done" : mot ? "mot" : (bankLu || loa) ? "loan" : "spa";
+  const stageOrder = ["spa", "loan", "mot", "done"] as const;
+  const stageIndex = stageOrder.indexOf(stage as any);
+
+  const messages = Array.isArray(messagesQuery.data?.data) ? messagesQuery.data!.data : [];
+
+  return (
+    <div className="space-y-4">
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+        <div className="rounded-lg border border-sky-200 bg-sky-50 px-4 py-3">
+          <div className="text-xs font-semibold text-sky-900">Lawyer Status</div>
+          <div className="mt-1 text-sm text-slate-900 whitespace-pre-wrap break-words">
+            {item.lawyerStatus?.trim() ? item.lawyerStatus : "No updates from lawyer."}
+          </div>
+          <div className="mt-1 text-[11px] text-sky-900/70">
+            {formatBillboardTs(item.lawyerStatusUpdatedAt) ?? ""}
+          </div>
+        </div>
+
+        <div className="rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-3">
+          <div className="flex items-center justify-between gap-2">
+            <div className="text-xs font-semibold text-emerald-900">Developer Status</div>
+            <Button variant="outline" size="sm" onClick={() => setEditingDevStatus(true)} disabled={editingDevStatus}>
+              Update Status
+            </Button>
+          </div>
+          {editingDevStatus ? (
+            <div className="mt-2 space-y-2">
+              <Textarea
+                value={devStatusDraft}
+                onChange={(e) => setDevStatusDraft(e.target.value)}
+                placeholder="Write a short status update..."
+                className="min-h-[90px] bg-white"
+              />
+              <div className="flex items-center justify-end gap-2">
+                <Button variant="outline" size="sm" onClick={() => setEditingDevStatus(false)} disabled={updateStatusMutation.isPending}>
+                  Cancel
+                </Button>
+                <Button
+                  size="sm"
+                  onClick={() => {
+                    const t = devStatusDraft.trim();
+                    updateStatusMutation.mutate({ caseId: item.id, developerStatus: t ? t : null });
+                  }}
+                  disabled={updateStatusMutation.isPending}
+                >
+                  Save
+                </Button>
+              </div>
+              {updateStatusMutation.isError ? (
+                <div className="text-xs text-red-700">Failed to update. Please try again.</div>
+              ) : null}
+            </div>
+          ) : (
+            <>
+              <div className="mt-1 text-sm text-slate-900 whitespace-pre-wrap break-words">
+                {item.developerStatus?.trim() ? item.developerStatus : "No updates from developer."}
+              </div>
+              <div className="mt-1 text-[11px] text-emerald-900/70">
+                {formatBillboardTs(item.developerStatusUpdatedAt) ?? ""}
+              </div>
+            </>
+          )}
+        </div>
+      </div>
+
+      <div className="flex items-start justify-between gap-3 flex-wrap">
+        <div className="min-w-0">
+          <div className="text-xs text-slate-500">Reference</div>
+          <div className="text-sm font-medium text-slate-900 truncate">{item.referenceNo}</div>
+          <div className="text-xs text-slate-500 mt-1 truncate">{item.projectName}</div>
+        </div>
+        <div className="text-xs text-slate-500">
+          Last updated: {item.updatedAt ? new Date(item.updatedAt).toLocaleDateString() : "—"}
+        </div>
+      </div>
+
+      <div className="space-y-2">
+        <div className="text-xs font-medium text-slate-600">Progress</div>
+        <div className="flex items-center gap-2">
+          {(["SPA", "Loan", "MOT", "Done"] as const).map((label, idx) => (
+            <div key={label} className="flex items-center gap-2 min-w-0">
+              <div className={cn("h-2.5 w-2.5 rounded-full", idx <= stageIndex ? "bg-slate-900" : "bg-slate-300")} />
+              <div className={cn("text-xs", idx <= stageIndex ? "text-slate-900 font-medium" : "text-slate-500")}>{label}</div>
+              {idx < 3 ? <div className="h-px w-6 bg-slate-200" /> : null}
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+        <KeyDate label="SPA Signed" ymd={spaSigned} />
+        <KeyDate label="LO Date" ymd={loa} />
+        <KeyDate label="MOT" ymd={mot} />
+        <KeyDate label="Completion" ymd={completion} />
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        <div className="space-y-2">
+          <div className="text-xs font-medium text-slate-600">Messages</div>
+          <div className="rounded-md border border-slate-200 bg-white">
+            <div className="max-h-[240px] overflow-auto p-3 space-y-2">
+              {messagesQuery.isLoading ? (
+                <div className="text-sm text-slate-500">Loading messages...</div>
+              ) : messagesQuery.isError ? (
+                <div className="text-sm text-red-600">Failed to load messages.</div>
+              ) : messages.length === 0 ? (
+                <div className="text-sm text-slate-600">No messages yet.</div>
+              ) : (
+                messages.map((m) => {
+                  const isMine = m.senderType === "developer";
+                  return (
+                    <div key={m.id} className={cn("flex", isMine ? "justify-end" : "justify-start")}>
+                      <div className={cn("max-w-[85%] rounded-2xl px-3 py-2", isMine ? "bg-slate-900 text-white" : "bg-white text-slate-900 border border-slate-200")}>
+                        <div className={cn("text-[11px]", isMine ? "text-slate-200" : "text-slate-500")}>
+                          {isMine ? "You" : (m.senderName || "Staff")}
+                        </div>
+                        <div className="text-sm whitespace-pre-wrap break-words">{m.messageText}</div>
+                        <div className={cn("mt-1 text-[10px]", isMine ? "text-slate-300" : "text-slate-400")}>
+                          {m.createdAt ? new Date(m.createdAt).toLocaleString() : ""}
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })
+              )}
+            </div>
+            <div className="border-t border-slate-200 p-3 space-y-2">
+              <Textarea
+                value={messageDraft}
+                onChange={(e) => setMessageDraft(e.target.value)}
+                placeholder="Write a message to the law firm..."
+                className="min-h-[90px]"
+              />
+              <div className="flex items-center justify-between gap-2">
+                <div className="text-[11px] text-slate-500">{Math.min(2000, messageDraft.length)}/2000</div>
+                <Button
+                  onClick={() => {
+                    const t = messageDraft.trim();
+                    if (!t) return;
+                    if (t.length > 2000) return;
+                    sendMutation.mutate({ caseId: item.id, messageText: t });
+                  }}
+                  disabled={sendMutation.isPending || !messageDraft.trim()}
+                >
+                  Send
+                </Button>
+              </div>
+              {sendMutation.isError ? (
+                <div className="text-xs text-red-600">Failed to send. Please try again.</div>
+              ) : null}
+            </div>
+          </div>
+        </div>
+
+        <div className="space-y-2">
+          <div className="text-xs font-medium text-slate-600">Key Dates</div>
+          <div className="rounded-md border border-slate-200 bg-white p-3">
+            {progressQuery.isLoading ? (
+              <div className="text-sm text-slate-500">Loading key dates...</div>
+            ) : progressQuery.isError ? (
+              <div className="text-sm text-red-600">Failed to load key dates.</div>
+            ) : (
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <KeyDate label="SPA Date" ymd={getYmd("spa_date")} />
+                <KeyDate label="SPA Stamped" ymd={getYmd("spa_stamped_date")} />
+                <KeyDate label="LO Stamped" ymd={getYmd("letter_of_offer_stamped_date")} />
+                <KeyDate label="Bank LU Received" ymd={getYmd("bank_lu_received_date")} />
+                <KeyDate label="MOT Signed" ymd={getYmd("mot_signed_date")} />
+                <KeyDate label="MOT Registered" ymd={getYmd("mot_registered_date")} />
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function KeyDate(props: { label: string; ymd: string }) {
+  return (
+    <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2">
+      <div className="text-[11px] text-slate-500">{props.label}</div>
+      <div className={cn("text-sm font-medium", props.ymd ? "text-slate-900" : "text-slate-500")}>
+        {props.ymd ? formatYmdToDmy(props.ymd) : "Missing"}
+      </div>
+    </div>
+  );
+}

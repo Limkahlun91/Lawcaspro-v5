@@ -220,6 +220,8 @@ export default function CaseDetail() {
   const [activeStepId, setActiveStepId] = useState<number | null>(null);
   const [stepNote, setStepNote] = useState("");
   const [shareTrackingOpen, setShareTrackingOpen] = useState(false);
+  const [editingLawyerStatus, setEditingLawyerStatus] = useState(false);
+  const [lawyerStatusDraft, setLawyerStatusDraft] = useState("");
   const [clientReplyDraft, setClientReplyDraft] = useState("");
   const params = new URLSearchParams(searchString);
   const tabFromUrl = params.get("tab") ?? "overview";
@@ -1188,6 +1190,13 @@ export default function CaseDetail() {
     saveStampingMutation.mutate(items);
   };
 
+  const formatBillboardTs = (ts: unknown): string => {
+    if (ts == null || ts === "") return "";
+    const d = new Date(String(ts));
+    if (Number.isNaN(d.getTime())) return "";
+    return d.toLocaleString(undefined, { day: "2-digit", month: "short", year: "numeric", hour: "numeric", minute: "2-digit" });
+  };
+
   return (
     <div className="space-y-6 pb-12">
       <input
@@ -1285,6 +1294,73 @@ export default function CaseDetail() {
               </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+        <div className="rounded-lg border border-sky-200 bg-sky-50 px-4 py-3">
+          <div className="flex items-center justify-between gap-2">
+            <div className="text-xs font-semibold text-sky-900">Lawyer Status</div>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => {
+                setLawyerStatusDraft(String((caseInfo as any)?.lawyerStatus ?? ""));
+                setEditingLawyerStatus(true);
+              }}
+              disabled={editingLawyerStatus || updateCaseMutation.isPending}
+            >
+              Edit
+            </Button>
+          </div>
+          {editingLawyerStatus ? (
+            <div className="mt-2 space-y-2">
+              <Textarea
+                value={lawyerStatusDraft}
+                onChange={(e) => setLawyerStatusDraft(e.target.value)}
+                placeholder="Write a short status update..."
+                className="min-h-[90px] bg-white"
+              />
+              <div className="flex items-center justify-end gap-2">
+                <Button variant="outline" size="sm" onClick={() => setEditingLawyerStatus(false)} disabled={updateCaseMutation.isPending}>
+                  Cancel
+                </Button>
+                <Button
+                  size="sm"
+                  onClick={async () => {
+                    const t = lawyerStatusDraft.trim();
+                    try {
+                      await updateCaseMutation.mutateAsync({ lawyerStatus: t ? t : null });
+                      toast({ title: "Lawyer status updated" });
+                      setEditingLawyerStatus(false);
+                    } catch {}
+                  }}
+                  disabled={updateCaseMutation.isPending}
+                >
+                  Save
+                </Button>
+              </div>
+            </div>
+          ) : (
+            <>
+              <div className="mt-1 text-sm text-slate-900 whitespace-pre-wrap break-words">
+                {String((caseInfo as any)?.lawyerStatus ?? "").trim() ? String((caseInfo as any)?.lawyerStatus ?? "") : "No updates from lawyer."}
+              </div>
+              <div className="mt-1 text-[11px] text-sky-900/70">
+                {formatBillboardTs((caseInfo as any)?.lawyerStatusUpdatedAt)}
+              </div>
+            </>
+          )}
+        </div>
+
+        <div className="rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-3">
+          <div className="text-xs font-semibold text-emerald-900">Developer Status</div>
+          <div className="mt-1 text-sm text-slate-900 whitespace-pre-wrap break-words">
+            {String((caseInfo as any)?.developerStatus ?? "").trim() ? String((caseInfo as any)?.developerStatus ?? "") : "No updates from developer."}
+          </div>
+          <div className="mt-1 text-[11px] text-emerald-900/70">
+            {formatBillboardTs((caseInfo as any)?.developerStatusUpdatedAt)}
+          </div>
         </div>
       </div>
 

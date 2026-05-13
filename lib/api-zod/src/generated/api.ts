@@ -1081,7 +1081,8 @@ export const UpdateCaseBody = zod.object({
   "titleType": zod.string().optional(),
   "spaPrice": zod.number().optional(),
   "assignedLawyerId": zod.number().optional(),
-  "assignedClerkId": zod.number().optional()
+  "assignedClerkId": zod.number().optional(),
+  "lawyerStatus": zod.string().nullish()
 })
 
 export const UpdateCaseResponse = zod.object({

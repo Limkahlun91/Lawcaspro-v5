@@ -2251,6 +2251,8 @@ components:
           type: integer
         assignedClerkId:
           type: integer
+        lawyerStatus:
+          type: ["string", "null"]
 
     # ── Workflow ─────────────────────────────────────────────────────────────
     WorkflowStep:

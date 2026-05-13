@@ -555,6 +555,10 @@ async function formatCaseDetail(r: DbConn, c: typeof casesTable.$inferSelect) {
     trackingToken: c.trackingToken,
     spaPrice: c.spaPrice ? Number(c.spaPrice) : null,
     status: c.status,
+    lawyerStatus: c.lawyerStatus ?? null,
+    lawyerStatusUpdatedAt: toIsoStringSafeOrNull(c.lawyerStatusUpdatedAt),
+    developerStatus: c.developerStatus ?? null,
+    developerStatusUpdatedAt: toIsoStringSafeOrNull(c.developerStatusUpdatedAt),
     caseType: c.caseType,
     parcelNo: c.parcelNo,
     spaDetails,
@@ -3512,6 +3516,10 @@ router.patch("/cases/:caseId", requireAuthHandler, requireFirmUserHandler, requi
   if (parsed.data.purchaseMode !== undefined) updates.purchaseMode = parsed.data.purchaseMode;
   if (parsed.data.titleType !== undefined) updates.titleType = parsed.data.titleType;
   if (parsed.data.spaPrice !== undefined) updates.spaPrice = String(parsed.data.spaPrice);
+  if (parsed.data.lawyerStatus !== undefined) {
+    updates.lawyerStatus = parsed.data.lawyerStatus;
+    updates.lawyerStatusUpdatedAt = new Date();
+  }
 
   const wantsAssignLawyer = parsed.data.assignedLawyerId !== undefined;
   const wantsAssignClerk = (parsed.data as any)?.assignedClerkId !== undefined;

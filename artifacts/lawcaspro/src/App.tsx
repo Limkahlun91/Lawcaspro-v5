@@ -81,7 +81,6 @@ import QuotationDetail from "@/pages/app/quotations/detail";
 
 // Developer Pages
 import DeveloperDashboardPage from "@/pages/developer/dashboard";
-import DeveloperInventoryPage from "@/pages/developer/inventory";
 
 const apiOrigin = getApiOrigin();
 if (apiOrigin) setBaseUrl(apiOrigin);
@@ -315,7 +314,7 @@ function DeveloperRoutes() {
         <DeveloperLayout>
           <Switch>
             <Route path="/developer/dashboard" component={DeveloperDashboardPage} />
-            <Route path="/developer/inventory" component={DeveloperInventoryPage} />
+            <Route path="/developer/inventory" component={() => <Redirect to="/developer/dashboard" />} />
             <Route path="/developer" component={() => <Redirect to="/developer/dashboard" />} />
             <Route path="/developer/*" component={NotFound} />
           </Switch>
