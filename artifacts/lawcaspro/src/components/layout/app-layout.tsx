@@ -71,10 +71,6 @@ export function AppLayout({ children }: { children: ReactNode }) {
         queryFn: () => apiFetchJson("/cases/filter-options"),
       });
       queryClient.prefetchQuery({
-        queryKey: ["cases", "saved-views"],
-        queryFn: () => apiFetchJson("/case-list-views"),
-      });
-      queryClient.prefetchQuery({
         queryKey: getListProjectsQueryKey({ page: 1, limit: 200 }),
         queryFn: () => apiFetchJson("/projects?page=1&limit=200"),
       });
