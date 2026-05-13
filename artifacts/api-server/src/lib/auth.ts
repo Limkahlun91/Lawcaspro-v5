@@ -603,7 +603,7 @@ async function ensureBaselinePermissions(rlsDb: RlsDb | typeof db, roleId: numbe
         ('developers','read'),('developers','create'),('developers','update'),
         ('documents','read'),('documents','export'),
         ('communications','read'),('communications','create'),
-        ('accounting','read'),
+        ('accounting','read'),('accounting','write'),
         ('reports','read'),
         ('settings','read'),
         ('users','read')

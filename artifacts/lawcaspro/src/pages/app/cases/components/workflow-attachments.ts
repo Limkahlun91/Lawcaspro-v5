@@ -23,11 +23,11 @@ export const WORKFLOW_ATTACHMENT_ITEMS: WorkflowAttachmentConfigItem[] = [
   { docKey: "letter_disclaimer", dateKey: "letter_disclaimer_dated", label: "Letter Disclaimer" },
 ];
 
-export const WORKFLOW_ATTACHMENT_ACCEPT = ".pdf,.doc,.docx,.jpg,.jpeg,.png";
+export const WORKFLOW_ATTACHMENT_ACCEPT = "application/pdf,image/jpeg,image/png";
 
 export function isAllowedWorkflowAttachmentFileName(name: string): boolean {
   const idx = name.lastIndexOf(".");
   const ext = idx >= 0 ? name.slice(idx + 1).toLowerCase() : "";
-  return ext === "pdf" || ext === "doc" || ext === "docx" || ext === "jpg" || ext === "jpeg" || ext === "png";
+  return ext === "pdf" || ext === "jpg" || ext === "jpeg" || ext === "png";
 }
 

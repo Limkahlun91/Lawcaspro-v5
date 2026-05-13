@@ -15,6 +15,7 @@ import { QueryFallback } from "@/components/query-fallback";
 import { toastError } from "@/lib/toast-error";
 import { apiFetchBlob, apiFetchJson } from "@/lib/api-client";
 import { downloadBlob } from "@/lib/download";
+import { validateUploadFile } from "@/lib/upload-validation";
 
 interface FirmFolder {
   id: number;
@@ -42,10 +43,12 @@ interface FirmDocument {
 }
 
 const ACCEPTED_EXTENSIONS = [
-  ".docx", ".doc", ".pdf", ".xlsx", ".xls", ".csv", ".txt", ".jpg", ".jpeg", ".png",
+  ".pdf", ".jpg", ".jpeg", ".png",
 ];
 
 async function uploadFile(file: File): Promise<{ objectPath: string }> {
+  const v = validateUploadFile(file);
+  if (!v.ok) throw new Error(v.message);
   const formData = new FormData();
   formData.append("file", file);
   return await apiFetchJson("/storage/upload", { method: "POST", body: formData });

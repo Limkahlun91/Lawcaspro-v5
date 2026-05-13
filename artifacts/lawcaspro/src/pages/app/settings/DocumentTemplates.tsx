@@ -22,6 +22,7 @@ import { apiFetchBlob, apiFetchJson } from "@/lib/api-client";
 import { downloadBlob } from "@/lib/download";
 import { toastError } from "@/lib/toast-error";
 import { useAuth } from "@/lib/auth-context";
+import { DOCX_MIME_TYPES, validateUploadFile } from "@/lib/upload-validation";
 import { hasPermission } from "@/lib/permissions";
 import { ensureArray, listItems } from "@/lib/list-items";
 import { throwIfApiFailure, getApiFailureCodeFromError } from "@/lib/api-failure";
@@ -361,9 +362,14 @@ export default function DocumentTemplates() {
       let fileName: string | undefined;
       let mimeType: string | undefined;
       if (payload.file) {
+        const v = validateUploadFile(payload.file, { allowedMimeTypes: DOCX_MIME_TYPES });
+        if (!v.ok) throw new Error(v.message);
+        if (!user?.firmId) throw new Error("Missing firm context");
+        const safeName = payload.file.name.replace(/[^a-zA-Z0-9._-]/g, "_");
+        const requestedObjectPath = `/objects/templates/firms/${user.firmId}/document-templates/versions/${crypto.randomUUID()}-${safeName}`;
         const formData = new FormData();
         formData.append("file", payload.file);
-        const up = await apiFetchJson<{ objectPath: string }>("/storage/upload", { method: "POST", body: formData });
+        const up = await apiFetchJson<{ objectPath: string }>(`/storage/upload?objectPath=${encodeURIComponent(requestedObjectPath)}`, { method: "POST", body: formData });
         objectPath = up.objectPath;
         fileName = payload.file.name;
         mimeType = payload.file.type || "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
@@ -442,9 +448,14 @@ export default function DocumentTemplates() {
     if (!selectedFile || !templateName) return;
     setIsUploading(true);
     try {
+      const v = validateUploadFile(selectedFile, { allowedMimeTypes: DOCX_MIME_TYPES });
+      if (!v.ok) throw new Error(v.message);
+      if (!user?.firmId) throw new Error("Missing firm context");
+      const safeName = selectedFile.name.replace(/[^a-zA-Z0-9._-]/g, "_");
+      const requestedObjectPath = `/objects/templates/firms/${user.firmId}/document-templates/${crypto.randomUUID()}-${safeName}`;
       const formData = new FormData();
       formData.append("file", selectedFile);
-      const { objectPath } = await apiFetchJson<{ objectPath: string }>("/storage/upload", { method: "POST", body: formData });
+      const { objectPath } = await apiFetchJson<{ objectPath: string }>(`/storage/upload?objectPath=${encodeURIComponent(requestedObjectPath)}`, { method: "POST", body: formData });
 
       await apiFetchJson("/document-templates", {
         method: "POST",

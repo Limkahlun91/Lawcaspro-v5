@@ -36,7 +36,33 @@ const expressRouter = express.Router();
 const router = expressRouter as unknown as RouterInternalLike;
 const objectStorageService = new ObjectStorageService();
 const supabaseStorage = new SupabaseStorageService();
-const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 * 1024 * 1024 } });
+const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
+const DEFAULT_ALLOWED_MIME_TYPES = new Set([
+  "application/pdf",
+  "image/jpeg",
+  "image/png",
+]);
+const TEMPLATE_ALLOWED_MIME_TYPES = new Set([
+  ...DEFAULT_ALLOWED_MIME_TYPES,
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+]);
+
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: MAX_UPLOAD_BYTES },
+  fileFilter: (req, file, cb) => {
+    const requestedObjectPath = queryOne((req as any).query, "objectPath");
+    const allowTemplateTypes = typeof requestedObjectPath === "string" && requestedObjectPath.startsWith("/objects/templates/");
+    const allowed = allowTemplateTypes ? TEMPLATE_ALLOWED_MIME_TYPES : DEFAULT_ALLOWED_MIME_TYPES;
+    if (!allowed.has(file.mimetype)) {
+      const err = new Error("UNSUPPORTED_FILE_TYPE");
+      (err as any).code = "UNSUPPORTED_FILE_TYPE";
+      cb(err);
+      return;
+    }
+    cb(null, true);
+  },
+});
 
 router.post("/storage/uploads/request-url", requireAuth, async (req: AuthRequest, res: ExpressResponse) => {
   const parsed = RequestUploadUrlBody.safeParse(req.body);
@@ -50,6 +76,15 @@ router.post("/storage/uploads/request-url", requireAuth, async (req: AuthRequest
 
   try {
     supabaseStorage.assertConfigured();
+    const { size, contentType } = parsed.data as { size?: number; contentType?: string };
+    if (typeof size === "number" && size > MAX_UPLOAD_BYTES) {
+      sendError(res as any, new ApiError({ status: 413, code: "FILE_TOO_LARGE", message: "File size must be under 10MB", retryable: false }));
+      return;
+    }
+    if (typeof contentType === "string" && contentType && !DEFAULT_ALLOWED_MIME_TYPES.has(contentType)) {
+      sendError(res as any, new ApiError({ status: 415, code: "UNSUPPORTED_MEDIA_TYPE", message: "Only PDF, JPG, or PNG files are allowed", retryable: false }));
+      return;
+    }
     const { randomUUID } = await import("crypto");
     const objectPath = `/objects/uploads/${randomUUID()}`;
     const host = req.get("host") || "";
@@ -144,7 +179,24 @@ router.get("/storage/objects/*path", requireAuth, requireFounder, async (req: Au
   }
 });
 
-router.post("/storage/upload", requireAuth, upload.single("file"), async (req: AuthRequest, res: ExpressResponse) => {
+router.post(
+  "/storage/upload",
+  requireAuth,
+  (req: AuthRequest, res: ExpressResponse, next: any) => {
+    upload.single("file")(req as any, res as any, (err: any) => {
+      if (!err) return next();
+      if (err instanceof multer.MulterError && err.code === "LIMIT_FILE_SIZE") {
+        sendError(res as any, new ApiError({ status: 413, code: "FILE_TOO_LARGE", message: "File size must be under 10MB", retryable: false }));
+        return;
+      }
+      if (err && typeof err === "object" && (err as any).code === "UNSUPPORTED_FILE_TYPE") {
+        sendError(res as any, new ApiError({ status: 415, code: "UNSUPPORTED_MEDIA_TYPE", message: "Only PDF, JPG, or PNG files are allowed", retryable: false }));
+        return;
+      }
+      sendError(res as any, new ApiError({ status: 400, code: "INVALID_UPLOAD", message: "Invalid upload", retryable: false }));
+    });
+  },
+  async (req: AuthRequest, res: ExpressResponse) => {
   try {
     if (!req.file) {
       sendError(res as any, new ApiError({ status: 400, code: "MISSING_REQUIRED_FIELD", message: "No file provided", retryable: false }));

@@ -302,7 +302,7 @@ function fillMissingScalarsForRender(placeholders: string[], input: Record<strin
 
 function newGeneratedDocObjectPath(firmId: number, caseId: number, extension: string): string {
   const ext = extension.replace(/^\./, "").toLowerCase() || "docx";
-  return `/objects/cases/${firmId}/case-${caseId}/generated/${randomUUID()}.${ext}`;
+  return `/objects/temp-generated/${firmId}/case-${caseId}/generated/${randomUUID()}.${ext}`;
 }
 
 function isLoanStampingItemKey(v: string): v is LoanStampingItemKey {
@@ -376,12 +376,7 @@ function fmtRM(val: unknown): string {
 
 const FIRM_DOCUMENT_ALLOWED_EXTENSIONS = new Set([
   "docx",
-  "doc",
   "pdf",
-  "xlsx",
-  "xls",
-  "csv",
-  "txt",
   "jpg",
   "jpeg",
   "png",
@@ -1588,6 +1583,15 @@ router.post("/document-templates", requireAuth, requireFirmUser, requirePermissi
     res.status(400).json({ error: "name, objectPath, and fileName are required" });
     return;
   }
+  const maxBytes = 10 * 1024 * 1024;
+  if (typeof fileSize !== "number" || !Number.isFinite(fileSize) || fileSize <= 0 || Math.floor(fileSize) > maxBytes) {
+    res.status(413).json({ error: "File size must be under 10MB", code: "FILE_TOO_LARGE" });
+    return;
+  }
+  if (!String(objectPath).startsWith("/objects/")) {
+    res.status(400).json({ error: "Invalid objectPath" });
+    return;
+  }
 
   const folderIdNum = typeof folderId === "number" ? folderId : null;
   const kindVal = typeof kind === "string" ? kind : "template";
@@ -1616,6 +1620,10 @@ router.post("/document-templates", requireAuth, requireFirmUser, requirePermissi
     res.status(400).json({ error: "Template must be a .docx file", code: "TEMPLATE_MUST_BE_DOCX" });
     return;
   }
+  if (ext === "docx" && !String(objectPath).startsWith(`/objects/templates/firms/${req.firmId!}/`)) {
+    res.status(400).json({ error: "Invalid objectPath" });
+    return;
+  }
   const isTemplateCapable = effectiveKind === "template" && ext === "docx";
 
   const rows = await queryRows(
@@ -1635,7 +1643,7 @@ router.post("/document-templates", requireAuth, requireFirmUser, requirePermissi
             kind = ${effectiveKind},
             mime_type = ${mimeType ?? null},
             extension = ${ext || null},
-            file_size = ${typeof fileSize === "number" ? fileSize : null},
+            file_size = ${Math.floor(fileSize)},
             is_template_capable = ${isTemplateCapable},
             updated_at = now()
         WHERE id = ${createdId ?? 0} AND firm_id = ${req.firmId!}
@@ -3971,7 +3979,8 @@ router.get("/cases/:caseId/documents/checklist", requireAuth, requireFirmUser, r
   });
 });
 
-const CHECKLIST_ALLOWED_ATTACHMENT_EXTENSIONS = new Set<string>(["pdf", "doc", "docx", "jpg", "jpeg", "png"]);
+const CHECKLIST_ALLOWED_ATTACHMENT_EXTENSIONS = new Set<string>(["pdf", "jpg", "jpeg", "png"]);
+const CHECKLIST_MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024;
 
 function parseChecklistKeyTarget(checklistKey: string): { templateId?: number; platformDocumentId?: number } {
   const k = checklistKey.trim();
@@ -4341,13 +4350,17 @@ router.post("/cases/:caseId/documents/checklist/items/:checklistKey/upload", req
     res.status(400).json({ error: "Missing objectPath or fileName" });
     return;
   }
+  if (fileSize === null || fileSize > CHECKLIST_MAX_ATTACHMENT_BYTES) {
+    res.status(413).json({ error: "File size must be under 10MB", code: "FILE_TOO_LARGE" });
+    return;
+  }
   if (!objectPath.startsWith(`/objects/cases/${req.firmId!}/case-${caseId}/documents/`)) {
     res.status(400).json({ error: "Invalid objectPath" });
     return;
   }
   const ext = fileExtensionFromName(fileName);
   if (!ext || !CHECKLIST_ALLOWED_ATTACHMENT_EXTENSIONS.has(ext)) {
-    res.status(422).json({ error: "Unsupported file type. Allowed: pdf, doc, docx, jpg, jpeg, png" });
+    res.status(422).json({ error: "Unsupported file type. Allowed: pdf, jpg, jpeg, png" });
     return;
   }
   const { templateId, platformDocumentId } = parseChecklistKeyTarget(checklistKey);
@@ -5037,6 +5050,7 @@ async function generateFirmDocument({
     fileBytes: outputBytes,
     contentType: outputContentType,
   });
+  const outputSize = outputBytes.length;
   const docName = documentName ?? String((template as any).name ?? "Generated document");
   const templateCode = String((template as any).document_type ?? "DOC");
   const sequence = await nextCaseDocumentSequence(r, firmId, caseId);
@@ -5071,8 +5085,8 @@ async function generateFirmDocument({
   };
   const templateSnapshotUpdatedAt = (version as any)?.published_at ?? (template as any).updated_at ?? null;
   const docRows = await queryRows(r, sql`
-    INSERT INTO case_documents (case_id, firm_id, template_id, template_source, template_snapshot_name, template_snapshot_updated_at, name, document_type, status, object_path, file_name, generated_by, clause_snapshot, naming_snapshot)
-    VALUES (${caseId}, ${firmId}, ${templateId}, 'firm', ${String((template as any).name ?? "")}, ${templateSnapshotUpdatedAt as any}, ${docName}, ${templateDocType}, 'generated', ${normalizedPath}, ${downloadName}, ${actorId}, ${clauseSnapshot as any}, ${namingSnapshot as any})
+    INSERT INTO case_documents (case_id, firm_id, template_id, template_source, template_snapshot_name, template_snapshot_updated_at, name, document_type, status, object_path, file_name, file_size, is_uploaded, generated_by, generated_at, clause_snapshot, naming_snapshot)
+    VALUES (${caseId}, ${firmId}, ${templateId}, 'firm', ${String((template as any).name ?? "")}, ${templateSnapshotUpdatedAt as any}, ${docName}, ${templateDocType}, 'generated', ${normalizedPath}, ${downloadName}, ${outputSize}, false, ${actorId}, now(), ${clauseSnapshot as any}, ${namingSnapshot as any})
     RETURNING *
   `);
   const created = docRows[0];
@@ -5540,6 +5554,7 @@ async function generateMasterDocument({
     fileBytes: buffer,
     contentType: outputMime,
   });
+  const outputSize = buffer.length;
   const docName = documentName ?? String((masterDoc as any).name ?? "Generated document");
   const templateCode = String((masterDoc as any).category ?? (masterDoc as any).name ?? "DOC");
   const sequence = await nextCaseDocumentSequence(r, firmId, caseId);
@@ -5573,8 +5588,8 @@ async function generateMasterDocument({
     collisionSuffixApplied: uniq.collisionSuffixApplied,
   };
   const savedRows = await queryRows(r, sql`
-    INSERT INTO case_documents (case_id, firm_id, template_source, platform_document_id, template_snapshot_name, template_snapshot_updated_at, name, document_type, status, object_path, file_name, generated_by, clause_snapshot, naming_snapshot)
-    VALUES (${caseId}, ${firmId}, 'master', ${masterDocId}, ${String((masterDoc as any).name ?? "")}, ${(masterDoc as any).created_at ?? null}, ${docName}, ${(masterDoc as any).category ?? "other"}, 'generated', ${normalizedPath}, ${fileName}, ${actorId}, ${clauseSnapshot as any}, ${namingSnapshot as any})
+    INSERT INTO case_documents (case_id, firm_id, template_source, platform_document_id, template_snapshot_name, template_snapshot_updated_at, name, document_type, status, object_path, file_name, file_size, is_uploaded, generated_by, generated_at, clause_snapshot, naming_snapshot)
+    VALUES (${caseId}, ${firmId}, 'master', ${masterDocId}, ${String((masterDoc as any).name ?? "")}, ${(masterDoc as any).created_at ?? null}, ${docName}, ${(masterDoc as any).category ?? "other"}, 'generated', ${normalizedPath}, ${fileName}, ${outputSize}, false, ${actorId}, now(), ${clauseSnapshot as any}, ${namingSnapshot as any})
     RETURNING *
   `);
   const created = savedRows[0];
@@ -5814,7 +5829,7 @@ router.post("/cases/:caseId/documents/batch-export", requireAuth, requireFirmUse
       originalFileNameOrExt: "zip",
       fallbackExt: "zip",
     }).fileName;
-    const objectPath = `/objects/cases/${req.firmId!}/case-${caseId}/batch-exports/${jobId}.zip`;
+    const objectPath = `/objects/temp-generated/${req.firmId!}/case-${caseId}/batch-exports/${jobId}.zip`;
     await supabaseStorage.uploadPrivateObject({ objectPath, fileBytes: zipBytes, contentType: "application/zip" });
 
     await queryRows(r, sql`
@@ -7568,12 +7583,13 @@ router.post("/cases/:caseId/documents/print", requireAuth, requireFirmUser, requ
       fileBytes: outBytes,
       contentType: outContentType,
     });
+    const outSize = outBytes.length;
     const nameToUse = documentName || `${cfg.label} - ${context.reference_no}`;
     const fileName = `${nameToUse.replace(/[^a-zA-Z0-9 \-_]/g, "_")}.${outExt}`;
 
     const docRows = await queryRows(r, sql`
-      INSERT INTO case_documents (case_id, firm_id, template_id, name, document_type, status, object_path, file_name, generated_by)
-      VALUES (${caseId}, ${req.firmId!}, ${(template as any).id as number}, ${nameToUse}, ${cfg.documentType}, 'generated', ${normalizedPath}, ${fileName}, ${req.userId!})
+      INSERT INTO case_documents (case_id, firm_id, template_id, name, document_type, status, object_path, file_name, file_size, is_uploaded, generated_by, generated_at)
+      VALUES (${caseId}, ${req.firmId!}, ${(template as any).id as number}, ${nameToUse}, ${cfg.documentType}, 'generated', ${normalizedPath}, ${fileName}, ${outSize}, false, ${req.userId!}, now())
       RETURNING *`
     );
 
@@ -7916,6 +7932,21 @@ router.post("/cases/:caseId/documents/upload", requireAuth, requireFirmUser, req
 
   if (!name || !objectPath || !fileName) {
     res.status(400).json({ error: "name, objectPath, and fileName are required" });
+    return;
+  }
+  const maxBytes = 10 * 1024 * 1024;
+  if (typeof fileSize === "number" && fileSize > maxBytes) {
+    res.status(413).json({ error: "File size must be under 10MB", code: "FILE_TOO_LARGE" });
+    return;
+  }
+  const lowerName = String(fileName || "").toLowerCase();
+  const allowedExt = lowerName.endsWith(".pdf") || lowerName.endsWith(".jpg") || lowerName.endsWith(".jpeg") || lowerName.endsWith(".png");
+  if (!allowedExt) {
+    res.status(415).json({ error: "Only PDF, JPG, or PNG files are allowed", code: "UNSUPPORTED_MEDIA_TYPE" });
+    return;
+  }
+  if (!objectPath.startsWith(`/objects/cases/${req.firmId!}/`)) {
+    res.status(403).json({ error: "Invalid objectPath", code: "FORBIDDEN" });
     return;
   }
 

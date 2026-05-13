@@ -884,6 +884,20 @@ routerInternal.post("/platform/documents", requireAuth, requireFounder, async (r
     res.status(400).json({ error: "Missing required fields" });
     return;
   }
+  const maxBytes = 10 * 1024 * 1024;
+  const allowedMimeTypes = new Set<string>(["application/pdf", "image/jpeg", "image/png"]);
+  if (fileSize === undefined || fileSize > maxBytes) {
+    res.status(413).json({ error: "File size must be under 10MB", code: "FILE_TOO_LARGE" });
+    return;
+  }
+  if (!allowedMimeTypes.has(fileType)) {
+    res.status(415).json({ error: "Only PDF, JPG, or PNG files are allowed", code: "UNSUPPORTED_MEDIA_TYPE" });
+    return;
+  }
+  if (!objectPath.startsWith("/objects/uploads/")) {
+    res.status(400).json({ error: "Invalid objectPath" });
+    return;
+  }
   const doc = await withAuthSafeDb(async (authDb) => {
     const [doc] = await authDb
       .insert(platformDocumentsTable)

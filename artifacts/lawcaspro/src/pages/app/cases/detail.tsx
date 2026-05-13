@@ -34,6 +34,7 @@ import { downloadBlob } from "@/lib/download";
 import { printWordBlob } from "@/lib/documents/BrowserPrinter";
 import { useAuth } from "@/lib/auth-context";
 import { hasPermission } from "@/lib/permissions";
+import { DEFAULT_ALLOWED_MIME_TYPES, validateUploadFile } from "@/lib/upload-validation";
 import { WORKFLOW_ATTACHMENT_ACCEPT, WORKFLOW_ATTACHMENT_ITEMS, isAllowedWorkflowAttachmentFileName, type WorkflowAttachmentDocKey, type WorkflowAttachmentDateKey } from "./components/workflow-attachments";
 
 import { getListCasesQueryKey } from "@workspace/api-client-react";
@@ -708,8 +709,9 @@ export default function CaseDetail() {
       toast({ title: "Permission denied", description: "You do not have permission to upload documents.", variant: "destructive" });
       return;
     }
-    if (!isAllowedWorkflowAttachmentFileName(file.name)) {
-      toast({ title: "Unsupported file type", description: "Allowed: pdf, doc, docx, jpg, jpeg, png", variant: "destructive" });
+    const v = validateUploadFile(file, { allowedMimeTypes: DEFAULT_ALLOWED_MIME_TYPES });
+    if (!v.ok) {
+      toast({ title: "Invalid file", description: v.message, variant: "destructive" });
       return;
     }
     const dateYmd = keyDatesDraft[ref.dateKey] || "";
@@ -822,8 +824,9 @@ export default function CaseDetail() {
       toast({ title: "Permission denied", description: "You do not have permission to upload documents.", variant: "destructive" });
       return;
     }
-    if (!isAllowedWorkflowAttachmentFileName(file.name)) {
-      toast({ title: "Unsupported file type", description: "Allowed: pdf, doc, docx, jpg, jpeg, png", variant: "destructive" });
+    const v = validateUploadFile(file, { allowedMimeTypes: DEFAULT_ALLOWED_MIME_TYPES });
+    if (!v.ok) {
+      toast({ title: "Invalid file", description: v.message, variant: "destructive" });
       return;
     }
     if (!user?.firmId) {

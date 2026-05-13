@@ -1,5 +1,6 @@
 export * from "./generated/api";
 export * from "./storage";
+export * from "./paymentVouchers";
 export type * as ApiTypes from "./generated/types";
 
 export {

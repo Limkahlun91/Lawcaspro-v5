@@ -13,6 +13,8 @@ import { useToast } from "@/hooks/use-toast";
 import { Download, Pencil, Trash2, Upload } from "lucide-react";
 import { toastError } from "@/lib/toast-error";
 import { apiFetchBlob, apiFetchJson } from "@/lib/api-client";
+import { useAuth } from "@/lib/auth-context";
+import { DOCX_MIME_TYPES, validateUploadFile } from "@/lib/upload-validation";
 
 interface FirmLetterhead {
   id: number;
@@ -31,15 +33,21 @@ interface FirmLetterhead {
   created_at: string;
 }
 
-async function uploadDocx(file: File): Promise<{ objectPath: string }> {
+async function uploadDocx(file: File, firmId: number): Promise<{ objectPath: string }> {
+  const v = validateUploadFile(file, { allowedMimeTypes: DOCX_MIME_TYPES });
+  if (!v.ok) throw new Error(v.message);
+  const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, "_");
+  const objectPath = `/objects/templates/firms/${firmId}/letterheads/${crypto.randomUUID()}-${safeName}`;
   const formData = new FormData();
   formData.append("file", file);
-  return await apiFetchJson("/storage/upload", { method: "POST", body: formData });
+  return await apiFetchJson(`/storage/upload?objectPath=${encodeURIComponent(objectPath)}`, { method: "POST", body: formData });
 }
 
 export default function FirmLetterHead() {
   const { toast } = useToast();
   const qc = useQueryClient();
+  const { user } = useAuth();
+  const firmId = user?.firmId;
   const firstRef = useRef<HTMLInputElement>(null);
   const contRef = useRef<HTMLInputElement>(null);
   const footerRef = useRef<HTMLInputElement>(null);
@@ -102,6 +110,7 @@ export default function FirmLetterHead() {
     if (!editName.trim()) return;
     setIsSaving(true);
     try {
+      if (!firmId) throw new Error("Missing firm context");
       const patch: Record<string, unknown> = {
         name: editName.trim(),
         description: editDescription.trim() ? editDescription.trim() : null,
@@ -110,7 +119,7 @@ export default function FirmLetterHead() {
       };
 
       if (replaceFirstFile) {
-        const up = await uploadDocx(replaceFirstFile);
+        const up = await uploadDocx(replaceFirstFile, firmId);
         patch.firstPageObjectPath = up.objectPath;
         patch.firstPageFileName = replaceFirstFile.name;
         patch.firstPageMimeType = replaceFirstFile.type || "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
@@ -118,7 +127,7 @@ export default function FirmLetterHead() {
         patch.firstPageFileSize = replaceFirstFile.size;
       }
       if (replaceContFile) {
-        const up = await uploadDocx(replaceContFile);
+        const up = await uploadDocx(replaceContFile, firmId);
         patch.continuationHeaderObjectPath = up.objectPath;
         patch.continuationHeaderFileName = replaceContFile.name;
         patch.continuationHeaderMimeType = replaceContFile.type || "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
@@ -131,7 +140,7 @@ export default function FirmLetterHead() {
         patch.footerMimeType = null;
         patch.footerExtension = null;
       } else if (replaceFooterFile) {
-        const up = await uploadDocx(replaceFooterFile);
+        const up = await uploadDocx(replaceFooterFile, firmId);
         patch.footerObjectPath = up.objectPath;
         patch.footerFileName = replaceFooterFile.name;
         patch.footerMimeType = replaceFooterFile.type || "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
@@ -161,9 +170,10 @@ export default function FirmLetterHead() {
     if (!name.trim() || !firstFile || !contFile) return;
     setIsCreating(true);
     try {
-      const firstUp = await uploadDocx(firstFile);
-      const contUp = await uploadDocx(contFile);
-      const footerUp = footerFile ? await uploadDocx(footerFile) : null;
+      if (!firmId) throw new Error("Missing firm context");
+      const firstUp = await uploadDocx(firstFile, firmId);
+      const contUp = await uploadDocx(contFile, firmId);
+      const footerUp = footerFile ? await uploadDocx(footerFile, firmId) : null;
 
       await apiFetchJson("/firm-letterheads", {
         method: "POST",

@@ -1,6 +1,7 @@
 import express, { type Response, type Router as ExpressRouter } from "express";
 import { eq, and, desc } from "drizzle-orm";
-import { db, ledgerEntriesTable, paymentVoucherItemsTable, paymentVouchersTable, sql } from "@workspace/db";
+import { db, ledgerEntriesTable, paymentVoucherItemsTable, paymentVouchersTable, rolesTable, sql } from "@workspace/db";
+import { CreatePaymentVoucherBody, PaymentVoucherTransitionBody } from "@workspace/api-zod";
 import { requireAuth, requireFirmUser, requirePermission, requireReAuth, type AuthRequest, writeAuditLog } from "../lib/auth.js";
 import { sensitiveRateLimiter } from "../lib/rate-limit.js";
 
@@ -14,15 +15,26 @@ type RouterInternalLike = {
 const expressRouter = express.Router();
 const router = expressRouter as unknown as RouterInternalLike;
 
-const STATUS_FLOW: Record<string, string[]> = {
-  draft: ["prepared"],
-  prepared: ["lawyer_approved", "draft"],
-  lawyer_approved: ["partner_approved", "prepared"],
-  partner_approved: ["submitted", "lawyer_approved"],
-  submitted: ["paid", "returned"],
-  returned: ["prepared"],
-  paid: ["locked"],
-};
+type DbConn = typeof db | NonNullable<AuthRequest["rlsDb"]>;
+const rdb = (req: AuthRequest): DbConn => req.rlsDb ?? db;
+
+async function getRoleName(req: AuthRequest): Promise<string> {
+  if (!req.firmId || !req.roleId) return "";
+  const r = rdb(req);
+  const rows = await r
+    .select({ name: rolesTable.name })
+    .from(rolesTable)
+    .where(and(eq(rolesTable.id, req.roleId), eq(rolesTable.firmId, req.firmId)))
+    .limit(1);
+  return typeof rows?.[0]?.name === "string" ? rows[0].name : "";
+}
+
+function classifyRole(roleName: string): "partner" | "lawyer" | "clerk" | "account" {
+  if (roleName === "Partner") return "partner";
+  if (roleName === "Manager" || roleName === "Senior Lawyer" || roleName === "Lawyer") return "lawyer";
+  if (roleName === "Account" || roleName === "Accounts" || roleName === "Finance" || roleName === "Accountant") return "account";
+  return "clerk";
+}
 
 async function nextVoucherNo(firmId: number): Promise<string> {
   const [row] = await db.select({ c: sql<number>`COUNT(*)` }).from(paymentVouchersTable).where(eq(paymentVouchersTable.firmId, firmId));
@@ -38,7 +50,8 @@ router.get("/payment-vouchers", requireAuth, requireFirmUser, requirePermission(
   const conds = [eq(paymentVouchersTable.firmId, req.firmId!)];
   if (caseId) conds.push(eq(paymentVouchersTable.caseId, parseInt(caseId, 10)));
   if (status) conds.push(eq(paymentVouchersTable.status, status));
-  const rows = await db.select().from(paymentVouchersTable).where(and(...conds)).orderBy(desc(paymentVouchersTable.createdAt));
+  const r = rdb(req);
+  const rows = await r.select().from(paymentVouchersTable).where(and(...conds)).orderBy(desc(paymentVouchersTable.createdAt));
   res.json(rows);
 });
 
@@ -47,56 +60,70 @@ router.get("/payment-vouchers/:id", requireAuth, requireFirmUser, requirePermiss
   const idStr = one(req.params.id);
   const id = idStr ? parseInt(idStr) : NaN;
   if (isNaN(id)) { res.status(400).json({ error: "Invalid voucher ID" }); return; }
-  const [pv] = await db.select().from(paymentVouchersTable).where(and(eq(paymentVouchersTable.id, id), eq(paymentVouchersTable.firmId, req.firmId!)));
+  const r = rdb(req);
+  const [pv] = await r.select().from(paymentVouchersTable).where(and(eq(paymentVouchersTable.id, id), eq(paymentVouchersTable.firmId, req.firmId!)));
   if (!pv) { res.status(404).json({ error: "Payment voucher not found" }); return; }
-  const items = await db.select().from(paymentVoucherItemsTable).where(eq(paymentVoucherItemsTable.voucherId, id)).orderBy(paymentVoucherItemsTable.sortOrder);
+  const items = await r.select().from(paymentVoucherItemsTable).where(eq(paymentVoucherItemsTable.voucherId, id)).orderBy(paymentVoucherItemsTable.sortOrder);
   res.json({ ...pv, items });
 });
 
 // Create
 router.post("/payment-vouchers", sensitiveRateLimiter, requireAuth, requireFirmUser, requirePermission("accounting", "write"), async (req: AuthRequest, res: Response): Promise<void> => {
-  const { caseId, payeeName, payeeBank, payeeAccountNo, paymentMethod, bankAccountId,
-    accountType, amount, purpose, notes, items } = req.body;
-  if (!payeeName || !amount || !purpose) { res.status(400).json({ error: "payeeName, amount, purpose required" }); return; }
+  const parsed = CreatePaymentVoucherBody.safeParse(req.body);
+  if (!parsed.success) { res.status(400).json({ error: parsed.error.message }); return; }
+  const {
+    caseId,
+    payeeName,
+    payeeBank,
+    payeeAccountNo,
+    paymentMethod,
+    bankAccountId,
+    accountType,
+    amount,
+    purpose,
+    notes,
+    items,
+    fundStatus,
+  } = parsed.data;
 
-  const amountNum = Number(amount);
-  if (!Number.isFinite(amountNum) || amountNum <= 0) { res.status(400).json({ error: "Invalid amount" }); return; }
-  const amountStr = amountNum.toFixed(2);
-  const caseIdNum = caseId ? Number(caseId) : null;
-  if (caseIdNum !== null && (!Number.isFinite(caseIdNum) || caseIdNum <= 0)) { res.status(400).json({ error: "Invalid caseId" }); return; }
-  const bankAccountIdNum = bankAccountId ? Number(bankAccountId) : null;
-  if (bankAccountIdNum !== null && (!Number.isFinite(bankAccountIdNum) || bankAccountIdNum <= 0)) { res.status(400).json({ error: "Invalid bankAccountId" }); return; }
+  const roleName = await getRoleName(req);
+  const roleKind = classifyRole(roleName);
+  const initialStatus =
+    roleKind === "partner"
+      ? "pending_account"
+      : roleKind === "lawyer"
+        ? "pending_partner"
+        : "pending_lawyer";
 
   const voucherNo = await nextVoucherNo(req.firmId!);
-  const [pv] = await db.insert(paymentVouchersTable).values({
+  const r = rdb(req);
+  const [pv] = await r.insert(paymentVouchersTable).values({
     firmId: req.firmId!,
-    caseId: caseIdNum,
+    caseId: caseId ?? null,
     voucherNo,
-    status: "draft",
+    status: initialStatus,
+    fundStatus,
     payeeName,
-    payeeBank: payeeBank || null,
-    payeeAccountNo: payeeAccountNo || null,
+    payeeBank: payeeBank ?? null,
+    payeeAccountNo: payeeAccountNo ?? null,
     paymentMethod: paymentMethod || "bank_transfer",
-    bankAccountId: bankAccountIdNum,
+    bankAccountId: bankAccountId ?? null,
     accountType: accountType || "office",
-    amount: amountStr,
+    amount: amount.toFixed(2),
     purpose,
-    notes: notes || null,
+    notes: notes ?? null,
     createdBy: req.userId!,
   }).returning();
 
-  const itemList = (Array.isArray(items) ? items : []) as { description: string; itemType?: string; amount: number }[];
-  if (itemList.length) {
-    await db.insert(paymentVoucherItemsTable).values(itemList.map((i, idx) => ({
-      voucherId: pv.id,
-      description: String(i.description ?? ""),
-      itemType: i.itemType || "disbursement",
-      amount: Number(i.amount || 0).toFixed(2),
-      sortOrder: idx,
-    })));
-  }
+  await r.insert(paymentVoucherItemsTable).values(items.map((i, idx) => ({
+    voucherId: pv.id,
+    description: i.description,
+    itemType: i.itemType,
+    amount: i.amount.toFixed(2),
+    sortOrder: idx,
+  })));
 
-  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "accounting.payment_voucher.create", entityType: "payment_voucher", entityId: pv.id, detail: `voucherNo=${pv.voucherNo}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "accounting.payment_voucher.create", entityType: "payment_voucher", entityId: pv.id, detail: `voucherNo=${pv.voucherNo} status=${initialStatus}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
   res.status(201).json(pv);
 });
 
@@ -105,38 +132,69 @@ router.post("/payment-vouchers/:id/transition", sensitiveRateLimiter, requireAut
   const idStr = one(req.params.id);
   const id = idStr ? parseInt(idStr) : NaN;
   if (isNaN(id)) { res.status(400).json({ error: "Invalid voucher ID" }); return; }
-  const { toStatus, notes } = req.body as { toStatus: string; notes?: string };
-  const [pv] = await db.select().from(paymentVouchersTable).where(and(eq(paymentVouchersTable.id, id), eq(paymentVouchersTable.firmId, req.firmId!)));
+  const parsed = PaymentVoucherTransitionBody.safeParse(req.body);
+  if (!parsed.success) { res.status(400).json({ error: parsed.error.message }); return; }
+
+  const r = rdb(req);
+  const [pv] = await r.select().from(paymentVouchersTable).where(and(eq(paymentVouchersTable.id, id), eq(paymentVouchersTable.firmId, req.firmId!)));
   if (!pv) { res.status(404).json({ error: "Voucher not found" }); return; }
   if (pv.isReversed) { res.status(400).json({ error: "Reversed voucher cannot be transitioned" }); return; }
 
-  const allowed = STATUS_FLOW[pv.status] || [];
-  if (!allowed.includes(toStatus)) { res.status(400).json({ error: `Cannot move from ${pv.status} to ${toStatus}` }); return; }
-
+  const roleName = await getRoleName(req);
+  const roleKind = classifyRole(roleName);
   const now = new Date();
-  const updateFields: Partial<typeof paymentVouchersTable.$inferInsert> = { status: toStatus, updatedAt: now };
-  if (toStatus === "prepared") { updateFields.preparedBy = req.userId!; updateFields.preparedAt = now; }
-  if (toStatus === "lawyer_approved") { updateFields.lawyerApprovedBy = req.userId!; updateFields.lawyerApprovedAt = now; }
-  if (toStatus === "partner_approved") { updateFields.partnerApprovedBy = req.userId!; updateFields.partnerApprovedAt = now; }
-  if (toStatus === "paid") {
-    updateFields.paidAt = now; updateFields.paidBy = req.userId!;
-    // Post ledger entry (debit from account)
-    await db.insert(ledgerEntriesTable).values({
+
+  const updateFields: Partial<typeof paymentVouchersTable.$inferInsert> = { updatedAt: now };
+  const fromStatus = pv.status;
+  let toStatus: string | null = null;
+
+  if (parsed.data.action === "lawyer_approve") {
+    if (pv.status !== "pending_lawyer") { res.status(400).json({ error: "Invalid status", code: "INVALID_STATUS" }); return; }
+    if (roleKind !== "lawyer" && roleKind !== "partner") { res.status(403).json({ error: "Forbidden", code: "FORBIDDEN" }); return; }
+    toStatus = "pending_partner";
+    updateFields.status = toStatus;
+    updateFields.lawyerApprovedBy = req.userId!;
+    updateFields.lawyerApprovedAt = now;
+  } else if (parsed.data.action === "partner_approve") {
+    if (pv.status !== "pending_partner") { res.status(400).json({ error: "Invalid status", code: "INVALID_STATUS" }); return; }
+    if (roleKind !== "partner") { res.status(403).json({ error: "Forbidden", code: "FORBIDDEN" }); return; }
+    toStatus = "pending_account";
+    updateFields.status = toStatus;
+    updateFields.partnerApprovedBy = req.userId!;
+    updateFields.partnerApprovedAt = now;
+  } else if (parsed.data.action === "mark_paid") {
+    if (pv.status !== "pending_account") { res.status(400).json({ error: "Invalid status", code: "INVALID_STATUS" }); return; }
+    if (roleKind !== "partner" && roleKind !== "account") { res.status(403).json({ error: "Forbidden", code: "FORBIDDEN" }); return; }
+    toStatus = "paid_pending_collection";
+    updateFields.status = toStatus;
+    updateFields.accountType = parsed.data.accountType;
+    updateFields.paymentMethod = parsed.data.paymentMethod;
+    updateFields.bankChequeRefNo = parsed.data.bankChequeRefNo;
+    updateFields.paidAt = now;
+    updateFields.paidBy = req.userId!;
+    await r.insert(ledgerEntriesTable).values({
       firmId: req.firmId!,
       caseId: pv.caseId ?? null,
       entryDate: now.toISOString().slice(0, 10),
       entryType: "payment_voucher",
-      accountType: pv.accountType,
+      accountType: parsed.data.accountType,
       debit: Number(pv.amount).toFixed(2),
       credit: "0",
       balanceAfter: "0",
       description: `Payment Voucher ${pv.voucherNo} — ${pv.payeeName}`,
       referenceNo: pv.voucherNo, sourceType: "payment_voucher", sourceId: id, createdBy: req.userId!,
     });
+  } else if (parsed.data.action === "acknowledge_file_return") {
+    if (pv.status !== "paid_pending_collection") { res.status(400).json({ error: "Invalid status", code: "INVALID_STATUS" }); return; }
+    if (roleKind !== "clerk") { res.status(403).json({ error: "Forbidden", code: "FORBIDDEN" }); return; }
+    toStatus = "completed";
+    updateFields.status = toStatus;
   }
 
-  const [updated] = await db.update(paymentVouchersTable).set(updateFields).where(eq(paymentVouchersTable.id, id)).returning();
-  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "accounting.payment_voucher.transition", entityType: "payment_voucher", entityId: id, detail: `from=${pv.status} to=${toStatus}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+  if (!toStatus) { res.status(400).json({ error: "Invalid transition", code: "INVALID_TRANSITION" }); return; }
+
+  const [updated] = await r.update(paymentVouchersTable).set(updateFields).where(eq(paymentVouchersTable.id, id)).returning();
+  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "accounting.payment_voucher.transition", entityType: "payment_voucher", entityId: id, detail: `action=${parsed.data.action} from=${fromStatus} to=${toStatus}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
   res.json(updated);
 });
 

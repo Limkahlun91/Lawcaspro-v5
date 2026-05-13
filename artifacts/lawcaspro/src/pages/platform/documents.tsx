@@ -24,6 +24,7 @@ import { QueryFallback } from "@/components/query-fallback";
 import { apiFetchBlob, apiFetchJson, apiRequest } from "@/lib/api-client";
 import { downloadBlob } from "@/lib/download";
 import { toastError } from "@/lib/toast-error";
+import { validateUploadFile } from "@/lib/upload-validation";
 import { unwrapApiData } from "@/lib/api-contract";
 import { ensureArray, listItems } from "@/lib/list-items";
 import { PlatformPage, PlatformPageHeader } from "@/components/platform/page";
@@ -241,7 +242,6 @@ export default function PlatformDocuments() {
   const [uploading, setUploading] = useState(false);
   const [form, setForm] = useState({ name: "", description: "", category: "general" });
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
-  const [textUploadContent, setTextUploadContent] = useState("");
 
   const [showNewFolder, setShowNewFolder] = useState(false);
   const [newFolderName, setNewFolderName] = useState("");
@@ -600,27 +600,24 @@ export default function PlatformDocuments() {
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
-    if (!ALLOWED_TYPES[file.type]) {
-      toast({ title: "Unsupported file type", description: "Please upload a PDF, Word, Excel, image, or TXT file.", variant: "destructive" });
+    const v = validateUploadFile(file);
+    if (!v.ok) {
+      toast({ title: "Invalid file", description: v.message, variant: "destructive" });
       return;
     }
     setSelectedFile(file);
-    setTextUploadContent("");
     if (!form.name) setForm(f => ({ ...f, name: file.name.replace(/\.[^.]+$/, "") }));
   };
 
   const handleUpload = async () => {
     if (!form.name) return;
-    const file =
-      selectedFile ??
-      (textUploadContent.trim()
-        ? new globalThis.File(
-            [textUploadContent],
-            form.name.toLowerCase().endsWith(".txt") ? form.name : `${form.name}.txt`,
-            { type: "text/plain" },
-          )
-        : null);
+    const file = selectedFile;
     if (!file) return;
+    const v = validateUploadFile(file);
+    if (!v.ok) {
+      toast({ title: "Invalid file", description: v.message, variant: "destructive" });
+      return;
+    }
 
     setUploading(true);
     try {
@@ -997,7 +994,7 @@ export default function PlatformDocuments() {
                 ref={fileInputRef}
                 type="file"
                 className="hidden"
-                accept=".pdf,.doc,.docx,.xls,.xlsx,.jpg,.jpeg,.png,.gif,.webp,.txt"
+                accept="application/pdf,image/jpeg,image/png"
                 onChange={handleFileSelect}
               />
               {selectedFile ? (
@@ -1010,22 +1007,10 @@ export default function PlatformDocuments() {
                 <div>
                   <Upload className="w-8 h-8 text-slate-400 mx-auto mb-2" />
                   <p className="text-sm font-medium text-slate-700">Click to select file</p>
-                  <p className="text-xs text-slate-400 mt-1">PDF, Word, Excel, Image (max 50MB)</p>
+                  <p className="text-xs text-slate-400 mt-1">PDF, JPG, or PNG (max 10MB)</p>
                 </div>
               )}
             </div>
-
-            {!selectedFile && (
-              <div className="space-y-2">
-                <Label>Quick TXT Upload</Label>
-                <Textarea
-                  placeholder="Paste text here to upload a .txt document (no file picker needed)..."
-                  value={textUploadContent}
-                  onChange={e => setTextUploadContent(e.target.value)}
-                  rows={3}
-                />
-              </div>
-            )}
 
             <div className="space-y-2">
               <Label>Document Name</Label>
@@ -1058,7 +1043,7 @@ export default function PlatformDocuments() {
           </div>
           <DialogFooter className="pt-2 border-t">
             <Button variant="outline" onClick={() => setShowUpload(false)}>Cancel</Button>
-            <Button onClick={handleUpload} disabled={!form.name || uploading || (!selectedFile && !textUploadContent.trim())}>
+            <Button onClick={handleUpload} disabled={!form.name || uploading || !selectedFile}>
               {uploading ? "Uploading..." : "Upload"}
             </Button>
           </DialogFooter>

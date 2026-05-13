@@ -18,6 +18,7 @@ import { Input as SearchInput } from "@/components/ui/input";
 import { QueryFallback } from "@/components/query-fallback";
 import { apiFetchBlob, apiFetchJson } from "@/lib/api-client";
 import { toastError } from "@/lib/toast-error";
+import { validateUploadFile } from "@/lib/upload-validation";
 
 const ALLOWED_TYPES: Record<string, string> = {
   "application/pdf": "PDF",
@@ -159,9 +160,15 @@ export default function HubPage() {
 
   const handleAddAttachment = (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(e.target.files ?? []);
-    const valid = files.filter((f) => ALLOWED_TYPES[f.type]);
-    if (valid.length < files.length) {
-      toast({ title: "Some files skipped", description: "Only PDF, Word, Excel, and image files are supported.", variant: "destructive" });
+    const valid: File[] = [];
+    let skipped = 0;
+    for (const f of files) {
+      const v = validateUploadFile(f);
+      if (v.ok) valid.push(f);
+      else skipped += 1;
+    }
+    if (skipped > 0) {
+      toast({ title: "Some files skipped", description: "Only PDF, JPG, or PNG files under 10MB are allowed.", variant: "destructive" });
     }
     setAttachments((prev) => [...prev, ...valid]);
     e.target.value = "";
@@ -174,6 +181,11 @@ export default function HubPage() {
       const uploadedAttachments: Array<{ fileName: string; fileType: string; fileSize: number; objectPath: string }> = [];
 
       for (const file of attachments) {
+        const v = validateUploadFile(file);
+        if (!v.ok) {
+          toast({ title: "Invalid file", description: v.message, variant: "destructive" });
+          return;
+        }
         const formData = new FormData();
         formData.append("file", file);
         const { objectPath } = await apiFetchJson<{ objectPath: string }>("/storage/upload", { method: "POST", body: formData });
@@ -411,7 +423,7 @@ export default function HubPage() {
                   type="file"
                   className="hidden"
                   multiple
-                  accept=".pdf,.doc,.docx,.xls,.xlsx,.jpg,.jpeg,.png,.gif,.webp,.txt"
+                  accept="application/pdf,image/jpeg,image/png"
                   onChange={handleAddAttachment}
                 />
                 <Button
@@ -424,7 +436,7 @@ export default function HubPage() {
                   <Paperclip className="w-3.5 h-3.5" />
                   Attach Files
                 </Button>
-                <p className="text-xs text-slate-400 mt-1">PDF, Word, Excel, Image files supported</p>
+                <p className="text-xs text-slate-400 mt-1">PDF, JPG, or PNG (max 10MB each)</p>
               </div>
               {attachments.length > 0 && (
                 <div className="flex flex-wrap gap-2 mt-2">
