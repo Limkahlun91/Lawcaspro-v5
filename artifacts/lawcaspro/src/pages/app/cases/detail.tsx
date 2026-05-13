@@ -17,6 +17,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Textarea } from "@/components/ui/textarea";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Badge } from "@/components/ui/badge";
 import { Breadcrumb, BreadcrumbItem, BreadcrumbLink, BreadcrumbList, BreadcrumbPage, BreadcrumbSeparator } from "@/components/ui/breadcrumb";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
@@ -590,8 +591,21 @@ export default function CaseDetail() {
   const isMasterTitle = titleType === "master";
   const isStrataOrIndividual = titleType === "strata" || titleType === "individual";
   const caseMeta: Record<string, unknown> = caseInfo && typeof caseInfo === "object" ? (caseInfo as unknown as Record<string, unknown>) : {};
-  const isEncumbered = caseMeta.isEncumbered === true || caseMeta.is_encumbered === true;
-  const tenureRaw = typeof caseMeta.tenure === "string" ? caseMeta.tenure.trim().toLowerCase() : "";
+  const projectMeta: Record<string, unknown> =
+    caseMeta.project && typeof caseMeta.project === "object"
+      ? (caseMeta.project as Record<string, unknown>)
+      : {};
+  const isEncumbered =
+    caseMeta.isEncumbered === true ||
+    caseMeta.is_encumbered === true ||
+    projectMeta.isEncumbered === true ||
+    projectMeta.is_encumbered === true;
+  const tenureRaw =
+    typeof caseMeta.tenure === "string"
+      ? caseMeta.tenure.trim().toLowerCase()
+      : typeof projectMeta.tenure === "string"
+        ? projectMeta.tenure.trim().toLowerCase()
+        : "";
   const tenure = tenureRaw === "leasehold" ? "leasehold" : "freehold";
   const showNoaAndPoa = isMasterTitle;
   const showEncumbranceFields = isEncumbered;

@@ -412,9 +412,10 @@ export const GetDashboardStatsResponse = zod.object({
   "label": zod.string(),
   "count": zod.number(),
   "filter": zod.object({
-  "milestone": zod.enum(['spa_date', 'spa_stamped_date', 'letter_of_offer_date', 'loan_docs_signed_date', 'acting_letter_issued_date', 'loan_sent_bank_execution_date', 'loan_bank_executed_date', 'bank_lu_received_date', 'noa_served_on', 'completion_date']),
+  "milestone": zod.enum(['spa_date', 'spa_stamped_date', 'letter_of_offer_date', 'loan_docs_pending_date', 'loan_docs_signed_date', 'acting_letter_issued_date', 'developer_confirmation_received_on', 'loan_sent_bank_execution_date', 'loan_bank_executed_date', 'bank_lu_received_date', 'advice_to_bank_date', 'bank_lu_forward_to_developer_on', 'developer_lu_received_on', 'developer_lu_dated', 'register_poa_on', 'letter_disclaimer_dated', 'mot_received_date', 'mot_signed_date', 'mot_stamped_date', 'mot_registered_date', 'noa_served_on', 'completion_date']),
   "milestonePresence": zod.enum(['filled', 'missing']),
-  "purchaseMode": zod.string().optional()
+  "purchaseMode": zod.string().optional(),
+  "titleType": zod.string().optional()
 })
 }))
 })
@@ -965,7 +966,7 @@ export const ListCasesQueryParams = zod.object({
   "assignedToUserId": zod.coerce.number().optional(),
   "spaStatus": zod.coerce.string().optional(),
   "loanStatus": zod.coerce.string().optional(),
-  "milestone": zod.enum(['spa_date', 'spa_stamped_date', 'letter_of_offer_date', 'loan_docs_signed_date', 'acting_letter_issued_date', 'loan_sent_bank_execution_date', 'loan_bank_executed_date', 'bank_lu_received_date', 'noa_served_on', 'completion_date']).optional(),
+  "milestone": zod.enum(['spa_date', 'spa_stamped_date', 'letter_of_offer_date', 'loan_docs_pending_date', 'loan_docs_signed_date', 'acting_letter_issued_date', 'developer_confirmation_received_on', 'loan_sent_bank_execution_date', 'loan_bank_executed_date', 'bank_lu_received_date', 'advice_to_bank_date', 'bank_lu_forward_to_developer_on', 'developer_lu_received_on', 'developer_lu_dated', 'register_poa_on', 'letter_disclaimer_dated', 'mot_received_date', 'mot_signed_date', 'mot_stamped_date', 'mot_registered_date', 'noa_served_on', 'completion_date']).optional(),
   "milestonePresence": zod.enum(['filled', 'missing']).optional(),
   "overdueDays": zod.union([zod.literal(7),zod.literal(14),zod.literal(30)]).optional(),
   "purchaseMode": zod.coerce.string().optional(),

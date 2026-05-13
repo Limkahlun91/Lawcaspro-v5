@@ -12,4 +12,5 @@ export type DashboardMilestoneCardFilter = {
   milestone: CaseMilestoneKey;
   milestonePresence: MilestonePresence;
   purchaseMode?: string;
+  titleType?: string;
 };

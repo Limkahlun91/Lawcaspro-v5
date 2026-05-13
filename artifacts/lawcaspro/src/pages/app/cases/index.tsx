@@ -50,6 +50,8 @@ export default function CasesList() {
   const [lawyerId, setLawyerId] = useState<string>(() => (typeof window !== "undefined" ? (new URLSearchParams(window.location.search).get("assignedLawyerId") ?? "all") : (sp.get("assignedLawyerId") ?? "all")));
   const [clerkId, setClerkId] = useState<string>(() => (typeof window !== "undefined" ? (new URLSearchParams(window.location.search).get("assignedClerkId") ?? "all") : (sp.get("assignedClerkId") ?? "all")));
   const [projectId, setProjectId] = useState<string>(() => (typeof window !== "undefined" ? (new URLSearchParams(window.location.search).get("projectId") ?? "all") : (sp.get("projectId") ?? "all")));
+  const [purchaseMode, setPurchaseMode] = useState<string>(() => (typeof window !== "undefined" ? (new URLSearchParams(window.location.search).get("purchaseMode") ?? "all") : (sp.get("purchaseMode") ?? "all")));
+  const [titleType, setTitleType] = useState<string>(() => (typeof window !== "undefined" ? (new URLSearchParams(window.location.search).get("titleType") ?? "all") : (sp.get("titleType") ?? "all")));
   const [milestone, setMilestone] = useState<CaseMilestoneKey | "all">(() => {
     const raw = typeof window !== "undefined" ? new URLSearchParams(window.location.search).get("milestone") : sp.get("milestone");
     return raw && Object.values(CaseMilestoneKey).includes(raw as any) ? (raw as CaseMilestoneKey) : "all";
@@ -75,6 +77,8 @@ export default function CasesList() {
     const nextLawyerId = sp.get("assignedLawyerId") ?? "all";
     const nextClerkId = sp.get("assignedClerkId") ?? "all";
     const nextProjectId = sp.get("projectId") ?? "all";
+    const nextPurchaseMode = sp.get("purchaseMode") ?? "all";
+    const nextTitleType = sp.get("titleType") ?? "all";
     const nextMilestoneRaw = sp.get("milestone");
     const nextMilestone: CaseMilestoneKey | "all" =
       nextMilestoneRaw && Object.values(CaseMilestoneKey).includes(nextMilestoneRaw as any)
@@ -92,6 +96,8 @@ export default function CasesList() {
     setLawyerId((prev) => prev === nextLawyerId ? prev : nextLawyerId);
     setClerkId((prev) => prev === nextClerkId ? prev : nextClerkId);
     setProjectId((prev) => prev === nextProjectId ? prev : nextProjectId);
+    setPurchaseMode((prev) => prev === nextPurchaseMode ? prev : nextPurchaseMode);
+    setTitleType((prev) => prev === nextTitleType ? prev : nextTitleType);
     setMilestone((prev) => prev === nextMilestone ? prev : nextMilestone);
     setMilestonePresence((prev) => prev === nextPresence ? prev : nextPresence);
     setPage((prev) => prev === (Number.isInteger(nextPage) && nextPage > 0 ? nextPage : 1) ? prev : (Number.isInteger(nextPage) && nextPage > 0 ? nextPage : 1));
@@ -114,6 +120,8 @@ export default function CasesList() {
     setIf("assignedLawyerId", lawyerId);
     setIf("assignedClerkId", clerkId);
     setIf("projectId", projectId);
+    setIf("purchaseMode", purchaseMode);
+    setIf("titleType", titleType);
     setIf("milestone", milestone === "all" ? undefined : milestone);
     if (milestone !== "all") nextSp.set("milestonePresence", milestonePresence);
     nextSp.set("page", String(page));
@@ -129,6 +137,8 @@ export default function CasesList() {
     lawyerId,
     clerkId,
     projectId,
+    purchaseMode,
+    titleType,
     milestone,
     milestonePresence,
     page,
@@ -146,6 +156,8 @@ export default function CasesList() {
     assignedClerkId: clerkId !== "all" ? parseInt(clerkId) : undefined,
     spaStatus: spaStatus !== "all" ? spaStatus : undefined,
     loanStatus: loanStatus !== "all" ? loanStatus : undefined,
+    purchaseMode: purchaseMode !== "all" ? purchaseMode : undefined,
+    titleType: titleType !== "all" ? titleType : undefined,
     milestone: milestone !== "all" ? milestone : undefined,
     milestonePresence: milestone !== "all" ? milestonePresence : undefined,
   });
@@ -165,8 +177,18 @@ export default function CasesList() {
     queryFn: () => apiFetchJson<CaseFilterOptionsResponse>("/cases/filter-options"),
     retry: false,
   });
-  const spaStatuses: string[] = Array.isArray(filterOptions?.spaStatuses) ? filterOptions.spaStatuses : ["Pending"];
-  const loanStatuses: string[] = Array.isArray(filterOptions?.loanStatuses) ? filterOptions.loanStatuses : ["Pending"];
+  const spaStatusesFromApi: string[] | null = Array.isArray(filterOptions?.spaStatuses) ? filterOptions.spaStatuses : null;
+  const loanStatusesFromApi: string[] | null = Array.isArray(filterOptions?.loanStatuses) ? filterOptions.loanStatuses : null;
+  const spaStatuses: string[] = Array.from(new Set([
+    ...(spaStatusesFromApi ?? []),
+    ...(spaStatusesFromApi ? [] : (spaStatus !== "all" ? [spaStatus] : [])),
+    "Pending",
+  ]));
+  const loanStatuses: string[] = Array.from(new Set([
+    ...(loanStatusesFromApi ?? []),
+    ...(loanStatusesFromApi ? [] : (loanStatus !== "all" ? [loanStatus] : [])),
+    "Pending",
+  ]));
   const lawyers: Array<{ id: number; name: string }> = Array.isArray(filterOptions?.assignees?.lawyers) ? filterOptions.assignees.lawyers : [];
   const clerks: Array<{ id: number; name: string }> = Array.isArray(filterOptions?.assignees?.clerks) ? filterOptions.assignees.clerks : [];
   const milestoneOptions: Array<{ key: CaseMilestoneKey; label: string }> = Array.isArray(filterOptions?.milestones) ? filterOptions.milestones : [];
@@ -193,15 +215,15 @@ export default function CasesList() {
   const milestoneLabelByKey = useMemo(() => new Map(milestoneOptions.map(m => [m.key, m.label])), [milestoneOptions]);
 
   useEffect(() => {
-    if (spaStatus !== "all" && spaStatuses.length > 0 && !spaStatuses.includes(spaStatus)) {
+    if (spaStatusesFromApi && spaStatus !== "all" && spaStatusesFromApi.length > 0 && !spaStatusesFromApi.includes(spaStatus)) {
       setSpaStatus("all");
       setPage(1);
     }
-    if (loanStatus !== "all" && loanStatuses.length > 0 && !loanStatuses.includes(loanStatus)) {
+    if (loanStatusesFromApi && loanStatus !== "all" && loanStatusesFromApi.length > 0 && !loanStatusesFromApi.includes(loanStatus)) {
       setLoanStatus("all");
       setPage(1);
     }
-  }, [spaStatus, loanStatus, spaStatuses, loanStatuses]);
+  }, [spaStatus, loanStatus, spaStatusesFromApi, loanStatusesFromApi]);
 
   const activeChips = useMemo(() => {
     const chips: Array<{ key: string; label: string; onClear: () => void }> = [];

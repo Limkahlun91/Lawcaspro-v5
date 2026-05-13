@@ -48,7 +48,7 @@ const MILESTONE_TO_STATUS_QUERY: Record<string, { param: "spaStatus" | "loanStat
   bank_lu_received_date: { param: "loanStatus", value: "BLU Received" },
 };
 
-function buildCasesHref(filter: { milestone: string; milestonePresence: string; purchaseMode?: string | null }) {
+function buildCasesHref(filter: { milestone: string; milestonePresence: string; purchaseMode?: string | null; titleType?: string | null }) {
   const qs = new URLSearchParams();
   const mapped = filter.milestonePresence === "filled" ? MILESTONE_TO_STATUS_QUERY[filter.milestone] : undefined;
   if (mapped) {
@@ -58,6 +58,7 @@ function buildCasesHref(filter: { milestone: string; milestonePresence: string; 
     qs.set("milestonePresence", filter.milestonePresence);
   }
   if (filter.purchaseMode) qs.set("purchaseMode", filter.purchaseMode);
+  if (filter.titleType) qs.set("titleType", filter.titleType);
   return `/app/cases?${qs.toString()}`;
 }
 
@@ -99,10 +100,14 @@ export default function AppDashboard() {
     key: string;
     label: string;
     count: number;
-    filter: { milestone: string; milestonePresence: string; purchaseMode?: string };
+    filter: { milestone: string; milestonePresence: string; purchaseMode?: string; titleType?: string };
   };
   const milestoneCards: MilestoneCard[] = Array.isArray((stats as Record<string, any>).milestoneCards)
     ? ((stats as Record<string, any>).milestoneCards as MilestoneCard[])
+    : [];
+  type MilestoneSection = { key: string; label: string; total: number; cards: MilestoneCard[] };
+  const milestoneSections: MilestoneSection[] = Array.isArray((stats as Record<string, any>).milestoneSections)
+    ? ((stats as Record<string, any>).milestoneSections as MilestoneSection[])
     : [];
 
   return (
@@ -169,7 +174,7 @@ export default function AppDashboard() {
         ))}
       </div>
 
-      {milestoneCards.length > 0 && (
+      {(milestoneSections.length > 0 || milestoneCards.length > 0) && (
         <Card>
           <CardHeader className="pb-3">
             <CardTitle>Milestones</CardTitle>
@@ -177,28 +182,64 @@ export default function AppDashboard() {
           <CardContent>
             <Table>
               <TableBody>
-                {milestoneCards.map((card) => {
-                  const href = buildCasesHref(card.filter);
-                  return (
-                    <TableRow
-                      key={card.key}
-                      className="cursor-pointer"
-                      role="button"
-                      tabIndex={0}
-                      onClick={() => setLocation(href)}
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter" || e.key === " ") setLocation(href);
-                      }}
-                    >
-                      <TableCell className="py-3">
-                        <div className="text-sm font-medium text-slate-900">{card.label}</div>
-                      </TableCell>
-                      <TableCell className="py-3 text-right">
-                        <span className="font-semibold text-slate-900">{card.count}</span>
-                      </TableCell>
-                    </TableRow>
-                  );
-                })}
+                {milestoneSections.length > 0
+                  ? milestoneSections.flatMap((section) => {
+                      const sectionRow = (
+                        <TableRow key={`section_${section.key}`}>
+                          <TableCell className="py-2" colSpan={2}>
+                            <div className="flex items-center justify-between">
+                              <div className="text-sm font-semibold text-slate-900">{section.label}</div>
+                              <div className="text-xs text-slate-500">Total: {section.total}</div>
+                            </div>
+                          </TableCell>
+                        </TableRow>
+                      );
+                      const rows = section.cards.map((card) => {
+                        const href = buildCasesHref(card.filter);
+                        return (
+                          <TableRow
+                            key={card.key}
+                            className="cursor-pointer"
+                            role="button"
+                            tabIndex={0}
+                            onClick={() => setLocation(href)}
+                            onKeyDown={(e) => {
+                              if (e.key === "Enter" || e.key === " ") setLocation(href);
+                            }}
+                          >
+                            <TableCell className="py-3">
+                              <div className="text-sm font-medium text-slate-900">{card.label}</div>
+                            </TableCell>
+                            <TableCell className="py-3 text-right">
+                              <span className="font-semibold text-slate-900">{card.count}</span>
+                            </TableCell>
+                          </TableRow>
+                        );
+                      });
+                      return [sectionRow, ...rows];
+                    })
+                  : milestoneCards.map((card) => {
+                      const href = buildCasesHref(card.filter);
+                      return (
+                        <TableRow
+                          key={card.key}
+                          className="cursor-pointer"
+                          role="button"
+                          tabIndex={0}
+                          onClick={() => setLocation(href)}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter" || e.key === " ") setLocation(href);
+                          }}
+                        >
+                          <TableCell className="py-3">
+                            <div className="text-sm font-medium text-slate-900">{card.label}</div>
+                          </TableCell>
+                          <TableCell className="py-3 text-right">
+                            <span className="font-semibold text-slate-900">{card.count}</span>
+                          </TableCell>
+                        </TableRow>
+                      );
+                    })}
               </TableBody>
             </Table>
           </CardContent>

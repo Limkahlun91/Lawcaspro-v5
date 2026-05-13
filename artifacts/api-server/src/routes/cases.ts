@@ -691,8 +691,25 @@ router.get("/cases/filter-options", requireAuthHandler, requireFirmUserHandler, 
     milestones: [
       { key: "spa_date", label: "SPA Date" },
       { key: "spa_stamped_date", label: "SPA Stamped" },
-      { key: "letter_of_offer_date", label: "LOF Date" },
+      { key: "letter_of_offer_date", label: "LO Date" },
+      { key: "loan_docs_pending_date", label: "Loan Docs Pending" },
       { key: "loan_docs_signed_date", label: "Loan Docs Signed" },
+      { key: "acting_letter_issued_date", label: "Acting Letter Issued" },
+      { key: "developer_confirmation_received_on", label: "Developer Confirmation Received" },
+      { key: "loan_sent_bank_execution_date", label: "Loan Sent Bank Execution" },
+      { key: "loan_bank_executed_date", label: "Loan Bank Executed" },
+      { key: "bank_lu_received_date", label: "BLU Received" },
+      { key: "advice_to_bank_date", label: "Advice to Bank" },
+      { key: "bank_lu_forward_to_developer_on", label: "BLU Forwarded to Developer" },
+      { key: "developer_lu_received_on", label: "Developer LU Received" },
+      { key: "developer_lu_dated", label: "Developer LU Dated" },
+      { key: "noa_served_on", label: "NOA Served" },
+      { key: "register_poa_on", label: "POA Registered" },
+      { key: "letter_disclaimer_dated", label: "Letter Disclaimer Dated" },
+      { key: "mot_received_date", label: "MOT Received" },
+      { key: "mot_signed_date", label: "MOT Signed" },
+      { key: "mot_stamped_date", label: "MOT Stamped" },
+      { key: "mot_registered_date", label: "MOT Registered" },
       { key: "completion_date", label: "Completion Date" },
     ],
   });
@@ -1792,7 +1809,11 @@ router.get("/cases/export.csv", requireAuthHandler, requireFirmUserHandler, requ
   if (projectId) conditions.push(eq(casesTable.projectId, projectId));
   if (developerId) conditions.push(eq(casesTable.developerId, developerId));
   if (purchaseMode) conditions.push(eq(casesTable.purchaseMode, purchaseMode));
-  if (titleType) conditions.push(eq(casesTable.titleType, titleType));
+  if (titleType) {
+    const parts = String(titleType).split(",").map((s) => s.trim()).filter(Boolean);
+    if (parts.length === 1) conditions.push(eq(casesTable.titleType, parts[0]));
+    else conditions.push(or(...parts.map((p) => eq(casesTable.titleType, p))));
+  }
   if (assignedLawyerId) {
     conditions.push(sql`EXISTS (
       SELECT 1
@@ -2050,7 +2071,11 @@ router.get("/cases", requireAuthHandler, requireFirmUserHandler, requirePermissi
   if (projectId) conditions.push(eq(casesTable.projectId, projectId));
   if (developerId) conditions.push(eq(casesTable.developerId, developerId));
   if (purchaseMode) conditions.push(eq(casesTable.purchaseMode, purchaseMode));
-  if (titleType) conditions.push(eq(casesTable.titleType, titleType));
+  if (titleType) {
+    const parts = String(titleType).split(",").map((s) => s.trim()).filter(Boolean);
+    if (parts.length === 1) conditions.push(eq(casesTable.titleType, parts[0]));
+    else conditions.push(or(...parts.map((p) => eq(casesTable.titleType, p))));
+  }
   if (assignedLawyerId) {
     conditions.push(sql`EXISTS (
       SELECT 1
@@ -2080,10 +2105,10 @@ router.get("/cases", requireAuthHandler, requireFirmUserHandler, requirePermissi
         AND ${caseAssignmentsTable.unassignedAt} IS NULL
     )`);
   }
-  if (hasWorkflowSteps && spaStatus) {
+  if (spaStatus) {
     conditions.push(sql`${spaStatusExpr} = ${spaStatus}`);
   }
-  if (hasWorkflowSteps && loanStatus) {
+  if (loanStatus) {
     conditions.push(sql`${loanStatusExpr} = ${loanStatus}`);
   }
   if (hasKeyDates && milestone && milestonePresence && (milestonePresence === "filled" || milestonePresence === "missing")) {
