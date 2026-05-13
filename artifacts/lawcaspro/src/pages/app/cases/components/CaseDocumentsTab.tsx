@@ -13,6 +13,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
+import { Switch as ToggleSwitch } from "@/components/ui/switch";
 import { cn } from "@/lib/utils";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Progress } from "@/components/ui/progress";
@@ -22,9 +23,14 @@ import { QueryFallback } from "@/components/query-fallback";
 import { apiFetchBlob, apiFetchJson, apiRequest } from "@/lib/api-client";
 import { downloadBlob } from "@/lib/download";
 import { toastError } from "@/lib/toast-error";
+import { printWordBlob } from "@/lib/documents/BrowserPrinter";
 import { useAuth } from "@/lib/auth-context";
 import { hasPermission } from "@/lib/permissions";
+<<<<<<< HEAD
 import { getGetCaseWorkflowQueryKey, getListCasesQueryKey } from "@workspace/api-client-react";
+=======
+import { validateUploadFile } from "@/lib/upload-validation";
+>>>>>>> 1b6aeb9056b6a3686ba71ceb8a151391761dbecd
 
 function docTypeLabel(dt: string): string {
   return (DOCUMENT_TYPE_LABELS as Record<string, string>)[dt] ?? dt;
@@ -197,6 +203,8 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
   const [batchVariableChecklistShowOnlyMissing, setBatchVariableChecklistShowOnlyMissing] = useState(true);
   const [batchLoopGenerating, setBatchLoopGenerating] = useState(false);
   const [batchLoopProgress, setBatchLoopProgress] = useState<{ current: number; total: number }>({ current: 0, total: 0 });
+  const [batchPrintWaiting, setBatchPrintWaiting] = useState(false);
+  const [batchPrintWaitingLabel, setBatchPrintWaitingLabel] = useState("");
   const [batchGeneratedPdfDocIds, setBatchGeneratedPdfDocIds] = useState<number[]>([]);
   const [batchMergePrinting, setBatchMergePrinting] = useState(false);
 
@@ -842,7 +850,6 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
     setBatchLoopProgress({ current: 0, total: items.length });
     setBatchGeneratedPdfDocIds([]);
     try {
-      const ids: number[] = [];
       for (let i = 0; i < items.length; i++) {
         const it = items[i]!;
         setBatchLoopProgress({ current: i + 1, total: items.length });
@@ -860,8 +867,8 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
           : undefined;
 
         const endpoint = it.source === "firm"
-          ? `/cases/${caseId}/documents/generate?format=pdf`
-          : `/cases/${caseId}/documents/generate-from-master?format=pdf`;
+          ? `/cases/${caseId}/documents/generate`
+          : `/cases/${caseId}/documents/generate-from-master`;
 
         const payload = it.source === "firm"
           ? { templateId: Number(it.templateId), letterheadId: letterheadIdToSend, bypassApplicability, clauses: selectedClauses, overrides }
@@ -871,18 +878,19 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
         const blob = await res.blob();
         const cd = res.headers.get("content-disposition") ?? "";
         const m = /filename\*=UTF-8''([^;]+)|filename=\"?([^\";]+)\"?/i.exec(cd);
-        const fileNameRaw = m?.[1] ?? m?.[2] ?? `case-${caseId}-document-${i + 1}.pdf`;
+        const fileNameRaw = m?.[1] ?? m?.[2] ?? `case-${caseId}-document-${i + 1}.docx`;
         const fileName = decodeURIComponent(String(fileNameRaw).trim());
-        downloadBlob(blob, fileName);
-        const docId = Number(res.headers.get("x-case-document-id") ?? NaN);
-        if (Number.isFinite(docId)) ids.push(docId);
+        setBatchPrintWaitingLabel(fileName);
+        setBatchPrintWaiting(true);
+        await new Promise((r) => setTimeout(r, 50));
+        await printWordBlob(blob, { title: fileName });
+        setBatchPrintWaiting(false);
       }
-      setBatchGeneratedPdfDocIds(ids);
       setSelectedChecklistKeys(new Set());
       await qc.invalidateQueries({ queryKey: ["case-documents", caseId] });
       await qc.invalidateQueries({ queryKey: ["case-documents-checklist", caseId] });
       await qc.invalidateQueries({ queryKey: ["case-documents-instances", caseId] });
-      toast({ title: "Batch PDFs generated", description: `${items.length} documents` });
+      toast({ title: "Batch print ready", description: `${items.length} documents` });
       setViewTab("list");
     } catch (err) {
       if (err instanceof Error && err.message === "Missing firm letterhead") {
@@ -891,6 +899,8 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
         toastError(toast, err, "Batch generate failed");
       }
     } finally {
+      setBatchPrintWaiting(false);
+      setBatchPrintWaitingLabel("");
       setBatchLoopGenerating(false);
       setBatchLoopProgress((prev) => ({ ...prev, current: 0 }));
     }
@@ -969,6 +979,15 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
     setRowNamingPreview({});
   }
 
+  function ensureValidUpload(file: File): boolean {
+    const v = validateUploadFile(file);
+    if (!v.ok) {
+      toast({ title: "Invalid file", description: v.message, variant: "destructive" });
+      return false;
+    }
+    return true;
+  }
+
   async function uploadPrivateObject(file: File, objectPath?: string): Promise<string> {
     const formData = new FormData();
     formData.append("file", file);
@@ -979,6 +998,7 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
 
   async function handleUpload() {
     if (!selectedFile || !uploadName) return;
+    if (!ensureValidUpload(selectedFile)) return;
     setIsUploading(true);
     try {
       const objectPath = await uploadPrivateObject(selectedFile);
@@ -1012,6 +1032,7 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
     setIsUploading(true);
     try {
       const file = checklistUploadFile;
+      if (!ensureValidUpload(file)) return;
       const firmId = Number(user.firmId);
       const safeKey = checklistUploadTarget.checklistKey.replace(/[^a-zA-Z0-9:_-]/g, "_");
       if (checklistUploadTarget.kind === "workflow") {
@@ -2066,22 +2087,8 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
                     disabled={variableChecklistGenerating || isGenerating}
                   />
                   <div className="flex items-center gap-2">
-                    <Button
-                      size="sm"
-                      variant={variableChecklistShowOnlyMissing ? "default" : "outline"}
-                      onClick={() => setVariableChecklistShowOnlyMissing(true)}
-                      disabled={variableChecklistGenerating || isGenerating}
-                    >
-                      Missing only
-                    </Button>
-                    <Button
-                      size="sm"
-                      variant={!variableChecklistShowOnlyMissing ? "default" : "outline"}
-                      onClick={() => setVariableChecklistShowOnlyMissing(false)}
-                      disabled={variableChecklistGenerating || isGenerating}
-                    >
-                      All
-                    </Button>
+                    <ToggleSwitch checked={variableChecklistShowOnlyMissing} onCheckedChange={setVariableChecklistShowOnlyMissing} disabled={variableChecklistGenerating || isGenerating} />
+                    <div className="text-xs text-slate-700 font-medium">Hide Filled Items</div>
                   </div>
                 </div>
 
@@ -2273,22 +2280,8 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
                     disabled={batchLoopGenerating}
                   />
                   <div className="flex items-center gap-2">
-                    <Button
-                      size="sm"
-                      variant={batchVariableChecklistShowOnlyMissing ? "default" : "outline"}
-                      onClick={() => setBatchVariableChecklistShowOnlyMissing(true)}
-                      disabled={batchLoopGenerating}
-                    >
-                      Missing only
-                    </Button>
-                    <Button
-                      size="sm"
-                      variant={!batchVariableChecklistShowOnlyMissing ? "default" : "outline"}
-                      onClick={() => setBatchVariableChecklistShowOnlyMissing(false)}
-                      disabled={batchLoopGenerating}
-                    >
-                      All
-                    </Button>
+                    <ToggleSwitch checked={batchVariableChecklistShowOnlyMissing} onCheckedChange={setBatchVariableChecklistShowOnlyMissing} disabled={batchLoopGenerating} />
+                    <div className="text-xs text-slate-700 font-medium">Hide Filled Items</div>
                   </div>
                 </div>
 
@@ -2303,6 +2296,11 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
                         Generating {batchLoopProgress.current}/{batchLoopProgress.total}…
                       </div>
                       <Progress value={batchLoopProgress.total ? (batchLoopProgress.current / batchLoopProgress.total) * 100 : 5} />
+                    </div>
+                  ) : null}
+                  {batchPrintWaiting ? (
+                    <div className="mt-2 text-xs text-amber-700">
+                      請處理當前列印以繼續下一份{batchPrintWaitingLabel ? `：${batchPrintWaitingLabel}` : ""}
                     </div>
                   ) : null}
                 </div>
@@ -2415,13 +2413,15 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
                   <Button onClick={runBatchGeneratePdf} disabled={!canGenerate || batchLoopGenerating || batchMergePrinting || batchVariableChecklistItems.length === 0}>
                     Batch Generate (PDF)
                   </Button>
-                  <Button
-                    variant="secondary"
-                    onClick={mergeAndPrintBatch}
-                    disabled={batchLoopGenerating || batchMergePrinting || batchGeneratedPdfDocIds.length === 0}
-                  >
-                    Merge & Print
-                  </Button>
+                  {batchGeneratedPdfDocIds.length > 0 ? (
+                    <Button
+                      variant="secondary"
+                      onClick={mergeAndPrintBatch}
+                      disabled={batchLoopGenerating || batchMergePrinting}
+                    >
+                      Merge & Print
+                    </Button>
+                  ) : null}
                 </div>
               </>
             )}
@@ -2650,6 +2650,7 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
                 type="file"
                 ref={uploadRef}
                 className="hidden"
+                accept="application/pdf,image/jpeg,image/png"
                 onChange={(e) => setSelectedFile(e.target.files?.[0] ?? null)}
               />
             </div>
@@ -2853,7 +2854,7 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
             </div>
             <div className="space-y-1.5">
               <Label>File</Label>
-              <Input type="file" onChange={(e) => setChecklistUploadFile(e.target.files?.[0] ?? null)} />
+              <Input type="file" accept="application/pdf,image/jpeg,image/png" onChange={(e) => setChecklistUploadFile(e.target.files?.[0] ?? null)} />
               {checklistUploadFile ? <div className="text-xs text-slate-500">{checklistUploadFile.name}</div> : null}
             </div>
             <div className="flex justify-end gap-2 pt-2">

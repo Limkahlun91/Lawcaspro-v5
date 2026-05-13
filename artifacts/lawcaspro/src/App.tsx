@@ -11,6 +11,7 @@ import { AuthGuard } from "@/components/auth-guard";
 import { PermissionGuard } from "@/components/permission-guard";
 import { PlatformLayout } from "@/components/layout/platform-layout";
 import { AppLayout } from "@/components/layout/app-layout";
+import { GlobalCaseSearch } from "@/components/GlobalCaseSearch";
 import { getApiOrigin } from "@/lib/api-base";
 import { getStoredAuthToken } from "@/lib/auth-token";
 
@@ -82,6 +83,7 @@ setAuthTokenGetter(() => getStoredAuthToken());
 const queryClient = new QueryClient({
   defaultOptions: {
     queries: {
+      staleTime: 1000 * 60 * 5,
       retry: (failureCount, err) => {
         if (isAbortError(err) && !isRequestTimeoutError(err)) return false;
         const status = getHttpStatus(err);
@@ -129,6 +131,7 @@ function AppRoutes() {
   return (
     <AuthGuard requireRole="firm_user">
       <AppLayout>
+        <GlobalCaseSearch />
         <Switch>
           <Route path="/app/dashboard" component={() => (
             <PermissionGuard module="dashboard" action="read">

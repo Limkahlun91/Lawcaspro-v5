@@ -302,7 +302,7 @@ function fillMissingScalarsForRender(placeholders: string[], input: Record<strin
 
 function newGeneratedDocObjectPath(firmId: number, caseId: number, extension: string): string {
   const ext = extension.replace(/^\./, "").toLowerCase() || "docx";
-  return `/objects/cases/${firmId}/case-${caseId}/generated/${randomUUID()}.${ext}`;
+  return `/objects/temp-generated/${firmId}/case-${caseId}/generated/${randomUUID()}.${ext}`;
 }
 
 function isLoanStampingItemKey(v: string): v is LoanStampingItemKey {
@@ -376,12 +376,7 @@ function fmtRM(val: unknown): string {
 
 const FIRM_DOCUMENT_ALLOWED_EXTENSIONS = new Set([
   "docx",
-  "doc",
   "pdf",
-  "xlsx",
-  "xls",
-  "csv",
-  "txt",
   "jpg",
   "jpeg",
   "png",
@@ -746,6 +741,7 @@ async function buildCaseContext(r: DbConn, caseId: number, firmId: number, cache
         c.parcel_no,
         c.spa_price,
         c.purchase_mode,
+        c.loan_party_type,
         c.title_type,
         c.status,
         c.spa_details,
@@ -911,6 +907,16 @@ async function buildCaseContext(r: DbConn, caseId: number, firmId: number, cache
   const spa = safeJson((c as any).spa_details);
   const prop = safeJson((c as any).property_details);
   const loan = safeJson((c as any).loan_details);
+  const loanPartyTypeRaw = typeof (c as any).loan_party_type === "string" ? String((c as any).loan_party_type).trim() : "";
+  const loanPartyType = loanPartyTypeRaw === "3rd_party" ? "3rd_party" : "1st_party";
+  if (loanPartyType === "1st_party" && String((c as any).purchase_mode ?? "") === "loan") {
+    const p1 = purchaserRows[0] ?? null;
+    const p2 = purchaserRows[1] ?? null;
+    (loan as any).borrower1Name = p1 && typeof (p1 as any).name === "string" ? String((p1 as any).name) : "";
+    (loan as any).borrower1Ic = p1 && typeof (p1 as any).ic_no === "string" ? String((p1 as any).ic_no) : "";
+    (loan as any).borrower2Name = p2 && typeof (p2 as any).name === "string" ? String((p2 as any).name) : "";
+    (loan as any).borrower2Ic = p2 && typeof (p2 as any).ic_no === "string" ? String((p2 as any).ic_no) : "";
+  }
   const comp = safeJson((c as any).company_details);
   const devContacts = typeof (c as any).developer_contacts_json === "string"
     ? (() => { try { return JSON.parse(String((c as any).developer_contacts_json)); } catch { return []; } })()
@@ -1577,6 +1583,15 @@ router.post("/document-templates", requireAuth, requireFirmUser, requirePermissi
     res.status(400).json({ error: "name, objectPath, and fileName are required" });
     return;
   }
+  const maxBytes = 10 * 1024 * 1024;
+  if (typeof fileSize !== "number" || !Number.isFinite(fileSize) || fileSize <= 0 || Math.floor(fileSize) > maxBytes) {
+    res.status(413).json({ error: "File size must be under 10MB", code: "FILE_TOO_LARGE" });
+    return;
+  }
+  if (!String(objectPath).startsWith("/objects/")) {
+    res.status(400).json({ error: "Invalid objectPath" });
+    return;
+  }
 
   const folderIdNum = typeof folderId === "number" ? folderId : null;
   const kindVal = typeof kind === "string" ? kind : "template";
@@ -1605,6 +1620,10 @@ router.post("/document-templates", requireAuth, requireFirmUser, requirePermissi
     res.status(400).json({ error: "Template must be a .docx file", code: "TEMPLATE_MUST_BE_DOCX" });
     return;
   }
+  if (ext === "docx" && !String(objectPath).startsWith(`/objects/templates/firms/${req.firmId!}/`)) {
+    res.status(400).json({ error: "Invalid objectPath" });
+    return;
+  }
   const isTemplateCapable = effectiveKind === "template" && ext === "docx";
 
   const rows = await queryRows(
@@ -1624,7 +1643,7 @@ router.post("/document-templates", requireAuth, requireFirmUser, requirePermissi
             kind = ${effectiveKind},
             mime_type = ${mimeType ?? null},
             extension = ${ext || null},
-            file_size = ${typeof fileSize === "number" ? fileSize : null},
+            file_size = ${Math.floor(fileSize)},
             is_template_capable = ${isTemplateCapable},
             updated_at = now()
         WHERE id = ${createdId ?? 0} AND firm_id = ${req.firmId!}
@@ -3960,7 +3979,8 @@ router.get("/cases/:caseId/documents/checklist", requireAuth, requireFirmUser, r
   });
 });
 
-const CHECKLIST_ALLOWED_ATTACHMENT_EXTENSIONS = new Set<string>(["pdf", "doc", "docx", "jpg", "jpeg", "png"]);
+const CHECKLIST_ALLOWED_ATTACHMENT_EXTENSIONS = new Set<string>(["pdf", "jpg", "jpeg", "png"]);
+const CHECKLIST_MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024;
 
 function parseChecklistKeyTarget(checklistKey: string): { templateId?: number; platformDocumentId?: number } {
   const k = checklistKey.trim();
@@ -4330,13 +4350,17 @@ router.post("/cases/:caseId/documents/checklist/items/:checklistKey/upload", req
     res.status(400).json({ error: "Missing objectPath or fileName" });
     return;
   }
+  if (fileSize === null || fileSize > CHECKLIST_MAX_ATTACHMENT_BYTES) {
+    res.status(413).json({ error: "File size must be under 10MB", code: "FILE_TOO_LARGE" });
+    return;
+  }
   if (!objectPath.startsWith(`/objects/cases/${req.firmId!}/case-${caseId}/documents/`)) {
     res.status(400).json({ error: "Invalid objectPath" });
     return;
   }
   const ext = fileExtensionFromName(fileName);
   if (!ext || !CHECKLIST_ALLOWED_ATTACHMENT_EXTENSIONS.has(ext)) {
-    res.status(422).json({ error: "Unsupported file type. Allowed: pdf, doc, docx, jpg, jpeg, png" });
+    res.status(422).json({ error: "Unsupported file type. Allowed: pdf, jpg, jpeg, png" });
     return;
   }
   const { templateId, platformDocumentId } = parseChecklistKeyTarget(checklistKey);
@@ -5026,6 +5050,7 @@ async function generateFirmDocument({
     fileBytes: outputBytes,
     contentType: outputContentType,
   });
+  const outputSize = outputBytes.length;
   const docName = documentName ?? String((template as any).name ?? "Generated document");
   const templateCode = String((template as any).document_type ?? "DOC");
   const sequence = await nextCaseDocumentSequence(r, firmId, caseId);
@@ -5060,8 +5085,8 @@ async function generateFirmDocument({
   };
   const templateSnapshotUpdatedAt = (version as any)?.published_at ?? (template as any).updated_at ?? null;
   const docRows = await queryRows(r, sql`
-    INSERT INTO case_documents (case_id, firm_id, template_id, template_source, template_snapshot_name, template_snapshot_updated_at, name, document_type, status, object_path, file_name, generated_by, clause_snapshot, naming_snapshot)
-    VALUES (${caseId}, ${firmId}, ${templateId}, 'firm', ${String((template as any).name ?? "")}, ${templateSnapshotUpdatedAt as any}, ${docName}, ${templateDocType}, 'generated', ${normalizedPath}, ${downloadName}, ${actorId}, ${clauseSnapshot as any}, ${namingSnapshot as any})
+    INSERT INTO case_documents (case_id, firm_id, template_id, template_source, template_snapshot_name, template_snapshot_updated_at, name, document_type, status, object_path, file_name, file_size, is_uploaded, generated_by, generated_at, clause_snapshot, naming_snapshot)
+    VALUES (${caseId}, ${firmId}, ${templateId}, 'firm', ${String((template as any).name ?? "")}, ${templateSnapshotUpdatedAt as any}, ${docName}, ${templateDocType}, 'generated', ${normalizedPath}, ${downloadName}, ${outputSize}, false, ${actorId}, now(), ${clauseSnapshot as any}, ${namingSnapshot as any})
     RETURNING *
   `);
   const created = docRows[0];
@@ -5529,6 +5554,7 @@ async function generateMasterDocument({
     fileBytes: buffer,
     contentType: outputMime,
   });
+  const outputSize = buffer.length;
   const docName = documentName ?? String((masterDoc as any).name ?? "Generated document");
   const templateCode = String((masterDoc as any).category ?? (masterDoc as any).name ?? "DOC");
   const sequence = await nextCaseDocumentSequence(r, firmId, caseId);
@@ -5562,8 +5588,8 @@ async function generateMasterDocument({
     collisionSuffixApplied: uniq.collisionSuffixApplied,
   };
   const savedRows = await queryRows(r, sql`
-    INSERT INTO case_documents (case_id, firm_id, template_source, platform_document_id, template_snapshot_name, template_snapshot_updated_at, name, document_type, status, object_path, file_name, generated_by, clause_snapshot, naming_snapshot)
-    VALUES (${caseId}, ${firmId}, 'master', ${masterDocId}, ${String((masterDoc as any).name ?? "")}, ${(masterDoc as any).created_at ?? null}, ${docName}, ${(masterDoc as any).category ?? "other"}, 'generated', ${normalizedPath}, ${fileName}, ${actorId}, ${clauseSnapshot as any}, ${namingSnapshot as any})
+    INSERT INTO case_documents (case_id, firm_id, template_source, platform_document_id, template_snapshot_name, template_snapshot_updated_at, name, document_type, status, object_path, file_name, file_size, is_uploaded, generated_by, generated_at, clause_snapshot, naming_snapshot)
+    VALUES (${caseId}, ${firmId}, 'master', ${masterDocId}, ${String((masterDoc as any).name ?? "")}, ${(masterDoc as any).created_at ?? null}, ${docName}, ${(masterDoc as any).category ?? "other"}, 'generated', ${normalizedPath}, ${fileName}, ${outputSize}, false, ${actorId}, now(), ${clauseSnapshot as any}, ${namingSnapshot as any})
     RETURNING *
   `);
   const created = savedRows[0];
@@ -5803,7 +5829,7 @@ router.post("/cases/:caseId/documents/batch-export", requireAuth, requireFirmUse
       originalFileNameOrExt: "zip",
       fallbackExt: "zip",
     }).fileName;
-    const objectPath = `/objects/cases/${req.firmId!}/case-${caseId}/batch-exports/${jobId}.zip`;
+    const objectPath = `/objects/temp-generated/${req.firmId!}/case-${caseId}/batch-exports/${jobId}.zip`;
     await supabaseStorage.uploadPrivateObject({ objectPath, fileBytes: zipBytes, contentType: "application/zip" });
 
     await queryRows(r, sql`
@@ -5847,6 +5873,93 @@ router.post("/cases/:caseId/documents/batch-export", requireAuth, requireFirmUse
       SET status = 'failed', error_code = ${e.code}, error_message = ${e.message}, finished_at = now()
       WHERE job_id = ${jobId}::uuid AND firm_id = ${req.firmId!}
     `);
+    res.status(e.statusCode).json({ error: e.message, code: e.code });
+  }
+});
+
+router.post("/cases/batch-generated-documents-zip", requireAuth, requireFirmUser, requirePermission("documents", "export"), async (req: AuthRequest, res): Promise<void> => {
+  const r = getRlsDb(req, res);
+  if (!r) return;
+
+  const body = req.body as Record<string, unknown>;
+  const idsRaw = Array.isArray(body.caseIds) ? body.caseIds : [];
+  const caseIds = Array.from(new Set(idsRaw.map((x) => (typeof x === "number" ? x : (typeof x === "string" ? parseInt(x, 10) : NaN))).filter((x) => Number.isFinite(x)))).map((x) => Math.trunc(x));
+  if (caseIds.length === 0) {
+    res.status(422).json({ error: "caseIds is required", code: "CASE_IDS_REQUIRED" });
+    return;
+  }
+  if (caseIds.length > 20) {
+    res.status(422).json({ error: "Too many cases", code: "TOO_MANY_CASES", limit: 20 });
+    return;
+  }
+
+  const caseRows = await queryRows(r, sql`
+    SELECT id, reference_no
+    FROM cases
+    WHERE firm_id = ${req.firmId!}
+      AND deleted_at IS NULL
+      AND id IN (${sql.join(caseIds.map((id) => sql`${id}`), sql`, `)})
+  `);
+  if (caseRows.length !== caseIds.length) {
+    res.status(404).json({ error: "One or more cases not found", code: "CASE_NOT_FOUND" });
+    return;
+  }
+
+  const refByCaseId = new Map<number, string>();
+  for (const row of caseRows) {
+    const id = typeof (row as any).id === "number" ? Number((row as any).id) : NaN;
+    if (!Number.isFinite(id)) continue;
+    const ref = typeof (row as any).reference_no === "string" ? String((row as any).reference_no) : "";
+    refByCaseId.set(id, ref);
+  }
+
+  const docs = await queryRows(r, sql`
+    SELECT case_id, object_path, file_name, id
+    FROM case_documents
+    WHERE firm_id = ${req.firmId!}
+      AND status = 'generated'
+      AND case_id IN (${sql.join(caseIds.map((id) => sql`${id}`), sql`, `)})
+    ORDER BY case_id ASC, created_at DESC
+  `);
+  if (docs.length === 0) {
+    res.status(404).json({ error: "No generated documents found", code: "NO_GENERATED_DOCUMENTS" });
+    return;
+  }
+  if (docs.length > 400) {
+    res.status(422).json({ error: "Too many documents", code: "TOO_MANY_DOCUMENTS", limit: 400 });
+    return;
+  }
+
+  const entries = docs.map((d) => {
+    const caseId = typeof (d as any).case_id === "number" ? Number((d as any).case_id) : NaN;
+    const ref = Number.isFinite(caseId) ? (refByCaseId.get(caseId) ?? "") : "";
+    const folder = safeFilenameAscii(ref) || (Number.isFinite(caseId) ? `case-${caseId}` : "case");
+    const file = safeFilenameAscii(String((d as any).file_name ?? "")) || `document-${String((d as any).id ?? "")}`;
+    return {
+      zipPath: `${folder}/${file}`,
+      objectPath: String((d as any).object_path ?? ""),
+    };
+  });
+
+  if (entries.some((e) => !e.objectPath)) {
+    res.status(422).json({ error: "One or more document files missing", code: "DOCUMENT_FILE_MISSING" });
+    return;
+  }
+
+  try {
+    const zipBytes = await buildZipBufferFromPrivateObjects(entries);
+    const outName = safeFilenameAscii(`generated-documents-${new Date().toISOString().slice(0, 10)}.zip`) || "generated-documents.zip";
+    await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.batch_export.generated", entityType: "case", entityId: undefined, detail: `cases=${caseIds.length} docs=${entries.length}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+    res.setHeader("Content-Disposition", contentDispositionAttachment(outName));
+    res.setHeader("Content-Type", "application/zip");
+    res.status(200).send(zipBytes);
+  } catch (err: unknown) {
+    const cfgErr = getSupabaseStorageConfigError(err);
+    const e =
+      cfgErr ? new DocumentGenerationError(cfgErr.statusCode, "STORAGE_NOT_CONFIGURED", cfgErr.error)
+      : err instanceof ObjectNotFoundError ? new DocumentGenerationError(404, "DOCUMENT_FILE_NOT_FOUND", "One or more document files not found")
+      : err instanceof DocumentGenerationError ? err
+      : new DocumentGenerationError(500, "INTERNAL_ERROR", "Internal Server Error");
     res.status(e.statusCode).json({ error: e.message, code: e.code });
   }
 });
@@ -7278,6 +7391,10 @@ router.post("/cases/:caseId/documents/print", requireAuth, requireFirmUser, requ
 
   const documentName = typeof body.documentName === "string" ? body.documentName.trim() : "";
   const letterheadId = typeof body.letterheadId === "number" ? body.letterheadId : null;
+  const requestedOutputFormat =
+    body.outputFormat === "pdf" ? "pdf" :
+    body.outputFormat === "docx" ? "docx" :
+    undefined;
 
   const cache = createRequestCache();
   const [context, templateRows] = await Promise.all([
@@ -7448,19 +7565,31 @@ router.post("/cases/:caseId/documents/print", requireAuth, requireFirmUser, requ
       });
     }
 
-    buffer = await convertDocxToPdf(buffer);
-    const normalizedPath = newGeneratedDocObjectPath(req.firmId!, caseId, "pdf");
+    const gotenbergUrl = typeof process.env.GOTENBERG_URL === "string" ? process.env.GOTENBERG_URL.trim() : "";
+    const wantPdf = requestedOutputFormat === "pdf"
+      ? true
+      : requestedOutputFormat === "docx"
+        ? false
+        : Boolean(gotenbergUrl);
+    const outBytes = wantPdf ? await convertDocxToPdf(buffer) : buffer;
+    const outExt = wantPdf ? "pdf" : "docx";
+    const outContentType = wantPdf
+      ? "application/pdf"
+      : "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+
+    const normalizedPath = newGeneratedDocObjectPath(req.firmId!, caseId, outExt);
     await supabaseStorage.uploadPrivateObject({
       objectPath: normalizedPath,
-      fileBytes: buffer,
-      contentType: "application/pdf",
+      fileBytes: outBytes,
+      contentType: outContentType,
     });
+    const outSize = outBytes.length;
     const nameToUse = documentName || `${cfg.label} - ${context.reference_no}`;
-    const fileName = `${nameToUse.replace(/[^a-zA-Z0-9 \-_]/g, "_")}.pdf`;
+    const fileName = `${nameToUse.replace(/[^a-zA-Z0-9 \-_]/g, "_")}.${outExt}`;
 
     const docRows = await queryRows(r, sql`
-      INSERT INTO case_documents (case_id, firm_id, template_id, name, document_type, status, object_path, file_name, generated_by)
-      VALUES (${caseId}, ${req.firmId!}, ${(template as any).id as number}, ${nameToUse}, ${cfg.documentType}, 'generated', ${normalizedPath}, ${fileName}, ${req.userId!})
+      INSERT INTO case_documents (case_id, firm_id, template_id, name, document_type, status, object_path, file_name, file_size, is_uploaded, generated_by, generated_at)
+      VALUES (${caseId}, ${req.firmId!}, ${(template as any).id as number}, ${nameToUse}, ${cfg.documentType}, 'generated', ${normalizedPath}, ${fileName}, ${outSize}, false, ${req.userId!}, now())
       RETURNING *`
     );
 
@@ -7468,13 +7597,13 @@ router.post("/cases/:caseId/documents/print", requireAuth, requireFirmUser, requ
     const createdId = created && typeof created === "object" && "id" in created && typeof (created as { id?: unknown }).id === "number"
       ? (created as { id: number }).id
       : undefined;
-    await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.case.print", entityType: "case_document", entityId: createdId, detail: `caseId=${caseId} printKey=${printKey} templateId=${(template as any).id} name=${nameToUse} letterhead=${isLetterLike ? (usedLetterheadId ?? "default") : "n/a"}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+    await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.case.print", entityType: "case_document", entityId: createdId, detail: `caseId=${caseId} printKey=${printKey} templateId=${(template as any).id} name=${nameToUse} letterhead=${isLetterLike ? (usedLetterheadId ?? "default") : "n/a"} output=${outExt}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
     await finishGenerationRunSuccess(r, req.firmId!, runId, createdId ?? null, context, null, null);
     await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.generation.succeeded", entityType: "document_generation_run", entityId: runId, detail: `caseId=${caseId} templateSource=firm templateId=${templateId} renderMode=print`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
     if (createdId) res.setHeader("x-case-document-id", String(createdId));
     res.setHeader("Content-Disposition", contentDispositionAttachment(fileName));
-    res.setHeader("Content-Type", "application/pdf");
-    res.status(201).send(buffer);
+    res.setHeader("Content-Type", outContentType);
+    res.status(201).send(outBytes);
   } catch (err: unknown) {
     const cfgErr = getSupabaseStorageConfigError(err);
     if (cfgErr) {
@@ -7803,6 +7932,21 @@ router.post("/cases/:caseId/documents/upload", requireAuth, requireFirmUser, req
 
   if (!name || !objectPath || !fileName) {
     res.status(400).json({ error: "name, objectPath, and fileName are required" });
+    return;
+  }
+  const maxBytes = 10 * 1024 * 1024;
+  if (typeof fileSize === "number" && fileSize > maxBytes) {
+    res.status(413).json({ error: "File size must be under 10MB", code: "FILE_TOO_LARGE" });
+    return;
+  }
+  const lowerName = String(fileName || "").toLowerCase();
+  const allowedExt = lowerName.endsWith(".pdf") || lowerName.endsWith(".jpg") || lowerName.endsWith(".jpeg") || lowerName.endsWith(".png");
+  if (!allowedExt) {
+    res.status(415).json({ error: "Only PDF, JPG, or PNG files are allowed", code: "UNSUPPORTED_MEDIA_TYPE" });
+    return;
+  }
+  if (!objectPath.startsWith(`/objects/cases/${req.firmId!}/`)) {
+    res.status(403).json({ error: "Invalid objectPath", code: "FORBIDDEN" });
     return;
   }
 

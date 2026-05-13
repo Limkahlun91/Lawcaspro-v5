@@ -1,7 +1,7 @@
 import { ReactNode } from "react";
 import { useAuth } from "@/lib/auth-context";
 import { hasPermission } from "@/lib/permissions";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useLocation } from "wouter";
 import { 
   LayoutDashboard, 
@@ -20,10 +20,12 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { apiFetchJson } from "@/lib/api-client";
+import { getListCasesQueryKey, getListDevelopersQueryKey, getListProjectsQueryKey, getListUsersQueryKey } from "@workspace/api-client-react";
 
 export function AppLayout({ children }: { children: ReactNode }) {
   const { user, logout } = useAuth();
   const [location] = useLocation();
+  const queryClient = useQueryClient();
 
   const { data: unreadData } = useQuery({
     queryKey: ["unread-count"],
@@ -53,6 +55,59 @@ export function AppLayout({ children }: { children: ReactNode }) {
   ];
   const visibleNavItems = navItems.filter((i) => hasPermission(user, i.perm[0], i.perm[1]));
 
+  const prefetchByHref: Record<string, () => void> = {
+    "/app/cases": () => {
+      const params = { page: 1, limit: 50 } as const;
+      queryClient.prefetchQuery({
+        queryKey: getListCasesQueryKey(params),
+        queryFn: () => apiFetchJson(`/cases?page=${params.page}&limit=${params.limit}`),
+      });
+      queryClient.prefetchQuery({
+        queryKey: ["cases", "filter-options"],
+        queryFn: () => apiFetchJson("/cases/filter-options"),
+      });
+      queryClient.prefetchQuery({
+        queryKey: ["cases", "saved-views"],
+        queryFn: () => apiFetchJson("/case-list-views"),
+      });
+      queryClient.prefetchQuery({
+        queryKey: getListProjectsQueryKey({ page: 1, limit: 200 }),
+        queryFn: () => apiFetchJson("/projects?page=1&limit=200"),
+      });
+      queryClient.prefetchQuery({
+        queryKey: getListDevelopersQueryKey({ page: 1, limit: 200 }),
+        queryFn: () => apiFetchJson("/developers?page=1&limit=200"),
+      });
+      queryClient.prefetchQuery({
+        queryKey: getListUsersQueryKey({ page: 1, limit: 200 }),
+        queryFn: () => apiFetchJson("/users?page=1&limit=200"),
+      });
+    },
+    "/app/projects": () => {
+      queryClient.prefetchQuery({
+        queryKey: getListProjectsQueryKey({ page: 1, limit: 50 }),
+        queryFn: () => apiFetchJson("/projects?page=1&limit=50"),
+      });
+      queryClient.prefetchQuery({
+        queryKey: getListDevelopersQueryKey({ limit: 100 }),
+        queryFn: () => apiFetchJson("/developers?limit=100"),
+      });
+    },
+    "/app/developers": () => {
+      queryClient.prefetchQuery({
+        queryKey: getListDevelopersQueryKey({ page: 1, limit: 50 }),
+        queryFn: () => apiFetchJson("/developers?page=1&limit=50"),
+      });
+    },
+    "/app/settings": () => {
+      const userParams = { page: 1, limit: 50 } as const;
+      queryClient.prefetchQuery({
+        queryKey: getListUsersQueryKey(userParams),
+        queryFn: () => apiFetchJson(`/users?page=${userParams.page}&limit=${userParams.limit}`),
+      });
+    },
+  };
+
   return (
     <div className="flex min-h-screen w-full bg-slate-50 overflow-x-hidden">
       <div className="w-64 bg-slate-900 text-slate-100 flex flex-col shrink-0 sticky top-0 h-screen overflow-y-auto">
@@ -70,13 +125,17 @@ export function AppLayout({ children }: { children: ReactNode }) {
         <nav className="flex-1 py-4 px-3 space-y-1">
           {visibleNavItems.map((item) => {
             const isActive = location === item.href || location.startsWith(`${item.href}/`) || (item.href === "/app/accounting" && location.startsWith("/app/quotations"));
+            const onPrefetch = prefetchByHref[item.href];
             return (
               <Link key={item.href} href={item.href}>
-                <div className={`flex items-center gap-3 px-3 py-2.5 rounded-md text-sm font-medium transition-colors ${
+                <div
+                  onMouseEnter={onPrefetch}
+                  className={`flex items-center gap-3 px-3 py-2.5 rounded-md text-sm font-medium transition-colors ${
                   isActive 
                     ? "bg-blue-500/10 text-blue-200" 
                     : "text-slate-300 hover:bg-slate-800 hover:text-slate-100 cursor-pointer"
-                }`}>
+                  }`}
+                >
                   <item.icon className="w-4 h-4 shrink-0" />
                   <span className="truncate flex-1">{item.label}</span>
                   {item.label === "Communications" && unreadCount > 0 && (

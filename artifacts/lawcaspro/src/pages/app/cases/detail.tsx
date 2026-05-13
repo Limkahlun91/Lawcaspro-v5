@@ -4,7 +4,8 @@ import {
   useGetCaseWorkflow, getGetCaseWorkflowQueryKey, 
   useUpdateWorkflowStep, 
   useGetCaseNotes, getGetCaseNotesQueryKey,
-  useCreateCaseNote
+  useCreateCaseNote,
+  useListUsers
 } from "@workspace/api-client-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -30,8 +31,10 @@ import { toastError } from "@/lib/toast-error";
 import { apiFetchBlob, apiFetchJson, apiRequest } from "@/lib/api-client";
 import { DateOnlyInput, formatYmdToDmy, normalizeDateOnlyFromApi } from "@/components/date-only-input";
 import { downloadBlob } from "@/lib/download";
+import { printWordBlob } from "@/lib/documents/BrowserPrinter";
 import { useAuth } from "@/lib/auth-context";
 import { hasPermission } from "@/lib/permissions";
+import { DEFAULT_ALLOWED_MIME_TYPES, validateUploadFile } from "@/lib/upload-validation";
 import { WORKFLOW_ATTACHMENT_ACCEPT, WORKFLOW_ATTACHMENT_ITEMS, isAllowedWorkflowAttachmentFileName, type WorkflowAttachmentDocKey, type WorkflowAttachmentDateKey } from "./components/workflow-attachments";
 
 import { getListCasesQueryKey } from "@workspace/api-client-react";
@@ -94,7 +97,7 @@ export default function CaseDetail() {
     query: { enabled: !!caseId, queryKey: getGetCaseQueryKey(caseId) }
   });
 
-  const { data: usersRes } = useListUsers({ limit: 200 });
+  const { data: usersRes } = useListUsers({ limit: 200 }, { query: { staleTime: 5 * 60 * 1000 } });
   const users = usersRes?.data || [];
   const lawyerOptions = users.filter((u) => ["Partner", "Senior Lawyer", "Lawyer"].includes(String(u.roleName ?? "").trim()));
   const clerkOptions = users.filter((u) => ["Senior Clerk", "Clerk"].includes(String(u.roleName ?? "").trim()));
@@ -176,7 +179,7 @@ export default function CaseDetail() {
       const res = await apiRequest(`/cases/${caseId}/documents/print`, {
         method: "POST",
         timeoutMs: 60000,
-        body: JSON.stringify(payload),
+        body: JSON.stringify({ ...payload, outputFormat: "docx" }),
       });
       const blob = await res.blob();
       const cd = res.headers.get("content-disposition") ?? "";
@@ -191,6 +194,7 @@ export default function CaseDetail() {
       if (Number.isFinite(docId)) {
         queryClient.invalidateQueries({ queryKey: ["case-documents", caseId] });
       }
+<<<<<<< HEAD
       downloadBlob(blob, fileName);
       toast({ title: "Download started" });
 
@@ -199,6 +203,10 @@ export default function CaseDetail() {
       } else if (vars?.printKey === "letter_advice_spa_sol_lu") {
         autoKeyDatesMutation.mutate({ payload: { advice_to_bank_date: todayYmdLocal() }, statusLabel: "Advised" });
       }
+=======
+      await printWordBlob(blob, { title: fileName });
+      toast({ title: "Print preview opened" });
+>>>>>>> 1b6aeb9056b6a3686ba71ceb8a151391761dbecd
     },
     onError: (err) => toastError(toast, err, "Print failed"),
   });
@@ -321,6 +329,9 @@ export default function CaseDetail() {
     advice_to_bank_date: normalizeDateOnlyFromApi((src as any).advice_to_bank_date),
     bank_1st_release_on: normalizeDateOnlyFromApi((src as any).bank_1st_release_on),
     first_release_amount_rm: (src as any).first_release_amount_rm !== null && (src as any).first_release_amount_rm !== undefined ? String((src as any).first_release_amount_rm) : "",
+    discharge_date: normalizeDateOnlyFromApi((src as any).discharge_date),
+    consent_to_transfer_date: normalizeDateOnlyFromApi((src as any).consent_to_transfer_date),
+    consent_to_charge_date: normalizeDateOnlyFromApi((src as any).consent_to_charge_date),
     mot_received_date: normalizeDateOnlyFromApi((src as any).mot_received_date),
     mot_signed_date: normalizeDateOnlyFromApi((src as any).mot_signed_date),
     mot_stamped_date: normalizeDateOnlyFromApi((src as any).mot_stamped_date),
@@ -362,6 +373,7 @@ export default function CaseDetail() {
       "bank_1st_release_on",
       "first_release_amount_rm",
       "redemption_sum",
+      "discharge_date",
       "letter_disclaimer_received_on",
       "letter_disclaimer_dated",
       "letter_disclaimer_reference_nos",
@@ -374,6 +386,8 @@ export default function CaseDetail() {
       "mot_signed_date",
       "mot_stamped_date",
       "mot_registered_date",
+      "consent_to_transfer_date",
+      "consent_to_charge_date",
     ],
   } as const;
 
@@ -571,6 +585,21 @@ export default function CaseDetail() {
   const titleType = normalizeTitleType(String(caseInfo?.titleType ?? ""));
   const isMasterTitle = titleType === "master";
   const isStrataOrIndividual = titleType === "strata" || titleType === "individual";
+  const caseMeta = caseInfo as unknown as Record<string, unknown>;
+  const isEncumbered = caseMeta.isEncumbered === true || caseMeta.is_encumbered === true;
+  const tenureRaw = typeof caseMeta.tenure === "string" ? caseMeta.tenure.trim().toLowerCase() : "";
+  const tenure = tenureRaw === "leasehold" ? "leasehold" : "freehold";
+  const showNoaAndPoa = isMasterTitle;
+  const showEncumbranceFields = isEncumbered;
+  const showLeaseholdConsents = tenure === "leasehold" && isStrataOrIndividual;
+
+  const visibleWorkflowAttachmentItems = useMemo(() => {
+    return WORKFLOW_ATTACHMENT_ITEMS.filter((it) => {
+      if (it.docKey === "register_poa") return showNoaAndPoa;
+      if (it.docKey === "letter_disclaimer") return showEncumbranceFields;
+      return true;
+    });
+  }, [showNoaAndPoa, showEncumbranceFields]);
 
   const fixedStampingKeys: Array<{ key: LoanStampingItemKey; label: string; visible: boolean }> = [
     { key: "facility_agreement", label: "Facility Agreement", visible: true },
@@ -711,8 +740,9 @@ export default function CaseDetail() {
       toast({ title: "Permission denied", description: "You do not have permission to upload documents.", variant: "destructive" });
       return;
     }
-    if (!isAllowedWorkflowAttachmentFileName(file.name)) {
-      toast({ title: "Unsupported file type", description: "Allowed: pdf, doc, docx, jpg, jpeg, png", variant: "destructive" });
+    const v = validateUploadFile(file, { allowedMimeTypes: DEFAULT_ALLOWED_MIME_TYPES });
+    if (!v.ok) {
+      toast({ title: "Invalid file", description: v.message, variant: "destructive" });
       return;
     }
     const dateYmd = keyDatesDraft[ref.dateKey] || "";
@@ -825,8 +855,9 @@ export default function CaseDetail() {
       toast({ title: "Permission denied", description: "You do not have permission to upload documents.", variant: "destructive" });
       return;
     }
-    if (!isAllowedWorkflowAttachmentFileName(file.name)) {
-      toast({ title: "Unsupported file type", description: "Allowed: pdf, doc, docx, jpg, jpeg, png", variant: "destructive" });
+    const v = validateUploadFile(file, { allowedMimeTypes: DEFAULT_ALLOWED_MIME_TYPES });
+    if (!v.ok) {
+      toast({ title: "Invalid file", description: v.message, variant: "destructive" });
       return;
     }
     if (!user?.firmId) {
@@ -1669,16 +1700,33 @@ export default function CaseDetail() {
                     <div className="space-y-4">
                       <div className="text-sm font-semibold text-slate-800">NOA / POA / Disclaimer</div>
                       <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                        <FieldCard label="NOA Served On" value={keyDatesDraft.noa_served_on || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, noa_served_on: v }))} printerKey="noa" />
-                        <WorkflowFileCard label="Register POA" docKey="register_poa" dateKey="register_poa_on" />
-                        <FieldCard label="Registered POA Registration Number" type="text" value={keyDatesDraft.registered_poa_registration_number || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, registered_poa_registration_number: v }))} />
-                        <FieldCard label="Letter Disclaimer Received On" value={keyDatesDraft.letter_disclaimer_received_on || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, letter_disclaimer_received_on: v }))} />
-                        <WorkflowFileCard label="Letter Disclaimer" docKey="letter_disclaimer" dateKey="letter_disclaimer_dated" />
-                        <FieldCard label="Letter Disclaimer Reference Nos" type="text" value={keyDatesDraft.letter_disclaimer_reference_nos || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, letter_disclaimer_reference_nos: v }))} />
+                        {showNoaAndPoa ? (
+                          <FieldCard label="NOA Served On" value={keyDatesDraft.noa_served_on || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, noa_served_on: v }))} printerKey="noa" />
+                        ) : null}
+                        {showNoaAndPoa ? (
+                          <WorkflowFileCard label="Register POA" docKey="register_poa" dateKey="register_poa_on" />
+                        ) : null}
+                        {showNoaAndPoa ? (
+                          <FieldCard label="Registered POA Registration Number" type="text" value={keyDatesDraft.registered_poa_registration_number || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, registered_poa_registration_number: v }))} />
+                        ) : null}
+                        {showEncumbranceFields ? (
+                          <FieldCard label="Letter Disclaimer Received On" value={keyDatesDraft.letter_disclaimer_received_on || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, letter_disclaimer_received_on: v }))} />
+                        ) : null}
+                        {showEncumbranceFields ? (
+                          <WorkflowFileCard label="Letter Disclaimer" docKey="letter_disclaimer" dateKey="letter_disclaimer_dated" />
+                        ) : null}
+                        {showEncumbranceFields ? (
+                          <FieldCard label="Letter Disclaimer Reference Nos" type="text" value={keyDatesDraft.letter_disclaimer_reference_nos || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, letter_disclaimer_reference_nos: v }))} />
+                        ) : null}
                       </div>
 
                       <div className="pt-3 grid grid-cols-1 md:grid-cols-2 gap-3">
-                        <FieldCard label="Redemption Sum (RM)" type="number" value={keyDatesDraft.redemption_sum || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, redemption_sum: v }))} />
+                        {showEncumbranceFields ? (
+                          <FieldCard label="Redemption Sum (RM)" type="number" value={keyDatesDraft.redemption_sum || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, redemption_sum: v }))} />
+                        ) : null}
+                        {showEncumbranceFields ? (
+                          <FieldCard label="Discharge Date" value={keyDatesDraft.discharge_date || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, discharge_date: v }))} />
+                        ) : null}
                         <FieldCard label="Bank 1st Release On" value={keyDatesDraft.bank_1st_release_on || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, bank_1st_release_on: v }))} />
                         <FieldCard label="First Release Amount (RM)" type="number" value={keyDatesDraft.first_release_amount_rm || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, first_release_amount_rm: v }))} />
                       </div>
@@ -1707,6 +1755,12 @@ export default function CaseDetail() {
                     <FieldCard label="MOT Signed" value={keyDatesDraft.mot_signed_date || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, mot_signed_date: v }))} />
                     <FieldCard label="MOT Stamped" value={keyDatesDraft.mot_stamped_date || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, mot_stamped_date: v }))} />
                     <FieldCard label="MOT Registered" value={keyDatesDraft.mot_registered_date || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, mot_registered_date: v }))} />
+                    {showLeaseholdConsents ? (
+                      <FieldCard label="Consent to Transfer" value={keyDatesDraft.consent_to_transfer_date || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, consent_to_transfer_date: v }))} />
+                    ) : null}
+                    {showLeaseholdConsents ? (
+                      <FieldCard label="Consent to Charge" value={keyDatesDraft.consent_to_charge_date || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, consent_to_charge_date: v }))} />
+                    ) : null}
                   </div>
                 </TabsContent>
               </Tabs>
@@ -1722,7 +1776,7 @@ export default function CaseDetail() {
             </CardHeader>
             <CardContent className="min-w-0">
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3 min-w-0">
-                {WORKFLOW_ATTACHMENT_ITEMS.map((it) => (
+                {visibleWorkflowAttachmentItems.map((it) => (
                   <WorkflowFileCard key={it.docKey} label={it.label} docKey={it.docKey} dateKey={it.dateKey} />
                 ))}
               </div>

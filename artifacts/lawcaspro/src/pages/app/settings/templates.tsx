@@ -14,6 +14,7 @@ import { useAuth } from "@/lib/auth-context";
 import { TemplatePdfMappingEditor } from "@/components/TemplatePdfMappingEditor";
 import { throwIfApiFailure, getApiFailureCodeFromError } from "@/lib/api-failure";
 import { SupportSessionRequired } from "@/components/support-session-required";
+import { DOCX_MIME_TYPES, MAX_UPLOAD_BYTES, validateUploadFile } from "@/lib/upload-validation";
 
 type TemplateRow = {
   id: number;
@@ -131,6 +132,8 @@ export default function FirmTemplatesSettingsPage() {
     mutationFn: async () => {
       const fileType = inferFileType(uploadFile);
       if (!uploadFile || !fileType) throw new Error("Unsupported file type");
+      const v = validateUploadFile(uploadFile, { maxBytes: MAX_UPLOAD_BYTES, allowedMimeTypes: ["application/pdf", DOCX_MIME_TYPES[0]] });
+      if (!v.ok) throw new Error(v.message);
       if (!firmId) throw new Error("Missing firm context");
 
       const uuid = crypto.randomUUID();
@@ -335,7 +338,21 @@ export default function FirmTemplatesSettingsPage() {
             </div>
             <div>
               <div className="text-sm font-medium mb-1">File (.docx / .pdf)</div>
-              <Input type="file" accept=".pdf,.docx" onChange={(e) => setUploadFile(e.target.files?.[0] ?? null)} />
+              <Input
+                type="file"
+                accept=".pdf,.docx"
+                onChange={(e) => {
+                  const f = e.target.files?.[0] ?? null;
+                  if (!f) { setUploadFile(null); return; }
+                  const v = validateUploadFile(f, { maxBytes: MAX_UPLOAD_BYTES, allowedMimeTypes: ["application/pdf", DOCX_MIME_TYPES[0]] });
+                  if (!v.ok) {
+                    toast({ title: "Invalid file", description: v.message, variant: "destructive" });
+                    setUploadFile(null);
+                    return;
+                  }
+                  setUploadFile(f);
+                }}
+              />
               <div className="text-xs text-slate-500 mt-1">
                 Uploads to templates/firms/{firmId ?? "—"}.
               </div>

@@ -10,6 +10,8 @@ export const casesTable = pgTable("cases", {
   referenceNo: text("reference_no").notNull(),
   purchaseMode: text("purchase_mode").notNull().default("cash"),
   titleType: text("title_type").notNull().default("master"),
+  isEncumbered: boolean("is_encumbered").notNull().default(false),
+  tenure: text("tenure").notNull().default("freehold"),
   spaPrice: numeric("spa_price", { precision: 15, scale: 2 }),
   status: text("status").notNull().default("File Opened / SPA Pending Signing"),
   caseType: text("case_type"),
@@ -17,6 +19,7 @@ export const casesTable = pgTable("cases", {
   spaDetails: text("spa_details"),
   propertyDetails: text("property_details"),
   loanDetails: text("loan_details"),
+  loanPartyType: text("loan_party_type").notNull().default("1st_party"),
   companyDetails: text("company_details"),
   createdBy: integer("created_by"),
   deletedAt: timestamp("deleted_at", { withTimezone: true }),
@@ -120,6 +123,10 @@ export const caseKeyDatesTable = pgTable("case_key_dates", {
   adviceToBankDate: date("advice_to_bank_date"),
   bank1stReleaseOn: date("bank_1st_release_on"),
   firstReleaseAmountRm: numeric("first_release_amount_rm", { precision: 15, scale: 2 }),
+
+  dischargeDate: date("discharge_date"),
+  consentToTransferDate: date("consent_to_transfer_date"),
+  consentToChargeDate: date("consent_to_charge_date"),
 
   motReceivedDate: date("mot_received_date"),
   motSignedDate: date("mot_signed_date"),

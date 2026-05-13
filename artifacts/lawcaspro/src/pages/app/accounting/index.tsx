@@ -17,6 +17,9 @@ import { toastError } from "@/lib/toast-error";
 import { useListQuotations } from "@workspace/api-client-react";
 import { QueryFallback } from "@/components/query-fallback";
 import { useReAuth } from "@/components/re-auth-dialog";
+import { useAuth } from "@/lib/auth-context";
+import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { CreatePaymentVoucherBody, PaymentVoucherTransitionBody, type PaymentVoucherFundStatus } from "@workspace/api-zod";
 
 function fmt(val: unknown) {
   return `RM ${Number(val ?? 0).toLocaleString("en-MY", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
@@ -83,12 +86,11 @@ const STATUS_COLORS: Record<string, string> = {
   paid: "bg-green-100 text-green-700",
   void: "bg-red-100 text-red-600",
   overdue: "bg-red-100 text-red-700",
-  prepared: "bg-blue-100 text-blue-700",
-  lawyer_approved: "bg-indigo-100 text-indigo-700",
-  partner_approved: "bg-violet-100 text-violet-700",
-  submitted: "bg-amber-100 text-amber-700",
-  returned: "bg-orange-100 text-orange-700",
-  locked: "bg-slate-100 text-slate-500",
+  pending_lawyer: "bg-blue-100 text-blue-700",
+  pending_partner: "bg-indigo-100 text-indigo-700",
+  pending_account: "bg-violet-100 text-violet-700",
+  paid_pending_collection: "bg-amber-100 text-amber-700",
+  completed: "bg-green-100 text-green-700",
 };
 
 function StatusBadge({ status }: { status: string }) {
@@ -700,26 +702,32 @@ function ReceiptsTab() {
 
 // ── PAYMENT VOUCHERS TAB ──────────────────────────────────────────────────────
 
-const PV_ACTIONS: Record<string, { label: string; toStatus: string }[]> = {
-  draft: [{ label: "Submit for Approval", toStatus: "prepared" }],
-  prepared: [{ label: "Lawyer Approve", toStatus: "lawyer_approved" }, { label: "Return to Draft", toStatus: "draft" }],
-  lawyer_approved: [{ label: "Partner Approve", toStatus: "partner_approved" }, { label: "Return", toStatus: "prepared" }],
-  partner_approved: [{ label: "Submit to Finance", toStatus: "submitted" }, { label: "Return", toStatus: "lawyer_approved" }],
-  submitted: [{ label: "Mark Paid", toStatus: "paid" }, { label: "Return", toStatus: "returned" }],
-  returned: [{ label: "Resubmit", toStatus: "prepared" }],
-  paid: [],
-  locked: [],
-};
-
 function PaymentVouchersTab() {
   const [showCreate, setShowCreate] = useState(false);
   const { toast } = useToast();
   const qc = useQueryClient();
   const { wrapWithReAuth } = useReAuth();
+  const { user } = useAuth();
+  const roleName = user?.userType === "firm_user" ? (user.roleName ?? "") : "";
+  const roleKind =
+    roleName === "Partner"
+      ? "partner"
+      : (roleName === "Manager" || roleName === "Senior Lawyer" || roleName === "Lawyer")
+        ? "lawyer"
+        : (roleName === "Account" || roleName === "Accounts" || roleName === "Finance" || roleName === "Accountant")
+          ? "account"
+          : "clerk";
+  const isFullVoucherView = roleKind === "partner" || roleKind === "account";
+
+  const [markPaidOpen, setMarkPaidOpen] = useState(false);
+  const [markPaidVoucherId, setMarkPaidVoucherId] = useState<number | null>(null);
+  const [markPaidForm, setMarkPaidForm] = useState({ accountType: "office", paymentMethod: "bank_transfer", bankChequeRefNo: "" });
+
   const [form, setForm] = useState({
     payeeName: "", payeeBank: "", payeeAccountNo: "",
     paymentMethod: "bank_transfer", accountType: "office",
     amount: "", purpose: "", notes: "",
+    fundStatus: "client_paid" as PaymentVoucherFundStatus,
     items: [{ description: "", itemType: "disbursement", amount: "" }],
   });
 
@@ -728,30 +736,44 @@ function PaymentVouchersTab() {
   const vouchers = (data ?? []) as any[];
 
   const createMut = useMutation({
-    mutationFn: () => apiFetchJson("/payment-vouchers", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        ...form,
+    mutationFn: async () => {
+      const payload = {
+        payeeName: form.payeeName,
+        payeeBank: isFullVoucherView ? (form.payeeBank || null) : null,
+        payeeAccountNo: isFullVoucherView ? (form.payeeAccountNo || null) : null,
+        paymentMethod: isFullVoucherView ? form.paymentMethod : undefined,
+        accountType: isFullVoucherView ? form.accountType : undefined,
         amount: parseFloat(form.amount),
-        items: form.items.filter((i) => i.description && i.amount).map((i) => ({ ...i, amount: parseFloat(i.amount) })),
-      }),
-    }),
+        purpose: form.purpose,
+        notes: form.notes || null,
+        fundStatus: form.fundStatus,
+        items: form.items
+          .filter((i) => i.description && i.amount)
+          .map((i) => ({ description: i.description, itemType: i.itemType, amount: parseFloat(i.amount) })),
+      };
+      const parsed = CreatePaymentVoucherBody.safeParse(payload);
+      if (!parsed.success) throw new Error(parsed.error.message);
+      return apiFetchJson("/payment-vouchers", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(parsed.data),
+      });
+    },
     onSuccess: (pv: any) => {
       qc.invalidateQueries({ queryKey: ["payment-vouchers"] });
       setShowCreate(false);
-      setForm({ payeeName: "", payeeBank: "", payeeAccountNo: "", paymentMethod: "bank_transfer", accountType: "office", amount: "", purpose: "", notes: "", items: [{ description: "", itemType: "disbursement", amount: "" }] });
-      toast({ title: "Payment Voucher created", description: `${pv.voucherNo} created as draft` });
+      setForm({ payeeName: "", payeeBank: "", payeeAccountNo: "", paymentMethod: "bank_transfer", accountType: "office", amount: "", purpose: "", notes: "", fundStatus: "client_paid", items: [{ description: "", itemType: "disbursement", amount: "" }] });
+      toast({ title: isFullVoucherView ? "Payment Voucher created" : "Payment Request created", description: `${pv.voucherNo}` });
     },
     onError: (e) => toastError(toast, e, "Create failed"),
   });
 
   const transitionMut = useMutation({
-    mutationFn: ({ id, toStatus }: { id: number; toStatus: string }) =>
+    mutationFn: ({ id, body }: { id: number; body: unknown }) =>
       wrapWithReAuth(
         (headers) => apiFetchJson(`/payment-vouchers/${id}/transition`, {
           method: "POST",
           headers: { ...headers, "Content-Type": "application/json" },
-          body: JSON.stringify({ toStatus }),
+          body: JSON.stringify(body),
         }),
         "Changing a payment voucher status is a sensitive action. Continue?"
       ),
@@ -767,18 +789,90 @@ function PaymentVouchersTab() {
     setForm((f) => ({ ...f, items: f.items.map((it, i) => i === idx ? { ...it, [field]: val } : it) }));
 
   const totalFromItems = form.items.reduce((s, i) => s + (parseFloat(i.amount) || 0), 0);
+  const fundStatusLabel = (v: string) => v === "request_advance" ? "Request Advance" : "Client Paid";
+
+  async function printVoucher(voucherId: number): Promise<void> {
+    const pv = await apiFetchJson<any>(`/payment-vouchers/${voucherId}`);
+    const items = Array.isArray(pv.items) ? pv.items : [];
+    const w = window.open("", "_blank", "noopener,noreferrer");
+    if (!w) return;
+    const rowsHtml = items
+      .map((it: any) => `<tr><td style="padding:6px 8px;border-bottom:1px solid #eee;">${String(it.description ?? "")}</td><td style="padding:6px 8px;border-bottom:1px solid #eee;text-align:right;">${fmt(it.amount)}</td></tr>`)
+      .join("");
+    w.document.open();
+    w.document.write(`
+      <html>
+        <head>
+          <title>${String(pv.voucherNo ?? "Payment Voucher")}</title>
+          <style>
+            body { font-family: Arial, sans-serif; margin: 24px; color: #111; }
+            h1 { font-size: 18px; margin: 0 0 12px; }
+            .meta { font-size: 12px; color: #444; margin-bottom: 12px; }
+            table { width: 100%; border-collapse: collapse; margin-top: 8px; }
+            .sig { margin-top: 24px; display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 16px; font-size: 12px; }
+            .sig > div { border-top: 1px solid #111; padding-top: 6px; }
+            @media print { button { display:none; } }
+          </style>
+        </head>
+        <body>
+          <h1>Payment Voucher</h1>
+          <div class="meta">
+            <div><b>Voucher No:</b> ${String(pv.voucherNo ?? "")}</div>
+            <div><b>Payee:</b> ${String(pv.payeeName ?? "")}</div>
+            <div><b>Purpose:</b> ${String(pv.purpose ?? "")}</div>
+            <div><b>Fund Status:</b> ${fundStatusLabel(String(pv.fundStatus ?? ""))}</div>
+            <div><b>Total:</b> ${fmt(pv.amount)}</div>
+          </div>
+          <table>
+            <thead>
+              <tr><th style="text-align:left;border-bottom:1px solid #111;padding:6px 8px;">Line Item</th><th style="text-align:right;border-bottom:1px solid #111;padding:6px 8px;">Amount</th></tr>
+            </thead>
+            <tbody>${rowsHtml}</tbody>
+          </table>
+          <div class="sig">
+            <div>Lawyer Approval</div>
+            <div>Partner Approval</div>
+            <div>Account / Paid</div>
+          </div>
+          <button onclick="window.print()" style="margin-top:16px;">Print</button>
+        </body>
+      </html>
+    `);
+    w.document.close();
+    w.focus();
+    w.print();
+  }
+
+  async function submitMarkPaid(): Promise<void> {
+    if (!markPaidVoucherId) return;
+    const body = {
+      action: "mark_paid",
+      accountType: markPaidForm.accountType,
+      paymentMethod: markPaidForm.paymentMethod,
+      bankChequeRefNo: markPaidForm.bankChequeRefNo,
+    };
+    const parsed = PaymentVoucherTransitionBody.safeParse(body);
+    if (!parsed.success) {
+      toast({ title: "Invalid input", description: parsed.error.message, variant: "destructive" });
+      return;
+    }
+    transitionMut.mutate({ id: markPaidVoucherId, body: parsed.data });
+    setMarkPaidOpen(false);
+    setMarkPaidVoucherId(null);
+    setMarkPaidForm({ accountType: "office", paymentMethod: "bank_transfer", bankChequeRefNo: "" });
+  }
 
   return (
     <div className="space-y-4">
       <div className="flex justify-end">
         <Button onClick={() => setShowCreate(!showCreate)} className="bg-amber-500 hover:bg-amber-600 text-white gap-2">
-          <Plus className="w-4 h-4" /> New Payment Voucher
+          <Plus className="w-4 h-4" /> {isFullVoucherView ? "New Payment Voucher" : "New Payment Request"}
         </Button>
       </div>
 
       {showCreate && (
         <Card className="border-amber-200 bg-amber-50">
-          <CardHeader><CardTitle className="text-base">New Payment Voucher</CardTitle></CardHeader>
+          <CardHeader><CardTitle className="text-base">{isFullVoucherView ? "New Payment Voucher" : "New Payment Request"}</CardTitle></CardHeader>
           <CardContent className="space-y-4">
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <div>
@@ -786,34 +880,38 @@ function PaymentVouchersTab() {
                 <Input placeholder="Recipient name" value={form.payeeName}
                   onChange={(e) => setForm((f) => ({ ...f, payeeName: e.target.value }))} />
               </div>
-              <div>
-                <label className="text-sm font-medium text-slate-700 block mb-1">Payee Bank</label>
-                <Input placeholder="e.g. Maybank" value={form.payeeBank}
-                  onChange={(e) => setForm((f) => ({ ...f, payeeBank: e.target.value }))} />
-              </div>
-              <div>
-                <label className="text-sm font-medium text-slate-700 block mb-1">Account Number</label>
-                <Input placeholder="Bank account number" value={form.payeeAccountNo}
-                  onChange={(e) => setForm((f) => ({ ...f, payeeAccountNo: e.target.value }))} />
-              </div>
-              <div>
-                <label className="text-sm font-medium text-slate-700 block mb-1">Payment Method</label>
-                <select className="w-full border border-slate-200 rounded-md px-3 py-2 text-sm bg-white"
-                  value={form.paymentMethod} onChange={(e) => setForm((f) => ({ ...f, paymentMethod: e.target.value }))}>
-                  <option value="bank_transfer">Bank Transfer</option>
-                  <option value="cheque">Cheque</option>
-                  <option value="cash">Cash</option>
-                </select>
-              </div>
-              <div>
-                <label className="text-sm font-medium text-slate-700 block mb-1">Deduct From Account</label>
-                <select className="w-full border border-slate-200 rounded-md px-3 py-2 text-sm bg-white"
-                  value={form.accountType} onChange={(e) => setForm((f) => ({ ...f, accountType: e.target.value }))}>
-                  <option value="office">Office Account</option>
-                  <option value="client">Client Account</option>
-                  <option value="trust">Trust Account</option>
-                </select>
-              </div>
+              {isFullVoucherView ? (
+                <>
+                  <div>
+                    <label className="text-sm font-medium text-slate-700 block mb-1">Payee Bank</label>
+                    <Input placeholder="e.g. Maybank" value={form.payeeBank}
+                      onChange={(e) => setForm((f) => ({ ...f, payeeBank: e.target.value }))} />
+                  </div>
+                  <div>
+                    <label className="text-sm font-medium text-slate-700 block mb-1">Account Number</label>
+                    <Input placeholder="Bank account number" value={form.payeeAccountNo}
+                      onChange={(e) => setForm((f) => ({ ...f, payeeAccountNo: e.target.value }))} />
+                  </div>
+                  <div>
+                    <label className="text-sm font-medium text-slate-700 block mb-1">Payment Method</label>
+                    <select className="w-full border border-slate-200 rounded-md px-3 py-2 text-sm bg-white"
+                      value={form.paymentMethod} onChange={(e) => setForm((f) => ({ ...f, paymentMethod: e.target.value }))}>
+                      <option value="bank_transfer">Bank Transfer</option>
+                      <option value="cheque">Cheque</option>
+                      <option value="cash">Cash</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="text-sm font-medium text-slate-700 block mb-1">Deduct From Account</label>
+                    <select className="w-full border border-slate-200 rounded-md px-3 py-2 text-sm bg-white"
+                      value={form.accountType} onChange={(e) => setForm((f) => ({ ...f, accountType: e.target.value }))}>
+                      <option value="office">Office Account</option>
+                      <option value="client">Client Account</option>
+                      <option value="trust">Trust Account</option>
+                    </select>
+                  </div>
+                </>
+              ) : null}
               <div>
                 <label className="text-sm font-medium text-slate-700 block mb-1">Total Amount (RM)</label>
                 <Input type="number" step="0.01" placeholder="0.00" value={form.amount}
@@ -821,6 +919,17 @@ function PaymentVouchersTab() {
                 {totalFromItems > 0 && Math.abs(totalFromItems - parseFloat(form.amount || "0")) > 0.01 && (
                   <p className="text-xs text-amber-600 mt-1">Items total: {fmt(totalFromItems)}</p>
                 )}
+              </div>
+              <div>
+                <label className="text-sm font-medium text-slate-700 block mb-1">Fund Status</label>
+                <select
+                  className="w-full border border-slate-200 rounded-md px-3 py-2 text-sm bg-white"
+                  value={form.fundStatus}
+                  onChange={(e) => setForm((f) => ({ ...f, fundStatus: e.target.value as PaymentVoucherFundStatus }))}
+                >
+                  <option value="client_paid">Client Paid</option>
+                  <option value="request_advance">Request Advance</option>
+                </select>
               </div>
               <div className="md:col-span-2">
                 <label className="text-sm font-medium text-slate-700 block mb-1">Purpose</label>
@@ -863,9 +972,9 @@ function PaymentVouchersTab() {
 
             <div className="flex gap-2">
               <Button onClick={() => createMut.mutate()}
-                disabled={!form.payeeName || !form.amount || !form.purpose || createMut.isPending}
+                disabled={!form.payeeName || !form.amount || !form.purpose || createMut.isPending || form.items.filter((i) => i.description && i.amount).length === 0}
                 className="bg-amber-500 hover:bg-amber-600 text-white">
-                {createMut.isPending ? "Creating…" : "Create Voucher"}
+                {createMut.isPending ? "Creating…" : (isFullVoucherView ? "Create Voucher" : "Create Request")}
               </Button>
               <Button variant="outline" onClick={() => setShowCreate(false)}>Cancel</Button>
             </div>
@@ -890,7 +999,7 @@ function PaymentVouchersTab() {
                 <th className="px-4 py-3 text-left font-medium">Voucher No</th>
                 <th className="px-4 py-3 text-left font-medium">Payee</th>
                 <th className="px-4 py-3 text-left font-medium">Purpose</th>
-                <th className="px-4 py-3 text-left font-medium">Account</th>
+                <th className="px-4 py-3 text-left font-medium">{isFullVoucherView ? "Account" : "Fund Status"}</th>
                 <th className="px-4 py-3 text-left font-medium">Status</th>
                 <th className="px-4 py-3 text-right font-medium">Amount</th>
                 <th className="px-4 py-3 text-right font-medium">Actions</th>
@@ -898,22 +1007,59 @@ function PaymentVouchersTab() {
             </thead>
             <tbody className="divide-y divide-slate-100">
               {vouchers.map((pv: any) => {
-                const actions = PV_ACTIONS[pv.status] ?? [];
+                const actions: Array<{ key: string; label: string; onClick: () => void; show: boolean }> = [
+                  {
+                    key: "lawyer_approve",
+                    label: "Lawyer Approve",
+                    onClick: () => transitionMut.mutate({ id: pv.id, body: { action: "lawyer_approve" } }),
+                    show: pv.status === "pending_lawyer" && (roleKind === "lawyer" || roleKind === "partner"),
+                  },
+                  {
+                    key: "partner_approve",
+                    label: "Partner Approve",
+                    onClick: () => transitionMut.mutate({ id: pv.id, body: { action: "partner_approve" } }),
+                    show: pv.status === "pending_partner" && roleKind === "partner",
+                  },
+                  {
+                    key: "print",
+                    label: "Print Voucher",
+                    onClick: () => { printVoucher(pv.id).catch((e) => toastError(toast, e, "Print failed")); },
+                    show: pv.status === "pending_account",
+                  },
+                  {
+                    key: "mark_paid",
+                    label: "Mark as Paid",
+                    onClick: () => {
+                      setMarkPaidVoucherId(pv.id);
+                      setMarkPaidOpen(true);
+                    },
+                    show: pv.status === "pending_account" && (roleKind === "partner" || roleKind === "account"),
+                  },
+                  {
+                    key: "ack_file",
+                    label: "Acknowledge File Return",
+                    onClick: () => transitionMut.mutate({ id: pv.id, body: { action: "acknowledge_file_return" } }),
+                    show: pv.status === "paid_pending_collection" && roleKind === "clerk",
+                  },
+                ];
                 return (
                   <tr key={pv.id} className="hover:bg-slate-50 transition-colors">
                     <td className="px-4 py-3 font-medium text-slate-900">{pv.voucherNo}</td>
                     <td className="px-4 py-3 text-slate-700">{pv.payeeName}</td>
                     <td className="px-4 py-3 text-slate-500 max-w-xs truncate">{pv.purpose}</td>
                     <td className="px-4 py-3">
-                      <span className="px-2 py-0.5 rounded-full text-xs bg-slate-100 text-slate-600 capitalize">{pv.accountType}</span>
+                      {isFullVoucherView
+                        ? <span className="px-2 py-0.5 rounded-full text-xs bg-slate-100 text-slate-600 capitalize">{pv.accountType}</span>
+                        : <span className="text-xs text-slate-500">{fundStatusLabel(String(pv.fundStatus ?? ""))}</span>
+                      }
                     </td>
                     <td className="px-4 py-3"><StatusBadge status={pv.status} /></td>
                     <td className="px-4 py-3 text-right font-semibold text-slate-800">{fmt(pv.amount)}</td>
                     <td className="px-4 py-3 text-right">
                       <div className="flex items-center justify-end gap-1.5 flex-wrap">
-                        {actions.map((a) => (
-                          <Button key={a.toStatus} size="sm" variant="outline" className="text-xs h-7"
-                            onClick={() => transitionMut.mutate({ id: pv.id, toStatus: a.toStatus })}
+                        {actions.filter((a) => a.show).map((a) => (
+                          <Button key={a.key} size="sm" variant="outline" className="text-xs h-7"
+                            onClick={a.onClick}
                             disabled={transitionMut.isPending}
                           >
                             {a.label}
@@ -928,6 +1074,53 @@ function PaymentVouchersTab() {
           </table>
         </div>
       )}
+
+      <Dialog open={markPaidOpen} onOpenChange={(v) => { if (!v) setMarkPaidVoucherId(null); setMarkPaidOpen(v); }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Mark as Paid</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-3">
+            <div>
+              <label className="text-sm font-medium text-slate-700 block mb-1">Deduct From Account</label>
+              <select
+                className="w-full border border-slate-200 rounded-md px-3 py-2 text-sm bg-white"
+                value={markPaidForm.accountType}
+                onChange={(e) => setMarkPaidForm((f) => ({ ...f, accountType: e.target.value }))}
+              >
+                <option value="office">Office Account</option>
+                <option value="client">Client Account</option>
+              </select>
+            </div>
+            <div>
+              <label className="text-sm font-medium text-slate-700 block mb-1">Payment Method</label>
+              <select
+                className="w-full border border-slate-200 rounded-md px-3 py-2 text-sm bg-white"
+                value={markPaidForm.paymentMethod}
+                onChange={(e) => setMarkPaidForm((f) => ({ ...f, paymentMethod: e.target.value }))}
+              >
+                <option value="bank_transfer">Bank Transfer</option>
+                <option value="cheque">Cheque</option>
+                <option value="cash">Cash</option>
+              </select>
+            </div>
+            <div>
+              <label className="text-sm font-medium text-slate-700 block mb-1">Bank/Cheque Ref No</label>
+              <Input
+                placeholder="e.g. Maybank Ref / Cheque No"
+                value={markPaidForm.bankChequeRefNo}
+                onChange={(e) => setMarkPaidForm((f) => ({ ...f, bankChequeRefNo: e.target.value }))}
+              />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setMarkPaidOpen(false)}>Cancel</Button>
+            <Button className="bg-amber-500 hover:bg-amber-600 text-white" onClick={() => submitMarkPaid()} disabled={!markPaidVoucherId || !markPaidForm.bankChequeRefNo.trim() || transitionMut.isPending}>
+              Confirm
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

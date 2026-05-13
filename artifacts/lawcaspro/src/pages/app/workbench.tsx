@@ -54,7 +54,7 @@ export default function Workbench() {
   const lawyers: Array<{ id: number; name: string }> = Array.isArray(filterOptions?.assignees?.lawyers) ? filterOptions.assignees.lawyers : [];
   const clerks: Array<{ id: number; name: string }> = Array.isArray(filterOptions?.assignees?.clerks) ? filterOptions.assignees.clerks : [];
 
-  const { data: projectsRes } = useListProjects({ page: 1, limit: 200 });
+  const { data: projectsRes } = useListProjects({ page: 1, limit: 200 }, { query: { staleTime: 5 * 60 * 1000 } });
   const projects = projectsRes?.data ?? [];
 
   const workbenchQuery = useMemo(() => {

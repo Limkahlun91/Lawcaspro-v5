@@ -7,7 +7,7 @@ import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useMemo, useState, useEffect, useRef } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { apiFetchBlob, apiFetchJson } from "@/lib/api-client";
+import { apiFetchBlob, apiFetchJson, apiRequest } from "@/lib/api-client";
 import { Badge } from "@/components/ui/badge";
 import { Checkbox } from "@/components/ui/checkbox";
 import { useToast } from "@/hooks/use-toast";
@@ -34,23 +34,45 @@ export default function CasesList() {
   const queryClient = useQueryClient();
   const { toast } = useToast();
 
-  const [search, setSearch] = useState("");
-  const [purchaseMode, setPurchaseMode] = useState<string>("all");
-  const [spaStatus, setSpaStatus] = useState<string>("all");
-  const [loanStatus, setLoanStatus] = useState<string>("all");
-  const [milestone, setMilestone] = useState<CaseMilestoneKey | "all">("all");
-  const [milestonePresence, setMilestonePresence] = useState<MilestonePresence>("filled");
-  const [lawyerId, setLawyerId] = useState<string>("all");
-  const [clerkId, setClerkId] = useState<string>("all");
-  const [projectId, setProjectId] = useState<string>("all");
-  const [developerId, setDeveloperId] = useState<string>("all");
-  const [titleType, setTitleType] = useState<string>("all");
-  const [page, setPage] = useState<number>(1);
-  const [limit, setLimit] = useState<number>(50);
-  const [sortBy, setSortBy] = useState<"updatedAt" | "createdAt" | "referenceNo" | "spaDate">("updatedAt");
-  const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
-  const [assignedToUserId, setAssignedToUserId] = useState<string>("all");
-  const [overdueDays, setOverdueDays] = useState<string>("all");
+  const initialMilestoneRaw = sp.get("milestone");
+  const initialMilestone: CaseMilestoneKey | "all" =
+    initialMilestoneRaw && Object.values(CaseMilestoneKey).includes(initialMilestoneRaw as CaseMilestoneKey)
+      ? (initialMilestoneRaw as CaseMilestoneKey)
+      : "all";
+  const initialPresenceRaw = sp.get("milestonePresence");
+  const initialPresence: MilestonePresence =
+    initialPresenceRaw && Object.values(MilestonePresence).includes(initialPresenceRaw as MilestonePresence)
+      ? (initialPresenceRaw as MilestonePresence)
+      : "filled";
+  const initialPageRaw = sp.get("page");
+  const initialLimitRaw = sp.get("limit");
+  const initialSortByRaw = sp.get("sortBy");
+  const initialSortDirRaw = sp.get("sortDir");
+  const initialPage = initialPageRaw ? Number(initialPageRaw) : 1;
+  const initialLimit = initialLimitRaw ? Number(initialLimitRaw) : 50;
+  const initialSortBy = (initialSortByRaw === "createdAt" || initialSortByRaw === "referenceNo" || initialSortByRaw === "spaDate") ? initialSortByRaw : "updatedAt";
+  const initialSortDir = (initialSortDirRaw === "asc" || initialSortDirRaw === "desc") ? initialSortDirRaw : "desc";
+  const initialAssignedToUserId = sp.get("assignedToUserId") ?? "all";
+  const initialOverdueDaysRaw = sp.get("overdueDays");
+  const initialOverdueDays = initialOverdueDaysRaw === "7" || initialOverdueDaysRaw === "14" || initialOverdueDaysRaw === "30" ? initialOverdueDaysRaw : "all";
+
+  const [search, setSearch] = useState(() => sp.get("search") ?? "");
+  const [purchaseMode, setPurchaseMode] = useState<string>(() => sp.get("purchaseMode") ?? "all");
+  const [spaStatus, setSpaStatus] = useState<string>(() => sp.get("spaStatus") ?? "all");
+  const [loanStatus, setLoanStatus] = useState<string>(() => sp.get("loanStatus") ?? "all");
+  const [milestone, setMilestone] = useState<CaseMilestoneKey | "all">(initialMilestone);
+  const [milestonePresence, setMilestonePresence] = useState<MilestonePresence>(initialPresence);
+  const [lawyerId, setLawyerId] = useState<string>(() => sp.get("assignedLawyerId") ?? "all");
+  const [clerkId, setClerkId] = useState<string>(() => sp.get("assignedClerkId") ?? "all");
+  const [projectId, setProjectId] = useState<string>(() => sp.get("projectId") ?? "all");
+  const [developerId, setDeveloperId] = useState<string>(() => sp.get("developerId") ?? "all");
+  const [titleType, setTitleType] = useState<string>(() => sp.get("titleType") ?? "all");
+  const [page, setPage] = useState<number>(() => Number.isInteger(initialPage) && initialPage > 0 ? initialPage : 1);
+  const [limit, setLimit] = useState<number>(() => Number.isInteger(initialLimit) && initialLimit > 0 ? initialLimit : 50);
+  const [sortBy, setSortBy] = useState<"updatedAt" | "createdAt" | "referenceNo" | "spaDate">(initialSortBy);
+  const [sortDir, setSortDir] = useState<"asc" | "desc">(initialSortDir);
+  const [assignedToUserId, setAssignedToUserId] = useState<string>(initialAssignedToUserId);
+  const [overdueDays, setOverdueDays] = useState<string>(initialOverdueDays);
 
   useEffect(() => {
     isHydratingFromUrl.current = true;
@@ -77,23 +99,33 @@ export default function CasesList() {
     const nextOverdueDaysRaw = sp.get("overdueDays");
     const nextOverdueDays = nextOverdueDaysRaw === "7" || nextOverdueDaysRaw === "14" || nextOverdueDaysRaw === "30" ? nextOverdueDaysRaw : "all";
 
-    setSearch(sp.get("search") ?? "");
-    setPurchaseMode(sp.get("purchaseMode") ?? "all");
-    setSpaStatus(sp.get("spaStatus") ?? "all");
-    setLoanStatus(sp.get("loanStatus") ?? "all");
-    setMilestone(nextMilestone);
-    setMilestonePresence(nextPresence);
-    setLawyerId(sp.get("assignedLawyerId") ?? "all");
-    setClerkId(sp.get("assignedClerkId") ?? "all");
-    setProjectId(sp.get("projectId") ?? "all");
-    setDeveloperId(sp.get("developerId") ?? "all");
-    setTitleType(sp.get("titleType") ?? "all");
-    setPage(Number.isInteger(nextPage) && nextPage > 0 ? nextPage : 1);
-    setLimit(Number.isInteger(nextLimit) && nextLimit > 0 ? nextLimit : 50);
-    setSortBy(nextSortBy);
-    setSortDir(nextSortDir);
-    setAssignedToUserId(nextAssignedToUserId);
-    setOverdueDays(nextOverdueDays);
+    const nextSearch = sp.get("search") ?? "";
+    const nextPurchaseMode = sp.get("purchaseMode") ?? "all";
+    const nextSpaStatus = sp.get("spaStatus") ?? "all";
+    const nextLoanStatus = sp.get("loanStatus") ?? "all";
+    const nextLawyerId = sp.get("assignedLawyerId") ?? "all";
+    const nextClerkId = sp.get("assignedClerkId") ?? "all";
+    const nextProjectId = sp.get("projectId") ?? "all";
+    const nextDeveloperId = sp.get("developerId") ?? "all";
+    const nextTitleType = sp.get("titleType") ?? "all";
+
+    setSearch((prev) => prev === nextSearch ? prev : nextSearch);
+    setPurchaseMode((prev) => prev === nextPurchaseMode ? prev : nextPurchaseMode);
+    setSpaStatus((prev) => prev === nextSpaStatus ? prev : nextSpaStatus);
+    setLoanStatus((prev) => prev === nextLoanStatus ? prev : nextLoanStatus);
+    setMilestone((prev) => prev === nextMilestone ? prev : nextMilestone);
+    setMilestonePresence((prev) => prev === nextPresence ? prev : nextPresence);
+    setLawyerId((prev) => prev === nextLawyerId ? prev : nextLawyerId);
+    setClerkId((prev) => prev === nextClerkId ? prev : nextClerkId);
+    setProjectId((prev) => prev === nextProjectId ? prev : nextProjectId);
+    setDeveloperId((prev) => prev === nextDeveloperId ? prev : nextDeveloperId);
+    setTitleType((prev) => prev === nextTitleType ? prev : nextTitleType);
+    setPage((prev) => prev === (Number.isInteger(nextPage) && nextPage > 0 ? nextPage : 1) ? prev : (Number.isInteger(nextPage) && nextPage > 0 ? nextPage : 1));
+    setLimit((prev) => prev === (Number.isInteger(nextLimit) && nextLimit > 0 ? nextLimit : 50) ? prev : (Number.isInteger(nextLimit) && nextLimit > 0 ? nextLimit : 50));
+    setSortBy((prev) => prev === nextSortBy ? prev : nextSortBy);
+    setSortDir((prev) => prev === nextSortDir ? prev : nextSortDir);
+    setAssignedToUserId((prev) => prev === nextAssignedToUserId ? prev : nextAssignedToUserId);
+    setOverdueDays((prev) => prev === nextOverdueDays ? prev : nextOverdueDays);
 
     queueMicrotask(() => { isHydratingFromUrl.current = false; });
   }, [sp]);
@@ -223,9 +255,9 @@ export default function CasesList() {
   const clerks: Array<{ id: number; name: string }> = Array.isArray(filterOptions?.assignees?.clerks) ? filterOptions.assignees.clerks : [];
   const milestoneOptions: Array<{ key: CaseMilestoneKey; label: string }> = Array.isArray(filterOptions?.milestones) ? filterOptions.milestones : [];
 
-  const { data: projectsRes } = useListProjects({ page: 1, limit: 200 });
-  const { data: devsRes } = useListDevelopers({ page: 1, limit: 200 });
-  const { data: usersRes } = useListUsers({ page: 1, limit: 200 });
+  const { data: projectsRes } = useListProjects({ page: 1, limit: 200 }, { query: { staleTime: 5 * 60 * 1000 } });
+  const { data: devsRes } = useListDevelopers({ page: 1, limit: 200 }, { query: { staleTime: 5 * 60 * 1000 } });
+  const { data: usersRes } = useListUsers({ page: 1, limit: 200 }, { query: { staleTime: 5 * 60 * 1000 } });
   const allUsers = usersRes?.data ?? [];
   const userNameById = useMemo(() => new Map(allUsers.map(u => [String(u.id), u.name])), [allUsers]);
   const lawyerCandidates = allUsers.filter(u => (u.roleName ?? "").toLowerCase().includes("lawyer") || (u.roleName ?? "").toLowerCase().includes("partner"));
@@ -295,9 +327,13 @@ export default function CasesList() {
   const [selectedCaseIds, setSelectedCaseIds] = useState<Set<number>>(new Set());
   const [bulkLawyerId, setBulkLawyerId] = useState<string>("all");
   const [bulkClerkId, setBulkClerkId] = useState<string>("all");
+<<<<<<< HEAD
   const [isBatchStatusOpen, setIsBatchStatusOpen] = useState(false);
   const [batchStatusModule, setBatchStatusModule] = useState<"spa" | "loan">("loan");
   const [batchStatusValue, setBatchStatusValue] = useState<string>("");
+=======
+  const [bulkZipDownloading, setBulkZipDownloading] = useState(false);
+>>>>>>> 1b6aeb9056b6a3686ba71ceb8a151391761dbecd
 
   useEffect(() => {
     setSelectedCaseIds(new Set());
@@ -374,6 +410,37 @@ export default function CasesList() {
     a.click();
     a.remove();
     URL.revokeObjectURL(url);
+  };
+
+  const downloadGeneratedDocumentsZip = async () => {
+    const ids = Array.from(selectedCaseIds);
+    if (ids.length === 0) return;
+    setBulkZipDownloading(true);
+    try {
+      const res = await apiRequest("/cases/batch-generated-documents-zip", {
+        method: "POST",
+        body: JSON.stringify({ caseIds: ids }),
+        timeoutMs: 60000,
+      });
+      const blob = await res.blob();
+      const cd = res.headers.get("content-disposition") ?? "";
+      const m = /filename\*=UTF-8''([^;]+)|filename=\"?([^\";]+)\"?/i.exec(cd);
+      const fileNameRaw = m?.[1] ?? m?.[2] ?? "generated-documents.zip";
+      const fileName = decodeURIComponent(String(fileNameRaw).trim());
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = fileName || "generated-documents.zip";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      toast({ title: "Download started", description: `${ids.length} case(s)` });
+    } catch (err) {
+      toastError(toast, err, "Download ZIP failed");
+    } finally {
+      setBulkZipDownloading(false);
+    }
   };
 
   type SavedView = { id: number; name: string; routeKey: string; filtersJson: Record<string, string> };
@@ -859,6 +926,7 @@ export default function CasesList() {
                     Apply
                   </Button>
 
+<<<<<<< HEAD
                   <Select value={bulkClerkId} onValueChange={setBulkClerkId}>
                     <SelectTrigger className="w-[220px]">
                       <SelectValue placeholder="Assign Clerk" />
@@ -889,6 +957,23 @@ export default function CasesList() {
             </Card>
           </div>
         </div>
+=======
+              <Button variant="ghost" onClick={() => setSelectedCaseIds(new Set())}>
+                Clear selection
+              </Button>
+
+              <Button
+                variant="secondary"
+                onClick={downloadGeneratedDocumentsZip}
+                disabled={bulkAssignMutation.isPending || bulkZipDownloading || selectedCaseIds.size === 0}
+              >
+                <Download className="w-4 h-4 mr-2" />
+                Download Generated Documents (ZIP)
+              </Button>
+            </div>
+          </CardContent>
+        </Card>
+>>>>>>> 1b6aeb9056b6a3686ba71ceb8a151391761dbecd
       )}
 
       <Dialog open={isBatchStatusOpen} onOpenChange={setIsBatchStatusOpen}>
