@@ -78,6 +78,72 @@ async function enforcePermission(req: AuthRequest, res: ExpressResponse, module:
   return ok;
 }
 
+async function getRoleName(r: DbConn, firmId: number, roleId: number | null | undefined): Promise<string> {
+  if (!roleId) return "";
+  const [row] = await r
+    .select({ name: rolesTable.name })
+    .from(rolesTable)
+    .where(and(eq(rolesTable.id, roleId), eq(rolesTable.firmId, firmId)))
+    .limit(1);
+  return typeof row?.name === "string" ? row.name : "";
+}
+
+async function canBypassCaseAssignment(r: DbConn, firmId: number, roleId: number | null | undefined): Promise<boolean> {
+  const canAssignAny = await hasRolePermission(r, firmId, roleId, "cases", "assign_any");
+  if (canAssignAny) return true;
+  const roleName = await getRoleName(r, firmId, roleId);
+  const rn = roleName.toLowerCase();
+  return rn.includes("partner") || rn.includes("manager");
+}
+
+async function enforceCaseAccess(r: DbConn, req: AuthRequest, res: ExpressResponse, caseId: number): Promise<boolean> {
+  const firmId = req.firmId;
+  if (!firmId || !req.userId) {
+    res.status(403).json({ error: "Forbidden" });
+    return false;
+  }
+
+  const [caseRow] = await r
+    .select({ id: casesTable.id })
+    .from(casesTable)
+    .where(and(eq(casesTable.id, caseId), eq(casesTable.firmId, firmId)))
+    .limit(1);
+  if (!caseRow) {
+    res.status(404).json({ error: "Case not found" });
+    return false;
+  }
+
+  const elevated = await canBypassCaseAssignment(r, firmId, req.roleId);
+  if (elevated) return true;
+
+  const [assigned] = await r
+    .select({ id: caseAssignmentsTable.id })
+    .from(caseAssignmentsTable)
+    .where(and(
+      eq(caseAssignmentsTable.caseId, caseId),
+      eq(caseAssignmentsTable.userId, req.userId),
+      inArray(caseAssignmentsTable.roleInCase, ["lawyer", "clerk"]),
+      sql`${caseAssignmentsTable.unassignedAt} IS NULL`,
+    ))
+    .limit(1);
+  if (assigned) return true;
+
+  await writeAuditLog({
+    firmId,
+    actorId: req.userId,
+    actorType: req.userType ?? "firm_user",
+    action: "auth.forbidden.case_access_denied",
+    entityType: "case",
+    entityId: caseId,
+    detail: "not_assigned",
+    ipAddress: req.ip,
+    userAgent: req.headers["user-agent"],
+  }, { db: req.rlsDb });
+
+  res.status(403).json({ error: "Forbidden" });
+  return false;
+}
+
 type AuthedHandler = (
   req: AuthRequest,
   res: ExpressResponse,
@@ -480,6 +546,7 @@ async function formatCaseDetail(r: DbConn, c: typeof casesTable.$inferSelect) {
     titleType: c.titleType,
     isEncumbered: c.isEncumbered,
     tenure: c.tenure,
+    trackingToken: c.trackingToken,
     spaPrice: c.spaPrice ? Number(c.spaPrice) : null,
     status: c.status,
     caseType: c.caseType,
@@ -2572,7 +2639,8 @@ router.get("/cases/:caseId", requireAuthHandler, requireFirmUserHandler, require
   }
 
   try {
-    const canAssignAny = await hasRolePermission(r, req.firmId!, req.roleId, "cases", "assign_any");
+    const ok = await enforceCaseAccess(r, req, res, params.data.caseId);
+    if (!ok) return;
     const [c] = await r
       .select()
       .from(casesTable)
@@ -2581,22 +2649,6 @@ router.get("/cases/:caseId", requireAuthHandler, requireFirmUserHandler, require
       res.status(404).json({ error: "Case not found" });
       return;
     }
-    if (!canAssignAny) {
-      const check = await r.execute(sql`
-        SELECT 1
-        FROM ${caseAssignmentsTable}
-        WHERE ${caseAssignmentsTable.caseId} = ${params.data.caseId}
-          AND ${caseAssignmentsTable.userId} = ${req.userId}
-          AND ${caseAssignmentsTable.unassignedAt} IS NULL
-        LIMIT 1
-      `);
-      const rows = Array.isArray(check) ? (check as any[]) : ((check as any)?.rows ?? []);
-      if (!rows?.[0]) {
-        res.status(404).json({ error: "Case not found" });
-        return;
-      }
-    }
-
     res.json(await formatCaseDetail(r, c));
   } catch (e) {
     logger.error({ err: e, firmId: req.firmId, userId: req.userId, caseId: params.data.caseId }, "[cases] get case failed");
@@ -2621,14 +2673,8 @@ router.get("/cases/:caseId/key-dates", requireAuthHandler, requireFirmUserHandle
     res.json({});
     return;
   }
-  const [caseRow] = await r
-    .select({ id: casesTable.id })
-    .from(casesTable)
-    .where(and(eq(casesTable.id, params.data.caseId), eq(casesTable.firmId, req.firmId!)));
-  if (!caseRow) {
-    res.status(404).json({ error: "Case not found" });
-    return;
-  }
+  const ok = await enforceCaseAccess(r, req, res, params.data.caseId);
+  if (!ok) return;
   const [kd] = await r
     .select()
     .from(caseKeyDatesTable)
@@ -2713,6 +2759,9 @@ router.get("/cases/:caseId/progress", requireAuthHandler, requireFirmUserHandler
       res.status(400).json({ error: "Invalid caseId" });
       return;
     }
+
+    const ok = await enforceCaseAccess(r, req, res, caseId);
+    if (!ok) return;
 
     const [caseRow] = await r
       .select({ purchaseMode: casesTable.purchaseMode, titleType: casesTable.titleType })
@@ -2935,14 +2984,8 @@ router.patch("/cases/:caseId/key-dates", requireAuthHandler, requireFirmUserHand
     res.status(400).json({ error: params.error.message });
     return;
   }
-  const [caseRow] = await r
-    .select({ id: casesTable.id })
-    .from(casesTable)
-    .where(and(eq(casesTable.id, params.data.caseId), eq(casesTable.firmId, req.firmId!)));
-  if (!caseRow) {
-    res.status(404).json({ error: "Case not found" });
-    return;
-  }
+  const ok = await enforceCaseAccess(r, req, res, params.data.caseId);
+  if (!ok) return;
   const body = req.body as Record<string, unknown>;
 
   const dateFieldMap = {
@@ -3159,6 +3202,9 @@ router.patch("/cases/:caseId", requireAuthHandler, requireFirmUserHandler, requi
     return;
   }
 
+  const ok = await enforceCaseAccess(r, req, res, params.data.caseId);
+  if (!ok) return;
+
   const parsed = UpdateCaseBody.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: parsed.error.message });
@@ -3170,15 +3216,6 @@ router.patch("/cases/:caseId", requireAuthHandler, requireFirmUserHandler, requi
   if (parsed.data.purchaseMode !== undefined) updates.purchaseMode = parsed.data.purchaseMode;
   if (parsed.data.titleType !== undefined) updates.titleType = parsed.data.titleType;
   if (parsed.data.spaPrice !== undefined) updates.spaPrice = String(parsed.data.spaPrice);
-
-  const [caseRow] = await r
-    .select({ id: casesTable.id })
-    .from(casesTable)
-    .where(and(eq(casesTable.id, params.data.caseId), eq(casesTable.firmId, req.firmId!)));
-  if (!caseRow) {
-    res.status(404).json({ error: "Case not found" });
-    return;
-  }
 
   const wantsAssignLawyer = parsed.data.assignedLawyerId !== undefined;
   const wantsAssignClerk = (parsed.data as any)?.assignedClerkId !== undefined;
@@ -3250,14 +3287,8 @@ router.get("/cases/:caseId/workflow-documents", requireAuthHandler, requireFirmU
     res.status(400).json({ error: "Invalid caseId" });
     return;
   }
-  const [caseRow] = await r
-    .select({ id: casesTable.id })
-    .from(casesTable)
-    .where(and(eq(casesTable.id, caseId), eq(casesTable.firmId, req.firmId!)));
-  if (!caseRow) {
-    res.status(404).json({ error: "Case not found" });
-    return;
-  }
+  const ok = await enforceCaseAccess(r, req, res, caseId);
+  if (!ok) return;
   const milestoneKey = one((req.query as any).milestoneKey);
   if (milestoneKey && !WORKFLOW_DOCUMENT_ALLOWED_KEYS.has(milestoneKey)) {
     res.status(422).json({ error: "Invalid milestoneKey" });
@@ -3324,6 +3355,8 @@ router.post("/cases/:caseId/workflow-documents", requireAuthHandler, requireFirm
     res.status(400).json({ error: "Invalid caseId" });
     return;
   }
+  const ok = await enforceCaseAccess(r, req, res, caseId);
+  if (!ok) return;
   const body = asObject(req.body) ?? {};
   const milestoneKey = asString(body.milestoneKey);
   const objectPath = asString(body.objectPath);
@@ -3502,6 +3535,8 @@ router.delete("/cases/:caseId/workflow-documents/:id", requireAuthHandler, requi
     res.status(400).json({ error: "Invalid params" });
     return;
   }
+  const ok = await enforceCaseAccess(r, req, res, caseId);
+  if (!ok) return;
   const exists = await tableExists(r, "public.case_workflow_documents");
   if (!exists) {
     res.status(404).json({ error: "Not found" });
@@ -3591,6 +3626,8 @@ router.get("/cases/:caseId/workflow-documents/:id/download", requireAuthHandler,
     res.status(400).json({ error: "Invalid params" });
     return;
   }
+  const ok = await enforceCaseAccess(r, req, res, caseId);
+  if (!ok) return;
   const exists = await tableExists(r, "public.case_workflow_documents");
   if (!exists) {
     res.status(404).json({ error: "Not found" });
@@ -3662,14 +3699,8 @@ router.get("/cases/:caseId/loan-stamping", requireAuthHandler, requireFirmUserHa
     res.status(400).json({ error: "Invalid caseId" });
     return;
   }
-  const [caseRow] = await r
-    .select({ id: casesTable.id })
-    .from(casesTable)
-    .where(and(eq(casesTable.id, caseId), eq(casesTable.firmId, req.firmId!)));
-  if (!caseRow) {
-    res.status(404).json({ error: "Case not found" });
-    return;
-  }
+  const ok = await enforceCaseAccess(r, req, res, caseId);
+  if (!ok) return;
   const exists = await tableExists(r, "public.case_loan_stamping_items");
   if (!exists) {
     res.json([]);
@@ -3723,6 +3754,8 @@ router.post("/cases/:caseId/loan-stamping/ensure", requireAuthHandler, requireFi
     res.status(503).json({ error: "Loan stamping not available" });
     return;
   }
+  const ok = await enforceCaseAccess(r, req, res, caseId);
+  if (!ok) return;
   const [caseRow] = await r
     .select({ titleType: casesTable.titleType })
     .from(casesTable)
@@ -3863,6 +3896,8 @@ router.put("/cases/:caseId/loan-stamping", requireAuthHandler, requireFirmUserHa
     res.status(503).json({ error: "Loan stamping not available" });
     return;
   }
+  const ok = await enforceCaseAccess(r, req, res, caseId);
+  if (!ok) return;
   const [caseRow] = await r
     .select({ titleType: casesTable.titleType })
     .from(casesTable)
@@ -3995,14 +4030,6 @@ router.delete("/cases/:caseId/loan-stamping/:id", requireAuthHandler, requireFir
     res.status(404).json({ error: "Not found" });
     return;
   }
-  const [caseRow] = await r
-    .select({ id: casesTable.id })
-    .from(casesTable)
-    .where(and(eq(casesTable.id, caseId), eq(casesTable.firmId, req.firmId!)));
-  if (!caseRow) {
-    res.status(404).json({ error: "Case not found" });
-    return;
-  }
   const [existing] = await r
     .select({
       objectPath: caseLoanStampingItemsTable.objectPath,
@@ -4074,6 +4101,8 @@ router.post("/cases/:caseId/loan-stamping/:id/file", requireAuthHandler, require
     res.status(400).json({ error: "Invalid params" });
     return;
   }
+  const ok = await enforceCaseAccess(r, req, res, caseId);
+  if (!ok) return;
   const body = asObject(req.body) ?? {};
   const objectPath = asString(body.objectPath);
   const fileName = asString(body.fileName);
@@ -4095,14 +4124,6 @@ router.post("/cases/:caseId/loan-stamping/:id/file", requireAuthHandler, require
   const exists = await tableExists(r, "public.case_loan_stamping_items");
   if (!exists) {
     res.status(404).json({ error: "Not found" });
-    return;
-  }
-  const [caseRow] = await r
-    .select({ id: casesTable.id })
-    .from(casesTable)
-    .where(and(eq(casesTable.id, caseId), eq(casesTable.firmId, req.firmId!)));
-  if (!caseRow) {
-    res.status(404).json({ error: "Case not found" });
     return;
   }
   const [existing] = await r
@@ -4286,14 +4307,8 @@ router.get("/cases/:caseId/loan-stamping/:id/download", requireAuthHandler, requ
     res.status(404).json({ error: "Not found" });
     return;
   }
-  const [caseRow] = await r
-    .select({ id: casesTable.id })
-    .from(casesTable)
-    .where(and(eq(casesTable.id, caseId), eq(casesTable.firmId, req.firmId!)));
-  if (!caseRow) {
-    res.status(404).json({ error: "Case not found" });
-    return;
-  }
+  const ok = await enforceCaseAccess(r, req, res, caseId);
+  if (!ok) return;
   const [row] = await r
     .select({
       objectPath: caseLoanStampingItemsTable.objectPath,
@@ -4354,14 +4369,8 @@ router.get("/cases/:caseId/workflow", requireAuthHandler, requireFirmUserHandler
   }
 
   try {
-    const [caseRow] = await r
-      .select({ id: casesTable.id })
-      .from(casesTable)
-      .where(and(eq(casesTable.id, params.data.caseId), eq(casesTable.firmId, req.firmId!)));
-    if (!caseRow) {
-      res.status(404).json({ error: "Case not found" });
-      return;
-    }
+    const ok = await enforceCaseAccess(r, req, res, params.data.caseId);
+    if (!ok) return;
 
     const wfExists = await tableExists(r, "public.case_workflow_steps");
     if (!wfExists) {
@@ -4437,14 +4446,8 @@ router.patch("/cases/:caseId/workflow/:stepId", requireAuthHandler, requireFirmU
   }
   if (parsed.data.notes !== undefined) updates.notes = parsed.data.notes;
 
-  const [caseRow] = await r
-    .select({ id: casesTable.id })
-    .from(casesTable)
-    .where(and(eq(casesTable.id, params.data.caseId), eq(casesTable.firmId, req.firmId!)));
-  if (!caseRow) {
-    res.status(404).json({ error: "Case not found" });
-    return;
-  }
+  const ok = await enforceCaseAccess(r, req, res, params.data.caseId);
+  if (!ok) return;
 
   const [existingStep] = await r
     .select({ id: caseWorkflowStepsTable.id, stepKey: caseWorkflowStepsTable.stepKey })
@@ -4556,14 +4559,8 @@ router.get("/cases/:caseId/notes", requireAuthHandler, requireFirmUserHandler, r
     return;
   }
 
-  const [caseRow] = await r
-    .select({ id: casesTable.id })
-    .from(casesTable)
-    .where(and(eq(casesTable.id, params.data.caseId), eq(casesTable.firmId, req.firmId!)));
-  if (!caseRow) {
-    res.status(404).json({ error: "Case not found" });
-    return;
-  }
+  const ok = await enforceCaseAccess(r, req, res, params.data.caseId);
+  if (!ok) return;
 
   const notes = await r.select().from(caseNotesTable)
     .where(eq(caseNotesTable.caseId, params.data.caseId))
@@ -4608,14 +4605,8 @@ router.post("/cases/:caseId/notes", requireAuthHandler, requireFirmUserHandler, 
     return;
   }
 
-  const [caseRow] = await r
-    .select({ id: casesTable.id })
-    .from(casesTable)
-    .where(and(eq(casesTable.id, params.data.caseId), eq(casesTable.firmId, req.firmId!)));
-  if (!caseRow) {
-    res.status(404).json({ error: "Case not found" });
-    return;
-  }
+  const ok = await enforceCaseAccess(r, req, res, params.data.caseId);
+  if (!ok) return;
 
   const [note] = await r
     .insert(caseNotesTable)

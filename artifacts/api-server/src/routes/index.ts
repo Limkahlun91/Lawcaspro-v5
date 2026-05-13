@@ -1,6 +1,7 @@
 import express, { type Router as ExpressRouter } from "express";
 import healthRouter from "./health.js";
 import authRouter from "./auth.js";
+import publicRouter from "./public.js";
 import platformRouter from "./platform.js";
 import usersRouter from "./users.js";
 import rolesRouter from "./roles.js";
@@ -44,6 +45,7 @@ const routerInternal = expressRouter as unknown as RouterLike;
 
 routerInternal.use(healthRouter);
 routerInternal.use(authRouter);
+routerInternal.use(publicRouter);
 routerInternal.use(platformRouter);
 routerInternal.use(usersRouter);
 routerInternal.use(rolesRouter);

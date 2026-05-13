@@ -1,4 +1,4 @@
-import { pgTable, serial, text, integer, numeric, timestamp, index, uniqueIndex, date, boolean, jsonb } from "drizzle-orm/pg-core";
+import { pgTable, serial, text, integer, numeric, timestamp, index, uniqueIndex, date, boolean, jsonb, uuid } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod/v4";
 
@@ -12,6 +12,7 @@ export const casesTable = pgTable("cases", {
   titleType: text("title_type").notNull().default("master"),
   isEncumbered: boolean("is_encumbered").notNull().default(false),
   tenure: text("tenure").notNull().default("freehold"),
+  trackingToken: uuid("tracking_token").notNull().defaultRandom(),
   spaPrice: numeric("spa_price", { precision: 15, scale: 2 }),
   status: text("status").notNull().default("File Opened / SPA Pending Signing"),
   caseType: text("case_type"),
@@ -30,6 +31,7 @@ export const casesTable = pgTable("cases", {
   statusIdx: index("idx_cases_status").on(t.status),
   createdAtIdx: index("idx_cases_created_at").on(t.createdAt),
   firmStatusIdx: index("idx_cases_firm_status").on(t.firmId, t.status),
+  trackingTokenUnique: uniqueIndex("cases_tracking_token_key").on(t.trackingToken),
 }));
 
 export const casePurchasersTable = pgTable("case_purchasers", {

@@ -1,6 +1,6 @@
 import { ReactNode } from "react";
 import { useAuth } from "@/lib/auth-context";
-import { hasPermission } from "@/lib/permissions";
+import { hasPermission, isAccountingRoleAllowed } from "@/lib/permissions";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useLocation } from "wouter";
 import { 
@@ -53,7 +53,11 @@ export function AppLayout({ children }: { children: ReactNode }) {
     { label: "Audit Logs", href: "/app/audit-logs", icon: ScrollText, perm: ["audit", "read"] as const },
     { label: "Settings", href: "/app/settings", icon: Settings, perm: ["settings", "read"] as const },
   ];
-  const visibleNavItems = navItems.filter((i) => hasPermission(user, i.perm[0], i.perm[1]));
+  const visibleNavItems = navItems.filter((i) => {
+    if (!hasPermission(user, i.perm[0], i.perm[1])) return false;
+    if (i.href === "/app/accounting") return isAccountingRoleAllowed(user.roleName);
+    return true;
+  });
 
   const prefetchByHref: Record<string, () => void> = {
     "/app/cases": () => {

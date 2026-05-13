@@ -17,6 +17,7 @@ import { getStoredAuthToken } from "@/lib/auth-token";
 
 import Login from "@/pages/auth/login";
 import NotFound from "@/pages/not-found";
+import TrackingTokenPage from "@/pages/public/track/[token]";
 
 // Platform Pages
 import PlatformDashboard from "@/pages/platform/dashboard";
@@ -304,6 +305,7 @@ function AppRoutes() {
 function Router() {
   return (
     <Switch>
+      <Route path="/track/:token" component={TrackingTokenPage} />
       <Route path="/" component={() => <Redirect to="/auth/login" />} />
       <Route path="/auth/login" component={Login} />
       

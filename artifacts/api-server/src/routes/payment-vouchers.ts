@@ -1,4 +1,4 @@
-import express, { type Response, type Router as ExpressRouter } from "express";
+import express, { type NextFunction, type Response, type Router as ExpressRouter } from "express";
 import { eq, and, desc } from "drizzle-orm";
 import { db, ledgerEntriesTable, paymentVoucherItemsTable, paymentVouchersTable, rolesTable, sql } from "@workspace/db";
 import { CreatePaymentVoucherBody, PaymentVoucherTransitionBody } from "@workspace/api-zod";
@@ -36,19 +36,51 @@ function classifyRole(roleName: string): "partner" | "lawyer" | "clerk" | "accou
   return "clerk";
 }
 
-async function nextVoucherNo(firmId: number): Promise<string> {
-  const [row] = await db.select({ c: sql<number>`COUNT(*)` }).from(paymentVouchersTable).where(eq(paymentVouchersTable.firmId, firmId));
+function isAccountingRoleAllowed(roleName: string): boolean {
+  const rn = roleName.trim().toLowerCase();
+  if (rn === "partner") return true;
+  if (rn === "account" || rn === "accounts" || rn === "finance" || rn === "accountant") return true;
+  if (rn.startsWith("manager") && rn.includes("account")) return true;
+  return false;
+}
+
+const requireAccountingReadRole = async (req: AuthRequest, res: Response, next: NextFunction) => {
+  const roleName = await getRoleName(req);
+  if (isAccountingRoleAllowed(roleName)) {
+    next();
+    return;
+  }
+  await writeAuditLog({
+    firmId: req.firmId,
+    actorId: req.userId,
+    actorType: req.userType,
+    action: "auth.forbidden.accounting_read_role_denied",
+    entityType: "firm",
+    entityId: req.firmId ?? undefined,
+    detail: `roleName=${roleName}`,
+    ipAddress: req.ip,
+    userAgent: req.headers["user-agent"],
+  }, { db: req.rlsDb });
+  res.status(403).json({ error: "Forbidden", code: "ACCOUNTING_ROLE_REQUIRED" });
+};
+
+async function nextVoucherNo(r: DbConn, firmId: number): Promise<string> {
+  const [row] = await r.select({ c: sql<number>`COUNT(*)` }).from(paymentVouchersTable).where(eq(paymentVouchersTable.firmId, firmId));
   const seq = (Number(row?.c ?? 0) + 1).toString().padStart(4, "0");
   const yr = new Date().getFullYear();
   return `PV-${yr}-${seq}`;
 }
 
 // List
-router.get("/payment-vouchers", requireAuth, requireFirmUser, requirePermission("accounting", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
+router.get("/payment-vouchers", requireAuth, requireFirmUser, requireAccountingReadRole, requirePermission("accounting", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
   const caseId = one((req.query as any).caseId);
   const status = one((req.query as any).status);
   const conds = [eq(paymentVouchersTable.firmId, req.firmId!)];
-  if (caseId) conds.push(eq(paymentVouchersTable.caseId, parseInt(caseId, 10)));
+  if (caseId) {
+    const n = Number(caseId);
+    if (!Number.isFinite(n)) { res.status(400).json({ error: "Invalid caseId" }); return; }
+    conds.push(eq(paymentVouchersTable.caseId, n));
+  }
   if (status) conds.push(eq(paymentVouchersTable.status, status));
   const r = rdb(req);
   const rows = await r.select().from(paymentVouchersTable).where(and(...conds)).orderBy(desc(paymentVouchersTable.createdAt));
@@ -56,7 +88,7 @@ router.get("/payment-vouchers", requireAuth, requireFirmUser, requirePermission(
 });
 
 // Detail
-router.get("/payment-vouchers/:id", requireAuth, requireFirmUser, requirePermission("accounting", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
+router.get("/payment-vouchers/:id", requireAuth, requireFirmUser, requireAccountingReadRole, requirePermission("accounting", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
   const idStr = one(req.params.id);
   const id = idStr ? parseInt(idStr) : NaN;
   if (isNaN(id)) { res.status(400).json({ error: "Invalid voucher ID" }); return; }
@@ -95,8 +127,8 @@ router.post("/payment-vouchers", sensitiveRateLimiter, requireAuth, requireFirmU
         ? "pending_partner"
         : "pending_lawyer";
 
-  const voucherNo = await nextVoucherNo(req.firmId!);
   const r = rdb(req);
+  const voucherNo = await nextVoucherNo(r, req.firmId!);
   const [pv] = await r.insert(paymentVouchersTable).values({
     firmId: req.firmId!,
     caseId: caseId ?? null,
@@ -193,29 +225,43 @@ router.post("/payment-vouchers/:id/transition", sensitiveRateLimiter, requireAut
 
   if (!toStatus) { res.status(400).json({ error: "Invalid transition", code: "INVALID_TRANSITION" }); return; }
 
-  const [updated] = await r.update(paymentVouchersTable).set(updateFields).where(eq(paymentVouchersTable.id, id)).returning();
+  const [updated] = await r
+    .update(paymentVouchersTable)
+    .set(updateFields)
+    .where(and(eq(paymentVouchersTable.id, id), eq(paymentVouchersTable.firmId, req.firmId!)))
+    .returning();
   await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "accounting.payment_voucher.transition", entityType: "payment_voucher", entityId: id, detail: `action=${parsed.data.action} from=${fromStatus} to=${toStatus}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
   res.json(updated);
 });
 
 // Ledger: view by case and account type
-router.get("/ledger", requireAuth, requireFirmUser, requirePermission("accounting", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
+router.get("/ledger", requireAuth, requireFirmUser, requireAccountingReadRole, requirePermission("accounting", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
   const caseId = one((req.query as any).caseId);
   const accountType = one((req.query as any).accountType);
   const conds = [eq(ledgerEntriesTable.firmId, req.firmId!)];
-  if (caseId) conds.push(eq(ledgerEntriesTable.caseId, parseInt(caseId, 10)));
+  if (caseId) {
+    const n = Number(caseId);
+    if (!Number.isFinite(n)) { res.status(400).json({ error: "Invalid caseId" }); return; }
+    conds.push(eq(ledgerEntriesTable.caseId, n));
+  }
   if (accountType) conds.push(eq(ledgerEntriesTable.accountType, accountType));
-  const rows = await db.select().from(ledgerEntriesTable).where(and(...conds)).orderBy(ledgerEntriesTable.entryDate, ledgerEntriesTable.createdAt);
+  const r = rdb(req);
+  const rows = await r.select().from(ledgerEntriesTable).where(and(...conds)).orderBy(ledgerEntriesTable.entryDate, ledgerEntriesTable.createdAt);
   res.json(rows);
 });
 
 // Ledger summary (balance per account type per case)
-router.get("/ledger/summary", requireAuth, requireFirmUser, requirePermission("accounting", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
+router.get("/ledger/summary", requireAuth, requireFirmUser, requireAccountingReadRole, requirePermission("accounting", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
   const caseId = one((req.query as any).caseId);
   const conds = [eq(ledgerEntriesTable.firmId, req.firmId!)];
-  if (caseId) conds.push(eq(ledgerEntriesTable.caseId, parseInt(caseId, 10)));
+  if (caseId) {
+    const n = Number(caseId);
+    if (!Number.isFinite(n)) { res.status(400).json({ error: "Invalid caseId" }); return; }
+    conds.push(eq(ledgerEntriesTable.caseId, n));
+  }
   const cond = and(...conds);
-  const rows = await db.select({
+  const r = rdb(req);
+  const rows = await r.select({
     accountType: ledgerEntriesTable.accountType,
     totalDebit: sql<string>`COALESCE(SUM(debit), 0)`,
     totalCredit: sql<string>`COALESCE(SUM(credit), 0)`,

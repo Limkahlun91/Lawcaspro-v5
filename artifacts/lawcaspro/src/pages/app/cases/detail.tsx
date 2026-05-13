@@ -9,7 +9,7 @@ import {
 } from "@workspace/api-client-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { ArrowLeft, CheckCircle2, Clock, User, Building2, MapPin, Tag, Receipt, Printer, Upload, Download, Trash2, Plus, X, MoreHorizontal } from "lucide-react";
+import { ArrowLeft, CheckCircle2, Clock, User, Building2, MapPin, Tag, Receipt, Printer, Upload, Download, Trash2, Plus, X, MoreHorizontal, Share2 } from "lucide-react";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useToast } from "@/hooks/use-toast";
@@ -20,6 +20,7 @@ import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { Breadcrumb, BreadcrumbItem, BreadcrumbLink, BreadcrumbList, BreadcrumbPage, BreadcrumbSeparator } from "@/components/ui/breadcrumb";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import CaseDocumentsTab from "./components/CaseDocumentsTab";
 import CaseBillingTab from "./components/CaseBillingTab";
 import CaseCommunicationsTab from "./components/CaseCommunicationsTab";
@@ -209,6 +210,7 @@ export default function CaseDetail() {
   const [noteContent, setNoteContent] = useState("");
   const [activeStepId, setActiveStepId] = useState<number | null>(null);
   const [stepNote, setStepNote] = useState("");
+  const [shareTrackingOpen, setShareTrackingOpen] = useState(false);
   const params = new URLSearchParams(searchString);
   const tabFromUrl = params.get("tab") ?? "overview";
   const threadIdFromUrl = params.get("threadId");
@@ -228,6 +230,13 @@ export default function CaseDetail() {
     retry: false,
   });
   const keyDates = (keyDatesQuery.data && typeof keyDatesQuery.data === "object") ? keyDatesQuery.data : {};
+
+  const trackingToken = String((caseInfo as any)?.trackingToken ?? "").trim();
+  const trackingLink = (() => {
+    if (!trackingToken) return "";
+    const base = import.meta.env.BASE_URL ? String(import.meta.env.BASE_URL).replace(/\/$/, "") : "";
+    return `${window.location.origin}${base}/track/${encodeURIComponent(trackingToken)}`;
+  })();
 
   const workflowDocsQuery = useQuery<WorkflowDocument[]>({
     queryKey: ["case-workflow-documents", caseId],
@@ -1164,6 +1173,15 @@ export default function CaseDetail() {
           <Button
             variant="outline"
             size="sm"
+            onClick={() => setShareTrackingOpen(true)}
+            disabled={!trackingToken}
+          >
+            <Share2 className="w-4 h-4 mr-2" />
+            Share Tracking Link
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
             onClick={() => {
               const purchaserNames = safePurchasers
                 .map((p) => (p as any)?.clientName)
@@ -1196,6 +1214,47 @@ export default function CaseDetail() {
           </DropdownMenu>
         </div>
       </div>
+
+      <Dialog open={shareTrackingOpen} onOpenChange={setShareTrackingOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Share Tracking Link</DialogTitle>
+            <DialogDescription>Send this link to your client (no login required).</DialogDescription>
+          </DialogHeader>
+          <div className="space-y-2">
+            <div className="text-sm font-medium">Tracking URL</div>
+            <Input value={trackingLink || "Tracking link unavailable"} readOnly />
+          </div>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={async () => {
+                if (!trackingLink) return;
+                try {
+                  await navigator.clipboard.writeText(trackingLink);
+                  toast({ title: "Link copied" });
+                } catch (err) {
+                  toastError(toast, err, "Copy failed");
+                }
+              }}
+              disabled={!trackingLink}
+            >
+              Copy Link
+            </Button>
+            <Button
+              onClick={() => {
+                if (!trackingLink) return;
+                const msg = `Hi, you can track your property transaction progress here: ${trackingLink}`;
+                const url = `https://wa.me/?text=${encodeURIComponent(msg)}`;
+                window.open(url, "_blank", "noopener,noreferrer");
+              }}
+              disabled={!trackingLink}
+            >
+              Share via WhatsApp
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {!progressQuery.isError && Array.isArray(progressQuery.data?.sections) && progressQuery.data.sections.length > 0 && (
         <Card className="mb-6">

@@ -2,6 +2,15 @@ import type { AuthUser } from "@workspace/api-client-react";
 
 export type Permission = { module: string; action: string };
 
+export function isAccountingRoleAllowed(roleName: string | null | undefined): boolean {
+  const rn = String(roleName ?? "").trim();
+  const rnl = rn.toLowerCase();
+  if (rnl === "partner") return true;
+  if (rnl === "account" || rnl === "accounts" || rnl === "finance" || rnl === "accountant") return true;
+  if (rnl.startsWith("manager") && rnl.includes("account")) return true;
+  return false;
+}
+
 export function getPermissions(user: AuthUser | null): Permission[] {
   if (!user) return [];
   const u = user as unknown as { permissions?: unknown };
@@ -44,7 +53,6 @@ export function hasPermission(user: AuthUser | null, module: string, action: str
     "developers:read", "developers:create", "developers:update",
     "documents:read", "documents:export",
     "communications:read", "communications:create",
-    "accounting:read",
     "reports:read",
     "settings:read",
     "users:read",

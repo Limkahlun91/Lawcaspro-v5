@@ -14,6 +14,7 @@ import { useToast } from "@/hooks/use-toast";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { QueryFallback } from "@/components/query-fallback";
 import { toastError } from "@/lib/toast-error";
+import { useAuth } from "@/lib/auth-context";
 
 async function apiFetchCsv(path: string): Promise<Blob> {
   return await apiFetchBlob(path, { timeoutMs: 60000, headers: { accept: "text/csv" } });
@@ -33,6 +34,10 @@ export default function CasesList() {
   const isHydratingFromUrl = useRef(false);
   const queryClient = useQueryClient();
   const { toast } = useToast();
+  const { user } = useAuth();
+  const myUserId = typeof (user as any)?.id === "number" ? (user as any).id : Number((user as any)?.id);
+  const roleName = String((user as any)?.roleName ?? "");
+  const isPartnerOrManager = roleName.toLowerCase().includes("partner") || roleName.toLowerCase().includes("manager");
 
   const initialMilestoneRaw = sp.get("milestone");
   const initialMilestone: CaseMilestoneKey | "all" =
@@ -279,6 +284,17 @@ export default function CasesList() {
   const clerkNameById = useMemo(() => new Map(clerks.map(u => [String(u.id), u.name])), [clerks]);
   const projectNameById = useMemo(() => new Map(projects.map(p => [String(p.id), p.name])), [projects]);
   const developerNameById = useMemo(() => new Map(developers.map(d => [String(d.id), d.name])), [developers]);
+
+  useEffect(() => {
+    if (spaStatus !== "all" && spaStatuses.length > 0 && !spaStatuses.includes(spaStatus)) {
+      setSpaStatus("all");
+      setPage(1);
+    }
+    if (loanStatus !== "all" && loanStatuses.length > 0 && !loanStatuses.includes(loanStatus)) {
+      setLoanStatus("all");
+      setPage(1);
+    }
+  }, [spaStatus, loanStatus, spaStatuses, loanStatuses]);
 
   const activeChips = useMemo(() => {
     const chips: Array<{ key: string; label: string; onClear: () => void }> = [];
@@ -820,7 +836,24 @@ export default function CasesList() {
                         />
                       </td>
                       <td className="px-6 py-4">
-                        <Link href={`/app/cases/${c.id}?returnTo=${encodeURIComponent(location)}`}>
+                        <Link
+                          href={`/app/cases/${c.id}?returnTo=${encodeURIComponent(location)}`}
+                          onClick={(e) => {
+                            if (isPartnerOrManager) return;
+                            if (!Number.isFinite(myUserId)) return;
+                            const assignedLawyerId = typeof (c as any).assignedLawyerId === "number" ? (c as any).assignedLawyerId : Number((c as any).assignedLawyerId);
+                            const assignedClerkId = typeof (c as any).assignedClerkId === "number" ? (c as any).assignedClerkId : Number((c as any).assignedClerkId);
+                            const ok = myUserId === assignedLawyerId || myUserId === assignedClerkId;
+                            if (!ok) {
+                              e.preventDefault();
+                              toast({
+                                title: "Access Denied",
+                                description: "Access Denied: You are not assigned to this case. You can only view its basic info here.",
+                                variant: "destructive",
+                              });
+                            }
+                          }}
+                        >
                           <span className="font-medium text-slate-900 hover:text-amber-600 cursor-pointer transition-colors">
                             {c.referenceNo}
                           </span>

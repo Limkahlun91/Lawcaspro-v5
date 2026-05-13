@@ -5,6 +5,8 @@ import { Briefcase, Users, Building2, HardHat, DollarSign, TrendingUp, MessageSq
 import { useLocation } from "wouter";
 import { apiFetchJson } from "@/lib/api-client";
 import { QueryFallback } from "@/components/query-fallback";
+import { useAuth } from "@/lib/auth-context";
+import { hasPermission, isAccountingRoleAllowed } from "@/lib/permissions";
 
 function fmt(val: unknown) {
   return `RM ${Number(val ?? 0).toLocaleString("en-MY", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
@@ -35,16 +37,33 @@ function StatusBadge({ status }: { status: string }) {
   );
 }
 
+const MILESTONE_TO_STATUS_QUERY: Record<string, { param: "spaStatus" | "loanStatus"; value: string }> = {
+  spa_stamped_date: { param: "spaStatus", value: "SPA Stamped" },
+  noa_served_on: { param: "spaStatus", value: "NOA Served" },
+  completion_date: { param: "spaStatus", value: "Completed" },
+  loan_docs_signed_date: { param: "loanStatus", value: "Loan Docs Signed" },
+  acting_letter_issued_date: { param: "loanStatus", value: "Acting Letter Issued" },
+  loan_sent_bank_execution_date: { param: "loanStatus", value: "Loan Sent Bank Execution" },
+  loan_bank_executed_date: { param: "loanStatus", value: "Loan Bank Executed" },
+  bank_lu_received_date: { param: "loanStatus", value: "BLU Received" },
+};
+
 function buildCasesHref(filter: { milestone: string; milestonePresence: string; purchaseMode?: string | null }) {
   const qs = new URLSearchParams();
-  qs.set("milestone", filter.milestone);
-  qs.set("milestonePresence", filter.milestonePresence);
+  const mapped = filter.milestonePresence === "filled" ? MILESTONE_TO_STATUS_QUERY[filter.milestone] : undefined;
+  if (mapped) {
+    qs.set(mapped.param, mapped.value);
+  } else {
+    qs.set("milestone", filter.milestone);
+    qs.set("milestonePresence", filter.milestonePresence);
+  }
   if (filter.purchaseMode) qs.set("purchaseMode", filter.purchaseMode);
   return `/app/cases?${qs.toString()}`;
 }
 
 export default function AppDashboard() {
   const [, setLocation] = useLocation();
+  const { user } = useAuth();
 
   const { data: stats, isLoading, isError, error, refetch, isFetching } = useQuery({
     queryKey: ["dashboard"],
@@ -74,6 +93,7 @@ export default function AppDashboard() {
     );
   }
 
+  const canSeeAccounting = !!user && hasPermission(user, "accounting", "read") && isAccountingRoleAllowed(user.roleName);
   const billing = (stats.billing ?? {}) as Record<string, number>;
   type MilestoneCard = {
     key: string;
@@ -185,34 +205,37 @@ export default function AppDashboard() {
         </Card>
       )}
 
-      {/* Billing + Comms summary row */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-        <Card className="cursor-pointer hover:shadow-md transition-shadow" onClick={() => setLocation("/app/accounting")}>
-          <CardContent className="pt-5 pb-4">
-            <div className="flex items-center gap-3">
-              <div className="w-10 h-10 rounded-lg bg-slate-100 flex items-center justify-center">
-                <DollarSign className="w-5 h-5 text-slate-700" />
+      <div className={`grid grid-cols-1 gap-4 ${canSeeAccounting ? "md:grid-cols-3" : ""}`}>
+        {canSeeAccounting && (
+          <Card className="cursor-pointer hover:shadow-md transition-shadow" onClick={() => setLocation("/app/accounting")}>
+            <CardContent className="pt-5 pb-4">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-lg bg-slate-100 flex items-center justify-center">
+                  <DollarSign className="w-5 h-5 text-slate-700" />
+                </div>
+                <div>
+                  <div className="text-xs text-slate-500">Total Billed</div>
+                  <div className="text-xl font-bold text-slate-900">{fmt(billing.totalBilled)}</div>
+                </div>
               </div>
-              <div>
-                <div className="text-xs text-slate-500">Total Billed</div>
-                <div className="text-xl font-bold text-slate-900">{fmt(billing.totalBilled)}</div>
+            </CardContent>
+          </Card>
+        )}
+        {canSeeAccounting && (
+          <Card className="cursor-pointer hover:shadow-md transition-shadow" onClick={() => setLocation("/app/accounting")}>
+            <CardContent className="pt-5 pb-4">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-lg bg-red-50 flex items-center justify-center">
+                  <TrendingUp className="w-5 h-5 text-red-500" />
+                </div>
+                <div>
+                  <div className="text-xs text-slate-500">Outstanding</div>
+                  <div className="text-xl font-bold text-red-600">{fmt(billing.totalOutstanding)}</div>
+                </div>
               </div>
-            </div>
-          </CardContent>
-        </Card>
-        <Card className="cursor-pointer hover:shadow-md transition-shadow" onClick={() => setLocation("/app/accounting")}>
-          <CardContent className="pt-5 pb-4">
-            <div className="flex items-center gap-3">
-              <div className="w-10 h-10 rounded-lg bg-red-50 flex items-center justify-center">
-                <TrendingUp className="w-5 h-5 text-red-500" />
-              </div>
-              <div>
-                <div className="text-xs text-slate-500">Outstanding</div>
-                <div className="text-xl font-bold text-red-600">{fmt(billing.totalOutstanding)}</div>
-              </div>
-            </div>
-          </CardContent>
-        </Card>
+            </CardContent>
+          </Card>
+        )}
         <Card className="cursor-pointer hover:shadow-md transition-shadow" onClick={() => setLocation("/app/communications")}>
           <CardContent className="pt-5 pb-4">
             <div className="flex items-center gap-3">
