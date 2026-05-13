@@ -2,7 +2,7 @@ import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
+import { DateOnlyInput } from "@/components/date-only-input";
 import { Badge } from "@/components/ui/badge";
 import { ArrowLeft, Download, BookOpen, Printer } from "lucide-react";
 import { useLocation } from "wouter";
@@ -89,11 +89,11 @@ export default function BillsDeliveredBook() {
           <div className="flex flex-wrap items-end gap-3">
             <div>
               <p className="text-xs text-slate-500 mb-1">From</p>
-              <Input type="date" value={from} onChange={e => setFrom(e.target.value)} className="h-8 text-sm w-36" />
+              <DateOnlyInput valueYmd={from} onChangeYmd={setFrom} className="h-8 text-sm w-36" />
             </div>
             <div>
               <p className="text-xs text-slate-500 mb-1">To</p>
-              <Input type="date" value={to} onChange={e => setTo(e.target.value)} className="h-8 text-sm w-36" />
+              <DateOnlyInput valueYmd={to} onChangeYmd={setTo} className="h-8 text-sm w-36" />
             </div>
             <Button size="sm" className="h-8 bg-[#0f1729] hover:bg-slate-800 text-white" onClick={() => setApplied({ from, to })}>
               Apply

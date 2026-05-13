@@ -84,7 +84,12 @@ export default function Login() {
       if (body.userType === "founder") {
         setLocation("/platform/dashboard");
       } else {
-        setLocation("/app/dashboard");
+        const roleName = String((body as any)?.roleName ?? "");
+        if (roleName === "Developer_User") {
+          setLocation("/developer/dashboard");
+        } else {
+          setLocation("/app/dashboard");
+        }
       }
     } catch (e) {
       toastError(toast, e, "Login failed");

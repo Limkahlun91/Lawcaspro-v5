@@ -9,6 +9,7 @@ import {
 } from "lucide-react";
 import { Link } from "wouter";
 import { Button } from "@/components/ui/button";
+import { DateOnlyInput } from "@/components/date-only-input";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
 import { useToast } from "@/hooks/use-toast";
@@ -615,7 +616,7 @@ function ReceiptsTab() {
               </div>
               <div>
                 <label className="text-sm font-medium text-slate-700 block mb-1">Received Date</label>
-                <Input type="date" value={form.receivedDate} onChange={(e) => setForm((f) => ({ ...f, receivedDate: e.target.value }))} />
+                <DateOnlyInput valueYmd={form.receivedDate} onChangeYmd={(v) => setForm((f) => ({ ...f, receivedDate: v }))} />
               </div>
               <div>
                 <label className="text-sm font-medium text-slate-700 block mb-1">Reference No</label>

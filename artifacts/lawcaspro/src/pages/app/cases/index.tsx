@@ -1,4 +1,4 @@
-import { CaseMilestoneKey, MilestonePresence, getListCasesQueryKey, useListCases, useListProjects, useListUsers } from "@workspace/api-client-react";
+import { CaseMilestoneKey, MilestonePresence, getListCasesQueryKey, useListCases, useListProjects } from "@workspace/api-client-react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Download, Plus, Search } from "lucide-react";
@@ -15,6 +15,7 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { QueryFallback } from "@/components/query-fallback";
 import { toastError } from "@/lib/toast-error";
 import { useAuth } from "@/lib/auth-context";
+import { DateOnlyInput } from "@/components/date-only-input";
 
 async function apiFetchCsv(path: string): Promise<Blob> {
   return await apiFetchBlob(path, { timeoutMs: 60000, headers: { accept: "text/csv" } });
@@ -194,10 +195,6 @@ export default function CasesList() {
   const milestoneOptions: Array<{ key: CaseMilestoneKey; label: string }> = Array.isArray(filterOptions?.milestones) ? filterOptions.milestones : [];
 
   const { data: projectsRes } = useListProjects({ page: 1, limit: 200 }, { query: { staleTime: 5 * 60 * 1000 } });
-  const { data: usersRes } = useListUsers({ page: 1, limit: 200 }, { query: { staleTime: 5 * 60 * 1000 } });
-  const allUsers = usersRes?.data ?? [];
-  const lawyerCandidates = allUsers.filter(u => (u.roleName ?? "").toLowerCase().includes("lawyer") || (u.roleName ?? "").toLowerCase().includes("partner"));
-  const clerkCandidates = allUsers.filter(u => (u.roleName ?? "").toLowerCase().includes("clerk"));
   const projects = projectsRes?.data ?? [];
   const cases = response?.data ?? [];
   const total = response?.total ?? 0;
@@ -258,20 +255,27 @@ export default function CasesList() {
   ]);
 
   const [selectedCaseIds, setSelectedCaseIds] = useState<Set<number>>(new Set());
-  const [bulkLawyerId, setBulkLawyerId] = useState<string>("all");
-  const [bulkClerkId, setBulkClerkId] = useState<string>("all");
   const [isBatchStatusOpen, setIsBatchStatusOpen] = useState(false);
   const [batchStatusModule, setBatchStatusModule] = useState<"spa" | "loan">("loan");
   const [batchStatusValue, setBatchStatusValue] = useState<string>("");
   const [bulkZipDownloading, setBulkZipDownloading] = useState(false);
+  const [isBatchDateOpen, setIsBatchDateOpen] = useState(false);
+  const [batchDateField, setBatchDateField] = useState<string>("");
+  const [batchDateValue, setBatchDateValue] = useState<string>("");
+  const [isBatchGenerateOpen, setIsBatchGenerateOpen] = useState(false);
+  const [selectedTemplateIds, setSelectedTemplateIds] = useState<Set<number>>(new Set());
+  const [bulkGenerateDownloading, setBulkGenerateDownloading] = useState(false);
 
   useEffect(() => {
     setSelectedCaseIds(new Set());
-    setBulkLawyerId("all");
-    setBulkClerkId("all");
     setIsBatchStatusOpen(false);
     setBatchStatusModule("loan");
     setBatchStatusValue("");
+    setIsBatchDateOpen(false);
+    setBatchDateField("");
+    setBatchDateValue("");
+    setIsBatchGenerateOpen(false);
+    setSelectedTemplateIds(new Set());
   }, [sp.toString()]);
 
   const currentPageIds = (response?.data ?? []).map((c) => c.id);
@@ -299,21 +303,6 @@ export default function CasesList() {
     });
   };
 
-  const bulkAssignMutation = useMutation({
-    mutationFn: async (vars: { roleInCase: "lawyer" | "clerk"; userId: number; caseIds: number[] }) => {
-      const res = await apiFetchJson("/cases/bulk/assign", { method: "POST", body: JSON.stringify(vars) });
-      return res as { requested: number; succeeded: number; failed: number; failures: Array<{ caseId: number; error: string }> };
-    },
-    onSuccess: (data) => {
-      queryClient.invalidateQueries({ queryKey: getListCasesQueryKey() });
-      setSelectedCaseIds(new Set());
-      setBulkLawyerId("all");
-      setBulkClerkId("all");
-      toast({ title: "Bulk update completed", description: `${data.succeeded} succeeded, ${data.failed} failed` });
-    },
-    onError: (err) => toastError(toast, err, "Bulk update failed"),
-  });
-
   const bulkStatusMutation = useMutation({
     mutationFn: async (vars: { module: "spa" | "loan"; status: string; caseIds: number[] }) => {
       const res = await apiFetchJson("/cases/bulk/status", { method: "POST", body: JSON.stringify(vars) });
@@ -329,6 +318,22 @@ export default function CasesList() {
     onError: (err) => toastError(toast, err, "Batch update failed"),
   });
 
+  const bulkKeyDatesMutation = useMutation({
+    mutationFn: async (vars: { field: string; date: string; caseIds: number[] }) => {
+      const res = await apiFetchJson("/cases/bulk/key-dates", { method: "PATCH", body: JSON.stringify(vars) });
+      return res as { requested: number; succeeded: number; failed: number; failures: Array<{ caseId: number; error: string }> };
+    },
+    onSuccess: (data) => {
+      queryClient.invalidateQueries({ queryKey: getListCasesQueryKey() });
+      setSelectedCaseIds(new Set());
+      setIsBatchDateOpen(false);
+      setBatchDateField("");
+      setBatchDateValue("");
+      toast({ title: "Batch date update completed", description: `${data.succeeded} succeeded, ${data.failed} failed` });
+    },
+    onError: (err) => toastError(toast, err, "Batch date update failed"),
+  });
+
   const downloadCsv = async () => {
     const qs = sp.toString();
     const blob = await apiFetchCsv(`/cases/export.csv?${qs}`);
@@ -340,37 +345,6 @@ export default function CasesList() {
     a.click();
     a.remove();
     URL.revokeObjectURL(url);
-  };
-
-  const downloadGeneratedDocumentsZip = async () => {
-    const ids = Array.from(selectedCaseIds);
-    if (ids.length === 0) return;
-    setBulkZipDownloading(true);
-    try {
-      const res = await apiRequest("/cases/batch-generated-documents-zip", {
-        method: "POST",
-        body: JSON.stringify({ caseIds: ids }),
-        timeoutMs: 60000,
-      });
-      const blob = await res.blob();
-      const cd = res.headers.get("content-disposition") ?? "";
-      const m = /filename\*=UTF-8''([^;]+)|filename=\"?([^\";]+)\"?/i.exec(cd);
-      const fileNameRaw = m?.[1] ?? m?.[2] ?? "generated-documents.zip";
-      const fileName = decodeURIComponent(String(fileNameRaw).trim());
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = fileName || "generated-documents.zip";
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      URL.revokeObjectURL(url);
-      toast({ title: "Download started", description: `${ids.length} case(s)` });
-    } catch (err) {
-      toastError(toast, err, "Download ZIP failed");
-    } finally {
-      setBulkZipDownloading(false);
-    }
   };
 
   return (
@@ -645,7 +619,7 @@ export default function CasesList() {
                 </div>
                 <div className="flex flex-col lg:flex-row gap-2 lg:items-center">
                   <Button
-                    disabled={bulkAssignMutation.isPending || bulkStatusMutation.isPending}
+                    disabled={bulkStatusMutation.isPending || bulkKeyDatesMutation.isPending || bulkGenerateDownloading}
                     onClick={() => {
                       setBatchStatusValue("");
                       setIsBatchStatusOpen(true);
@@ -654,61 +628,28 @@ export default function CasesList() {
                     Batch Update Status
                   </Button>
 
-                  <Select value={bulkLawyerId} onValueChange={setBulkLawyerId}>
-                    <SelectTrigger className="w-[220px]">
-                      <SelectValue placeholder="Assign Lawyer" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="all">Select lawyer…</SelectItem>
-                      {lawyerCandidates.map((u) => (
-                        <SelectItem key={u.id} value={String(u.id)}>{u.name}</SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
                   <Button
-                    variant="outline"
-                    disabled={bulkLawyerId === "all" || bulkAssignMutation.isPending}
+                    disabled={bulkStatusMutation.isPending || bulkKeyDatesMutation.isPending || bulkGenerateDownloading}
                     onClick={() => {
-                      const ids = Array.from(selectedCaseIds);
-                      bulkAssignMutation.mutate({ roleInCase: "lawyer", userId: Number(bulkLawyerId), caseIds: ids });
+                      setBatchDateField("");
+                      setBatchDateValue("");
+                      setIsBatchDateOpen(true);
                     }}
                   >
-                    Apply
-                  </Button>
-
-                  <Select value={bulkClerkId} onValueChange={setBulkClerkId}>
-                    <SelectTrigger className="w-[220px]">
-                      <SelectValue placeholder="Assign Clerk" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="all">Select clerk…</SelectItem>
-                      {clerkCandidates.map((u) => (
-                        <SelectItem key={u.id} value={String(u.id)}>{u.name}</SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                  <Button
-                    variant="outline"
-                    disabled={bulkClerkId === "all" || bulkAssignMutation.isPending}
-                    onClick={() => {
-                      const ids = Array.from(selectedCaseIds);
-                      bulkAssignMutation.mutate({ roleInCase: "clerk", userId: Number(bulkClerkId), caseIds: ids });
-                    }}
-                  >
-                    Apply
-                  </Button>
-
-                  <Button variant="ghost" onClick={() => setSelectedCaseIds(new Set())}>
-                    Clear selection
+                    Batch Update Date
                   </Button>
 
                   <Button
                     variant="secondary"
-                    onClick={downloadGeneratedDocumentsZip}
-                    disabled={bulkAssignMutation.isPending || bulkZipDownloading || selectedCaseIds.size === 0}
+                    disabled={bulkStatusMutation.isPending || bulkKeyDatesMutation.isPending || bulkGenerateDownloading}
+                    onClick={() => setIsBatchGenerateOpen(true)}
                   >
                     <Download className="w-4 h-4 mr-2" />
-                    Download Generated Documents (ZIP)
+                    Batch Generate Documents
+                  </Button>
+
+                  <Button variant="ghost" onClick={() => setSelectedCaseIds(new Set())}>
+                    Clear selection
                   </Button>
                 </div>
               </CardContent>
@@ -782,6 +723,243 @@ export default function CasesList() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      <Dialog open={isBatchDateOpen} onOpenChange={setIsBatchDateOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Batch Update Date</DialogTitle>
+            <DialogDescription>Update a key date for multiple cases at once.</DialogDescription>
+          </DialogHeader>
+
+          <div className="space-y-4">
+            <div className="space-y-1">
+              <div className="text-sm font-medium">Field</div>
+              <Select value={batchDateField} onValueChange={setBatchDateField}>
+                <SelectTrigger>
+                  <SelectValue placeholder="Select field" />
+                </SelectTrigger>
+                <SelectContent>
+                  {milestoneOptions.map((m) => (
+                    <SelectItem key={m.key} value={m.key}>{m.label}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+
+            <div className="space-y-1">
+              <div className="text-sm font-medium">Date</div>
+              <DateOnlyInput valueYmd={batchDateValue} onChangeYmd={setBatchDateValue} />
+            </div>
+          </div>
+
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setIsBatchDateOpen(false)}>Cancel</Button>
+            <Button
+              disabled={!batchDateField || !batchDateValue || bulkKeyDatesMutation.isPending}
+              onClick={() => {
+                const ids = Array.from(selectedCaseIds);
+                const loanOnly = new Set([
+                  "letter_of_offer_date",
+                  "letter_of_offer_stamped_date",
+                  "loan_docs_pending_date",
+                  "loan_docs_signed_date",
+                  "acting_letter_issued_date",
+                  "loan_sent_bank_execution_date",
+                  "loan_bank_executed_date",
+                  "bank_lu_received_date",
+                  "advice_to_bank_date",
+                  "bank_lu_forward_to_developer_on",
+                  "developer_lu_received_on",
+                  "developer_lu_dated",
+                  "register_poa_on",
+                  "letter_disclaimer_dated",
+                  "loan_agreement_stamped_date",
+                  "bank_1st_release_on",
+                  "discharge_date",
+                  "caveat_lodged_date",
+                  "first_advice_date",
+                  "dev_informed_redemption_date",
+                  "request_discharge_date",
+                  "charge_date",
+                  "presentation_date",
+                  "second_advice_date",
+                  "mot_received_date",
+                  "mot_signed_date",
+                  "mot_stamped_date",
+                  "mot_registered_date",
+                  "noa_served_on",
+                ]);
+                const filtered = loanOnly.has(batchDateField)
+                  ? ids.filter((id) => String((caseById.get(id) as any)?.purchaseMode ?? "").trim().toLowerCase() === "loan")
+                  : ids;
+                if (filtered.length === 0) {
+                  toast({ title: "No eligible cases selected", description: "Select at least one matching case for this field.", variant: "destructive" });
+                  return;
+                }
+                bulkKeyDatesMutation.mutate({ field: batchDateField, date: batchDateValue, caseIds: filtered });
+              }}
+            >
+              Update
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <BatchGenerateDialog
+        open={isBatchGenerateOpen}
+        onOpenChange={(v) => {
+          setIsBatchGenerateOpen(v);
+          if (!v) setSelectedTemplateIds(new Set());
+        }}
+        selectedCaseIds={selectedCaseIds}
+        selectedTemplateIds={selectedTemplateIds}
+        setSelectedTemplateIds={setSelectedTemplateIds}
+        bulkZipDownloading={bulkZipDownloading}
+        setBulkZipDownloading={setBulkZipDownloading}
+        bulkGenerateDownloading={bulkGenerateDownloading}
+        setBulkGenerateDownloading={setBulkGenerateDownloading}
+        onSuccess={() => {
+          setSelectedCaseIds(new Set());
+        }}
+        toast={toast}
+      />
     </div>
+  );
+}
+
+function BatchGenerateDialog(props: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  selectedCaseIds: Set<number>;
+  selectedTemplateIds: Set<number>;
+  setSelectedTemplateIds: (next: Set<number> | ((prev: Set<number>) => Set<number>)) => void;
+  bulkZipDownloading: boolean;
+  setBulkZipDownloading: (v: boolean) => void;
+  bulkGenerateDownloading: boolean;
+  setBulkGenerateDownloading: (v: boolean) => void;
+  onSuccess: () => void;
+  toast: ReturnType<typeof useToast>["toast"];
+}) {
+  const {
+    open,
+    onOpenChange,
+    selectedCaseIds,
+    selectedTemplateIds,
+    setSelectedTemplateIds,
+    bulkZipDownloading,
+    setBulkZipDownloading,
+    bulkGenerateDownloading,
+    setBulkGenerateDownloading,
+    onSuccess,
+    toast,
+  } = props;
+
+  type TemplateRow = { id: number; name?: string | null; document_type?: string | null; kind?: string | null };
+
+  const templatesQuery = useQuery<TemplateRow[]>({
+    queryKey: ["document-templates", "templateCapable"],
+    queryFn: () => apiFetchJson<TemplateRow[]>("/document-templates?templateCapable=1"),
+    enabled: open,
+    retry: false,
+    staleTime: 60_000,
+  });
+
+  const templates = Array.isArray(templatesQuery.data) ? templatesQuery.data : [];
+
+  const selectedTemplateCount = selectedTemplateIds.size;
+  const selectedCaseCount = selectedCaseIds.size;
+
+  const toggleTemplate = (id: number) => {
+    setSelectedTemplateIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const generateAndDownloadZip = async () => {
+    const ids = Array.from(selectedCaseIds);
+    const templateIds = Array.from(selectedTemplateIds);
+    if (ids.length === 0 || templateIds.length === 0) return;
+    setBulkGenerateDownloading(true);
+    try {
+      const res = await apiRequest("/cases/bulk/generate-documents-zip", {
+        method: "POST",
+        body: JSON.stringify({ caseIds: ids, templateIds }),
+        timeoutMs: 180000,
+      });
+      const blob = await res.blob();
+      const cd = res.headers.get("content-disposition") ?? "";
+      const m = /filename\*=UTF-8''([^;]+)|filename=\"?([^\";]+)\"?/i.exec(cd);
+      const fileNameRaw = m?.[1] ?? m?.[2] ?? "batch-documents.zip";
+      const fileName = decodeURIComponent(String(fileNameRaw).trim());
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = fileName || "batch-documents.zip";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      toast({ title: "Download started", description: `${ids.length} case(s), ${templateIds.length} template(s)` });
+      onOpenChange(false);
+      onSuccess();
+    } catch (err) {
+      toastError(toast, err, "Batch generate failed");
+    } finally {
+      setBulkGenerateDownloading(false);
+    }
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Batch Generate Documents</DialogTitle>
+          <DialogDescription>Select templates to generate, then download as ZIP.</DialogDescription>
+        </DialogHeader>
+
+        {templatesQuery.isError ? (
+          <QueryFallback title="Templates unavailable" error={templatesQuery.error} onRetry={() => templatesQuery.refetch()} isRetrying={templatesQuery.isFetching} />
+        ) : (
+          <div className="space-y-3">
+            <div className="text-sm text-slate-600">
+              {selectedCaseCount} case(s) selected · {selectedTemplateCount} template(s) selected
+            </div>
+            <div className="max-h-[320px] overflow-auto rounded-md border border-slate-200">
+              {templates.length === 0 ? (
+                <div className="p-4 text-sm text-slate-500">No templates found.</div>
+              ) : (
+                <div className="divide-y divide-slate-100">
+                  {templates.map((t) => (
+                    <label key={t.id} className="flex items-center gap-3 px-4 py-3 text-sm cursor-pointer hover:bg-slate-50">
+                      <Checkbox checked={selectedTemplateIds.has(t.id)} onCheckedChange={() => toggleTemplate(t.id)} />
+                      <div className="min-w-0">
+                        <div className="font-medium text-slate-900 truncate">{String(t.name ?? `Template ${t.id}`)}</div>
+                        <div className="text-xs text-slate-500 truncate">{String(t.document_type ?? "")}</div>
+                      </div>
+                    </label>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        <DialogFooter>
+          <Button variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button>
+          <Button
+            disabled={bulkZipDownloading || bulkGenerateDownloading || selectedCaseCount === 0 || selectedTemplateCount === 0}
+            onClick={() => {
+              setBulkZipDownloading(true);
+              generateAndDownloadZip().finally(() => setBulkZipDownloading(false));
+            }}
+          >
+            Generate &amp; Download ZIP
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }

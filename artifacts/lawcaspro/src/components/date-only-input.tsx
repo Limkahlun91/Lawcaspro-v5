@@ -1,6 +1,9 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import { Input } from "@/components/ui/input";
+import { useMemo, useState } from "react";
+import { Button } from "@/components/ui/button";
+import { Calendar } from "@/components/ui/calendar";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { cn } from "@/lib/utils";
+import { Calendar as CalendarIcon, X } from "lucide-react";
 
 function pad2(n: number): string {
   return n < 10 ? `0${n}` : String(n);
@@ -25,6 +28,26 @@ export function formatYmdToDmy(ymd: string): string {
   const dd = Number(m[3]);
   if (!Number.isFinite(yyyy) || !Number.isFinite(mm) || !Number.isFinite(dd)) return "";
   return `${pad2(dd)}/${pad2(mm)}/${m[1]}`;
+}
+
+function ymdToLocalDate(ymd: string): Date | null {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(ymd.trim());
+  if (!m) return null;
+  const yyyy = Number(m[1]);
+  const mm = Number(m[2]);
+  const dd = Number(m[3]);
+  if (!Number.isFinite(yyyy) || !Number.isFinite(mm) || !Number.isFinite(dd)) return null;
+  const dt = new Date(yyyy, mm - 1, dd);
+  if (Number.isNaN(dt.getTime())) return null;
+  if (dt.getFullYear() !== yyyy || dt.getMonth() + 1 !== mm || dt.getDate() !== dd) return null;
+  return dt;
+}
+
+function localDateToYmd(dt: Date): string {
+  const yyyy = dt.getFullYear();
+  const mm = dt.getMonth() + 1;
+  const dd = dt.getDate();
+  return `${yyyy}-${pad2(mm)}-${pad2(dd)}`;
 }
 
 export function normalizeDateOnlyFromApi(v: unknown): string {
@@ -79,48 +102,53 @@ export function DateOnlyInput(props: {
   className?: string;
 }) {
   const { valueYmd, onChangeYmd, disabled, className } = props;
-  const [text, setText] = useState<string>("");
-  const [invalid, setInvalid] = useState(false);
-  const focusedRef = useRef(false);
-
-  const formatted = useMemo(() => (valueYmd ? formatYmdToDmy(valueYmd) : ""), [valueYmd]);
-
-  useEffect(() => {
-    if (focusedRef.current) return;
-    setText(formatted);
-    setInvalid(false);
-  }, [formatted]);
+  const [open, setOpen] = useState(false);
+  const selected = useMemo(() => (valueYmd ? ymdToLocalDate(valueYmd) : null), [valueYmd]);
+  const label = useMemo(() => (valueYmd ? formatYmdToDmy(valueYmd) : ""), [valueYmd]);
 
   return (
-    <Input
-      className={cn(className, invalid && "border-red-300 focus-visible:ring-red-200")}
-      value={text}
-      disabled={disabled}
-      placeholder="dd/mm/yyyy"
-      inputMode="numeric"
-      onFocus={() => {
-        focusedRef.current = true;
-      }}
-      onBlur={() => {
-        focusedRef.current = false;
-        const next = parseDateInputToYmd(text);
-        if (next === null) {
-          if (!text.trim()) {
-            setInvalid(false);
-            onChangeYmd("");
-            return;
-          }
-          setInvalid(true);
-          return;
-        }
-        setInvalid(false);
-        onChangeYmd(next);
-        setText(formatYmdToDmy(next));
-      }}
-      onChange={(e) => {
-        setText(e.target.value);
-        if (invalid) setInvalid(false);
-      }}
-    />
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger asChild>
+        <Button
+          type="button"
+          variant="outline"
+          disabled={disabled}
+          className={cn("h-9 justify-between px-3 font-normal", !label && "text-slate-500", className)}
+        >
+          <span className="truncate">{label || "Select date"}</span>
+          <CalendarIcon className="h-4 w-4 text-slate-500" />
+        </Button>
+      </PopoverTrigger>
+      <PopoverContent className="w-auto p-3" align="start">
+        <Calendar
+          mode="single"
+          selected={selected ?? undefined}
+          onSelect={(d) => {
+            if (!d) return;
+            onChangeYmd(localDateToYmd(d));
+            setOpen(false);
+          }}
+          initialFocus
+        />
+        <div className="mt-2 flex items-center justify-between gap-2">
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            disabled={disabled || !valueYmd}
+            onClick={() => {
+              onChangeYmd("");
+              setOpen(false);
+            }}
+          >
+            <X className="h-4 w-4" />
+            Clear
+          </Button>
+          <Button type="button" variant="outline" size="sm" onClick={() => setOpen(false)}>
+            Close
+          </Button>
+        </div>
+      </PopoverContent>
+    </Popover>
   );
 }

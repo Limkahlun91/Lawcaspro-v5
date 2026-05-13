@@ -6,6 +6,7 @@ export type CaseMilestoneKey =
   | "spa_date"
   | "spa_stamped_date"
   | "letter_of_offer_date"
+  | "letter_of_offer_stamped_date"
   | "loan_docs_pending_date"
   | "loan_docs_signed_date"
   | "acting_letter_issued_date"
@@ -19,6 +20,16 @@ export type CaseMilestoneKey =
   | "developer_lu_dated"
   | "register_poa_on"
   | "letter_disclaimer_dated"
+  | "loan_agreement_stamped_date"
+  | "bank_1st_release_on"
+  | "discharge_date"
+  | "caveat_lodged_date"
+  | "first_advice_date"
+  | "dev_informed_redemption_date"
+  | "request_discharge_date"
+  | "charge_date"
+  | "presentation_date"
+  | "second_advice_date"
   | "mot_received_date"
   | "mot_signed_date"
   | "mot_stamped_date"
@@ -73,6 +84,8 @@ export function milestoneDateSql(milestone: CaseMilestoneKey): SQL<Date | null> 
       return sql<Date | null>`COALESCE(${caseKeyDatesTable.spaStampedDate}, ${workflowCompletedDateSql("spa_stamped")})`;
     case "letter_of_offer_date":
       return sql<Date | null>`(${caseKeyDatesTable.letterOfOfferDate})`;
+    case "letter_of_offer_stamped_date":
+      return sql<Date | null>`COALESCE(${caseKeyDatesTable.letterOfOfferStampedDate}, ${workflowCompletedDateSql("lof_stamped")})`;
     case "loan_docs_pending_date":
       return sql<Date | null>`COALESCE(${caseKeyDatesTable.loanDocsPendingDate}, ${workflowCompletedDateSql("loan_docs_pending")})`;
     case "loan_docs_signed_date":
@@ -99,6 +112,26 @@ export function milestoneDateSql(milestone: CaseMilestoneKey): SQL<Date | null> 
       return sql<Date | null>`COALESCE(${caseKeyDatesTable.registerPoaOn}, ${workflowCompletedDateSql("pa_registered")})`;
     case "letter_disclaimer_dated":
       return sql<Date | null>`COALESCE(${caseKeyDatesTable.letterDisclaimerDated}, ${workflowCompletedDateSql("letter_disclaimer")})`;
+    case "loan_agreement_stamped_date":
+      return sql<Date | null>`(${caseKeyDatesTable.loanAgreementStampedDate})`;
+    case "bank_1st_release_on":
+      return sql<Date | null>`(${caseKeyDatesTable.bank1stReleaseOn})`;
+    case "discharge_date":
+      return sql<Date | null>`(${caseKeyDatesTable.dischargeDate})`;
+    case "caveat_lodged_date":
+      return sql<Date | null>`(${caseKeyDatesTable.caveatLodgedDate})`;
+    case "first_advice_date":
+      return sql<Date | null>`(${caseKeyDatesTable.firstAdviceDate})`;
+    case "dev_informed_redemption_date":
+      return sql<Date | null>`(${caseKeyDatesTable.devInformedRedemptionDate})`;
+    case "request_discharge_date":
+      return sql<Date | null>`(${caseKeyDatesTable.requestDischargeDate})`;
+    case "charge_date":
+      return sql<Date | null>`(${caseKeyDatesTable.chargeDate})`;
+    case "presentation_date":
+      return sql<Date | null>`(${caseKeyDatesTable.presentationDate})`;
+    case "second_advice_date":
+      return sql<Date | null>`(${caseKeyDatesTable.secondAdviceDate})`;
     case "mot_received_date":
       return sql<Date | null>`COALESCE(${caseKeyDatesTable.motReceivedDate}, ${workflowCompletedDateSql("mot_received")})`;
     case "mot_signed_date":

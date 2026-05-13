@@ -50,16 +50,19 @@ const MILESTONE_TO_STATUS_QUERY: Record<string, { param: "spaStatus" | "loanStat
 
 function buildCasesHref(filter: { milestone: string; milestonePresence: string; purchaseMode?: string | null; titleType?: string | null }) {
   const qs = new URLSearchParams();
-  const mapped = filter.milestonePresence === "filled" ? MILESTONE_TO_STATUS_QUERY[filter.milestone] : undefined;
+  const milestone = (filter as any)?.milestone as string | undefined;
+  const milestonePresence = (filter as any)?.milestonePresence as string | undefined;
+  const mapped = milestone && milestonePresence === "filled" ? MILESTONE_TO_STATUS_QUERY[milestone] : undefined;
   if (mapped) {
     qs.set(mapped.param, mapped.value);
-  } else {
-    qs.set("milestone", filter.milestone);
-    qs.set("milestonePresence", filter.milestonePresence);
+  } else if (milestone && milestonePresence) {
+    qs.set("milestone", milestone);
+    qs.set("milestonePresence", milestonePresence);
   }
   if (filter.purchaseMode) qs.set("purchaseMode", filter.purchaseMode);
   if (filter.titleType) qs.set("titleType", filter.titleType);
-  return `/app/cases?${qs.toString()}`;
+  const q = qs.toString();
+  return q ? `/app/cases?${q}` : "/app/cases";
 }
 
 export default function AppDashboard() {
@@ -100,7 +103,7 @@ export default function AppDashboard() {
     key: string;
     label: string;
     count: number;
-    filter: { milestone: string; milestonePresence: string; purchaseMode?: string; titleType?: string };
+    filter: { milestone?: string; milestonePresence?: string; purchaseMode?: string; titleType?: string };
   };
   const milestoneCards: MilestoneCard[] = Array.isArray((stats as Record<string, any>).milestoneCards)
     ? ((stats as Record<string, any>).milestoneCards as MilestoneCard[])

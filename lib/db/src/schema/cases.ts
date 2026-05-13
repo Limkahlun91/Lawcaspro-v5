@@ -143,6 +143,13 @@ export const caseKeyDatesTable = pgTable("case_key_dates", {
   dischargeDate: date("discharge_date"),
   consentToTransferDate: date("consent_to_transfer_date"),
   consentToChargeDate: date("consent_to_charge_date"),
+  caveatLodgedDate: date("caveat_lodged_date"),
+  firstAdviceDate: date("first_advice_date"),
+  devInformedRedemptionDate: date("dev_informed_redemption_date"),
+  requestDischargeDate: date("request_discharge_date"),
+  chargeDate: date("charge_date"),
+  presentationDate: date("presentation_date"),
+  secondAdviceDate: date("second_advice_date"),
 
   motReceivedDate: date("mot_received_date"),
   motSignedDate: date("mot_signed_date"),

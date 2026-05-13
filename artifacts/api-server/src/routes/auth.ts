@@ -700,6 +700,13 @@ routerInternal.get("/auth/me", async (req: ReqLike, res: RouteResLike): Promise<
     let permissions: Array<{ module: string; action: string }> = [];
     if (user.userType === "firm_user" && user.roleId) {
       try {
+        if (user.firmId) {
+          try {
+            await ensureRolePermissionsInitialized(db as any, user.firmId, user.roleId);
+          } catch (err) {
+            logger.error({ route: getRoute(req), reqId, stage: "permissions_seed", err }, "auth.me.degraded");
+          }
+        }
         permissions = await db
           .select({ module: permissionsTable.module, action: permissionsTable.action })
           .from(permissionsTable)

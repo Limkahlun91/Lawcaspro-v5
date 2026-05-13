@@ -125,72 +125,83 @@ export async function computeDashboardStats(r: DbConn, firmId: number): Promise<
   };
 
   const loanMasterWhere = sql`${casesTable.purchaseMode} = 'loan' AND ${casesTable.titleType} = 'master'`;
-  const loanIndStrataWhere = sql`${casesTable.purchaseMode} = 'loan' AND (${casesTable.titleType} = 'individual' OR ${casesTable.titleType} = 'strata')`;
+  const loanTitleWhere = sql`${casesTable.purchaseMode} = 'loan' AND (${casesTable.titleType} = 'individual' OR ${casesTable.titleType} = 'strata')`;
 
-  const milestoneDefsSpa: Array<{ key: CaseMilestoneKey; label: string }> = [
-    { key: "spa_date", label: "SPA Date" },
-    { key: "spa_stamped_date", label: "SPA Stamped" },
-    { key: "letter_of_offer_date", label: "LO Date" },
-  ];
-
-  const milestoneDefsLoanCommon: Array<{ key: CaseMilestoneKey; label: string }> = [
-    { key: "loan_docs_pending_date", label: "Loan Docs Pending" },
-    { key: "loan_docs_signed_date", label: "Loan Docs Signed" },
-    { key: "acting_letter_issued_date", label: "Acting Letter Issued" },
-    { key: "developer_confirmation_received_on", label: "Developer Confirmation Received" },
-    { key: "loan_sent_bank_execution_date", label: "Loan Sent Bank Execution" },
-    { key: "loan_bank_executed_date", label: "Loan Bank Executed" },
-    { key: "bank_lu_received_date", label: "BLU Received" },
-    { key: "advice_to_bank_date", label: "Advice to Bank" },
-    { key: "bank_lu_forward_to_developer_on", label: "BLU Forwarded to Developer" },
-    { key: "developer_lu_received_on", label: "Developer LU Received" },
-    { key: "developer_lu_dated", label: "Developer LU Dated" },
-  ];
-
-  const milestoneDefsLoanMaster: Array<{ key: CaseMilestoneKey; label: string }> = [
-    { key: "noa_served_on", label: "NOA Served" },
-    { key: "register_poa_on", label: "POA Registered" },
-    { key: "letter_disclaimer_dated", label: "Letter Disclaimer Dated" },
-  ];
-
-  const milestoneDefsLoanIndStrata: Array<{ key: CaseMilestoneKey; label: string }> = [
-    { key: "mot_received_date", label: "MOT Received" },
-    { key: "mot_signed_date", label: "MOT Signed" },
-    { key: "mot_stamped_date", label: "MOT Stamped" },
-    { key: "mot_registered_date", label: "MOT Registered" },
-  ];
-
-  const totalsBySegment = hasKeyDates
+  const segmentTotals = hasKeyDates
     ? (await r
         .select({
-          totalSpa: count(),
-          totalLoanMaster: sql<number>`COUNT(*) FILTER (WHERE ${loanMasterWhere})`,
-          totalLoanIndStrata: sql<number>`COUNT(*) FILTER (WHERE ${loanIndStrataWhere})`,
+          spaTotal: count(),
+          loanMasterTotal: sql<number>`COUNT(*) FILTER (WHERE ${loanMasterWhere})`,
+          loanTitleTotal: sql<number>`COUNT(*) FILTER (WHERE ${loanTitleWhere})`,
         })
         .from(casesTable)
         .leftJoin(caseKeyDatesTable, sql`${caseKeyDatesTable.caseId} = ${casesTable.id} AND ${caseKeyDatesTable.firmId} = ${casesTable.firmId}`)
         .where(eq(casesTable.firmId, firmId)))[0]
     : undefined;
 
-  const totalSpa = Number(totalsBySegment?.totalSpa ?? 0);
-  const totalLoanMaster = Number(totalsBySegment?.totalLoanMaster ?? 0);
-  const totalLoanIndStrata = Number(totalsBySegment?.totalLoanIndStrata ?? 0);
+  const spaTotal = Number(segmentTotals?.spaTotal ?? 0);
+  const loanMasterTotal = Number(segmentTotals?.loanMasterTotal ?? 0);
+  const loanTitleTotal = Number(segmentTotals?.loanTitleTotal ?? 0);
+
+  const isEncumberedSql = sql`${casesTable.isEncumbered} = true`;
+  const encumbranceMissingSql = (milestone: CaseMilestoneKey, extraWhere: ReturnType<typeof sql>) =>
+    sql<number>`COUNT(*) FILTER (WHERE ${extraWhere} AND ${isEncumberedSql} AND ${milestonePresenceWhereSql(milestone, "missing")})`;
+
+  const spaMilestones: Array<{ key: CaseMilestoneKey; label: string }> = [
+    { key: "spa_date", label: "SPA Date" },
+    { key: "spa_stamped_date", label: "SPA Stamped Date" },
+  ];
+
+  const loanMasterMilestones: Array<{ key: CaseMilestoneKey; label: string }> = [
+    { key: "letter_of_offer_date", label: "LO Date" },
+    { key: "letter_of_offer_stamped_date", label: "LO Stamped" },
+    { key: "acting_letter_issued_date", label: "Acting Letter" },
+    { key: "loan_sent_bank_execution_date", label: "Bank Execution" },
+    { key: "loan_bank_executed_date", label: "Loan Doc" },
+    { key: "loan_agreement_stamped_date", label: "Loan Doc Stamped" },
+    { key: "letter_disclaimer_dated", label: "Letter Disclaimer" },
+    { key: "register_poa_on", label: "Register PA" },
+    { key: "noa_served_on", label: "NOA Serve" },
+    { key: "advice_to_bank_date", label: "Advice" },
+    { key: "bank_1st_release_on", label: "Bank Released" },
+    { key: "completion_date", label: "Completion" },
+  ];
+
+  const loanTitleMilestones: Array<{ key: CaseMilestoneKey; label: string; encumbranceOnlyWhenMissing?: boolean }> = [
+    { key: "letter_of_offer_date", label: "LO Date" },
+    { key: "letter_of_offer_stamped_date", label: "LO Stamped" },
+    { key: "acting_letter_issued_date", label: "Acting Letter" },
+    { key: "loan_sent_bank_execution_date", label: "Bank Execution" },
+    { key: "loan_bank_executed_date", label: "Loan Doc" },
+    { key: "loan_agreement_stamped_date", label: "Loan Doc Stamped" },
+    { key: "letter_disclaimer_dated", label: "Letter Disclaimer" },
+    { key: "caveat_lodged_date", label: "Caveat Lodged", encumbranceOnlyWhenMissing: true },
+    { key: "first_advice_date", label: "1st Advice", encumbranceOnlyWhenMissing: true },
+    { key: "dev_informed_redemption_date", label: "Dev Informed Redemption", encumbranceOnlyWhenMissing: true },
+    { key: "request_discharge_date", label: "Request Discharge", encumbranceOnlyWhenMissing: true },
+    { key: "discharge_date", label: "Discharge", encumbranceOnlyWhenMissing: true },
+    { key: "mot_registered_date", label: "MOT" },
+    { key: "charge_date", label: "Charge" },
+    { key: "presentation_date", label: "Presentation" },
+    { key: "second_advice_date", label: "2nd Advice" },
+    { key: "bank_1st_release_on", label: "Bank Released" },
+    { key: "completion_date", label: "Completion" },
+  ];
 
   const filledCounts = hasKeyDates
     ? (await r
         .select(Object.fromEntries([
-          ...milestoneDefsSpa.map((m) => [`spa_${m.key}`, milestoneCountSql(m.key, "filled")]),
-          ...milestoneDefsLoanCommon.map((m) => [`loan_master_common_${m.key}`, milestoneCountSql(m.key, "filled", loanMasterWhere)]),
-          ...milestoneDefsLoanCommon.map((m) => [`loan_ind_common_${m.key}`, milestoneCountSql(m.key, "filled", loanIndStrataWhere)]),
-          ...milestoneDefsLoanMaster.map((m) => [`loan_master_${m.key}`, milestoneCountSql(m.key, "filled", loanMasterWhere)]),
-          ...milestoneDefsLoanIndStrata.map((m) => [`loan_ind_${m.key}`, milestoneCountSql(m.key, "filled", loanIndStrataWhere)]),
+          ...spaMilestones.map((m) => [`spa_${m.key}`, milestoneCountSql(m.key, "filled")]),
+          ...loanMasterMilestones.map((m) => [`loan_master_${m.key}`, milestoneCountSql(m.key, "filled", loanMasterWhere)]),
+          ...loanTitleMilestones.filter((m) => !m.encumbranceOnlyWhenMissing).map((m) => [`loan_title_${m.key}`, milestoneCountSql(m.key, "filled", loanTitleWhere)]),
+          ...loanTitleMilestones.filter((m) => m.encumbranceOnlyWhenMissing).map((m) => [`loan_title_enc_${m.key}`, encumbranceMissingSql(m.key, loanTitleWhere)]),
         ]))
         .from(casesTable)
         .leftJoin(caseKeyDatesTable, sql`${caseKeyDatesTable.caseId} = ${casesTable.id} AND ${caseKeyDatesTable.firmId} = ${casesTable.firmId}`)
         .where(eq(casesTable.firmId, firmId)))[0] as Record<string, unknown>
     : {};
 
-  const toPendingCard = (segKey: string, total: number, m: { key: CaseMilestoneKey; label: string }, filledKey: string, extraFilter?: Record<string, string>) => {
+  const toPendingCard = (segKey: string, total: number, m: { key: CaseMilestoneKey; label: string }, filledKey: string, extraFilter: Record<string, string> | undefined) => {
     const filled = Number((filledCounts as any)?.[filledKey] ?? 0);
     const pending = Math.max(0, total - filled);
     return {
@@ -205,24 +216,62 @@ export async function computeDashboardStats(r: DbConn, firmId: number): Promise<
     };
   };
 
-  const spaCards = milestoneDefsSpa.map((m) => toPendingCard("spa", totalSpa, m, `spa_${m.key}`));
-  const loanMasterCards = [
-    ...milestoneDefsLoanCommon.map((m) => toPendingCard("loan_master", totalLoanMaster, m, `loan_master_common_${m.key}`, { purchaseMode: "loan", titleType: "master" })),
-    ...milestoneDefsLoanMaster.map((m) => toPendingCard("loan_master", totalLoanMaster, m, `loan_master_${m.key}`, { purchaseMode: "loan", titleType: "master" })),
-  ];
-  const loanIndStrataCards = [
-    ...milestoneDefsLoanCommon.map((m) => toPendingCard("loan_ind", totalLoanIndStrata, m, `loan_ind_common_${m.key}`, { purchaseMode: "loan", titleType: "individual,strata" })),
-    ...milestoneDefsLoanIndStrata.map((m) => toPendingCard("loan_ind", totalLoanIndStrata, m, `loan_ind_${m.key}`, { purchaseMode: "loan", titleType: "individual,strata" })),
-  ];
+  const toEncumbrancePendingCard = (segKey: string, m: { key: CaseMilestoneKey; label: string }, missingKey: string, extraFilter: Record<string, string>) => {
+    const pending = Number((filledCounts as any)?.[missingKey] ?? 0);
+    return {
+      key: `${segKey}_${String(m.key)}`,
+      label: `${m.label} Pending`,
+      count: pending,
+      filter: {
+        milestone: m.key,
+        milestonePresence: "missing",
+        ...extraFilter,
+      },
+    };
+  };
+
+  const spaCards = spaMilestones.map((m) => toPendingCard("spa", spaTotal, m, `spa_${m.key}`, undefined));
+  const loanMasterCards = loanMasterMilestones.map((m) => toPendingCard("loan_master", loanMasterTotal, m, `loan_master_${m.key}`, { purchaseMode: "loan", titleType: "master" }));
+  const loanTitleCards = loanTitleMilestones.map((m) => {
+    const baseFilter = { purchaseMode: "loan", titleType: "individual,strata" };
+    if (m.encumbranceOnlyWhenMissing) {
+      return toEncumbrancePendingCard("loan_title", m, `loan_title_enc_${m.key}`, baseFilter);
+    }
+    return toPendingCard("loan_title", loanTitleTotal, m, `loan_title_${m.key}`, baseFilter);
+  });
 
   const milestoneSections = hasKeyDates ? [
-    { key: "spa", label: "Total SPA Cases", total: totalSpa, cards: spaCards },
-    { key: "loan_master", label: "Total Loan Cases (Master Title)", total: totalLoanMaster, cards: loanMasterCards },
-    { key: "loan_ind_strata", label: "Total Loan Cases (Individual/Strata)", total: totalLoanIndStrata, cards: loanIndStrataCards },
+    {
+      key: "spa",
+      label: "SPA Total",
+      total: spaTotal,
+      cards: [
+        { key: "spa_total", label: "Total", count: spaTotal, filter: {} },
+        ...spaCards,
+      ],
+    },
+    {
+      key: "loan_master",
+      label: "Loan (Master) Total",
+      total: loanMasterTotal,
+      cards: [
+        { key: "loan_master_total", label: "Total", count: loanMasterTotal, filter: { purchaseMode: "loan", titleType: "master" } },
+        ...loanMasterCards,
+      ],
+    },
+    {
+      key: "loan_title",
+      label: "Loan (Title) Total",
+      total: loanTitleTotal,
+      cards: [
+        { key: "loan_title_total", label: "Total", count: loanTitleTotal, filter: { purchaseMode: "loan", titleType: "individual,strata" } },
+        ...loanTitleCards,
+      ],
+    },
   ] : [];
 
   const milestoneCards = hasKeyDates
-    ? [...spaCards, ...loanMasterCards, ...loanIndStrataCards]
+    ? [...spaCards, ...loanMasterCards, ...loanTitleCards]
     : [];
 
   return {

@@ -624,6 +624,26 @@ async function buildZipBufferFromPrivateObjects(entries: Array<{ zipPath: string
   return Buffer.concat(chunks);
 }
 
+async function buildZipBufferFromBuffers(entries: Array<{ zipPath: string; bytes: Buffer }>): Promise<Buffer> {
+  const zipfile = new yazl.ZipFile();
+  const nameCounts = new Map<string, number>();
+  for (const e of entries) {
+    const base = e.zipPath.replace(/^\/*/, "");
+    const n = (nameCounts.get(base) ?? 0) + 1;
+    nameCounts.set(base, n);
+    const zipPath = n === 1 ? base : base.replace(/(\.[^./\\]+)?$/, (_m, ext) => ` (${n})${ext ?? ""}`);
+    zipfile.addBuffer(e.bytes, zipPath);
+  }
+  zipfile.end();
+  const chunks: Buffer[] = [];
+  await new Promise<void>((resolve, reject) => {
+    zipfile.outputStream.on("data", (c: any) => chunks.push(Buffer.isBuffer(c) ? c : Buffer.from(c)));
+    zipfile.outputStream.on("error", reject);
+    zipfile.outputStream.on("end", resolve);
+  });
+  return Buffer.concat(chunks);
+}
+
 async function applyLetterheadToDocxBuffer({
   baseDocx,
   firstPageTemplateDocx,
@@ -5962,6 +5982,180 @@ router.post("/cases/batch-generated-documents-zip", requireAuth, requireFirmUser
       : new DocumentGenerationError(500, "INTERNAL_ERROR", "Internal Server Error");
     res.status(e.statusCode).json({ error: e.message, code: e.code });
   }
+});
+
+router.post("/cases/bulk/generate-documents-zip", requireAuth, requireFirmUser, requirePermission("documents", "generate"), async (req: AuthRequest, res): Promise<void> => {
+  const r = getRlsDb(req, res);
+  if (!r) return;
+
+  const body = req.body as Record<string, unknown>;
+  const caseIdsRaw = Array.isArray(body.caseIds) ? body.caseIds : [];
+  const templateIdsRaw = Array.isArray(body.templateIds) ? body.templateIds : [];
+
+  const caseIds = Array.from(new Set(
+    caseIdsRaw
+      .map((x) => (typeof x === "number" ? x : (typeof x === "string" ? parseInt(x, 10) : NaN)))
+      .filter((x) => Number.isFinite(x))
+      .map((x) => Math.trunc(x))
+      .filter((x) => x > 0)
+  ));
+  const templateIds = Array.from(new Set(
+    templateIdsRaw
+      .map((x) => (typeof x === "number" ? x : (typeof x === "string" ? parseInt(x, 10) : NaN)))
+      .filter((x) => Number.isFinite(x))
+      .map((x) => Math.trunc(x))
+      .filter((x) => x > 0)
+  ));
+
+  if (caseIds.length === 0) {
+    res.status(422).json({ error: "caseIds is required", code: "CASE_IDS_REQUIRED" });
+    return;
+  }
+  if (templateIds.length === 0) {
+    res.status(422).json({ error: "templateIds is required", code: "TEMPLATE_IDS_REQUIRED" });
+    return;
+  }
+  if (caseIds.length > 20) {
+    res.status(422).json({ error: "Too many cases", code: "TOO_MANY_CASES", limit: 20 });
+    return;
+  }
+  if (templateIds.length > 25) {
+    res.status(422).json({ error: "Too many templates", code: "TOO_MANY_TEMPLATES", limit: 25 });
+    return;
+  }
+  if (caseIds.length * templateIds.length > 300) {
+    res.status(422).json({ error: "Too many documents", code: "TOO_MANY_DOCUMENTS", limit: 300 });
+    return;
+  }
+
+  const roleRows = await queryRows(r, sql`SELECT name FROM roles WHERE id = ${req.roleId!} AND firm_id = ${req.firmId!} LIMIT 1`);
+  const roleName = roleRows[0]?.name ? String(roleRows[0].name).toLowerCase() : "";
+  const elevated = roleName.includes("partner") || roleName.includes("manager");
+
+  const caseRows = elevated
+    ? await queryRows(r, sql`
+        SELECT id, reference_no
+        FROM cases
+        WHERE firm_id = ${req.firmId!}
+          AND deleted_at IS NULL
+          AND id IN (${sql.join(caseIds.map((id) => sql`${id}`), sql`, `)})
+      `)
+    : await queryRows(r, sql`
+        SELECT c.id, c.reference_no
+        FROM cases c
+        WHERE c.firm_id = ${req.firmId!}
+          AND c.deleted_at IS NULL
+          AND c.id IN (${sql.join(caseIds.map((id) => sql`${id}`), sql`, `)})
+          AND EXISTS (
+            SELECT 1 FROM case_assignments ca
+            WHERE ca.case_id = c.id
+              AND ca.user_id = ${req.userId!}
+              AND ca.role_in_case IN ('lawyer','clerk')
+              AND ca.unassigned_at IS NULL
+          )
+      `);
+  if (caseRows.length !== caseIds.length) {
+    res.status(403).json({ error: "Forbidden", code: "CASE_ACCESS_DENIED" });
+    return;
+  }
+
+  const templateRows = await queryRows(r, sql`
+    SELECT id, name, document_type
+    FROM document_templates
+    WHERE firm_id = ${req.firmId!}
+      AND is_template_capable = true
+      AND id IN (${sql.join(templateIds.map((id) => sql`${id}`), sql`, `)})
+    ORDER BY created_at DESC
+  `);
+  if (templateRows.length !== templateIds.length) {
+    res.status(404).json({ error: "One or more templates not found", code: "TEMPLATE_NOT_FOUND" });
+    return;
+  }
+
+  const refByCaseId = new Map<number, string>();
+  for (const row of caseRows) {
+    const id = typeof (row as any).id === "number" ? Number((row as any).id) : (typeof (row as any).id === "string" ? parseInt(String((row as any).id), 10) : NaN);
+    const ref = typeof (row as any).reference_no === "string" ? String((row as any).reference_no) : "";
+    if (Number.isFinite(id)) refByCaseId.set(id, ref);
+  }
+
+  const failures: Array<{ caseId: number; templateId: number; error: string; code?: string }> = [];
+  const entries: Array<{ zipPath: string; bytes: Buffer }> = [];
+
+  for (const caseId of caseIds) {
+    const ref = refByCaseId.get(caseId) ?? "";
+    const folder = safeFilenameAscii(ref) || `case-${caseId}`;
+    for (const t of templateRows) {
+      const templateId = typeof (t as any).id === "number" ? Number((t as any).id) : NaN;
+      if (!Number.isFinite(templateId)) continue;
+      const templateName = typeof (t as any).name === "string" ? String((t as any).name) : `template-${templateId}`;
+
+      const runId = await createGenerationRun(r, {
+        firm_id: req.firmId!,
+        case_id: caseId,
+        template_source: "firm",
+        template_id: templateId,
+        template_version_id: null,
+        platform_document_id: null,
+        document_name: templateName,
+        render_mode: "docx",
+        status: "running",
+        rendered_variables_snapshot: null,
+        checklist_snapshot: null,
+        readiness_snapshot: null,
+        triggered_by: req.userId!,
+        error_code: null,
+        error_message: null,
+      });
+
+      try {
+        const out = await generateFirmDocument({
+          r,
+          firmId: req.firmId!,
+          actorId: req.userId!,
+          actorType: req.userType,
+          ipAddress: req.ip,
+          userAgent: req.headers["user-agent"],
+          caseId,
+          templateId,
+          documentName: templateName,
+          letterheadId: null,
+          runId,
+          bypassApplicability: false,
+          outputFormat: "docx",
+        });
+        await finishGenerationRunSuccess(r, req.firmId!, runId, out.caseDocumentId, out.renderedVars, out.checklistSnapshot, out.readinessSnapshot);
+        await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.generation.succeeded", entityType: "document_generation_run", entityId: runId, detail: `caseId=${caseId} templateSource=firm templateId=${templateId}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+
+        const bytes = out.outputBytes ?? null;
+        if (!bytes) throw new DocumentGenerationError(500, "INTERNAL_ERROR", "Missing output bytes");
+        const fileName = safeFilenameAscii(String((out.caseDocument as any)?.file_name ?? `${templateName}.docx`)) || `${safeFilenameAscii(templateName) || `template-${templateId}`}.docx`;
+        entries.push({ zipPath: `${folder}/${fileName}`, bytes });
+      } catch (err: unknown) {
+        const cfgErr = getSupabaseStorageConfigError(err);
+        const e =
+          cfgErr ? new DocumentGenerationError(cfgErr.statusCode, "STORAGE_NOT_CONFIGURED", cfgErr.error)
+          : err instanceof ObjectNotFoundError ? new DocumentGenerationError(404, "TEMPLATE_FILE_NOT_FOUND", "Template file not found")
+          : err instanceof DocumentGenerationError ? err
+          : new DocumentGenerationError(500, "INTERNAL_ERROR", "Internal Server Error");
+        await finishGenerationRunFailed(r, req.firmId!, runId, e.code, e.message);
+        await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.generation.failed", entityType: "document_generation_run", entityId: runId, detail: `caseId=${caseId} templateSource=firm templateId=${templateId} code=${e.code}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+        failures.push({ caseId, templateId, error: e.message, code: e.code });
+      }
+    }
+  }
+
+  if (entries.length === 0) {
+    res.status(422).json({ error: "No documents generated", code: "NO_DOCUMENTS_GENERATED", failures });
+    return;
+  }
+
+  const zipBytes = await buildZipBufferFromBuffers(entries);
+  const outName = safeFilenameAscii(`batch-documents-${new Date().toISOString().slice(0, 10)}.zip`) || "batch-documents.zip";
+  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.bulk_generate_zip", entityType: "case", entityId: undefined, detail: `cases=${caseIds.length} templates=${templateIds.length} ok=${entries.length} failed=${failures.length}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+  res.setHeader("Content-Disposition", contentDispositionAttachment(outName));
+  res.setHeader("Content-Type", "application/zip");
+  res.status(200).send(zipBytes);
 });
 
 router.get("/document-batch-jobs/:jobId", requireAuth, requireFirmUser, requirePermission("documents", "read"), async (req: AuthRequest, res): Promise<void> => {

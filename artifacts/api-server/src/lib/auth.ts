@@ -489,38 +489,73 @@ export function requirePermission(moduleName: string, action: string) {
     next: NextFunction
   ): Promise<void> {
     try {
+      const safeAudit = async (detail: string) => {
+        try {
+          await writeAuditLog({
+            actorId: req.userId,
+            firmId: req.firmId,
+            actorType: req.userType ?? "unknown",
+            action: "auth.forbidden.permission",
+            detail,
+            ipAddress: req.ip,
+            userAgent: req.headers["user-agent"],
+          });
+        } catch (err) {
+          logger.warn(
+            {
+              route: req.path,
+              requestId: getReqId(req) ?? null,
+              userId: req.userId ?? null,
+              firmId: req.firmId ?? null,
+              roleId: req.roleId ?? null,
+              moduleName,
+              action,
+              err,
+            },
+            "auth.audit_log_failed",
+          );
+        }
+      };
+
       if (req.userType !== "firm_user" || !req.firmId || !req.roleId) {
-        await writeAuditLog({
-          actorId: req.userId,
-          firmId: req.firmId,
-          actorType: req.userType ?? "unknown",
-          action: "auth.forbidden.permission",
-          detail: `${moduleName}:${action} ${req.method} ${req.path}`,
-          ipAddress: req.ip,
-          userAgent: req.headers["user-agent"],
-        });
+        await safeAudit(`${moduleName}:${action} ${req.method} ${req.path}`);
         res.status(403).json({ error: "Permission denied" });
         return;
       }
 
       const rlsDb = req.rlsDb ?? db;
 
-      const [role] = await rlsDb
-        .select()
-        .from(rolesTable)
-        .where(and(eq(rolesTable.id, req.roleId), eq(rolesTable.firmId, req.firmId)));
+      const cached = (req as any)._roleCache as { firmId: number; roleId: number; name: string } | undefined;
+      let roleName = cached && cached.firmId === req.firmId && cached.roleId === req.roleId ? cached.name : null;
+      if (!roleName) {
+        const [role] = await rlsDb
+          .select({ name: rolesTable.name })
+          .from(rolesTable)
+          .where(and(eq(rolesTable.id, req.roleId), eq(rolesTable.firmId, req.firmId)))
+          .limit(1);
+        roleName = role?.name ?? null;
+        if (roleName) {
+          (req as any)._roleCache = { firmId: req.firmId, roleId: req.roleId, name: roleName };
+        }
+      }
 
-      if (!role) {
-        await writeAuditLog({
-          actorId: req.userId,
-          firmId: req.firmId,
-          actorType: req.userType ?? "unknown",
-          action: "auth.forbidden.permission",
-          detail: `${moduleName}:${action} ${req.method} ${req.path} reason=role_not_found`,
-          ipAddress: req.ip,
-          userAgent: req.headers["user-agent"],
-        });
+      if (!roleName) {
+        await safeAudit(`${moduleName}:${action} ${req.method} ${req.path} reason=role_not_found`);
         res.status(403).json({ error: "Permission denied" });
+        return;
+      }
+
+      const permCache = ((req as any)._permissionCache as Map<string, boolean> | undefined) ?? new Map<string, boolean>();
+      (req as any)._permissionCache = permCache;
+      const permKey = `${moduleName}:${action}`;
+      const cachedAllowed = permCache.has(permKey) ? permCache.get(permKey) : undefined;
+      if (cachedAllowed === false) {
+        await safeAudit(`${moduleName}:${action} ${req.method} ${req.path}`);
+        res.status(403).json({ error: "Permission denied", code: "PERMISSION_DENIED" });
+        return;
+      }
+      if (cachedAllowed === true) {
+        next();
         return;
       }
 
@@ -533,9 +568,15 @@ export function requirePermission(moduleName: string, action: string) {
           eq(permissionsTable.action, action),
         ));
 
-      if (!perm && (role.name === "Partner" || role.name === "Clerk" || role.name === "Senior Clerk")) {
+      const baselineRoles = new Set(["Partner", "Clerk", "Senior Clerk", "Developer_User"]);
+      if (!perm && baselineRoles.has(roleName)) {
+        const ensured = ((req as any)._baselineEnsuredRoleIds as Set<number> | undefined) ?? new Set<number>();
+        (req as any)._baselineEnsuredRoleIds = ensured;
         try {
-          await ensureBaselinePermissions(rlsDb, role.id, role.name as "Partner" | "Clerk" | "Senior Clerk");
+          if (!ensured.has(req.roleId)) {
+            await ensureBaselinePermissions(rlsDb, req.roleId, roleName as "Partner" | "Clerk" | "Senior Clerk" | "Developer_User");
+            ensured.add(req.roleId);
+          }
         } catch (err) {
           const sqlState = (() => {
             if (!err || typeof err !== "object") return undefined;
@@ -569,19 +610,13 @@ export function requirePermission(moduleName: string, action: string) {
       }
 
       if (!perm || !perm.allowed) {
-        await writeAuditLog({
-          actorId: req.userId,
-          firmId: req.firmId,
-          actorType: req.userType ?? "unknown",
-          action: "auth.forbidden.permission",
-          detail: `${moduleName}:${action} ${req.method} ${req.path}`,
-          ipAddress: req.ip,
-          userAgent: req.headers["user-agent"],
-        });
+        permCache.set(permKey, false);
+        await safeAudit(`${moduleName}:${action} ${req.method} ${req.path}`);
         res.status(403).json({ error: "Permission denied", code: "PERMISSION_DENIED" });
         return;
       }
 
+      permCache.set(permKey, true);
       next();
     } catch (err) {
       const sqlState = (() => {
@@ -645,6 +680,8 @@ async function ensureBaselinePermissions(rlsDb: RlsDb | typeof db, roleId: numbe
       SELECT ${roleId}, v.module, v.action, TRUE
       FROM (
         VALUES
+          ('dashboard','read'),
+          ('cases','read'),
           ('developer_portal','read'),
           ('developer_portal','export'),
           ('developer_portal','message')

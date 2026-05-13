@@ -4,7 +4,10 @@ import { useLocation } from "wouter";
 
 export function AuthGuard({ children, requireRole }: { children: ReactNode, requireRole?: "founder" | "firm_user" }) {
   const { user, isLoading } = useAuth();
-  const [, setLocation] = useLocation();
+  const [location, setLocation] = useLocation();
+  const roleName = user ? String((user as any)?.roleName ?? "") : "";
+  const isDeveloperUser = user?.userType === "firm_user" && roleName === "Developer_User";
+  const shouldRedirectDeveloperAwayFromApp = isDeveloperUser && location.startsWith("/app");
 
   useEffect(() => {
     if (!isLoading) {
@@ -16,9 +19,11 @@ export function AuthGuard({ children, requireRole }: { children: ReactNode, requ
         } else {
           setLocation("/app/dashboard");
         }
+      } else if (shouldRedirectDeveloperAwayFromApp) {
+        setLocation("/developer/dashboard");
       }
     }
-  }, [user, isLoading, requireRole, setLocation]);
+  }, [user, isLoading, requireRole, setLocation, shouldRedirectDeveloperAwayFromApp]);
 
   if (isLoading) {
     return (
@@ -28,7 +33,7 @@ export function AuthGuard({ children, requireRole }: { children: ReactNode, requ
     );
   }
 
-  if (!user || (requireRole && user.userType !== requireRole)) {
+  if (!user || (requireRole && user.userType !== requireRole) || shouldRedirectDeveloperAwayFromApp) {
     return null;
   }
 

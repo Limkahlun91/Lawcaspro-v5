@@ -90,6 +90,10 @@ export default function CaseDetail() {
   const myUserId = typeof (user as any)?.id === "number" ? (user as any).id : Number((user as any)?.id);
   const roleName = String((user as any)?.roleName ?? "");
   const isPartnerOrManager = roleName.toLowerCase().includes("partner") || roleName.toLowerCase().includes("manager");
+  const canEditAssignments = (() => {
+    const rn = roleName.trim();
+    return rn === "Partner" || rn === "Manager" || rn.startsWith("Manager");
+  })();
 
   const {
     data: caseInfo,
@@ -371,6 +375,13 @@ export default function CaseDetail() {
     bank_1st_release_on: normalizeDateOnlyFromApi((src as any).bank_1st_release_on),
     first_release_amount_rm: (src as any).first_release_amount_rm !== null && (src as any).first_release_amount_rm !== undefined ? String((src as any).first_release_amount_rm) : "",
     discharge_date: normalizeDateOnlyFromApi((src as any).discharge_date),
+    caveat_lodged_date: normalizeDateOnlyFromApi((src as any).caveat_lodged_date),
+    first_advice_date: normalizeDateOnlyFromApi((src as any).first_advice_date),
+    dev_informed_redemption_date: normalizeDateOnlyFromApi((src as any).dev_informed_redemption_date),
+    request_discharge_date: normalizeDateOnlyFromApi((src as any).request_discharge_date),
+    charge_date: normalizeDateOnlyFromApi((src as any).charge_date),
+    presentation_date: normalizeDateOnlyFromApi((src as any).presentation_date),
+    second_advice_date: normalizeDateOnlyFromApi((src as any).second_advice_date),
     consent_to_transfer_date: normalizeDateOnlyFromApi((src as any).consent_to_transfer_date),
     consent_to_charge_date: normalizeDateOnlyFromApi((src as any).consent_to_charge_date),
     mot_received_date: normalizeDateOnlyFromApi((src as any).mot_received_date),
@@ -415,6 +426,13 @@ export default function CaseDetail() {
       "first_release_amount_rm",
       "redemption_sum",
       "discharge_date",
+      "caveat_lodged_date",
+      "first_advice_date",
+      "dev_informed_redemption_date",
+      "request_discharge_date",
+      "charge_date",
+      "presentation_date",
+      "second_advice_date",
       "letter_disclaimer_received_on",
       "letter_disclaimer_dated",
       "letter_disclaimer_reference_nos",
@@ -752,11 +770,11 @@ export default function CaseDetail() {
   const safeAssignments = Array.isArray((caseInfo as any)?.assignments) ? ((caseInfo as any).assignments as any[]) : [];
   const safePurchasers = Array.isArray((caseInfo as any)?.purchasers) ? ((caseInfo as any).purchasers as any[]) : [];
 
-  const saveScope = (scope: "SPA" | "Loan" | "Bank / LU / NOA" | "MOT / Completion") => {
+  const saveScope = (scope: "SPA" | "Loan" | "Bank / LU / NOA" | "Bank / LU" | "MOT / Completion") => {
     const tab: keyof typeof scopeKeys =
       scope === "SPA" ? "spa" :
       scope === "Loan" ? "loan" :
-      scope === "Bank / LU / NOA" ? "bank" :
+      (scope === "Bank / LU / NOA" || scope === "Bank / LU") ? "bank" :
       "mot";
     const dirty =
       tab === "spa" ? dirtySpa :
@@ -1381,7 +1399,7 @@ export default function CaseDetail() {
                   <div>
                     <div className="text-sm font-medium text-slate-500">Assigned Lawyer</div>
                     <div className="text-slate-900 font-medium">
-                      {canAssignAny ? (
+                      {canEditAssignments ? (
                         <Select
                           value={currentLawyerId ? String(currentLawyerId) : ""}
                           onValueChange={(v) => {
@@ -1407,7 +1425,7 @@ export default function CaseDetail() {
                   <div>
                     <div className="text-sm font-medium text-slate-500">Assigned Clerk</div>
                     <div className="text-slate-900 font-medium">
-                      {canAssignAny ? (
+                      {canEditAssignments ? (
                         <Select
                           value={currentClerkId ? String(currentClerkId) : "__none__"}
                           onValueChange={(v) => {
@@ -1503,7 +1521,7 @@ export default function CaseDetail() {
                     <span className="flex items-center gap-1">Loan{dirtyLoan && <span className="h-1.5 w-1.5 rounded-full bg-slate-600" />}</span>
                   </TabsTrigger>
                   <TabsTrigger value="bank">
-                    <span className="flex items-center gap-1">Bank / LU / NOA{dirtyBank && <span className="h-1.5 w-1.5 rounded-full bg-slate-600" />}</span>
+                    <span className="flex items-center gap-1">{isMasterTitle ? "Bank / LU / NOA" : "Bank / LU"}{dirtyBank && <span className="h-1.5 w-1.5 rounded-full bg-slate-600" />}</span>
                   </TabsTrigger>
                   <TabsTrigger value="mot">
                     <span className="flex items-center gap-1">MOT / Completion{dirtyMot && <span className="h-1.5 w-1.5 rounded-full bg-slate-600" />}</span>
@@ -1784,15 +1802,15 @@ export default function CaseDetail() {
 
                 <TabsContent value="bank" className="pt-6 space-y-6">
                   <div className="flex items-center justify-between">
-                    <div className="text-sm font-semibold text-slate-800">Bank / LU / NOA</div>
+                    <div className="text-sm font-semibold text-slate-800">{isMasterTitle ? "Bank / LU / NOA" : "Bank / LU"}</div>
                     <Button
                       size="sm"
                       variant={dirtyBank ? "default" : "outline"}
                       className={dirtyBank ? "bg-amber-500 hover:bg-amber-600" : undefined}
-                      onClick={() => saveScope("Bank / LU / NOA")}
+                      onClick={() => saveScope(isMasterTitle ? "Bank / LU / NOA" : "Bank / LU")}
                       disabled={saveKeyDatesMutation.isPending || !dirtyBank}
                     >
-                      {saveKeyDatesMutation.isPending && savingScope === "Bank / LU / NOA" ? "Saving..." : dirtyBank ? "Save Bank" : "Saved"}
+                      {saveKeyDatesMutation.isPending && (savingScope === "Bank / LU / NOA" || savingScope === "Bank / LU") ? "Saving..." : dirtyBank ? "Save Bank" : "Saved"}
                     </Button>
                   </div>
                   <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
@@ -1807,40 +1825,81 @@ export default function CaseDetail() {
                       </div>
                     </div>
 
-                    <div className="space-y-4">
-                      <div className="text-sm font-semibold text-slate-800">NOA / POA / Disclaimer</div>
-                      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                        {showNoaAndPoa ? (
-                          <FieldCard label="NOA Served On" value={keyDatesDraft.noa_served_on || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, noa_served_on: v }))} printerKey="noa" />
-                        ) : null}
-                        {showNoaAndPoa ? (
-                          <WorkflowFileCard label="Register POA" docKey="register_poa" dateKey="register_poa_on" />
-                        ) : null}
-                        {showNoaAndPoa ? (
-                          <FieldCard label="Registered POA Registration Number" type="text" value={keyDatesDraft.registered_poa_registration_number || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, registered_poa_registration_number: v }))} />
-                        ) : null}
-                        {showEncumbranceFields ? (
-                          <FieldCard label="Letter Disclaimer Received On" value={keyDatesDraft.letter_disclaimer_received_on || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, letter_disclaimer_received_on: v }))} />
-                        ) : null}
-                        {showEncumbranceFields ? (
-                          <WorkflowFileCard label="Letter Disclaimer" docKey="letter_disclaimer" dateKey="letter_disclaimer_dated" />
-                        ) : null}
-                        {showEncumbranceFields ? (
-                          <FieldCard label="Letter Disclaimer Reference Nos" type="text" value={keyDatesDraft.letter_disclaimer_reference_nos || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, letter_disclaimer_reference_nos: v }))} />
-                        ) : null}
-                      </div>
+                    {isMasterTitle ? (
+                      <div className="space-y-4">
+                        <div className="text-sm font-semibold text-slate-800">NOA / POA / Disclaimer</div>
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                          {showNoaAndPoa ? (
+                            <FieldCard label="NOA Served On" value={keyDatesDraft.noa_served_on || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, noa_served_on: v }))} printerKey="noa" />
+                          ) : null}
+                          {showNoaAndPoa ? (
+                            <WorkflowFileCard label="Register POA" docKey="register_poa" dateKey="register_poa_on" />
+                          ) : null}
+                          {showNoaAndPoa ? (
+                            <FieldCard label="Registered POA Registration Number" type="text" value={keyDatesDraft.registered_poa_registration_number || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, registered_poa_registration_number: v }))} />
+                          ) : null}
+                          {showEncumbranceFields ? (
+                            <FieldCard label="Letter Disclaimer Received On" value={keyDatesDraft.letter_disclaimer_received_on || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, letter_disclaimer_received_on: v }))} />
+                          ) : null}
+                          {showEncumbranceFields ? (
+                            <WorkflowFileCard label="Letter Disclaimer" docKey="letter_disclaimer" dateKey="letter_disclaimer_dated" />
+                          ) : null}
+                          {showEncumbranceFields ? (
+                            <FieldCard label="Letter Disclaimer Reference Nos" type="text" value={keyDatesDraft.letter_disclaimer_reference_nos || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, letter_disclaimer_reference_nos: v }))} />
+                          ) : null}
+                        </div>
 
-                      <div className="pt-3 grid grid-cols-1 md:grid-cols-2 gap-3">
-                        {showEncumbranceFields ? (
-                          <FieldCard label="Redemption Sum (RM)" type="number" value={keyDatesDraft.redemption_sum || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, redemption_sum: v }))} />
-                        ) : null}
-                        {showEncumbranceFields ? (
-                          <FieldCard label="Discharge Date" value={keyDatesDraft.discharge_date || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, discharge_date: v }))} />
-                        ) : null}
-                        <FieldCard label="Bank 1st Release On" value={keyDatesDraft.bank_1st_release_on || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, bank_1st_release_on: v }))} />
-                        <FieldCard label="First Release Amount (RM)" type="number" value={keyDatesDraft.first_release_amount_rm || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, first_release_amount_rm: v }))} />
+                        <div className="pt-3 grid grid-cols-1 md:grid-cols-2 gap-3">
+                          {showEncumbranceFields ? (
+                            <FieldCard label="Redemption Sum (RM)" type="number" value={keyDatesDraft.redemption_sum || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, redemption_sum: v }))} />
+                          ) : null}
+                          {showEncumbranceFields ? (
+                            <FieldCard label="Discharge Date" value={keyDatesDraft.discharge_date || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, discharge_date: v }))} />
+                          ) : null}
+                          <FieldCard label="Bank 1st Release On" value={keyDatesDraft.bank_1st_release_on || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, bank_1st_release_on: v }))} />
+                          <FieldCard label="First Release Amount (RM)" type="number" value={keyDatesDraft.first_release_amount_rm || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, first_release_amount_rm: v }))} />
+                        </div>
                       </div>
-                    </div>
+                    ) : (
+                      <div className="space-y-4">
+                        <div className="text-sm font-semibold text-slate-800">Caveat / Encumbrance</div>
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                          <FieldCard label="Caveat Lodged Date" value={keyDatesDraft.caveat_lodged_date || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, caveat_lodged_date: v }))} />
+                          {showEncumbranceFields ? (
+                            <FieldCard label="1st Advice Date" value={keyDatesDraft.first_advice_date || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, first_advice_date: v }))} />
+                          ) : null}
+                          {showEncumbranceFields ? (
+                            <FieldCard label="Dev Informed Redemption Date" value={keyDatesDraft.dev_informed_redemption_date || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, dev_informed_redemption_date: v }))} />
+                          ) : null}
+                          {showEncumbranceFields ? (
+                            <FieldCard label="Request Discharge Date" value={keyDatesDraft.request_discharge_date || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, request_discharge_date: v }))} />
+                          ) : null}
+                          {showEncumbranceFields ? (
+                            <FieldCard label="Discharge Date" value={keyDatesDraft.discharge_date || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, discharge_date: v }))} />
+                          ) : null}
+                          <FieldCard label="Charge Date" value={keyDatesDraft.charge_date || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, charge_date: v }))} />
+                          <FieldCard label="Presentation Date" value={keyDatesDraft.presentation_date || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, presentation_date: v }))} />
+                          <FieldCard label="2nd Advice Date" value={keyDatesDraft.second_advice_date || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, second_advice_date: v }))} />
+                          {showEncumbranceFields ? (
+                            <FieldCard label="Letter Disclaimer Received On" value={keyDatesDraft.letter_disclaimer_received_on || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, letter_disclaimer_received_on: v }))} />
+                          ) : null}
+                          {showEncumbranceFields ? (
+                            <WorkflowFileCard label="Letter Disclaimer" docKey="letter_disclaimer" dateKey="letter_disclaimer_dated" />
+                          ) : null}
+                          {showEncumbranceFields ? (
+                            <FieldCard label="Letter Disclaimer Reference Nos" type="text" value={keyDatesDraft.letter_disclaimer_reference_nos || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, letter_disclaimer_reference_nos: v }))} />
+                          ) : null}
+                        </div>
+
+                        <div className="pt-3 grid grid-cols-1 md:grid-cols-2 gap-3">
+                          {showEncumbranceFields ? (
+                            <FieldCard label="Redemption Sum (RM)" type="number" value={keyDatesDraft.redemption_sum || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, redemption_sum: v }))} />
+                          ) : null}
+                          <FieldCard label="Bank 1st Release On" value={keyDatesDraft.bank_1st_release_on || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, bank_1st_release_on: v }))} />
+                          <FieldCard label="First Release Amount (RM)" type="number" value={keyDatesDraft.first_release_amount_rm || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, first_release_amount_rm: v }))} />
+                        </div>
+                      </div>
+                    )}
                   </div>
                 </TabsContent>
 

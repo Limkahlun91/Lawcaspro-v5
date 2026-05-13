@@ -698,6 +698,7 @@ router.get("/cases/filter-options", requireAuthHandler, requireFirmUserHandler, 
       { key: "spa_date", label: "SPA Date" },
       { key: "spa_stamped_date", label: "SPA Stamped" },
       { key: "letter_of_offer_date", label: "LO Date" },
+      { key: "letter_of_offer_stamped_date", label: "LO Stamped" },
       { key: "loan_docs_pending_date", label: "Loan Docs Pending" },
       { key: "loan_docs_signed_date", label: "Loan Docs Signed" },
       { key: "acting_letter_issued_date", label: "Acting Letter Issued" },
@@ -712,6 +713,16 @@ router.get("/cases/filter-options", requireAuthHandler, requireFirmUserHandler, 
       { key: "noa_served_on", label: "NOA Served" },
       { key: "register_poa_on", label: "POA Registered" },
       { key: "letter_disclaimer_dated", label: "Letter Disclaimer Dated" },
+      { key: "loan_agreement_stamped_date", label: "Loan Doc Stamped" },
+      { key: "bank_1st_release_on", label: "Bank Released" },
+      { key: "discharge_date", label: "Discharge" },
+      { key: "caveat_lodged_date", label: "Caveat Lodged" },
+      { key: "first_advice_date", label: "1st Advice" },
+      { key: "dev_informed_redemption_date", label: "Dev Informed Redemption" },
+      { key: "request_discharge_date", label: "Request Discharge" },
+      { key: "charge_date", label: "Charge" },
+      { key: "presentation_date", label: "Presentation" },
+      { key: "second_advice_date", label: "2nd Advice" },
       { key: "mot_received_date", label: "MOT Received" },
       { key: "mot_signed_date", label: "MOT Signed" },
       { key: "mot_stamped_date", label: "MOT Stamped" },
@@ -1455,6 +1466,199 @@ router.post("/cases/bulk/status", requireAuthHandler, requireFirmUserHandler, re
   res.json({ requested: normalizedCaseIds.length, succeeded, failed: failures.length, failures });
 }));
 
+router.patch("/cases/bulk/key-dates", requireAuthHandler, requireFirmUserHandler, requirePermission("cases", "update") as RequestHandler, authed(async (req, res) => {
+  const r = req.rlsDb;
+  if (!r) {
+    res.status(500).json({ error: "Internal Server Error" });
+    return;
+  }
+
+  const kdExists = await tableExists(r, "public.case_key_dates");
+  if (!kdExists) {
+    res.status(503).json({ error: "Key dates table not available. Run migrations." });
+    return;
+  }
+
+  const body = asObject(req.body);
+  const rawCaseIds = Array.isArray(body?.caseIds) ? body!.caseIds : [];
+  const field = (asString(body?.field) ?? "").trim();
+  const dateInput = Object.prototype.hasOwnProperty.call(body ?? {}, "date") ? (body as any).date : undefined;
+
+  const normalizedCaseIds = Array.from(new Set(
+    rawCaseIds
+      .map((x: unknown) => Number(x))
+      .filter((x: number) => Number.isInteger(x) && x > 0)
+  ));
+  if (normalizedCaseIds.length === 0) {
+    res.status(400).json({ error: "caseIds is required" });
+    return;
+  }
+  if (!field) {
+    res.status(400).json({ error: "field is required" });
+    return;
+  }
+  if (dateInput === undefined) {
+    res.status(400).json({ error: "date is required" });
+    return;
+  }
+
+  const ymdParsed = parseDateOnlyInput(dateInput);
+  if (ymdParsed === undefined || ymdParsed === null) {
+    res.status(400).json({ error: "Invalid date" });
+    return;
+  }
+  const ymd = ymdParsed;
+
+  const dateFieldMap = {
+    spa_signed_date: "spaSignedDate",
+    spa_forward_to_developer_execution_on: "spaForwardToDeveloperExecutionOn",
+    spa_date: "spaDate",
+    spa_stamped_date: "spaStampedDate",
+    stamped_spa_send_to_developer_on: "stampedSpaSendToDeveloperOn",
+    stamped_spa_received_from_developer_on: "stampedSpaReceivedFromDeveloperOn",
+    letter_of_offer_date: "letterOfOfferDate",
+    letter_of_offer_stamped_date: "letterOfOfferStampedDate",
+    loan_docs_pending_date: "loanDocsPendingDate",
+    loan_docs_signed_date: "loanDocsSignedDate",
+    acting_letter_issued_date: "actingLetterIssuedDate",
+    developer_confirmation_received_on: "developerConfirmationReceivedOn",
+    developer_confirmation_date: "developerConfirmationDate",
+    loan_sent_bank_execution_date: "loanSentBankExecutionDate",
+    loan_bank_executed_date: "loanBankExecutedDate",
+    bank_lu_received_date: "bankLuReceivedDate",
+    bank_lu_forward_to_developer_on: "bankLuForwardToDeveloperOn",
+    developer_lu_received_on: "developerLuReceivedOn",
+    developer_lu_dated: "developerLuDated",
+    letter_disclaimer_received_on: "letterDisclaimerReceivedOn",
+    letter_disclaimer_dated: "letterDisclaimerDated",
+    loan_agreement_dated: "loanAgreementDated",
+    loan_agreement_submitted_stamping_date: "loanAgreementSubmittedStampingDate",
+    loan_agreement_stamped_date: "loanAgreementStampedDate",
+    register_poa_on: "registerPoaOn",
+    noa_served_on: "noaServedOn",
+    advice_to_bank_date: "adviceToBankDate",
+    bank_1st_release_on: "bank1stReleaseOn",
+    discharge_date: "dischargeDate",
+    caveat_lodged_date: "caveatLodgedDate",
+    first_advice_date: "firstAdviceDate",
+    dev_informed_redemption_date: "devInformedRedemptionDate",
+    request_discharge_date: "requestDischargeDate",
+    charge_date: "chargeDate",
+    presentation_date: "presentationDate",
+    second_advice_date: "secondAdviceDate",
+    consent_to_transfer_date: "consentToTransferDate",
+    consent_to_charge_date: "consentToChargeDate",
+    mot_received_date: "motReceivedDate",
+    mot_signed_date: "motSignedDate",
+    mot_stamped_date: "motStampedDate",
+    mot_registered_date: "motRegisteredDate",
+    progressive_payment_date: "progressivePaymentDate",
+    full_settlement_date: "fullSettlementDate",
+    completion_date: "completionDate",
+  } as const;
+
+  const colKey = (dateFieldMap as any)[field] as string | undefined;
+  if (!colKey) {
+    res.status(400).json({ error: "Unsupported field" });
+    return;
+  }
+
+  const elevated = await canBypassCaseAssignment(r, req.firmId!, req.roleId);
+  const requestedIds = normalizedCaseIds;
+
+  const visibleCases = elevated
+    ? await r
+        .select({ id: casesTable.id })
+        .from(casesTable)
+        .where(and(eq(casesTable.firmId, req.firmId!), inArray(casesTable.id, requestedIds)))
+    : await r
+        .select({ id: casesTable.id })
+        .from(casesTable)
+        .innerJoin(caseAssignmentsTable, and(
+          eq(caseAssignmentsTable.caseId, casesTable.id),
+          eq(caseAssignmentsTable.userId, req.userId!),
+          inArray(caseAssignmentsTable.roleInCase, ["lawyer", "clerk"]),
+          sql`${caseAssignmentsTable.unassignedAt} IS NULL`,
+        ))
+        .where(and(eq(casesTable.firmId, req.firmId!), inArray(casesTable.id, requestedIds)));
+
+  const allowedIds = Array.from(new Set(visibleCases.map((c) => c.id)));
+  const allowedSet = new Set(allowedIds);
+  const failures: Array<{ caseId: number; error: string }> = requestedIds
+    .filter((id) => !allowedSet.has(id))
+    .map((id) => ({ caseId: id, error: "Forbidden" }));
+
+  const now = new Date();
+  let succeeded = 0;
+
+  if (allowedIds.length > 0) {
+    const existingRows = await r
+      .select({ caseId: caseKeyDatesTable.caseId })
+      .from(caseKeyDatesTable)
+      .where(and(eq(caseKeyDatesTable.firmId, req.firmId!), inArray(caseKeyDatesTable.caseId, allowedIds)));
+    const existingSet = new Set(existingRows.map((x) => x.caseId));
+    const toUpdate = allowedIds.filter((id) => existingSet.has(id));
+    const toInsert = allowedIds.filter((id) => !existingSet.has(id));
+
+    if (toUpdate.length > 0) {
+      const updateValues: any = { updatedAt: now };
+      updateValues[colKey] = ymd;
+      await r
+        .update(caseKeyDatesTable)
+        .set(updateValues)
+        .where(and(eq(caseKeyDatesTable.firmId, req.firmId!), inArray(caseKeyDatesTable.caseId, toUpdate)));
+      succeeded += toUpdate.length;
+    }
+    if (toInsert.length > 0) {
+      const rows: any[] = toInsert.map((caseId) => {
+        const v: any = { firmId: req.firmId!, caseId, updatedAt: now };
+        v[colKey] = ymd;
+        return v;
+      });
+      await r.insert(caseKeyDatesTable).values(rows);
+      succeeded += toInsert.length;
+    }
+
+    const auditRows = allowedIds.map((caseId) => ({
+      firmId: req.firmId,
+      actorId: req.userId,
+      actorType: "firm_user",
+      action: "case.key_dates.updated",
+      entityType: "case",
+      entityId: caseId,
+      detail: JSON.stringify([field]),
+    }));
+    await r.insert(auditLogsTable).values(auditRows);
+
+    for (const caseId of allowedIds) {
+      try {
+        await syncWorkflowStepsFromCaseState(r, caseId, {
+          firmId: req.firmId!,
+          actorId: req.userId,
+          actorType: req.userType ?? "firm_user",
+          ipAddress: req.ip,
+          userAgent: req.headers["user-agent"],
+        });
+      } catch (err) {
+        failures.push({ caseId, error: err instanceof Error ? err.message : String(err) });
+      }
+    }
+  }
+
+  await writeAuditLog({
+    firmId: req.firmId,
+    actorId: req.userId,
+    actorType: req.userType,
+    action: "cases.bulk.key_dates.summary",
+    entityType: "case_key_dates",
+    detail: `field=${field} date=${ymd} requested=${requestedIds.length} succeeded=${succeeded} failed=${failures.length}`,
+    ipAddress: req.ip,
+    userAgent: req.headers["user-agent"],
+  });
+
+  res.json({ requested: requestedIds.length, succeeded, failed: failures.length, failures });
+}));
+
 function hasLoanOnlyMilestone(milestone: CaseMilestoneKey): boolean {
   return (
     milestone === "loan_docs_signed_date" ||
@@ -2061,11 +2265,35 @@ router.get("/cases", requireAuthHandler, requireFirmUserHandler, requirePermissi
   const mCompletionDateExpr = hasKeyDates ? milestoneDateYmdSql("completion_date") : sql<string | null>`NULL`;
 
   const loanOnlyMilestones: Set<CaseMilestoneKey> = new Set([
+    "letter_of_offer_date",
+    "letter_of_offer_stamped_date",
     "loan_docs_signed_date",
     "acting_letter_issued_date",
     "loan_sent_bank_execution_date",
     "loan_bank_executed_date",
     "bank_lu_received_date",
+    "advice_to_bank_date",
+    "noa_served_on",
+    "register_poa_on",
+    "letter_disclaimer_dated",
+    "loan_agreement_stamped_date",
+    "bank_1st_release_on",
+    "discharge_date",
+    "caveat_lodged_date",
+    "first_advice_date",
+    "dev_informed_redemption_date",
+    "request_discharge_date",
+    "charge_date",
+    "presentation_date",
+    "second_advice_date",
+  ]);
+
+  const encumbranceOnlyWhenMissing: Set<CaseMilestoneKey> = new Set([
+    "caveat_lodged_date",
+    "first_advice_date",
+    "dev_informed_redemption_date",
+    "request_discharge_date",
+    "discharge_date",
   ]);
 
   const conditions = [eq(casesTable.firmId, req.firmId!)];
@@ -2132,6 +2360,9 @@ router.get("/cases", requireAuthHandler, requireFirmUserHandler, requirePermissi
   if (hasKeyDates && milestone && milestonePresence && (milestonePresence === "filled" || milestonePresence === "missing")) {
     if (loanOnlyMilestones.has(milestone)) {
       conditions.push(eq(casesTable.purchaseMode, "loan"));
+    }
+    if (milestonePresence === "missing" && encumbranceOnlyWhenMissing.has(milestone)) {
+      conditions.push(eq(casesTable.isEncumbered, true));
     }
     conditions.push(milestonePresenceWhereSql(milestone, milestonePresence));
   }
@@ -2756,6 +2987,13 @@ router.get("/cases/:caseId/key-dates", requireAuthHandler, requireFirmUserHandle
     bank_1st_release_on: kd.bank1stReleaseOn ? String(kd.bank1stReleaseOn) : null,
     first_release_amount_rm: kd.firstReleaseAmountRm ? Number(kd.firstReleaseAmountRm) : null,
     discharge_date: kd.dischargeDate ? String(kd.dischargeDate) : null,
+    caveat_lodged_date: kd.caveatLodgedDate ? String(kd.caveatLodgedDate) : null,
+    first_advice_date: kd.firstAdviceDate ? String(kd.firstAdviceDate) : null,
+    dev_informed_redemption_date: kd.devInformedRedemptionDate ? String(kd.devInformedRedemptionDate) : null,
+    request_discharge_date: kd.requestDischargeDate ? String(kd.requestDischargeDate) : null,
+    charge_date: kd.chargeDate ? String(kd.chargeDate) : null,
+    presentation_date: kd.presentationDate ? String(kd.presentationDate) : null,
+    second_advice_date: kd.secondAdviceDate ? String(kd.secondAdviceDate) : null,
     consent_to_transfer_date: kd.consentToTransferDate ? String(kd.consentToTransferDate) : null,
     consent_to_charge_date: kd.consentToChargeDate ? String(kd.consentToChargeDate) : null,
     mot_received_date: kd.motReceivedDate ? String(kd.motReceivedDate) : null,
@@ -3061,6 +3299,13 @@ router.patch("/cases/:caseId/key-dates", requireAuthHandler, requireFirmUserHand
     advice_to_bank_date: "adviceToBankDate",
     bank_1st_release_on: "bank1stReleaseOn",
     discharge_date: "dischargeDate",
+    caveat_lodged_date: "caveatLodgedDate",
+    first_advice_date: "firstAdviceDate",
+    dev_informed_redemption_date: "devInformedRedemptionDate",
+    request_discharge_date: "requestDischargeDate",
+    charge_date: "chargeDate",
+    presentation_date: "presentationDate",
+    second_advice_date: "secondAdviceDate",
     consent_to_transfer_date: "consentToTransferDate",
     consent_to_charge_date: "consentToChargeDate",
     mot_received_date: "motReceivedDate",
@@ -3222,6 +3467,14 @@ router.patch("/cases/:caseId/key-dates", requireAuthHandler, requireFirmUserHand
     advice_to_bank_date: kd.adviceToBankDate ? String(kd.adviceToBankDate) : null,
     bank_1st_release_on: kd.bank1stReleaseOn ? String(kd.bank1stReleaseOn) : null,
     first_release_amount_rm: kd.firstReleaseAmountRm ? Number(kd.firstReleaseAmountRm) : null,
+    discharge_date: kd.dischargeDate ? String(kd.dischargeDate) : null,
+    caveat_lodged_date: kd.caveatLodgedDate ? String(kd.caveatLodgedDate) : null,
+    first_advice_date: kd.firstAdviceDate ? String(kd.firstAdviceDate) : null,
+    dev_informed_redemption_date: kd.devInformedRedemptionDate ? String(kd.devInformedRedemptionDate) : null,
+    request_discharge_date: kd.requestDischargeDate ? String(kd.requestDischargeDate) : null,
+    charge_date: kd.chargeDate ? String(kd.chargeDate) : null,
+    presentation_date: kd.presentationDate ? String(kd.presentationDate) : null,
+    second_advice_date: kd.secondAdviceDate ? String(kd.secondAdviceDate) : null,
     mot_received_date: kd.motReceivedDate ? String(kd.motReceivedDate) : null,
     mot_signed_date: kd.motSignedDate ? String(kd.motSignedDate) : null,
     mot_stamped_date: kd.motStampedDate ? String(kd.motStampedDate) : null,
@@ -3263,8 +3516,17 @@ router.patch("/cases/:caseId", requireAuthHandler, requireFirmUserHandler, requi
   const wantsAssignLawyer = parsed.data.assignedLawyerId !== undefined;
   const wantsAssignClerk = (parsed.data as any)?.assignedClerkId !== undefined;
   if (wantsAssignLawyer || wantsAssignClerk) {
-    const ok = await enforcePermission(req as AuthRequest, res as ExpressResponse, "cases", "assign_any");
-    if (!ok) return;
+    const [roleRow] = await r
+      .select({ name: rolesTable.name })
+      .from(rolesTable)
+      .where(and(eq(rolesTable.id, req.roleId!), eq(rolesTable.firmId, req.firmId!)))
+      .limit(1);
+    const roleName = String(roleRow?.name ?? "");
+    const canEditAssignments = roleName === "Partner" || roleName === "Manager" || roleName.startsWith("Manager");
+    if (!canEditAssignments) {
+      res.status(403).json({ error: "Forbidden" });
+      return;
+    }
   }
 
   if (wantsAssignLawyer) {

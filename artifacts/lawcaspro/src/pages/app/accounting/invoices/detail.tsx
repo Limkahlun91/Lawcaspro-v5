@@ -4,6 +4,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, Printer, CheckCircle, XCircle, Plus, AlertCircle } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { DateOnlyInput } from "@/components/date-only-input";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
 import { useToast } from "@/hooks/use-toast";
@@ -209,8 +210,7 @@ export default function InvoiceDetail() {
               </div>
               <div>
                 <label className="text-sm font-medium text-slate-700 block mb-1">Date Received</label>
-                <Input type="date" value={receiptForm.receivedDate}
-                  onChange={(e) => setReceiptForm((f) => ({ ...f, receivedDate: e.target.value }))} />
+                <DateOnlyInput valueYmd={receiptForm.receivedDate} onChangeYmd={(v) => setReceiptForm((f) => ({ ...f, receivedDate: v }))} />
               </div>
               <div>
                 <label className="text-sm font-medium text-slate-700 block mb-1">Reference No</label>

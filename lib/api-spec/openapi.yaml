@@ -1475,6 +1475,7 @@ components:
         - spa_date
         - spa_stamped_date
         - letter_of_offer_date
+        - letter_of_offer_stamped_date
         - loan_docs_pending_date
         - loan_docs_signed_date
         - acting_letter_issued_date
@@ -1488,6 +1489,16 @@ components:
         - developer_lu_dated
         - register_poa_on
         - letter_disclaimer_dated
+        - loan_agreement_stamped_date
+        - bank_1st_release_on
+        - discharge_date
+        - caveat_lodged_date
+        - first_advice_date
+        - dev_informed_redemption_date
+        - request_discharge_date
+        - charge_date
+        - presentation_date
+        - second_advice_date
         - mot_received_date
         - mot_signed_date
         - mot_stamped_date

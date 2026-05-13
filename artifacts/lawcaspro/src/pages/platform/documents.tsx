@@ -12,6 +12,17 @@ import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription,
 } from "@/components/ui/dialog";
 import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from "@/components/ui/alert-dialog";
+import {
   FileText, Upload, Trash2, Download, Plus, File, Search,
   FolderOpen, Folder, ChevronUp, ChevronDown, Pencil, FolderPlus,
   Eye, EyeOff, ChevronRight, BookOpen, Copy, Check, FileEdit,
@@ -951,19 +962,39 @@ export default function PlatformDocuments() {
                             >
                               <Download className={cn("w-3.5 h-3.5", downloadingDocId === doc.id && "animate-bounce")} />
                             </Button>
-                            <Button
-                              variant="ghost"
-                              size="sm"
-                              className="h-7 w-7 p-0 text-red-500 hover:text-red-600"
-                              onClick={() => {
-                                if (!confirm(`Delete "${doc.name}"?`)) return;
-                                deleteMutation.mutate(doc.id);
-                              }}
-                              disabled={deleteMutation.isPending}
-                              title="Delete"
-                            >
-                              <Trash2 className="w-3.5 h-3.5" />
-                            </Button>
+                            <AlertDialog>
+                              <AlertDialogTrigger asChild>
+                                <Button
+                                  variant="ghost"
+                                  size="sm"
+                                  className="h-7 w-7 p-0 text-red-500 hover:text-red-600"
+                                  disabled={deleteMutation.isPending}
+                                  title="Delete"
+                                >
+                                  <Trash2 className="w-3.5 h-3.5" />
+                                </Button>
+                              </AlertDialogTrigger>
+                              <AlertDialogContent>
+                                <AlertDialogHeader>
+                                  <AlertDialogTitle>Are you absolutely sure?</AlertDialogTitle>
+                                  <AlertDialogDescription>
+                                    This will permanently delete this document and its metadata. This action cannot be undone.
+                                  </AlertDialogDescription>
+                                </AlertDialogHeader>
+                                <AlertDialogFooter>
+                                  <AlertDialogCancel>Cancel</AlertDialogCancel>
+                                  <AlertDialogAction asChild>
+                                    <Button
+                                      variant="destructive"
+                                      disabled={deleteMutation.isPending}
+                                      onClick={() => deleteMutation.mutate(doc.id)}
+                                    >
+                                      Delete
+                                    </Button>
+                                  </AlertDialogAction>
+                                </AlertDialogFooter>
+                              </AlertDialogContent>
+                            </AlertDialog>
                           </div>
                         </td>
                       </tr>
