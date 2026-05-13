@@ -631,11 +631,16 @@ export default function CaseDetail() {
     caseMeta.project && typeof caseMeta.project === "object"
       ? (caseMeta.project as Record<string, unknown>)
       : {};
-  const isEncumbered =
+  const isEncumbered = !!(
+    (caseInfo as any)?.project?.isEncumbered ||
+    (caseInfo as any)?.project?.is_encumbered ||
+    (caseInfo as any)?.isEncumbered ||
+    (caseInfo as any)?.is_encumbered ||
     caseMeta.isEncumbered === true ||
     caseMeta.is_encumbered === true ||
     projectMeta.isEncumbered === true ||
-    projectMeta.is_encumbered === true;
+    projectMeta.is_encumbered === true
+  );
   const tenureRaw =
     typeof caseMeta.tenure === "string"
       ? caseMeta.tenure.trim().toLowerCase()

@@ -2,6 +2,7 @@ import express, { type Response, type Router as ExpressRouter } from "express";
 import { db, sql } from "@workspace/db";
 import { requireAuth, requireFirmUser, requirePermission, type AuthRequest } from "../lib/auth.js";
 import { logger } from "../lib/logger.js";
+import { isTransientDbConnectionError } from "../lib/auth-safe-db.js";
 import { computeDashboardStats } from "../services/dashboard-stats.js";
 
 type DbConn = typeof db | NonNullable<AuthRequest["rlsDb"]>;
@@ -65,6 +66,10 @@ router.get("/dashboard", requireAuth, requireFirmUser, requirePermission("dashbo
     res.json(payload);
   } catch (err) {
     logger.error({ err, path: req.path, firmId: req.firmId, userId: req.userId }, "[dashboard]");
+    if (isTransientDbConnectionError(err)) {
+      res.status(503).json({ error: "Dashboard temporarily unavailable" });
+      return;
+    }
     res.status(500).json({ error: "Internal Server Error" });
   }
 });

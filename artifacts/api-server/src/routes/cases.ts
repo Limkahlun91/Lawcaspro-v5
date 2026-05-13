@@ -1850,7 +1850,13 @@ router.get("/cases/export.csv", requireAuthHandler, requireFirmUserHandler, requ
     )`);
   }
   if (spaStatus) {
-    conditions.push(sql`${spaStatusSql()} = ${spaStatus}`);
+    if (spaStatus === "NOA Served") {
+      conditions.push(milestonePresenceWhereSql("noa_served_on", "filled"));
+    } else if (spaStatus === "Completed") {
+      conditions.push(milestonePresenceWhereSql("completion_date", "filled"));
+    } else {
+      conditions.push(sql`${spaStatusSql()} = ${spaStatus}`);
+    }
   }
   if (loanStatus) {
     conditions.push(sql`${loanStatusSql()} = ${loanStatus}`);
@@ -2112,7 +2118,13 @@ router.get("/cases", requireAuthHandler, requireFirmUserHandler, requirePermissi
     )`);
   }
   if (spaStatus) {
-    conditions.push(sql`${spaStatusExpr} = ${spaStatus}`);
+    if (spaStatus === "NOA Served" && hasKeyDates) {
+      conditions.push(milestonePresenceWhereSql("noa_served_on", "filled"));
+    } else if (spaStatus === "Completed" && hasKeyDates) {
+      conditions.push(milestonePresenceWhereSql("completion_date", "filled"));
+    } else {
+      conditions.push(sql`${spaStatusExpr} = ${spaStatus}`);
+    }
   }
   if (loanStatus) {
     conditions.push(sql`${loanStatusExpr} = ${loanStatus}`);

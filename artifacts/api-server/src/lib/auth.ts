@@ -1,5 +1,5 @@
 import { Request, Response, NextFunction } from "express";
-import { clearTenantContext, db, makeRlsDb, permissionsTable, pool, RlsDb, rolesTable, sessionsTable, setTenantContext, sql, usersTable, auditLogsTable, platformFounderRolePermissionsTable, platformFounderRolesTable, platformFounderUserRolesTable } from "@workspace/db";
+import { clearTenantContext, db, makeRlsDb, permissionsTable, pool, RlsDb, rolesTable, sessionsTable, setTenantContext, sql, usersTable, auditLogsTable, platformFounderRolePermissionsTable, platformFounderRolesTable, platformFounderUserRolesTable, type PoolClient } from "@workspace/db";
 import { and, eq } from "drizzle-orm";
 import crypto from "crypto";
 import { logger } from "./logger";
@@ -390,7 +390,33 @@ export async function requireFirmUser(
   }
 
   let released = false;
-  const client = await pool.connect();
+  let client: PoolClient | null = null;
+  try {
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      try {
+        client = await pool.connect();
+        break;
+      } catch (err) {
+        const transient = isTransientDbConnectionError(err);
+        if (!transient || attempt >= 2) throw err;
+        await new Promise<void>((r) => setTimeout(r, 50 * attempt));
+      }
+    }
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    const sqlState = (() => {
+      if (!err || typeof err !== "object") return undefined;
+      const c = (err as { code?: unknown }).code;
+      return typeof c === "string" ? c : undefined;
+    })();
+    logger.error({ err, message, sqlState: sqlState ?? null, userId: req.userId ?? null, firmId: req.firmId ?? null }, "auth.firm_user.connect_failed");
+    res.status(503).json({ error: "Tenant context temporarily unavailable", code: "DB_CONNECT" });
+    return;
+  }
+  if (!client) {
+    res.status(503).json({ error: "Tenant context temporarily unavailable", code: "DB_CONNECT" });
+    return;
+  }
 
   const releaseClient = async (ok: boolean) => {
     if (released) return;
