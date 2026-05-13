@@ -17,16 +17,29 @@ import { cn } from "@/lib/utils";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Progress } from "@/components/ui/progress";
 import { isFirmDocumentTypeLetterLike, isMasterDocumentLetterLike } from "@/lib/documents/letterLike";
-import { DOCUMENT_TYPE_LABELS } from "@workspace/documents-registry";
+import { DOCUMENT_TYPE_LABELS, normalizeDocumentType } from "@workspace/documents-registry";
 import { QueryFallback } from "@/components/query-fallback";
 import { apiFetchBlob, apiFetchJson, apiRequest } from "@/lib/api-client";
 import { downloadBlob } from "@/lib/download";
 import { toastError } from "@/lib/toast-error";
 import { useAuth } from "@/lib/auth-context";
 import { hasPermission } from "@/lib/permissions";
+import { getGetCaseWorkflowQueryKey, getListCasesQueryKey } from "@workspace/api-client-react";
 
 function docTypeLabel(dt: string): string {
   return (DOCUMENT_TYPE_LABELS as Record<string, string>)[dt] ?? dt;
+}
+
+function pad2(n: number): string {
+  return n < 10 ? `0${n}` : String(n);
+}
+
+function todayYmdLocal(): string {
+  const d = new Date();
+  const yyyy = d.getFullYear();
+  const mm = pad2(d.getMonth() + 1);
+  const dd = pad2(d.getDate());
+  return `${yyyy}-${mm}-${dd}`;
 }
 
 interface CaseDocument {
@@ -559,6 +572,30 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
           ),
         });
       }
+
+      const docType = normalizeDocumentType(item.documentType);
+      const autoKeyDate =
+        docType === "acting_letter"
+          ? { key: "acting_letter_issued_date", statusLabel: "Acting Letter Issued" }
+          : (docType === "letter_advice_spa_sol_lu"
+            ? { key: "advice_to_bank_date", statusLabel: "Advised" }
+            : null);
+
+      if (autoKeyDate) {
+        const payload = { [autoKeyDate.key]: todayYmdLocal() };
+        void apiFetchJson(`/cases/${caseId}/key-dates`, { method: "PATCH", body: JSON.stringify(payload) })
+          .then(async () => {
+            await qc.invalidateQueries({ queryKey: getListCasesQueryKey() });
+            await qc.invalidateQueries({ queryKey: ["case-key-dates", caseId] });
+            await qc.invalidateQueries({ queryKey: ["case-progress", caseId] });
+            await qc.invalidateQueries({ queryKey: getGetCaseWorkflowQueryKey(caseId) });
+            toast({ title: "Loan Status automatically updated", description: `Loan Status automatically updated to ${autoKeyDate.statusLabel}` });
+          })
+          .catch((err) => {
+            toastError(toast, err, "Auto status update failed");
+          });
+      }
+
       setViewTab("list");
       closeGenerateDialog();
       closeVariableChecklist();

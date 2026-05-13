@@ -383,6 +383,7 @@ function shouldBackfillKeyDate(field: KeyDateField, kd: typeof caseKeyDatesTable
     case "loan_docs_pending_date": return !kd.loanDocsPendingDate;
     case "loan_docs_signed_date": return !kd.loanDocsSignedDate;
     case "acting_letter_issued_date": return !kd.actingLetterIssuedDate;
+    case "advice_to_bank_date": return !kd.adviceToBankDate;
     case "loan_sent_bank_execution_date": return !kd.loanSentBankExecutionDate;
     case "loan_bank_executed_date": return !kd.loanBankExecutedDate;
     case "bank_lu_received_date": return !kd.bankLuReceivedDate;
@@ -401,6 +402,7 @@ function keyDatePatchFromWorkflow(field: KeyDateField, ymd: string): Partial<Cas
     case "loan_docs_pending_date": return { loanDocsPendingDate: ymd };
     case "loan_docs_signed_date": return { loanDocsSignedDate: ymd };
     case "acting_letter_issued_date": return { actingLetterIssuedDate: ymd };
+    case "advice_to_bank_date": return { adviceToBankDate: ymd };
     case "loan_sent_bank_execution_date": return { loanSentBankExecutionDate: ymd };
     case "loan_bank_executed_date": return { loanBankExecutedDate: ymd };
     case "bank_lu_received_date": return { bankLuReceivedDate: ymd };
@@ -1147,6 +1149,209 @@ router.post("/cases/bulk/assign", requireAuthHandler, requireFirmUserHandler, re
     action: "cases.bulk.assign.summary",
     entityType: "case_assignment",
     detail: `role=${roleInCase} userId=${targetUserId} requested=${normalizedCaseIds.length} succeeded=${succeeded} failed=${failures.length}`,
+    ipAddress: req.ip,
+    userAgent: req.headers["user-agent"],
+  });
+
+  res.json({ requested: normalizedCaseIds.length, succeeded, failed: failures.length, failures });
+}));
+
+router.post("/cases/bulk/status", requireAuthHandler, requireFirmUserHandler, requirePermission("cases", "update") as RequestHandler, authed(async (req, res) => {
+  const r = req.rlsDb;
+  if (!r) {
+    res.status(500).json({ error: "Internal Server Error" });
+    return;
+  }
+
+  const body = asObject(req.body);
+  const rawCaseIds = Array.isArray(body?.caseIds) ? body!.caseIds : [];
+  const moduleRaw = (asString(body?.module) ?? "").trim().toLowerCase();
+  const statusName = (asString(body?.status) ?? "").trim();
+  const dateInput = Object.prototype.hasOwnProperty.call(body ?? {}, "date") ? (body as any).date : undefined;
+
+  const normalizedCaseIds = rawCaseIds
+    .map((x: unknown) => Number(x))
+    .filter((x: number) => Number.isInteger(x) && x > 0);
+
+  if (normalizedCaseIds.length === 0) {
+    res.status(400).json({ error: "caseIds is required" });
+    return;
+  }
+
+  if (moduleRaw !== "spa" && moduleRaw !== "loan") {
+    res.status(400).json({ error: "module must be spa or loan" });
+    return;
+  }
+
+  if (!statusName) {
+    res.status(400).json({ error: "status is required" });
+    return;
+  }
+
+  const ymdParsed = parseDateOnlyInput(dateInput === undefined ? new Date() : dateInput);
+  if (ymdParsed === undefined || ymdParsed === null) {
+    res.status(400).json({ error: "Invalid date" });
+    return;
+  }
+  const ymd = ymdParsed;
+
+  const now = new Date();
+  const cases = await r
+    .select({ id: casesTable.id, purchaseMode: casesTable.purchaseMode, titleType: casesTable.titleType })
+    .from(casesTable)
+    .where(and(eq(casesTable.firmId, req.firmId!), inArray(casesTable.id, normalizedCaseIds)));
+
+  const existingIds = new Set(cases.map((c) => c.id));
+  const missingIds = normalizedCaseIds.filter((id: number) => !existingIds.has(id));
+
+  const failures: Array<{ caseId: number; error: string }> = missingIds.map((id) => ({ caseId: id, error: "Case not found" }));
+  let succeeded = 0;
+
+  const pathType = moduleRaw === "spa" ? "common" : "loan";
+  const statusNameLower = statusName.toLowerCase();
+
+  for (const { id: caseId, purchaseMode: purchaseModeRaw, titleType: titleTypeRaw } of cases) {
+    try {
+      const purchaseMode = String(purchaseModeRaw || "").trim().toLowerCase();
+      if (moduleRaw === "loan" && purchaseMode !== "loan") {
+        failures.push({ caseId, error: "Not a loan case" });
+        continue;
+      }
+
+      const titleTypeNorm = (normalizeTitleType(titleTypeRaw) ?? String(titleTypeRaw || "").trim().toLowerCase()) || "master";
+      const defs = buildWorkflowSteps(purchaseMode, titleTypeNorm);
+      const def = defs.find((d) => d.pathType === pathType && String(d.stepName || "").trim().toLowerCase() === statusNameLower);
+      if (!def) {
+        failures.push({ caseId, error: `Unsupported status for ${moduleRaw}` });
+        continue;
+      }
+
+      await ensureCaseWorkflowSteps(r, req.firmId!, caseId);
+
+      const requirement = WORKFLOW_AUTOMATION_RULE_BY_STEP_KEY[def.stepKey];
+      if (requirement) {
+        const keyDateFieldRaw = requirement.keyDateField;
+        if (!Object.prototype.hasOwnProperty.call(KEY_DATE_FIELD_TO_STEP_KEY, keyDateFieldRaw)) {
+          failures.push({ caseId, error: "Invalid automated step mapping" });
+          continue;
+        }
+        const keyDateField = keyDateFieldRaw as KeyDateField;
+
+        if (requirement.kind === "dateAndWorkflowDoc") {
+          const docKey = requirement.docKey as WorkflowDocumentMilestoneKey;
+          const [doc] = await r
+            .select({ id: caseWorkflowDocumentsTable.id })
+            .from(caseWorkflowDocumentsTable)
+            .where(and(
+              eq(caseWorkflowDocumentsTable.firmId, req.firmId!),
+              eq(caseWorkflowDocumentsTable.caseId, caseId),
+              eq(caseWorkflowDocumentsTable.milestoneKey, docKey),
+              sql`${caseWorkflowDocumentsTable.deletedAt} IS NULL`,
+              sql`${caseWorkflowDocumentsTable.objectPath} <> ''`,
+              sql`${caseWorkflowDocumentsTable.fileName} <> ''`,
+            ))
+            .limit(1);
+          if (!doc) {
+            failures.push({ caseId, error: "Missing required attachment for this status" });
+            continue;
+          }
+        }
+
+        const patch = keyDatePatchFromWorkflow(keyDateField, ymd);
+        const [existingKd] = await r
+          .select({ id: caseKeyDatesTable.id })
+          .from(caseKeyDatesTable)
+          .where(and(eq(caseKeyDatesTable.caseId, caseId), eq(caseKeyDatesTable.firmId, req.firmId!)));
+        if (existingKd) {
+          await r
+            .update(caseKeyDatesTable)
+            .set({ ...patch, updatedAt: now })
+            .where(and(eq(caseKeyDatesTable.caseId, caseId), eq(caseKeyDatesTable.firmId, req.firmId!)));
+        } else {
+          await r
+            .insert(caseKeyDatesTable)
+            .values({ firmId: req.firmId!, caseId, ...patch });
+        }
+
+        await r.insert(auditLogsTable).values({
+          firmId: req.firmId,
+          actorId: req.userId,
+          actorType: "firm_user",
+          action: "case.key_dates.updated",
+          entityType: "case",
+          entityId: caseId,
+          detail: JSON.stringify([keyDateField]),
+        });
+
+        await syncWorkflowStepsFromCaseState(r, caseId, {
+          firmId: req.firmId!,
+          actorId: req.userId,
+          actorType: req.userType ?? "firm_user",
+          ipAddress: req.ip,
+          userAgent: req.headers["user-agent"],
+        });
+      } else {
+        const [step] = await r
+          .select({ id: caseWorkflowStepsTable.id, stepName: caseWorkflowStepsTable.stepName })
+          .from(caseWorkflowStepsTable)
+          .where(and(eq(caseWorkflowStepsTable.caseId, caseId), eq(caseWorkflowStepsTable.stepKey, def.stepKey)))
+          .limit(1);
+        if (!step) {
+          failures.push({ caseId, error: "Workflow step not found" });
+          continue;
+        }
+
+        const [updated] = await r
+          .update(caseWorkflowStepsTable)
+          .set({
+            status: "completed",
+            completedBy: req.userId ?? null,
+            completedAt: now,
+            updatedAt: now,
+          })
+          .where(and(eq(caseWorkflowStepsTable.id, step.id), eq(caseWorkflowStepsTable.caseId, caseId)))
+          .returning();
+        if (!updated) {
+          failures.push({ caseId, error: "Workflow step not found" });
+          continue;
+        }
+
+        await r.insert(auditLogsTable).values({
+          firmId: req.firmId,
+          actorId: req.userId,
+          actorType: "firm_user",
+          action: "workflow.step_updated",
+          entityType: "case_workflow_step",
+          entityId: updated.id,
+          detail: `Step ${String(step.stepName)} -> completed`,
+        });
+      }
+
+      await writeAuditLog({
+        firmId: req.firmId,
+        actorId: req.userId,
+        actorType: req.userType,
+        action: "cases.bulk.status",
+        entityType: "case",
+        entityId: caseId,
+        detail: `module=${moduleRaw} status=${statusName} date=${ymd}`,
+        ipAddress: req.ip,
+        userAgent: req.headers["user-agent"],
+      });
+
+      succeeded += 1;
+    } catch (err) {
+      failures.push({ caseId, error: err instanceof Error ? err.message : String(err) });
+    }
+  }
+
+  await writeAuditLog({
+    firmId: req.firmId,
+    actorId: req.userId,
+    actorType: req.userType,
+    action: "cases.bulk.status.summary",
+    entityType: "case_workflow_step",
+    detail: `module=${moduleRaw} status=${statusName} requested=${normalizedCaseIds.length} succeeded=${succeeded} failed=${failures.length} date=${ymd}`,
     ipAddress: req.ip,
     userAgent: req.headers["user-agent"],
   });

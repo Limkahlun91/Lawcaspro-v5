@@ -236,6 +236,7 @@ export default function CasesList() {
   const total = response?.total ?? 0;
   const pageCount = Math.max(1, Math.ceil(total / limit));
   const safePage = Math.min(page, pageCount);
+  const caseById = useMemo(() => new Map(cases.map((c) => [c.id, c])), [cases]);
 
   useEffect(() => {
     if (safePage !== page) setPage(safePage);
@@ -294,11 +295,17 @@ export default function CasesList() {
   const [selectedCaseIds, setSelectedCaseIds] = useState<Set<number>>(new Set());
   const [bulkLawyerId, setBulkLawyerId] = useState<string>("all");
   const [bulkClerkId, setBulkClerkId] = useState<string>("all");
+  const [isBatchStatusOpen, setIsBatchStatusOpen] = useState(false);
+  const [batchStatusModule, setBatchStatusModule] = useState<"spa" | "loan">("loan");
+  const [batchStatusValue, setBatchStatusValue] = useState<string>("");
 
   useEffect(() => {
     setSelectedCaseIds(new Set());
     setBulkLawyerId("all");
     setBulkClerkId("all");
+    setIsBatchStatusOpen(false);
+    setBatchStatusModule("loan");
+    setBatchStatusValue("");
   }, [sp.toString()]);
 
   const currentPageIds = (response?.data ?? []).map((c) => c.id);
@@ -339,6 +346,21 @@ export default function CasesList() {
       toast({ title: "Bulk update completed", description: `${data.succeeded} succeeded, ${data.failed} failed` });
     },
     onError: (err) => toastError(toast, err, "Bulk update failed"),
+  });
+
+  const bulkStatusMutation = useMutation({
+    mutationFn: async (vars: { module: "spa" | "loan"; status: string; caseIds: number[] }) => {
+      const res = await apiFetchJson("/cases/bulk/status", { method: "POST", body: JSON.stringify(vars) });
+      return res as { requested: number; succeeded: number; failed: number; failures: Array<{ caseId: number; error: string }> };
+    },
+    onSuccess: (data) => {
+      queryClient.invalidateQueries({ queryKey: getListCasesQueryKey() });
+      setSelectedCaseIds(new Set());
+      setIsBatchStatusOpen(false);
+      setBatchStatusValue("");
+      toast({ title: "Batch update completed", description: `${data.succeeded} succeeded, ${data.failed} failed` });
+    },
+    onError: (err) => toastError(toast, err, "Batch update failed"),
   });
 
   const downloadCsv = async () => {
@@ -400,7 +422,7 @@ export default function CasesList() {
   });
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-6 pb-24">
       <div className="flex justify-between items-center">
         <div>
           <h1 className="text-3xl font-bold text-slate-900 tracking-tight">Cases</h1>
@@ -797,63 +819,143 @@ export default function CasesList() {
       </Card>
 
       {selectedCaseIds.size > 0 && (
-        <Card>
-          <CardContent className="py-4 flex flex-col md:flex-row md:items-center md:justify-between gap-3">
-            <div className="text-sm text-slate-700">
-              {selectedCaseIds.size} case(s) selected
-            </div>
-            <div className="flex flex-col md:flex-row gap-2 md:items-center">
-              <Select value={bulkLawyerId} onValueChange={setBulkLawyerId}>
-                <SelectTrigger className="w-[220px]">
-                  <SelectValue placeholder="Assign Lawyer" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="all">Select lawyer…</SelectItem>
-                  {lawyerCandidates.map((u) => (
-                    <SelectItem key={u.id} value={String(u.id)}>{u.name}</SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-              <Button
-                variant="outline"
-                disabled={bulkLawyerId === "all" || bulkAssignMutation.isPending}
-                onClick={() => {
-                  const ids = Array.from(selectedCaseIds);
-                  bulkAssignMutation.mutate({ roleInCase: "lawyer", userId: Number(bulkLawyerId), caseIds: ids });
-                }}
-              >
-                Apply
-              </Button>
+        <div className="fixed inset-x-0 bottom-0 z-40">
+          <div className="mx-auto w-full max-w-6xl px-4 pb-4">
+            <Card className="shadow-lg border-slate-200">
+              <CardContent className="py-4 flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3">
+                <div className="text-sm text-slate-700">
+                  {selectedCaseIds.size} case(s) selected
+                </div>
+                <div className="flex flex-col lg:flex-row gap-2 lg:items-center">
+                  <Button
+                    disabled={bulkAssignMutation.isPending || bulkStatusMutation.isPending}
+                    onClick={() => {
+                      setBatchStatusValue("");
+                      setIsBatchStatusOpen(true);
+                    }}
+                  >
+                    Batch Update Status
+                  </Button>
 
-              <Select value={bulkClerkId} onValueChange={setBulkClerkId}>
-                <SelectTrigger className="w-[220px]">
-                  <SelectValue placeholder="Assign Clerk" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="all">Select clerk…</SelectItem>
-                  {clerkCandidates.map((u) => (
-                    <SelectItem key={u.id} value={String(u.id)}>{u.name}</SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-              <Button
-                variant="outline"
-                disabled={bulkClerkId === "all" || bulkAssignMutation.isPending}
-                onClick={() => {
-                  const ids = Array.from(selectedCaseIds);
-                  bulkAssignMutation.mutate({ roleInCase: "clerk", userId: Number(bulkClerkId), caseIds: ids });
-                }}
-              >
-                Apply
-              </Button>
+                  <Select value={bulkLawyerId} onValueChange={setBulkLawyerId}>
+                    <SelectTrigger className="w-[220px]">
+                      <SelectValue placeholder="Assign Lawyer" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="all">Select lawyer…</SelectItem>
+                      {lawyerCandidates.map((u) => (
+                        <SelectItem key={u.id} value={String(u.id)}>{u.name}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  <Button
+                    variant="outline"
+                    disabled={bulkLawyerId === "all" || bulkAssignMutation.isPending}
+                    onClick={() => {
+                      const ids = Array.from(selectedCaseIds);
+                      bulkAssignMutation.mutate({ roleInCase: "lawyer", userId: Number(bulkLawyerId), caseIds: ids });
+                    }}
+                  >
+                    Apply
+                  </Button>
 
-              <Button variant="ghost" onClick={() => setSelectedCaseIds(new Set())}>
-                Clear selection
-              </Button>
-            </div>
-          </CardContent>
-        </Card>
+                  <Select value={bulkClerkId} onValueChange={setBulkClerkId}>
+                    <SelectTrigger className="w-[220px]">
+                      <SelectValue placeholder="Assign Clerk" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="all">Select clerk…</SelectItem>
+                      {clerkCandidates.map((u) => (
+                        <SelectItem key={u.id} value={String(u.id)}>{u.name}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  <Button
+                    variant="outline"
+                    disabled={bulkClerkId === "all" || bulkAssignMutation.isPending}
+                    onClick={() => {
+                      const ids = Array.from(selectedCaseIds);
+                      bulkAssignMutation.mutate({ roleInCase: "clerk", userId: Number(bulkClerkId), caseIds: ids });
+                    }}
+                  >
+                    Apply
+                  </Button>
+
+                  <Button variant="ghost" onClick={() => setSelectedCaseIds(new Set())}>
+                    Clear selection
+                  </Button>
+                </div>
+              </CardContent>
+            </Card>
+          </div>
+        </div>
       )}
+
+      <Dialog open={isBatchStatusOpen} onOpenChange={setIsBatchStatusOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Batch Update Status</DialogTitle>
+            <DialogDescription>Update workflow status for multiple cases at once.</DialogDescription>
+          </DialogHeader>
+
+          <div className="space-y-4">
+            <div className="space-y-1">
+              <div className="text-sm font-medium">Module</div>
+              <Select
+                value={batchStatusModule}
+                onValueChange={(v: "spa" | "loan") => {
+                  setBatchStatusModule(v);
+                  setBatchStatusValue("");
+                }}
+              >
+                <SelectTrigger>
+                  <SelectValue placeholder="Select module" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="spa">SPA Status</SelectItem>
+                  <SelectItem value="loan">Loan Status</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+
+            <div className="space-y-1">
+              <div className="text-sm font-medium">New Status</div>
+              <Select value={batchStatusValue} onValueChange={setBatchStatusValue}>
+                <SelectTrigger>
+                  <SelectValue placeholder="Select status" />
+                </SelectTrigger>
+                <SelectContent>
+                  {(batchStatusModule === "spa" ? spaStatuses : loanStatuses)
+                    .filter((s) => s !== "Pending")
+                    .map((s) => (
+                      <SelectItem key={s} value={s}>{s}</SelectItem>
+                    ))}
+                </SelectContent>
+              </Select>
+            </div>
+          </div>
+
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setIsBatchStatusOpen(false)}>Cancel</Button>
+            <Button
+              disabled={!batchStatusValue || bulkStatusMutation.isPending}
+              onClick={() => {
+                const ids = Array.from(selectedCaseIds);
+                const filtered = batchStatusModule === "loan"
+                  ? ids.filter((id) => String((caseById.get(id) as any)?.purchaseMode ?? "").trim().toLowerCase() === "loan")
+                  : ids;
+                if (filtered.length === 0) {
+                  toast({ title: "No eligible cases selected", description: "Select at least one matching case for this module.", variant: "destructive" });
+                  return;
+                }
+                bulkStatusMutation.mutate({ module: batchStatusModule, status: batchStatusValue, caseIds: filtered });
+              }}
+            >
+              Update
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <Dialog open={isSaveViewOpen} onOpenChange={setIsSaveViewOpen}>
         <DialogContent>

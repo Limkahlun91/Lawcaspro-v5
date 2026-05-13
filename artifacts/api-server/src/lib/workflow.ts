@@ -19,11 +19,12 @@ function getLoanSteps(): WorkflowStepDef[] {
     { stepKey: "loan_docs_signed", stepName: "Loan Docs Signed", stepOrder: 5, pathType: "loan" },
     { stepKey: "acting_letter_pending", stepName: "Acting Letter Pending", stepOrder: 6, pathType: "loan" },
     { stepKey: "acting_letter_issued", stepName: "Acting Letter Issued", stepOrder: 7, pathType: "loan" },
-    { stepKey: "loan_pending_bank_exec", stepName: "Loan Doc. Pending Bank Execution", stepOrder: 8, pathType: "loan" },
-    { stepKey: "loan_sent_bank_exec", stepName: "Loan Doc. Sent for Bank Execution", stepOrder: 9, pathType: "loan" },
-    { stepKey: "loan_bank_executed", stepName: "Loan Doc. Bank Executed", stepOrder: 10, pathType: "loan" },
-    { stepKey: "blu_received", stepName: "Bank Letter of Undertaking Received", stepOrder: 11, pathType: "loan" },
-    { stepKey: "blu_confirmed", stepName: "Bank's Letter of Undertaking", stepOrder: 12, pathType: "loan" },
+    { stepKey: "advised", stepName: "Advised", stepOrder: 8, pathType: "loan" },
+    { stepKey: "loan_pending_bank_exec", stepName: "Loan Doc. Pending Bank Execution", stepOrder: 9, pathType: "loan" },
+    { stepKey: "loan_sent_bank_exec", stepName: "Loan Doc. Sent for Bank Execution", stepOrder: 10, pathType: "loan" },
+    { stepKey: "loan_bank_executed", stepName: "Loan Doc. Bank Executed", stepOrder: 11, pathType: "loan" },
+    { stepKey: "blu_received", stepName: "Bank Letter of Undertaking Received", stepOrder: 12, pathType: "loan" },
+    { stepKey: "blu_confirmed", stepName: "Bank's Letter of Undertaking", stepOrder: 13, pathType: "loan" },
   ];
 }
 

@@ -151,6 +151,26 @@ export default function CaseDetail() {
     },
     onError: (err) => toastError(toast, err, "Save failed"),
   });
+
+  const pad2 = (n: number): string => (n < 10 ? `0${n}` : String(n));
+  const todayYmdLocal = (): string => {
+    const d = new Date();
+    return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+  };
+
+  const autoKeyDatesMutation = useMutation({
+    mutationFn: (vars: { payload: Record<string, unknown>; statusLabel: string }) =>
+      apiFetchJson(`/cases/${caseId}/key-dates`, { method: "PATCH", body: JSON.stringify(vars.payload) }),
+    onSuccess: async (_data, vars) => {
+      queryClient.invalidateQueries({ queryKey: getListCasesQueryKey() });
+      queryClient.invalidateQueries({ queryKey: getGetCaseQueryKey(caseId) });
+      queryClient.invalidateQueries({ queryKey: ["case-key-dates", caseId] });
+      queryClient.invalidateQueries({ queryKey: ["case-progress", caseId] });
+      queryClient.invalidateQueries({ queryKey: getGetCaseWorkflowQueryKey(caseId) });
+      toast({ title: "Loan Status automatically updated", description: `Loan Status automatically updated to ${vars.statusLabel}` });
+    },
+    onError: (err) => toastError(toast, err, "Auto status update failed"),
+  });
   const printMutation = useMutation({
     mutationFn: async (payload: { printKey: string }) => {
       const res = await apiRequest(`/cases/${caseId}/documents/print`, {
@@ -166,13 +186,19 @@ export default function CaseDetail() {
       const docId = Number(res.headers.get("x-case-document-id") ?? NaN);
       return { blob, fileName, docId };
     },
-    onSuccess: async ({ blob, fileName, docId }) => {
+    onSuccess: async ({ blob, fileName, docId }, vars) => {
       queryClient.invalidateQueries({ queryKey: ["case-documents", caseId] });
       if (Number.isFinite(docId)) {
         queryClient.invalidateQueries({ queryKey: ["case-documents", caseId] });
       }
       downloadBlob(blob, fileName);
       toast({ title: "Download started" });
+
+      if (vars?.printKey === "acting_letter") {
+        autoKeyDatesMutation.mutate({ payload: { acting_letter_issued_date: todayYmdLocal() }, statusLabel: "Acting Letter Issued" });
+      } else if (vars?.printKey === "letter_advice_spa_sol_lu") {
+        autoKeyDatesMutation.mutate({ payload: { advice_to_bank_date: todayYmdLocal() }, statusLabel: "Advised" });
+      }
     },
     onError: (err) => toastError(toast, err, "Print failed"),
   });

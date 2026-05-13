@@ -21,6 +21,7 @@ export const WORKFLOW_STEP_AUTOMATION_RULES: WorkflowStepAutomationRule[] = [
   { stepKey: "lof_stamped", requirement: { kind: "dateAndWorkflowDoc", keyDateField: "letter_of_offer_stamped_date", docKey: "lo_stamped" } },
   { stepKey: "loan_docs_signed", requirement: { kind: "keyDate", keyDateField: "loan_docs_signed_date" } },
   { stepKey: "acting_letter_issued", requirement: { kind: "keyDate", keyDateField: "acting_letter_issued_date" } },
+  { stepKey: "advised", requirement: { kind: "keyDate", keyDateField: "advice_to_bank_date" } },
   { stepKey: "loan_sent_bank_exec", requirement: { kind: "keyDate", keyDateField: "loan_sent_bank_execution_date" } },
   { stepKey: "loan_bank_executed", requirement: { kind: "keyDate", keyDateField: "loan_bank_executed_date" } },
   { stepKey: "blu_received", requirement: { kind: "keyDate", keyDateField: "bank_lu_received_date" } },
@@ -60,4 +61,3 @@ export function requiredKeyDateFieldForStep(stepKey: string): string | null {
   if (!rule) return null;
   return rule.keyDateField;
 }
-

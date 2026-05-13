@@ -8,6 +8,7 @@ export const KEY_DATE_WORKFLOW_MAPPINGS = [
   { keyDateField: "loan_sent_bank_execution_date", stepKey: "loan_sent_bank_exec" },
   { keyDateField: "loan_bank_executed_date", stepKey: "loan_bank_executed" },
   { keyDateField: "bank_lu_received_date", stepKey: "blu_received" },
+  { keyDateField: "advice_to_bank_date", stepKey: "advised" },
   { keyDateField: "noa_served_on", stepKey: "noa_served" },
   { keyDateField: "register_poa_on", stepKey: "pa_registered" },
   { keyDateField: "letter_disclaimer_dated", stepKey: "letter_disclaimer" },
