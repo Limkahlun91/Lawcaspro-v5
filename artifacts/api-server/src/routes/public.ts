@@ -1,7 +1,8 @@
 import express, { type RequestHandler, type Router as ExpressRouter } from "express";
-import { and, desc, eq } from "drizzle-orm";
+import { and, asc, desc, eq, inArray } from "drizzle-orm";
 import { z } from "zod/v4";
 import {
+  caseMessagesTable,
   casesTable,
   caseKeyDatesTable,
   casePurchasersTable,
@@ -10,9 +11,11 @@ import {
   db,
   firmsTable,
   projectsTable,
+  usersTable,
 } from "@workspace/db";
 import { buildWorkflowSteps } from "../lib/workflow.js";
 import { WORKFLOW_STEP_KEY_TO_KEY_DATE_FIELD } from "../lib/keyDatesWorkflow.js";
+import { writeAuditLog } from "../lib/auth.js";
 
 const router: ExpressRouter = express.Router();
 
@@ -32,6 +35,26 @@ function maskName(name: string): string {
 }
 
 const TokenParams = z.object({ token: z.string().uuid() });
+const PublicCreateMessageBody = z.object({
+  messageText: z.string().trim().min(1).max(2000),
+  attachments: z.array(z.record(z.string(), z.unknown())).max(10).optional(),
+});
+
+function toIsoString(v: unknown): string {
+  if (v instanceof Date) return v.toISOString();
+  const d = new Date(typeof v === "string" ? v : "");
+  return Number.isNaN(d.getTime()) ? new Date().toISOString() : d.toISOString();
+}
+
+async function findCaseByToken(token: string): Promise<{ id: number; firmId: number } | null> {
+  const [c] = await db
+    .select({ id: casesTable.id, firmId: casesTable.firmId })
+    .from(casesTable)
+    .where(eq(casesTable.trackingToken, token))
+    .limit(1);
+  if (!c) return null;
+  return { id: c.id, firmId: c.firmId };
+}
 
 router.get("/public/track/:token", (async (req, res) => {
   const parsed = TokenParams.safeParse(req.params);
@@ -157,6 +180,104 @@ router.get("/public/track/:token", (async (req, res) => {
     spaStatus,
     loanStatus,
     timeline,
+  });
+}) as RequestHandler);
+
+router.get("/public/track/:token/messages", (async (req, res) => {
+  const parsed = TokenParams.safeParse(req.params);
+  if (!parsed.success) {
+    res.status(400).json({ error: "Invalid token" });
+    return;
+  }
+
+  const c = await findCaseByToken(parsed.data.token);
+  if (!c) {
+    res.status(404).json({ error: "Not found" });
+    return;
+  }
+
+  const rows = await db
+    .select({
+      id: caseMessagesTable.id,
+      senderType: caseMessagesTable.senderType,
+      senderId: caseMessagesTable.senderId,
+      senderName: usersTable.name,
+      messageText: caseMessagesTable.messageText,
+      attachments: caseMessagesTable.attachments,
+      createdAt: caseMessagesTable.createdAt,
+    })
+    .from(caseMessagesTable)
+    .leftJoin(usersTable, eq(caseMessagesTable.senderId, usersTable.id))
+    .where(and(
+      eq(caseMessagesTable.firmId, c.firmId),
+      eq(caseMessagesTable.caseId, c.id),
+      inArray(caseMessagesTable.senderType, ["client", "staff"]),
+    ))
+    .orderBy(asc(caseMessagesTable.createdAt))
+    .limit(200);
+
+  res.set("Cache-Control", "no-store");
+  res.json({
+    data: rows.map((r) => ({
+      id: String(r.id),
+      senderType: String(r.senderType) === "staff" ? "staff" : "client",
+      senderName: String(r.senderType) === "staff" ? (r.senderName ? String(r.senderName) : "Staff") : "Client",
+      messageText: String(r.messageText ?? ""),
+      attachments: r.attachments ?? [],
+      createdAt: toIsoString(r.createdAt),
+    })),
+  });
+}) as RequestHandler);
+
+router.post("/public/track/:token/messages", (async (req, res) => {
+  const parsed = TokenParams.safeParse(req.params);
+  if (!parsed.success) {
+    res.status(400).json({ error: "Invalid token" });
+    return;
+  }
+  const bodyParsed = PublicCreateMessageBody.safeParse(req.body);
+  if (!bodyParsed.success) {
+    res.status(400).json({ error: "Invalid body" });
+    return;
+  }
+
+  const c = await findCaseByToken(parsed.data.token);
+  if (!c) {
+    res.status(404).json({ error: "Not found" });
+    return;
+  }
+
+  const [created] = await db
+    .insert(caseMessagesTable)
+    .values({
+      firmId: c.firmId,
+      caseId: c.id,
+      senderType: "client",
+      senderId: null,
+      messageText: bodyParsed.data.messageText,
+      attachments: bodyParsed.data.attachments ?? [],
+    })
+    .returning({
+      id: caseMessagesTable.id,
+      createdAt: caseMessagesTable.createdAt,
+    });
+
+  await writeAuditLog({
+    firmId: c.firmId,
+    actorId: null,
+    actorType: "client",
+    action: "client_portal.message.create",
+    entityType: "case",
+    entityId: c.id,
+    detail: "client_message",
+    ipAddress: req.ip,
+    userAgent: req.headers["user-agent"],
+  });
+
+  res.set("Cache-Control", "no-store");
+  res.status(201).json({
+    id: String(created?.id ?? ""),
+    createdAt: toIsoString(created?.createdAt),
   });
 }) as RequestHandler);
 

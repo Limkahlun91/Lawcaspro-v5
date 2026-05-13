@@ -11,6 +11,7 @@ export interface AuthRequest extends Request {
   userType?: string;
   firmId?: number | null;
   roleId?: number | null;
+  developerId?: number | null;
   supportSessionId?: number | null;
   founderPermissions?: string[];
   founderRoleLevel?: string | null;
@@ -191,6 +192,7 @@ export async function requireAuth(
   req.userType = user.userType;
   req.firmId = user.firmId;
   req.roleId = user.roleId;
+  req.developerId = (user as any).developerId ?? null;
 
   next();
 }
@@ -208,6 +210,7 @@ export async function lookupSessionAndUserByTokenHash(
             userType: string;
             firmId: number | null;
             roleId: number | null;
+            developerId: number | null;
             status: string;
           }
         | undefined;
@@ -231,10 +234,28 @@ export async function lookupSessionAndUserByTokenHash(
           userType: usersTable.userType,
           firmId: usersTable.firmId,
           roleId: usersTable.roleId,
+          developerId: usersTable.developerId,
           status: usersTable.status,
         })
         .from(usersTable)
-        .where(eq(usersTable.id, s.userId));
+        .where(eq(usersTable.id, s.userId))
+        .catch(async (err) => {
+          const code = err && typeof err === "object" ? (err as { code?: unknown }).code : undefined;
+          if (code !== "42703") throw err;
+          const [u2] = await db
+            .select({
+              id: usersTable.id,
+              email: usersTable.email,
+              name: usersTable.name,
+              userType: usersTable.userType,
+              firmId: usersTable.firmId,
+              roleId: usersTable.roleId,
+              status: usersTable.status,
+            })
+            .from(usersTable)
+            .where(eq(usersTable.id, s.userId));
+          return [u2 ? ({ ...u2, developerId: null }) : undefined] as any;
+        });
       return { session: s, user: u };
     } catch (err) {
       const shouldRetry = isTransientDbConnectionError(err);
@@ -563,7 +584,7 @@ export function requirePermission(moduleName: string, action: string) {
   };
 }
 
-async function ensureBaselinePermissions(rlsDb: RlsDb | typeof db, roleId: number, roleName: "Partner" | "Clerk" | "Senior Clerk"): Promise<void> {
+async function ensureBaselinePermissions(rlsDb: RlsDb | typeof db, roleId: number, roleName: "Partner" | "Clerk" | "Senior Clerk" | "Developer_User"): Promise<void> {
   if (roleName === "Partner") {
     await rlsDb.execute(sql`
       INSERT INTO permissions (role_id, module, action, allowed)
@@ -583,6 +604,24 @@ async function ensureBaselinePermissions(rlsDb: RlsDb | typeof db, roleId: numbe
           ('settings','read'),('settings','update'),
           ('users','read'),('users','create'),('users','update'),('users','delete'),
           ('roles','read'),('roles','create'),('roles','update'),('roles','delete')
+      ) AS v(module, action)
+      WHERE NOT EXISTS (
+        SELECT 1 FROM permissions p
+        WHERE p.role_id = ${roleId} AND p.module = v.module AND p.action = v.action
+      )
+    `);
+    return;
+  }
+
+  if (roleName === "Developer_User") {
+    await rlsDb.execute(sql`
+      INSERT INTO permissions (role_id, module, action, allowed)
+      SELECT ${roleId}, v.module, v.action, TRUE
+      FROM (
+        VALUES
+          ('developer_portal','read'),
+          ('developer_portal','export'),
+          ('developer_portal','message')
       ) AS v(module, action)
       WHERE NOT EXISTS (
         SELECT 1 FROM permissions p
@@ -639,8 +678,8 @@ export async function ensureRolePermissionsInitialized(
   }
 
   let insertedBaseline = false;
-  if (role.name === "Partner" || role.name === "Clerk" || role.name === "Senior Clerk") {
-    await ensureBaselinePermissions(rlsDb, roleId, role.name as "Partner" | "Clerk" | "Senior Clerk");
+  if (role.name === "Partner" || role.name === "Clerk" || role.name === "Senior Clerk" || role.name === "Developer_User") {
+    await ensureBaselinePermissions(rlsDb, roleId, role.name as "Partner" | "Clerk" | "Senior Clerk" | "Developer_User");
     insertedBaseline = true;
   }
 

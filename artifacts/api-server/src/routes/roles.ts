@@ -77,7 +77,7 @@ type TransactionCapable = {
 };
 const asTransactionCapable = (conn: DbConn): TransactionCapable => conn as unknown as TransactionCapable;
 
-const standardRoleNames = ["Partner", "Senior Lawyer", "Lawyer", "Senior Clerk", "Clerk", "Manager", "Admin", "Viewer"] as const;
+const standardRoleNames = ["Partner", "Senior Lawyer", "Lawyer", "Senior Clerk", "Clerk", "Manager", "Admin", "Viewer", "Developer_User"] as const;
 
 async function canBackfillStandardRoles(r: DbConn, req: AuthRequest): Promise<boolean> {
   if (!req.roleId) return false;

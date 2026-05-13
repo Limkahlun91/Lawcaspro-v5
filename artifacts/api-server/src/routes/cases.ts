@@ -7,7 +7,7 @@ import express, {
 import { eq, count, desc, and, or, asc, inArray } from "drizzle-orm";
 import {
   db, casesTable, casePurchasersTable, caseAssignmentsTable,
-  caseWorkflowStepsTable, caseNotesTable,
+  caseWorkflowStepsTable, caseNotesTable, caseMessagesTable,
   caseKeyDatesTable,
   caseWorkflowDocumentsTable,
   caseLoanStampingItemsTable,
@@ -46,6 +46,12 @@ type DbConn = typeof db | NonNullable<AuthRequest["rlsDb"]>;
 const rdb = (req: AuthRequest): DbConn => req.rlsDb ?? db;
 
 type CaseKeyDatesInsert = typeof caseKeyDatesTable.$inferInsert;
+
+const GetCaseMessagesParams = z.object({ caseId: z.coerce.number().int().positive() });
+const CreateCaseMessageBody = z.object({
+  messageText: z.string().trim().min(1).max(2000),
+  attachments: z.array(z.record(z.string(), z.unknown())).max(10).optional(),
+});
 
 async function hasRolePermission(
   r: DbConn,
@@ -4654,6 +4660,121 @@ router.post("/cases/:caseId/notes", requireAuthHandler, requireFirmUserHandler, 
     authorName: author?.name ?? "Unknown",
     content: note.content,
     createdAt: note.createdAt instanceof Date ? note.createdAt.toISOString() : new Date(note.createdAt).toISOString(),
+  });
+}));
+
+router.get("/cases/:caseId/messages", requireAuthHandler, requireFirmUserHandler, requirePermission("cases", "read") as RequestHandler, authed(async (req, res) => {
+  const r = req.rlsDb;
+  if (!r) {
+    logger.error({ path: req.path, firmId: req.firmId, userId: req.userId }, "[cases] missing tenant database context");
+    res.status(500).json({ error: "Internal Server Error" });
+    return;
+  }
+  const params = GetCaseMessagesParams.safeParse(req.params);
+  if (!params.success) {
+    res.status(400).json({ error: params.error.message });
+    return;
+  }
+  const ok = await enforceCaseAccess(r, req, res, params.data.caseId);
+  if (!ok) return;
+
+  const rows = await r
+    .select({
+      id: caseMessagesTable.id,
+      senderType: caseMessagesTable.senderType,
+      senderId: caseMessagesTable.senderId,
+      senderName: usersTable.name,
+      messageText: caseMessagesTable.messageText,
+      attachments: caseMessagesTable.attachments,
+      createdAt: caseMessagesTable.createdAt,
+    })
+    .from(caseMessagesTable)
+    .leftJoin(usersTable, eq(caseMessagesTable.senderId, usersTable.id))
+    .where(and(eq(caseMessagesTable.firmId, req.firmId!), eq(caseMessagesTable.caseId, params.data.caseId)))
+    .orderBy(asc(caseMessagesTable.createdAt))
+    .limit(500);
+
+  res.json({
+    data: rows.map((m) => ({
+      id: String(m.id),
+      senderType: String(m.senderType) === "staff" ? "staff" : (String(m.senderType) === "developer" ? "developer" : "client"),
+      senderId: m.senderId ?? null,
+      senderName: String(m.senderType) === "staff"
+        ? (m.senderName ? String(m.senderName) : "Staff")
+        : (String(m.senderType) === "developer"
+          ? (m.senderName ? String(m.senderName) : "Developer")
+          : "Client"),
+      messageText: String(m.messageText ?? ""),
+      attachments: m.attachments ?? [],
+      createdAt: toIsoStringSafe(m.createdAt),
+    })),
+  });
+}));
+
+router.post("/cases/:caseId/messages", requireAuthHandler, requireFirmUserHandler, requirePermission("cases", "update") as RequestHandler, authed(async (req, res) => {
+  const r = req.rlsDb;
+  if (!r) {
+    logger.error({ path: req.path, firmId: req.firmId, userId: req.userId }, "[cases] missing tenant database context");
+    res.status(500).json({ error: "Internal Server Error" });
+    return;
+  }
+  const params = GetCaseMessagesParams.safeParse(req.params);
+  if (!params.success) {
+    res.status(400).json({ error: params.error.message });
+    return;
+  }
+  const parsed = CreateCaseMessageBody.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: parsed.error.message });
+    return;
+  }
+  const ok = await enforceCaseAccess(r, req, res, params.data.caseId);
+  if (!ok) return;
+
+  const [created] = await r
+    .insert(caseMessagesTable)
+    .values({
+      firmId: req.firmId!,
+      caseId: params.data.caseId,
+      senderType: "staff",
+      senderId: req.userId!,
+      messageText: parsed.data.messageText,
+      attachments: parsed.data.attachments ?? [],
+    })
+    .returning({
+      id: caseMessagesTable.id,
+      senderType: caseMessagesTable.senderType,
+      senderId: caseMessagesTable.senderId,
+      messageText: caseMessagesTable.messageText,
+      attachments: caseMessagesTable.attachments,
+      createdAt: caseMessagesTable.createdAt,
+    });
+
+  const [sender] = await r
+    .select({ name: usersTable.name })
+    .from(usersTable)
+    .where(eq(usersTable.id, req.userId!));
+
+  await writeAuditLog({
+    firmId: req.firmId!,
+    actorId: req.userId!,
+    actorType: req.userType ?? "firm_user",
+    action: "case_messages.staff.create",
+    entityType: "case",
+    entityId: params.data.caseId,
+    detail: "staff_message",
+    ipAddress: req.ip,
+    userAgent: req.headers["user-agent"],
+  }, { db: req.rlsDb });
+
+  res.status(201).json({
+    id: String(created?.id ?? ""),
+    senderType: "staff",
+    senderId: created?.senderId ?? null,
+    senderName: sender?.name ?? "Staff",
+    messageText: String(created?.messageText ?? ""),
+    attachments: created?.attachments ?? [],
+    createdAt: toIsoStringSafe(created?.createdAt),
   });
 }));
 

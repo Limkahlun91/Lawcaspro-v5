@@ -11,9 +11,11 @@ import { AuthGuard } from "@/components/auth-guard";
 import { PermissionGuard } from "@/components/permission-guard";
 import { PlatformLayout } from "@/components/layout/platform-layout";
 import { AppLayout } from "@/components/layout/app-layout";
+import { DeveloperLayout } from "@/components/layout/developer-layout";
 import { GlobalCaseSearch } from "@/components/GlobalCaseSearch";
 import { getApiOrigin } from "@/lib/api-base";
 import { getStoredAuthToken } from "@/lib/auth-token";
+import { DeveloperGuard } from "@/components/developer-guard";
 
 import Login from "@/pages/auth/login";
 import NotFound from "@/pages/not-found";
@@ -76,6 +78,10 @@ import CommunicationThreadDetail from "@/pages/app/communications/thread-detail"
 import QuotationsList from "@/pages/app/quotations";
 import NewQuotation from "@/pages/app/quotations/new";
 import QuotationDetail from "@/pages/app/quotations/detail";
+
+// Developer Pages
+import DeveloperDashboardPage from "@/pages/developer/dashboard";
+import DeveloperInventoryPage from "@/pages/developer/inventory";
 
 const apiOrigin = getApiOrigin();
 if (apiOrigin) setBaseUrl(apiOrigin);
@@ -302,6 +308,23 @@ function AppRoutes() {
   );
 }
 
+function DeveloperRoutes() {
+  return (
+    <AuthGuard requireRole="firm_user">
+      <DeveloperGuard>
+        <DeveloperLayout>
+          <Switch>
+            <Route path="/developer/dashboard" component={DeveloperDashboardPage} />
+            <Route path="/developer/inventory" component={DeveloperInventoryPage} />
+            <Route path="/developer" component={() => <Redirect to="/developer/dashboard" />} />
+            <Route path="/developer/*" component={NotFound} />
+          </Switch>
+        </DeveloperLayout>
+      </DeveloperGuard>
+    </AuthGuard>
+  );
+}
+
 function Router() {
   return (
     <Switch>
@@ -312,6 +335,9 @@ function Router() {
       <Route path="/platform" component={() => <Redirect to="/platform/dashboard" />} />
       <Route path="/platform/*" component={PlatformRoutes} />
       
+      <Route path="/developer" component={() => <Redirect to="/developer/dashboard" />} />
+      <Route path="/developer/*" component={DeveloperRoutes} />
+
       <Route path="/app" component={() => <Redirect to="/app/dashboard" />} />
       <Route path="/app/*" component={AppRoutes} />
       

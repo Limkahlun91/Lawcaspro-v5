@@ -87,6 +87,9 @@ export default function CaseDetail() {
   const { toast } = useToast();
   const { user } = useAuth();
   const canAssignAny = hasPermission(user, "cases", "assign_any");
+  const myUserId = typeof (user as any)?.id === "number" ? (user as any).id : Number((user as any)?.id);
+  const roleName = String((user as any)?.roleName ?? "");
+  const isPartnerOrManager = roleName.toLowerCase().includes("partner") || roleName.toLowerCase().includes("manager");
 
   const {
     data: caseInfo,
@@ -107,6 +110,7 @@ export default function CaseDetail() {
     .find((a: any) => a?.roleInCase === "lawyer")?.userId as number | undefined;
   const currentClerkId = (Array.isArray((caseInfo as any)?.assignments) ? (caseInfo as any).assignments : [])
     .find((a: any) => a?.roleInCase === "clerk")?.userId as number | undefined;
+  const canAccessClientInteraction = !!caseId && (canAssignAny || isPartnerOrManager || (Number.isFinite(myUserId) && (myUserId === currentLawyerId || myUserId === currentClerkId)));
 
   const {
     data: workflow,
@@ -212,6 +216,7 @@ export default function CaseDetail() {
   const [activeStepId, setActiveStepId] = useState<number | null>(null);
   const [stepNote, setStepNote] = useState("");
   const [shareTrackingOpen, setShareTrackingOpen] = useState(false);
+  const [clientReplyDraft, setClientReplyDraft] = useState("");
   const params = new URLSearchParams(searchString);
   const tabFromUrl = params.get("tab") ?? "overview";
   const threadIdFromUrl = params.get("threadId");
@@ -258,6 +263,37 @@ export default function CaseDetail() {
     queryFn: ({ signal }) => apiFetchJson(`/cases/${caseId}/progress`, { signal }),
     enabled: !!caseId,
     retry: false,
+  });
+
+  type CaseMessage = {
+    id: string;
+    senderType: "client" | "staff" | "developer";
+    senderId: number | null;
+    senderName: string;
+    messageText: string;
+    attachments: unknown;
+    createdAt: string;
+  };
+
+  const caseMessagesQuery = useQuery<{ data: CaseMessage[] }>({
+    queryKey: ["case-messages", caseId],
+    queryFn: ({ signal }) => apiFetchJson(`/cases/${caseId}/messages`, { signal }),
+    enabled: !!caseId && canAccessClientInteraction,
+    retry: false,
+  });
+
+  const sendCaseMessageMutation = useMutation({
+    mutationFn: async (messageText: string) => {
+      return await apiFetchJson(`/cases/${caseId}/messages`, {
+        method: "POST",
+        body: JSON.stringify({ messageText }),
+      });
+    },
+    onSuccess: async () => {
+      setClientReplyDraft("");
+      await queryClient.invalidateQueries({ queryKey: ["case-messages", caseId] });
+    },
+    onError: (err) => toastError(toast, err, { fallback: "Failed to send message" }),
   });
 
   const printableQuery = useQuery<any[]>({
@@ -1308,6 +1344,7 @@ export default function CaseDetail() {
           <TabsTrigger value="documents">Documents</TabsTrigger>
           <TabsTrigger value="billing">Billing</TabsTrigger>
           <TabsTrigger value="communications">Comms</TabsTrigger>
+          {canAccessClientInteraction && <TabsTrigger value="client-interaction">Client Interaction</TabsTrigger>}
           <TabsTrigger value="tasks">Tasks</TabsTrigger>
           <TabsTrigger value="time">Time</TabsTrigger>
           <TabsTrigger value="notes">Notes</TabsTrigger>
@@ -2001,6 +2038,70 @@ export default function CaseDetail() {
         <TabsContent value="communications">
           <CaseCommunicationsTab caseId={caseId} initialThreadId={initialThreadId} />
         </TabsContent>
+
+        {canAccessClientInteraction && (
+          <TabsContent value="client-interaction" className="space-y-4">
+            <Card>
+              <CardHeader>
+                <CardTitle>Client Interaction</CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-3">
+                {caseMessagesQuery.isLoading && (
+                  <div className="text-sm text-slate-500">Loading messages...</div>
+                )}
+                {caseMessagesQuery.isError && (
+                  <div className="text-sm text-red-600">Failed to load messages.</div>
+                )}
+                {!caseMessagesQuery.isLoading && !caseMessagesQuery.isError && (
+                  <div className="space-y-2">
+                    {(Array.isArray(caseMessagesQuery.data?.data) ? caseMessagesQuery.data!.data : []).map((m) => {
+                      const isExternal = m.senderType !== "staff";
+                      return (
+                        <div key={m.id} className={`flex ${isExternal ? "justify-start" : "justify-end"}`}>
+                          <div className={`max-w-[85%] rounded-2xl px-3 py-2 ${isExternal ? "bg-slate-100 text-slate-900" : "bg-slate-900 text-white"}`}>
+                            <div className={`text-[11px] ${isExternal ? "text-slate-500" : "text-slate-200"}`}>
+                              {isExternal ? (m.senderType === "developer" ? "Developer" : "Client") : (m.senderName || "Staff")}
+                            </div>
+                            <div className="text-sm whitespace-pre-wrap break-words">{m.messageText}</div>
+                            <div className={`mt-1 text-[10px] ${isExternal ? "text-slate-400" : "text-slate-300"}`}>
+                              {m.createdAt ? new Date(m.createdAt).toLocaleString() : ""}
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                    {(Array.isArray(caseMessagesQuery.data?.data) ? caseMessagesQuery.data!.data : []).length === 0 && (
+                      <div className="text-sm text-slate-600">No client messages yet.</div>
+                    )}
+                  </div>
+                )}
+
+                <div className="pt-2 border-t border-slate-200 space-y-2">
+                  <Textarea
+                    value={clientReplyDraft}
+                    onChange={(e) => setClientReplyDraft(e.target.value)}
+                    placeholder="Reply to client..."
+                    className="min-h-[90px]"
+                  />
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="text-[11px] text-slate-500">{Math.min(2000, clientReplyDraft.length)}/2000</div>
+                    <Button
+                      onClick={() => {
+                        const t = clientReplyDraft.trim();
+                        if (!t) return;
+                        if (t.length > 2000) return;
+                        sendCaseMessageMutation.mutate(t);
+                      }}
+                      disabled={sendCaseMessageMutation.isPending || !clientReplyDraft.trim()}
+                    >
+                      Send
+                    </Button>
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+          </TabsContent>
+        )}
 
         <TabsContent value="tasks">
           <CaseTasksTab caseId={caseId} />

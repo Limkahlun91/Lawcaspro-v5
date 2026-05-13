@@ -719,6 +719,7 @@ routerInternal.get("/auth/me", async (req: ReqLike, res: RouteResLike): Promise<
       userType: user.userType,
       firmId: user.firmId,
       roleId: user.roleId,
+      developerId: (user as any).developerId ?? null,
       roleName,
       firmName,
       permissions,

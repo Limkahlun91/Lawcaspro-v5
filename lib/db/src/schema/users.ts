@@ -5,6 +5,7 @@ import { z } from "zod/v4";
 export const usersTable = pgTable("users", {
   id: serial("id").primaryKey(),
   firmId: integer("firm_id"),
+  developerId: integer("developer_id"),
   email: text("email").notNull(),
   name: text("name").notNull(),
   passwordHash: text("password_hash").notNull(),
@@ -23,6 +24,7 @@ export const usersTable = pgTable("users", {
 }, (t) => ({
   emailUnique: uniqueIndex("users_email_key").on(t.email),
   firmIdIdx: index("idx_users_firm").on(t.firmId),
+  firmDeveloperIdx: index("idx_users_firm_developer").on(t.firmId, t.developerId),
   statusIdx: index("idx_users_status").on(t.status),
 }));
 

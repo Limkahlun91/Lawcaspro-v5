@@ -86,6 +86,20 @@ export const caseNotesTable = pgTable("case_notes", {
   caseIdIdx: index("idx_case_notes_case").on(t.caseId),
 }));
 
+export const caseMessagesTable = pgTable("case_messages", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  firmId: integer("firm_id").notNull(),
+  caseId: integer("case_id").notNull(),
+  senderType: text("sender_type").notNull(),
+  senderId: integer("sender_id"),
+  messageText: text("message_text").notNull(),
+  attachments: jsonb("attachments").notNull().default([]),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => ({
+  firmCaseCreatedAtIdx: index("idx_case_messages_firm_case_created_at").on(t.firmId, t.caseId, t.createdAt),
+  caseCreatedAtIdx: index("idx_case_messages_case_created_at").on(t.caseId, t.createdAt),
+}));
+
 export const caseKeyDatesTable = pgTable("case_key_dates", {
   id: serial("id").primaryKey(),
   firmId: integer("firm_id").notNull(),

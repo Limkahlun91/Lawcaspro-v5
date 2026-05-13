@@ -35,6 +35,7 @@ import conflictRouter from "./conflict.js";
 import platformOpsRouter from "./platform-ops.js";
 import platformApprovalsRouter from "./platform-approvals.js";
 import platformOpsCenterRouter from "./platform-ops-center.js";
+import developerPortalRouter from "./developer.js";
 
 type RouterLike = {
   use: (...args: unknown[]) => RouterLike;
@@ -65,6 +66,7 @@ routerInternal.use(auditRouter);
 routerInternal.use(platformOpsRouter);
 routerInternal.use(platformApprovalsRouter);
 routerInternal.use(platformOpsCenterRouter);
+routerInternal.use(developerPortalRouter);
 routerInternal.use(hubRouter);
 routerInternal.use(quotationsRouter);
 routerInternal.use(firmSettingsRouter);

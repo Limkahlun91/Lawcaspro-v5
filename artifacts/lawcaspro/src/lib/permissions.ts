@@ -58,7 +58,14 @@ export function hasPermission(user: AuthUser | null, module: string, action: str
     "users:read",
   ]);
 
+  const developerUser = new Set<string>([
+    "developer_portal:read",
+    "developer_portal:export",
+    "developer_portal:message",
+  ]);
+
   if (roleName === "Partner") return partner.has(key);
   if (roleName === "Clerk") return clerk.has(key);
+  if (roleName === "Developer_User") return developerUser.has(key);
   return false;
 }
