@@ -327,13 +327,10 @@ export default function CasesList() {
   const [selectedCaseIds, setSelectedCaseIds] = useState<Set<number>>(new Set());
   const [bulkLawyerId, setBulkLawyerId] = useState<string>("all");
   const [bulkClerkId, setBulkClerkId] = useState<string>("all");
-<<<<<<< HEAD
   const [isBatchStatusOpen, setIsBatchStatusOpen] = useState(false);
   const [batchStatusModule, setBatchStatusModule] = useState<"spa" | "loan">("loan");
   const [batchStatusValue, setBatchStatusValue] = useState<string>("");
-=======
   const [bulkZipDownloading, setBulkZipDownloading] = useState(false);
->>>>>>> 1b6aeb9056b6a3686ba71ceb8a151391761dbecd
 
   useEffect(() => {
     setSelectedCaseIds(new Set());
@@ -926,7 +923,6 @@ export default function CasesList() {
                     Apply
                   </Button>
 
-<<<<<<< HEAD
                   <Select value={bulkClerkId} onValueChange={setBulkClerkId}>
                     <SelectTrigger className="w-[220px]">
                       <SelectValue placeholder="Assign Clerk" />
@@ -952,28 +948,20 @@ export default function CasesList() {
                   <Button variant="ghost" onClick={() => setSelectedCaseIds(new Set())}>
                     Clear selection
                   </Button>
+
+                  <Button
+                    variant="secondary"
+                    onClick={downloadGeneratedDocumentsZip}
+                    disabled={bulkAssignMutation.isPending || bulkZipDownloading || selectedCaseIds.size === 0}
+                  >
+                    <Download className="w-4 h-4 mr-2" />
+                    Download Generated Documents (ZIP)
+                  </Button>
                 </div>
               </CardContent>
             </Card>
           </div>
         </div>
-=======
-              <Button variant="ghost" onClick={() => setSelectedCaseIds(new Set())}>
-                Clear selection
-              </Button>
-
-              <Button
-                variant="secondary"
-                onClick={downloadGeneratedDocumentsZip}
-                disabled={bulkAssignMutation.isPending || bulkZipDownloading || selectedCaseIds.size === 0}
-              >
-                <Download className="w-4 h-4 mr-2" />
-                Download Generated Documents (ZIP)
-              </Button>
-            </div>
-          </CardContent>
-        </Card>
->>>>>>> 1b6aeb9056b6a3686ba71ceb8a151391761dbecd
       )}
 
       <Dialog open={isBatchStatusOpen} onOpenChange={setIsBatchStatusOpen}>

@@ -194,19 +194,14 @@ export default function CaseDetail() {
       if (Number.isFinite(docId)) {
         queryClient.invalidateQueries({ queryKey: ["case-documents", caseId] });
       }
-<<<<<<< HEAD
-      downloadBlob(blob, fileName);
-      toast({ title: "Download started" });
+      await printWordBlob(blob, { title: fileName });
+      toast({ title: "Print preview opened" });
 
       if (vars?.printKey === "acting_letter") {
         autoKeyDatesMutation.mutate({ payload: { acting_letter_issued_date: todayYmdLocal() }, statusLabel: "Acting Letter Issued" });
       } else if (vars?.printKey === "letter_advice_spa_sol_lu") {
         autoKeyDatesMutation.mutate({ payload: { advice_to_bank_date: todayYmdLocal() }, statusLabel: "Advised" });
       }
-=======
-      await printWordBlob(blob, { title: fileName });
-      toast({ title: "Print preview opened" });
->>>>>>> 1b6aeb9056b6a3686ba71ceb8a151391761dbecd
     },
     onError: (err) => toastError(toast, err, "Print failed"),
   });

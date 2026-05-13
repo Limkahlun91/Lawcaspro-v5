@@ -26,11 +26,8 @@ import { toastError } from "@/lib/toast-error";
 import { printWordBlob } from "@/lib/documents/BrowserPrinter";
 import { useAuth } from "@/lib/auth-context";
 import { hasPermission } from "@/lib/permissions";
-<<<<<<< HEAD
 import { getGetCaseWorkflowQueryKey, getListCasesQueryKey } from "@workspace/api-client-react";
-=======
 import { validateUploadFile } from "@/lib/upload-validation";
->>>>>>> 1b6aeb9056b6a3686ba71ceb8a151391761dbecd
 
 function docTypeLabel(dt: string): string {
   return (DOCUMENT_TYPE_LABELS as Record<string, string>)[dt] ?? dt;
