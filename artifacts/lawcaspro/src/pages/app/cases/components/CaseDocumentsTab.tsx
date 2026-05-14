@@ -7,7 +7,7 @@ import { useToast } from "@/hooks/use-toast";
 import { ToastAction } from "@/components/ui/toast";
 import { FileText, Upload, Trash2, Download, Plus, ChevronUp, ChevronDown, X, Sparkles } from "lucide-react";
 import {
-  Dialog, DialogContent, DialogHeader, DialogTitle,
+  Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -172,6 +172,7 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
   const [templateApplicabilityFilter, setTemplateApplicabilityFilter] = useState<"all" | "applicable" | "warning" | "not_applicable">("all");
   const [selectedLetterheadId, setSelectedLetterheadId] = useState<string>("");
   const [documentName, setDocumentName] = useState("");
+  const documentNameToSend = documentName.trim() ? documentName.trim() : undefined;
   const [rowNamingPreview, setRowNamingPreview] = useState<Record<string, { fileName: string; ruleUsed: string; warnings?: string[] }>>({});
   const [extractionOpen, setExtractionOpen] = useState(false);
   const [extractionDoc, setExtractionDoc] = useState<CaseDocument | null>(null);
@@ -472,7 +473,7 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
 
   async function openVariableChecklist(item: ChecklistItem) {
     if (!canGenerate) return;
-    if (item.kind !== "template" || typeof item.templateId !== "number" || (item.source !== "firm" && item.source !== "master")) return;
+    if (item.kind !== "template" || typeof item.templateId !== "number" || !Number.isFinite(item.templateId) || (item.source !== "firm" && item.source !== "master")) return;
     setVariableChecklistOpen(true);
     setVariableChecklistLoading(true);
     setVariableChecklistItem(item);
@@ -481,14 +482,13 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
     setVariableChecklistLongRunning(false);
     setVariableChecklistProgress(0);
     try {
-      const bypassApplicability = Boolean(showAllTemplates && canBypassApplicability);
+      const payload =
+        item.source === "firm"
+          ? { templateId: Number(item.templateId) }
+          : { platformDocumentId: Number(item.templateId) };
       const result = await apiFetchJson<DocumentPreviewResponse>(`/cases/${caseId}/documents/preview-variables`, {
         method: "POST",
-        body: JSON.stringify(
-          item.source === "firm"
-            ? { templateId: Number(item.templateId), bypassApplicability, clauses: selectedClauses }
-            : { platformDocumentId: Number(item.templateId), bypassApplicability, clauses: selectedClauses }
-        ),
+        body: JSON.stringify(payload),
       });
       setVariableChecklistResult(result);
     } catch (err) {
@@ -508,8 +508,9 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
       toast({ title: "Missing firm letterhead", description: "Please configure a Firm Letter Head before generating this document.", variant: "destructive" });
       return;
     }
+    const parsedLetterheadId = selectedLetterheadId ? Number(selectedLetterheadId) : NaN;
     const letterheadIdToSend = isLetterLike
-      ? (selectedLetterheadId ? Number(selectedLetterheadId) : defaultLetterhead?.id)
+      ? (Number.isFinite(parsedLetterheadId) ? parsedLetterheadId : null)
       : undefined;
 
     const startedAt = Date.now();
@@ -536,7 +537,7 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
           timeoutMs: 120000,
           body: JSON.stringify({
             templateId: Number(item.templateId),
-            documentName: documentName || undefined,
+            documentName: documentNameToSend,
             letterheadId: letterheadIdToSend,
             bypassApplicability,
             clauses: selectedClauses,
@@ -549,7 +550,7 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
           timeoutMs: 120000,
           body: JSON.stringify({
             masterDocId: Number(item.templateId),
-            documentName: documentName || undefined,
+            documentName: documentNameToSend,
             letterheadId: letterheadIdToSend,
             bypassApplicability,
             clauses: selectedClauses,
@@ -647,7 +648,7 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
 
   async function handlePreview(item: ChecklistItem) {
     if (!canGenerate) return;
-    if (item.kind !== "template" || typeof item.templateId !== "number" || (item.source !== "firm" && item.source !== "master")) return;
+    if (item.kind !== "template" || typeof item.templateId !== "number" || !Number.isFinite(item.templateId) || (item.source !== "firm" && item.source !== "master")) return;
     setPreviewItem(item);
     setPreviewOpen(true);
     setPreviewLoading(true);
@@ -669,8 +670,8 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
           method: "POST",
           body: JSON.stringify(
             item.source === "firm"
-              ? { templateId: Number(item.templateId), documentName: documentName || item.name, originalFileName: item.fileName ?? "docx", fallbackExt: "docx" }
-              : { platformDocumentId: Number(item.templateId), documentName: documentName || item.name, originalFileName: item.fileName ?? "docx", fallbackExt: "docx" }
+              ? { templateId: Number(item.templateId), documentName: documentNameToSend || item.name, originalFileName: item.fileName ?? "docx", fallbackExt: "docx" }
+              : { platformDocumentId: Number(item.templateId), documentName: documentNameToSend || item.name, originalFileName: item.fileName ?? "docx", fallbackExt: "docx" }
           ),
         });
         setPreviewNaming(naming);
@@ -685,15 +686,15 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
   }
 
   async function previewFileNameForItem(item: ChecklistItem): Promise<void> {
-    if (item.kind !== "template" || typeof item.templateId !== "number" || (item.source !== "firm" && item.source !== "master")) return;
+    if (item.kind !== "template" || typeof item.templateId !== "number" || !Number.isFinite(item.templateId) || (item.source !== "firm" && item.source !== "master")) return;
     const key = `${item.source}-${item.templateId}`;
     try {
       const naming = await apiFetchJson<{ fileName: string; ruleUsed: string; warnings?: string[] }>(`/cases/${caseId}/documents/filename-preview`, {
         method: "POST",
         body: JSON.stringify(
           item.source === "firm"
-            ? { templateId: Number(item.templateId), documentName: documentName || item.name, originalFileName: item.fileName ?? "docx", fallbackExt: "docx" }
-            : { platformDocumentId: Number(item.templateId), documentName: documentName || item.name, originalFileName: item.fileName ?? "docx", fallbackExt: "docx" }
+            ? { templateId: Number(item.templateId), documentName: documentNameToSend || item.name, originalFileName: item.fileName ?? "docx", fallbackExt: "docx" }
+            : { platformDocumentId: Number(item.templateId), documentName: documentNameToSend || item.name, originalFileName: item.fileName ?? "docx", fallbackExt: "docx" }
         ),
       });
       setRowNamingPreview((prev) => ({ ...prev, [key]: naming }));
@@ -763,12 +764,11 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
     setBatchGeneratedPdfDocIds([]);
     setBatchLoopProgress({ current: 0, total: 0 });
     try {
-      const bypassApplicability = Boolean(showAllTemplates && canBypassApplicability);
       const previews = await Promise.all(items.map((it) => {
         const payload =
           it.source === "firm"
-            ? { templateId: Number(it.templateId), bypassApplicability, clauses: selectedClauses }
-            : { platformDocumentId: Number(it.templateId), bypassApplicability, clauses: selectedClauses };
+            ? { templateId: Number(it.templateId) }
+            : { platformDocumentId: Number(it.templateId) };
         return apiFetchJson<DocumentPreviewResponse>(`/cases/${caseId}/documents/preview-variables`, {
           method: "POST",
           body: JSON.stringify(payload),
@@ -859,8 +859,9 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
           throw new Error("Missing firm letterhead");
         }
 
+        const parsedLetterheadId = selectedLetterheadId ? Number(selectedLetterheadId) : NaN;
         const letterheadIdToSend = isLetterLike
-          ? (selectedLetterheadId ? Number(selectedLetterheadId) : defaultLetterhead?.id)
+          ? (Number.isFinite(parsedLetterheadId) ? parsedLetterheadId : null)
           : undefined;
 
         const endpoint = it.source === "firm"
@@ -2430,6 +2431,7 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
         <DialogContent className="w-[95vw] sm:w-[80vw] max-w-[95vw] sm:max-w-[80vw] max-h-[80vh] overflow-hidden">
           <DialogHeader>
             <DialogTitle>Generate Document from Template</DialogTitle>
+            <DialogDescription className="sr-only">Document generation options</DialogDescription>
           </DialogHeader>
           <div className="flex flex-col gap-4 h-full">
             <div className="flex items-center justify-between gap-3">

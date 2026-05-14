@@ -95,11 +95,13 @@ export const DEFAULT_DOCUMENT_VARIABLES: DefaultDocumentVariable[] = [
   { key: "purchaser_address", label: "Purchaser Address", category: "purchaser", valueType: "string", sourcePath: "purchaser_address", sortOrder: 220 },
   { key: "purchaser_email", label: "Purchaser Email", category: "purchaser", valueType: "string", sourcePath: "purchaser_email", sortOrder: 230 },
   { key: "purchaser_phone", label: "Purchaser Phone", category: "purchaser", valueType: "string", sourcePath: "purchaser_phone", sortOrder: 240 },
+  { key: "purchasers_inline", label: "Purchasers (Inline)", description: "Formatted purchaser list: A (NRIC NO.: X) & B (NRIC NO.: Y)", category: "purchaser", valueType: "string", sourcePath: "purchasers_inline", exampleValue: "Ali (NRIC NO.: 900101-14-5678) & Abu (NRIC NO.: 880202-10-1234)", sortOrder: 245 },
 
   { key: "borrower1_name", label: "Borrower 1 Name", category: "loan", valueType: "string", sourcePath: "borrower1_name", sortOrder: 300 },
   { key: "borrower1_ic", label: "Borrower 1 NRIC", category: "loan", valueType: "string", sourcePath: "borrower1_ic", sortOrder: 310 },
   { key: "borrower2_name", label: "Borrower 2 Name", category: "loan", valueType: "string", sourcePath: "borrower2_name", sortOrder: 320 },
   { key: "borrower2_ic", label: "Borrower 2 NRIC", category: "loan", valueType: "string", sourcePath: "borrower2_ic", sortOrder: 330 },
+  { key: "borrowers_inline", label: "Borrowers (Inline)", description: "Formatted borrower list: A (NRIC NO.: X) & B (NRIC NO.: Y)", category: "loan", valueType: "string", sourcePath: "borrowers_inline", exampleValue: "Ali (NRIC NO.: 900101-14-5678)", sortOrder: 335 },
   { key: "end_financier", label: "Bank Name / End Financier", category: "loan", valueType: "string", sourcePath: "end_financier", sortOrder: 340 },
   { key: "financing_sum", label: "Loan Amount (RM)", category: "loan", valueType: "string", sourcePath: "financing_sum", sortOrder: 350 },
   { key: "financing_sum_raw", label: "Loan Amount (Raw)", category: "loan", valueType: "number", sourcePath: "financing_sum_raw", sortOrder: 360 },
@@ -129,6 +131,7 @@ export const DEFAULT_DOCUMENT_VARIABLES: DefaultDocumentVariable[] = [
   { key: "vendor_address", label: "Vendor Address", category: "custom", valueType: "string", sourcePath: "vendor_address", sortOrder: 920 },
   { key: "vendor_email", label: "Vendor Email", category: "custom", valueType: "string", sourcePath: "vendor_email", sortOrder: 930 },
   { key: "vendor_phone", label: "Vendor Phone", category: "custom", valueType: "string", sourcePath: "vendor_phone", sortOrder: 940 },
+  { key: "vendors_inline", label: "Vendors (Inline)", description: "Formatted vendor list: A (NRIC NO.: X) & B (NRIC NO.: Y)", category: "custom", valueType: "string", sourcePath: "vendors_inline", exampleValue: "Vendor A (NRIC NO.: 900101-14-5678)", sortOrder: 945 },
 
   ...extraVars,
   ...keyDateVars,

@@ -225,6 +225,22 @@ function formatNric(v: unknown): string | null {
   return masked;
 }
 
+export function formatPersonList(persons: Array<{ name?: unknown; nric?: unknown }> | null | undefined): string {
+  const items = Array.isArray(persons)
+    ? persons
+        .map((p) => ({
+          name: typeof p?.name === "string" ? p.name.trim() : String(p?.name ?? "").trim(),
+          nric: typeof p?.nric === "string" ? p.nric.trim() : String(p?.nric ?? "").trim(),
+        }))
+        .filter((p) => Boolean(p.name))
+        .map((p) => (p.nric ? `${p.name} (NRIC NO.: ${p.nric})` : p.name))
+    : [];
+  if (items.length === 0) return "";
+  if (items.length === 1) return items[0]!;
+  if (items.length === 2) return `${items[0]} & ${items[1]}`;
+  return `${items.slice(0, -1).join(", ")} & ${items[items.length - 1]}`;
+}
+
 export function applyFormatter(formatter: string | null | undefined, value: unknown): unknown {
   const f = (formatter || "").trim().toLowerCase();
   if (!f) return value;
@@ -300,6 +316,39 @@ export function resolveVariablesForTemplate(params: {
       }
     }
   }
+
+  const purchasersInline = formatPersonList(
+    Array.isArray((params.caseContext as any)?.purchasers)
+      ? (params.caseContext as any).purchasers.map((p: any) => ({
+          name: p?.name,
+          nric: p?.nric ?? p?.ic ?? p?.ic_no,
+        }))
+      : []
+  );
+  const borrowersInline = formatPersonList((() => {
+    const arr = Array.isArray((params.caseContext as any)?.borrowers) ? (params.caseContext as any).borrowers : null;
+    if (arr) return arr.map((b: any) => ({ name: b?.name, nric: b?.nric ?? b?.ic ?? b?.ic_no }));
+    const b1n = (params.caseContext as any)?.borrower1_name;
+    const b1i = (params.caseContext as any)?.borrower1_ic;
+    const b2n = (params.caseContext as any)?.borrower2_name;
+    const b2i = (params.caseContext as any)?.borrower2_ic;
+    const out: Array<{ name?: unknown; nric?: unknown }> = [];
+    if (b1n) out.push({ name: b1n, nric: b1i });
+    if (b2n) out.push({ name: b2n, nric: b2i });
+    return out;
+  })());
+  const vendorsInline = formatPersonList((() => {
+    const arr = Array.isArray((params.caseContext as any)?.vendors) ? (params.caseContext as any).vendors : null;
+    if (arr) return arr.map((v: any) => ({ name: v?.name, nric: v?.nric ?? v?.ic ?? v?.ic_no }));
+    const vn = (params.caseContext as any)?.vendor_name;
+    const vi = (params.caseContext as any)?.vendor_ic;
+    if (!vn) return [];
+    return [{ name: vn, nric: vi }];
+  })());
+
+  if (!Object.prototype.hasOwnProperty.call(resolved, "purchasers_inline")) resolved.purchasers_inline = purchasersInline || null;
+  if (!Object.prototype.hasOwnProperty.call(resolved, "borrowers_inline")) resolved.borrowers_inline = borrowersInline || null;
+  if (!Object.prototype.hasOwnProperty.call(resolved, "vendors_inline")) resolved.vendors_inline = vendorsInline || null;
 
   return {
     resolvedVariables: resolved,

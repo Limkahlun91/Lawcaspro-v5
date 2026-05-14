@@ -929,6 +929,8 @@ async function buildCaseContext(r: DbConn, caseId: number, firmId: number, cache
   const loan = safeJson((c as any).loan_details);
   const loanPartyTypeRaw = typeof (c as any).loan_party_type === "string" ? String((c as any).loan_party_type).trim() : "";
   const loanPartyType = loanPartyTypeRaw === "3rd_party" ? "3rd_party" : "1st_party";
+  const isThirdPartyLoan = loanPartyType === "3rd_party" && String((c as any).purchase_mode ?? "") === "loan";
+  const isDirectLoan = !isThirdPartyLoan;
   if (loanPartyType === "1st_party" && String((c as any).purchase_mode ?? "") === "loan") {
     const p1 = purchaserRows[0] ?? null;
     const p2 = purchaserRows[1] ?? null;
@@ -1172,11 +1174,17 @@ async function buildCaseContext(r: DbConn, caseId: number, firmId: number, cache
     purchaser_phone: mainPurchaser.phone ?? "",
     purchaser_email: mainPurchaser.email ?? "",
 
+    // Grammar helpers
+    is_plural_purchaser: purchaserRows.length > 1,
+    is_3rd_party_loan: isThirdPartyLoan,
+    is_direct_loan: isDirectLoan,
+
     // All Purchasers (loop)
     purchasers: purchaserRows.map((p, i) => ({
       index: i + 1,
       name: p.name ?? "",
       ic: p.ic_no ?? "",
+      nric: p.ic_no ?? "",
       nationality: p.nationality ?? "",
       address: p.address ?? "",
       phone: p.phone ?? "",
@@ -6449,6 +6457,157 @@ router.put("/clauses/:id", requireAuth, requireFirmUser, requirePermission("docu
   if (!rows[0]) { res.status(404).json({ error: "Clause not found" }); return; }
   await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "clauses.firm.update", entityType: "firm_clause", entityId: id, detail: `clauseId=${id}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
   res.json(rows[0]);
+});
+
+router.get("/settings/custom-clauses", requireAuth, requireFirmUser, requirePermission("documents", "read"), async (req: AuthRequest, res): Promise<void> => {
+  const r = getRlsDb(req, res);
+  if (!r) return;
+  const rows = await queryRows(r, sql`
+    SELECT id, clause_code, title, body, status, created_at, updated_at
+    FROM firm_clauses
+    WHERE firm_id = ${req.firmId!} AND status <> 'archived'
+    ORDER BY updated_at DESC, id DESC
+  `);
+  res.json({
+    data: rows.map((x) => ({
+      id: Number((x as any).id),
+      clauseName: String((x as any).clause_code ?? ""),
+      title: String((x as any).title ?? ""),
+      content: String((x as any).body ?? ""),
+      status: String((x as any).status ?? "draft"),
+      createdAt: (() => {
+        const v = (x as any).created_at;
+        if (!v) return null;
+        const d = new Date(v);
+        return Number.isNaN(d.getTime()) ? null : d.toISOString();
+      })(),
+      updatedAt: (() => {
+        const v = (x as any).updated_at;
+        if (!v) return null;
+        const d = new Date(v);
+        return Number.isNaN(d.getTime()) ? null : d.toISOString();
+      })(),
+    })),
+  });
+});
+
+router.post("/settings/custom-clauses", requireAuth, requireFirmUser, requirePermission("documents", "update"), async (req: AuthRequest, res): Promise<void> => {
+  const r = getRlsDb(req, res);
+  if (!r) return;
+  const body = (req.body && typeof req.body === "object") ? (req.body as Record<string, unknown>) : {};
+  const clauseNameRaw = typeof body.clauseName === "string" ? body.clauseName : "";
+  const contentRaw = typeof body.content === "string" ? body.content : "";
+  const titleRaw = typeof body.title === "string" ? body.title : "";
+  const clauseName = normalizeClauseCode(clauseNameRaw);
+  const content = contentRaw.trim();
+  const title = titleRaw.trim() || clauseName;
+  if (!clauseName) { res.status(422).json({ error: "clauseName is required" }); return; }
+  if (!content) { res.status(422).json({ error: "content is required" }); return; }
+  if (content.length > 20000) { res.status(422).json({ error: "content too long" }); return; }
+  try {
+    const rows = await queryRows(r, sql`
+      INSERT INTO firm_clauses (firm_id, source_platform_clause_id, clause_code, title, category, language, body, notes, tags, status, is_system, sort_order, applicability, created_by, updated_by, created_at, updated_at)
+      VALUES (${req.firmId!}, NULL, ${clauseName}, ${title}, 'General', 'en', ${content}, NULL, '{}'::text[], 'active', false, 0, NULL, ${req.userId ?? null}, ${req.userId ?? null}, now(), now())
+      RETURNING id, clause_code, title, body, status, created_at, updated_at
+    `);
+    const created = rows[0];
+    await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "custom_clause.create", entityType: "firm_clause", entityId: typeof (created as any)?.id === "number" ? Number((created as any).id) : undefined, detail: `clauseCode=${clauseName}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+    res.status(201).json({
+      id: Number((created as any).id),
+      clauseName: String((created as any).clause_code ?? ""),
+      title: String((created as any).title ?? ""),
+      content: String((created as any).body ?? ""),
+      status: String((created as any).status ?? "draft"),
+      createdAt: (() => {
+        const v = (created as any).created_at;
+        if (!v) return null;
+        const d = new Date(v);
+        return Number.isNaN(d.getTime()) ? null : d.toISOString();
+      })(),
+      updatedAt: (() => {
+        const v = (created as any).updated_at;
+        if (!v) return null;
+        const d = new Date(v);
+        return Number.isNaN(d.getTime()) ? null : d.toISOString();
+      })(),
+    });
+  } catch (err: unknown) {
+    const pg = getPgCode(err);
+    if (pg === "23505") { res.status(409).json({ error: "Clause name already exists" }); return; }
+    logger.error({ err, firmId: req.firmId, userId: req.userId }, "[custom-clauses.create]");
+    res.status(500).json({ error: "Internal Server Error" });
+  }
+});
+
+router.put("/settings/custom-clauses/:id", requireAuth, requireFirmUser, requirePermission("documents", "update"), async (req: AuthRequest, res): Promise<void> => {
+  const r = getRlsDb(req, res);
+  if (!r) return;
+  const idStr = one((req.params as any).id);
+  const id = idStr ? parseInt(idStr, 10) : NaN;
+  if (!Number.isFinite(id) || id <= 0) { res.status(400).json({ error: "Invalid id" }); return; }
+  const body = (req.body && typeof req.body === "object") ? (req.body as Record<string, unknown>) : {};
+  const clauseNameRaw = typeof body.clauseName === "string" ? body.clauseName : "";
+  const contentRaw = typeof body.content === "string" ? body.content : "";
+  const titleRaw = typeof body.title === "string" ? body.title : "";
+  const clauseName = normalizeClauseCode(clauseNameRaw);
+  const content = contentRaw.trim();
+  const title = titleRaw.trim() || clauseName;
+  if (!clauseName) { res.status(422).json({ error: "clauseName is required" }); return; }
+  if (!content) { res.status(422).json({ error: "content is required" }); return; }
+  if (content.length > 20000) { res.status(422).json({ error: "content too long" }); return; }
+  try {
+    const rows = await queryRows(r, sql`
+      UPDATE firm_clauses
+      SET clause_code = ${clauseName}, title = ${title}, body = ${content}, updated_by = ${req.userId ?? null}, updated_at = now()
+      WHERE firm_id = ${req.firmId!} AND id = ${id} AND status <> 'archived'
+      RETURNING id, clause_code, title, body, status, created_at, updated_at
+    `);
+    const updated = rows[0];
+    if (!updated) { res.status(404).json({ error: "Not found" }); return; }
+    await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "custom_clause.update", entityType: "firm_clause", entityId: id, detail: `clauseCode=${clauseName}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+    res.json({
+      id: Number((updated as any).id),
+      clauseName: String((updated as any).clause_code ?? ""),
+      title: String((updated as any).title ?? ""),
+      content: String((updated as any).body ?? ""),
+      status: String((updated as any).status ?? "draft"),
+      createdAt: (() => {
+        const v = (updated as any).created_at;
+        if (!v) return null;
+        const d = new Date(v);
+        return Number.isNaN(d.getTime()) ? null : d.toISOString();
+      })(),
+      updatedAt: (() => {
+        const v = (updated as any).updated_at;
+        if (!v) return null;
+        const d = new Date(v);
+        return Number.isNaN(d.getTime()) ? null : d.toISOString();
+      })(),
+    });
+  } catch (err: unknown) {
+    const pg = getPgCode(err);
+    if (pg === "23505") { res.status(409).json({ error: "Clause name already exists" }); return; }
+    logger.error({ err, firmId: req.firmId, userId: req.userId, id }, "[custom-clauses.update]");
+    res.status(500).json({ error: "Internal Server Error" });
+  }
+});
+
+router.delete("/settings/custom-clauses/:id", requireAuth, requireFirmUser, requirePermission("documents", "update"), async (req: AuthRequest, res): Promise<void> => {
+  const r = getRlsDb(req, res);
+  if (!r) return;
+  const idStr = one((req.params as any).id);
+  const id = idStr ? parseInt(idStr, 10) : NaN;
+  if (!Number.isFinite(id) || id <= 0) { res.status(400).json({ error: "Invalid id" }); return; }
+  const rows = await queryRows(r, sql`
+    UPDATE firm_clauses
+    SET status = 'archived', updated_by = ${req.userId ?? null}, updated_at = now()
+    WHERE firm_id = ${req.firmId!} AND id = ${id} AND status <> 'archived'
+    RETURNING id, clause_code
+  `);
+  const row = rows[0];
+  if (!row) { res.status(404).json({ error: "Not found" }); return; }
+  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "custom_clause.archive", entityType: "firm_clause", entityId: id, detail: `clauseCode=${String((row as any).clause_code ?? "")}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+  res.json({ ok: true });
 });
 
 router.post("/clauses/platform/:id/copy", requireAuth, requireFirmUser, requirePermission("documents", "update"), async (req: AuthRequest, res): Promise<void> => {
