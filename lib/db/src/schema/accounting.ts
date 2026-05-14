@@ -1,4 +1,4 @@
-import { pgTable, serial, text, integer, numeric, boolean, date, timestamp, index } from "drizzle-orm/pg-core";
+import { pgTable, serial, text, integer, numeric, boolean, date, timestamp, index, uuid } from "drizzle-orm/pg-core";
 
 export const caseBillingEntriesTable = pgTable("case_billing_entries", {
   id:          serial("id").primaryKey(),
@@ -49,6 +49,7 @@ export const invoiceItemsTable = pgTable("invoice_items", {
   invoiceId:    integer("invoice_id").notNull(),
   description:  text("description").notNull(),
   itemType:     text("item_type").notNull().default("disbursement"),
+  itemCategory: text("item_category").notNull().default("fee"),
   amountExclTax: numeric("amount_excl_tax", { precision: 18, scale: 2 }).notNull().default("0"),
   taxRate:      numeric("tax_rate", { precision: 5, scale: 2 }).notNull().default("0"),
   taxAmount:    numeric("tax_amount", { precision: 18, scale: 2 }).notNull().default("0"),
@@ -173,4 +174,40 @@ export const creditNotesTable = pgTable("credit_notes", {
 }, (t) => ({
   firmIdx:    index("idx_credit_notes_firm").on(t.firmId),
   invoiceIdx: index("idx_credit_notes_invoice").on(t.invoiceId),
+}));
+
+export const bankTransactionsTable = pgTable("bank_transactions", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  firmId: integer("firm_id").notNull(),
+  bankAccountId: integer("bank_account_id"),
+  caseId: integer("case_id"),
+  transactionDate: date("transaction_date").notNull(),
+  description: text("description").notNull(),
+  referenceNo: text("reference_no"),
+  withdrawal: numeric("withdrawal", { precision: 12, scale: 2 }),
+  deposit: numeric("deposit", { precision: 12, scale: 2 }),
+  balance: numeric("balance", { precision: 12, scale: 2 }),
+  isExportedToAutocount: boolean("is_exported_to_autocount").notNull().default(false),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow().$onUpdate(() => new Date()),
+}, (t) => ({
+  firmDateIdx: index("idx_bank_transactions_firm_date").on(t.firmId, t.transactionDate),
+  exportIdx: index("idx_bank_transactions_export").on(t.firmId, t.isExportedToAutocount),
+  firmAccountIdx: index("idx_bank_transactions_firm_account").on(t.firmId, t.bankAccountId),
+  firmCaseIdx: index("idx_bank_transactions_firm_case").on(t.firmId, t.caseId),
+}));
+
+export const caseLedgersTable = pgTable("case_ledgers", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  firmId: integer("firm_id").notNull(),
+  caseId: integer("case_id").notNull(),
+  transactionDate: date("transaction_date").notNull(),
+  entryCategory: text("entry_category").notNull(),
+  entryType: text("entry_type").notNull(),
+  description: text("description").notNull(),
+  amount: numeric("amount", { precision: 12, scale: 2 }).notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow().$onUpdate(() => new Date()),
+}, (t) => ({
+  firmCaseIdx: index("idx_case_ledgers_firm_case").on(t.firmId, t.caseId, t.transactionDate),
 }));

@@ -38,6 +38,7 @@ export const quotationItemsTable = pgTable("quotation_items", {
   subItemNo:       text("sub_item_no"),
   description:     text("description").notNull(),
   taxCode:         text("tax_code").notNull().default("T"),
+  itemCategory:    text("item_category").notNull().default("fee"),
   amountExclTax:   numeric("amount_excl_tax", { precision: 18, scale: 2 }).notNull().default("0"),
   taxRate:         numeric("tax_rate", { precision: 5, scale: 2 }).notNull().default("8"),
   taxAmount:       numeric("tax_amount", { precision: 18, scale: 2 }).notNull().default("0"),

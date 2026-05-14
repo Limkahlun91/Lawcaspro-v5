@@ -68,7 +68,9 @@ import ClausesSettingsPage from "@/pages/app/settings/clauses";
 import Settings from "@/pages/app/settings";
 import DocumentsPage from "@/pages/app/documents";
 import Accounting from "@/pages/app/accounting";
+import BankReconciliationPage from "@/pages/app/accounting/bank-reconciliation";
 import InvoiceDetail from "@/pages/app/accounting/invoices/detail";
+import ReceiptDetail from "@/pages/app/accounting/receipts/detail";
 import Reports from "@/pages/app/reports";
 import BillsDeliveredBook from "@/pages/app/reports/bills-delivered-book";
 import MatterAging from "@/pages/app/reports/matter-aging";
@@ -253,6 +255,16 @@ function AppRoutes() {
           <Route path="/app/accounting/invoices/:id" component={() => (
             <PermissionGuard module="accounting" action="read">
               <InvoiceDetail />
+            </PermissionGuard>
+          )} />
+          <Route path="/app/accounting/receipts/:id" component={() => (
+            <PermissionGuard module="accounting" action="read">
+              <ReceiptDetail />
+            </PermissionGuard>
+          )} />
+          <Route path="/app/accounting/bank-reconciliation" component={() => (
+            <PermissionGuard module="accounting" action="read">
+              <BankReconciliationPage />
             </PermissionGuard>
           )} />
           <Route path="/app/accounting" component={() => (

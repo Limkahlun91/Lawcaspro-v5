@@ -13,11 +13,12 @@ import { useToast } from "@/hooks/use-toast";
 import { useAuth } from "@/lib/auth-context";
 import { hasPermission } from "@/lib/permissions";
 import { ME_QUERY_KEY } from "@/lib/query-keys";
-import { apiFetchJson } from "@/lib/api-client";
+import { apiFetchBlob, apiFetchJson } from "@/lib/api-client";
 import { toastError } from "@/lib/toast-error";
 import { QueryFallback } from "@/components/query-fallback";
 import DocumentTemplates from "@/pages/app/settings/DocumentTemplates";
 import { useReAuth } from "@/components/re-auth-dialog";
+import { validateUploadFile } from "@/lib/upload-validation";
 
 const apiFetch = apiFetchJson;
 
@@ -54,10 +55,15 @@ type FirmBankAccount = {
 };
 
 type FirmSettings = {
+  logoUrl?: string | null;
   name?: string | null;
   address?: string | null;
   stNumber?: string | null;
   tinNumber?: string | null;
+  registrationNo?: string | null;
+  sstNo?: string | null;
+  phone?: string | null;
+  email?: string | null;
   bankAccounts?: FirmBankAccount[];
 };
 
@@ -401,6 +407,7 @@ function FirmInfoTab() {
   const queryClient = useQueryClient();
   const { user } = useAuth();
   const canUpdate = hasPermission(user, "settings", "update");
+  const firmId = user?.firmId;
 
   const { data: settings, isLoading } = useQuery<FirmSettings>({
     queryKey: ["firm-settings"],
@@ -408,9 +415,17 @@ function FirmInfoTab() {
   });
 
   const [name, setName] = useState("");
+  const [logoUrl, setLogoUrl] = useState("");
+  const [logoFile, setLogoFile] = useState<File | null>(null);
+  const [logoPreviewUrl, setLogoPreviewUrl] = useState<string | null>(null);
+  const [savedLogoPreviewUrl, setSavedLogoPreviewUrl] = useState<string | null>(null);
   const [address, setAddress] = useState("");
   const [stNumber, setStNumber] = useState("");
   const [tinNumber, setTinNumber] = useState("");
+  const [registrationNo, setRegistrationNo] = useState("");
+  const [sstNo, setSstNo] = useState("");
+  const [phone, setPhone] = useState("");
+  const [email, setEmail] = useState("");
   const [newBankName, setNewBankName] = useState("");
   const [newAccountNo, setNewAccountNo] = useState("");
   const [newAccountType, setNewAccountType] = useState("office");
@@ -425,8 +440,45 @@ function FirmInfoTab() {
       setAddress(settings.address ?? "");
       setStNumber(settings.stNumber ?? "");
       setTinNumber(settings.tinNumber ?? "");
+      setRegistrationNo(settings.registrationNo ?? "");
+      setSstNo(settings.sstNo ?? "");
+      setPhone(settings.phone ?? "");
+      setEmail(settings.email ?? "");
+      setLogoUrl(settings.logoUrl ?? "");
     }
   }, [settings]);
+
+  useEffect(() => {
+    if (!logoFile) {
+      setLogoPreviewUrl(null);
+      return;
+    }
+    const url = URL.createObjectURL(logoFile);
+    setLogoPreviewUrl(url);
+    return () => URL.revokeObjectURL(url);
+  }, [logoFile]);
+
+  useEffect(() => {
+    if (!logoUrl) {
+      setSavedLogoPreviewUrl(null);
+      return;
+    }
+    let cancelled = false;
+    let url: string | null = null;
+    (async () => {
+      try {
+        const blob = await apiFetchBlob("/firm-settings/logo");
+        url = URL.createObjectURL(blob);
+        if (!cancelled) setSavedLogoPreviewUrl(url);
+      } catch {
+        if (!cancelled) setSavedLogoPreviewUrl(null);
+      }
+    })();
+    return () => {
+      cancelled = true;
+      if (url) URL.revokeObjectURL(url);
+    };
+  }, [logoUrl]);
 
   const updateMutation = useMutation({
     mutationFn: (data: Record<string, unknown>) => apiFetch("/firm-settings", {
@@ -500,8 +552,32 @@ function FirmInfoTab() {
       toast({ title: "You don't have permission to update firm settings", variant: "destructive" });
       return;
     }
-    updateMutation.mutate({ name, address, stNumber, tinNumber });
+    updateMutation.mutate({ name, address, stNumber, tinNumber, registrationNo, sstNo, phone, email });
   };
+
+  const uploadLogoMutation = useMutation({
+    mutationFn: async () => {
+      if (!firmId) throw new Error("Missing firm context");
+      if (!logoFile) throw new Error("No file selected");
+      const v = validateUploadFile(logoFile, { allowedMimeTypes: ["image/jpeg", "image/png"] });
+      if (!v.ok) throw new Error(v.message);
+
+      const safeName = logoFile.name.replace(/[^a-zA-Z0-9._-]/g, "_");
+      const objectPath = `/objects/templates/firms/${firmId}/branding/${crypto.randomUUID()}-${safeName}`;
+      const formData = new FormData();
+      formData.append("file", logoFile);
+      const result = await apiFetchJson<{ objectPath: string }>(`/storage/upload?objectPath=${encodeURIComponent(objectPath)}`, { method: "POST", body: formData });
+      await apiFetchJson("/firm-settings", { method: "PATCH", body: JSON.stringify({ logoUrl: result.objectPath }) });
+      return result.objectPath;
+    },
+    onSuccess: (next: string) => {
+      queryClient.invalidateQueries({ queryKey: ["firm-settings"] });
+      setLogoUrl(next);
+      setLogoFile(null);
+      toast({ title: "Logo uploaded" });
+    },
+    onError: (e) => toastError(toast, e, "Upload failed"),
+  });
 
   const handleAddBank = () => {
     if (!canUpdate) {
@@ -523,6 +599,60 @@ function FirmInfoTab() {
         <CardHeader>
           <CardTitle className="text-base flex items-center gap-2">
             <Building2 className="w-4 h-4" />
+            Letterhead & Logo
+          </CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="flex items-start gap-4 flex-wrap">
+            <div className="w-[220px] h-[120px] border rounded-md bg-white flex items-center justify-center overflow-hidden">
+              {logoPreviewUrl ? (
+                <img src={logoPreviewUrl} alt="Logo preview" className="max-w-full max-h-full object-contain" />
+              ) : savedLogoPreviewUrl ? (
+                <img src={savedLogoPreviewUrl} alt="Firm logo" className="max-w-full max-h-full object-contain" />
+              ) : (
+                <div className="text-xs text-slate-400">No logo</div>
+              )}
+            </div>
+
+            <div className="space-y-2">
+              <Label className="text-xs text-slate-500">Upload Logo (PNG/JPG)</Label>
+              <Input
+                type="file"
+                accept="image/png,image/jpeg"
+                disabled={!canUpdate || uploadLogoMutation.isPending}
+                onChange={(e) => {
+                  const f = e.target.files?.[0] ?? null;
+                  setLogoFile(f);
+                }}
+              />
+              <div className="flex gap-2">
+                <Button
+                  variant="outline"
+                  onClick={() => uploadLogoMutation.mutate()}
+                  disabled={!canUpdate || !logoFile || uploadLogoMutation.isPending}
+                >
+                  {uploadLogoMutation.isPending ? "Uploading..." : "Upload & Save"}
+                </Button>
+                {logoUrl ? (
+                  <Button
+                    variant="outline"
+                    onClick={() => { navigator.clipboard.writeText(logoUrl); toast({ title: "Copied logo path" }); }}
+                    disabled={uploadLogoMutation.isPending}
+                  >
+                    Copy Path
+                  </Button>
+                ) : null}
+              </div>
+              {logoUrl ? <div className="text-xs text-slate-500 break-all">Saved: {logoUrl}</div> : null}
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base flex items-center gap-2">
+            <Building2 className="w-4 h-4" />
             General Information
           </CardTitle>
         </CardHeader>
@@ -539,6 +669,22 @@ function FirmInfoTab() {
             <div>
               <Label className="text-xs text-slate-500">TIN Number (Tax Identification)</Label>
               <Input value={tinNumber} onChange={e => setTinNumber(e.target.value)} disabled={!canUpdate} placeholder="e.g. C1234567890" />
+            </div>
+            <div>
+              <Label className="text-xs text-slate-500">Registration No. (SSM)</Label>
+              <Input value={registrationNo} onChange={e => setRegistrationNo(e.target.value)} disabled={!canUpdate} placeholder="e.g. 202001234567" />
+            </div>
+            <div>
+              <Label className="text-xs text-slate-500">SST No.</Label>
+              <Input value={sstNo} onChange={e => setSstNo(e.target.value)} disabled={!canUpdate} placeholder="e.g. W10-1234-56789012" />
+            </div>
+            <div>
+              <Label className="text-xs text-slate-500">Phone</Label>
+              <Input value={phone} onChange={e => setPhone(e.target.value)} disabled={!canUpdate} placeholder="e.g. +60 3-1234 5678" />
+            </div>
+            <div>
+              <Label className="text-xs text-slate-500">Email</Label>
+              <Input value={email} onChange={e => setEmail(e.target.value)} disabled={!canUpdate} placeholder="e.g. accounts@firm.com" />
             </div>
             <div className="md:col-span-2">
               <Label className="text-xs text-slate-500">Address</Label>

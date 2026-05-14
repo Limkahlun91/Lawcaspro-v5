@@ -1,4 +1,4 @@
-import { useState, useCallback } from "react";
+import { useEffect, useState, useCallback } from "react";
 import { useParams, useLocation } from "wouter";
 import { useGetQuotation, getGetQuotationQueryKey, getListQuotationsQueryKey, useUpdateQuotation, useDeleteQuotation, useDuplicateQuotation } from "@workspace/api-client-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -6,11 +6,11 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { ArrowLeft, Save, Copy, Trash2, Pencil, Printer, Plus, Calculator } from "lucide-react";
-import { useQueryClient, useMutation } from "@tanstack/react-query";
+import { useQuery, useQueryClient, useMutation } from "@tanstack/react-query";
 import { useToast } from "@/hooks/use-toast";
 import { QueryFallback } from "@/components/query-fallback";
 import { toastError } from "@/lib/toast-error";
-import { apiFetchJson } from "@/lib/api-client";
+import { apiFetchBlob, apiFetchJson } from "@/lib/api-client";
 
 const TAX_RATE = 8;
 
@@ -28,11 +28,24 @@ interface LocalItem {
   subItemNo: string;
   description: string;
   taxCode: string;
+  itemCategory: "fee" | "disbursement";
   amountExclTax: number;
   taxRate: number;
   taxAmount: number;
   amountInclTax: number;
 }
+
+type FirmSettings = {
+  logoUrl?: string | null;
+  name?: string | null;
+  address?: string | null;
+  stNumber?: string | null;
+  tinNumber?: string | null;
+  registrationNo?: string | null;
+  sstNo?: string | null;
+  phone?: string | null;
+  email?: string | null;
+};
 
 export default function QuotationDetail() {
   const { id } = useParams<{ id: string }>();
@@ -44,6 +57,33 @@ export default function QuotationDetail() {
   const { data: quotation, isLoading, isError, error, refetch, isFetching } = useGetQuotation(quotationId, {
     query: { enabled: !!quotationId, queryKey: getGetQuotationQueryKey(quotationId) }
   });
+
+  const firmQuery = useQuery<FirmSettings>({
+    queryKey: ["firm-settings"],
+    queryFn: () => apiFetchJson<FirmSettings>("/firm-settings"),
+    retry: false,
+  });
+  const firm = firmQuery.data;
+  const [logoPreviewUrl, setLogoPreviewUrl] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!firm?.logoUrl) { setLogoPreviewUrl(null); return; }
+    let cancelled = false;
+    let url: string | null = null;
+    (async () => {
+      try {
+        const blob = await apiFetchBlob("/firm-settings/logo");
+        url = URL.createObjectURL(blob);
+        if (!cancelled) setLogoPreviewUrl(url);
+      } catch {
+        if (!cancelled) setLogoPreviewUrl(null);
+      }
+    })();
+    return () => {
+      cancelled = true;
+      if (url) URL.revokeObjectURL(url);
+    };
+  }, [firm?.logoUrl]);
 
   const updateMutation = useUpdateQuotation();
   const deleteMutation = useDeleteQuotation();
@@ -83,6 +123,7 @@ export default function QuotationDetail() {
         subItemNo: item.subItemNo || "",
         description: item.description,
         taxCode: item.taxCode,
+        itemCategory: item.itemCategory === "disbursement" ? "disbursement" : (item.section === "fees" ? "fee" : "disbursement"),
         amountExclTax: item.amountExclTax,
         taxRate: item.taxRate || TAX_RATE,
         taxAmount: item.taxAmount,
@@ -143,6 +184,7 @@ export default function QuotationDetail() {
       subItemNo: item.subItemNo,
       description: item.description,
       taxCode: item.taxCode,
+      itemCategory: item.itemCategory,
       amountExclTax: item.amountExclTax,
       taxRate: item.taxRate,
       taxAmount: item.taxAmount,
@@ -216,6 +258,7 @@ export default function QuotationDetail() {
     subItemNo: item.subItemNo || "",
     description: item.description,
     taxCode: item.taxCode,
+    itemCategory: item.itemCategory === "disbursement" ? "disbursement" : (item.section === "fees" ? "fee" : "disbursement"),
     amountExclTax: item.amountExclTax,
     taxRate: item.taxRate || TAX_RATE,
     taxAmount: item.taxAmount,
@@ -266,6 +309,7 @@ export default function QuotationDetail() {
               <th className="text-left px-3 py-2 font-medium text-slate-600 w-10">No.</th>
               <th className="text-left px-3 py-2 font-medium text-slate-600">Description</th>
               <th className="text-center px-3 py-2 font-medium text-slate-600 w-20">Tax Code</th>
+              <th className="text-center px-3 py-2 font-medium text-slate-600 w-36">Category</th>
               <th className="text-right px-3 py-2 font-medium text-slate-600 w-32">Excl. ST (RM)</th>
               <th className="text-right px-3 py-2 font-medium text-slate-600 w-28">ST @ {TAX_RATE}%</th>
               <th className="text-right px-3 py-2 font-medium text-slate-600 w-32">Incl. ST (RM)</th>
@@ -301,6 +345,18 @@ export default function QuotationDetail() {
                       </select>
                     ) : !isHeader ? item.taxCode : ""}
                   </td>
+                  <td className="px-3 py-1.5 text-center text-xs">
+                    {isEditing && !isHeader ? (
+                      <select
+                        value={item.itemCategory}
+                        onChange={(e) => setEditItems((prev) => prev.map((i) => i.id === item.id ? { ...i, itemCategory: e.target.value === "fee" ? "fee" : "disbursement" } : i))}
+                        className="h-7 text-xs border rounded px-2 bg-white"
+                      >
+                        <option value="fee">Fee</option>
+                        <option value="disbursement">Disbursement</option>
+                      </select>
+                    ) : !isHeader ? (item.itemCategory === "fee" ? "Fee" : "Disbursement") : ""}
+                  </td>
                   <td className="px-3 py-1.5 text-right text-xs">
                     {isEditing && !isHeader ? (
                       <Input
@@ -331,7 +387,7 @@ export default function QuotationDetail() {
           </tbody>
           <tfoot>
             <tr className="bg-slate-50 font-medium text-sm">
-              <td colSpan={3} className="px-3 py-2 text-right">Total {sectionLabel}</td>
+              <td colSpan={4} className="px-3 py-2 text-right">Total {sectionLabel}</td>
               <td className="px-3 py-2 text-right">{formatRM(totals.totalExclTax)}</td>
               <td className="px-3 py-2 text-right">{formatRM(totals.totalTax)}</td>
               <td className="px-3 py-2 text-right">{formatRM(totals.totalInclTax)}</td>
@@ -353,13 +409,41 @@ export default function QuotationDetail() {
 
   return (
     <div className="space-y-6">
+      <Card className="print:shadow-none">
+        <CardContent className="pt-6 pb-6">
+          <div className="flex items-start justify-between gap-6">
+            <div className="min-w-0">
+              {logoPreviewUrl ? (
+                <img src={logoPreviewUrl} alt="Firm logo" className="max-h-12 max-w-[200px] object-contain mb-2" />
+              ) : null}
+              <div className="text-lg font-bold text-slate-900">{firm?.name ?? "—"}</div>
+              {firm?.registrationNo ? <div className="text-xs text-slate-500 mt-0.5">Registration No: {firm.registrationNo}</div> : null}
+              {firm?.sstNo || firm?.stNumber ? <div className="text-xs text-slate-500">SST No: {firm?.sstNo ?? firm?.stNumber}</div> : null}
+              {firm?.tinNumber ? <div className="text-xs text-slate-500">TIN: {firm.tinNumber}</div> : null}
+              {firm?.address ? <div className="text-xs text-slate-600 mt-2 whitespace-pre-wrap">{firm.address}</div> : null}
+              {(firm?.phone || firm?.email) ? (
+                <div className="text-xs text-slate-600 mt-1">
+                  {firm?.phone ? `Tel: ${firm.phone}` : ""}
+                  {firm?.phone && firm?.email ? " · " : ""}
+                  {firm?.email ? `Email: ${firm.email}` : ""}
+                </div>
+              ) : null}
+            </div>
+            <div className="text-right">
+              <div className="text-xs text-slate-500">QUOTATION</div>
+              <div className="text-2xl font-bold text-slate-900">{data.referenceNo}</div>
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+
       <div className="flex items-start justify-between gap-3 flex-wrap print:hidden">
         <div className="flex items-center gap-3">
           <Button variant="ghost" size="sm" onClick={() => setLocation("/app/accounting?tab=quotations")}>
             <ArrowLeft className="w-4 h-4" />
           </Button>
           <div>
-            <h1 className="text-2xl font-bold text-slate-900">Quotation {data.referenceNo}</h1>
+            <h1 className="text-2xl font-bold text-slate-900">Quotation</h1>
             <p className="text-sm text-slate-500 mt-1">{data.clientName}</p>
           </div>
           <span className={`ml-3 inline-block px-2 py-0.5 rounded text-xs font-medium capitalize ${statusColors[data.status] || statusColors.draft}`}>

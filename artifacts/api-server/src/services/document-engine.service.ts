@@ -1,8 +1,12 @@
 import PizZip from "pizzip";
 import Docxtemplater from "docxtemplater";
+import ImageModule from "docxtemplater-image-module-free";
 import { PDFDocument, rgb, StandardFonts } from "pdf-lib";
-import { db, casesTable, templatesTable } from "@workspace/db";
+import { db, casesTable, firmsTable, templatesTable } from "@workspace/db";
 import { and, eq, isNull, or } from "drizzle-orm";
+import { SupabaseStorageService } from "../lib/objectStorage.js";
+
+const supabaseStorage = new SupabaseStorageService();
 
 export class DataFetchTimeoutError extends Error {
   constructor() {
@@ -57,6 +61,60 @@ export class DocumentEngineService {
     };
   }
 
+  private static buildFirmVariables(firmData: {
+    name: string;
+    logoUrl: string | null;
+    address: string | null;
+    stNumber: string | null;
+    tinNumber: string | null;
+    registrationNo: string | null;
+    sstNo: string | null;
+    phone: string | null;
+    email: string | null;
+    logoBuffer: Buffer | null;
+  }): Record<string, unknown> {
+    return {
+      firm_name: firmData.name,
+      firm_address: firmData.address ?? "",
+      firm_registration_no: firmData.registrationNo ?? "",
+      firm_sst_no: firmData.sstNo ?? firmData.stNumber ?? "",
+      firm_st_no: firmData.stNumber ?? "",
+      firm_tin_no: firmData.tinNumber ?? "",
+      firm_phone: firmData.phone ?? "",
+      firm_email: firmData.email ?? "",
+      firm_logo: firmData.logoBuffer ?? "",
+      firm_logo_url: firmData.logoUrl ?? "",
+    };
+  }
+
+  private static async loadFirmLogoBuffer(logoUrl: string | null, timeoutMs: number): Promise<Buffer | null> {
+    const url = typeof logoUrl === "string" ? logoUrl.trim() : "";
+    if (!url) return null;
+    try {
+      if (url.startsWith("/objects/")) {
+        supabaseStorage.assertConfigured();
+        const resp = await this.withTimeout(supabaseStorage.fetchPrivateObjectResponse(url, { timeoutMs: 15_000 }), timeoutMs);
+        const ab = await resp.arrayBuffer();
+        return Buffer.from(ab);
+      }
+      if (/^https?:\/\//i.test(url)) {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 15_000);
+        try {
+          const resp = await fetch(url, { method: "GET", signal: controller.signal });
+          if (!resp.ok) return null;
+          const ab = await resp.arrayBuffer();
+          return Buffer.from(ab);
+        } finally {
+          clearTimeout(timer);
+        }
+      }
+      return null;
+    } catch {
+      return null;
+    }
+  }
+
   private static renderDocx(templateBuffer: Buffer, variables: Record<string, unknown>): Buffer {
     const zip = new PizZip(templateBuffer);
     const doc = new Docxtemplater(zip, {
@@ -67,6 +125,14 @@ export class DocumentEngineService {
         return "";
       },
     });
+    const imageModule = new (ImageModule as any)({
+      getImage: (tagValue: unknown) => (Buffer.isBuffer(tagValue) ? tagValue : Buffer.alloc(0)),
+      getSize: (img: unknown) => {
+        if (!Buffer.isBuffer(img) || img.length === 0) return [0, 0];
+        return [160, 60];
+      },
+    });
+    (doc as any).attachModule(imageModule);
     doc.render(variables);
     return doc.getZip().generate({ type: "nodebuffer", compression: "DEFLATE" });
   }
@@ -253,7 +319,28 @@ export class DocumentEngineService {
       throw new Error(`Case with ID ${caseId} not found`);
     }
 
-    const variables = this.buildCaseVariables(caseData);
+    const firmRes = db
+      .select({
+        name: firmsTable.name,
+        logoUrl: firmsTable.logoUrl,
+        address: firmsTable.address,
+        stNumber: firmsTable.stNumber,
+        tinNumber: firmsTable.tinNumber,
+        registrationNo: firmsTable.registrationNo,
+        sstNo: firmsTable.sstNo,
+        phone: firmsTable.phone,
+        email: firmsTable.email,
+      })
+      .from(firmsTable)
+      .where(eq(firmsTable.id, fid))
+      .limit(1);
+    const [firmData] = await this.withTimeout(firmRes, timeoutMs);
+    const logoBuffer = firmData ? await this.loadFirmLogoBuffer(firmData.logoUrl, timeoutMs) : null;
+
+    const variables = {
+      ...this.buildCaseVariables(caseData),
+      ...(firmData ? this.buildFirmVariables({ ...firmData, logoBuffer }) : {}),
+    };
     if (fileType === "docx") {
       return { buffer: this.renderDocx(fileBuffer, variables), fileType: "docx" };
     }
@@ -281,7 +368,27 @@ export class DocumentEngineService {
     }
 
     try {
-      const templateVariables = this.buildCaseVariables(caseData);
+      const [firmData] = await db
+        .select({
+          name: firmsTable.name,
+          logoUrl: firmsTable.logoUrl,
+          address: firmsTable.address,
+          stNumber: firmsTable.stNumber,
+          tinNumber: firmsTable.tinNumber,
+          registrationNo: firmsTable.registrationNo,
+          sstNo: firmsTable.sstNo,
+          phone: firmsTable.phone,
+          email: firmsTable.email,
+        })
+        .from(firmsTable)
+        .where(eq(firmsTable.id, firmId))
+        .limit(1);
+      const logoBuffer = firmData ? await this.loadFirmLogoBuffer(firmData.logoUrl, 15_000) : null;
+
+      const templateVariables = {
+        ...this.buildCaseVariables(caseData),
+        ...(firmData ? this.buildFirmVariables({ ...firmData, logoBuffer }) : {}),
+      };
       return this.renderDocx(templateBuffer, templateVariables);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err ?? "Unknown error");

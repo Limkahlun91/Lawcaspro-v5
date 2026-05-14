@@ -12,6 +12,7 @@ import {
   caseWorkflowDocumentsTable,
   caseLoanStampingItemsTable,
   caseListSavedViewsTable,
+  caseLedgersTable,
   projectsTable, developersTable, clientsTable, usersTable, rolesTable, auditLogsTable,
   permissionsTable,
   sql,
@@ -51,6 +52,15 @@ const GetCaseMessagesParams = z.object({ caseId: z.coerce.number().int().positiv
 const CreateCaseMessageBody = z.object({
   messageText: z.string().trim().min(1).max(2000),
   attachments: z.array(z.record(z.string(), z.unknown())).max(10).optional(),
+});
+
+const GetCaseLedgerParams = z.object({ caseId: z.coerce.number().int().positive() });
+const CreateCaseLedgerBody = z.object({
+  transactionDate: z.string().trim().regex(/^\d{4}-\d{2}-\d{2}$/),
+  entryCategory: z.enum(["office", "client"]),
+  entryType: z.enum(["invoice_billed", "payment_received", "disbursement_paid", "trust_received", "trust_paid"]),
+  description: z.string().trim().min(1).max(2000),
+  amount: z.number().finite(),
 });
 
 async function hasRolePermission(
@@ -5057,6 +5067,119 @@ router.post("/cases/:caseId/messages", requireAuthHandler, requireFirmUserHandle
     messageText: String(created?.messageText ?? ""),
     attachments: created?.attachments ?? [],
     createdAt: toIsoStringSafe(created?.createdAt),
+  });
+}));
+
+router.get("/cases/:caseId/ledger", requireAuthHandler, requireFirmUserHandler, requirePermission("accounting", "read") as RequestHandler, authed(async (req, res) => {
+  const r = req.rlsDb;
+  if (!r) {
+    logger.error({ path: req.path, firmId: req.firmId, userId: req.userId }, "[cases] missing tenant database context");
+    res.status(500).json({ error: "Internal Server Error" });
+    return;
+  }
+  const params = GetCaseLedgerParams.safeParse(req.params);
+  if (!params.success) { res.status(400).json({ error: params.error.message }); return; }
+  const ok = await enforceCaseAccess(r, req, res, params.data.caseId);
+  if (!ok) return;
+
+  const rows = await r
+    .select({
+      id: caseLedgersTable.id,
+      transactionDate: caseLedgersTable.transactionDate,
+      entryCategory: caseLedgersTable.entryCategory,
+      entryType: caseLedgersTable.entryType,
+      description: caseLedgersTable.description,
+      amount: caseLedgersTable.amount,
+      createdAt: caseLedgersTable.createdAt,
+      updatedAt: caseLedgersTable.updatedAt,
+    })
+    .from(caseLedgersTable)
+    .where(and(eq(caseLedgersTable.firmId, req.firmId!), eq(caseLedgersTable.caseId, params.data.caseId)))
+    .orderBy(asc(caseLedgersTable.transactionDate), asc(caseLedgersTable.createdAt));
+
+  const sumByType = (t: string) => rows.reduce((acc, rr) => acc + (String(rr.entryType) === t ? Number(rr.amount ?? 0) : 0), 0);
+  const totalBilled = sumByType("invoice_billed");
+  const totalReceived = sumByType("payment_received");
+  const outstandingBalance = totalBilled - totalReceived;
+  const trustBalance = sumByType("trust_received") - sumByType("trust_paid");
+
+  res.json({
+    summary: {
+      total_billed: totalBilled,
+      total_received: totalReceived,
+      outstanding_balance: outstandingBalance,
+      trust_balance: trustBalance,
+    },
+    data: rows.map((x) => ({
+      id: String(x.id),
+      transactionDate: String(x.transactionDate),
+      entryCategory: String(x.entryCategory),
+      entryType: String(x.entryType),
+      description: String(x.description),
+      amount: Number(x.amount ?? 0),
+      createdAt: toIsoStringSafe(x.createdAt),
+      updatedAt: toIsoStringSafe(x.updatedAt),
+    })),
+  });
+}));
+
+router.post("/cases/:caseId/ledger", requireAuthHandler, requireFirmUserHandler, requirePermission("accounting", "write") as RequestHandler, authed(async (req, res) => {
+  const r = req.rlsDb;
+  if (!r) {
+    logger.error({ path: req.path, firmId: req.firmId, userId: req.userId }, "[cases] missing tenant database context");
+    res.status(500).json({ error: "Internal Server Error" });
+    return;
+  }
+  const params = GetCaseLedgerParams.safeParse(req.params);
+  if (!params.success) { res.status(400).json({ error: params.error.message }); return; }
+  const parsed = CreateCaseLedgerBody.safeParse(req.body);
+  if (!parsed.success) { res.status(422).json({ error: parsed.error.message }); return; }
+  const ok = await enforceCaseAccess(r, req, res, params.data.caseId);
+  if (!ok) return;
+
+  const [created] = await r
+    .insert(caseLedgersTable)
+    .values({
+      firmId: req.firmId!,
+      caseId: params.data.caseId,
+      transactionDate: parsed.data.transactionDate,
+      entryCategory: parsed.data.entryCategory,
+      entryType: parsed.data.entryType,
+      description: parsed.data.description,
+      amount: String(parsed.data.amount),
+    } as any)
+    .returning({
+      id: caseLedgersTable.id,
+      transactionDate: caseLedgersTable.transactionDate,
+      entryCategory: caseLedgersTable.entryCategory,
+      entryType: caseLedgersTable.entryType,
+      description: caseLedgersTable.description,
+      amount: caseLedgersTable.amount,
+      createdAt: caseLedgersTable.createdAt,
+      updatedAt: caseLedgersTable.updatedAt,
+    });
+
+  await writeAuditLog({
+    firmId: req.firmId!,
+    actorId: req.userId!,
+    actorType: req.userType ?? "firm_user",
+    action: "case_ledger.create",
+    entityType: "case",
+    entityId: params.data.caseId,
+    detail: `${parsed.data.entryCategory}:${parsed.data.entryType} amount=${parsed.data.amount}`,
+    ipAddress: req.ip,
+    userAgent: req.headers["user-agent"],
+  }, { db: req.rlsDb });
+
+  res.status(201).json({
+    id: String(created?.id ?? ""),
+    transactionDate: String(created?.transactionDate ?? parsed.data.transactionDate),
+    entryCategory: String(created?.entryCategory ?? parsed.data.entryCategory),
+    entryType: String(created?.entryType ?? parsed.data.entryType),
+    description: String(created?.description ?? parsed.data.description),
+    amount: Number(created?.amount ?? parsed.data.amount),
+    createdAt: toIsoStringSafe(created?.createdAt),
+    updatedAt: toIsoStringSafe(created?.updatedAt),
   });
 }));
 

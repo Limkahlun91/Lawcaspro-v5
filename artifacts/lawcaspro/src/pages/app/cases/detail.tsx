@@ -9,7 +9,7 @@ import {
 } from "@workspace/api-client-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { ArrowLeft, CheckCircle2, Clock, User, Building2, MapPin, Tag, Receipt, Printer, Upload, Download, Trash2, Plus, X, MoreHorizontal, Share2 } from "lucide-react";
+import { ArrowLeft, CheckCircle2, Clock, User, Building2, MapPin, Tag, Receipt, Printer, Upload, Download, Trash2, Plus, X, MoreHorizontal, Share2, AlertTriangle } from "lucide-react";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useToast } from "@/hooks/use-toast";
@@ -73,9 +73,224 @@ type LoanStampingSaveItem = Pick<
   "id" | "itemKey" | "customName" | "datedOn" | "stampedOn" | "sortOrder"
 >;
 
+type CaseLedgerEntry = {
+  id: string;
+  transactionDate: string;
+  entryCategory: "office" | "client";
+  entryType: "invoice_billed" | "payment_received" | "disbursement_paid" | "trust_received" | "trust_paid";
+  description: string;
+  amount: number;
+  createdAt?: string | null;
+};
+
+type CaseLedgerResponse = {
+  summary: {
+    total_billed: number;
+    total_received: number;
+    outstanding_balance: number;
+    trust_balance: number;
+  };
+  data: CaseLedgerEntry[];
+};
+
 function safeFileNamePart(name: string): string {
   const base = name.trim().replace(/\s+/g, "_");
   return base.replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 80) || "file";
+}
+
+function fmtMoney(val: unknown) {
+  return `RM ${Number(val ?? 0).toLocaleString("en-MY", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+}
+
+function CaseLedgerTab({ caseId }: { caseId: number }) {
+  const { toast } = useToast();
+  const qc = useQueryClient();
+  const [open, setOpen] = useState(false);
+  const [transactionDate, setTransactionDate] = useState<string | null>(null);
+  const [entryCategory, setEntryCategory] = useState<"office" | "client">("office");
+  const [entryType, setEntryType] = useState<CaseLedgerEntry["entryType"]>("invoice_billed");
+  const [description, setDescription] = useState("");
+  const [amount, setAmount] = useState("");
+
+  const ledgerQuery = useQuery<CaseLedgerResponse>({
+    queryKey: ["case-ledger", caseId],
+    queryFn: ({ signal }) => apiFetchJson(`/cases/${caseId}/ledger`, { signal }),
+    enabled: Number.isFinite(caseId) && caseId > 0,
+    retry: false,
+  });
+
+  const entries = Array.isArray(ledgerQuery.data?.data) ? ledgerQuery.data!.data : [];
+  const summary = ledgerQuery.data?.summary ?? { total_billed: 0, total_received: 0, outstanding_balance: 0, trust_balance: 0 };
+
+  const createMutation = useMutation({
+    mutationFn: async () => {
+      const n = Number(String(amount).replace(/,/g, "").trim());
+      if (!Number.isFinite(n)) throw new Error("INVALID_AMOUNT");
+      if (!transactionDate) throw new Error("MISSING_DATE");
+      return await apiFetchJson(`/cases/${caseId}/ledger`, {
+        method: "POST",
+        body: JSON.stringify({
+          transactionDate,
+          entryCategory,
+          entryType,
+          description: description.trim(),
+          amount: n,
+        }),
+      });
+    },
+    onSuccess: async () => {
+      toast({ title: "Added" });
+      setOpen(false);
+      setTransactionDate(null);
+      setEntryCategory("office");
+      setEntryType("invoice_billed");
+      setDescription("");
+      setAmount("");
+      await qc.invalidateQueries({ queryKey: ["case-ledger", caseId] });
+    },
+    onError: (e) => toastError(toast, e, "Add failed"),
+  });
+
+  return (
+    <div className="space-y-6">
+      <div className="flex items-start justify-between gap-3 flex-wrap">
+        <div>
+          <h3 className="text-lg font-semibold text-slate-900">Case Ledger</h3>
+          <p className="text-sm text-slate-500 mt-1">Track billed, payments, and client trust balance for this case.</p>
+        </div>
+        <Button onClick={() => setOpen(true)} disabled={createMutation.isPending}>
+          Add Transaction
+        </Button>
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+        <Card>
+          <CardContent className="pt-6">
+            <div className="text-xs text-slate-500">Total Billed</div>
+            <div className="text-lg font-bold text-slate-900">{fmtMoney(summary.total_billed)}</div>
+          </CardContent>
+        </Card>
+        <Card>
+          <CardContent className="pt-6">
+            <div className="text-xs text-slate-500">Amount Paid</div>
+            <div className="text-lg font-bold text-slate-900">{fmtMoney(summary.total_received)}</div>
+          </CardContent>
+        </Card>
+        <Card>
+          <CardContent className="pt-6">
+            <div className="text-xs text-slate-500">Outstanding</div>
+            <div className="flex items-center gap-2">
+              {summary.outstanding_balance > 0 ? <AlertTriangle className="w-4 h-4 text-red-500" /> : null}
+              <div className={cn("text-lg font-bold", summary.outstanding_balance > 0 ? "text-red-600" : "text-slate-900")}>
+                {fmtMoney(summary.outstanding_balance)}
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+        <Card>
+          <CardContent className="pt-6">
+            <div className="text-xs text-slate-500">Client Trust Balance</div>
+            <div className="text-lg font-bold text-slate-900">{fmtMoney(summary.trust_balance)}</div>
+          </CardContent>
+        </Card>
+      </div>
+
+      <Dialog open={open} onOpenChange={setOpen}>
+        <DialogContent className="max-w-lg">
+          <DialogHeader>
+            <DialogTitle>Add Ledger Transaction</DialogTitle>
+            <DialogDescription className="sr-only">Add a manual ledger entry.</DialogDescription>
+          </DialogHeader>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div className="space-y-1.5">
+              <Label>Date</Label>
+              <DateOnlyInput value={transactionDate} onChange={setTransactionDate} />
+            </div>
+            <div className="space-y-1.5">
+              <Label>Category</Label>
+              <Select value={entryCategory} onValueChange={(v) => setEntryCategory(v as any)}>
+                <SelectTrigger className="h-9">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="office">office</SelectItem>
+                  <SelectItem value="client">client</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-1.5 md:col-span-2">
+              <Label>Type</Label>
+              <Select value={entryType} onValueChange={(v) => setEntryType(v as any)}>
+                <SelectTrigger className="h-9">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="invoice_billed">invoice_billed</SelectItem>
+                  <SelectItem value="payment_received">payment_received</SelectItem>
+                  <SelectItem value="disbursement_paid">disbursement_paid</SelectItem>
+                  <SelectItem value="trust_received">trust_received</SelectItem>
+                  <SelectItem value="trust_paid">trust_paid</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-1.5 md:col-span-2">
+              <Label>Description</Label>
+              <Textarea value={description} onChange={(e) => setDescription(e.target.value)} className="min-h-[90px]" />
+            </div>
+            <div className="space-y-1.5 md:col-span-2">
+              <Label>Amount</Label>
+              <Input value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="0.00" />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setOpen(false)} disabled={createMutation.isPending}>Cancel</Button>
+            <Button onClick={() => createMutation.mutate()} disabled={createMutation.isPending || !transactionDate || !description.trim() || !amount.trim()}>
+              {createMutation.isPending ? "Saving..." : "Add"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Card>
+        <CardHeader className="pb-3">
+          <CardTitle className="text-base">Entries</CardTitle>
+        </CardHeader>
+        <CardContent>
+          {ledgerQuery.isError ? <div className="text-sm text-red-600">Failed to load ledger.</div> : null}
+          {ledgerQuery.isLoading ? (
+            <div className="text-sm text-slate-500 py-6 text-center">Loading...</div>
+          ) : entries.length === 0 ? (
+            <div className="text-sm text-slate-500 py-6 text-center">No ledger entries yet.</div>
+          ) : (
+            <div className="overflow-x-auto rounded-md border border-slate-200 bg-white">
+              <table className="w-full text-sm">
+                <thead className="bg-slate-50 border-b border-slate-200">
+                  <tr className="text-left text-slate-600">
+                    <th className="py-3 px-3 font-medium">Date</th>
+                    <th className="py-3 px-3 font-medium">Category</th>
+                    <th className="py-3 px-3 font-medium">Type</th>
+                    <th className="py-3 px-3 font-medium">Description</th>
+                    <th className="py-3 px-3 font-medium text-right">Amount</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {entries.map((e) => (
+                    <tr key={e.id} className="border-b border-slate-100">
+                      <td className="py-2 px-3 whitespace-nowrap">{e.transactionDate}</td>
+                      <td className="py-2 px-3">{e.entryCategory}</td>
+                      <td className="py-2 px-3 font-mono text-xs">{e.entryType}</td>
+                      <td className="py-2 px-3">{e.description}</td>
+                      <td className="py-2 px-3 text-right font-mono text-xs">{fmtMoney(e.amount)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </CardContent>
+      </Card>
+    </div>
+  );
 }
 
 export default function CaseDetail() {
@@ -1442,6 +1657,7 @@ export default function CaseDetail() {
           <TabsTrigger value="workflow">Workflow</TabsTrigger>
           <TabsTrigger value="documents">Documents</TabsTrigger>
           <TabsTrigger value="billing">Billing</TabsTrigger>
+          <TabsTrigger value="ledger">Ledger</TabsTrigger>
           <TabsTrigger value="communications">Comms</TabsTrigger>
           {canAccessClientInteraction && <TabsTrigger value="client-interaction">Client Interaction</TabsTrigger>}
           <TabsTrigger value="tasks">Tasks</TabsTrigger>
@@ -2173,6 +2389,10 @@ export default function CaseDetail() {
 
         <TabsContent value="billing">
           <CaseBillingTab caseId={caseId} />
+        </TabsContent>
+
+        <TabsContent value="ledger" className="space-y-6">
+          <CaseLedgerTab caseId={caseId} />
         </TabsContent>
 
         <TabsContent value="communications">

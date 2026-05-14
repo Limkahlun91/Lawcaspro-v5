@@ -1,5 +1,10 @@
 import express, { type Response, type Router as ExpressRouter } from "express";
 import { db, sql } from "@workspace/db";
+import multer from "multer";
+import { PDFParse } from "pdf-parse";
+import OpenAI from "openai";
+import * as XLSX from "xlsx";
+import { z } from "zod";
 import { requireAuth, requireFirmUser, requirePermission, type AuthRequest, writeAuditLog } from "../lib/auth.js";
 
 type SqlChunk = ReturnType<typeof sql>;
@@ -14,11 +19,126 @@ type RouterInternalLike = {
 const expressRouter = express.Router();
 const router = expressRouter as unknown as RouterInternalLike;
 
+function safeFilenameAscii(filename: string): string {
+  const clean = String(filename || "export").replace(/[^a-zA-Z0-9._-]+/g, "_");
+  return clean.length ? clean : "export";
+}
+
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 25 * 1024 * 1024 },
+  fileFilter: (_req, file, cb) => {
+    if (file.mimetype !== "application/pdf") {
+      const err = new Error("UNSUPPORTED_FILE_TYPE");
+      (err as any).code = "UNSUPPORTED_FILE_TYPE";
+      cb(err);
+      return;
+    }
+    cb(null, true);
+  },
+});
+
 async function queryRows(query: ReturnType<typeof sql>): Promise<Record<string, unknown>[]> {
   const result = await db.execute(query);
   if (Array.isArray(result)) return result as Record<string, unknown>[];
   if ("rows" in result) return (result as { rows: Record<string, unknown>[] }).rows;
   return [];
+}
+
+async function queryRowsFrom(
+  executor: { execute: (query: ReturnType<typeof sql>) => Promise<unknown> },
+  query: ReturnType<typeof sql>,
+): Promise<Record<string, unknown>[]> {
+  const result = await executor.execute(query);
+  if (Array.isArray(result)) return result as Record<string, unknown>[];
+  if (result && typeof result === "object" && "rows" in result) return (result as { rows: Record<string, unknown>[] }).rows;
+  return [];
+}
+
+function toNumber(v: unknown): number | null {
+  if (v === null || v === undefined) return null;
+  if (typeof v === "number") return Number.isFinite(v) ? v : null;
+  const s = String(v).replace(/,/g, "").trim();
+  if (!s) return null;
+  const n = Number(s);
+  return Number.isFinite(n) ? n : null;
+}
+
+const AiStatementTx = z.object({
+  transaction_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  description: z.string().trim().min(1).max(2000),
+  reference_no: z.preprocess((v) => {
+    if (v === null || v === undefined) return null;
+    const s = String(v).trim();
+    return s ? s : null;
+  }, z.string().max(200).nullable()),
+  withdrawal: z.preprocess((v) => {
+    if (v === null || v === undefined || v === "") return 0;
+    if (typeof v === "number") return v;
+    const s = String(v).replace(/,/g, "").trim();
+    const n = Number(s);
+    return Number.isFinite(n) ? n : v;
+  }, z.number().finite().nonnegative()),
+  deposit: z.preprocess((v) => {
+    if (v === null || v === undefined || v === "") return 0;
+    if (typeof v === "number") return v;
+    const s = String(v).replace(/,/g, "").trim();
+    const n = Number(s);
+    return Number.isFinite(n) ? n : v;
+  }, z.number().finite().nonnegative()),
+  balance: z.preprocess((v) => {
+    if (v === null || v === undefined || v === "") return 0;
+    if (typeof v === "number") return v;
+    const s = String(v).replace(/,/g, "").trim();
+    const n = Number(s);
+    return Number.isFinite(n) ? n : v;
+  }, z.number().finite().nonnegative()),
+});
+const AiStatementTxList = z.array(AiStatementTx);
+
+const AI_BANK_STATEMENT_SYSTEM_PROMPT = [
+  "你是一個專業的馬來西亞銀行會計。請分析以下銀行對帳單的文本，精準提取每一筆交易明細，並以 JSON 陣列回傳。",
+  "【重要排版特性與規則】：",
+  "1. 這份對帳單來自 RHB, CIMB, Maybank, Public Bank 或 Alliance Bank。",
+  "2. 忽略頁首、頁尾、頁碼。",
+  "3. 嚴格忽略『Brought Forward (B/F)』與『Carried Forward (C/F)』的餘額行，不要把它們當作交易。",
+  "4. 將馬來西亞常見的日期格式 (如 DD/MM/YYYY 或 DD-MMM-YY) 統一轉換為 YYYY-MM-DD。",
+  "5. 金額欄位可能包含千分位逗號 (如 1,500.00)，請轉換為純數字浮點數 (1500.00)。無金額則補 0。",
+  "6. 將多行的 Description 組合為單一字串。嘗試從 Description 中分離出支票號碼 (Cheque No) 或參考號碼 (Ref) 填入 reference_no，若無則填 null。",
+  "7. 欄位為：transaction_date, description, reference_no, withdrawal, deposit, balance。",
+].join("\n");
+
+function extractJsonArray(text: string): string | null {
+  const first = text.indexOf("[");
+  const last = text.lastIndexOf("]");
+  if (first < 0 || last < 0 || last <= first) return null;
+  return text.slice(first, last + 1);
+}
+
+function isCarryForwardLine(description: string): boolean {
+  const s = String(description || "").toLowerCase();
+  if (!s) return false;
+  if (s.includes("brought forward") || s.includes("carried forward")) return true;
+  if (/\b(b\/f|c\/f)\b/.test(s)) return true;
+  return false;
+}
+
+function parseNumeric12_2(v: unknown): number | null {
+  if (v === null || v === undefined) return null;
+  const n = typeof v === "number" ? v : typeof v === "string" ? Number(v.replace(/,/g, "").trim()) : NaN;
+  return Number.isFinite(n) ? Math.round(n * 100) / 100 : null;
+}
+
+function parseDateYmd(v: unknown): string | null {
+  if (v === null || v === undefined) return null;
+  const s = typeof v === "string" ? v.trim() : "";
+  if (!s) return null;
+  return /^\d{4}-\d{2}-\d{2}$/.test(s) ? s : null;
+}
+
+function parseIdInt(v: unknown): number | null {
+  const n = typeof v === "number" ? v : typeof v === "string" ? parseInt(v, 10) : NaN;
+  return Number.isFinite(n) && n > 0 ? Math.trunc(n) : null;
 }
 
 const CATEGORIES = ["legal_fee", "disbursement", "stamp_duty", "professional_fee", "other"] as const;
@@ -220,6 +340,671 @@ router.get("/accounting/summary", requireAuth, requireFirmUser, requirePermissio
     topCases,
     monthly: monthly.reverse(),
   });
+});
+
+router.get("/accounting/bank-accounts", requireAuth, requireFirmUser, requirePermission("accounting", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
+  const rows = await queryRows(sql`
+    SELECT
+      id,
+      bank_name,
+      account_name,
+      account_no,
+      account_type,
+      autocount_gl_code,
+      opening_balance,
+      opening_balance_date,
+      is_default,
+      created_at,
+      updated_at
+    FROM firm_bank_accounts
+    WHERE firm_id = ${req.firmId!}
+    ORDER BY is_default DESC, id DESC
+  `);
+  res.json({ data: rows });
+});
+
+router.post("/accounting/bank-accounts", requireAuth, requireFirmUser, requirePermission("accounting", "write"), async (req: AuthRequest, res: Response): Promise<void> => {
+  const body = (req.body && typeof req.body === "object") ? (req.body as Record<string, unknown>) : {};
+  const bankName = typeof body.bankName === "string" ? body.bankName.trim() : "";
+  const accountName = typeof body.accountName === "string" ? body.accountName.trim() : "";
+  const accountNo = typeof body.accountNo === "string" ? body.accountNo.trim() : "";
+  const accountType = typeof body.accountType === "string" ? body.accountType.trim() : "office";
+  const autocountGlCode = typeof body.autocountGlCode === "string" ? body.autocountGlCode.trim() : "";
+  const openingBalance = parseNumeric12_2(body.openingBalance) ?? 0;
+  const openingBalanceDate = parseDateYmd(body.openingBalanceDate);
+  const isDefault = Boolean(body.isDefault ?? false);
+
+  if (!bankName || !accountNo) { res.status(422).json({ error: "bankName and accountNo are required" }); return; }
+  if (openingBalanceDate === null) { res.status(422).json({ error: "openingBalanceDate is required (YYYY-MM-DD)" }); return; }
+
+  const rows = await queryRows(sql`
+    INSERT INTO firm_bank_accounts
+      (firm_id, bank_name, account_name, account_no, account_type, autocount_gl_code, opening_balance, opening_balance_date, is_default, created_at, updated_at)
+    VALUES
+      (${req.firmId!}, ${bankName}, ${accountName || null}, ${accountNo}, ${accountType}, ${autocountGlCode || null}, ${openingBalance}, ${openingBalanceDate}, ${isDefault}, now(), now())
+    RETURNING *
+  `);
+  const created = rows[0];
+  res.status(201).json(created);
+  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "accounting.bank_accounts.create", entityType: "firm_bank_account", detail: `bank=${bankName} accountNo=${accountNo}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+});
+
+router.patch("/accounting/bank-accounts/:id", requireAuth, requireFirmUser, requirePermission("accounting", "write"), async (req: AuthRequest, res: Response): Promise<void> => {
+  const id = parseIdInt((req.params as any).id);
+  if (!id) { res.status(400).json({ error: "Invalid id" }); return; }
+  const body = (req.body && typeof req.body === "object") ? (req.body as Record<string, unknown>) : {};
+  const patch: SqlChunk[] = [];
+
+  if (Object.prototype.hasOwnProperty.call(body, "bankName")) {
+    const v = typeof body.bankName === "string" ? body.bankName.trim() : "";
+    if (!v) { res.status(422).json({ error: "bankName cannot be empty" }); return; }
+    patch.push(sql`bank_name = ${v}`);
+  }
+  if (Object.prototype.hasOwnProperty.call(body, "accountName")) {
+    const v = typeof body.accountName === "string" ? body.accountName.trim() : "";
+    patch.push(sql`account_name = ${v || null}`);
+  }
+  if (Object.prototype.hasOwnProperty.call(body, "accountNo")) {
+    const v = typeof body.accountNo === "string" ? body.accountNo.trim() : "";
+    if (!v) { res.status(422).json({ error: "accountNo cannot be empty" }); return; }
+    patch.push(sql`account_no = ${v}`);
+  }
+  if (Object.prototype.hasOwnProperty.call(body, "accountType")) {
+    const v = typeof body.accountType === "string" ? body.accountType.trim() : "";
+    patch.push(sql`account_type = ${v || "office"}`);
+  }
+  if (Object.prototype.hasOwnProperty.call(body, "autocountGlCode")) {
+    const v = typeof body.autocountGlCode === "string" ? body.autocountGlCode.trim() : "";
+    patch.push(sql`autocount_gl_code = ${v || null}`);
+  }
+  if (Object.prototype.hasOwnProperty.call(body, "openingBalance")) {
+    const v = parseNumeric12_2(body.openingBalance);
+    if (v === null) { res.status(422).json({ error: "openingBalance invalid" }); return; }
+    patch.push(sql`opening_balance = ${v}`);
+  }
+  if (Object.prototype.hasOwnProperty.call(body, "openingBalanceDate")) {
+    const v = parseDateYmd(body.openingBalanceDate);
+    if (!v) { res.status(422).json({ error: "openingBalanceDate invalid (YYYY-MM-DD)" }); return; }
+    patch.push(sql`opening_balance_date = ${v}`);
+  }
+  if (Object.prototype.hasOwnProperty.call(body, "isDefault")) {
+    patch.push(sql`is_default = ${Boolean(body.isDefault)}`);
+  }
+
+  if (patch.length === 0) { res.status(400).json({ error: "No changes" }); return; }
+  patch.push(sql`updated_at = now()`);
+
+  const rows = await queryRows(sql`
+    UPDATE firm_bank_accounts
+    SET ${sql.join(patch, sql`, `)}
+    WHERE firm_id = ${req.firmId!} AND id = ${id}
+    RETURNING *
+  `);
+  const updated = rows[0];
+  if (!updated) { res.status(404).json({ error: "Not found" }); return; }
+  res.json(updated);
+  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "accounting.bank_accounts.update", entityType: "firm_bank_account", detail: `id=${id}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+});
+
+router.delete("/accounting/bank-accounts/:id", requireAuth, requireFirmUser, requirePermission("accounting", "write"), async (req: AuthRequest, res: Response): Promise<void> => {
+  const id = parseIdInt((req.params as any).id);
+  if (!id) { res.status(400).json({ error: "Invalid id" }); return; }
+  const rows = await queryRows(sql`
+    DELETE FROM firm_bank_accounts
+    WHERE firm_id = ${req.firmId!} AND id = ${id}
+    RETURNING id
+  `);
+  if (!rows[0]) { res.status(404).json({ error: "Not found" }); return; }
+  res.sendStatus(204);
+  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "accounting.bank_accounts.delete", entityType: "firm_bank_account", detail: `id=${id}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+});
+
+router.post(
+  "/accounting/bank-statements/parse",
+  requireAuth,
+  requireFirmUser,
+  requirePermission("accounting", "write"),
+  upload.single("file"),
+  async (req: AuthRequest, res: Response): Promise<void> => {
+    const file = (req as any).file as { buffer?: Buffer; originalname?: string; mimetype?: string } | undefined;
+    if (!file?.buffer) {
+      res.status(400).json({ error: "Missing file" });
+      return;
+    }
+    const bankAccountId = parseIdInt((req.body as any)?.bankAccountId);
+    if (!bankAccountId) { res.status(422).json({ error: "bankAccountId is required" }); return; }
+    const acct = await queryRows(sql`SELECT id FROM firm_bank_accounts WHERE firm_id = ${req.firmId!} AND id = ${bankAccountId} LIMIT 1`);
+    if (!acct[0]) { res.status(404).json({ error: "Bank account not found" }); return; }
+
+    let rawText = "";
+    try {
+      const parser = new PDFParse({ data: file.buffer });
+      const parsed = await parser.getText();
+      rawText = String(parsed?.text ?? "").trim();
+      await parser.destroy().catch(() => undefined);
+    } catch {
+      res.status(400).json({ error: "無法提取文字，請確保上傳的是非加密且文字可選取的 PDF。" });
+      return;
+    }
+
+    if (rawText.length < 30) {
+      res.status(400).json({ error: "無法提取文字，請確保上傳的是非加密且文字可選取的 PDF。" });
+      return;
+    }
+
+    const apiKey = process.env.OPENAI_API_KEY;
+    if (!apiKey) {
+      res.status(500).json({ error: "OPENAI_API_KEY is not configured" });
+      return;
+    }
+
+    const model = String(process.env.OPENAI_MODEL || "gpt-4o-mini");
+    const client = new OpenAI({ apiKey });
+
+    const prompt = [
+      "只輸出 JSON 陣列，不要加上任何額外文字或 markdown。",
+      "",
+      "Bank Statement Text:",
+      rawText.slice(0, 120_000),
+    ].join("\n");
+
+    let aiText = "";
+    try {
+      const completion = await client.chat.completions.create({
+        model,
+        temperature: 0,
+        messages: [
+          { role: "system", content: AI_BANK_STATEMENT_SYSTEM_PROMPT },
+          { role: "user", content: prompt },
+        ],
+      });
+      aiText = String(completion.choices?.[0]?.message?.content ?? "").trim();
+    } catch {
+      res.status(500).json({ error: "AI statement parsing failed" });
+      return;
+    }
+
+    let parsedTx: unknown;
+    try {
+      const jsonArrayText = extractJsonArray(aiText) ?? aiText;
+      parsedTx = JSON.parse(jsonArrayText);
+    } catch {
+      res.status(500).json({ error: "AI output is not valid JSON" });
+      return;
+    }
+
+    const txList = AiStatementTxList.safeParse(parsedTx);
+    if (!txList.success) {
+      res.status(500).json({ error: "AI output schema validation failed" });
+      return;
+    }
+
+    const items = txList.data.slice(0, 5000);
+    if (items.length === 0) {
+      res.status(422).json({ error: "No transactions found from statement" });
+      return;
+    }
+
+    const values: SqlChunk[] = [];
+    for (const t of items) {
+      const d = parseDateYmd(t.transaction_date);
+      if (!d) continue;
+      if (isCarryForwardLine(t.description)) continue;
+      const withdrawal = t.withdrawal > 0 ? Math.round(t.withdrawal * 100) / 100 : null;
+      const deposit = t.deposit > 0 ? Math.round(t.deposit * 100) / 100 : null;
+      const balance = t.balance > 0 ? Math.round(t.balance * 100) / 100 : null;
+      const refNo = t.reference_no && t.reference_no.trim() ? t.reference_no.trim() : null;
+
+      values.push(sql`(${req.firmId!}, ${bankAccountId}, ${d}, ${t.description}, ${refNo}, ${withdrawal}, ${deposit}, ${balance}, false)`);
+    }
+
+    if (values.length === 0) {
+      res.status(422).json({ error: "No valid transactions found after validation" });
+      return;
+    }
+
+    let inserted = 0;
+    try {
+      const rows = await queryRows(sql`
+        INSERT INTO bank_transactions (firm_id, bank_account_id, transaction_date, description, reference_no, withdrawal, deposit, balance, is_exported_to_autocount)
+        VALUES ${sql.join(values, sql`, `)}
+        RETURNING id
+      `);
+      inserted = rows.length;
+    } catch {
+      res.status(500).json({ error: "Failed to save parsed transactions" });
+      return;
+    }
+
+    res.status(201).json({ inserted });
+    await writeAuditLog({
+      firmId: req.firmId,
+      actorId: req.userId,
+      actorType: req.userType,
+      action: "accounting.bank_statements.parse.ai",
+      entityType: "bank_transaction",
+      detail: `file=${String(file.originalname ?? "")} inserted=${inserted}`,
+      ipAddress: req.ip,
+      userAgent: req.headers["user-agent"],
+    });
+  }
+);
+
+router.get("/accounting/bank-transactions", requireAuth, requireFirmUser, requirePermission("accounting", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
+  const firmId = req.firmId!;
+  const bankAccountId = parseIdInt((req.query as any)?.bankAccountId);
+  if (!bankAccountId) { res.status(422).json({ error: "bankAccountId is required" }); return; }
+  const acct = await queryRows(sql`SELECT id FROM firm_bank_accounts WHERE firm_id = ${firmId} AND id = ${bankAccountId} LIMIT 1`);
+  if (!acct[0]) { res.status(404).json({ error: "Bank account not found" }); return; }
+
+  const rows = await queryRows(sql`
+    SELECT
+      id,
+      bank_account_id,
+      case_id,
+      transaction_date,
+      description,
+      reference_no,
+      withdrawal,
+      deposit,
+      balance,
+      is_exported_to_autocount,
+      created_at,
+      updated_at
+    FROM bank_transactions
+    WHERE firm_id = ${firmId}
+      AND bank_account_id = ${bankAccountId}
+    ORDER BY transaction_date DESC, created_at DESC
+    LIMIT 2000
+  `);
+
+  const boundCaseIds = Array.from(new Set(
+    rows
+      .map((r: any) => parseIdInt(r.case_id))
+      .filter((v): v is number => typeof v === "number" && Number.isFinite(v) && v > 0),
+  ));
+
+  const caseInfoRows = boundCaseIds.length
+    ? await queryRows(sql`
+        SELECT
+          c.id,
+          c.reference_no,
+          COALESCE(cl.name, '') as client_name
+        FROM cases c
+        LEFT JOIN case_purchasers cp ON cp.case_id = c.id AND cp.role = 'main'
+        LEFT JOIN clients cl ON cl.id = cp.client_id AND cl.firm_id = ${firmId}
+        WHERE c.firm_id = ${firmId}
+          AND c.id IN (${sql.join(boundCaseIds.map((id) => sql`${id}`), sql`, `)})
+          AND c.deleted_at IS NULL
+      `)
+    : [];
+
+  const caseInfoMap = new Map<number, { case_id: number; title: string }>();
+  for (const r of caseInfoRows as any[]) {
+    const id = parseIdInt(r.id);
+    if (!id) continue;
+    const ref = String((r as any).reference_no ?? "");
+    const clientName = String((r as any).client_name ?? "");
+    const title = clientName ? `${ref} • ${clientName}` : ref;
+    caseInfoMap.set(id, { case_id: id, title });
+  }
+
+  const hasCandidates = rows.some((r: any) => !parseIdInt(r.case_id) && (toNumber(r.deposit) ?? 0) > 0);
+  let candidates: Array<{ case_id: number; title: string; client_name: string }> = [];
+  let outstandingMap = new Map<number, number>();
+
+  if (hasCandidates) {
+    const candidateRows = await queryRows(sql`
+      SELECT
+        c.id,
+        c.reference_no,
+        COALESCE(cl.name, '') as client_name
+      FROM cases c
+      LEFT JOIN case_purchasers cp ON cp.case_id = c.id AND cp.role = 'main'
+      LEFT JOIN clients cl ON cl.id = cp.client_id AND cl.firm_id = ${firmId}
+      WHERE c.firm_id = ${firmId}
+        AND c.deleted_at IS NULL
+      ORDER BY c.updated_at DESC
+      LIMIT 200
+    `);
+
+    candidates = (candidateRows as any[])
+      .map((r) => {
+        const id = parseIdInt(r.id);
+        if (!id) return null;
+        const ref = String((r as any).reference_no ?? "");
+        const clientName = String((r as any).client_name ?? "");
+        const title = clientName ? `${ref} • ${clientName}` : ref;
+        return { case_id: id, title, client_name: clientName };
+      })
+      .filter(Boolean) as Array<{ case_id: number; title: string; client_name: string }>;
+
+    const candidateIds = candidates.map((c) => c.case_id);
+    if (candidateIds.length) {
+      const outstandingRows = await queryRows(sql`
+        SELECT
+          case_id,
+          SUM(amount_due) as outstanding
+        FROM invoices
+        WHERE firm_id = ${firmId}
+          AND deleted_at IS NULL
+          AND case_id IN (${sql.join(candidateIds.map((id) => sql`${id}`), sql`, `)})
+        GROUP BY case_id
+      `);
+
+      for (const r of outstandingRows as any[]) {
+        const id = parseIdInt(r.case_id);
+        if (!id) continue;
+        const out = toNumber(r.outstanding);
+        if (out == null) continue;
+        outstandingMap.set(id, Math.round(out * 100) / 100);
+      }
+    }
+  }
+
+  const data = (rows as any[]).map((r) => {
+    const caseId = parseIdInt(r.case_id);
+    const deposit = toNumber(r.deposit) ?? 0;
+    const descLower = String(r.description ?? "").toLowerCase();
+
+    const boundCase = caseId ? (caseInfoMap.get(caseId) ?? { case_id: caseId, title: `Case #${caseId}` }) : null;
+    let recommendedCase: { case_id: number; title: string; match_reason: string } | null = null;
+
+    if (!caseId && deposit > 0 && candidates.length) {
+      const amountMatch = (() => {
+        for (const c of candidates) {
+          const outstanding = outstandingMap.get(c.case_id);
+          if (outstanding == null) continue;
+          if (Math.abs(outstanding - deposit) <= 0.005) return { c, outstanding };
+        }
+        return null;
+      })();
+
+      if (amountMatch) {
+        recommendedCase = {
+          case_id: amountMatch.c.case_id,
+          title: amountMatch.c.title,
+          match_reason: `Amount match: deposit RM ${deposit.toFixed(2)} equals outstanding RM ${amountMatch.outstanding.toFixed(2)}`,
+        };
+      } else {
+        const nameMatch = candidates.find((c) => {
+          const n = String(c.client_name ?? "").trim().toLowerCase();
+          if (!n || n.length < 3) return false;
+          return descLower.includes(n);
+        });
+        if (nameMatch) {
+          recommendedCase = {
+            case_id: nameMatch.case_id,
+            title: nameMatch.title,
+            match_reason: `Name match: description contains '${nameMatch.client_name}'`,
+          };
+        }
+      }
+    }
+
+    return {
+      ...r,
+      case: boundCase,
+      recommended_case: recommendedCase,
+    };
+  });
+
+  res.json({ data });
+});
+
+router.get("/accounting/cases/search", requireAuth, requireFirmUser, requirePermission("accounting", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
+  const firmId = req.firmId!;
+  const q = typeof (req.query as any)?.query === "string" ? String((req.query as any).query).trim() : "";
+  if (!q) { res.json({ data: [] }); return; }
+
+  const like = `%${q.replace(/%/g, "\\%").replace(/_/g, "\\_")}%`;
+  const rows = await queryRows(sql`
+    SELECT
+      c.id,
+      c.reference_no,
+      COALESCE(cl.name, '') as client_name
+    FROM cases c
+    LEFT JOIN case_purchasers cp ON cp.case_id = c.id AND cp.role = 'main'
+    LEFT JOIN clients cl ON cl.id = cp.client_id AND cl.firm_id = ${firmId}
+    WHERE c.firm_id = ${firmId}
+      AND c.deleted_at IS NULL
+      AND (
+        c.reference_no ILIKE ${like}
+        OR COALESCE(cl.name, '') ILIKE ${like}
+      )
+    ORDER BY c.updated_at DESC
+    LIMIT 20
+  `);
+
+  const data = (rows as any[]).map((r) => {
+    const id = parseIdInt(r.id);
+    const ref = String(r.reference_no ?? "");
+    const clientName = String(r.client_name ?? "");
+    const title = clientName ? `${ref} • ${clientName}` : ref;
+    return { case_id: id, title };
+  }).filter((x) => x.case_id);
+
+  res.json({ data });
+});
+
+router.post("/accounting/bank-transactions/:id/bind-case", requireAuth, requireFirmUser, requirePermission("accounting", "write"), async (req: AuthRequest, res: Response): Promise<void> => {
+  const firmId = req.firmId!;
+  const id = String(req.params.id ?? "").trim();
+  if (!id || !/^[0-9a-f-]{36}$/i.test(id)) { res.status(400).json({ error: "Invalid id" }); return; }
+
+  const body = (req.body && typeof req.body === "object") ? (req.body as Record<string, unknown>) : {};
+  const caseId = parseIdInt((body as any).caseId ?? (body as any).case_id);
+  if (!caseId) { res.status(422).json({ error: "caseId is required" }); return; }
+
+  const fail = (status: number, message: string) => {
+    const e = new Error(message) as any;
+    e.status = status;
+    throw e;
+  };
+
+  try {
+    const result = await db.transaction(async (tx) => {
+      const txRows = await queryRowsFrom(tx as any, sql`
+        SELECT id, bank_account_id, case_id, transaction_date, description, deposit
+        FROM bank_transactions
+        WHERE firm_id = ${firmId} AND id = ${id}::uuid
+        FOR UPDATE
+      `);
+      const bt = txRows[0] as any;
+      if (!bt) fail(404, "Bank transaction not found");
+      if (parseIdInt(bt.case_id)) fail(409, "Bank transaction already bound");
+
+      const deposit = toNumber(bt.deposit) ?? 0;
+      if (deposit <= 0) fail(422, "Only deposit transactions can be bound");
+
+      const caseRows = await queryRowsFrom(tx as any, sql`
+        SELECT id, reference_no
+        FROM cases
+        WHERE firm_id = ${firmId} AND id = ${caseId} AND deleted_at IS NULL
+        LIMIT 1
+      `);
+      const c = caseRows[0] as any;
+      if (!c) fail(404, "Case not found");
+
+      const acctRows = await queryRowsFrom(tx as any, sql`
+        SELECT account_type
+        FROM firm_bank_accounts
+        WHERE firm_id = ${firmId} AND id = ${bt.bank_account_id}
+        LIMIT 1
+      `);
+      const accountType = String((acctRows[0] as any)?.account_type ?? "client");
+      const entryCategory = accountType === "office" ? "office" : "client";
+      const entryType = accountType === "office" ? "payment_received" : "trust_received";
+
+      await tx.execute(sql`
+        UPDATE bank_transactions
+        SET case_id = ${caseId}, updated_at = NOW()
+        WHERE firm_id = ${firmId} AND id = ${id}::uuid
+      `);
+
+      await tx.execute(sql`
+        INSERT INTO case_ledgers (firm_id, case_id, transaction_date, entry_category, entry_type, description, amount, created_at, updated_at)
+        VALUES (${firmId}, ${caseId}, ${bt.transaction_date}, ${entryCategory}, ${entryType}, ${bt.description}, ${deposit}, NOW(), NOW())
+      `);
+
+      return {
+        case_id: caseId,
+        case_title: String(c.reference_no ?? ""),
+        entry_category: entryCategory,
+        entry_type: entryType,
+      };
+    });
+
+    res.json({ ok: true, ...result });
+    await writeAuditLog({
+      firmId: req.firmId,
+      actorId: req.userId,
+      actorType: req.userType,
+      action: "accounting.bank_transactions.bind_case",
+      entityType: "bank_transaction",
+      detail: `id=${id} caseId=${result.case_id} entryType=${result.entry_type}`,
+      ipAddress: req.ip,
+      userAgent: req.headers["user-agent"],
+    });
+  } catch (err: any) {
+    const status = err?.status && Number.isInteger(err.status) ? Number(err.status) : 500;
+    res.status(status).json({ error: status === 500 ? "Bind failed" : String(err?.message ?? "Bind failed") });
+  }
+});
+
+router.patch("/accounting/bank-transactions/:id", requireAuth, requireFirmUser, requirePermission("accounting", "write"), async (req: AuthRequest, res: Response): Promise<void> => {
+  const id = String(req.params.id ?? "").trim();
+  if (!id || !/^[0-9a-f-]{36}$/i.test(id)) { res.status(400).json({ error: "Invalid id" }); return; }
+
+  const body = (req.body && typeof req.body === "object") ? (req.body as Record<string, unknown>) : {};
+  const parts: SqlChunk[] = [];
+
+  if (Object.prototype.hasOwnProperty.call(body, "transactionDate")) {
+    const v = typeof body.transactionDate === "string" ? body.transactionDate.trim() : "";
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(v)) { res.status(422).json({ error: "Invalid transactionDate" }); return; }
+    parts.push(sql`transaction_date = ${v}`);
+  }
+  if (Object.prototype.hasOwnProperty.call(body, "description")) {
+    parts.push(sql`description = ${typeof body.description === "string" ? body.description : ""}`);
+  }
+  if (Object.prototype.hasOwnProperty.call(body, "referenceNo")) {
+    const v = typeof body.referenceNo === "string" ? body.referenceNo : null;
+    parts.push(sql`reference_no = ${v as any}`);
+  }
+  if (Object.prototype.hasOwnProperty.call(body, "withdrawal")) {
+    const v = body.withdrawal === null ? null : Number(body.withdrawal);
+    parts.push(sql`withdrawal = ${Number.isFinite(v as any) ? v : null}`);
+  }
+  if (Object.prototype.hasOwnProperty.call(body, "deposit")) {
+    const v = body.deposit === null ? null : Number(body.deposit);
+    parts.push(sql`deposit = ${Number.isFinite(v as any) ? v : null}`);
+  }
+  if (Object.prototype.hasOwnProperty.call(body, "balance")) {
+    const v = body.balance === null ? null : Number(body.balance);
+    parts.push(sql`balance = ${Number.isFinite(v as any) ? v : null}`);
+  }
+
+  if (parts.length === 0) { res.status(400).json({ error: "No fields to update" }); return; }
+  parts.push(sql`updated_at = NOW()`);
+  const setClause = sql.join(parts, sql`, `);
+
+  const rows = await queryRows(sql`
+    UPDATE bank_transactions
+    SET ${setClause}
+    WHERE id = ${id}::uuid AND firm_id = ${req.firmId!}
+    RETURNING *
+  `);
+  const updated = rows[0];
+  if (!updated) { res.status(404).json({ error: "Not found" }); return; }
+  res.json(updated);
+  await writeAuditLog({
+    firmId: req.firmId,
+    actorId: req.userId,
+    actorType: req.userType,
+    action: "accounting.bank_transactions.update",
+    entityType: "bank_transaction",
+    entityId: undefined,
+    detail: `id=${id}`,
+    ipAddress: req.ip,
+    userAgent: req.headers["user-agent"],
+  });
+});
+
+async function exportAutoCountXlsx(req: AuthRequest, res: Response): Promise<void> {
+  const bankAccountId = parseIdInt((req.query as any)?.bankAccountId);
+  if (!bankAccountId) { res.status(422).json({ error: "bankAccountId is required" }); return; }
+  const acctRows = await queryRows(sql`
+    SELECT id, autocount_gl_code
+    FROM firm_bank_accounts
+    WHERE firm_id = ${req.firmId!} AND id = ${bankAccountId}
+    LIMIT 1
+  `);
+  const acct = acctRows[0];
+  if (!acct) { res.status(404).json({ error: "Bank account not found" }); return; }
+  const glCode = (acct as any).autocount_gl_code ? String((acct as any).autocount_gl_code) : "";
+  const rows = await queryRows(sql`
+    SELECT
+      id,
+      transaction_date,
+      description,
+      reference_no,
+      withdrawal,
+      deposit
+    FROM bank_transactions
+    WHERE firm_id = ${req.firmId!}
+      AND bank_account_id = ${bankAccountId}
+      AND is_exported_to_autocount = false
+    ORDER BY transaction_date ASC, created_at ASC
+    LIMIT 5000
+  `);
+
+  const exportRows = rows.map((r: any) => ({
+    DocDate: typeof r.transaction_date === "string" ? r.transaction_date : String(r.transaction_date ?? ""),
+    Description: String(r.description ?? ""),
+    RefNo: r.reference_no == null ? "" : String(r.reference_no),
+    PaymentAmount: r.withdrawal == null ? "" : Number(r.withdrawal),
+    DepositAmount: r.deposit == null ? "" : Number(r.deposit),
+    GLCode: glCode,
+  }));
+
+  const wb = XLSX.utils.book_new();
+  const ws = XLSX.utils.json_to_sheet(exportRows);
+  XLSX.utils.book_append_sheet(wb, ws, "AutoCount");
+  const buf = XLSX.write(wb, { type: "buffer", bookType: "xlsx" }) as unknown as Buffer;
+
+  if (rows.length > 0) {
+    const ids = rows.map((x: any) => String(x.id)).filter(Boolean);
+    await queryRows(sql`
+      UPDATE bank_transactions
+      SET is_exported_to_autocount = true, updated_at = NOW()
+      WHERE firm_id = ${req.firmId!}
+        AND id = ANY(${ids}::uuid[])
+    `);
+  }
+
+  await writeAuditLog({
+    firmId: req.firmId,
+    actorId: req.userId,
+    actorType: req.userType,
+    action: "accounting.bank_transactions.export_autocount",
+    entityType: "bank_transaction",
+    detail: `exported=${rows.length}`,
+    ipAddress: req.ip,
+    userAgent: req.headers["user-agent"],
+  });
+
+  const fileName = safeFilenameAscii(`autocount_bank_export_${new Date().toISOString().slice(0, 10)}.xlsx`);
+  res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+  res.setHeader("Content-Disposition", `attachment; filename="${fileName}"`);
+  res.send(buf);
+}
+
+router.get("/accounting/bank-transactions/export-autocount", requireAuth, requireFirmUser, requirePermission("accounting", "write"), async (req: AuthRequest, res: Response): Promise<void> => {
+  await exportAutoCountXlsx(req, res);
+});
+
+router.get("/accounting/export-autocount", requireAuth, requireFirmUser, requirePermission("accounting", "write"), async (req: AuthRequest, res: Response): Promise<void> => {
+  await exportAutoCountXlsx(req, res);
 });
 
 const exportedRouter = expressRouter as unknown as ExpressRouter;

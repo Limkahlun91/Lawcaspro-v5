@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useParams, useLocation } from "wouter";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, Printer, CheckCircle, XCircle, Plus, AlertCircle } from "lucide-react";
@@ -9,7 +9,7 @@ import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
 import { useToast } from "@/hooks/use-toast";
 import { QueryFallback } from "@/components/query-fallback";
-import { apiFetchJson } from "@/lib/api-client";
+import { apiFetchBlob, apiFetchJson } from "@/lib/api-client";
 import { toastError } from "@/lib/toast-error";
 import { useReAuth } from "@/components/re-auth-dialog";
 
@@ -21,6 +21,7 @@ type InvoiceItem = {
   id: number;
   description: string;
   itemType: string;
+  itemCategory?: string;
   amountExclTax?: number | string;
   taxRate?: number | string;
   taxAmount?: number | string;
@@ -51,6 +52,18 @@ type ReceiptRow = {
   isReversed?: boolean;
   invoiceId?: number | null;
   caseId?: number | null;
+};
+
+type FirmSettings = {
+  logoUrl?: string | null;
+  name?: string | null;
+  address?: string | null;
+  stNumber?: string | null;
+  tinNumber?: string | null;
+  registrationNo?: string | null;
+  sstNo?: string | null;
+  phone?: string | null;
+  email?: string | null;
 };
 
 const STATUS_COLORS: Record<string, string> = {
@@ -86,6 +99,33 @@ export default function InvoiceDetail() {
     retry: false,
   });
   const { data: inv, isLoading } = invQuery;
+
+  const firmQuery = useQuery<FirmSettings>({
+    queryKey: ["firm-settings"],
+    queryFn: () => apiFetchJson<FirmSettings>("/firm-settings"),
+    retry: false,
+  });
+  const firm = firmQuery.data;
+  const [logoPreviewUrl, setLogoPreviewUrl] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!firm?.logoUrl) { setLogoPreviewUrl(null); return; }
+    let cancelled = false;
+    let url: string | null = null;
+    (async () => {
+      try {
+        const blob = await apiFetchBlob("/firm-settings/logo");
+        url = URL.createObjectURL(blob);
+        if (!cancelled) setLogoPreviewUrl(url);
+      } catch {
+        if (!cancelled) setLogoPreviewUrl(null);
+      }
+    })();
+    return () => {
+      cancelled = true;
+      if (url) URL.revokeObjectURL(url);
+    };
+  }, [firm?.logoUrl]);
 
   const receiptsQuery = useQuery<ReceiptRow[]>({
     queryKey: ["receipts-for-invoice", id],
@@ -138,10 +178,14 @@ export default function InvoiceDetail() {
   if (!inv) return <div className="py-16 text-center text-slate-400">Invoice not found</div>;
 
   const items = inv.items ?? [];
-  const profFees = items.filter((i) => i.itemType === "professional_fee" || i.itemType === "taxable_service");
-  const disbursements = items.filter((i) => i.itemType === "disbursement");
-  const trustItems = items.filter((i) => i.itemType === "trust_amount" || i.itemType === "pass_through");
-  const otherItems = items.filter((i) => !profFees.includes(i) && !disbursements.includes(i) && !trustItems.includes(i));
+  const getCategory = (i: InvoiceItem): "fee" | "disbursement" => {
+    const c = String(i.itemCategory ?? "").toLowerCase();
+    if (c === "fee" || c === "disbursement") return c;
+    if (i.itemType === "disbursement" || i.itemType === "trust_amount" || i.itemType === "pass_through") return "disbursement";
+    return "fee";
+  };
+  const feeItems = items.filter((i) => getCategory(i) === "fee");
+  const disbursementItems = items.filter((i) => getCategory(i) === "disbursement");
 
   const issuable = inv.status === "draft";
   const voidable = inv.status !== "paid" && inv.status !== "void";
@@ -149,12 +193,40 @@ export default function InvoiceDetail() {
 
   return (
     <div className="space-y-6 min-w-0">
+      <Card className="print:shadow-none">
+        <CardContent className="pt-6 pb-6">
+          <div className="flex items-start justify-between gap-6">
+            <div className="min-w-0">
+              {logoPreviewUrl ? (
+                <img src={logoPreviewUrl} alt="Firm logo" className="max-h-12 max-w-[200px] object-contain mb-2" />
+              ) : null}
+              <div className="text-lg font-bold text-slate-900">{firm?.name ?? "—"}</div>
+              {firm?.registrationNo ? <div className="text-xs text-slate-500 mt-0.5">Registration No: {firm.registrationNo}</div> : null}
+              {firm?.sstNo || firm?.stNumber ? <div className="text-xs text-slate-500">SST No: {firm?.sstNo ?? firm?.stNumber}</div> : null}
+              {firm?.tinNumber ? <div className="text-xs text-slate-500">TIN: {firm.tinNumber}</div> : null}
+              {firm?.address ? <div className="text-xs text-slate-600 mt-2 whitespace-pre-wrap">{firm.address}</div> : null}
+              {(firm?.phone || firm?.email) ? (
+                <div className="text-xs text-slate-600 mt-1">
+                  {firm?.phone ? `Tel: ${firm.phone}` : ""}
+                  {firm?.phone && firm?.email ? " · " : ""}
+                  {firm?.email ? `Email: ${firm.email}` : ""}
+                </div>
+              ) : null}
+            </div>
+            <div className="text-right">
+              <div className="text-xs text-slate-500">INVOICE</div>
+              <div className="text-2xl font-bold text-slate-900">{inv.invoiceNo}</div>
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+
       <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
         <Button variant="ghost" size="sm" onClick={() => setLocation("/app/accounting?tab=invoices")} className="gap-1.5">
           <ArrowLeft className="w-4 h-4" /> Back
         </Button>
         <div className="flex-1 min-w-0">
-          <h1 className="text-2xl font-bold text-slate-900">{inv.invoiceNo}</h1>
+          <h1 className="text-2xl font-bold text-slate-900">Invoice</h1>
           <div className="flex items-center gap-3 mt-1">
             <span className={cn("px-2 py-0.5 rounded-full text-xs font-medium", STATUS_COLORS[inv.status] ?? "bg-slate-100 text-slate-600")}>
               {inv.status?.replace(/_/g, " ").replace(/\b\w/g, (c: string) => c.toUpperCase())}
@@ -260,10 +332,8 @@ export default function InvoiceDetail() {
         </CardHeader>
         <CardContent className="p-0">
           {[
-            { label: "A — Professional Fees", items: profFees },
-            { label: "B — Disbursements", items: disbursements },
-            { label: "C — Trust / Pass-through", items: trustItems },
-            { label: "Other", items: otherItems },
+            { label: "A — Professional Fees (E-invoice)", items: feeItems },
+            { label: "B — Disbursements (Trust / Pass-through)", items: disbursementItems },
           ].filter(g => g.items.length > 0).map((group) => (
             <div key={group.label}>
               <div className="px-4 py-2 bg-slate-50 border-y text-xs font-semibold text-slate-500 uppercase tracking-wide">

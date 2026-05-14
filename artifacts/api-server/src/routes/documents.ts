@@ -9,6 +9,7 @@ import { getSupabaseStorageConfigError, ObjectNotFoundError, ObjectStorageServic
 import { Readable } from "stream";
 import { randomUUID } from "crypto";
 import Docxtemplater from "docxtemplater";
+import ImageModule from "docxtemplater-image-module-free";
 import PizZip from "pizzip";
 import * as yazl from "yazl";
 import { PDFDocument, rgb, StandardFonts } from "pdf-lib";
@@ -50,6 +51,32 @@ const supabaseStorage = new SupabaseStorageService();
 type DbConn = typeof db | NonNullable<AuthRequest["rlsDb"]>;
 
 const one = (v: string | string[] | undefined): string | undefined => (Array.isArray(v) ? v[0] : v);
+
+function attachDocxImageModule(doc: any) {
+  const imageModule = new (ImageModule as any)({
+    getImage: (tagValue: unknown) => (Buffer.isBuffer(tagValue) ? tagValue : Buffer.alloc(0)),
+    getSize: (img: unknown) => {
+      if (!Buffer.isBuffer(img) || img.length === 0) return [0, 0];
+      return [160, 60];
+    },
+  });
+  doc.attachModule(imageModule);
+}
+
+async function maybeHydrateFirmLogoBuffer(input: Record<string, unknown>): Promise<void> {
+  const url =
+    typeof input.firm_logo_url === "string"
+      ? input.firm_logo_url.trim()
+      : typeof input.firm_logo === "string"
+        ? input.firm_logo.trim()
+        : "";
+  if (!url || !url.startsWith("/objects/")) return;
+  try {
+    const resp = await supabaseStorage.fetchPrivateObjectResponse(url, { timeoutMs: 15_000 });
+    const ab = await resp.arrayBuffer();
+    input.firm_logo = Buffer.from(ab);
+  } catch {}
+}
 
 const truthy = (v: string | string[] | undefined): boolean => {
   const s = one(v);
@@ -813,7 +840,7 @@ async function buildCaseContext(r: DbConn, caseId: number, firmId: number, cache
       r,
       cache,
       `firms:${firmId}`,
-      sql`SELECT name, address, st_number, tin_number FROM firms WHERE id = ${firmId} LIMIT 1`
+      sql`SELECT name, address, st_number, tin_number, registration_no, sst_no, phone, email, logo_url FROM firms WHERE id = ${firmId} LIMIT 1`
     ),
     queryRowsCached(
       r,
@@ -1202,6 +1229,12 @@ async function buildCaseContext(r: DbConn, caseId: number, firmId: number, cache
     firm_address: firm.address ?? "",
     firm_st_number: firm.st_number ?? "",
     firm_tin_number: firm.tin_number ?? "",
+    firm_registration_no: firm.registration_no ?? "",
+    firm_sst_no: (firm.sst_no ?? firm.st_number) ?? "",
+    firm_phone: firm.phone ?? "",
+    firm_email: firm.email ?? "",
+    firm_logo: firm.logo_url ?? "",
+    firm_logo_url: firm.logo_url ?? "",
 
     // Bank Accounts
     office_bank_name: officeBanks[0]?.bank_name ?? "",
@@ -5046,6 +5079,8 @@ async function generateFirmDocument({
   }
   const zip = new PizZip(fileContents);
   const doc = new Docxtemplater(zip, { paragraphLoop: true, linebreaks: true });
+  attachDocxImageModule(doc);
+  await maybeHydrateFirmLogoBuffer(input as any);
   try {
     doc.render(input);
   } catch (err) {
@@ -5431,6 +5466,8 @@ async function generateMasterDocument({
   if (isDocx) {
     const zip = new PizZip(docxBytesForRender ?? fileContents);
     const doc = new Docxtemplater(zip, { paragraphLoop: true, linebreaks: true });
+    attachDocxImageModule(doc);
+    await maybeHydrateFirmLogoBuffer(renderInput as any);
     try {
       doc.render(renderInput);
     } catch (err) {
@@ -7045,6 +7082,8 @@ router.post("/cases/:caseId/documents/preview", requireAuth, requireFirmUser, re
         try {
           const zip = new PizZip(bytes);
           const doc = new Docxtemplater(zip, { paragraphLoop: true, linebreaks: true });
+          attachDocxImageModule(doc);
+          await maybeHydrateFirmLogoBuffer(input as any);
           doc.render(input);
         } catch {
           renderable = false;
@@ -7204,6 +7243,8 @@ router.post("/cases/:caseId/documents/preview", requireAuth, requireFirmUser, re
       try {
         const zip = new PizZip(bytes);
         const d = new Docxtemplater(zip, { paragraphLoop: true, linebreaks: true });
+        attachDocxImageModule(d);
+        await maybeHydrateFirmLogoBuffer(input as any);
         d.render(input);
       } catch {
         renderable = false;
@@ -7897,6 +7938,8 @@ router.post("/cases/:caseId/documents/print", requireAuth, requireFirmUser, requ
 
     const zip = new PizZip(fileContents);
     const doc = new Docxtemplater(zip, { paragraphLoop: true, linebreaks: true });
+    attachDocxImageModule(doc);
+    await maybeHydrateFirmLogoBuffer(input as any);
     try {
       doc.render(input);
     } catch (err) {

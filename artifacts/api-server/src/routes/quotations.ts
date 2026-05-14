@@ -33,15 +33,30 @@ function normalizeItem(item: any, quotationId: number, idx: number) {
   const taxCode = item.taxCode || "T";
   const taxRate = parseFloat(item.taxRate) || DEFAULT_TAX_RATE;
   const { taxAmount, amountInclTax } = computeTax(amountExclTax, taxCode, taxRate);
+  const section = typeof item.section === "string" ? item.section : "disbursement";
+  const itemCategory =
+    item.itemCategory === "fee" || item.itemCategory === "disbursement"
+      ? item.itemCategory
+      : section === "fees"
+        ? "fee"
+        : "disbursement";
+  const itemType =
+    typeof item.itemType === "string" && item.itemType
+      ? item.itemType
+      : itemCategory === "fee"
+        ? "professional_fee"
+        : "disbursement";
 
   return {
     quotationId,
-    section: item.section,
+    section,
     category: item.category || null,
     itemNo: item.itemNo || null,
     subItemNo: item.subItemNo || null,
     description: item.description,
     taxCode,
+    itemCategory,
+    itemType,
     amountExclTax: String(amountExclTax),
     taxRate: String(taxRate),
     taxAmount: String(taxAmount),

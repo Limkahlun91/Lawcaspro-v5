@@ -19,6 +19,7 @@ interface LineItem {
   subItemNo: string;
   description: string;
   taxCode: string;
+  itemCategory: "fee" | "disbursement";
   amountExclTax: number;
   taxRate: number;
   taxAmount: number;
@@ -37,7 +38,7 @@ function calcTax(amount: number, taxCode: string, rate: number = TAX_RATE) {
   return { taxAmount, amountInclTax: amount + taxAmount };
 }
 
-const DEFAULT_DISBURSEMENT_ITEMS: Omit<LineItem, "id">[] = [
+const DEFAULT_DISBURSEMENT_ITEMS: Omit<LineItem, "id" | "itemCategory">[] = [
   { section: "disbursement", category: "search", itemNo: "1", subItemNo: "", description: "SEARCH", taxCode: "T", amountExclTax: 0, taxRate: TAX_RATE, taxAmount: 0, amountInclTax: 0 },
   { section: "disbursement", category: "search", itemNo: "1", subItemNo: "a", description: "Land Search", taxCode: "T", amountExclTax: 0, taxRate: TAX_RATE, taxAmount: 0, amountInclTax: 0 },
   { section: "disbursement", category: "search", itemNo: "1", subItemNo: "b", description: "CTC Title", taxCode: "T", amountExclTax: 0, taxRate: TAX_RATE, taxAmount: 0, amountInclTax: 0 },
@@ -75,7 +76,7 @@ const DEFAULT_DISBURSEMENT_ITEMS: Omit<LineItem, "id">[] = [
   { section: "disbursement", category: "registration", itemNo: "3", subItemNo: "g", description: "MOT Form14A/Form16F/Form16I NLC", taxCode: "T", amountExclTax: 0, taxRate: TAX_RATE, taxAmount: 0, amountInclTax: 0 },
 ];
 
-const DEFAULT_FEES_ITEMS: Omit<LineItem, "id">[] = [
+const DEFAULT_FEES_ITEMS: Omit<LineItem, "id" | "itemCategory">[] = [
   { section: "fees", category: "fees", itemNo: "1", subItemNo: "", description: "SPA/SPA(sub)", taxCode: "T", amountExclTax: 0, taxRate: TAX_RATE, taxAmount: 0, amountInclTax: 0 },
   { section: "fees", category: "fees", itemNo: "2", subItemNo: "", description: "Loan Agreement/LACA/Facilities Agreement", taxCode: "T", amountExclTax: 0, taxRate: TAX_RATE, taxAmount: 0, amountInclTax: 0 },
   { section: "fees", category: "fees", itemNo: "3", subItemNo: "", description: "Deed of Mutual Covenant", taxCode: "T", amountExclTax: 0, taxRate: TAX_RATE, taxAmount: 0, amountInclTax: 0 },
@@ -106,7 +107,7 @@ const DEFAULT_FEES_ITEMS: Omit<LineItem, "id">[] = [
   { section: "fees", category: "fees", itemNo: "28", subItemNo: "", description: "Others-Refer Attachment I", taxCode: "T", amountExclTax: 0, taxRate: TAX_RATE, taxAmount: 0, amountInclTax: 0 },
 ];
 
-const DEFAULT_REIMBURSEMENT_ITEMS: Omit<LineItem, "id">[] = [
+const DEFAULT_REIMBURSEMENT_ITEMS: Omit<LineItem, "id" | "itemCategory">[] = [
   { section: "reimbursement", category: "reimbursement", itemNo: "1", subItemNo: "", description: "Developer's Confirmation Letter", taxCode: "T", amountExclTax: 0, taxRate: TAX_RATE, taxAmount: 0, amountInclTax: 0 },
   { section: "reimbursement", category: "reimbursement", itemNo: "2", subItemNo: "", description: "Travelling and transportation", taxCode: "T", amountExclTax: 0, taxRate: TAX_RATE, taxAmount: 0, amountInclTax: 0 },
   { section: "reimbursement", category: "reimbursement", itemNo: "3", subItemNo: "", description: "Paper, printing, photocopy, stationery, binding", taxCode: "T", amountExclTax: 0, taxRate: TAX_RATE, taxAmount: 0, amountInclTax: 0 },
@@ -115,8 +116,16 @@ const DEFAULT_REIMBURSEMENT_ITEMS: Omit<LineItem, "id">[] = [
   { section: "reimbursement", category: "reimbursement", itemNo: "6", subItemNo: "", description: "Miscellaneous", taxCode: "T", amountExclTax: 0, taxRate: TAX_RATE, taxAmount: 0, amountInclTax: 0 },
 ];
 
-function initItems(defaults: Omit<LineItem, "id">[]): LineItem[] {
-  return defaults.map(d => ({ ...d, id: generateId() }));
+function initItems(defaults: Array<Omit<LineItem, "id"> | Omit<LineItem, "id" | "itemCategory">>): LineItem[] {
+  return defaults.map((d: any) => ({
+    ...d,
+    id: generateId(),
+    itemCategory: d.itemCategory === "fee" || d.itemCategory === "disbursement"
+      ? d.itemCategory
+      : d.section === "fees"
+        ? "fee"
+        : "disbursement",
+  }));
 }
 
 export default function NewQuotation() {
@@ -210,6 +219,17 @@ export default function NewQuotation() {
     }));
   }, []);
 
+  const updateItemCategory = useCallback((
+    setItems: React.Dispatch<React.SetStateAction<LineItem[]>>,
+    itemId: string,
+    itemCategory: "fee" | "disbursement"
+  ) => {
+    setItems(prev => prev.map(item => {
+      if (item.id !== itemId) return item;
+      return { ...item, itemCategory };
+    }));
+  }, []);
+
   const addAttachmentItem = () => {
     setAttachmentItems(prev => [...prev, {
       id: generateId(),
@@ -219,6 +239,7 @@ export default function NewQuotation() {
       subItemNo: "",
       description: "",
       taxCode: "T",
+      itemCategory: "disbursement",
       amountExclTax: 0,
       taxRate: TAX_RATE,
       taxAmount: 0,
@@ -273,6 +294,7 @@ export default function NewQuotation() {
       subItemNo: item.subItemNo,
       description: item.description,
       taxCode: item.taxCode,
+      itemCategory: item.itemCategory,
       amountExclTax: item.amountExclTax,
       taxRate: item.taxRate,
       taxAmount: item.taxAmount,
@@ -418,6 +440,7 @@ export default function NewQuotation() {
                         <th className="text-left px-3 py-2 font-medium text-slate-600 w-10">No.</th>
                         <th className="text-left px-3 py-2 font-medium text-slate-600">Description</th>
                         <th className="text-center px-3 py-2 font-medium text-slate-600 w-20">Tax Code</th>
+                        <th className="text-center px-3 py-2 font-medium text-slate-600 w-36">Category</th>
                         <th className="text-right px-3 py-2 font-medium text-slate-600 w-32">Total Excl. ST (RM)</th>
                         <th className="text-right px-3 py-2 font-medium text-slate-600 w-28">ST @ {TAX_RATE}% (RM)</th>
                         <th className="text-right px-3 py-2 font-medium text-slate-600 w-32">Total Incl. ST (RM)</th>
@@ -448,6 +471,16 @@ export default function NewQuotation() {
                               <option value="SR">SR</option>
                             </select>
                           </td>
+                          <td className="px-3 py-2 text-center">
+                            <select
+                              value={item.itemCategory}
+                              onChange={(e) => updateItemCategory(setAttachmentItems, item.id, e.target.value === "fee" ? "fee" : "disbursement")}
+                              className="h-7 text-xs border rounded px-2 bg-white"
+                            >
+                              <option value="fee">Fee</option>
+                              <option value="disbursement">Disbursement</option>
+                            </select>
+                          </td>
                           <td className="px-3 py-2">
                             <Input
                               type="number"
@@ -469,7 +502,7 @@ export default function NewQuotation() {
                     </tbody>
                     <tfoot>
                       <tr className="bg-slate-50 font-medium">
-                        <td colSpan={3} className="px-3 py-2 text-right">Total</td>
+                        <td colSpan={4} className="px-3 py-2 text-right">Total</td>
                         <td className="px-3 py-2 text-right">{formatRM(attTotals.totalExclTax)}</td>
                         <td className="px-3 py-2 text-right">{formatRM(attTotals.totalTax)}</td>
                         <td className="px-3 py-2 text-right">{formatRM(attTotals.totalInclTax)}</td>
@@ -488,6 +521,7 @@ export default function NewQuotation() {
                     <th className="text-left px-3 py-2 font-medium text-slate-600 w-10">No.</th>
                     <th className="text-left px-3 py-2 font-medium text-slate-600">Description</th>
                     <th className="text-center px-3 py-2 font-medium text-slate-600 w-20">Tax Code</th>
+                    <th className="text-center px-3 py-2 font-medium text-slate-600 w-36">Category</th>
                     <th className="text-right px-3 py-2 font-medium text-slate-600 w-32">Total Excl. ST (RM)</th>
                     <th className="text-right px-3 py-2 font-medium text-slate-600 w-28">ST @ {TAX_RATE}% (RM)</th>
                     <th className="text-right px-3 py-2 font-medium text-slate-600 w-32">Total Incl. ST (RM)</th>
@@ -518,6 +552,18 @@ export default function NewQuotation() {
                             </select>
                           )}
                         </td>
+                        <td className="px-3 py-1.5 text-center">
+                          {!isHeader && (
+                            <select
+                              value={item.itemCategory}
+                              onChange={(e) => updateItemCategory(currentSection.setter, item.id, e.target.value === "fee" ? "fee" : "disbursement")}
+                              className="h-7 text-xs border rounded px-2 bg-white"
+                            >
+                              <option value="fee">Fee</option>
+                              <option value="disbursement">Disbursement</option>
+                            </select>
+                          )}
+                        </td>
                         <td className="px-3 py-1.5 text-right">
                           {!isHeader && (
                             <Input
@@ -541,7 +587,7 @@ export default function NewQuotation() {
                 </tbody>
                 <tfoot>
                   <tr className="bg-slate-50 font-medium">
-                    <td colSpan={3} className="px-3 py-2 text-right">Total {currentSection.label}</td>
+                    <td colSpan={4} className="px-3 py-2 text-right">Total {currentSection.label}</td>
                     <td className="px-3 py-2 text-right">{formatRM(currentSection.totals.totalExclTax)}</td>
                     <td className="px-3 py-2 text-right">{formatRM(currentSection.totals.totalTax)}</td>
                     <td className="px-3 py-2 text-right">{formatRM(currentSection.totals.totalInclTax)}</td>

@@ -101,6 +101,7 @@ router.post("/invoices/from-quotation/:quotationId", sensitiveRateLimiter, requi
       invoiceId: inv.id,
       description: qi.description,
       itemType: qi.itemType || "disbursement",
+      itemCategory: qi.itemCategory === "disbursement" ? "disbursement" : "fee",
       amountExclTax: String(qi.amountExclTax),
       taxRate: String(qi.taxRate),
       taxAmount: String(qi.taxAmount),
@@ -123,11 +124,12 @@ router.post("/invoices", sensitiveRateLimiter, requireAuth, requireFirmUser, req
       const obj = (i && typeof i === "object") ? (i as Record<string, unknown>) : {};
       const description = typeof obj.description === "string" ? obj.description : "";
       const itemType = typeof obj.itemType === "string" ? obj.itemType : "professional_fee";
+      const itemCategory = obj.itemCategory === "disbursement" ? "disbursement" : "fee";
       const amountExclTax = Number(obj.amountExclTax ?? 0);
       const taxRate = Number(obj.taxRate ?? 0);
       const taxAmount = Number(obj.taxAmount ?? 0);
       const amountInclTax = Number(obj.amountInclTax ?? (amountExclTax + taxAmount));
-      return { description, itemType, amountExclTax, taxRate, taxAmount, amountInclTax };
+      return { description, itemType, itemCategory, amountExclTax, taxRate, taxAmount, amountInclTax };
     })
     .filter((i) => Boolean(i.description));
 
@@ -152,6 +154,7 @@ router.post("/invoices", sensitiveRateLimiter, requireAuth, requireFirmUser, req
       invoiceId: inv.id,
       description: i.description,
       itemType: i.itemType || "professional_fee",
+      itemCategory: i.itemCategory,
       amountExclTax: (Number.isFinite(i.amountExclTax) ? i.amountExclTax : 0).toFixed(2),
       taxRate: (Number.isFinite(i.taxRate) ? i.taxRate : 0).toFixed(2),
       taxAmount: (Number.isFinite(i.taxAmount) ? i.taxAmount : 0).toFixed(2),

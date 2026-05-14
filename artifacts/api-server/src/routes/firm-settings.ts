@@ -1,8 +1,10 @@
 import express, { type Response, type Router as ExpressRouter } from "express";
+import { Readable } from "stream";
 import { eq, and } from "drizzle-orm";
 import { db, firmBankAccountsTable, firmsTable, sql } from "@workspace/db";
 import { requireAuth, requireFirmUser, requirePermission, type AuthRequest, writeAuditLog } from "../lib/auth.js";
 import { one } from "../lib/http.js";
+import { getSupabaseStorageConfigError, ObjectNotFoundError, SupabaseStorageService } from "../lib/objectStorage.js";
 
 const VALID_ACCOUNT_TYPES = ["office", "client"];
 
@@ -15,6 +17,7 @@ type RouterInternalLike = {
 
 const expressRouter = express.Router();
 const router = expressRouter as unknown as RouterInternalLike;
+const supabaseStorage = new SupabaseStorageService();
 
 type DbConn = typeof db | NonNullable<AuthRequest["rlsDb"]>;
 const rdb = (req: AuthRequest): DbConn => req.rlsDb ?? db;
@@ -33,9 +36,14 @@ router.get("/firm-settings", requireAuth, requireFirmUser, async (req: AuthReque
       id: firm.id,
       name: firm.name,
       slug: firm.slug,
+      logoUrl: firm.logoUrl || "",
       address: firm.address || "",
       stNumber: firm.stNumber || "",
       tinNumber: firm.tinNumber || "",
+      registrationNo: firm.registrationNo || "",
+      sstNo: firm.sstNo || "",
+      phone: firm.phone || "",
+      email: firm.email || "",
       bankAccounts: bankAccounts.map(b => ({
         id: b.id,
         bankName: b.bankName,
@@ -52,17 +60,49 @@ router.get("/firm-settings", requireAuth, requireFirmUser, async (req: AuthReque
   }
 });
 
+router.get("/firm-settings/logo", requireAuth, requireFirmUser, async (req: AuthRequest, res: Response) => {
+  try {
+    const r = rdb(req);
+    const firmId = req.firmId!;
+    const [firm] = await r.select({ logoUrl: firmsTable.logoUrl }).from(firmsTable).where(eq(firmsTable.id, firmId));
+    const logoUrl = typeof firm?.logoUrl === "string" ? firm.logoUrl : "";
+    if (!logoUrl) { res.status(404).json({ error: "Logo not set" }); return; }
+    if (!logoUrl.startsWith("/objects/")) { res.status(400).json({ error: "Invalid logoUrl" }); return; }
+
+    const response = await supabaseStorage.fetchPrivateObjectResponse(logoUrl);
+    res.status(response.status);
+    response.headers.forEach?.((value, key) => res.setHeader(key, value));
+    if (response.body) {
+      const nodeStream = Readable.fromWeb(response.body as ReadableStream<Uint8Array>);
+      nodeStream.pipe(res as any);
+    } else {
+      res.end();
+    }
+  } catch (error) {
+    if (error instanceof ObjectNotFoundError) { res.status(404).json({ error: "Logo not found" }); return; }
+    const configErr = getSupabaseStorageConfigError(error);
+    if (configErr) { res.status(configErr.statusCode).json({ error: configErr.error, code: configErr.code, missing: configErr.missing }); return; }
+    req.log.error({ err: error }, "firm_settings.logo failed");
+    res.status(500).json({ error: "Internal Server Error" });
+  }
+});
+
 router.patch("/firm-settings", requireAuth, requireFirmUser, requirePermission("settings", "update"), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const r = rdb(req);
     const firmId = req.firmId!;
-    const { name, address, stNumber, tinNumber } = req.body;
+    const { name, logoUrl, address, stNumber, tinNumber, registrationNo, sstNo, phone, email } = req.body;
 
     const updates: Record<string, unknown> = {};
     if (name !== undefined) updates.name = name;
+    if (logoUrl !== undefined) updates.logoUrl = logoUrl;
     if (address !== undefined) updates.address = address;
     if (stNumber !== undefined) updates.stNumber = stNumber;
     if (tinNumber !== undefined) updates.tinNumber = tinNumber;
+    if (registrationNo !== undefined) updates.registrationNo = registrationNo;
+    if (sstNo !== undefined) updates.sstNo = sstNo;
+    if (phone !== undefined) updates.phone = phone;
+    if (email !== undefined) updates.email = email;
 
     const [updated] = await r.update(firmsTable)
       .set(updates)
@@ -76,9 +116,14 @@ router.patch("/firm-settings", requireAuth, requireFirmUser, requirePermission("
       id: updated.id,
       name: updated.name,
       slug: updated.slug,
+      logoUrl: updated.logoUrl || "",
       address: updated.address || "",
       stNumber: updated.stNumber || "",
       tinNumber: updated.tinNumber || "",
+      registrationNo: updated.registrationNo || "",
+      sstNo: updated.sstNo || "",
+      phone: updated.phone || "",
+      email: updated.email || "",
       bankAccounts: bankAccounts.map(b => ({
         id: b.id,
         bankName: b.bankName,

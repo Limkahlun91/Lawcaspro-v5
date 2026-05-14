@@ -5,7 +5,7 @@ import { useLocation, useSearch } from "wouter";
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from "recharts";
 import {
   DollarSign, TrendingUp, Clock, Briefcase, Plus, Search, FileText,
-  Receipt, CreditCard, BookOpen, ChevronRight, RotateCcw, ArrowUpDown, ListOrdered
+  Receipt, CreditCard, BookOpen, ChevronRight, RotateCcw, ArrowUpDown, ListOrdered, Landmark, Printer
 } from "lucide-react";
 import { Link } from "wouter";
 import { Button } from "@/components/ui/button";
@@ -21,6 +21,8 @@ import { useReAuth } from "@/components/re-auth-dialog";
 import { useAuth } from "@/lib/auth-context";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { CreatePaymentVoucherBody, PaymentVoucherTransitionBody, type PaymentVoucherFundStatus } from "@workspace/api-zod";
+import BankAccountsTab from "./bank-accounts";
+import BankReconciliationPage from "./bank-reconciliation";
 
 function fmt(val: unknown) {
   return `RM ${Number(val ?? 0).toLocaleString("en-MY", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
@@ -68,7 +70,7 @@ type CaseFilesListResponse = {
   total: number;
 };
 
-const TABS = ["Overview", "File Listing", "Invoices", "Receipts", "Payment Vouchers", "Ledger"] as const;
+const TABS = ["Overview", "File Listing", "Invoices", "Receipts", "Payment Vouchers", "Bank Accounts", "Bank Reconciliation", "Ledger"] as const;
 type Tab = typeof TABS[number];
 
 const TAB_KEYS: Record<string, Tab> = {
@@ -77,6 +79,8 @@ const TAB_KEYS: Record<string, Tab> = {
   invoices: "Invoices",
   receipts: "Receipts",
   "payment-vouchers": "Payment Vouchers",
+  "bank-accounts": "Bank Accounts",
+  "bank-reconciliation": "Bank Reconciliation",
   ledger: "Ledger",
 };
 
@@ -526,6 +530,7 @@ function InvoicesTab() {
 // ── RECEIPTS TAB ─────────────────────────────────────────────────────────────
 
 function ReceiptsTab() {
+  const [, setLocation] = useLocation();
   const [showCreate, setShowCreate] = useState(false);
   const { toast } = useToast();
   const qc = useQueryClient();
@@ -681,6 +686,15 @@ function ReceiptsTab() {
                     }
                   </td>
                   <td className="px-4 py-3 text-right">
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      className="h-7 w-7 p-0 text-slate-400 hover:text-slate-700"
+                      title="View / Print"
+                      onClick={() => setLocation(`/app/accounting/receipts/${r.id}`)}
+                    >
+                      <Printer className="w-3.5 h-3.5" />
+                    </Button>
                     {!r.isReversed && (
                       <Button size="sm" variant="ghost" className="h-7 w-7 p-0 text-slate-400 hover:text-red-500"
                         title="Reverse receipt"
@@ -1246,6 +1260,8 @@ export default function Accounting() {
     "Invoices": <FileText className="w-4 h-4" />,
     "Receipts": <Receipt className="w-4 h-4" />,
     "Payment Vouchers": <CreditCard className="w-4 h-4" />,
+    "Bank Accounts": <Landmark className="w-4 h-4" />,
+    "Bank Reconciliation": <RotateCcw className="w-4 h-4" />,
     "Ledger": <BookOpen className="w-4 h-4" />,
   };
 
@@ -1279,6 +1295,8 @@ export default function Accounting() {
       {activeTab === "Invoices" && <InvoicesTab />}
       {activeTab === "Receipts" && <ReceiptsTab />}
       {activeTab === "Payment Vouchers" && <PaymentVouchersTab />}
+      {activeTab === "Bank Accounts" && <BankAccountsTab />}
+      {activeTab === "Bank Reconciliation" && <BankReconciliationPage />}
       {activeTab === "Ledger" && <LedgerTab />}
     </div>
   );
