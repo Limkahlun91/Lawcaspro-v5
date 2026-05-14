@@ -22,8 +22,20 @@ export function validateUploadFile(
     return { ok: false, message: "File size must be under 10MB" };
   }
   const mime = typeof file.type === "string" ? file.type : "";
-  if (!mime || !allowed.includes(mime)) {
-    const allowSet = new Set(allowed);
+  const allowSet = new Set(allowed);
+  const fileNameLower = typeof file.name === "string" ? file.name.toLowerCase() : "";
+  const allowedByExt = (() => {
+    const extAllowed: string[] = [];
+    if (allowSet.has("application/vnd.openxmlformats-officedocument.wordprocessingml.document")) extAllowed.push(".docx");
+    if (allowSet.has("application/msword")) extAllowed.push(".doc");
+    if (allowSet.has("application/pdf")) extAllowed.push(".pdf");
+    if (allowSet.has("image/jpeg")) extAllowed.push(".jpg", ".jpeg");
+    if (allowSet.has("image/png")) extAllowed.push(".png");
+    if (extAllowed.length === 0) return false;
+    return extAllowed.some((ext) => fileNameLower.endsWith(ext));
+  })();
+
+  if ((!mime || !allowSet.has(mime)) && !allowedByExt) {
     if (
       allowSet.size === DEFAULT_ALLOWED_MIME_TYPES.length &&
       DEFAULT_ALLOWED_MIME_TYPES.every((t) => allowSet.has(t))

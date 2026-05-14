@@ -45,6 +45,7 @@ const DEFAULT_ALLOWED_MIME_TYPES = new Set([
 const TEMPLATE_ALLOWED_MIME_TYPES = new Set([
   ...DEFAULT_ALLOWED_MIME_TYPES,
   "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  "application/msword",
 ]);
 
 const upload = multer({
@@ -54,7 +55,20 @@ const upload = multer({
     const requestedObjectPath = queryOne((req as any).query, "objectPath");
     const allowTemplateTypes = typeof requestedObjectPath === "string" && requestedObjectPath.startsWith("/objects/templates/");
     const allowed = allowTemplateTypes ? TEMPLATE_ALLOWED_MIME_TYPES : DEFAULT_ALLOWED_MIME_TYPES;
-    if (!allowed.has(file.mimetype)) {
+    const originalName = typeof file.originalname === "string" ? file.originalname : "";
+    const lower = originalName.toLowerCase();
+    const ext =
+      lower.endsWith(".docx") ? "docx"
+      : lower.endsWith(".doc") ? "doc"
+      : lower.endsWith(".pdf") ? "pdf"
+      : lower.endsWith(".jpeg") ? "jpeg"
+      : lower.endsWith(".jpg") ? "jpg"
+      : lower.endsWith(".png") ? "png"
+      : "";
+    const extAllowed = allowTemplateTypes
+      ? ext === "docx" || ext === "doc" || ext === "pdf" || ext === "jpg" || ext === "jpeg" || ext === "png"
+      : ext === "pdf" || ext === "jpg" || ext === "jpeg" || ext === "png";
+    if (!allowed.has(file.mimetype) && !extAllowed) {
       const err = new Error("UNSUPPORTED_FILE_TYPE");
       (err as any).code = "UNSUPPORTED_FILE_TYPE";
       cb(err);
@@ -190,7 +204,10 @@ router.post(
         return;
       }
       if (err && typeof err === "object" && (err as any).code === "UNSUPPORTED_FILE_TYPE") {
-        sendError(res as any, new ApiError({ status: 415, code: "UNSUPPORTED_MEDIA_TYPE", message: "Only PDF, JPG, or PNG files are allowed", retryable: false }));
+        const requestedObjectPath = queryOne((req as any).query, "objectPath");
+        const allowTemplateTypes = typeof requestedObjectPath === "string" && requestedObjectPath.startsWith("/objects/templates/");
+        const message = allowTemplateTypes ? "Only DOCX, PDF, JPG, or PNG files are allowed" : "Only PDF, JPG, or PNG files are allowed";
+        sendError(res as any, new ApiError({ status: 415, code: "UNSUPPORTED_MEDIA_TYPE", message, retryable: false }));
         return;
       }
       sendError(res as any, new ApiError({ status: 400, code: "INVALID_UPLOAD", message: "Invalid upload", retryable: false }));

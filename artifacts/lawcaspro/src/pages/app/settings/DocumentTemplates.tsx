@@ -678,7 +678,7 @@ export default function DocumentTemplates() {
                     </div>
                   </div>
                   <div className="space-y-1.5">
-                    <Label>New DOCX (optional)</Label>
+                    <Label>New Template File (DOCX or PDF) (optional)</Label>
                     <div
                       className="border-2 border-dashed border-slate-200 rounded-lg p-4 text-center cursor-pointer hover:border-amber-300 transition-colors"
                       onClick={() => versionUploadRef.current?.click()}
@@ -686,49 +686,69 @@ export default function DocumentTemplates() {
                       {versionFile ? (
                         <div className="text-sm text-slate-700 font-medium">{versionFile.name}</div>
                       ) : (
-                        <div className="text-sm text-slate-500">Click to select a DOCX file for a new draft</div>
+                        <div className="text-sm text-slate-500">Click to select a template file for a new draft</div>
                       )}
                     </div>
                     <input
                       type="file"
                       ref={versionUploadRef}
                       className="hidden"
-                      accept=".docx,.pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/pdf"
+                      accept=".docx,.doc,.pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/msword,application/pdf"
                       onChange={(e) => setVersionFile(e.target.files?.[0] ?? null)}
                     />
                   </div>
-                  <div>
-                    <div className="text-xs text-slate-500">File</div>
-                    <div className="text-sm text-slate-700 break-words">{activeTemplate.file_name}</div>
-                  </div>
-                  <div className="space-y-1.5">
-                    <Label>Clause insertion mode</Label>
-                    <Select value={editClauseInsertionMode} onValueChange={setEditClauseInsertionMode} disabled={!canUpdate}>
-                      <SelectTrigger><SelectValue /></SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="prefer_placeholder_else_append">Prefer placeholder else append</SelectItem>
-                        <SelectItem value="explicit_placeholder_only">Explicit placeholder only</SelectItem>
-                        <SelectItem value="append_to_end">Append to end</SelectItem>
-                      </SelectContent>
-                    </Select>
-                    <div className="text-xs text-slate-500">
-                      Tip: place {"{{clauses}}"} or {"{{clause_CODE}}"} in the DOCX to control insertion location.
-                    </div>
-                    {(() => {
-                      const v0 = (versionsQuery.data ?? [])[0] as any;
-                      const keys = (v0?.variables_snapshot && typeof v0.variables_snapshot === "object" && "keys" in v0.variables_snapshot)
-                        ? (v0.variables_snapshot.keys as unknown[])
-                        : [];
-                      const keyStrings = Array.isArray(keys) ? keys.filter((k): k is string => typeof k === "string") : [];
-                      const hasClauses = keyStrings.includes("clauses");
-                      const clauseCodes = keyStrings.filter((k) => k.startsWith("clause_")).length;
-                      return (
-                        <div className="text-xs text-slate-600">
-                          Detected: {"{{clauses}}"}={hasClauses ? "yes" : "no"} • {"{{clause_CODE}}"}={clauseCodes}
+                  {(() => {
+                    const v0 = (versionsQuery.data ?? [])[0] as DocumentTemplateVersion | undefined;
+                    const fileName = v0?.filename || activeTemplate.file_name || "";
+                    const isPdf = fileName.toLowerCase().endsWith(".pdf");
+                    return (
+                      <>
+                        <div>
+                          <div className="text-xs text-slate-500">File</div>
+                          <div className="text-sm text-slate-700 break-words">{fileName}</div>
                         </div>
-                      );
-                    })()}
-                  </div>
+                        {isPdf ? (
+                    <div className="space-y-2">
+                      <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+                        <div className="font-medium mb-1">How to map variables in PDF?</div>
+                        <div>
+                          Use Adobe Acrobat to add "Text Form Fields" to this PDF. Name each field exactly as the system Variable Keys (e.g., "firm_name", "purchaser_name"). The system will automatically detect and fill them during generation.
+                        </div>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="space-y-1.5">
+                      <Label>Clause insertion mode</Label>
+                      <Select value={editClauseInsertionMode} onValueChange={setEditClauseInsertionMode} disabled={!canUpdate}>
+                        <SelectTrigger><SelectValue /></SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="prefer_placeholder_else_append">Prefer placeholder else append</SelectItem>
+                          <SelectItem value="explicit_placeholder_only">Explicit placeholder only</SelectItem>
+                          <SelectItem value="append_to_end">Append to end</SelectItem>
+                        </SelectContent>
+                      </Select>
+                      <div className="text-xs text-slate-500">
+                        Tip: place {"{{clauses}}"} or {"{{clause_CODE}}"} in the DOCX to control insertion location.
+                      </div>
+                      {(() => {
+                        const v0 = (versionsQuery.data ?? [])[0] as any;
+                        const keys = (v0?.variables_snapshot && typeof v0.variables_snapshot === "object" && "keys" in v0.variables_snapshot)
+                          ? (v0.variables_snapshot.keys as unknown[])
+                          : [];
+                        const keyStrings = Array.isArray(keys) ? keys.filter((k): k is string => typeof k === "string") : [];
+                        const hasClauses = keyStrings.includes("clauses");
+                        const clauseCodes = keyStrings.filter((k) => k.startsWith("clause_")).length;
+                        return (
+                          <div className="text-xs text-slate-600">
+                            Detected: {"{{clauses}}"}={hasClauses ? "yes" : "no"} • {"{{clause_CODE}}"}={clauseCodes}
+                          </div>
+                        );
+                      })()}
+                    </div>
+                  )}
+                      </>
+                    );
+                  })()}
                   <div className="space-y-1.5">
                     <Label>File naming rule</Label>
                     <Textarea
@@ -1371,7 +1391,7 @@ export default function DocumentTemplates() {
               />
             </div>
             <div className="space-y-1.5">
-              <Label>DOCX File</Label>
+              <Label>Template File (DOCX or PDF)</Label>
               <div
                 className="border-2 border-dashed border-slate-200 rounded-lg p-6 text-center cursor-pointer hover:border-amber-300 transition-colors"
                 onClick={() => uploadRef.current?.click()}
@@ -1380,8 +1400,8 @@ export default function DocumentTemplates() {
                   <div className="text-sm text-slate-700 font-medium">{selectedFile.name}</div>
                 ) : (
                   <div>
-                    <p className="text-sm text-slate-500 mb-1">Click to select a DOCX file</p>
-                    <p className="text-xs text-slate-400">Use {"{{"} field_name {"}}"}  syntax for template fields</p>
+                    <p className="text-sm text-slate-500 mb-1">Click to select a template file</p>
+                    <p className="text-xs text-slate-400">For DOCX: use {"{{"} field_name {"}}"} syntax. For PDF: use Acrobat form fields named as variable keys.</p>
                   </div>
                 )}
               </div>
@@ -1389,7 +1409,7 @@ export default function DocumentTemplates() {
                 type="file"
                 ref={uploadRef}
                 className="hidden"
-                accept=".docx,.pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/pdf"
+                accept=".docx,.doc,.pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/msword,application/pdf"
                 onChange={(e) => setSelectedFile(e.target.files?.[0] ?? null)}
               />
             </div>
