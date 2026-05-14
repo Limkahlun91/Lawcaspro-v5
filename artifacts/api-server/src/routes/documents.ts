@@ -1775,216 +1775,225 @@ router.patch("/document-templates/:templateId", requireAuth, requireFirmUser, re
     res.status(400).json({ error: "Invalid template ID" });
     return;
   }
-  const body = req.body as Record<string, unknown>;
-  const hasFolderId = Object.prototype.hasOwnProperty.call(body, "folderId");
-  const hasName = Object.prototype.hasOwnProperty.call(body, "name");
-  const hasDescription = Object.prototype.hasOwnProperty.call(body, "description");
-  const hasDocumentType = Object.prototype.hasOwnProperty.call(body, "documentType");
-  const hasIsActive = Object.prototype.hasOwnProperty.call(body, "isActive");
-  const hasAppliesToPurchaseMode = Object.prototype.hasOwnProperty.call(body, "appliesToPurchaseMode");
-  const hasAppliesToTitleType = Object.prototype.hasOwnProperty.call(body, "appliesToTitleType");
-  const hasAppliesToCaseType = Object.prototype.hasOwnProperty.call(body, "appliesToCaseType");
-  const hasDocumentGroup = Object.prototype.hasOwnProperty.call(body, "documentGroup");
-  const hasSortOrder = Object.prototype.hasOwnProperty.call(body, "sortOrder");
-  const hasFileNamingRule = Object.prototype.hasOwnProperty.call(body, "fileNamingRule");
-  const hasClauseInsertionMode = Object.prototype.hasOwnProperty.call(body, "clauseInsertionMode");
-  const hasChecklistMode = Object.prototype.hasOwnProperty.call(body, "checklistMode");
-  const hasChecklistItems = Object.prototype.hasOwnProperty.call(body, "checklistItems");
+  try {
+    const body = req.body as Record<string, unknown>;
+    const hasFolderId = Object.prototype.hasOwnProperty.call(body, "folderId");
+    const hasName = Object.prototype.hasOwnProperty.call(body, "name");
+    const hasDescription = Object.prototype.hasOwnProperty.call(body, "description");
+    const hasDocumentType = Object.prototype.hasOwnProperty.call(body, "documentType");
+    const hasIsActive = Object.prototype.hasOwnProperty.call(body, "isActive");
+    const hasAppliesToPurchaseMode = Object.prototype.hasOwnProperty.call(body, "appliesToPurchaseMode");
+    const hasAppliesToTitleType = Object.prototype.hasOwnProperty.call(body, "appliesToTitleType");
+    const hasAppliesToCaseType = Object.prototype.hasOwnProperty.call(body, "appliesToCaseType");
+    const hasDocumentGroup = Object.prototype.hasOwnProperty.call(body, "documentGroup");
+    const hasSortOrder = Object.prototype.hasOwnProperty.call(body, "sortOrder");
+    const hasFileNamingRule = Object.prototype.hasOwnProperty.call(body, "fileNamingRule");
+    const hasClauseInsertionMode = Object.prototype.hasOwnProperty.call(body, "clauseInsertionMode");
+    const hasChecklistMode = Object.prototype.hasOwnProperty.call(body, "checklistMode");
+    const hasChecklistItems = Object.prototype.hasOwnProperty.call(body, "checklistItems");
 
-  const folderId = body.folderId;
-  const kind = body.kind;
-  const name = body.name;
-  const description = body.description;
-  const documentType = body.documentType;
-  const isActive = body.isActive;
-  const appliesToPurchaseMode = body.appliesToPurchaseMode;
-  const appliesToTitleType = body.appliesToTitleType;
-  const appliesToCaseType = body.appliesToCaseType;
-  const documentGroup = body.documentGroup;
-  const sortOrder = body.sortOrder;
-  const fileNamingRule = body.fileNamingRule;
-  const clauseInsertionMode = body.clauseInsertionMode;
-  const checklistMode = body.checklistMode;
-  const checklistItems = body.checklistItems;
+    const folderId = body.folderId;
+    const kind = body.kind;
+    const name = body.name;
+    const description = body.description;
+    const documentType = body.documentType;
+    const isActive = body.isActive;
+    const appliesToPurchaseMode = body.appliesToPurchaseMode;
+    const appliesToTitleType = body.appliesToTitleType;
+    const appliesToCaseType = body.appliesToCaseType;
+    const documentGroup = body.documentGroup;
+    const sortOrder = body.sortOrder;
+    const fileNamingRule = body.fileNamingRule;
+    const clauseInsertionMode = body.clauseInsertionMode;
+    const checklistMode = body.checklistMode;
+    const checklistItems = body.checklistItems;
 
-  const folderIdNum: number | null | undefined = hasFolderId ? (typeof folderId === "number" ? folderId : folderId === null ? null : undefined) : undefined;
-  if (hasFolderId && folderIdNum === undefined) {
-    res.status(400).json({ error: "Invalid folderId" });
-    return;
-  }
-
-  const kindVal = typeof kind === "string" ? kind : undefined;
-  const nameVal = typeof name === "string" ? name.trim() : undefined;
-  if (hasName && !nameVal) {
-    res.status(400).json({ error: "name is required" });
-    return;
-  }
-  const descriptionVal: string | null | undefined =
-    hasDescription
-      ? (typeof description === "string" ? description.trim() : description === null ? null : undefined)
-      : undefined;
-  if (hasDescription && descriptionVal === undefined) {
-    res.status(400).json({ error: "Invalid description" });
-    return;
-  }
-  const docTypeVal: string | undefined =
-    hasDocumentType
-      ? (typeof documentType === "string" ? (documentType.trim() || "other") : undefined)
-      : undefined;
-  if (hasDocumentType && !docTypeVal) {
-    res.status(400).json({ error: "Invalid documentType" });
-    return;
-  }
-
-  const isActiveVal: boolean | undefined = hasIsActive ? (typeof isActive === "boolean" ? isActive : undefined) : undefined;
-  if (hasIsActive && isActiveVal === undefined) {
-    res.status(400).json({ error: "Invalid isActive" });
-    return;
-  }
-  const purchaseModeVal: string | null | undefined =
-    hasAppliesToPurchaseMode
-      ? (typeof appliesToPurchaseMode === "string" ? (appliesToPurchaseMode.trim() || null) : appliesToPurchaseMode === null ? null : undefined)
-      : undefined;
-  if (hasAppliesToPurchaseMode && purchaseModeVal === undefined) {
-    res.status(400).json({ error: "Invalid appliesToPurchaseMode" });
-    return;
-  }
-  const titleTypeVal: string | undefined =
-    hasAppliesToTitleType
-      ? (typeof appliesToTitleType === "string" ? (appliesToTitleType.trim() || "any") : undefined)
-      : undefined;
-  if (hasAppliesToTitleType && !titleTypeVal) {
-    res.status(400).json({ error: "Invalid appliesToTitleType" });
-    return;
-  }
-  const caseTypeVal: string | null | undefined =
-    hasAppliesToCaseType
-      ? (typeof appliesToCaseType === "string" ? (appliesToCaseType.trim() || null) : appliesToCaseType === null ? null : undefined)
-      : undefined;
-  if (hasAppliesToCaseType && caseTypeVal === undefined) {
-    res.status(400).json({ error: "Invalid appliesToCaseType" });
-    return;
-  }
-  const groupVal: string | undefined =
-    hasDocumentGroup
-      ? (typeof documentGroup === "string" ? (documentGroup.trim() || "Others") : undefined)
-      : undefined;
-  if (hasDocumentGroup && !groupVal) {
-    res.status(400).json({ error: "Invalid documentGroup" });
-    return;
-  }
-  const sortOrderVal: number | undefined = hasSortOrder ? (typeof sortOrder === "number" && Number.isFinite(sortOrder) ? sortOrder : undefined) : undefined;
-  if (hasSortOrder && sortOrderVal === undefined) {
-    res.status(400).json({ error: "Invalid sortOrder" });
-    return;
-  }
-  const fileNamingRuleVal: string | null | undefined =
-    hasFileNamingRule
-      ? (typeof fileNamingRule === "string" ? (fileNamingRule.trim() || null) : fileNamingRule === null ? null : undefined)
-      : undefined;
-  if (hasFileNamingRule && fileNamingRuleVal === undefined) {
-    res.status(400).json({ error: "Invalid fileNamingRule" });
-    return;
-  }
-  const clauseInsertionModeVal: string | null | undefined =
-    hasClauseInsertionMode
-      ? (typeof clauseInsertionMode === "string" ? (clauseInsertionMode.trim() || null) : clauseInsertionMode === null ? null : undefined)
-      : undefined;
-  if (hasClauseInsertionMode && clauseInsertionModeVal === undefined) {
-    res.status(400).json({ error: "Invalid clauseInsertionMode" });
-    return;
-  }
-  const checklistModeVal: string | null | undefined =
-    hasChecklistMode
-      ? (typeof checklistMode === "string" ? (checklistMode.trim() || null) : checklistMode === null ? null : undefined)
-      : undefined;
-  if (hasChecklistMode && checklistModeVal === undefined) {
-    res.status(400).json({ error: "Invalid checklistMode" });
-    return;
-  }
-  const checklistItemsVal: Record<string, unknown>[] | null | undefined =
-    hasChecklistItems
-      ? (Array.isArray(checklistItems) ? (checklistItems as Record<string, unknown>[]) : checklistItems === null ? null : undefined)
-      : undefined;
-  if (hasChecklistItems && checklistItemsVal === undefined) {
-    res.status(400).json({ error: "Invalid checklistItems" });
-    return;
-  }
-  if (kindVal && kindVal !== "template" && kindVal !== "reference") {
-    res.status(400).json({ error: "Invalid kind" });
-    return;
-  }
-  if (hasFolderId && folderIdNum !== null) {
-    const folderRows = await queryRows(
-      r,
-      sql`SELECT id FROM firm_document_folders WHERE id = ${folderIdNum} AND firm_id = ${req.firmId!}`
-    );
-    if (!folderRows[0]) {
-      res.status(400).json({ error: "Invalid folder" });
+    const folderIdNum: number | null | undefined = hasFolderId ? (typeof folderId === "number" ? folderId : folderId === null ? null : undefined) : undefined;
+    if (hasFolderId && folderIdNum === undefined) {
+      res.status(400).json({ error: "Invalid folderId" });
       return;
     }
-  }
 
-  const existingRows = await queryRows(
-    r,
-    sql`SELECT * FROM document_templates WHERE id = ${templateId} AND firm_id = ${req.firmId!}`
-  );
-  const existing = existingRows[0];
-  if (!existing) {
-    res.status(404).json({ error: "Document not found" });
-    return;
-  }
-  const existingExt = typeof (existing as any).extension === "string" ? String((existing as any).extension) : fileExtensionFromName(String((existing as any).file_name ?? ""));
-  const existingKindRaw = typeof (existing as any).kind === "string" ? String((existing as any).kind) : "template";
-  const requestedKindRaw = kindVal ?? existingKindRaw;
-  const requestedKind: "template" | "reference" = requestedKindRaw === "reference" ? "reference" : "template";
-  const effectiveKind: "template" | "reference" = (existingExt || "").toLowerCase() === "docx" ? requestedKind : "reference";
-  if (effectiveKind === "template" && String(existingExt || "").toLowerCase() !== "docx") {
-    res.status(400).json({ error: "Template must be a .docx file", code: "TEMPLATE_MUST_BE_DOCX" });
-    return;
-  }
+    const kindVal = typeof kind === "string" ? kind : undefined;
+    const nameVal = typeof name === "string" ? name.trim() : undefined;
+    if (hasName && !nameVal) {
+      res.status(400).json({ error: "name is required" });
+      return;
+    }
+    const descriptionVal: string | null | undefined =
+      hasDescription
+        ? (typeof description === "string" ? description.trim() : description === null ? null : undefined)
+        : undefined;
+    if (hasDescription && descriptionVal === undefined) {
+      res.status(400).json({ error: "Invalid description" });
+      return;
+    }
+    const docTypeVal: string | undefined =
+      hasDocumentType
+        ? (typeof documentType === "string" ? (documentType.trim() || "other") : undefined)
+        : undefined;
+    if (hasDocumentType && !docTypeVal) {
+      res.status(400).json({ error: "Invalid documentType" });
+      return;
+    }
 
-  const rows = await queryRows(
-    r,
-    sql`UPDATE document_templates
-        SET folder_id = CASE WHEN ${hasFolderId} THEN ${folderIdNum ?? null} ELSE folder_id END,
-            kind = ${effectiveKind},
-            name = CASE WHEN ${hasName} THEN ${nameVal ?? ""} ELSE name END,
-            description = CASE WHEN ${hasDescription} THEN ${descriptionVal ?? null} ELSE description END,
-            document_type = CASE WHEN ${hasDocumentType} THEN ${effectiveKind === "template" ? (docTypeVal ?? "other") : "other"} ELSE document_type END,
-            is_active = CASE WHEN ${hasIsActive} THEN ${isActiveVal ?? true} ELSE is_active END,
-            applies_to_purchase_mode = CASE WHEN ${hasAppliesToPurchaseMode} THEN ${purchaseModeVal ?? null} ELSE applies_to_purchase_mode END,
-            applies_to_title_type = CASE WHEN ${hasAppliesToTitleType} THEN ${titleTypeVal ?? "any"} ELSE applies_to_title_type END,
-            applies_to_case_type = CASE WHEN ${hasAppliesToCaseType} THEN ${caseTypeVal ?? null} ELSE applies_to_case_type END,
-            document_group = CASE WHEN ${hasDocumentGroup} THEN ${groupVal ?? "Others"} ELSE document_group END,
-            sort_order = CASE WHEN ${hasSortOrder} THEN ${sortOrderVal ?? 0} ELSE sort_order END,
-            file_naming_rule = CASE WHEN ${hasFileNamingRule} THEN ${fileNamingRuleVal ?? null} ELSE file_naming_rule END,
-            clause_insertion_mode = CASE WHEN ${hasClauseInsertionMode} THEN ${clauseInsertionModeVal ?? null} ELSE clause_insertion_mode END,
-            checklist_mode = CASE WHEN ${hasChecklistMode} THEN ${checklistModeVal ?? null} ELSE checklist_mode END,
-            checklist_items = CASE WHEN ${hasChecklistItems} THEN ${checklistItemsVal as any} ELSE checklist_items END,
-            is_template_capable = (
-              ${effectiveKind} = 'template'
-              AND LOWER(COALESCE(NULLIF(extension,''), split_part(file_name, '.', array_length(string_to_array(file_name, '.'), 1)))) = 'docx'
-            ),
-            updated_at = now()
-        WHERE id = ${templateId} AND firm_id = ${req.firmId!}
-        RETURNING *`
-  );
-  if (!rows[0]) {
-    res.status(404).json({ error: "Document not found" });
-    return;
+    const isActiveVal: boolean | undefined = hasIsActive ? (typeof isActive === "boolean" ? isActive : undefined) : undefined;
+    if (hasIsActive && isActiveVal === undefined) {
+      res.status(400).json({ error: "Invalid isActive" });
+      return;
+    }
+    const purchaseModeVal: string | null | undefined =
+      hasAppliesToPurchaseMode
+        ? (typeof appliesToPurchaseMode === "string" ? (appliesToPurchaseMode.trim() || null) : appliesToPurchaseMode === null ? null : undefined)
+        : undefined;
+    if (hasAppliesToPurchaseMode && purchaseModeVal === undefined) {
+      res.status(400).json({ error: "Invalid appliesToPurchaseMode" });
+      return;
+    }
+    const titleTypeVal: string | undefined =
+      hasAppliesToTitleType
+        ? (typeof appliesToTitleType === "string" ? (appliesToTitleType.trim() || "any") : undefined)
+        : undefined;
+    if (hasAppliesToTitleType && !titleTypeVal) {
+      res.status(400).json({ error: "Invalid appliesToTitleType" });
+      return;
+    }
+    const caseTypeVal: string | null | undefined =
+      hasAppliesToCaseType
+        ? (typeof appliesToCaseType === "string" ? (appliesToCaseType.trim() || null) : appliesToCaseType === null ? null : undefined)
+        : undefined;
+    if (hasAppliesToCaseType && caseTypeVal === undefined) {
+      res.status(400).json({ error: "Invalid appliesToCaseType" });
+      return;
+    }
+    const groupVal: string | undefined =
+      hasDocumentGroup
+        ? (typeof documentGroup === "string" ? (documentGroup.trim() || "Others") : undefined)
+        : undefined;
+    if (hasDocumentGroup && !groupVal) {
+      res.status(400).json({ error: "Invalid documentGroup" });
+      return;
+    }
+    const sortOrderVal: number | undefined = hasSortOrder ? (typeof sortOrder === "number" && Number.isFinite(sortOrder) ? sortOrder : undefined) : undefined;
+    if (hasSortOrder && sortOrderVal === undefined) {
+      res.status(400).json({ error: "Invalid sortOrder" });
+      return;
+    }
+    const fileNamingRuleVal: string | null | undefined =
+      hasFileNamingRule
+        ? (typeof fileNamingRule === "string" ? (fileNamingRule.trim() || null) : fileNamingRule === null ? null : undefined)
+        : undefined;
+    if (hasFileNamingRule && fileNamingRuleVal === undefined) {
+      res.status(400).json({ error: "Invalid fileNamingRule" });
+      return;
+    }
+    const clauseInsertionModeVal: string | null | undefined =
+      hasClauseInsertionMode
+        ? (typeof clauseInsertionMode === "string" ? (clauseInsertionMode.trim() || null) : clauseInsertionMode === null ? null : undefined)
+        : undefined;
+    if (hasClauseInsertionMode && clauseInsertionModeVal === undefined) {
+      res.status(400).json({ error: "Invalid clauseInsertionMode" });
+      return;
+    }
+    const checklistModeVal: string | null | undefined =
+      hasChecklistMode
+        ? (typeof checklistMode === "string" ? (checklistMode.trim() || null) : checklistMode === null ? null : undefined)
+        : undefined;
+    if (hasChecklistMode && checklistModeVal === undefined) {
+      res.status(400).json({ error: "Invalid checklistMode" });
+      return;
+    }
+    const checklistItemsVal: Record<string, unknown>[] | null | undefined =
+      hasChecklistItems
+        ? (Array.isArray(checklistItems) ? (checklistItems as Record<string, unknown>[]) : checklistItems === null ? null : undefined)
+        : undefined;
+    if (hasChecklistItems && checklistItemsVal === undefined) {
+      res.status(400).json({ error: "Invalid checklistItems" });
+      return;
+    }
+    if (kindVal && kindVal !== "template" && kindVal !== "reference") {
+      res.status(400).json({ error: "Invalid kind" });
+      return;
+    }
+    if (hasFolderId && folderIdNum !== null) {
+      const folderRows = await queryRows(
+        r,
+        sql`SELECT id FROM firm_document_folders WHERE id = ${folderIdNum} AND firm_id = ${req.firmId!}`
+      );
+      if (!folderRows[0]) {
+        res.status(400).json({ error: "Invalid folder" });
+        return;
+      }
+    }
+
+    const existingRows = await queryRows(
+      r,
+      sql`SELECT * FROM document_templates WHERE id = ${templateId} AND firm_id = ${req.firmId!}`
+    );
+    const existing = existingRows[0];
+    if (!existing) {
+      res.status(404).json({ error: "Document not found" });
+      return;
+    }
+    const existingExt = typeof (existing as any).extension === "string" ? String((existing as any).extension) : fileExtensionFromName(String((existing as any).file_name ?? ""));
+    const existingKindRaw = typeof (existing as any).kind === "string" ? String((existing as any).kind) : "template";
+    const requestedKindRaw = kindVal ?? existingKindRaw;
+    const requestedKind: "template" | "reference" = requestedKindRaw === "reference" ? "reference" : "template";
+    const effectiveKind: "template" | "reference" = (existingExt || "").toLowerCase() === "docx" ? requestedKind : "reference";
+    if (effectiveKind === "template" && String(existingExt || "").toLowerCase() !== "docx") {
+      res.status(400).json({ error: "Template must be a .docx file", code: "TEMPLATE_MUST_BE_DOCX" });
+      return;
+    }
+
+    const rows = await queryRows(
+      r,
+      sql`UPDATE document_templates
+          SET folder_id = CASE WHEN ${hasFolderId} THEN ${folderIdNum ?? null} ELSE folder_id END,
+              kind = ${effectiveKind},
+              name = CASE WHEN ${hasName} THEN ${nameVal ?? ""} ELSE name END,
+              description = CASE WHEN ${hasDescription} THEN ${descriptionVal ?? null} ELSE description END,
+              document_type = CASE WHEN ${hasDocumentType} THEN ${effectiveKind === "template" ? (docTypeVal ?? "other") : "other"} ELSE document_type END,
+              is_active = CASE WHEN ${hasIsActive} THEN ${isActiveVal ?? true} ELSE is_active END,
+              applies_to_purchase_mode = CASE WHEN ${hasAppliesToPurchaseMode} THEN ${purchaseModeVal ?? null} ELSE applies_to_purchase_mode END,
+              applies_to_title_type = CASE WHEN ${hasAppliesToTitleType} THEN ${titleTypeVal ?? "any"} ELSE applies_to_title_type END,
+              applies_to_case_type = CASE WHEN ${hasAppliesToCaseType} THEN ${caseTypeVal ?? null} ELSE applies_to_case_type END,
+              document_group = CASE WHEN ${hasDocumentGroup} THEN ${groupVal ?? "Others"} ELSE document_group END,
+              sort_order = CASE WHEN ${hasSortOrder} THEN ${sortOrderVal ?? 0} ELSE sort_order END,
+              file_naming_rule = CASE WHEN ${hasFileNamingRule} THEN ${fileNamingRuleVal ?? null} ELSE file_naming_rule END,
+              clause_insertion_mode = CASE WHEN ${hasClauseInsertionMode} THEN ${clauseInsertionModeVal ?? null} ELSE clause_insertion_mode END,
+              checklist_mode = CASE WHEN ${hasChecklistMode} THEN ${checklistModeVal ?? null} ELSE checklist_mode END,
+              checklist_items = CASE WHEN ${hasChecklistItems} THEN ${checklistItemsVal as any} ELSE checklist_items END,
+              is_template_capable = (
+                ${effectiveKind} = 'template'
+                AND LOWER(COALESCE(NULLIF(extension,''), split_part(file_name, '.', array_length(string_to_array(file_name, '.'), 1)))) = 'docx'
+              ),
+              updated_at = now()
+          WHERE id = ${templateId} AND firm_id = ${req.firmId!}
+          RETURNING *`
+    );
+    if (!rows[0]) {
+      res.status(404).json({ error: "Document not found" });
+      return;
+    }
+
+    const prevFolderId = (existing as any).folder_id ?? null;
+    const moved = hasFolderId ? prevFolderId !== folderIdNum : false;
+    const action = moved ? "documents.firm_document.move" : "documents.firm_document.update";
+    const detailParts: string[] = [];
+    if (moved) detailParts.push(`folderId=${folderIdNum ?? "null"}`);
+    if (nameVal !== undefined) detailParts.push(`name=${nameVal}`);
+    if (hasDescription) detailParts.push("description=updated");
+    if (docTypeVal !== undefined) detailParts.push(`documentType=${docTypeVal}`);
+    if (kindVal !== undefined) detailParts.push(`kind=${effectiveKind}`);
+
+    res.status(200).json(rows[0]);
+    void writeAuditLog(
+      { firmId: req.firmId, actorId: req.userId, actorType: req.userType, action, entityType: "firm_document", entityId: templateId, detail: detailParts.length ? detailParts.join(" ") : undefined, ipAddress: req.ip, userAgent: req.headers["user-agent"] },
+    ).catch((err) => console.error("Update Template Error:", err));
+  } catch (err) {
+    console.error("Update Template Error:", err);
+    res.status(500).json({ error: "Update template failed" });
   }
-  const prevFolderId = (existing as any).folder_id ?? null;
-  const moved = hasFolderId ? prevFolderId !== folderIdNum : false;
-  const action = moved ? "documents.firm_document.move" : "documents.firm_document.update";
-  const detailParts: string[] = [];
-  if (moved) detailParts.push(`folderId=${folderIdNum ?? "null"}`);
-  if (nameVal !== undefined) detailParts.push(`name=${nameVal}`);
-  if (hasDescription) detailParts.push("description=updated");
-  if (docTypeVal !== undefined) detailParts.push(`documentType=${docTypeVal}`);
-  if (kindVal !== undefined) detailParts.push(`kind=${effectiveKind}`);
-  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action, entityType: "firm_document", entityId: templateId, detail: detailParts.length ? detailParts.join(" ") : undefined, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
-  res.json(rows[0]);
 });
 
 router.get("/document-variables", requireAuth, requireFirmUser, requirePermission("documents", "read"), async (req: AuthRequest, res): Promise<void> => {
