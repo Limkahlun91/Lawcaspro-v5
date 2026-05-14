@@ -136,6 +136,13 @@ const purchaserNameSql = sql<string | null>`(
   LIMIT 1
 )`;
 
+const purchaserNamesSql = sql<string | null>`(
+  SELECT string_agg(${clientsTable.name}, ', ' ORDER BY ${casePurchasersTable.orderNo} ASC)
+  FROM ${casePurchasersTable}
+  INNER JOIN ${clientsTable} ON ${casePurchasersTable.clientId} = ${clientsTable.id}
+  WHERE ${casePurchasersTable.caseId} = ${casesTable.id}
+)`;
+
 routerInternal.get("/developer/dashboard", requireAuth, requireFirmUser, async (req: AuthRequestLike, res: RouteResLike) => {
   const ctx = await requireDeveloperUser(req, res);
   if (!ctx) return;
@@ -161,6 +168,7 @@ routerInternal.get("/developer/dashboard", requireAuth, requireFirmUser, async (
       unitNo: casesTable.parcelNo,
       projectName: projectsTable.name,
       purchaserName: purchaserNameSql,
+      purchaserNames: purchaserNamesSql,
       spaStatus: spaStatusSql(),
       loanStatus: loanStatusSql(),
       updatedAt: casesTable.updatedAt,
@@ -192,7 +200,7 @@ routerInternal.get("/developer/dashboard", requireAuth, requireFirmUser, async (
       referenceNo: c.referenceNo,
       unitNo: c.unitNo ?? null,
       projectName: c.projectName,
-      purchaserName: c.purchaserName ?? null,
+      purchaserName: (c as any).purchaserNames ?? c.purchaserName ?? null,
       spaStatus: String(c.spaStatus ?? "Pending"),
       loanStatus: c.loanStatus == null ? null : String(c.loanStatus),
       updatedAt: toIsoStringSafe(c.updatedAt),
@@ -239,6 +247,7 @@ routerInternal.get("/developer/inventory", requireAuth, requireFirmUser, async (
       unitNo: casesTable.parcelNo,
       projectName: projectsTable.name,
       purchaserName: purchaserNameSql,
+      purchaserNames: purchaserNamesSql,
       spaStatus: spaStatusSql(),
       loanStatus: loanStatusSql(),
       updatedAt: casesTable.updatedAt,
@@ -260,6 +269,7 @@ routerInternal.get("/developer/inventory", requireAuth, requireFirmUser, async (
       referenceNo: c.referenceNo,
       unitNo: c.unitNo ?? null,
       projectName: c.projectName,
+      purchaserNames: (c as any).purchaserNames ?? null,
       purchaserName: c.purchaserName ?? null,
       spaStatus: String(c.spaStatus ?? "Pending"),
       loanStatus: c.loanStatus == null ? null : String(c.loanStatus),
@@ -366,6 +376,7 @@ routerInternal.get("/developer/inventory/export.xlsx", requireAuth, requireFirmU
       unitNo: casesTable.parcelNo,
       projectName: projectsTable.name,
       purchaserName: purchaserNameSql,
+      purchaserNames: purchaserNamesSql,
       spaStatus: spaStatusSql(),
       loanStatus: loanStatusSql(),
       updatedAt: casesTable.updatedAt,
@@ -379,7 +390,7 @@ routerInternal.get("/developer/inventory/export.xlsx", requireAuth, requireFirmU
   const exportRows = rows.map((r) => ({
     "Reference No": r.referenceNo,
     "Unit No": r.unitNo ?? "",
-    "Purchaser": r.purchaserName ?? "",
+    "Purchaser": (r as any).purchaserNames ?? r.purchaserName ?? "",
     "Project": r.projectName,
     "SPA Status": String(r.spaStatus ?? "Pending"),
     "Loan Status": r.loanStatus == null ? "" : String(r.loanStatus),
@@ -416,6 +427,13 @@ routerInternal.get("/developer/cases/:caseId/messages", requireAuth, requireFirm
     return;
   }
 
+  const channelRaw = (req as any)?.query?.channel;
+  const channel = typeof channelRaw === "string" ? channelRaw : (Array.isArray(channelRaw) ? channelRaw[0] : undefined);
+  if (channel && channel !== "developer") {
+    res.status(400).json({ error: "Invalid channel" });
+    return;
+  }
+
   const rows = await r
     .select({
       id: caseMessagesTable.id,
@@ -428,7 +446,12 @@ routerInternal.get("/developer/cases/:caseId/messages", requireAuth, requireFirm
     })
     .from(caseMessagesTable)
     .leftJoin(usersTable, eq(caseMessagesTable.senderId, usersTable.id))
-    .where(and(eq(caseMessagesTable.firmId, ctx.firmId), eq(caseMessagesTable.caseId, caseId)))
+    .where(and(
+      eq(caseMessagesTable.firmId, ctx.firmId),
+      eq(caseMessagesTable.caseId, caseId),
+      eq(caseMessagesTable.channel, "developer"),
+      inArray(caseMessagesTable.senderType, ["developer", "staff"]),
+    ))
     .orderBy(asc(caseMessagesTable.createdAt))
     .limit(200);
 
@@ -462,6 +485,10 @@ routerInternal.post("/developer/cases/:caseId/messages", requireAuth, requireFir
     res.status(400).json({ error: "Invalid body" });
     return;
   }
+  if (body?.channel && String(body.channel) !== "developer") {
+    res.status(400).json({ error: "Invalid channel" });
+    return;
+  }
 
   const [c] = await r
     .select({ id: casesTable.id })
@@ -478,6 +505,7 @@ routerInternal.post("/developer/cases/:caseId/messages", requireAuth, requireFir
     .values({
       firmId: ctx.firmId,
       caseId,
+      channel: "developer",
       senderType: "developer",
       senderId: ctx.userId,
       messageText,

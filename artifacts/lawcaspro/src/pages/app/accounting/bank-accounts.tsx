@@ -49,8 +49,9 @@ export default function BankAccountsTab() {
   const [accountType, setAccountType] = useState("office");
   const [glCode, setGlCode] = useState("");
   const [openingBalance, setOpeningBalance] = useState("0");
-  const [openingBalanceDate, setOpeningBalanceDate] = useState<string | null>(null);
+  const [openingBalanceDate, setOpeningBalanceDate] = useState<string>("");
   const [isDefault, setIsDefault] = useState(false);
+  const [errors, setErrors] = useState<{ bankName?: string; accountNo?: string; openingBalanceDate?: string }>({});
 
   const listQuery = useQuery<ListBankAccountsResponse>({
     queryKey: ["bank-accounts"],
@@ -69,7 +70,7 @@ export default function BankAccountsTab() {
         accountType,
         glCode: glCode.trim() || null,
         openingBalance: parseMoney(openingBalance) ?? 0,
-        openingBalanceDate,
+        openingBalanceDate: openingBalanceDate ? openingBalanceDate : null,
         isDefault,
       };
       if (editing) {
@@ -102,13 +103,14 @@ export default function BankAccountsTab() {
   function resetForm(next?: BankAccountRow | null) {
     const r = next ?? null;
     setEditing(r);
+    setErrors({});
     setAccountName(r?.account_name ?? "");
     setBankName(r?.bank_name ?? "");
     setAccountNo(r?.account_no ?? "");
     setAccountType(r?.account_type ?? "office");
     setGlCode(r?.gl_code ?? "");
     setOpeningBalance(String(r?.opening_balance ?? 0));
-    setOpeningBalanceDate(r?.opening_balance_date ? normalizeDateOnlyFromApi(r.opening_balance_date) : null);
+    setOpeningBalanceDate(r?.opening_balance_date ? normalizeDateOnlyFromApi(r.opening_balance_date) : "");
     setIsDefault(Boolean(r?.is_default ?? false));
   }
 
@@ -116,6 +118,19 @@ export default function BankAccountsTab() {
     const v = parseMoney(openingBalance);
     return v == null ? "" : fmtMoney(v);
   }, [openingBalance]);
+
+  const onSave = () => {
+    const nextErrors: typeof errors = {};
+    if (!bankName.trim()) nextErrors.bankName = "Bank name is required";
+    if (!accountNo.trim()) nextErrors.accountNo = "Account number is required";
+    if (!openingBalanceDate) nextErrors.openingBalanceDate = "Opening date is required";
+    setErrors(nextErrors);
+    if (Object.keys(nextErrors).length > 0) {
+      toast({ title: "Please check the form", variant: "destructive" as any });
+      return;
+    }
+    upsertMutation.mutate();
+  };
 
   return (
     <div className="space-y-6">
@@ -142,11 +157,23 @@ export default function BankAccountsTab() {
             </div>
             <div className="space-y-1.5">
               <Label>Bank Name</Label>
-              <Input value={bankName} onChange={(e) => setBankName(e.target.value)} placeholder="Maybank" />
+              <Input
+                value={bankName}
+                onChange={(e) => { setBankName(e.target.value); if (errors.bankName) setErrors((p) => ({ ...p, bankName: undefined })); }}
+                placeholder="Maybank"
+                className={cn(errors.bankName && "border-red-300 focus-visible:ring-red-200")}
+              />
+              {errors.bankName ? <div className="text-xs text-red-600">{errors.bankName}</div> : null}
             </div>
             <div className="space-y-1.5">
               <Label>Account Number</Label>
-              <Input value={accountNo} onChange={(e) => setAccountNo(e.target.value)} placeholder="1234567890" />
+              <Input
+                value={accountNo}
+                onChange={(e) => { setAccountNo(e.target.value); if (errors.accountNo) setErrors((p) => ({ ...p, accountNo: undefined })); }}
+                placeholder="1234567890"
+                className={cn(errors.accountNo && "border-red-300 focus-visible:ring-red-200")}
+              />
+              {errors.accountNo ? <div className="text-xs text-red-600">{errors.accountNo}</div> : null}
             </div>
             <div className="space-y-1.5">
               <Label>Account Type</Label>
@@ -172,7 +199,15 @@ export default function BankAccountsTab() {
             </div>
             <div className="space-y-1.5">
               <Label>Opening Balance Date</Label>
-              <DateOnlyInput value={openingBalanceDate} onChange={setOpeningBalanceDate} />
+              <DateOnlyInput
+                valueYmd={openingBalanceDate}
+                onChangeYmd={(v) => {
+                  setOpeningBalanceDate(v);
+                  if (errors.openingBalanceDate) setErrors((p) => ({ ...p, openingBalanceDate: undefined }));
+                }}
+                className={cn(errors.openingBalanceDate && "border-red-300")}
+              />
+              {errors.openingBalanceDate ? <div className="text-xs text-red-600">{errors.openingBalanceDate}</div> : null}
             </div>
             <div className="space-y-1.5">
               <Label>Default</Label>
@@ -190,7 +225,7 @@ export default function BankAccountsTab() {
 
           <DialogFooter>
             <Button variant="outline" onClick={() => setOpen(false)} disabled={isBusy}>Cancel</Button>
-            <Button onClick={() => upsertMutation.mutate()} disabled={isBusy || !bankName.trim() || !accountNo.trim() || !openingBalanceDate}>
+            <Button onClick={onSave} disabled={isBusy}>
               {upsertMutation.isPending ? "Saving..." : "Save"}
             </Button>
           </DialogFooter>

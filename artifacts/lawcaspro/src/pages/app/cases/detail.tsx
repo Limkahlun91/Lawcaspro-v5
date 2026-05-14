@@ -3,8 +3,6 @@ import {
   useGetCase, getGetCaseQueryKey, 
   useGetCaseWorkflow, getGetCaseWorkflowQueryKey, 
   useUpdateWorkflowStep, 
-  useGetCaseNotes, getGetCaseNotesQueryKey,
-  useCreateCaseNote,
   useListUsers
 } from "@workspace/api-client-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -19,14 +17,14 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Badge } from "@/components/ui/badge";
+import { cn } from "@/lib/utils";
 import { Breadcrumb, BreadcrumbItem, BreadcrumbLink, BreadcrumbList, BreadcrumbPage, BreadcrumbSeparator } from "@/components/ui/breadcrumb";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { QuickAddUserDialog } from "@/components/quick-add-user-dialog";
 import CaseDocumentsTab from "./components/CaseDocumentsTab";
 import CaseBillingTab from "./components/CaseBillingTab";
 import CaseCommunicationsTab from "./components/CaseCommunicationsTab";
-import CaseTasksTab from "./components/CaseTasksTab";
-import CaseTimeTab from "./components/CaseTimeTab";
 import CaseComplianceTab from "./components/CaseComplianceTab";
 import { QueryFallback } from "@/components/query-fallback";
 import { toastError } from "@/lib/toast-error";
@@ -309,6 +307,8 @@ export default function CaseDetail() {
     const rn = roleName.trim();
     return rn === "Partner" || rn === "Manager" || rn.startsWith("Manager");
   })();
+  const [quickAddUserOpen, setQuickAddUserOpen] = useState(false);
+  const [quickAddUserRoleKind, setQuickAddUserRoleKind] = useState<"lawyer" | "clerk">("lawyer");
 
   const {
     data: caseInfo,
@@ -342,12 +342,7 @@ export default function CaseDetail() {
     query: { enabled: !!caseId, queryKey: getGetCaseWorkflowQueryKey(caseId) }
   });
 
-  const { data: notes, isLoading: isLoadingNotes } = useGetCaseNotes(caseId, {
-    query: { enabled: !!caseId, queryKey: getGetCaseNotesQueryKey(caseId) }
-  });
-
   const updateStepMutation = useUpdateWorkflowStep();
-  const createNoteMutation = useCreateCaseNote();
   const updateCaseMutation = useMutation({
     mutationFn: async (payload: Record<string, unknown>) => {
       return apiFetchJson(`/cases/${caseId}`, { method: "PATCH", body: JSON.stringify(payload) });
@@ -430,16 +425,12 @@ export default function CaseDetail() {
     },
     onError: (err) => toastError(toast, err, "Print failed"),
   });
-
-  const [noteContent, setNoteContent] = useState("");
   const [activeStepId, setActiveStepId] = useState<number | null>(null);
   const [stepNote, setStepNote] = useState("");
   const [shareTrackingOpen, setShareTrackingOpen] = useState(false);
-  const [editingLawyerStatus, setEditingLawyerStatus] = useState(false);
-  const [lawyerStatusDraft, setLawyerStatusDraft] = useState("");
   const [clientReplyDraft, setClientReplyDraft] = useState("");
   const params = new URLSearchParams(searchString);
-  const tabFromUrl = params.get("tab") ?? "overview";
+  const tabFromUrlRaw = params.get("tab") ?? "overview";
   const threadIdFromUrl = params.get("threadId");
   const initialThreadIdRaw = threadIdFromUrl ? parseInt(threadIdFromUrl, 10) : NaN;
   const returnToRaw = params.get("returnTo");
@@ -448,7 +439,22 @@ export default function CaseDetail() {
       ? returnToRaw
       : "/app/cases";
   const initialThreadId = Number.isNaN(initialThreadIdRaw) ? null : initialThreadIdRaw;
-  const [activeTab, setActiveTab] = useState(tabFromUrl);
+  const initialActiveTab = (() => {
+    const allowed = new Set([
+      "overview",
+      "workflow",
+      "documents",
+      "billing",
+      "ledger",
+      "communications",
+      "client-interaction",
+      "compliance",
+    ]);
+    const next = allowed.has(tabFromUrlRaw) ? tabFromUrlRaw : "overview";
+    if (next === "client-interaction" && !canAccessClientInteraction) return "overview";
+    return next;
+  })();
+  const [activeTab, setActiveTab] = useState(initialActiveTab);
 
   const keyDatesQuery = useQuery<Record<string, unknown>>({
     queryKey: ["case-key-dates", caseId],
@@ -488,6 +494,7 @@ export default function CaseDetail() {
 
   type CaseMessage = {
     id: string;
+    channel?: "client" | "developer";
     senderType: "client" | "staff" | "developer";
     senderId: number | null;
     senderName: string;
@@ -496,23 +503,74 @@ export default function CaseDetail() {
     createdAt: string;
   };
 
+  const [interactionChannel, setInteractionChannel] = useState<"client" | "developer">("client");
+
   const caseMessagesQuery = useQuery<{ data: CaseMessage[] }>({
-    queryKey: ["case-messages", caseId],
-    queryFn: ({ signal }) => apiFetchJson(`/cases/${caseId}/messages`, { signal }),
+    queryKey: ["case-messages", caseId, interactionChannel],
+    queryFn: ({ signal }) => apiFetchJson(`/cases/${caseId}/messages?channel=${encodeURIComponent(interactionChannel)}`, { signal }),
     enabled: !!caseId && canAccessClientInteraction,
     retry: false,
   });
 
+  const caseMessagesUnreadQuery = useQuery<{ totalUnreadCount: number; unreadCountByChannel: { client: number; developer: number } }>({
+    queryKey: ["case-messages-unread-count", caseId],
+    queryFn: ({ signal }) => apiFetchJson(`/cases/${caseId}/messages/unread-count`, { signal }),
+    enabled: !!caseId && canAccessClientInteraction,
+    retry: false,
+    refetchInterval: 15000,
+  });
+  const unreadClient = Number((caseMessagesUnreadQuery.data as any)?.unreadCountByChannel?.client ?? 0) || 0;
+  const unreadDeveloper = Number((caseMessagesUnreadQuery.data as any)?.unreadCountByChannel?.developer ?? 0) || 0;
+  const unreadTotal = Number((caseMessagesUnreadQuery.data as any)?.totalUnreadCount ?? (unreadClient + unreadDeveloper)) || 0;
+  const prevUnreadRef = useRef<{ client: number; developer: number } | null>(null);
+
+  const markCaseMessagesReadMutation = useMutation({
+    mutationFn: async (channel: "client" | "developer") => {
+      return await apiFetchJson(`/cases/${caseId}/messages/read`, { method: "POST", body: JSON.stringify({ channel }) });
+    },
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ["case-messages-unread-count", caseId] });
+    },
+  });
+
+  useEffect(() => {
+    if (!canAccessClientInteraction) return;
+    if (!Number.isFinite(unreadClient) || !Number.isFinite(unreadDeveloper)) return;
+    if (prevUnreadRef.current === null) {
+      prevUnreadRef.current = { client: unreadClient, developer: unreadDeveloper };
+      return;
+    }
+    if (activeTab !== "client-interaction") {
+      if (unreadClient > prevUnreadRef.current.client) {
+        toast({ title: "New message from client received!" });
+      }
+      if (unreadDeveloper > prevUnreadRef.current.developer) {
+        toast({ title: "New message from developer received!" });
+      }
+    }
+    prevUnreadRef.current = { client: unreadClient, developer: unreadDeveloper };
+  }, [unreadClient, unreadDeveloper, activeTab, canAccessClientInteraction, toast]);
+
+  useEffect(() => {
+    if (!canAccessClientInteraction) return;
+    if (activeTab !== "client-interaction") return;
+    if (caseMessagesQuery.isLoading) return;
+    const unread = interactionChannel === "client" ? unreadClient : unreadDeveloper;
+    if (unread <= 0) return;
+    markCaseMessagesReadMutation.mutate(interactionChannel);
+  }, [activeTab, canAccessClientInteraction, caseMessagesQuery.isLoading, interactionChannel, unreadClient, unreadDeveloper]);
+
   const sendCaseMessageMutation = useMutation({
-    mutationFn: async (messageText: string) => {
+    mutationFn: async (vars: { messageText: string; channel: "client" | "developer" }) => {
       return await apiFetchJson(`/cases/${caseId}/messages`, {
         method: "POST",
-        body: JSON.stringify({ messageText }),
+        body: JSON.stringify({ messageText: vars.messageText, channel: vars.channel }),
       });
     },
     onSuccess: async () => {
       setClientReplyDraft("");
-      await queryClient.invalidateQueries({ queryKey: ["case-messages", caseId] });
+      await queryClient.invalidateQueries({ queryKey: ["case-messages", caseId, interactionChannel] });
+      await queryClient.invalidateQueries({ queryKey: ["case-messages-unread-count", caseId] });
     },
     onError: (err) => toastError(toast, err, { fallback: "Failed to send message" }),
   });
@@ -948,21 +1006,6 @@ export default function CaseDetail() {
           setStepNote("");
         },
         onError: (err) => toastError(toast, err, "Update failed"),
-      }
-    );
-  };
-
-  const handleAddNote = () => {
-    if (!noteContent.trim()) return;
-    createNoteMutation.mutate(
-      { caseId, data: { content: noteContent } },
-      {
-        onSuccess: () => {
-          queryClient.invalidateQueries({ queryKey: getGetCaseNotesQueryKey(caseId) });
-          setNoteContent("");
-          toast({ title: "Note added" });
-        },
-        onError: (err) => toastError(toast, err, "Save failed"),
       }
     );
   };
@@ -1405,13 +1448,6 @@ export default function CaseDetail() {
     saveStampingMutation.mutate(items);
   };
 
-  const formatBillboardTs = (ts: unknown): string => {
-    if (ts == null || ts === "") return "";
-    const d = new Date(String(ts));
-    if (Number.isNaN(d.getTime())) return "";
-    return d.toLocaleString(undefined, { day: "2-digit", month: "short", year: "numeric", hour: "numeric", minute: "2-digit" });
-  };
-
   return (
     <div className="space-y-6 pb-12">
       <input
@@ -1427,6 +1463,20 @@ export default function CaseDetail() {
         accept={WORKFLOW_ATTACHMENT_ACCEPT}
         className="hidden"
         onChange={(e) => handleStampingFileSelected(e.target.files?.[0] ?? null)}
+      />
+      <QuickAddUserDialog
+        open={quickAddUserOpen}
+        onOpenChange={setQuickAddUserOpen}
+        roleKind={quickAddUserRoleKind}
+        onCreated={(created) => {
+          const id = Number(created.id);
+          if (!Number.isFinite(id) || id <= 0) return;
+          if (quickAddUserRoleKind === "lawyer") {
+            updateCaseMutation.mutate({ assignedLawyerId: id });
+          } else {
+            updateCaseMutation.mutate({ assignedClerkId: id });
+          }
+        }}
       />
       <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4 min-w-0">
         <div className="flex items-start gap-4 min-w-0">
@@ -1512,73 +1562,6 @@ export default function CaseDetail() {
         </div>
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
-        <div className="rounded-lg border border-sky-200 bg-sky-50 px-4 py-3">
-          <div className="flex items-center justify-between gap-2">
-            <div className="text-xs font-semibold text-sky-900">Lawyer Status</div>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => {
-                setLawyerStatusDraft(String((caseInfo as any)?.lawyerStatus ?? ""));
-                setEditingLawyerStatus(true);
-              }}
-              disabled={editingLawyerStatus || updateCaseMutation.isPending}
-            >
-              Edit
-            </Button>
-          </div>
-          {editingLawyerStatus ? (
-            <div className="mt-2 space-y-2">
-              <Textarea
-                value={lawyerStatusDraft}
-                onChange={(e) => setLawyerStatusDraft(e.target.value)}
-                placeholder="Write a short status update..."
-                className="min-h-[90px] bg-white"
-              />
-              <div className="flex items-center justify-end gap-2">
-                <Button variant="outline" size="sm" onClick={() => setEditingLawyerStatus(false)} disabled={updateCaseMutation.isPending}>
-                  Cancel
-                </Button>
-                <Button
-                  size="sm"
-                  onClick={async () => {
-                    const t = lawyerStatusDraft.trim();
-                    try {
-                      await updateCaseMutation.mutateAsync({ lawyerStatus: t ? t : null });
-                      toast({ title: "Lawyer status updated" });
-                      setEditingLawyerStatus(false);
-                    } catch {}
-                  }}
-                  disabled={updateCaseMutation.isPending}
-                >
-                  Save
-                </Button>
-              </div>
-            </div>
-          ) : (
-            <>
-              <div className="mt-1 text-sm text-slate-900 whitespace-pre-wrap break-words">
-                {String((caseInfo as any)?.lawyerStatus ?? "").trim() ? String((caseInfo as any)?.lawyerStatus ?? "") : "No updates from lawyer."}
-              </div>
-              <div className="mt-1 text-[11px] text-sky-900/70">
-                {formatBillboardTs((caseInfo as any)?.lawyerStatusUpdatedAt)}
-              </div>
-            </>
-          )}
-        </div>
-
-        <div className="rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-3">
-          <div className="text-xs font-semibold text-emerald-900">Developer Status</div>
-          <div className="mt-1 text-sm text-slate-900 whitespace-pre-wrap break-words">
-            {String((caseInfo as any)?.developerStatus ?? "").trim() ? String((caseInfo as any)?.developerStatus ?? "") : "No updates from developer."}
-          </div>
-          <div className="mt-1 text-[11px] text-emerald-900/70">
-            {formatBillboardTs((caseInfo as any)?.developerStatusUpdatedAt)}
-          </div>
-        </div>
-      </div>
-
       <Dialog open={shareTrackingOpen} onOpenChange={setShareTrackingOpen}>
         <DialogContent>
           <DialogHeader>
@@ -1659,10 +1642,16 @@ export default function CaseDetail() {
           <TabsTrigger value="billing">Billing</TabsTrigger>
           <TabsTrigger value="ledger">Ledger</TabsTrigger>
           <TabsTrigger value="communications">Comms</TabsTrigger>
-          {canAccessClientInteraction && <TabsTrigger value="client-interaction">Client Interaction</TabsTrigger>}
-          <TabsTrigger value="tasks">Tasks</TabsTrigger>
-          <TabsTrigger value="time">Time</TabsTrigger>
-          <TabsTrigger value="notes">Notes</TabsTrigger>
+          {canAccessClientInteraction && (
+            <TabsTrigger value="client-interaction" className="gap-2">
+              <span>Client Interaction</span>
+              {unreadTotal > 0 && (
+                <span className="inline-flex items-center rounded-full bg-red-500 text-white text-[11px] px-2 py-0.5">
+                  {unreadTotal}
+                </span>
+              )}
+            </TabsTrigger>
+          )}
           <TabsTrigger value="compliance">Compliance</TabsTrigger>
         </TabsList>
 
@@ -1692,23 +1681,35 @@ export default function CaseDetail() {
                     <div className="text-sm font-medium text-slate-500">Assigned Lawyer</div>
                     <div className="text-slate-900 font-medium">
                       {canEditAssignments ? (
-                        <Select
-                          value={currentLawyerId ? String(currentLawyerId) : ""}
-                          onValueChange={(v) => {
-                            const id = Number(v);
-                            if (!Number.isInteger(id) || id <= 0) return;
-                            updateCaseMutation.mutate({ assignedLawyerId: id });
-                          }}
-                        >
-                          <SelectTrigger className="h-9 text-sm border-slate-200 bg-white">
-                            <SelectValue placeholder="Select lawyer" />
-                          </SelectTrigger>
-                          <SelectContent>
-                            {lawyerOptions.map((u) => (
-                              <SelectItem key={u.id} value={String(u.id)}>{u.name}</SelectItem>
-                            ))}
-                          </SelectContent>
-                        </Select>
+                        <div className="flex items-center gap-2">
+                          <Select
+                            value={currentLawyerId ? String(currentLawyerId) : ""}
+                            onValueChange={(v) => {
+                              const id = Number(v);
+                              if (!Number.isInteger(id) || id <= 0) return;
+                              updateCaseMutation.mutate({ assignedLawyerId: id });
+                            }}
+                          >
+                            <SelectTrigger className="h-9 text-sm border-slate-200 bg-white flex-1">
+                              <SelectValue placeholder="Select lawyer" />
+                            </SelectTrigger>
+                            <SelectContent>
+                              {lawyerOptions.map((u) => (
+                                <SelectItem key={u.id} value={String(u.id)}>{u.name}</SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="icon"
+                            className="h-9 w-9"
+                            onClick={() => { setQuickAddUserRoleKind("lawyer"); setQuickAddUserOpen(true); }}
+                            title="Quick add lawyer"
+                          >
+                            <Plus className="h-4 w-4" />
+                          </Button>
+                        </div>
                       ) : (
                         (safeAssignments.find((a) => (a as any)?.roleInCase === "lawyer") as any)?.userName ?? "Unassigned"
                       )}
@@ -1718,28 +1719,40 @@ export default function CaseDetail() {
                     <div className="text-sm font-medium text-slate-500">Assigned Clerk</div>
                     <div className="text-slate-900 font-medium">
                       {canEditAssignments ? (
-                        <Select
-                          value={currentClerkId ? String(currentClerkId) : "__none__"}
-                          onValueChange={(v) => {
-                            if (v === "__none__") {
-                              updateCaseMutation.mutate({ assignedClerkId: null });
-                              return;
-                            }
-                            const id = Number(v);
-                            if (!Number.isInteger(id) || id <= 0) return;
-                            updateCaseMutation.mutate({ assignedClerkId: id });
-                          }}
-                        >
-                          <SelectTrigger className="h-9 text-sm border-slate-200 bg-white">
-                            <SelectValue placeholder="Select clerk" />
-                          </SelectTrigger>
-                          <SelectContent>
-                            <SelectItem value="__none__">None</SelectItem>
-                            {clerkOptions.map((u) => (
-                              <SelectItem key={u.id} value={String(u.id)}>{u.name}</SelectItem>
-                            ))}
-                          </SelectContent>
-                        </Select>
+                        <div className="flex items-center gap-2">
+                          <Select
+                            value={currentClerkId ? String(currentClerkId) : "__none__"}
+                            onValueChange={(v) => {
+                              if (v === "__none__") {
+                                updateCaseMutation.mutate({ assignedClerkId: null });
+                                return;
+                              }
+                              const id = Number(v);
+                              if (!Number.isInteger(id) || id <= 0) return;
+                              updateCaseMutation.mutate({ assignedClerkId: id });
+                            }}
+                          >
+                            <SelectTrigger className="h-9 text-sm border-slate-200 bg-white flex-1">
+                              <SelectValue placeholder="Select clerk" />
+                            </SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="__none__">None</SelectItem>
+                              {clerkOptions.map((u) => (
+                                <SelectItem key={u.id} value={String(u.id)}>{u.name}</SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="icon"
+                            className="h-9 w-9"
+                            onClick={() => { setQuickAddUserRoleKind("clerk"); setQuickAddUserOpen(true); }}
+                            title="Quick add clerk"
+                          >
+                            <Plus className="h-4 w-4" />
+                          </Button>
+                        </div>
                       ) : (
                         (safeAssignments.find((a) => (a as any)?.roleInCase === "clerk") as any)?.userName ?? "Unassigned"
                       )}
@@ -2406,6 +2419,27 @@ export default function CaseDetail() {
                 <CardTitle>Client Interaction</CardTitle>
               </CardHeader>
               <CardContent className="space-y-3">
+                <Tabs value={interactionChannel} onValueChange={(v) => setInteractionChannel(v === "developer" ? "developer" : "client")} className="w-full">
+                  <TabsList className="w-full justify-start">
+                    <TabsTrigger value="client" className="gap-2">
+                      <span>Client Chat</span>
+                      {unreadClient > 0 && (
+                        <span className="inline-flex items-center rounded-full bg-red-500 text-white text-[11px] px-2 py-0.5">
+                          {unreadClient}
+                        </span>
+                      )}
+                    </TabsTrigger>
+                    <TabsTrigger value="developer" className="gap-2">
+                      <span>Developer Chat</span>
+                      {unreadDeveloper > 0 && (
+                        <span className="inline-flex items-center rounded-full bg-red-500 text-white text-[11px] px-2 py-0.5">
+                          {unreadDeveloper}
+                        </span>
+                      )}
+                    </TabsTrigger>
+                  </TabsList>
+                </Tabs>
+
                 {caseMessagesQuery.isLoading && (
                   <div className="text-sm text-slate-500">Loading messages...</div>
                 )}
@@ -2431,7 +2465,9 @@ export default function CaseDetail() {
                       );
                     })}
                     {(Array.isArray(caseMessagesQuery.data?.data) ? caseMessagesQuery.data!.data : []).length === 0 && (
-                      <div className="text-sm text-slate-600">No client messages yet.</div>
+                      <div className="text-sm text-slate-600">
+                        {interactionChannel === "client" ? "No client messages yet." : "No developer messages yet."}
+                      </div>
                     )}
                   </div>
                 )}
@@ -2440,7 +2476,7 @@ export default function CaseDetail() {
                   <Textarea
                     value={clientReplyDraft}
                     onChange={(e) => setClientReplyDraft(e.target.value)}
-                    placeholder="Reply to client..."
+                    placeholder={interactionChannel === "client" ? "Reply to client..." : "Reply to developer..."}
                     className="min-h-[90px]"
                   />
                   <div className="flex items-center justify-between gap-2">
@@ -2450,7 +2486,7 @@ export default function CaseDetail() {
                         const t = clientReplyDraft.trim();
                         if (!t) return;
                         if (t.length > 2000) return;
-                        sendCaseMessageMutation.mutate(t);
+                        sendCaseMessageMutation.mutate({ messageText: t, channel: interactionChannel });
                       }}
                       disabled={sendCaseMessageMutation.isPending || !clientReplyDraft.trim()}
                     >
@@ -2462,60 +2498,6 @@ export default function CaseDetail() {
             </Card>
           </TabsContent>
         )}
-
-        <TabsContent value="tasks">
-          <CaseTasksTab caseId={caseId} />
-        </TabsContent>
-
-        <TabsContent value="time">
-          <CaseTimeTab caseId={caseId} />
-        </TabsContent>
-
-        <TabsContent value="notes" className="space-y-6">
-          <Card>
-            <CardHeader>
-              <CardTitle>Case Notes</CardTitle>
-            </CardHeader>
-            <CardContent>
-              <div className="space-y-4 mb-6">
-                <Textarea 
-                  placeholder="Type a new note here..." 
-                  value={noteContent}
-                  onChange={e => setNoteContent(e.target.value)}
-                  className="min-h-[100px]"
-                />
-                <Button 
-                  onClick={handleAddNote} 
-                  disabled={!noteContent.trim() || createNoteMutation.isPending}
-                  className="bg-amber-500 hover:bg-amber-600"
-                >
-                  Add Note
-                </Button>
-              </div>
-
-              <div className="space-y-4 border-t border-slate-100 pt-6">
-                {isLoadingNotes ? (
-                  <div className="text-slate-500">Loading notes...</div>
-                ) : notes?.length === 0 ? (
-                  <div className="text-center py-8 text-slate-500">No notes added yet.</div>
-                ) : (
-                  notes?.map(note => (
-                    <div key={note.id} className="bg-slate-50 p-4 rounded-lg border border-slate-100">
-                      <div className="flex justify-between items-center mb-2">
-                        <div className="font-semibold text-sm text-slate-900">{note.authorName}</div>
-                        <div className="text-xs text-slate-500 flex items-center gap-1">
-                          <Clock className="w-3 h-3" />
-                          {new Date(note.createdAt).toLocaleString()}
-                        </div>
-                      </div>
-                      <p className="text-sm text-slate-700 whitespace-pre-wrap">{note.content}</p>
-                    </div>
-                  ))
-                )}
-              </div>
-            </CardContent>
-          </Card>
-        </TabsContent>
 
         <TabsContent value="compliance">
           <CaseComplianceTab caseId={caseId} />

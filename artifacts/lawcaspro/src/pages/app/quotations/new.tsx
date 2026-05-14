@@ -1,15 +1,15 @@
-import { useState, useCallback, useEffect } from "react";
+import { useState, useCallback, useEffect, useRef } from "react";
 import { useLocation, useSearch } from "wouter";
-import { useCreateQuotation, getListQuotationsQueryKey, useListCases, useGetCase, getGetCaseQueryKey } from "@workspace/api-client-react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useCreateQuotation, getListQuotationsQueryKey, useListCases, useGetCase, getGetCaseQueryKey, useGetClient } from "@workspace/api-client-react";
+import { useQueryClient } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Textarea } from "@/components/ui/textarea";
 import { ArrowLeft, Plus, Trash2, Save } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import { toastError } from "@/lib/toast-error";
-import { apiFetchJson } from "@/lib/api-client";
 
 interface LineItem {
   id: string;
@@ -26,59 +26,60 @@ interface LineItem {
   amountInclTax: number;
 }
 
-const TAX_RATE = 8;
+const DEFAULT_TAX_RATE = 8;
+const TAX_RATE = DEFAULT_TAX_RATE;
 
 function generateId() {
   return Math.random().toString(36).substring(2, 9);
 }
 
-function calcTax(amount: number, taxCode: string, rate: number = TAX_RATE) {
+function calcTax(amount: number, taxCode: string, rate: number) {
   if (taxCode === "NT" || taxCode === "ZR" || amount === 0) return { taxAmount: 0, amountInclTax: amount };
   const taxAmount = Math.round(amount * rate) / 100;
   return { taxAmount, amountInclTax: amount + taxAmount };
 }
 
 const DEFAULT_DISBURSEMENT_ITEMS: Omit<LineItem, "id" | "itemCategory">[] = [
-  { section: "disbursement", category: "search", itemNo: "1", subItemNo: "", description: "SEARCH", taxCode: "T", amountExclTax: 0, taxRate: TAX_RATE, taxAmount: 0, amountInclTax: 0 },
-  { section: "disbursement", category: "search", itemNo: "1", subItemNo: "a", description: "Land Search", taxCode: "T", amountExclTax: 0, taxRate: TAX_RATE, taxAmount: 0, amountInclTax: 0 },
-  { section: "disbursement", category: "search", itemNo: "1", subItemNo: "b", description: "CTC Title", taxCode: "T", amountExclTax: 0, taxRate: TAX_RATE, taxAmount: 0, amountInclTax: 0 },
-  { section: "disbursement", category: "search", itemNo: "1", subItemNo: "c", description: "Bankruptcy Search", taxCode: "T", amountExclTax: 0, taxRate: TAX_RATE, taxAmount: 0, amountInclTax: 0 },
-  { section: "disbursement", category: "search", itemNo: "1", subItemNo: "d", description: "Bankruptcy Search Service Charge", taxCode: "T", amountExclTax: 0, taxRate: TAX_RATE, taxAmount: 0, amountInclTax: 0 },
-  { section: "disbursement", category: "search", itemNo: "1", subItemNo: "e", description: "CCM Search", taxCode: "T", amountExclTax: 0, taxRate: TAX_RATE, taxAmount: 0, amountInclTax: 0 },
-  { section: "disbursement", category: "stamp_duty", itemNo: "2", subItemNo: "", description: "STAMP DUTY", taxCode: "T", amountExclTax: 0, taxRate: TAX_RATE, taxAmount: 0, amountInclTax: 0 },
-  { section: "disbursement", category: "stamp_duty", itemNo: "2", subItemNo: "a", description: "SPA", taxCode: "T", amountExclTax: 0, taxRate: TAX_RATE, taxAmount: 0, amountInclTax: 0 },
-  { section: "disbursement", category: "stamp_duty", itemNo: "2", subItemNo: "b", description: "Deed of Mutual Covenants", taxCode: "T", amountExclTax: 0, taxRate: TAX_RATE, taxAmount: 0, amountInclTax: 0 },
-  { section: "disbursement", category: "stamp_duty", itemNo: "2", subItemNo: "c", description: "Transfer/Deed of Assignment (by way of Transfer)", taxCode: "T", amountExclTax: 0, taxRate: TAX_RATE, taxAmount: 0, amountInclTax: 0 },
-  { section: "disbursement", category: "stamp_duty", itemNo: "2", subItemNo: "d", description: "Discharge Form 16N/Deed of Receipt & Reassignment", taxCode: "T", amountExclTax: 0, taxRate: TAX_RATE, taxAmount: 0, amountInclTax: 0 },
-  { section: "disbursement", category: "stamp_duty", itemNo: "2", subItemNo: "e", description: "Loan Agreement/LACA/Facilities Agreement", taxCode: "T", amountExclTax: 0, taxRate: TAX_RATE, taxAmount: 0, amountInclTax: 0 },
-  { section: "disbursement", category: "stamp_duty", itemNo: "2", subItemNo: "f", description: "Charge 16A (Annexure)", taxCode: "T", amountExclTax: 0, taxRate: TAX_RATE, taxAmount: 0, amountInclTax: 0 },
-  { section: "disbursement", category: "stamp_duty", itemNo: "2", subItemNo: "g", description: "Personal Guarantee", taxCode: "T", amountExclTax: 0, taxRate: TAX_RATE, taxAmount: 0, amountInclTax: 0 },
-  { section: "disbursement", category: "stamp_duty", itemNo: "2", subItemNo: "h", description: "Corporate Guarantee", taxCode: "T", amountExclTax: 0, taxRate: TAX_RATE, taxAmount: 0, amountInclTax: 0 },
-  { section: "disbursement", category: "stamp_duty", itemNo: "2", subItemNo: "i", description: "Letter of Offer and SD", taxCode: "T", amountExclTax: 0, taxRate: TAX_RATE, taxAmount: 0, amountInclTax: 0 },
-  { section: "disbursement", category: "stamp_duty", itemNo: "2", subItemNo: "j", description: "Property Purchase Agreement", taxCode: "T", amountExclTax: 0, taxRate: TAX_RATE, taxAmount: 0, amountInclTax: 0 },
-  { section: "disbursement", category: "stamp_duty", itemNo: "2", subItemNo: "k", description: "Deed of Assignment", taxCode: "T", amountExclTax: 0, taxRate: TAX_RATE, taxAmount: 0, amountInclTax: 0 },
-  { section: "disbursement", category: "stamp_duty", itemNo: "2", subItemNo: "l", description: "Deed of Revocation", taxCode: "T", amountExclTax: 0, taxRate: TAX_RATE, taxAmount: 0, amountInclTax: 0 },
-  { section: "disbursement", category: "stamp_duty", itemNo: "2", subItemNo: "m", description: "Power of Attorney/Revocation of Power of Attorney", taxCode: "T", amountExclTax: 0, taxRate: TAX_RATE, taxAmount: 0, amountInclTax: 0 },
-  { section: "disbursement", category: "stamp_duty", itemNo: "2", subItemNo: "n", description: "Supplemental Letter Offer", taxCode: "T", amountExclTax: 0, taxRate: TAX_RATE, taxAmount: 0, amountInclTax: 0 },
-  { section: "disbursement", category: "stamp_duty", itemNo: "2", subItemNo: "o", description: "Memorandum of Deposit", taxCode: "T", amountExclTax: 0, taxRate: TAX_RATE, taxAmount: 0, amountInclTax: 0 },
-  { section: "disbursement", category: "stamp_duty", itemNo: "2", subItemNo: "p", description: "Letter of Set-Off", taxCode: "T", amountExclTax: 0, taxRate: TAX_RATE, taxAmount: 0, amountInclTax: 0 },
-  { section: "disbursement", category: "stamp_duty", itemNo: "2", subItemNo: "q", description: "Assignment of Rental Proceed", taxCode: "T", amountExclTax: 0, taxRate: TAX_RATE, taxAmount: 0, amountInclTax: 0 },
-  { section: "disbursement", category: "stamp_duty", itemNo: "2", subItemNo: "r", description: "Tenancy Agreement", taxCode: "T", amountExclTax: 0, taxRate: TAX_RATE, taxAmount: 0, amountInclTax: 0 },
-  { section: "disbursement", category: "stamp_duty", itemNo: "2", subItemNo: "s", description: "Islamic Banking", taxCode: "T", amountExclTax: 0, taxRate: TAX_RATE, taxAmount: 0, amountInclTax: 0 },
-  { section: "disbursement", category: "stamp_duty", itemNo: "2", subItemNo: "t", description: "Others-Refer Attachment I", taxCode: "T", amountExclTax: 0, taxRate: TAX_RATE, taxAmount: 0, amountInclTax: 0 },
-  { section: "disbursement", category: "registration", itemNo: "3", subItemNo: "", description: "REGISTRATION/ENTRY/WITHDRAWAL", taxCode: "T", amountExclTax: 0, taxRate: TAX_RATE, taxAmount: 0, amountInclTax: 0 },
-  { section: "disbursement", category: "registration", itemNo: "3", subItemNo: "a", description: "Entry PC/LHC", taxCode: "T", amountExclTax: 0, taxRate: TAX_RATE, taxAmount: 0, amountInclTax: 0 },
-  { section: "disbursement", category: "registration", itemNo: "3", subItemNo: "b", description: "Withdrawal PC/LHC", taxCode: "T", amountExclTax: 0, taxRate: TAX_RATE, taxAmount: 0, amountInclTax: 0 },
-  { section: "disbursement", category: "registration", itemNo: "3", subItemNo: "c", description: "Discharge/Charge", taxCode: "T", amountExclTax: 0, taxRate: TAX_RATE, taxAmount: 0, amountInclTax: 0 },
-  { section: "disbursement", category: "registration", itemNo: "3", subItemNo: "d", description: "Consent to Charge/Transfer", taxCode: "T", amountExclTax: 0, taxRate: TAX_RATE, taxAmount: 0, amountInclTax: 0 },
-  { section: "disbursement", category: "registration", itemNo: "3", subItemNo: "e", description: "Letter of Consent for Registration", taxCode: "T", amountExclTax: 0, taxRate: TAX_RATE, taxAmount: 0, amountInclTax: 0 },
-  { section: "disbursement", category: "registration", itemNo: "3", subItemNo: "f", description: "Application consent to Charge/Transfer", taxCode: "T", amountExclTax: 0, taxRate: TAX_RATE, taxAmount: 0, amountInclTax: 0 },
-  { section: "disbursement", category: "registration", itemNo: "3", subItemNo: "g", description: "MOT Form14A/Form16F/Form16I NLC", taxCode: "T", amountExclTax: 0, taxRate: TAX_RATE, taxAmount: 0, amountInclTax: 0 },
+  { section: "disbursement", category: "search", itemNo: "1", subItemNo: "", description: "SEARCH", taxCode: "T", amountExclTax: 0, taxRate: DEFAULT_TAX_RATE, taxAmount: 0, amountInclTax: 0 },
+  { section: "disbursement", category: "search", itemNo: "1", subItemNo: "a", description: "Land Search", taxCode: "T", amountExclTax: 0, taxRate: DEFAULT_TAX_RATE, taxAmount: 0, amountInclTax: 0 },
+  { section: "disbursement", category: "search", itemNo: "1", subItemNo: "b", description: "CTC Title", taxCode: "T", amountExclTax: 0, taxRate: DEFAULT_TAX_RATE, taxAmount: 0, amountInclTax: 0 },
+  { section: "disbursement", category: "search", itemNo: "1", subItemNo: "c", description: "Bankruptcy Search", taxCode: "T", amountExclTax: 0, taxRate: DEFAULT_TAX_RATE, taxAmount: 0, amountInclTax: 0 },
+  { section: "disbursement", category: "search", itemNo: "1", subItemNo: "d", description: "Bankruptcy Search Service Charge", taxCode: "T", amountExclTax: 0, taxRate: DEFAULT_TAX_RATE, taxAmount: 0, amountInclTax: 0 },
+  { section: "disbursement", category: "search", itemNo: "1", subItemNo: "e", description: "CCM Search", taxCode: "T", amountExclTax: 0, taxRate: DEFAULT_TAX_RATE, taxAmount: 0, amountInclTax: 0 },
+  { section: "disbursement", category: "stamp_duty", itemNo: "2", subItemNo: "", description: "STAMP DUTY", taxCode: "T", amountExclTax: 0, taxRate: DEFAULT_TAX_RATE, taxAmount: 0, amountInclTax: 0 },
+  { section: "disbursement", category: "stamp_duty", itemNo: "2", subItemNo: "a", description: "SPA", taxCode: "T", amountExclTax: 0, taxRate: DEFAULT_TAX_RATE, taxAmount: 0, amountInclTax: 0 },
+  { section: "disbursement", category: "stamp_duty", itemNo: "2", subItemNo: "b", description: "Deed of Mutual Covenants", taxCode: "T", amountExclTax: 0, taxRate: DEFAULT_TAX_RATE, taxAmount: 0, amountInclTax: 0 },
+  { section: "disbursement", category: "stamp_duty", itemNo: "2", subItemNo: "c", description: "Transfer/Deed of Assignment (by way of Transfer)", taxCode: "T", amountExclTax: 0, taxRate: DEFAULT_TAX_RATE, taxAmount: 0, amountInclTax: 0 },
+  { section: "disbursement", category: "stamp_duty", itemNo: "2", subItemNo: "d", description: "Discharge Form 16N/Deed of Receipt & Reassignment", taxCode: "T", amountExclTax: 0, taxRate: DEFAULT_TAX_RATE, taxAmount: 0, amountInclTax: 0 },
+  { section: "disbursement", category: "stamp_duty", itemNo: "2", subItemNo: "e", description: "Loan Agreement/LACA/Facilities Agreement", taxCode: "T", amountExclTax: 0, taxRate: DEFAULT_TAX_RATE, taxAmount: 0, amountInclTax: 0 },
+  { section: "disbursement", category: "stamp_duty", itemNo: "2", subItemNo: "f", description: "Charge 16A (Annexure)", taxCode: "T", amountExclTax: 0, taxRate: DEFAULT_TAX_RATE, taxAmount: 0, amountInclTax: 0 },
+  { section: "disbursement", category: "stamp_duty", itemNo: "2", subItemNo: "g", description: "Personal Guarantee", taxCode: "T", amountExclTax: 0, taxRate: DEFAULT_TAX_RATE, taxAmount: 0, amountInclTax: 0 },
+  { section: "disbursement", category: "stamp_duty", itemNo: "2", subItemNo: "h", description: "Corporate Guarantee", taxCode: "T", amountExclTax: 0, taxRate: DEFAULT_TAX_RATE, taxAmount: 0, amountInclTax: 0 },
+  { section: "disbursement", category: "stamp_duty", itemNo: "2", subItemNo: "i", description: "Letter of Offer and SD", taxCode: "T", amountExclTax: 0, taxRate: DEFAULT_TAX_RATE, taxAmount: 0, amountInclTax: 0 },
+  { section: "disbursement", category: "stamp_duty", itemNo: "2", subItemNo: "j", description: "Property Purchase Agreement", taxCode: "T", amountExclTax: 0, taxRate: DEFAULT_TAX_RATE, taxAmount: 0, amountInclTax: 0 },
+  { section: "disbursement", category: "stamp_duty", itemNo: "2", subItemNo: "k", description: "Deed of Assignment", taxCode: "T", amountExclTax: 0, taxRate: DEFAULT_TAX_RATE, taxAmount: 0, amountInclTax: 0 },
+  { section: "disbursement", category: "stamp_duty", itemNo: "2", subItemNo: "l", description: "Deed of Revocation", taxCode: "T", amountExclTax: 0, taxRate: DEFAULT_TAX_RATE, taxAmount: 0, amountInclTax: 0 },
+  { section: "disbursement", category: "stamp_duty", itemNo: "2", subItemNo: "m", description: "Power of Attorney/Revocation of Power of Attorney", taxCode: "T", amountExclTax: 0, taxRate: DEFAULT_TAX_RATE, taxAmount: 0, amountInclTax: 0 },
+  { section: "disbursement", category: "stamp_duty", itemNo: "2", subItemNo: "n", description: "Supplemental Letter Offer", taxCode: "T", amountExclTax: 0, taxRate: DEFAULT_TAX_RATE, taxAmount: 0, amountInclTax: 0 },
+  { section: "disbursement", category: "stamp_duty", itemNo: "2", subItemNo: "o", description: "Memorandum of Deposit", taxCode: "T", amountExclTax: 0, taxRate: DEFAULT_TAX_RATE, taxAmount: 0, amountInclTax: 0 },
+  { section: "disbursement", category: "stamp_duty", itemNo: "2", subItemNo: "p", description: "Letter of Set-Off", taxCode: "T", amountExclTax: 0, taxRate: DEFAULT_TAX_RATE, taxAmount: 0, amountInclTax: 0 },
+  { section: "disbursement", category: "stamp_duty", itemNo: "2", subItemNo: "q", description: "Assignment of Rental Proceed", taxCode: "T", amountExclTax: 0, taxRate: DEFAULT_TAX_RATE, taxAmount: 0, amountInclTax: 0 },
+  { section: "disbursement", category: "stamp_duty", itemNo: "2", subItemNo: "r", description: "Tenancy Agreement", taxCode: "T", amountExclTax: 0, taxRate: DEFAULT_TAX_RATE, taxAmount: 0, amountInclTax: 0 },
+  { section: "disbursement", category: "stamp_duty", itemNo: "2", subItemNo: "s", description: "Islamic Banking", taxCode: "T", amountExclTax: 0, taxRate: DEFAULT_TAX_RATE, taxAmount: 0, amountInclTax: 0 },
+  { section: "disbursement", category: "stamp_duty", itemNo: "2", subItemNo: "t", description: "Others-Refer Attachment I", taxCode: "T", amountExclTax: 0, taxRate: DEFAULT_TAX_RATE, taxAmount: 0, amountInclTax: 0 },
+  { section: "disbursement", category: "registration", itemNo: "3", subItemNo: "", description: "REGISTRATION/ENTRY/WITHDRAWAL", taxCode: "T", amountExclTax: 0, taxRate: DEFAULT_TAX_RATE, taxAmount: 0, amountInclTax: 0 },
+  { section: "disbursement", category: "registration", itemNo: "3", subItemNo: "a", description: "Entry PC/LHC", taxCode: "T", amountExclTax: 0, taxRate: DEFAULT_TAX_RATE, taxAmount: 0, amountInclTax: 0 },
+  { section: "disbursement", category: "registration", itemNo: "3", subItemNo: "b", description: "Withdrawal PC/LHC", taxCode: "T", amountExclTax: 0, taxRate: DEFAULT_TAX_RATE, taxAmount: 0, amountInclTax: 0 },
+  { section: "disbursement", category: "registration", itemNo: "3", subItemNo: "c", description: "Discharge/Charge", taxCode: "T", amountExclTax: 0, taxRate: DEFAULT_TAX_RATE, taxAmount: 0, amountInclTax: 0 },
+  { section: "disbursement", category: "registration", itemNo: "3", subItemNo: "d", description: "Consent to Charge/Transfer", taxCode: "T", amountExclTax: 0, taxRate: DEFAULT_TAX_RATE, taxAmount: 0, amountInclTax: 0 },
+  { section: "disbursement", category: "registration", itemNo: "3", subItemNo: "e", description: "Letter of Consent for Registration", taxCode: "T", amountExclTax: 0, taxRate: DEFAULT_TAX_RATE, taxAmount: 0, amountInclTax: 0 },
+  { section: "disbursement", category: "registration", itemNo: "3", subItemNo: "f", description: "Application consent to Charge/Transfer", taxCode: "T", amountExclTax: 0, taxRate: DEFAULT_TAX_RATE, taxAmount: 0, amountInclTax: 0 },
+  { section: "disbursement", category: "registration", itemNo: "3", subItemNo: "g", description: "MOT Form14A/Form16F/Form16I NLC", taxCode: "T", amountExclTax: 0, taxRate: DEFAULT_TAX_RATE, taxAmount: 0, amountInclTax: 0 },
 ];
 
 const DEFAULT_FEES_ITEMS: Omit<LineItem, "id" | "itemCategory">[] = [
-  { section: "fees", category: "fees", itemNo: "1", subItemNo: "", description: "SPA/SPA(sub)", taxCode: "T", amountExclTax: 0, taxRate: TAX_RATE, taxAmount: 0, amountInclTax: 0 },
-  { section: "fees", category: "fees", itemNo: "2", subItemNo: "", description: "Loan Agreement/LACA/Facilities Agreement", taxCode: "T", amountExclTax: 0, taxRate: TAX_RATE, taxAmount: 0, amountInclTax: 0 },
+  { section: "fees", category: "fees", itemNo: "1", subItemNo: "", description: "SPA/SPA(sub)", taxCode: "T", amountExclTax: 0, taxRate: DEFAULT_TAX_RATE, taxAmount: 0, amountInclTax: 0 },
+  { section: "fees", category: "fees", itemNo: "2", subItemNo: "", description: "Loan Agreement/LACA/Facilities Agreement", taxCode: "T", amountExclTax: 0, taxRate: DEFAULT_TAX_RATE, taxAmount: 0, amountInclTax: 0 },
   { section: "fees", category: "fees", itemNo: "3", subItemNo: "", description: "Deed of Mutual Covenant", taxCode: "T", amountExclTax: 0, taxRate: TAX_RATE, taxAmount: 0, amountInclTax: 0 },
   { section: "fees", category: "fees", itemNo: "4", subItemNo: "", description: "Transfer Form 14A", taxCode: "T", amountExclTax: 0, taxRate: TAX_RATE, taxAmount: 0, amountInclTax: 0 },
   { section: "fees", category: "fees", itemNo: "5", subItemNo: "", description: "Charge Form 16A (Annexure)", taxCode: "T", amountExclTax: 0, taxRate: TAX_RATE, taxAmount: 0, amountInclTax: 0 },
@@ -140,12 +141,14 @@ export default function NewQuotation() {
 
   const [selectedCaseId, setSelectedCaseId] = useState<string>(prefillCaseId || "");
   const [referenceNo, setReferenceNo] = useState("");
-  const [stNo, setStNo] = useState("");
   const [clientName, setClientName] = useState("");
+  const [clientAddress, setClientAddress] = useState("");
+  const [clientTin, setClientTin] = useState("");
   const [propertyDescription, setPropertyDescription] = useState("");
   const [purchasePrice, setPurchasePrice] = useState("");
   const [bankName, setBankName] = useState("");
   const [loanAmount, setLoanAmount] = useState("");
+  const [taxRate, setTaxRate] = useState<number>(DEFAULT_TAX_RATE);
 
   const { data: casesRes } = useListCases({ limit: 100 });
   const cases = casesRes?.data ?? [];
@@ -160,18 +163,10 @@ export default function NewQuotation() {
     }
   );
 
-  type FirmSettings = { stNumber?: string | null };
-  const { data: firmSettings } = useQuery<FirmSettings>({
-    queryKey: ["firm-settings"],
-    queryFn: () => apiFetchJson<FirmSettings>("/firm-settings"),
-    retry: false,
-  });
-
   useEffect(() => {
-    if (firmSettings?.stNumber) {
-      setStNo(firmSettings.stNumber);
-    }
-  }, [firmSettings]);
+    setClientAddress("");
+    setClientTin("");
+  }, [selectedCaseId]);
 
   useEffect(() => {
     if (!caseDetail) return;
@@ -188,12 +183,45 @@ export default function NewQuotation() {
     if (caseDetail.referenceNo) setReferenceNo(caseDetail.referenceNo);
   }, [caseDetail]);
 
+  const primaryClientId = (() => {
+    const ps = Array.isArray((caseDetail as any)?.purchasers) ? ((caseDetail as any).purchasers as any[]) : [];
+    const primary = ps.find((p) => String(p?.role ?? "").toLowerCase() === "main") ?? ps[0];
+    const id = Number(primary?.clientId);
+    return Number.isFinite(id) ? id : 0;
+  })();
+  const { data: primaryClient } = useGetClient(primaryClientId, { query: { enabled: primaryClientId > 0, staleTime: 5 * 60 * 1000 } });
+
+  useEffect(() => {
+    if (!primaryClient) return;
+    setClientAddress((prev) => prev || String((primaryClient as any)?.address ?? ""));
+    const tin =
+      (primaryClient as any)?.tinNumber ??
+      (primaryClient as any)?.tin_number ??
+      (primaryClient as any)?.taxNumber ??
+      (primaryClient as any)?.tax_number ??
+      "";
+    setClientTin((prev) => prev || String(tin ?? ""));
+  }, [primaryClient]);
+
   const [disbursementItems, setDisbursementItems] = useState<LineItem[]>(() => initItems(DEFAULT_DISBURSEMENT_ITEMS));
   const [feesItems, setFeesItems] = useState<LineItem[]>(() => initItems(DEFAULT_FEES_ITEMS));
   const [reimbursementItems, setReimbursementItems] = useState<LineItem[]>(() => initItems(DEFAULT_REIMBURSEMENT_ITEMS));
   const [attachmentItems, setAttachmentItems] = useState<LineItem[]>([]);
 
-  const [activeSection, setActiveSection] = useState<string>("disbursement");
+  const [activeSection, setActiveSection] = useState<string>("fees");
+  const exclInputRefs = useRef<Record<string, HTMLInputElement | null>>({});
+
+  useEffect(() => {
+    const recalc = (items: LineItem[]): LineItem[] =>
+      items.map((item) => {
+        const { taxAmount, amountInclTax } = calcTax(item.amountExclTax, item.taxCode, taxRate);
+        return { ...item, taxRate, taxAmount, amountInclTax };
+      });
+    setDisbursementItems(recalc);
+    setFeesItems(recalc);
+    setReimbursementItems(recalc);
+    setAttachmentItems(recalc);
+  }, [taxRate]);
 
   const updateItemAmount = useCallback((
     setItems: React.Dispatch<React.SetStateAction<LineItem[]>>,
@@ -202,10 +230,10 @@ export default function NewQuotation() {
   ) => {
     setItems(prev => prev.map(item => {
       if (item.id !== itemId) return item;
-      const { taxAmount, amountInclTax } = calcTax(amount, item.taxCode, item.taxRate);
-      return { ...item, amountExclTax: amount, taxAmount, amountInclTax };
+      const { taxAmount, amountInclTax } = calcTax(amount, item.taxCode, taxRate);
+      return { ...item, amountExclTax: amount, taxRate, taxAmount, amountInclTax };
     }));
-  }, []);
+  }, [taxRate]);
 
   const updateItemTaxCode = useCallback((
     setItems: React.Dispatch<React.SetStateAction<LineItem[]>>,
@@ -214,21 +242,10 @@ export default function NewQuotation() {
   ) => {
     setItems(prev => prev.map(item => {
       if (item.id !== itemId) return item;
-      const { taxAmount, amountInclTax } = calcTax(item.amountExclTax, taxCode, item.taxRate);
-      return { ...item, taxCode, taxAmount, amountInclTax };
+      const { taxAmount, amountInclTax } = calcTax(item.amountExclTax, taxCode, taxRate);
+      return { ...item, taxCode, taxRate, taxAmount, amountInclTax };
     }));
-  }, []);
-
-  const updateItemCategory = useCallback((
-    setItems: React.Dispatch<React.SetStateAction<LineItem[]>>,
-    itemId: string,
-    itemCategory: "fee" | "disbursement"
-  ) => {
-    setItems(prev => prev.map(item => {
-      if (item.id !== itemId) return item;
-      return { ...item, itemCategory };
-    }));
-  }, []);
+  }, [taxRate]);
 
   const addAttachmentItem = () => {
     setAttachmentItems(prev => [...prev, {
@@ -241,7 +258,7 @@ export default function NewQuotation() {
       taxCode: "T",
       itemCategory: "disbursement",
       amountExclTax: 0,
-      taxRate: TAX_RATE,
+      taxRate,
       taxAmount: 0,
       amountInclTax: 0,
     }]);
@@ -287,7 +304,7 @@ export default function NewQuotation() {
       ...feesItems,
       ...reimbursementItems,
       ...attachmentItems,
-    ].filter(i => i.amountExclTax > 0 || i.description.trim()).map((item, idx) => ({
+    ].filter(i => i.amountExclTax > 0).map((item, idx) => ({
       section: item.section,
       category: item.category,
       itemNo: item.itemNo,
@@ -296,7 +313,7 @@ export default function NewQuotation() {
       taxCode: item.taxCode,
       itemCategory: item.itemCategory,
       amountExclTax: item.amountExclTax,
-      taxRate: item.taxRate,
+      taxRate,
       taxAmount: item.taxAmount,
       amountInclTax: item.amountInclTax,
       sortOrder: idx,
@@ -306,13 +323,15 @@ export default function NewQuotation() {
       {
         data: {
           referenceNo,
-          stNo: stNo || undefined,
           clientName,
+          clientAddress: clientAddress || undefined,
+          clientTin: clientTin || undefined,
           caseId: selectedCaseId ? parseInt(selectedCaseId) : undefined,
           propertyDescription: propertyDescription || undefined,
           purchasePrice: purchasePrice || undefined,
           bankName: bankName || undefined,
           loanAmount: loanAmount || undefined,
+          taxRate,
           items: allItems,
         },
       },
@@ -328,13 +347,20 @@ export default function NewQuotation() {
   };
 
   const sections = [
-    { key: "disbursement", label: "Disbursement", items: disbursementItems, setter: setDisbursementItems, totals: disbTotals },
     { key: "fees", label: "Professional Fees", items: feesItems, setter: setFeesItems, totals: feesTotals },
     { key: "reimbursement", label: "Reimbursement", items: reimbursementItems, setter: setReimbursementItems, totals: reimbTotals },
+    { key: "disbursement", label: "Disbursement", items: disbursementItems, setter: setDisbursementItems, totals: disbTotals },
     { key: "attachment", label: "Attachment I", items: attachmentItems, setter: setAttachmentItems, totals: attTotals },
   ];
 
   const currentSection = sections.find(s => s.key === activeSection)!;
+  const currentEditableIds = currentSection.items
+    .filter((item) => {
+      const isHeader = !item.subItemNo && item.description === item.description.toUpperCase();
+      return !isHeader;
+    })
+    .map((i) => i.id);
+  const attachmentEditableIds = attachmentItems.map((i) => i.id);
 
   return (
     <div className="space-y-6">
@@ -374,12 +400,25 @@ export default function NewQuotation() {
               <Input value={referenceNo} onChange={e => setReferenceNo(e.target.value)} placeholder="e.g. NYC/CON" />
             </div>
             <div>
-              <Label className="text-xs text-slate-500">ST No.</Label>
-              <Input value={stNo} onChange={e => setStNo(e.target.value)} placeholder="Service tax number" />
+              <Label className="text-xs text-slate-500">Service Tax Rate (%)</Label>
+              <Input
+                type="number"
+                value={String(taxRate)}
+                onChange={(e) => setTaxRate(Number(e.target.value) || 0)}
+                placeholder="8"
+              />
             </div>
             <div>
               <Label className="text-xs text-slate-500">Client Name *</Label>
               <Input value={clientName} onChange={e => setClientName(e.target.value)} placeholder="Client name" />
+            </div>
+            <div>
+              <Label className="text-xs text-slate-500">Client TIN Number</Label>
+              <Input value={clientTin} onChange={e => setClientTin(e.target.value)} placeholder="TIN number" />
+            </div>
+            <div className="md:col-span-3">
+              <Label className="text-xs text-slate-500">Client Address</Label>
+              <Textarea value={clientAddress} onChange={e => setClientAddress(e.target.value)} placeholder="Client address" className="min-h-[70px]" />
             </div>
             <div className="md:col-span-3">
               <Label className="text-xs text-slate-500">Property Description</Label>
@@ -440,9 +479,8 @@ export default function NewQuotation() {
                         <th className="text-left px-3 py-2 font-medium text-slate-600 w-10">No.</th>
                         <th className="text-left px-3 py-2 font-medium text-slate-600">Description</th>
                         <th className="text-center px-3 py-2 font-medium text-slate-600 w-20">Tax Code</th>
-                        <th className="text-center px-3 py-2 font-medium text-slate-600 w-36">Category</th>
                         <th className="text-right px-3 py-2 font-medium text-slate-600 w-32">Total Excl. ST (RM)</th>
-                        <th className="text-right px-3 py-2 font-medium text-slate-600 w-28">ST @ {TAX_RATE}% (RM)</th>
+                        <th className="text-right px-3 py-2 font-medium text-slate-600 w-28">ST @ {taxRate}% (RM)</th>
                         <th className="text-right px-3 py-2 font-medium text-slate-600 w-32">Total Incl. ST (RM)</th>
                         <th className="w-10"></th>
                       </tr>
@@ -459,28 +497,7 @@ export default function NewQuotation() {
                               className="h-8"
                             />
                           </td>
-                          <td className="px-3 py-2 text-center">
-                            <select
-                              value={item.taxCode}
-                              onChange={e => updateItemTaxCode(setAttachmentItems, item.id, e.target.value)}
-                              className="h-7 text-xs border rounded px-1 bg-white"
-                            >
-                              <option value="T">T</option>
-                              <option value="NT">NT</option>
-                              <option value="ZR">ZR</option>
-                              <option value="SR">SR</option>
-                            </select>
-                          </td>
-                          <td className="px-3 py-2 text-center">
-                            <select
-                              value={item.itemCategory}
-                              onChange={(e) => updateItemCategory(setAttachmentItems, item.id, e.target.value === "fee" ? "fee" : "disbursement")}
-                              className="h-7 text-xs border rounded px-2 bg-white"
-                            >
-                              <option value="fee">Fee</option>
-                              <option value="disbursement">Disbursement</option>
-                            </select>
-                          </td>
+                          <td className="px-3 py-2 text-center text-xs text-slate-700">{item.taxCode}</td>
                           <td className="px-3 py-2">
                             <Input
                               type="number"
@@ -488,10 +505,22 @@ export default function NewQuotation() {
                               onChange={e => updateItemAmount(setAttachmentItems, item.id, parseFloat(e.target.value) || 0)}
                               className="h-8 text-right"
                               placeholder="0.00"
+                              ref={(el) => { exclInputRefs.current[item.id] = el; }}
+                              onKeyDown={(e) => {
+                                if (e.key !== "Tab" || e.shiftKey) return;
+                                e.preventDefault();
+                                const idx = attachmentEditableIds.indexOf(item.id);
+                                const nextId = idx >= 0 ? attachmentEditableIds[idx + 1] : undefined;
+                                if (nextId) exclInputRefs.current[nextId]?.focus();
+                              }}
                             />
                           </td>
-                          <td className="px-3 py-2 text-right text-slate-500">{item.taxAmount.toFixed(2)}</td>
-                          <td className="px-3 py-2 text-right font-medium">{item.amountInclTax.toFixed(2)}</td>
+                          <td className="px-3 py-2 text-right">
+                            <Input readOnly tabIndex={-1} value={item.taxAmount.toFixed(2)} className="h-8 text-right text-xs text-slate-500 border-0 bg-transparent shadow-none focus-visible:ring-0" />
+                          </td>
+                          <td className="px-3 py-2 text-right">
+                            <Input readOnly tabIndex={-1} value={item.amountInclTax.toFixed(2)} className="h-8 text-right text-xs font-medium border-0 bg-transparent shadow-none focus-visible:ring-0" />
+                          </td>
                           <td className="px-3 py-2">
                             <Button variant="ghost" size="sm" onClick={() => removeAttachmentItem(item.id)} className="text-red-500">
                               <Trash2 className="w-3 h-3" />
@@ -502,7 +531,7 @@ export default function NewQuotation() {
                     </tbody>
                     <tfoot>
                       <tr className="bg-slate-50 font-medium">
-                        <td colSpan={4} className="px-3 py-2 text-right">Total</td>
+                        <td colSpan={3} className="px-3 py-2 text-right">Total</td>
                         <td className="px-3 py-2 text-right">{formatRM(attTotals.totalExclTax)}</td>
                         <td className="px-3 py-2 text-right">{formatRM(attTotals.totalTax)}</td>
                         <td className="px-3 py-2 text-right">{formatRM(attTotals.totalInclTax)}</td>
@@ -521,9 +550,8 @@ export default function NewQuotation() {
                     <th className="text-left px-3 py-2 font-medium text-slate-600 w-10">No.</th>
                     <th className="text-left px-3 py-2 font-medium text-slate-600">Description</th>
                     <th className="text-center px-3 py-2 font-medium text-slate-600 w-20">Tax Code</th>
-                    <th className="text-center px-3 py-2 font-medium text-slate-600 w-36">Category</th>
                     <th className="text-right px-3 py-2 font-medium text-slate-600 w-32">Total Excl. ST (RM)</th>
-                    <th className="text-right px-3 py-2 font-medium text-slate-600 w-28">ST @ {TAX_RATE}% (RM)</th>
+                    <th className="text-right px-3 py-2 font-medium text-slate-600 w-28">ST @ {taxRate}% (RM)</th>
                     <th className="text-right px-3 py-2 font-medium text-slate-600 w-32">Total Incl. ST (RM)</th>
                   </tr>
                 </thead>
@@ -539,30 +567,7 @@ export default function NewQuotation() {
                           {item.description}
                         </td>
                         <td className="px-3 py-1.5 text-center">
-                          {!isHeader && (
-                            <select
-                              value={item.taxCode}
-                              onChange={e => updateItemTaxCode(currentSection.setter, item.id, e.target.value)}
-                              className="h-7 text-xs border rounded px-1 bg-white"
-                            >
-                              <option value="T">T</option>
-                              <option value="NT">NT</option>
-                              <option value="ZR">ZR</option>
-                              <option value="SR">SR</option>
-                            </select>
-                          )}
-                        </td>
-                        <td className="px-3 py-1.5 text-center">
-                          {!isHeader && (
-                            <select
-                              value={item.itemCategory}
-                              onChange={(e) => updateItemCategory(currentSection.setter, item.id, e.target.value === "fee" ? "fee" : "disbursement")}
-                              className="h-7 text-xs border rounded px-2 bg-white"
-                            >
-                              <option value="fee">Fee</option>
-                              <option value="disbursement">Disbursement</option>
-                            </select>
-                          )}
+                          {!isHeader ? <span className="text-xs text-slate-700">{item.taxCode}</span> : null}
                         </td>
                         <td className="px-3 py-1.5 text-right">
                           {!isHeader && (
@@ -572,14 +577,26 @@ export default function NewQuotation() {
                               onChange={e => updateItemAmount(currentSection.setter, item.id, parseFloat(e.target.value) || 0)}
                               className="h-7 text-right text-xs w-28 ml-auto"
                               placeholder="0.00"
+                              ref={(el) => { exclInputRefs.current[item.id] = el; }}
+                              onKeyDown={(e) => {
+                                if (e.key !== "Tab" || e.shiftKey) return;
+                                e.preventDefault();
+                                const idx = currentEditableIds.indexOf(item.id);
+                                const nextId = idx >= 0 ? currentEditableIds[idx + 1] : undefined;
+                                if (nextId) exclInputRefs.current[nextId]?.focus();
+                              }}
                             />
                           )}
                         </td>
                         <td className="px-3 py-1.5 text-right text-xs text-slate-500">
-                          {!isHeader ? item.taxAmount.toFixed(2) : ""}
+                          {!isHeader ? (
+                            <Input readOnly tabIndex={-1} value={item.taxAmount.toFixed(2)} className="h-7 text-right text-xs text-slate-500 border-0 bg-transparent shadow-none focus-visible:ring-0 w-24 ml-auto" />
+                          ) : ""}
                         </td>
                         <td className="px-3 py-1.5 text-right text-xs font-medium">
-                          {!isHeader ? item.amountInclTax.toFixed(2) : ""}
+                          {!isHeader ? (
+                            <Input readOnly tabIndex={-1} value={item.amountInclTax.toFixed(2)} className="h-7 text-right text-xs font-medium border-0 bg-transparent shadow-none focus-visible:ring-0 w-24 ml-auto" />
+                          ) : ""}
                         </td>
                       </tr>
                     );
@@ -587,7 +604,7 @@ export default function NewQuotation() {
                 </tbody>
                 <tfoot>
                   <tr className="bg-slate-50 font-medium">
-                    <td colSpan={4} className="px-3 py-2 text-right">Total {currentSection.label}</td>
+                    <td colSpan={3} className="px-3 py-2 text-right">Total {currentSection.label}</td>
                     <td className="px-3 py-2 text-right">{formatRM(currentSection.totals.totalExclTax)}</td>
                     <td className="px-3 py-2 text-right">{formatRM(currentSection.totals.totalTax)}</td>
                     <td className="px-3 py-2 text-right">{formatRM(currentSection.totals.totalInclTax)}</td>
@@ -603,16 +620,16 @@ export default function NewQuotation() {
         <CardContent className="pt-4">
           <div className="max-w-md ml-auto space-y-2">
             <div className="flex justify-between text-sm">
-              <span className="text-slate-500">Disbursement</span>
-              <span>{formatRM(disbTotals.totalInclTax)}</span>
-            </div>
-            <div className="flex justify-between text-sm">
               <span className="text-slate-500">Professional Fees</span>
               <span>{formatRM(feesTotals.totalInclTax)}</span>
             </div>
             <div className="flex justify-between text-sm">
               <span className="text-slate-500">Reimbursement</span>
               <span>{formatRM(reimbTotals.totalInclTax)}</span>
+            </div>
+            <div className="flex justify-between text-sm">
+              <span className="text-slate-500">Disbursement</span>
+              <span>{formatRM(disbTotals.totalInclTax)}</span>
             </div>
             {attTotals.totalInclTax > 0 && (
               <div className="flex justify-between text-sm">

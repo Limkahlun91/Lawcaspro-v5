@@ -192,9 +192,9 @@ export default function InvoiceDetail() {
   const canRecord = inv.status === "issued" || inv.status === "partially_paid";
 
   return (
-    <div className="space-y-6 min-w-0">
-      <Card className="print:shadow-none">
-        <CardContent className="pt-6 pb-6">
+    <div className="space-y-6 min-w-0 print-doc print:space-y-3">
+      <Card className="print:shadow-none print:border-none print:bg-transparent print:rounded-none">
+        <CardContent className="pt-6 pb-6 print:pt-0 print:pb-2">
           <div className="flex items-start justify-between gap-6">
             <div className="min-w-0">
               {logoPreviewUrl ? (
@@ -221,7 +221,43 @@ export default function InvoiceDetail() {
         </CardContent>
       </Card>
 
-      <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+      <div className="hidden print:block">
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <div className="text-[10px] text-slate-500 uppercase">Bill To</div>
+            <div className="text-sm font-medium text-slate-900">
+              {typeof (inv as any).billToName === "string" && (inv as any).billToName.trim()
+                ? String((inv as any).billToName)
+                : "—"}
+            </div>
+            {typeof (inv as any).billToAddress === "string" && (inv as any).billToAddress.trim()
+              ? <div className="text-xs text-slate-700 whitespace-pre-wrap">{String((inv as any).billToAddress)}</div>
+              : null}
+          </div>
+          <div className="text-right">
+            <div className="grid gap-1 justify-end">
+              <div className="flex justify-between gap-4 text-xs">
+                <span className="text-slate-500">Invoice No</span>
+                <span className="font-mono text-slate-900">{inv.invoiceNo}</span>
+              </div>
+              <div className="flex justify-between gap-4 text-xs">
+                <span className="text-slate-500">Issued</span>
+                <span className="font-mono text-slate-900">{inv.issuedDate ?? "—"}</span>
+              </div>
+              <div className="flex justify-between gap-4 text-xs">
+                <span className="text-slate-500">Due</span>
+                <span className="font-mono text-slate-900">{inv.dueDate ?? "—"}</span>
+              </div>
+              <div className="flex justify-between gap-4 text-xs">
+                <span className="text-slate-500">Status</span>
+                <span className="font-mono text-slate-900">{String(inv.status ?? "").replace(/_/g, " ") || "—"}</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between print:hidden">
         <Button variant="ghost" size="sm" onClick={() => setLocation("/app/accounting?tab=invoices")} className="gap-1.5">
           <ArrowLeft className="w-4 h-4" /> Back
         </Button>
@@ -302,7 +338,7 @@ export default function InvoiceDetail() {
       )}
 
       {/* Payment summary bar */}
-      <div className="grid grid-cols-3 gap-4">
+      <div className="grid grid-cols-3 gap-4 print:hidden">
         <Card>
           <CardContent className="pt-4 pb-4 text-center">
             <div className="text-xs text-slate-500 mb-1">Invoice Total</div>
@@ -326,34 +362,34 @@ export default function InvoiceDetail() {
       </div>
 
       {/* Invoice line items */}
-      <Card className="print:shadow-none">
-        <CardHeader className="pb-2">
+      <Card className="print:shadow-none print:border-none print:bg-transparent print:rounded-none">
+        <CardHeader className="pb-2 print:pb-1 print:px-0">
           <CardTitle className="text-base font-semibold">Invoice Items</CardTitle>
         </CardHeader>
-        <CardContent className="p-0">
+        <CardContent className="p-0 print:px-0">
           {[
             { label: "A — Professional Fees (E-invoice)", items: feeItems },
             { label: "B — Disbursements (Trust / Pass-through)", items: disbursementItems },
           ].filter(g => g.items.length > 0).map((group) => (
             <div key={group.label}>
-              <div className="px-4 py-2 bg-slate-50 border-y text-xs font-semibold text-slate-500 uppercase tracking-wide">
+              <div className="px-4 py-2 bg-slate-50 border-y text-xs font-semibold text-slate-500 uppercase tracking-wide print:px-0 print:py-1 print:bg-transparent print:border-black print:text-black">
                 {group.label}
               </div>
               <div className="overflow-x-auto">
-                <table className="w-full text-sm min-w-[900px]">
+                <table className="w-full text-sm min-w-[900px] print:min-w-0 print:text-xs">
                   <thead>
-                    <tr className="text-slate-400 text-xs">
-                      <th className="px-4 py-2 text-left font-medium">Description</th>
+                    <tr className="text-slate-400 text-xs print:text-black print:border-b print:border-black">
+                      <th className="px-4 py-2 text-left font-medium print:px-0">Description</th>
                       <th className="px-4 py-2 text-left font-medium">Type</th>
                       <th className="px-4 py-2 text-right font-medium">Excl. Tax</th>
-                      <th className="px-4 py-2 text-right font-medium">Tax</th>
+                      <th className="px-4 py-2 text-right font-medium">SST</th>
                       <th className="px-4 py-2 text-right font-medium">Total</th>
                     </tr>
                   </thead>
                   <tbody>
                     {group.items.map((item: InvoiceItem) => (
-                      <tr key={item.id} className="border-t border-slate-100 hover:bg-slate-50">
-                        <td className="px-4 py-2.5 text-slate-800">{item.description}</td>
+                      <tr key={item.id} className="border-t border-slate-100 hover:bg-slate-50 print:hover:bg-transparent print:border-black print:break-inside-avoid">
+                        <td className="px-4 py-2.5 text-slate-800 print:px-0">{item.description}</td>
                         <td className="px-4 py-2.5">
                           <span className="text-xs text-slate-400">{ITEM_TYPE_LABELS[item.itemType] ?? item.itemType}</span>
                         </td>
@@ -370,15 +406,15 @@ export default function InvoiceDetail() {
             </div>
           ))}
 
-          <div className="border-t p-4">
-            <div className="ml-auto max-w-xs space-y-1.5">
-              <div className="flex justify-between text-sm text-slate-600">
+          <div className="border-t p-4 print:p-0 print:pt-2 print:border-black">
+            <div className="ml-auto max-w-xs space-y-1.5 print:text-xs">
+              <div className="flex justify-between text-sm text-slate-600 print:text-xs print:text-black">
                 <span>Subtotal (excl. tax)</span><span className="font-mono">{fmt(inv.subtotal)}</span>
               </div>
-              <div className="flex justify-between text-sm text-slate-600">
+              <div className="flex justify-between text-sm text-slate-600 print:text-xs print:text-black">
                 <span>SST / Tax</span><span className="font-mono">{fmt(inv.taxTotal)}</span>
               </div>
-              <div className="flex justify-between text-base font-bold text-slate-900 border-t pt-2">
+              <div className="flex justify-between text-base font-bold text-slate-900 border-t pt-2 print:text-sm print:pt-1 print:border-black">
                 <span>Grand Total</span><span className="font-mono">{fmt(inv.grandTotal)}</span>
               </div>
             </div>
@@ -396,6 +432,14 @@ export default function InvoiceDetail() {
           </CardContent>
         </Card>
       )}
+
+      <div className="hidden print:block pt-8">
+        <div className="ml-auto w-[280px]">
+          <div className="border-t border-black pt-2 text-xs text-slate-900 text-center">
+            Authorized Signature
+          </div>
+        </div>
+      </div>
     </div>
   );
 }

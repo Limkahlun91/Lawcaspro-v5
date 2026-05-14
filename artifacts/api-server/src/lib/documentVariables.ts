@@ -337,10 +337,23 @@ export function resolveVariablesForTemplate(params: {
     if (b2n) out.push({ name: b2n, nric: b2i });
     return out;
   })());
+  const borrowerAddresses = (() => {
+    const arr = Array.isArray((params.caseContext as any)?.borrowers) ? (params.caseContext as any).borrowers : null;
+    if (arr) {
+      return arr
+        .map((b: any) => (typeof b?.address === "string" ? b.address.trim() : ""))
+        .filter(Boolean)
+        .join(", ");
+    }
+    const a1 = typeof (params.caseContext as any)?.borrower1_address === "string" ? String((params.caseContext as any).borrower1_address).trim() : "";
+    const a2 = typeof (params.caseContext as any)?.borrower2_address === "string" ? String((params.caseContext as any).borrower2_address).trim() : "";
+    return [a1, a2].filter(Boolean).join(", ");
+  })();
   const vendorsInline = formatPersonList((() => {
     const arr = Array.isArray((params.caseContext as any)?.vendors) ? (params.caseContext as any).vendors : null;
     if (arr) return arr.map((v: any) => ({ name: v?.name, nric: v?.nric ?? v?.ic ?? v?.ic_no }));
     const vn = (params.caseContext as any)?.vendor_name;
+    const vi = (params.caseContext as any)?.vendor_ic;
     const vi = (params.caseContext as any)?.vendor_ic;
     if (!vn) return [];
     return [{ name: vn, nric: vi }];
@@ -348,6 +361,11 @@ export function resolveVariablesForTemplate(params: {
 
   if (!Object.prototype.hasOwnProperty.call(resolved, "purchasers_inline")) resolved.purchasers_inline = purchasersInline || null;
   if (!Object.prototype.hasOwnProperty.call(resolved, "borrowers_inline")) resolved.borrowers_inline = borrowersInline || null;
+  if (!Object.prototype.hasOwnProperty.call(resolved, "borrower_addresses")) resolved.borrower_addresses = borrowerAddresses || null;
+  if (!Object.prototype.hasOwnProperty.call(resolved, "borrower_1_address")) resolved.borrower_1_address = typeof (params.caseContext as any)?.borrower_1_address === "string" ? String((params.caseContext as any).borrower_1_address) : (typeof (params.caseContext as any)?.borrower1_address === "string" ? String((params.caseContext as any).borrower1_address) : null);
+  if (!Object.prototype.hasOwnProperty.call(resolved, "borrower_2_address")) resolved.borrower_2_address = typeof (params.caseContext as any)?.borrower_2_address === "string" ? String((params.caseContext as any).borrower_2_address) : (typeof (params.caseContext as any)?.borrower2_address === "string" ? String((params.caseContext as any).borrower2_address) : null);
+  if (!Object.prototype.hasOwnProperty.call(resolved, "borrower1_address")) resolved.borrower1_address = typeof (params.caseContext as any)?.borrower1_address === "string" ? String((params.caseContext as any).borrower1_address) : null;
+  if (!Object.prototype.hasOwnProperty.call(resolved, "borrower2_address")) resolved.borrower2_address = typeof (params.caseContext as any)?.borrower2_address === "string" ? String((params.caseContext as any).borrower2_address) : null;
   if (!Object.prototype.hasOwnProperty.call(resolved, "vendors_inline")) resolved.vendors_inline = vendorsInline || null;
 
   return {

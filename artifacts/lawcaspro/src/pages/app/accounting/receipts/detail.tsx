@@ -86,7 +86,7 @@ export default function ReceiptDetail() {
   if (!rec) return <div className="py-16 text-center text-slate-400">Receipt not found</div>;
 
   return (
-    <div className="space-y-6 min-w-0">
+    <div className="space-y-6 min-w-0 print-doc print:space-y-3">
       <div className="flex items-center justify-between gap-3 print:hidden">
         <Button variant="ghost" size="sm" onClick={() => setLocation("/app/accounting?tab=receipts")} className="gap-1.5">
           <ArrowLeft className="w-4 h-4" /> Back
@@ -96,8 +96,8 @@ export default function ReceiptDetail() {
         </Button>
       </div>
 
-      <Card className="print:shadow-none">
-        <CardContent className="pt-6 pb-6">
+      <Card className="print:shadow-none print:border-none print:bg-transparent print:rounded-none">
+        <CardContent className="pt-6 pb-6 print:pt-0 print:pb-2">
           <div className="flex items-start justify-between gap-6">
             <div className="min-w-0">
               {logoPreviewUrl ? (
@@ -117,7 +117,7 @@ export default function ReceiptDetail() {
               ) : null}
             </div>
             <div className="text-right">
-              <div className="text-xs text-slate-500">RECEIPT</div>
+              <div className="text-xs text-slate-500">OFFICIAL RECEIPT</div>
               <div className="text-2xl font-bold text-slate-900">{rec.receiptNo}</div>
               {rec.isReversed ? <div className="text-xs text-red-600 mt-1">REVERSED</div> : null}
             </div>
@@ -155,13 +155,13 @@ export default function ReceiptDetail() {
       </Card>
 
       {(rec.allocations ?? []).length > 0 ? (
-        <Card className="print:shadow-none">
-          <CardContent className="pt-4 pb-4">
+        <Card className="print:shadow-none print:border-none print:bg-transparent print:rounded-none">
+          <CardContent className="pt-4 pb-4 print:pt-2 print:pb-0 print:px-0">
             <div className="text-sm font-semibold text-slate-900 mb-2">Allocations</div>
-            <div className="overflow-x-auto border rounded-lg">
-              <table className="w-full text-sm">
+            <div className="overflow-x-auto border rounded-lg print:border-black print:rounded-none">
+              <table className="w-full text-sm print:text-xs">
                 <thead>
-                  <tr className="bg-slate-50 border-b text-slate-500 text-xs uppercase tracking-wide">
+                  <tr className="bg-slate-50 border-b text-slate-500 text-xs uppercase tracking-wide print:bg-transparent print:border-black print:text-black">
                     <th className="px-4 py-3 text-left font-medium">Invoice</th>
                     <th className="px-4 py-3 text-right font-medium">Amount</th>
                     <th className="px-4 py-3 text-left font-medium">Notes</th>
@@ -169,7 +169,7 @@ export default function ReceiptDetail() {
                 </thead>
                 <tbody className="divide-y divide-slate-100">
                   {(rec.allocations ?? []).map((a) => (
-                    <tr key={a.id}>
+                    <tr key={a.id} className="print:break-inside-avoid">
                       <td className="px-4 py-3">{a.invoiceId ? `Invoice #${a.invoiceId}` : "—"}</td>
                       <td className="px-4 py-3 text-right font-mono">{fmt(a.amount)}</td>
                       <td className="px-4 py-3 text-slate-600">{a.notes || "—"}</td>
@@ -181,6 +181,14 @@ export default function ReceiptDetail() {
           </CardContent>
         </Card>
       ) : null}
+
+      <div className="hidden print:block pt-8">
+        <div className="ml-auto w-[280px]">
+          <div className="border-t border-black pt-2 text-xs text-slate-900 text-center">
+            Authorized Signature
+          </div>
+        </div>
+      </div>
     </div>
   );
 }

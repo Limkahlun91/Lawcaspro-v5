@@ -3,13 +3,14 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { useToast } from "@/hooks/use-toast";
-import { FileText, Trash2, Upload, Info, Download } from "lucide-react";
+import { FileText, Trash2, Upload, Download } from "lucide-react";
 import {
   Dialog,
   DialogContent,
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from "@/components/ui/accordion";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -27,6 +28,7 @@ import { hasPermission } from "@/lib/permissions";
 import { ensureArray, listItems } from "@/lib/list-items";
 import { throwIfApiFailure, getApiFailureCodeFromError } from "@/lib/api-failure";
 import { SupportSessionRequired } from "@/components/support-session-required";
+import { TemplatePdfMappingEditor } from "@/components/TemplatePdfMappingEditor";
 
 function docTypeLabel(dt: string): string {
   return (DOCUMENT_TYPE_LABELS as Record<string, string>)[dt] ?? dt;
@@ -46,6 +48,7 @@ interface DocumentTemplate {
   applies_to_case_type?: string | null;
   document_group?: string | null;
   sort_order?: number | null;
+  pdf_mapping_config?: unknown | null;
 }
 
 interface DocumentTemplateVersion {
@@ -124,7 +127,6 @@ export default function DocumentTemplates() {
   const uploadRef = useRef<HTMLInputElement>(null);
   const [uploadDialogOpen, setUploadDialogOpen] = useState(false);
   const versionUploadRef = useRef<HTMLInputElement>(null);
-  const [infoOpen, setInfoOpen] = useState(false);
   const [detailOpen, setDetailOpen] = useState(false);
   const [activeTemplate, setActiveTemplate] = useState<DocumentTemplate | null>(null);
   const [templateName, setTemplateName] = useState("");
@@ -134,22 +136,20 @@ export default function DocumentTemplates() {
   const [isUploading, setIsUploading] = useState(false);
 
   const [isDownloading, setIsDownloading] = useState(false);
+  const [pdfMappingOpen, setPdfMappingOpen] = useState(false);
+  const [pdfMappingPdfUrl, setPdfMappingPdfUrl] = useState<string>("");
+  const [pdfMappingLoading, setPdfMappingLoading] = useState(false);
 
   const canRead = hasPermission(user, "documents", "read");
   const canCreate = hasPermission(user, "documents", "create");
   const canUpdate = hasPermission(user, "documents", "update");
   const canDelete = hasPermission(user, "documents", "delete");
 
-  const variablesQuery = useQuery<DocumentVariableDefinition[]>({
-    queryKey: ["document-variables", "active"],
-    queryFn: async ({ signal }) => {
-      const res = await apiFetchJson("/document-variables?active=1", { signal });
-      throwIfApiFailure(res);
-      return listItems<DocumentVariableDefinition>(res);
-    },
-    enabled: infoOpen && canRead,
-    retry: false,
-  });
+  useEffect(() => {
+    return () => {
+      if (pdfMappingPdfUrl) URL.revokeObjectURL(pdfMappingPdfUrl);
+    };
+  }, [pdfMappingPdfUrl]);
 
   const [editIsActive, setEditIsActive] = useState(true);
   const [editPurchaseMode, setEditPurchaseMode] = useState<string>("both");
@@ -186,6 +186,12 @@ export default function DocumentTemplates() {
   const [ruleValue, setRuleValue] = useState("");
 
   useEffect(() => {
+    setPdfMappingOpen(false);
+    setPdfMappingLoading(false);
+    setPdfMappingPdfUrl((prev) => {
+      if (prev) URL.revokeObjectURL(prev);
+      return "";
+    });
     if (!activeTemplate) return;
     setDetailTab("details");
     setVersionFile(null);
@@ -482,25 +488,40 @@ export default function DocumentTemplates() {
     }
   }
 
+  const activeVersion0 = (versionsQuery.data ?? [])[0] as DocumentTemplateVersion | undefined;
+  const activeFileName = activeTemplate ? (activeVersion0?.filename || activeTemplate.file_name || "") : "";
+  const activeIsPdf = Boolean(activeTemplate && activeFileName.toLowerCase().endsWith(".pdf"));
+
+  const openPdfMappingEditor = async () => {
+    if (!activeTemplate) return;
+    if (!activeIsPdf) return;
+    if (pdfMappingPdfUrl) {
+      setPdfMappingOpen(true);
+      return;
+    }
+    setPdfMappingLoading(true);
+    try {
+      const blob = await apiFetchBlob(`/document-templates/${activeTemplate.id}/download`);
+      const url = URL.createObjectURL(blob);
+      setPdfMappingPdfUrl(url);
+      setPdfMappingOpen(true);
+    } catch (e) {
+      toastError(toast, e, "Failed to load PDF");
+    } finally {
+      setPdfMappingLoading(false);
+    }
+  };
+
   return (
     <Card>
       <CardHeader className="flex flex-row items-center justify-between pb-4">
         <div>
           <CardTitle>Document Templates</CardTitle>
           <p className="text-sm text-slate-500 mt-1">
-            Upload DOCX template files to generate documents for cases.
+            Upload DOCX or PDF templates to generate documents for cases.
           </p>
         </div>
         <div className="flex gap-2">
-          <Button
-            size="sm"
-            variant="outline"
-            onClick={() => setInfoOpen(true)}
-            className="gap-1.5"
-          >
-            <Info className="w-3.5 h-3.5" />
-            Template Fields
-          </Button>
           <Button
             size="sm"
             className="bg-amber-500 hover:bg-amber-600 gap-1.5"
@@ -524,7 +545,7 @@ export default function DocumentTemplates() {
             <FileText className="w-10 h-10 text-slate-300 mx-auto mb-3" />
             <p className="font-medium text-slate-600 mb-1">No templates yet</p>
             <p className="text-sm max-w-sm mx-auto">
-              Upload a DOCX file with template fields (e.g. <code className="bg-slate-100 px-1 rounded text-xs">{"{{purchaser_name}}"}</code>)
+              Upload a DOCX file with template fields (e.g. <code className="bg-slate-100 px-1 rounded text-xs">{"{{purchaser_name}}"}</code>) or a PDF template with visual variable mapping
               to start generating documents for cases.
             </p>
           </div>
@@ -600,82 +621,6 @@ export default function DocumentTemplates() {
                         })()}
                       </div>
                     </div>
-                    <div>
-                      <div className="text-xs text-slate-500">Uploaded</div>
-                      <div className="text-sm text-slate-900">{new Date(activeTemplate.created_at).toLocaleString("en-MY")}</div>
-                    </div>
-                  </div>
-                  <div className="grid grid-cols-2 gap-3">
-                    <div className="space-y-1.5">
-                      <Label>Active</Label>
-                      <Select value={String(editIsActive)} onValueChange={(v) => setEditIsActive(v === "true")}>
-                        <SelectTrigger>
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="true">Active</SelectItem>
-                          <SelectItem value="false">Inactive</SelectItem>
-                        </SelectContent>
-                      </Select>
-                    </div>
-                    <div className="space-y-1.5">
-                      <Label>Group</Label>
-                      <Select value={editGroup} onValueChange={setEditGroup}>
-                        <SelectTrigger>
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="SPA">SPA</SelectItem>
-                          <SelectItem value="Loan">Loan</SelectItem>
-                          <SelectItem value="MOT / Transfer">MOT / Transfer</SelectItem>
-                          <SelectItem value="Completion">Completion</SelectItem>
-                          <SelectItem value="Others">Others</SelectItem>
-                        </SelectContent>
-                      </Select>
-                    </div>
-                  </div>
-                  <div className="grid grid-cols-2 gap-3">
-                    <div className="space-y-1.5">
-                      <Label>Applies to Purchase Mode</Label>
-                      <Select value={editPurchaseMode} onValueChange={setEditPurchaseMode}>
-                        <SelectTrigger>
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="both">Both</SelectItem>
-                          <SelectItem value="cash">Cash</SelectItem>
-                          <SelectItem value="loan">Loan</SelectItem>
-                        </SelectContent>
-                      </Select>
-                    </div>
-                    <div className="space-y-1.5">
-                      <Label>Applies to Title Type</Label>
-                      <Select value={editTitleType} onValueChange={setEditTitleType}>
-                        <SelectTrigger>
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="any">Any</SelectItem>
-                          <SelectItem value="master">Master</SelectItem>
-                          <SelectItem value="strata">Strata</SelectItem>
-                          <SelectItem value="individual">Individual</SelectItem>
-                        </SelectContent>
-                      </Select>
-                    </div>
-                  </div>
-                  <div className="grid grid-cols-2 gap-3">
-                    <div className="space-y-1.5">
-                      <Label>Applies to Case Type (optional)</Label>
-                      <Input value={editCaseType} onChange={(e) => setEditCaseType(e.target.value)} placeholder="e.g. Primary Market" />
-                    </div>
-                    <div className="space-y-1.5">
-                      <Label>Sort order</Label>
-                      <Input
-                        inputMode="numeric"
-                        value={String(editSortOrder)}
-                        onChange={(e) => setEditSortOrder(Number(e.target.value || "0"))}
-                      />
-                    </div>
                   </div>
                   <div className="space-y-1.5">
                     <Label>New Template File (DOCX or PDF) (optional)</Label>
@@ -697,58 +642,36 @@ export default function DocumentTemplates() {
                       onChange={(e) => setVersionFile(e.target.files?.[0] ?? null)}
                     />
                   </div>
-                  {(() => {
-                    const v0 = (versionsQuery.data ?? [])[0] as DocumentTemplateVersion | undefined;
-                    const fileName = v0?.filename || activeTemplate.file_name || "";
-                    const isPdf = fileName.toLowerCase().endsWith(".pdf");
-                    return (
-                      <>
-                        <div>
-                          <div className="text-xs text-slate-500">File</div>
-                          <div className="text-sm text-slate-700 break-words">{fileName}</div>
-                        </div>
-                        {isPdf ? (
+                  <div>
+                    <div className="text-xs text-slate-500">File</div>
+                    <div className="text-sm text-slate-700 break-words">{activeFileName}</div>
+                  </div>
+                  {activeIsPdf ? (
                     <div className="space-y-2">
-                      <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
-                        <div className="font-medium mb-1">How to map variables in PDF?</div>
+                      <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-800">
+                        <div className="font-medium mb-1">PDF Variable Mapping</div>
                         <div>
-                          Use Adobe Acrobat to add "Text Form Fields" to this PDF. Name each field exactly as the system Variable Keys (e.g., "firm_name", "purchaser_name"). The system will automatically detect and fill them during generation.
+                          Use the built-in visual editor to bind system variables to positions on this PDF template.
+                        </div>
+                        <div className="mt-2 flex items-center gap-2">
+                          <Button variant="outline" size="sm" onClick={openPdfMappingEditor} disabled={!canRead || pdfMappingLoading}>
+                            {pdfMappingLoading ? "Loading..." : "Open PDF Mapping Editor"}
+                          </Button>
+                          <div className="text-xs text-slate-500">
+                            Mapped: {(() => {
+                              const raw = activeTemplate.pdf_mapping_config;
+                              if (!raw) return 0;
+                              if (Array.isArray(raw)) return raw.length;
+                              if (typeof raw === "object") return Object.keys(raw as any).length;
+                              return 0;
+                            })()}
+                          </div>
                         </div>
                       </div>
                     </div>
                   ) : (
-                    <div className="space-y-1.5">
-                      <Label>Clause insertion mode</Label>
-                      <Select value={editClauseInsertionMode} onValueChange={setEditClauseInsertionMode} disabled={!canUpdate}>
-                        <SelectTrigger><SelectValue /></SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="prefer_placeholder_else_append">Prefer placeholder else append</SelectItem>
-                          <SelectItem value="explicit_placeholder_only">Explicit placeholder only</SelectItem>
-                          <SelectItem value="append_to_end">Append to end</SelectItem>
-                        </SelectContent>
-                      </Select>
-                      <div className="text-xs text-slate-500">
-                        Tip: place {"{{clauses}}"} or {"{{clause_CODE}}"} in the DOCX to control insertion location.
-                      </div>
-                      {(() => {
-                        const v0 = (versionsQuery.data ?? [])[0] as any;
-                        const keys = (v0?.variables_snapshot && typeof v0.variables_snapshot === "object" && "keys" in v0.variables_snapshot)
-                          ? (v0.variables_snapshot.keys as unknown[])
-                          : [];
-                        const keyStrings = Array.isArray(keys) ? keys.filter((k): k is string => typeof k === "string") : [];
-                        const hasClauses = keyStrings.includes("clauses");
-                        const clauseCodes = keyStrings.filter((k) => k.startsWith("clause_")).length;
-                        return (
-                          <div className="text-xs text-slate-600">
-                            Detected: {"{{clauses}}"}={hasClauses ? "yes" : "no"} • {"{{clause_CODE}}"}={clauseCodes}
-                          </div>
-                        );
-                      })()}
-                    </div>
+                    <div />
                   )}
-                      </>
-                    );
-                  })()}
                   <div className="space-y-1.5">
                     <Label>File naming rule</Label>
                     <Textarea
@@ -768,55 +691,6 @@ export default function DocumentTemplates() {
                         </Button>
                       ))}
                     </div>
-                    <div className="grid grid-cols-2 gap-2 items-end">
-                      <div className="space-y-1.5">
-                        <Label>Preview case ID</Label>
-                        <Input value={previewCaseId} onChange={(e) => setPreviewCaseId(e.target.value)} placeholder="e.g. 123" />
-                      </div>
-                      <Button
-                        variant="outline"
-                        onClick={async () => {
-                          const id = parseInt(previewCaseId || "", 10);
-                          if (!Number.isFinite(id)) {
-                            toast({ title: "Invalid case ID", variant: "destructive" as any });
-                            return;
-                          }
-                          try {
-                            const resp = await apiFetchJson<{ fileName: string; ruleUsed: string; warnings?: string[] }>(`/cases/${id}/documents/filename-preview`, {
-                              method: "POST",
-                              body: JSON.stringify({
-                                templateId: activeTemplate.id,
-                                documentName: activeTemplate.name,
-                                originalFileName: activeTemplate.file_name,
-                                fallbackExt: "docx",
-                              }),
-                            });
-                            setPreviewFileName(`${resp.fileName}${resp.warnings?.length ? ` | ${resp.warnings.join(", ")}` : ""}`);
-                          } catch (e) {
-                            toastError(toast, e, "Preview failed");
-                          }
-                        }}
-                        disabled={!canRead}
-                      >
-                        Preview filename
-                      </Button>
-                    </div>
-                    {previewFileName ? (
-                      <div className="text-sm text-slate-700 break-words">
-                        <span className="text-xs text-slate-500">Preview:</span> {previewFileName}
-                      </div>
-                    ) : null}
-                  </div>
-                  <div className="rounded-lg border border-slate-200 bg-white p-3">
-                    <div className="flex items-center justify-between gap-2">
-                      <div className="text-sm font-medium text-slate-900">Clause Library</div>
-                      <Button variant="outline" size="sm" onClick={() => setClauseDialogOpen(true)} disabled={!canRead}>
-                        Open
-                      </Button>
-                    </div>
-                    <div className="mt-2 text-xs text-slate-500">
-                      Use clause body or placeholder {"{{clause_CODE}}"} in Word template.
-                    </div>
                   </div>
                   {activeTemplate.description ? (
                     <div>
@@ -824,6 +698,172 @@ export default function DocumentTemplates() {
                       <div className="text-sm text-slate-700 whitespace-pre-wrap">{activeTemplate.description}</div>
                     </div>
                   ) : null}
+                  <Accordion type="single" collapsible className="rounded-lg border border-slate-200 bg-white">
+                    <AccordionItem value="advanced" className="px-3">
+                      <AccordionTrigger className="py-3 text-sm">Advanced Settings</AccordionTrigger>
+                      <AccordionContent className="pt-2">
+                        <div className="space-y-3">
+                          <div className="grid grid-cols-2 gap-3">
+                            <div className="space-y-1.5">
+                              <Label>Active</Label>
+                              <Select value={String(editIsActive)} onValueChange={(v) => setEditIsActive(v === "true")}>
+                                <SelectTrigger>
+                                  <SelectValue />
+                                </SelectTrigger>
+                                <SelectContent>
+                                  <SelectItem value="true">Active</SelectItem>
+                                  <SelectItem value="false">Inactive</SelectItem>
+                                </SelectContent>
+                              </Select>
+                            </div>
+                            <div className="space-y-1.5">
+                              <Label>Group</Label>
+                              <Select value={editGroup} onValueChange={setEditGroup}>
+                                <SelectTrigger>
+                                  <SelectValue />
+                                </SelectTrigger>
+                                <SelectContent>
+                                  <SelectItem value="SPA">SPA</SelectItem>
+                                  <SelectItem value="Loan">Loan</SelectItem>
+                                  <SelectItem value="MOT / Transfer">MOT / Transfer</SelectItem>
+                                  <SelectItem value="Completion">Completion</SelectItem>
+                                  <SelectItem value="Others">Others</SelectItem>
+                                </SelectContent>
+                              </Select>
+                            </div>
+                          </div>
+                          <div className="grid grid-cols-2 gap-3">
+                            <div className="space-y-1.5">
+                              <Label>Applies to Purchase Mode</Label>
+                              <Select value={editPurchaseMode} onValueChange={setEditPurchaseMode}>
+                                <SelectTrigger>
+                                  <SelectValue />
+                                </SelectTrigger>
+                                <SelectContent>
+                                  <SelectItem value="both">Both</SelectItem>
+                                  <SelectItem value="cash">Cash</SelectItem>
+                                  <SelectItem value="loan">Loan</SelectItem>
+                                </SelectContent>
+                              </Select>
+                            </div>
+                            <div className="space-y-1.5">
+                              <Label>Applies to Title Type</Label>
+                              <Select value={editTitleType} onValueChange={setEditTitleType}>
+                                <SelectTrigger>
+                                  <SelectValue />
+                                </SelectTrigger>
+                                <SelectContent>
+                                  <SelectItem value="any">Any</SelectItem>
+                                  <SelectItem value="master">Master</SelectItem>
+                                  <SelectItem value="strata">Strata</SelectItem>
+                                  <SelectItem value="individual">Individual</SelectItem>
+                                </SelectContent>
+                              </Select>
+                            </div>
+                          </div>
+                          <div className="grid grid-cols-2 gap-3">
+                            <div className="space-y-1.5">
+                              <Label>Applies to Case Type (optional)</Label>
+                              <Input value={editCaseType} onChange={(e) => setEditCaseType(e.target.value)} placeholder="e.g. Primary Market" />
+                            </div>
+                            <div className="space-y-1.5">
+                              <Label>Sort order</Label>
+                              <Input
+                                inputMode="numeric"
+                                value={String(editSortOrder)}
+                                onChange={(e) => setEditSortOrder(Number(e.target.value || "0"))}
+                              />
+                            </div>
+                          </div>
+                          {!activeIsPdf ? (
+                            <div className="space-y-3">
+                              <div className="space-y-1.5">
+                                <Label>Clause insertion mode</Label>
+                                <Select value={editClauseInsertionMode} onValueChange={setEditClauseInsertionMode} disabled={!canUpdate}>
+                                  <SelectTrigger><SelectValue /></SelectTrigger>
+                                  <SelectContent>
+                                    <SelectItem value="prefer_placeholder_else_append">Prefer placeholder else append</SelectItem>
+                                    <SelectItem value="explicit_placeholder_only">Explicit placeholder only</SelectItem>
+                                    <SelectItem value="append_to_end">Append to end</SelectItem>
+                                  </SelectContent>
+                                </Select>
+                                <div className="text-xs text-slate-500">
+                                  Tip: place {"{{clauses}}"} or {"{{clause_CODE}}"} in the DOCX to control insertion location.
+                                </div>
+                                {(() => {
+                                  const v0 = (versionsQuery.data ?? [])[0] as any;
+                                  const keys = (v0?.variables_snapshot && typeof v0.variables_snapshot === "object" && "keys" in v0.variables_snapshot)
+                                    ? (v0.variables_snapshot.keys as unknown[])
+                                    : [];
+                                  const keyStrings = Array.isArray(keys) ? keys.filter((k): k is string => typeof k === "string") : [];
+                                  const hasClauses = keyStrings.includes("clauses");
+                                  const clauseCodes = keyStrings.filter((k) => k.startsWith("clause_")).length;
+                                  return (
+                                    <div className="text-xs text-slate-600">
+                                      Detected: {"{{clauses}}"}={hasClauses ? "yes" : "no"} • {"{{clause_CODE}}"}={clauseCodes}
+                                    </div>
+                                  );
+                                })()}
+                              </div>
+                              <div className="rounded-lg border border-slate-200 bg-white p-3">
+                                <div className="flex items-center justify-between gap-2">
+                                  <div className="text-sm font-medium text-slate-900">Clause Library</div>
+                                  <Button variant="outline" size="sm" onClick={() => setClauseDialogOpen(true)} disabled={!canRead}>
+                                    Open
+                                  </Button>
+                                </div>
+                                <div className="mt-2 text-xs text-slate-500">
+                                  Use clause body or placeholder {"{{clause_CODE}}"} in Word template.
+                                </div>
+                              </div>
+                              <div className="grid grid-cols-2 gap-2 items-end">
+                                <div className="space-y-1.5">
+                                  <Label>Preview case ID</Label>
+                                  <Input value={previewCaseId} onChange={(e) => setPreviewCaseId(e.target.value)} placeholder="e.g. 123" />
+                                </div>
+                                <Button
+                                  variant="outline"
+                                  onClick={async () => {
+                                    const id = parseInt(previewCaseId || "", 10);
+                                    if (!Number.isFinite(id)) {
+                                      toast({ title: "Invalid case ID", variant: "destructive" as any });
+                                      return;
+                                    }
+                                    try {
+                                      const resp = await apiFetchJson<{ fileName: string; ruleUsed: string; warnings?: string[] }>(`/cases/${id}/documents/filename-preview`, {
+                                        method: "POST",
+                                        body: JSON.stringify({
+                                          templateId: activeTemplate.id,
+                                          documentName: activeTemplate.name,
+                                          originalFileName: activeTemplate.file_name,
+                                          fallbackExt: activeIsPdf ? "pdf" : "docx",
+                                        }),
+                                      });
+                                      setPreviewFileName(`${resp.fileName}${resp.warnings?.length ? ` | ${resp.warnings.join(", ")}` : ""}`);
+                                    } catch (e) {
+                                      toastError(toast, e, "Preview failed");
+                                    }
+                                  }}
+                                  disabled={!canRead}
+                                >
+                                  Preview filename
+                                </Button>
+                              </div>
+                              {previewFileName ? (
+                                <div className="text-sm text-slate-700 break-words">
+                                  <span className="text-xs text-slate-500">Preview:</span> {previewFileName}
+                                </div>
+                              ) : null}
+                            </div>
+                          ) : null}
+                          <div>
+                            <div className="text-xs text-slate-500">Uploaded</div>
+                            <div className="text-sm text-slate-900">{new Date(activeTemplate.created_at).toLocaleString("en-MY")}</div>
+                          </div>
+                        </div>
+                      </AccordionContent>
+                    </AccordionItem>
+                  </Accordion>
                   <div className="pt-2 flex gap-2 justify-end flex-wrap">
                     <Button
                       variant="outline"
@@ -840,7 +880,7 @@ export default function DocumentTemplates() {
                             documentGroup: editGroup,
                             sortOrder: editSortOrder,
                             fileNamingRule: editFileNamingRule.trim() ? editFileNamingRule.trim() : null,
-                            clauseInsertionMode: editClauseInsertionMode || null,
+                            ...(activeIsPdf ? {} : { clauseInsertionMode: editClauseInsertionMode || null }),
                           },
                         });
                       }}
@@ -862,7 +902,7 @@ export default function DocumentTemplates() {
                             documentGroup: editGroup,
                             sortOrder: editSortOrder,
                             fileNamingRule: editFileNamingRule.trim() ? editFileNamingRule.trim() : null,
-                            clauseInsertionMode: editClauseInsertionMode || null,
+                            ...(activeIsPdf ? {} : { clauseInsertionMode: editClauseInsertionMode || null }),
                           },
                         });
                       }}
@@ -1352,6 +1392,30 @@ export default function DocumentTemplates() {
         </DialogContent>
       </Dialog>
 
+      {activeTemplate && activeIsPdf ? (
+        <TemplatePdfMappingEditor
+          open={pdfMappingOpen}
+          templateId={activeTemplate.id}
+          templateName={activeTemplate.name}
+          pdfUrl={pdfMappingPdfUrl}
+          initialMappingConfig={activeTemplate.pdf_mapping_config}
+          savePath={`/document-templates/${activeTemplate.id}`}
+          saveBodyKey="pdfMappingConfig"
+          responseMappingKey="pdf_mapping_config"
+          onClose={() => {
+            setPdfMappingOpen(false);
+            setPdfMappingPdfUrl((prev) => {
+              if (prev) URL.revokeObjectURL(prev);
+              return "";
+            });
+          }}
+          onSaved={(next) => {
+            setActiveTemplate((prev) => prev ? ({ ...prev, pdf_mapping_config: next }) : prev);
+            void qc.invalidateQueries({ queryKey: ["document-templates"] });
+          }}
+        />
+      ) : null}
+
       {/* Upload Dialog */}
       <Dialog open={uploadDialogOpen} onOpenChange={setUploadDialogOpen}>
         <DialogContent className="sm:max-w-md">
@@ -1401,7 +1465,7 @@ export default function DocumentTemplates() {
                 ) : (
                   <div>
                     <p className="text-sm text-slate-500 mb-1">Click to select a template file</p>
-                    <p className="text-xs text-slate-400">For DOCX: use {"{{"} field_name {"}}"} syntax. For PDF: use Acrobat form fields named as variable keys.</p>
+                    <p className="text-xs text-slate-400">For DOCX: use {"{{"} field_name {"}}"} syntax. For PDF: upload first, then map variables visually via the PDF Mapping Editor.</p>
                   </div>
                 )}
               </div>
@@ -1423,60 +1487,6 @@ export default function DocumentTemplates() {
                 {isUploading ? "Uploading..." : "Upload Template"}
               </Button>
             </div>
-          </div>
-        </DialogContent>
-      </Dialog>
-
-      {/* Template Fields Info Dialog */}
-      <Dialog open={infoOpen} onOpenChange={setInfoOpen}>
-        <DialogContent className="sm:max-w-lg max-h-[80vh] overflow-y-auto">
-          <DialogHeader>
-            <DialogTitle>Available Template Fields</DialogTitle>
-          </DialogHeader>
-          <div className="py-2">
-            <p className="text-sm text-slate-600 mb-4">
-              Use these field names in double curly braces in your DOCX file. When a document is generated,
-              they will be replaced with the actual case data.
-            </p>
-            {variablesQuery.isError ? (
-              getApiFailureCodeFromError(variablesQuery.error) === "SUPPORT_SESSION_REQUIRED" ? (
-                <SupportSessionRequired title="Support session required" />
-              ) : (
-                <QueryFallback title="Variables unavailable" error={variablesQuery.error} onRetry={() => variablesQuery.refetch()} isRetrying={variablesQuery.isFetching} />
-              )
-            ) : variablesQuery.isLoading ? (
-              <div className="text-sm text-slate-500">Loading variables…</div>
-            ) : (
-              <div className="space-y-1">
-                {ensureArray(variablesQuery.data).map((v) => (
-                  <div key={v.key} className="flex items-start gap-3 py-2 border-b border-slate-100 last:border-0">
-                    <code className="text-xs bg-amber-50 text-amber-800 px-2 py-1 rounded font-mono flex-shrink-0 mt-0.5">
-                      {`{{${v.key}}}`}
-                    </code>
-                    <div className="min-w-0">
-                      <div className="text-sm text-slate-700">{v.label}</div>
-                      <div className="text-xs text-slate-500 break-words">
-                        {v.category}
-                        {v.sourcePath ? ` · ${v.sourcePath}` : ""}
-                        {v.formatter ? ` · fmt=${v.formatter}` : ""}
-                        {v.exampleValue ? ` · e.g. ${v.exampleValue}` : ""}
-                      </div>
-                    </div>
-                  </div>
-                ))}
-                {ensureArray(variablesQuery.data).length === 0 ? (
-                  <div className="text-sm text-slate-500">No variables found.</div>
-                ) : null}
-              </div>
-            )}
-            <p className="text-sm text-slate-500 mt-4">
-              For multiple purchasers, use a loop tag:
-            </p>
-            <pre className="text-xs bg-slate-50 p-3 rounded mt-2 text-slate-700 overflow-x-auto">
-{`{#purchasers}
-  {index}. {name} ({ic})
-{/purchasers}`}
-            </pre>
           </div>
         </DialogContent>
       </Dialog>

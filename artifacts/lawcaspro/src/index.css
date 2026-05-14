@@ -179,7 +179,7 @@
 @media print {
   @page {
     size: A4;
-    margin: 12mm;
+    margin: 15mm;
   }
 
   body {
@@ -219,5 +219,25 @@
   .max-w-7xl {
     max-width: 100% !important;
     padding: 0 !important;
+  }
+
+  .print-doc {
+    color: #000 !important;
+    font-size: 11px !important;
+    line-height: 1.25 !important;
+  }
+
+  .print-doc table {
+    border-collapse: collapse !important;
+  }
+
+  .print-doc th,
+  .print-doc td {
+    padding: 4px 6px !important;
+  }
+
+  .print-doc tr {
+    break-inside: avoid;
+    page-break-inside: avoid;
   }
 }

@@ -1,20 +1,20 @@
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState } from "react";
 import { useParams, useLocation } from "wouter";
 import { useGetQuotation, getGetQuotationQueryKey, getListQuotationsQueryKey, useUpdateQuotation, useDeleteQuotation, useDuplicateQuotation } from "@workspace/api-client-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { ArrowLeft, Save, Copy, Trash2, Pencil, Printer, Plus, Calculator } from "lucide-react";
-import { useQuery, useQueryClient, useMutation } from "@tanstack/react-query";
+import { ArrowLeft, Save, Copy, Trash2, Pencil, Printer, Plus } from "lucide-react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useToast } from "@/hooks/use-toast";
 import { QueryFallback } from "@/components/query-fallback";
 import { toastError } from "@/lib/toast-error";
 import { apiFetchBlob, apiFetchJson } from "@/lib/api-client";
 
-const TAX_RATE = 8;
+const DEFAULT_TAX_RATE = 8;
 
-function calcTax(amount: number, taxCode: string, rate: number = TAX_RATE) {
+function calcTax(amount: number, taxCode: string, rate: number) {
   if (taxCode === "NT" || taxCode === "ZR" || amount === 0) return { taxAmount: 0, amountInclTax: amount };
   const taxAmount = Math.round(amount * rate) / 100;
   return { taxAmount, amountInclTax: amount + taxAmount };
@@ -89,29 +89,23 @@ export default function QuotationDetail() {
   const deleteMutation = useDeleteQuotation();
   const duplicateMutation = useDuplicateQuotation();
 
-  const autoCalcMutation = useMutation({
-    mutationFn: () => apiFetchJson(`/quotations/${quotationId}/auto-calculate`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({}) }),
-    onSuccess: (result: any) => {
-      queryClient.invalidateQueries({ queryKey: getGetQuotationQueryKey(quotationId) });
-      toast({ title: "Fees calculated", description: `Generated ${result.items?.filter((i: any) => i.isSystemGenerated).length ?? 0} system items from Malaysian SRO/stamp duty rules` });
-    },
-    onError: (e) => toastError(toast, e, "Calculation failed"),
-  });
-
   const [isEditing, setIsEditing] = useState(false);
   const [editData, setEditData] = useState<any>(null);
   const [editItems, setEditItems] = useState<LocalItem[]>([]);
 
   const startEditing = () => {
     if (!quotation) return;
+    const currentTaxRate = Number((quotation as any)?.taxRate) || DEFAULT_TAX_RATE;
     setEditData({
       referenceNo: quotation.referenceNo,
-      stNo: quotation.stNo || "",
       clientName: quotation.clientName,
+      clientTin: (quotation as any).clientTin || "",
+      clientAddress: (quotation as any).clientAddress || "",
       propertyDescription: quotation.propertyDescription || "",
       purchasePrice: quotation.purchasePrice ? String(quotation.purchasePrice) : "",
       bankName: quotation.bankName || "",
       loanAmount: quotation.loanAmount || "",
+      taxRate: currentTaxRate,
       status: quotation.status,
     });
     setEditItems(
@@ -125,7 +119,7 @@ export default function QuotationDetail() {
         taxCode: item.taxCode,
         itemCategory: item.itemCategory === "disbursement" ? "disbursement" : (item.section === "fees" ? "fee" : "disbursement"),
         amountExclTax: item.amountExclTax,
-        taxRate: item.taxRate || TAX_RATE,
+        taxRate: currentTaxRate,
         taxAmount: item.taxAmount,
         amountInclTax: item.amountInclTax,
       }))
@@ -139,24 +133,29 @@ export default function QuotationDetail() {
     setEditItems([]);
   };
 
+  useEffect(() => {
+    if (!isEditing) return;
+    const rate = Number((editData as any)?.taxRate) || DEFAULT_TAX_RATE;
+    setEditItems((prev) =>
+      prev.map((item) => {
+        const { taxAmount, amountInclTax } = calcTax(item.amountExclTax, item.taxCode, rate);
+        return { ...item, taxRate: rate, taxAmount, amountInclTax };
+      })
+    );
+  }, [isEditing, (editData as any)?.taxRate]);
+
   const updateItemAmount = (itemId: string, amount: number) => {
     setEditItems(prev => prev.map(item => {
       if (item.id !== itemId) return item;
-      const { taxAmount, amountInclTax } = calcTax(amount, item.taxCode, item.taxRate);
-      return { ...item, amountExclTax: amount, taxAmount, amountInclTax };
-    }));
-  };
-
-  const updateItemTaxCode = (itemId: string, taxCode: string) => {
-    setEditItems(prev => prev.map(item => {
-      if (item.id !== itemId) return item;
-      const { taxAmount, amountInclTax } = calcTax(item.amountExclTax, taxCode, item.taxRate);
-      return { ...item, taxCode, taxAmount, amountInclTax };
+      const rate = Number((editData as any)?.taxRate) || DEFAULT_TAX_RATE;
+      const { taxAmount, amountInclTax } = calcTax(amount, item.taxCode, rate);
+      return { ...item, amountExclTax: amount, taxRate: rate, taxAmount, amountInclTax };
     }));
   };
 
   const addAttachmentItem = () => {
     const attItems = editItems.filter(i => i.section === "attachment");
+    const rate = Number((editData as any)?.taxRate) || DEFAULT_TAX_RATE;
     setEditItems(prev => [...prev, {
       id: `new-${Date.now()}`,
       section: "attachment",
@@ -166,7 +165,7 @@ export default function QuotationDetail() {
       description: "",
       taxCode: "T",
       amountExclTax: 0,
-      taxRate: TAX_RATE,
+      taxRate: rate,
       taxAmount: 0,
       amountInclTax: 0,
     }]);
@@ -177,7 +176,7 @@ export default function QuotationDetail() {
   };
 
   const saveEdits = () => {
-    const items = editItems.map((item, idx) => ({
+    const items = editItems.filter((i) => i.amountExclTax > 0).map((item, idx) => ({
       section: item.section,
       category: item.category,
       itemNo: item.itemNo,
@@ -186,7 +185,7 @@ export default function QuotationDetail() {
       taxCode: item.taxCode,
       itemCategory: item.itemCategory,
       amountExclTax: item.amountExclTax,
-      taxRate: item.taxRate,
+      taxRate: Number((editData as any)?.taxRate) || item.taxRate,
       taxAmount: item.taxAmount,
       amountInclTax: item.amountInclTax,
       sortOrder: idx,
@@ -250,6 +249,8 @@ export default function QuotationDetail() {
   if (isError) return <div className="py-10"><QueryFallback title="Quotation unavailable" error={error} onRetry={() => refetch()} isRetrying={isFetching} /></div>;
   if (!quotation) return <div className="py-10 text-sm text-slate-500">Quotation not found</div>;
 
+  const effectiveTaxRate = Number((isEditing ? (editData as any)?.taxRate : (quotation as any)?.taxRate)) || DEFAULT_TAX_RATE;
+
   const items = isEditing ? editItems : (quotation.items || []).map((item: any, idx: number) => ({
     id: String(item.id || idx),
     section: item.section,
@@ -259,10 +260,10 @@ export default function QuotationDetail() {
     description: item.description,
     taxCode: item.taxCode,
     itemCategory: item.itemCategory === "disbursement" ? "disbursement" : (item.section === "fees" ? "fee" : "disbursement"),
-    amountExclTax: item.amountExclTax,
-    taxRate: item.taxRate || TAX_RATE,
-    taxAmount: item.taxAmount,
-    amountInclTax: item.amountInclTax,
+    amountExclTax: Number(item.amountExclTax) || 0,
+    taxRate: Number(item.taxRate) || effectiveTaxRate,
+    taxAmount: Number(item.taxAmount) || 0,
+    amountInclTax: Number(item.amountInclTax) || 0,
   }));
 
   const disbursementItems = items.filter((i: LocalItem) => i.section === "disbursement");
@@ -299,30 +300,40 @@ export default function QuotationDetail() {
 
   const renderSectionTable = (sectionLabel: string, sectionItems: LocalItem[], totals: { totalExclTax: number; totalTax: number; totalInclTax: number }) => {
     if (sectionItems.length === 0) return null;
+    const isHeaderRow = (item: LocalItem) =>
+      !item.subItemNo && item.description === item.description.toUpperCase() && item.section !== "attachment";
+    const visibleRows = sectionItems.filter((item) => {
+      if (isEditing) return true;
+      if (isHeaderRow(item)) return true;
+      const excl = Number(item.amountExclTax) || 0;
+      const incl = Number(item.amountInclTax) || 0;
+      return excl > 0 || incl > 0;
+    });
+    const hasNonHeader = visibleRows.some((i) => !isHeaderRow(i));
+    if (!hasNonHeader) return null;
     return (
       <div className="mb-6">
         <h3 className="text-sm font-semibold text-slate-800 mb-2 uppercase">{sectionLabel}</h3>
         <div className="overflow-x-auto">
-          <table className="w-full text-sm min-w-[900px]">
+          <table className="w-full text-sm min-w-[900px] print:min-w-0 print:text-xs">
           <thead>
-            <tr className="border-b border-slate-200 bg-slate-50">
-              <th className="text-left px-3 py-2 font-medium text-slate-600 w-10">No.</th>
-              <th className="text-left px-3 py-2 font-medium text-slate-600">Description</th>
-              <th className="text-center px-3 py-2 font-medium text-slate-600 w-20">Tax Code</th>
-              <th className="text-center px-3 py-2 font-medium text-slate-600 w-36">Category</th>
-              <th className="text-right px-3 py-2 font-medium text-slate-600 w-32">Excl. ST (RM)</th>
-              <th className="text-right px-3 py-2 font-medium text-slate-600 w-28">ST @ {TAX_RATE}%</th>
-              <th className="text-right px-3 py-2 font-medium text-slate-600 w-32">Incl. ST (RM)</th>
+            <tr className="border-b border-slate-200 bg-slate-50 print:bg-transparent print:border-black">
+              <th className="text-left px-3 py-2 font-medium text-slate-600 w-10 print:px-2 print:py-1">No.</th>
+              <th className="text-left px-3 py-2 font-medium text-slate-600 print:px-2 print:py-1">Description</th>
+              <th className="text-center px-3 py-2 font-medium text-slate-600 w-20 print:px-2 print:py-1">Tax Code</th>
+              <th className="text-right px-3 py-2 font-medium text-slate-600 w-32 print:px-2 print:py-1">Excl. ST (RM)</th>
+              <th className="text-right px-3 py-2 font-medium text-slate-600 w-28 print:px-2 print:py-1">ST @ {effectiveTaxRate}%</th>
+              <th className="text-right px-3 py-2 font-medium text-slate-600 w-32 print:px-2 print:py-1">Incl. ST (RM)</th>
               {isEditing && sectionLabel === "ATTACHMENT I" && <th className="w-10"></th>}
             </tr>
           </thead>
           <tbody>
-            {sectionItems.map((item) => {
-              const isHeader = !item.subItemNo && item.description === item.description.toUpperCase() && item.section !== "attachment";
+            {visibleRows.map((item) => {
+              const isHeader = isHeaderRow(item);
               return (
-                <tr key={item.id} className={`border-b border-slate-100 ${isHeader ? "bg-slate-50/50" : ""}`}>
-                  <td className="px-3 py-1.5 text-slate-500 text-xs">{item.subItemNo || item.itemNo}</td>
-                  <td className={`px-3 py-1.5 ${isHeader ? "font-semibold text-slate-800" : "text-slate-600"}`}>
+                <tr key={item.id} className={`border-b border-slate-100 print:border-black print:break-inside-avoid ${isHeader ? "bg-slate-50/50 print:bg-transparent" : ""}`}>
+                  <td className="px-3 py-1.5 text-slate-500 text-xs print:px-2 print:py-1">{item.subItemNo || item.itemNo}</td>
+                  <td className={`px-3 py-1.5 print:px-2 print:py-1 ${isHeader ? "font-semibold text-slate-800" : "text-slate-600"}`}>
                     {isEditing && sectionLabel === "ATTACHMENT I" ? (
                       <Input
                         value={item.description}
@@ -331,33 +342,12 @@ export default function QuotationDetail() {
                       />
                     ) : item.description}
                   </td>
-                  <td className="px-3 py-1.5 text-center text-xs">
-                    {isEditing && !isHeader ? (
-                      <select
-                        value={item.taxCode}
-                        onChange={e => updateItemTaxCode(item.id, e.target.value)}
-                        className="h-7 text-xs border rounded px-1 bg-white"
-                      >
-                        <option value="T">T</option>
-                        <option value="NT">NT</option>
-                        <option value="ZR">ZR</option>
-                        <option value="SR">SR</option>
-                      </select>
-                    ) : !isHeader ? item.taxCode : ""}
+                  <td className="px-3 py-1.5 text-center text-xs print:px-2 print:py-1">
+                    {!isHeader ? (
+                      <span className="text-xs text-slate-700">{item.taxCode}</span>
+                    ) : ""}
                   </td>
-                  <td className="px-3 py-1.5 text-center text-xs">
-                    {isEditing && !isHeader ? (
-                      <select
-                        value={item.itemCategory}
-                        onChange={(e) => setEditItems((prev) => prev.map((i) => i.id === item.id ? { ...i, itemCategory: e.target.value === "fee" ? "fee" : "disbursement" } : i))}
-                        className="h-7 text-xs border rounded px-2 bg-white"
-                      >
-                        <option value="fee">Fee</option>
-                        <option value="disbursement">Disbursement</option>
-                      </select>
-                    ) : !isHeader ? (item.itemCategory === "fee" ? "Fee" : "Disbursement") : ""}
-                  </td>
-                  <td className="px-3 py-1.5 text-right text-xs">
+                  <td className="px-3 py-1.5 text-right text-xs print:px-2 print:py-1">
                     {isEditing && !isHeader ? (
                       <Input
                         type="number"
@@ -368,10 +358,10 @@ export default function QuotationDetail() {
                       />
                     ) : !isHeader ? item.amountExclTax.toFixed(2) : ""}
                   </td>
-                  <td className="px-3 py-1.5 text-right text-xs text-slate-500">
+                  <td className="px-3 py-1.5 text-right text-xs text-slate-500 print:px-2 print:py-1">
                     {!isHeader ? item.taxAmount.toFixed(2) : ""}
                   </td>
-                  <td className="px-3 py-1.5 text-right text-xs font-medium">
+                  <td className="px-3 py-1.5 text-right text-xs font-medium print:px-2 print:py-1">
                     {!isHeader ? item.amountInclTax.toFixed(2) : ""}
                   </td>
                   {isEditing && sectionLabel === "ATTACHMENT I" && (
@@ -386,11 +376,11 @@ export default function QuotationDetail() {
             })}
           </tbody>
           <tfoot>
-            <tr className="bg-slate-50 font-medium text-sm">
-              <td colSpan={4} className="px-3 py-2 text-right">Total {sectionLabel}</td>
-              <td className="px-3 py-2 text-right">{formatRM(totals.totalExclTax)}</td>
-              <td className="px-3 py-2 text-right">{formatRM(totals.totalTax)}</td>
-              <td className="px-3 py-2 text-right">{formatRM(totals.totalInclTax)}</td>
+            <tr className="bg-slate-50 font-medium text-sm print:bg-transparent print:border-t print:border-black">
+              <td colSpan={3} className="px-3 py-2 text-right print:px-2 print:py-1">Total {sectionLabel}</td>
+              <td className="px-3 py-2 text-right print:px-2 print:py-1">{formatRM(totals.totalExclTax)}</td>
+              <td className="px-3 py-2 text-right print:px-2 print:py-1">{formatRM(totals.totalTax)}</td>
+              <td className="px-3 py-2 text-right print:px-2 print:py-1">{formatRM(totals.totalInclTax)}</td>
               {isEditing && sectionLabel === "ATTACHMENT I" && <td></td>}
             </tr>
           </tfoot>
@@ -408,9 +398,9 @@ export default function QuotationDetail() {
   };
 
   return (
-    <div className="space-y-6">
-      <Card className="print:shadow-none">
-        <CardContent className="pt-6 pb-6">
+    <div className="space-y-6 print-doc print:space-y-3 print:bg-white print:m-0 print:p-0 print:text-sm">
+      <Card className="print:shadow-none print:border-none print:bg-white print:m-0 print:p-0 print:rounded-none">
+        <CardContent className="pt-6 pb-6 print:pt-0 print:pb-2 print:px-0">
           <div className="flex items-start justify-between gap-6">
             <div className="min-w-0">
               {logoPreviewUrl ? (
@@ -437,6 +427,34 @@ export default function QuotationDetail() {
         </CardContent>
       </Card>
 
+      <div className="hidden print:block">
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <div className="text-[10px] text-slate-500 uppercase">Bill To</div>
+            <div className="text-sm font-medium text-slate-900">{quotation.clientName || "—"}</div>
+            {(quotation as any).clientTin ? <div className="text-xs text-slate-700 mt-0.5">Client TIN: {(quotation as any).clientTin}</div> : null}
+            {(quotation as any).clientAddress ? <div className="text-xs text-slate-700 whitespace-pre-wrap mt-0.5">Client Address: {(quotation as any).clientAddress}</div> : null}
+            {quotation.propertyDescription ? <div className="text-xs text-slate-700">{quotation.propertyDescription}</div> : null}
+          </div>
+          <div className="text-right">
+            <div className="grid gap-1 justify-end">
+              <div className="flex justify-between gap-4 text-xs">
+                <span className="text-slate-500">Quotation No</span>
+                <span className="font-mono text-slate-900">{quotation.referenceNo}</span>
+              </div>
+              <div className="flex justify-between gap-4 text-xs">
+                <span className="text-slate-500">ST Rate</span>
+                <span className="font-mono text-slate-900">{effectiveTaxRate}%</span>
+              </div>
+              <div className="flex justify-between gap-4 text-xs">
+                <span className="text-slate-500">Status</span>
+                <span className="font-mono text-slate-900">{String(quotation.status ?? "") || "—"}</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
       <div className="flex items-start justify-between gap-3 flex-wrap print:hidden">
         <div className="flex items-center gap-3">
           <Button variant="ghost" size="sm" onClick={() => setLocation("/app/accounting?tab=quotations")}>
@@ -461,19 +479,6 @@ export default function QuotationDetail() {
             </>
           ) : (
             <>
-              {((quotation as any)?.purchasePrice || (quotation as any)?.loanAmount) && (
-                <Button
-                  size="sm"
-                  variant="outline"
-                  className="border-amber-300 text-amber-700 hover:bg-amber-50 gap-1.5"
-                  disabled={autoCalcMutation.isPending}
-                  onClick={() => autoCalcMutation.mutate()}
-                  title="Auto-calculate SRO fees, stamp duty and SST from Malaysian regulatory rules"
-                >
-                  <Calculator className="w-4 h-4" />
-                  {autoCalcMutation.isPending ? "Calculating…" : "Auto-Calculate Fees"}
-                </Button>
-              )}
               <Button variant="outline" size="sm" onClick={handlePrint}><Printer className="w-4 h-4 mr-1" /> Print</Button>
               <Button variant="outline" size="sm" onClick={handleDuplicate} disabled={duplicateMutation.isPending || deleteMutation.isPending}>
                 <Copy className="w-4 h-4 mr-1" /> {duplicateMutation.isPending ? "Duplicating..." : "Duplicate"}
@@ -487,11 +492,11 @@ export default function QuotationDetail() {
         </div>
       </div>
 
-      <Card className="mb-6">
-        <CardHeader className="pb-3">
+      <Card className="mb-6 print:mb-2 print:shadow-none print:border-none print:bg-transparent print:rounded-none">
+        <CardHeader className="pb-3 print:px-0 print:pb-1">
           <CardTitle className="text-base">Quotation Details</CardTitle>
         </CardHeader>
-        <CardContent>
+        <CardContent className="print:px-0">
           {isEditing ? (
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
               <div>
@@ -499,12 +504,24 @@ export default function QuotationDetail() {
                 <Input value={editData.referenceNo} onChange={e => setEditData({ ...editData, referenceNo: e.target.value })} />
               </div>
               <div>
-                <Label className="text-xs text-slate-500">ST No.</Label>
-                <Input value={editData.stNo} onChange={e => setEditData({ ...editData, stNo: e.target.value })} />
+                <Label className="text-xs text-slate-500">Service Tax Rate (%)</Label>
+                <Input
+                  type="number"
+                  value={String(editData.taxRate ?? DEFAULT_TAX_RATE)}
+                  onChange={e => setEditData({ ...editData, taxRate: Number(e.target.value) || 0 })}
+                />
               </div>
               <div>
                 <Label className="text-xs text-slate-500">Client Name</Label>
                 <Input value={editData.clientName} onChange={e => setEditData({ ...editData, clientName: e.target.value })} />
+              </div>
+              <div>
+                <Label className="text-xs text-slate-500">Client TIN Number</Label>
+                <Input value={editData.clientTin} onChange={e => setEditData({ ...editData, clientTin: e.target.value })} />
+              </div>
+              <div className="md:col-span-3">
+                <Label className="text-xs text-slate-500">Client Address</Label>
+                <Input value={editData.clientAddress} onChange={e => setEditData({ ...editData, clientAddress: e.target.value })} />
               </div>
               <div className="md:col-span-3">
                 <Label className="text-xs text-slate-500">Property Description</Label>
@@ -542,16 +559,26 @@ export default function QuotationDetail() {
                 <Label className="text-xs text-slate-500">Reference No.</Label>
                 <p className="text-sm font-medium">{quotation.referenceNo}</p>
               </div>
-              {quotation.stNo && (
-                <div>
-                  <Label className="text-xs text-slate-500">ST No.</Label>
-                  <p className="text-sm font-medium">{quotation.stNo}</p>
-                </div>
-              )}
+              <div>
+                <Label className="text-xs text-slate-500">Service Tax Rate (%)</Label>
+                <p className="text-sm font-medium">{effectiveTaxRate}%</p>
+              </div>
               <div>
                 <Label className="text-xs text-slate-500">Client Name</Label>
                 <p className="text-sm font-medium">{quotation.clientName}</p>
               </div>
+              {(quotation as any).clientTin ? (
+                <div>
+                  <Label className="text-xs text-slate-500">Client TIN Number</Label>
+                  <p className="text-sm font-medium">{(quotation as any).clientTin}</p>
+                </div>
+              ) : null}
+              {(quotation as any).clientAddress ? (
+                <div className="md:col-span-3">
+                  <Label className="text-xs text-slate-500">Client Address</Label>
+                  <p className="text-sm font-medium whitespace-pre-wrap">{(quotation as any).clientAddress}</p>
+                </div>
+              ) : null}
               {quotation.propertyDescription && (
                 <div className="md:col-span-3">
                   <Label className="text-xs text-slate-500">Property</Label>
@@ -581,49 +608,57 @@ export default function QuotationDetail() {
         </CardContent>
       </Card>
 
-      <Card className="mb-6">
-        <CardContent className="pt-4">
-          {renderSectionTable("DISBURSEMENT", disbursementItems, disbTotals)}
+      <Card className="mb-6 print:mb-2 print:shadow-none print:border-none print:bg-transparent print:rounded-none">
+        <CardContent className="pt-4 print:px-0 print:pt-2">
           {renderSectionTable("PROFESSIONAL FEES", feesItems, feesTotals)}
-          {renderSectionTable("REIMBURSEMENT", reimbursementItems, reimbTotals)}
+          {renderSectionTable("REIMBURSEMENTS", reimbursementItems, reimbTotals)}
+          {renderSectionTable("DISBURSEMENTS", disbursementItems, disbTotals)}
           {renderSectionTable("ATTACHMENT I", attachmentItems, attTotals)}
 
-          <div className="max-w-md ml-auto space-y-2 mt-6 border-t border-slate-200 pt-4">
-            <div className="flex justify-between text-sm">
-              <span className="text-slate-500">Disbursement</span>
-              <span>{formatRM(disbTotals.totalInclTax)}</span>
-            </div>
-            <div className="flex justify-between text-sm">
+          <div className="max-w-md ml-auto space-y-2 mt-6 border-t border-slate-200 pt-4 print:mt-3 print:pt-2 print:border-black print:text-xs">
+            <div className="flex justify-between text-sm print:text-xs">
               <span className="text-slate-500">Professional Fees</span>
               <span>{formatRM(feesTotals.totalInclTax)}</span>
             </div>
-            <div className="flex justify-between text-sm">
-              <span className="text-slate-500">Reimbursement</span>
+            <div className="flex justify-between text-sm print:text-xs">
+              <span className="text-slate-500">Reimbursements</span>
               <span>{formatRM(reimbTotals.totalInclTax)}</span>
             </div>
+            <div className="flex justify-between text-sm print:text-xs">
+              <span className="text-slate-500">Disbursements</span>
+              <span>{formatRM(disbTotals.totalInclTax)}</span>
+            </div>
             {attTotals.totalInclTax > 0 && (
-              <div className="flex justify-between text-sm">
+              <div className="flex justify-between text-sm print:text-xs">
                 <span className="text-slate-500">Attachment I</span>
                 <span>{formatRM(attTotals.totalInclTax)}</span>
               </div>
             )}
-            <div className="border-t border-slate-200 pt-2 flex justify-between text-sm font-medium">
+            <div className="border-t border-slate-200 pt-2 flex justify-between text-sm font-medium print:border-black print:pt-1 print:text-sm">
               <span>Total Amount Due</span>
               <span>{formatRM(grandTotalInclTax)}</span>
             </div>
             {roundingAdj !== 0 && (
-              <div className="flex justify-between text-sm text-slate-500">
+              <div className="flex justify-between text-sm text-slate-500 print:text-xs">
                 <span>Rounding Adj.</span>
                 <span>{formatRM(roundingAdj)}</span>
               </div>
             )}
-            <div className="border-t border-slate-900 pt-2 flex justify-between text-base font-bold">
+            <div className="border-t border-slate-900 pt-2 flex justify-between text-base font-bold print:border-black print:pt-1 print:text-sm">
               <span>Total Payable Incl. ST</span>
               <span>{formatRM(totalPayable)}</span>
             </div>
           </div>
         </CardContent>
       </Card>
+
+      <div className="hidden print:block pt-8">
+        <div className="ml-auto w-[280px]">
+          <div className="border-t border-black pt-2 text-xs text-slate-900 text-center">
+            Authorized Signature
+          </div>
+        </div>
+      </div>
     </div>
   );
 }

@@ -137,6 +137,9 @@ type Props = {
   templateName: string;
   pdfUrl: string;
   initialMappingConfig: unknown;
+  savePath?: string;
+  saveBodyKey?: string;
+  responseMappingKey?: string;
   onClose: () => void;
   onSaved?: (next: PdfMappingConfig) => void;
 };
@@ -236,13 +239,16 @@ export function TemplatePdfMappingEditor(props: Props) {
   const save = async () => {
     setSaving(true);
     try {
-      const updated = await apiFetchJson(`/templates/${props.templateId}`, {
+      const savePath = props.savePath ?? `/templates/${props.templateId}`;
+      const saveBodyKey = props.saveBodyKey ?? "mappingConfig";
+      const responseMappingKey = props.responseMappingKey ?? "mapping_config";
+      const updated = await apiFetchJson(savePath, {
         method: "PATCH",
-        body: JSON.stringify({ mappingConfig: mapping }),
+        body: JSON.stringify({ [saveBodyKey]: mapping }),
       });
       const next = (() => {
         if (!isRecord(updated)) return mapping;
-        return normalizeMappingConfig(updated.mapping_config ?? mapping);
+        return normalizeMappingConfig((updated as any)[responseMappingKey] ?? mapping);
       })();
       props.onSaved?.(next);
       toast({ title: "PDF mapping saved" });

@@ -626,6 +626,7 @@ export default function FirmDocuments() {
                 ) : (
                   <div>
                     <p className="text-sm text-slate-500 mb-1">Click to select a file</p>
+                    <p className="text-xs text-slate-400">Supports DOCX (auto-expand signature fields) and PDF (visual variable binding).</p>
                     <p className="text-xs text-slate-400">{ACCEPTED_EXTENSIONS.join(" ")}</p>
                   </div>
                 )}

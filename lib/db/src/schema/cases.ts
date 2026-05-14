@@ -2,6 +2,8 @@ import { pgTable, serial, text, integer, numeric, timestamp, index, uniqueIndex,
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod/v4";
 
+export type CaseBorrower = { name: string; ic?: string | null; address: string };
+
 export const casesTable = pgTable("cases", {
   id: serial("id").primaryKey(),
   firmId: integer("firm_id").notNull(),
@@ -24,6 +26,7 @@ export const casesTable = pgTable("cases", {
   spaDetails: text("spa_details"),
   propertyDetails: text("property_details"),
   loanDetails: text("loan_details"),
+  borrowers: jsonb("borrowers").notNull().default([]),
   loanPartyType: text("loan_party_type").notNull().default("1st_party"),
   companyDetails: text("company_details"),
   createdBy: integer("created_by"),
@@ -94,6 +97,7 @@ export const caseMessagesTable = pgTable("case_messages", {
   id: uuid("id").primaryKey().defaultRandom(),
   firmId: integer("firm_id").notNull(),
   caseId: integer("case_id").notNull(),
+  channel: text("channel").notNull().default("client"),
   senderType: text("sender_type").notNull(),
   senderId: integer("sender_id"),
   messageText: text("message_text").notNull(),
@@ -102,6 +106,20 @@ export const caseMessagesTable = pgTable("case_messages", {
 }, (t) => ({
   firmCaseCreatedAtIdx: index("idx_case_messages_firm_case_created_at").on(t.firmId, t.caseId, t.createdAt),
   caseCreatedAtIdx: index("idx_case_messages_case_created_at").on(t.caseId, t.createdAt),
+}));
+
+export const caseMessageReadStatusTable = pgTable("case_message_read_status", {
+  id: serial("id").primaryKey(),
+  firmId: integer("firm_id").notNull(),
+  caseId: integer("case_id").notNull(),
+  userId: integer("user_id").notNull(),
+  channel: text("channel").notNull().default("client"),
+  lastReadAt: timestamp("last_read_at", { withTimezone: true }).notNull().defaultNow(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => ({
+  firmCaseUserUnique: uniqueIndex("case_message_read_status_firm_case_user_key").on(t.firmId, t.caseId, t.userId, t.channel),
+  firmUserIdx: index("idx_case_message_read_status_firm_user").on(t.firmId, t.userId),
+  firmCaseIdx: index("idx_case_message_read_status_firm_case").on(t.firmId, t.caseId),
 }));
 
 export const caseKeyDatesTable = pgTable("case_key_dates", {

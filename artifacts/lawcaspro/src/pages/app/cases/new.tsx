@@ -88,10 +88,7 @@ export default function NewCasePage() {
   // Loan
   const [purchaseMode, setPurchaseMode] = useState("loan");
   const [loanPartyType, setLoanPartyType] = useState<"1st_party" | "3rd_party">("1st_party");
-  const [borrower1Name, setBorrower1Name] = useState("");
-  const [borrower1Ic, setBorrower1Ic] = useState("");
-  const [borrower2Name, setBorrower2Name] = useState("");
-  const [borrower2Ic, setBorrower2Ic] = useState("");
+  const [borrowers, setBorrowers] = useState<{ name: string; ic: string; address: string }[]>([{ name: "", ic: "", address: "" }]);
   const [endFinancier, setEndFinancier] = useState("");
   const [bankRef, setBankRef] = useState("");
   const [bankBranch, setBankBranch] = useState("");
@@ -194,15 +191,39 @@ export default function NewCasePage() {
   }, [addrLine1, addrLine2, addrLine3, addrLine4, addrLine5, mailingManuallyEdited]);
 
   useEffect(() => {
-    if (purchaseMode !== "loan") return;
-    if (loanPartyType !== "1st_party") return;
-    const p1 = purchasers[0] ?? { name: "", ic: "" };
-    const p2 = purchasers[1] ?? { name: "", ic: "" };
-    setBorrower1Name(p1.name ?? "");
-    setBorrower1Ic(p1.ic ?? "");
-    setBorrower2Name(p2.name ?? "");
-    setBorrower2Ic(p2.ic ?? "");
-  }, [purchaseMode, loanPartyType, purchasers]);
+    if (purchaseMode !== "loan") {
+      setBorrowers([]);
+      return;
+    }
+    if (loanPartyType === "1st_party") {
+      const defaultAddr = mailingAddress?.trim() || [addrLine1, addrLine2, addrLine3, addrLine4, addrLine5].filter((x) => x.trim()).join(", ");
+      setBorrowers((prev) =>
+        purchasers.map((p, idx) => ({
+          name: p.name ?? "",
+          ic: p.ic ?? "",
+          address: prev[idx]?.address ?? defaultAddr ?? "",
+        }))
+      );
+      return;
+    }
+    setBorrowers((prev) => (prev.length > 0 ? prev : [{ name: "", ic: "", address: "" }]));
+  }, [purchaseMode, loanPartyType, purchasers, mailingAddress, addrLine1, addrLine2, addrLine3, addrLine4, addrLine5]);
+
+  function addBorrower() {
+    setBorrowers((prev) => [...prev, { name: "", ic: "", address: "" }]);
+  }
+
+  function removeBorrower(index: number) {
+    setBorrowers((prev) => prev.filter((_, i) => i !== index));
+  }
+
+  function updateBorrower(index: number, field: "name" | "ic", value: string) {
+    setBorrowers((prev) => prev.map((b, i) => (i === index ? { ...b, [field]: value } : b)));
+  }
+
+  function updateBorrowerAddress(index: number, value: string) {
+    setBorrowers((prev) => prev.map((b, i) => (i === index ? { ...b, address: value } : b)));
+  }
 
   function addPurchaser() {
     setPurchasers(prev => [...prev, { name: "", ic: "" }]);
@@ -263,6 +284,11 @@ export default function NewCasePage() {
       assignedLawyerId: canAssignAny ? Number(assignedLawyerId) : selfUserId,
       assignedClerkId: canAssignAny ? resolvedClerkId : undefined,
       purchasers: validPurchasers.map(p => ({ name: p.name.trim(), ic: p.ic.trim() || undefined })),
+      borrowers: purchaseMode === "loan"
+        ? borrowers
+          .map((b) => ({ name: b.name.trim(), ic: b.ic.trim() || undefined, address: b.address.trim() }))
+          .filter((b) => b.name.length > 0)
+        : [],
       caseType,
       parcelNo,
       spaDetails: {
@@ -290,10 +316,6 @@ export default function NewCasePage() {
         approvedPurchasePrice: approvedPrice,
       },
       loanDetails: purchaseMode === "loan" ? {
-        borrower1Name,
-        borrower1Ic,
-        borrower2Name,
-        borrower2Ic,
         endFinancier,
         bankRef,
         bankBranch,
@@ -720,23 +742,64 @@ export default function NewCasePage() {
                   </p>
                 ) : null}
 
+                <div className="space-y-3">
+                  <div className="flex items-center justify-between gap-2">
+                    <Label className="text-xs font-medium text-gray-600">Borrowers</Label>
+                    {purchaseMode === "loan" && loanPartyType === "3rd_party" ? (
+                      <Button type="button" variant="outline" size="sm" className="gap-1" onClick={addBorrower}>
+                        <Plus className="w-3.5 h-3.5" />
+                        Add Borrower
+                      </Button>
+                    ) : null}
+                  </div>
+                  <div className="space-y-3">
+                    {(borrowers.length > 0 ? borrowers : [{ name: "", ic: "", address: "" }]).map((b, idx) => (
+                      <div key={idx} className="grid grid-cols-2 gap-x-6 gap-y-2 items-end">
+                        <div className="space-y-1">
+                          <Label className="text-xs font-medium text-gray-600">{`Borrower ${idx + 1} Name`}</Label>
+                          <Input
+                            className={cn("h-9 text-sm border-gray-300", purchaseMode === "loan" && loanPartyType === "1st_party" ? "bg-gray-50" : "")}
+                            placeholder="Enter borrower name"
+                            value={b.name}
+                            onChange={(e) => updateBorrower(idx, "name", e.target.value)}
+                            readOnly={purchaseMode === "loan" && loanPartyType === "1st_party"}
+                            disabled={purchaseMode !== "loan" || (purchaseMode === "loan" && loanPartyType === "1st_party")}
+                          />
+                        </div>
+                        <div className="space-y-1">
+                          <div className="flex items-center justify-between gap-2">
+                            <Label className="text-xs font-medium text-gray-600">{`Borrower ${idx + 1} IC`}</Label>
+                            {purchaseMode === "loan" && loanPartyType === "3rd_party" && borrowers.length > 1 ? (
+                              <Button type="button" variant="ghost" size="icon" className="h-8 w-8" onClick={() => removeBorrower(idx)}>
+                                <Trash2 className="w-4 h-4 text-red-600" />
+                              </Button>
+                            ) : null}
+                          </div>
+                          <Input
+                            className={cn("h-9 text-sm border-gray-300", purchaseMode === "loan" && loanPartyType === "1st_party" ? "bg-gray-50" : "")}
+                            placeholder="Enter IC"
+                            value={b.ic}
+                            onChange={(e) => updateBorrower(idx, "ic", e.target.value)}
+                            readOnly={purchaseMode === "loan" && loanPartyType === "1st_party"}
+                            disabled={purchaseMode !== "loan" || (purchaseMode === "loan" && loanPartyType === "1st_party")}
+                          />
+                        </div>
+                        <div className="col-span-2 space-y-1">
+                          <Label className="text-xs font-medium text-gray-600">{`Borrower ${idx + 1} Address`}</Label>
+                          <Textarea
+                            className="text-sm border-gray-300 resize-none"
+                            rows={2}
+                            placeholder="Enter borrower address"
+                            value={b.address}
+                            onChange={(e) => updateBorrowerAddress(idx, e.target.value)}
+                            disabled={purchaseMode !== "loan"}
+                          />
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
                 <div className="grid grid-cols-2 gap-x-6 gap-y-4">
-                  <div className="space-y-1">
-                    <Label className="text-xs font-medium text-gray-600">Borrower 1 Name</Label>
-                    <Input className={cn("h-9 text-sm border-gray-300", purchaseMode === "loan" && loanPartyType === "1st_party" ? "bg-gray-50" : "")} placeholder="Enter borrower 1 name" value={borrower1Name} onChange={e => setBorrower1Name(e.target.value)} readOnly={purchaseMode === "loan" && loanPartyType === "1st_party"} disabled={purchaseMode !== "loan" || (purchaseMode === "loan" && loanPartyType === "1st_party")} />
-                  </div>
-                  <div className="space-y-1">
-                    <Label className="text-xs font-medium text-gray-600">Borrower 1 IC</Label>
-                    <Input className={cn("h-9 text-sm border-gray-300", purchaseMode === "loan" && loanPartyType === "1st_party" ? "bg-gray-50" : "")} placeholder="Enter IC" value={borrower1Ic} onChange={e => setBorrower1Ic(e.target.value)} readOnly={purchaseMode === "loan" && loanPartyType === "1st_party"} disabled={purchaseMode !== "loan" || (purchaseMode === "loan" && loanPartyType === "1st_party")} />
-                  </div>
-                  <div className="space-y-1">
-                    <Label className="text-xs font-medium text-gray-600">Borrower 2 Name</Label>
-                    <Input className={cn("h-9 text-sm border-gray-300", purchaseMode === "loan" && loanPartyType === "1st_party" ? "bg-gray-50" : "")} placeholder="Enter borrower 2 name" value={borrower2Name} onChange={e => setBorrower2Name(e.target.value)} readOnly={purchaseMode === "loan" && loanPartyType === "1st_party"} disabled={purchaseMode !== "loan" || (purchaseMode === "loan" && loanPartyType === "1st_party")} />
-                  </div>
-                  <div className="space-y-1">
-                    <Label className="text-xs font-medium text-gray-600">Borrower 2 IC</Label>
-                    <Input className={cn("h-9 text-sm border-gray-300", purchaseMode === "loan" && loanPartyType === "1st_party" ? "bg-gray-50" : "")} placeholder="Enter IC" value={borrower2Ic} onChange={e => setBorrower2Ic(e.target.value)} readOnly={purchaseMode === "loan" && loanPartyType === "1st_party"} disabled={purchaseMode !== "loan" || (purchaseMode === "loan" && loanPartyType === "1st_party")} />
-                  </div>
                   <div className="space-y-1">
                     <Label className="text-xs font-medium text-gray-600">End Financier (Bank)</Label>
                     <Input className="h-9 text-sm border-gray-300" placeholder="Enter bank name" value={endFinancier} onChange={e => setEndFinancier(e.target.value)} />

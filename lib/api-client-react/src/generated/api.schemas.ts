@@ -606,12 +606,14 @@ export interface QuotationSummary {
   firmId: number;
   caseId?: number | null;
   referenceNo: string;
-  stNo?: string | null;
   clientName: string;
+  clientAddress?: string | null;
+  clientTin?: string | null;
   propertyDescription?: string | null;
   purchasePrice?: number | null;
   bankName?: string | null;
   loanAmount?: string | null;
+  taxRate?: number | null;
   status: string;
   notes?: string | null;
   createdBy?: number | null;
@@ -628,12 +630,14 @@ export interface QuotationDetail {
   firmId: number;
   caseId?: number | null;
   referenceNo: string;
-  stNo?: string | null;
   clientName: string;
+  clientAddress?: string | null;
+  clientTin?: string | null;
   propertyDescription?: string | null;
   purchasePrice?: number | null;
   bankName?: string | null;
   loanAmount?: string | null;
+  taxRate?: number | null;
   status: string;
   notes?: string | null;
   createdBy?: number | null;
@@ -658,13 +662,15 @@ export type CreateQuotationBodyItemsItem = {
 
 export interface CreateQuotationBody {
   referenceNo: string;
-  stNo?: string;
   clientName: string;
+  clientAddress?: string;
+  clientTin?: string;
   caseId?: number;
   propertyDescription?: string;
   purchasePrice?: string;
   bankName?: string;
   loanAmount?: string;
+  taxRate?: number;
   notes?: string;
   items: CreateQuotationBodyItemsItem[];
 }
@@ -685,13 +691,15 @@ export type UpdateQuotationBodyItemsItem = {
 
 export interface UpdateQuotationBody {
   referenceNo?: string;
-  stNo?: string;
   clientName?: string;
+  clientAddress?: string;
+  clientTin?: string;
   caseId?: number;
   propertyDescription?: string;
   purchasePrice?: string;
   bankName?: string;
   loanAmount?: string;
+  taxRate?: number;
   status?: string;
   notes?: string;
   items?: UpdateQuotationBodyItemsItem[];

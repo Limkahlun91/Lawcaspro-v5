@@ -11,12 +11,14 @@ export interface QuotationSummary {
   firmId: number;
   caseId?: number | null;
   referenceNo: string;
-  stNo?: string | null;
   clientName: string;
+  clientAddress?: string | null;
+  clientTin?: string | null;
   propertyDescription?: string | null;
   purchasePrice?: number | null;
   bankName?: string | null;
   loanAmount?: string | null;
+  taxRate?: number | null;
   status: string;
   notes?: string | null;
   createdBy?: number | null;

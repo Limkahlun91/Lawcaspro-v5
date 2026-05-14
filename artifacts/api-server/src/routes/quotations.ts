@@ -28,11 +28,16 @@ function computeTax(amountExclTax: number, taxCode: string, taxRate: number = DE
   return { taxAmount, amountInclTax: amountExclTax + taxAmount };
 }
 
-function normalizeItem(item: any, quotationId: number, idx: number) {
+function normalizeQuotationTaxRate(v: unknown): number {
+  const n = typeof v === "number" ? v : typeof v === "string" ? parseFloat(v) : NaN;
+  return Number.isFinite(n) && n > 0 ? n : DEFAULT_TAX_RATE;
+}
+
+function normalizeItem(item: any, quotationId: number, idx: number, defaultTaxRate: number) {
   const amountExclTax = parseFloat(item.amountExclTax) || 0;
   const taxCode = item.taxCode || "T";
-  const taxRate = parseFloat(item.taxRate) || DEFAULT_TAX_RATE;
-  const { taxAmount, amountInclTax } = computeTax(amountExclTax, taxCode, taxRate);
+  const taxRate = defaultTaxRate;
+  const { taxAmount, amountInclTax } = computeTax(amountExclTax, taxCode, defaultTaxRate);
   const section = typeof item.section === "string" ? item.section : "disbursement";
   const itemCategory =
     item.itemCategory === "fee" || item.itemCategory === "disbursement"
@@ -86,6 +91,7 @@ router.get("/quotations", requireAuth, requireFirmUser, async (req, res): Promis
       return {
         ...q,
         purchasePrice: q.purchasePrice ? parseFloat(q.purchasePrice) : null,
+        taxRate: q.taxRate ? parseFloat(q.taxRate) : DEFAULT_TAX_RATE,
         itemCount: itemCount?.count || 0,
         totalExclTax,
         totalTax,
@@ -108,17 +114,19 @@ router.post("/quotations", requireAuth, requireFirmUser, async (req, res): Promi
   try {
     const firmId = (req as AuthRequest).firmId!;
     const userId = (req as AuthRequest).userId!;
-    const { items, ...quotationData } = req.body;
+    const { items, taxRate, ...quotationData } = req.body;
+    const taxRateNum = normalizeQuotationTaxRate(taxRate);
 
     const result = await db.transaction(async (tx) => {
       const [quotation] = await tx.insert(quotationsTable).values({
         ...quotationData,
+        taxRate: String(taxRateNum),
         firmId,
         createdBy: userId,
       }).returning();
 
       if (items && Array.isArray(items) && items.length > 0) {
-        const itemRows = items.map((item: any, idx: number) => normalizeItem(item, quotation.id, idx));
+        const itemRows = items.map((item: any, idx: number) => normalizeItem(item, quotation.id, idx, taxRateNum));
         await tx.insert(quotationItemsTable).values(itemRows);
       }
 
@@ -129,6 +137,7 @@ router.post("/quotations", requireAuth, requireFirmUser, async (req, res): Promi
       return {
         ...quotation,
         purchasePrice: quotation.purchasePrice ? parseFloat(quotation.purchasePrice) : null,
+        taxRate: quotation.taxRate ? parseFloat(quotation.taxRate) : taxRateNum,
         items: allItems.map(formatItem),
         createdAt: quotation.createdAt.toISOString(),
         updatedAt: quotation.updatedAt.toISOString(),
@@ -163,6 +172,7 @@ router.get("/quotations/:id", requireAuth, requireFirmUser, async (req, res): Pr
     res.json({
       ...quotation,
       purchasePrice: quotation.purchasePrice ? parseFloat(quotation.purchasePrice) : null,
+      taxRate: quotation.taxRate ? parseFloat(quotation.taxRate) : DEFAULT_TAX_RATE,
       items: items.map(formatItem),
       createdAt: quotation.createdAt.toISOString(),
       updatedAt: quotation.updatedAt.toISOString(),
@@ -181,23 +191,25 @@ router.patch("/quotations/:id", requireAuth, requireFirmUser, async (req, res): 
     const idStr = one(req.params.id);
     const id = idStr ? parseInt(idStr, 10) : NaN;
     if (isNaN(id)) { res.status(400).json({ error: "Invalid quotation ID" }); return; }
-    const { items, ...quotationData } = req.body;
+    const { items, taxRate, ...quotationData } = req.body;
 
     const [existing] = await db.select().from(quotationsTable)
       .where(and(eq(quotationsTable.id, id), eq(quotationsTable.firmId, firmId)));
 
     if (!existing) { res.status(404).json({ error: "Quotation not found" }); return; }
 
+    const nextTaxRate = normalizeQuotationTaxRate(taxRate ?? (existing as any).taxRate);
+
     const result = await db.transaction(async (tx) => {
       const [updated] = await tx.update(quotationsTable)
-        .set(quotationData)
+        .set({ ...quotationData, taxRate: String(nextTaxRate) })
         .where(eq(quotationsTable.id, id))
         .returning();
 
       if (items && Array.isArray(items)) {
         await tx.delete(quotationItemsTable).where(eq(quotationItemsTable.quotationId, id));
         if (items.length > 0) {
-          const itemRows = items.map((item: any, idx: number) => normalizeItem(item, id, idx));
+          const itemRows = items.map((item: any, idx: number) => normalizeItem(item, id, idx, nextTaxRate));
           await tx.insert(quotationItemsTable).values(itemRows);
         }
       }
@@ -209,6 +221,7 @@ router.patch("/quotations/:id", requireAuth, requireFirmUser, async (req, res): 
       return {
         ...updated,
         purchasePrice: updated.purchasePrice ? parseFloat(updated.purchasePrice) : null,
+        taxRate: updated.taxRate ? parseFloat(updated.taxRate) : nextTaxRate,
         items: allItems.map(formatItem),
         createdAt: updated.createdAt.toISOString(),
         updatedAt: updated.updatedAt.toISOString(),
@@ -268,12 +281,14 @@ router.post("/quotations/:id/duplicate", requireAuth, requireFirmUser, async (re
         firmId,
         caseId: original.caseId,
         referenceNo: `${original.referenceNo} (Copy)`,
-        stNo: original.stNo,
         clientName: original.clientName,
+        clientAddress: (original as any).clientAddress ?? null,
+        clientTin: (original as any).clientTin ?? null,
         propertyDescription: original.propertyDescription,
         purchasePrice: original.purchasePrice,
         bankName: original.bankName,
         loanAmount: original.loanAmount,
+        taxRate: (original as any).taxRate ?? String(DEFAULT_TAX_RATE),
         status: "draft",
         notes: original.notes,
         createdBy: userId,
@@ -292,10 +307,13 @@ router.post("/quotations/:id/duplicate", requireAuth, requireFirmUser, async (re
             subItemNo: item.subItemNo,
             description: item.description,
             taxCode: item.taxCode,
+            itemCategory: item.itemCategory,
+            itemType: item.itemType,
             amountExclTax: item.amountExclTax,
             taxRate: item.taxRate,
             taxAmount: item.taxAmount,
             amountInclTax: item.amountInclTax,
+            isSystemGenerated: item.isSystemGenerated,
             sortOrder: item.sortOrder,
           }))
         );
@@ -308,6 +326,7 @@ router.post("/quotations/:id/duplicate", requireAuth, requireFirmUser, async (re
       return {
         ...newQuotation,
         purchasePrice: newQuotation.purchasePrice ? parseFloat(newQuotation.purchasePrice) : null,
+        taxRate: (newQuotation as any).taxRate ? parseFloat(String((newQuotation as any).taxRate)) : DEFAULT_TAX_RATE,
         items: items.map(formatItem),
         createdAt: newQuotation.createdAt.toISOString(),
         updatedAt: newQuotation.updatedAt.toISOString(),

@@ -10,6 +10,7 @@ export const documentTemplatesTable = pgTable("document_templates", {
   isActive: boolean("is_active").notNull().default(true),
   fileNamingRule: text("file_naming_rule"),
   clauseInsertionMode: text("clause_insertion_mode"),
+  pdfMappingConfig: jsonb("pdf_mapping_config"),
   applicabilityMode: text("applicability_mode"),
   applicabilityRules: jsonb("applicability_rules"),
   checklistMode: text("checklist_mode"),

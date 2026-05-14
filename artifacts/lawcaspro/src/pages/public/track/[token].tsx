@@ -55,16 +55,16 @@ export default function TrackingTokenPage() {
 
   const messagesQuery = useQuery<{ data: PublicMessage[] }>({
     queryKey: ["public-track-messages", token],
-    queryFn: ({ signal }) => apiFetchJson(`/public/track/${encodeURIComponent(String(token || ""))}/messages`, { signal }),
+    queryFn: ({ signal }) => apiFetchJson(`/public/track/${encodeURIComponent(String(token || ""))}/messages?channel=client`, { signal }),
     enabled: Boolean(token),
     retry: false,
   });
 
   const sendMutation = useMutation({
     mutationFn: async (messageText: string) => {
-      return await apiFetchJson(`/public/track/${encodeURIComponent(String(token || ""))}/messages`, {
+      return await apiFetchJson(`/public/track/${encodeURIComponent(String(token || ""))}/messages?channel=client`, {
         method: "POST",
-        body: JSON.stringify({ messageText }),
+        body: JSON.stringify({ messageText, channel: "client" }),
       });
     },
     onSuccess: async () => {
@@ -73,7 +73,14 @@ export default function TrackingTokenPage() {
     },
   });
 
-  const timeline = Array.isArray(query.data?.timeline) ? query.data!.timeline : [];
+  const timelineRaw = Array.isArray(query.data?.timeline) ? query.data!.timeline : [];
+  const timeline = useMemo(() => {
+    return [...timelineRaw].sort((a, b) => {
+      const aa = Number(a?.stepOrder ?? 0);
+      const bb = Number(b?.stepOrder ?? 0);
+      return aa - bb;
+    });
+  }, [timelineRaw]);
   const activeIndex = useMemo(() => {
     const idx = timeline.findIndex((s) => String(s.status) !== "completed");
     return idx >= 0 ? idx : timeline.length - 1;

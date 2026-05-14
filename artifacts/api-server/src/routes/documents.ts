@@ -889,6 +889,7 @@ async function buildCaseContext(r: DbConn, caseId: number, firmId: number, cache
         c.spa_details,
         c.property_details,
         c.loan_details,
+        c.borrowers,
         c.company_details,
         p.name as project_name,
         p.phase as project_phase,
@@ -1180,6 +1181,44 @@ async function buildCaseContext(r: DbConn, caseId: number, firmId: number, cache
   const officeBanks = bankRows.filter((b) => b.account_type === "office");
   const clientBanks = bankRows.filter((b) => b.account_type === "client");
 
+  const borrowersArr: Array<{ name: string; ic?: string; address?: string }> = (() => {
+    const partyType = String((c as any).loan_party_type ?? "");
+    if (partyType === "1st_party") {
+      return purchaserRows
+        .map((p: any) => {
+          const name = typeof p?.name === "string" ? p.name.trim() : "";
+          if (!name) return null;
+          const ic = typeof p?.ic_no === "string" ? String(p.ic_no).trim() : "";
+          const address = typeof p?.address === "string" ? String(p.address).trim() : "";
+          return ic ? { name, ic, address } : { name, address };
+        })
+        .filter(Boolean) as Array<{ name: string; ic?: string; address?: string }>;
+    }
+
+    const fromColumn = Array.isArray((c as any).borrowers) ? (c as any).borrowers : null;
+    if (fromColumn) {
+      return fromColumn
+        .map((b: any) => {
+          const name = typeof b?.name === "string" ? b.name.trim() : "";
+          if (!name) return null;
+          const ic = typeof (b?.ic ?? b?.nric) === "string" ? String(b.ic ?? b.nric).trim() : "";
+          const address = typeof b?.address === "string" ? String(b.address).trim() : "";
+          return ic ? { name, ic, address } : { name, address };
+        })
+        .filter(Boolean) as Array<{ name: string; ic?: string; address?: string }>;
+    }
+
+    const b1 = typeof (loan as any)?.borrower1Name === "string" ? String((loan as any).borrower1Name).trim() : "";
+    const i1 = typeof (loan as any)?.borrower1Ic === "string" ? String((loan as any).borrower1Ic).trim() : "";
+    const b2 = typeof (loan as any)?.borrower2Name === "string" ? String((loan as any).borrower2Name).trim() : "";
+    const i2 = typeof (loan as any)?.borrower2Ic === "string" ? String((loan as any).borrower2Ic).trim() : "";
+    const out: Array<{ name: string; ic?: string; address?: string }> = [];
+    if (b1) out.push(i1 ? { name: b1, ic: i1 } : { name: b1 });
+    if (b2) out.push(i2 ? { name: b2, ic: i2 } : { name: b2 });
+    return out;
+  })();
+  const borrowerAddresses = borrowersArr.map((b) => (typeof b.address === "string" ? b.address.trim() : "")).filter(Boolean).join(", ");
+
   return {
     case_id: caseId,
     reference_no: (c as any).reference_no ?? "",
@@ -1227,10 +1266,16 @@ async function buildCaseContext(r: DbConn, caseId: number, firmId: number, cache
     property_approved_price_raw: prop.approvedPurchasePrice ?? "",
 
     // Loan Details
-    borrower1_name: loan.borrower1Name ?? "",
-    borrower1_ic: loan.borrower1Ic ?? "",
-    borrower2_name: loan.borrower2Name ?? "",
-    borrower2_ic: loan.borrower2Ic ?? "",
+    borrowers: borrowersArr,
+    borrower1_name: borrowersArr[0]?.name ?? "",
+    borrower1_ic: borrowersArr[0]?.ic ?? "",
+    borrower2_name: borrowersArr[1]?.name ?? "",
+    borrower2_ic: borrowersArr[1]?.ic ?? "",
+    borrower1_address: borrowersArr[0]?.address ?? "",
+    borrower2_address: borrowersArr[1]?.address ?? "",
+    borrower_1_address: borrowersArr[0]?.address ?? "",
+    borrower_2_address: borrowersArr[1]?.address ?? "",
+    borrower_addresses: borrowerAddresses,
     end_financier: loan.endFinancier ?? "",
     bank_ref: loan.bankRef ?? "",
     bank_branch: loan.bankBranch ?? "",
@@ -1836,6 +1881,7 @@ router.patch("/document-templates/:templateId", requireAuth, requireFirmUser, re
     const hasClauseInsertionMode = Object.prototype.hasOwnProperty.call(body, "clauseInsertionMode");
     const hasChecklistMode = Object.prototype.hasOwnProperty.call(body, "checklistMode");
     const hasChecklistItems = Object.prototype.hasOwnProperty.call(body, "checklistItems");
+    const hasPdfMappingConfig = Object.prototype.hasOwnProperty.call(body, "pdfMappingConfig");
 
     const folderId = body.folderId;
     const kind = body.kind;
@@ -1852,6 +1898,7 @@ router.patch("/document-templates/:templateId", requireAuth, requireFirmUser, re
     const clauseInsertionMode = body.clauseInsertionMode;
     const checklistMode = body.checklistMode;
     const checklistItems = body.checklistItems;
+    const pdfMappingConfig = body.pdfMappingConfig;
 
     const folderIdNum: number | null | undefined = hasFolderId ? (typeof folderId === "number" ? folderId : folderId === null ? null : undefined) : undefined;
     if (hasFolderId && folderIdNum === undefined) {
@@ -1956,6 +2003,14 @@ router.patch("/document-templates/:templateId", requireAuth, requireFirmUser, re
       res.status(400).json({ error: "Invalid checklistItems" });
       return;
     }
+    const pdfMappingConfigVal: unknown | null | undefined =
+      hasPdfMappingConfig
+        ? (pdfMappingConfig === null ? null : typeof pdfMappingConfig === "object" ? pdfMappingConfig : undefined)
+        : undefined;
+    if (hasPdfMappingConfig && pdfMappingConfigVal === undefined) {
+      res.status(400).json({ error: "Invalid pdfMappingConfig" });
+      return;
+    }
     if (kindVal && kindVal !== "template" && kindVal !== "reference") {
       res.status(400).json({ error: "Invalid kind" });
       return;
@@ -1981,13 +2036,18 @@ router.patch("/document-templates/:templateId", requireAuth, requireFirmUser, re
       return;
     }
     const existingExt = typeof (existing as any).extension === "string" ? String((existing as any).extension) : fileExtensionFromName(String((existing as any).file_name ?? ""));
+    const existingExtLower = String(existingExt || "").toLowerCase();
     const existingKindRaw = typeof (existing as any).kind === "string" ? String((existing as any).kind) : "template";
     const requestedKindRaw = kindVal ?? existingKindRaw;
     const requestedKind: "template" | "reference" = requestedKindRaw === "reference" ? "reference" : "template";
-    const existingTemplateExtOk = ["docx", "pdf"].includes(String(existingExt || "").toLowerCase());
+    const existingTemplateExtOk = ["docx", "pdf"].includes(existingExtLower);
     const effectiveKind: "template" | "reference" = existingTemplateExtOk ? requestedKind : "reference";
     if (effectiveKind === "template" && !existingTemplateExtOk) {
       res.status(400).json({ error: "Template must be a .docx or .pdf file", code: "TEMPLATE_MUST_BE_DOCX_OR_PDF" });
+      return;
+    }
+    if (hasPdfMappingConfig && existingExtLower !== "pdf") {
+      res.status(422).json({ error: "PDF mapping is only supported for .pdf templates", code: "PDF_MAPPING_ONLY_FOR_PDF" });
       return;
     }
 
@@ -2008,6 +2068,7 @@ router.patch("/document-templates/:templateId", requireAuth, requireFirmUser, re
       sort_order: await col("sort_order"),
       file_naming_rule: await col("file_naming_rule"),
       clause_insertion_mode: await col("clause_insertion_mode"),
+      pdf_mapping_config: await col("pdf_mapping_config"),
       checklist_mode: await col("checklist_mode"),
       checklist_items: await col("checklist_items"),
       is_template_capable: await col("is_template_capable"),
@@ -2015,6 +2076,11 @@ router.patch("/document-templates/:templateId", requireAuth, requireFirmUser, re
       file_name: await col("file_name"),
       updated_at: await col("updated_at"),
     };
+
+    if (hasPdfMappingConfig && !cols.pdf_mapping_config) {
+      res.status(409).json({ error: "PDF mapping is not supported on this database", code: "PDF_MAPPING_COLUMN_MISSING" });
+      return;
+    }
 
     const patch: Array<ReturnType<typeof sql>> = [];
     if (hasFolderId && cols.folder_id) patch.push(sql`folder_id = ${folderIdNum ?? null}`);
@@ -2030,13 +2096,14 @@ router.patch("/document-templates/:templateId", requireAuth, requireFirmUser, re
     if (hasSortOrder && cols.sort_order) patch.push(sql`sort_order = ${sortOrderVal ?? 0}`);
     if (hasFileNamingRule && cols.file_naming_rule) patch.push(sql`file_naming_rule = ${fileNamingRuleVal ?? null}`);
     if (hasClauseInsertionMode && cols.clause_insertion_mode) patch.push(sql`clause_insertion_mode = ${clauseInsertionModeVal ?? null}`);
+    if (hasPdfMappingConfig && cols.pdf_mapping_config) patch.push(sql`pdf_mapping_config = ${pdfMappingConfigVal as any}`);
     if (hasChecklistMode && cols.checklist_mode) patch.push(sql`checklist_mode = ${checklistModeVal ?? null}`);
     if (hasChecklistItems && cols.checklist_items) patch.push(sql`checklist_items = ${checklistItemsVal as any}`);
     if (cols.is_template_capable && cols.extension && cols.file_name) {
       patch.push(sql`
         is_template_capable = (
           ${effectiveKind} = 'template'
-          AND LOWER(COALESCE(NULLIF(extension,''), split_part(file_name, '.', array_length(string_to_array(file_name, '.'), 1)))) = 'docx'
+          AND LOWER(COALESCE(NULLIF(extension,''), split_part(file_name, '.', array_length(string_to_array(file_name, '.'), 1)))) IN ('docx','pdf')
         )
       `);
     }
@@ -2068,6 +2135,7 @@ router.patch("/document-templates/:templateId", requireAuth, requireFirmUser, re
     if (hasDescription) detailParts.push("description=updated");
     if (docTypeVal !== undefined) detailParts.push(`documentType=${docTypeVal}`);
     if (kindVal !== undefined) detailParts.push(`kind=${effectiveKind}`);
+    if (hasPdfMappingConfig) detailParts.push("pdfMappingConfig=updated");
 
     res.status(200).json(rows[0]);
     void writeAuditLog(
@@ -2728,6 +2796,7 @@ router.post("/document-templates/:templateId/versions", requireAuth, requireFirm
       logger.error({ err, path: req.path, firmId: req.firmId, userId: req.userId, templateId }, "[documents] detect_variables_failed");
     }
   }
+  const pdfMappingsSnapshot: unknown = ext === "pdf" ? ((tpl as any).pdf_mapping_config ?? null) : null;
 
   const isActive = Object.prototype.hasOwnProperty.call(patch, "isActive") ? Boolean(patch.isActive) : Boolean((tpl as any).is_active ?? true);
   const appliesToPurchaseMode = Object.prototype.hasOwnProperty.call(patch, "appliesToPurchaseMode")
@@ -2755,7 +2824,7 @@ router.post("/document-templates/:templateId/versions", requireAuth, requireFirm
       ${req.firmId!}, ${templateId}, ${nextNo}, 'draft',
       ${effectiveObjectPath}, ${effectiveFileName}, ${mimeType},
       ${String((tpl as any).kind ?? "template")}, ${String((tpl as any).document_type ?? "other")}, ${documentGroup},
-      ${variablesSnapshot as any}, ${null as any},
+      ${variablesSnapshot as any}, ${pdfMappingsSnapshot as any},
       ${{
         applies_to_purchase_mode: appliesToPurchaseMode,
         applies_to_title_type: appliesToTitleType,
@@ -4968,6 +5037,140 @@ async function renderPdfFormTemplate(args: { pdfBytes: Buffer; data: Record<stri
   }
 }
 
+type PdfFontFamily = "Helvetica" | "Times-Roman" | "Courier";
+type PdfTextAlignment = "left" | "center" | "right";
+type NormalizedPdfMappingEntry = {
+  key: string;
+  page: number;
+  x: number;
+  y: number;
+  size: number;
+  maxWidth?: number;
+  lineHeight?: number;
+  alignment?: PdfTextAlignment;
+  fontFamily?: PdfFontFamily;
+};
+
+function normalizePdfMappingConfig(raw: unknown): NormalizedPdfMappingEntry[] {
+  const out: NormalizedPdfMappingEntry[] = [];
+
+  const pushOne = (key: unknown, coord: any) => {
+    if (typeof key !== "string" || !key.trim()) return;
+    const page = typeof coord?.page === "number" && Number.isFinite(coord.page) ? Math.max(1, Math.floor(coord.page)) : 1;
+    const x = typeof coord?.x === "number" && Number.isFinite(coord.x) ? coord.x : NaN;
+    const y = typeof coord?.y === "number" && Number.isFinite(coord.y) ? coord.y : NaN;
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+    const size = typeof coord?.size === "number" && Number.isFinite(coord.size) ? Math.max(1, coord.size) : 12;
+    const maxWidth = typeof coord?.maxWidth === "number" && Number.isFinite(coord.maxWidth) ? Math.max(1, coord.maxWidth) : undefined;
+    const lineHeight = typeof coord?.lineHeight === "number" && Number.isFinite(coord.lineHeight) ? Math.max(1, coord.lineHeight) : undefined;
+    const alignment =
+      coord?.alignment === "left" || coord?.alignment === "center" || coord?.alignment === "right"
+        ? (coord.alignment as PdfTextAlignment)
+        : undefined;
+    const fontFamily =
+      coord?.fontFamily === "Helvetica" || coord?.fontFamily === "Times-Roman" || coord?.fontFamily === "Courier"
+        ? (coord.fontFamily as PdfFontFamily)
+        : undefined;
+    out.push({ key: key.trim(), page, x, y, size, ...(maxWidth ? { maxWidth } : {}), ...(lineHeight ? { lineHeight } : {}), ...(alignment ? { alignment } : {}), ...(fontFamily ? { fontFamily } : {}) });
+  };
+
+  if (Array.isArray(raw)) {
+    for (const item of raw) {
+      if (!item || typeof item !== "object") continue;
+      const rec = item as any;
+      const key = typeof rec.key === "string" ? rec.key : typeof rec.variableKey === "string" ? rec.variableKey : typeof rec.variable === "string" ? rec.variable : undefined;
+      pushOne(key, rec);
+    }
+    return out;
+  }
+
+  if (raw && typeof raw === "object") {
+    for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+      pushOne(k, v as any);
+    }
+  }
+  return out;
+}
+
+function wrapPdfLines(text: string, font: any, fontSize: number, maxWidth: number): string[] {
+  const t = text.trim();
+  if (!t) return [""];
+  const words = t.split(/\s+/);
+  const lines: string[] = [];
+  let current = "";
+  for (const w of words) {
+    const next = current ? `${current} ${w}` : w;
+    const width = font.widthOfTextAtSize(next, fontSize);
+    if (width <= maxWidth || !current) {
+      current = next;
+    } else {
+      lines.push(current);
+      current = w;
+    }
+  }
+  if (current) lines.push(current);
+  return lines.length ? lines : [t];
+}
+
+async function renderPdfMappedTemplate(args: { pdfBytes: Buffer; data: Record<string, unknown>; mappingConfig: unknown }): Promise<Buffer> {
+  if (!Buffer.isBuffer(args.pdfBytes) || args.pdfBytes.length === 0) {
+    throw new DocumentGenerationError(400, "TEMPLATE_FILE_BUFFER_MISSING", "Template file buffer is missing or corrupted in the database.");
+  }
+  const mappings = normalizePdfMappingConfig(args.mappingConfig);
+  if (!mappings.length) return args.pdfBytes;
+  try {
+    const pdf = await PDFDocument.load(args.pdfBytes);
+    const fontCache = new Map<PdfFontFamily, any>();
+    const getFont = async (family?: string) => {
+      const f: PdfFontFamily =
+        family === "Times-Roman" || family === "Courier" || family === "Helvetica"
+          ? (family as PdfFontFamily)
+          : "Helvetica";
+      const cached = fontCache.get(f);
+      if (cached) return cached;
+      const font =
+        f === "Times-Roman"
+          ? await pdf.embedFont(StandardFonts.TimesRoman)
+          : f === "Courier"
+            ? await pdf.embedFont(StandardFonts.Courier)
+            : await pdf.embedFont(StandardFonts.Helvetica);
+      fontCache.set(f, font);
+      return font;
+    };
+
+    for (const m of mappings) {
+      const raw = (args.data as any)[m.key];
+      const value = raw === null || raw === undefined ? "" : String(raw);
+      const page = pdf.getPage(m.page - 1);
+      if (!page) continue;
+      const font = await getFont(m.fontFamily);
+      const fontSize = m.size;
+      const lineHeight = m.lineHeight ?? Math.ceil(fontSize * 1.2);
+      const lines = m.maxWidth ? wrapPdfLines(value, font, fontSize, m.maxWidth) : value.split(/\r?\n/);
+      const align = m.alignment === "center" || m.alignment === "right" ? m.alignment : "left";
+      for (let i = 0; i < lines.length; i++) {
+        const y = m.y - i * lineHeight;
+        const line = lines[i] ?? "";
+        const x = (() => {
+          if (!m.maxWidth) return m.x;
+          const textWidth = font.widthOfTextAtSize(line, fontSize);
+          if (align === "center") return Math.max(m.x, m.x + (m.maxWidth - textWidth) / 2);
+          if (align === "right") return Math.max(m.x, m.x + (m.maxWidth - textWidth));
+          return m.x;
+        })();
+        page.drawText(line, { x, y, size: fontSize, font, color: rgb(0, 0, 0) });
+      }
+    }
+
+    const out = await pdf.save();
+    return Buffer.from(out);
+  } catch (err) {
+    if (err instanceof DocumentGenerationError) throw err;
+    console.error(err);
+    throw new DocumentGenerationError(422, "PDF_TEMPLATE_RENDER_FAILED", "PDF template render failed", { details: err instanceof Error ? err.message : String(err) });
+  }
+}
+
 async function generateFirmDocument({
   r,
   firmId,
@@ -5319,7 +5522,10 @@ async function generateFirmDocument({
 
   if (templateExt === "pdf") {
     outFormat = "pdf";
-    outputBytes = await renderPdfFormTemplate({ pdfBytes: fileContents, data: input, flatten: true });
+    const mappingConfig = (template as any).pdf_mapping_config ?? null;
+    outputBytes = await (normalizePdfMappingConfig(mappingConfig).length > 0
+      ? renderPdfMappedTemplate({ pdfBytes: fileContents, data: input, mappingConfig })
+      : renderPdfFormTemplate({ pdfBytes: fileContents, data: input, flatten: true }));
     outputContentType = "application/pdf";
   } else {
     if (!Buffer.isBuffer(fileContents) || fileContents.length === 0) {

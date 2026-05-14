@@ -1,10 +1,11 @@
-import { Fragment, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient, type UseMutationResult, type UseQueryResult } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { QueryFallback } from "@/components/query-fallback";
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { apiFetchJson } from "@/lib/api-client";
 import { cn } from "@/lib/utils";
 import { downloadFromApi } from "@/lib/download";
@@ -29,6 +30,7 @@ type InventoryItem = {
   id: number;
   referenceNo: string;
   unitNo: string | null;
+  purchaserNames?: string | null;
   purchaserName: string | null;
   projectName: string;
   spaStatus: string;
@@ -60,7 +62,7 @@ export default function DeveloperDashboardPage() {
   const [search, setSearch] = useState("");
   const [page, setPage] = useState(1);
   const limit = 50;
-  const [expandedCaseId, setExpandedCaseId] = useState<number | null>(null);
+  const [activeCaseId, setActiveCaseId] = useState<number | null>(null);
   const [messageDraft, setMessageDraft] = useState("");
 
   const qs = useMemo(() => {
@@ -84,30 +86,30 @@ export default function DeveloperDashboardPage() {
   });
 
   const progressQuery = useQuery<CaseProgressResponse>({
-    queryKey: ["developer-case-progress", expandedCaseId],
-    queryFn: ({ signal }) => apiFetchJson(`/developer/cases/${expandedCaseId}/progress`, { signal }),
-    enabled: typeof expandedCaseId === "number" && expandedCaseId > 0,
+    queryKey: ["developer-case-progress", activeCaseId],
+    queryFn: ({ signal }) => apiFetchJson(`/developer/cases/${activeCaseId}/progress`, { signal }),
+    enabled: typeof activeCaseId === "number" && activeCaseId > 0,
     retry: false,
     staleTime: 30_000,
   });
 
   const messagesQuery = useQuery<{ data: DevMessage[] }>({
-    queryKey: ["developer-case-messages", expandedCaseId],
-    queryFn: ({ signal }) => apiFetchJson(`/developer/cases/${expandedCaseId}/messages`, { signal }),
-    enabled: typeof expandedCaseId === "number" && expandedCaseId > 0,
+    queryKey: ["developer-case-messages", activeCaseId],
+    queryFn: ({ signal }) => apiFetchJson(`/developer/cases/${activeCaseId}/messages?channel=developer`, { signal }),
+    enabled: typeof activeCaseId === "number" && activeCaseId > 0,
     retry: false,
   });
 
   const sendMutation = useMutation<unknown, unknown, { caseId: number; messageText: string }>({
     mutationFn: async ({ caseId, messageText }) => {
-      return await apiFetchJson(`/developer/cases/${caseId}/messages`, {
+      return await apiFetchJson(`/developer/cases/${caseId}/messages?channel=developer`, {
         method: "POST",
-        body: JSON.stringify({ messageText }),
+        body: JSON.stringify({ messageText, channel: "developer" }),
       });
     },
     onSuccess: async () => {
       setMessageDraft("");
-      await queryClient.invalidateQueries({ queryKey: ["developer-case-messages", expandedCaseId] });
+      await queryClient.invalidateQueries({ queryKey: ["developer-case-messages", activeCaseId] });
     },
   });
 
@@ -139,6 +141,7 @@ export default function DeveloperDashboardPage() {
   const items = Array.isArray(invQuery.data?.data) ? invQuery.data!.data : [];
   const totalUnits = Number(invQuery.data?.total ?? 0);
   const totalPages = Math.max(1, Math.ceil(totalUnits / limit));
+  const activeItem = items.find((x) => x.id === activeCaseId) ?? null;
 
   return (
     <div className="space-y-6">
@@ -194,40 +197,21 @@ export default function DeveloperDashboardPage() {
                 </tr>
               </thead>
               <tbody>
-                {items.map((c) => {
-                  const isOpen = expandedCaseId === c.id;
-                  return (
-                    <Fragment key={c.id}>
-                      <tr
-                        className={cn("border-b border-slate-100 cursor-pointer hover:bg-slate-50/60", isOpen && "bg-slate-50")}
-                        onClick={() => {
-                          setExpandedCaseId((prev) => (prev === c.id ? null : c.id));
-                          setMessageDraft("");
-                        }}
-                      >
-                        <td className="py-3 px-4 text-slate-900 font-medium">{c.unitNo ?? "—"}</td>
-                        <td className="py-3 px-4 text-slate-900">{c.purchaserName ?? "—"}</td>
-                        <td className="py-3 px-4 text-slate-700">{c.spaStatus}</td>
-                        <td className="py-3 px-4 text-slate-700">{c.loanStatus ?? "—"}</td>
-                      </tr>
-
-                      {isOpen ? (
-                        <tr className="border-b border-slate-100">
-                          <td colSpan={4} className="px-4 py-4">
-                            <ExpandedUnitPanel
-                              item={c}
-                              progressQuery={progressQuery}
-                              messagesQuery={messagesQuery}
-                              messageDraft={messageDraft}
-                              setMessageDraft={setMessageDraft}
-                              sendMutation={sendMutation}
-                            />
-                          </td>
-                        </tr>
-                      ) : null}
-                    </Fragment>
-                  );
-                })}
+                {items.map((c) => (
+                  <tr
+                    key={c.id}
+                    className={cn("border-b border-slate-100 cursor-pointer hover:bg-slate-50/60", activeCaseId === c.id && "bg-slate-50")}
+                    onClick={() => {
+                      setActiveCaseId(c.id);
+                      setMessageDraft("");
+                    }}
+                  >
+                    <td className="py-3 px-4 text-slate-900 font-medium">{c.unitNo ?? "—"}</td>
+                    <td className="py-3 px-4 text-slate-900">{c.purchaserNames ?? c.purchaserName ?? "—"}</td>
+                    <td className="py-3 px-4 text-slate-700">{c.spaStatus}</td>
+                    <td className="py-3 px-4 text-slate-700">{c.loanStatus ?? "—"}</td>
+                  </tr>
+                ))}
 
                 {items.length === 0 ? (
                   <tr>
@@ -253,6 +237,34 @@ export default function DeveloperDashboardPage() {
           </div>
         </CardContent>
       </Card>
+
+      <Dialog
+        open={typeof activeCaseId === "number" && activeCaseId > 0}
+        onOpenChange={(open) => {
+          if (!open) {
+            setActiveCaseId(null);
+            setMessageDraft("");
+          }
+        }}
+      >
+        <DialogContent className="max-w-4xl">
+          <DialogHeader>
+            <DialogTitle>Unit Details</DialogTitle>
+          </DialogHeader>
+          {activeItem ? (
+            <UnitDetailsDialogContent
+              item={activeItem}
+              progressQuery={progressQuery}
+              messagesQuery={messagesQuery}
+              messageDraft={messageDraft}
+              setMessageDraft={setMessageDraft}
+              sendMutation={sendMutation}
+            />
+          ) : (
+            <div className="text-sm text-slate-500">Loading...</div>
+          )}
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
@@ -268,7 +280,7 @@ function KpiCard(props: { label: string; value: number }) {
   );
 }
 
-function ExpandedUnitPanel(props: {
+function UnitDetailsDialogContent(props: {
   item: InventoryItem;
   progressQuery: UseQueryResult<CaseProgressResponse>;
   messagesQuery: UseQueryResult<{ data: DevMessage[] }>;
@@ -277,29 +289,6 @@ function ExpandedUnitPanel(props: {
   sendMutation: UseMutationResult<unknown, unknown, { caseId: number; messageText: string }>;
 }) {
   const { item, progressQuery, messagesQuery, messageDraft, setMessageDraft, sendMutation } = props;
-  const queryClient = useQueryClient();
-  const [editingDevStatus, setEditingDevStatus] = useState(false);
-  const [devStatusDraft, setDevStatusDraft] = useState(() => item.developerStatus ?? "");
-
-  const updateStatusMutation = useMutation<unknown, unknown, { caseId: number; developerStatus: string | null }>({
-    mutationFn: async ({ caseId, developerStatus }) => {
-      return await apiFetchJson(`/developer/cases/${caseId}/status`, {
-        method: "PATCH",
-        body: JSON.stringify({ developerStatus }),
-      });
-    },
-    onSuccess: async () => {
-      setEditingDevStatus(false);
-      await queryClient.invalidateQueries({ queryKey: ["developer-inventory"] });
-    },
-  });
-
-  const formatBillboardTs = (ts: string | null | undefined): string | null => {
-    if (!ts) return null;
-    const d = new Date(ts);
-    if (Number.isNaN(d.getTime())) return null;
-    return d.toLocaleString(undefined, { day: "2-digit", month: "short", year: "numeric", hour: "numeric", minute: "2-digit" });
-  };
 
   const keyDates = progressQuery.data?.keyDates ?? {};
   const getYmd = (k: string) => normalizeDateOnlyFromApi(keyDates[k]);
@@ -317,64 +306,6 @@ function ExpandedUnitPanel(props: {
 
   return (
     <div className="space-y-4">
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
-        <div className="rounded-lg border border-sky-200 bg-sky-50 px-4 py-3">
-          <div className="text-xs font-semibold text-sky-900">Lawyer Status</div>
-          <div className="mt-1 text-sm text-slate-900 whitespace-pre-wrap break-words">
-            {item.lawyerStatus?.trim() ? item.lawyerStatus : "No updates from lawyer."}
-          </div>
-          <div className="mt-1 text-[11px] text-sky-900/70">
-            {formatBillboardTs(item.lawyerStatusUpdatedAt) ?? ""}
-          </div>
-        </div>
-
-        <div className="rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-3">
-          <div className="flex items-center justify-between gap-2">
-            <div className="text-xs font-semibold text-emerald-900">Developer Status</div>
-            <Button variant="outline" size="sm" onClick={() => setEditingDevStatus(true)} disabled={editingDevStatus}>
-              Update Status
-            </Button>
-          </div>
-          {editingDevStatus ? (
-            <div className="mt-2 space-y-2">
-              <Textarea
-                value={devStatusDraft}
-                onChange={(e) => setDevStatusDraft(e.target.value)}
-                placeholder="Write a short status update..."
-                className="min-h-[90px] bg-white"
-              />
-              <div className="flex items-center justify-end gap-2">
-                <Button variant="outline" size="sm" onClick={() => setEditingDevStatus(false)} disabled={updateStatusMutation.isPending}>
-                  Cancel
-                </Button>
-                <Button
-                  size="sm"
-                  onClick={() => {
-                    const t = devStatusDraft.trim();
-                    updateStatusMutation.mutate({ caseId: item.id, developerStatus: t ? t : null });
-                  }}
-                  disabled={updateStatusMutation.isPending}
-                >
-                  Save
-                </Button>
-              </div>
-              {updateStatusMutation.isError ? (
-                <div className="text-xs text-red-700">Failed to update. Please try again.</div>
-              ) : null}
-            </div>
-          ) : (
-            <>
-              <div className="mt-1 text-sm text-slate-900 whitespace-pre-wrap break-words">
-                {item.developerStatus?.trim() ? item.developerStatus : "No updates from developer."}
-              </div>
-              <div className="mt-1 text-[11px] text-emerald-900/70">
-                {formatBillboardTs(item.developerStatusUpdatedAt) ?? ""}
-              </div>
-            </>
-          )}
-        </div>
-      </div>
-
       <div className="flex items-start justify-between gap-3 flex-wrap">
         <div className="min-w-0">
           <div className="text-xs text-slate-500">Reference</div>
@@ -386,31 +317,44 @@ function ExpandedUnitPanel(props: {
         </div>
       </div>
 
-      <div className="space-y-2">
-        <div className="text-xs font-medium text-slate-600">Progress</div>
-        <div className="flex items-center gap-2">
-          {(["SPA", "Loan", "MOT", "Done"] as const).map((label, idx) => (
-            <div key={label} className="flex items-center gap-2 min-w-0">
-              <div className={cn("h-2.5 w-2.5 rounded-full", idx <= stageIndex ? "bg-slate-900" : "bg-slate-300")} />
-              <div className={cn("text-xs", idx <= stageIndex ? "text-slate-900 font-medium" : "text-slate-500")}>{label}</div>
-              {idx < 3 ? <div className="h-px w-6 bg-slate-200" /> : null}
-            </div>
-          ))}
-        </div>
-      </div>
-
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
-        <KeyDate label="SPA Signed" ymd={spaSigned} />
-        <KeyDate label="LO Date" ymd={loa} />
-        <KeyDate label="MOT" ymd={mot} />
-        <KeyDate label="Completion" ymd={completion} />
-      </div>
-
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         <div className="space-y-2">
-          <div className="text-xs font-medium text-slate-600">Messages</div>
+          <div className="text-xs font-medium text-slate-600">Key Dates</div>
+          <div className="flex items-center gap-2">
+            {(["SPA", "Loan", "MOT", "Done"] as const).map((label, idx) => (
+              <div key={label} className="flex items-center gap-2 min-w-0">
+                <div className={cn("h-2.5 w-2.5 rounded-full", idx <= stageIndex ? "bg-slate-900" : "bg-slate-300")} />
+                <div className={cn("text-xs", idx <= stageIndex ? "text-slate-900 font-medium" : "text-slate-500")}>{label}</div>
+                {idx < 3 ? <div className="h-px w-6 bg-slate-200" /> : null}
+              </div>
+            ))}
+          </div>
+          <div className="rounded-md border border-slate-200 bg-white p-3">
+            {progressQuery.isLoading ? (
+              <div className="text-sm text-slate-500">Loading key dates...</div>
+            ) : progressQuery.isError ? (
+              <div className="text-sm text-red-600">Failed to load key dates.</div>
+            ) : (
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <KeyDate label="SPA Signed" ymd={spaSigned} />
+                <KeyDate label="LO Date" ymd={loa} />
+                <KeyDate label="MOT" ymd={mot} />
+                <KeyDate label="Completion" ymd={completion} />
+                <KeyDate label="SPA Date" ymd={getYmd("spa_date")} />
+                <KeyDate label="SPA Stamped" ymd={getYmd("spa_stamped_date")} />
+                <KeyDate label="LO Stamped" ymd={getYmd("letter_of_offer_stamped_date")} />
+                <KeyDate label="Bank LU Received" ymd={getYmd("bank_lu_received_date")} />
+                <KeyDate label="MOT Signed" ymd={getYmd("mot_signed_date")} />
+                <KeyDate label="MOT Registered" ymd={getYmd("mot_registered_date")} />
+              </div>
+            )}
+          </div>
+        </div>
+
+        <div className="space-y-2">
+          <div className="text-xs font-medium text-slate-600">Developer Chat</div>
           <div className="rounded-md border border-slate-200 bg-white">
-            <div className="max-h-[240px] overflow-auto p-3 space-y-2">
+            <div className="max-h-[360px] overflow-auto p-3 space-y-2">
               {messagesQuery.isLoading ? (
                 <div className="text-sm text-slate-500">Loading messages...</div>
               ) : messagesQuery.isError ? (
@@ -461,26 +405,6 @@ function ExpandedUnitPanel(props: {
                 <div className="text-xs text-red-600">Failed to send. Please try again.</div>
               ) : null}
             </div>
-          </div>
-        </div>
-
-        <div className="space-y-2">
-          <div className="text-xs font-medium text-slate-600">Key Dates</div>
-          <div className="rounded-md border border-slate-200 bg-white p-3">
-            {progressQuery.isLoading ? (
-              <div className="text-sm text-slate-500">Loading key dates...</div>
-            ) : progressQuery.isError ? (
-              <div className="text-sm text-red-600">Failed to load key dates.</div>
-            ) : (
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <KeyDate label="SPA Date" ymd={getYmd("spa_date")} />
-                <KeyDate label="SPA Stamped" ymd={getYmd("spa_stamped_date")} />
-                <KeyDate label="LO Stamped" ymd={getYmd("letter_of_offer_stamped_date")} />
-                <KeyDate label="Bank LU Received" ymd={getYmd("bank_lu_received_date")} />
-                <KeyDate label="MOT Signed" ymd={getYmd("mot_signed_date")} />
-                <KeyDate label="MOT Registered" ymd={getYmd("mot_registered_date")} />
-              </div>
-            )}
           </div>
         </div>
       </div>

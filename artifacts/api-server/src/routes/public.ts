@@ -19,6 +19,12 @@ import { writeAuditLog } from "../lib/auth.js";
 
 const router: ExpressRouter = express.Router();
 
+const one = (v: unknown): string | undefined => {
+  if (typeof v === "string") return v;
+  if (Array.isArray(v)) return typeof v[0] === "string" ? v[0] : undefined;
+  return undefined;
+};
+
 function maskName(name: string): string {
   const s = name.trim().replace(/\s+/g, " ");
   if (!s) return "";
@@ -35,7 +41,9 @@ function maskName(name: string): string {
 }
 
 const TokenParams = z.object({ token: z.string().uuid() });
+const PublicMessageChannel = z.literal("client");
 const PublicCreateMessageBody = z.object({
+  channel: PublicMessageChannel.optional(),
   messageText: z.string().trim().min(1).max(2000),
   attachments: z.array(z.record(z.string(), z.unknown())).max(10).optional(),
 });
@@ -190,6 +198,12 @@ router.get("/public/track/:token/messages", (async (req, res) => {
     return;
   }
 
+  const channelRaw = one((req as any).query?.channel);
+  if (channelRaw && channelRaw !== "client") {
+    res.status(400).json({ error: "Invalid channel" });
+    return;
+  }
+
   const c = await findCaseByToken(parsed.data.token);
   if (!c) {
     res.status(404).json({ error: "Not found" });
@@ -211,6 +225,7 @@ router.get("/public/track/:token/messages", (async (req, res) => {
     .where(and(
       eq(caseMessagesTable.firmId, c.firmId),
       eq(caseMessagesTable.caseId, c.id),
+      eq(caseMessagesTable.channel, "client"),
       inArray(caseMessagesTable.senderType, ["client", "staff"]),
     ))
     .orderBy(asc(caseMessagesTable.createdAt))
@@ -240,6 +255,10 @@ router.post("/public/track/:token/messages", (async (req, res) => {
     res.status(400).json({ error: "Invalid body" });
     return;
   }
+  if (bodyParsed.data.channel && bodyParsed.data.channel !== "client") {
+    res.status(400).json({ error: "Invalid channel" });
+    return;
+  }
 
   const c = await findCaseByToken(parsed.data.token);
   if (!c) {
@@ -252,6 +271,7 @@ router.post("/public/track/:token/messages", (async (req, res) => {
     .values({
       firmId: c.firmId,
       caseId: c.id,
+      channel: "client",
       senderType: "client",
       senderId: null,
       messageText: bodyParsed.data.messageText,

@@ -7,7 +7,7 @@ import express, {
 import { eq, count, desc, and, or, asc, inArray } from "drizzle-orm";
 import {
   db, casesTable, casePurchasersTable, caseAssignmentsTable,
-  caseWorkflowStepsTable, caseNotesTable, caseMessagesTable,
+  caseWorkflowStepsTable, caseNotesTable, caseMessagesTable, caseMessageReadStatusTable,
   caseKeyDatesTable,
   caseWorkflowDocumentsTable,
   caseLoanStampingItemsTable,
@@ -49,7 +49,9 @@ const rdb = (req: AuthRequest): DbConn => req.rlsDb ?? db;
 type CaseKeyDatesInsert = typeof caseKeyDatesTable.$inferInsert;
 
 const GetCaseMessagesParams = z.object({ caseId: z.coerce.number().int().positive() });
+const CaseMessageChannel = z.enum(["client", "developer"]);
 const CreateCaseMessageBody = z.object({
+  channel: CaseMessageChannel.optional(),
   messageText: z.string().trim().min(1).max(2000),
   attachments: z.array(z.record(z.string(), z.unknown())).max(10).optional(),
 });
@@ -232,6 +234,8 @@ async function buildSmartNamingContext(r: DbConn, firmId: number, caseId: number
         projectName: projectsTable.name,
         developerName: developersTable.name,
         loanDetails: casesTable.loanDetails,
+        loanPartyType: casesTable.loanPartyType,
+        borrowers: casesTable.borrowers,
       })
       .from(casesTable)
       .innerJoin(projectsTable, eq(projectsTable.id, casesTable.projectId))
@@ -245,15 +249,38 @@ async function buildSmartNamingContext(r: DbConn, firmId: number, caseId: number
 
     const [baseRows, purchaserExists] = await Promise.all([basePromise, purchaserExistsPromise]);
     const base = baseRows[0];
-    const [purchaser] = purchaserExists
+    const purchaserNames = purchaserExists
       ? await r
           .select({ name: clientsTable.name })
           .from(casePurchasersTable)
           .innerJoin(clientsTable, eq(clientsTable.id, casePurchasersTable.clientId))
-          .where(and(eq(casePurchasersTable.caseId, caseId), eq(casePurchasersTable.role, "main")))
+          .where(and(eq(casePurchasersTable.caseId, caseId)))
           .orderBy(asc(casePurchasersTable.orderNo))
-          .limit(1)
+          .limit(20)
+      : [];
+    const purchaserNameList = purchaserNames.map((x) => String(x.name ?? "").trim()).filter(Boolean);
+    const [purchaser] = purchaserNameList.length > 0
+      ? [{ name: purchaserNameList[0] }]
       : [undefined];
+
+    const borrowerNames = (() => {
+      const partyType = String((base as any)?.loanPartyType ?? "");
+      if (partyType === "1st_party") return purchaserNameList.join(", ");
+      const fromColumn = (base as any)?.borrowers;
+      if (Array.isArray(fromColumn)) {
+        return fromColumn.map((b: any) => (typeof b?.name === "string" ? b.name.trim() : "")).filter(Boolean).join(", ");
+      }
+      const raw = base?.loanDetails ? String(base.loanDetails) : "";
+      if (!raw) return "";
+      try {
+        const obj = JSON.parse(raw) as Record<string, unknown>;
+        const b1 = typeof (obj as any)?.borrower1Name === "string" ? String((obj as any).borrower1Name).trim() : "";
+        const b2 = typeof (obj as any)?.borrower2Name === "string" ? String((obj as any).borrower2Name).trim() : "";
+        return [b1, b2].filter(Boolean).join(", ");
+      } catch {
+        return "";
+      }
+    })();
 
     const loanBank = (() => {
       const raw = base?.loanDetails ? String(base.loanDetails) : "";
@@ -275,6 +302,7 @@ async function buildSmartNamingContext(r: DbConn, firmId: number, caseId: number
       projectName: String(base?.projectName ?? ""),
       developerName: String(base?.developerName ?? ""),
       clientName: String(purchaser?.name ?? ""),
+      borrowerNames,
       loanBank,
     };
   } catch (err) {
@@ -2588,6 +2616,11 @@ router.post("/cases", requireAuthHandler, requireFirmUserHandler, requirePermiss
         ic: z.string().nullish(),
       })).optional(),
       loanPartyType: z.enum(["1st_party", "3rd_party"]).optional(),
+      borrowers: z.array(z.object({
+        name: z.string(),
+        ic: z.string().nullish(),
+        address: z.string().optional().transform((v) => (v ?? "").trim()),
+      })).optional(),
     }).superRefine((v, ctx) => {
       if (v.purchaseMode !== "loan" && v.purchaseMode !== "cash") {
         ctx.addIssue({ code: "custom", path: ["purchaseMode"], message: "Invalid purchaseMode" });
@@ -2601,6 +2634,13 @@ router.post("/cases", requireAuthHandler, requireFirmUserHandler, requirePermiss
       const hasInlinePurchasers = Array.isArray(v.purchasers) && v.purchasers.some((p) => (p?.name ?? "").trim().length > 0);
       if (!hasPurchaserIds && !hasInlinePurchasers) {
         ctx.addIssue({ code: "custom", path: ["purchasers"], message: "At least one purchaser name is required" });
+      }
+      if (v.purchaseMode === "loan" && v.loanPartyType === "3rd_party") {
+        const borrowers = Array.isArray(v.borrowers) ? v.borrowers : [];
+        const hasBorrowers = borrowers.some((b) => (b?.name ?? "").trim().length > 0);
+        if (!hasBorrowers) {
+          ctx.addIssue({ code: "custom", path: ["borrowers"], message: "At least one borrower name is required for 3rd-party loan" });
+        }
       }
     });
 
@@ -2616,7 +2656,7 @@ router.post("/cases", requireAuthHandler, requireFirmUserHandler, requirePermiss
       return;
     }
 
-    const { projectId, developerId: clientDeveloperId, purchaseMode, titleType, spaPrice, assignedLawyerId, assignedClerkId, purchaserIds, purchasers, loanPartyType } = parsed.data;
+    const { projectId, developerId: clientDeveloperId, purchaseMode, titleType, spaPrice, assignedLawyerId, assignedClerkId, purchaserIds, purchasers, loanPartyType, borrowers: requestedBorrowers } = parsed.data;
     const canAssignAny = await hasRolePermission(r, req.firmId!, req.roleId, "cases", "assign_any");
     const normalizedAssignedLawyerId = assignedLawyerId ?? undefined;
     const normalizedAssignedClerkId = assignedClerkId ?? undefined;
@@ -2770,6 +2810,59 @@ router.post("/cases", requireAuthHandler, requireFirmUserHandler, requirePermiss
 
     const refNo = requestedRef || `LCP-${req.firmId}-${Date.now()}`;
 
+    const normalizeBorrowers = (raw: unknown): Array<{ name: string; ic?: string; address: string }> => {
+      if (!Array.isArray(raw)) return [];
+      const out: Array<{ name: string; ic?: string; address: string }> = [];
+      for (const v of raw) {
+        const name = typeof (v as any)?.name === "string" ? String((v as any).name).trim() : "";
+        if (!name) continue;
+        const icRaw = (v as any)?.ic;
+        const ic = typeof icRaw === "string" ? icRaw.trim() : "";
+        const addressRaw = (v as any)?.address;
+        const address = typeof addressRaw === "string" ? addressRaw.trim() : "";
+        out.push(ic ? { name, ic, address } : { name, address });
+      }
+      return out;
+    };
+
+    const normalizedRequestedBorrowers = normalizeBorrowers(requestedBorrowers);
+    const isLoan = purchaseMode === "loan";
+    const effectiveLoanPartyType: "1st_party" | "3rd_party" = isLoan ? (loanPartyType ?? "1st_party") : "1st_party";
+    let borrowersToStore: Array<{ name: string; ic?: string; address: string }> = [];
+
+    if (isLoan) {
+      if (effectiveLoanPartyType === "1st_party") {
+        const rows = await r
+          .select({ id: clientsTable.id, name: clientsTable.name, ic: clientsTable.icNo, address: clientsTable.address })
+          .from(clientsTable)
+          .where(and(eq(clientsTable.firmId, req.firmId!), inArray(clientsTable.id, resolvedPurchaserIds)));
+        const byId = new Map<number, { name: string; ic: string | null; address: string | null }>();
+        for (const row of rows) byId.set(row.id, { name: String(row.name ?? ""), ic: row.ic ?? null, address: row.address ?? null });
+        borrowersToStore = resolvedPurchaserIds
+          .map((id) => {
+            const v = byId.get(id);
+            const name = v?.name?.trim() ?? "";
+            const ic = v?.ic ? String(v.ic).trim() : "";
+            const address = v?.address ? String(v.address).trim() : "";
+            return ic ? { name, ic, address } : { name, address };
+          })
+          .filter((b) => b.name.trim().length > 0);
+      } else {
+        borrowersToStore = normalizedRequestedBorrowers;
+        if (borrowersToStore.length === 0 && loanDetails && typeof loanDetails === "object") {
+          const ld: any = loanDetails as any;
+          const b1 = typeof ld.borrower1Name === "string" ? ld.borrower1Name.trim() : "";
+          const i1 = typeof ld.borrower1Ic === "string" ? ld.borrower1Ic.trim() : "";
+          const b2 = typeof ld.borrower2Name === "string" ? ld.borrower2Name.trim() : "";
+          const i2 = typeof ld.borrower2Ic === "string" ? ld.borrower2Ic.trim() : "";
+          const fallback: Array<{ name: string; ic?: string; address: string }> = [];
+          if (b1) fallback.push(i1 ? { name: b1, ic: i1, address: "" } : { name: b1, address: "" });
+          if (b2) fallback.push(i2 ? { name: b2, ic: i2, address: "" } : { name: b2, address: "" });
+          borrowersToStore = fallback;
+        }
+      }
+    }
+
     const insertCaseBase = {
       firmId: req.firmId!,
       projectId,
@@ -2787,6 +2880,7 @@ router.post("/cases", requireAuthHandler, requireFirmUserHandler, requirePermiss
       propertyDetails: propertyDetails ? JSON.stringify(propertyDetails) : null,
       loanDetails: loanDetails ? JSON.stringify(loanDetails) : null,
       loanPartyType: purchaseMode === "loan" ? (loanPartyType ?? "1st_party") : "1st_party",
+      borrowers: borrowersToStore,
       companyDetails: companyDetails ? JSON.stringify(companyDetails) : null,
       createdBy: req.userId ?? null,
     } satisfies typeof casesTable.$inferInsert;
@@ -4970,9 +5064,13 @@ router.get("/cases/:caseId/messages", requireAuthHandler, requireFirmUserHandler
   const ok = await enforceCaseAccess(r, req, res, params.data.caseId);
   if (!ok) return;
 
+  const channelRaw = one((req as any).query?.channel);
+  const channel = CaseMessageChannel.safeParse(channelRaw).success ? (channelRaw as "client" | "developer") : "client";
+
   const rows = await r
     .select({
       id: caseMessagesTable.id,
+      channel: caseMessagesTable.channel,
       senderType: caseMessagesTable.senderType,
       senderId: caseMessagesTable.senderId,
       senderName: usersTable.name,
@@ -4982,13 +5080,18 @@ router.get("/cases/:caseId/messages", requireAuthHandler, requireFirmUserHandler
     })
     .from(caseMessagesTable)
     .leftJoin(usersTable, eq(caseMessagesTable.senderId, usersTable.id))
-    .where(and(eq(caseMessagesTable.firmId, req.firmId!), eq(caseMessagesTable.caseId, params.data.caseId)))
+    .where(and(
+      eq(caseMessagesTable.firmId, req.firmId!),
+      eq(caseMessagesTable.caseId, params.data.caseId),
+      eq(caseMessagesTable.channel, channel),
+    ))
     .orderBy(asc(caseMessagesTable.createdAt))
     .limit(500);
 
   res.json({
     data: rows.map((m) => ({
       id: String(m.id),
+      channel: String((m as any).channel ?? "client"),
       senderType: String(m.senderType) === "staff" ? "staff" : (String(m.senderType) === "developer" ? "developer" : "client"),
       senderId: m.senderId ?? null,
       senderName: String(m.senderType) === "staff"
@@ -5001,6 +5104,88 @@ router.get("/cases/:caseId/messages", requireAuthHandler, requireFirmUserHandler
       createdAt: toIsoStringSafe(m.createdAt),
     })),
   });
+}));
+
+router.get("/cases/:caseId/messages/unread-count", requireAuthHandler, requireFirmUserHandler, requirePermission("cases", "read") as RequestHandler, authed(async (req, res) => {
+  const r = req.rlsDb;
+  if (!r) {
+    logger.error({ path: req.path, firmId: req.firmId, userId: req.userId }, "[cases] missing tenant database context");
+    res.status(500).json({ error: "Internal Server Error" });
+    return;
+  }
+  const params = GetCaseMessagesParams.safeParse(req.params);
+  if (!params.success) {
+    res.status(400).json({ error: params.error.message });
+    return;
+  }
+  const ok = await enforceCaseAccess(r, req, res, params.data.caseId);
+  if (!ok) return;
+
+  const channels: Array<"client" | "developer"> = ["client", "developer"];
+  const byChannel: Record<"client" | "developer", number> = { client: 0, developer: 0 };
+  for (const ch of channels) {
+    const [readStatus] = await r
+      .select({ lastReadAt: caseMessageReadStatusTable.lastReadAt })
+      .from(caseMessageReadStatusTable)
+      .where(and(
+        eq(caseMessageReadStatusTable.firmId, req.firmId!),
+        eq(caseMessageReadStatusTable.caseId, params.data.caseId),
+        eq(caseMessageReadStatusTable.userId, req.userId!),
+        eq(caseMessageReadStatusTable.channel, ch),
+      ));
+
+    const lastReadAt = readStatus?.lastReadAt instanceof Date ? readStatus.lastReadAt : new Date(0);
+    const [row] = await r
+      .select({ c: sql<number>`COUNT(*)::int` })
+      .from(caseMessagesTable)
+      .where(and(
+        eq(caseMessagesTable.firmId, req.firmId!),
+        eq(caseMessagesTable.caseId, params.data.caseId),
+        eq(caseMessagesTable.channel, ch),
+        inArray(caseMessagesTable.senderType, ["client", "developer"]),
+        sql`${caseMessagesTable.createdAt} > ${lastReadAt}`,
+      ));
+    byChannel[ch] = Number((row as any)?.c ?? 0);
+  }
+
+  res.json({ totalUnreadCount: byChannel.client + byChannel.developer, unreadCountByChannel: byChannel });
+}));
+
+router.post("/cases/:caseId/messages/read", requireAuthHandler, requireFirmUserHandler, requirePermission("cases", "read") as RequestHandler, authed(async (req, res) => {
+  const r = req.rlsDb;
+  if (!r) {
+    logger.error({ path: req.path, firmId: req.firmId, userId: req.userId }, "[cases] missing tenant database context");
+    res.status(500).json({ error: "Internal Server Error" });
+    return;
+  }
+  const params = GetCaseMessagesParams.safeParse(req.params);
+  if (!params.success) {
+    res.status(400).json({ error: params.error.message });
+    return;
+  }
+  const ok = await enforceCaseAccess(r, req, res, params.data.caseId);
+  if (!ok) return;
+
+  const body = (req.body && typeof req.body === "object") ? (req.body as Record<string, unknown>) : {};
+  const channelRaw = one((body as any).channel);
+  const parsedChannel = CaseMessageChannel.safeParse(channelRaw);
+  const channelsToMark: Array<"client" | "developer"> = parsedChannel.success ? [parsedChannel.data] : ["client", "developer"];
+  const now = new Date();
+
+  await Promise.all(channelsToMark.map((ch) =>
+    r.insert(caseMessageReadStatusTable).values({
+      firmId: req.firmId!,
+      caseId: params.data.caseId,
+      userId: req.userId!,
+      channel: ch,
+      lastReadAt: now,
+    }).onConflictDoUpdate({
+      target: [caseMessageReadStatusTable.firmId, caseMessageReadStatusTable.caseId, caseMessageReadStatusTable.userId, caseMessageReadStatusTable.channel],
+      set: { lastReadAt: now },
+    })
+  ));
+
+  res.json({ ok: true });
 }));
 
 router.post("/cases/:caseId/messages", requireAuthHandler, requireFirmUserHandler, requirePermission("cases", "update") as RequestHandler, authed(async (req, res) => {
@@ -5023,11 +5208,14 @@ router.post("/cases/:caseId/messages", requireAuthHandler, requireFirmUserHandle
   const ok = await enforceCaseAccess(r, req, res, params.data.caseId);
   if (!ok) return;
 
+  const channel = parsed.data.channel ?? "client";
+
   const [created] = await r
     .insert(caseMessagesTable)
     .values({
       firmId: req.firmId!,
       caseId: params.data.caseId,
+      channel,
       senderType: "staff",
       senderId: req.userId!,
       messageText: parsed.data.messageText,
@@ -5061,6 +5249,7 @@ router.post("/cases/:caseId/messages", requireAuthHandler, requireFirmUserHandle
 
   res.status(201).json({
     id: String(created?.id ?? ""),
+    channel,
     senderType: "staff",
     senderId: created?.senderId ?? null,
     senderName: sender?.name ?? "Staff",
