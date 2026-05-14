@@ -971,13 +971,13 @@ export default function CaseDetail() {
     }
   }
 
-  const FieldCard = (props: {
+  function FieldCard(props: {
     label: string;
     value: string;
     onChange: (v: string) => void;
     type?: "date" | "text" | "number";
     printerKey?: string;
-  }) => {
+  }) {
     const type = props.type ?? "date";
     const isDate = type === "date";
     const dateVal = props.value || "";
@@ -1029,14 +1029,14 @@ export default function CaseDetail() {
         </div>
       </div>
     );
-  };
+  }
 
   const canDocsRead = hasPermission(user, "documents", "read");
   const canDocsUpdate = hasPermission(user, "documents", "update");
   const canDocsWrite = hasPermission(user, "documents", "create") || canDocsUpdate;
   const canDocsDelete = hasPermission(user, "documents", "delete");
 
-  const WorkflowFileCard = (props: { label: string; docKey: WorkflowAttachmentDocKey; dateKey: WorkflowAttachmentDateKey; printerKey?: string }) => {
+  function WorkflowFileCard(props: { label: string; docKey: WorkflowAttachmentDocKey; dateKey: WorkflowAttachmentDateKey; printerKey?: string }) {
     const value = keyDatesDraft[props.dateKey] ?? "";
     const doc = workflowDocsByKey.get(props.docKey);
     const uploading = workflowUploadingKey === props.docKey || uploadWorkflowDocMutation.isPending;
@@ -1156,7 +1156,7 @@ export default function CaseDetail() {
         </div>
       </div>
     );
-  };
+  }
 
   const upsertStampingItem = (next: LoanStampingItem) => {
     setStampingDirty(true);
