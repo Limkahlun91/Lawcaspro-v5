@@ -354,7 +354,6 @@ export function resolveVariablesForTemplate(params: {
     if (arr) return arr.map((v: any) => ({ name: v?.name, nric: v?.nric ?? v?.ic ?? v?.ic_no }));
     const vn = (params.caseContext as any)?.vendor_name;
     const vi = (params.caseContext as any)?.vendor_ic;
-    const vi = (params.caseContext as any)?.vendor_ic;
     if (!vn) return [];
     return [{ name: vn, nric: vi }];
   })());

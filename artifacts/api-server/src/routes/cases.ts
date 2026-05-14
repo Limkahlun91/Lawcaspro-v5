@@ -203,6 +203,7 @@ async function buildSmartNamingContext(r: DbConn, firmId: number, caseId: number
   projectName: string;
   developerName: string;
   clientName: string;
+  borrowerNames: string;
   loanBank: string;
 }> {
   const fallback = {
@@ -213,6 +214,7 @@ async function buildSmartNamingContext(r: DbConn, firmId: number, caseId: number
     projectName: "",
     developerName: "",
     clientName: "",
+    borrowerNames: "",
     loanBank: "",
   };
 
