@@ -205,6 +205,17 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
   const [batchGeneratedPdfDocIds, setBatchGeneratedPdfDocIds] = useState<number[]>([]);
   const [batchMergePrinting, setBatchMergePrinting] = useState(false);
 
+  const [variableChecklistOpen, setVariableChecklistOpen] = useState(false);
+  const [variableChecklistLoading, setVariableChecklistLoading] = useState(false);
+  const [variableChecklistItem, setVariableChecklistItem] = useState<ChecklistItem | null>(null);
+  const [variableChecklistResult, setVariableChecklistResult] = useState<DocumentPreviewResponse | null>(null);
+  const [variableChecklistOverrides, setVariableChecklistOverrides] = useState<Record<string, string>>({});
+  const [variableChecklistQuery, setVariableChecklistQuery] = useState("");
+  const [variableChecklistShowOnlyMissing, setVariableChecklistShowOnlyMissing] = useState(true);
+  const [variableChecklistGenerating, setVariableChecklistGenerating] = useState(false);
+  const [variableChecklistLongRunning, setVariableChecklistLongRunning] = useState(false);
+  const [variableChecklistProgress, setVariableChecklistProgress] = useState(0);
+
   const [selectedDocIds, setSelectedDocIds] = useState<Set<number>>(new Set());
   const [isBatchExporting, setIsBatchExporting] = useState(false);
   const [downloadingDocId, setDownloadingDocId] = useState<number | null>(null);
@@ -445,17 +456,6 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
       .trim();
     return pretty.length ? pretty.replace(/\b\w/g, (m) => m.toUpperCase()) : key;
   }
-
-  const [variableChecklistOpen, setVariableChecklistOpen] = useState(false);
-  const [variableChecklistLoading, setVariableChecklistLoading] = useState(false);
-  const [variableChecklistItem, setVariableChecklistItem] = useState<ChecklistItem | null>(null);
-  const [variableChecklistResult, setVariableChecklistResult] = useState<DocumentPreviewResponse | null>(null);
-  const [variableChecklistOverrides, setVariableChecklistOverrides] = useState<Record<string, string>>({});
-  const [variableChecklistQuery, setVariableChecklistQuery] = useState("");
-  const [variableChecklistShowOnlyMissing, setVariableChecklistShowOnlyMissing] = useState(true);
-  const [variableChecklistGenerating, setVariableChecklistGenerating] = useState(false);
-  const [variableChecklistLongRunning, setVariableChecklistLongRunning] = useState(false);
-  const [variableChecklistProgress, setVariableChecklistProgress] = useState(0);
 
   const closeVariableChecklist = () => {
     setVariableChecklistOpen(false);
