@@ -84,6 +84,28 @@ const truthy = (v: string | string[] | undefined): boolean => {
   return s === "1" || s.toLowerCase() === "true" || s.toLowerCase() === "yes";
 };
 
+function toPositiveInt(v: unknown): number | null {
+  if (typeof v === "number" && Number.isFinite(v)) {
+    const n = Math.trunc(v);
+    return n > 0 ? n : null;
+  }
+  if (typeof v === "string") {
+    const s = v.trim();
+    if (!s) return null;
+    const n = Number(s);
+    if (!Number.isFinite(n)) return null;
+    const i = Math.trunc(n);
+    return i > 0 ? i : null;
+  }
+  return null;
+}
+
+function normalizeLetterheadId(v: unknown): number | null {
+  if (v === null || v === undefined) return null;
+  if (typeof v === "string" && !v.trim()) return null;
+  return toPositiveInt(v);
+}
+
 const getPgCode = (err: unknown): string | null => {
   const code = err && typeof err === "object" ? (err as { code?: unknown }).code : undefined;
   return typeof code === "string" && code ? code : null;
@@ -6755,12 +6777,12 @@ router.post("/cases/:caseId/documents/preview-variables", requireAuth, requireFi
   const r = getRlsDb(req, res);
   if (!r) return;
   const caseIdStr = one((req.params as any).caseId);
-  const caseId = caseIdStr ? parseInt(caseIdStr, 10) : NaN;
-  if (Number.isNaN(caseId)) { res.status(400).json({ error: "Invalid case ID" }); return; }
+  const caseId = toPositiveInt(caseIdStr);
+  if (!caseId) { res.status(400).json({ error: "Invalid case ID" }); return; }
 
   const body = req.body as Record<string, unknown>;
-  const templateId = typeof body.templateId === "number" ? body.templateId : null;
-  const platformDocumentId = typeof body.platformDocumentId === "number" ? body.platformDocumentId : null;
+  const templateId = toPositiveInt(body.templateId);
+  const platformDocumentId = toPositiveInt(body.platformDocumentId);
   const overrides = (body.overrides && typeof body.overrides === "object" && !Array.isArray(body.overrides)) ? (body.overrides as Record<string, unknown>) : null;
   if (!templateId && !platformDocumentId) { res.status(422).json({ error: "templateId or platformDocumentId is required", code: "TEMPLATE_ID_REQUIRED" }); return; }
   if (templateId && platformDocumentId) { res.status(422).json({ error: "Provide only one of templateId or platformDocumentId", code: "TEMPLATE_ID_CONFLICT" }); return; }
@@ -6857,15 +6879,15 @@ router.post("/cases/:caseId/documents/preview", requireAuth, requireFirmUser, re
   const r = getRlsDb(req, res);
   if (!r) return;
   const caseIdStr = one((req.params as any).caseId);
-  const caseId = caseIdStr ? parseInt(caseIdStr, 10) : NaN;
-  if (Number.isNaN(caseId)) {
+  const caseId = toPositiveInt(caseIdStr);
+  if (!caseId) {
     res.status(400).json({ error: "Invalid case ID" });
     return;
   }
 
   const body = req.body as Record<string, unknown>;
-  const templateId = typeof body.templateId === "number" ? body.templateId : null;
-  const platformDocumentId = typeof body.platformDocumentId === "number" ? body.platformDocumentId : null;
+  const templateId = toPositiveInt(body.templateId);
+  const platformDocumentId = toPositiveInt(body.platformDocumentId);
   const overrides = asObjectRecord(body.overrides);
   const clauseRefsRaw = Array.isArray(body.clauses) ? body.clauses : [];
   const clauseRefs: SelectedClauseRef[] = clauseRefsRaw
@@ -6873,7 +6895,7 @@ router.post("/cases/:caseId/documents/preview", requireAuth, requireFirmUser, re
     .filter((x): x is Record<string, unknown> => Boolean(x))
     .map((x) => ({
       scope: x.scope === "platform" ? ("platform" as const) : ("firm" as const),
-      id: typeof x.id === "number" ? x.id : NaN,
+      id: toPositiveInt(x.id) ?? NaN,
       includeTitle: typeof x.includeTitle === "boolean" ? x.includeTitle : false,
     }))
     .filter((x) => Number.isFinite(x.id));
@@ -7505,17 +7527,32 @@ router.post("/cases/:caseId/documents/generate", requireAuth, requireFirmUser, r
   const r = getRlsDb(req, res);
   if (!r) return;
   const caseIdStr = one((req.params as any).caseId);
-  const caseId = caseIdStr ? parseInt(caseIdStr, 10) : NaN;
-  if (Number.isNaN(caseId)) {
+  const caseId = toPositiveInt(caseIdStr);
+  if (!caseId) {
     res.status(400).json({ error: "Invalid case ID" });
     return;
   }
-  const { templateId, documentName, letterheadId, bypassApplicability, clauses, overrides } = req.body as { templateId: number; documentName?: string; letterheadId?: number | null; bypassApplicability?: boolean; clauses?: SelectedClauseRef[]; overrides?: Record<string, unknown> | null };
-  const tid = typeof templateId === "number" ? templateId : NaN;
-  if (Number.isNaN(tid)) {
+  const body = req.body as Record<string, unknown>;
+  const tid = toPositiveInt(body.templateId);
+  if (!tid) {
     res.status(422).json({ error: "templateId is required", code: "TEMPLATE_ID_REQUIRED" });
     return;
   }
+  const documentName = typeof body.documentName === "string" ? body.documentName : undefined;
+  const letterheadId = normalizeLetterheadId(body.letterheadId);
+  const bypassApplicability = typeof body.bypassApplicability === "boolean" ? body.bypassApplicability : undefined;
+  const clauses = Array.isArray(body.clauses)
+    ? (body.clauses as unknown[])
+      .map((x) => (x && typeof x === "object" ? x as Record<string, unknown> : null))
+      .filter((x): x is Record<string, unknown> => Boolean(x))
+      .map((x) => ({
+        scope: x.scope === "platform" ? ("platform" as const) : ("firm" as const),
+        id: toPositiveInt(x.id) ?? NaN,
+        includeTitle: typeof x.includeTitle === "boolean" ? x.includeTitle : false,
+      }))
+      .filter((x) => Number.isFinite(x.id))
+    : undefined;
+  const overrides = asObjectRecord(body.overrides);
   const safeOverrides = (overrides && typeof overrides === "object" && !Array.isArray(overrides)) ? overrides : null;
   const fmt = String(one((req.query as any).format) ?? "").trim().toLowerCase();
   const wantPdf = fmt === "pdf";
@@ -7600,17 +7637,32 @@ router.post("/cases/:caseId/documents/generate-from-master", requireAuth, requir
   const r = getRlsDb(req, res);
   if (!r) return;
   const caseIdStr = one((req.params as any).caseId);
-  const caseId = caseIdStr ? parseInt(caseIdStr, 10) : NaN;
-  if (Number.isNaN(caseId)) {
+  const caseId = toPositiveInt(caseIdStr);
+  if (!caseId) {
     res.status(400).json({ error: "Invalid case ID" });
     return;
   }
-  const { masterDocId, documentName, letterheadId, bypassApplicability, clauses, overrides } = req.body as { masterDocId: number; documentName?: string; letterheadId?: number | null; bypassApplicability?: boolean; clauses?: SelectedClauseRef[]; overrides?: Record<string, unknown> | null };
-  const mid = typeof masterDocId === "number" ? masterDocId : NaN;
-  if (Number.isNaN(mid)) {
+  const body = req.body as Record<string, unknown>;
+  const mid = toPositiveInt(body.masterDocId);
+  if (!mid) {
     res.status(422).json({ error: "masterDocId is required", code: "MASTER_DOC_ID_REQUIRED" });
     return;
   }
+  const documentName = typeof body.documentName === "string" ? body.documentName : undefined;
+  const letterheadId = normalizeLetterheadId(body.letterheadId);
+  const bypassApplicability = typeof body.bypassApplicability === "boolean" ? body.bypassApplicability : undefined;
+  const clauses = Array.isArray(body.clauses)
+    ? (body.clauses as unknown[])
+      .map((x) => (x && typeof x === "object" ? x as Record<string, unknown> : null))
+      .filter((x): x is Record<string, unknown> => Boolean(x))
+      .map((x) => ({
+        scope: x.scope === "platform" ? ("platform" as const) : ("firm" as const),
+        id: toPositiveInt(x.id) ?? NaN,
+        includeTitle: typeof x.includeTitle === "boolean" ? x.includeTitle : false,
+      }))
+      .filter((x) => Number.isFinite(x.id))
+    : undefined;
+  const overrides = asObjectRecord(body.overrides);
   const safeOverrides = (overrides && typeof overrides === "object" && !Array.isArray(overrides)) ? overrides : null;
   const fmt = String(one((req.query as any).format) ?? "").trim().toLowerCase();
   const wantPdf = fmt === "pdf";
