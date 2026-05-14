@@ -8,6 +8,7 @@ export const DEFAULT_ALLOWED_MIME_TYPES = [
 
 export const DOCX_MIME_TYPES = [
   "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  "application/msword",
 ] as const;
 
 export function validateUploadFile(
@@ -27,7 +28,7 @@ export function validateUploadFile(
       allowSet.size === DEFAULT_ALLOWED_MIME_TYPES.length &&
       DEFAULT_ALLOWED_MIME_TYPES.every((t) => allowSet.has(t))
     ) {
-      return { ok: false, message: "Only PDF, JPG, or PNG files are allowed" };
+      return { ok: false, message: "Only DOCX, PDF, JPG, or PNG files are allowed" };
     }
     if (allowSet.size === 1 && allowSet.has(DOCX_MIME_TYPES[0])) {
       return { ok: false, message: "Only DOCX files are allowed" };

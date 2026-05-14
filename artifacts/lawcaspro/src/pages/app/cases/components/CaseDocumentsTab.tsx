@@ -17,7 +17,7 @@ import { Switch as ToggleSwitch } from "@/components/ui/switch";
 import { cn } from "@/lib/utils";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Progress } from "@/components/ui/progress";
-import { isFirmDocumentTypeLetterLike, isMasterDocumentLetterLike } from "@/lib/documents/letterLike";
+import { isFirmDocumentTypeLetterLike } from "@/lib/documents/letterLike";
 import { DOCUMENT_TYPE_LABELS, normalizeDocumentType } from "@workspace/documents-registry";
 import { QueryFallback } from "@/components/query-fallback";
 import { apiFetchBlob, apiFetchJson, apiRequest } from "@/lib/api-client";
@@ -168,7 +168,7 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
   const [viewTab, setViewTab] = useState<"list" | "checklist" | "history">("list");
   const [generateDialogOpen, setGenerateDialogOpen] = useState(false);
   const [showAllTemplates, setShowAllTemplates] = useState(false);
-  const [templateSourceFilter, setTemplateSourceFilter] = useState<"all" | "firm" | "master">("all");
+  const [templateSourceFilter, setTemplateSourceFilter] = useState<"all" | "firm">("all");
   const [templateApplicabilityFilter, setTemplateApplicabilityFilter] = useState<"all" | "applicable" | "warning" | "not_applicable">("all");
   const [selectedLetterheadId, setSelectedLetterheadId] = useState<string>("");
   const [documentName, setDocumentName] = useState("");
@@ -473,7 +473,7 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
 
   async function openVariableChecklist(item: ChecklistItem) {
     if (!canGenerate) return;
-    if (item.kind !== "template" || typeof item.templateId !== "number" || !Number.isFinite(item.templateId) || (item.source !== "firm" && item.source !== "master")) return;
+    if (item.kind !== "template" || typeof item.templateId !== "number" || !Number.isFinite(item.templateId) || item.source !== "firm") return;
     setVariableChecklistOpen(true);
     setVariableChecklistLoading(true);
     setVariableChecklistItem(item);
@@ -482,13 +482,9 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
     setVariableChecklistLongRunning(false);
     setVariableChecklistProgress(0);
     try {
-      const payload =
-        item.source === "firm"
-          ? { templateId: Number(item.templateId) }
-          : { platformDocumentId: Number(item.templateId) };
       const result = await apiFetchJson<DocumentPreviewResponse>(`/cases/${caseId}/documents/preview-variables`, {
         method: "POST",
-        body: JSON.stringify(payload),
+        body: JSON.stringify({ templateId: Number(item.templateId) }),
       });
       setVariableChecklistResult(result);
     } catch (err) {
@@ -500,9 +496,7 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
   }
 
   async function handleGenerate(item: ChecklistItem, overrides?: Record<string, string>) {
-    const isLetterLike = item.source === "firm"
-      ? isFirmDocumentTypeLetterLike(item.documentType)
-      : isMasterDocumentLetterLike({ name: item.name, category: item.documentType, fileName: item.fileName ?? undefined });
+    const isLetterLike = isFirmDocumentTypeLetterLike(item.documentType);
 
     if (isLetterLike && activeLetterheads.length === 0) {
       toast({ title: "Missing firm letterhead", description: "Please configure a Firm Letter Head before generating this document.", variant: "destructive" });
@@ -531,33 +525,18 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
         }, 400);
       } catch {
       }
-      if (item.source === "firm") {
-        created = await apiFetchJson(`/cases/${caseId}/documents/generate`, {
-          method: "POST",
-          timeoutMs: 120000,
-          body: JSON.stringify({
-            templateId: Number(item.templateId),
-            documentName: documentNameToSend,
-            letterheadId: letterheadIdToSend,
-            bypassApplicability,
-            clauses: selectedClauses,
-            overrides: overrides && Object.keys(overrides).length ? overrides : null,
-          }),
-        });
-      } else {
-        created = await apiFetchJson(`/cases/${caseId}/documents/generate-from-master`, {
-          method: "POST",
-          timeoutMs: 120000,
-          body: JSON.stringify({
-            masterDocId: Number(item.templateId),
-            documentName: documentNameToSend,
-            letterheadId: letterheadIdToSend,
-            bypassApplicability,
-            clauses: selectedClauses,
-            overrides: overrides && Object.keys(overrides).length ? overrides : null,
-          }),
-        });
-      }
+      created = await apiFetchJson(`/cases/${caseId}/documents/generate`, {
+        method: "POST",
+        timeoutMs: 120000,
+        body: JSON.stringify({
+          templateId: Number(item.templateId),
+          documentName: documentNameToSend,
+          letterheadId: letterheadIdToSend,
+          bypassApplicability,
+          clauses: selectedClauses,
+          overrides: overrides && Object.keys(overrides).length ? overrides : null,
+        }),
+      });
       setVariableChecklistProgress(100);
       await qc.invalidateQueries({ queryKey: ["case-documents", caseId] });
       await qc.invalidateQueries({ queryKey: ["case-documents-checklist", caseId] });
@@ -648,7 +627,7 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
 
   async function handlePreview(item: ChecklistItem) {
     if (!canGenerate) return;
-    if (item.kind !== "template" || typeof item.templateId !== "number" || !Number.isFinite(item.templateId) || (item.source !== "firm" && item.source !== "master")) return;
+    if (item.kind !== "template" || typeof item.templateId !== "number" || !Number.isFinite(item.templateId) || item.source !== "firm") return;
     setPreviewItem(item);
     setPreviewOpen(true);
     setPreviewLoading(true);
@@ -659,9 +638,7 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
       const result = await apiFetchJson<DocumentPreviewResponse>(`/cases/${caseId}/documents/preview`, {
         method: "POST",
         body: JSON.stringify(
-          item.source === "firm"
-            ? { templateId: Number(item.templateId), bypassApplicability, clauses: selectedClauses }
-            : { platformDocumentId: Number(item.templateId), bypassApplicability, clauses: selectedClauses }
+          { templateId: Number(item.templateId), bypassApplicability, clauses: selectedClauses }
         ),
       });
       setPreviewResult(result);
@@ -669,9 +646,7 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
         const naming = await apiFetchJson<{ fileName: string; ruleUsed: string; warnings?: string[]; fallbackUsed?: boolean }>(`/cases/${caseId}/documents/filename-preview`, {
           method: "POST",
           body: JSON.stringify(
-            item.source === "firm"
-              ? { templateId: Number(item.templateId), documentName: documentNameToSend || item.name, originalFileName: item.fileName ?? "docx", fallbackExt: "docx" }
-              : { platformDocumentId: Number(item.templateId), documentName: documentNameToSend || item.name, originalFileName: item.fileName ?? "docx", fallbackExt: "docx" }
+            { templateId: Number(item.templateId), documentName: documentNameToSend || item.name, originalFileName: item.fileName ?? "docx", fallbackExt: "docx" }
           ),
         });
         setPreviewNaming(naming);
@@ -686,15 +661,13 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
   }
 
   async function previewFileNameForItem(item: ChecklistItem): Promise<void> {
-    if (item.kind !== "template" || typeof item.templateId !== "number" || !Number.isFinite(item.templateId) || (item.source !== "firm" && item.source !== "master")) return;
+    if (item.kind !== "template" || typeof item.templateId !== "number" || !Number.isFinite(item.templateId) || item.source !== "firm") return;
     const key = `${item.source}-${item.templateId}`;
     try {
       const naming = await apiFetchJson<{ fileName: string; ruleUsed: string; warnings?: string[] }>(`/cases/${caseId}/documents/filename-preview`, {
         method: "POST",
         body: JSON.stringify(
-          item.source === "firm"
-            ? { templateId: Number(item.templateId), documentName: documentNameToSend || item.name, originalFileName: item.fileName ?? "docx", fallbackExt: "docx" }
-            : { platformDocumentId: Number(item.templateId), documentName: documentNameToSend || item.name, originalFileName: item.fileName ?? "docx", fallbackExt: "docx" }
+          { templateId: Number(item.templateId), documentName: documentNameToSend || item.name, originalFileName: item.fileName ?? "docx", fallbackExt: "docx" }
         ),
       });
       setRowNamingPreview((prev) => ({ ...prev, [key]: naming }));
@@ -705,7 +678,8 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
 
   async function confirmManualChecklist(itemId: string): Promise<void> {
     if (!previewItem || previewItem.kind !== "template" || typeof previewItem.templateId !== "number") return;
-    const prefix = previewItem.source === "firm" ? `tpl:firm:${previewItem.templateId}` : `tpl:master:${previewItem.templateId}`;
+    if (previewItem.source !== "firm") return;
+    const prefix = `tpl:firm:${previewItem.templateId}`;
     const checklistKey = `${prefix}:confirm:${itemId}`;
     try {
       await apiFetchJson(`/cases/${caseId}/documents/checklist/items/${encodeURIComponent(checklistKey)}/completed`, { method: "POST", body: JSON.stringify({ notes: "confirmed from preview" }) });
@@ -717,7 +691,7 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
   }
 
   function toggleChecklistSelection(it: ChecklistItem) {
-    if (it.kind !== "template" || (it.source !== "firm" && it.source !== "master") || typeof it.templateId !== "number") return;
+    if (it.kind !== "template" || it.source !== "firm" || typeof it.templateId !== "number") return;
     const key = it.checklistKey;
     setSelectedChecklistKeys((prev) => {
       const next = new Set(prev);
@@ -765,13 +739,9 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
     setBatchLoopProgress({ current: 0, total: 0 });
     try {
       const previews = await Promise.all(items.map((it) => {
-        const payload =
-          it.source === "firm"
-            ? { templateId: Number(it.templateId) }
-            : { platformDocumentId: Number(it.templateId) };
         return apiFetchJson<DocumentPreviewResponse>(`/cases/${caseId}/documents/preview-variables`, {
           method: "POST",
-          body: JSON.stringify(payload),
+          body: JSON.stringify({ templateId: Number(it.templateId) }),
         });
       }));
 
@@ -851,9 +821,7 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
         const it = items[i]!;
         setBatchLoopProgress({ current: i + 1, total: items.length });
 
-        const isLetterLike = it.source === "firm"
-          ? isFirmDocumentTypeLetterLike(it.documentType)
-          : isMasterDocumentLetterLike({ name: it.name, category: it.documentType, fileName: it.fileName ?? undefined });
+        const isLetterLike = isFirmDocumentTypeLetterLike(it.documentType);
 
         if (isLetterLike && activeLetterheads.length === 0) {
           throw new Error("Missing firm letterhead");
@@ -864,13 +832,8 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
           ? (Number.isFinite(parsedLetterheadId) ? parsedLetterheadId : null)
           : undefined;
 
-        const endpoint = it.source === "firm"
-          ? `/cases/${caseId}/documents/generate`
-          : `/cases/${caseId}/documents/generate-from-master`;
-
-        const payload = it.source === "firm"
-          ? { templateId: Number(it.templateId), letterheadId: letterheadIdToSend, bypassApplicability, clauses: selectedClauses, overrides }
-          : { masterDocId: Number(it.templateId), letterheadId: letterheadIdToSend, bypassApplicability, clauses: selectedClauses, overrides };
+        const endpoint = `/cases/${caseId}/documents/generate`;
+        const payload = { templateId: Number(it.templateId), letterheadId: letterheadIdToSend, bypassApplicability, clauses: selectedClauses, overrides };
 
         const res = await apiRequest(endpoint, { method: "POST", body: JSON.stringify(payload), timeoutMs: 60000 });
         const blob = await res.blob();
@@ -940,7 +903,7 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
     if (!canGenerate || keys.size === 0) return;
     const allItems = (checklistQuery.data?.sections ?? []).flatMap((s) => s.items ?? []);
     const selected = allItems
-      .filter((it) => it.kind === "template" && (it.source === "firm" || it.source === "master") && typeof it.templateId === "number")
+      .filter((it) => it.kind === "template" && it.source === "firm" && typeof it.templateId === "number")
       .filter((it) => keys.has(it.checklistKey));
     if (selected.length === 0) return;
     await openBatchVariableChecklist(selected);
@@ -1087,9 +1050,7 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
           body: JSON.stringify(
             checklistUploadTarget.kind === "template" && checklistUploadTarget.source === "firm" && typeof checklistUploadTarget.templateId === "number"
               ? { templateId: checklistUploadTarget.templateId, documentName: checklistUploadTarget.name, originalFileName: file.name, fallbackExt: ext }
-              : checklistUploadTarget.kind === "template" && checklistUploadTarget.source === "master" && typeof checklistUploadTarget.templateId === "number"
-                ? { platformDocumentId: checklistUploadTarget.templateId, documentName: checklistUploadTarget.name, originalFileName: file.name, fallbackExt: ext }
-                : { documentName: checklistUploadTarget.name, originalFileName: file.name, fallbackExt: ext }
+              : { documentName: checklistUploadTarget.name, originalFileName: file.name, fallbackExt: ext }
           ),
         });
         await apiFetchJson(`/cases/${caseId}/documents/checklist/items/${encodeURIComponent(checklistUploadTarget.checklistKey)}/upload`, {
@@ -1508,7 +1469,7 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
                                 ? (it.readiness?.missing ?? []).map((m) => m.message).filter(Boolean).slice(0, 3).join(", ")
                                 : "";
 
-                            const canSelectForBatch = canGenerate && it.kind === "template" && it.source !== "workflow" && it.source !== "stamping" && it.source !== "manual";
+                            const canSelectForBatch = canGenerate && it.kind === "template" && it.source === "firm";
                             const selected = selectedChecklistKeys.has(it.checklistKey);
 
                             const statusTone =
@@ -1525,7 +1486,6 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
 
                             const sourceLabel =
                               it.source === "firm" ? "Firm"
-                              : it.source === "master" ? "Master"
                               : it.source === "workflow" ? "Workflow"
                               : it.source === "stamping" ? "Loan stamping"
                               : "Manual";
@@ -1548,7 +1508,7 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
                                 <div className="min-w-0">
                                   <div className="font-medium text-slate-900 truncate" title={it.name}>{it.name}</div>
                                   <div className="mt-1 flex items-center gap-2 flex-wrap">
-                                    <span className={cn("text-[10px] px-1.5 py-0.5 rounded font-medium", it.source === "firm" ? "bg-slate-100 text-slate-700" : it.source === "master" ? "bg-purple-50 text-purple-700" : "bg-slate-100 text-slate-700")}>
+                                    <span className={cn("text-[10px] px-1.5 py-0.5 rounded font-medium", it.source === "firm" ? "bg-slate-100 text-slate-700" : "bg-slate-100 text-slate-700")}>
                                       {sourceLabel}
                                     </span>
                                     <span className={cn("text-[10px] px-1.5 py-0.5 rounded font-medium", it.isRequired ? "bg-rose-50 text-rose-700" : "bg-slate-100 text-slate-600")}>
@@ -1583,7 +1543,7 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
                                 <div className="shrink-0 flex flex-col items-end gap-2">
                                   <div className="flex items-center gap-2 flex-wrap justify-end">
                                     {it.kind === "template" ? (
-                                      <Button size="sm" variant="outline" onClick={() => handlePreview(it)} disabled={!canGenerate || previewLoading}>
+                                      <Button size="sm" variant="outline" onClick={() => handlePreview(it)} disabled={!canGenerate || previewLoading || it.source !== "firm"}>
                                         Preview
                                       </Button>
                                     ) : null}
@@ -2449,7 +2409,7 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
               )}
               <Select
                 value={templateSourceFilter}
-                onValueChange={(v) => setTemplateSourceFilter(v === "firm" ? "firm" : v === "master" ? "master" : "all")}
+                onValueChange={(v) => setTemplateSourceFilter(v === "firm" ? "firm" : "all")}
               >
                 <SelectTrigger className="w-40">
                   <SelectValue />
@@ -2457,7 +2417,6 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
                 <SelectContent>
                   <SelectItem value="all">All sources</SelectItem>
                   <SelectItem value="firm">Firm</SelectItem>
-                  <SelectItem value="master">Master</SelectItem>
                 </SelectContent>
               </Select>
               <Select value={templateApplicabilityFilter} onValueChange={(v) => setTemplateApplicabilityFilter(v as any)}>
@@ -2552,7 +2511,7 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
                                   <div className="min-w-0">
                                     <div className="text-sm font-medium text-slate-900 truncate" title={it.name}>{it.name}</div>
                                     <div className="mt-1 text-xs text-slate-600 truncate">
-                                      {it.source} · {it.documentGroup}
+                                      {(it.source === "firm" ? "Firm" : it.source)} · {it.documentGroup}
                                       {it.checklistResult ? ` · Checklist ${it.checklistResult.checklistStatus}` : ""}
                                     </div>
                                   </div>
@@ -2564,13 +2523,13 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
                                     {reason ? <div className="mt-1 text-xs text-slate-600 truncate" title={reason}>{reason}</div> : null}
                                   </div>
                                   <div className="flex items-center gap-2 justify-start lg:justify-end flex-wrap">
-                                    <Button size="sm" variant="outline" onClick={() => previewFileNameForItem(it)} disabled={!applicable || !ready}>
+                                    <Button size="sm" variant="outline" onClick={() => previewFileNameForItem(it)} disabled={!applicable || !ready || it.source !== "firm"}>
                                       Filename
                                     </Button>
-                                    <Button size="sm" variant="outline" onClick={() => { closeGenerateDialog(); handlePreview(it); }} disabled={!applicable || !ready || previewLoading}>
+                                    <Button size="sm" variant="outline" onClick={() => { closeGenerateDialog(); handlePreview(it); }} disabled={!applicable || !ready || previewLoading || it.source !== "firm"}>
                                       Preview
                                     </Button>
-                                    <Button size="sm" onClick={() => openVariableChecklist(it)} disabled={!applicable || !ready || isGenerating}>
+                                    <Button size="sm" onClick={() => openVariableChecklist(it)} disabled={!applicable || !ready || isGenerating || it.source !== "firm"}>
                                       Generate
                                     </Button>
                                   </div>
@@ -2649,7 +2608,7 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
                 type="file"
                 ref={uploadRef}
                 className="hidden"
-                accept="application/pdf,image/jpeg,image/png"
+                accept=".docx,.doc,.pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/msword,application/pdf,image/jpeg,image/png"
                 onChange={(e) => setSelectedFile(e.target.files?.[0] ?? null)}
               />
             </div>
@@ -2853,7 +2812,7 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
             </div>
             <div className="space-y-1.5">
               <Label>File</Label>
-              <Input type="file" accept="application/pdf,image/jpeg,image/png" onChange={(e) => setChecklistUploadFile(e.target.files?.[0] ?? null)} />
+              <Input type="file" accept=".docx,.doc,.pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/msword,application/pdf,image/jpeg,image/png" onChange={(e) => setChecklistUploadFile(e.target.files?.[0] ?? null)} />
               {checklistUploadFile ? <div className="text-xs text-slate-500">{checklistUploadFile.name}</div> : null}
             </div>
             <div className="flex justify-end gap-2 pt-2">

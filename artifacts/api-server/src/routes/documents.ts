@@ -605,6 +605,26 @@ function extractPdfMappingPlaceholders(mappings: unknown): string[] {
   return Array.from(keys).sort((a, b) => a.localeCompare(b));
 }
 
+async function extractPdfFormFieldNames(fileBytes: Buffer): Promise<string[]> {
+  try {
+    const pdfDoc = await PDFDocument.load(fileBytes);
+    const form = pdfDoc.getForm();
+    const fields = form.getFields();
+    const names = fields
+      .map((f) => {
+        try {
+          return f.getName();
+        } catch {
+          return "";
+        }
+      })
+      .filter(Boolean);
+    return Array.from(new Set(names)).sort((a, b) => a.localeCompare(b));
+  } catch {
+    return [];
+  }
+}
+
 function extractDocxBodyInnerXml(documentXml: string): string {
   const m = documentXml.match(/<w:body[^>]*>([\s\S]*?)<\/w:body>/);
   if (!m) return "";
@@ -1751,16 +1771,17 @@ router.post("/document-templates", requireAuth, requireFirmUser, requirePermissi
     res.status(400).json({ error: "Unsupported file type", code: "UNSUPPORTED_FILE_TYPE" });
     return;
   }
-  const effectiveKind: "template" | "reference" = ext === "docx" ? kindVal : "reference";
-  if (effectiveKind === "template" && ext !== "docx") {
-    res.status(400).json({ error: "Template must be a .docx file", code: "TEMPLATE_MUST_BE_DOCX" });
+  const templateExtOk = ext === "docx" || ext === "pdf";
+  const effectiveKind: "template" | "reference" = templateExtOk ? kindVal : "reference";
+  if (effectiveKind === "template" && !templateExtOk) {
+    res.status(400).json({ error: "Template must be a .docx or .pdf file", code: "TEMPLATE_MUST_BE_DOCX_OR_PDF" });
     return;
   }
-  if (ext === "docx" && !String(objectPath).startsWith(`/objects/templates/firms/${req.firmId!}/`)) {
+  if (effectiveKind === "template" && !String(objectPath).startsWith(`/objects/templates/firms/${req.firmId!}/`)) {
     res.status(400).json({ error: "Invalid objectPath" });
     return;
   }
-  const isTemplateCapable = effectiveKind === "template" && ext === "docx";
+  const isTemplateCapable = effectiveKind === "template" && templateExtOk;
 
   const rows = await queryRows(
     r,
@@ -1963,9 +1984,10 @@ router.patch("/document-templates/:templateId", requireAuth, requireFirmUser, re
     const existingKindRaw = typeof (existing as any).kind === "string" ? String((existing as any).kind) : "template";
     const requestedKindRaw = kindVal ?? existingKindRaw;
     const requestedKind: "template" | "reference" = requestedKindRaw === "reference" ? "reference" : "template";
-    const effectiveKind: "template" | "reference" = (existingExt || "").toLowerCase() === "docx" ? requestedKind : "reference";
-    if (effectiveKind === "template" && String(existingExt || "").toLowerCase() !== "docx") {
-      res.status(400).json({ error: "Template must be a .docx file", code: "TEMPLATE_MUST_BE_DOCX" });
+    const existingTemplateExtOk = ["docx", "pdf"].includes(String(existingExt || "").toLowerCase());
+    const effectiveKind: "template" | "reference" = existingTemplateExtOk ? requestedKind : "reference";
+    if (effectiveKind === "template" && !existingTemplateExtOk) {
+      res.status(400).json({ error: "Template must be a .docx or .pdf file", code: "TEMPLATE_MUST_BE_DOCX_OR_PDF" });
       return;
     }
 
@@ -2264,6 +2286,14 @@ async function getFirmTemplatePlaceholders(r: DbConn, firmId: number, templateId
     try {
       const bytes = await downloadPrivateObjectBytes(obj);
       return detectDocxVariables(bytes);
+    } catch {
+      return [];
+    }
+  }
+  if (obj && fileExtensionFromName(filename) === "pdf") {
+    try {
+      const bytes = await downloadPrivateObjectBytes(obj);
+      return await extractPdfFormFieldNames(bytes);
     } catch {
       return [];
     }
@@ -4880,6 +4910,64 @@ async function convertDocxToPdf(docxBytes: Buffer): Promise<Buffer> {
   }
 }
 
+function valueToPdfText(v: unknown): string | null {
+  if (v === null || v === undefined) return null;
+  if (typeof v === "string") {
+    const s = v.trim();
+    return s ? s : null;
+  }
+  if (typeof v === "number") return Number.isFinite(v) ? String(v) : null;
+  if (typeof v === "boolean") return v ? "true" : "false";
+  if (v instanceof Date) return Number.isFinite(v.getTime()) ? v.toISOString().slice(0, 10) : null;
+  return null;
+}
+
+async function renderPdfFormTemplate(args: { pdfBytes: Buffer; data: Record<string, unknown>; flatten?: boolean }): Promise<Buffer> {
+  if (!Buffer.isBuffer(args.pdfBytes) || args.pdfBytes.length === 0) {
+    throw new DocumentGenerationError(400, "TEMPLATE_FILE_BUFFER_MISSING", "Template file buffer is missing or corrupted in the database.");
+  }
+  try {
+    const pdfDoc = await PDFDocument.load(args.pdfBytes);
+    const form = pdfDoc.getForm();
+    const fields = form.getFields();
+    if (!fields.length) {
+      throw new DocumentGenerationError(422, "PDF_TEMPLATE_NO_FIELDS", "PDF template has no form fields");
+    }
+    for (const f of fields) {
+      let name = "";
+      try {
+        name = f.getName();
+      } catch {
+        continue;
+      }
+      if (!name) continue;
+      if (!Object.prototype.hasOwnProperty.call(args.data, name)) continue;
+      const val = valueToPdfText((args.data as any)[name]);
+      if (val === null) continue;
+      try {
+        if (typeof (f as any).setText === "function") {
+          (f as any).setText(val);
+        } else if (typeof (f as any).check === "function") {
+          if (val === "true" || val === "1" || val.toLowerCase() === "yes") (f as any).check();
+        } else if (typeof (f as any).select === "function") {
+          (f as any).select(val);
+        }
+      } catch {}
+    }
+    if (args.flatten !== false) {
+      try {
+        form.flatten();
+      } catch {}
+    }
+    const out = await pdfDoc.save();
+    return Buffer.from(out);
+  } catch (err) {
+    if (err instanceof DocumentGenerationError) throw err;
+    console.error(err);
+    throw new DocumentGenerationError(422, "PDF_TEMPLATE_RENDER_FAILED", "PDF template render failed", { details: err instanceof Error ? err.message : String(err) });
+  }
+}
+
 async function generateFirmDocument({
   r,
   firmId,
@@ -5026,8 +5114,23 @@ async function generateFirmDocument({
   });
   if (readiness.status !== "ready") throw new DocumentGenerationError(422, "TEMPLATE_NOT_READY", "Template not ready", { status: readiness.status, missing: readiness.missing });
 
+  const templateVersionId = await ensureFirmTemplatePublishedVersionId(r, firmId, templateId, actorId);
+  await queryRows(r, sql`UPDATE document_generation_runs SET template_version_id = ${templateVersionId} WHERE id = ${runId} AND firm_id = ${firmId}`);
+
+  const versionRows = await queryRows(r, sql`SELECT * FROM document_template_versions WHERE id = ${templateVersionId} AND firm_id = ${firmId}`);
+  const version = versionRows[0];
+  const templateObjectPath = String((version as any)?.source_object_path ?? "");
+  if (!templateObjectPath) throw new DocumentGenerationError(404, "TEMPLATE_FILE_MISSING", "Template file missing");
+  const templateFileName =
+    typeof (version as any)?.filename === "string"
+      ? String((version as any).filename)
+      : typeof (template as any)?.file_name === "string"
+        ? String((template as any).file_name)
+        : "";
+  const templateExt = fileExtensionFromName(templateFileName);
   const isLetterLike = isLetterheadApplicableDocumentType(templateDocType);
-  const letterheadBytesPromise = isLetterLike ? (async () => {
+  const shouldUseLetterhead = templateExt === "docx" && isLetterLike;
+  const letterheadBytesPromise = shouldUseLetterhead ? (async () => {
     const letterheadIdNum = typeof letterheadId === "number" ? letterheadId : null;
     let lh: Record<string, unknown> | undefined;
     if (letterheadIdNum !== null) {
@@ -5054,14 +5157,6 @@ async function generateFirmDocument({
     return { usedLetterheadId, footerMode, firstBytes, contBytes, footerBytes };
   })() : Promise.resolve(null);
 
-  const templateVersionId = await ensureFirmTemplatePublishedVersionId(r, firmId, templateId, actorId);
-  await queryRows(r, sql`UPDATE document_generation_runs SET template_version_id = ${templateVersionId} WHERE id = ${runId} AND firm_id = ${firmId}`);
-
-  const versionRows = await queryRows(r, sql`SELECT * FROM document_template_versions WHERE id = ${templateVersionId} AND firm_id = ${firmId}`);
-  const version = versionRows[0];
-  const templateObjectPath = String((version as any)?.source_object_path ?? "");
-  if (!templateObjectPath) throw new DocumentGenerationError(404, "TEMPLATE_FILE_MISSING", "Template file missing");
-
   let usedLetterheadId: number | null = null;
   const [fileContentsRaw, letterheadBytes] = await Promise.all([
     downloadPrivateObjectBytes(templateObjectPath),
@@ -5073,7 +5168,14 @@ async function generateFirmDocument({
     throw new DocumentGenerationError(400, "TEMPLATE_FILE_BUFFER_MISSING", "Template file buffer is missing or corrupted in the database.");
   }
   const placeholders = placeholdersFromVariablesSnapshot((version as any)?.variables_snapshot);
-  const effectivePlaceholders = placeholders.length > 0 ? placeholders : detectDocxVariables(fileContents);
+  const effectivePlaceholders =
+    placeholders.length > 0
+      ? placeholders
+      : templateExt === "docx"
+        ? detectDocxVariables(fileContents)
+        : templateExt === "pdf"
+          ? await extractPdfFormFieldNames(fileContents)
+          : [];
   const storedOverrides = await getCaseVariableOverrides(r, cache, firmId, caseId);
   const mergedOverrides = mergeOverrides(storedOverrides, overrides ?? null);
   const preview = await runDocumentPreview(r, {
@@ -5100,6 +5202,9 @@ async function generateFirmDocument({
   });
   let checklistOverrideUsed = false;
   if (clauses && clauses.length > 0) {
+    if (templateExt !== "docx") {
+      throw new DocumentGenerationError(422, "PDF_TEMPLATE_CLAUSES_NOT_SUPPORTED", "Clauses are not supported for PDF templates.");
+    }
     const ins = await buildClauseInsertion({ r, firmId, selected: clauses, resolvedVariables: input });
     const selectedCodes = ins.selectedClausesResolved.map((c) => c.clauseCode).filter(Boolean);
     const detection = detectClausePlaceholders(fileContents, selectedCodes);
@@ -5208,43 +5313,53 @@ async function generateFirmDocument({
       }
     }
   }
-  if (!Buffer.isBuffer(fileContents) || fileContents.length === 0) {
-    throw new DocumentGenerationError(400, "TEMPLATE_FILE_BUFFER_MISSING", "Template file buffer is missing or corrupted in the database.");
-  }
-  const zip = new PizZip(fileContents);
-  const doc = new Docxtemplater(zip, { paragraphLoop: true, linebreaks: true });
-  attachDocxImageModule(doc);
-  await maybeHydrateFirmLogoBuffer(input as any);
-  try {
-    doc.render(input);
-  } catch (err) {
-    const detail = extractDocxTemplateErrorDetail(err);
-    console.error(err);
-    logger.error({ err, firmId, caseId, templateId }, "[documents.generate] docx render failed");
-    const syntaxErrors = extractDocxSyntaxErrors(err);
-    const message = isDocxSyntaxError(err)
-      ? "The document template contains invalid variable tags. Please check for unclosed brackets or typos."
-      : detail.message;
-    throw new DocumentGenerationError(422, "TEMPLATE_RENDER_FAILED", message, { details: detail.message, tags: detail.tags, syntaxErrors });
-  }
+  let outFormat: "docx" | "pdf" = "docx";
+  let outputBytes: Buffer;
+  let outputContentType: string;
 
-  let buffer = doc.getZip().generate({ type: "nodebuffer", compression: "DEFLATE" }) as Buffer;
-  if (letterheadBytes) {
-    buffer = await applyLetterheadToDocxBuffer({
-      baseDocx: buffer,
-      firstPageTemplateDocx: letterheadBytes.firstBytes,
-      continuationHeaderTemplateDocx: letterheadBytes.contBytes,
-      footerTemplateDocx: letterheadBytes.footerBytes,
-      footerMode: letterheadBytes.footerMode,
-    });
-  }
+  if (templateExt === "pdf") {
+    outFormat = "pdf";
+    outputBytes = await renderPdfFormTemplate({ pdfBytes: fileContents, data: input, flatten: true });
+    outputContentType = "application/pdf";
+  } else {
+    if (!Buffer.isBuffer(fileContents) || fileContents.length === 0) {
+      throw new DocumentGenerationError(400, "TEMPLATE_FILE_BUFFER_MISSING", "Template file buffer is missing or corrupted in the database.");
+    }
+    const zip = new PizZip(fileContents);
+    const doc = new Docxtemplater(zip, { paragraphLoop: true, linebreaks: true });
+    attachDocxImageModule(doc);
+    await maybeHydrateFirmLogoBuffer(input as any);
+    try {
+      doc.render(input);
+    } catch (err) {
+      const detail = extractDocxTemplateErrorDetail(err);
+      console.error(err);
+      logger.error({ err, firmId, caseId, templateId }, "[documents.generate] docx render failed");
+      const syntaxErrors = extractDocxSyntaxErrors(err);
+      const message = isDocxSyntaxError(err)
+        ? "The document template contains invalid variable tags. Please check for unclosed brackets or typos."
+        : detail.message;
+      throw new DocumentGenerationError(422, "TEMPLATE_RENDER_FAILED", message, { details: detail.message, tags: detail.tags, syntaxErrors });
+    }
 
-  const outFormat: "docx" | "pdf" = outputFormat === "pdf" ? "pdf" : "docx";
-  const outputBytes = outFormat === "pdf" ? await convertDocxToPdf(buffer) : buffer;
-  const outputContentType =
-    outFormat === "pdf"
-      ? "application/pdf"
-      : "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+    let buffer = doc.getZip().generate({ type: "nodebuffer", compression: "DEFLATE" }) as Buffer;
+    if (letterheadBytes) {
+      buffer = await applyLetterheadToDocxBuffer({
+        baseDocx: buffer,
+        firstPageTemplateDocx: letterheadBytes.firstBytes,
+        continuationHeaderTemplateDocx: letterheadBytes.contBytes,
+        footerTemplateDocx: letterheadBytes.footerBytes,
+        footerMode: letterheadBytes.footerMode,
+      });
+    }
+
+    outFormat = outputFormat === "pdf" ? "pdf" : "docx";
+    outputBytes = outFormat === "pdf" ? await convertDocxToPdf(buffer) : buffer;
+    outputContentType =
+      outFormat === "pdf"
+        ? "application/pdf"
+        : "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+  }
 
   const normalizedPath = newGeneratedDocObjectPath(firmId, caseId, outFormat);
   await supabaseStorage.uploadPrivateObject({
@@ -6434,12 +6549,12 @@ router.post("/cases/:caseId/documents/filename-preview", requireAuth, requireFir
   const originalFileName = typeof body.originalFileName === "string" ? body.originalFileName.trim() : null;
   const fallbackExt = typeof body.fallbackExt === "string" ? body.fallbackExt.trim() : "docx";
 
-  if (!templateId && !platformDocumentId && !documentName) {
-    res.status(422).json({ error: "templateId/platformDocumentId or documentName is required" });
+  if (platformDocumentId) {
+    res.status(410).json({ error: "Platform/master documents are no longer supported. Please use templateId.", code: "PLATFORM_DOCUMENT_DEPRECATED" });
     return;
   }
-  if (templateId && platformDocumentId) {
-    res.status(422).json({ error: "Provide only one of templateId or platformDocumentId" });
+  if (!templateId && !documentName) {
+    res.status(422).json({ error: "templateId or documentName is required" });
     return;
   }
 
@@ -6460,15 +6575,6 @@ router.post("/cases/:caseId/documents/filename-preview", requireAuth, requireFir
     }
     templateName = String((tpl as any).name ?? "");
     rule = typeof (tpl as any).file_naming_rule === "string" ? String((tpl as any).file_naming_rule) : null;
-  } else if (platformDocumentId) {
-    const rows = await queryRows(r, sql`SELECT * FROM platform_documents WHERE id = ${platformDocumentId}`);
-    const doc = rows[0];
-    if (!doc) {
-      res.status(404).json({ error: "Document not found" });
-      return;
-    }
-    templateName = String((doc as any).name ?? "");
-    rule = typeof (doc as any).file_naming_rule === "string" ? String((doc as any).file_naming_rule) : null;
   }
 
   const sequence = await nextCaseDocumentSequence(r, req.firmId!, caseId);
@@ -6911,10 +7017,8 @@ router.post("/cases/:caseId/documents/preview-variables", requireAuth, requireFi
 
   const body = req.body as Record<string, unknown>;
   const templateId = toPositiveInt(body.templateId);
-  const platformDocumentId = toPositiveInt(body.platformDocumentId);
   const overrides = (body.overrides && typeof body.overrides === "object" && !Array.isArray(body.overrides)) ? (body.overrides as Record<string, unknown>) : null;
-  if (!templateId && !platformDocumentId) { res.status(422).json({ error: "templateId or platformDocumentId is required", code: "TEMPLATE_ID_REQUIRED" }); return; }
-  if (templateId && platformDocumentId) { res.status(422).json({ error: "Provide only one of templateId or platformDocumentId", code: "TEMPLATE_ID_CONFLICT" }); return; }
+  if (!templateId) { res.status(422).json({ error: "templateId is required", code: "TEMPLATE_ID_REQUIRED" }); return; }
 
   const cache = createRequestCache();
   const context = await buildCaseContext(r, caseId, req.firmId!, cache);
@@ -6924,79 +7028,35 @@ router.post("/cases/:caseId/documents/preview-variables", requireAuth, requireFi
     const storedOverrides = await getCaseVariableOverrides(r, cache, req.firmId!, caseId);
     const mergedOverrides = mergeOverrides(storedOverrides, overrides);
     let placeholders: string[] = [];
-    if (templateId) {
-      const [tplRows, vRows] = await Promise.all([
-        queryRowsCached(r, cache, `document_templates:${req.firmId!}:${templateId}`, sql`SELECT * FROM document_templates WHERE id = ${templateId} AND firm_id = ${req.firmId!}`),
-        queryRows(r, sql`
-          SELECT * FROM document_template_versions
-          WHERE firm_id = ${req.firmId!} AND template_id = ${templateId} AND status = 'published'
-          ORDER BY published_at DESC NULLS LAST, version_no DESC
-          LIMIT 1
-        `),
-      ]);
-      const tpl = tplRows[0];
-      if (!tpl) { res.status(404).json({ error: "Template not found" }); return; }
-      const v = vRows[0];
-      const obj = typeof (v as any)?.source_object_path === "string" ? String((v as any).source_object_path) : String((tpl as any).object_path ?? "");
-      const filename = typeof (v as any)?.filename === "string" ? String((v as any).filename) : String((tpl as any).file_name ?? "");
-      if (!obj) { res.status(404).json({ error: "Template file missing", code: "TEMPLATE_FILE_MISSING" }); return; }
-      const ext = fileExtensionFromName(filename);
-      if (ext !== "docx") {
-        res.json({ resolvedVariables: {}, missingRequiredVariables: [], unusedBindings: [], placeholderWarnings: [], usedMode: "bindings", previewSummary: { placeholdersCount: 0, missingRequiredCount: 0, resolvedCount: 0, renderable: true } });
-        return;
-      }
-      placeholders = placeholdersFromVariablesSnapshot((v as any)?.variables_snapshot);
-      if (placeholders.length === 0) {
-        const bytes = await downloadPrivateObjectBytes(obj);
-        if (!Buffer.isBuffer(bytes) || bytes.length === 0) {
-          res.status(400).json({ error: "Template file buffer is missing or corrupted in the database.", code: "TEMPLATE_FILE_BUFFER_MISSING" });
-          return;
-        }
-        placeholders = detectDocxVariables(bytes);
-      }
-      const preview = await runDocumentPreview(r, { firmId: req.firmId!, caseContext: context, templateRef: { kind: "firm", templateId }, placeholders, overrides: mergedOverrides });
-      res.json({
-        resolvedVariables: preview.resolvedVariables,
-        missingRequiredVariables: preview.missingRequiredVariables,
-        unusedBindings: preview.unusedBindings,
-        placeholderWarnings: preview.placeholderWarnings,
-        usedMode: preview.usedMode,
-        previewSummary: { placeholdersCount: placeholders.length, missingRequiredCount: preview.missingRequiredVariables.length, resolvedCount: Object.keys(preview.resolvedVariables).length, renderable: true },
-      });
-      return;
-    }
-
-    const docRows = await queryRows(r, sql`SELECT * FROM platform_documents WHERE id = ${platformDocumentId!} AND (firm_id IS NULL OR firm_id = ${req.firmId!})`);
-    const doc = docRows[0];
-    if (!doc) { res.status(404).json({ error: "Document not found" }); return; }
-    const fileName = String((doc as any).file_name ?? "");
-    const isDocx = fileName.toLowerCase().endsWith(".docx") || fileName.toLowerCase().endsWith(".doc");
-    const isPdf = fileName.toLowerCase().endsWith(".pdf");
-    if (isPdf && (doc as any).pdf_mappings) {
-      const mappings = (doc as any).pdf_mappings as any;
-      const keys = new Set<string>();
-      const pages = Array.isArray(mappings?.pages) ? mappings.pages : [];
-      for (const p of pages) {
-        const tbs = Array.isArray(p?.textBoxes) ? p.textBoxes : [];
-        for (const tb of tbs) {
-          const content = typeof tb?.content === "string" ? tb.content : "";
-          content.replace(/\{\{\s*([a-zA-Z0-9_.-]+)\s*\}\}/g, (_m: string, k: string) => { keys.add(k); return ""; });
-        }
-      }
-      placeholders = Array.from(keys);
-    } else if (isDocx) {
-      const obj = String((doc as any).object_path ?? "");
-      if (!obj) { res.status(404).json({ error: "Template file missing", code: "TEMPLATE_FILE_MISSING" }); return; }
+    const [tplRows, vRows] = await Promise.all([
+      queryRowsCached(r, cache, `document_templates:${req.firmId!}:${templateId}`, sql`SELECT * FROM document_templates WHERE id = ${templateId} AND firm_id = ${req.firmId!}`),
+      queryRows(r, sql`
+        SELECT * FROM document_template_versions
+        WHERE firm_id = ${req.firmId!} AND template_id = ${templateId} AND status = 'published'
+        ORDER BY published_at DESC NULLS LAST, version_no DESC
+        LIMIT 1
+      `),
+    ]);
+    const tpl = tplRows[0];
+    if (!tpl) { res.status(404).json({ error: "Template not found" }); return; }
+    const v = vRows[0];
+    const obj = typeof (v as any)?.source_object_path === "string" ? String((v as any).source_object_path) : String((tpl as any).object_path ?? "");
+    const filename = typeof (v as any)?.filename === "string" ? String((v as any).filename) : String((tpl as any).file_name ?? "");
+    if (!obj) { res.status(404).json({ error: "Template file missing", code: "TEMPLATE_FILE_MISSING" }); return; }
+    const ext = fileExtensionFromName(filename);
+    placeholders = placeholdersFromVariablesSnapshot((v as any)?.variables_snapshot);
+    if (placeholders.length === 0) {
       const bytes = await downloadPrivateObjectBytes(obj);
       if (!Buffer.isBuffer(bytes) || bytes.length === 0) {
         res.status(400).json({ error: "Template file buffer is missing or corrupted in the database.", code: "TEMPLATE_FILE_BUFFER_MISSING" });
         return;
       }
-      placeholders = detectDocxVariables(bytes);
-    } else {
-      placeholders = [];
+      placeholders =
+        ext === "docx" ? detectDocxVariables(bytes)
+        : ext === "pdf" ? await extractPdfFormFieldNames(bytes)
+        : [];
     }
-    const preview = await runDocumentPreview(r, { firmId: req.firmId!, caseContext: context, templateRef: { kind: "platform", documentId: platformDocumentId! }, placeholders, overrides: mergedOverrides });
+    const preview = await runDocumentPreview(r, { firmId: req.firmId!, caseContext: context, templateRef: { kind: "firm", templateId }, placeholders, overrides: mergedOverrides });
     res.json({
       resolvedVariables: preview.resolvedVariables,
       missingRequiredVariables: preview.missingRequiredVariables,
@@ -7044,12 +7104,12 @@ router.post("/cases/:caseId/documents/preview", requireAuth, requireFirmUser, re
   const bypassReq = Boolean(body.bypassApplicability ?? false);
   const bypass = bypassReq ? await canBypassApplicability(r, req.firmId!, req.roleId) : false;
 
-  if (!templateId && !platformDocumentId) {
-    res.status(422).json({ error: "templateId or platformDocumentId is required", code: "TEMPLATE_ID_REQUIRED" });
+  if (platformDocumentId) {
+    res.status(410).json({ error: "Platform/master documents are no longer supported. Please use templateId.", code: "PLATFORM_DOCUMENT_DEPRECATED" });
     return;
   }
-  if (templateId && platformDocumentId) {
-    res.status(422).json({ error: "Provide only one of templateId or platformDocumentId", code: "TEMPLATE_ID_CONFLICT" });
+  if (!templateId) {
+    res.status(422).json({ error: "templateId is required", code: "TEMPLATE_ID_REQUIRED" });
     return;
   }
 
@@ -7290,6 +7350,38 @@ router.post("/cases/:caseId/documents/preview", requireAuth, requireFirmUser, re
         };
         await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: renderable ? "documents.preview" : "documents.preview.failed", entityType: "document_template", entityId: templateId, detail: `caseId=${caseId} mode=${preview.usedMode} applicable=${applicabilityResult.applicable} bypass=${bypass} clauses=${clauseRefs.length} target=${insertionTarget ?? ""}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
         res.json(resp);
+        return;
+      }
+
+      if (ext === "pdf") {
+        if (clauseRefs.length > 0) {
+          res.status(422).json({ error: "Clauses are not supported for PDF templates.", code: "PDF_TEMPLATE_CLAUSES_NOT_SUPPORTED" });
+          return;
+        }
+        const bytes = await downloadPrivateObjectBytes(obj);
+        if (!Buffer.isBuffer(bytes) || bytes.length === 0) {
+          res.status(400).json({ error: "Template file buffer is missing or corrupted in the database.", code: "TEMPLATE_FILE_BUFFER_MISSING" });
+          return;
+        }
+        let placeholders: string[] = placeholdersFromVariablesSnapshot((v as any)?.variables_snapshot);
+        if (placeholders.length === 0) placeholders = await extractPdfFormFieldNames(bytes);
+        const preview = await runDocumentPreview(r, {
+          firmId: req.firmId!,
+          caseContext: context,
+          templateRef: { kind: "firm", templateId },
+          placeholders,
+          overrides: mergedOverrides,
+        });
+        await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.preview", entityType: "document_template", entityId: templateId, detail: `caseId=${caseId} ext=pdf mode=${preview.usedMode} applicable=${applicabilityResult.applicable} bypass=${bypass}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+        res.json({
+          resolvedVariables: preview.resolvedVariables,
+          missingRequiredVariables: preview.missingRequiredVariables,
+          unusedBindings: preview.unusedBindings,
+          placeholderWarnings: preview.placeholderWarnings,
+          applicabilityResult,
+          renderMode: "pdf",
+          previewSummary: { renderable: true, placeholdersCount: placeholders.length, usedMode: preview.usedMode, missingRequiredCount: preview.missingRequiredVariables.length },
+        });
         return;
       }
 
@@ -7832,105 +7924,7 @@ router.post("/cases/:caseId/documents/generate-from-master", requireAuth, requir
     res.status(400).json({ error: "Invalid case ID" });
     return;
   }
-  const body = req.body as Record<string, unknown>;
-  const mid = toPositiveInt(body.masterDocId);
-  if (!mid) {
-    res.status(422).json({ error: "masterDocId is required", code: "MASTER_DOC_ID_REQUIRED" });
-    return;
-  }
-  const documentName = typeof body.documentName === "string" ? body.documentName : undefined;
-  const letterheadId = normalizeLetterheadId(body.letterheadId);
-  const bypassApplicability = typeof body.bypassApplicability === "boolean" ? body.bypassApplicability : undefined;
-  const clauses = Array.isArray(body.clauses)
-    ? (body.clauses as unknown[])
-      .map((x) => (x && typeof x === "object" ? x as Record<string, unknown> : null))
-      .filter((x): x is Record<string, unknown> => Boolean(x))
-      .map((x) => ({
-        scope: x.scope === "platform" ? ("platform" as const) : ("firm" as const),
-        id: toPositiveInt(x.id) ?? NaN,
-        includeTitle: typeof x.includeTitle === "boolean" ? x.includeTitle : false,
-      }))
-      .filter((x) => Number.isFinite(x.id))
-    : undefined;
-  const overrides = asObjectRecord(body.overrides);
-  const safeOverrides = (overrides && typeof overrides === "object" && !Array.isArray(overrides)) ? overrides : null;
-  const fmt = String(one((req.query as any).format) ?? "").trim().toLowerCase();
-  const wantPdf = fmt === "pdf";
-
-  const runId = await createGenerationRun(r, {
-    firm_id: req.firmId!,
-    case_id: caseId,
-    template_source: "master",
-    template_id: null,
-    template_version_id: null,
-    platform_document_id: mid,
-    document_name: documentName ?? "Generated document",
-    render_mode: wantPdf ? "pdf" : "docx",
-    status: "running",
-    rendered_variables_snapshot: null,
-    checklist_snapshot: null,
-    readiness_snapshot: null,
-    triggered_by: req.userId!,
-    error_code: null,
-    error_message: null,
-  });
-
-  try {
-    const bypass = Boolean(bypassApplicability) ? await canBypassApplicability(r, req.firmId!, req.roleId) : false;
-    const out = await generateMasterDocument({
-      r,
-      firmId: req.firmId!,
-      actorId: req.userId!,
-      actorType: req.userType,
-      ipAddress: req.ip,
-      userAgent: req.headers["user-agent"],
-      caseId,
-      masterDocId: mid,
-      documentName,
-      letterheadId,
-      runId,
-      bypassApplicability: bypass,
-      clauses,
-      overrides: safeOverrides,
-      outputFormat: wantPdf ? "pdf" : undefined,
-    });
-    await finishGenerationRunSuccess(r, req.firmId!, runId, out.caseDocumentId, out.renderedVars, out.checklistSnapshot, out.readinessSnapshot);
-    await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.generation.succeeded", entityType: "document_generation_run", entityId: runId, detail: `caseId=${caseId} templateSource=master templateId=${mid}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
-    if (wantPdf) {
-      const bytes = out.outputBytes;
-      const ct = out.outputContentType ?? "application/pdf";
-      if (!bytes) {
-        res.status(503).json({ error: "PDF conversion failed", code: "DOCX_TO_PDF_FAILED" });
-        return;
-      }
-      const fileName = typeof (out.caseDocument as any)?.file_name === "string" ? String((out.caseDocument as any).file_name) : `case-${caseId}-document.pdf`;
-      const docId = typeof (out.caseDocument as any)?.id === "number" ? String((out.caseDocument as any).id) : "";
-      if (docId) res.setHeader("x-case-document-id", docId);
-      res.setHeader("Content-Disposition", contentDispositionAttachment(fileName));
-      res.setHeader("Content-Type", ct);
-      res.status(201).send(bytes);
-      return;
-    }
-    res.status(201).json(out.caseDocument);
-  } catch (err: unknown) {
-    const cfgErr = getSupabaseStorageConfigError(err);
-    if (cfgErr) {
-      await finishGenerationRunFailed(r, req.firmId!, runId, "STORAGE_NOT_CONFIGURED", cfgErr.error);
-      await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.generation.failed", entityType: "document_generation_run", entityId: runId, detail: `caseId=${caseId} templateSource=master templateId=${mid} code=STORAGE_NOT_CONFIGURED`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
-      res.status(cfgErr.statusCode).json({ error: cfgErr.error, code: "STORAGE_NOT_CONFIGURED" });
-      return;
-    }
-    if (err instanceof ObjectNotFoundError) {
-      await finishGenerationRunFailed(r, req.firmId!, runId, "MASTER_FILE_NOT_FOUND", "Master file not found");
-      await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.generation.failed", entityType: "document_generation_run", entityId: runId, detail: `caseId=${caseId} templateSource=master templateId=${mid} code=MASTER_FILE_NOT_FOUND`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
-      res.status(404).json({ error: "Master file not found", code: "MASTER_FILE_NOT_FOUND" });
-      return;
-    }
-    const e = err instanceof DocumentGenerationError ? err : new DocumentGenerationError(500, "INTERNAL_ERROR", "Internal Server Error");
-    await finishGenerationRunFailed(r, req.firmId!, runId, e.code, e.message);
-    await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.generation.failed", entityType: "document_generation_run", entityId: runId, detail: `caseId=${caseId} templateSource=master templateId=${mid} code=${e.code}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
-    res.status(e.statusCode).json({ error: e.message, code: e.code, ...(e.payload ? e.payload : {}) });
-  }
+  res.status(410).json({ error: "Platform/master documents are no longer supported. Please use templateId.", code: "PLATFORM_DOCUMENT_DEPRECATED" });
 });
 
 router.get("/printable-config", requireAuth, requireFirmUser, requirePermission("documents", "read"), async (req: AuthRequest, res): Promise<void> => {
@@ -8578,9 +8572,15 @@ router.post("/cases/:caseId/documents/upload", requireAuth, requireFirmUser, req
     return;
   }
   const lowerName = String(fileName || "").toLowerCase();
-  const allowedExt = lowerName.endsWith(".pdf") || lowerName.endsWith(".jpg") || lowerName.endsWith(".jpeg") || lowerName.endsWith(".png");
+  const allowedExt =
+    lowerName.endsWith(".docx") ||
+    lowerName.endsWith(".doc") ||
+    lowerName.endsWith(".pdf") ||
+    lowerName.endsWith(".jpg") ||
+    lowerName.endsWith(".jpeg") ||
+    lowerName.endsWith(".png");
   if (!allowedExt) {
-    res.status(415).json({ error: "Only PDF, JPG, or PNG files are allowed", code: "UNSUPPORTED_MEDIA_TYPE" });
+    res.status(415).json({ error: "Only DOCX, PDF, JPG, or PNG files are allowed", code: "UNSUPPORTED_MEDIA_TYPE" });
     return;
   }
   if (!objectPath.startsWith(`/objects/cases/${req.firmId!}/`)) {

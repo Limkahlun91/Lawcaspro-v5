@@ -362,7 +362,7 @@ export default function DocumentTemplates() {
       let fileName: string | undefined;
       let mimeType: string | undefined;
       if (payload.file) {
-        const v = validateUploadFile(payload.file, { allowedMimeTypes: DOCX_MIME_TYPES });
+        const v = validateUploadFile(payload.file, { allowedMimeTypes: [...DOCX_MIME_TYPES, "application/pdf"] as const });
         if (!v.ok) throw new Error(v.message);
         if (!user?.firmId) throw new Error("Missing firm context");
         const safeName = payload.file.name.replace(/[^a-zA-Z0-9._-]/g, "_");
@@ -448,7 +448,7 @@ export default function DocumentTemplates() {
     if (!selectedFile || !templateName) return;
     setIsUploading(true);
     try {
-      const v = validateUploadFile(selectedFile, { allowedMimeTypes: DOCX_MIME_TYPES });
+      const v = validateUploadFile(selectedFile, { allowedMimeTypes: [...DOCX_MIME_TYPES, "application/pdf"] as const });
       if (!v.ok) throw new Error(v.message);
       if (!user?.firmId) throw new Error("Missing firm context");
       const safeName = selectedFile.name.replace(/[^a-zA-Z0-9._-]/g, "_");
@@ -693,7 +693,7 @@ export default function DocumentTemplates() {
                       type="file"
                       ref={versionUploadRef}
                       className="hidden"
-                      accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                      accept=".docx,.pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/pdf"
                       onChange={(e) => setVersionFile(e.target.files?.[0] ?? null)}
                     />
                   </div>
@@ -1389,7 +1389,7 @@ export default function DocumentTemplates() {
                 type="file"
                 ref={uploadRef}
                 className="hidden"
-                accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                accept=".docx,.pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/pdf"
                 onChange={(e) => setSelectedFile(e.target.files?.[0] ?? null)}
               />
             </div>
