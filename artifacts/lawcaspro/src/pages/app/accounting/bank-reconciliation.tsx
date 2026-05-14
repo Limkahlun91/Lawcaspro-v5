@@ -21,7 +21,8 @@ type BankTransactionRow = {
   withdrawal: string | number | null;
   deposit: string | number | null;
   balance: string | number | null;
-  is_exported_to_autocount: boolean;
+  is_exported: boolean;
+  exported_at?: string | null;
   case?: { case_id: number; title: string } | null;
   recommended_case?: { case_id: number; title: string; match_reason: string } | null;
 };
@@ -33,7 +34,7 @@ type BankAccountRow = {
   bank_name: string;
   account_name: string | null;
   account_no: string;
-  autocount_gl_code: string | null;
+  gl_code: string | null;
   opening_balance: string | number | null;
   opening_balance_date: string | null;
   is_default: boolean;
@@ -121,12 +122,12 @@ export default function BankReconciliationPage() {
 
   const exportMutation = useMutation({
     mutationFn: async () => {
-      const blob = await apiFetchBlob(`/accounting/bank-transactions/export-autocount?bankAccountId=${bankAccountId}`);
-      const fileName = `autocount_bank_export_${new Date().toISOString().slice(0, 10)}.xlsx`;
+      const blob = await apiFetchBlob(`/accounting/bank-transactions/export?bankAccountId=${bankAccountId}`);
+      const fileName = `bank_transactions_export_${new Date().toISOString().slice(0, 10)}.xlsx`;
       downloadBlob(blob, fileName);
     },
     onSuccess: async () => {
-      toast({ title: "Exported to AutoCount" });
+      toast({ title: "Exported to Excel" });
       await qc.invalidateQueries({ queryKey: ["bank-transactions", bankAccountId] });
     },
     onError: (e) => toastError(toast, e, "Export failed"),
@@ -209,10 +210,10 @@ export default function BankReconciliationPage() {
       <div className="flex items-start justify-between gap-3 flex-wrap">
         <div>
           <h1 className="text-2xl font-semibold text-slate-900 tracking-tight">Bank Reconciliation</h1>
-          <p className="text-slate-500 mt-1 text-sm">Upload statements, correct OCR results, and export to AutoCount.</p>
+          <p className="text-slate-500 mt-1 text-sm">Upload statements, correct OCR results, and export to Excel.</p>
         </div>
         <Button onClick={() => exportMutation.mutate()} disabled={isBusy || bankAccountId == null} className="bg-emerald-600 hover:bg-emerald-700">
-          Export to AutoCount (XLSX)
+          Export to Excel (XLSX)
         </Button>
       </div>
 
@@ -471,8 +472,8 @@ export default function BankReconciliationPage() {
                           )}
                         </td>
                         <td className="py-2 px-3">
-                          <span className={cn("text-xs px-2 py-0.5 rounded-full", r.is_exported_to_autocount ? "bg-emerald-50 text-emerald-700" : "bg-slate-100 text-slate-600")}>
-                            {r.is_exported_to_autocount ? "Yes" : "No"}
+                          <span className={cn("text-xs px-2 py-0.5 rounded-full", r.is_exported ? "bg-emerald-50 text-emerald-700" : "bg-slate-100 text-slate-600")}>
+                            {r.is_exported ? "Yes" : "No"}
                           </span>
                         </td>
                         <td className="py-2 px-3">

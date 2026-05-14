@@ -350,7 +350,7 @@ router.get("/accounting/bank-accounts", requireAuth, requireFirmUser, requirePer
       account_name,
       account_no,
       account_type,
-      autocount_gl_code,
+      gl_code,
       opening_balance,
       opening_balance_date,
       is_default,
@@ -369,7 +369,7 @@ router.post("/accounting/bank-accounts", requireAuth, requireFirmUser, requirePe
   const accountName = typeof body.accountName === "string" ? body.accountName.trim() : "";
   const accountNo = typeof body.accountNo === "string" ? body.accountNo.trim() : "";
   const accountType = typeof body.accountType === "string" ? body.accountType.trim() : "office";
-  const autocountGlCode = typeof body.autocountGlCode === "string" ? body.autocountGlCode.trim() : "";
+  const glCode = typeof body.glCode === "string" ? body.glCode.trim() : "";
   const openingBalance = parseNumeric12_2(body.openingBalance) ?? 0;
   const openingBalanceDate = parseDateYmd(body.openingBalanceDate);
   const isDefault = Boolean(body.isDefault ?? false);
@@ -379,9 +379,9 @@ router.post("/accounting/bank-accounts", requireAuth, requireFirmUser, requirePe
 
   const rows = await queryRows(sql`
     INSERT INTO firm_bank_accounts
-      (firm_id, bank_name, account_name, account_no, account_type, autocount_gl_code, opening_balance, opening_balance_date, is_default, created_at, updated_at)
+      (firm_id, bank_name, account_name, account_no, account_type, gl_code, opening_balance, opening_balance_date, is_default, created_at, updated_at)
     VALUES
-      (${req.firmId!}, ${bankName}, ${accountName || null}, ${accountNo}, ${accountType}, ${autocountGlCode || null}, ${openingBalance}, ${openingBalanceDate}, ${isDefault}, now(), now())
+      (${req.firmId!}, ${bankName}, ${accountName || null}, ${accountNo}, ${accountType}, ${glCode || null}, ${openingBalance}, ${openingBalanceDate}, ${isDefault}, now(), now())
     RETURNING *
   `);
   const created = rows[0];
@@ -413,9 +413,9 @@ router.patch("/accounting/bank-accounts/:id", requireAuth, requireFirmUser, requ
     const v = typeof body.accountType === "string" ? body.accountType.trim() : "";
     patch.push(sql`account_type = ${v || "office"}`);
   }
-  if (Object.prototype.hasOwnProperty.call(body, "autocountGlCode")) {
-    const v = typeof body.autocountGlCode === "string" ? body.autocountGlCode.trim() : "";
-    patch.push(sql`autocount_gl_code = ${v || null}`);
+  if (Object.prototype.hasOwnProperty.call(body, "glCode")) {
+    const v = typeof body.glCode === "string" ? body.glCode.trim() : "";
+    patch.push(sql`gl_code = ${v || null}`);
   }
   if (Object.prototype.hasOwnProperty.call(body, "openingBalance")) {
     const v = parseNumeric12_2(body.openingBalance);
@@ -566,7 +566,7 @@ router.post(
     let inserted = 0;
     try {
       const rows = await queryRows(sql`
-        INSERT INTO bank_transactions (firm_id, bank_account_id, transaction_date, description, reference_no, withdrawal, deposit, balance, is_exported_to_autocount)
+        INSERT INTO bank_transactions (firm_id, bank_account_id, transaction_date, description, reference_no, withdrawal, deposit, balance, is_exported)
         VALUES ${sql.join(values, sql`, `)}
         RETURNING id
       `);
@@ -608,7 +608,8 @@ router.get("/accounting/bank-transactions", requireAuth, requireFirmUser, requir
       withdrawal,
       deposit,
       balance,
-      is_exported_to_autocount,
+      is_exported,
+      exported_at,
       created_at,
       updated_at
     FROM bank_transactions
@@ -930,18 +931,19 @@ router.patch("/accounting/bank-transactions/:id", requireAuth, requireFirmUser, 
   });
 });
 
-async function exportAutoCountXlsx(req: AuthRequest, res: Response): Promise<void> {
+async function exportBankTransactionsXlsx(req: AuthRequest, res: Response): Promise<void> {
   const bankAccountId = parseIdInt((req.query as any)?.bankAccountId);
   if (!bankAccountId) { res.status(422).json({ error: "bankAccountId is required" }); return; }
   const acctRows = await queryRows(sql`
-    SELECT id, autocount_gl_code
+    SELECT id, account_name, bank_name, gl_code
     FROM firm_bank_accounts
     WHERE firm_id = ${req.firmId!} AND id = ${bankAccountId}
     LIMIT 1
   `);
   const acct = acctRows[0];
   if (!acct) { res.status(404).json({ error: "Bank account not found" }); return; }
-  const glCode = (acct as any).autocount_gl_code ? String((acct as any).autocount_gl_code) : "";
+  const bankAccountName = String((acct as any).account_name ?? (acct as any).bank_name ?? "");
+  const glCode = (acct as any).gl_code ? String((acct as any).gl_code) : "";
   const rows = await queryRows(sql`
     SELECT
       id,
@@ -949,34 +951,48 @@ async function exportAutoCountXlsx(req: AuthRequest, res: Response): Promise<voi
       description,
       reference_no,
       withdrawal,
-      deposit
+      deposit,
+      balance,
+      case_id,
+      is_exported,
+      exported_at,
+      created_at,
+      updated_at
     FROM bank_transactions
     WHERE firm_id = ${req.firmId!}
       AND bank_account_id = ${bankAccountId}
-      AND is_exported_to_autocount = false
     ORDER BY transaction_date ASC, created_at ASC
     LIMIT 5000
   `);
 
   const exportRows = rows.map((r: any) => ({
-    DocDate: typeof r.transaction_date === "string" ? r.transaction_date : String(r.transaction_date ?? ""),
+    "Transaction ID": String(r.id ?? ""),
+    "Bank Account ID": bankAccountId,
+    "Transaction Date": typeof r.transaction_date === "string" ? r.transaction_date : String(r.transaction_date ?? ""),
     Description: String(r.description ?? ""),
-    RefNo: r.reference_no == null ? "" : String(r.reference_no),
-    PaymentAmount: r.withdrawal == null ? "" : Number(r.withdrawal),
-    DepositAmount: r.deposit == null ? "" : Number(r.deposit),
-    GLCode: glCode,
+    "Reference No": r.reference_no == null ? "" : String(r.reference_no),
+    Withdrawal: r.withdrawal == null ? "" : Number(r.withdrawal),
+    Deposit: r.deposit == null ? "" : Number(r.deposit),
+    Balance: r.balance == null ? "" : Number(r.balance),
+    "Bank Account Name": bankAccountName,
+    "GL Code": glCode,
+    "Assigned Case ID": r.case_id == null ? "" : Number(r.case_id),
+    Exported: Boolean(r.is_exported),
+    "Exported At": r.exported_at == null ? "" : (typeof r.exported_at === "string" ? r.exported_at : String(r.exported_at)),
+    "Created At": r.created_at == null ? "" : (typeof r.created_at === "string" ? r.created_at : String(r.created_at)),
+    "Updated At": r.updated_at == null ? "" : (typeof r.updated_at === "string" ? r.updated_at : String(r.updated_at)),
   }));
 
   const wb = XLSX.utils.book_new();
   const ws = XLSX.utils.json_to_sheet(exportRows);
-  XLSX.utils.book_append_sheet(wb, ws, "AutoCount");
+  XLSX.utils.book_append_sheet(wb, ws, "Export");
   const buf = XLSX.write(wb, { type: "buffer", bookType: "xlsx" }) as unknown as Buffer;
 
   if (rows.length > 0) {
     const ids = rows.map((x: any) => String(x.id)).filter(Boolean);
     await queryRows(sql`
       UPDATE bank_transactions
-      SET is_exported_to_autocount = true, updated_at = NOW()
+      SET is_exported = true, exported_at = COALESCE(exported_at, NOW()), updated_at = NOW()
       WHERE firm_id = ${req.firmId!}
         AND id = ANY(${ids}::uuid[])
     `);
@@ -986,25 +1002,21 @@ async function exportAutoCountXlsx(req: AuthRequest, res: Response): Promise<voi
     firmId: req.firmId,
     actorId: req.userId,
     actorType: req.userType,
-    action: "accounting.bank_transactions.export_autocount",
+    action: "accounting.bank_transactions.export_excel",
     entityType: "bank_transaction",
     detail: `exported=${rows.length}`,
     ipAddress: req.ip,
     userAgent: req.headers["user-agent"],
   });
 
-  const fileName = safeFilenameAscii(`autocount_bank_export_${new Date().toISOString().slice(0, 10)}.xlsx`);
+  const fileName = safeFilenameAscii(`bank_transactions_export_${new Date().toISOString().slice(0, 10)}.xlsx`);
   res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
   res.setHeader("Content-Disposition", `attachment; filename="${fileName}"`);
   res.send(buf);
 }
 
-router.get("/accounting/bank-transactions/export-autocount", requireAuth, requireFirmUser, requirePermission("accounting", "write"), async (req: AuthRequest, res: Response): Promise<void> => {
-  await exportAutoCountXlsx(req, res);
-});
-
-router.get("/accounting/export-autocount", requireAuth, requireFirmUser, requirePermission("accounting", "write"), async (req: AuthRequest, res: Response): Promise<void> => {
-  await exportAutoCountXlsx(req, res);
+router.get("/accounting/bank-transactions/export", requireAuth, requireFirmUser, requirePermission("accounting", "write"), async (req: AuthRequest, res: Response): Promise<void> => {
+  await exportBankTransactionsXlsx(req, res);
 });
 
 const exportedRouter = expressRouter as unknown as ExpressRouter;

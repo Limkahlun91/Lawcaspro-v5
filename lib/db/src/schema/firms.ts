@@ -29,7 +29,7 @@ export const firmBankAccountsTable = pgTable("firm_bank_accounts", {
   bankName: text("bank_name").notNull(),
   accountNo: text("account_no").notNull(),
   accountType: text("account_type").notNull().default("office"),
-  autocountGlCode: text("autocount_gl_code"),
+  glCode: text("gl_code"),
   openingBalance: numeric("opening_balance", { precision: 12, scale: 2 }).notNull().default("0"),
   openingBalanceDate: date("opening_balance_date"),
   isDefault: boolean("is_default").notNull().default(false),

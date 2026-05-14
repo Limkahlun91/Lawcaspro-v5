@@ -75,7 +75,9 @@ async function maybeHydrateFirmLogoBuffer(input: Record<string, unknown>): Promi
     const resp = await supabaseStorage.fetchPrivateObjectResponse(url, { timeoutMs: 15_000 });
     const ab = await resp.arrayBuffer();
     input.firm_logo = Buffer.from(ab);
-  } catch {}
+  } catch {
+    input.firm_logo = Buffer.alloc(0);
+  }
 }
 
 const truthy = (v: string | string[] | undefined): boolean => {
@@ -104,6 +106,33 @@ function normalizeLetterheadId(v: unknown): number | null {
   if (v === null || v === undefined) return null;
   if (typeof v === "string" && !v.trim()) return null;
   return toPositiveInt(v);
+}
+
+function extractDocxSyntaxErrors(err: unknown): Array<{ name?: string; message: string; id?: string; explanation?: string; file?: string; offset?: number }> | null {
+  const raw = err && typeof err === "object" ? (err as any).properties?.errors : null;
+  if (!Array.isArray(raw) || raw.length === 0) return null;
+  return raw
+    .map((e: any) => {
+      const msg = typeof e?.message === "string" ? e.message : (typeof e === "string" ? e : "");
+      if (!msg) return null;
+      const props = e && typeof e === "object" ? (e as any).properties : null;
+      return {
+        name: typeof e?.name === "string" ? e.name : undefined,
+        message: msg,
+        id: typeof props?.id === "string" ? props.id : undefined,
+        explanation: typeof props?.explanation === "string" ? props.explanation : undefined,
+        file: typeof props?.file === "string" ? props.file : undefined,
+        offset: typeof props?.offset === "number" ? props.offset : undefined,
+      };
+    })
+    .filter(Boolean) as Array<{ name?: string; message: string; id?: string; explanation?: string; file?: string; offset?: number }>;
+}
+
+function isDocxSyntaxError(err: unknown): boolean {
+  const name = err && typeof err === "object" ? (err as any).name : null;
+  if (name === "XMLError") return true;
+  const syntaxErrors = extractDocxSyntaxErrors(err);
+  return Boolean(syntaxErrors && syntaxErrors.length);
 }
 
 const getPgCode = (err: unknown): string | null => {
@@ -4963,6 +4992,9 @@ async function generateFirmDocument({
   ]);
   if (letterheadBytes) usedLetterheadId = letterheadBytes.usedLetterheadId ?? null;
   let fileContents = fileContentsRaw;
+  if (!Buffer.isBuffer(fileContents) || fileContents.length === 0) {
+    throw new DocumentGenerationError(400, "TEMPLATE_FILE_BUFFER_MISSING", "Template file buffer is missing or corrupted in the database.");
+  }
   const placeholders = placeholdersFromVariablesSnapshot((version as any)?.variables_snapshot);
   const effectivePlaceholders = placeholders.length > 0 ? placeholders : detectDocxVariables(fileContents);
   const storedOverrides = await getCaseVariableOverrides(r, cache, firmId, caseId);
@@ -5099,6 +5131,9 @@ async function generateFirmDocument({
       }
     }
   }
+  if (!Buffer.isBuffer(fileContents) || fileContents.length === 0) {
+    throw new DocumentGenerationError(400, "TEMPLATE_FILE_BUFFER_MISSING", "Template file buffer is missing or corrupted in the database.");
+  }
   const zip = new PizZip(fileContents);
   const doc = new Docxtemplater(zip, { paragraphLoop: true, linebreaks: true });
   attachDocxImageModule(doc);
@@ -5107,8 +5142,13 @@ async function generateFirmDocument({
     doc.render(input);
   } catch (err) {
     const detail = extractDocxTemplateErrorDetail(err);
+    console.error(err);
     logger.error({ err, firmId, caseId, templateId }, "[documents.generate] docx render failed");
-    throw new DocumentGenerationError(422, "TEMPLATE_RENDER_FAILED", detail.message, { tags: detail.tags });
+    const syntaxErrors = extractDocxSyntaxErrors(err);
+    const message = isDocxSyntaxError(err)
+      ? "The document template contains invalid variable tags. Please check for unclosed brackets or typos."
+      : detail.message;
+    throw new DocumentGenerationError(422, "TEMPLATE_RENDER_FAILED", message, { details: detail.message, tags: detail.tags, syntaxErrors });
   }
 
   let buffer = doc.getZip().generate({ type: "nodebuffer", compression: "DEFLATE" }) as Buffer;
@@ -5337,6 +5377,9 @@ async function generateMasterDocument({
   const masterObjectPath = typeof (masterDoc as any).object_path === "string" ? String((masterDoc as any).object_path) : "";
   if (!masterObjectPath) throw new DocumentGenerationError(404, "MASTER_FILE_MISSING", "Master file missing");
   const fileContents = await downloadPrivateObjectBytes(masterObjectPath);
+  if (!Buffer.isBuffer(fileContents) || fileContents.length === 0) {
+    throw new DocumentGenerationError(400, "TEMPLATE_FILE_BUFFER_MISSING", "Template file buffer is missing or corrupted in the database.");
+  }
 
   const placeholders =
     isDocx ? detectDocxVariables(fileContents)
@@ -5486,7 +5529,11 @@ async function generateMasterDocument({
   let renderMode: "docx" | "pdf" = "docx";
 
   if (isDocx) {
-    const zip = new PizZip(docxBytesForRender ?? fileContents);
+    const bytesForRender = docxBytesForRender ?? fileContents;
+    if (!Buffer.isBuffer(bytesForRender) || bytesForRender.length === 0) {
+      throw new DocumentGenerationError(400, "TEMPLATE_FILE_BUFFER_MISSING", "Template file buffer is missing or corrupted in the database.");
+    }
+    const zip = new PizZip(bytesForRender);
     const doc = new Docxtemplater(zip, { paragraphLoop: true, linebreaks: true });
     attachDocxImageModule(doc);
     await maybeHydrateFirmLogoBuffer(renderInput as any);
@@ -5494,8 +5541,13 @@ async function generateMasterDocument({
       doc.render(renderInput);
     } catch (err) {
       const detail = extractDocxTemplateErrorDetail(err);
+      console.error(err);
       logger.error({ err, firmId, caseId, masterDocId }, "[documents.generate] docx render failed (master)");
-      throw new DocumentGenerationError(422, "TEMPLATE_RENDER_FAILED", detail.message, { tags: detail.tags });
+      const syntaxErrors = extractDocxSyntaxErrors(err);
+      const message = isDocxSyntaxError(err)
+        ? "The document template contains invalid variable tags. Please check for unclosed brackets or typos."
+        : detail.message;
+      throw new DocumentGenerationError(422, "TEMPLATE_RENDER_FAILED", message, { details: detail.message, tags: detail.tags, syntaxErrors });
     }
     buffer = doc.getZip().generate({ type: "nodebuffer", compression: "DEFLATE" }) as Buffer;
     outputMime = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
@@ -6819,6 +6871,10 @@ router.post("/cases/:caseId/documents/preview-variables", requireAuth, requireFi
       placeholders = placeholdersFromVariablesSnapshot((v as any)?.variables_snapshot);
       if (placeholders.length === 0) {
         const bytes = await downloadPrivateObjectBytes(obj);
+        if (!Buffer.isBuffer(bytes) || bytes.length === 0) {
+          res.status(400).json({ error: "Template file buffer is missing or corrupted in the database.", code: "TEMPLATE_FILE_BUFFER_MISSING" });
+          return;
+        }
         placeholders = detectDocxVariables(bytes);
       }
       const preview = await runDocumentPreview(r, { firmId: req.firmId!, caseContext: context, templateRef: { kind: "firm", templateId }, placeholders, overrides: mergedOverrides });
@@ -6855,6 +6911,10 @@ router.post("/cases/:caseId/documents/preview-variables", requireAuth, requireFi
       const obj = String((doc as any).object_path ?? "");
       if (!obj) { res.status(404).json({ error: "Template file missing", code: "TEMPLATE_FILE_MISSING" }); return; }
       const bytes = await downloadPrivateObjectBytes(obj);
+      if (!Buffer.isBuffer(bytes) || bytes.length === 0) {
+        res.status(400).json({ error: "Template file buffer is missing or corrupted in the database.", code: "TEMPLATE_FILE_BUFFER_MISSING" });
+        return;
+      }
       placeholders = detectDocxVariables(bytes);
     } else {
       placeholders = [];
@@ -6869,9 +6929,14 @@ router.post("/cases/:caseId/documents/preview-variables", requireAuth, requireFi
       previewSummary: { placeholdersCount: placeholders.length, missingRequiredCount: preview.missingRequiredVariables.length, resolvedCount: Object.keys(preview.resolvedVariables).length, renderable: true },
     });
   } catch (err) {
+    console.error(err);
     logger.error({ err, firmId: req.firmId, userId: req.userId, caseId }, "[documents.preview-variables]");
     const detail = isDocxTemplateRenderError(err) ? extractDocxTemplateErrorDetail(err) : null;
-    res.status(422).json({ error: detail?.message ?? "Template preview failed", code: "TEMPLATE_PREVIEW_FAILED", tags: detail?.tags ?? [] });
+    const syntaxErrors = extractDocxSyntaxErrors(err);
+    const message = isDocxSyntaxError(err)
+      ? "The document template contains invalid variable tags. Please check for unclosed brackets or typos."
+      : (detail?.message ?? "Template preview failed");
+    res.status(422).json({ error: message, code: "TEMPLATE_PREVIEW_FAILED", details: detail?.message ?? (err instanceof Error ? err.message : String(err ?? "")), tags: detail?.tags ?? [], syntaxErrors });
   }
 });
 
@@ -7101,14 +7166,27 @@ router.post("/cases/:caseId/documents/preview", requireAuth, requireFirmUser, re
           milestones: buildChecklistMilestones({ workflowDocs: workflowMap, context }),
           manualConfirmations,
         });
+        let renderError: { message: string; details?: string; syntaxErrors?: unknown } | null = null;
         try {
+          if (!Buffer.isBuffer(bytes) || bytes.length === 0) {
+            throw new DocumentGenerationError(400, "TEMPLATE_FILE_BUFFER_MISSING", "Template file buffer is missing or corrupted in the database.");
+          }
           const zip = new PizZip(bytes);
           const doc = new Docxtemplater(zip, { paragraphLoop: true, linebreaks: true });
           attachDocxImageModule(doc);
           await maybeHydrateFirmLogoBuffer(input as any);
           doc.render(input);
-        } catch {
+        } catch (err) {
+          console.error(err);
           renderable = false;
+          const syntaxErrors = extractDocxSyntaxErrors(err);
+          renderError = {
+            message: isDocxSyntaxError(err)
+              ? "The document template contains invalid variable tags. Please check for unclosed brackets or typos."
+              : "Template preview failed",
+            details: err instanceof Error ? err.message : String(err ?? ""),
+            syntaxErrors: syntaxErrors ?? undefined,
+          };
         }
         const resp = {
           resolvedVariables: preview.resolvedVariables,
@@ -7130,6 +7208,7 @@ router.post("/cases/:caseId/documents/preview", requireAuth, requireFirmUser, re
             placeholdersCount: placeholders.length,
             usedMode: preview.usedMode,
             missingRequiredCount: preview.missingRequiredVariables.length,
+            renderError,
           },
         };
         await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: renderable ? "documents.preview" : "documents.preview.failed", entityType: "document_template", entityId: templateId, detail: `caseId=${caseId} mode=${preview.usedMode} applicable=${applicabilityResult.applicable} bypass=${bypass} clauses=${clauseRefs.length} target=${insertionTarget ?? ""}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
@@ -7200,6 +7279,9 @@ router.post("/cases/:caseId/documents/preview", requireAuth, requireFirmUser, re
     };
 
     let bytes = await downloadPrivateObjectBytes(obj);
+    if (!Buffer.isBuffer(bytes) || bytes.length === 0) {
+      throw new DocumentGenerationError(400, "TEMPLATE_FILE_BUFFER_MISSING", "Template file buffer is missing or corrupted in the database.");
+    }
     const placeholders =
       ext === "docx" ? detectDocxVariables(bytes)
       : ext === "pdf" ? extractPdfMappingPlaceholders((doc as any).pdf_mappings)
@@ -7226,6 +7308,7 @@ router.post("/cases/:caseId/documents/preview", requireAuth, requireFirmUser, re
       : ext === "docx" ? "docx"
       : "docx";
     let renderable = ext === "docx";
+    let renderError: { message: string; details?: string; syntaxErrors?: unknown } | null = null;
     if (ext === "docx") {
       let input: Record<string, unknown> = preview.usedMode === "bindings" ? preview.resolvedVariables : (context as any);
       if (clauseRefs.length > 0) {
@@ -7263,13 +7346,25 @@ router.post("/cases/:caseId/documents/preview", requireAuth, requireFirmUser, re
         input = applied.data;
       }
       try {
+        if (!Buffer.isBuffer(bytes) || bytes.length === 0) {
+          throw new DocumentGenerationError(400, "TEMPLATE_FILE_BUFFER_MISSING", "Template file buffer is missing or corrupted in the database.");
+        }
         const zip = new PizZip(bytes);
         const d = new Docxtemplater(zip, { paragraphLoop: true, linebreaks: true });
         attachDocxImageModule(d);
         await maybeHydrateFirmLogoBuffer(input as any);
         d.render(input);
-      } catch {
+      } catch (err) {
+        console.error(err);
         renderable = false;
+        const syntaxErrors = extractDocxSyntaxErrors(err);
+        renderError = {
+          message: isDocxSyntaxError(err)
+            ? "The document template contains invalid variable tags. Please check for unclosed brackets or typos."
+            : "Template preview failed",
+          details: err instanceof Error ? err.message : String(err ?? ""),
+          syntaxErrors: syntaxErrors ?? undefined,
+        };
       }
     }
     const caseDocs = await queryRows(r, sql`
@@ -7354,6 +7449,7 @@ router.post("/cases/:caseId/documents/preview", requireAuth, requireFirmUser, re
         placeholdersCount: placeholders.length,
         usedMode: preview.usedMode,
         missingRequiredCount: preview.missingRequiredVariables.length,
+        renderError,
       },
     });
   } catch (err: unknown) {
@@ -7366,6 +7462,23 @@ router.post("/cases/:caseId/documents/preview", requireAuth, requireFirmUser, re
     if (err instanceof ObjectNotFoundError) {
       await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.preview.failed", entityType: "case", entityId: caseId, detail: `code=FILE_NOT_FOUND`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
       res.status(404).json({ error: "Template file not found", code: "FILE_NOT_FOUND" });
+      return;
+    }
+    console.error(err);
+    if (err instanceof DocumentGenerationError) {
+      await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.preview.failed", entityType: "case", entityId: caseId, detail: `code=${err.code}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+      res.status(err.statusCode).json({ error: err.message, code: err.code, ...(err.payload ? err.payload : {}) });
+      return;
+    }
+    if (isDocxSyntaxError(err)) {
+      const syntaxErrors = extractDocxSyntaxErrors(err);
+      await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.preview.failed", entityType: "case", entityId: caseId, detail: `code=TEMPLATE_PREVIEW_FAILED`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+      res.status(422).json({
+        error: "The document template contains invalid variable tags. Please check for unclosed brackets or typos.",
+        code: "TEMPLATE_PREVIEW_FAILED",
+        details: err instanceof Error ? err.message : String(err ?? ""),
+        syntaxErrors,
+      });
       return;
     }
     logger.error({ err, path: req.path, firmId: req.firmId, userId: req.userId, caseId }, "[documents] preview_failed");

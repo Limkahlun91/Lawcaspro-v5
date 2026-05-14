@@ -12,6 +12,7 @@ import { useToast } from "@/hooks/use-toast";
 import { toastError } from "@/lib/toast-error";
 import { Copy, Plus, Trash2, Pencil } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { VariableDictionaryPanel } from "@/components/document-automation/variable-dictionary";
 
 type VariableDef = {
   id: number;
@@ -54,29 +55,6 @@ export default function ClausesSettingsPage() {
 
   const clauses = Array.isArray(clausesQuery.data?.data) ? clausesQuery.data!.data : [];
   const vars = Array.isArray(varsQuery.data) ? varsQuery.data : [];
-
-  const inlineVars = useMemo(
-    () => vars.filter((v) => typeof v.key === "string" && v.key.endsWith("_inline")).slice().sort((a, b) => String(a.key).localeCompare(String(b.key))),
-    [vars]
-  );
-
-  const varsByCategory = useMemo(() => {
-    const m = new Map<string, VariableDef[]>();
-    for (const v of vars) {
-      if (typeof v.key === "string" && v.key.endsWith("_inline")) continue;
-      const cat = String(v.category ?? "General") || "General";
-      const list = m.get(cat) ?? [];
-      list.push(v);
-      m.set(cat, list);
-    }
-    for (const [k, list] of m.entries()) {
-      list.sort((a, b) => String(a.key).localeCompare(String(b.key)));
-      m.set(k, list);
-    }
-    return m;
-  }, [vars]);
-
-  const categories = useMemo(() => Array.from(varsByCategory.keys()).sort((a, b) => a.localeCompare(b)), [varsByCategory]);
 
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editingId, setEditingId] = useState<number | null>(null);
@@ -150,10 +128,6 @@ export default function ClausesSettingsPage() {
     } catch (err) {
       toastError(toast, err, "Copy failed");
     }
-  }
-
-  function insertVariable(key: string) {
-    insertText(`{{${key}}}`);
   }
 
   function insertText(token: string) {
@@ -293,108 +267,18 @@ export default function ClausesSettingsPage() {
                   <div className="text-sm font-semibold text-slate-900">Variable Dictionary</div>
                   <div className="text-xs text-slate-500">Click to insert</div>
                 </div>
-                <div className="p-3 space-y-4 overflow-y-auto min-h-0">
-                  <div className="space-y-2">
-                    <div className="text-[11px] font-semibold text-slate-600 uppercase tracking-wider">Parties (Formatted)</div>
-                    <div className="space-y-1">
-                      {inlineVars.length === 0 ? (
-                        <div className="text-sm text-slate-500">No formatted party variables.</div>
-                      ) : (
-                        inlineVars.map((v) => (
-                          <button
-                            key={v.key}
-                            type="button"
-                            className={cn("w-full text-left rounded-md border border-slate-200 px-2 py-1.5 hover:bg-slate-50")}
-                            onClick={() => insertVariable(v.key)}
-                          >
-                            <div className="text-xs font-medium text-slate-900 truncate">{v.label || v.key}</div>
-                            <div className="text-[10px] text-slate-500 font-mono truncate">{"{{"}{v.key}{"}}"}</div>
-                          </button>
-                        ))
-                      )}
-                    </div>
-                  </div>
-
-                  <div className="space-y-2">
-                    <div className="text-[11px] font-semibold text-slate-600 uppercase tracking-wider">Dynamic Blocks (Looping)</div>
-                    <div className="text-[11px] text-slate-500">
-                      Tip: Wrap your signature blocks with these tags. The system will automatically duplicate the content inside based on the actual number of people.
-                    </div>
-                    <div className="space-y-1">
-                      {[
-                        { label: "Purchasers Loop Start", value: "{#purchasers}" },
-                        { label: "Purchasers Loop End", value: "{/purchasers}" },
-                        { label: "Borrowers Loop Start", value: "{#borrowers}" },
-                        { label: "Borrowers Loop End", value: "{/borrowers}" },
-                        { label: "Vendors Loop Start", value: "{#vendors}" },
-                        { label: "Vendors Loop End", value: "{/vendors}" },
-                      ].map((x) => (
-                        <button
-                          key={x.value}
-                          type="button"
-                          className={cn("w-full text-left rounded-md border border-slate-200 px-2 py-1.5 hover:bg-slate-50")}
-                          onClick={() => insertText(x.value)}
-                        >
-                          <div className="text-xs font-medium text-slate-900 truncate">{x.label}</div>
-                          <div className="text-[10px] text-slate-500 font-mono truncate">{x.value}</div>
-                          <div className="text-[10px] text-slate-400 truncate">Use for multi-person signature blocks.</div>
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-
-                  <div className="space-y-2">
-                    <div className="text-[11px] font-semibold text-slate-600 uppercase tracking-wider">Ready-to-use Snippets</div>
-                    <div className="text-[11px] text-slate-500">Copy and paste these blocks into Word. New lines and dotted lines are preserved.</div>
-                    {[
-                      {
-                        title: "Buyer Signature Block (買家簽名欄)",
-                        value: `{#purchasers}\n...................................................\n{{name}}\n(NRIC NO.: {{nric}})\n\n{/purchasers}\n`,
-                      },
-                      {
-                        title: "Borrower Signature Block (借貸人簽名欄)",
-                        value: `{#borrowers}\n...................................................\n{{name}}\n(NRIC NO.: {{ic_no}})\n\n{/borrowers}\n`,
-                      },
-                    ].map((s) => (
-                      <div key={s.title} className="rounded-md border border-slate-200 bg-white">
-                        <div className="flex items-start justify-between gap-2 px-2 py-1.5 border-b border-slate-100">
-                          <div className="text-xs font-medium text-slate-900">{s.title}</div>
-                          <Button variant="outline" size="sm" onClick={() => copy(s.value)}>Copy Block</Button>
-                        </div>
-                        <pre className="p-2 text-[11px] leading-5 font-mono text-slate-700 whitespace-pre-wrap bg-slate-50 rounded-b-md">
-                          <code>{s.value}</code>
-                        </pre>
-                      </div>
-                    ))}
-                  </div>
-
+                <div className="p-3 overflow-y-auto min-h-0">
                   {varsQuery.isLoading ? (
                     <div className="text-sm text-slate-500">Loading variables...</div>
                   ) : varsQuery.isError ? (
                     <div className="text-sm text-red-600">Failed to load variables.</div>
                   ) : (
-                    categories.map((cat) => {
-                      const items = varsByCategory.get(cat) ?? [];
-                      if (!items.length) return null;
-                      return (
-                        <div key={cat} className="space-y-2">
-                          <div className="text-[11px] font-semibold text-slate-600 uppercase tracking-wider">{cat}</div>
-                          <div className="space-y-1">
-                            {items.map((v) => (
-                              <button
-                                key={v.key}
-                                type="button"
-                                className={cn("w-full text-left rounded-md border border-slate-200 px-2 py-1.5 hover:bg-slate-50")}
-                                onClick={() => insertVariable(v.key)}
-                              >
-                                <div className="text-xs font-medium text-slate-900 truncate">{v.label || v.key}</div>
-                                <div className="text-[10px] text-slate-500 font-mono truncate">{"{{"}{v.key}{"}}"}</div>
-                              </button>
-                            ))}
-                          </div>
-                        </div>
-                      );
-                    })
+                    <VariableDictionaryPanel
+                      variables={vars}
+                      mode="insert"
+                      onInsert={insertText}
+                      onCopy={copy}
+                    />
                   )}
                 </div>
               </div>

@@ -187,12 +187,13 @@ export const bankTransactionsTable = pgTable("bank_transactions", {
   withdrawal: numeric("withdrawal", { precision: 12, scale: 2 }),
   deposit: numeric("deposit", { precision: 12, scale: 2 }),
   balance: numeric("balance", { precision: 12, scale: 2 }),
-  isExportedToAutocount: boolean("is_exported_to_autocount").notNull().default(false),
+  isExported: boolean("is_exported").notNull().default(false),
+  exportedAt: timestamp("exported_at", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow().$onUpdate(() => new Date()),
 }, (t) => ({
   firmDateIdx: index("idx_bank_transactions_firm_date").on(t.firmId, t.transactionDate),
-  exportIdx: index("idx_bank_transactions_export").on(t.firmId, t.isExportedToAutocount),
+  exportIdx: index("idx_bank_transactions_export").on(t.firmId, t.isExported),
   firmAccountIdx: index("idx_bank_transactions_firm_account").on(t.firmId, t.bankAccountId),
   firmCaseIdx: index("idx_bank_transactions_firm_case").on(t.firmId, t.caseId),
 }));

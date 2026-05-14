@@ -16,6 +16,7 @@ import { apiFetchBlob, apiFetchJson } from "@/lib/api-client";
 import { downloadBlob } from "@/lib/download";
 import { toastError } from "@/lib/toast-error";
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
+import { VariableDictionaryPanel } from "@/components/document-automation/variable-dictionary";
 
 interface SystemDoc {
   id: number;
@@ -162,22 +163,6 @@ function VariableDictionarySheet() {
   const vars = Array.isArray(varsQuery.data) ? varsQuery.data : [];
   const clauses = Array.isArray(clausesQuery.data?.data) ? clausesQuery.data!.data : [];
 
-  const inlineVars = vars
-    .filter((v) => typeof v.key === "string" && v.key.endsWith("_inline"))
-    .slice()
-    .sort((a, b) => String(a.key).localeCompare(String(b.key)));
-
-  const varsByCategory = new Map<string, VariableDef[]>();
-  for (const v of vars) {
-    if (typeof v.key === "string" && v.key.endsWith("_inline")) continue;
-    const cat = String(v.category ?? "General") || "General";
-    const list = varsByCategory.get(cat) ?? [];
-    list.push(v);
-    varsByCategory.set(cat, list);
-  }
-
-  const categories = Array.from(varsByCategory.keys()).sort((a, b) => a.localeCompare(b));
-
   async function copy(text: string) {
     try {
       await navigator.clipboard.writeText(text);
@@ -198,136 +183,20 @@ function VariableDictionarySheet() {
           <SheetDescription className="sr-only">Copy variables and custom clauses placeholders</SheetDescription>
         </SheetHeader>
 
-        <div className="mt-5 space-y-6">
-          <div className="space-y-2">
-            <div className="text-xs font-semibold text-slate-600 uppercase tracking-wider">Parties (Formatted)</div>
-            <div className="rounded-md border border-slate-200 bg-white divide-y divide-slate-100">
-              {inlineVars.length === 0 ? (
-                <div className="px-3 py-3 text-sm text-slate-500">No formatted party variables.</div>
-              ) : (
-                inlineVars.map((v) => (
-                  <div key={v.key} className="flex items-center justify-between gap-3 px-3 py-2">
-                    <div className="min-w-0">
-                      <div className="text-sm font-medium text-slate-900 truncate">{v.label || v.key}</div>
-                      <div className="text-[11px] text-slate-500 font-mono truncate">{"{{"}{v.key}{"}}"}</div>
-                    </div>
-                    <Button variant="outline" size="icon" onClick={() => copy(`{{${v.key}}}`)} aria-label="Copy variable">
-                      <Copy className="w-4 h-4" />
-                    </Button>
-                  </div>
-                ))
-              )}
-            </div>
-          </div>
-
-          <div className="space-y-2">
-            <div className="text-xs font-semibold text-slate-600 uppercase tracking-wider">Dynamic Blocks (Looping)</div>
-            <div className="text-xs text-slate-500">
-              Tip: Wrap your signature blocks with these tags. The system will automatically duplicate the content inside based on the actual number of people.
-            </div>
-            <div className="rounded-md border border-slate-200 bg-white divide-y divide-slate-100">
-              {[
-                { label: "Purchasers Loop Start", value: "{#purchasers}", hint: "買家簽名欄/迴圈 起點" },
-                { label: "Purchasers Loop End", value: "{/purchasers}", hint: "買家簽名欄/迴圈 終點" },
-                { label: "Borrowers Loop Start", value: "{#borrowers}", hint: "借貸人簽名欄/迴圈 起點" },
-                { label: "Borrowers Loop End", value: "{/borrowers}", hint: "借貸人簽名欄/迴圈 終點" },
-                { label: "Vendors Loop Start", value: "{#vendors}", hint: "賣家簽名欄/迴圈 起點" },
-                { label: "Vendors Loop End", value: "{/vendors}", hint: "賣家簽名欄/迴圈 終點" },
-              ].map((x) => (
-                <div key={x.value} className="flex items-center justify-between gap-3 px-3 py-2">
-                  <div className="min-w-0">
-                    <div className="text-sm font-medium text-slate-900 truncate">{x.label}</div>
-                    <div className="text-[11px] text-slate-500 font-mono truncate">{x.value}</div>
-                    <div className="text-[11px] text-slate-400 truncate">{x.hint}</div>
-                  </div>
-                  <Button variant="outline" size="icon" onClick={() => copy(x.value)} aria-label="Copy tag">
-                    <Copy className="w-4 h-4" />
-                  </Button>
-                </div>
-              ))}
-            </div>
-          </div>
-
-          <div className="space-y-2">
-            <div className="text-xs font-semibold text-slate-600 uppercase tracking-wider">Ready-to-use Snippets</div>
-            <div className="text-xs text-slate-500">
-              Copy and paste these blocks into Word. New lines and dotted lines are preserved.
-            </div>
-            {[
-              {
-                title: "Buyer Signature Block (買家簽名欄)",
-                value: `{#purchasers}\n...................................................\n{{name}}\n(NRIC NO.: {{nric}})\n\n{/purchasers}\n`,
-              },
-              {
-                title: "Borrower Signature Block (借貸人簽名欄)",
-                value: `{#borrowers}\n...................................................\n{{name}}\n(NRIC NO.: {{ic_no}})\n\n{/borrowers}\n`,
-              },
-            ].map((s) => (
-              <div key={s.title} className="rounded-md border border-slate-200 bg-white">
-                <div className="flex items-start justify-between gap-3 px-3 py-2 border-b border-slate-100">
-                  <div className="text-sm font-medium text-slate-900">{s.title}</div>
-                  <Button variant="outline" size="sm" onClick={() => copy(s.value)}>Copy Block</Button>
-                </div>
-                <pre className="p-3 text-[12px] leading-5 font-mono text-slate-700 whitespace-pre-wrap bg-slate-50 rounded-b-md">
-                  <code>{s.value}</code>
-                </pre>
-              </div>
-            ))}
-          </div>
-
+        <div className="mt-5">
           {varsQuery.isError ? (
-            <div className="text-sm text-red-600">Failed to load variables.</div>
+            <div className="text-sm text-red-600 mb-3">Failed to load variables.</div>
           ) : null}
           {clausesQuery.isError ? (
-            <div className="text-sm text-red-600">Failed to load custom clauses.</div>
+            <div className="text-sm text-red-600 mb-3">Failed to load custom clauses.</div>
           ) : null}
 
-          {categories.map((cat) => {
-            const items = (varsByCategory.get(cat) ?? []).slice().sort((a, b) => String(a.key).localeCompare(String(b.key)));
-            if (items.length === 0) return null;
-            return (
-              <div key={cat} className="space-y-2">
-                <div className="text-xs font-semibold text-slate-600 uppercase tracking-wider">{cat}</div>
-                <div className="rounded-md border border-slate-200 bg-white divide-y divide-slate-100">
-                  {items.map((v) => (
-                    <div key={v.key} className="flex items-center justify-between gap-3 px-3 py-2">
-                      <div className="min-w-0">
-                        <div className="text-sm font-medium text-slate-900 truncate">{v.label || v.key}</div>
-                        <div className="text-[11px] text-slate-500 font-mono truncate">{"{{"}{v.key}{"}}"}</div>
-                      </div>
-                      <Button variant="outline" size="icon" onClick={() => copy(`{{${v.key}}}`)} aria-label="Copy variable">
-                        <Copy className="w-4 h-4" />
-                      </Button>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            );
-          })}
-
-          <div className="space-y-2">
-            <div className="text-xs font-semibold text-slate-600 uppercase tracking-wider">Custom Clauses</div>
-            <div className="rounded-md border border-slate-200 bg-white divide-y divide-slate-100">
-              {clauses.length === 0 ? (
-                <div className="px-3 py-3 text-sm text-slate-500">No custom clauses yet.</div>
-              ) : (
-                clauses
-                  .slice()
-                  .sort((a, b) => String(a.clauseName).localeCompare(String(b.clauseName)))
-                  .map((c) => (
-                    <div key={c.id} className="flex items-center justify-between gap-3 px-3 py-2">
-                      <div className="min-w-0">
-                        <div className="text-sm font-medium text-slate-900 truncate">{c.title || c.clauseName}</div>
-                        <div className="text-[11px] text-slate-500 font-mono truncate">{"{{"}clause_{c.clauseName}{"}}"}</div>
-                      </div>
-                      <Button variant="outline" size="icon" onClick={() => copy(`{{clause_${c.clauseName}}}`)} aria-label="Copy clause variable">
-                        <Copy className="w-4 h-4" />
-                      </Button>
-                    </div>
-                  ))
-              )}
-            </div>
-          </div>
+          <VariableDictionaryPanel
+            variables={vars}
+            customClauses={clauses.map((c) => ({ id: c.id, clauseName: c.clauseName, title: c.title }))}
+            mode="copy"
+            onCopy={copy}
+          />
         </div>
       </SheetContent>
     </Sheet>

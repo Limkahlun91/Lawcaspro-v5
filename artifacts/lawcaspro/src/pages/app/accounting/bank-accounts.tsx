@@ -18,7 +18,7 @@ type BankAccountRow = {
   account_name: string | null;
   account_no: string;
   account_type: string;
-  autocount_gl_code: string | null;
+  gl_code: string | null;
   opening_balance: string | number | null;
   opening_balance_date: string | null;
   is_default: boolean;
@@ -47,7 +47,7 @@ export default function BankAccountsTab() {
   const [bankName, setBankName] = useState("");
   const [accountNo, setAccountNo] = useState("");
   const [accountType, setAccountType] = useState("office");
-  const [autocountGlCode, setAutocountGlCode] = useState("");
+  const [glCode, setGlCode] = useState("");
   const [openingBalance, setOpeningBalance] = useState("0");
   const [openingBalanceDate, setOpeningBalanceDate] = useState<string | null>(null);
   const [isDefault, setIsDefault] = useState(false);
@@ -67,7 +67,7 @@ export default function BankAccountsTab() {
         bankName: bankName.trim(),
         accountNo: accountNo.trim(),
         accountType,
-        autocountGlCode: autocountGlCode.trim() || null,
+        glCode: glCode.trim() || null,
         openingBalance: parseMoney(openingBalance) ?? 0,
         openingBalanceDate,
         isDefault,
@@ -106,7 +106,7 @@ export default function BankAccountsTab() {
     setBankName(r?.bank_name ?? "");
     setAccountNo(r?.account_no ?? "");
     setAccountType(r?.account_type ?? "office");
-    setAutocountGlCode(r?.autocount_gl_code ?? "");
+    setGlCode(r?.gl_code ?? "");
     setOpeningBalance(String(r?.opening_balance ?? 0));
     setOpeningBalanceDate(r?.opening_balance_date ? normalizeDateOnlyFromApi(r.opening_balance_date) : null);
     setIsDefault(Boolean(r?.is_default ?? false));
@@ -122,7 +122,7 @@ export default function BankAccountsTab() {
       <div className="flex items-start justify-between gap-3 flex-wrap">
         <div>
           <h2 className="text-xl font-semibold text-slate-900">Bank Accounts</h2>
-          <p className="text-sm text-slate-500 mt-1">Configure opening balance and AutoCount GL code per account.</p>
+          <p className="text-sm text-slate-500 mt-1">Configure opening balance and GL code / account code per account.</p>
         </div>
         <Button onClick={() => { resetForm(null); setOpen(true); }} disabled={isBusy}>
           New Account
@@ -162,8 +162,8 @@ export default function BankAccountsTab() {
             </div>
 
             <div className="space-y-1.5">
-              <Label>AutoCount GL Code</Label>
-              <Input value={autocountGlCode} onChange={(e) => setAutocountGlCode(e.target.value)} placeholder="GL-1000" />
+              <Label>GL Code / Account Code</Label>
+              <Input value={glCode} onChange={(e) => setGlCode(e.target.value)} placeholder="GL-1000" />
             </div>
             <div className="space-y-1.5">
               <Label>Opening Balance</Label>
@@ -235,7 +235,7 @@ export default function BankAccountsTab() {
                           {r.account_type}
                         </span>
                       </td>
-                      <td className="py-2 px-3 font-mono text-xs">{r.autocount_gl_code ?? ""}</td>
+                      <td className="py-2 px-3 font-mono text-xs">{r.gl_code ?? ""}</td>
                       <td className="py-2 px-3 text-right font-mono text-xs">{fmtMoney(r.opening_balance ?? 0)}</td>
                       <td className="py-2 px-3 text-xs">{r.opening_balance_date ?? ""}</td>
                       <td className="py-2 px-3 text-xs">{r.is_default ? "Yes" : "No"}</td>
