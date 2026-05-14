@@ -271,6 +271,30 @@ async function tableExistsCached(r: DbConn, cache: RequestCache | undefined, ful
   return await cacheGetOrSet(cache, `tableExists:${fullName}`, async () => await tableExists(r, fullName));
 }
 
+async function columnExists(r: DbConn, params: { schema: string; table: string; column: string }): Promise<boolean> {
+  const rows = await queryRows(
+    r,
+    sql`
+      SELECT 1
+      FROM information_schema.columns
+      WHERE table_schema = ${params.schema}
+        AND table_name = ${params.table}
+        AND column_name = ${params.column}
+      LIMIT 1
+    `
+  );
+  return Boolean(rows[0]);
+}
+
+async function columnExistsCached(
+  r: DbConn,
+  cache: RequestCache | undefined,
+  params: { schema: string; table: string; column: string }
+): Promise<boolean> {
+  const key = `columnExists:${params.schema}.${params.table}.${params.column}`;
+  return await cacheGetOrSet(cache, key, async () => await columnExists(r, params));
+}
+
 async function queryRowsCached(r: DbConn, cache: RequestCache | undefined, key: string, query: ReturnType<typeof sql>): Promise<Record<string, unknown>[]> {
   return await cacheGetOrSet(cache, `queryRows:${key}`, async () => await queryRows(r, query));
 }
@@ -1945,29 +1969,66 @@ router.patch("/document-templates/:templateId", requireAuth, requireFirmUser, re
       return;
     }
 
+    const cache = createRequestCache();
+    const col = async (column: string) => await columnExistsCached(r, cache, { schema: "public", table: "document_templates", column });
+
+    const cols = {
+      folder_id: await col("folder_id"),
+      kind: await col("kind"),
+      name: await col("name"),
+      description: await col("description"),
+      document_type: await col("document_type"),
+      is_active: await col("is_active"),
+      applies_to_purchase_mode: await col("applies_to_purchase_mode"),
+      applies_to_title_type: await col("applies_to_title_type"),
+      applies_to_case_type: await col("applies_to_case_type"),
+      document_group: await col("document_group"),
+      sort_order: await col("sort_order"),
+      file_naming_rule: await col("file_naming_rule"),
+      clause_insertion_mode: await col("clause_insertion_mode"),
+      checklist_mode: await col("checklist_mode"),
+      checklist_items: await col("checklist_items"),
+      is_template_capable: await col("is_template_capable"),
+      extension: await col("extension"),
+      file_name: await col("file_name"),
+      updated_at: await col("updated_at"),
+    };
+
+    const patch: Array<ReturnType<typeof sql>> = [];
+    if (hasFolderId && cols.folder_id) patch.push(sql`folder_id = ${folderIdNum ?? null}`);
+    if (cols.kind) patch.push(sql`kind = ${effectiveKind}`);
+    if (hasName && cols.name) patch.push(sql`name = ${nameVal ?? ""}`);
+    if (hasDescription && cols.description) patch.push(sql`description = ${descriptionVal ?? null}`);
+    if (hasDocumentType && cols.document_type) patch.push(sql`document_type = ${effectiveKind === "template" ? (docTypeVal ?? "other") : "other"}`);
+    if (hasIsActive && cols.is_active) patch.push(sql`is_active = ${isActiveVal ?? true}`);
+    if (hasAppliesToPurchaseMode && cols.applies_to_purchase_mode) patch.push(sql`applies_to_purchase_mode = ${purchaseModeVal ?? null}`);
+    if (hasAppliesToTitleType && cols.applies_to_title_type) patch.push(sql`applies_to_title_type = ${titleTypeVal ?? "any"}`);
+    if (hasAppliesToCaseType && cols.applies_to_case_type) patch.push(sql`applies_to_case_type = ${caseTypeVal ?? null}`);
+    if (hasDocumentGroup && cols.document_group) patch.push(sql`document_group = ${groupVal ?? "Others"}`);
+    if (hasSortOrder && cols.sort_order) patch.push(sql`sort_order = ${sortOrderVal ?? 0}`);
+    if (hasFileNamingRule && cols.file_naming_rule) patch.push(sql`file_naming_rule = ${fileNamingRuleVal ?? null}`);
+    if (hasClauseInsertionMode && cols.clause_insertion_mode) patch.push(sql`clause_insertion_mode = ${clauseInsertionModeVal ?? null}`);
+    if (hasChecklistMode && cols.checklist_mode) patch.push(sql`checklist_mode = ${checklistModeVal ?? null}`);
+    if (hasChecklistItems && cols.checklist_items) patch.push(sql`checklist_items = ${checklistItemsVal as any}`);
+    if (cols.is_template_capable && cols.extension && cols.file_name) {
+      patch.push(sql`
+        is_template_capable = (
+          ${effectiveKind} = 'template'
+          AND LOWER(COALESCE(NULLIF(extension,''), split_part(file_name, '.', array_length(string_to_array(file_name, '.'), 1)))) = 'docx'
+        )
+      `);
+    }
+    if (cols.updated_at) patch.push(sql`updated_at = now()`);
+
+    if (patch.length === 0) {
+      res.status(400).json({ error: "No changes" });
+      return;
+    }
+
     const rows = await queryRows(
       r,
       sql`UPDATE document_templates
-          SET folder_id = CASE WHEN ${hasFolderId} THEN ${folderIdNum ?? null} ELSE folder_id END,
-              kind = ${effectiveKind},
-              name = CASE WHEN ${hasName} THEN ${nameVal ?? ""} ELSE name END,
-              description = CASE WHEN ${hasDescription} THEN ${descriptionVal ?? null} ELSE description END,
-              document_type = CASE WHEN ${hasDocumentType} THEN ${effectiveKind === "template" ? (docTypeVal ?? "other") : "other"} ELSE document_type END,
-              is_active = CASE WHEN ${hasIsActive} THEN ${isActiveVal ?? true} ELSE is_active END,
-              applies_to_purchase_mode = CASE WHEN ${hasAppliesToPurchaseMode} THEN ${purchaseModeVal ?? null} ELSE applies_to_purchase_mode END,
-              applies_to_title_type = CASE WHEN ${hasAppliesToTitleType} THEN ${titleTypeVal ?? "any"} ELSE applies_to_title_type END,
-              applies_to_case_type = CASE WHEN ${hasAppliesToCaseType} THEN ${caseTypeVal ?? null} ELSE applies_to_case_type END,
-              document_group = CASE WHEN ${hasDocumentGroup} THEN ${groupVal ?? "Others"} ELSE document_group END,
-              sort_order = CASE WHEN ${hasSortOrder} THEN ${sortOrderVal ?? 0} ELSE sort_order END,
-              file_naming_rule = CASE WHEN ${hasFileNamingRule} THEN ${fileNamingRuleVal ?? null} ELSE file_naming_rule END,
-              clause_insertion_mode = CASE WHEN ${hasClauseInsertionMode} THEN ${clauseInsertionModeVal ?? null} ELSE clause_insertion_mode END,
-              checklist_mode = CASE WHEN ${hasChecklistMode} THEN ${checklistModeVal ?? null} ELSE checklist_mode END,
-              checklist_items = CASE WHEN ${hasChecklistItems} THEN ${checklistItemsVal as any} ELSE checklist_items END,
-              is_template_capable = (
-                ${effectiveKind} = 'template'
-                AND LOWER(COALESCE(NULLIF(extension,''), split_part(file_name, '.', array_length(string_to_array(file_name, '.'), 1)))) = 'docx'
-              ),
-              updated_at = now()
+          SET ${sql.join(patch, sql`, `)}
           WHERE id = ${templateId} AND firm_id = ${req.firmId!}
           RETURNING *`
     );
@@ -1992,7 +2053,14 @@ router.patch("/document-templates/:templateId", requireAuth, requireFirmUser, re
     ).catch((err) => console.error("Update Template Error:", err));
   } catch (err) {
     console.error("Update Template Error:", err);
-    res.status(500).json({ error: "Update template failed" });
+    const code = err && typeof err === "object" ? (err as any).code : undefined;
+    const zodErrors = err && typeof err === "object" ? (err as any).errors : undefined;
+    res.status(500).json({
+      error: "Update template failed",
+      details: err instanceof Error ? err.message : String(err),
+      dbCode: typeof code === "string" ? code : undefined,
+      zodErrors: Array.isArray(zodErrors) ? zodErrors : undefined,
+    });
   }
 });
 
