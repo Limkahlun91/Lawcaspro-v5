@@ -182,7 +182,7 @@ export function milestonePresenceWhereSql(milestone: CaseMilestoneKey, presence:
   if (presence === "completed" || presence === "pending") {
     const completed = sql`EXISTS (
       SELECT 1
-      FROM ${caseWorkflowStepsTable} s
+      FROM ${caseWorkflowStepsTable}
       WHERE ${caseWorkflowStepsTable.caseId} = ${casesTable.id}
         AND ${caseWorkflowStepsTable.stepKey} = ${milestone}
         AND ${caseWorkflowStepsTable.status} = 'completed'
@@ -191,13 +191,13 @@ export function milestonePresenceWhereSql(milestone: CaseMilestoneKey, presence:
 
     const missingStep = sql`NOT EXISTS (
       SELECT 1
-      FROM ${caseWorkflowStepsTable} s
+      FROM ${caseWorkflowStepsTable}
       WHERE ${caseWorkflowStepsTable.caseId} = ${casesTable.id}
         AND ${caseWorkflowStepsTable.stepKey} = ${milestone}
     )`;
     const notCompleted = sql`EXISTS (
       SELECT 1
-      FROM ${caseWorkflowStepsTable} s
+      FROM ${caseWorkflowStepsTable}
       WHERE ${caseWorkflowStepsTable.caseId} = ${casesTable.id}
         AND ${caseWorkflowStepsTable.stepKey} = ${milestone}
         AND ${caseWorkflowStepsTable.status} <> 'completed'

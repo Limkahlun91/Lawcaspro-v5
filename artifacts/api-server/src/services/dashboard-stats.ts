@@ -177,7 +177,7 @@ export async function computeDashboardStats(r: DbConn, firmId: number): Promise<
 
   const completedWhereSql = (stepKey: CaseMilestoneKey) => sql`EXISTS (
     SELECT 1
-    FROM ${caseWorkflowStepsTable} s
+    FROM ${caseWorkflowStepsTable}
     WHERE ${caseWorkflowStepsTable.caseId} = ${casesTable.id}
       AND ${caseWorkflowStepsTable.stepKey} = ${stepKey}
       AND ${caseWorkflowStepsTable.status} = 'completed'
