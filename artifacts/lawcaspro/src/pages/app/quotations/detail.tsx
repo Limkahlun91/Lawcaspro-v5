@@ -1,11 +1,11 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useParams, useLocation } from "wouter";
 import { useGetQuotation, getGetQuotationQueryKey, getListQuotationsQueryKey, useUpdateQuotation, useDeleteQuotation, useDuplicateQuotation } from "@workspace/api-client-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { ArrowLeft, Save, Copy, Trash2, Pencil, Printer, Plus } from "lucide-react";
+import { ArrowLeft, Save, Copy, Trash2, Pencil, Download, Plus } from "lucide-react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useToast } from "@/hooks/use-toast";
 import { QueryFallback } from "@/components/query-fallback";
@@ -13,6 +13,7 @@ import { toastError } from "@/lib/toast-error";
 import { apiFetchBlob, apiFetchJson } from "@/lib/api-client";
 import { BillToBlock } from "@/components/accounting/BillToBlock";
 import { DocumentPrintStyles } from "@/components/accounting/DocumentPrintStyles";
+import { exportElementToPdf } from "@/lib/pdf-export";
 
 const DEFAULT_TAX_RATE = 8;
 
@@ -128,6 +129,8 @@ export default function QuotationDetail() {
   const [isEditing, setIsEditing] = useState(false);
   const [editData, setEditData] = useState<any>(null);
   const [editItems, setEditItems] = useState<LocalItem[]>([]);
+  const [isExporting, setIsExporting] = useState(false);
+  const pdfRef = useRef<HTMLDivElement>(null);
 
   const startEditing = () => {
     if (!quotation) return;
@@ -290,8 +293,15 @@ export default function QuotationDetail() {
     );
   };
 
-  const handlePrint = () => {
-    window.print();
+  const handleDownloadPdf = async () => {
+    if (!pdfRef.current || isEditing) return;
+    setIsExporting(true);
+    try {
+      const filename = `Quotation-${String((quotation as any)?.referenceNo ?? quotationId)}.pdf`;
+      await exportElementToPdf({ element: pdfRef.current, filename });
+    } finally {
+      setIsExporting(false);
+    }
   };
 
   if (isLoading) return <div className="py-10 text-sm text-slate-500">Loading quotation...</div>;
@@ -462,8 +472,52 @@ export default function QuotationDetail() {
     );
   };
 
+  const billToDetails = isEditing ? (Array.isArray((editData as any)?.clientDetails) ? (editData as any).clientDetails : []) : viewClientDetails;
+  const billToAddress = isEditing ? String((editData as any)?.clientAddress ?? "") : String((quotation as any).clientAddress ?? "");
+
   return (
-    <div className="space-y-6 print-doc print:space-y-3 print:bg-white print:m-0 print:p-0 print:text-sm">
+    <div className="space-y-6 min-w-0">
+      <DocumentPrintStyles />
+      <div className="flex items-start justify-between gap-3 flex-wrap print:hidden pdf-hide">
+        <div className="flex items-center gap-3">
+          <Button variant="ghost" size="sm" onClick={() => setLocation("/app/accounting?tab=quotations")}>
+            <ArrowLeft className="w-4 h-4" />
+          </Button>
+          <div>
+            <h1 className="text-2xl font-bold text-slate-900">Quotation</h1>
+            <p className="text-sm text-slate-500 mt-1">{data.clientName}</p>
+          </div>
+          <span className={`ml-3 inline-block px-2 py-0.5 rounded text-xs font-medium capitalize ${statusColors[data.status] || statusColors.draft}`}>
+            {data.status}
+          </span>
+        </div>
+        <div className="flex gap-2 flex-wrap">
+          {isEditing ? (
+            <>
+              <Button variant="outline" onClick={cancelEditing}>Cancel</Button>
+              <Button onClick={saveEdits} disabled={updateMutation.isPending} className="bg-amber-500 hover:bg-amber-600 text-white">
+                <Save className="w-4 h-4 mr-2" />
+                {updateMutation.isPending ? "Saving..." : "Save"}
+              </Button>
+            </>
+          ) : (
+            <>
+              <Button variant="outline" size="sm" onClick={handleDownloadPdf} disabled={isExporting}>
+                <Download className="w-4 h-4 mr-1" /> {isExporting ? "Generating..." : "Download PDF"}
+              </Button>
+              <Button variant="outline" size="sm" onClick={handleDuplicate} disabled={duplicateMutation.isPending || deleteMutation.isPending}>
+                <Copy className="w-4 h-4 mr-1" /> {duplicateMutation.isPending ? "Duplicating..." : "Duplicate"}
+              </Button>
+              <Button variant="outline" size="sm" onClick={startEditing} disabled={duplicateMutation.isPending || deleteMutation.isPending}><Pencil className="w-4 h-4 mr-1" /> Edit</Button>
+              <Button variant="outline" size="sm" onClick={handleDelete} disabled={deleteMutation.isPending || duplicateMutation.isPending} className="text-red-500 hover:text-red-700">
+                <Trash2 className="w-4 h-4 mr-1" /> Delete
+              </Button>
+            </>
+          )}
+        </div>
+      </div>
+
+      <div ref={pdfRef} className="space-y-6 print-doc print:space-y-3 print:bg-white print:m-0 print:p-0 print:text-sm">
       <Card className="print:shadow-none print:border-none print:bg-white print:m-0 print:p-0 print:rounded-none">
         <CardContent className="pt-6 pb-6 print:pt-0 print:pb-2 print:px-0">
           <div className="flex items-start justify-between gap-6">
@@ -492,25 +546,15 @@ export default function QuotationDetail() {
         </CardContent>
       </Card>
 
-      <div className="hidden print:block">
-        <div className="grid grid-cols-2 gap-3">
-          <div>
-            <div className="text-[10px] text-slate-500 uppercase">Bill To</div>
-            <div className="text-sm font-medium text-slate-900">
-              {viewClientDetails.length > 0 ? viewClientDetails.map((c) => c.name).join(" & ") : "—"}
-            </div>
-            {viewClientDetails.length > 0 ? (
-              <div className="mt-1 space-y-0.5">
-                {viewClientDetails.map((c) => (
-                  <div key={c.id} className="text-xs text-slate-700">
-                    {c.name}{c.tin ? ` — TIN: ${c.tin}` : ""}
-                  </div>
-                ))}
-              </div>
-            ) : null}
-            {(quotation as any).clientAddress ? <div className="text-xs text-slate-700 whitespace-pre-wrap mt-0.5">Client Address: {(quotation as any).clientAddress}</div> : null}
-            {quotation.propertyDescription ? <div className="text-xs text-slate-700">{quotation.propertyDescription}</div> : null}
-          </div>
+      <Card className="print:shadow-none print:border-none print:bg-transparent print:rounded-none">
+        <CardContent className="pt-4 pb-4 print:pt-0 print:pb-0 print:px-0">
+          <div className="grid grid-cols-2 gap-3">
+            <BillToBlock
+              clientName={data.clientName ?? null}
+              clientTin={(quotation as any).clientTin ?? null}
+              address={billToAddress || null}
+              clientDetails={billToDetails}
+            />
           <div className="text-right">
             <div className="grid gap-1 justify-end">
               <div className="flex justify-between gap-4 text-xs">
@@ -528,44 +572,8 @@ export default function QuotationDetail() {
             </div>
           </div>
         </div>
-      </div>
-
-      <div className="flex items-start justify-between gap-3 flex-wrap print:hidden">
-        <div className="flex items-center gap-3">
-          <Button variant="ghost" size="sm" onClick={() => setLocation("/app/accounting?tab=quotations")}>
-            <ArrowLeft className="w-4 h-4" />
-          </Button>
-          <div>
-            <h1 className="text-2xl font-bold text-slate-900">Quotation</h1>
-            <p className="text-sm text-slate-500 mt-1">{data.clientName}</p>
-          </div>
-          <span className={`ml-3 inline-block px-2 py-0.5 rounded text-xs font-medium capitalize ${statusColors[data.status] || statusColors.draft}`}>
-            {data.status}
-          </span>
-        </div>
-        <div className="flex gap-2 flex-wrap">
-          {isEditing ? (
-            <>
-              <Button variant="outline" onClick={cancelEditing}>Cancel</Button>
-              <Button onClick={saveEdits} disabled={updateMutation.isPending} className="bg-amber-500 hover:bg-amber-600 text-white">
-                <Save className="w-4 h-4 mr-2" />
-                {updateMutation.isPending ? "Saving..." : "Save"}
-              </Button>
-            </>
-          ) : (
-            <>
-              <Button variant="outline" size="sm" onClick={handlePrint}><Printer className="w-4 h-4 mr-1" /> Print</Button>
-              <Button variant="outline" size="sm" onClick={handleDuplicate} disabled={duplicateMutation.isPending || deleteMutation.isPending}>
-                <Copy className="w-4 h-4 mr-1" /> {duplicateMutation.isPending ? "Duplicating..." : "Duplicate"}
-              </Button>
-              <Button variant="outline" size="sm" onClick={startEditing} disabled={duplicateMutation.isPending || deleteMutation.isPending}><Pencil className="w-4 h-4 mr-1" /> Edit</Button>
-              <Button variant="outline" size="sm" onClick={handleDelete} disabled={deleteMutation.isPending || duplicateMutation.isPending} className="text-red-500 hover:text-red-700">
-                <Trash2 className="w-4 h-4 mr-1" /> Delete
-              </Button>
-            </>
-          )}
-        </div>
-      </div>
+        </CardContent>
+      </Card>
 
       <Card className="mb-6 print:mb-2 print:shadow-none print:border-none print:bg-transparent print:rounded-none">
         <CardHeader className="pb-3 print:px-0 print:pb-1">
@@ -784,12 +792,13 @@ export default function QuotationDetail() {
         </CardContent>
       </Card>
 
-      <div className="hidden print:block pt-8">
+      <div className="hidden print:block pdf-show pt-8">
         <div className="ml-auto w-[280px]">
           <div className="border-t border-black pt-2 text-xs text-slate-900 text-center">
             Authorized Signature
           </div>
         </div>
+      </div>
       </div>
     </div>
   );

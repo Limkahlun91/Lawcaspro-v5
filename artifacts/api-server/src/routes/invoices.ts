@@ -68,10 +68,21 @@ router.get("/invoices/:id", requireAuth, requireFirmUser, requirePermission("acc
         const [q] = await r.select().from(quotationsTable)
           .where(and(eq(quotationsTable.id, inv.quotationId), eq(quotationsTable.firmId, req.firmId!)));
         if (q) {
+          const rawDetails = q.clientDetails as unknown;
+          const clientDetails = Array.isArray(rawDetails)
+            ? rawDetails
+                .map((row) => (row && typeof row === "object") ? (row as Record<string, unknown>) : null)
+                .filter((row): row is Record<string, unknown> => Boolean(row))
+                .map((row) => ({
+                  name: typeof row.name === "string" ? row.name : "",
+                  tin: typeof row.tin === "string" ? row.tin : undefined,
+                }))
+                .filter((row) => Boolean(row.name))
+            : [];
           return {
             billToName: q.clientName,
-            billToAddress: (q as any).clientAddress ?? null,
-            clientDetails: (q as any).clientDetails ?? [],
+            billToAddress: q.clientAddress ?? null,
+            clientDetails,
           };
         }
       }

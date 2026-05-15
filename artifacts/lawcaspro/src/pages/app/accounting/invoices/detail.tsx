@@ -1,7 +1,7 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useParams, useLocation } from "wouter";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, Printer, CheckCircle, XCircle, Plus, AlertCircle } from "lucide-react";
+import { ArrowLeft, Download, CheckCircle, XCircle, Plus, AlertCircle } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { DateOnlyInput } from "@/components/date-only-input";
@@ -14,6 +14,7 @@ import { toastError } from "@/lib/toast-error";
 import { useReAuth } from "@/components/re-auth-dialog";
 import { BillToBlock } from "@/components/accounting/BillToBlock";
 import { DocumentPrintStyles } from "@/components/accounting/DocumentPrintStyles";
+import { exportElementToPdf } from "@/lib/pdf-export";
 
 function fmt(val: unknown) {
   return `RM ${Number(val ?? 0).toLocaleString("en-MY", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
@@ -94,6 +95,8 @@ export default function InvoiceDetail() {
   const qc = useQueryClient();
   const { wrapWithReAuth } = useReAuth();
   const [showReceipt, setShowReceipt] = useState(false);
+  const [isExporting, setIsExporting] = useState(false);
+  const pdfRef = useRef<HTMLDivElement>(null);
   const [receiptForm, setReceiptForm] = useState({
     amount: "", paymentMethod: "bank_transfer", receivedDate: new Date().toISOString().slice(0, 10), referenceNo: "",
   });
@@ -200,70 +203,20 @@ export default function InvoiceDetail() {
   const voidable = inv.status !== "paid" && inv.status !== "void";
   const canRecord = inv.status === "issued" || inv.status === "partially_paid";
 
+  const handleDownloadPdf = async () => {
+    if (!pdfRef.current) return;
+    setIsExporting(true);
+    try {
+      await exportElementToPdf({ element: pdfRef.current, filename: `Invoice-${inv.invoiceNo}.pdf` });
+    } finally {
+      setIsExporting(false);
+    }
+  };
+
   return (
-    <div className="space-y-6 min-w-0 print-doc print:space-y-3">
+    <div className="space-y-6 min-w-0">
       <DocumentPrintStyles />
-      <Card className="print:shadow-none print:border-none print:bg-transparent print:rounded-none">
-        <CardContent className="pt-6 pb-6 print:pt-0 print:pb-2">
-          <div className="flex items-start justify-between gap-6">
-            <div className="min-w-0">
-              {logoPreviewUrl ? (
-                <img src={logoPreviewUrl} alt="Firm logo" className="max-h-12 max-w-[200px] object-contain mb-2" />
-              ) : null}
-              <div className="text-lg font-bold text-slate-900">{firm?.name ?? "—"}</div>
-              {firm?.registrationNo ? <div className="text-xs text-slate-500 mt-0.5">Registration No: {firm.registrationNo}</div> : null}
-              {firm?.sstNo || firm?.stNumber ? <div className="text-xs text-slate-500">SST No: {firm?.sstNo ?? firm?.stNumber}</div> : null}
-              {firm?.tinNumber ? <div className="text-xs text-slate-500">TIN: {firm.tinNumber}</div> : null}
-              {firm?.address ? <div className="text-xs text-slate-600 mt-2 whitespace-pre-wrap">{firm.address}</div> : null}
-              {(firm?.phone || firm?.email) ? (
-                <div className="text-xs text-slate-600 mt-1">
-                  {firm?.phone ? `Tel: ${firm.phone}` : ""}
-                  {firm?.phone && firm?.email ? " · " : ""}
-                  {firm?.email ? `Email: ${firm.email}` : ""}
-                </div>
-              ) : null}
-            </div>
-            <div className="text-right">
-              <div className="text-xs text-slate-500">INVOICE</div>
-              <div className="text-2xl font-bold text-slate-900">{inv.invoiceNo}</div>
-            </div>
-          </div>
-        </CardContent>
-      </Card>
-
-      <Card className="print:shadow-none print:border-none print:bg-transparent print:rounded-none">
-        <CardContent className="pt-4 pb-4 print:pt-0 print:pb-0 print:px-0">
-          <div className="grid grid-cols-2 gap-3">
-            <BillToBlock
-              clientName={inv.billToName ?? null}
-              address={inv.billToAddress ?? null}
-              clientDetails={Array.isArray(inv.clientDetails) ? inv.clientDetails : []}
-            />
-          <div className="text-right">
-            <div className="grid gap-1 justify-end">
-              <div className="flex justify-between gap-4 text-xs">
-                <span className="text-slate-500">Invoice No</span>
-                <span className="font-mono text-slate-900">{inv.invoiceNo}</span>
-              </div>
-              <div className="flex justify-between gap-4 text-xs">
-                <span className="text-slate-500">Issued</span>
-                <span className="font-mono text-slate-900">{inv.issuedDate ?? "—"}</span>
-              </div>
-              <div className="flex justify-between gap-4 text-xs">
-                <span className="text-slate-500">Due</span>
-                <span className="font-mono text-slate-900">{inv.dueDate ?? "—"}</span>
-              </div>
-              <div className="flex justify-between gap-4 text-xs">
-                <span className="text-slate-500">Status</span>
-                <span className="font-mono text-slate-900">{String(inv.status ?? "").replace(/_/g, " ") || "—"}</span>
-              </div>
-            </div>
-          </div>
-          </div>
-        </CardContent>
-      </Card>
-
-      <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between print:hidden">
+      <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between print:hidden pdf-hide">
         <Button variant="ghost" size="sm" onClick={() => setLocation("/app/accounting?tab=invoices")} className="gap-1.5">
           <ArrowLeft className="w-4 h-4" /> Back
         </Button>
@@ -278,8 +231,8 @@ export default function InvoiceDetail() {
           </div>
         </div>
         <div className="flex gap-2 flex-wrap">
-          <Button variant="outline" size="sm" className="gap-1.5" onClick={() => window.print()}>
-            <Printer className="w-4 h-4" /> Print / Save as PDF
+          <Button variant="outline" size="sm" className="gap-1.5" onClick={handleDownloadPdf} disabled={isExporting}>
+            <Download className="w-4 h-4" /> {isExporting ? "Generating..." : "Download PDF"}
           </Button>
           {issuable && (
             <Button size="sm" className="bg-blue-600 hover:bg-blue-700 text-white gap-1.5" onClick={() => issueMut.mutate()} disabled={issueMut.isPending || voidMut.isPending}>
@@ -303,7 +256,7 @@ export default function InvoiceDetail() {
       </div>
 
       {showReceipt && (
-        <Card className="border-amber-200 bg-amber-50">
+        <Card className="border-amber-200 bg-amber-50 pdf-hide">
           <CardHeader><CardTitle className="text-base">Record Payment for {inv.invoiceNo}</CardTitle></CardHeader>
           <CardContent>
             <div className="grid grid-cols-2 gap-4">
@@ -344,7 +297,7 @@ export default function InvoiceDetail() {
       )}
 
       {/* Payment summary bar */}
-      <div className="grid grid-cols-3 gap-4 print:hidden">
+      <div className="grid grid-cols-3 gap-4 print:hidden pdf-hide">
         <Card>
           <CardContent className="pt-4 pb-4 text-center">
             <div className="text-xs text-slate-500 mb-1">Invoice Total</div>
@@ -366,6 +319,67 @@ export default function InvoiceDetail() {
           </CardContent>
         </Card>
       </div>
+
+      <div ref={pdfRef} className="space-y-6 print-doc print:space-y-3">
+      <Card className="print:shadow-none print:border-none print:bg-transparent print:rounded-none">
+        <CardContent className="pt-6 pb-6 print:pt-0 print:pb-2">
+          <div className="flex items-start justify-between gap-6">
+            <div className="min-w-0">
+              {logoPreviewUrl ? (
+                <img src={logoPreviewUrl} alt="Firm logo" className="max-h-12 max-w-[200px] object-contain mb-2" />
+              ) : null}
+              <div className="text-lg font-bold text-slate-900">{firm?.name ?? "—"}</div>
+              {firm?.registrationNo ? <div className="text-xs text-slate-500 mt-0.5">Registration No: {firm.registrationNo}</div> : null}
+              {firm?.sstNo || firm?.stNumber ? <div className="text-xs text-slate-500">SST No: {firm?.sstNo ?? firm?.stNumber}</div> : null}
+              {firm?.tinNumber ? <div className="text-xs text-slate-500">TIN: {firm.tinNumber}</div> : null}
+              {firm?.address ? <div className="text-xs text-slate-600 mt-2 whitespace-pre-wrap">{firm.address}</div> : null}
+              {(firm?.phone || firm?.email) ? (
+                <div className="text-xs text-slate-600 mt-1">
+                  {firm?.phone ? `Tel: ${firm.phone}` : ""}
+                  {firm?.phone && firm?.email ? " · " : ""}
+                  {firm?.email ? `Email: ${firm.email}` : ""}
+                </div>
+              ) : null}
+            </div>
+            <div className="text-right">
+              <div className="text-xs text-slate-500">TAX INVOICE</div>
+              <div className="text-2xl font-bold text-slate-900">{inv.invoiceNo}</div>
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card className="print:shadow-none print:border-none print:bg-transparent print:rounded-none">
+        <CardContent className="pt-4 pb-4 print:pt-0 print:pb-0 print:px-0">
+          <div className="grid grid-cols-2 gap-3">
+            <BillToBlock
+              clientName={inv.billToName ?? null}
+              address={inv.billToAddress ?? null}
+              clientDetails={Array.isArray(inv.clientDetails) ? inv.clientDetails : []}
+            />
+          <div className="text-right">
+            <div className="grid gap-1 justify-end">
+              <div className="flex justify-between gap-4 text-xs">
+                <span className="text-slate-500">Invoice No</span>
+                <span className="font-mono text-slate-900">{inv.invoiceNo}</span>
+              </div>
+              <div className="flex justify-between gap-4 text-xs">
+                <span className="text-slate-500">Issued</span>
+                <span className="font-mono text-slate-900">{inv.issuedDate ?? "—"}</span>
+              </div>
+              <div className="flex justify-between gap-4 text-xs">
+                <span className="text-slate-500">Due</span>
+                <span className="font-mono text-slate-900">{inv.dueDate ?? "—"}</span>
+              </div>
+              <div className="flex justify-between gap-4 text-xs">
+                <span className="text-slate-500">Status</span>
+                <span className="font-mono text-slate-900">{String(inv.status ?? "").replace(/_/g, " ") || "—"}</span>
+              </div>
+            </div>
+          </div>
+          </div>
+        </CardContent>
+      </Card>
 
       {/* Invoice line items */}
       <Card className="print:shadow-none print:border-none print:bg-transparent print:rounded-none">
@@ -439,12 +453,13 @@ export default function InvoiceDetail() {
         </Card>
       )}
 
-      <div className="hidden print:block pt-8">
+      <div className="hidden print:block pdf-show pt-8">
         <div className="ml-auto w-[280px]">
           <div className="border-t border-black pt-2 text-xs text-slate-900 text-center">
             Authorized Signature
           </div>
         </div>
+      </div>
       </div>
     </div>
   );

@@ -70,7 +70,7 @@ async function postLedger(firmId: number, caseId: number | null, opts: {
 
 // List
 router.get("/receipts", requireAuth, requireFirmUser, requirePermission("accounting", "read"), async (req: AuthRequest, res): Promise<void> => {
-  const caseId = one((req.query as any).caseId);
+  const caseId = one((req.query as { caseId?: string | string[] }).caseId);
   const conds = [eq(receiptsTable.firmId, req.firmId!)];
   if (caseId) conds.push(eq(receiptsTable.caseId, parseInt(caseId, 10)));
   const rows = await db.select().from(receiptsTable).where(and(...conds)).orderBy(desc(receiptsTable.createdAt));
@@ -95,10 +95,21 @@ router.get("/receipts/:id", requireAuth, requireFirmUser, requirePermission("acc
         const [q] = await db.select().from(quotationsTable)
           .where(and(eq(quotationsTable.id, inv.quotationId), eq(quotationsTable.firmId, req.firmId!)));
         if (q) {
+          const rawDetails = q.clientDetails as unknown;
+          const clientDetails = Array.isArray(rawDetails)
+            ? rawDetails
+                .map((row) => (row && typeof row === "object") ? (row as Record<string, unknown>) : null)
+                .filter((row): row is Record<string, unknown> => Boolean(row))
+                .map((row) => ({
+                  name: typeof row.name === "string" ? row.name : "",
+                  tin: typeof row.tin === "string" ? row.tin : undefined,
+                }))
+                .filter((row) => Boolean(row.name))
+            : [];
           return {
             billToName: q.clientName,
-            billToAddress: (q as any).clientAddress ?? null,
-            clientDetails: (q as any).clientDetails ?? [],
+            billToAddress: q.clientAddress ?? null,
+            clientDetails,
           };
         }
       }

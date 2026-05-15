@@ -1,13 +1,14 @@
 import { useParams, useLocation } from "wouter";
 import { useQuery } from "@tanstack/react-query";
-import { useEffect, useState } from "react";
-import { ArrowLeft, Printer } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { ArrowLeft, Download } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { QueryFallback } from "@/components/query-fallback";
 import { apiFetchBlob, apiFetchJson } from "@/lib/api-client";
 import { BillToBlock } from "@/components/accounting/BillToBlock";
 import { DocumentPrintStyles } from "@/components/accounting/DocumentPrintStyles";
+import { exportElementToPdf } from "@/lib/pdf-export";
 
 function fmt(val: unknown) {
   return `RM ${Number(val ?? 0).toLocaleString("en-MY", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
@@ -51,6 +52,8 @@ type ReceiptDetailResponse = {
 export default function ReceiptDetail() {
   const { id } = useParams<{ id: string }>();
   const [, setLocation] = useLocation();
+  const [isExporting, setIsExporting] = useState(false);
+  const pdfRef = useRef<HTMLDivElement>(null);
 
   const recQuery = useQuery<ReceiptDetailResponse>({
     queryKey: ["receipt", id],
@@ -92,18 +95,29 @@ export default function ReceiptDetail() {
 
   const allocations = (rec.allocations ?? []).filter((a) => (Number(a.amount) || 0) > 0);
 
+  const handleDownloadPdf = async () => {
+    if (!pdfRef.current) return;
+    setIsExporting(true);
+    try {
+      await exportElementToPdf({ element: pdfRef.current, filename: `Receipt-${rec.receiptNo}.pdf` });
+    } finally {
+      setIsExporting(false);
+    }
+  };
+
   return (
-    <div className="space-y-6 min-w-0 print-doc print:space-y-3">
+    <div className="space-y-6 min-w-0">
       <DocumentPrintStyles />
-      <div className="flex items-center justify-between gap-3 print:hidden">
+      <div className="flex items-center justify-between gap-3 print:hidden pdf-hide">
         <Button variant="ghost" size="sm" onClick={() => setLocation("/app/accounting?tab=receipts")} className="gap-1.5">
           <ArrowLeft className="w-4 h-4" /> Back
         </Button>
-        <Button variant="outline" size="sm" className="gap-1.5" onClick={() => window.print()}>
-          <Printer className="w-4 h-4" /> Print / Save as PDF
+        <Button variant="outline" size="sm" className="gap-1.5" onClick={handleDownloadPdf} disabled={isExporting}>
+          <Download className="w-4 h-4" /> {isExporting ? "Generating..." : "Download PDF"}
         </Button>
       </div>
 
+      <div ref={pdfRef} className="space-y-6 print-doc print:space-y-3">
       <Card className="print:shadow-none print:border-none print:bg-transparent print:rounded-none">
         <CardContent className="pt-6 pb-6 print:pt-0 print:pb-2">
           <div className="flex items-start justify-between gap-6">
@@ -199,12 +213,13 @@ export default function ReceiptDetail() {
         </Card>
       ) : null}
 
-      <div className="hidden print:block pt-8">
+      <div className="hidden print:block pdf-show pt-8">
         <div className="ml-auto w-[280px]">
           <div className="border-t border-black pt-2 text-xs text-slate-900 text-center">
             Authorized Signature
           </div>
         </div>
+      </div>
       </div>
     </div>
   );
