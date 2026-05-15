@@ -3,7 +3,6 @@ import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
 import { useState } from "react";
 import { useAuth } from "@/lib/auth-context";
-import { useLocation } from "wouter";
 import { useToast } from "@/hooks/use-toast";
 import { Button } from "@/components/ui/button";
 import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from "@/components/ui/form";
@@ -43,7 +42,6 @@ function requiresTotp(value: unknown): boolean {
 
 export default function Login() {
   const { login: setAuthUser } = useAuth();
-  const [, setLocation] = useLocation();
   const { toast } = useToast();
   const [showPassword, setShowPassword] = useState(false);
   const [isPending, setIsPending] = useState(false);
@@ -81,16 +79,14 @@ export default function Login() {
         setStoredAuthToken(body.token.trim());
       }
       setAuthUser(body);
-      if (body.userType === "founder") {
-        setLocation("/platform/dashboard");
-      } else {
+      const nextPath = (() => {
+        if (body.userType === "founder") return "/platform/dashboard";
         const roleName = String((body as any)?.roleName ?? "");
-        if (roleName === "Developer_User") {
-          setLocation("/developer/dashboard");
-        } else {
-          setLocation("/app/dashboard");
-        }
-      }
+        if (roleName === "Developer_User") return "/developer/dashboard";
+        return "/app/dashboard";
+      })();
+      const base = import.meta.env.BASE_URL ? String(import.meta.env.BASE_URL).replace(/\/$/, "") : "";
+      window.location.assign(`${base}${nextPath}`);
     } catch (e) {
       toastError(toast, e, "Login failed");
       setTotpStep(false);

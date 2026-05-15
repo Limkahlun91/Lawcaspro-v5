@@ -4,10 +4,26 @@ import { hasPermission } from "@/lib/permissions";
 import { Card, CardContent } from "@/components/ui/card";
 
 export function DeveloperGuard({ children }: { children: ReactNode }) {
-  const { user } = useAuth();
+  const { user, isLoading, permissionsStatus } = useAuth();
+
+  if (isLoading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-slate-50">
+        <div className="w-8 h-8 rounded-full border-4 border-amber-500 border-t-transparent animate-spin"></div>
+      </div>
+    );
+  }
 
   if (!user) return null;
   if (user.userType !== "firm_user") return null;
+
+  if (permissionsStatus === "loading") {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-slate-50">
+        <div className="w-8 h-8 rounded-full border-4 border-amber-500 border-t-transparent animate-spin"></div>
+      </div>
+    );
+  }
 
   const roleName = String((user as any)?.roleName ?? "");
   const developerId = (user as any)?.developerId ?? null;
@@ -29,4 +45,3 @@ export function DeveloperGuard({ children }: { children: ReactNode }) {
 
   return <>{children}</>;
 }
-
