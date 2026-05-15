@@ -1,4 +1,4 @@
-import { pgTable, serial, text, integer, numeric, boolean, timestamp, index } from "drizzle-orm/pg-core";
+import { pgTable, serial, text, integer, numeric, boolean, timestamp, index, jsonb } from "drizzle-orm/pg-core";
 
 export const quotationsTable = pgTable("quotations", {
   id:                      serial("id").primaryKey(),
@@ -6,6 +6,7 @@ export const quotationsTable = pgTable("quotations", {
   caseId:                  integer("case_id"),
   referenceNo:             text("reference_no").notNull(),
   clientName:              text("client_name").notNull(),
+  clientDetails:           jsonb("client_details").notNull().default([]),
   clientAddress:           text("client_address"),
   clientTin:               text("client_tin"),
   propertyDescription:     text("property_description"),

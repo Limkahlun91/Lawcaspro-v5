@@ -20,7 +20,7 @@ import { QueryFallback } from "@/components/query-fallback";
 import { useReAuth } from "@/components/re-auth-dialog";
 import { useAuth } from "@/lib/auth-context";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { CreatePaymentVoucherBody, PaymentVoucherTransitionBody, type PaymentVoucherFundStatus, type PaymentVoucherType } from "@workspace/api-zod";
+import { CreatePaymentVoucherBody, PaymentVoucherTransitionBody, type PaymentVoucherFundStatus } from "@workspace/api-zod";
 import BankAccountsTab from "./bank-accounts";
 import BankReconciliationPage from "./bank-reconciliation";
 
@@ -818,114 +818,78 @@ function PaymentVouchersTab() {
         : (roleName === "Account" || roleName === "Accounts" || roleName === "Finance" || roleName === "Accountant")
           ? "account"
           : "clerk";
-  const isFullVoucherView = roleKind === "partner" || roleKind === "account";
 
   const [markPaidOpen, setMarkPaidOpen] = useState(false);
   const [markPaidVoucherId, setMarkPaidVoucherId] = useState<number | null>(null);
   const [markPaidForm, setMarkPaidForm] = useState({ accountType: "office", paymentMethod: "bank_transfer", bankChequeRefNo: "" });
 
-  const bankAccountsQuery = useQuery({
-    queryKey: ["bank-accounts"],
-    queryFn: ({ signal }) => apiFetchJson("/accounting/bank-accounts", { signal }) as Promise<{ data?: any[] }>,
+  const todayLabel = new Date().toLocaleDateString("en-MY", { year: "numeric", month: "short", day: "2-digit" });
+
+  const [simpleForm, setSimpleForm] = useState({
+    payeeName: "",
+    beneficiaryBank: "",
+    beneficiaryAccountNo: "",
+    purpose: "",
+    isAdvance: false,
+    amount: "",
+  });
+  const [caseQueryText, setCaseQueryText] = useState("");
+  const [casePickerOpen, setCasePickerOpen] = useState(false);
+  const [selectedCases, setSelectedCases] = useState<Array<{ case_id: number; title: string }>>([]);
+
+  const caseSearchQuery = useQuery({
+    queryKey: ["accounting", "cases-search", "multi", caseQueryText],
+    queryFn: ({ signal }) =>
+      apiFetchJson(`/accounting/cases/search?query=${encodeURIComponent(caseQueryText)}`, { signal }) as Promise<{ data?: any[] }>,
     retry: false,
+    enabled: caseQueryText.trim().length >= 2 && casePickerOpen,
   });
-  const bankAccounts = Array.isArray(bankAccountsQuery.data?.data) ? bankAccountsQuery.data!.data! : [];
-
-  const [form, setForm] = useState({
-    voucherType: "external_payment" as PaymentVoucherType,
-    caseId: "",
-    targetCaseId: "",
-    bankAccountId: "",
-    targetAccountId: "",
-    payeeName: "", payeeBank: "", payeeAccountNo: "",
-    paymentMethod: "bank_transfer", accountType: "office",
-    amount: "", purpose: "", notes: "",
-    fundStatus: "client_paid" as PaymentVoucherFundStatus,
-    items: [{ description: "", itemType: "disbursement", amount: "" }],
-  });
-
-  const [sourceCaseQueryText, setSourceCaseQueryText] = useState("");
-  const [targetCaseQueryText, setTargetCaseQueryText] = useState("");
-  const [sourceCaseOpen, setSourceCaseOpen] = useState(false);
-  const [targetCaseOpen, setTargetCaseOpen] = useState(false);
-
-  const caseSearchSourceQuery = useQuery({
-    queryKey: ["accounting", "cases-search", "source", sourceCaseQueryText],
-    queryFn: ({ signal }) => apiFetchJson(`/accounting/cases/search?query=${encodeURIComponent(sourceCaseQueryText)}`, { signal }) as Promise<{ data?: any[] }>,
-    retry: false,
-    enabled: form.voucherType === "file_transfer" && sourceCaseQueryText.trim().length >= 2 && sourceCaseOpen,
-  });
-  const sourceCaseResults = Array.isArray(caseSearchSourceQuery.data?.data) ? caseSearchSourceQuery.data!.data! : [];
-
-  const caseSearchTargetQuery = useQuery({
-    queryKey: ["accounting", "cases-search", "target", targetCaseQueryText],
-    queryFn: ({ signal }) => apiFetchJson(`/accounting/cases/search?query=${encodeURIComponent(targetCaseQueryText)}`, { signal }) as Promise<{ data?: any[] }>,
-    retry: false,
-    enabled: form.voucherType === "file_transfer" && targetCaseQueryText.trim().length >= 2 && targetCaseOpen,
-  });
-  const targetCaseResults = Array.isArray(caseSearchTargetQuery.data?.data) ? caseSearchTargetQuery.data!.data! : [];
+  const caseResults = Array.isArray(caseSearchQuery.data?.data) ? caseSearchQuery.data!.data! : [];
 
   const vouchersQuery = useQuery({ queryKey: ["payment-vouchers"], queryFn: () => apiFetchJson("/payment-vouchers"), retry: false });
   const { data, isLoading } = vouchersQuery;
   const vouchers = (data ?? []) as any[];
 
-  const createMut = useMutation({
+  const createBatchMut = useMutation({
     mutationFn: async () => {
-      const derivedPayeeName = (() => {
-        if (form.voucherType === "external_payment") return form.payeeName;
-        if (form.voucherType === "file_transfer") return "Internal File Transfer";
-        if (form.voucherType === "account_transfer") return "Account Transfer";
-        return form.payeeName;
-      })();
-      const payload = {
-        voucherType: form.voucherType,
-        caseId: form.caseId ? Number(form.caseId) : null,
-        targetCaseId: form.targetCaseId ? Number(form.targetCaseId) : null,
-        bankAccountId: form.bankAccountId ? Number(form.bankAccountId) : null,
-        targetAccountId: form.targetAccountId ? Number(form.targetAccountId) : null,
-        payeeName: derivedPayeeName,
-        payeeBank: isFullVoucherView ? (form.payeeBank || null) : null,
-        payeeAccountNo: isFullVoucherView ? (form.payeeAccountNo || null) : null,
-        paymentMethod: isFullVoucherView ? form.paymentMethod : undefined,
-        accountType: isFullVoucherView ? form.accountType : undefined,
-        amount: parseFloat(form.amount),
-        purpose: form.purpose,
-        notes: form.notes || null,
-        fundStatus: form.fundStatus,
-        items: form.items
-          .filter((i) => i.description && i.amount)
-          .map((i) => ({ description: i.description, itemType: i.itemType, amount: parseFloat(i.amount) })),
+      const amount = parseFloat(simpleForm.amount);
+      if (!Number.isFinite(amount) || amount <= 0) throw new Error("Invalid amount");
+      if (!simpleForm.payeeName.trim()) throw new Error("Payee name is required");
+      if (!simpleForm.purpose.trim()) throw new Error("Purpose is required");
+      if (selectedCases.length === 0) throw new Error("Please select at least one case");
+
+      const fundStatus: PaymentVoucherFundStatus = simpleForm.isAdvance ? "request_advance" : "client_paid";
+      const bodyBase = {
+        voucherType: "external_payment" as const,
+        payeeName: simpleForm.payeeName.trim(),
+        beneficiaryBank: simpleForm.beneficiaryBank.trim() ? simpleForm.beneficiaryBank.trim() : null,
+        beneficiaryAccountNo: simpleForm.beneficiaryAccountNo.trim() ? simpleForm.beneficiaryAccountNo.trim() : null,
+        purpose: simpleForm.purpose.trim(),
+        amount,
+        fundStatus,
+        notes: null,
+        items: [{ description: simpleForm.purpose.trim(), itemType: "disbursement" as const, amount }],
       };
-      const parsed = CreatePaymentVoucherBody.safeParse(payload);
-      if (!parsed.success) throw new Error(parsed.error.message);
-      return apiFetchJson("/payment-vouchers", {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(parsed.data),
+
+      const calls = selectedCases.map((c) => {
+        const payload = { ...bodyBase, caseId: c.case_id };
+        const parsed = CreatePaymentVoucherBody.safeParse(payload);
+        if (!parsed.success) throw new Error(parsed.error.message);
+        return apiFetchJson("/payment-vouchers", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(parsed.data),
+        });
       });
+      return await Promise.all(calls);
     },
-    onSuccess: (pv: any) => {
-      qc.invalidateQueries({ queryKey: ["payment-vouchers"] });
+    onSuccess: async (rows: any[]) => {
+      await qc.invalidateQueries({ queryKey: ["payment-vouchers"] });
       setShowCreate(false);
-      setForm({
-        voucherType: "external_payment",
-        caseId: "",
-        targetCaseId: "",
-        bankAccountId: "",
-        targetAccountId: "",
-        payeeName: "",
-        payeeBank: "",
-        payeeAccountNo: "",
-        paymentMethod: "bank_transfer",
-        accountType: "office",
-        amount: "",
-        purpose: "",
-        notes: "",
-        fundStatus: "client_paid",
-        items: [{ description: "", itemType: "disbursement", amount: "" }],
-      });
-      setSourceCaseQueryText("");
-      setTargetCaseQueryText("");
-      toast({ title: isFullVoucherView ? "Payment Voucher created" : "Payment Request created", description: `${pv.voucherNo}` });
+      setSimpleForm({ payeeName: "", beneficiaryBank: "", beneficiaryAccountNo: "", purpose: "", isAdvance: false, amount: "" });
+      setCaseQueryText("");
+      setSelectedCases([]);
+      toast({ title: "Payment Vouchers created", description: `${rows.length} voucher(s) created` });
     },
     onError: (e) => toastError(toast, e, "Create failed"),
   });
@@ -948,10 +912,6 @@ function PaymentVouchersTab() {
     onError: (e) => toastError(toast, e, "Update failed"),
   });
 
-  const updateItem = (idx: number, field: string, val: string) =>
-    setForm((f) => ({ ...f, items: f.items.map((it, i) => i === idx ? { ...it, [field]: val } : it) }));
-
-  const totalFromItems = form.items.reduce((s, i) => s + (parseFloat(i.amount) || 0), 0);
   const fundStatusLabel = (v: string) => v === "request_advance" ? "Request Advance" : "Client Paid";
 
   async function printVoucher(voucherId: number): Promise<void> {
@@ -1051,263 +1011,148 @@ function PaymentVouchersTab() {
     <div className="space-y-4">
       <div className="flex justify-end">
         <Button onClick={() => setShowCreate(!showCreate)} className="bg-amber-500 hover:bg-amber-600 text-white gap-2">
-          <Plus className="w-4 h-4" /> {isFullVoucherView ? "New Payment Voucher" : "New Payment Request"}
+          <Plus className="w-4 h-4" /> New Payment Voucher
         </Button>
       </div>
 
       {showCreate && (
         <Card className="border-amber-200 bg-amber-50">
-          <CardHeader><CardTitle className="text-base">{isFullVoucherView ? "New Payment Voucher" : "New Payment Request"}</CardTitle></CardHeader>
+          <CardHeader><CardTitle className="text-base">New Payment Voucher</CardTitle></CardHeader>
           <CardContent className="space-y-4">
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              <div>
-                <label className="text-sm font-medium text-slate-700 block mb-1">Type</label>
-                <select
-                  className="w-full border border-slate-200 rounded-md px-3 py-2 text-sm bg-white"
-                  value={form.voucherType}
-                  onChange={(e) => {
-                    const next = e.target.value as PaymentVoucherType;
-                    setForm((f) => ({
-                      ...f,
-                      voucherType: next,
-                      caseId: "",
-                      targetCaseId: "",
-                      bankAccountId: "",
-                      targetAccountId: "",
-                      payeeName: next === "external_payment" ? f.payeeName : "",
-                      payeeBank: "",
-                      payeeAccountNo: "",
-                    }));
-                    setSourceCaseQueryText("");
-                    setTargetCaseQueryText("");
-                  }}
-                >
-                  <option value="external_payment">External Payment</option>
-                  <option value="file_transfer">Internal File Transfer</option>
-                  <option value="account_transfer">Account Transfer</option>
-                </select>
-              </div>
-
-              {form.voucherType === "external_payment" ? (
-                <div>
-                  <label className="text-sm font-medium text-slate-700 block mb-1">Payee Name</label>
-                  <Input placeholder="Recipient name" value={form.payeeName}
-                    onChange={(e) => setForm((f) => ({ ...f, payeeName: e.target.value }))} />
+            <>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div className="space-y-1.5">
+                  <label className="text-sm font-medium text-slate-700 block">Date of issue</label>
+                  <div className="h-10 flex items-center px-3 rounded-md border border-slate-200 bg-white text-sm text-slate-700">
+                    {todayLabel}
+                  </div>
                 </div>
-              ) : form.voucherType === "file_transfer" ? (
-                <div className="space-y-1">
-                  <label className="text-sm font-medium text-slate-700 block">Source Case</label>
+
+                <div className="space-y-1.5">
+                  <label className="text-sm font-medium text-slate-700 block">Amount (RM)</label>
+                  <Input
+                    type="number"
+                    step="0.01"
+                    placeholder="0.00"
+                    value={simpleForm.amount}
+                    onChange={(e) => setSimpleForm((f) => ({ ...f, amount: e.target.value }))}
+                  />
+                </div>
+
+                <div className="space-y-1.5 md:col-span-2">
+                  <label className="text-sm font-medium text-slate-700 block">Case Reference (multi-select)</label>
                   <Input
                     placeholder="Search case ref / client name…"
-                    value={sourceCaseQueryText}
-                    onFocus={() => setSourceCaseOpen(true)}
-                    onBlur={() => setTimeout(() => setSourceCaseOpen(false), 120)}
-                    onChange={(e) => { setSourceCaseQueryText(e.target.value); setForm((f) => ({ ...f, caseId: "" })); }}
+                    value={caseQueryText}
+                    onFocus={() => setCasePickerOpen(true)}
+                    onBlur={() => setTimeout(() => setCasePickerOpen(false), 120)}
+                    onChange={(e) => setCaseQueryText(e.target.value)}
                   />
-                  {sourceCaseOpen && sourceCaseQueryText.trim().length >= 2 && sourceCaseResults.length > 0 ? (
-                    <div className="border border-slate-200 rounded-md bg-white shadow-sm overflow-hidden">
-                      {sourceCaseResults.map((c: any) => (
+                  {selectedCases.length > 0 ? (
+                    <div className="flex flex-wrap gap-2 pt-2">
+                      {selectedCases.map((c) => (
                         <button
-                          key={String(c.case_id)}
+                          key={c.case_id}
                           type="button"
-                          className="w-full text-left px-3 py-2 text-sm hover:bg-slate-50"
-                          onMouseDown={(e) => e.preventDefault()}
-                          onClick={() => {
-                            setForm((f) => ({ ...f, caseId: String(c.case_id) }));
-                            setSourceCaseQueryText(String(c.title ?? ""));
-                            setSourceCaseOpen(false);
-                          }}
+                          className="px-2 py-1 rounded-md border border-slate-200 bg-white text-xs text-slate-700 hover:bg-slate-50"
+                          onClick={() => setSelectedCases((xs) => xs.filter((x) => x.case_id !== c.case_id))}
+                          title="Remove"
                         >
-                          {String(c.title ?? "")}
+                          {c.title} ×
                         </button>
                       ))}
                     </div>
                   ) : null}
-                </div>
-              ) : (
-                <div>
-                  <label className="text-sm font-medium text-slate-700 block mb-1">Source Bank Account</label>
-                  <select
-                    className="w-full border border-slate-200 rounded-md px-3 py-2 text-sm bg-white"
-                    value={form.bankAccountId}
-                    onChange={(e) => setForm((f) => ({ ...f, bankAccountId: e.target.value }))}
-                  >
-                    <option value="">— Select —</option>
-                    {bankAccounts.map((b: any) => (
-                      <option key={b.id} value={String(b.id)}>
-                        {(b.account_name ? `${b.account_name} • ` : "") + `${b.bank_name} ${b.account_no} (${b.account_type})`}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-              )}
-
-              {form.voucherType === "file_transfer" ? (
-                <div className="space-y-1">
-                  <label className="text-sm font-medium text-slate-700 block">Target Case</label>
-                  <Input
-                    placeholder="Search case ref / client name…"
-                    value={targetCaseQueryText}
-                    onFocus={() => setTargetCaseOpen(true)}
-                    onBlur={() => setTimeout(() => setTargetCaseOpen(false), 120)}
-                    onChange={(e) => { setTargetCaseQueryText(e.target.value); setForm((f) => ({ ...f, targetCaseId: "" })); }}
-                  />
-                  {targetCaseOpen && targetCaseQueryText.trim().length >= 2 && targetCaseResults.length > 0 ? (
-                    <div className="border border-slate-200 rounded-md bg-white shadow-sm overflow-hidden">
-                      {targetCaseResults.map((c: any) => (
-                        <button
-                          key={String(c.case_id)}
-                          type="button"
-                          className="w-full text-left px-3 py-2 text-sm hover:bg-slate-50"
-                          onMouseDown={(e) => e.preventDefault()}
-                          onClick={() => {
-                            setForm((f) => ({ ...f, targetCaseId: String(c.case_id) }));
-                            setTargetCaseQueryText(String(c.title ?? ""));
-                            setTargetCaseOpen(false);
-                          }}
-                        >
-                          {String(c.title ?? "")}
-                        </button>
-                      ))}
+                  {casePickerOpen && caseQueryText.trim().length >= 2 && caseResults.length > 0 ? (
+                    <div className="border border-slate-200 rounded-md bg-white shadow-sm overflow-hidden mt-2">
+                      {caseResults.map((c: any) => {
+                        const id = Number(c.case_id);
+                        const title = String(c.title ?? "");
+                        const already = selectedCases.some((x) => x.case_id === id);
+                        return (
+                          <button
+                            key={String(c.case_id)}
+                            type="button"
+                            className="w-full text-left px-3 py-2 text-sm hover:bg-slate-50 flex items-center justify-between gap-3"
+                            onMouseDown={(e) => e.preventDefault()}
+                            onClick={() => {
+                              if (!Number.isFinite(id) || id <= 0) return;
+                              if (already) return;
+                              setSelectedCases((xs) => [...xs, { case_id: id, title }]);
+                              setCaseQueryText("");
+                            }}
+                          >
+                            <span className="truncate">{title}</span>
+                            {already ? <span className="text-xs text-slate-400">Selected</span> : <span className="text-xs text-amber-600">Add</span>}
+                          </button>
+                        );
+                      })}
                     </div>
                   ) : null}
                 </div>
-              ) : form.voucherType === "account_transfer" ? (
-                <div>
-                  <label className="text-sm font-medium text-slate-700 block mb-1">Target Bank Account</label>
-                  <select
-                    className="w-full border border-slate-200 rounded-md px-3 py-2 text-sm bg-white"
-                    value={form.targetAccountId}
-                    onChange={(e) => setForm((f) => ({ ...f, targetAccountId: e.target.value }))}
-                  >
-                    <option value="">— Select —</option>
-                    {bankAccounts.map((b: any) => (
-                      <option key={b.id} value={String(b.id)}>
-                        {(b.account_name ? `${b.account_name} • ` : "") + `${b.bank_name} ${b.account_no} (${b.account_type})`}
-                      </option>
-                    ))}
-                  </select>
+
+                <div className="space-y-1.5">
+                  <label className="text-sm font-medium text-slate-700 block">Pay To (Payee Name)</label>
+                  <Input
+                    placeholder="Recipient / payee name"
+                    value={simpleForm.payeeName}
+                    onChange={(e) => setSimpleForm((f) => ({ ...f, payeeName: e.target.value }))}
+                  />
                 </div>
-              ) : (
-                <div />
-              )}
 
-              {isFullVoucherView ? (
-                <>
-                  {form.voucherType === "external_payment" ? (
-                    <>
-                      <div>
-                        <label className="text-sm font-medium text-slate-700 block mb-1">Payee Bank</label>
-                        <Input placeholder="e.g. Maybank" value={form.payeeBank}
-                          onChange={(e) => setForm((f) => ({ ...f, payeeBank: e.target.value }))} />
-                      </div>
-                      <div>
-                        <label className="text-sm font-medium text-slate-700 block mb-1">Account Number</label>
-                        <Input placeholder="Bank account number" value={form.payeeAccountNo}
-                          onChange={(e) => setForm((f) => ({ ...f, payeeAccountNo: e.target.value }))} />
-                      </div>
-                    </>
-                  ) : null}
-                  <div>
-                    <label className="text-sm font-medium text-slate-700 block mb-1">Payment Method</label>
-                    <select className="w-full border border-slate-200 rounded-md px-3 py-2 text-sm bg-white"
-                      value={form.paymentMethod} onChange={(e) => setForm((f) => ({ ...f, paymentMethod: e.target.value }))}>
-                      <option value="bank_transfer">Bank Transfer</option>
-                      <option value="cheque">Cheque</option>
-                      <option value="cash">Cash</option>
-                    </select>
+                <div className="space-y-1.5">
+                  <label className="text-sm font-medium text-slate-700 block">Beneficiary Bank</label>
+                  <Input
+                    placeholder="e.g. Maybank Islamic Berhad"
+                    value={simpleForm.beneficiaryBank}
+                    onChange={(e) => setSimpleForm((f) => ({ ...f, beneficiaryBank: e.target.value }))}
+                  />
+                </div>
+
+                <div className="space-y-1.5">
+                  <label className="text-sm font-medium text-slate-700 block">Beneficiary Account No.</label>
+                  <Input
+                    placeholder="Bank account number"
+                    value={simpleForm.beneficiaryAccountNo}
+                    onChange={(e) => setSimpleForm((f) => ({ ...f, beneficiaryAccountNo: e.target.value }))}
+                  />
+                </div>
+
+                <div className="space-y-1.5 md:col-span-2">
+                  <label className="text-sm font-medium text-slate-700 block">Purpose</label>
+                  <Input
+                    placeholder="Brief purpose of payment"
+                    value={simpleForm.purpose}
+                    onChange={(e) => setSimpleForm((f) => ({ ...f, purpose: e.target.value }))}
+                  />
+                </div>
+
+                <div className="space-y-1.5 md:col-span-2">
+                  <label className="text-sm font-medium text-slate-700 block">Is Advance Payment?</label>
+                  <div className="flex items-center gap-3">
+                    <input
+                      type="checkbox"
+                      checked={simpleForm.isAdvance}
+                      onChange={(e) => setSimpleForm((f) => ({ ...f, isAdvance: e.target.checked }))}
+                    />
+                    <span className={simpleForm.isAdvance ? "text-xs text-amber-700" : "text-xs text-slate-400"}>
+                      {simpleForm.isAdvance ? "If yes, partner must approve" : "—"}
+                    </span>
                   </div>
-                  <div>
-                    <label className="text-sm font-medium text-slate-700 block mb-1">Deduct From Account</label>
-                    <select className="w-full border border-slate-200 rounded-md px-3 py-2 text-sm bg-white"
-                      value={form.accountType} onChange={(e) => setForm((f) => ({ ...f, accountType: e.target.value }))}>
-                      <option value="office">Office Account</option>
-                      <option value="client">Client Account</option>
-                      <option value="trust">Trust Account</option>
-                    </select>
-                  </div>
-                </>
-              ) : null}
-              <div>
-                <label className="text-sm font-medium text-slate-700 block mb-1">Total Amount (RM)</label>
-                <Input type="number" step="0.01" placeholder="0.00" value={form.amount}
-                  onChange={(e) => setForm((f) => ({ ...f, amount: e.target.value }))} />
-                {totalFromItems > 0 && Math.abs(totalFromItems - parseFloat(form.amount || "0")) > 0.01 && (
-                  <p className="text-xs text-amber-600 mt-1">Items total: {fmt(totalFromItems)}</p>
-                )}
+                </div>
               </div>
-              <div>
-                <label className="text-sm font-medium text-slate-700 block mb-1">Fund Status</label>
-                <select
-                  className="w-full border border-slate-200 rounded-md px-3 py-2 text-sm bg-white"
-                  value={form.fundStatus}
-                  onChange={(e) => setForm((f) => ({ ...f, fundStatus: e.target.value as PaymentVoucherFundStatus }))}
+
+              <div className="flex gap-2">
+                <Button
+                  onClick={() => createBatchMut.mutate()}
+                  disabled={createBatchMut.isPending}
+                  className="bg-amber-500 hover:bg-amber-600 text-white"
                 >
-                  <option value="client_paid">Client Paid</option>
-                  <option value="request_advance">Request Advance</option>
-                </select>
-              </div>
-              <div className="md:col-span-2">
-                <label className="text-sm font-medium text-slate-700 block mb-1">Purpose</label>
-                <Input placeholder="Brief purpose of payment" value={form.purpose}
-                  onChange={(e) => setForm((f) => ({ ...f, purpose: e.target.value }))} />
-              </div>
-            </div>
-
-            <div>
-              <div className="flex items-center justify-between mb-2">
-                <label className="text-sm font-medium text-slate-700">Line Items</label>
-                <Button type="button" variant="ghost" size="sm" className="text-xs h-7"
-                  onClick={() => setForm((f) => ({ ...f, items: [...f.items, { description: "", itemType: "disbursement", amount: "" }] }))}>
-                  + Add Item
+                  {createBatchMut.isPending ? "Creating…" : "Submit"}
                 </Button>
+                <Button variant="outline" onClick={() => setShowCreate(false)} disabled={createBatchMut.isPending}>Cancel</Button>
               </div>
-              <div className="space-y-2">
-                {form.items.map((item, idx) => (
-                  <div key={idx} className="grid grid-cols-12 gap-2">
-                    <div className="col-span-6">
-                      <Input placeholder="Description" value={item.description}
-                        onChange={(e) => updateItem(idx, "description", e.target.value)} />
-                    </div>
-                    <div className="col-span-3">
-                      <select className="w-full border border-slate-200 rounded-md px-3 py-2 text-sm bg-white"
-                        value={item.itemType} onChange={(e) => updateItem(idx, "itemType", e.target.value)}>
-                        <option value="disbursement">Disbursement</option>
-                        <option value="professional_fee">Prof. Fee</option>
-                        <option value="trust_amount">Trust</option>
-                      </select>
-                    </div>
-                    <div className="col-span-3">
-                      <Input type="number" step="0.01" placeholder="Amount" value={item.amount}
-                        onChange={(e) => updateItem(idx, "amount", e.target.value)} />
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
-
-            <div className="flex gap-2">
-              {(() => {
-                const hasItems = form.items.filter((i) => i.description && i.amount).length > 0;
-                const hasAmount = Boolean(form.amount) && Number.isFinite(parseFloat(form.amount));
-                const hasPurpose = Boolean(form.purpose);
-                const typeOk =
-                  form.voucherType === "external_payment"
-                    ? Boolean(form.payeeName)
-                    : form.voucherType === "file_transfer"
-                      ? Boolean(form.caseId) && Boolean(form.targetCaseId)
-                      : Boolean(form.bankAccountId) && Boolean(form.targetAccountId);
-                const disabled = !typeOk || !hasAmount || !hasPurpose || !hasItems || createMut.isPending;
-                return (
-              <Button onClick={() => createMut.mutate()}
-                disabled={disabled}
-                className="bg-amber-500 hover:bg-amber-600 text-white">
-                {createMut.isPending ? "Creating…" : (isFullVoucherView ? "Create Voucher" : "Create Request")}
-              </Button>
-                );
-              })()}
-              <Button variant="outline" onClick={() => setShowCreate(false)}>Cancel</Button>
-            </div>
+            </>
           </CardContent>
         </Card>
       )}
@@ -1331,7 +1176,7 @@ function PaymentVouchersTab() {
                 <th className="px-4 py-3 text-left font-medium">Payee</th>
                 <th className="px-4 py-3 text-left font-medium">Purpose</th>
                 <th className="px-4 py-3 text-left font-medium">Approval</th>
-                <th className="px-4 py-3 text-left font-medium">{isFullVoucherView ? "Account" : "Fund Status"}</th>
+                <th className="px-4 py-3 text-left font-medium">Account / Fund</th>
                 <th className="px-4 py-3 text-left font-medium">Status</th>
                 <th className="px-4 py-3 text-right font-medium">Amount</th>
                 <th className="px-4 py-3 text-right font-medium">Actions</th>
@@ -1388,8 +1233,8 @@ function PaymentVouchersTab() {
                     <td className="px-4 py-3 text-slate-500 max-w-xs truncate">{pv.purpose}</td>
                     <td className="px-4 py-3"><ApprovalBadge status={String(pv.approvalStatus ?? "approved")} /></td>
                     <td className="px-4 py-3">
-                      {isFullVoucherView
-                        ? <span className="px-2 py-0.5 rounded-full text-xs bg-slate-100 text-slate-600 capitalize">{pv.accountType}</span>
+                      {pv.accountType
+                        ? <span className="px-2 py-0.5 rounded-full text-xs bg-slate-100 text-slate-600 capitalize">{String(pv.accountType)}</span>
                         : <span className="text-xs text-slate-500">{fundStatusLabel(String(pv.fundStatus ?? ""))}</span>
                       }
                     </td>

@@ -207,7 +207,11 @@ export const ListQuotationsResponse = zod.array(ListQuotationsResponseItem)
 export const CreateQuotationBody = zod.object({
   "referenceNo": zod.string(),
   "stNo": zod.string().optional(),
-  "clientName": zod.string(),
+  "clientName": zod.string().optional(),
+  "clientDetails": zod.array(zod.object({
+  "name": zod.string(),
+  "tin": zod.string().optional()
+})).optional(),
   "caseId": zod.number().optional(),
   "propertyDescription": zod.string().optional(),
   "purchasePrice": zod.string().optional(),
@@ -244,6 +248,10 @@ export const GetQuotationResponse = zod.object({
   "referenceNo": zod.string(),
   "stNo": zod.string().nullish(),
   "clientName": zod.string(),
+  "clientDetails": zod.array(zod.object({
+  "name": zod.string(),
+  "tin": zod.string().optional()
+})).optional(),
   "propertyDescription": zod.string().nullish(),
   "purchasePrice": zod.number().nullish(),
   "bankName": zod.string().nullish(),
@@ -283,6 +291,10 @@ export const UpdateQuotationBody = zod.object({
   "referenceNo": zod.string().optional(),
   "stNo": zod.string().optional(),
   "clientName": zod.string().optional(),
+  "clientDetails": zod.array(zod.object({
+  "name": zod.string(),
+  "tin": zod.string().optional()
+})).optional(),
   "caseId": zod.number().optional(),
   "propertyDescription": zod.string().optional(),
   "purchasePrice": zod.string().optional(),
@@ -1254,5 +1266,3 @@ export const GetRecentCasesResponseItem = zod.object({
   "updatedAt": zod.coerce.date()
 })
 export const GetRecentCasesResponse = zod.array(GetRecentCasesResponseItem)
-
-

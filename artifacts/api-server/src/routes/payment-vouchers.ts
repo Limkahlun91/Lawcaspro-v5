@@ -118,6 +118,8 @@ router.post("/payment-vouchers", sensitiveRateLimiter, requireAuth, requireFirmU
     payeeName,
     payeeBank,
     payeeAccountNo,
+    beneficiaryBank,
+    beneficiaryAccountNo,
     paymentMethod,
     bankAccountId,
     accountType,
@@ -143,14 +145,20 @@ router.post("/payment-vouchers", sensitiveRateLimiter, requireAuth, requireFirmU
     if (bankAccountId === targetAccountId) { res.status(400).json({ error: "targetAccountId must be different from bankAccountId" }); return; }
   }
   const initialStatus =
-    roleKind === "partner"
-      ? "pending_account"
-      : roleKind === "lawyer"
-        ? "pending_partner"
-        : "pending_lawyer";
+    (() => {
+      const isSimplified = !paymentMethod && !accountType && !bankAccountId;
+      if (isSimplified) return "pending_account";
+      return roleKind === "partner"
+        ? "pending_account"
+        : roleKind === "lawyer"
+          ? "pending_partner"
+          : "pending_lawyer";
+    })();
 
+  const effectiveFundStatus = fundStatus ?? "client_paid";
   const approvalStatus = (() => {
     if (voucherType === "account_transfer") return "pending_approval";
+    if (effectiveFundStatus === "request_advance") return "pending_approval";
     if (amount >= approvalThresholdRm()) return "pending_approval";
     return "approved";
   })();
@@ -181,20 +189,26 @@ router.post("/payment-vouchers", sensitiveRateLimiter, requireAuth, requireFirmU
     approvalStatus,
     voucherNo,
     status: initialStatus,
-    fundStatus,
+    fundStatus: effectiveFundStatus,
     payeeName,
-    payeeBank: payeeBank ?? null,
-    payeeAccountNo: payeeAccountNo ?? null,
-    paymentMethod: paymentMethod || "bank_transfer",
+    payeeBank: payeeBank ?? beneficiaryBank ?? null,
+    payeeAccountNo: payeeAccountNo ?? beneficiaryAccountNo ?? null,
+    beneficiaryBank: beneficiaryBank ?? payeeBank ?? null,
+    beneficiaryAccountNo: beneficiaryAccountNo ?? payeeAccountNo ?? null,
+    paymentMethod: paymentMethod ?? null,
     bankAccountId: bankAccountId ?? null,
-    accountType: accountType || "office",
+    accountType: accountType ?? null,
     amount: amount.toFixed(2),
     purpose,
     notes: notes ?? null,
     createdBy: req.userId!,
   }).returning();
 
-  await r.insert(paymentVoucherItemsTable).values(items.map((i, idx) => ({
+  const effectiveItems = (Array.isArray(items) && items.length > 0)
+    ? items
+    : [{ description: purpose, itemType: "disbursement", amount }];
+
+  await r.insert(paymentVoucherItemsTable).values(effectiveItems.map((i, idx) => ({
     voucherId: pv.id,
     description: i.description,
     itemType: i.itemType,

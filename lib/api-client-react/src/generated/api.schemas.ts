@@ -658,6 +658,10 @@ export interface QuotationDetail {
   referenceNo: string;
   stNo?: string | null;
   clientName: string;
+  clientDetails?: {
+    name: string;
+    tin?: string;
+  }[];
   propertyDescription?: string | null;
   purchasePrice?: number | null;
   bankName?: string | null;
@@ -687,7 +691,11 @@ export type CreateQuotationBodyItemsItem = {
 export interface CreateQuotationBody {
   referenceNo: string;
   stNo?: string;
-  clientName: string;
+  clientName?: string;
+  clientDetails?: {
+    name: string;
+    tin?: string;
+  }[];
   caseId?: number;
   propertyDescription?: string;
   purchasePrice?: string;
@@ -715,6 +723,10 @@ export interface UpdateQuotationBody {
   referenceNo?: string;
   stNo?: string;
   clientName?: string;
+  clientDetails?: {
+    name: string;
+    tin?: string;
+  }[];
   caseId?: number;
   propertyDescription?: string;
   purchasePrice?: string;
@@ -819,4 +831,3 @@ export const ListCasesOverdueDays = {
 export type GetRecentCasesParams = {
 limit?: number;
 };
-

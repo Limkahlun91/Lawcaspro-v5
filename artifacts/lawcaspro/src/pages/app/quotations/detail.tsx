@@ -15,9 +15,11 @@ import { apiFetchBlob, apiFetchJson } from "@/lib/api-client";
 const DEFAULT_TAX_RATE = 8;
 
 function calcTax(amount: number, taxCode: string, rate: number) {
-  if (taxCode === "NT" || taxCode === "ZR" || amount === 0) return { taxAmount: 0, amountInclTax: amount };
-  const taxAmount = Math.round(amount * rate) / 100;
-  return { taxAmount, amountInclTax: amount + taxAmount };
+  const code = String(taxCode || "").trim().toUpperCase();
+  const effectiveRate = (code === "Z" || code === "ZR" || code === "O" || code === "NT" || amount === 0) ? 0 : rate;
+  if (effectiveRate === 0) return { taxRate: 0, taxAmount: 0, amountInclTax: amount };
+  const taxAmount = Math.round(amount * effectiveRate) / 100;
+  return { taxRate: effectiveRate, taxAmount, amountInclTax: amount + taxAmount };
 }
 
 interface LocalItem {
@@ -46,6 +48,38 @@ type FirmSettings = {
   phone?: string | null;
   email?: string | null;
 };
+
+type ClientDetailRow = { id: string; name: string; tin: string };
+
+function genId(): string {
+  return Math.random().toString(36).slice(2, 9) + "-" + Date.now().toString(36);
+}
+
+function normalizeClientDetails(v: unknown, fallbackName: string, fallbackTin: string): ClientDetailRow[] {
+  const fromAny = (() => {
+    if (!v) return null;
+    if (Array.isArray(v)) return v;
+    if (typeof v === "string") {
+      try {
+        const parsed = JSON.parse(v);
+        return Array.isArray(parsed) ? parsed : null;
+      } catch {
+        return null;
+      }
+    }
+    return null;
+  })();
+  if (fromAny && Array.isArray(fromAny)) {
+    const rows = fromAny
+      .map((r: any) => ({ name: typeof r?.name === "string" ? r.name.trim() : "", tin: typeof r?.tin === "string" ? r.tin.trim() : "" }))
+      .filter((r) => r.name)
+      .map((r) => ({ id: genId(), ...r }));
+    if (rows.length > 0) return rows;
+  }
+  const name = fallbackName.trim();
+  if (!name) return [];
+  return [{ id: genId(), name, tin: fallbackTin.trim() }];
+}
 
 export default function QuotationDetail() {
   const { id } = useParams<{ id: string }>();
@@ -96,10 +130,14 @@ export default function QuotationDetail() {
   const startEditing = () => {
     if (!quotation) return;
     const currentTaxRate = Number((quotation as any)?.taxRate) || DEFAULT_TAX_RATE;
+    const currentClientDetails = normalizeClientDetails(
+      (quotation as any).clientDetails ?? (quotation as any).client_details,
+      String((quotation as any).clientName ?? ""),
+      String((quotation as any).clientTin ?? "")
+    );
     setEditData({
       referenceNo: quotation.referenceNo,
-      clientName: quotation.clientName,
-      clientTin: (quotation as any).clientTin || "",
+      clientDetails: currentClientDetails,
       clientAddress: (quotation as any).clientAddress || "",
       propertyDescription: quotation.propertyDescription || "",
       purchasePrice: quotation.purchasePrice ? String(quotation.purchasePrice) : "",
@@ -138,8 +176,8 @@ export default function QuotationDetail() {
     const rate = Number((editData as any)?.taxRate) || DEFAULT_TAX_RATE;
     setEditItems((prev) =>
       prev.map((item) => {
-        const { taxAmount, amountInclTax } = calcTax(item.amountExclTax, item.taxCode, rate);
-        return { ...item, taxRate: rate, taxAmount, amountInclTax };
+        const nextTax = calcTax(item.amountExclTax, item.taxCode, rate);
+        return { ...item, taxRate: nextTax.taxRate, taxAmount: nextTax.taxAmount, amountInclTax: nextTax.amountInclTax };
       })
     );
   }, [isEditing, (editData as any)?.taxRate]);
@@ -148,8 +186,17 @@ export default function QuotationDetail() {
     setEditItems(prev => prev.map(item => {
       if (item.id !== itemId) return item;
       const rate = Number((editData as any)?.taxRate) || DEFAULT_TAX_RATE;
-      const { taxAmount, amountInclTax } = calcTax(amount, item.taxCode, rate);
-      return { ...item, amountExclTax: amount, taxRate: rate, taxAmount, amountInclTax };
+      const nextTax = calcTax(amount, item.taxCode, rate);
+      return { ...item, amountExclTax: amount, taxRate: nextTax.taxRate, taxAmount: nextTax.taxAmount, amountInclTax: nextTax.amountInclTax };
+    }));
+  };
+
+  const updateItemTaxCode = (itemId: string, taxCode: string) => {
+    setEditItems(prev => prev.map(item => {
+      if (item.id !== itemId) return item;
+      const rate = Number((editData as any)?.taxRate) || DEFAULT_TAX_RATE;
+      const nextTax = calcTax(item.amountExclTax, taxCode, rate);
+      return { ...item, taxCode, taxRate: nextTax.taxRate, taxAmount: nextTax.taxAmount, amountInclTax: nextTax.amountInclTax };
     }));
   };
 
@@ -185,7 +232,7 @@ export default function QuotationDetail() {
       taxCode: item.taxCode,
       itemCategory: item.itemCategory,
       amountExclTax: item.amountExclTax,
-      taxRate: Number((editData as any)?.taxRate) || item.taxRate,
+      taxRate: item.taxRate,
       taxAmount: item.taxAmount,
       amountInclTax: item.amountInclTax,
       sortOrder: idx,
@@ -250,6 +297,11 @@ export default function QuotationDetail() {
   if (!quotation) return <div className="py-10 text-sm text-slate-500">Quotation not found</div>;
 
   const effectiveTaxRate = Number((isEditing ? (editData as any)?.taxRate : (quotation as any)?.taxRate)) || DEFAULT_TAX_RATE;
+  const viewClientDetails = normalizeClientDetails(
+    (quotation as any).clientDetails ?? (quotation as any).client_details,
+    String((quotation as any).clientName ?? ""),
+    String((quotation as any).clientTin ?? "")
+  );
 
   const items = isEditing ? editItems : (quotation.items || []).map((item: any, idx: number) => ({
     id: String(item.id || idx),
@@ -344,7 +396,18 @@ export default function QuotationDetail() {
                   </td>
                   <td className="px-3 py-1.5 text-center text-xs print:px-2 print:py-1">
                     {!isHeader ? (
-                      <span className="text-xs text-slate-700">{item.taxCode}</span>
+                      isEditing ? (
+                        <select
+                          value={item.taxCode}
+                          onChange={(e) => updateItemTaxCode(item.id, e.target.value)}
+                          className="h-7 border border-slate-200 rounded-md px-2 text-xs bg-white print:hidden"
+                        >
+                          <option value="T">T</option>
+                          <option value="Z">Z</option>
+                        </select>
+                      ) : (
+                        <span className="text-xs text-slate-700">{item.taxCode}</span>
+                      )
                     ) : ""}
                   </td>
                   <td className="px-3 py-1.5 text-right text-xs print:px-2 print:py-1">
@@ -431,8 +494,18 @@ export default function QuotationDetail() {
         <div className="grid grid-cols-2 gap-3">
           <div>
             <div className="text-[10px] text-slate-500 uppercase">Bill To</div>
-            <div className="text-sm font-medium text-slate-900">{quotation.clientName || "—"}</div>
-            {(quotation as any).clientTin ? <div className="text-xs text-slate-700 mt-0.5">Client TIN: {(quotation as any).clientTin}</div> : null}
+            <div className="text-sm font-medium text-slate-900">
+              {viewClientDetails.length > 0 ? viewClientDetails.map((c) => c.name).join(" & ") : "—"}
+            </div>
+            {viewClientDetails.length > 0 ? (
+              <div className="mt-1 space-y-0.5">
+                {viewClientDetails.map((c) => (
+                  <div key={c.id} className="text-xs text-slate-700">
+                    {c.name}{c.tin ? ` — TIN: ${c.tin}` : ""}
+                  </div>
+                ))}
+              </div>
+            ) : null}
             {(quotation as any).clientAddress ? <div className="text-xs text-slate-700 whitespace-pre-wrap mt-0.5">Client Address: {(quotation as any).clientAddress}</div> : null}
             {quotation.propertyDescription ? <div className="text-xs text-slate-700">{quotation.propertyDescription}</div> : null}
           </div>
@@ -511,13 +584,66 @@ export default function QuotationDetail() {
                   onChange={e => setEditData({ ...editData, taxRate: Number(e.target.value) || 0 })}
                 />
               </div>
-              <div>
-                <Label className="text-xs text-slate-500">Client Name</Label>
-                <Input value={editData.clientName} onChange={e => setEditData({ ...editData, clientName: e.target.value })} />
-              </div>
-              <div>
-                <Label className="text-xs text-slate-500">Client TIN Number</Label>
-                <Input value={editData.clientTin} onChange={e => setEditData({ ...editData, clientTin: e.target.value })} />
+              <div className="md:col-span-3">
+                <Label className="text-xs text-slate-500">Client Details (Name + TIN)</Label>
+                <div className="space-y-2 mt-2">
+                  {(Array.isArray(editData.clientDetails) ? editData.clientDetails : []).map((c: ClientDetailRow) => (
+                    <div key={c.id} className="grid grid-cols-1 md:grid-cols-12 gap-2">
+                      <div className="md:col-span-7">
+                        <Input
+                          value={c.name}
+                          placeholder="Name"
+                          onChange={(e) =>
+                            setEditData({
+                              ...editData,
+                              clientDetails: (editData.clientDetails as ClientDetailRow[]).map((x) => x.id === c.id ? { ...x, name: e.target.value } : x),
+                            })
+                          }
+                        />
+                      </div>
+                      <div className="md:col-span-4">
+                        <Input
+                          value={c.tin}
+                          placeholder="TIN Number"
+                          onChange={(e) =>
+                            setEditData({
+                              ...editData,
+                              clientDetails: (editData.clientDetails as ClientDetailRow[]).map((x) => x.id === c.id ? { ...x, tin: e.target.value } : x),
+                            })
+                          }
+                        />
+                      </div>
+                      <div className="md:col-span-1 flex md:justify-end">
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="icon"
+                          onClick={() =>
+                            setEditData({
+                              ...editData,
+                              clientDetails: (editData.clientDetails as ClientDetailRow[]).filter((x) => x.id !== c.id),
+                            })
+                          }
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </Button>
+                      </div>
+                    </div>
+                  ))}
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() =>
+                      setEditData({
+                        ...editData,
+                        clientDetails: [...(Array.isArray(editData.clientDetails) ? editData.clientDetails : []), { id: genId(), name: "", tin: "" }],
+                      })
+                    }
+                  >
+                    <Plus className="w-4 h-4 mr-2" /> Add Client
+                  </Button>
+                </div>
               </div>
               <div className="md:col-span-3">
                 <Label className="text-xs text-slate-500">Client Address</Label>
@@ -563,16 +689,20 @@ export default function QuotationDetail() {
                 <Label className="text-xs text-slate-500">Service Tax Rate (%)</Label>
                 <p className="text-sm font-medium">{effectiveTaxRate}%</p>
               </div>
-              <div>
-                <Label className="text-xs text-slate-500">Client Name</Label>
-                <p className="text-sm font-medium">{quotation.clientName}</p>
+              <div className="md:col-span-3">
+                <Label className="text-xs text-slate-500">Client Details</Label>
+                {viewClientDetails.length > 0 ? (
+                  <div className="mt-1 space-y-1">
+                    {viewClientDetails.map((c) => (
+                      <div key={c.id} className="text-sm font-medium">
+                        {c.name}{c.tin ? ` — TIN: ${c.tin}` : ""}
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="text-sm font-medium">{quotation.clientName}</p>
+                )}
               </div>
-              {(quotation as any).clientTin ? (
-                <div>
-                  <Label className="text-xs text-slate-500">Client TIN Number</Label>
-                  <p className="text-sm font-medium">{(quotation as any).clientTin}</p>
-                </div>
-              ) : null}
               {(quotation as any).clientAddress ? (
                 <div className="md:col-span-3">
                   <Label className="text-xs text-slate-500">Client Address</Label>

@@ -26,6 +26,8 @@ interface LineItem {
   amountInclTax: number;
 }
 
+type ClientDetailRow = { id: string; name: string; tin: string };
+
 const DEFAULT_TAX_RATE = 8;
 const TAX_RATE = DEFAULT_TAX_RATE;
 
@@ -34,9 +36,11 @@ function generateId() {
 }
 
 function calcTax(amount: number, taxCode: string, rate: number) {
-  if (taxCode === "NT" || taxCode === "ZR" || amount === 0) return { taxAmount: 0, amountInclTax: amount };
-  const taxAmount = Math.round(amount * rate) / 100;
-  return { taxAmount, amountInclTax: amount + taxAmount };
+  const code = String(taxCode || "").trim().toUpperCase();
+  const effectiveRate = (code === "Z" || code === "ZR" || code === "O" || code === "NT" || amount === 0) ? 0 : rate;
+  if (effectiveRate === 0) return { taxRate: 0, taxAmount: 0, amountInclTax: amount };
+  const taxAmount = Math.round(amount * effectiveRate) / 100;
+  return { taxRate: effectiveRate, taxAmount, amountInclTax: amount + taxAmount };
 }
 
 const DEFAULT_DISBURSEMENT_ITEMS: Omit<LineItem, "id" | "itemCategory">[] = [
@@ -121,6 +125,7 @@ function initItems(defaults: Array<Omit<LineItem, "id"> | Omit<LineItem, "id" | 
   return defaults.map((d: any) => ({
     ...d,
     id: generateId(),
+    taxCode: d.section === "disbursement" ? "Z" : (d.taxCode || "T"),
     itemCategory: d.itemCategory === "fee" || d.itemCategory === "disbursement"
       ? d.itemCategory
       : d.section === "fees"
@@ -141,9 +146,8 @@ export default function NewQuotation() {
 
   const [selectedCaseId, setSelectedCaseId] = useState<string>(prefillCaseId || "");
   const [referenceNo, setReferenceNo] = useState("");
-  const [clientName, setClientName] = useState("");
   const [clientAddress, setClientAddress] = useState("");
-  const [clientTin, setClientTin] = useState("");
+  const [clientDetails, setClientDetails] = useState<ClientDetailRow[]>([]);
   const [propertyDescription, setPropertyDescription] = useState("");
   const [purchasePrice, setPurchasePrice] = useState("");
   const [bankName, setBankName] = useState("");
@@ -165,7 +169,7 @@ export default function NewQuotation() {
 
   useEffect(() => {
     setClientAddress("");
-    setClientTin("");
+    setClientDetails([]);
   }, [selectedCaseId]);
 
   useEffect(() => {
@@ -174,7 +178,11 @@ export default function NewQuotation() {
       .map((p) => p.clientName)
       .filter(Boolean)
       .join(" & ");
-    if (purchaserNames) setClientName(purchaserNames);
+    const purchaserRows = (caseDetail.purchasers || [])
+      .map((p) => String(p.clientName ?? "").trim())
+      .filter(Boolean)
+      .map((name) => ({ id: generateId(), name, tin: "" }));
+    if (purchaserRows.length > 0) setClientDetails(purchaserRows);
 
     const propParts = [caseDetail.projectName].filter(Boolean).join(", ");
     if (propParts) setPropertyDescription(propParts);
@@ -194,13 +202,6 @@ export default function NewQuotation() {
   useEffect(() => {
     if (!primaryClient) return;
     setClientAddress((prev) => prev || String((primaryClient as any)?.address ?? ""));
-    const tin =
-      (primaryClient as any)?.tinNumber ??
-      (primaryClient as any)?.tin_number ??
-      (primaryClient as any)?.taxNumber ??
-      (primaryClient as any)?.tax_number ??
-      "";
-    setClientTin((prev) => prev || String(tin ?? ""));
   }, [primaryClient]);
 
   const [disbursementItems, setDisbursementItems] = useState<LineItem[]>(() => initItems(DEFAULT_DISBURSEMENT_ITEMS));
@@ -214,8 +215,8 @@ export default function NewQuotation() {
   useEffect(() => {
     const recalc = (items: LineItem[]): LineItem[] =>
       items.map((item) => {
-        const { taxAmount, amountInclTax } = calcTax(item.amountExclTax, item.taxCode, taxRate);
-        return { ...item, taxRate, taxAmount, amountInclTax };
+        const nextTax = calcTax(item.amountExclTax, item.taxCode, taxRate);
+        return { ...item, taxRate: nextTax.taxRate, taxAmount: nextTax.taxAmount, amountInclTax: nextTax.amountInclTax };
       });
     setDisbursementItems(recalc);
     setFeesItems(recalc);
@@ -230,8 +231,8 @@ export default function NewQuotation() {
   ) => {
     setItems(prev => prev.map(item => {
       if (item.id !== itemId) return item;
-      const { taxAmount, amountInclTax } = calcTax(amount, item.taxCode, taxRate);
-      return { ...item, amountExclTax: amount, taxRate, taxAmount, amountInclTax };
+      const nextTax = calcTax(amount, item.taxCode, taxRate);
+      return { ...item, amountExclTax: amount, taxRate: nextTax.taxRate, taxAmount: nextTax.taxAmount, amountInclTax: nextTax.amountInclTax };
     }));
   }, [taxRate]);
 
@@ -242,8 +243,8 @@ export default function NewQuotation() {
   ) => {
     setItems(prev => prev.map(item => {
       if (item.id !== itemId) return item;
-      const { taxAmount, amountInclTax } = calcTax(item.amountExclTax, taxCode, taxRate);
-      return { ...item, taxCode, taxRate, taxAmount, amountInclTax };
+      const nextTax = calcTax(item.amountExclTax, taxCode, taxRate);
+      return { ...item, taxCode, taxRate: nextTax.taxRate, taxAmount: nextTax.taxAmount, amountInclTax: nextTax.amountInclTax };
     }));
   }, [taxRate]);
 
@@ -294,8 +295,9 @@ export default function NewQuotation() {
   const formatRM = (v: number) => `RM ${v.toFixed(2)}`;
 
   const handleSubmit = () => {
-    if (!referenceNo.trim() || !clientName.trim()) {
-      toast({ title: "Reference number and client name are required", variant: "destructive" });
+    const hasClient = clientDetails.some((c) => c.name.trim());
+    if (!referenceNo.trim() || !hasClient) {
+      toast({ title: "Reference number and client details are required", variant: "destructive" });
       return;
     }
 
@@ -313,7 +315,7 @@ export default function NewQuotation() {
       taxCode: item.taxCode,
       itemCategory: item.itemCategory,
       amountExclTax: item.amountExclTax,
-      taxRate,
+      taxRate: item.taxRate,
       taxAmount: item.taxAmount,
       amountInclTax: item.amountInclTax,
       sortOrder: idx,
@@ -323,9 +325,10 @@ export default function NewQuotation() {
       {
         data: {
           referenceNo,
-          clientName,
           clientAddress: clientAddress || undefined,
-          clientTin: clientTin || undefined,
+          clientDetails: clientDetails
+            .map((c) => ({ name: c.name.trim(), tin: c.tin.trim() || undefined }))
+            .filter((c) => c.name),
           caseId: selectedCaseId ? parseInt(selectedCaseId) : undefined,
           propertyDescription: propertyDescription || undefined,
           purchasePrice: purchasePrice || undefined,
@@ -408,13 +411,49 @@ export default function NewQuotation() {
                 placeholder="8"
               />
             </div>
-            <div>
-              <Label className="text-xs text-slate-500">Client Name *</Label>
-              <Input value={clientName} onChange={e => setClientName(e.target.value)} placeholder="Client name" />
-            </div>
-            <div>
-              <Label className="text-xs text-slate-500">Client TIN Number</Label>
-              <Input value={clientTin} onChange={e => setClientTin(e.target.value)} placeholder="TIN number" />
+            <div className="md:col-span-3">
+              <Label className="text-xs text-slate-500">Client Details (Name + TIN)</Label>
+              <div className="space-y-2 mt-2">
+                {clientDetails.map((c) => (
+                  <div key={c.id} className="grid grid-cols-1 md:grid-cols-12 gap-2">
+                    <div className="md:col-span-7">
+                      <Input
+                        value={c.name}
+                        placeholder="Name"
+                        onChange={(e) => setClientDetails((xs) => xs.map((x) => x.id === c.id ? { ...x, name: e.target.value } : x))}
+                      />
+                    </div>
+                    <div className="md:col-span-4">
+                      <Input
+                        value={c.tin}
+                        placeholder="TIN Number"
+                        onChange={(e) => setClientDetails((xs) => xs.map((x) => x.id === c.id ? { ...x, tin: e.target.value } : x))}
+                      />
+                    </div>
+                    <div className="md:col-span-1 flex md:justify-end">
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="icon"
+                        onClick={() => setClientDetails((xs) => xs.filter((x) => x.id !== c.id))}
+                      >
+                        <Trash2 className="w-4 h-4" />
+                      </Button>
+                    </div>
+                  </div>
+                ))}
+                {clientDetails.length === 0 ? (
+                  <div className="text-xs text-slate-500">Select a case to auto-fill purchasers, or add clients manually.</div>
+                ) : null}
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setClientDetails((xs) => [...xs, { id: generateId(), name: "", tin: "" }])}
+                >
+                  <Plus className="w-4 h-4 mr-2" /> Add Client
+                </Button>
+              </div>
             </div>
             <div className="md:col-span-3">
               <Label className="text-xs text-slate-500">Client Address</Label>
@@ -497,7 +536,16 @@ export default function NewQuotation() {
                               className="h-8"
                             />
                           </td>
-                          <td className="px-3 py-2 text-center text-xs text-slate-700">{item.taxCode}</td>
+                        <td className="px-3 py-2 text-center">
+                          <select
+                            value={item.taxCode}
+                            onChange={(e) => updateItemTaxCode(setAttachmentItems, item.id, e.target.value)}
+                            className="h-8 border border-slate-200 rounded-md px-2 text-xs bg-white"
+                          >
+                            <option value="T">T</option>
+                            <option value="Z">Z</option>
+                          </select>
+                        </td>
                           <td className="px-3 py-2">
                             <Input
                               type="number"
@@ -567,7 +615,16 @@ export default function NewQuotation() {
                           {item.description}
                         </td>
                         <td className="px-3 py-1.5 text-center">
-                          {!isHeader ? <span className="text-xs text-slate-700">{item.taxCode}</span> : null}
+                          {!isHeader ? (
+                            <select
+                              value={item.taxCode}
+                              onChange={(e) => updateItemTaxCode(currentSection.setter, item.id, e.target.value)}
+                              className="h-7 border border-slate-200 rounded-md px-2 text-xs bg-white"
+                            >
+                              <option value="T">T</option>
+                              <option value="Z">Z</option>
+                            </select>
+                          ) : null}
                         </td>
                         <td className="px-3 py-1.5 text-right">
                           {!isHeader && (

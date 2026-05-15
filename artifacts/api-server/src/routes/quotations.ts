@@ -21,7 +21,8 @@ const router = expressRouter as unknown as RouterInternalLike;
 const DEFAULT_TAX_RATE = 8;
 
 function computeTax(amountExclTax: number, taxCode: string, taxRate: number = DEFAULT_TAX_RATE) {
-  if (taxCode === "NT" || taxCode === "ZR" || amountExclTax === 0) {
+  const code = String(taxCode || "").trim().toUpperCase();
+  if (code === "Z" || code === "ZR" || code === "O" || code === "NT" || amountExclTax === 0) {
     return { taxAmount: 0, amountInclTax: amountExclTax };
   }
   const taxAmount = Math.round(amountExclTax * taxRate) / 100;
@@ -33,11 +34,32 @@ function normalizeQuotationTaxRate(v: unknown): number {
   return Number.isFinite(n) && n > 0 ? n : DEFAULT_TAX_RATE;
 }
 
+type QuotationClientDetail = { name: string; tin?: string };
+
+function normalizeClientDetails(v: unknown): QuotationClientDetail[] {
+  if (!Array.isArray(v)) return [];
+  const out: QuotationClientDetail[] = [];
+  for (const row of v) {
+    if (!row || typeof row !== "object") continue;
+    const name = typeof (row as any).name === "string" ? (row as any).name.trim() : "";
+    if (!name) continue;
+    const tinRaw = (row as any).tin;
+    const tin = typeof tinRaw === "string" && tinRaw.trim() ? tinRaw.trim() : undefined;
+    out.push({ name, ...(tin ? { tin } : {}) });
+  }
+  return out;
+}
+
+function joinClientNames(details: QuotationClientDetail[]): string {
+  return details.map((d) => d.name).filter(Boolean).join(" & ");
+}
+
 function normalizeItem(item: any, quotationId: number, idx: number, defaultTaxRate: number) {
   const amountExclTax = parseFloat(item.amountExclTax) || 0;
   const taxCode = item.taxCode || "T";
-  const taxRate = defaultTaxRate;
-  const { taxAmount, amountInclTax } = computeTax(amountExclTax, taxCode, defaultTaxRate);
+  const code = String(taxCode || "").trim().toUpperCase();
+  const taxRate = (code === "Z" || code === "ZR" || code === "O" || code === "NT") ? 0 : defaultTaxRate;
+  const { taxAmount, amountInclTax } = computeTax(amountExclTax, taxCode, taxRate);
   const section = typeof item.section === "string" ? item.section : "disbursement";
   const itemCategory =
     item.itemCategory === "fee" || item.itemCategory === "disbursement"
@@ -114,12 +136,34 @@ router.post("/quotations", requireAuth, requireFirmUser, async (req, res): Promi
   try {
     const firmId = (req as AuthRequest).firmId!;
     const userId = (req as AuthRequest).userId!;
-    const { items, taxRate, ...quotationData } = req.body;
+    const {
+      items,
+      taxRate,
+      clientDetails,
+      client_details,
+      clientName,
+      clientTin,
+      ...quotationData
+    } = req.body ?? {};
     const taxRateNum = normalizeQuotationTaxRate(taxRate);
+
+    const normalizedClientDetails = (() => {
+      const details = normalizeClientDetails(clientDetails ?? client_details);
+      if (details.length > 0) return details;
+      const legacyName = typeof clientName === "string" ? clientName.trim() : "";
+      const legacyTin = typeof clientTin === "string" ? clientTin.trim() : "";
+      if (!legacyName) return [];
+      return [{ name: legacyName, ...(legacyTin ? { tin: legacyTin } : {}) }];
+    })();
+    const derivedClientName = joinClientNames(normalizedClientDetails);
+    const finalClientName = derivedClientName || (typeof clientName === "string" ? clientName.trim() : "");
+    if (!finalClientName) { res.status(400).json({ error: "clientName or clientDetails is required" }); return; }
 
     const result = await db.transaction(async (tx) => {
       const [quotation] = await tx.insert(quotationsTable).values({
         ...quotationData,
+        clientName: finalClientName,
+        clientDetails: normalizedClientDetails,
         taxRate: String(taxRateNum),
         firmId,
         createdBy: userId,
@@ -191,7 +235,15 @@ router.patch("/quotations/:id", requireAuth, requireFirmUser, async (req, res): 
     const idStr = one(req.params.id);
     const id = idStr ? parseInt(idStr, 10) : NaN;
     if (isNaN(id)) { res.status(400).json({ error: "Invalid quotation ID" }); return; }
-    const { items, taxRate, ...quotationData } = req.body;
+    const {
+      items,
+      taxRate,
+      clientDetails,
+      client_details,
+      clientName,
+      clientTin,
+      ...quotationData
+    } = req.body ?? {};
 
     const [existing] = await db.select().from(quotationsTable)
       .where(and(eq(quotationsTable.id, id), eq(quotationsTable.firmId, firmId)));
@@ -199,10 +251,22 @@ router.patch("/quotations/:id", requireAuth, requireFirmUser, async (req, res): 
     if (!existing) { res.status(404).json({ error: "Quotation not found" }); return; }
 
     const nextTaxRate = normalizeQuotationTaxRate(taxRate ?? (existing as any).taxRate);
+    const normalizedClientDetails = normalizeClientDetails(clientDetails ?? client_details);
+    const derivedClientName = normalizedClientDetails.length > 0 ? joinClientNames(normalizedClientDetails) : "";
 
     const result = await db.transaction(async (tx) => {
+      const updateData: Record<string, unknown> = { ...quotationData, taxRate: String(nextTaxRate) };
+      if (normalizedClientDetails.length > 0) {
+        updateData.clientDetails = normalizedClientDetails;
+        updateData.clientName = derivedClientName;
+      } else if (typeof clientName === "string" && clientName.trim()) {
+        updateData.clientName = clientName.trim();
+        const legacyTin = typeof clientTin === "string" ? clientTin.trim() : "";
+        updateData.clientDetails = [{ name: clientName.trim(), ...(legacyTin ? { tin: legacyTin } : {}) }];
+      }
+
       const [updated] = await tx.update(quotationsTable)
-        .set({ ...quotationData, taxRate: String(nextTaxRate) })
+        .set(updateData)
         .where(eq(quotationsTable.id, id))
         .returning();
 
@@ -282,6 +346,7 @@ router.post("/quotations/:id/duplicate", requireAuth, requireFirmUser, async (re
         caseId: original.caseId,
         referenceNo: `${original.referenceNo} (Copy)`,
         clientName: original.clientName,
+        clientDetails: (original as any).clientDetails ?? [],
         clientAddress: (original as any).clientAddress ?? null,
         clientTin: (original as any).clientTin ?? null,
         propertyDescription: original.propertyDescription,

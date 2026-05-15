@@ -1569,14 +1569,9 @@ export default function CaseDetail() {
             variant="outline"
             size="sm"
             onClick={() => {
-              const purchaserNames = safePurchasers
-                .map((p) => (p as any)?.clientName)
-                .filter(Boolean)
-                .join(", ");
               const params = new URLSearchParams();
               params.set("caseId", String((caseInfo as any).id ?? ""));
               params.set("ref", String((caseInfo as any).referenceNo ?? ""));
-              if (purchaserNames) params.set("client", purchaserNames);
               if ((caseInfo as any).spaPrice) params.set("price", String((caseInfo as any).spaPrice));
               const propDesc = [String((caseInfo as any).projectName ?? ""), String((caseInfo as any).developerName ?? "")].filter((x) => x.trim()).join(" • ");
               if (propDesc) params.set("property", propDesc);
