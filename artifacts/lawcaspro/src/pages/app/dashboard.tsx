@@ -37,25 +37,11 @@ function StatusBadge({ status }: { status: string }) {
   );
 }
 
-const MILESTONE_TO_STATUS_QUERY: Record<string, { param: "spaStatus" | "loanStatus"; value: string }> = {
-  spa_stamped_date: { param: "spaStatus", value: "SPA Stamped" },
-  noa_served_on: { param: "spaStatus", value: "NOA Served" },
-  completion_date: { param: "spaStatus", value: "Completed" },
-  loan_docs_signed_date: { param: "loanStatus", value: "Loan Docs Signed" },
-  acting_letter_issued_date: { param: "loanStatus", value: "Acting Letter Issued" },
-  loan_sent_bank_execution_date: { param: "loanStatus", value: "Loan Sent Bank Execution" },
-  loan_bank_executed_date: { param: "loanStatus", value: "Loan Bank Executed" },
-  bank_lu_received_date: { param: "loanStatus", value: "BLU Received" },
-};
-
-function buildCasesHref(filter: { milestone: string; milestonePresence: string; purchaseMode?: string | null; titleType?: string | null }) {
+function buildCasesHref(filter: { milestone?: string | null; milestonePresence?: string | null; purchaseMode?: string | null; titleType?: string | null }) {
   const qs = new URLSearchParams();
   const milestone = (filter as any)?.milestone as string | undefined;
   const milestonePresence = (filter as any)?.milestonePresence as string | undefined;
-  const mapped = milestone && milestonePresence === "filled" ? MILESTONE_TO_STATUS_QUERY[milestone] : undefined;
-  if (mapped) {
-    qs.set(mapped.param, mapped.value);
-  } else if (milestone && milestonePresence) {
+  if (milestone && milestonePresence) {
     qs.set("milestone", milestone);
     qs.set("milestonePresence", milestonePresence);
   }

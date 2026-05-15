@@ -776,8 +776,8 @@ export default function CaseDetail() {
   }, [loanStampingQuery.data, stampingDirty]);
 
   useEffect(() => {
-    setActiveTab(tabFromUrl);
-  }, [tabFromUrl]);
+    setActiveTab(initialActiveTab);
+  }, [initialActiveTab]);
 
   const workflowDocsByKey = useMemo(() => {
     const rows = Array.isArray(workflowDocsQuery.data) ? workflowDocsQuery.data : [];

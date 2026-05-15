@@ -15,6 +15,7 @@ import {
   usersTable,
   caseKeyDatesTable,
   quotationsTable,
+  quotationItemsTable,
   invoicesTable,
 } from "@workspace/db";
 import { requireAuth, requireFirmUser, type AuthRequest, writeAuditLog } from "../lib/auth.js";
@@ -147,7 +148,12 @@ router.get("/case-files", requireAuth, requireFirmUser, async (req: AuthRequest,
       'id', q.id,
       'date', q.created_at,
       'billedTo', q.client_name,
-      'amount', q.purchase_price
+      'amount',
+        COALESCE((
+          SELECT SUM(${quotationItemsTable.amountInclTax}::numeric)
+          FROM ${quotationItemsTable}
+          WHERE ${quotationItemsTable.quotationId} = q.id
+        ), 0)
     )::text
     FROM ${quotationsTable} q
     WHERE q.case_id = ${casesTable.id}

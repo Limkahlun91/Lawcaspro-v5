@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -27,6 +27,7 @@ import { toastError } from "@/lib/toast-error";
 import { apiFetchBlob, apiFetchJson } from "@/lib/api-client";
 import { downloadBlob } from "@/lib/download";
 import { DEFAULT_ALLOWED_MIME_TYPES, DOCX_MIME_TYPES, validateUploadFile } from "@/lib/upload-validation";
+import TemplatePdfMappingEditor from "@/components/TemplatePdfMappingEditor";
 
 interface FirmFolder {
   id: number;
@@ -51,6 +52,7 @@ interface FirmDocument {
   extension: string | null;
   file_size: number | null;
   is_template_capable: boolean;
+  pdf_mapping_config?: unknown | null;
 }
 
 const ACCEPTED_EXTENSIONS = [
@@ -173,6 +175,11 @@ export default function FirmDocuments() {
   const [editKind, setEditKind] = useState<"template" | "reference">("template");
   const [editType, setEditType] = useState("other");
   const [downloadingDocId, setDownloadingDocId] = useState<number | null>(null);
+
+  const [pdfMappingOpen, setPdfMappingOpen] = useState(false);
+  const [pdfMappingDoc, setPdfMappingDoc] = useState<FirmDocument | null>(null);
+  const [pdfMappingPdfUrl, setPdfMappingPdfUrl] = useState("");
+  const [pdfMappingLoading, setPdfMappingLoading] = useState(false);
 
   const foldersQuery = useQuery<FirmFolder[]>({
     queryKey: ["firm-document-folders"],
@@ -345,6 +352,42 @@ export default function FirmDocuments() {
     }
   }
 
+  const isPdfDoc = (doc: FirmDocument): boolean => {
+    const ext = String(doc.extension || String(doc.file_name ?? "").split(".").pop() || "").toLowerCase();
+    return ext === "pdf";
+  };
+
+  const openPdfMappingEditorForDoc = async (doc: FirmDocument) => {
+    if (!isPdfDoc(doc)) return;
+    if (doc.kind !== "template") return;
+    setPdfMappingDoc(doc);
+    if (pdfMappingDoc?.id === doc.id && pdfMappingPdfUrl) {
+      setPdfMappingOpen(true);
+      return;
+    }
+    setPdfMappingLoading(true);
+    try {
+      setPdfMappingPdfUrl((prev) => {
+        if (prev) URL.revokeObjectURL(prev);
+        return "";
+      });
+      const blob = await apiFetchBlob(`/document-templates/${doc.id}/download`);
+      const url = URL.createObjectURL(blob);
+      setPdfMappingPdfUrl(url);
+      setPdfMappingOpen(true);
+    } catch (e) {
+      toastError(toast, e, "Failed to load PDF");
+    } finally {
+      setPdfMappingLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    return () => {
+      if (pdfMappingPdfUrl) URL.revokeObjectURL(pdfMappingPdfUrl);
+    };
+  }, [pdfMappingPdfUrl]);
+
   const selectedFolder = folders.find(f => f.id === selectedFolderId);
 
   return (
@@ -470,6 +513,18 @@ export default function FirmDocuments() {
                               <Button size="icon" variant="ghost" className="h-8 w-8 text-slate-400 hover:text-slate-700" onClick={() => handleDownload(doc)} disabled={downloadingDocId === doc.id}>
                                 <Download className={cn("w-4 h-4", downloadingDocId === doc.id && "animate-bounce")} />
                               </Button>
+                              {doc.kind === "template" && isPdfDoc(doc) ? (
+                                <Button
+                                  size="sm"
+                                  variant="outline"
+                                  className="h-8 px-2 text-xs"
+                                  onClick={() => void openPdfMappingEditorForDoc(doc)}
+                                  disabled={pdfMappingLoading && pdfMappingDoc?.id === doc.id}
+                                  title="Edit PDF Mapping"
+                                >
+                                  {pdfMappingLoading && pdfMappingDoc?.id === doc.id ? "Loading..." : "PDF Mapping"}
+                                </Button>
+                              ) : null}
                               <Button
                                 size="icon"
                                 variant="ghost"
@@ -530,6 +585,30 @@ export default function FirmDocuments() {
           </div>
         </CardContent>
       </Card>
+
+      {pdfMappingDoc && isPdfDoc(pdfMappingDoc) ? (
+        <TemplatePdfMappingEditor
+          open={pdfMappingOpen}
+          templateId={pdfMappingDoc.id}
+          templateName={pdfMappingDoc.name}
+          pdfUrl={pdfMappingPdfUrl}
+          initialMappingConfig={pdfMappingDoc.pdf_mapping_config}
+          savePath={`/document-templates/${pdfMappingDoc.id}`}
+          saveBodyKey="pdfMappingConfig"
+          responseMappingKey="pdf_mapping_config"
+          onClose={() => {
+            setPdfMappingOpen(false);
+            setPdfMappingPdfUrl((prev) => {
+              if (prev) URL.revokeObjectURL(prev);
+              return "";
+            });
+          }}
+          onSaved={(next) => {
+            setPdfMappingDoc((prev) => prev ? ({ ...prev, pdf_mapping_config: next }) : prev);
+            void qc.invalidateQueries({ queryKey: ["firm-documents"] });
+          }}
+        />
+      ) : null}
 
       <Dialog open={createFolderOpen} onOpenChange={setCreateFolderOpen}>
         <DialogContent className="sm:max-w-md">

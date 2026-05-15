@@ -1,8 +1,9 @@
 import { useState, useEffect } from "react";
-import { getListRolesQueryKey, getListUsersQueryKey, useDeleteUser, useListDevelopers, useListRoles, useListUsers, useUpdateUser } from "@workspace/api-client-react";
+import { getListRolesQueryKey, getListUsersQueryKey, useDeleteUser, useListDevelopers, useListRoles, useListUsers, useUpdateRole, useUpdateUser } from "@workspace/api-client-react";
 import { useQuery, useQueryClient, useMutation } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -32,6 +33,22 @@ const TAB_KEYS: Record<string, Tab> = {
   security: "Security",
   documents: "Document Templates",
 };
+
+const PERMISSION_CATALOG: Array<{ module: string; actions: string[] }> = [
+  { module: "dashboard", actions: ["read"] },
+  { module: "cases", actions: ["read", "create", "update", "delete", "assign_any"] },
+  { module: "projects", actions: ["read", "create", "update", "delete"] },
+  { module: "developers", actions: ["read", "create", "update", "delete"] },
+  { module: "documents", actions: ["read", "create", "update", "delete", "generate", "export"] },
+  { module: "communications", actions: ["read", "create", "update", "delete"] },
+  { module: "accounting", actions: ["read", "write"] },
+  { module: "reports", actions: ["read", "export"] },
+  { module: "audit", actions: ["read"] },
+  { module: "settings", actions: ["read", "update"] },
+  { module: "users", actions: ["read", "create", "update", "delete"] },
+  { module: "roles", actions: ["read", "create", "update", "delete"] },
+  { module: "developer_portal", actions: ["read", "export", "message"] },
+];
 
 type AuthSession = {
   id: number;
@@ -910,6 +927,7 @@ export default function Settings() {
     query: { queryKey: getListRolesQueryKey(), enabled: canManageRoles },
   });
   const updateUserMutation = useUpdateUser();
+  const updateRoleMutation = useUpdateRole();
   const deleteUserMutation = useDeleteUser();
 
   const [editUserOpen, setEditUserOpen] = useState(false);
@@ -926,6 +944,10 @@ export default function Settings() {
 
   const [deleteUserOpen, setDeleteUserOpen] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<any | null>(null);
+
+  const [editRoleOpen, setEditRoleOpen] = useState(false);
+  const [editRole, setEditRole] = useState<any | null>(null);
+  const [editRolePermissionSet, setEditRolePermissionSet] = useState<Set<string>>(new Set());
 
   return (
     <div className="space-y-6">
@@ -1284,7 +1306,16 @@ export default function Settings() {
               <div className="col-span-2 p-8 text-center text-slate-500">Loading roles...</div>
             ) : (
               (rolesRes ?? []).map((role: any) => (
-                <Card key={role.id}>
+                <Card key={role.id} className="cursor-pointer" onClick={() => {
+                  setEditRole(role);
+                  const allowed = new Set<string>(
+                    (Array.isArray(role.permissions) ? role.permissions : [])
+                      .filter((p: any) => p && p.allowed)
+                      .map((p: any) => `${String(p.module)}:${String(p.action)}`)
+                  );
+                  setEditRolePermissionSet(allowed);
+                  setEditRoleOpen(true);
+                }}>
                   <CardContent className="p-6">
                     <div className="flex justify-between items-start mb-4">
                       <div>
@@ -1321,11 +1352,113 @@ export default function Settings() {
                         )}
                       </div>
                     </div>
+                    <div className="mt-5 flex justify-end">
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={(e) => {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          setEditRole(role);
+                          const allowed = new Set<string>(
+                            (Array.isArray(role.permissions) ? role.permissions : [])
+                              .filter((p: any) => p && p.allowed)
+                              .map((p: any) => `${String(p.module)}:${String(p.action)}`)
+                          );
+                          setEditRolePermissionSet(allowed);
+                          setEditRoleOpen(true);
+                        }}
+                      >
+                        Edit
+                      </Button>
+                    </div>
                   </CardContent>
                 </Card>
               ))
             )}
           </div>
+
+          <Dialog
+            open={editRoleOpen}
+            onOpenChange={(open) => {
+              setEditRoleOpen(open);
+              if (!open) {
+                setEditRole(null);
+                setEditRolePermissionSet(new Set());
+              }
+            }}
+          >
+            <DialogContent className="max-w-3xl">
+              <DialogHeader>
+                <DialogTitle>Edit Role Permissions</DialogTitle>
+              </DialogHeader>
+              <div className="text-sm text-slate-600">
+                {editRole?.name ? `Role: ${editRole.name}` : ""}
+              </div>
+              <div className="max-h-[60vh] overflow-y-auto border rounded-md">
+                <div className="p-4 space-y-6">
+                  {PERMISSION_CATALOG.map((group) => (
+                    <div key={group.module} className="space-y-2">
+                      <div className="text-sm font-semibold text-slate-900 capitalize">{group.module.replace(/_/g, " ")}</div>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                        {group.actions.map((action) => {
+                          const key = `${group.module}:${action}`;
+                          const checked = editRolePermissionSet.has(key);
+                          return (
+                            <label key={key} className="flex items-center gap-2 rounded-md border px-3 py-2 text-sm text-slate-700">
+                              <Checkbox
+                                checked={checked}
+                                onCheckedChange={(v) => {
+                                  const next = new Set(editRolePermissionSet);
+                                  if (v) next.add(key);
+                                  else next.delete(key);
+                                  setEditRolePermissionSet(next);
+                                }}
+                              />
+                              <span className="font-mono text-xs">{action}</span>
+                            </label>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+              <DialogFooter>
+                <Button
+                  variant="outline"
+                  onClick={() => setEditRoleOpen(false)}
+                  disabled={updateRoleMutation.isPending}
+                >
+                  Cancel
+                </Button>
+                <Button
+                  onClick={() => {
+                    const roleId = Number(editRole?.id);
+                    if (!Number.isInteger(roleId) || roleId <= 0) return;
+                    const permissions = Array.from(editRolePermissionSet).map((k) => {
+                      const [module, action] = k.split(":");
+                      return { module: String(module), action: String(action), allowed: true };
+                    });
+                    updateRoleMutation.mutate(
+                      { roleId, data: { permissions } },
+                      {
+                        onSuccess: async () => {
+                          await queryClient.invalidateQueries({ queryKey: getListRolesQueryKey() });
+                          toast({ title: "Role updated" });
+                          setEditRoleOpen(false);
+                        },
+                        onError: (e: any) => toastError(toast, e, "Failed to update role"),
+                      }
+                    );
+                  }}
+                  disabled={updateRoleMutation.isPending || !editRole}
+                >
+                  {updateRoleMutation.isPending ? "Saving..." : "Save"}
+                </Button>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
         </div>
       )}
 
