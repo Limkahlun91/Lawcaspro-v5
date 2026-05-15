@@ -1472,7 +1472,7 @@ components:
 
     MilestonePresence:
       type: string
-      enum: ["filled", "missing"]
+      enum: ["filled", "missing", "completed", "pending"]
 
     CaseMilestoneKey:
       type: string
@@ -1510,6 +1510,30 @@ components:
         - mot_registered_date
         - noa_served_on
         - completion_date
+        - file_opened
+        - spa_stamped
+        - lof_stamped
+        - loan_docs_pending
+        - loan_docs_signed
+        - acting_letter_pending
+        - acting_letter_issued
+        - advised
+        - loan_pending_bank_exec
+        - loan_sent_bank_exec
+        - loan_bank_executed
+        - blu_received
+        - blu_confirmed
+        - mot_pending
+        - mot_received
+        - mot_invoice_prepare
+        - mot_stamp_received
+        - mot_submitted_stamping
+        - mot_stamp
+        - noa_prepare
+        - noa_served
+        - pa_pending
+        - pa_registered
+        - letter_disclaimer
 
     CaseMilestoneSummary:
       type: object

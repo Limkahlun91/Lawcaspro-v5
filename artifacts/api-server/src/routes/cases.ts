@@ -2109,11 +2109,15 @@ router.get("/cases/export.csv", requireAuthHandler, requireFirmUserHandler, requ
   if (loanStatus) {
     conditions.push(sql`${loanStatusSql()} = ${loanStatus}`);
   }
-  if (milestone && milestonePresence && (milestonePresence === "filled" || milestonePresence === "missing")) {
-    if (loanOnlyMilestones.has(milestone)) {
-      conditions.push(eq(casesTable.purchaseMode, "loan"));
+  if (milestone && milestonePresence) {
+    if (milestonePresence === "filled" || milestonePresence === "missing") {
+      if (loanOnlyMilestones.has(milestone)) {
+        conditions.push(eq(casesTable.purchaseMode, "loan"));
+      }
+      conditions.push(milestonePresenceWhereSql(milestone as any, milestonePresence));
+    } else if (milestonePresence === "completed" || milestonePresence === "pending") {
+      conditions.push(milestonePresenceWhereSql(milestone as any, milestonePresence));
     }
-    conditions.push(milestonePresenceWhereSql(milestone, milestonePresence));
   }
   if (search && search.trim()) {
     const like = `%${search.trim()}%`;

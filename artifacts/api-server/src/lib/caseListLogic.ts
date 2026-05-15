@@ -1,6 +1,6 @@
 import { casesTable, caseKeyDatesTable, caseWorkflowStepsTable, sql, type SQL } from "@workspace/db";
 
-export type MilestonePresence = "filled" | "missing";
+export type MilestonePresence = "filled" | "missing" | "completed" | "pending";
 
 export type CaseMilestoneKey =
   | "spa_date"
@@ -35,7 +35,31 @@ export type CaseMilestoneKey =
   | "mot_stamped_date"
   | "mot_registered_date"
   | "noa_served_on"
-  | "completion_date";
+  | "completion_date"
+  | "file_opened"
+  | "spa_stamped"
+  | "lof_stamped"
+  | "loan_docs_pending"
+  | "loan_docs_signed"
+  | "acting_letter_pending"
+  | "acting_letter_issued"
+  | "advised"
+  | "loan_pending_bank_exec"
+  | "loan_sent_bank_exec"
+  | "loan_bank_executed"
+  | "blu_received"
+  | "blu_confirmed"
+  | "mot_pending"
+  | "mot_received"
+  | "mot_invoice_prepare"
+  | "mot_stamp_received"
+  | "mot_submitted_stamping"
+  | "mot_stamp"
+  | "noa_prepare"
+  | "noa_served"
+  | "pa_pending"
+  | "pa_registered"
+  | "letter_disclaimer";
 
 export function spaStatusSql(): SQL<string> {
   return sql<string>`COALESCE((
@@ -155,6 +179,32 @@ export function milestoneDateYmdSql(milestone: CaseMilestoneKey): SQL<string | n
 }
 
 export function milestonePresenceWhereSql(milestone: CaseMilestoneKey, presence: MilestonePresence): SQL<unknown> {
+  if (presence === "completed" || presence === "pending") {
+    const completed = sql`EXISTS (
+      SELECT 1
+      FROM ${caseWorkflowStepsTable} s
+      WHERE ${caseWorkflowStepsTable.caseId} = ${casesTable.id}
+        AND ${caseWorkflowStepsTable.stepKey} = ${milestone}
+        AND ${caseWorkflowStepsTable.status} = 'completed'
+    )`;
+    if (presence === "completed") return completed;
+
+    const missingStep = sql`NOT EXISTS (
+      SELECT 1
+      FROM ${caseWorkflowStepsTable} s
+      WHERE ${caseWorkflowStepsTable.caseId} = ${casesTable.id}
+        AND ${caseWorkflowStepsTable.stepKey} = ${milestone}
+    )`;
+    const notCompleted = sql`EXISTS (
+      SELECT 1
+      FROM ${caseWorkflowStepsTable} s
+      WHERE ${caseWorkflowStepsTable.caseId} = ${casesTable.id}
+        AND ${caseWorkflowStepsTable.stepKey} = ${milestone}
+        AND ${caseWorkflowStepsTable.status} <> 'completed'
+    )`;
+    return sql`(${missingStep} OR ${notCompleted})`;
+  }
+
   const expr = milestoneDateSql(milestone);
   if (presence === "filled") return sql`${expr} IS NOT NULL`;
   return sql`${expr} IS NULL`;

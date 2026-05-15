@@ -186,6 +186,30 @@ export const CaseMilestoneKey = {
   mot_registered_date: 'mot_registered_date',
   noa_served_on: 'noa_served_on',
   completion_date: 'completion_date',
+  file_opened: 'file_opened',
+  spa_stamped: 'spa_stamped',
+  lof_stamped: 'lof_stamped',
+  loan_docs_pending: 'loan_docs_pending',
+  loan_docs_signed: 'loan_docs_signed',
+  acting_letter_pending: 'acting_letter_pending',
+  acting_letter_issued: 'acting_letter_issued',
+  advised: 'advised',
+  loan_pending_bank_exec: 'loan_pending_bank_exec',
+  loan_sent_bank_exec: 'loan_sent_bank_exec',
+  loan_bank_executed: 'loan_bank_executed',
+  blu_received: 'blu_received',
+  blu_confirmed: 'blu_confirmed',
+  mot_pending: 'mot_pending',
+  mot_received: 'mot_received',
+  mot_invoice_prepare: 'mot_invoice_prepare',
+  mot_stamp_received: 'mot_stamp_received',
+  mot_submitted_stamping: 'mot_submitted_stamping',
+  mot_stamp: 'mot_stamp',
+  noa_prepare: 'noa_prepare',
+  noa_served: 'noa_served',
+  pa_pending: 'pa_pending',
+  pa_registered: 'pa_registered',
+  letter_disclaimer: 'letter_disclaimer',
 } as const;
 
 export type MilestonePresence = typeof MilestonePresence[keyof typeof MilestonePresence];
@@ -194,6 +218,8 @@ export type MilestonePresence = typeof MilestonePresence[keyof typeof MilestoneP
 export const MilestonePresence = {
   filled: 'filled',
   missing: 'missing',
+  completed: 'completed',
+  pending: 'pending',
 } as const;
 
 export type DashboardMilestoneCardFilter = {

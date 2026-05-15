@@ -29,6 +29,12 @@ const STATUS_COLORS: Record<string, string> = {
   "NOA Served": "bg-cyan-50 text-cyan-700",
 };
 
+const MILESTONE_SECTION_ROW_CLASS: Record<string, string> = {
+  spa: "bg-amber-50",
+  loan_master: "bg-blue-50",
+  loan_title: "bg-emerald-50",
+};
+
 function StatusBadge({ status }: { status: string }) {
   const short = STATUS_SHORT[status] ?? status;
   const colorClass = STATUS_COLORS[status] ?? "bg-slate-100 text-slate-600";
@@ -175,12 +181,13 @@ export default function AppDashboard() {
               <TableBody>
                 {milestoneSections.length > 0
                   ? milestoneSections.flatMap((section) => {
+                      const sectionRowClass = MILESTONE_SECTION_ROW_CLASS[section.key] ?? "bg-slate-50";
                       const sectionRow = (
-                        <TableRow key={`section_${section.key}`}>
-                          <TableCell className="py-2" colSpan={2}>
+                        <TableRow key={`section_${section.key}`} className={sectionRowClass}>
+                          <TableCell className="py-3" colSpan={2}>
                             <div className="flex items-center justify-between">
-                              <div className="text-sm font-semibold text-slate-900">{section.label}</div>
-                              <div className="text-xs text-slate-500">Total: {section.total}</div>
+                              <div className="text-base font-semibold text-slate-900">{section.label}</div>
+                              <div className="text-sm font-semibold text-slate-700">Total: {section.total}</div>
                             </div>
                           </TableCell>
                         </TableRow>
@@ -191,8 +198,8 @@ export default function AppDashboard() {
                         const pendingCount = Number((card as any)?.pendingCount ?? card.count ?? 0) || 0;
                         const doneCount = Number((card as any)?.doneCount ?? 0) || 0;
                         const hasMilestone = Boolean(filter.milestone);
-                        const pendingHref = buildCasesHref({ ...filter, milestonePresence: "missing" });
-                        const doneHref = buildCasesHref({ ...filter, milestonePresence: "filled" });
+                        const pendingHref = buildCasesHref({ ...filter, milestonePresence: "pending" });
+                        const doneHref = buildCasesHref({ ...filter, milestonePresence: "completed" });
                         return (
                           <TableRow
                             key={card.key}
@@ -205,21 +212,21 @@ export default function AppDashboard() {
                             }}
                           >
                             <TableCell className="py-3">
-                              <div className="text-sm font-medium text-slate-900">{card.label}</div>
+                              <div className="text-base font-medium text-slate-900">{card.label}</div>
                             </TableCell>
                             <TableCell className="py-3 text-right">
                               {hasMilestone ? (
                                 <div className="flex items-center justify-end gap-3">
                                   <button
                                     type="button"
-                                    className="text-xs font-semibold text-emerald-700 hover:underline"
+                                    className="text-sm font-semibold text-emerald-700 hover:text-emerald-800 hover:underline cursor-pointer transition-colors"
                                     onClick={(e) => { e.preventDefault(); e.stopPropagation(); setLocation(doneHref); }}
                                   >
                                     DONE ({doneCount})
                                   </button>
                                   <button
                                     type="button"
-                                    className="text-xs font-semibold text-amber-700 hover:underline"
+                                    className="text-sm font-semibold text-amber-700 hover:text-amber-800 hover:underline cursor-pointer transition-colors"
                                     onClick={(e) => { e.preventDefault(); e.stopPropagation(); setLocation(pendingHref); }}
                                   >
                                     Pending ({pendingCount})
@@ -240,8 +247,8 @@ export default function AppDashboard() {
                       const pendingCount = Number((card as any)?.pendingCount ?? card.count ?? 0) || 0;
                       const doneCount = Number((card as any)?.doneCount ?? 0) || 0;
                       const hasMilestone = Boolean(filter.milestone);
-                      const pendingHref = buildCasesHref({ ...filter, milestonePresence: "missing" });
-                      const doneHref = buildCasesHref({ ...filter, milestonePresence: "filled" });
+                      const pendingHref = buildCasesHref({ ...filter, milestonePresence: "pending" });
+                      const doneHref = buildCasesHref({ ...filter, milestonePresence: "completed" });
                       return (
                         <TableRow
                           key={card.key}
@@ -254,21 +261,21 @@ export default function AppDashboard() {
                           }}
                         >
                           <TableCell className="py-3">
-                            <div className="text-sm font-medium text-slate-900">{card.label}</div>
+                            <div className="text-base font-medium text-slate-900">{card.label}</div>
                           </TableCell>
                           <TableCell className="py-3 text-right">
                             {hasMilestone ? (
                               <div className="flex items-center justify-end gap-3">
                                 <button
                                   type="button"
-                                  className="text-xs font-semibold text-emerald-700 hover:underline"
+                                  className="text-sm font-semibold text-emerald-700 hover:text-emerald-800 hover:underline cursor-pointer transition-colors"
                                   onClick={(e) => { e.preventDefault(); e.stopPropagation(); setLocation(doneHref); }}
                                 >
                                   DONE ({doneCount})
                                 </button>
                                 <button
                                   type="button"
-                                  className="text-xs font-semibold text-amber-700 hover:underline"
+                                  className="text-sm font-semibold text-amber-700 hover:text-amber-800 hover:underline cursor-pointer transition-colors"
                                   onClick={(e) => { e.preventDefault(); e.stopPropagation(); setLocation(pendingHref); }}
                                 >
                                   Pending ({pendingCount})

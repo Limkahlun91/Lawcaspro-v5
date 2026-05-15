@@ -12,4 +12,6 @@ export type MilestonePresence = typeof MilestonePresence[keyof typeof MilestoneP
 export const MilestonePresence = {
   filled: 'filled',
   missing: 'missing',
+  completed: 'completed',
+  pending: 'pending',
 } as const;

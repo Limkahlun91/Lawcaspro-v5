@@ -229,9 +229,14 @@ export default function CasesList() {
     if (loanStatus !== "all") chips.push({ key: "loanStatus", label: `Loan: ${loanStatus}`, onClear: () => { setLoanStatus("all"); setPage(1); } });
     if (milestone !== "all") {
       const label = milestoneLabelByKey.get(milestone) ?? milestone;
+      const presenceLabel =
+        milestonePresence === "missing" ? "Missing"
+          : milestonePresence === "filled" ? "Filled"
+            : milestonePresence === "completed" ? "Done"
+              : "Pending";
       chips.push({
         key: "milestone",
-        label: `${label}: ${milestonePresence === "missing" ? "Missing" : "Filled"}`,
+        label: `${label}: ${presenceLabel}`,
         onClear: () => { setMilestone("all"); setMilestonePresence("filled"); setPage(1); },
       });
     }
