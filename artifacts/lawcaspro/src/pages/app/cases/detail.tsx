@@ -1029,6 +1029,45 @@ export default function CaseDetail() {
 
   const safeAssignments = Array.isArray((caseInfo as any)?.assignments) ? ((caseInfo as any).assignments as any[]) : [];
   const safePurchasers = Array.isArray((caseInfo as any)?.purchasers) ? ((caseInfo as any).purchasers as any[]) : [];
+  const loanDetailsRaw = typeof (caseInfo as any)?.loanDetails === "string" ? String((caseInfo as any).loanDetails) : "";
+  const loanDetailsObj: Record<string, unknown> | null = (() => {
+    if (!loanDetailsRaw) return null;
+    try {
+      const parsed = JSON.parse(loanDetailsRaw);
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+      return parsed as Record<string, unknown>;
+    } catch {
+      return null;
+    }
+  })();
+
+  const safeBorrowers = (() => {
+    const fromColumn = Array.isArray((caseInfo as any)?.borrowers) ? ((caseInfo as any).borrowers as any[]) : [];
+    const namesFromColumn = fromColumn
+      .map((b) => (typeof b?.name === "string" ? b.name.trim() : ""))
+      .filter(Boolean);
+    if (namesFromColumn.length > 0) return namesFromColumn.map((name) => ({ name }));
+
+    const b1 = typeof loanDetailsObj?.borrower1Name === "string" ? String(loanDetailsObj.borrower1Name).trim() : "";
+    const b2 = typeof loanDetailsObj?.borrower2Name === "string" ? String(loanDetailsObj.borrower2Name).trim() : "";
+    const list = [b1, b2].filter(Boolean);
+    return list.map((name) => ({ name }));
+  })();
+
+  const loanBank = (() => {
+    const v = loanDetailsObj?.end_financier ?? loanDetailsObj?.endFinancier ?? loanDetailsObj?.bank ?? loanDetailsObj?.financier;
+    return v ? String(v).trim() : "";
+  })();
+
+  const loanAmountValue = (() => {
+    const v = loanDetailsObj?.loanAmountNum ?? loanDetailsObj?.loanAmount ?? loanDetailsObj?.loan_amount ?? loanDetailsObj?.amount;
+    if (typeof v === "number") return v;
+    if (typeof v === "string") {
+      const n = Number(v.replace(/[^0-9.]/g, "").trim());
+      return Number.isFinite(n) ? n : v.trim();
+    }
+    return "";
+  })();
 
   const saveScope = (scope: "SPA" | "Loan" | "Bank / LU / NOA" | "Bank / LU" | "MOT / Completion") => {
     const tab: keyof typeof scopeKeys =
@@ -1656,30 +1695,74 @@ export default function CaseDetail() {
         </TabsList>
 
         <TabsContent value="overview" className="space-y-6">
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-            <Card>
-              <CardHeader>
-                <CardTitle>Case Information</CardTitle>
-              </CardHeader>
-              <CardContent className="space-y-4">
-                <div className="grid grid-cols-2 gap-4">
-                  <div>
-                    <div className="text-sm font-medium text-slate-500">Purchase Mode</div>
-                    <div className="text-slate-900 capitalize font-medium">{caseInfo.purchaseMode}</div>
-                  </div>
-                  <div>
-                    <div className="text-sm font-medium text-slate-500">Title Type</div>
-                    <div className="text-slate-900 capitalize font-medium">{caseInfo.titleType}</div>
-                  </div>
-                  <div>
-                    <div className="text-sm font-medium text-slate-500">SPA Price</div>
-                    <div className="text-slate-900 font-medium">
-                      {caseInfo.spaPrice ? `RM ${caseInfo.spaPrice.toLocaleString()}` : 'Not set'}
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+            <div className="space-y-6 lg:col-span-2">
+              <Card>
+                <CardHeader className="pb-3">
+                  <CardTitle>Property & Financial Details</CardTitle>
+                </CardHeader>
+                <CardContent>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+                    <div className="space-y-1">
+                      <div className="text-xs font-medium text-slate-500">Property / Project</div>
+                      <div className="text-sm font-semibold text-slate-900">
+                        {(() => {
+                          const prop = typeof caseMeta.propertyDetails === "string" ? caseMeta.propertyDetails.trim() : "";
+                          const proj = String((caseInfo as any)?.projectName ?? "").trim();
+                          return prop || proj || "—";
+                        })()}
+                      </div>
                     </div>
+                    <div className="space-y-1">
+                      <div className="text-xs font-medium text-slate-500">Developer / Vendor</div>
+                      <div className="text-sm font-semibold text-slate-900">
+                        {String((caseInfo as any)?.developerName ?? "").trim() || "—"}
+                      </div>
+                    </div>
+                    <div className="space-y-1">
+                      <div className="text-xs font-medium text-slate-500">Purchase Mode</div>
+                      <div className="text-sm font-semibold text-slate-900 capitalize">{String((caseInfo as any)?.purchaseMode ?? "") || "—"}</div>
+                    </div>
+                    <div className="space-y-1">
+                      <div className="text-xs font-medium text-slate-500">Title Type</div>
+                      <div className="text-sm font-semibold text-slate-900 capitalize">{String((caseInfo as any)?.titleType ?? "") || "—"}</div>
+                    </div>
+                    <div className="space-y-1">
+                      <div className="text-xs font-medium text-slate-500">SPA Price</div>
+                      <div className="text-sm font-semibold text-slate-900">
+                        {(() => {
+                          const v = (caseMeta as any)?.spaPrice;
+                          return v == null || String(v).trim() === "" ? "Not set" : fmtMoney(v);
+                        })()}
+                      </div>
+                    </div>
+
+                    {String((caseInfo as any)?.purchaseMode ?? "").trim().toLowerCase() === "loan" && (
+                      <>
+                        <div className="space-y-1">
+                          <div className="text-xs font-medium text-slate-500">Loan Bank</div>
+                          <div className="text-sm font-semibold text-slate-900">{loanBank || "—"}</div>
+                        </div>
+                        <div className="space-y-1">
+                          <div className="text-xs font-medium text-slate-500">Loan Amount</div>
+                          <div className="text-sm font-semibold text-slate-900">
+                            {typeof loanAmountValue === "number" ? fmtMoney(loanAmountValue) : String(loanAmountValue || "—")}
+                          </div>
+                        </div>
+                      </>
+                    )}
                   </div>
-                  <div>
-                    <div className="text-sm font-medium text-slate-500">Assigned Lawyer</div>
-                    <div className="text-slate-900 font-medium">
+                </CardContent>
+              </Card>
+
+              <Card>
+                <CardHeader className="pb-3">
+                  <CardTitle>Firm Assignments</CardTitle>
+                </CardHeader>
+                <CardContent className="space-y-4">
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <div className="space-y-1.5">
+                      <div className="text-xs font-medium text-slate-500">Assigned Lawyer</div>
                       {canEditAssignments ? (
                         <div className="flex items-center gap-2">
                           <Select
@@ -1691,7 +1774,7 @@ export default function CaseDetail() {
                             }}
                           >
                             <SelectTrigger className="h-9 text-sm border-slate-200 bg-white flex-1">
-                              <SelectValue placeholder="Select lawyer" />
+                              <SelectValue placeholder="Select existing lawyer..." />
                             </SelectTrigger>
                             <SelectContent>
                               {lawyerOptions.map((u) => (
@@ -1705,23 +1788,24 @@ export default function CaseDetail() {
                             size="icon"
                             className="h-9 w-9"
                             onClick={() => { setQuickAddUserRoleKind("lawyer"); setQuickAddUserOpen(true); }}
-                            title="Quick add lawyer"
+                            title="Register new employee (lawyer)"
                           >
                             <Plus className="h-4 w-4" />
                           </Button>
                         </div>
                       ) : (
-                        (safeAssignments.find((a) => (a as any)?.roleInCase === "lawyer") as any)?.userName ?? "Unassigned"
+                        <div className="text-sm font-semibold text-slate-900">
+                          {(safeAssignments.find((a) => (a as any)?.roleInCase === "lawyer") as any)?.userName ?? "Unassigned"}
+                        </div>
                       )}
                     </div>
-                  </div>
-                  <div>
-                    <div className="text-sm font-medium text-slate-500">Assigned Clerk</div>
-                    <div className="text-slate-900 font-medium">
+
+                    <div className="space-y-1.5">
+                      <div className="text-xs font-medium text-slate-500">Assigned Clerk</div>
                       {canEditAssignments ? (
                         <div className="flex items-center gap-2">
                           <Select
-                            value={currentClerkId ? String(currentClerkId) : "__none__"}
+                            value={currentClerkId ? String(currentClerkId) : ""}
                             onValueChange={(v) => {
                               if (v === "__none__") {
                                 updateCaseMutation.mutate({ assignedClerkId: null });
@@ -1733,7 +1817,7 @@ export default function CaseDetail() {
                             }}
                           >
                             <SelectTrigger className="h-9 text-sm border-slate-200 bg-white flex-1">
-                              <SelectValue placeholder="Select clerk" />
+                              <SelectValue placeholder="Select existing clerk..." />
                             </SelectTrigger>
                             <SelectContent>
                               <SelectItem value="__none__">None</SelectItem>
@@ -1748,44 +1832,68 @@ export default function CaseDetail() {
                             size="icon"
                             className="h-9 w-9"
                             onClick={() => { setQuickAddUserRoleKind("clerk"); setQuickAddUserOpen(true); }}
-                            title="Quick add clerk"
+                            title="Register new employee (clerk)"
                           >
                             <Plus className="h-4 w-4" />
                           </Button>
                         </div>
                       ) : (
-                        (safeAssignments.find((a) => (a as any)?.roleInCase === "clerk") as any)?.userName ?? "Unassigned"
+                        <div className="text-sm font-semibold text-slate-900">
+                          {(safeAssignments.find((a) => (a as any)?.roleInCase === "clerk") as any)?.userName ?? "Unassigned"}
+                        </div>
                       )}
                     </div>
                   </div>
-                </div>
-              </CardContent>
-            </Card>
+                </CardContent>
+              </Card>
+            </div>
 
-            <Card>
-              <CardHeader>
-                <CardTitle>Purchasers</CardTitle>
-              </CardHeader>
-              <CardContent>
-                <div className="space-y-4">
-                  {safePurchasers.map((p: any, idx: number) => (
-                    <div key={p?.id ?? `p-${idx}`} className="flex items-start gap-3 p-3 bg-slate-50 rounded-lg border border-slate-100">
-                      <User className="w-5 h-5 text-slate-400 mt-0.5" />
-                      <div>
-                        <div className="font-medium text-slate-900">{String(p?.clientName ?? "")}</div>
-                        <div className="text-xs text-slate-500">{String(p?.icNo ?? "")}</div>
-                        <span className="inline-block mt-1 px-2 py-0.5 text-[10px] uppercase font-semibold bg-white border border-slate-200 rounded text-slate-600">
-                          {String(p?.role ?? "")} Purchaser
-                        </span>
-                      </div>
+            <div className="space-y-6">
+              <Card className="h-full">
+                <CardHeader className="pb-3">
+                  <CardTitle>Parties</CardTitle>
+                </CardHeader>
+                <CardContent className="space-y-5">
+                  <div>
+                    <div className="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-2">Purchasers</div>
+                    <div className="space-y-3">
+                      {safePurchasers.map((p: any, idx: number) => (
+                        <div key={p?.id ?? `p-${idx}`} className="flex items-start gap-3 p-3 bg-slate-50 rounded-lg border border-slate-100">
+                          <User className="w-5 h-5 text-slate-400 mt-0.5" />
+                          <div className="min-w-0">
+                            <div className="font-medium text-slate-900 break-words">{String(p?.clientName ?? "")}</div>
+                            <div className="text-xs text-slate-500 break-words">{String(p?.icNo ?? "")}</div>
+                            <span className="inline-block mt-1 px-2 py-0.5 text-[10px] uppercase font-semibold bg-white border border-slate-200 rounded text-slate-600">
+                              {String(p?.role ?? "")} Purchaser
+                            </span>
+                          </div>
+                        </div>
+                      ))}
+                      {safePurchasers.length === 0 ? (
+                        <div className="text-sm text-slate-500">No purchasers.</div>
+                      ) : null}
                     </div>
-                  ))}
-                  {safePurchasers.length === 0 ? (
-                    <div className="text-sm text-slate-500">No purchasers.</div>
-                  ) : null}
-                </div>
-              </CardContent>
-            </Card>
+                  </div>
+
+                  <div>
+                    <div className="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-2">Borrowers</div>
+                    <div className="space-y-3">
+                      {safeBorrowers.map((b, idx) => (
+                        <div key={`${b.name}-${idx}`} className="flex items-start gap-3 p-3 bg-slate-50 rounded-lg border border-slate-100">
+                          <User className="w-5 h-5 text-slate-400 mt-0.5" />
+                          <div className="min-w-0">
+                            <div className="font-medium text-slate-900 break-words">{b.name}</div>
+                          </div>
+                        </div>
+                      ))}
+                      {safeBorrowers.length === 0 ? (
+                        <div className="text-sm text-slate-500">No borrowers.</div>
+                      ) : null}
+                    </div>
+                  </div>
+                </CardContent>
+              </Card>
+            </div>
           </div>
 
           <Card>

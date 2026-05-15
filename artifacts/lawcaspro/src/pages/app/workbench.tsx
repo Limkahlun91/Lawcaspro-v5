@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button";
 import { apiFetchJson } from "@/lib/api-client";
 import { useListProjects } from "@workspace/api-client-react";
 import { QueryFallback } from "@/components/query-fallback";
+import { MilestonesTable } from "@/components/milestones-table";
 
 type WorkbenchCard = { key: string; label: string; count: number; query: Record<string, string> };
 type WorkbenchResponse = {
@@ -17,6 +18,16 @@ type WorkbenchResponse = {
   missingDates: { cards: WorkbenchCard[] };
   overdue: { cards: WorkbenchCard[] };
 };
+
+type MilestoneCard = {
+  key: string;
+  label: string;
+  count: number;
+  pendingCount?: number;
+  doneCount?: number;
+  filter: { milestone?: string; milestonePresence?: string; purchaseMode?: string; titleType?: string };
+};
+type MilestoneSection = { key: string; label: string; total: number; cards: MilestoneCard[] };
 
 function buildCasesHref(query: Record<string, string>) {
   const sp = new URLSearchParams(query);
@@ -72,6 +83,13 @@ export default function Workbench() {
     queryFn: ({ signal }) => apiFetchJson(`/cases/workbench${workbenchQuery ? `?${workbenchQuery}` : ""}`, { signal }),
     retry: 1,
     retryDelay: 400,
+  });
+
+  const milestonesQuery = useQuery({
+    queryKey: ["dashboard", "assignedToMe"],
+    queryFn: ({ signal }) => apiFetchJson(`/dashboard?assignedToMe=true`, { signal }) as Promise<Record<string, unknown>>,
+    retry: false,
+    enabled: tab === "my-work" && userId === "me",
   });
 
   useEffect(() => {
@@ -140,6 +158,32 @@ export default function Workbench() {
               </div>
             ))}
           </div>
+
+          {userId === "me" && (
+            <div className="mt-4">
+              {milestonesQuery.isError ? (
+                <QueryFallback title="Milestones unavailable" error={milestonesQuery.error} onRetry={() => milestonesQuery.refetch()} isRetrying={milestonesQuery.isFetching} />
+              ) : (
+                (() => {
+                  const payload = milestonesQuery.data as Record<string, unknown> | undefined;
+                  const milestoneSections: MilestoneSection[] = Array.isArray(payload?.milestoneSections)
+                    ? (payload?.milestoneSections as unknown as MilestoneSection[])
+                    : [];
+                  const milestoneCards: MilestoneCard[] = Array.isArray(payload?.milestoneCards)
+                    ? (payload?.milestoneCards as unknown as MilestoneCard[])
+                    : [];
+                  return (
+                <MilestonesTable
+                  title="My Milestones"
+                  milestoneSections={milestoneSections}
+                  milestoneCards={milestoneCards}
+                  onNavigate={(href) => setLocation(href)}
+                />
+                  );
+                })()
+              )}
+            </div>
+          )}
 
           <Card className="mt-4">
             <CardHeader className="pb-3">

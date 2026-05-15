@@ -1,12 +1,12 @@
 import { useQuery } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Table, TableBody, TableCell, TableRow } from "@/components/ui/table";
 import { Briefcase, Users, Building2, HardHat, DollarSign, TrendingUp, MessageSquare, ArrowRight } from "lucide-react";
 import { useLocation } from "wouter";
 import { apiFetchJson } from "@/lib/api-client";
 import { QueryFallback } from "@/components/query-fallback";
 import { useAuth } from "@/lib/auth-context";
 import { hasPermission, isAccountingRoleAllowed } from "@/lib/permissions";
+import { MilestonesTable } from "@/components/milestones-table";
 
 function fmt(val: unknown) {
   return `RM ${Number(val ?? 0).toLocaleString("en-MY", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
@@ -29,32 +29,12 @@ const STATUS_COLORS: Record<string, string> = {
   "NOA Served": "bg-cyan-50 text-cyan-700",
 };
 
-const MILESTONE_SECTION_ROW_CLASS: Record<string, string> = {
-  spa: "bg-amber-50",
-  loan_master: "bg-blue-50",
-  loan_title: "bg-emerald-50",
-};
-
 function StatusBadge({ status }: { status: string }) {
   const short = STATUS_SHORT[status] ?? status;
   const colorClass = STATUS_COLORS[status] ?? "bg-slate-100 text-slate-600";
   return (
     <span className={`text-xs font-medium px-2 py-0.5 rounded ${colorClass}`}>{short}</span>
   );
-}
-
-function buildCasesHref(filter: { milestone?: string | null; milestonePresence?: string | null; purchaseMode?: string | null; titleType?: string | null }) {
-  const qs = new URLSearchParams();
-  const milestone = (filter as any)?.milestone as string | undefined;
-  const milestonePresence = (filter as any)?.milestonePresence as string | undefined;
-  if (milestone && milestonePresence) {
-    qs.set("milestone", milestone);
-    qs.set("milestonePresence", milestonePresence);
-  }
-  if (filter.purchaseMode) qs.set("purchaseMode", filter.purchaseMode);
-  if (filter.titleType) qs.set("titleType", filter.titleType);
-  const q = qs.toString();
-  return q ? `/app/cases?${q}` : "/app/cases";
 }
 
 export default function AppDashboard() {
@@ -172,126 +152,11 @@ export default function AppDashboard() {
       </div>
 
       {(milestoneSections.length > 0 || milestoneCards.length > 0) && (
-        <Card>
-          <CardHeader className="pb-3">
-            <CardTitle>Milestones</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <Table>
-              <TableBody>
-                {milestoneSections.length > 0
-                  ? milestoneSections.flatMap((section) => {
-                      const sectionRowClass = MILESTONE_SECTION_ROW_CLASS[section.key] ?? "bg-slate-50";
-                      const sectionRow = (
-                        <TableRow key={`section_${section.key}`} className={sectionRowClass}>
-                          <TableCell className="py-3" colSpan={2}>
-                            <div className="flex items-center justify-between">
-                              <div className="text-base font-semibold text-slate-900">{section.label}</div>
-                              <div className="text-sm font-semibold text-slate-700">Total: {section.total}</div>
-                            </div>
-                          </TableCell>
-                        </TableRow>
-                      );
-                      const rows = section.cards.map((card) => {
-                        const filter = card.filter ?? {};
-                        const href = buildCasesHref(filter);
-                        const pendingCount = Number((card as any)?.pendingCount ?? card.count ?? 0) || 0;
-                        const doneCount = Number((card as any)?.doneCount ?? 0) || 0;
-                        const hasMilestone = Boolean(filter.milestone);
-                        const pendingHref = buildCasesHref({ ...filter, milestonePresence: "pending" });
-                        const doneHref = buildCasesHref({ ...filter, milestonePresence: "completed" });
-                        return (
-                          <TableRow
-                            key={card.key}
-                            className={hasMilestone ? "" : "cursor-pointer"}
-                            role={hasMilestone ? undefined : "button"}
-                            tabIndex={hasMilestone ? undefined : 0}
-                            onClick={hasMilestone ? undefined : () => setLocation(href)}
-                            onKeyDown={hasMilestone ? undefined : (e) => {
-                              if (e.key === "Enter" || e.key === " ") setLocation(href);
-                            }}
-                          >
-                            <TableCell className="py-3">
-                              <div className="text-base font-medium text-slate-900">{card.label}</div>
-                            </TableCell>
-                            <TableCell className="py-3 text-right">
-                              {hasMilestone ? (
-                                <div className="flex items-center justify-end gap-3">
-                                  <button
-                                    type="button"
-                                    className="text-sm font-semibold text-emerald-700 hover:text-emerald-800 hover:underline cursor-pointer transition-colors"
-                                    onClick={(e) => { e.preventDefault(); e.stopPropagation(); setLocation(doneHref); }}
-                                  >
-                                    DONE ({doneCount})
-                                  </button>
-                                  <button
-                                    type="button"
-                                    className="text-sm font-semibold text-amber-700 hover:text-amber-800 hover:underline cursor-pointer transition-colors"
-                                    onClick={(e) => { e.preventDefault(); e.stopPropagation(); setLocation(pendingHref); }}
-                                  >
-                                    Pending ({pendingCount})
-                                  </button>
-                                </div>
-                              ) : (
-                                <span className="font-semibold text-slate-900">{card.count}</span>
-                              )}
-                            </TableCell>
-                          </TableRow>
-                        );
-                      });
-                      return [sectionRow, ...rows];
-                    })
-                  : milestoneCards.map((card) => {
-                      const filter = card.filter ?? {};
-                      const href = buildCasesHref(filter);
-                      const pendingCount = Number((card as any)?.pendingCount ?? card.count ?? 0) || 0;
-                      const doneCount = Number((card as any)?.doneCount ?? 0) || 0;
-                      const hasMilestone = Boolean(filter.milestone);
-                      const pendingHref = buildCasesHref({ ...filter, milestonePresence: "pending" });
-                      const doneHref = buildCasesHref({ ...filter, milestonePresence: "completed" });
-                      return (
-                        <TableRow
-                          key={card.key}
-                          className={hasMilestone ? "" : "cursor-pointer"}
-                          role={hasMilestone ? undefined : "button"}
-                          tabIndex={hasMilestone ? undefined : 0}
-                          onClick={hasMilestone ? undefined : () => setLocation(href)}
-                          onKeyDown={hasMilestone ? undefined : (e) => {
-                            if (e.key === "Enter" || e.key === " ") setLocation(href);
-                          }}
-                        >
-                          <TableCell className="py-3">
-                            <div className="text-base font-medium text-slate-900">{card.label}</div>
-                          </TableCell>
-                          <TableCell className="py-3 text-right">
-                            {hasMilestone ? (
-                              <div className="flex items-center justify-end gap-3">
-                                <button
-                                  type="button"
-                                  className="text-sm font-semibold text-emerald-700 hover:text-emerald-800 hover:underline cursor-pointer transition-colors"
-                                  onClick={(e) => { e.preventDefault(); e.stopPropagation(); setLocation(doneHref); }}
-                                >
-                                  DONE ({doneCount})
-                                </button>
-                                <button
-                                  type="button"
-                                  className="text-sm font-semibold text-amber-700 hover:text-amber-800 hover:underline cursor-pointer transition-colors"
-                                  onClick={(e) => { e.preventDefault(); e.stopPropagation(); setLocation(pendingHref); }}
-                                >
-                                  Pending ({pendingCount})
-                                </button>
-                              </div>
-                            ) : (
-                              <span className="font-semibold text-slate-900">{card.count}</span>
-                            )}
-                          </TableCell>
-                        </TableRow>
-                      );
-                    })}
-              </TableBody>
-            </Table>
-          </CardContent>
-        </Card>
+        <MilestonesTable
+          milestoneSections={milestoneSections}
+          milestoneCards={milestoneCards}
+          onNavigate={(href) => setLocation(href)}
+        />
       )}
 
       <div className={`grid grid-cols-1 gap-4 ${canSeeAccounting ? "md:grid-cols-3" : ""}`}>

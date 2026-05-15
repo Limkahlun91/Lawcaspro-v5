@@ -9,6 +9,8 @@ import {
 import { TrendingUp, Briefcase, Users, MessageSquare, BookOpen, Landmark, Clock, ArrowRight, AlertTriangle } from "lucide-react";
 import { QueryFallback } from "@/components/query-fallback";
 import { apiFetchJson } from "@/lib/api-client";
+import { useAuth } from "@/lib/auth-context";
+import { hasPermission } from "@/lib/permissions";
 
 function fmt(val: unknown) {
   return `RM ${Number(val ?? 0).toLocaleString("en-MY", { minimumFractionDigits: 0, maximumFractionDigits: 0 })}`;
@@ -35,6 +37,8 @@ const COMM_COLORS: Record<string, string> = {
 
 export default function Reports() {
   const [, setLocation] = useLocation();
+  const { user } = useAuth();
+  const canSeeAccounting = !!user && hasPermission(user, "accounting", "read");
   type ReportsOverviewResponse = {
     casesByStatus?: Array<Record<string, unknown>>;
     casesByMonth?: Array<Record<string, unknown>>;
@@ -98,7 +102,10 @@ export default function Reports() {
               href: "/app/reports/matter-aging",
               color: "text-red-600 bg-red-50",
             },
-          ].map(({ title, description, icon: Icon, href, color }) => (
+          ].filter((item) => {
+            if (canSeeAccounting) return true;
+            return item.title !== "Bills Delivered Book" && item.title !== "Trust Account Statement";
+          }).map(({ title, description, icon: Icon, href, color }) => (
             <Card key={title} className="border-slate-200 hover:border-slate-300 cursor-pointer transition-colors" onClick={() => setLocation(href)}>
               <CardContent className="py-4 px-4 flex gap-3">
                 <div className={`p-2 rounded-lg ${color} flex-shrink-0 h-fit mt-0.5`}>
@@ -126,11 +133,11 @@ export default function Reports() {
         <>
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
             {[
-              { label: "Total Cases", value: String(casesByStatus.reduce((s, r) => s + Number(r.count), 0)), icon: Briefcase, color: "bg-slate-100 text-slate-600" },
-              { label: "Total Billed", value: fmt(billing.total_billed), icon: TrendingUp, color: "bg-amber-50 text-amber-600" },
-              { label: "Outstanding", value: fmt(billing.total_outstanding), icon: TrendingUp, color: "bg-red-50 text-red-500" },
-              { label: "Lawyers Active", value: String(lawyerWorkload.length), icon: Users, color: "bg-blue-50 text-blue-600" },
-            ].map((item) => (
+              { label: "Total Cases", value: String(casesByStatus.reduce((s, r) => s + Number(r.count), 0)), icon: Briefcase, color: "bg-slate-100 text-slate-600", gate: "always" as const },
+              { label: "Total Billed", value: fmt(billing.total_billed), icon: TrendingUp, color: "bg-amber-50 text-amber-600", gate: "accounting" as const },
+              { label: "Outstanding", value: fmt(billing.total_outstanding), icon: TrendingUp, color: "bg-red-50 text-red-500", gate: "accounting" as const },
+              { label: "Lawyers Active", value: String(lawyerWorkload.length), icon: Users, color: "bg-blue-50 text-blue-600", gate: "always" as const },
+            ].filter((item) => item.gate === "always" || canSeeAccounting).map((item) => (
               <Card key={item.label}>
                 <CardContent className="pt-6">
                   <div className="flex items-center gap-3">

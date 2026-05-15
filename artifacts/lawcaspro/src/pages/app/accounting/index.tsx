@@ -20,7 +20,7 @@ import { QueryFallback } from "@/components/query-fallback";
 import { useReAuth } from "@/components/re-auth-dialog";
 import { useAuth } from "@/lib/auth-context";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { CreatePaymentVoucherBody, PaymentVoucherTransitionBody, type PaymentVoucherFundStatus } from "@workspace/api-zod";
+import { CreatePaymentVoucherBody, PaymentVoucherTransitionBody, type PaymentVoucherFundStatus, type PaymentVoucherType } from "@workspace/api-zod";
 import BankAccountsTab from "./bank-accounts";
 import BankReconciliationPage from "./bank-reconciliation";
 
@@ -70,7 +70,7 @@ type CaseFilesListResponse = {
   total: number;
 };
 
-const TABS = ["Overview", "File Listing", "Invoices", "Receipts", "Payment Vouchers", "Bank Accounts", "Bank Reconciliation", "Ledger"] as const;
+const TABS = ["Overview", "File Listing", "Invoices", "Receipts", "Payment Vouchers", "Quotations", "Bank Accounts", "Bank Reconciliation", "Ledger"] as const;
 type Tab = typeof TABS[number];
 
 const TAB_KEYS: Record<string, Tab> = {
@@ -79,6 +79,7 @@ const TAB_KEYS: Record<string, Tab> = {
   invoices: "Invoices",
   receipts: "Receipts",
   "payment-vouchers": "Payment Vouchers",
+  quotations: "Quotations",
   "bank-accounts": "Bank Accounts",
   "bank-reconciliation": "Bank Reconciliation",
   ledger: "Ledger",
@@ -91,6 +92,9 @@ const STATUS_COLORS: Record<string, string> = {
   paid: "bg-green-100 text-green-700",
   void: "bg-red-100 text-red-600",
   overdue: "bg-red-100 text-red-700",
+  sent: "bg-blue-100 text-blue-700",
+  accepted: "bg-green-100 text-green-700",
+  rejected: "bg-red-100 text-red-700",
   pending_lawyer: "bg-blue-100 text-blue-700",
   pending_partner: "bg-indigo-100 text-indigo-700",
   pending_account: "bg-violet-100 text-violet-700",
@@ -102,6 +106,21 @@ function StatusBadge({ status }: { status: string }) {
   const label = status.replace(/_/g, " ").replace(/\b\w/g, (c: string) => c.toUpperCase());
   return (
     <span className={cn("px-2 py-0.5 rounded-full text-xs font-medium", STATUS_COLORS[status] ?? "bg-slate-100 text-slate-600")}>
+      {label}
+    </span>
+  );
+}
+
+const APPROVAL_COLORS: Record<string, string> = {
+  approved: "bg-green-100 text-green-700",
+  pending_approval: "bg-amber-100 text-amber-700",
+  rejected: "bg-red-100 text-red-700",
+};
+
+function ApprovalBadge({ status }: { status: string }) {
+  const label = status.replace(/_/g, " ").replace(/\b\w/g, (c: string) => c.toUpperCase());
+  return (
+    <span className={cn("px-2 py-0.5 rounded-full text-xs font-medium", APPROVAL_COLORS[status] ?? "bg-slate-100 text-slate-600")}>
       {label}
     </span>
   );
@@ -715,6 +734,72 @@ function ReceiptsTab() {
   );
 }
 
+// ── QUOTATIONS TAB ────────────────────────────────────────────────────────────
+
+function QuotationsTab() {
+  const [, setLocation] = useLocation();
+  const { data: quotations, isLoading, isError, error, refetch, isFetching } = useListQuotations();
+  const rows = Array.isArray(quotations) ? quotations : [];
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between gap-3">
+        <div>
+          <h2 className="text-xl font-semibold text-slate-900">Quotations</h2>
+          <p className="text-sm text-slate-500 mt-1">All quotations across the firm.</p>
+        </div>
+        <Button onClick={() => setLocation("/app/quotations/new")} className="bg-amber-500 hover:bg-amber-600 text-white gap-2">
+          <Plus className="w-4 h-4" /> New Quotation
+        </Button>
+      </div>
+
+      {isLoading ? (
+        <div className="text-center py-12 text-slate-400">Loading…</div>
+      ) : isError ? (
+        <QueryFallback title="Quotations unavailable" error={error} onRetry={() => refetch()} isRetrying={isFetching} />
+      ) : rows.length === 0 ? (
+        <div className="text-center py-16 text-slate-400">
+          <FileText className="w-10 h-10 mx-auto mb-3 opacity-30" />
+          <p>No quotations yet</p>
+        </div>
+      ) : (
+        <div className="overflow-x-auto rounded-lg border border-slate-200 bg-white">
+          <table className="w-full text-sm min-w-[900px]">
+            <thead>
+              <tr className="bg-slate-50 border-b text-slate-500 text-xs uppercase tracking-wide">
+                <th className="px-4 py-3 text-left font-medium">File Ref</th>
+                <th className="px-4 py-3 text-left font-medium">Client Name</th>
+                <th className="px-4 py-3 text-left font-medium">Date</th>
+                <th className="px-4 py-3 text-right font-medium">Amount</th>
+                <th className="px-4 py-3 text-left font-medium">Status</th>
+                <th className="px-4 py-3 text-right font-medium">Actions</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-100">
+              {rows.map((q: any) => (
+                <tr key={q.id} className="hover:bg-slate-50 transition-colors cursor-pointer" onClick={() => setLocation(`/app/quotations/${q.id}`)}>
+                  <td className="px-4 py-3 font-medium text-slate-900">{q.referenceNo}</td>
+                  <td className="px-4 py-3 text-slate-700">{q.clientName}</td>
+                  <td className="px-4 py-3 text-slate-500">
+                    {q.createdAt ? new Date(String(q.createdAt)).toLocaleDateString("en-MY") : "—"}
+                  </td>
+                  <td className="px-4 py-3 text-right font-semibold text-slate-800">{fmt(q.totalInclTax)}</td>
+                  <td className="px-4 py-3"><StatusBadge status={String(q.status ?? "draft")} /></td>
+                  <td className="px-4 py-3 text-right">
+                    <Button size="sm" variant="outline" className="text-xs h-7" onClick={(e) => { e.stopPropagation(); setLocation(`/app/quotations/${q.id}`); }}>
+                      View
+                    </Button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── PAYMENT VOUCHERS TAB ──────────────────────────────────────────────────────
 
 function PaymentVouchersTab() {
@@ -723,6 +808,7 @@ function PaymentVouchersTab() {
   const qc = useQueryClient();
   const { wrapWithReAuth } = useReAuth();
   const { user } = useAuth();
+  const firmName = user?.firmName ?? "";
   const roleName = user?.userType === "firm_user" ? (user.roleName ?? "") : "";
   const roleKind =
     roleName === "Partner"
@@ -738,7 +824,19 @@ function PaymentVouchersTab() {
   const [markPaidVoucherId, setMarkPaidVoucherId] = useState<number | null>(null);
   const [markPaidForm, setMarkPaidForm] = useState({ accountType: "office", paymentMethod: "bank_transfer", bankChequeRefNo: "" });
 
+  const bankAccountsQuery = useQuery({
+    queryKey: ["bank-accounts"],
+    queryFn: ({ signal }) => apiFetchJson("/accounting/bank-accounts", { signal }) as Promise<{ data?: any[] }>,
+    retry: false,
+  });
+  const bankAccounts = Array.isArray(bankAccountsQuery.data?.data) ? bankAccountsQuery.data!.data! : [];
+
   const [form, setForm] = useState({
+    voucherType: "external_payment" as PaymentVoucherType,
+    caseId: "",
+    targetCaseId: "",
+    bankAccountId: "",
+    targetAccountId: "",
     payeeName: "", payeeBank: "", payeeAccountNo: "",
     paymentMethod: "bank_transfer", accountType: "office",
     amount: "", purpose: "", notes: "",
@@ -746,14 +844,46 @@ function PaymentVouchersTab() {
     items: [{ description: "", itemType: "disbursement", amount: "" }],
   });
 
+  const [sourceCaseQueryText, setSourceCaseQueryText] = useState("");
+  const [targetCaseQueryText, setTargetCaseQueryText] = useState("");
+  const [sourceCaseOpen, setSourceCaseOpen] = useState(false);
+  const [targetCaseOpen, setTargetCaseOpen] = useState(false);
+
+  const caseSearchSourceQuery = useQuery({
+    queryKey: ["accounting", "cases-search", "source", sourceCaseQueryText],
+    queryFn: ({ signal }) => apiFetchJson(`/accounting/cases/search?query=${encodeURIComponent(sourceCaseQueryText)}`, { signal }) as Promise<{ data?: any[] }>,
+    retry: false,
+    enabled: form.voucherType === "file_transfer" && sourceCaseQueryText.trim().length >= 2 && sourceCaseOpen,
+  });
+  const sourceCaseResults = Array.isArray(caseSearchSourceQuery.data?.data) ? caseSearchSourceQuery.data!.data! : [];
+
+  const caseSearchTargetQuery = useQuery({
+    queryKey: ["accounting", "cases-search", "target", targetCaseQueryText],
+    queryFn: ({ signal }) => apiFetchJson(`/accounting/cases/search?query=${encodeURIComponent(targetCaseQueryText)}`, { signal }) as Promise<{ data?: any[] }>,
+    retry: false,
+    enabled: form.voucherType === "file_transfer" && targetCaseQueryText.trim().length >= 2 && targetCaseOpen,
+  });
+  const targetCaseResults = Array.isArray(caseSearchTargetQuery.data?.data) ? caseSearchTargetQuery.data!.data! : [];
+
   const vouchersQuery = useQuery({ queryKey: ["payment-vouchers"], queryFn: () => apiFetchJson("/payment-vouchers"), retry: false });
   const { data, isLoading } = vouchersQuery;
   const vouchers = (data ?? []) as any[];
 
   const createMut = useMutation({
     mutationFn: async () => {
+      const derivedPayeeName = (() => {
+        if (form.voucherType === "external_payment") return form.payeeName;
+        if (form.voucherType === "file_transfer") return "Internal File Transfer";
+        if (form.voucherType === "account_transfer") return "Account Transfer";
+        return form.payeeName;
+      })();
       const payload = {
-        payeeName: form.payeeName,
+        voucherType: form.voucherType,
+        caseId: form.caseId ? Number(form.caseId) : null,
+        targetCaseId: form.targetCaseId ? Number(form.targetCaseId) : null,
+        bankAccountId: form.bankAccountId ? Number(form.bankAccountId) : null,
+        targetAccountId: form.targetAccountId ? Number(form.targetAccountId) : null,
+        payeeName: derivedPayeeName,
         payeeBank: isFullVoucherView ? (form.payeeBank || null) : null,
         payeeAccountNo: isFullVoucherView ? (form.payeeAccountNo || null) : null,
         paymentMethod: isFullVoucherView ? form.paymentMethod : undefined,
@@ -776,7 +906,25 @@ function PaymentVouchersTab() {
     onSuccess: (pv: any) => {
       qc.invalidateQueries({ queryKey: ["payment-vouchers"] });
       setShowCreate(false);
-      setForm({ payeeName: "", payeeBank: "", payeeAccountNo: "", paymentMethod: "bank_transfer", accountType: "office", amount: "", purpose: "", notes: "", fundStatus: "client_paid", items: [{ description: "", itemType: "disbursement", amount: "" }] });
+      setForm({
+        voucherType: "external_payment",
+        caseId: "",
+        targetCaseId: "",
+        bankAccountId: "",
+        targetAccountId: "",
+        payeeName: "",
+        payeeBank: "",
+        payeeAccountNo: "",
+        paymentMethod: "bank_transfer",
+        accountType: "office",
+        amount: "",
+        purpose: "",
+        notes: "",
+        fundStatus: "client_paid",
+        items: [{ description: "", itemType: "disbursement", amount: "" }],
+      });
+      setSourceCaseQueryText("");
+      setTargetCaseQueryText("");
       toast({ title: isFullVoucherView ? "Payment Voucher created" : "Payment Request created", description: `${pv.voucherNo}` });
     },
     onError: (e) => toastError(toast, e, "Create failed"),
@@ -807,20 +955,31 @@ function PaymentVouchersTab() {
   const fundStatusLabel = (v: string) => v === "request_advance" ? "Request Advance" : "Client Paid";
 
   async function printVoucher(voucherId: number): Promise<void> {
+    const w = window.open("", "_blank");
+    if (!w) return;
+    w.document.open();
+    w.document.write(`<html><head><title>Preparing voucher…</title></head><body style="font-family: Arial, sans-serif; padding:16px;">Preparing voucher…</body></html>`);
+    w.document.close();
     const pv = await apiFetchJson<any>(`/payment-vouchers/${voucherId}`);
     const items = Array.isArray(pv.items) ? pv.items : [];
-    const w = window.open("", "_blank", "noopener,noreferrer");
-    if (!w) return;
     const rowsHtml = items
       .map((it: any) => `<tr><td style="padding:6px 8px;border-bottom:1px solid #eee;">${String(it.description ?? "")}</td><td style="padding:6px 8px;border-bottom:1px solid #eee;text-align:right;">${fmt(it.amount)}</td></tr>`)
       .join("");
+    const printedAt = new Date().toLocaleString("en-MY");
     w.document.open();
     w.document.write(`
       <html>
         <head>
           <title>${String(pv.voucherNo ?? "Payment Voucher")}</title>
           <style>
-            body { font-family: Arial, sans-serif; margin: 24px; color: #111; }
+            @page { size: A5 portrait; margin: 10mm; }
+            body { font-family: Arial, sans-serif; margin: 0; color: #111; }
+            .page { padding: 10mm; }
+            .letterhead { border-bottom: 1px solid #111; padding-bottom: 8px; margin-bottom: 10px; display:flex; justify-content:space-between; gap:12px; }
+            .firm { font-weight: 800; font-size: 14px; }
+            .doc { text-align:right; }
+            .doc .title { font-weight: 800; font-size: 14px; }
+            .doc .meta { font-size: 11px; color: #444; margin-top: 2px; }
             h1 { font-size: 18px; margin: 0 0 12px; }
             .meta { font-size: 12px; color: #444; margin-bottom: 12px; }
             table { width: 100%; border-collapse: collapse; margin-top: 8px; }
@@ -830,30 +989,41 @@ function PaymentVouchersTab() {
           </style>
         </head>
         <body>
-          <h1>Payment Voucher</h1>
-          <div class="meta">
-            <div><b>Voucher No:</b> ${String(pv.voucherNo ?? "")}</div>
-            <div><b>Payee:</b> ${String(pv.payeeName ?? "")}</div>
-            <div><b>Purpose:</b> ${String(pv.purpose ?? "")}</div>
-            <div><b>Fund Status:</b> ${fundStatusLabel(String(pv.fundStatus ?? ""))}</div>
-            <div><b>Total:</b> ${fmt(pv.amount)}</div>
+          <div class="page">
+            <div class="letterhead">
+              <div class="firm">${String(firmName || "Firm")}</div>
+              <div class="doc">
+                <div class="title">Payment Voucher</div>
+                <div class="meta">Printed: ${printedAt}</div>
+              </div>
+            </div>
+
+            <div class="meta">
+              <div><b>Voucher No:</b> ${String(pv.voucherNo ?? "")}</div>
+              <div><b>Payee:</b> ${String(pv.payeeName ?? "")}</div>
+              <div><b>Purpose:</b> ${String(pv.purpose ?? "")}</div>
+              <div><b>Fund Status:</b> ${fundStatusLabel(String(pv.fundStatus ?? ""))}</div>
+              <div><b>Total:</b> ${fmt(pv.amount)}</div>
+            </div>
+
+            <table>
+              <thead>
+                <tr><th style="text-align:left;border-bottom:1px solid #111;padding:6px 8px;">Line Item</th><th style="text-align:right;border-bottom:1px solid #111;padding:6px 8px;">Amount</th></tr>
+              </thead>
+              <tbody>${rowsHtml}</tbody>
+            </table>
+            <div class="sig">
+              <div>Lawyer Approval</div>
+              <div>Partner Approval</div>
+              <div>Account / Paid</div>
+            </div>
+            <button onclick="window.print()" style="margin-top:16px;">Print</button>
           </div>
-          <table>
-            <thead>
-              <tr><th style="text-align:left;border-bottom:1px solid #111;padding:6px 8px;">Line Item</th><th style="text-align:right;border-bottom:1px solid #111;padding:6px 8px;">Amount</th></tr>
-            </thead>
-            <tbody>${rowsHtml}</tbody>
-          </table>
-          <div class="sig">
-            <div>Lawyer Approval</div>
-            <div>Partner Approval</div>
-            <div>Account / Paid</div>
-          </div>
-          <button onclick="window.print()" style="margin-top:16px;">Print</button>
         </body>
       </html>
     `);
     w.document.close();
+    await new Promise<void>((resolve) => setTimeout(() => resolve(), 250));
     w.focus();
     w.print();
   }
@@ -891,22 +1061,153 @@ function PaymentVouchersTab() {
           <CardContent className="space-y-4">
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <div>
-                <label className="text-sm font-medium text-slate-700 block mb-1">Payee Name</label>
-                <Input placeholder="Recipient name" value={form.payeeName}
-                  onChange={(e) => setForm((f) => ({ ...f, payeeName: e.target.value }))} />
+                <label className="text-sm font-medium text-slate-700 block mb-1">Type</label>
+                <select
+                  className="w-full border border-slate-200 rounded-md px-3 py-2 text-sm bg-white"
+                  value={form.voucherType}
+                  onChange={(e) => {
+                    const next = e.target.value as PaymentVoucherType;
+                    setForm((f) => ({
+                      ...f,
+                      voucherType: next,
+                      caseId: "",
+                      targetCaseId: "",
+                      bankAccountId: "",
+                      targetAccountId: "",
+                      payeeName: next === "external_payment" ? f.payeeName : "",
+                      payeeBank: "",
+                      payeeAccountNo: "",
+                    }));
+                    setSourceCaseQueryText("");
+                    setTargetCaseQueryText("");
+                  }}
+                >
+                  <option value="external_payment">External Payment</option>
+                  <option value="file_transfer">Internal File Transfer</option>
+                  <option value="account_transfer">Account Transfer</option>
+                </select>
               </div>
+
+              {form.voucherType === "external_payment" ? (
+                <div>
+                  <label className="text-sm font-medium text-slate-700 block mb-1">Payee Name</label>
+                  <Input placeholder="Recipient name" value={form.payeeName}
+                    onChange={(e) => setForm((f) => ({ ...f, payeeName: e.target.value }))} />
+                </div>
+              ) : form.voucherType === "file_transfer" ? (
+                <div className="space-y-1">
+                  <label className="text-sm font-medium text-slate-700 block">Source Case</label>
+                  <Input
+                    placeholder="Search case ref / client name…"
+                    value={sourceCaseQueryText}
+                    onFocus={() => setSourceCaseOpen(true)}
+                    onBlur={() => setTimeout(() => setSourceCaseOpen(false), 120)}
+                    onChange={(e) => { setSourceCaseQueryText(e.target.value); setForm((f) => ({ ...f, caseId: "" })); }}
+                  />
+                  {sourceCaseOpen && sourceCaseQueryText.trim().length >= 2 && sourceCaseResults.length > 0 ? (
+                    <div className="border border-slate-200 rounded-md bg-white shadow-sm overflow-hidden">
+                      {sourceCaseResults.map((c: any) => (
+                        <button
+                          key={String(c.case_id)}
+                          type="button"
+                          className="w-full text-left px-3 py-2 text-sm hover:bg-slate-50"
+                          onMouseDown={(e) => e.preventDefault()}
+                          onClick={() => {
+                            setForm((f) => ({ ...f, caseId: String(c.case_id) }));
+                            setSourceCaseQueryText(String(c.title ?? ""));
+                            setSourceCaseOpen(false);
+                          }}
+                        >
+                          {String(c.title ?? "")}
+                        </button>
+                      ))}
+                    </div>
+                  ) : null}
+                </div>
+              ) : (
+                <div>
+                  <label className="text-sm font-medium text-slate-700 block mb-1">Source Bank Account</label>
+                  <select
+                    className="w-full border border-slate-200 rounded-md px-3 py-2 text-sm bg-white"
+                    value={form.bankAccountId}
+                    onChange={(e) => setForm((f) => ({ ...f, bankAccountId: e.target.value }))}
+                  >
+                    <option value="">— Select —</option>
+                    {bankAccounts.map((b: any) => (
+                      <option key={b.id} value={String(b.id)}>
+                        {(b.account_name ? `${b.account_name} • ` : "") + `${b.bank_name} ${b.account_no} (${b.account_type})`}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
+
+              {form.voucherType === "file_transfer" ? (
+                <div className="space-y-1">
+                  <label className="text-sm font-medium text-slate-700 block">Target Case</label>
+                  <Input
+                    placeholder="Search case ref / client name…"
+                    value={targetCaseQueryText}
+                    onFocus={() => setTargetCaseOpen(true)}
+                    onBlur={() => setTimeout(() => setTargetCaseOpen(false), 120)}
+                    onChange={(e) => { setTargetCaseQueryText(e.target.value); setForm((f) => ({ ...f, targetCaseId: "" })); }}
+                  />
+                  {targetCaseOpen && targetCaseQueryText.trim().length >= 2 && targetCaseResults.length > 0 ? (
+                    <div className="border border-slate-200 rounded-md bg-white shadow-sm overflow-hidden">
+                      {targetCaseResults.map((c: any) => (
+                        <button
+                          key={String(c.case_id)}
+                          type="button"
+                          className="w-full text-left px-3 py-2 text-sm hover:bg-slate-50"
+                          onMouseDown={(e) => e.preventDefault()}
+                          onClick={() => {
+                            setForm((f) => ({ ...f, targetCaseId: String(c.case_id) }));
+                            setTargetCaseQueryText(String(c.title ?? ""));
+                            setTargetCaseOpen(false);
+                          }}
+                        >
+                          {String(c.title ?? "")}
+                        </button>
+                      ))}
+                    </div>
+                  ) : null}
+                </div>
+              ) : form.voucherType === "account_transfer" ? (
+                <div>
+                  <label className="text-sm font-medium text-slate-700 block mb-1">Target Bank Account</label>
+                  <select
+                    className="w-full border border-slate-200 rounded-md px-3 py-2 text-sm bg-white"
+                    value={form.targetAccountId}
+                    onChange={(e) => setForm((f) => ({ ...f, targetAccountId: e.target.value }))}
+                  >
+                    <option value="">— Select —</option>
+                    {bankAccounts.map((b: any) => (
+                      <option key={b.id} value={String(b.id)}>
+                        {(b.account_name ? `${b.account_name} • ` : "") + `${b.bank_name} ${b.account_no} (${b.account_type})`}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              ) : (
+                <div />
+              )}
+
               {isFullVoucherView ? (
                 <>
-                  <div>
-                    <label className="text-sm font-medium text-slate-700 block mb-1">Payee Bank</label>
-                    <Input placeholder="e.g. Maybank" value={form.payeeBank}
-                      onChange={(e) => setForm((f) => ({ ...f, payeeBank: e.target.value }))} />
-                  </div>
-                  <div>
-                    <label className="text-sm font-medium text-slate-700 block mb-1">Account Number</label>
-                    <Input placeholder="Bank account number" value={form.payeeAccountNo}
-                      onChange={(e) => setForm((f) => ({ ...f, payeeAccountNo: e.target.value }))} />
-                  </div>
+                  {form.voucherType === "external_payment" ? (
+                    <>
+                      <div>
+                        <label className="text-sm font-medium text-slate-700 block mb-1">Payee Bank</label>
+                        <Input placeholder="e.g. Maybank" value={form.payeeBank}
+                          onChange={(e) => setForm((f) => ({ ...f, payeeBank: e.target.value }))} />
+                      </div>
+                      <div>
+                        <label className="text-sm font-medium text-slate-700 block mb-1">Account Number</label>
+                        <Input placeholder="Bank account number" value={form.payeeAccountNo}
+                          onChange={(e) => setForm((f) => ({ ...f, payeeAccountNo: e.target.value }))} />
+                      </div>
+                    </>
+                  ) : null}
                   <div>
                     <label className="text-sm font-medium text-slate-700 block mb-1">Payment Method</label>
                     <select className="w-full border border-slate-200 rounded-md px-3 py-2 text-sm bg-white"
@@ -986,11 +1287,25 @@ function PaymentVouchersTab() {
             </div>
 
             <div className="flex gap-2">
+              {(() => {
+                const hasItems = form.items.filter((i) => i.description && i.amount).length > 0;
+                const hasAmount = Boolean(form.amount) && Number.isFinite(parseFloat(form.amount));
+                const hasPurpose = Boolean(form.purpose);
+                const typeOk =
+                  form.voucherType === "external_payment"
+                    ? Boolean(form.payeeName)
+                    : form.voucherType === "file_transfer"
+                      ? Boolean(form.caseId) && Boolean(form.targetCaseId)
+                      : Boolean(form.bankAccountId) && Boolean(form.targetAccountId);
+                const disabled = !typeOk || !hasAmount || !hasPurpose || !hasItems || createMut.isPending;
+                return (
               <Button onClick={() => createMut.mutate()}
-                disabled={!form.payeeName || !form.amount || !form.purpose || createMut.isPending || form.items.filter((i) => i.description && i.amount).length === 0}
+                disabled={disabled}
                 className="bg-amber-500 hover:bg-amber-600 text-white">
                 {createMut.isPending ? "Creating…" : (isFullVoucherView ? "Create Voucher" : "Create Request")}
               </Button>
+                );
+              })()}
               <Button variant="outline" onClick={() => setShowCreate(false)}>Cancel</Button>
             </div>
           </CardContent>
@@ -1012,8 +1327,10 @@ function PaymentVouchersTab() {
             <thead>
               <tr className="bg-slate-50 border-b text-slate-500 text-xs uppercase tracking-wide">
                 <th className="px-4 py-3 text-left font-medium">Voucher No</th>
+                <th className="px-4 py-3 text-left font-medium">Type</th>
                 <th className="px-4 py-3 text-left font-medium">Payee</th>
                 <th className="px-4 py-3 text-left font-medium">Purpose</th>
+                <th className="px-4 py-3 text-left font-medium">Approval</th>
                 <th className="px-4 py-3 text-left font-medium">{isFullVoucherView ? "Account" : "Fund Status"}</th>
                 <th className="px-4 py-3 text-left font-medium">Status</th>
                 <th className="px-4 py-3 text-right font-medium">Amount</th>
@@ -1036,10 +1353,16 @@ function PaymentVouchersTab() {
                     show: pv.status === "pending_partner" && roleKind === "partner",
                   },
                   {
+                    key: "approve",
+                    label: "Approve",
+                    onClick: () => transitionMut.mutate({ id: pv.id, body: { action: "approve", decision: "approved" } }),
+                    show: pv.approvalStatus === "pending_approval" && roleKind === "partner",
+                  },
+                  {
                     key: "print",
                     label: "Print Voucher",
                     onClick: () => { printVoucher(pv.id).catch((e) => toastError(toast, e, "Print failed")); },
-                    show: pv.status === "pending_account",
+                    show: pv.status === "pending_account" && pv.approvalStatus !== "pending_approval" && pv.approvalStatus !== "rejected",
                   },
                   {
                     key: "mark_paid",
@@ -1048,7 +1371,7 @@ function PaymentVouchersTab() {
                       setMarkPaidVoucherId(pv.id);
                       setMarkPaidOpen(true);
                     },
-                    show: pv.status === "pending_account" && (roleKind === "partner" || roleKind === "account"),
+                    show: pv.status === "pending_account" && (roleKind === "partner" || roleKind === "account") && pv.approvalStatus !== "pending_approval" && pv.approvalStatus !== "rejected",
                   },
                   {
                     key: "ack_file",
@@ -1060,8 +1383,10 @@ function PaymentVouchersTab() {
                 return (
                   <tr key={pv.id} className="hover:bg-slate-50 transition-colors">
                     <td className="px-4 py-3 font-medium text-slate-900">{pv.voucherNo}</td>
+                    <td className="px-4 py-3 text-slate-700 capitalize">{String(pv.voucherType ?? "external_payment").replace(/_/g, " ")}</td>
                     <td className="px-4 py-3 text-slate-700">{pv.payeeName}</td>
                     <td className="px-4 py-3 text-slate-500 max-w-xs truncate">{pv.purpose}</td>
+                    <td className="px-4 py-3"><ApprovalBadge status={String(pv.approvalStatus ?? "approved")} /></td>
                     <td className="px-4 py-3">
                       {isFullVoucherView
                         ? <span className="px-2 py-0.5 rounded-full text-xs bg-slate-100 text-slate-600 capitalize">{pv.accountType}</span>
@@ -1260,6 +1585,7 @@ export default function Accounting() {
     "Invoices": <FileText className="w-4 h-4" />,
     "Receipts": <Receipt className="w-4 h-4" />,
     "Payment Vouchers": <CreditCard className="w-4 h-4" />,
+    "Quotations": <FileText className="w-4 h-4" />,
     "Bank Accounts": <Landmark className="w-4 h-4" />,
     "Bank Reconciliation": <RotateCcw className="w-4 h-4" />,
     "Ledger": <BookOpen className="w-4 h-4" />,
@@ -1295,6 +1621,7 @@ export default function Accounting() {
       {activeTab === "Invoices" && <InvoicesTab />}
       {activeTab === "Receipts" && <ReceiptsTab />}
       {activeTab === "Payment Vouchers" && <PaymentVouchersTab />}
+      {activeTab === "Quotations" && <QuotationsTab />}
       {activeTab === "Bank Accounts" && <BankAccountsTab />}
       {activeTab === "Bank Reconciliation" && <BankReconciliationPage />}
       {activeTab === "Ledger" && <LedgerTab />}

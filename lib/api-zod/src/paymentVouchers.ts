@@ -15,6 +15,20 @@ export const PaymentVoucherFundStatus = z.enum([
 ]);
 export type PaymentVoucherFundStatus = z.infer<typeof PaymentVoucherFundStatus>;
 
+export const PaymentVoucherType = z.enum([
+  "external_payment",
+  "file_transfer",
+  "account_transfer",
+]);
+export type PaymentVoucherType = z.infer<typeof PaymentVoucherType>;
+
+export const PaymentVoucherApprovalStatus = z.enum([
+  "approved",
+  "pending_approval",
+  "rejected",
+]);
+export type PaymentVoucherApprovalStatus = z.infer<typeof PaymentVoucherApprovalStatus>;
+
 export const PaymentVoucherPaymentMethod = z.enum([
   "bank_transfer",
   "cheque",
@@ -37,6 +51,9 @@ export type PaymentVoucherItem = z.infer<typeof PaymentVoucherItem>;
 
 export const CreatePaymentVoucherBody = z.object({
   caseId: z.number().int().positive().nullable().optional(),
+  voucherType: PaymentVoucherType.optional().default("external_payment"),
+  targetCaseId: z.number().int().positive().nullable().optional(),
+  targetAccountId: z.number().int().positive().nullable().optional(),
   payeeName: z.string().trim().min(1),
   purpose: z.string().trim().min(1),
   amount: z.number().finite().positive(),
@@ -55,6 +72,10 @@ export type CreatePaymentVoucherBody = z.infer<typeof CreatePaymentVoucherBody>;
 export const PaymentVoucherTransitionBody = z.discriminatedUnion("action", [
   z.object({ action: z.literal("lawyer_approve") }),
   z.object({ action: z.literal("partner_approve") }),
+  z.object({
+    action: z.literal("approve"),
+    decision: PaymentVoucherApprovalStatus.optional().default("approved"),
+  }),
   z.object({
     action: z.literal("mark_paid"),
     accountType: PaymentVoucherDeductFromAccount,

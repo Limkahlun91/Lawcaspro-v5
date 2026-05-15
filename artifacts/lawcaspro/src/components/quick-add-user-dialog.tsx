@@ -112,7 +112,7 @@ export function QuickAddUserDialog(props: {
       <DialogContent className="sm:max-w-md">
         <DialogHeader>
           <DialogTitle>
-            Quick Add {props.roleKind === "lawyer" ? "Lawyer" : "Clerk"}
+            Register New Employee ({props.roleKind === "lawyer" ? "Lawyer" : "Clerk"})
           </DialogTitle>
         </DialogHeader>
         <Form {...form}>

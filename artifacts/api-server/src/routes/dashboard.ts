@@ -8,6 +8,8 @@ import { computeDashboardStats } from "../services/dashboard-stats.js";
 type DbConn = typeof db | NonNullable<AuthRequest["rlsDb"]>;
 const rdb = (req: AuthRequest): DbConn => req.rlsDb ?? db;
 
+const one = (v: string | string[] | undefined): string | undefined => (Array.isArray(v) ? v[0] : v);
+
 async function queryRows(r: DbConn, query: ReturnType<typeof sql>): Promise<Record<string, unknown>[]> {
   const result = await r.execute(query);
   if (Array.isArray(result)) return result as Record<string, unknown>[];
@@ -31,6 +33,18 @@ router.get("/dashboard", requireAuth, requireFirmUser, requirePermission("dashbo
   try {
     const firmId = req.firmId!;
     const r = rdb(req);
+    const assignedToMe = (() => {
+      const raw = one((req.query as unknown as Record<string, unknown>)?.assignedToMe as string | string[] | undefined);
+      if (!raw) return false;
+      const v = raw.trim().toLowerCase();
+      return v === "1" || v === "true" || v === "yes";
+    })();
+    if (assignedToMe) {
+      const payload = await computeDashboardStats(r, firmId, { assignedToUserId: req.userId ?? undefined });
+      res.json(payload);
+      return;
+    }
+
     const hasCache = await tableExists(r, "public.firm_dashboard_stats_cache");
     if (hasCache) {
       const cachedRows = await queryRows(r, sql`
@@ -65,6 +79,7 @@ router.get("/dashboard", requireAuth, requireFirmUser, requirePermission("dashbo
 
     res.json(payload);
   } catch (err) {
+    console.error(err);
     logger.error({ err, path: req.path, firmId: req.firmId, userId: req.userId }, "[dashboard]");
     if (isTransientDbConnectionError(err)) {
       res.status(503).json({ error: "Dashboard temporarily unavailable" });
