@@ -118,10 +118,14 @@ export async function computeDashboardStats(r: DbConn, firmId: number): Promise<
         `))[0]?.total_this_month ?? 0)
     : 0;
 
+  const statusLowerSql = sql`LOWER(COALESCE(${casesTable.status}, ''))`;
+  const isCompletedCaseSql = sql`${statusLowerSql} LIKE '%complet%' OR ${statusLowerSql} LIKE '%registered%' OR ${statusLowerSql} LIKE '%stamp%'`;
+  const activeCaseWhere = sql`NOT (${isCompletedCaseSql})`;
+
   const milestoneCountSql = (milestone: CaseMilestoneKey, presence: MilestonePresence, extraWhere?: ReturnType<typeof sql>): ReturnType<typeof sql<number>> => {
     const p = milestonePresenceWhereSql(milestone, presence);
-    if (extraWhere) return sql<number>`COUNT(*) FILTER (WHERE ${extraWhere} AND ${p})`;
-    return sql<number>`COUNT(*) FILTER (WHERE ${p})`;
+    if (extraWhere) return sql<number>`COUNT(*) FILTER (WHERE ${activeCaseWhere} AND ${extraWhere} AND ${p})`;
+    return sql<number>`COUNT(*) FILTER (WHERE ${activeCaseWhere} AND ${p})`;
   };
 
   const loanMasterWhere = sql`${casesTable.purchaseMode} = 'loan' AND ${casesTable.titleType} = 'master'`;
@@ -130,9 +134,9 @@ export async function computeDashboardStats(r: DbConn, firmId: number): Promise<
   const segmentTotals = hasKeyDates
     ? (await r
         .select({
-          spaTotal: count(),
-          loanMasterTotal: sql<number>`COUNT(*) FILTER (WHERE ${loanMasterWhere})`,
-          loanTitleTotal: sql<number>`COUNT(*) FILTER (WHERE ${loanTitleWhere})`,
+          spaTotal: sql<number>`COUNT(*) FILTER (WHERE ${activeCaseWhere})`,
+          loanMasterTotal: sql<number>`COUNT(*) FILTER (WHERE ${activeCaseWhere} AND ${loanMasterWhere})`,
+          loanTitleTotal: sql<number>`COUNT(*) FILTER (WHERE ${activeCaseWhere} AND ${loanTitleWhere})`,
         })
         .from(casesTable)
         .leftJoin(caseKeyDatesTable, sql`${caseKeyDatesTable.caseId} = ${casesTable.id} AND ${caseKeyDatesTable.firmId} = ${casesTable.firmId}`)
@@ -144,8 +148,8 @@ export async function computeDashboardStats(r: DbConn, firmId: number): Promise<
   const loanTitleTotal = Number(segmentTotals?.loanTitleTotal ?? 0);
 
   const isEncumberedSql = sql`${casesTable.isEncumbered} = true`;
-  const encumbranceMissingSql = (milestone: CaseMilestoneKey, extraWhere: ReturnType<typeof sql>) =>
-    sql<number>`COUNT(*) FILTER (WHERE ${extraWhere} AND ${isEncumberedSql} AND ${milestonePresenceWhereSql(milestone, "missing")})`;
+  const encumbrancePresenceSql = (milestone: CaseMilestoneKey, presence: MilestonePresence, extraWhere: ReturnType<typeof sql>) =>
+    sql<number>`COUNT(*) FILTER (WHERE ${activeCaseWhere} AND ${extraWhere} AND ${isEncumberedSql} AND ${milestonePresenceWhereSql(milestone, presence)})`;
 
   const spaMilestones: Array<{ key: CaseMilestoneKey; label: string }> = [
     { key: "spa_date", label: "SPA Date" },
@@ -194,20 +198,23 @@ export async function computeDashboardStats(r: DbConn, firmId: number): Promise<
           ...spaMilestones.map((m) => [`spa_${m.key}`, milestoneCountSql(m.key, "filled")]),
           ...loanMasterMilestones.map((m) => [`loan_master_${m.key}`, milestoneCountSql(m.key, "filled", loanMasterWhere)]),
           ...loanTitleMilestones.filter((m) => !m.encumbranceOnlyWhenMissing).map((m) => [`loan_title_${m.key}`, milestoneCountSql(m.key, "filled", loanTitleWhere)]),
-          ...loanTitleMilestones.filter((m) => m.encumbranceOnlyWhenMissing).map((m) => [`loan_title_enc_${m.key}`, encumbranceMissingSql(m.key, loanTitleWhere)]),
+          ...loanTitleMilestones.filter((m) => m.encumbranceOnlyWhenMissing).map((m) => [`loan_title_enc_missing_${m.key}`, encumbrancePresenceSql(m.key, "missing", loanTitleWhere)]),
+          ...loanTitleMilestones.filter((m) => m.encumbranceOnlyWhenMissing).map((m) => [`loan_title_enc_filled_${m.key}`, encumbrancePresenceSql(m.key, "filled", loanTitleWhere)]),
         ]))
         .from(casesTable)
         .leftJoin(caseKeyDatesTable, sql`${caseKeyDatesTable.caseId} = ${casesTable.id} AND ${caseKeyDatesTable.firmId} = ${casesTable.firmId}`)
         .where(eq(casesTable.firmId, firmId)))[0] as Record<string, unknown>
     : {};
 
-  const toPendingCard = (segKey: string, total: number, m: { key: CaseMilestoneKey; label: string }, filledKey: string, extraFilter: Record<string, string> | undefined) => {
+  const toMilestoneCard = (segKey: string, total: number, m: { key: CaseMilestoneKey; label: string }, filledKey: string, extraFilter: Record<string, string> | undefined) => {
     const filled = Number((filledCounts as any)?.[filledKey] ?? 0);
     const pending = Math.max(0, total - filled);
     return {
       key: `${segKey}_${String(m.key)}`,
-      label: `${m.label} Pending`,
+      label: m.label,
       count: pending,
+      pendingCount: pending,
+      doneCount: filled,
       filter: {
         milestone: m.key,
         milestonePresence: "missing",
@@ -216,12 +223,15 @@ export async function computeDashboardStats(r: DbConn, firmId: number): Promise<
     };
   };
 
-  const toEncumbrancePendingCard = (segKey: string, m: { key: CaseMilestoneKey; label: string }, missingKey: string, extraFilter: Record<string, string>) => {
+  const toEncumbranceCard = (segKey: string, m: { key: CaseMilestoneKey; label: string }, missingKey: string, filledKey: string, extraFilter: Record<string, string>) => {
     const pending = Number((filledCounts as any)?.[missingKey] ?? 0);
+    const done = Number((filledCounts as any)?.[filledKey] ?? 0);
     return {
       key: `${segKey}_${String(m.key)}`,
-      label: `${m.label} Pending`,
+      label: m.label,
       count: pending,
+      pendingCount: pending,
+      doneCount: done,
       filter: {
         milestone: m.key,
         milestonePresence: "missing",
@@ -230,14 +240,14 @@ export async function computeDashboardStats(r: DbConn, firmId: number): Promise<
     };
   };
 
-  const spaCards = spaMilestones.map((m) => toPendingCard("spa", spaTotal, m, `spa_${m.key}`, undefined));
-  const loanMasterCards = loanMasterMilestones.map((m) => toPendingCard("loan_master", loanMasterTotal, m, `loan_master_${m.key}`, { purchaseMode: "loan", titleType: "master" }));
+  const spaCards = spaMilestones.map((m) => toMilestoneCard("spa", spaTotal, m, `spa_${m.key}`, undefined));
+  const loanMasterCards = loanMasterMilestones.map((m) => toMilestoneCard("loan_master", loanMasterTotal, m, `loan_master_${m.key}`, { purchaseMode: "loan", titleType: "master" }));
   const loanTitleCards = loanTitleMilestones.map((m) => {
     const baseFilter = { purchaseMode: "loan", titleType: "individual,strata" };
     if (m.encumbranceOnlyWhenMissing) {
-      return toEncumbrancePendingCard("loan_title", m, `loan_title_enc_${m.key}`, baseFilter);
+      return toEncumbranceCard("loan_title", m, `loan_title_enc_missing_${m.key}`, `loan_title_enc_filled_${m.key}`, baseFilter);
     }
-    return toPendingCard("loan_title", loanTitleTotal, m, `loan_title_${m.key}`, baseFilter);
+    return toMilestoneCard("loan_title", loanTitleTotal, m, `loan_title_${m.key}`, baseFilter);
   });
 
   const milestoneSections = hasKeyDates ? [

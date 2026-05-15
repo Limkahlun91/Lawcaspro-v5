@@ -9,15 +9,13 @@ import type { UpdateQuotationBodyItemsItem } from './updateQuotationBodyItemsIte
 
 export interface UpdateQuotationBody {
   referenceNo?: string;
+  stNo?: string;
   clientName?: string;
-  clientAddress?: string;
-  clientTin?: string;
   caseId?: number;
   propertyDescription?: string;
   purchasePrice?: string;
   bankName?: string;
   loanAmount?: string;
-  taxRate?: number;
   status?: string;
   notes?: string;
   items?: UpdateQuotationBodyItemsItem[];

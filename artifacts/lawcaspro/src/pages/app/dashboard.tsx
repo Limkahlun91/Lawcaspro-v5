@@ -89,6 +89,8 @@ export default function AppDashboard() {
     key: string;
     label: string;
     count: number;
+    pendingCount?: number;
+    doneCount?: number;
     filter: { milestone?: string; milestonePresence?: string; purchaseMode?: string; titleType?: string };
   };
   const milestoneCards: MilestoneCard[] = Array.isArray((stats as Record<string, any>).milestoneCards)
@@ -184,15 +186,21 @@ export default function AppDashboard() {
                         </TableRow>
                       );
                       const rows = section.cards.map((card) => {
-                        const href = buildCasesHref(card.filter);
+                        const filter = card.filter ?? {};
+                        const href = buildCasesHref(filter);
+                        const pendingCount = Number((card as any)?.pendingCount ?? card.count ?? 0) || 0;
+                        const doneCount = Number((card as any)?.doneCount ?? 0) || 0;
+                        const hasMilestone = Boolean(filter.milestone);
+                        const pendingHref = buildCasesHref({ ...filter, milestonePresence: "missing" });
+                        const doneHref = buildCasesHref({ ...filter, milestonePresence: "filled" });
                         return (
                           <TableRow
                             key={card.key}
-                            className="cursor-pointer"
-                            role="button"
-                            tabIndex={0}
-                            onClick={() => setLocation(href)}
-                            onKeyDown={(e) => {
+                            className={hasMilestone ? "" : "cursor-pointer"}
+                            role={hasMilestone ? undefined : "button"}
+                            tabIndex={hasMilestone ? undefined : 0}
+                            onClick={hasMilestone ? undefined : () => setLocation(href)}
+                            onKeyDown={hasMilestone ? undefined : (e) => {
                               if (e.key === "Enter" || e.key === " ") setLocation(href);
                             }}
                           >
@@ -200,7 +208,26 @@ export default function AppDashboard() {
                               <div className="text-sm font-medium text-slate-900">{card.label}</div>
                             </TableCell>
                             <TableCell className="py-3 text-right">
-                              <span className="font-semibold text-slate-900">{card.count}</span>
+                              {hasMilestone ? (
+                                <div className="flex items-center justify-end gap-3">
+                                  <button
+                                    type="button"
+                                    className="text-xs font-semibold text-emerald-700 hover:underline"
+                                    onClick={(e) => { e.preventDefault(); e.stopPropagation(); setLocation(doneHref); }}
+                                  >
+                                    DONE ({doneCount})
+                                  </button>
+                                  <button
+                                    type="button"
+                                    className="text-xs font-semibold text-amber-700 hover:underline"
+                                    onClick={(e) => { e.preventDefault(); e.stopPropagation(); setLocation(pendingHref); }}
+                                  >
+                                    Pending ({pendingCount})
+                                  </button>
+                                </div>
+                              ) : (
+                                <span className="font-semibold text-slate-900">{card.count}</span>
+                              )}
                             </TableCell>
                           </TableRow>
                         );
@@ -208,15 +235,21 @@ export default function AppDashboard() {
                       return [sectionRow, ...rows];
                     })
                   : milestoneCards.map((card) => {
-                      const href = buildCasesHref(card.filter);
+                      const filter = card.filter ?? {};
+                      const href = buildCasesHref(filter);
+                      const pendingCount = Number((card as any)?.pendingCount ?? card.count ?? 0) || 0;
+                      const doneCount = Number((card as any)?.doneCount ?? 0) || 0;
+                      const hasMilestone = Boolean(filter.milestone);
+                      const pendingHref = buildCasesHref({ ...filter, milestonePresence: "missing" });
+                      const doneHref = buildCasesHref({ ...filter, milestonePresence: "filled" });
                       return (
                         <TableRow
                           key={card.key}
-                          className="cursor-pointer"
-                          role="button"
-                          tabIndex={0}
-                          onClick={() => setLocation(href)}
-                          onKeyDown={(e) => {
+                          className={hasMilestone ? "" : "cursor-pointer"}
+                          role={hasMilestone ? undefined : "button"}
+                          tabIndex={hasMilestone ? undefined : 0}
+                          onClick={hasMilestone ? undefined : () => setLocation(href)}
+                          onKeyDown={hasMilestone ? undefined : (e) => {
                             if (e.key === "Enter" || e.key === " ") setLocation(href);
                           }}
                         >
@@ -224,7 +257,26 @@ export default function AppDashboard() {
                             <div className="text-sm font-medium text-slate-900">{card.label}</div>
                           </TableCell>
                           <TableCell className="py-3 text-right">
-                            <span className="font-semibold text-slate-900">{card.count}</span>
+                            {hasMilestone ? (
+                              <div className="flex items-center justify-end gap-3">
+                                <button
+                                  type="button"
+                                  className="text-xs font-semibold text-emerald-700 hover:underline"
+                                  onClick={(e) => { e.preventDefault(); e.stopPropagation(); setLocation(doneHref); }}
+                                >
+                                  DONE ({doneCount})
+                                </button>
+                                <button
+                                  type="button"
+                                  className="text-xs font-semibold text-amber-700 hover:underline"
+                                  onClick={(e) => { e.preventDefault(); e.stopPropagation(); setLocation(pendingHref); }}
+                                >
+                                  Pending ({pendingCount})
+                                </button>
+                              </div>
+                            ) : (
+                              <span className="font-semibold text-slate-900">{card.count}</span>
+                            )}
                           </TableCell>
                         </TableRow>
                       );

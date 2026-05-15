@@ -10,6 +10,8 @@ import type { DashboardMilestoneCardFilter } from './dashboardMilestoneCardFilte
 export interface DashboardMilestoneCard {
   key: string;
   label: string;
-  count: number;
+  count?: number;
+  pendingCount: number;
+  doneCount: number;
   filter: DashboardMilestoneCardFilter;
 }

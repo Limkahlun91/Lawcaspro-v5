@@ -1445,6 +1445,10 @@ components:
           type: string
         count:
           type: integer
+        pendingCount:
+          type: integer
+        doneCount:
+          type: integer
         filter:
           type: object
           properties:
@@ -1462,7 +1466,8 @@ components:
       required:
         - key
         - label
-        - count
+        - pendingCount
+        - doneCount
         - filter
 
     MilestonePresence:
