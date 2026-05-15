@@ -27,7 +27,7 @@ import { toastError } from "@/lib/toast-error";
 import { apiFetchBlob, apiFetchJson } from "@/lib/api-client";
 import { downloadBlob } from "@/lib/download";
 import { DEFAULT_ALLOWED_MIME_TYPES, DOCX_MIME_TYPES, validateUploadFile } from "@/lib/upload-validation";
-import TemplatePdfMappingEditor from "@/components/TemplatePdfMappingEditor";
+import { TemplatePdfMappingEditor } from "@/components/TemplatePdfMappingEditor";
 
 interface FirmFolder {
   id: number;
