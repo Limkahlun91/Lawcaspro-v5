@@ -12,6 +12,8 @@ import { QueryFallback } from "@/components/query-fallback";
 import { apiFetchBlob, apiFetchJson } from "@/lib/api-client";
 import { toastError } from "@/lib/toast-error";
 import { useReAuth } from "@/components/re-auth-dialog";
+import { BillToBlock } from "@/components/accounting/BillToBlock";
+import { DocumentPrintStyles } from "@/components/accounting/DocumentPrintStyles";
 
 function fmt(val: unknown) {
   return `RM ${Number(val ?? 0).toLocaleString("en-MY", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
@@ -42,6 +44,9 @@ type InvoiceDetailResponse = {
   dueDate?: string | null;
   notes?: string | null;
   items?: InvoiceItem[];
+  billToName?: string | null;
+  billToAddress?: string | null;
+  clientDetails?: Array<{ name: string; tin?: string }>;
 };
 
 type ReceiptRow = {
@@ -177,7 +182,11 @@ export default function InvoiceDetail() {
   if (invQuery.isError) return <div className="py-10"><QueryFallback title="Invoice unavailable" error={invQuery.error} onRetry={() => invQuery.refetch()} isRetrying={invQuery.isFetching} /></div>;
   if (!inv) return <div className="py-16 text-center text-slate-400">Invoice not found</div>;
 
-  const items = inv.items ?? [];
+  const items = (inv.items ?? []).filter((i) => {
+    const excl = Number((i as any).amountExclTax) || 0;
+    const incl = Number((i as any).amountInclTax) || 0;
+    return excl > 0 || incl > 0;
+  });
   const getCategory = (i: InvoiceItem): "fee" | "disbursement" => {
     const c = String(i.itemCategory ?? "").toLowerCase();
     if (c === "fee" || c === "disbursement") return c;
@@ -193,6 +202,7 @@ export default function InvoiceDetail() {
 
   return (
     <div className="space-y-6 min-w-0 print-doc print:space-y-3">
+      <DocumentPrintStyles />
       <Card className="print:shadow-none print:border-none print:bg-transparent print:rounded-none">
         <CardContent className="pt-6 pb-6 print:pt-0 print:pb-2">
           <div className="flex items-start justify-between gap-6">
@@ -221,19 +231,14 @@ export default function InvoiceDetail() {
         </CardContent>
       </Card>
 
-      <div className="hidden print:block">
-        <div className="grid grid-cols-2 gap-3">
-          <div>
-            <div className="text-[10px] text-slate-500 uppercase">Bill To</div>
-            <div className="text-sm font-medium text-slate-900">
-              {typeof (inv as any).billToName === "string" && (inv as any).billToName.trim()
-                ? String((inv as any).billToName)
-                : "—"}
-            </div>
-            {typeof (inv as any).billToAddress === "string" && (inv as any).billToAddress.trim()
-              ? <div className="text-xs text-slate-700 whitespace-pre-wrap">{String((inv as any).billToAddress)}</div>
-              : null}
-          </div>
+      <Card className="print:shadow-none print:border-none print:bg-transparent print:rounded-none">
+        <CardContent className="pt-4 pb-4 print:pt-0 print:pb-0 print:px-0">
+          <div className="grid grid-cols-2 gap-3">
+            <BillToBlock
+              clientName={inv.billToName ?? null}
+              address={inv.billToAddress ?? null}
+              clientDetails={Array.isArray(inv.clientDetails) ? inv.clientDetails : []}
+            />
           <div className="text-right">
             <div className="grid gap-1 justify-end">
               <div className="flex justify-between gap-4 text-xs">
@@ -254,8 +259,9 @@ export default function InvoiceDetail() {
               </div>
             </div>
           </div>
-        </div>
-      </div>
+          </div>
+        </CardContent>
+      </Card>
 
       <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between print:hidden">
         <Button variant="ghost" size="sm" onClick={() => setLocation("/app/accounting?tab=invoices")} className="gap-1.5">
@@ -273,7 +279,7 @@ export default function InvoiceDetail() {
         </div>
         <div className="flex gap-2 flex-wrap">
           <Button variant="outline" size="sm" className="gap-1.5" onClick={() => window.print()}>
-            <Printer className="w-4 h-4" /> Print
+            <Printer className="w-4 h-4" /> Print / Save as PDF
           </Button>
           {issuable && (
             <Button size="sm" className="bg-blue-600 hover:bg-blue-700 text-white gap-1.5" onClick={() => issueMut.mutate()} disabled={issueMut.isPending || voidMut.isPending}>

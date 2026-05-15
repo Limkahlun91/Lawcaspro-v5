@@ -6,6 +6,8 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { QueryFallback } from "@/components/query-fallback";
 import { apiFetchBlob, apiFetchJson } from "@/lib/api-client";
+import { BillToBlock } from "@/components/accounting/BillToBlock";
+import { DocumentPrintStyles } from "@/components/accounting/DocumentPrintStyles";
 
 function fmt(val: unknown) {
   return `RM ${Number(val ?? 0).toLocaleString("en-MY", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
@@ -41,6 +43,9 @@ type ReceiptDetailResponse = {
   notes?: string | null;
   isReversed?: boolean;
   allocations?: ReceiptAllocation[];
+  billToName?: string | null;
+  billToAddress?: string | null;
+  clientDetails?: Array<{ name: string; tin?: string }>;
 };
 
 export default function ReceiptDetail() {
@@ -85,14 +90,17 @@ export default function ReceiptDetail() {
   const rec = recQuery.data;
   if (!rec) return <div className="py-16 text-center text-slate-400">Receipt not found</div>;
 
+  const allocations = (rec.allocations ?? []).filter((a) => (Number(a.amount) || 0) > 0);
+
   return (
     <div className="space-y-6 min-w-0 print-doc print:space-y-3">
+      <DocumentPrintStyles />
       <div className="flex items-center justify-between gap-3 print:hidden">
         <Button variant="ghost" size="sm" onClick={() => setLocation("/app/accounting?tab=receipts")} className="gap-1.5">
           <ArrowLeft className="w-4 h-4" /> Back
         </Button>
         <Button variant="outline" size="sm" className="gap-1.5" onClick={() => window.print()}>
-          <Printer className="w-4 h-4" /> Print
+          <Printer className="w-4 h-4" /> Print / Save as PDF
         </Button>
       </div>
 
@@ -121,6 +129,15 @@ export default function ReceiptDetail() {
               <div className="text-2xl font-bold text-slate-900">{rec.receiptNo}</div>
               {rec.isReversed ? <div className="text-xs text-red-600 mt-1">REVERSED</div> : null}
             </div>
+          </div>
+
+          <div className="mt-6 grid grid-cols-2 gap-3">
+            <BillToBlock
+              clientName={rec.billToName ?? null}
+              address={rec.billToAddress ?? null}
+              clientDetails={Array.isArray(rec.clientDetails) ? rec.clientDetails : []}
+            />
+            <div />
           </div>
 
           <div className="mt-6 grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -154,7 +171,7 @@ export default function ReceiptDetail() {
         </CardContent>
       </Card>
 
-      {(rec.allocations ?? []).length > 0 ? (
+      {allocations.length > 0 ? (
         <Card className="print:shadow-none print:border-none print:bg-transparent print:rounded-none">
           <CardContent className="pt-4 pb-4 print:pt-2 print:pb-0 print:px-0">
             <div className="text-sm font-semibold text-slate-900 mb-2">Allocations</div>
@@ -168,7 +185,7 @@ export default function ReceiptDetail() {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
-                  {(rec.allocations ?? []).map((a) => (
+                  {allocations.map((a) => (
                     <tr key={a.id} className="print:break-inside-avoid">
                       <td className="px-4 py-3">{a.invoiceId ? `Invoice #${a.invoiceId}` : "—"}</td>
                       <td className="px-4 py-3 text-right font-mono">{fmt(a.amount)}</td>

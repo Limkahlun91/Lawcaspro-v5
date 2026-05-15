@@ -63,7 +63,38 @@ router.get("/invoices/:id", requireAuth, requireFirmUser, requirePermission("acc
     const [inv] = await r.select().from(invoicesTable).where(and(eq(invoicesTable.id, id), eq(invoicesTable.firmId, req.firmId!)));
     if (!inv) { res.status(404).json({ error: "Invoice not found" }); return; }
     const items = await r.select().from(invoiceItemsTable).where(eq(invoiceItemsTable.invoiceId, id)).orderBy(invoiceItemsTable.sortOrder);
-    res.json({ ...inv, items });
+    const billTo = await (async () => {
+      if (inv.quotationId) {
+        const [q] = await r.select().from(quotationsTable)
+          .where(and(eq(quotationsTable.id, inv.quotationId), eq(quotationsTable.firmId, req.firmId!)));
+        if (q) {
+          return {
+            billToName: q.clientName,
+            billToAddress: (q as any).clientAddress ?? null,
+            clientDetails: (q as any).clientDetails ?? [],
+          };
+        }
+      }
+      if (inv.caseId) {
+        const purchasers = await r.select({
+          name: clientsTable.name,
+          address: clientsTable.address,
+        })
+          .from(casePurchasersTable)
+          .innerJoin(clientsTable, eq(casePurchasersTable.clientId, clientsTable.id))
+          .where(and(eq(casePurchasersTable.caseId, inv.caseId), eq(clientsTable.firmId, req.firmId!)))
+          .orderBy(casePurchasersTable.id);
+        const names = purchasers.map((p) => p.name).filter(Boolean);
+        const firstAddr = purchasers.find((p) => typeof p.address === "string" && p.address.trim())?.address ?? null;
+        return {
+          billToName: names.join(" & "),
+          billToAddress: firstAddr,
+          clientDetails: names.map((n) => ({ name: n })),
+        };
+      }
+      return { billToName: null, billToAddress: null, clientDetails: [] as Array<{ name: string; tin?: string }> };
+    })();
+    res.json({ ...inv, items, ...billTo });
   } catch (err) {
     req.log.error({ err, route: req.originalUrl, firmId: req.firmId, userId: req.userId }, "invoices.detail_failed");
     res.status(500).json({ error: "Failed to load invoice" });

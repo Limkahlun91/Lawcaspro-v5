@@ -11,6 +11,8 @@ import { useToast } from "@/hooks/use-toast";
 import { QueryFallback } from "@/components/query-fallback";
 import { toastError } from "@/lib/toast-error";
 import { apiFetchBlob, apiFetchJson } from "@/lib/api-client";
+import { BillToBlock } from "@/components/accounting/BillToBlock";
+import { DocumentPrintStyles } from "@/components/accounting/DocumentPrintStyles";
 
 const DEFAULT_TAX_RATE = 8;
 

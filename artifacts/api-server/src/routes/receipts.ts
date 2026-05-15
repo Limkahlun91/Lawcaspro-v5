@@ -1,6 +1,6 @@
 import express, { type Router as ExpressRouter } from "express";
 import { eq, and, desc } from "drizzle-orm";
-import { db, firmBankAccountsTable, invoicesTable, ledgerEntriesTable, receiptAllocationsTable, receiptsTable, sql } from "@workspace/db";
+import { db, firmBankAccountsTable, invoicesTable, ledgerEntriesTable, receiptAllocationsTable, receiptsTable, sql, quotationsTable, clientsTable, casePurchasersTable } from "@workspace/db";
 import { requireAuth, requireFirmUser, requirePermission, requireReAuth, type AuthRequest, writeAuditLog } from "../lib/auth.js";
 import { sensitiveRateLimiter } from "../lib/rate-limit.js";
 
@@ -85,7 +85,45 @@ router.get("/receipts/:id", requireAuth, requireFirmUser, requirePermission("acc
   const [rec] = await db.select().from(receiptsTable).where(and(eq(receiptsTable.id, id), eq(receiptsTable.firmId, req.firmId!)));
   if (!rec) { res.status(404).json({ error: "Receipt not found" }); return; }
   const allocs = await db.select().from(receiptAllocationsTable).where(eq(receiptAllocationsTable.receiptId, id));
-  res.json({ ...rec, allocations: allocs });
+  const invoiceIdFromAlloc = allocs.find((a) => a.invoiceId)?.invoiceId ?? null;
+  const invoiceId = rec.invoiceId ?? invoiceIdFromAlloc;
+
+  const billTo = await (async () => {
+    if (invoiceId) {
+      const [inv] = await db.select().from(invoicesTable).where(and(eq(invoicesTable.id, invoiceId), eq(invoicesTable.firmId, req.firmId!)));
+      if (inv?.quotationId) {
+        const [q] = await db.select().from(quotationsTable)
+          .where(and(eq(quotationsTable.id, inv.quotationId), eq(quotationsTable.firmId, req.firmId!)));
+        if (q) {
+          return {
+            billToName: q.clientName,
+            billToAddress: (q as any).clientAddress ?? null,
+            clientDetails: (q as any).clientDetails ?? [],
+          };
+        }
+      }
+      if (inv?.caseId) {
+        const purchasers = await db.select({
+          name: clientsTable.name,
+          address: clientsTable.address,
+        })
+          .from(casePurchasersTable)
+          .innerJoin(clientsTable, eq(casePurchasersTable.clientId, clientsTable.id))
+          .where(and(eq(casePurchasersTable.caseId, inv.caseId), eq(clientsTable.firmId, req.firmId!)))
+          .orderBy(casePurchasersTable.id);
+        const names = purchasers.map((p) => p.name).filter(Boolean);
+        const firstAddr = purchasers.find((p) => typeof p.address === "string" && p.address.trim())?.address ?? null;
+        return {
+          billToName: names.join(" & "),
+          billToAddress: firstAddr,
+          clientDetails: names.map((n) => ({ name: n })),
+        };
+      }
+    }
+    return { billToName: null, billToAddress: null, clientDetails: [] as Array<{ name: string; tin?: string }> };
+  })();
+
+  res.json({ ...rec, allocations: allocs, ...billTo });
 });
 
 // Create receipt
