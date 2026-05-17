@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -23,6 +23,8 @@ type AutomationCaseRow = {
   purchaserName: string | null;
   loanBank: string | null;
   status: string;
+  purchaseMode: string;
+  titleType: string;
 };
 
 type AutomationCasesResponse = {
@@ -56,6 +58,15 @@ function parseFilenameFromContentDisposition(v: string | null): string | null {
   return null;
 }
 
+function includesAllTokens(haystack: string, tokens: string[]): boolean {
+  const h = haystack.toLowerCase();
+  return tokens.every((t) => h.includes(t.toLowerCase()));
+}
+
+function safeText(v: unknown): string {
+  return typeof v === "string" ? v.trim() : "";
+}
+
 export default function DocumentAutomationHub() {
   const { toast } = useToast();
   const [caseSearch, setCaseSearch] = useState("");
@@ -66,6 +77,10 @@ export default function DocumentAutomationHub() {
   const [duplexMode, setDuplexMode] = useState<"double" | "single" | "custom">("double");
   const [customDuplexRange, setCustomDuplexRange] = useState("");
   const [busy, setBusy] = useState(false);
+  const [smartMessage, setSmartMessage] = useState<string | null>(null);
+  const [smartTemplateIdSet, setSmartTemplateIdSet] = useState<Set<number>>(() => new Set());
+  const [smartFolderIdSet, setSmartFolderIdSet] = useState<Set<number>>(() => new Set());
+  const [smartDismissedKey, setSmartDismissedKey] = useState<string>("");
 
   const casesQuery = useQuery<AutomationCasesResponse>({
     queryKey: ["document-automation", "cases", caseSearch],
@@ -88,6 +103,12 @@ export default function DocumentAutomationHub() {
   const cases = casesQuery.data?.items ?? [];
   const folders = foldersQuery.data ?? [];
   const templates = templatesQuery.data ?? [];
+
+  const caseCacheById = useMemo(() => {
+    const m = new Map<number, AutomationCaseRow>();
+    for (const c of cases) m.set(c.id, c);
+    return m;
+  }, [cases]);
 
   const folderChildren = useMemo(() => {
     const byParent = new Map<number | null, FirmFolder[]>();
@@ -122,6 +143,30 @@ export default function DocumentAutomationHub() {
   const selectedCaseIdSet = useMemo(() => new Set(selectedCaseIds), [selectedCaseIds]);
   const selectedTemplateIdSet = useMemo(() => new Set(selectedTemplateIds), [selectedTemplateIds]);
 
+  const selectedCaseKey = useMemo(() => selectedCaseIds.slice().sort((a, b) => a - b).join(","), [selectedCaseIds]);
+
+  const folderById = useMemo(() => {
+    const m = new Map<number, FirmFolder>();
+    for (const f of folders) m.set(f.id, f);
+    return m;
+  }, [folders]);
+
+  const folderPathById = useMemo(() => {
+    const memo = new Map<number, string>();
+    const build = (id: number): string => {
+      const existing = memo.get(id);
+      if (existing) return existing;
+      const f = folderById.get(id);
+      if (!f) return "";
+      const parentId = f.parent_id;
+      const path = parentId ? `${build(parentId)} / ${f.name}` : f.name;
+      memo.set(id, path);
+      return path;
+    };
+    for (const f of folders) build(f.id);
+    return memo;
+  }, [folderById, folders]);
+
   const allCasesOnPageSelected = cases.length > 0 && cases.every((c) => selectedCaseIdSet.has(c.id));
   const someCasesOnPageSelected = cases.some((c) => selectedCaseIdSet.has(c.id)) && !allCasesOnPageSelected;
 
@@ -136,6 +181,15 @@ export default function DocumentAutomationHub() {
   function toggleSelectCase(id: number) {
     setSelectedCaseIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
   }
+
+  const selectedCases = useMemo(() => {
+    const out: AutomationCaseRow[] = [];
+    for (const id of selectedCaseIds) {
+      const c = caseCacheById.get(id);
+      if (c) out.push(c);
+    }
+    return out;
+  }, [caseCacheById, selectedCaseIds]);
 
   const templateIdsInFolder = useMemo(() => {
     const memo = new Map<number | null, number[]>();
@@ -155,6 +209,75 @@ export default function DocumentAutomationHub() {
   function toggleSelectTemplate(id: number) {
     setSelectedTemplateIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
   }
+
+  useEffect(() => {
+    const key = selectedCaseIds.slice().sort((a, b) => a - b).join(",");
+    if (!key || smartDismissedKey === key) {
+      setSmartMessage(null);
+      setSmartTemplateIdSet(new Set());
+      setSmartFolderIdSet(new Set());
+      return;
+    }
+
+    if (selectedCases.length === 0 || folders.length === 0 || templates.length === 0) {
+      setSmartMessage(null);
+      setSmartTemplateIdSet(new Set());
+      setSmartFolderIdSet(new Set());
+      return;
+    }
+
+    const recommendedFolderIds = new Set<number>();
+    const recommendedTemplateIds = new Set<number>();
+    const messages: string[] = [];
+
+    for (const c of selectedCases) {
+      const loanBank = safeText(c.loanBank).toLowerCase();
+      const titleType = safeText(c.titleType).toLowerCase();
+
+      const isRhbIslamic = loanBank.includes("rhb") && loanBank.includes("islamic");
+      const isStrata = titleType === "strata";
+
+      if (isRhbIslamic && isStrata) {
+        const tokens = ["rhb", "islamic", "3rd", "party"];
+        const match = folders.find((f) => {
+          const path = folderPathById.get(f.id) ?? f.name;
+          return includesAllTokens(path, tokens) || includesAllTokens(f.name, tokens);
+        });
+        if (match) {
+          recommendedFolderIds.add(match.id);
+          const allIds = templateIdsInFolder.get(match.id) ?? [];
+          const core = allIds.filter((tid) => {
+            const t = templates.find((x) => x.id === tid);
+            const n = safeText(t?.name).toLowerCase();
+            return n.includes("facility") && n.includes("agreement");
+          });
+          const picked = core.length > 0 ? core : allIds;
+          for (const tid of picked) recommendedTemplateIds.add(tid);
+          messages.push(`Auto-selected RHB Islamic 3rd Party templates (Strata)`);
+        }
+      }
+    }
+
+    if (recommendedTemplateIds.size === 0) {
+      setSmartMessage(null);
+      setSmartTemplateIdSet(new Set());
+      setSmartFolderIdSet(new Set());
+      return;
+    }
+
+    setSelectedTemplateIds((prev) => Array.from(new Set([...prev, ...Array.from(recommendedTemplateIds)])));
+    setSmartTemplateIdSet(new Set(recommendedTemplateIds));
+    setSmartFolderIdSet(new Set(recommendedFolderIds));
+    setSmartMessage(`✨ Smart Match: ${Array.from(new Set(messages)).join(" / ")}`);
+
+    /*
+      Future AI extension point:
+      - When users upload a Bank Letter of Offer (PDF), we can send it to:
+        POST /api/ai/extract-data
+      - The extracted structured fields (bank, amounts, key dates) can then be written back into the Case database,
+        allowing the recommender to become data-driven instead of rule-only.
+    */
+  }, [folders, folderPathById, selectedCaseIds, selectedCases, smartDismissedKey, templateIdsInFolder, templates]);
 
   function toggleFolderTemplates(folderId: number | null) {
     const ids = templateIdsInFolder.get(folderId) ?? [];
@@ -253,11 +376,15 @@ export default function DocumentAutomationHub() {
     const cb = folderCheckboxState(folder.id);
     const hasChildren = children.length > 0;
     const hasTemplates = (templateIdsInFolder.get(folder.id) ?? []).length > 0;
+    const isSmart = smartFolderIdSet.has(folder.id);
 
     return (
       <div>
         <div
-          className="flex items-center gap-2 rounded px-2 py-1 text-xs hover:bg-slate-50"
+          className={cn(
+            "flex items-center gap-2 rounded px-2 py-1 text-xs hover:bg-slate-50",
+            isSmart && cb.checked && "bg-blue-50"
+          )}
           style={{ paddingLeft: `${depth * 14 + 6}px` }}
         >
           <button
@@ -279,6 +406,7 @@ export default function DocumentAutomationHub() {
           >
             {folder.name}
           </button>
+          {isSmart && cb.checked && <span className="text-[10px] text-blue-600">✨</span>}
         </div>
 
         {expanded && (
@@ -286,12 +414,16 @@ export default function DocumentAutomationHub() {
             {(templatesByFolder.get(folder.id) ?? []).map((t) => (
               <div
                 key={t.id}
-                className="flex items-center gap-2 rounded px-2 py-1 text-xs hover:bg-slate-50"
+                className={cn(
+                  "flex items-center gap-2 rounded px-2 py-1 text-xs hover:bg-slate-50",
+                  smartTemplateIdSet.has(t.id) && selectedTemplateIdSet.has(t.id) && "bg-blue-50"
+                )}
                 style={{ paddingLeft: `${(depth + 1) * 14 + 22}px` }}
               >
                 <Checkbox checked={selectedTemplateIdSet.has(t.id)} onCheckedChange={() => toggleSelectTemplate(t.id)} />
                 <FileText className="h-3.5 w-3.5 text-slate-500" />
                 <div className="flex-1 truncate">{t.name}</div>
+                {smartTemplateIdSet.has(t.id) && selectedTemplateIdSet.has(t.id) && <span className="text-[10px] text-blue-600">✨</span>}
               </div>
             ))}
             {children.map((c) => (
@@ -383,6 +515,19 @@ export default function DocumentAutomationHub() {
                     </div>
                     <div className="text-xs text-slate-500">Selected: {selectedTemplateIds.length}</div>
                   </div>
+                  {smartMessage && (
+                    <div className="mt-3 rounded-md border border-blue-200 bg-blue-50 px-3 py-2 text-xs text-blue-800 flex items-start justify-between gap-3">
+                      <div className="leading-relaxed">{smartMessage}</div>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        className="h-6 px-2 text-xs text-blue-800 hover:bg-blue-100"
+                        onClick={() => setSmartDismissedKey(selectedCaseKey)}
+                      >
+                        Dismiss
+                      </Button>
+                    </div>
+                  )}
                 </div>
 
                 <div className="flex-1 overflow-auto bg-white">
@@ -394,10 +539,17 @@ export default function DocumentAutomationHub() {
                       <div className="mt-2">
                         <div className="px-2 py-1 text-xs font-medium text-slate-500">Uncategorized</div>
                         {(templatesByFolder.get(null) ?? []).map((t) => (
-                          <div key={t.id} className="flex items-center gap-2 rounded px-2 py-1 text-xs hover:bg-slate-50">
+                          <div
+                            key={t.id}
+                            className={cn(
+                              "flex items-center gap-2 rounded px-2 py-1 text-xs hover:bg-slate-50",
+                              smartTemplateIdSet.has(t.id) && selectedTemplateIdSet.has(t.id) && "bg-blue-50"
+                            )}
+                          >
                             <Checkbox checked={selectedTemplateIdSet.has(t.id)} onCheckedChange={() => toggleSelectTemplate(t.id)} />
                             <FileText className="h-3.5 w-3.5 text-slate-500" />
                             <div className="flex-1 truncate">{t.name}</div>
+                            {smartTemplateIdSet.has(t.id) && selectedTemplateIdSet.has(t.id) && <span className="text-[10px] text-blue-600">✨</span>}
                           </div>
                         ))}
                       </div>
