@@ -139,6 +139,7 @@ export class DocumentEngineService {
 
   private static normalizePdfMappingConfig(raw: unknown): Array<{
     key: string;
+    value?: string;
     page: number;
     x: number;
     y: number;
@@ -150,6 +151,7 @@ export class DocumentEngineService {
   }> {
     const out: Array<{
       key: string;
+      value?: string;
       page: number;
       x: number;
       y: number;
@@ -167,6 +169,14 @@ export class DocumentEngineService {
       const y = typeof coord?.y === "number" && Number.isFinite(coord.y) ? coord.y : NaN;
       if (!Number.isFinite(x) || !Number.isFinite(y)) return;
       const size = typeof coord?.size === "number" && Number.isFinite(coord.size) ? Math.max(1, coord.size) : 12;
+      const value =
+        typeof coord?.value === "string"
+          ? coord.value
+          : typeof coord?.content === "string"
+            ? coord.content
+            : typeof coord?.expression === "string"
+              ? coord.expression
+              : undefined;
       const maxWidth = typeof coord?.maxWidth === "number" && Number.isFinite(coord.maxWidth) ? Math.max(1, coord.maxWidth) : undefined;
       const lineHeight = typeof coord?.lineHeight === "number" && Number.isFinite(coord.lineHeight) ? Math.max(1, coord.lineHeight) : undefined;
       const alignment =
@@ -177,7 +187,18 @@ export class DocumentEngineService {
         coord?.fontFamily === "Helvetica" || coord?.fontFamily === "Times-Roman" || coord?.fontFamily === "Courier"
           ? coord.fontFamily
           : undefined;
-      out.push({ key: key.trim(), page, x, y, size, ...(maxWidth ? { maxWidth } : {}), ...(lineHeight ? { lineHeight } : {}), ...(alignment ? { alignment } : {}), ...(fontFamily ? { fontFamily } : {}) });
+      out.push({
+        key: key.trim(),
+        ...(value !== undefined ? { value } : {}),
+        page,
+        x,
+        y,
+        size,
+        ...(maxWidth ? { maxWidth } : {}),
+        ...(lineHeight ? { lineHeight } : {}),
+        ...(alignment ? { alignment } : {}),
+        ...(fontFamily ? { fontFamily } : {}),
+      });
     };
 
     if (Array.isArray(raw)) {
@@ -197,6 +218,24 @@ export class DocumentEngineService {
     }
 
     return out;
+  }
+
+  private static interpolateTemplate(template: string, variables: Record<string, unknown>): string {
+    const resolvePath = (path: string): unknown => {
+      if (!path) return undefined;
+      if (!path.includes(".")) return (variables as any)[path];
+      const parts = path.split(".").filter(Boolean);
+      let cur: any = variables;
+      for (const p of parts) {
+        if (cur === null || cur === undefined) return undefined;
+        cur = cur[p];
+      }
+      return cur;
+    };
+    return template.replace(/\{\{\s*([a-zA-Z0-9_.-]+)\s*\}\}/g, (_m, key) => {
+      const raw = resolvePath(String(key));
+      return raw === null || raw === undefined ? "" : String(raw);
+    });
   }
 
   private static wrapLines(text: string, font: any, fontSize: number, maxWidth: number): string[] {
@@ -241,8 +280,11 @@ export class DocumentEngineService {
     const mappings = this.normalizePdfMappingConfig(mappingConfig);
 
     for (const m of mappings) {
-      const raw = (variables as any)[m.key];
-      const value = raw === null || raw === undefined ? "" : String(raw);
+      const value = (() => {
+        if (typeof m.value === "string") return this.interpolateTemplate(m.value, variables);
+        const raw = (variables as any)[m.key];
+        return raw === null || raw === undefined ? "" : String(raw);
+      })();
       const page = pdf.getPage(m.page - 1);
       if (!page) continue;
       const font = await getFont(m.fontFamily);

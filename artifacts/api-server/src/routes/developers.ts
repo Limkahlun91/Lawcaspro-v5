@@ -521,17 +521,25 @@ routerInternal.post("/developers/:developerId/documents", requireAuth, requireFi
 
     const fileName = typeof f.originalname === "string" && f.originalname.trim() ? f.originalname.trim() : "document";
     const safeName = safeFilenameAscii(fileName).replace(/\s+/g, "_");
-    const objectPath = `/objects/developers/${req.firmId!}/${developerId}/${randomUUID()}-${safeName}`;
+    const primaryObjectPath = `/objects/developers/${req.firmId!}/${developerId}/${randomUUID()}-${safeName}`;
+    let objectPath = primaryObjectPath;
+    let warning: string | null = null;
 
-    await withTimeout(
-      supabaseStorage.uploadPrivateObject({
-        objectPath,
-        fileBytes: f.buffer,
-        contentType: typeof f.mimetype === "string" && f.mimetype.trim() ? f.mimetype.trim() : "application/octet-stream",
-      }),
-      12_000,
-      "uploadPrivateObject",
-    );
+    try {
+      await withTimeout(
+        supabaseStorage.uploadPrivateObject({
+          objectPath: primaryObjectPath,
+          fileBytes: f.buffer,
+          contentType: typeof f.mimetype === "string" && f.mimetype.trim() ? f.mimetype.trim() : "application/octet-stream",
+        }),
+        12_000,
+        "uploadPrivateObject",
+      );
+    } catch (err) {
+      console.warn(err);
+      objectPath = `pending_upload/developers/${req.firmId!}/${developerId}/${randomUUID()}-${safeName}`;
+      warning = "Storage service is currently unavailable. File metadata saved but file content was not uploaded.";
+    }
 
     const [created] = await r
       .insert(developerDocumentsTable)
@@ -561,7 +569,7 @@ routerInternal.post("/developers/:developerId/documents", requireAuth, requireFi
       userAgent: getHeader(req, "user-agent"),
     });
 
-    res.status(201).json({
+    res.status(warning ? 200 : 201).json({
       id: created.id,
       developerId: created.developerId,
       documentName: created.documentName,
@@ -573,11 +581,12 @@ routerInternal.post("/developers/:developerId/documents", requireAuth, requireFi
       validTo: created.validTo ? String(created.validTo) : null,
       createdAt: created.createdAt.toISOString(),
       updatedAt: created.updatedAt.toISOString(),
+      ...(warning ? { warning } : {}),
     });
   } catch (err) {
     console.error(err);
     logger.error({ err, path: req.path, firmId: req.firmId, userId: req.userId }, "[developers.documents.upload]");
-    res.status(503).json({ error: "Upload failed" });
+    res.status(500).json({ error: "Upload failed" });
   }
 });
 
@@ -600,6 +609,10 @@ routerInternal.get("/developers/:developerId/documents/:docId/view", requireAuth
     .limit(1);
   if (!row) {
     res.status(404).json({ error: "Document not found" });
+    return;
+  }
+  if (!row.objectPath.startsWith("/objects/")) {
+    res.status(409).json({ error: "File content not available. Storage upload pending." });
     return;
   }
 
@@ -643,7 +656,9 @@ routerInternal.delete("/developers/:developerId/documents/:docId", requireAuth, 
   }
 
   try {
-    await withTimeout(supabaseStorage.deletePrivateObject(deleted.objectPath), 8_000, "deletePrivateObject");
+    if (deleted.objectPath.startsWith("/objects/")) {
+      await withTimeout(supabaseStorage.deletePrivateObject(deleted.objectPath), 8_000, "deletePrivateObject");
+    }
   } catch (err) {
     if (!(err instanceof ObjectNotFoundError)) {
       logger.error({ err, path: req.path, firmId: req.firmId, userId: req.userId }, "[developers.documents] delete_private_object_failed");

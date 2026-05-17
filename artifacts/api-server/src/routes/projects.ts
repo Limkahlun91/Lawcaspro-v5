@@ -655,13 +655,20 @@ routerInternal.post("/projects/:projectId/documents", requireAuth, requireFirmUs
 
   const fileName = typeof f.originalname === "string" && f.originalname.trim() ? f.originalname.trim() : "document";
   const safeName = safeFilenameAscii(fileName).replace(/\s+/g, "_");
-  const objectPath = `/objects/projects/${req.firmId!}/${projectId}/${randomUUID()}-${safeName}`;
-
-  await supabaseStorage.uploadPrivateObject({
-    objectPath,
-    fileBytes: f.buffer,
-    contentType: typeof f.mimetype === "string" && f.mimetype.trim() ? f.mimetype.trim() : "application/octet-stream",
-  });
+  const primaryObjectPath = `/objects/projects/${req.firmId!}/${projectId}/${randomUUID()}-${safeName}`;
+  let objectPath = primaryObjectPath;
+  let warning: string | null = null;
+  try {
+    await supabaseStorage.uploadPrivateObject({
+      objectPath: primaryObjectPath,
+      fileBytes: f.buffer,
+      contentType: typeof f.mimetype === "string" && f.mimetype.trim() ? f.mimetype.trim() : "application/octet-stream",
+    });
+  } catch (err) {
+    console.warn(err);
+    objectPath = `pending_upload/projects/${req.firmId!}/${projectId}/${randomUUID()}-${safeName}`;
+    warning = "Storage service is currently unavailable. File metadata saved but file content was not uploaded.";
+  }
 
   const [created] = await r
     .insert(projectDocumentsTable)
@@ -695,7 +702,7 @@ routerInternal.post("/projects/:projectId/documents", requireAuth, requireFirmUs
     userAgent: getHeader(req, "user-agent"),
   });
 
-  res.status(201).json({
+  res.status(warning ? 200 : 201).json({
     id: created.id,
     projectId: created.projectId,
     category: created.category,
@@ -710,6 +717,7 @@ routerInternal.post("/projects/:projectId/documents", requireAuth, requireFirmUs
     validTo: created.validTo ? String(created.validTo) : null,
     createdAt: created.createdAt.toISOString(),
     updatedAt: created.updatedAt.toISOString(),
+    ...(warning ? { warning } : {}),
   });
 });
 
@@ -732,6 +740,10 @@ routerInternal.get("/projects/:projectId/documents/:docId/view", requireAuth, re
     .limit(1);
   if (!row) {
     res.status(404).json({ error: "Document not found" });
+    return;
+  }
+  if (!row.objectPath.startsWith("/objects/")) {
+    res.status(409).json({ error: "File content not available. Storage upload pending." });
     return;
   }
 

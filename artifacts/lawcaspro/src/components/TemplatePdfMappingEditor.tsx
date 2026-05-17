@@ -4,6 +4,7 @@ import "react-pdf/dist/Page/AnnotationLayer.css";
 import "react-pdf/dist/Page/TextLayer.css";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Badge } from "@/components/ui/badge";
@@ -35,7 +36,20 @@ type VarGroup = {
 type PdfFontFamily = "Helvetica" | "Times-Roman" | "Courier";
 type TextAlignment = "left" | "center" | "right";
 
-export type PdfMappingConfig = Record<string, { page: number; x: number; y: number; size: number; maxWidth?: number; lineHeight?: number; fontFamily?: PdfFontFamily; alignment?: TextAlignment }>;
+export type PdfMappingConfig = Record<
+  string,
+  {
+    page: number;
+    x: number;
+    y: number;
+    size: number;
+    value?: string;
+    maxWidth?: number;
+    lineHeight?: number;
+    fontFamily?: PdfFontFamily;
+    alignment?: TextAlignment;
+  }
+>;
 
 const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null;
 
@@ -86,6 +100,14 @@ function normalizeMappingConfig(raw: unknown): PdfMappingConfig {
       if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
       const maxWidth = typeof item.maxWidth === "number" && Number.isFinite(item.maxWidth) ? item.maxWidth : undefined;
       const lineHeight = typeof item.lineHeight === "number" && Number.isFinite(item.lineHeight) ? item.lineHeight : undefined;
+      const value =
+        typeof item.value === "string"
+          ? item.value
+          : typeof item.content === "string"
+            ? item.content
+            : typeof item.expression === "string"
+              ? item.expression
+              : undefined;
       const fontFamily =
         item.fontFamily === "Helvetica" || item.fontFamily === "Times-Roman" || item.fontFamily === "Courier"
           ? item.fontFamily
@@ -94,7 +116,17 @@ function normalizeMappingConfig(raw: unknown): PdfMappingConfig {
         item.alignment === "left" || item.alignment === "center" || item.alignment === "right"
           ? item.alignment
           : undefined;
-      out[key] = { page, x, y, size, ...(maxWidth ? { maxWidth } : {}), ...(lineHeight ? { lineHeight } : {}), ...(fontFamily ? { fontFamily } : {}), ...(alignment ? { alignment } : {}) };
+      out[key] = {
+        page,
+        x,
+        y,
+        size,
+        ...(value !== undefined ? { value } : {}),
+        ...(maxWidth ? { maxWidth } : {}),
+        ...(lineHeight ? { lineHeight } : {}),
+        ...(fontFamily ? { fontFamily } : {}),
+        ...(alignment ? { alignment } : {}),
+      };
     }
     return out;
   }
@@ -108,6 +140,14 @@ function normalizeMappingConfig(raw: unknown): PdfMappingConfig {
     if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
     const maxWidth = typeof v.maxWidth === "number" && Number.isFinite(v.maxWidth) ? v.maxWidth : undefined;
     const lineHeight = typeof v.lineHeight === "number" && Number.isFinite(v.lineHeight) ? v.lineHeight : undefined;
+    const value =
+      typeof v.value === "string"
+        ? v.value
+        : typeof v.content === "string"
+          ? v.content
+          : typeof v.expression === "string"
+            ? v.expression
+            : undefined;
     const fontFamily =
       v.fontFamily === "Helvetica" || v.fontFamily === "Times-Roman" || v.fontFamily === "Courier"
         ? v.fontFamily
@@ -116,7 +156,17 @@ function normalizeMappingConfig(raw: unknown): PdfMappingConfig {
       v.alignment === "left" || v.alignment === "center" || v.alignment === "right"
         ? v.alignment
         : undefined;
-    out[k] = { page, x, y, size, ...(maxWidth ? { maxWidth } : {}), ...(lineHeight ? { lineHeight } : {}), ...(fontFamily ? { fontFamily } : {}), ...(alignment ? { alignment } : {}) };
+    out[k] = {
+      page,
+      x,
+      y,
+      size,
+      ...(value !== undefined ? { value } : {}),
+      ...(maxWidth ? { maxWidth } : {}),
+      ...(lineHeight ? { lineHeight } : {}),
+      ...(fontFamily ? { fontFamily } : {}),
+      ...(alignment ? { alignment } : {}),
+    };
   }
   return out;
 }
@@ -216,6 +266,11 @@ export function TemplatePdfMappingEditor(props: Props) {
         x: Math.max(0, Math.round(x * 100) / 100),
         y: Math.max(0, Math.round(y * 100) / 100),
         size: prev[selectedVarKey]?.size ?? 12,
+        ...(prev[selectedVarKey]
+          ? {}
+          : {
+              value: `{{${selectedVarKey}}}`,
+            }),
         ...(prev[selectedVarKey]?.maxWidth ? { maxWidth: prev[selectedVarKey]?.maxWidth } : {}),
         ...(prev[selectedVarKey]?.lineHeight ? { lineHeight: prev[selectedVarKey]?.lineHeight } : {}),
         ...(prev[selectedVarKey]?.fontFamily ? { fontFamily: prev[selectedVarKey]?.fontFamily } : {}),
@@ -331,6 +386,18 @@ export function TemplatePdfMappingEditor(props: Props) {
                       <Button variant="ghost" size="sm" onClick={() => deleteEntry(key)}>
                         <Trash2 className="w-4 h-4" />
                       </Button>
+                    </div>
+                    <div>
+                      <div className="text-xs text-slate-500 mb-1">Content / Value</div>
+                      <Textarea
+                        value={v.value ?? ""}
+                        placeholder={`{{${key}}}`}
+                        className="min-h-[72px]"
+                        onChange={(e) => {
+                          const next = e.target.value;
+                          updateEntry(key, { value: next.trim() ? next : undefined });
+                        }}
+                      />
                     </div>
                     <div className="grid grid-cols-2 gap-2">
                       <div>
