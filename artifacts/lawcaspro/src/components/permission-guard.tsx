@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 import { useEffect, useRef, useState } from "react";
+import { useLocation } from "wouter";
 import { useAuth } from "@/lib/auth-context";
 import { getPermissions, hasPermission } from "@/lib/permissions";
 import { QueryFallback } from "@/components/query-fallback";
@@ -7,6 +8,7 @@ import { Button } from "@/components/ui/button";
 
 export function PermissionGuard(props: { module: string; action: string; children: ReactNode }) {
   const { user, permissionsStatus, retryPermissions } = useAuth();
+  const [, setLocation] = useLocation();
   const perms = getPermissions(user);
   const autoRetryRef = useRef(false);
   const [canForceRepair, setCanForceRepair] = useState(false);
@@ -72,6 +74,16 @@ export function PermissionGuard(props: { module: string; action: string; childre
   }
   const allowed = hasPermission(user, props.module, props.action);
   if (allowed) return props.children;
+  if (user && user.userType === "firm_user" && props.module === "dashboard" && props.action === "read") {
+    if (hasPermission(user, "cases", "read")) {
+      setTimeout(() => setLocation("/app/workbench"), 0);
+      return (
+        <div className="py-16 text-center">
+          <div className="text-slate-500 mt-2">Redirecting…</div>
+        </div>
+      );
+    }
+  }
   return (
     <div className="py-16 text-center">
       <div className="text-2xl font-bold text-slate-900">Access denied</div>

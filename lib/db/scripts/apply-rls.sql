@@ -51,8 +51,8 @@ GRANT USAGE ON SCHEMA public TO app_user;
 GRANT SELECT, INSERT, UPDATE, DELETE ON
   audit_logs, case_billing_entries, case_communications, case_documents,
   case_tasks, cases, clients, communication_threads, credit_notes,
-  developers, document_templates, templates, document_template_versions, document_generation_runs, document_generation_logs, document_generation_log_cases, document_batch_jobs, document_batch_job_items, document_variable_definitions, document_template_bindings, document_template_applicability_rules, firm_document_folders, firm_letterheads, firm_bank_accounts, invoices,
-  ledger_entries, payment_vouchers, platform_documents, projects,
+  developers, developer_documents, document_templates, templates, document_template_versions, document_generation_runs, document_generation_logs, document_generation_log_cases, document_batch_jobs, document_batch_job_items, document_variable_definitions, document_template_bindings, document_template_applicability_rules, firm_document_folders, firm_letterheads, firm_bank_accounts, invoices,
+  ledger_entries, payment_vouchers, platform_documents, projects, project_documents,
   quotations, receipts, roles, time_entries, users
 TO app_user;
 
@@ -104,6 +104,8 @@ ALTER TABLE credit_notes           ENABLE ROW LEVEL SECURITY;
 ALTER TABLE credit_notes           FORCE ROW LEVEL SECURITY;
 ALTER TABLE developers             ENABLE ROW LEVEL SECURITY;
 ALTER TABLE developers             FORCE ROW LEVEL SECURITY;
+ALTER TABLE developer_documents    ENABLE ROW LEVEL SECURITY;
+ALTER TABLE developer_documents    FORCE ROW LEVEL SECURITY;
 ALTER TABLE document_templates     ENABLE ROW LEVEL SECURITY;
 ALTER TABLE document_templates     FORCE ROW LEVEL SECURITY;
 ALTER TABLE templates              ENABLE ROW LEVEL SECURITY;
@@ -142,6 +144,8 @@ ALTER TABLE platform_documents     ENABLE ROW LEVEL SECURITY;
 ALTER TABLE platform_documents     FORCE ROW LEVEL SECURITY;
 ALTER TABLE projects               ENABLE ROW LEVEL SECURITY;
 ALTER TABLE projects               FORCE ROW LEVEL SECURITY;
+ALTER TABLE project_documents      ENABLE ROW LEVEL SECURITY;
+ALTER TABLE project_documents      FORCE ROW LEVEL SECURITY;
 ALTER TABLE quotations             ENABLE ROW LEVEL SECURITY;
 ALTER TABLE quotations             FORCE ROW LEVEL SECURITY;
 ALTER TABLE receipts               ENABLE ROW LEVEL SECURITY;
@@ -202,6 +206,7 @@ DROP POLICY IF EXISTS tenant_isolation ON clients;
 DROP POLICY IF EXISTS tenant_isolation ON communication_threads;
 DROP POLICY IF EXISTS tenant_isolation ON credit_notes;
 DROP POLICY IF EXISTS tenant_isolation ON developers;
+DROP POLICY IF EXISTS tenant_isolation ON developer_documents;
 DROP POLICY IF EXISTS tenant_isolation ON document_templates;
 DROP POLICY IF EXISTS tenant_isolation ON templates;
 DROP POLICY IF EXISTS templates_read ON templates;
@@ -228,6 +233,7 @@ DROP POLICY IF EXISTS platform_documents_insert ON platform_documents;
 DROP POLICY IF EXISTS platform_documents_update ON platform_documents;
 DROP POLICY IF EXISTS platform_documents_delete ON platform_documents;
 DROP POLICY IF EXISTS tenant_isolation ON projects;
+DROP POLICY IF EXISTS tenant_isolation ON project_documents;
 DROP POLICY IF EXISTS tenant_isolation ON quotations;
 DROP POLICY IF EXISTS tenant_isolation ON receipts;
 DROP POLICY IF EXISTS tenant_isolation ON roles;
@@ -294,6 +300,10 @@ CREATE POLICY tenant_isolation ON credit_notes FOR ALL TO PUBLIC
   WITH CHECK ((firm_id = NULLIF(current_setting('app.current_firm_id',true),'')::integer) OR current_setting('app.is_founder',true)='true');
 
 CREATE POLICY tenant_isolation ON developers FOR ALL TO PUBLIC
+  USING ((firm_id = NULLIF(current_setting('app.current_firm_id',true),'')::integer) OR current_setting('app.is_founder',true)='true')
+  WITH CHECK ((firm_id = NULLIF(current_setting('app.current_firm_id',true),'')::integer) OR current_setting('app.is_founder',true)='true');
+
+CREATE POLICY tenant_isolation ON developer_documents FOR ALL TO PUBLIC
   USING ((firm_id = NULLIF(current_setting('app.current_firm_id',true),'')::integer) OR current_setting('app.is_founder',true)='true')
   WITH CHECK ((firm_id = NULLIF(current_setting('app.current_firm_id',true),'')::integer) OR current_setting('app.is_founder',true)='true');
 
@@ -438,6 +448,10 @@ CREATE POLICY platform_documents_delete ON platform_documents FOR DELETE TO PUBL
   );
 
 CREATE POLICY tenant_isolation ON projects FOR ALL TO PUBLIC
+  USING ((firm_id = NULLIF(current_setting('app.current_firm_id',true),'')::integer) OR current_setting('app.is_founder',true)='true')
+  WITH CHECK ((firm_id = NULLIF(current_setting('app.current_firm_id',true),'')::integer) OR current_setting('app.is_founder',true)='true');
+
+CREATE POLICY tenant_isolation ON project_documents FOR ALL TO PUBLIC
   USING ((firm_id = NULLIF(current_setting('app.current_firm_id',true),'')::integer) OR current_setting('app.is_founder',true)='true')
   WITH CHECK ((firm_id = NULLIF(current_setting('app.current_firm_id',true),'')::integer) OR current_setting('app.is_founder',true)='true');
 

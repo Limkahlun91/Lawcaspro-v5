@@ -4,6 +4,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Checkbox } from "@/components/ui/checkbox";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -31,6 +32,16 @@ type AutomationCasesResponse = {
   items: AutomationCaseRow[];
   page: number;
   limit: number;
+};
+
+type PreflightReport = {
+  critical: boolean;
+  cases: Array<{
+    caseId: number;
+    referenceNo: string;
+    parcelNo: string | null;
+    missing: string[];
+  }>;
 };
 
 type FirmFolder = {
@@ -81,6 +92,9 @@ export default function DocumentAutomationHub() {
   const [smartTemplateIdSet, setSmartTemplateIdSet] = useState<Set<number>>(() => new Set());
   const [smartFolderIdSet, setSmartFolderIdSet] = useState<Set<number>>(() => new Set());
   const [smartDismissedKey, setSmartDismissedKey] = useState<string>("");
+  const [bundleMessage, setBundleMessage] = useState<string | null>(null);
+  const [bundleTemplateIdSet, setBundleTemplateIdSet] = useState<Set<number>>(() => new Set());
+  const [bundleFolderIdSet, setBundleFolderIdSet] = useState<Set<number>>(() => new Set());
 
   const casesQuery = useQuery<AutomationCasesResponse>({
     queryKey: ["document-automation", "cases", caseSearch],
@@ -144,6 +158,7 @@ export default function DocumentAutomationHub() {
   const selectedTemplateIdSet = useMemo(() => new Set(selectedTemplateIds), [selectedTemplateIds]);
 
   const selectedCaseKey = useMemo(() => selectedCaseIds.slice().sort((a, b) => a - b).join(","), [selectedCaseIds]);
+  const selectedTemplateKey = useMemo(() => selectedTemplateIds.slice().sort((a, b) => a - b).join(","), [selectedTemplateIds]);
 
   const folderById = useMemo(() => {
     const m = new Map<number, FirmFolder>();
@@ -169,6 +184,21 @@ export default function DocumentAutomationHub() {
 
   const allCasesOnPageSelected = cases.length > 0 && cases.every((c) => selectedCaseIdSet.has(c.id));
   const someCasesOnPageSelected = cases.some((c) => selectedCaseIdSet.has(c.id)) && !allCasesOnPageSelected;
+
+  const preflightEnabled = selectedCaseIds.length > 0 && selectedTemplateIds.length > 0;
+  const preflightQuery = useQuery<PreflightReport>({
+    queryKey: ["document-automation", "preflight", selectedCaseKey, selectedTemplateKey],
+    queryFn: () =>
+      apiFetchJson("/documents/automation/preflight", {
+        method: "POST",
+        body: JSON.stringify({ caseIds: selectedCaseIds, templateIds: selectedTemplateIds }),
+      }),
+    enabled: preflightEnabled,
+    retry: false,
+  });
+  const preflightMissing = preflightQuery.data?.cases ?? [];
+  const preflightCritical = Boolean(preflightQuery.data?.critical);
+  const preflightBlocking = preflightEnabled && (preflightQuery.isFetching || preflightQuery.isLoading || preflightCritical || Boolean(preflightQuery.error));
 
   function toggleSelectAllCasesOnPage() {
     if (allCasesOnPageSelected) {
@@ -299,6 +329,48 @@ export default function DocumentAutomationHub() {
     return { checked: false, indeterminate: true };
   }
 
+  function applyBundle(bundleName: string, tokens: string[], coreTemplateTokens?: string[]) {
+    if (folders.length === 0 || templates.length === 0) {
+      toast({ title: "Templates are still loading" });
+      return;
+    }
+
+    const matchFolder = folders.find((f) => {
+      const path = folderPathById.get(f.id) ?? f.name;
+      return includesAllTokens(path, tokens) || includesAllTokens(f.name, tokens);
+    });
+
+    const folderIds = new Set<number>();
+    const templateIds = new Set<number>();
+
+    if (matchFolder) {
+      folderIds.add(matchFolder.id);
+      const ids = templateIdsInFolder.get(matchFolder.id) ?? [];
+      const core = coreTemplateTokens && coreTemplateTokens.length > 0
+        ? ids.filter((tid) => {
+            const t = templates.find((x) => x.id === tid);
+            const n = safeText(t?.name).toLowerCase();
+            return coreTemplateTokens.every((tk) => n.includes(tk.toLowerCase()));
+          })
+        : [];
+      const picked = core.length > 0 ? core : ids;
+      for (const tid of picked) templateIds.add(tid);
+    } else {
+      const matchedTemplates = templates.filter((t) => includesAllTokens(safeText(t.name), tokens));
+      for (const t of matchedTemplates) templateIds.add(t.id);
+    }
+
+    if (templateIds.size === 0) {
+      toast({ title: "Bundle not found", description: "No matching folder/templates found in your template tree." });
+      return;
+    }
+
+    setSelectedTemplateIds((prev) => Array.from(new Set([...prev, ...Array.from(templateIds)])));
+    setBundleFolderIdSet(folderIds);
+    setBundleTemplateIdSet(templateIds);
+    setBundleMessage(`Quick Select Bundle: ${bundleName}`);
+  }
+
   async function runGenerate(mode: "download" | "print") {
     if (selectedCaseIds.length === 0) {
       toast({ title: "Please select at least one case" });
@@ -311,6 +383,17 @@ export default function DocumentAutomationHub() {
 
     setBusy(true);
     try {
+      if (preflightEnabled) {
+        const preflight = await preflightQuery.refetch();
+        if (preflight.error) {
+          throw preflight.error;
+        }
+        if (preflight.data?.critical) {
+          toast({ title: "Missing required case data", description: "Please fix missing fields before generating." });
+          return;
+        }
+      }
+
       const duplexSettings =
         mode === "print"
           ? duplexMode === "custom"
@@ -376,7 +459,7 @@ export default function DocumentAutomationHub() {
     const cb = folderCheckboxState(folder.id);
     const hasChildren = children.length > 0;
     const hasTemplates = (templateIdsInFolder.get(folder.id) ?? []).length > 0;
-    const isSmart = smartFolderIdSet.has(folder.id);
+    const isSmart = smartFolderIdSet.has(folder.id) || bundleFolderIdSet.has(folder.id);
 
     return (
       <div>
@@ -416,14 +499,14 @@ export default function DocumentAutomationHub() {
                 key={t.id}
                 className={cn(
                   "flex items-center gap-2 rounded px-2 py-1 text-xs hover:bg-slate-50",
-                  smartTemplateIdSet.has(t.id) && selectedTemplateIdSet.has(t.id) && "bg-blue-50"
+                  (smartTemplateIdSet.has(t.id) || bundleTemplateIdSet.has(t.id)) && selectedTemplateIdSet.has(t.id) && "bg-blue-50"
                 )}
                 style={{ paddingLeft: `${(depth + 1) * 14 + 22}px` }}
               >
                 <Checkbox checked={selectedTemplateIdSet.has(t.id)} onCheckedChange={() => toggleSelectTemplate(t.id)} />
                 <FileText className="h-3.5 w-3.5 text-slate-500" />
                 <div className="flex-1 truncate">{t.name}</div>
-                {smartTemplateIdSet.has(t.id) && selectedTemplateIdSet.has(t.id) && <span className="text-[10px] text-blue-600">✨</span>}
+                {(smartTemplateIdSet.has(t.id) || bundleTemplateIdSet.has(t.id)) && selectedTemplateIdSet.has(t.id) && <span className="text-[10px] text-blue-600">✨</span>}
               </div>
             ))}
             {children.map((c) => (
@@ -515,6 +598,23 @@ export default function DocumentAutomationHub() {
                     </div>
                     <div className="text-xs text-slate-500">Selected: {selectedTemplateIds.length}</div>
                   </div>
+                  <div className="mt-3 rounded-md border border-slate-200 bg-slate-50 px-3 py-2">
+                    <div className="text-xs font-medium text-slate-700">Quick Select Bundles</div>
+                    <div className="mt-2 flex flex-wrap gap-2">
+                      <Button type="button" variant="secondary" size="sm" onClick={() => applyBundle("RHB Islamic", ["rhb", "islamic"], ["facility", "agreement"])}>
+                        RHB Islamic
+                      </Button>
+                      <Button type="button" variant="secondary" size="sm" onClick={() => applyBundle("Maybank 3rd Party", ["maybank", "3rd", "party"], ["facility", "agreement"])}>
+                        Maybank 3rd Party
+                      </Button>
+                      <Button type="button" variant="secondary" size="sm" onClick={() => applyBundle("Standard SPA", ["spa"], [])}>
+                        Standard SPA
+                      </Button>
+                    </div>
+                    {bundleMessage && (
+                      <div className="mt-2 text-xs text-slate-600">{bundleMessage}</div>
+                    )}
+                  </div>
                   {smartMessage && (
                     <div className="mt-3 rounded-md border border-blue-200 bg-blue-50 px-3 py-2 text-xs text-blue-800 flex items-start justify-between gap-3">
                       <div className="leading-relaxed">{smartMessage}</div>
@@ -543,13 +643,13 @@ export default function DocumentAutomationHub() {
                             key={t.id}
                             className={cn(
                               "flex items-center gap-2 rounded px-2 py-1 text-xs hover:bg-slate-50",
-                              smartTemplateIdSet.has(t.id) && selectedTemplateIdSet.has(t.id) && "bg-blue-50"
+                              (smartTemplateIdSet.has(t.id) || bundleTemplateIdSet.has(t.id)) && selectedTemplateIdSet.has(t.id) && "bg-blue-50"
                             )}
                           >
                             <Checkbox checked={selectedTemplateIdSet.has(t.id)} onCheckedChange={() => toggleSelectTemplate(t.id)} />
                             <FileText className="h-3.5 w-3.5 text-slate-500" />
                             <div className="flex-1 truncate">{t.name}</div>
-                            {smartTemplateIdSet.has(t.id) && selectedTemplateIdSet.has(t.id) && <span className="text-[10px] text-blue-600">✨</span>}
+                            {(smartTemplateIdSet.has(t.id) || bundleTemplateIdSet.has(t.id)) && selectedTemplateIdSet.has(t.id) && <span className="text-[10px] text-blue-600">✨</span>}
                           </div>
                         ))}
                       </div>
@@ -588,6 +688,26 @@ export default function DocumentAutomationHub() {
                       <div className="text-sm text-slate-600">
                         Generates PDFs, applies naming rules, and exports a ZIP with the required folder structure.
                       </div>
+                      {preflightEnabled && (preflightBlocking || preflightMissing.length > 0) && (
+                        <Alert variant="destructive">
+                          <AlertTitle>Missing data detected</AlertTitle>
+                          <AlertDescription>
+                            <div className="space-y-1.5">
+                              {preflightQuery.isFetching || preflightQuery.isLoading ? (
+                                <div>Running pre-flight validation...</div>
+                              ) : preflightQuery.error ? (
+                                <div>Pre-flight validation failed. Please retry.</div>
+                              ) : (
+                                preflightMissing.map((c) => (
+                                  <div key={c.caseId}>
+                                    ⚠️ File Ref: {c.parcelNo || c.referenceNo || `Case ${c.caseId}`} - Missing {c.missing.join(", ")}.
+                                  </div>
+                                ))
+                              )}
+                            </div>
+                          </AlertDescription>
+                        </Alert>
+                      )}
                       <Button disabled={busy} className="w-full" onClick={() => runGenerate("download")}>
                         {busy ? "Generating..." : "Generate & Download"}
                       </Button>
@@ -629,7 +749,28 @@ export default function DocumentAutomationHub() {
                         Printing settings are recorded for audit. The actual duplex/copies are applied in your system print dialog.
                       </div>
 
-                      <Button disabled={busy} className="w-full" onClick={() => runGenerate("print")}>
+                      {preflightEnabled && (preflightBlocking || preflightMissing.length > 0) && (
+                        <Alert variant="destructive">
+                          <AlertTitle>Missing data detected</AlertTitle>
+                          <AlertDescription>
+                            <div className="space-y-1.5">
+                              {preflightQuery.isFetching || preflightQuery.isLoading ? (
+                                <div>Running pre-flight validation...</div>
+                              ) : preflightQuery.error ? (
+                                <div>Pre-flight validation failed. Please retry.</div>
+                              ) : (
+                                preflightMissing.map((c) => (
+                                  <div key={c.caseId}>
+                                    ⚠️ File Ref: {c.parcelNo || c.referenceNo || `Case ${c.caseId}`} - Missing {c.missing.join(", ")}.
+                                  </div>
+                                ))
+                              )}
+                            </div>
+                          </AlertDescription>
+                        </Alert>
+                      )}
+
+                      <Button disabled={busy || preflightBlocking} className="w-full" onClick={() => runGenerate("print")}>
                         {busy ? "Generating..." : "Generate Printable PDF"}
                       </Button>
                     </TabsContent>

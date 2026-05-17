@@ -6866,6 +6866,162 @@ router.get("/documents/automation/cases", requireAuth, requireFirmUser, requireP
   res.json({ items, page: safePage, limit: safeLimit });
 });
 
+function isBlankValue(v: unknown): boolean {
+  if (v === null || v === undefined) return true;
+  if (typeof v === "string") return v.trim().length === 0;
+  return false;
+}
+
+function isMissingPositiveNumber(v: unknown): boolean {
+  if (v === null || v === undefined) return true;
+  const n =
+    typeof v === "number" ? v
+    : typeof v === "string" ? Number(v)
+    : NaN;
+  return !Number.isFinite(n) || n <= 0;
+}
+
+function labelForVariableKey(key: string): string {
+  const k = String(key || "").trim();
+  if (!k) return "";
+  const map: Record<string, string> = {
+    purchaser_name: "Purchaser Name",
+    purchaser_ic: "Purchaser IC No",
+    purchaser_address: "Property Address",
+    parcel_no: "Parcel / Unit No",
+    end_financier: "Loan Bank",
+    financing_sum_raw: "Loan Amount",
+    financing_sum: "Loan Amount",
+  };
+  return map[k] ?? k;
+}
+
+async function runAutomationPreflight(args: {
+  r: DbConn;
+  firmId: number;
+  caseIds: number[];
+  templates: Array<{ id: number; name: string }>;
+}): Promise<{
+  critical: boolean;
+  cases: Array<{ caseId: number; referenceNo: string; parcelNo: string | null; missing: string[] }>;
+}> {
+  const cache = createRequestCache();
+  const templates = args.templates;
+  const templateNameTokens = templates.map((t) => String(t.name ?? "").toLowerCase());
+  const loanLike = templateNameTokens.some((n) => n.includes("facility") || n.includes("loan") || n.includes("financier") || n.includes("islamic"));
+
+  const out: Array<{ caseId: number; referenceNo: string; parcelNo: string | null; missing: string[] }> = [];
+
+  for (const caseId of args.caseIds) {
+    const context = await buildCaseContext(args.r, caseId, args.firmId, cache);
+    if (!context) {
+      out.push({ caseId, referenceNo: "", parcelNo: null, missing: ["reference_no"] });
+      continue;
+    }
+    const referenceNo = typeof (context as any).reference_no === "string" ? String((context as any).reference_no) : "";
+    const parcelNo = typeof (context as any).parcel_no === "string" ? String((context as any).parcel_no) : null;
+    const purchaseMode = typeof (context as any).purchase_mode === "string" ? String((context as any).purchase_mode) : "";
+
+    const missing = new Set<string>();
+    if (isBlankValue((context as any).purchaser_name)) missing.add("purchaser_name");
+    if (isBlankValue((context as any).purchaser_ic)) missing.add("purchaser_ic");
+    if (isBlankValue((context as any).purchaser_address)) missing.add("purchaser_address");
+    if (isBlankValue((context as any).parcel_no)) missing.add("parcel_no");
+
+    const missingFromBindings = new Set<string>();
+    for (const t of templates) {
+      const preview = await runDocumentPreview(args.r, {
+        firmId: args.firmId,
+        caseContext: context as any,
+        templateRef: { kind: "firm", templateId: t.id },
+        placeholders: [],
+        overrides: null,
+      });
+      for (const m of preview.missingRequiredVariables ?? []) {
+        const key = typeof m?.variableKey === "string" ? m.variableKey.trim() : "";
+        if (key) missingFromBindings.add(key);
+      }
+    }
+    for (const k of missingFromBindings) missing.add(k);
+
+    const requiresLoanCore = purchaseMode === "loan" && (loanLike || missingFromBindings.has("end_financier") || missingFromBindings.has("financing_sum_raw") || missingFromBindings.has("financing_sum"));
+    if (requiresLoanCore) {
+      if (isBlankValue((context as any).end_financier)) missing.add("end_financier");
+      if (isMissingPositiveNumber((context as any).financing_sum_raw)) missing.add("financing_sum_raw");
+    }
+
+    out.push({
+      caseId,
+      referenceNo,
+      parcelNo,
+      missing: Array.from(missing).map(labelForVariableKey).filter(Boolean),
+    });
+  }
+
+  const critical = out.some((x) => x.missing.length > 0);
+  return { critical, cases: out.filter((x) => x.missing.length > 0) };
+}
+
+router.post("/documents/automation/preflight", requireAuth, requireFirmUser, requirePermission("documents", "generate"), async (req: AuthRequest, res): Promise<void> => {
+  const r = getRlsDb(req, res);
+  if (!r) return;
+
+  const bodySchema = z.object({
+    caseIds: z.array(z.union([z.number(), z.string()])).min(1),
+    templateIds: z.array(z.union([z.number(), z.string()])).min(1),
+  });
+  const parsed = bodySchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(422).json({ error: "Invalid request body" });
+    return;
+  }
+
+  const caseIds = Array.from(new Set(
+    parsed.data.caseIds
+      .map((x) => (typeof x === "number" ? x : parseInt(x, 10)))
+      .filter((x) => Number.isFinite(x))
+      .map((x) => Math.trunc(x))
+      .filter((x) => x > 0)
+  ));
+  const templateIds = Array.from(new Set(
+    parsed.data.templateIds
+      .map((x) => (typeof x === "number" ? x : parseInt(x, 10)))
+      .filter((x) => Number.isFinite(x))
+      .map((x) => Math.trunc(x))
+      .filter((x) => x > 0)
+  ));
+
+  if (caseIds.length === 0 || templateIds.length === 0) {
+    res.status(400).json({ error: "caseIds and templateIds are required", code: "MISSING_INPUTS" });
+    return;
+  }
+  if (caseIds.length > 20 || templateIds.length > 25 || caseIds.length * templateIds.length > 300) {
+    res.status(422).json({ error: "Too many items", code: "TOO_MANY_ITEMS" });
+    return;
+  }
+
+  const templateRows = await queryRows(r, sql`
+    SELECT id, name
+    FROM document_templates
+    WHERE firm_id = ${req.firmId!}
+      AND is_template_capable = true
+      AND id IN (${sql.join(templateIds.map((id) => sql`${id}`), sql`, `)})
+    ORDER BY created_at DESC
+  `);
+  if (templateRows.length !== templateIds.length) {
+    res.status(404).json({ error: "One or more templates not found", code: "TEMPLATE_NOT_FOUND" });
+    return;
+  }
+
+  const report = await runAutomationPreflight({
+    r,
+    firmId: req.firmId!,
+    caseIds,
+    templates: templateRows.map((t) => ({ id: Number((t as any).id), name: String((t as any).name ?? "") })),
+  });
+  res.json(report);
+});
+
 router.post("/documents/automation/generate", requireAuth, requireFirmUser, requirePermission("documents", "generate"), async (req: AuthRequest, res): Promise<void> => {
   const r = getRlsDb(req, res);
   if (!r) return;
@@ -6999,6 +7155,28 @@ router.post("/documents/automation/generate", requireAuth, requireFirmUser, requ
   `);
   if (templateRows.length !== templateIds.length) {
     res.status(404).json({ error: "One or more templates not found", code: "TEMPLATE_NOT_FOUND" });
+    return;
+  }
+
+  const preflight = await runAutomationPreflight({
+    r,
+    firmId: req.firmId!,
+    caseIds,
+    templates: templateRows.map((t) => ({ id: Number((t as any).id), name: String((t as any).name ?? "") })),
+  });
+  if (preflight.critical) {
+    await writeAuditLog({
+      firmId: req.firmId,
+      actorId: req.userId,
+      actorType: req.userType,
+      action: "documents.automation.preflight.blocked",
+      entityType: "case",
+      entityId: undefined,
+      detail: `cases=${caseIds.length} templates=${templateIds.length} blocked=1`,
+      ipAddress: req.ip,
+      userAgent: req.headers["user-agent"],
+    });
+    res.status(400).json({ error: "Missing required data for document generation", code: "MISSING_REQUIRED_DATA", details: preflight });
     return;
   }
 

@@ -41,6 +41,15 @@ export default function CasesList() {
   const roleName = String((user as any)?.roleName ?? "");
   const isPartnerOrManager = roleName.toLowerCase().includes("partner") || roleName.toLowerCase().includes("manager");
 
+  const mode = sp.get("mode");
+  useEffect(() => {
+    if (mode !== "create") return;
+    const intake = sp.get("intake");
+    const next = intake ? `/app/cases/new?intake=${encodeURIComponent(intake)}` : "/app/cases/new";
+    setLocation(next);
+  }, [mode, setLocation, sp]);
+  if (mode === "create") return null;
+
   const initialPageRaw = sp.get("page");
   const initialLimitRaw = sp.get("limit");
   const initialPage = initialPageRaw ? Number(initialPageRaw) : 1;

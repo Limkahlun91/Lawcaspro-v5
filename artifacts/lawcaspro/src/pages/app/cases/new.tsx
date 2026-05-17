@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useLocation } from "wouter";
 import { useQueryClient } from "@tanstack/react-query";
 import { getListCasesQueryKey, useListProjects, useListUsers } from "@workspace/api-client-react";
@@ -31,6 +31,7 @@ export default function NewCasePage() {
   const { toast } = useToast();
   const { user } = useAuth();
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const intakeAppliedRef = useRef(false);
 
   const { data: projectsRes } = useListProjects({ limit: 100 }, { query: { staleTime: 5 * 60 * 1000 } });
   const projects = projectsRes?.data || [];
@@ -124,6 +125,49 @@ export default function NewCasePage() {
   const selectedClerk = users.find(u => String(u.id) === assignedClerkId);
   const selectedProject = projects.find(p => String(p.id) === projectId);
   const developerId = selectedProject?.developerId ? String(selectedProject.developerId) : "";
+
+  useEffect(() => {
+    if (intakeAppliedRef.current) return;
+    const search = typeof window !== "undefined" ? window.location.search : "";
+    if (!search) return;
+    const sp = new URLSearchParams(search.startsWith("?") ? search.slice(1) : search);
+    const intake = sp.get("intake");
+    if (!intake) return;
+    intakeAppliedRef.current = true;
+    try {
+      const b64 = intake.replace(/-/g, "+").replace(/_/g, "/");
+      const padded = b64 + "=".repeat((4 - (b64.length % 4)) % 4);
+      const json = decodeURIComponent(escape(atob(padded)));
+      const obj = JSON.parse(json) as Record<string, unknown>;
+      const s = (v: unknown): string => (typeof v === "string" ? v.trim() : "");
+      const purchaserName = s(obj.purchaserName);
+      const purchaserIc = s(obj.purchaserIc);
+      const parcel = s(obj.parcelNo);
+      const price = s(obj.price);
+      const bank = s(obj.loanBank);
+      const loanAmount = s(obj.loanAmount);
+      const addr = s(obj.propertyAddress);
+
+      if (purchaserName || purchaserIc) {
+        setPurchasers([{ name: purchaserName, ic: purchaserIc }]);
+      }
+      if (parcel) setParcelNo(parcel);
+      if (price) setPurchasePrice(price);
+      if (bank) setEndFinancier(bank);
+      if (loanAmount) setFinancingSum(loanAmount);
+      if (addr) {
+        setAddrLine1(addr);
+        setAddrLine2("");
+        setAddrLine3("");
+        setAddrLine4("");
+        setAddrLine5("");
+        setMailingManuallyEdited(true);
+        setMailingAddress(addr);
+      }
+    } catch {
+      intakeAppliedRef.current = false;
+    }
+  }, []);
 
   useEffect(() => {
     if (!selectedProject) {

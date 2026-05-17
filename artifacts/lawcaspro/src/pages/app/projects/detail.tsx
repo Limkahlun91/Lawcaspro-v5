@@ -6,10 +6,306 @@ import { Button } from "@/components/ui/button";
 import { ArrowLeft, Building2, MapPin, Tag, Pencil, Trash2 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import { useQueryClient } from "@tanstack/react-query";
-import { useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { QueryFallback } from "@/components/query-fallback";
 import { toastError } from "@/lib/toast-error";
-import { apiRequest } from "@/lib/api-client";
+import { apiFetchJson, apiRequest } from "@/lib/api-client";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Checkbox } from "@/components/ui/checkbox";
+import { DateOnlyInput, normalizeDateOnlyFromApi } from "@/components/date-only-input";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+
+type ProjectDocument = {
+  id: number;
+  projectId: number;
+  category: "general" | "developer_mlu" | "bank_mlu";
+  documentName: string;
+  bankName: string | null;
+  documentDate: string | null;
+  fileName: string;
+  mimeType: string | null;
+  fileSize: number | null;
+  hasExpiry: boolean;
+  validFrom: string | null;
+  validTo: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+function formatBytes(n: number | null): string {
+  if (!n || !Number.isFinite(n) || n <= 0) return "";
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function formatValidity(doc: { hasExpiry: boolean; validFrom: string | null; validTo: string | null }): string {
+  if (!doc.hasExpiry) return "No Expiry / N.A.";
+  const from = doc.validFrom ? normalizeDateOnlyFromApi(doc.validFrom) : "";
+  const to = doc.validTo ? normalizeDateOnlyFromApi(doc.validTo) : "";
+  const left = from || "N.A.";
+  const right = to || "N.A.";
+  return `${left} → ${right}`;
+}
+
+function ProjectDocumentsPanel(props: { projectId: number; category: "general" | "developer_mlu" | "bank_mlu" | "mlu" }) {
+  const { projectId } = props;
+  const { toast } = useToast();
+  const [docs, setDocs] = useState<ProjectDocument[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<unknown | null>(null);
+  const [uploading, setUploading] = useState(false);
+  const [deletingId, setDeletingId] = useState<number | null>(null);
+  const [dragging, setDragging] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+
+  const [documentName, setDocumentName] = useState("");
+  const [file, setFile] = useState<File | null>(null);
+
+  const [hasExpiry, setHasExpiry] = useState(false);
+  const [validFrom, setValidFrom] = useState("");
+  const [validTo, setValidTo] = useState("");
+
+  const [mluType, setMluType] = useState<"developer_mlu" | "bank_mlu">("developer_mlu");
+  const [bankName, setBankName] = useState("");
+  const [documentDate, setDocumentDate] = useState("");
+
+  const effectiveCategory = props.category === "mlu" ? mluType : props.category;
+
+  const nameSuggestions = useMemo(() => {
+    if (props.category !== "general") return [];
+    return [
+      "Building Plan Approval",
+      "Layout Approval",
+      "MMKN Approval (KM)",
+      "HDA Account opening (Lampiran A2)",
+      "Contractor All Risks Policy",
+    ];
+  }, [props.category]);
+
+  const fetchDocs = async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const cat = props.category === "mlu" ? "" : effectiveCategory;
+      const qs = cat ? `?category=${encodeURIComponent(cat)}` : "";
+      const rows = await apiFetchJson<ProjectDocument[]>(`/projects/${projectId}/documents${qs}`);
+      const filtered = props.category === "mlu"
+        ? (rows ?? []).filter((d) => d.category === "developer_mlu" || d.category === "bank_mlu")
+        : (rows ?? []);
+      setDocs(filtered);
+    } catch (e) {
+      setError(e);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!projectId) return;
+    fetchDocs();
+  }, [projectId, effectiveCategory, props.category]);
+
+  const canUpload = Boolean(documentName.trim()) && Boolean(file) && !uploading;
+
+  return (
+    <div className="space-y-4">
+      <Card>
+        <CardHeader>
+          <CardTitle>{props.category === "mlu" ? "Master Letter of Undertaking (MLU)" : "Project Documents"}</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          {props.category === "mlu" ? (
+            <div className="grid grid-cols-1 md:grid-cols-4 gap-3 items-end">
+              <div className="space-y-1.5">
+                <Label>Type</Label>
+                <Select value={mluType} onValueChange={(v) => setMluType(v === "bank_mlu" ? "bank_mlu" : "developer_mlu")}>
+                  <SelectTrigger>
+                    <SelectValue placeholder="Select type" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="developer_mlu">Developer MLU</SelectItem>
+                    <SelectItem value="bank_mlu">Bank MLU</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="space-y-1.5 md:col-span-2">
+                <Label>{mluType === "developer_mlu" ? "To Bank" : "From Bank"}</Label>
+                <Input value={bankName} onChange={(e) => setBankName(e.target.value)} placeholder="e.g. Maybank" />
+              </div>
+              <div className="space-y-1.5">
+                <Label>Document Date</Label>
+                <DateOnlyInput valueYmd={documentDate} onChangeYmd={setDocumentDate} />
+              </div>
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 md:grid-cols-5 gap-3 items-end">
+              <div className="md:col-span-2 space-y-1.5">
+                <Label>Document Name</Label>
+                <Input list="project-doc-suggestions" value={documentName} onChange={(e) => setDocumentName(e.target.value)} />
+                {nameSuggestions.length > 0 && (
+                  <datalist id="project-doc-suggestions">
+                    {nameSuggestions.map((s) => <option key={s} value={s} />)}
+                  </datalist>
+                )}
+              </div>
+              <div className="md:col-span-1 flex items-center gap-2">
+                <Checkbox checked={hasExpiry} onCheckedChange={(v) => setHasExpiry(Boolean(v))} />
+                <Label className="text-sm">Has expiry</Label>
+              </div>
+              <div className="md:col-span-1 space-y-1.5">
+                <Label>Valid From</Label>
+                <DateOnlyInput valueYmd={validFrom} onChangeYmd={setValidFrom} disabled={!hasExpiry} />
+              </div>
+              <div className="md:col-span-1 space-y-1.5">
+                <Label>Valid To</Label>
+                <DateOnlyInput valueYmd={validTo} onChangeYmd={setValidTo} disabled={!hasExpiry} />
+              </div>
+            </div>
+          )}
+
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="application/pdf,image/*"
+            className="hidden"
+            onChange={(e) => {
+              const f = e.target.files?.[0] ?? null;
+              setFile(f);
+              e.currentTarget.value = "";
+            }}
+          />
+          <div
+            className={`rounded-lg border border-dashed p-4 text-sm ${dragging ? "border-slate-400 bg-slate-50" : "border-slate-200 bg-white"}`}
+            onDragEnter={(e) => { e.preventDefault(); e.stopPropagation(); setDragging(true); }}
+            onDragOver={(e) => { e.preventDefault(); e.stopPropagation(); setDragging(true); }}
+            onDragLeave={(e) => { e.preventDefault(); e.stopPropagation(); setDragging(false); }}
+            onDrop={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              setDragging(false);
+              const f = e.dataTransfer.files?.[0] ?? null;
+              setFile(f);
+            }}
+            onClick={() => fileInputRef.current?.click()}
+            role="button"
+            tabIndex={0}
+          >
+            <div className="font-medium text-slate-900">File Upload</div>
+            <div className="text-slate-500 mt-1">Drag & drop PDF / image, or click to select.</div>
+            <div className="mt-2 text-xs text-slate-600">{file ? `Selected: ${file.name}` : "No file selected"}</div>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <Button
+              type="button"
+              disabled={!canUpload}
+              onClick={async () => {
+                if (!file) return;
+                setUploading(true);
+                try {
+                  const fd = new FormData();
+                  fd.append("category", effectiveCategory);
+                  fd.append("documentName", documentName.trim());
+                  if (props.category === "mlu") {
+                    if (bankName.trim()) fd.append("bankName", bankName.trim());
+                    if (documentDate) fd.append("documentDate", documentDate);
+                  } else {
+                    fd.append("hasExpiry", String(hasExpiry));
+                    if (hasExpiry) {
+                      if (validFrom) fd.append("validFrom", validFrom);
+                      if (validTo) fd.append("validTo", validTo);
+                    }
+                  }
+                  fd.append("file", file);
+                  await apiFetchJson(`/projects/${projectId}/documents`, { method: "POST", body: fd });
+                  setDocumentName("");
+                  setFile(null);
+                  setHasExpiry(false);
+                  setValidFrom("");
+                  setValidTo("");
+                  setBankName("");
+                  setDocumentDate("");
+                  await fetchDocs();
+                  toast({ title: "Document uploaded" });
+                } catch (e) {
+                  toastError(toast, e, "Upload failed");
+                } finally {
+                  setUploading(false);
+                }
+              }}
+            >
+              {uploading ? "Uploading..." : "Upload"}
+            </Button>
+            <Button type="button" variant="outline" onClick={() => fetchDocs()} disabled={loading}>
+              Refresh
+            </Button>
+          </div>
+
+          {error && (
+            <QueryFallback title="Documents unavailable" error={error} onRetry={fetchDocs} isRetrying={loading} />
+          )}
+
+          <div className="border rounded-lg overflow-hidden">
+            <div className="grid grid-cols-12 bg-slate-50 px-4 py-2 text-xs font-semibold text-slate-600">
+              <div className="col-span-4">Document</div>
+              <div className="col-span-3">{props.category === "mlu" ? "MLU" : "Validity"}</div>
+              <div className="col-span-3">Uploaded</div>
+              <div className="col-span-2 text-right">Actions</div>
+            </div>
+            {loading ? (
+              <div className="px-4 py-6 text-sm text-slate-500">Loading documents...</div>
+            ) : docs.length === 0 ? (
+              <div className="px-4 py-6 text-sm text-slate-500">No documents uploaded.</div>
+            ) : (
+              docs.map((d) => (
+                <div key={d.id} className="grid grid-cols-12 px-4 py-3 border-t text-sm items-center">
+                  <div className="col-span-4">
+                    <div className="font-medium text-slate-900">{d.documentName}</div>
+                    <div className="text-xs text-slate-500">{d.fileName}{d.fileSize ? ` • ${formatBytes(d.fileSize)}` : ""}</div>
+                  </div>
+                  <div className="col-span-3 text-xs text-slate-700">
+                    {props.category === "mlu"
+                      ? `${d.category === "developer_mlu" ? "To" : "From"} ${d.bankName || "Bank"}${d.documentDate ? ` • ${normalizeDateOnlyFromApi(d.documentDate)}` : ""}`
+                      : formatValidity(d)}
+                  </div>
+                  <div className="col-span-3 text-slate-600 text-xs">{new Date(d.createdAt).toLocaleDateString()}</div>
+                  <div className="col-span-2 flex items-center justify-end gap-2">
+                    <Button type="button" variant="outline" size="sm" onClick={() => window.open(`/api/projects/${projectId}/documents/${d.id}/view`, "_blank")}>
+                      View
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="destructive"
+                      size="sm"
+                      disabled={deletingId === d.id}
+                      onClick={async () => {
+                        setDeletingId(d.id);
+                        try {
+                          await apiRequest(`/projects/${projectId}/documents/${d.id}`, { method: "DELETE" });
+                          await fetchDocs();
+                          toast({ title: "Document deleted" });
+                        } catch (e) {
+                          toastError(toast, e, "Delete failed");
+                        } finally {
+                          setDeletingId(null);
+                        }
+                      }}
+                    >
+                      {deletingId === d.id ? "Deleting..." : "Delete"}
+                    </Button>
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
 
 export default function ProjectDetail() {
   const { id } = useParams<{ id: string }>();
@@ -92,47 +388,65 @@ export default function ProjectDetail() {
         </div>
       </div>
 
-      <div className="grid grid-cols-1 gap-6">
-        <Card>
-          <CardHeader>
-            <CardTitle>Project Information</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-6 mb-6">
-              <div className="flex items-start gap-3">
-                <Building2 className="w-5 h-5 text-amber-500 mt-0.5" />
-                <div>
-                  <div className="text-sm font-medium text-slate-500">Project Type</div>
-                  <div className="text-slate-900 capitalize font-medium">{project.projectType}</div>
-                </div>
-              </div>
-              <div className="flex items-start gap-3">
-                <Tag className="w-5 h-5 text-amber-500 mt-0.5" />
-                <div>
-                  <div className="text-sm font-medium text-slate-500">Title Type</div>
-                  <div className="text-slate-900 capitalize font-medium">{project.titleType}</div>
-                </div>
-              </div>
-              <div className="flex items-start gap-3">
-                <MapPin className="w-5 h-5 text-amber-500 mt-0.5" />
-                <div>
-                  <div className="text-sm font-medium text-slate-500">Land Use</div>
-                  <div className="text-slate-900 font-medium">{project.landUse || "-"}</div>
-                </div>
-              </div>
-              <div className="flex items-start gap-3">
-                <Building2 className="w-5 h-5 text-amber-500 mt-0.5" />
-                <div>
-                  <div className="text-sm font-medium text-slate-500">Condition</div>
-                  <div className="text-slate-900 font-medium">{project.developmentCondition || "-"}</div>
-                </div>
-              </div>
-            </div>
+      <Tabs defaultValue="overview" className="w-full">
+        <TabsList className="bg-white border border-slate-200">
+          <TabsTrigger value="overview">Overview</TabsTrigger>
+          <TabsTrigger value="documents">Project Documents</TabsTrigger>
+          <TabsTrigger value="mlu">MLU</TabsTrigger>
+        </TabsList>
 
-            {renderExtraFields()}
-          </CardContent>
-        </Card>
-      </div>
+        <TabsContent value="overview" className="mt-4">
+          <div className="grid grid-cols-1 gap-6">
+            <Card>
+              <CardHeader>
+                <CardTitle>Project Information</CardTitle>
+              </CardHeader>
+              <CardContent>
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-6 mb-6">
+                  <div className="flex items-start gap-3">
+                    <Building2 className="w-5 h-5 text-amber-500 mt-0.5" />
+                    <div>
+                      <div className="text-sm font-medium text-slate-500">Project Type</div>
+                      <div className="text-slate-900 capitalize font-medium">{project.projectType}</div>
+                    </div>
+                  </div>
+                  <div className="flex items-start gap-3">
+                    <Tag className="w-5 h-5 text-amber-500 mt-0.5" />
+                    <div>
+                      <div className="text-sm font-medium text-slate-500">Title Type</div>
+                      <div className="text-slate-900 capitalize font-medium">{project.titleType}</div>
+                    </div>
+                  </div>
+                  <div className="flex items-start gap-3">
+                    <MapPin className="w-5 h-5 text-amber-500 mt-0.5" />
+                    <div>
+                      <div className="text-sm font-medium text-slate-500">Land Use</div>
+                      <div className="text-slate-900 font-medium">{project.landUse || "-"}</div>
+                    </div>
+                  </div>
+                  <div className="flex items-start gap-3">
+                    <Building2 className="w-5 h-5 text-amber-500 mt-0.5" />
+                    <div>
+                      <div className="text-sm font-medium text-slate-500">Condition</div>
+                      <div className="text-slate-900 font-medium">{project.developmentCondition || "-"}</div>
+                    </div>
+                  </div>
+                </div>
+
+                {renderExtraFields()}
+              </CardContent>
+            </Card>
+          </div>
+        </TabsContent>
+
+        <TabsContent value="documents" className="mt-4">
+          <ProjectDocumentsPanel projectId={projectId} category="general" />
+        </TabsContent>
+
+        <TabsContent value="mlu" className="mt-4">
+          <ProjectDocumentsPanel projectId={projectId} category="mlu" />
+        </TabsContent>
+      </Tabs>
     </div>
   );
 }

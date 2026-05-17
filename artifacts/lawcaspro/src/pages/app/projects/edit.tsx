@@ -11,6 +11,7 @@ import { getListProjectsQueryKey } from "@workspace/api-client-react";
 import { QueryFallback } from "@/components/query-fallback";
 import { toastError } from "@/lib/toast-error";
 import { apiRequest } from "@/lib/api-client";
+import { DateOnlyInput, normalizeDateOnlyFromApi } from "@/components/date-only-input";
 
 interface PropertyType {
   id: string;
@@ -39,12 +40,24 @@ export default function EditProject() {
   const [isEncumbered, setIsEncumbered] = useState<"yes" | "no">("no");
   const [tenure, setTenure] = useState<"freehold" | "leasehold" | "">("");
   const [masterChargeeBank, setMasterChargeeBank] = useState("");
+  const [masterChargeeAccount, setMasterChargeeAccount] = useState("");
   const [titleSubtype, setTitleSubtype] = useState("");
   const [masterTitleNumber, setMasterTitleNumber] = useState("");
   const [masterTitleLandSize, setMasterTitleLandSize] = useState("");
   const [mukim, setMukim] = useState("");
   const [daerah, setDaerah] = useState("");
   const [negeri, setNegeri] = useState("");
+  const [apNumber, setApNumber] = useState("");
+  const [apValidFrom, setApValidFrom] = useState("");
+  const [apValidTo, setApValidTo] = useState("");
+  const [dlNumber, setDlNumber] = useState("");
+  const [dlValidFrom, setDlValidFrom] = useState("");
+  const [dlValidTo, setDlValidTo] = useState("");
+  const [constructionPeriodMonths, setConstructionPeriodMonths] = useState("");
+  const [actualVpDate, setActualVpDate] = useState("");
+  const [cccDate, setCccDate] = useState("");
+  const [hdaAccount, setHdaAccount] = useState("");
+  const [hdaBank, setHdaBank] = useState("");
   const [propertyTypes, setPropertyTypes] = useState<PropertyType[]>([
     { id: crypto.randomUUID(), buildingType: "" },
   ]);
@@ -62,16 +75,33 @@ export default function EditProject() {
       const ten = typeof proj.tenure === "string" ? proj.tenure : "";
       setTenure(ten === "freehold" || ten === "leasehold" ? ten : "");
       setMasterChargeeBank(typeof proj.masterChargeeBank === "string" ? proj.masterChargeeBank : "");
+      setMasterChargeeAccount(typeof proj.masterChargeeAccount === "string" ? proj.masterChargeeAccount : "");
+
+      setApNumber(typeof proj.apNumber === "string" ? proj.apNumber : "");
+      setApValidFrom(normalizeDateOnlyFromApi((proj as Record<string, unknown>).apValidFrom));
+      setApValidTo(normalizeDateOnlyFromApi((proj as Record<string, unknown>).apValidTo));
+      setDlNumber(typeof proj.dlNumber === "string" ? proj.dlNumber : "");
+      setDlValidFrom(normalizeDateOnlyFromApi((proj as Record<string, unknown>).dlValidFrom));
+      setDlValidTo(normalizeDateOnlyFromApi((proj as Record<string, unknown>).dlValidTo));
+      setConstructionPeriodMonths(
+        typeof proj.constructionPeriodMonths === "number" ? String(proj.constructionPeriodMonths)
+        : typeof (proj as Record<string, unknown>).constructionPeriodMonths === "string" ? String((proj as Record<string, unknown>).constructionPeriodMonths)
+        : ""
+      );
+      setActualVpDate(normalizeDateOnlyFromApi((proj as Record<string, unknown>).actualVpDate));
+      setCccDate(normalizeDateOnlyFromApi((proj as Record<string, unknown>).cccDate));
+      setHdaAccount(typeof proj.hdaAccount === "string" ? proj.hdaAccount : "");
+      setHdaBank(typeof proj.hdaBank === "string" ? proj.hdaBank : "");
 
       const extra = project.extraFields as Record<string, unknown> | undefined;
-      setPhase(typeof proj.phase === "string" ? proj.phase : (typeof extra?.phase === "string" ? extra.phase : ""));
-      setDeveloperName(typeof proj.developerName === "string" ? proj.developerName : (typeof extra?.developerName === "string" ? extra.developerName : ""));
-      setTitleSubtype(typeof extra?.titleSubtype === "string" ? extra.titleSubtype : "");
-      setMasterTitleNumber(typeof extra?.masterTitleNumber === "string" ? extra.masterTitleNumber : "");
-      setMasterTitleLandSize(typeof extra?.masterTitleLandSize === "string" ? extra.masterTitleLandSize : "");
-      setMukim(typeof extra?.mukim === "string" ? extra.mukim : "");
-      setDaerah(typeof extra?.daerah === "string" ? extra.daerah : "");
-      setNegeri(typeof extra?.negeri === "string" ? extra.negeri : "");
+      setPhase(typeof proj.phase === "string" ? proj.phase : "");
+      setDeveloperName(typeof proj.developerName === "string" ? proj.developerName : "");
+      setTitleSubtype(typeof proj.titleSubtype === "string" ? proj.titleSubtype : "");
+      setMasterTitleNumber(typeof proj.masterTitleNumber === "string" ? proj.masterTitleNumber : "");
+      setMasterTitleLandSize(typeof proj.masterTitleLandSize === "string" ? proj.masterTitleLandSize : "");
+      setMukim(typeof proj.mukim === "string" ? proj.mukim : "");
+      setDaerah(typeof proj.daerah === "string" ? proj.daerah : "");
+      setNegeri(typeof proj.negeri === "string" ? proj.negeri : "");
       const pts = (extra?.propertyTypes as PropertyType[]) || [];
       if (pts.length > 0) {
         setPropertyTypes(pts.map(p => ({ id: p.id || crypto.randomUUID(), buildingType: p.buildingType || "" })));
@@ -127,16 +157,28 @@ export default function EditProject() {
           isEncumbered: isEncumbered === "yes",
           tenure,
           masterChargeeBank: isEncumbered === "yes" ? (masterChargeeBank.trim() || null) : null,
+          masterChargeeAccount: masterChargeeAccount.trim() || null,
+          apNumber: apNumber.trim() || null,
+          apValidFrom: apValidFrom || null,
+          apValidTo: apValidTo || null,
+          dlNumber: dlNumber.trim() || null,
+          dlValidFrom: dlValidFrom || null,
+          dlValidTo: dlValidTo || null,
+          constructionPeriodMonths: constructionPeriodMonths.trim() ? Number(constructionPeriodMonths) : null,
+          actualVpDate: actualVpDate || null,
+          cccDate: cccDate || null,
+          hdaAccount: hdaAccount.trim() || null,
+          hdaBank: hdaBank.trim() || null,
+          phase: phase || null,
+          developerName: developerName || null,
+          titleSubtype: titleSubtype || null,
+          masterTitleNumber: masterTitleNumber || null,
+          masterTitleLandSize: masterTitleLandSize || null,
+          mukim: mukim || null,
+          daerah: daerah || null,
+          negeri: negeri || null,
           extraFields: {
             propertyTypes: propertyTypes.filter(p => p.buildingType.trim()),
-            phase,
-            developerName,
-            titleSubtype,
-            masterTitleNumber,
-            masterTitleLandSize,
-            mukim,
-            daerah,
-            negeri,
           },
         }),
       });
@@ -277,6 +319,90 @@ export default function EditProject() {
                 placeholder={isEncumbered === "yes" ? "e.g., Maybank" : "Enable Encumbered = Yes"}
                 className="mt-1.5"
               />
+            </div>
+          </div>
+
+          <div className="border-t border-slate-200 pt-6">
+            <h3 className="text-base font-bold text-slate-900 mb-4">Licenses & Permits</h3>
+            <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
+              <div className="md:col-span-2">
+                <Label className="text-sm font-semibold text-slate-700">Advertisement Permit (AP) No.</Label>
+                <Input value={apNumber} onChange={(e) => setApNumber(e.target.value)} className="mt-1.5" />
+              </div>
+              <div>
+                <Label className="text-sm font-semibold text-slate-700">AP Valid From</Label>
+                <div className="mt-1.5">
+                  <DateOnlyInput valueYmd={apValidFrom} onChangeYmd={setApValidFrom} />
+                </div>
+              </div>
+              <div>
+                <Label className="text-sm font-semibold text-slate-700">AP Valid To</Label>
+                <div className="mt-1.5">
+                  <DateOnlyInput valueYmd={apValidTo} onChangeYmd={setApValidTo} />
+                </div>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-4 gap-6 mt-5">
+              <div className="md:col-span-2">
+                <Label className="text-sm font-semibold text-slate-700">Developer License (DL) No.</Label>
+                <Input value={dlNumber} onChange={(e) => setDlNumber(e.target.value)} className="mt-1.5" />
+              </div>
+              <div>
+                <Label className="text-sm font-semibold text-slate-700">DL Valid From</Label>
+                <div className="mt-1.5">
+                  <DateOnlyInput valueYmd={dlValidFrom} onChangeYmd={setDlValidFrom} />
+                </div>
+              </div>
+              <div>
+                <Label className="text-sm font-semibold text-slate-700">DL Valid To</Label>
+                <div className="mt-1.5">
+                  <DateOnlyInput valueYmd={dlValidTo} onChangeYmd={setDlValidTo} />
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div className="border-t border-slate-200 pt-6">
+            <h3 className="text-base font-bold text-slate-900 mb-4">Vacant Possession (VP) & Completion</h3>
+            <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
+              <div>
+                <Label className="text-sm font-semibold text-slate-700">Construction Period (Months)</Label>
+                <Input value={constructionPeriodMonths} onChange={(e) => setConstructionPeriodMonths(e.target.value)} inputMode="numeric" className="mt-1.5" />
+                <div className="text-xs text-slate-500 mt-1">Contractual VP Date: Auto-calculated in Case</div>
+              </div>
+              <div>
+                <Label className="text-sm font-semibold text-slate-700">Actual VP Date</Label>
+                <div className="mt-1.5">
+                  <DateOnlyInput valueYmd={actualVpDate} onChangeYmd={setActualVpDate} />
+                </div>
+              </div>
+              <div>
+                <Label className="text-sm font-semibold text-slate-700">CCC Date</Label>
+                <div className="mt-1.5">
+                  <DateOnlyInput valueYmd={cccDate} onChangeYmd={setCccDate} />
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div className="border-t border-slate-200 pt-6">
+            <h3 className="text-base font-bold text-slate-900 mb-4">Additional Information</h3>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+              <div>
+                <Label className="text-sm font-semibold text-slate-700">HDA Account</Label>
+                <Input value={hdaAccount} onChange={(e) => setHdaAccount(e.target.value)} className="mt-1.5" />
+              </div>
+              <div>
+                <Label className="text-sm font-semibold text-slate-700">HDA Bank</Label>
+                <Input value={hdaBank} onChange={(e) => setHdaBank(e.target.value)} className="mt-1.5" />
+              </div>
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mt-5">
+              <div>
+                <Label className="text-sm font-semibold text-slate-700">Master Chargee Account Number</Label>
+                <Input value={masterChargeeAccount} onChange={(e) => setMasterChargeeAccount(e.target.value)} className="mt-1.5" />
+              </div>
             </div>
           </div>
 

@@ -13,6 +13,7 @@ import type { AuthUser } from "@workspace/api-client-react";
 import { setStoredAuthToken } from "@/lib/auth-token";
 import { apiFetchJson } from "@/lib/api-client";
 import { toastError } from "@/lib/toast-error";
+import { hasPermission } from "@/lib/permissions";
 
 const loginSchema = z.object({
   email: z.string().email("Please enter a valid email address"),
@@ -78,12 +79,18 @@ export default function Login() {
       if (isRecord(body) && typeof body.token === "string" && body.token.trim() !== "") {
         setStoredAuthToken(body.token.trim());
       }
-      setAuthUser(body);
+      const me = await apiFetchJson<AuthUser | null>("/auth/me");
+      const effective = me && isAuthUser(me) ? me : body;
+      setAuthUser(effective);
       const nextPath = (() => {
-        if (body.userType === "founder") return "/platform/dashboard";
-        const roleName = String((body as any)?.roleName ?? "");
+        if (effective.userType === "founder") return "/platform/dashboard";
+        const roleName = String((effective as any)?.roleName ?? "");
         if (roleName === "Developer_User") return "/developer/dashboard";
-        return "/app/dashboard";
+        if (hasPermission(effective, "dashboard", "read")) return "/app/dashboard";
+        if (hasPermission(effective, "cases", "read")) return "/app/workbench";
+        if (hasPermission(effective, "documents", "read")) return "/app/documents";
+        if (hasPermission(effective, "settings", "read")) return "/app/settings";
+        return "/app/workbench";
       })();
       const base = import.meta.env.BASE_URL ? String(import.meta.env.BASE_URL).replace(/\/$/, "") : "";
       window.location.assign(`${base}${nextPath}`);

@@ -367,6 +367,12 @@ export function resolveVariablesForTemplate(params: {
   if (!Object.prototype.hasOwnProperty.call(resolved, "borrower2_address")) resolved.borrower2_address = typeof (params.caseContext as any)?.borrower2_address === "string" ? String((params.caseContext as any).borrower2_address) : null;
   if (!Object.prototype.hasOwnProperty.call(resolved, "vendors_inline")) resolved.vendors_inline = vendorsInline || null;
 
+  const purchaserCount = Array.isArray((params.caseContext as any)?.purchasers) ? (params.caseContext as any).purchasers.length : 0;
+  const isJoint = purchaserCount > 1;
+  if (!Object.prototype.hasOwnProperty.call(resolved, "is_joint_purchaser")) resolved.is_joint_purchaser = isJoint;
+  if (!Object.prototype.hasOwnProperty.call(resolved, "purchaser_pronoun")) resolved.purchaser_pronoun = isJoint ? "We" : "I";
+  if (!Object.prototype.hasOwnProperty.call(resolved, "purchaser_verb")) resolved.purchaser_verb = isJoint ? "are" : "am";
+
   return {
     resolvedVariables: resolved,
     missingRequiredVariables: missing,

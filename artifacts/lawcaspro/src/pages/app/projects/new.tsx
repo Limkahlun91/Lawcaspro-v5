@@ -9,6 +9,7 @@ import { X, Plus, Trash2 } from "lucide-react";
 import { useQueryClient } from "@tanstack/react-query";
 import { getListProjectsQueryKey } from "@workspace/api-client-react";
 import { toastError } from "@/lib/toast-error";
+import { DateOnlyInput } from "@/components/date-only-input";
 
 interface PropertyType {
   id: string;
@@ -31,12 +32,24 @@ export default function NewProject() {
   const [isEncumbered, setIsEncumbered] = useState<"yes" | "no">("no");
   const [tenure, setTenure] = useState<"freehold" | "leasehold" | "">("");
   const [masterChargeeBank, setMasterChargeeBank] = useState("");
+  const [masterChargeeAccount, setMasterChargeeAccount] = useState("");
   const [titleSubtype, setTitleSubtype] = useState("");
   const [masterTitleNumber, setMasterTitleNumber] = useState("");
   const [masterTitleLandSize, setMasterTitleLandSize] = useState("");
   const [mukim, setMukim] = useState("");
   const [daerah, setDaerah] = useState("");
   const [negeri, setNegeri] = useState("");
+  const [apNumber, setApNumber] = useState("");
+  const [apValidFrom, setApValidFrom] = useState("");
+  const [apValidTo, setApValidTo] = useState("");
+  const [dlNumber, setDlNumber] = useState("");
+  const [dlValidFrom, setDlValidFrom] = useState("");
+  const [dlValidTo, setDlValidTo] = useState("");
+  const [constructionPeriodMonths, setConstructionPeriodMonths] = useState("");
+  const [actualVpDate, setActualVpDate] = useState("");
+  const [cccDate, setCccDate] = useState("");
+  const [hdaAccount, setHdaAccount] = useState("");
+  const [hdaBank, setHdaBank] = useState("");
   const [propertyTypes, setPropertyTypes] = useState<PropertyType[]>([
     { id: crypto.randomUUID(), buildingType: "" },
   ]);
@@ -86,6 +99,18 @@ export default function NewProject() {
       isEncumbered: isEncumbered === "yes",
       tenure,
       masterChargeeBank: isEncumbered === "yes" ? (masterChargeeBank.trim() || null) : null,
+      masterChargeeAccount: masterChargeeAccount.trim() || null,
+      apNumber: apNumber.trim() || null,
+      apValidFrom: apValidFrom || null,
+      apValidTo: apValidTo || null,
+      dlNumber: dlNumber.trim() || null,
+      dlValidFrom: dlValidFrom || null,
+      dlValidTo: dlValidTo || null,
+      constructionPeriodMonths: constructionPeriodMonths.trim() ? Number(constructionPeriodMonths) : null,
+      actualVpDate: actualVpDate || null,
+      cccDate: cccDate || null,
+      hdaAccount: hdaAccount.trim() || null,
+      hdaBank: hdaBank.trim() || null,
       phase,
       developerName: developerName || undefined,
       titleSubtype,
@@ -227,6 +252,90 @@ export default function NewProject() {
                 placeholder={isEncumbered === "yes" ? "e.g., Maybank" : "Enable Encumbered = Yes"}
                 className="mt-1.5"
               />
+            </div>
+          </div>
+
+          <div className="border-t border-slate-200 pt-6">
+            <h3 className="text-base font-bold text-slate-900 mb-4">Licenses & Permits</h3>
+            <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
+              <div className="md:col-span-2">
+                <Label className="text-sm font-semibold text-slate-700">Advertisement Permit (AP) No.</Label>
+                <Input value={apNumber} onChange={(e) => setApNumber(e.target.value)} className="mt-1.5" />
+              </div>
+              <div>
+                <Label className="text-sm font-semibold text-slate-700">AP Valid From</Label>
+                <div className="mt-1.5">
+                  <DateOnlyInput valueYmd={apValidFrom} onChangeYmd={setApValidFrom} />
+                </div>
+              </div>
+              <div>
+                <Label className="text-sm font-semibold text-slate-700">AP Valid To</Label>
+                <div className="mt-1.5">
+                  <DateOnlyInput valueYmd={apValidTo} onChangeYmd={setApValidTo} />
+                </div>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-4 gap-6 mt-5">
+              <div className="md:col-span-2">
+                <Label className="text-sm font-semibold text-slate-700">Developer License (DL) No.</Label>
+                <Input value={dlNumber} onChange={(e) => setDlNumber(e.target.value)} className="mt-1.5" />
+              </div>
+              <div>
+                <Label className="text-sm font-semibold text-slate-700">DL Valid From</Label>
+                <div className="mt-1.5">
+                  <DateOnlyInput valueYmd={dlValidFrom} onChangeYmd={setDlValidFrom} />
+                </div>
+              </div>
+              <div>
+                <Label className="text-sm font-semibold text-slate-700">DL Valid To</Label>
+                <div className="mt-1.5">
+                  <DateOnlyInput valueYmd={dlValidTo} onChangeYmd={setDlValidTo} />
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div className="border-t border-slate-200 pt-6">
+            <h3 className="text-base font-bold text-slate-900 mb-4">Vacant Possession (VP) & Completion</h3>
+            <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
+              <div>
+                <Label className="text-sm font-semibold text-slate-700">Construction Period (Months)</Label>
+                <Input value={constructionPeriodMonths} onChange={(e) => setConstructionPeriodMonths(e.target.value)} inputMode="numeric" className="mt-1.5" />
+                <div className="text-xs text-slate-500 mt-1">Contractual VP Date: Auto-calculated in Case</div>
+              </div>
+              <div>
+                <Label className="text-sm font-semibold text-slate-700">Actual VP Date</Label>
+                <div className="mt-1.5">
+                  <DateOnlyInput valueYmd={actualVpDate} onChangeYmd={setActualVpDate} />
+                </div>
+              </div>
+              <div>
+                <Label className="text-sm font-semibold text-slate-700">CCC Date</Label>
+                <div className="mt-1.5">
+                  <DateOnlyInput valueYmd={cccDate} onChangeYmd={setCccDate} />
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div className="border-t border-slate-200 pt-6">
+            <h3 className="text-base font-bold text-slate-900 mb-4">Additional Information</h3>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+              <div>
+                <Label className="text-sm font-semibold text-slate-700">HDA Account</Label>
+                <Input value={hdaAccount} onChange={(e) => setHdaAccount(e.target.value)} className="mt-1.5" />
+              </div>
+              <div>
+                <Label className="text-sm font-semibold text-slate-700">HDA Bank</Label>
+                <Input value={hdaBank} onChange={(e) => setHdaBank(e.target.value)} className="mt-1.5" />
+              </div>
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mt-5">
+              <div>
+                <Label className="text-sm font-semibold text-slate-700">Master Chargee Account Number</Label>
+                <Input value={masterChargeeAccount} onChange={(e) => setMasterChargeeAccount(e.target.value)} className="mt-1.5" />
+              </div>
             </div>
           </div>
 

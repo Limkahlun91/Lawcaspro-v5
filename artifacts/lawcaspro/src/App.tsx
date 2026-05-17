@@ -46,6 +46,7 @@ import CasesList from "@/pages/app/cases";
 import NewCase from "@/pages/app/cases/new";
 import CaseDetail from "@/pages/app/cases/detail";
 import Workbench from "@/pages/app/workbench";
+import CaseIntakeInboxPage from "@/pages/app/cases/intake";
 
 import NewUser from "@/pages/app/users/new";
 
@@ -158,6 +159,11 @@ function AppRoutes() {
           <Route path="/app/cases/new" component={() => (
             <PermissionGuard module="cases" action="create">
               <NewCase />
+            </PermissionGuard>
+          )} />
+          <Route path="/app/cases/intake" component={() => (
+            <PermissionGuard module="cases" action="create">
+              <CaseIntakeInboxPage />
             </PermissionGuard>
           )} />
           <Route path="/app/cases/:id" component={() => (
@@ -361,7 +367,7 @@ function Router() {
       <Route path="/developer" component={() => <Redirect to="/developer/dashboard" />} />
       <Route path="/developer/*" component={DeveloperRoutes} />
 
-      <Route path="/app" component={() => <Redirect to="/app/dashboard" />} />
+      <Route path="/app" component={() => <Redirect to="/app/workbench" />} />
       <Route path="/app/*" component={AppRoutes} />
       
       <Route component={NotFound} />

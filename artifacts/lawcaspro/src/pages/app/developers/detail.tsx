@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo, useRef } from "react";
 import { useParams, useLocation } from "wouter";
 import { useQueryClient } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -7,8 +7,10 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
+import { Checkbox } from "@/components/ui/checkbox";
+import { DateOnlyInput, normalizeDateOnlyFromApi } from "@/components/date-only-input";
 import {
-  ArrowLeft, Building2, Phone, Mail, User, MapPin, Pencil, X, Save, Plus, Trash2, Briefcase,
+  ArrowLeft, Building2, Phone, Mail, User, MapPin, Pencil, X, Save, Plus, Trash2, Briefcase, Eye,
 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import { getListDevelopersQueryKey } from "@workspace/api-client-react";
@@ -42,6 +44,20 @@ interface Developer {
   createdAt: string;
 }
 
+type DeveloperDocument = {
+  id: number;
+  developerId: number;
+  documentName: string;
+  fileName: string;
+  mimeType: string | null;
+  fileSize: number | null;
+  hasExpiry: boolean;
+  validFrom: string | null;
+  validTo: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
 const SALUTATIONS = new Set<Salutation>(["__none__", "MR.", "MS.", "MRS.", "MDM.", "DR.", "DATUK"]);
 
 const normalizeContact = (value: unknown): Contact => {
@@ -65,6 +81,22 @@ const normalizeContacts = (value: unknown): Contact[] => {
 
 const emptyContact = (): Contact => ({ salutation: "__none__", name: "", department: "", phone: "", phoneExt: "", email: "" });
 
+function formatValidity(doc: { hasExpiry: boolean; validFrom: string | null; validTo: string | null }): string {
+  if (!doc.hasExpiry) return "No Expiry / N.A.";
+  const from = doc.validFrom ? normalizeDateOnlyFromApi(doc.validFrom) : "";
+  const to = doc.validTo ? normalizeDateOnlyFromApi(doc.validTo) : "";
+  const left = from || "N.A.";
+  const right = to || "N.A.";
+  return `${left} → ${right}`;
+}
+
+function formatBytes(n: number | null): string {
+  if (!n || !Number.isFinite(n) || n <= 0) return "";
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
+
 export default function DeveloperDetail() {
   const { id } = useParams<{ id: string }>();
   const developerId = parseInt(id || "0", 10);
@@ -87,6 +119,21 @@ export default function DeveloperDetail() {
     email: "",
   });
   const [contacts, setContacts] = useState<Contact[]>([emptyContact()]);
+
+  const [documents, setDocuments] = useState<DeveloperDocument[]>([]);
+  const [docsLoading, setDocsLoading] = useState(false);
+  const [docsError, setDocsError] = useState<unknown | null>(null);
+  const [docName, setDocName] = useState("");
+  const [docFile, setDocFile] = useState<File | null>(null);
+  const [docHasExpiry, setDocHasExpiry] = useState(false);
+  const [docValidFrom, setDocValidFrom] = useState("");
+  const [docValidTo, setDocValidTo] = useState("");
+  const [docUploading, setDocUploading] = useState(false);
+  const [docDeletingId, setDocDeletingId] = useState<number | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const [dragging, setDragging] = useState(false);
+
+  const canUploadDoc = useMemo(() => Boolean(docName.trim()) && Boolean(docFile) && !docUploading, [docFile, docName, docUploading]);
 
   const fetchDeveloper = async () => {
     setLoading(true);
@@ -116,6 +163,24 @@ export default function DeveloperDetail() {
 
   useEffect(() => {
     if (developerId) fetchDeveloper();
+  }, [developerId]);
+
+  const fetchDocuments = async () => {
+    setDocsLoading(true);
+    setDocsError(null);
+    try {
+      const rows = await apiFetchJson<DeveloperDocument[]>(`/developers/${developerId}/documents`);
+      setDocuments(Array.isArray(rows) ? rows : []);
+    } catch (e) {
+      setDocsError(e);
+    } finally {
+      setDocsLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!developerId) return;
+    fetchDocuments();
   }, [developerId]);
 
   const updateContact = (index: number, field: keyof Contact, value: string) => {
@@ -489,6 +554,158 @@ export default function DeveloperDetail() {
           </Card>
         </div>
       )}
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Developer Documents (基礎文件)</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="grid grid-cols-1 md:grid-cols-5 gap-3 items-end">
+            <div className="md:col-span-2 space-y-1.5">
+              <Label>Document Name</Label>
+              <Input value={docName} onChange={(e) => setDocName(e.target.value)} placeholder="e.g. SSM, Developer License" />
+            </div>
+            <div className="md:col-span-1 flex items-center gap-2">
+              <Checkbox checked={docHasExpiry} onCheckedChange={(v) => setDocHasExpiry(Boolean(v))} />
+              <Label className="text-sm">Has expiry</Label>
+            </div>
+            <div className="md:col-span-1 space-y-1.5">
+              <Label>Valid From</Label>
+              <DateOnlyInput valueYmd={docValidFrom} onChangeYmd={setDocValidFrom} disabled={!docHasExpiry} />
+            </div>
+            <div className="md:col-span-1 space-y-1.5">
+              <Label>Valid To</Label>
+              <DateOnlyInput valueYmd={docValidTo} onChangeYmd={setDocValidTo} disabled={!docHasExpiry} />
+            </div>
+          </div>
+
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="application/pdf,image/*"
+            className="hidden"
+            onChange={(e) => {
+              const f = e.target.files?.[0] ?? null;
+              setDocFile(f);
+              e.currentTarget.value = "";
+            }}
+          />
+          <div
+            className={`rounded-lg border border-dashed p-4 text-sm ${dragging ? "border-slate-400 bg-slate-50" : "border-slate-200 bg-white"}`}
+            onDragEnter={(e) => { e.preventDefault(); e.stopPropagation(); setDragging(true); }}
+            onDragOver={(e) => { e.preventDefault(); e.stopPropagation(); setDragging(true); }}
+            onDragLeave={(e) => { e.preventDefault(); e.stopPropagation(); setDragging(false); }}
+            onDrop={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              setDragging(false);
+              const f = e.dataTransfer.files?.[0] ?? null;
+              setDocFile(f);
+            }}
+            onClick={() => fileInputRef.current?.click()}
+            role="button"
+            tabIndex={0}
+          >
+            <div className="font-medium text-slate-900">File Upload</div>
+            <div className="text-slate-500 mt-1">Drag & drop PDF / image, or click to select.</div>
+            <div className="mt-2 text-xs text-slate-600">{docFile ? `Selected: ${docFile.name}` : "No file selected"}</div>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <Button
+              type="button"
+              disabled={!canUploadDoc}
+              onClick={async () => {
+                if (!docFile) return;
+                setDocUploading(true);
+                try {
+                  const fd = new FormData();
+                  fd.append("documentName", docName.trim());
+                  fd.append("hasExpiry", String(docHasExpiry));
+                  if (docHasExpiry) {
+                    if (docValidFrom) fd.append("validFrom", docValidFrom);
+                    if (docValidTo) fd.append("validTo", docValidTo);
+                  }
+                  fd.append("file", docFile);
+                  await apiFetchJson(`/developers/${developerId}/documents`, { method: "POST", body: fd });
+                  setDocName("");
+                  setDocFile(null);
+                  setDocHasExpiry(false);
+                  setDocValidFrom("");
+                  setDocValidTo("");
+                  await fetchDocuments();
+                  toast({ title: "Document uploaded" });
+                } catch (e) {
+                  toastError(toast, e, "Upload failed");
+                } finally {
+                  setDocUploading(false);
+                }
+              }}
+            >
+              {docUploading ? "Uploading..." : "Upload"}
+            </Button>
+            <Button type="button" variant="outline" onClick={() => fetchDocuments()} disabled={docsLoading}>
+              Refresh
+            </Button>
+          </div>
+
+          {docsError && (
+            <QueryFallback title="Documents unavailable" error={docsError} onRetry={fetchDocuments} isRetrying={docsLoading} />
+          )}
+
+          <div className="border rounded-lg overflow-hidden">
+            <div className="grid grid-cols-12 bg-slate-50 px-4 py-2 text-xs font-semibold text-slate-600">
+              <div className="col-span-4">Document</div>
+              <div className="col-span-3">Validity</div>
+              <div className="col-span-3">Uploaded</div>
+              <div className="col-span-2 text-right">Actions</div>
+            </div>
+            {docsLoading ? (
+              <div className="px-4 py-6 text-sm text-slate-500">Loading documents...</div>
+            ) : documents.length === 0 ? (
+              <div className="px-4 py-6 text-sm text-slate-500">No documents uploaded.</div>
+            ) : (
+              documents.map((d) => (
+                <div key={d.id} className="grid grid-cols-12 px-4 py-3 border-t text-sm items-center">
+                  <div className="col-span-4">
+                    <div className="font-medium text-slate-900">{d.documentName}</div>
+                    <div className="text-xs text-slate-500">{d.fileName}{d.fileSize ? ` • ${formatBytes(d.fileSize)}` : ""}</div>
+                  </div>
+                  <div className="col-span-3 text-slate-700 text-xs">{formatValidity(d)}</div>
+                  <div className="col-span-3 text-slate-600 text-xs">{new Date(d.createdAt).toLocaleDateString()}</div>
+                  <div className="col-span-2 flex items-center justify-end gap-2">
+                    <Button type="button" variant="outline" size="sm" onClick={() => window.open(`/api/developers/${developerId}/documents/${d.id}/view`, "_blank")}>
+                      <Eye className="h-4 w-4 mr-1" />
+                      View
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="destructive"
+                      size="sm"
+                      disabled={docDeletingId === d.id}
+                      onClick={async () => {
+                        setDocDeletingId(d.id);
+                        try {
+                          await apiRequest(`/developers/${developerId}/documents/${d.id}`, { method: "DELETE" });
+                          await fetchDocuments();
+                          toast({ title: "Document deleted" });
+                        } catch (e) {
+                          toastError(toast, e, "Delete failed");
+                        } finally {
+                          setDocDeletingId(null);
+                        }
+                      }}
+                    >
+                      <Trash2 className="h-4 w-4 mr-1" />
+                      {docDeletingId === d.id ? "Deleting..." : "Delete"}
+                    </Button>
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
+        </CardContent>
+      </Card>
     </div>
   );
 }

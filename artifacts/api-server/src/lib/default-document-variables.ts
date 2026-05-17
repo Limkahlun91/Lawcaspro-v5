@@ -96,6 +96,9 @@ export const DEFAULT_DOCUMENT_VARIABLES: DefaultDocumentVariable[] = [
   { key: "purchaser_email", label: "Purchaser Email", category: "purchaser", valueType: "string", sourcePath: "purchaser_email", sortOrder: 230 },
   { key: "purchaser_phone", label: "Purchaser Phone", category: "purchaser", valueType: "string", sourcePath: "purchaser_phone", sortOrder: 240 },
   { key: "purchasers_inline", label: "Purchasers (Inline)", description: "Formatted purchaser list: A (NRIC NO.: X) & B (NRIC NO.: Y)", category: "purchaser", valueType: "string", sourcePath: "purchasers_inline", exampleValue: "Ali (NRIC NO.: 900101-14-5678) & Abu (NRIC NO.: 880202-10-1234)", sortOrder: 245 },
+  { key: "is_joint_purchaser", label: "Is Joint Purchaser", description: "True if more than one purchaser", category: "purchaser", valueType: "boolean", sourcePath: "is_joint_purchaser", sortOrder: 246 },
+  { key: "purchaser_pronoun", label: "Purchaser Pronoun", description: "I / We based on purchaser count", category: "purchaser", valueType: "string", sourcePath: "purchaser_pronoun", exampleValue: "We", sortOrder: 247 },
+  { key: "purchaser_verb", label: "Purchaser Verb", description: "am / are based on purchaser count", category: "purchaser", valueType: "string", sourcePath: "purchaser_verb", exampleValue: "are", sortOrder: 248 },
 
   { key: "borrower1_name", label: "Borrower 1 Name", category: "loan", valueType: "string", sourcePath: "borrower1_name", sortOrder: 300 },
   { key: "borrower1_ic", label: "Borrower 1 NRIC", category: "loan", valueType: "string", sourcePath: "borrower1_ic", sortOrder: 310 },
