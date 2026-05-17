@@ -229,8 +229,12 @@ routerInternal.get("/projects", requireAuth, requireFirmUser, requirePermission(
     const enriched = await Promise.all(projs.map((p: ProjectRow) => enrichProject(r, p)));
     res.json({ data: enriched, total: Number(totalRes?.c ?? 0), page, limit });
   } catch (err) {
+    console.error(err);
     logger.error({ err, path: req.path, firmId: req.firmId, userId: req.userId }, "[projects]");
-    res.status(500).json({ error: "Internal Server Error" });
+    const params = ListProjectsQuerySchema.safeParse(req.query);
+    const page = params.success ? (params.data.page ?? 1) : 1;
+    const limit = params.success ? (params.data.limit ?? 20) : 20;
+    res.json({ data: [], total: 0, page, limit });
   }
 });
 

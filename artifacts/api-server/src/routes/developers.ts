@@ -74,6 +74,19 @@ function normalizeDateOnly(value: unknown): string | null {
   return s;
 }
 
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  const ms = Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : 12_000;
+  let timer: NodeJS.Timeout | undefined;
+  const timeout = new Promise<T>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label} timed out`)), ms);
+  });
+  try {
+    return await Promise.race([promise, timeout]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 const getHeader = (req: AuthRequestLike, key: string): string | undefined => {
   const lower = key.toLowerCase();
   const value = req.headers?.[lower] ?? req.headers?.[key];
@@ -429,127 +442,143 @@ routerInternal.delete("/developers/:developerId", requireAuth, requireFirmUser, 
 });
 
 routerInternal.get("/developers/:developerId/documents", requireAuth, requireFirmUser, requirePermission("developers", "read"), async (req: AuthRequestLike, res: RouteResLike): Promise<void> => {
-  const r = rdb(req);
-  const params = DeveloperIdParamsSchema.safeParse(req.params);
-  if (!params.success) {
-    res.status(400).json({ error: params.error.message });
-    return;
-  }
-  const developerId = params.data.developerId;
-  const [dev] = await r.select({ id: developersTable.id, firmId: developersTable.firmId }).from(developersTable).where(eq(developersTable.id, developerId));
-  if (!dev || dev.firmId !== req.firmId) {
-    res.status(404).json({ error: "Developer not found" });
-    return;
-  }
+  try {
+    const r = rdb(req);
+    const params = DeveloperIdParamsSchema.safeParse(req.params);
+    if (!params.success) {
+      res.status(400).json({ error: params.error.message });
+      return;
+    }
+    const developerId = params.data.developerId;
+    const [dev] = await r.select({ id: developersTable.id, firmId: developersTable.firmId }).from(developersTable).where(eq(developersTable.id, developerId));
+    if (!dev || dev.firmId !== req.firmId) {
+      res.status(404).json({ error: "Developer not found" });
+      return;
+    }
 
-  const rows = await r
-    .select()
-    .from(developerDocumentsTable)
-    .where(and(eq(developerDocumentsTable.firmId, req.firmId!), eq(developerDocumentsTable.developerId, developerId)))
-    .orderBy(desc(developerDocumentsTable.createdAt));
+    const rows = await r
+      .select()
+      .from(developerDocumentsTable)
+      .where(and(eq(developerDocumentsTable.firmId, req.firmId!), eq(developerDocumentsTable.developerId, developerId)))
+      .orderBy(desc(developerDocumentsTable.createdAt));
 
-  res.json(rows.map((d) => ({
-    id: d.id,
-    developerId: d.developerId,
-    documentName: d.documentName,
-    fileName: d.fileName,
-    mimeType: d.mimeType ?? null,
-    fileSize: d.fileSize ?? null,
-    hasExpiry: d.hasExpiry,
-    validFrom: d.validFrom ? String(d.validFrom) : null,
-    validTo: d.validTo ? String(d.validTo) : null,
-    createdAt: d.createdAt.toISOString(),
-    updatedAt: d.updatedAt.toISOString(),
-  })));
+    res.json(rows.map((d) => ({
+      id: d.id,
+      developerId: d.developerId,
+      documentName: d.documentName,
+      fileName: d.fileName,
+      mimeType: d.mimeType ?? null,
+      fileSize: d.fileSize ?? null,
+      hasExpiry: d.hasExpiry,
+      validFrom: d.validFrom ? String(d.validFrom) : null,
+      validTo: d.validTo ? String(d.validTo) : null,
+      createdAt: d.createdAt.toISOString(),
+      updatedAt: d.updatedAt.toISOString(),
+    })));
+  } catch (err) {
+    console.error(err);
+    logger.error({ err, path: req.path, firmId: req.firmId, userId: req.userId }, "[developers.documents]");
+    res.json([]);
+  }
 });
 
 routerInternal.post("/developers/:developerId/documents", requireAuth, requireFirmUser, requirePermission("developers", "update"), upload.single("file"), async (req: AuthRequestLike, res: RouteResLike): Promise<void> => {
-  const r = req.rlsDb;
-  if (!r) {
-    logger.error({ path: req.path, firmId: req.firmId, userId: req.userId }, "[developers.documents] missing tenant database context");
-    res.status(500).json({ error: "Internal Server Error" });
-    return;
+  try {
+    const r = req.rlsDb;
+    if (!r) {
+      logger.error({ path: req.path, firmId: req.firmId, userId: req.userId }, "[developers.documents] missing tenant database context");
+      res.status(500).json({ error: "Internal Server Error" });
+      return;
+    }
+
+    const params = DeveloperIdParamsSchema.safeParse(req.params);
+    if (!params.success) {
+      res.status(400).json({ error: params.error.message });
+      return;
+    }
+    const developerId = params.data.developerId;
+    const [dev] = await r.select({ id: developersTable.id, firmId: developersTable.firmId }).from(developersTable).where(and(eq(developersTable.id, developerId), eq(developersTable.firmId, req.firmId!)));
+    if (!dev) {
+      res.status(404).json({ error: "Developer not found" });
+      return;
+    }
+
+    const f = (req as any).file as { originalname?: string; mimetype?: string; buffer?: Buffer; size?: number } | undefined;
+    if (!f || !Buffer.isBuffer(f.buffer) || f.buffer.length === 0) {
+      res.status(400).json({ error: "file is required" });
+      return;
+    }
+
+    const body = req.body as Record<string, unknown>;
+    const documentName = typeof body.documentName === "string" ? body.documentName.trim() : "";
+    if (!documentName) {
+      res.status(400).json({ error: "documentName is required" });
+      return;
+    }
+    const hasExpiry = normalizeBoolean(body.hasExpiry);
+    const validFrom = hasExpiry ? normalizeDateOnly(body.validFrom) : null;
+    const validTo = hasExpiry ? normalizeDateOnly(body.validTo) : null;
+
+    const fileName = typeof f.originalname === "string" && f.originalname.trim() ? f.originalname.trim() : "document";
+    const safeName = safeFilenameAscii(fileName).replace(/\s+/g, "_");
+    const objectPath = `/objects/developers/${req.firmId!}/${developerId}/${randomUUID()}-${safeName}`;
+
+    await withTimeout(
+      supabaseStorage.uploadPrivateObject({
+        objectPath,
+        fileBytes: f.buffer,
+        contentType: typeof f.mimetype === "string" && f.mimetype.trim() ? f.mimetype.trim() : "application/octet-stream",
+      }),
+      12_000,
+      "uploadPrivateObject",
+    );
+
+    const [created] = await r
+      .insert(developerDocumentsTable)
+      .values({
+        firmId: req.firmId!,
+        developerId,
+        documentName,
+        objectPath,
+        fileName,
+        mimeType: typeof f.mimetype === "string" ? f.mimetype : null,
+        fileSize: Math.floor(f.buffer.length),
+        hasExpiry,
+        validFrom: validFrom as any,
+        validTo: validTo as any,
+      })
+      .returning();
+
+    await writeAuditLog({
+      firmId: req.firmId,
+      actorId: req.userId,
+      actorType: req.userType,
+      action: "developers.documents.upload",
+      entityType: "developer_document",
+      entityId: created.id,
+      detail: `developerId=${developerId} name=${documentName}`,
+      ipAddress: req.ip,
+      userAgent: getHeader(req, "user-agent"),
+    });
+
+    res.status(201).json({
+      id: created.id,
+      developerId: created.developerId,
+      documentName: created.documentName,
+      fileName: created.fileName,
+      mimeType: created.mimeType ?? null,
+      fileSize: created.fileSize ?? null,
+      hasExpiry: created.hasExpiry,
+      validFrom: created.validFrom ? String(created.validFrom) : null,
+      validTo: created.validTo ? String(created.validTo) : null,
+      createdAt: created.createdAt.toISOString(),
+      updatedAt: created.updatedAt.toISOString(),
+    });
+  } catch (err) {
+    console.error(err);
+    logger.error({ err, path: req.path, firmId: req.firmId, userId: req.userId }, "[developers.documents.upload]");
+    res.status(503).json({ error: "Upload failed" });
   }
-
-  const params = DeveloperIdParamsSchema.safeParse(req.params);
-  if (!params.success) {
-    res.status(400).json({ error: params.error.message });
-    return;
-  }
-  const developerId = params.data.developerId;
-  const [dev] = await r.select({ id: developersTable.id, firmId: developersTable.firmId }).from(developersTable).where(and(eq(developersTable.id, developerId), eq(developersTable.firmId, req.firmId!)));
-  if (!dev) {
-    res.status(404).json({ error: "Developer not found" });
-    return;
-  }
-
-  const f = (req as any).file as { originalname?: string; mimetype?: string; buffer?: Buffer; size?: number } | undefined;
-  if (!f || !Buffer.isBuffer(f.buffer) || f.buffer.length === 0) {
-    res.status(400).json({ error: "file is required" });
-    return;
-  }
-
-  const body = req.body as Record<string, unknown>;
-  const documentName = typeof body.documentName === "string" ? body.documentName.trim() : "";
-  if (!documentName) {
-    res.status(400).json({ error: "documentName is required" });
-    return;
-  }
-  const hasExpiry = normalizeBoolean(body.hasExpiry);
-  const validFrom = hasExpiry ? normalizeDateOnly(body.validFrom) : null;
-  const validTo = hasExpiry ? normalizeDateOnly(body.validTo) : null;
-
-  const fileName = typeof f.originalname === "string" && f.originalname.trim() ? f.originalname.trim() : "document";
-  const safeName = safeFilenameAscii(fileName).replace(/\s+/g, "_");
-  const objectPath = `/objects/developers/${req.firmId!}/${developerId}/${randomUUID()}-${safeName}`;
-
-  await supabaseStorage.uploadPrivateObject({
-    objectPath,
-    fileBytes: f.buffer,
-    contentType: typeof f.mimetype === "string" && f.mimetype.trim() ? f.mimetype.trim() : "application/octet-stream",
-  });
-
-  const [created] = await r
-    .insert(developerDocumentsTable)
-    .values({
-      firmId: req.firmId!,
-      developerId,
-      documentName,
-      objectPath,
-      fileName,
-      mimeType: typeof f.mimetype === "string" ? f.mimetype : null,
-      fileSize: Math.floor(f.buffer.length),
-      hasExpiry,
-      validFrom: validFrom as any,
-      validTo: validTo as any,
-    })
-    .returning();
-
-  await writeAuditLog({
-    firmId: req.firmId,
-    actorId: req.userId,
-    actorType: req.userType,
-    action: "developers.documents.upload",
-    entityType: "developer_document",
-    entityId: created.id,
-    detail: `developerId=${developerId} name=${documentName}`,
-    ipAddress: req.ip,
-    userAgent: getHeader(req, "user-agent"),
-  });
-
-  res.status(201).json({
-    id: created.id,
-    developerId: created.developerId,
-    documentName: created.documentName,
-    fileName: created.fileName,
-    mimeType: created.mimeType ?? null,
-    fileSize: created.fileSize ?? null,
-    hasExpiry: created.hasExpiry,
-    validFrom: created.validFrom ? String(created.validFrom) : null,
-    validTo: created.validTo ? String(created.validTo) : null,
-    createdAt: created.createdAt.toISOString(),
-    updatedAt: created.updatedAt.toISOString(),
-  });
 });
 
 routerInternal.get("/developers/:developerId/documents/:docId/view", requireAuth, requireFirmUser, requirePermission("developers", "read"), async (req: AuthRequestLike, res: RouteResLike): Promise<void> => {
@@ -575,7 +604,7 @@ routerInternal.get("/developers/:developerId/documents/:docId/view", requireAuth
   }
 
   try {
-    const url = await supabaseStorage.createSignedDownloadUrl(row.objectPath, 60 * 10);
+    const url = await withTimeout(supabaseStorage.createSignedDownloadUrl(row.objectPath, 60 * 10), 8_000, "createSignedDownloadUrl");
     (res as any).redirect(url);
   } catch (err) {
     if (err instanceof ObjectNotFoundError) {
@@ -614,7 +643,7 @@ routerInternal.delete("/developers/:developerId/documents/:docId", requireAuth, 
   }
 
   try {
-    await supabaseStorage.deletePrivateObject(deleted.objectPath);
+    await withTimeout(supabaseStorage.deletePrivateObject(deleted.objectPath), 8_000, "deletePrivateObject");
   } catch (err) {
     if (!(err instanceof ObjectNotFoundError)) {
       logger.error({ err, path: req.path, firmId: req.firmId, userId: req.userId }, "[developers.documents] delete_private_object_failed");

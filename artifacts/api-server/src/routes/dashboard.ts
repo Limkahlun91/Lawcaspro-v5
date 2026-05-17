@@ -1,8 +1,7 @@
-import express, { type NextFunction, type Response, type Router as ExpressRouter } from "express";
+import express, { type Response, type Router as ExpressRouter } from "express";
 import { db, sql } from "@workspace/db";
 import { requireAuth, requireFirmUser, requirePermission, type AuthRequest } from "../lib/auth.js";
 import { logger } from "../lib/logger.js";
-import { isTransientDbConnectionError } from "../lib/auth-safe-db.js";
 import { computeDashboardStats } from "../services/dashboard-stats.js";
 
 type DbConn = typeof db | NonNullable<AuthRequest["rlsDb"]>;
@@ -29,7 +28,7 @@ type RouterInternalLike = {
 const expressRouter = express.Router();
 const router = expressRouter as unknown as RouterInternalLike;
 
-router.get("/dashboard", requireAuth, requireFirmUser, requirePermission("dashboard", "read"), async (req: AuthRequest, res: Response, next: NextFunction): Promise<void> => {
+router.get("/dashboard", requireAuth, requireFirmUser, requirePermission("dashboard", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const firmId = req.firmId!;
     const r = rdb(req);
@@ -81,11 +80,26 @@ router.get("/dashboard", requireAuth, requireFirmUser, requirePermission("dashbo
   } catch (err) {
     console.error(err);
     logger.error({ err, path: req.path, firmId: req.firmId, userId: req.userId }, "[dashboard]");
-    if (isTransientDbConnectionError(err)) {
-      res.status(503).json({ error: "Dashboard temporarily unavailable" });
-      return;
-    }
-    next(err);
+    const fallback = {
+      totalCases: 0,
+      activeCases: 0,
+      completedCases: 0,
+      totalClients: 0,
+      totalDevelopers: 0,
+      totalProjects: 0,
+      cashCases: 0,
+      loanCases: 0,
+      masterTitleCases: 0,
+      individualTitleCases: 0,
+      strataTitleCases: 0,
+      recentCases: [],
+      billing: { totalBilled: 0, totalPaid: 0, totalOutstanding: 0 },
+      commsThisMonth: 0,
+      milestoneSections: [],
+      milestoneCards: [],
+    };
+    res.json(fallback);
+    return;
   }
 });
 

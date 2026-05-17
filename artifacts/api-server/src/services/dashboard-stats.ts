@@ -30,6 +30,11 @@ async function tableExists(r: DbConn, reg: string): Promise<boolean> {
 
 type DashboardStatsOpts = { assignedToUserId?: number };
 
+function toNumber0(v: unknown): number {
+  const n = typeof v === "number" ? v : typeof v === "string" ? Number(v) : 0;
+  return Number.isFinite(n) ? n : 0;
+}
+
 export async function computeDashboardStats(
   r: DbConn,
   firmId: number,
@@ -54,7 +59,7 @@ export async function computeDashboardStats(
       ? r.select({ c: count() }).from(casesTable).innerJoin(caseAssignmentsTable, assignedCasesJoin)
       : r.select({ c: count() }).from(casesTable);
     const [row] = where ? await base.where(where) : await base;
-    return Number(row?.c ?? 0);
+    return toNumber0(row?.c);
   };
 
   const totalCases = await countCases(and(eq(casesTable.firmId, firmId)));
@@ -82,10 +87,10 @@ export async function computeDashboardStats(
           eq(casesTable.firmId, firmId),
           isNotNull(caseKeyDatesTable.completionDate),
         ));
-        return Number(row?.c ?? 0);
+        return toNumber0(row?.c);
       })())
     : 0;
-  const activeCases = totalCases - completedCases;
+  const activeCases = Math.max(0, totalCases - completedCases);
 
   const recentRawRows = assignedCasesJoin
     ? await r
@@ -322,9 +327,9 @@ export async function computeDashboardStats(
     totalCases,
     activeCases,
     completedCases,
-    totalClients: Number(totalClientsRes?.c ?? 0),
-    totalDevelopers: Number(totalDevsRes?.c ?? 0),
-    totalProjects: Number(totalProjsRes?.c ?? 0),
+    totalClients: toNumber0(totalClientsRes?.c),
+    totalDevelopers: toNumber0(totalDevsRes?.c),
+    totalProjects: toNumber0(totalProjsRes?.c),
     cashCases,
     loanCases,
     masterTitleCases,
@@ -334,9 +339,9 @@ export async function computeDashboardStats(
     billing: (() => {
       const row = billing as Record<string, unknown>;
       return {
-        totalBilled: Number(row.total_billed ?? 0),
-        totalPaid: Number(row.total_paid ?? 0),
-        totalOutstanding: Number(row.total_outstanding ?? 0),
+        totalBilled: toNumber0(row.total_billed),
+        totalPaid: toNumber0(row.total_paid),
+        totalOutstanding: toNumber0(row.total_outstanding),
       };
     })(),
     commsThisMonth,
