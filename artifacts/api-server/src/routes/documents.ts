@@ -8,6 +8,7 @@ import { sendOk } from "../lib/api-response.js";
 import { getSupabaseStorageConfigError, ObjectNotFoundError, ObjectStorageService, StorageRequestTimeoutError, SupabaseStorageService } from "../lib/objectStorage.js";
 import { Readable } from "stream";
 import { randomUUID } from "crypto";
+import multer from "multer";
 import Docxtemplater from "docxtemplater";
 import ImageModule from "docxtemplater-image-module-free";
 import PizZip from "pizzip";
@@ -47,6 +48,7 @@ const expressRouter = express.Router();
 const router = expressRouter as unknown as RouterInternalLike;
 const storage = new ObjectStorageService();
 const supabaseStorage = new SupabaseStorageService();
+const templateUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
 
 type DbConn = typeof db | NonNullable<AuthRequest["rlsDb"]>;
 
@@ -330,6 +332,25 @@ function safeFilenameAscii(filename: string): string {
   const base = filename.replace(/[\r\n"]/g, "").trim();
   if (!base) return "download";
   return base.replace(/[^\x20-\x7E]/g, "_");
+}
+
+function formatDateDdMmYyyy(d: Date): string {
+  const dd = String(d.getDate()).padStart(2, "0");
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  const yyyy = String(d.getFullYear());
+  return `${dd}.${mm}.${yyyy}`;
+}
+
+function stripExtension(name: string): string {
+  const v = String(name || "");
+  const idx = v.lastIndexOf(".");
+  if (idx <= 0) return v;
+  return v.slice(0, idx);
+}
+
+function sanitizePathSegment(v: string): string {
+  const s = safeFilenameAscii(String(v || "")).trim();
+  return s.replace(/[\/\\]/g, "_").replace(/\s+/g, " ").trim() || "item";
 }
 
 function decodeStoragePath(rawPath: unknown): string {
@@ -1854,6 +1875,66 @@ router.post("/document-templates", requireAuth, requireFirmUser, requirePermissi
 
   await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.firm_document.upload", entityType: "firm_document", entityId: createdId, detail: `name=${name} kind=${effectiveKind} ext=${ext}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
   res.status(201).json(patched[0] ?? rows[0]);
+});
+
+router.post("/documents/templates/upload", requireAuth, requireFirmUser, requirePermission("documents", "create"), templateUpload.single("file"), async (req: AuthRequest, res): Promise<void> => {
+  const r = getRlsDb(req, res);
+  if (!r) return;
+
+  const f = (req as any).file as { originalname?: string; mimetype?: string; buffer?: Buffer; size?: number } | undefined;
+  if (!f || !Buffer.isBuffer(f.buffer) || f.buffer.length === 0) {
+    res.status(400).json({ error: "file is required" });
+    return;
+  }
+
+  const body = req.body as Record<string, unknown>;
+  const templateName = typeof body.templateName === "string" ? body.templateName.trim() : typeof body.name === "string" ? body.name.trim() : "";
+  const description = typeof body.description === "string" ? body.description.trim() : "";
+  const documentType = typeof body.documentType === "string" ? body.documentType.trim() : "other";
+  const category = typeof body.category === "string" ? body.category.trim() : null;
+  const folderId = typeof body.folderId === "string" ? parseInt(body.folderId, 10) : typeof body.folderId === "number" ? body.folderId : null;
+  const folderIdNum = Number.isFinite(folderId) && (folderId as number) > 0 ? Math.trunc(folderId as number) : null;
+
+  if (!templateName) {
+    res.status(400).json({ error: "templateName is required" });
+    return;
+  }
+
+  const fileName = typeof f.originalname === "string" ? f.originalname : "template";
+  const ext = fileExtensionFromName(fileName);
+  if (ext !== "docx" && ext !== "pdf") {
+    res.status(400).json({ error: "Unsupported file type", code: "UNSUPPORTED_FILE_TYPE" });
+    return;
+  }
+  if (folderIdNum !== null) {
+    const folderRows = await queryRows(
+      r,
+      sql`SELECT id FROM firm_document_folders WHERE id = ${folderIdNum} AND firm_id = ${req.firmId!}`
+    );
+    if (!folderRows[0]) {
+      res.status(400).json({ error: "Invalid folder" });
+      return;
+    }
+  }
+
+  const safeName = safeFilenameAscii(fileName).replace(/\s+/g, "_");
+  const objectPath = `/objects/templates/firms/${req.firmId!}/uploads/${randomUUID()}-${safeName}`;
+  await supabaseStorage.uploadPrivateObject({
+    objectPath,
+    fileBytes: f.buffer,
+    contentType: typeof f.mimetype === "string" && f.mimetype.trim() ? f.mimetype.trim() : (ext === "pdf" ? "application/pdf" : "application/vnd.openxmlformats-officedocument.wordprocessingml.document"),
+  });
+
+  const rows = await queryRows(
+    r,
+    sql`INSERT INTO document_templates (firm_id, name, document_type, description, object_path, file_name, folder_id, kind, mime_type, extension, file_size, is_template_capable, category, created_by)
+        VALUES (${req.firmId!}, ${templateName}, ${documentType || "other"}, ${description || null}, ${objectPath}, ${fileName}, ${folderIdNum}, 'template', ${typeof f.mimetype === "string" ? f.mimetype : null}, ${ext}, ${Math.floor(f.buffer.length)}, true, ${category}, ${req.userId!})
+        RETURNING *`
+  );
+  const created = rows[0];
+  const createdId = created && typeof created === "object" && "id" in created ? Number((created as any).id) : undefined;
+  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.automation.template.upload", entityType: "document_template", entityId: createdId, detail: `name=${templateName} ext=${ext}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+  res.status(201).json(created);
 });
 
 router.patch("/document-templates/:templateId", requireAuth, requireFirmUser, requirePermission("documents", "update"), async (req: AuthRequest, res): Promise<void> => {
@@ -4979,6 +5060,19 @@ async function convertDocxToPdf(docxBytes: Buffer): Promise<Buffer> {
   }
 }
 
+async function mergePdfBuffers(buffers: Buffer[]): Promise<Buffer> {
+  if (!buffers.length) return Buffer.alloc(0);
+  const outDoc = await PDFDocument.create();
+  for (const b of buffers) {
+    if (!Buffer.isBuffer(b) || b.length === 0) continue;
+    const src = await PDFDocument.load(b);
+    const pages = await outDoc.copyPages(src, src.getPageIndices());
+    for (const p of pages) outDoc.addPage(p);
+  }
+  const bytes = await outDoc.save();
+  return Buffer.from(bytes);
+}
+
 function valueToPdfText(v: unknown): string | null {
   if (v === null || v === undefined) return null;
   if (typeof v === "string") {
@@ -6670,6 +6764,411 @@ router.post("/cases/bulk/generate-documents-zip", requireAuth, requireFirmUser, 
   const zipBytes = await buildZipBufferFromBuffers(entries);
   const outName = safeFilenameAscii(`batch-documents-${new Date().toISOString().slice(0, 10)}.zip`) || "batch-documents.zip";
   await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.bulk_generate_zip", entityType: "case", entityId: undefined, detail: `cases=${caseIds.length} templates=${templateIds.length} ok=${entries.length} failed=${failures.length}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+  res.setHeader("Content-Disposition", contentDispositionAttachment(outName));
+  res.setHeader("Content-Type", "application/zip");
+  res.status(200).send(zipBytes);
+});
+
+router.get("/documents/automation/cases", requireAuth, requireFirmUser, requirePermission("cases", "read"), async (req: AuthRequest, res): Promise<void> => {
+  const r = getRlsDb(req, res);
+  if (!r) return;
+
+  const q = one((req.query as any).search) ?? "";
+  const search = q.trim();
+  const pageStr = one((req.query as any).page);
+  const limitStr = one((req.query as any).limit);
+  const page = pageStr ? parseInt(pageStr, 10) : 1;
+  const limit = limitStr ? parseInt(limitStr, 10) : 50;
+  const safePage = Number.isFinite(page) && page > 0 ? page : 1;
+  const safeLimit = Number.isFinite(limit) && limit > 0 && limit <= 100 ? limit : 50;
+  const offset = (safePage - 1) * safeLimit;
+
+  const roleRows = await queryRows(r, sql`SELECT name FROM roles WHERE id = ${req.roleId!} AND firm_id = ${req.firmId!} LIMIT 1`);
+  const roleName = roleRows[0]?.name ? String(roleRows[0].name).toLowerCase() : "";
+  const elevated = roleName.includes("partner") || roleName.includes("manager");
+
+  const like = `%${search.replace(/%/g, "\\%").replace(/_/g, "\\_")}%`;
+  const searchClause = search
+    ? sql`AND (
+        c.reference_no ILIKE ${like}
+        OR COALESCE(c.parcel_no, '') ILIKE ${like}
+        OR EXISTS (
+          SELECT 1
+          FROM case_purchasers cp
+          INNER JOIN clients cl ON cl.id = cp.client_id
+          WHERE cp.case_id = c.id
+            AND cl.name ILIKE ${like}
+        )
+      )`
+    : sql``;
+
+  const accessClause = elevated
+    ? sql``
+    : sql`AND EXISTS (
+        SELECT 1 FROM case_assignments ca
+        WHERE ca.case_id = c.id
+          AND ca.user_id = ${req.userId!}
+          AND ca.role_in_case IN ('lawyer','clerk')
+          AND ca.unassigned_at IS NULL
+      )`;
+
+  const rows = await queryRows(r, sql`
+    SELECT
+      c.id,
+      c.reference_no,
+      c.parcel_no,
+      c.status,
+      c.purchase_mode,
+      c.title_type,
+      c.loan_details,
+      (
+        SELECT cl.name
+        FROM case_purchasers cp
+        INNER JOIN clients cl ON cl.id = cp.client_id
+        WHERE cp.case_id = c.id
+        ORDER BY cp.order_no ASC
+        LIMIT 1
+      ) AS purchaser_name
+    FROM cases c
+    WHERE c.firm_id = ${req.firmId!}
+      AND c.deleted_at IS NULL
+      ${accessClause}
+      ${searchClause}
+    ORDER BY c.updated_at DESC
+    LIMIT ${safeLimit} OFFSET ${offset}
+  `);
+
+  const items = rows.map((row) => {
+    const rawLoan = typeof (row as any).loan_details === "string" ? String((row as any).loan_details) : "";
+    const loanBank = (() => {
+      if (!rawLoan) return "";
+      try {
+        const obj = JSON.parse(rawLoan) as Record<string, unknown>;
+        const v = obj["end_financier"] ?? obj["endFinancier"] ?? obj["bank"] ?? obj["financier"];
+        return v ? String(v) : "";
+      } catch {
+        return "";
+      }
+    })();
+
+    return {
+      id: Number((row as any).id),
+      referenceNo: typeof (row as any).reference_no === "string" ? String((row as any).reference_no) : "",
+      parcelNo: typeof (row as any).parcel_no === "string" ? String((row as any).parcel_no) : null,
+      purchaserName: typeof (row as any).purchaser_name === "string" ? String((row as any).purchaser_name) : null,
+      loanBank: loanBank || null,
+      status: typeof (row as any).status === "string" ? String((row as any).status) : "",
+      purchaseMode: typeof (row as any).purchase_mode === "string" ? String((row as any).purchase_mode) : "",
+      titleType: typeof (row as any).title_type === "string" ? String((row as any).title_type) : "",
+    };
+  });
+
+  res.json({ items, page: safePage, limit: safeLimit });
+});
+
+router.post("/documents/automation/generate", requireAuth, requireFirmUser, requirePermission("documents", "generate"), async (req: AuthRequest, res): Promise<void> => {
+  const r = getRlsDb(req, res);
+  if (!r) return;
+
+  const bodySchema = z.object({
+    caseIds: z.array(z.union([z.number(), z.string()])).min(1),
+    templateIds: z.array(z.union([z.number(), z.string()])).min(1),
+    config: z.object({
+      action: z.enum(["download", "print"]),
+      copies: z.union([z.number(), z.string()]).optional(),
+      duplexSettings: z.unknown().optional(),
+    }),
+  });
+  const parsed = bodySchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(422).json({ error: "Invalid request body" });
+    return;
+  }
+
+  const caseIds = Array.from(new Set(
+    parsed.data.caseIds
+      .map((x) => (typeof x === "number" ? x : parseInt(x, 10)))
+      .filter((x) => Number.isFinite(x))
+      .map((x) => Math.trunc(x))
+      .filter((x) => x > 0)
+  ));
+  const templateIds = Array.from(new Set(
+    parsed.data.templateIds
+      .map((x) => (typeof x === "number" ? x : parseInt(x, 10)))
+      .filter((x) => Number.isFinite(x))
+      .map((x) => Math.trunc(x))
+      .filter((x) => x > 0)
+  ));
+
+  if (caseIds.length === 0) {
+    res.status(422).json({ error: "caseIds is required", code: "CASE_IDS_REQUIRED" });
+    return;
+  }
+  if (templateIds.length === 0) {
+    res.status(422).json({ error: "templateIds is required", code: "TEMPLATE_IDS_REQUIRED" });
+    return;
+  }
+  if (caseIds.length > 20) {
+    res.status(422).json({ error: "Too many cases", code: "TOO_MANY_CASES", limit: 20 });
+    return;
+  }
+  if (templateIds.length > 25) {
+    res.status(422).json({ error: "Too many templates", code: "TOO_MANY_TEMPLATES", limit: 25 });
+    return;
+  }
+  if (caseIds.length * templateIds.length > 300) {
+    res.status(422).json({ error: "Too many documents", code: "TOO_MANY_DOCUMENTS", limit: 300 });
+    return;
+  }
+
+  const config = parsed.data.config;
+  const actionType = config.action === "download" ? "download_zip" : "system_print";
+  const copies =
+    config.action === "print"
+      ? (() => {
+          const n = typeof config.copies === "number" ? config.copies : typeof config.copies === "string" ? parseInt(config.copies, 10) : NaN;
+          return Number.isFinite(n) && n > 0 ? Math.trunc(n) : 1;
+        })()
+      : null;
+
+  if (config.action === "print" && caseIds.length * templateIds.length > 60) {
+    res.status(422).json({ error: "Too many documents for print mode", code: "TOO_MANY_DOCUMENTS_FOR_PRINT", limit: 60 });
+    return;
+  }
+
+  const roleRows = await queryRows(r, sql`SELECT name FROM roles WHERE id = ${req.roleId!} AND firm_id = ${req.firmId!} LIMIT 1`);
+  const roleName = roleRows[0]?.name ? String(roleRows[0].name).toLowerCase() : "";
+  const elevated = roleName.includes("partner") || roleName.includes("manager");
+
+  const caseRows = elevated
+    ? await queryRows(r, sql`
+        SELECT
+          c.id,
+          c.reference_no,
+          c.parcel_no,
+          (
+            SELECT cl.name
+            FROM case_purchasers cp
+            INNER JOIN clients cl ON cl.id = cp.client_id
+            WHERE cp.case_id = c.id
+            ORDER BY cp.order_no ASC
+            LIMIT 1
+          ) AS purchaser_name
+        FROM cases c
+        WHERE c.firm_id = ${req.firmId!}
+          AND c.deleted_at IS NULL
+          AND c.id IN (${sql.join(caseIds.map((id) => sql`${id}`), sql`, `)})
+      `)
+    : await queryRows(r, sql`
+        SELECT
+          c.id,
+          c.reference_no,
+          c.parcel_no,
+          (
+            SELECT cl.name
+            FROM case_purchasers cp
+            INNER JOIN clients cl ON cl.id = cp.client_id
+            WHERE cp.case_id = c.id
+            ORDER BY cp.order_no ASC
+            LIMIT 1
+          ) AS purchaser_name
+        FROM cases c
+        WHERE c.firm_id = ${req.firmId!}
+          AND c.deleted_at IS NULL
+          AND c.id IN (${sql.join(caseIds.map((id) => sql`${id}`), sql`, `)})
+          AND EXISTS (
+            SELECT 1 FROM case_assignments ca
+            WHERE ca.case_id = c.id
+              AND ca.user_id = ${req.userId!}
+              AND ca.role_in_case IN ('lawyer','clerk')
+              AND ca.unassigned_at IS NULL
+          )
+      `);
+  if (caseRows.length !== caseIds.length) {
+    res.status(403).json({ error: "Forbidden", code: "CASE_ACCESS_DENIED" });
+    return;
+  }
+
+  const templateRows = await queryRows(r, sql`
+    SELECT id, name, file_name
+    FROM document_templates
+    WHERE firm_id = ${req.firmId!}
+      AND is_template_capable = true
+      AND id IN (${sql.join(templateIds.map((id) => sql`${id}`), sql`, `)})
+    ORDER BY created_at DESC
+  `);
+  if (templateRows.length !== templateIds.length) {
+    res.status(404).json({ error: "One or more templates not found", code: "TEMPLATE_NOT_FOUND" });
+    return;
+  }
+
+  const refByCaseId = new Map<number, string>();
+  const parcelByCaseId = new Map<number, string>();
+  const purchaserByCaseId = new Map<number, string>();
+  for (const row of caseRows) {
+    const id = typeof (row as any).id === "number" ? Number((row as any).id) : NaN;
+    if (!Number.isFinite(id)) continue;
+    const ref = typeof (row as any).reference_no === "string" ? String((row as any).reference_no) : "";
+    const parcel = typeof (row as any).parcel_no === "string" ? String((row as any).parcel_no) : "";
+    const purchaser = typeof (row as any).purchaser_name === "string" ? String((row as any).purchaser_name) : "";
+    refByCaseId.set(id, ref);
+    parcelByCaseId.set(id, parcel);
+    purchaserByCaseId.set(id, purchaser);
+  }
+
+  const failures: Array<{ caseId: number; templateId: number; error: string; code?: string }> = [];
+  const entries: Array<{ zipPath: string; bytes: Buffer }> = [];
+  const generatedFileNames: string[] = [];
+  const pdfBuffersForPrint: Buffer[] = [];
+
+  const today = new Date();
+  const dateStr = formatDateDdMmYyyy(today);
+  const rootFolder = sanitizePathSegment(`Document Automation Hub_${dateStr}`);
+  const multiCase = caseIds.length > 1;
+
+  for (const caseId of caseIds) {
+    const ref = refByCaseId.get(caseId) ?? "";
+    const parcel = parcelByCaseId.get(caseId) ?? "";
+    const purchaser = purchaserByCaseId.get(caseId) ?? "";
+    const parcelSeg = sanitizePathSegment(parcel || ref || `case-${caseId}`);
+    const purchaserFolder = sanitizePathSegment(purchaser || ref || `case-${caseId}`);
+
+    for (const t of templateRows) {
+      const templateId = typeof (t as any).id === "number" ? Number((t as any).id) : NaN;
+      if (!Number.isFinite(templateId)) continue;
+      const templateName = typeof (t as any).name === "string" ? String((t as any).name) : `template-${templateId}`;
+      const templateFileName = typeof (t as any).file_name === "string" ? String((t as any).file_name) : "";
+      const originalBase = sanitizePathSegment(stripExtension(templateFileName || templateName) || templateName);
+      const outFileName = safeFilenameAscii(`${parcelSeg}_${originalBase}_${dateStr}.pdf`).replace(/[\/\\]/g, "_");
+
+      const runId = await createGenerationRun(r, {
+        firm_id: req.firmId!,
+        case_id: caseId,
+        template_source: "firm",
+        template_id: templateId,
+        template_version_id: null,
+        platform_document_id: null,
+        document_name: templateName,
+        render_mode: "pdf",
+        status: "running",
+        rendered_variables_snapshot: null,
+        checklist_snapshot: null,
+        readiness_snapshot: null,
+        triggered_by: req.userId!,
+        error_code: null,
+        error_message: null,
+      });
+
+      try {
+        const out = await generateFirmDocument({
+          r,
+          firmId: req.firmId!,
+          actorId: req.userId!,
+          actorType: req.userType,
+          ipAddress: req.ip,
+          userAgent: req.headers["user-agent"],
+          caseId,
+          templateId,
+          documentName: templateName,
+          letterheadId: null,
+          runId,
+          bypassApplicability: false,
+          outputFormat: "pdf",
+        });
+        await finishGenerationRunSuccess(r, req.firmId!, runId, out.caseDocumentId, out.renderedVars, out.checklistSnapshot, out.readinessSnapshot);
+        await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.automation.generate.succeeded", entityType: "document_generation_run", entityId: runId, detail: `caseId=${caseId} templateId=${templateId}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+
+        const bytes = out.outputBytes ?? null;
+        const ct = out.outputContentType ?? "";
+        if (!bytes || !Buffer.isBuffer(bytes) || bytes.length === 0) throw new DocumentGenerationError(500, "INTERNAL_ERROR", "Missing output bytes");
+        if (ct && !String(ct).includes("pdf")) throw new DocumentGenerationError(422, "OUTPUT_NOT_PDF", "Generated output is not PDF");
+
+        generatedFileNames.push(outFileName);
+        if (config.action === "print") {
+          pdfBuffersForPrint.push(bytes);
+        } else if (caseIds.length === 1 && templateIds.length === 1) {
+          entries.push({ zipPath: outFileName, bytes });
+        } else {
+          const zipPath = multiCase ? `${rootFolder}/${purchaserFolder}/${outFileName}` : `${rootFolder}/${outFileName}`;
+          entries.push({ zipPath, bytes });
+        }
+      } catch (err: unknown) {
+        const cfgErr = getSupabaseStorageConfigError(err);
+        const e =
+          cfgErr ? new DocumentGenerationError(cfgErr.statusCode, "STORAGE_NOT_CONFIGURED", cfgErr.error)
+          : err instanceof ObjectNotFoundError ? new DocumentGenerationError(404, "TEMPLATE_FILE_NOT_FOUND", "Template file not found")
+          : err instanceof DocumentGenerationError ? err
+          : new DocumentGenerationError(500, "INTERNAL_ERROR", "Internal Server Error");
+        await finishGenerationRunFailed(r, req.firmId!, runId, e.code, e.message);
+        await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.automation.generate.failed", entityType: "document_generation_run", entityId: runId, detail: `caseId=${caseId} templateId=${templateId} code=${e.code}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+        failures.push({ caseId, templateId, error: e.message, code: e.code });
+      }
+    }
+  }
+
+  if (config.action === "print" && pdfBuffersForPrint.length === 0) {
+    res.status(422).json({ error: "No documents generated", code: "NO_DOCUMENTS_GENERATED", failures });
+    return;
+  }
+  if (config.action === "download" && entries.length === 0) {
+    res.status(422).json({ error: "No documents generated", code: "NO_DOCUMENTS_GENERATED", failures });
+    return;
+  }
+
+  const printSettings = config.duplexSettings ?? null;
+  const logRows = await queryRows(
+    r,
+    sql`INSERT INTO document_generation_logs (firm_id, user_id, case_id, action_type, file_names, copies_configured, print_settings)
+        VALUES (${req.firmId!}, ${req.userId!}, ${caseIds.length === 1 ? caseIds[0] : null}, ${actionType}, ${JSON.stringify(generatedFileNames)}::jsonb, ${copies}, ${printSettings as any})
+        RETURNING id`
+  );
+  const logId = typeof (logRows[0] as any)?.id === "number" ? Number((logRows[0] as any).id) : undefined;
+
+  if (caseIds.length > 1 && logId) {
+    const values = sql.join(caseIds.map((id) => sql`(${req.firmId!}, ${logId}, ${id})`), sql`, `);
+    await queryRows(r, sql`INSERT INTO document_generation_log_cases (firm_id, log_id, case_id) VALUES ${values} ON CONFLICT DO NOTHING`);
+  }
+
+  await writeAuditLog({
+    firmId: req.firmId,
+    actorId: req.userId,
+    actorType: req.userType,
+    action: config.action === "download" ? "documents.automation.download_zip" : "documents.automation.system_print",
+    entityType: "document_generation_log",
+    entityId: logId,
+    detail: `cases=${caseIds.length} templates=${templateIds.length} ok=${generatedFileNames.length} failed=${failures.length}`,
+    ipAddress: req.ip,
+    userAgent: req.headers["user-agent"],
+  });
+
+  if (failures.length) {
+    const txt = JSON.stringify(failures).slice(0, 4000);
+    res.setHeader("X-Document-Automation-Failures", txt);
+  }
+
+  if (config.action === "print") {
+    const merged = await mergePdfBuffers(pdfBuffersForPrint);
+    if (!merged.length) {
+      res.status(422).json({ error: "No printable PDF generated", code: "NO_PRINTABLE_OUTPUT", failures });
+      return;
+    }
+    const outName = safeFilenameAscii(`System_Print_${dateStr}.pdf`) || "system-print.pdf";
+    res.setHeader("Content-Disposition", contentDispositionAttachment(outName));
+    res.setHeader("Content-Type", "application/pdf");
+    res.status(200).send(merged);
+    return;
+  }
+
+  if (caseIds.length === 1 && templateIds.length === 1) {
+    const outName = safeFilenameAscii(entries[0]?.zipPath || `document_${dateStr}.pdf`) || "document.pdf";
+    res.setHeader("Content-Disposition", contentDispositionAttachment(outName));
+    res.setHeader("Content-Type", "application/pdf");
+    res.status(200).send(entries[0].bytes);
+    return;
+  }
+
+  const zipBytes = await buildZipBufferFromBuffers(entries);
+  const outName = safeFilenameAscii(`Document_Automation_${dateStr}.zip`) || "document-automation.zip";
   res.setHeader("Content-Disposition", contentDispositionAttachment(outName));
   res.setHeader("Content-Type", "application/zip");
   res.status(200).send(zipBytes);

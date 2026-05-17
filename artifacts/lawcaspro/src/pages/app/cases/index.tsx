@@ -31,7 +31,8 @@ function fmtYmd(ymd: string | null | undefined): string {
 
 export default function CasesList() {
   const [location, setLocation] = useLocation();
-  const sp = useMemo(() => new URLSearchParams(location.split("?")[1] ?? ""), [location]);
+  const searchString = typeof window !== "undefined" ? window.location.search : (location.includes("?") ? location.slice(location.indexOf("?")) : "");
+  const sp = useMemo(() => new URLSearchParams(searchString.startsWith("?") ? searchString.slice(1) : searchString), [searchString]);
   const isHydratingFromUrl = useRef(false);
   const queryClient = useQueryClient();
   const { toast } = useToast();
@@ -45,20 +46,20 @@ export default function CasesList() {
   const initialPage = initialPageRaw ? Number(initialPageRaw) : 1;
   const initialLimit = initialLimitRaw ? Number(initialLimitRaw) : 50;
 
-  const [search, setSearch] = useState(() => (typeof window !== "undefined" ? (new URLSearchParams(window.location.search).get("search") ?? "") : (sp.get("search") ?? "")));
-  const [spaStatus, setSpaStatus] = useState<string>(() => (typeof window !== "undefined" ? (new URLSearchParams(window.location.search).get("spaStatus") ?? "all") : (sp.get("spaStatus") ?? "all")));
-  const [loanStatus, setLoanStatus] = useState<string>(() => (typeof window !== "undefined" ? (new URLSearchParams(window.location.search).get("loanStatus") ?? "all") : (sp.get("loanStatus") ?? "all")));
-  const [lawyerId, setLawyerId] = useState<string>(() => (typeof window !== "undefined" ? (new URLSearchParams(window.location.search).get("assignedLawyerId") ?? "all") : (sp.get("assignedLawyerId") ?? "all")));
-  const [clerkId, setClerkId] = useState<string>(() => (typeof window !== "undefined" ? (new URLSearchParams(window.location.search).get("assignedClerkId") ?? "all") : (sp.get("assignedClerkId") ?? "all")));
-  const [projectId, setProjectId] = useState<string>(() => (typeof window !== "undefined" ? (new URLSearchParams(window.location.search).get("projectId") ?? "all") : (sp.get("projectId") ?? "all")));
-  const [purchaseMode, setPurchaseMode] = useState<string>(() => (typeof window !== "undefined" ? (new URLSearchParams(window.location.search).get("purchaseMode") ?? "all") : (sp.get("purchaseMode") ?? "all")));
-  const [titleType, setTitleType] = useState<string>(() => (typeof window !== "undefined" ? (new URLSearchParams(window.location.search).get("titleType") ?? "all") : (sp.get("titleType") ?? "all")));
+  const [search, setSearch] = useState(() => (sp.get("search") ?? ""));
+  const [spaStatus, setSpaStatus] = useState<string>(() => (sp.get("spaStatus") ?? "all"));
+  const [loanStatus, setLoanStatus] = useState<string>(() => (sp.get("loanStatus") ?? "all"));
+  const [lawyerId, setLawyerId] = useState<string>(() => (sp.get("assignedLawyerId") ?? "all"));
+  const [clerkId, setClerkId] = useState<string>(() => (sp.get("assignedClerkId") ?? "all"));
+  const [projectId, setProjectId] = useState<string>(() => (sp.get("projectId") ?? "all"));
+  const [purchaseMode, setPurchaseMode] = useState<string>(() => (sp.get("purchaseMode") ?? "all"));
+  const [titleType, setTitleType] = useState<string>(() => (sp.get("titleType") ?? "all"));
   const [milestone, setMilestone] = useState<CaseMilestoneKey | "all">(() => {
-    const raw = typeof window !== "undefined" ? new URLSearchParams(window.location.search).get("milestone") : sp.get("milestone");
+    const raw = sp.get("milestone");
     return raw && Object.values(CaseMilestoneKey).includes(raw as any) ? (raw as CaseMilestoneKey) : "all";
   });
   const [milestonePresence, setMilestonePresence] = useState<MilestonePresence>(() => {
-    const raw = typeof window !== "undefined" ? new URLSearchParams(window.location.search).get("milestonePresence") : sp.get("milestonePresence");
+    const raw = sp.get("milestonePresence");
     return raw && Object.values(MilestonePresence).includes(raw as any) ? (raw as MilestonePresence) : "filled";
   });
   const [page, setPage] = useState<number>(() => Number.isInteger(initialPage) && initialPage > 0 ? initialPage : 1);

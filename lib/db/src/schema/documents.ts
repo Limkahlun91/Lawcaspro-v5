@@ -19,6 +19,7 @@ export const documentTemplatesTable = pgTable("document_templates", {
   appliesToTitleType: text("applies_to_title_type").notNull().default("any"),
   appliesToCaseType: text("applies_to_case_type"),
   documentGroup: text("document_group").notNull().default("Others"),
+  category: text("category"),
   sortOrder: integer("sort_order").notNull().default(0),
   description: text("description"),
   objectPath: text("object_path").notNull(),

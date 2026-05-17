@@ -47,6 +47,7 @@ export function AppLayout({ children }: { children: ReactNode }) {
     { label: "Projects", href: "/app/projects", icon: Building2, perm: ["projects", "read"] as const },
     { label: "Developers", href: "/app/developers", icon: HardHat, perm: ["developers", "read"] as const },
     { label: "Documents", href: "/app/documents", icon: FileText, perm: ["documents", "read"] as const },
+    { label: "Doc Automation", href: "/app/documents/automation", icon: FileText, perm: ["documents", "read"] as const },
     { label: "Communications", href: "/app/hub", icon: MessageSquare, perm: ["communications", "read"] as const },
     { label: "Accounting", href: "/app/accounting", icon: Calculator, perm: ["accounting", "read"] as const },
     { label: "Reports", href: "/app/reports", icon: BarChart, perm: ["reports", "read"] as const },
@@ -124,7 +125,10 @@ export function AppLayout({ children }: { children: ReactNode }) {
         
         <nav className="flex-1 py-4 px-3 space-y-1">
           {visibleNavItems.map((item) => {
-            const isActive = location === item.href || location.startsWith(`${item.href}/`) || (item.href === "/app/accounting" && location.startsWith("/app/quotations"));
+            const isActive =
+              item.href === "/app/documents"
+                ? (location === "/app/documents" || (location.startsWith("/app/documents/") && !location.startsWith("/app/documents/automation")))
+                : location === item.href || location.startsWith(`${item.href}/`) || (item.href === "/app/accounting" && location.startsWith("/app/quotations"));
             const onPrefetch = prefetchByHref[item.href];
             return (
               <Link key={item.href} href={item.href}>

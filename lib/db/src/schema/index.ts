@@ -8,6 +8,7 @@ export * from "./cases";
 export { auditLogsTable } from "./cases";
 export * from "./documents";
 export * from "./templates";
+export * from "./document-automation";
 export * from "./extractions";
 export * from "./dashboard-cache";
 export * from "./firm-documents";
