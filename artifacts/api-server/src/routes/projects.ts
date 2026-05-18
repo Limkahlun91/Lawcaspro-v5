@@ -101,12 +101,6 @@ const CreateProjectBodySchema = z.object({
   tenure: z.enum(["freehold", "leasehold"]).optional(),
   masterChargeeBank: z.string().optional().nullable(),
   masterChargeeAccount: z.string().optional().nullable(),
-  apNumber: z.string().optional().nullable(),
-  apValidFrom: z.string().optional().nullable(),
-  apValidTo: z.string().optional().nullable(),
-  dlNumber: z.string().optional().nullable(),
-  dlValidFrom: z.string().optional().nullable(),
-  dlValidTo: z.string().optional().nullable(),
   constructionPeriodMonths: z.coerce.number().int().min(0).optional().nullable(),
   actualVpDate: z.string().optional().nullable(),
   cccDate: z.string().optional().nullable(),
@@ -127,12 +121,6 @@ const UpdateProjectBodySchema = z.object({
   tenure: z.enum(["freehold", "leasehold"]).optional(),
   masterChargeeBank: z.string().optional().nullable(),
   masterChargeeAccount: z.string().optional().nullable(),
-  apNumber: z.string().optional().nullable(),
-  apValidFrom: z.string().optional().nullable(),
-  apValidTo: z.string().optional().nullable(),
-  dlNumber: z.string().optional().nullable(),
-  dlValidFrom: z.string().optional().nullable(),
-  dlValidTo: z.string().optional().nullable(),
   constructionPeriodMonths: z.coerce.number().int().min(0).optional().nullable(),
   actualVpDate: z.string().optional().nullable(),
   cccDate: z.string().optional().nullable(),
@@ -174,13 +162,6 @@ async function enrichProject(r: DbConn, proj: ProjectRow) {
     tenure: proj.tenure,
     masterChargeeBank: proj.masterChargeeBank ?? null,
     masterChargeeAccount: proj.masterChargeeAccount ?? null,
-
-    apNumber: proj.apNumber ?? null,
-    apValidFrom: proj.apValidFrom ? String(proj.apValidFrom) : null,
-    apValidTo: proj.apValidTo ? String(proj.apValidTo) : null,
-    dlNumber: proj.dlNumber ?? null,
-    dlValidFrom: proj.dlValidFrom ? String(proj.dlValidFrom) : null,
-    dlValidTo: proj.dlValidTo ? String(proj.dlValidTo) : null,
     constructionPeriodMonths: proj.constructionPeriodMonths ?? null,
     actualVpDate: proj.actualVpDate ? String(proj.actualVpDate) : null,
     cccDate: proj.cccDate ? String(proj.cccDate) : null,
@@ -229,6 +210,7 @@ routerInternal.get("/projects", requireAuth, requireFirmUser, requirePermission(
     const enriched = await Promise.all(projs.map((p: ProjectRow) => enrichProject(r, p)));
     res.json({ data: enriched, total: Number(totalRes?.c ?? 0), page, limit });
   } catch (err) {
+    console.error("🚨 CRITICAL BACKEND ERROR:", err);
     console.error(err);
     logger.error({ err, path: req.path, firmId: req.firmId, userId: req.userId }, "[projects]");
     const params = ListProjectsQuerySchema.safeParse(req.query);
@@ -261,12 +243,6 @@ routerInternal.post("/projects", requireAuth, requireFirmUser, requirePermission
       tenure,
       masterChargeeBank,
       masterChargeeAccount,
-      apNumber,
-      apValidFrom,
-      apValidTo,
-      dlNumber,
-      dlValidFrom,
-      dlValidTo,
       constructionPeriodMonths,
       actualVpDate,
       cccDate,
@@ -305,13 +281,6 @@ routerInternal.post("/projects", requireAuth, requireFirmUser, requirePermission
       tenure: tenure ?? "freehold",
       masterChargeeBank: (isEncumbered ?? false) ? (typeof masterChargeeBank === "string" && masterChargeeBank.trim() ? masterChargeeBank.trim() : null) : null,
       masterChargeeAccount: (typeof masterChargeeAccount === "string" && masterChargeeAccount.trim()) ? masterChargeeAccount.trim() : null,
-
-      apNumber: (typeof apNumber === "string" && apNumber.trim()) ? apNumber.trim() : null,
-      apValidFrom: (typeof apValidFrom === "string" && apValidFrom.trim()) ? apValidFrom.trim() : null,
-      apValidTo: (typeof apValidTo === "string" && apValidTo.trim()) ? apValidTo.trim() : null,
-      dlNumber: (typeof dlNumber === "string" && dlNumber.trim()) ? dlNumber.trim() : null,
-      dlValidFrom: (typeof dlValidFrom === "string" && dlValidFrom.trim()) ? dlValidFrom.trim() : null,
-      dlValidTo: (typeof dlValidTo === "string" && dlValidTo.trim()) ? dlValidTo.trim() : null,
       constructionPeriodMonths: typeof constructionPeriodMonths === "number" ? constructionPeriodMonths : null,
       actualVpDate: (typeof actualVpDate === "string" && actualVpDate.trim()) ? actualVpDate.trim() : null,
       cccDate: (typeof cccDate === "string" && cccDate.trim()) ? cccDate.trim() : null,
@@ -440,12 +409,6 @@ routerInternal.patch("/projects/:projectId", requireAuth, requireFirmUser, requi
     tenure,
     masterChargeeBank,
     masterChargeeAccount,
-    apNumber,
-    apValidFrom,
-    apValidTo,
-    dlNumber,
-    dlValidFrom,
-    dlValidTo,
     constructionPeriodMonths,
     actualVpDate,
     cccDate,
@@ -484,12 +447,6 @@ routerInternal.patch("/projects/:projectId", requireAuth, requireFirmUser, requi
   if (tenure !== undefined) updateData.tenure = tenure;
   if (masterChargeeBank !== undefined) updateData.masterChargeeBank = (updateData.isEncumbered ?? existing.isEncumbered) ? (typeof masterChargeeBank === "string" && masterChargeeBank.trim() ? masterChargeeBank.trim() : null) : null;
   if (masterChargeeAccount !== undefined) updateData.masterChargeeAccount = (typeof masterChargeeAccount === "string" && masterChargeeAccount.trim()) ? masterChargeeAccount.trim() : null;
-  if (apNumber !== undefined) updateData.apNumber = (typeof apNumber === "string" && apNumber.trim()) ? apNumber.trim() : null;
-  if (apValidFrom !== undefined) updateData.apValidFrom = (typeof apValidFrom === "string" && apValidFrom.trim()) ? apValidFrom.trim() : null;
-  if (apValidTo !== undefined) updateData.apValidTo = (typeof apValidTo === "string" && apValidTo.trim()) ? apValidTo.trim() : null;
-  if (dlNumber !== undefined) updateData.dlNumber = (typeof dlNumber === "string" && dlNumber.trim()) ? dlNumber.trim() : null;
-  if (dlValidFrom !== undefined) updateData.dlValidFrom = (typeof dlValidFrom === "string" && dlValidFrom.trim()) ? dlValidFrom.trim() : null;
-  if (dlValidTo !== undefined) updateData.dlValidTo = (typeof dlValidTo === "string" && dlValidTo.trim()) ? dlValidTo.trim() : null;
   if (constructionPeriodMonths !== undefined) updateData.constructionPeriodMonths = (typeof constructionPeriodMonths === "number") ? constructionPeriodMonths : null;
   if (actualVpDate !== undefined) updateData.actualVpDate = (typeof actualVpDate === "string" && actualVpDate.trim()) ? actualVpDate.trim() : null;
   if (cccDate !== undefined) updateData.cccDate = (typeof cccDate === "string" && cccDate.trim()) ? cccDate.trim() : null;
@@ -573,7 +530,7 @@ routerInternal.get("/projects/:projectId/documents", requireAuth, requireFirmUse
   }
 
   const category = typeof (req.query as any)?.category === "string" ? String((req.query as any).category).trim() : "";
-  const categoryFilter = category && ["general", "developer_mlu", "bank_mlu"].includes(category) ? category : null;
+  const categoryFilter = category && ["general", "advertisement_permit", "developer_license", "developer_mlu", "bank_mlu"].includes(category) ? category : null;
 
   const whereClause = categoryFilter
     ? and(
@@ -597,6 +554,7 @@ routerInternal.get("/projects/:projectId/documents", requireAuth, requireFirmUse
     projectId: d.projectId,
     category: d.category,
     documentName: d.documentName,
+    licenseNumber: d.licenseNumber ?? null,
     bankName: d.bankName ?? null,
     documentDate: d.documentDate ? String(d.documentDate) : null,
     fileName: d.fileName,
@@ -639,10 +597,11 @@ routerInternal.post("/projects/:projectId/documents", requireAuth, requireFirmUs
 
     const body = req.body as Record<string, unknown>;
     const category = typeof body.category === "string" ? body.category.trim() : "general";
-    if (!["general", "developer_mlu", "bank_mlu"].includes(category)) {
+  if (!["general", "advertisement_permit", "developer_license", "developer_mlu", "bank_mlu"].includes(category)) {
       res.status(400).json({ error: "Invalid category" });
       return;
     }
+  const licenseNumber = typeof body.licenseNumber === "string" && body.licenseNumber.trim() ? body.licenseNumber.trim() : null;
     const documentName = typeof body.documentName === "string" ? body.documentName.trim() : "";
     if (!documentName) {
       res.status(400).json({ error: "documentName is required" });
@@ -651,9 +610,19 @@ routerInternal.post("/projects/:projectId/documents", requireAuth, requireFirmUs
     const bankName = typeof body.bankName === "string" && body.bankName.trim() ? body.bankName.trim() : null;
     const documentDate = normalizeDateOnly(body.documentDate);
 
-    const hasExpiry = normalizeBoolean(body.hasExpiry);
-    const validFrom = hasExpiry ? normalizeDateOnly(body.validFrom) : null;
-    const validTo = hasExpiry ? normalizeDateOnly(body.validTo) : null;
+  const apOrDl = category === "advertisement_permit" || category === "developer_license";
+  if (apOrDl && !licenseNumber) {
+    res.status(400).json({ error: "licenseNumber is required for Advertisement Permit / Developer License" });
+    return;
+  }
+
+  const hasExpiry = apOrDl ? true : normalizeBoolean(body.hasExpiry);
+  const validFrom = hasExpiry ? normalizeDateOnly(body.validFrom) : null;
+  const validTo = hasExpiry ? normalizeDateOnly(body.validTo) : null;
+  if (apOrDl && (!validFrom || !validTo)) {
+    res.status(400).json({ error: "validFrom and validTo are required for Advertisement Permit / Developer License" });
+    return;
+  }
 
     const fileName = typeof f.originalname === "string" && f.originalname.trim() ? f.originalname.trim() : "document";
     const safeName = safeFilenameAscii(fileName).replace(/\s+/g, "_");
@@ -678,6 +647,7 @@ routerInternal.post("/projects/:projectId/documents", requireAuth, requireFirmUs
         projectId,
         category,
         documentName,
+        licenseNumber,
         bankName,
         documentDate: documentDate as any,
         objectPath,
@@ -713,6 +683,7 @@ routerInternal.post("/projects/:projectId/documents", requireAuth, requireFirmUs
       projectId: created.projectId,
       category: created.category,
       documentName: created.documentName,
+      licenseNumber: created.licenseNumber ?? null,
       bankName: created.bankName ?? null,
       documentDate: created.documentDate ? String(created.documentDate) : null,
       fileName: created.fileName,
@@ -729,8 +700,8 @@ routerInternal.post("/projects/:projectId/documents", requireAuth, requireFirmUs
     console.error(err);
     logger.error({ err, path: req.path, firmId: req.firmId, userId: req.userId }, "[projects.documents.upload]");
     res.status(200).json({
-      warning: "Upload encountered an internal error. Please refresh to confirm whether the document record was saved, then retry if needed.",
-      warnings: ["Upload encountered an internal error. Please refresh to confirm whether the document record was saved, then retry if needed."],
+      warning: "Upload completed with degraded mode. If the document does not appear, please try uploading again.",
+      warnings: ["Upload completed with degraded mode. If the document does not appear, please try uploading again."],
     });
   }
 });

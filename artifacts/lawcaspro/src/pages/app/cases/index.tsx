@@ -33,6 +33,7 @@ export default function CasesList() {
   const [location, setLocation] = useLocation();
   const searchString = typeof window !== "undefined" ? window.location.search : (location.includes("?") ? location.slice(location.indexOf("?")) : "");
   const sp = useMemo(() => new URLSearchParams(searchString.startsWith("?") ? searchString.slice(1) : searchString), [searchString]);
+  const currentQs = sp.toString();
   const isHydratingFromUrl = useRef(false);
   const queryClient = useQueryClient();
   const { toast } = useToast();
@@ -42,12 +43,12 @@ export default function CasesList() {
   const isPartnerOrManager = roleName.toLowerCase().includes("partner") || roleName.toLowerCase().includes("manager");
 
   const mode = sp.get("mode");
+  const intake = sp.get("intake") ?? "";
   useEffect(() => {
     if (mode !== "create") return;
-    const intake = sp.get("intake");
     const next = intake ? `/app/cases/new?intake=${encodeURIComponent(intake)}` : "/app/cases/new";
     setLocation(next);
-  }, [mode, setLocation, sp]);
+  }, [mode, intake, setLocation]);
   if (mode === "create") return null;
 
   const initialPageRaw = sp.get("page");
@@ -77,25 +78,26 @@ export default function CasesList() {
   useEffect(() => {
     isHydratingFromUrl.current = true;
 
-    const nextPageRaw = sp.get("page");
-    const nextLimitRaw = sp.get("limit");
+    const q = new URLSearchParams(currentQs);
+    const nextPageRaw = q.get("page");
+    const nextLimitRaw = q.get("limit");
     const nextPage = nextPageRaw ? Number(nextPageRaw) : 1;
     const nextLimit = nextLimitRaw ? Number(nextLimitRaw) : 50;
 
-    const nextSearch = sp.get("search") ?? "";
-    const nextSpaStatus = sp.get("spaStatus") ?? "all";
-    const nextLoanStatus = sp.get("loanStatus") ?? "all";
-    const nextLawyerId = sp.get("assignedLawyerId") ?? "all";
-    const nextClerkId = sp.get("assignedClerkId") ?? "all";
-    const nextProjectId = sp.get("projectId") ?? "all";
-    const nextPurchaseMode = sp.get("purchaseMode") ?? "all";
-    const nextTitleType = sp.get("titleType") ?? "all";
-    const nextMilestoneRaw = sp.get("milestone");
+    const nextSearch = q.get("search") ?? "";
+    const nextSpaStatus = q.get("spaStatus") ?? "all";
+    const nextLoanStatus = q.get("loanStatus") ?? "all";
+    const nextLawyerId = q.get("assignedLawyerId") ?? "all";
+    const nextClerkId = q.get("assignedClerkId") ?? "all";
+    const nextProjectId = q.get("projectId") ?? "all";
+    const nextPurchaseMode = q.get("purchaseMode") ?? "all";
+    const nextTitleType = q.get("titleType") ?? "all";
+    const nextMilestoneRaw = q.get("milestone");
     const nextMilestone: CaseMilestoneKey | "all" =
       nextMilestoneRaw && Object.values(CaseMilestoneKey).includes(nextMilestoneRaw as any)
         ? (nextMilestoneRaw as CaseMilestoneKey)
         : "all";
-    const nextPresenceRaw = sp.get("milestonePresence");
+    const nextPresenceRaw = q.get("milestonePresence");
     const nextPresence: MilestonePresence =
       nextPresenceRaw && Object.values(MilestonePresence).includes(nextPresenceRaw as any)
         ? (nextPresenceRaw as MilestonePresence)
@@ -115,7 +117,7 @@ export default function CasesList() {
     setLimit((prev) => prev === (Number.isInteger(nextLimit) && nextLimit > 0 ? nextLimit : 50) ? prev : (Number.isInteger(nextLimit) && nextLimit > 0 ? nextLimit : 50));
 
     queueMicrotask(() => { isHydratingFromUrl.current = false; });
-  }, [sp]);
+  }, [currentQs]);
 
   useEffect(() => {
     if (isHydratingFromUrl.current) return;
@@ -139,7 +141,6 @@ export default function CasesList() {
     nextSp.set("limit", String(limit));
 
     const nextQs = nextSp.toString();
-    const currentQs = sp.toString();
     if (nextQs !== currentQs) setLocation(`/app/cases?${nextQs}`);
   }, [
     search,
@@ -154,7 +155,7 @@ export default function CasesList() {
     milestonePresence,
     page,
     limit,
-    sp,
+    currentQs,
     setLocation,
   ]);
 

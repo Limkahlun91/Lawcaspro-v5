@@ -90,6 +90,7 @@ router.get("/dashboard", requireAuth, requireFirmUser, requirePermission("dashbo
 
     res.json(payload);
   } catch (err) {
+    console.error("🚨 DASHBOARD REAL QUERY ERROR:", err);
     console.error(err);
     logger.error({ err, path: req.path, firmId: req.firmId, userId: req.userId }, "[dashboard]");
     const fallback = {

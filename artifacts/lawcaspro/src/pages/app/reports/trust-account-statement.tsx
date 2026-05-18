@@ -1,15 +1,16 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { ArrowLeft, Landmark, Download } from "lucide-react";
+import { ArrowLeft, Landmark, Download, FileText } from "lucide-react";
 import { useLocation } from "wouter";
 import { downloadFromApi } from "@/lib/download";
 import { useToast } from "@/hooks/use-toast";
 import { QueryFallback } from "@/components/query-fallback";
 import { apiFetchJson } from "@/lib/api-client";
 import { toastError } from "@/lib/toast-error";
+import { exportElementToPdf } from "@/lib/pdf-export";
 
 function fmtDate(d: string | null) { return d ? new Date(d).toLocaleDateString("en-MY") : "—"; }
 function fmtAmt(v: unknown) { return Number(v ?? 0).toLocaleString("en-MY", { minimumFractionDigits: 2 }); }
@@ -17,6 +18,7 @@ function fmtAmt(v: unknown) { return Number(v ?? 0).toLocaleString("en-MY", { mi
 export default function TrustAccountStatement() {
   const [, setLocation] = useLocation();
   const { toast } = useToast();
+  const tableRef = useRef<HTMLDivElement>(null);
   const [caseId, setCaseId] = useState("");
   const [applied, setApplied] = useState("");
 
@@ -24,6 +26,8 @@ export default function TrustAccountStatement() {
   type TrustStatementResponse = {
     entries?: TrustStatementEntry[];
     balance?: number;
+    ledgerBookBalance?: number;
+    availableBalance?: number;
   };
 
   const stmtQuery = useQuery<TrustStatementResponse>({
@@ -37,7 +41,8 @@ export default function TrustAccountStatement() {
   const { data, isLoading, isError, error } = stmtQuery;
 
   const entries = data?.entries ?? [];
-  const balance = Number(data?.balance ?? 0);
+  const ledgerBookBalance = Number(data?.ledgerBookBalance ?? data?.balance ?? 0);
+  const availableBalance = Number(data?.availableBalance ?? ledgerBookBalance);
 
   // Running balance
   let running = 0;
@@ -45,6 +50,27 @@ export default function TrustAccountStatement() {
     running += Number(e.credit) - Number(e.debit);
     return { ...e, runningBalance: running };
   });
+
+  async function downloadXlsx() {
+    try {
+      const params = new URLSearchParams();
+      if (applied) params.set("caseId", applied);
+      params.set("format", "xlsx");
+      await downloadFromApi(`/reports/trust-account-statement?${params.toString()}`, `trust-account-statement${applied ? `_${applied}` : ""}.xlsx`);
+    } catch (e: any) {
+      toastError(toast, e, "Download failed");
+    }
+  }
+
+  async function downloadPdf() {
+    const el = tableRef.current;
+    if (!el) return;
+    try {
+      await exportElementToPdf({ element: el, filename: `trust-account-statement${applied ? `_${applied}` : ""}.pdf` });
+    } catch (e: any) {
+      toastError(toast, e, "Export failed");
+    }
+  }
 
   return (
     <div className="space-y-6">
@@ -57,21 +83,29 @@ export default function TrustAccountStatement() {
           <p className="text-xs text-slate-500">Client trust money movements — Solicitors' Accounts Rules 1990 r.7</p>
         </div>
         <div className="ml-auto">
-          <Button
-            size="sm"
-            variant="outline"
-            className="h-8"
-            onClick={() => {
-              const params = new URLSearchParams();
-              if (applied) params.set("caseId", applied);
-              params.set("format", "csv");
-              downloadFromApi(`/reports/trust-account-statement?${params.toString()}`, `trust-account-statement${applied ? `_${applied}` : ""}.csv`).catch((e: any) => {
-                toastError(toast, e, "Download failed");
-              });
-            }}
-          >
-            <Download className="h-3.5 w-3.5 mr-1" /> Download CSV
-          </Button>
+          <div className="flex gap-2">
+            <Button
+              size="sm"
+              variant="outline"
+              className="h-8"
+              onClick={() => {
+                const params = new URLSearchParams();
+                if (applied) params.set("caseId", applied);
+                params.set("format", "csv");
+                downloadFromApi(`/reports/trust-account-statement?${params.toString()}`, `trust-account-statement${applied ? `_${applied}` : ""}.csv`).catch((e: any) => {
+                  toastError(toast, e, "Download failed");
+                });
+              }}
+            >
+              <Download className="h-3.5 w-3.5 mr-1" /> Download CSV
+            </Button>
+            <Button size="sm" variant="outline" className="h-8" onClick={() => downloadXlsx()}>
+              <Download className="h-3.5 w-3.5 mr-1" /> Download Excel
+            </Button>
+            <Button size="sm" variant="outline" className="h-8" onClick={() => downloadPdf()}>
+              <FileText className="h-3.5 w-3.5 mr-1" /> Download PDF
+            </Button>
+          </div>
         </div>
       </div>
 
@@ -88,11 +122,12 @@ export default function TrustAccountStatement() {
         </CardContent>
       </Card>
 
-      <div className="grid grid-cols-3 gap-3">
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
         {[
           { label: "Total Credits", value: `RM ${fmtAmt(entries.reduce((s, e) => s + Number(e.credit), 0))}`, color: "text-green-700" },
           { label: "Total Debits",  value: `RM ${fmtAmt(entries.reduce((s, e) => s + Number(e.debit), 0))}`,  color: "text-red-600" },
-          { label: "Balance",       value: `RM ${fmtAmt(balance)}`, color: balance >= 0 ? "text-[#0f1729]" : "text-red-700" },
+          { label: "Ledger Book Balance", value: `RM ${fmtAmt(ledgerBookBalance)}`, color: ledgerBookBalance >= 0 ? "text-[#0f1729]" : "text-red-700" },
+          { label: "Available Balance", value: `RM ${fmtAmt(availableBalance)}`, color: availableBalance >= 0 ? "text-[#0f1729]" : "text-red-700" },
         ].map(({ label, value, color }) => (
           <Card key={label} className="border-slate-200">
             <CardContent className="py-3 px-4">
@@ -103,12 +138,13 @@ export default function TrustAccountStatement() {
         ))}
       </div>
 
-      <Card className="border-slate-200">
-        <CardHeader className="py-3 px-4 border-b">
-          <CardTitle className="text-sm font-medium text-slate-700 flex items-center gap-2">
-            <Landmark className="h-4 w-4" /> Trust Ledger Entries
-          </CardTitle>
-        </CardHeader>
+      <div ref={tableRef}>
+        <Card className="border-slate-200">
+          <CardHeader className="py-3 px-4 border-b">
+            <CardTitle className="text-sm font-medium text-slate-700 flex items-center gap-2">
+              <Landmark className="h-4 w-4" /> Trust Ledger Entries
+            </CardTitle>
+          </CardHeader>
         {isLoading ? (
           <CardContent className="py-8 text-center text-sm text-slate-400">Loading...</CardContent>
         ) : isError ? (
@@ -122,7 +158,7 @@ export default function TrustAccountStatement() {
             <table className="w-full text-sm">
               <thead className="bg-slate-50 border-b">
                 <tr>
-                  {["Date", "Case", "Ref", "Description", "Debit (RM)", "Credit (RM)", "Balance (RM)"].map(h => (
+                  {["Date", "Case", "Ref", "Description", "Debit (RM)", "Credit (RM)", "Balance (RM)", "Cheque Status"].map(h => (
                     <th key={h} className="text-left px-4 py-2.5 text-xs font-medium text-slate-500 uppercase tracking-wide">{h}</th>
                   ))}
                 </tr>
@@ -143,13 +179,15 @@ export default function TrustAccountStatement() {
                     <td className={`px-4 py-2.5 text-right tabular-nums font-medium ${e.runningBalance >= 0 ? "text-slate-800" : "text-red-700"}`}>
                       {fmtAmt(e.runningBalance)}
                     </td>
+                    <td className="px-4 py-2.5 text-slate-600">{e.chequeStatus ?? "—"}</td>
                   </tr>
                 ))}
               </tbody>
             </table>
           </div>
         )}
-      </Card>
+        </Card>
+      </div>
     </div>
   );
 }

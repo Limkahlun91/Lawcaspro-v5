@@ -6,6 +6,7 @@ export const projectDocumentsTable = pgTable("project_documents", {
   projectId: integer("project_id").notNull(),
   category: text("category").notNull(),
   documentName: text("document_name").notNull(),
+  licenseNumber: text("license_number"),
   bankName: text("bank_name"),
   documentDate: date("document_date"),
   objectPath: text("object_path").notNull(),

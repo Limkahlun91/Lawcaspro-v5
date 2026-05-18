@@ -20,8 +20,9 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 type ProjectDocument = {
   id: number;
   projectId: number;
-  category: "general" | "developer_mlu" | "bank_mlu";
+  category: "general" | "advertisement_permit" | "developer_license" | "developer_mlu" | "bank_mlu";
   documentName: string;
+  licenseNumber: string | null;
   bankName: string | null;
   documentDate: string | null;
   fileName: string;
@@ -53,6 +54,7 @@ function formatValidity(doc: { hasExpiry: boolean; validFrom: string | null; val
 function ProjectDocumentsPanel(props: { projectId: number; category: "general" | "developer_mlu" | "bank_mlu" | "mlu" }) {
   const { projectId } = props;
   const { toast } = useToast();
+  const queryClient = useQueryClient();
   const [docs, setDocs] = useState<ProjectDocument[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<unknown | null>(null);
@@ -63,6 +65,8 @@ function ProjectDocumentsPanel(props: { projectId: number; category: "general" |
 
   const [documentName, setDocumentName] = useState("");
   const [file, setFile] = useState<File | null>(null);
+  const [licenseNumber, setLicenseNumber] = useState("");
+  const [uploadCategory, setUploadCategory] = useState<"general" | "advertisement_permit" | "developer_license">("general");
 
   const [hasExpiry, setHasExpiry] = useState(false);
   const [validFrom, setValidFrom] = useState("");
@@ -73,6 +77,13 @@ function ProjectDocumentsPanel(props: { projectId: number; category: "general" |
   const [documentDate, setDocumentDate] = useState("");
 
   const effectiveCategory = props.category === "mlu" ? mluType : props.category;
+  const effectiveUploadCategory = props.category === "mlu" ? effectiveCategory : uploadCategory;
+  const apOrDl = effectiveUploadCategory === "advertisement_permit" || effectiveUploadCategory === "developer_license";
+
+  useEffect(() => {
+    if (props.category === "mlu") return;
+    if (apOrDl) setHasExpiry(true);
+  }, [apOrDl, props.category]);
 
   const nameSuggestions = useMemo(() => {
     if (props.category !== "general") return [];
@@ -89,12 +100,15 @@ function ProjectDocumentsPanel(props: { projectId: number; category: "general" |
     setLoading(true);
     setError(null);
     try {
-      const cat = props.category === "mlu" ? "" : effectiveCategory;
-      const qs = cat ? `?category=${encodeURIComponent(cat)}` : "";
+      const qs =
+        props.category === "mlu"
+          ? `?category=${encodeURIComponent(effectiveCategory)}`
+          : "";
       const rows = await apiFetchJson<ProjectDocument[]>(`/projects/${projectId}/documents${qs}`);
+      const arr = Array.isArray(rows) ? rows : [];
       const filtered = props.category === "mlu"
-        ? (rows ?? []).filter((d) => d.category === "developer_mlu" || d.category === "bank_mlu")
-        : (rows ?? []);
+        ? arr
+        : arr.filter((d) => d.category !== "developer_mlu" && d.category !== "bank_mlu");
       setDocs(filtered);
     } catch (e) {
       setError(e);
@@ -108,7 +122,13 @@ function ProjectDocumentsPanel(props: { projectId: number; category: "general" |
     fetchDocs();
   }, [projectId, effectiveCategory, props.category]);
 
-  const canUpload = Boolean(documentName.trim()) && Boolean(file) && !uploading;
+  const canUpload = (() => {
+    if (!documentName.trim() || !file || uploading) return false;
+    if (props.category === "mlu") return true;
+    if (apOrDl) return Boolean(licenseNumber.trim()) && Boolean(validFrom) && Boolean(validTo);
+    if (hasExpiry) return Boolean(validFrom) && Boolean(validTo);
+    return true;
+  })();
 
   return (
     <div className="space-y-4">
@@ -141,7 +161,7 @@ function ProjectDocumentsPanel(props: { projectId: number; category: "general" |
               </div>
             </div>
           ) : (
-            <div className="grid grid-cols-1 md:grid-cols-5 gap-3 items-end">
+            <div className="grid grid-cols-1 md:grid-cols-7 gap-3 items-end">
               <div className="md:col-span-2 space-y-1.5">
                 <Label>Document Name</Label>
                 <Input list="project-doc-suggestions" value={documentName} onChange={(e) => setDocumentName(e.target.value)} />
@@ -151,17 +171,36 @@ function ProjectDocumentsPanel(props: { projectId: number; category: "general" |
                   </datalist>
                 )}
               </div>
+              <div className="md:col-span-2 space-y-1.5">
+                <Label>Category</Label>
+                <Select value={uploadCategory} onValueChange={(v) => setUploadCategory(v === "developer_license" ? "developer_license" : v === "advertisement_permit" ? "advertisement_permit" : "general")}>
+                  <SelectTrigger>
+                    <SelectValue placeholder="Select category" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="general">General</SelectItem>
+                    <SelectItem value="advertisement_permit">Advertisement Permit (AP)</SelectItem>
+                    <SelectItem value="developer_license">Developer License (DL)</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              {apOrDl && (
+                <div className="md:col-span-2 space-y-1.5">
+                  <Label>License / Permit Number</Label>
+                  <Input value={licenseNumber} onChange={(e) => setLicenseNumber(e.target.value)} placeholder="e.g. AP 1234 / DL 5678" />
+                </div>
+              )}
               <div className="md:col-span-1 flex items-center gap-2">
-                <Checkbox checked={hasExpiry} onCheckedChange={(v) => setHasExpiry(Boolean(v))} />
+                <Checkbox checked={hasExpiry} disabled={apOrDl} onCheckedChange={(v) => setHasExpiry(Boolean(v))} />
                 <Label className="text-sm">Has expiry</Label>
               </div>
               <div className="md:col-span-1 space-y-1.5">
-                <Label>Valid From</Label>
-                <DateOnlyInput valueYmd={validFrom} onChangeYmd={setValidFrom} disabled={!hasExpiry} />
+                <Label>{apOrDl || hasExpiry ? "Valid From *" : "Valid From"}</Label>
+                <DateOnlyInput valueYmd={validFrom} onChangeYmd={setValidFrom} disabled={!(apOrDl || hasExpiry)} />
               </div>
               <div className="md:col-span-1 space-y-1.5">
-                <Label>Valid To</Label>
-                <DateOnlyInput valueYmd={validTo} onChangeYmd={setValidTo} disabled={!hasExpiry} />
+                <Label>{apOrDl || hasExpiry ? "Valid To *" : "Valid To"}</Label>
+                <DateOnlyInput valueYmd={validTo} onChangeYmd={setValidTo} disabled={!(apOrDl || hasExpiry)} />
               </div>
             </div>
           )}
@@ -207,14 +246,17 @@ function ProjectDocumentsPanel(props: { projectId: number; category: "general" |
                 setUploading(true);
                 try {
                   const fd = new FormData();
-                  fd.append("category", effectiveCategory);
+                  fd.append("category", effectiveUploadCategory);
                   fd.append("documentName", documentName.trim());
                   if (props.category === "mlu") {
                     if (bankName.trim()) fd.append("bankName", bankName.trim());
                     if (documentDate) fd.append("documentDate", documentDate);
                   } else {
-                    fd.append("hasExpiry", String(hasExpiry));
-                    if (hasExpiry) {
+                    if (apOrDl) {
+                      fd.append("licenseNumber", licenseNumber.trim());
+                    }
+                    fd.append("hasExpiry", String(apOrDl ? true : hasExpiry));
+                    if (apOrDl || hasExpiry) {
                       if (validFrom) fd.append("validFrom", validFrom);
                       if (validTo) fd.append("validTo", validTo);
                     }
@@ -223,12 +265,15 @@ function ProjectDocumentsPanel(props: { projectId: number; category: "general" |
                   const created = await apiFetchJson(`/projects/${projectId}/documents`, { method: "POST", body: fd }) as any;
                   setDocumentName("");
                   setFile(null);
+                  setLicenseNumber("");
+                  setUploadCategory("general");
                   setHasExpiry(false);
                   setValidFrom("");
                   setValidTo("");
                   setBankName("");
                   setDocumentDate("");
                   await fetchDocs();
+                  queryClient.invalidateQueries({ queryKey: ["projects", projectId, "documents"] });
                   const warningText =
                     typeof created?.warning === "string"
                       ? created.warning
@@ -273,7 +318,17 @@ function ProjectDocumentsPanel(props: { projectId: number; category: "general" |
               docs.map((d) => (
                 <div key={d.id} className="grid grid-cols-12 px-4 py-3 border-t text-sm items-center">
                   <div className="col-span-4">
-                    <div className="font-medium text-slate-900">{d.documentName}</div>
+                    <div className="font-medium text-slate-900 flex flex-wrap items-center gap-2">
+                      <span>{d.documentName}</span>
+                      {(d.category === "advertisement_permit" || d.category === "developer_license") && (
+                        <span className="text-xs font-semibold text-slate-700">
+                          [{d.category === "advertisement_permit" ? "AP" : "DL"} No: {d.licenseNumber || "N.A."}]
+                        </span>
+                      )}
+                      {(d.category === "advertisement_permit" || d.category === "developer_license") && (
+                        <span className="text-xs text-slate-600">[Validity: {formatValidity(d)}]</span>
+                      )}
+                    </div>
                     <div className="text-xs text-slate-500">{d.fileName}{d.fileSize ? ` • ${formatBytes(d.fileSize)}` : ""}</div>
                   </div>
                   <div className="col-span-3 text-xs text-slate-700">

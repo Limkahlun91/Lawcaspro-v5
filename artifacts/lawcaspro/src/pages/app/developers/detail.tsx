@@ -634,6 +634,7 @@ export default function DeveloperDetail() {
                   setDocValidFrom("");
                   setDocValidTo("");
                   await fetchDocuments();
+                  queryClient.invalidateQueries({ queryKey: ["developers", developerId, "documents"] });
                   const warningText =
                     typeof created?.warning === "string"
                       ? created.warning

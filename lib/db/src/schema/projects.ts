@@ -15,13 +15,6 @@ export const projectsTable = pgTable("projects", {
   tenure: text("tenure").notNull().default("freehold"),
   masterChargeeBank: text("master_chargee_bank"),
   masterChargeeAccount: text("master_chargee_account"),
-
-  apNumber: text("ap_number"),
-  apValidFrom: date("ap_valid_from"),
-  apValidTo: date("ap_valid_to"),
-  dlNumber: text("dl_number"),
-  dlValidFrom: date("dl_valid_from"),
-  dlValidTo: date("dl_valid_to"),
   constructionPeriodMonths: integer("construction_period_months"),
   actualVpDate: date("actual_vp_date"),
   cccDate: date("ccc_date"),

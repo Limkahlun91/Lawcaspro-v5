@@ -611,8 +611,8 @@ routerInternal.post(
     console.error(err);
     logger.error({ err, path: req.path, firmId: req.firmId, userId: req.userId }, "[developers.documents.upload]");
     res.status(200).json({
-      warning: "Upload encountered an internal error. Please refresh to confirm whether the document record was saved, then retry if needed.",
-      warnings: ["Upload encountered an internal error. Please refresh to confirm whether the document record was saved, then retry if needed."],
+      warning: "Upload completed with degraded mode. If the document does not appear, please try uploading again.",
+      warnings: ["Upload completed with degraded mode. If the document does not appear, please try uploading again."],
     });
   }
 });

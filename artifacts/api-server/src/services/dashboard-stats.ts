@@ -136,8 +136,8 @@ export async function computeDashboardStats(
 
   const recentCases = await Promise.all(
     recentRows.map(async (c) => {
-      const [proj] = await r.select().from(projectsTable).where(eq(projectsTable.id, c.projectId));
-      const [dev] = await r.select().from(developersTable).where(eq(developersTable.id, c.developerId));
+      const [proj] = await r.select({ name: projectsTable.name }).from(projectsTable).where(eq(projectsTable.id, c.projectId));
+      const [dev] = await r.select({ name: developersTable.name }).from(developersTable).where(eq(developersTable.id, c.developerId));
       const [assignment] = await r
         .select({ userName: usersTable.name })
         .from(caseAssignmentsTable)

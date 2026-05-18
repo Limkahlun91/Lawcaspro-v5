@@ -171,6 +171,19 @@ function normalizeMappingConfig(raw: unknown): PdfMappingConfig {
   return out;
 }
 
+function mappingFingerprint(v: PdfMappingConfig): string {
+  const keys = Object.keys(v).sort((a, b) => a.localeCompare(b));
+  return keys.map((k) => {
+    const x = v[k];
+    const value = typeof x.value === "string" ? x.value : "";
+    const maxWidth = typeof x.maxWidth === "number" ? String(x.maxWidth) : "";
+    const lineHeight = typeof x.lineHeight === "number" ? String(x.lineHeight) : "";
+    const fontFamily = typeof x.fontFamily === "string" ? x.fontFamily : "";
+    const alignment = typeof x.alignment === "string" ? x.alignment : "";
+    return `${k}:${x.page},${x.x},${x.y},${x.size},${value},${maxWidth},${lineHeight},${fontFamily},${alignment}`;
+  }).join("|");
+}
+
 function viewDimsFromPdfPage(page: unknown): { w: number; h: number } | null {
   if (!isRecord(page)) return null;
   const view = page.view;
@@ -198,6 +211,7 @@ export function TemplatePdfMappingEditor(props: Props) {
   const { toast } = useToast();
   const containerRef = useRef<HTMLDivElement>(null);
   const pageContainerRef = useRef<HTMLDivElement>(null);
+  const lastInitFingerprintRef = useRef<string>("");
   const [numPages, setNumPages] = useState(0);
   const [page, setPage] = useState(1);
   const [saving, setSaving] = useState(false);
@@ -206,12 +220,17 @@ export function TemplatePdfMappingEditor(props: Props) {
   const [mapping, setMapping] = useState<PdfMappingConfig>(() => normalizeMappingConfig(props.initialMappingConfig));
   const [pageView, setPageView] = useState<Record<number, { w: number; h: number }>>({});
 
+  const normalizedInitialMapping = useMemo(() => normalizeMappingConfig(props.initialMappingConfig), [props.initialMappingConfig]);
+
   useEffect(() => {
     if (!props.open) return;
-    setMapping(normalizeMappingConfig(props.initialMappingConfig));
+    const fp = mappingFingerprint(normalizedInitialMapping);
+    if (fp === lastInitFingerprintRef.current) return;
+    lastInitFingerprintRef.current = fp;
+    setMapping(normalizedInitialMapping);
     setPage(1);
     loadVarGroups();
-  }, [props.open, props.initialMappingConfig]);
+  }, [props.open, normalizedInitialMapping]);
 
   const loadVarGroups = async () => {
     try {

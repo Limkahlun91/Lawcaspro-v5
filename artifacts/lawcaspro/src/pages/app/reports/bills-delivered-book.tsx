@@ -1,16 +1,17 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { DateOnlyInput } from "@/components/date-only-input";
 import { Badge } from "@/components/ui/badge";
-import { ArrowLeft, Download, BookOpen, Printer } from "lucide-react";
+import { ArrowLeft, Download, BookOpen, Printer, FileText } from "lucide-react";
 import { useLocation } from "wouter";
 import { downloadFromApi } from "@/lib/download";
 import { useToast } from "@/hooks/use-toast";
 import { QueryFallback } from "@/components/query-fallback";
 import { apiFetchJson } from "@/lib/api-client";
 import { toastError } from "@/lib/toast-error";
+import { exportElementToPdf } from "@/lib/pdf-export";
 
 const STATUS_BADGE: Record<string, string> = {
   draft: "bg-slate-100 text-slate-600",
@@ -26,6 +27,7 @@ function fmtAmt(v: unknown) { return `RM ${Number(v ?? 0).toLocaleString("en-MY"
 export default function BillsDeliveredBook() {
   const [, setLocation] = useLocation();
   const { toast } = useToast();
+  const tableRef = useRef<HTMLDivElement>(null);
   const [from, setFrom] = useState("");
   const [to, setTo] = useState("");
   const [applied, setApplied] = useState({ from: "", to: "" });
@@ -70,6 +72,33 @@ export default function BillsDeliveredBook() {
       toastError(toast, e, "Download failed");
     }
   }
+  async function downloadXlsx() {
+    try {
+      const params = new URLSearchParams();
+      if (applied.from) params.set("from", applied.from);
+      if (applied.to) params.set("to", applied.to);
+      params.set("format", "xlsx");
+      await downloadFromApi(
+        `/reports/bills-delivered-book?${params.toString()}`,
+        `bills-delivered-book${applied.from ? `_${applied.from}` : ""}${applied.to ? `_${applied.to}` : ""}.xlsx`
+      );
+    } catch (e: unknown) {
+      toastError(toast, e, "Download failed");
+    }
+  }
+
+  async function downloadPdf() {
+    const el = tableRef.current;
+    if (!el) return;
+    try {
+      await exportElementToPdf({
+        element: el,
+        filename: `bills-delivered-book${applied.from ? `_${applied.from}` : ""}${applied.to ? `_${applied.to}` : ""}.pdf`,
+      });
+    } catch (e: unknown) {
+      toastError(toast, e, "Export failed");
+    }
+  }
 
   return (
     <div className="space-y-6">
@@ -108,6 +137,12 @@ export default function BillsDeliveredBook() {
                 <Button size="sm" variant="outline" className="h-8" onClick={() => downloadCsv()}>
                   <Download className="h-3.5 w-3.5 mr-1" /> Download CSV
                 </Button>
+                <Button size="sm" variant="outline" className="h-8" onClick={() => downloadXlsx()}>
+                  <Download className="h-3.5 w-3.5 mr-1" /> Download Excel
+                </Button>
+                <Button size="sm" variant="outline" className="h-8" onClick={() => downloadPdf()}>
+                  <FileText className="h-3.5 w-3.5 mr-1" /> Download PDF
+                </Button>
                 <Button size="sm" variant="outline" className="h-8" onClick={printReport}>
                   <Printer className="h-3.5 w-3.5 mr-1" /> Print
                 </Button>
@@ -136,12 +171,13 @@ export default function BillsDeliveredBook() {
       </div>
 
       {/* Table */}
-      <Card className="border-slate-200">
-        <CardHeader className="py-3 px-4 border-b">
-          <CardTitle className="text-sm font-medium text-slate-700 flex items-center gap-2">
-            <BookOpen className="h-4 w-4" /> Bills Delivered
-          </CardTitle>
-        </CardHeader>
+      <div ref={tableRef}>
+        <Card className="border-slate-200">
+          <CardHeader className="py-3 px-4 border-b">
+            <CardTitle className="text-sm font-medium text-slate-700 flex items-center gap-2">
+              <BookOpen className="h-4 w-4" /> Bills Delivered
+            </CardTitle>
+          </CardHeader>
         {isLoading ? (
           <CardContent className="py-8 text-center text-sm text-slate-400">Loading...</CardContent>
         ) : isError ? (
@@ -155,7 +191,20 @@ export default function BillsDeliveredBook() {
             <table className="w-full text-sm">
               <thead className="bg-slate-50 border-b">
                 <tr>
-                  {["Date", "Invoice No.", "File Ref", "Client", "Gross (RM)", "Paid (RM)", "Due (RM)", "Status"].map(h => (
+                  {[
+                    "Date",
+                    "Invoice No.",
+                    "File Ref",
+                    "Client",
+                    "Taxable Disb. (RM)",
+                    "Non-taxable Disb. (RM)",
+                    "Receipt No(s)",
+                    "Payment Date(s)",
+                    "Gross (RM)",
+                    "Paid (RM)",
+                    "Due (RM)",
+                    "Status",
+                  ].map(h => (
                     <th key={h} className="text-left px-4 py-2.5 text-xs font-medium text-slate-500 uppercase tracking-wide">{h}</th>
                   ))}
                 </tr>
@@ -167,6 +216,10 @@ export default function BillsDeliveredBook() {
                     <td className="px-4 py-2.5 font-mono font-medium text-slate-800">{inv.invoiceNo}</td>
                     <td className="px-4 py-2.5 text-slate-600">{inv.caseRef ?? "—"}</td>
                     <td className="px-4 py-2.5 text-slate-700">{inv.clientName ?? "—"}</td>
+                    <td className="px-4 py-2.5 text-right tabular-nums">{Number(inv.taxableDisbursements ?? 0).toLocaleString("en-MY", { minimumFractionDigits: 2 })}</td>
+                    <td className="px-4 py-2.5 text-right tabular-nums">{Number(inv.nonTaxableDisbursements ?? 0).toLocaleString("en-MY", { minimumFractionDigits: 2 })}</td>
+                    <td className="px-4 py-2.5 text-slate-600">{Array.isArray(inv.receiptNumbers) && inv.receiptNumbers.length > 0 ? inv.receiptNumbers.join(", ") : "—"}</td>
+                    <td className="px-4 py-2.5 text-slate-600">{Array.isArray(inv.paymentDates) && inv.paymentDates.length > 0 ? inv.paymentDates.map((d: string) => fmtDate(d)).join(", ") : "—"}</td>
                     <td className="px-4 py-2.5 text-right tabular-nums">{Number(inv.grandTotal).toLocaleString("en-MY", { minimumFractionDigits: 2 })}</td>
                     <td className="px-4 py-2.5 text-right tabular-nums text-green-700">{Number(inv.amountPaid).toLocaleString("en-MY", { minimumFractionDigits: 2 })}</td>
                     <td className="px-4 py-2.5 text-right tabular-nums text-red-600">{Number(inv.amountDue).toLocaleString("en-MY", { minimumFractionDigits: 2 })}</td>
@@ -188,7 +241,8 @@ export default function BillsDeliveredBook() {
             </table>
           </div>
         )}
-      </Card>
+        </Card>
+      </div>
     </div>
   );
 }

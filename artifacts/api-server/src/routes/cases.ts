@@ -3039,6 +3039,7 @@ router.get("/cases/:caseId", requireAuthHandler, requireFirmUserHandler, require
     }
     res.json(await formatCaseDetail(r, c));
   } catch (e) {
+    console.error("🚨 CRITICAL BACKEND ERROR:", e);
     logger.error({ err: e, firmId: req.firmId, userId: req.userId, caseId: params.data.caseId }, "[cases] get case failed");
     res.status(500).json({ error: "Internal Server Error" });
   }

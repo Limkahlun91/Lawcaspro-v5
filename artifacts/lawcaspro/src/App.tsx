@@ -77,6 +77,7 @@ import Reports from "@/pages/app/reports";
 import BillsDeliveredBook from "@/pages/app/reports/bills-delivered-book";
 import MatterAging from "@/pages/app/reports/matter-aging";
 import TrustAccountStatement from "@/pages/app/reports/trust-account-statement";
+import ProjectStatusReport from "@/pages/app/reports/project-status";
 import Hub from "@/pages/app/hub";
 import Communications from "@/pages/app/communications";
 import CommunicationThreadDetail from "@/pages/app/communications/thread-detail";
@@ -297,6 +298,11 @@ function AppRoutes() {
           <Route path="/app/reports/trust-account-statement" component={() => (
             <PermissionGuard module="reports" action="read">
               <TrustAccountStatement />
+            </PermissionGuard>
+          )} />
+          <Route path="/app/reports/project-status" component={() => (
+            <PermissionGuard module="reports" action="read">
+              <ProjectStatusReport />
             </PermissionGuard>
           )} />
           <Route path="/app/reports" component={() => (

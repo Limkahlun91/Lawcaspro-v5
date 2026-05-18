@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -109,6 +109,7 @@ export default function DocumentAutomationHub() {
   const [smartTemplateIdSet, setSmartTemplateIdSet] = useState<Set<number>>(() => new Set());
   const [smartFolderIdSet, setSmartFolderIdSet] = useState<Set<number>>(() => new Set());
   const [smartDismissedKey, setSmartDismissedKey] = useState<string>("");
+  const smartAppliedKeyRef = useRef<string>("");
   const [bundleMessage, setBundleMessage] = useState<string | null>(null);
   const [bundleTemplateIdSet, setBundleTemplateIdSet] = useState<Set<number>>(() => new Set());
   const [bundleFolderIdSet, setBundleFolderIdSet] = useState<Set<number>>(() => new Set());
@@ -260,6 +261,7 @@ export default function DocumentAutomationHub() {
   useEffect(() => {
     const key = selectedCaseIds.slice().sort((a, b) => a - b).join(",");
     if (!key || smartDismissedKey === key) {
+      smartAppliedKeyRef.current = "";
       setSmartMessage(null);
       setSmartTemplateIdSet(new Set());
       setSmartFolderIdSet(new Set());
@@ -267,6 +269,7 @@ export default function DocumentAutomationHub() {
     }
 
     if (selectedCases.length === 0 || folders.length === 0 || templates.length === 0) {
+      smartAppliedKeyRef.current = "";
       setSmartMessage(null);
       setSmartTemplateIdSet(new Set());
       setSmartFolderIdSet(new Set());
@@ -306,13 +309,29 @@ export default function DocumentAutomationHub() {
     }
 
     if (recommendedTemplateIds.size === 0) {
+      smartAppliedKeyRef.current = "";
       setSmartMessage(null);
       setSmartTemplateIdSet(new Set());
       setSmartFolderIdSet(new Set());
       return;
     }
 
-    setSelectedTemplateIds((prev) => Array.from(new Set([...prev, ...Array.from(recommendedTemplateIds)])));
+    const nextIdsSorted = Array.from(recommendedTemplateIds).sort((a, b) => a - b);
+    const smartKey = `${key}:${nextIdsSorted.join(",")}`;
+    if (smartAppliedKeyRef.current === smartKey) return;
+    smartAppliedKeyRef.current = smartKey;
+
+    setSelectedTemplateIds((prev) => {
+      const next = new Set(prev);
+      let changed = false;
+      for (const tid of recommendedTemplateIds) {
+        if (!next.has(tid)) {
+          next.add(tid);
+          changed = true;
+        }
+      }
+      return changed ? Array.from(next) : prev;
+    });
     setSmartTemplateIdSet(new Set(recommendedTemplateIds));
     setSmartFolderIdSet(new Set(recommendedFolderIds));
     setSmartMessage(`✨ Smart Match: ${Array.from(new Set(messages)).join(" / ")}`);

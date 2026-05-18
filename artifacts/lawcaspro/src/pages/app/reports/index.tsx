@@ -123,6 +123,35 @@ export default function Reports() {
       </div>
 
       <div className="border-t border-slate-200" />
+      <div>
+        <h2 className="text-sm font-semibold text-slate-500 uppercase tracking-wide mb-3">Decision Reports</h2>
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+          {[
+            {
+              title: "Project Status & Case Analytics",
+              description: "Executive view of case progress and financial exposure by project, staff, and date range.",
+              icon: TrendingUp,
+              href: "/app/reports/project-status",
+              color: "text-[#1B365D] bg-slate-100",
+            },
+          ].map(({ title, description, icon: Icon, href, color }) => (
+            <Card key={title} className="border-slate-200 hover:border-slate-300 cursor-pointer transition-colors" onClick={() => setLocation(href)}>
+              <CardContent className="py-4 px-4 flex gap-3">
+                <div className={`p-2 rounded-lg ${color} flex-shrink-0 h-fit mt-0.5`}>
+                  <Icon className="h-4 w-4" />
+                </div>
+                <div>
+                  <p className="font-semibold text-sm text-slate-800">{title}</p>
+                  <p className="text-xs text-slate-500 mt-0.5 leading-relaxed">{description}</p>
+                </div>
+                <ArrowRight className="h-4 w-4 text-slate-300 ml-auto flex-shrink-0 mt-1" />
+              </CardContent>
+            </Card>
+          ))}
+        </div>
+      </div>
+
+      <div className="border-t border-slate-200" />
       <h2 className="text-sm font-semibold text-slate-500 uppercase tracking-wide">Analytics</h2>
 
       {reportsQuery.isError ? (

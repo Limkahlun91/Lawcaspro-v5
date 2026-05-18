@@ -47,12 +47,6 @@ export default function EditProject() {
   const [mukim, setMukim] = useState("");
   const [daerah, setDaerah] = useState("");
   const [negeri, setNegeri] = useState("");
-  const [apNumber, setApNumber] = useState("");
-  const [apValidFrom, setApValidFrom] = useState("");
-  const [apValidTo, setApValidTo] = useState("");
-  const [dlNumber, setDlNumber] = useState("");
-  const [dlValidFrom, setDlValidFrom] = useState("");
-  const [dlValidTo, setDlValidTo] = useState("");
   const [constructionPeriodMonths, setConstructionPeriodMonths] = useState("");
   const [actualVpDate, setActualVpDate] = useState("");
   const [cccDate, setCccDate] = useState("");
@@ -76,13 +70,6 @@ export default function EditProject() {
       setTenure(ten === "freehold" || ten === "leasehold" ? ten : "");
       setMasterChargeeBank(typeof proj.masterChargeeBank === "string" ? proj.masterChargeeBank : "");
       setMasterChargeeAccount(typeof proj.masterChargeeAccount === "string" ? proj.masterChargeeAccount : "");
-
-      setApNumber(typeof proj.apNumber === "string" ? proj.apNumber : "");
-      setApValidFrom(normalizeDateOnlyFromApi((proj as Record<string, unknown>).apValidFrom));
-      setApValidTo(normalizeDateOnlyFromApi((proj as Record<string, unknown>).apValidTo));
-      setDlNumber(typeof proj.dlNumber === "string" ? proj.dlNumber : "");
-      setDlValidFrom(normalizeDateOnlyFromApi((proj as Record<string, unknown>).dlValidFrom));
-      setDlValidTo(normalizeDateOnlyFromApi((proj as Record<string, unknown>).dlValidTo));
       setConstructionPeriodMonths(
         typeof proj.constructionPeriodMonths === "number" ? String(proj.constructionPeriodMonths)
         : typeof (proj as Record<string, unknown>).constructionPeriodMonths === "string" ? String((proj as Record<string, unknown>).constructionPeriodMonths)
@@ -158,12 +145,6 @@ export default function EditProject() {
           tenure,
           masterChargeeBank: isEncumbered === "yes" ? (masterChargeeBank.trim() || null) : null,
           masterChargeeAccount: masterChargeeAccount.trim() || null,
-          apNumber: apNumber.trim() || null,
-          apValidFrom: apValidFrom || null,
-          apValidTo: apValidTo || null,
-          dlNumber: dlNumber.trim() || null,
-          dlValidFrom: dlValidFrom || null,
-          dlValidTo: dlValidTo || null,
           constructionPeriodMonths: constructionPeriodMonths.trim() ? Number(constructionPeriodMonths) : null,
           actualVpDate: actualVpDate || null,
           cccDate: cccDate || null,
@@ -319,47 +300,6 @@ export default function EditProject() {
                 placeholder={isEncumbered === "yes" ? "e.g., Maybank" : "Enable Encumbered = Yes"}
                 className="mt-1.5"
               />
-            </div>
-          </div>
-
-          <div className="border-t border-slate-200 pt-6">
-            <h3 className="text-base font-bold text-slate-900 mb-4">Licenses & Permits</h3>
-            <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
-              <div className="md:col-span-2">
-                <Label className="text-sm font-semibold text-slate-700">Advertisement Permit (AP) No.</Label>
-                <Input value={apNumber} onChange={(e) => setApNumber(e.target.value)} className="mt-1.5" />
-              </div>
-              <div>
-                <Label className="text-sm font-semibold text-slate-700">AP Valid From</Label>
-                <div className="mt-1.5">
-                  <DateOnlyInput valueYmd={apValidFrom} onChangeYmd={setApValidFrom} />
-                </div>
-              </div>
-              <div>
-                <Label className="text-sm font-semibold text-slate-700">AP Valid To</Label>
-                <div className="mt-1.5">
-                  <DateOnlyInput valueYmd={apValidTo} onChangeYmd={setApValidTo} />
-                </div>
-              </div>
-            </div>
-
-            <div className="grid grid-cols-1 md:grid-cols-4 gap-6 mt-5">
-              <div className="md:col-span-2">
-                <Label className="text-sm font-semibold text-slate-700">Developer License (DL) No.</Label>
-                <Input value={dlNumber} onChange={(e) => setDlNumber(e.target.value)} className="mt-1.5" />
-              </div>
-              <div>
-                <Label className="text-sm font-semibold text-slate-700">DL Valid From</Label>
-                <div className="mt-1.5">
-                  <DateOnlyInput valueYmd={dlValidFrom} onChangeYmd={setDlValidFrom} />
-                </div>
-              </div>
-              <div>
-                <Label className="text-sm font-semibold text-slate-700">DL Valid To</Label>
-                <div className="mt-1.5">
-                  <DateOnlyInput valueYmd={dlValidTo} onChangeYmd={setDlValidTo} />
-                </div>
-              </div>
             </div>
           </div>
 
