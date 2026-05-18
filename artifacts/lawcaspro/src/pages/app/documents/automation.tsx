@@ -70,8 +70,25 @@ function parseFilenameFromContentDisposition(v: string | null): string | null {
 }
 
 function includesAllTokens(haystack: string, tokens: string[]): boolean {
-  const h = haystack.toLowerCase();
-  return tokens.every((t) => h.includes(t.toLowerCase()));
+  const normalize = (s: string): string =>
+    s
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, " ")
+      .replace(/\bthird\b/g, "3rd")
+      .trim();
+  const h = normalize(haystack);
+  return tokens.every((t) => h.includes(normalize(t)));
+}
+
+function includesAnyToken(haystack: string, tokens: string[]): boolean {
+  const normalize = (s: string): string =>
+    s
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, " ")
+      .replace(/\bthird\b/g, "3rd")
+      .trim();
+  const h = normalize(haystack);
+  return tokens.some((t) => h.includes(normalize(t)));
 }
 
 function safeText(v: unknown): string {
@@ -200,8 +217,8 @@ export default function DocumentAutomationHub() {
   const preflightCritical = Boolean(preflightQuery.data?.critical);
   const preflightBlocking = preflightEnabled && (preflightQuery.isFetching || preflightQuery.isLoading || preflightCritical || Boolean(preflightQuery.error));
 
-  function toggleSelectAllCasesOnPage() {
-    if (allCasesOnPageSelected) {
+  function setAllCasesOnPage(checked: boolean) {
+    if (!checked) {
       setSelectedCaseIds((prev) => prev.filter((id) => !cases.some((c) => c.id === id)));
       return;
     }
@@ -309,11 +326,10 @@ export default function DocumentAutomationHub() {
     */
   }, [folders, folderPathById, selectedCaseIds, selectedCases, smartDismissedKey, templateIdsInFolder, templates]);
 
-  function toggleFolderTemplates(folderId: number | null) {
+  function setFolderTemplates(folderId: number | null, checked: boolean) {
     const ids = templateIdsInFolder.get(folderId) ?? [];
     if (!ids.length) return;
-    const allSelected = ids.every((id) => selectedTemplateIdSet.has(id));
-    if (allSelected) {
+    if (!checked) {
       setSelectedTemplateIds((prev) => prev.filter((id) => !ids.includes(id)));
       return;
     }
@@ -337,7 +353,7 @@ export default function DocumentAutomationHub() {
 
     const matchFolder = folders.find((f) => {
       const path = folderPathById.get(f.id) ?? f.name;
-      return includesAllTokens(path, tokens) || includesAllTokens(f.name, tokens);
+      return includesAnyToken(path, tokens) || includesAnyToken(f.name, tokens);
     });
 
     const folderIds = new Set<number>();
@@ -356,7 +372,7 @@ export default function DocumentAutomationHub() {
       const picked = core.length > 0 ? core : ids;
       for (const tid of picked) templateIds.add(tid);
     } else {
-      const matchedTemplates = templates.filter((t) => includesAllTokens(safeText(t.name), tokens));
+      const matchedTemplates = templates.filter((t) => includesAnyToken(safeText(t.name), tokens));
       for (const t of matchedTemplates) templateIds.add(t.id);
     }
 
@@ -447,7 +463,7 @@ export default function DocumentAutomationHub() {
         }
       }
     } catch (err) {
-      toastError(err);
+      toastError(toast, err);
     } finally {
       setBusy(false);
     }
@@ -480,7 +496,7 @@ export default function DocumentAutomationHub() {
           <Checkbox
             checked={cb.indeterminate ? "indeterminate" : cb.checked}
             disabled={!hasTemplates}
-            onCheckedChange={() => toggleFolderTemplates(folder.id)}
+            onCheckedChange={(v) => setFolderTemplates(folder.id, v === true)}
           />
           <button
             className="flex-1 truncate text-left"
@@ -503,7 +519,18 @@ export default function DocumentAutomationHub() {
                 )}
                 style={{ paddingLeft: `${(depth + 1) * 14 + 22}px` }}
               >
-                <Checkbox checked={selectedTemplateIdSet.has(t.id)} onCheckedChange={() => toggleSelectTemplate(t.id)} />
+                <Checkbox
+                  checked={selectedTemplateIdSet.has(t.id)}
+                  onCheckedChange={(v) => {
+                    const checked = v === true;
+                    setSelectedTemplateIds((prev) => {
+                      const next = new Set(prev);
+                      if (checked) next.add(t.id);
+                      else next.delete(t.id);
+                      return Array.from(next);
+                    });
+                  }}
+                />
                 <FileText className="h-3.5 w-3.5 text-slate-500" />
                 <div className="flex-1 truncate">{t.name}</div>
                 {(smartTemplateIdSet.has(t.id) || bundleTemplateIdSet.has(t.id)) && selectedTemplateIdSet.has(t.id) && <span className="text-[10px] text-blue-600">✨</span>}
@@ -548,7 +575,10 @@ export default function DocumentAutomationHub() {
                     <thead className="sticky top-0 bg-white border-b">
                       <tr className="text-xs text-slate-500">
                         <th className="w-10 px-3 py-2">
-                          <Checkbox checked={someCasesOnPageSelected ? "indeterminate" : allCasesOnPageSelected} onCheckedChange={toggleSelectAllCasesOnPage} />
+                          <Checkbox
+                            checked={someCasesOnPageSelected ? "indeterminate" : allCasesOnPageSelected}
+                            onCheckedChange={(v) => setAllCasesOnPage(v === true)}
+                          />
                         </th>
                         <th className="text-left px-3 py-2">Parcel / Unit</th>
                         <th className="text-left px-3 py-2">Purchaser</th>
@@ -560,7 +590,18 @@ export default function DocumentAutomationHub() {
                       {cases.map((c) => (
                         <tr key={c.id} className="hover:bg-slate-50">
                           <td className="px-3 py-2 align-top">
-                            <Checkbox checked={selectedCaseIdSet.has(c.id)} onCheckedChange={() => toggleSelectCase(c.id)} />
+                            <Checkbox
+                              checked={selectedCaseIdSet.has(c.id)}
+                              onCheckedChange={(v) => {
+                                const checked = v === true;
+                                setSelectedCaseIds((prev) => {
+                                  const next = new Set(prev);
+                                  if (checked) next.add(c.id);
+                                  else next.delete(c.id);
+                                  return Array.from(next);
+                                });
+                              }}
+                            />
                           </td>
                           <td className="px-3 py-2 align-top">
                             <div className="text-slate-900">{c.parcelNo || "-"}</div>
@@ -646,7 +687,18 @@ export default function DocumentAutomationHub() {
                               (smartTemplateIdSet.has(t.id) || bundleTemplateIdSet.has(t.id)) && selectedTemplateIdSet.has(t.id) && "bg-blue-50"
                             )}
                           >
-                            <Checkbox checked={selectedTemplateIdSet.has(t.id)} onCheckedChange={() => toggleSelectTemplate(t.id)} />
+                            <Checkbox
+                              checked={selectedTemplateIdSet.has(t.id)}
+                              onCheckedChange={(v) => {
+                                const checked = v === true;
+                                setSelectedTemplateIds((prev) => {
+                                  const next = new Set(prev);
+                                  if (checked) next.add(t.id);
+                                  else next.delete(t.id);
+                                  return Array.from(next);
+                                });
+                              }}
+                            />
                             <FileText className="h-3.5 w-3.5 text-slate-500" />
                             <div className="flex-1 truncate">{t.name}</div>
                             {(smartTemplateIdSet.has(t.id) || bundleTemplateIdSet.has(t.id)) && selectedTemplateIdSet.has(t.id) && <span className="text-[10px] text-blue-600">✨</span>}

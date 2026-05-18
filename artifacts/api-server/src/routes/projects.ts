@@ -611,114 +611,128 @@ routerInternal.get("/projects/:projectId/documents", requireAuth, requireFirmUse
 });
 
 routerInternal.post("/projects/:projectId/documents", requireAuth, requireFirmUser, requirePermission("projects", "update"), upload.single("file"), async (req: AuthRequestLike, res: RouteResLike): Promise<void> => {
-  const r = req.rlsDb;
-  if (!r) {
-    logger.error({ path: req.path, firmId: req.firmId, userId: req.userId }, "[projects.documents] missing tenant database context");
-    res.status(500).json({ error: "Internal Server Error" });
-    return;
-  }
-  const params = ProjectIdParamsSchema.safeParse(req.params);
-  if (!params.success) {
-    res.status(400).json({ error: params.error.message });
-    return;
-  }
-  const projectId = params.data.projectId;
-  const [proj] = await r.select({ id: projectsTable.id, firmId: projectsTable.firmId }).from(projectsTable).where(and(eq(projectsTable.id, projectId), eq(projectsTable.firmId, req.firmId!)));
-  if (!proj) {
-    res.status(404).json({ error: "Project not found" });
-    return;
-  }
-
-  const f = (req as any).file as { originalname?: string; mimetype?: string; buffer?: Buffer; size?: number } | undefined;
-  if (!f || !Buffer.isBuffer(f.buffer) || f.buffer.length === 0) {
-    res.status(400).json({ error: "file is required" });
-    return;
-  }
-
-  const body = req.body as Record<string, unknown>;
-  const category = typeof body.category === "string" ? body.category.trim() : "general";
-  if (!["general", "developer_mlu", "bank_mlu"].includes(category)) {
-    res.status(400).json({ error: "Invalid category" });
-    return;
-  }
-  const documentName = typeof body.documentName === "string" ? body.documentName.trim() : "";
-  if (!documentName) {
-    res.status(400).json({ error: "documentName is required" });
-    return;
-  }
-  const bankName = typeof body.bankName === "string" && body.bankName.trim() ? body.bankName.trim() : null;
-  const documentDate = normalizeDateOnly(body.documentDate);
-
-  const hasExpiry = normalizeBoolean(body.hasExpiry);
-  const validFrom = hasExpiry ? normalizeDateOnly(body.validFrom) : null;
-  const validTo = hasExpiry ? normalizeDateOnly(body.validTo) : null;
-
-  const fileName = typeof f.originalname === "string" && f.originalname.trim() ? f.originalname.trim() : "document";
-  const safeName = safeFilenameAscii(fileName).replace(/\s+/g, "_");
-  const primaryObjectPath = `/objects/projects/${req.firmId!}/${projectId}/${randomUUID()}-${safeName}`;
-  let objectPath = primaryObjectPath;
-  let warning: string | null = null;
+  const warnings: string[] = [];
   try {
-    await supabaseStorage.uploadPrivateObject({
-      objectPath: primaryObjectPath,
-      fileBytes: f.buffer,
-      contentType: typeof f.mimetype === "string" && f.mimetype.trim() ? f.mimetype.trim() : "application/octet-stream",
+    const r = req.rlsDb;
+    if (!r) {
+      logger.error({ path: req.path, firmId: req.firmId, userId: req.userId }, "[projects.documents] missing tenant database context");
+      res.status(500).json({ error: "Internal Server Error" });
+      return;
+    }
+    const params = ProjectIdParamsSchema.safeParse(req.params);
+    if (!params.success) {
+      res.status(400).json({ error: params.error.message });
+      return;
+    }
+    const projectId = params.data.projectId;
+    const [proj] = await r.select({ id: projectsTable.id, firmId: projectsTable.firmId }).from(projectsTable).where(and(eq(projectsTable.id, projectId), eq(projectsTable.firmId, req.firmId!)));
+    if (!proj) {
+      res.status(404).json({ error: "Project not found" });
+      return;
+    }
+
+    const f = (req as any).file as { originalname?: string; mimetype?: string; buffer?: Buffer; size?: number } | undefined;
+    if (!f || !Buffer.isBuffer(f.buffer) || f.buffer.length === 0) {
+      res.status(400).json({ error: "file is required" });
+      return;
+    }
+
+    const body = req.body as Record<string, unknown>;
+    const category = typeof body.category === "string" ? body.category.trim() : "general";
+    if (!["general", "developer_mlu", "bank_mlu"].includes(category)) {
+      res.status(400).json({ error: "Invalid category" });
+      return;
+    }
+    const documentName = typeof body.documentName === "string" ? body.documentName.trim() : "";
+    if (!documentName) {
+      res.status(400).json({ error: "documentName is required" });
+      return;
+    }
+    const bankName = typeof body.bankName === "string" && body.bankName.trim() ? body.bankName.trim() : null;
+    const documentDate = normalizeDateOnly(body.documentDate);
+
+    const hasExpiry = normalizeBoolean(body.hasExpiry);
+    const validFrom = hasExpiry ? normalizeDateOnly(body.validFrom) : null;
+    const validTo = hasExpiry ? normalizeDateOnly(body.validTo) : null;
+
+    const fileName = typeof f.originalname === "string" && f.originalname.trim() ? f.originalname.trim() : "document";
+    const safeName = safeFilenameAscii(fileName).replace(/\s+/g, "_");
+    const primaryObjectPath = `/objects/projects/${req.firmId!}/${projectId}/${randomUUID()}-${safeName}`;
+    let objectPath = primaryObjectPath;
+    try {
+      await supabaseStorage.uploadPrivateObject({
+        objectPath: primaryObjectPath,
+        fileBytes: f.buffer,
+        contentType: typeof f.mimetype === "string" && f.mimetype.trim() ? f.mimetype.trim() : "application/octet-stream",
+      });
+    } catch (err) {
+      console.warn(err);
+      objectPath = `pending_upload/projects/${req.firmId!}/${projectId}/${randomUUID()}-${safeName}`;
+      warnings.push("Storage service is currently unavailable. File metadata saved but file content was not uploaded.");
+    }
+
+    const [created] = await r
+      .insert(projectDocumentsTable)
+      .values({
+        firmId: req.firmId!,
+        projectId,
+        category,
+        documentName,
+        bankName,
+        documentDate: documentDate as any,
+        objectPath,
+        fileName,
+        mimeType: typeof f.mimetype === "string" ? f.mimetype : null,
+        fileSize: Math.floor(f.buffer.length),
+        hasExpiry,
+        validFrom: validFrom as any,
+        validTo: validTo as any,
+        createdBy: req.userId ?? null,
+      })
+      .returning();
+
+    try {
+      await writeAuditLog({
+        firmId: req.firmId,
+        actorId: req.userId,
+        actorType: req.userType,
+        action: "projects.documents.upload",
+        entityType: "project_document",
+        entityId: created.id,
+        detail: `projectId=${projectId} category=${category} name=${documentName}`,
+        ipAddress: req.ip,
+        userAgent: getHeader(req, "user-agent"),
+      });
+    } catch (err) {
+      logger.error({ err, path: req.path, firmId: req.firmId, userId: req.userId }, "[projects.documents.upload] audit log failed");
+      warnings.push("Audit logging is temporarily unavailable. Upload succeeded, but audit trail may be incomplete.");
+    }
+
+    res.status(warnings.length ? 200 : 201).json({
+      id: created.id,
+      projectId: created.projectId,
+      category: created.category,
+      documentName: created.documentName,
+      bankName: created.bankName ?? null,
+      documentDate: created.documentDate ? String(created.documentDate) : null,
+      fileName: created.fileName,
+      mimeType: created.mimeType ?? null,
+      fileSize: created.fileSize ?? null,
+      hasExpiry: created.hasExpiry,
+      validFrom: created.validFrom ? String(created.validFrom) : null,
+      validTo: created.validTo ? String(created.validTo) : null,
+      createdAt: created.createdAt.toISOString(),
+      updatedAt: created.updatedAt.toISOString(),
+      ...(warnings.length ? { warning: warnings[0], warnings } : {}),
     });
   } catch (err) {
-    console.warn(err);
-    objectPath = `pending_upload/projects/${req.firmId!}/${projectId}/${randomUUID()}-${safeName}`;
-    warning = "Storage service is currently unavailable. File metadata saved but file content was not uploaded.";
+    console.error(err);
+    logger.error({ err, path: req.path, firmId: req.firmId, userId: req.userId }, "[projects.documents.upload]");
+    res.status(200).json({
+      warning: "Upload encountered an internal error. Please refresh to confirm whether the document record was saved, then retry if needed.",
+      warnings: ["Upload encountered an internal error. Please refresh to confirm whether the document record was saved, then retry if needed."],
+    });
   }
-
-  const [created] = await r
-    .insert(projectDocumentsTable)
-    .values({
-      firmId: req.firmId!,
-      projectId,
-      category,
-      documentName,
-      bankName,
-      documentDate: documentDate as any,
-      objectPath,
-      fileName,
-      mimeType: typeof f.mimetype === "string" ? f.mimetype : null,
-      fileSize: Math.floor(f.buffer.length),
-      hasExpiry,
-      validFrom: validFrom as any,
-      validTo: validTo as any,
-      createdBy: req.userId ?? null,
-    })
-    .returning();
-
-  await writeAuditLog({
-    firmId: req.firmId,
-    actorId: req.userId,
-    actorType: req.userType,
-    action: "projects.documents.upload",
-    entityType: "project_document",
-    entityId: created.id,
-    detail: `projectId=${projectId} category=${category} name=${documentName}`,
-    ipAddress: req.ip,
-    userAgent: getHeader(req, "user-agent"),
-  });
-
-  res.status(warning ? 200 : 201).json({
-    id: created.id,
-    projectId: created.projectId,
-    category: created.category,
-    documentName: created.documentName,
-    bankName: created.bankName ?? null,
-    documentDate: created.documentDate ? String(created.documentDate) : null,
-    fileName: created.fileName,
-    mimeType: created.mimeType ?? null,
-    fileSize: created.fileSize ?? null,
-    hasExpiry: created.hasExpiry,
-    validFrom: created.validFrom ? String(created.validFrom) : null,
-    validTo: created.validTo ? String(created.validTo) : null,
-    createdAt: created.createdAt.toISOString(),
-    updatedAt: created.updatedAt.toISOString(),
-    ...(warning ? { warning } : {}),
-  });
 });
 
 routerInternal.get("/projects/:projectId/documents/:docId/view", requireAuth, requireFirmUser, requirePermission("projects", "read"), async (req: AuthRequestLike, res: RouteResLike): Promise<void> => {

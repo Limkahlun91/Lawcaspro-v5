@@ -85,11 +85,18 @@ export default function Workbench() {
     retryDelay: 400,
   });
 
+  const milestonesTargetUserId = (() => {
+    if (!data?.staffUser?.id) return null;
+    if (userId === "me") return data.staffUser.id;
+    const n = Number.parseInt(userId, 10);
+    return Number.isFinite(n) && n > 0 ? n : null;
+  })();
   const milestonesQuery = useQuery({
-    queryKey: ["dashboard", "assignedToMe"],
-    queryFn: ({ signal }) => apiFetchJson(`/dashboard?assignedToMe=true`, { signal }) as Promise<Record<string, unknown>>,
+    queryKey: ["dashboard", "assignedToUserId", milestonesTargetUserId],
+    queryFn: ({ signal }) =>
+      apiFetchJson(`/dashboard?assignedToUserId=${encodeURIComponent(String(milestonesTargetUserId))}`, { signal }) as Promise<Record<string, unknown>>,
     retry: false,
-    enabled: tab === "my-work" && userId === "me",
+    enabled: tab === "my-work" && milestonesTargetUserId != null,
   });
 
   useEffect(() => {
@@ -159,31 +166,35 @@ export default function Workbench() {
             ))}
           </div>
 
-          {userId === "me" && (
-            <div className="mt-4">
-              {milestonesQuery.isError ? (
-                <QueryFallback title="Milestones unavailable" error={milestonesQuery.error} onRetry={() => milestonesQuery.refetch()} isRetrying={milestonesQuery.isFetching} />
-              ) : (
-                (() => {
-                  const payload = milestonesQuery.data as Record<string, unknown> | undefined;
-                  const milestoneSections: MilestoneSection[] = Array.isArray(payload?.milestoneSections)
-                    ? (payload?.milestoneSections as unknown as MilestoneSection[])
-                    : [];
-                  const milestoneCards: MilestoneCard[] = Array.isArray(payload?.milestoneCards)
-                    ? (payload?.milestoneCards as unknown as MilestoneCard[])
-                    : [];
-                  return (
-                <MilestonesTable
-                  title="My Milestones"
-                  milestoneSections={milestoneSections}
-                  milestoneCards={milestoneCards}
-                  onNavigate={(href) => setLocation(href)}
-                />
-                  );
-                })()
-              )}
-            </div>
-          )}
+          <div className="mt-4">
+            {milestonesQuery.isError ? (
+              <QueryFallback title="Milestones unavailable" error={milestonesQuery.error} onRetry={() => milestonesQuery.refetch()} isRetrying={milestonesQuery.isFetching} />
+            ) : (
+              (() => {
+                const payload = milestonesQuery.data as Record<string, unknown> | undefined;
+                const milestoneSections: MilestoneSection[] = Array.isArray(payload?.milestoneSections)
+                  ? (payload?.milestoneSections as unknown as MilestoneSection[])
+                  : [];
+                const milestoneCards: MilestoneCard[] = Array.isArray(payload?.milestoneCards)
+                  ? (payload?.milestoneCards as unknown as MilestoneCard[])
+                  : [];
+                const staffLabel = (() => {
+                  if (!data?.staffUser?.name) return "My Milestones";
+                  if (userId === "me") return "My Milestones";
+                  const match = data.staffOptions.find((u) => String(u.id) === userId);
+                  return match?.name ? `${match.name}'s Milestones` : "Milestones";
+                })();
+                return (
+                  <MilestonesTable
+                    title={staffLabel}
+                    milestoneSections={milestoneSections}
+                    milestoneCards={milestoneCards}
+                    onNavigate={(href) => setLocation(href)}
+                  />
+                );
+              })()
+            )}
+          </div>
 
           <Card className="mt-4">
             <CardHeader className="pb-3">

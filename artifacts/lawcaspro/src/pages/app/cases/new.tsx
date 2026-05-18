@@ -142,13 +142,23 @@ export default function NewCasePage() {
       const s = (v: unknown): string => (typeof v === "string" ? v.trim() : "");
       const purchaserName = s(obj.purchaserName);
       const purchaserIc = s(obj.purchaserIc);
+      const purchasers = Array.isArray(obj.purchasers)
+        ? (obj.purchasers as unknown[])
+            .map((p) => {
+              const r = p && typeof p === "object" ? (p as Record<string, unknown>) : {};
+              return { name: s(r.name), ic: s(r.ic) };
+            })
+            .filter((p) => p.name || p.ic)
+        : [];
       const parcel = s(obj.parcelNo);
       const price = s(obj.price);
       const bank = s(obj.loanBank);
       const loanAmount = s(obj.loanAmount);
       const addr = s(obj.propertyAddress);
 
-      if (purchaserName || purchaserIc) {
+      if (purchasers.length > 0) {
+        setPurchasers(purchasers);
+      } else if (purchaserName || purchaserIc) {
         setPurchasers([{ name: purchaserName, ic: purchaserIc }]);
       }
       if (parcel) setParcelNo(parcel);

@@ -482,7 +482,26 @@ routerInternal.get("/developers/:developerId/documents", requireAuth, requireFir
   }
 });
 
-routerInternal.post("/developers/:developerId/documents", requireAuth, requireFirmUser, requirePermission("developers", "update"), upload.single("file"), async (req: AuthRequestLike, res: RouteResLike): Promise<void> => {
+routerInternal.post(
+  "/developers/:developerId/documents",
+  requireAuth,
+  requireFirmUser,
+  requirePermission("developers", "update"),
+  (req: unknown, res: RouteResLike, next: (err?: unknown) => void) => {
+    upload.single("file")(req as any, res as any, (err: unknown) => {
+      if (!err) {
+        next();
+        return;
+      }
+      const code = (err as any)?.code;
+      if (code === "LIMIT_FILE_SIZE") {
+        res.status(413).json({ error: "File too large (max 10MB)" });
+        return;
+      }
+      res.status(400).json({ error: "Invalid upload" });
+    });
+  },
+  async (req: AuthRequestLike, res: RouteResLike): Promise<void> => {
   try {
     const r = req.rlsDb;
     if (!r) {
@@ -523,7 +542,7 @@ routerInternal.post("/developers/:developerId/documents", requireAuth, requireFi
     const safeName = safeFilenameAscii(fileName).replace(/\s+/g, "_");
     const primaryObjectPath = `/objects/developers/${req.firmId!}/${developerId}/${randomUUID()}-${safeName}`;
     let objectPath = primaryObjectPath;
-    let warning: string | null = null;
+    const warnings: string[] = [];
 
     try {
       await withTimeout(
@@ -538,7 +557,7 @@ routerInternal.post("/developers/:developerId/documents", requireAuth, requireFi
     } catch (err) {
       console.warn(err);
       objectPath = `pending_upload/developers/${req.firmId!}/${developerId}/${randomUUID()}-${safeName}`;
-      warning = "Storage service is currently unavailable. File metadata saved but file content was not uploaded.";
+      warnings.push("Storage service is currently unavailable. File metadata saved but file content was not uploaded.");
     }
 
     const [created] = await r
@@ -557,19 +576,24 @@ routerInternal.post("/developers/:developerId/documents", requireAuth, requireFi
       })
       .returning();
 
-    await writeAuditLog({
-      firmId: req.firmId,
-      actorId: req.userId,
-      actorType: req.userType,
-      action: "developers.documents.upload",
-      entityType: "developer_document",
-      entityId: created.id,
-      detail: `developerId=${developerId} name=${documentName}`,
-      ipAddress: req.ip,
-      userAgent: getHeader(req, "user-agent"),
-    });
+    try {
+      await writeAuditLog({
+        firmId: req.firmId,
+        actorId: req.userId,
+        actorType: req.userType,
+        action: "developers.documents.upload",
+        entityType: "developer_document",
+        entityId: created.id,
+        detail: `developerId=${developerId} name=${documentName}`,
+        ipAddress: req.ip,
+        userAgent: getHeader(req, "user-agent"),
+      });
+    } catch (err) {
+      logger.error({ err, path: req.path, firmId: req.firmId, userId: req.userId }, "[developers.documents.upload] audit log failed");
+      warnings.push("Audit logging is temporarily unavailable. Upload succeeded, but audit trail may be incomplete.");
+    }
 
-    res.status(warning ? 200 : 201).json({
+    res.status(warnings.length ? 200 : 201).json({
       id: created.id,
       developerId: created.developerId,
       documentName: created.documentName,
@@ -581,12 +605,15 @@ routerInternal.post("/developers/:developerId/documents", requireAuth, requireFi
       validTo: created.validTo ? String(created.validTo) : null,
       createdAt: created.createdAt.toISOString(),
       updatedAt: created.updatedAt.toISOString(),
-      ...(warning ? { warning } : {}),
+      ...(warnings.length ? { warning: warnings[0], warnings } : {}),
     });
   } catch (err) {
     console.error(err);
     logger.error({ err, path: req.path, firmId: req.firmId, userId: req.userId }, "[developers.documents.upload]");
-    res.status(500).json({ error: "Upload failed" });
+    res.status(200).json({
+      warning: "Upload encountered an internal error. Please refresh to confirm whether the document record was saved, then retry if needed.",
+      warnings: ["Upload encountered an internal error. Please refresh to confirm whether the document record was saved, then retry if needed."],
+    });
   }
 });
 

@@ -46,7 +46,7 @@ export function MilestonesTable({
   onNavigate: (href: string) => void;
   headerRight?: ReactNode;
 }) {
-  if (milestoneSections.length === 0 && milestoneCards.length === 0) return null;
+  const empty = milestoneSections.length === 0 && milestoneCards.length === 0;
 
   return (
     <Card>
@@ -55,6 +55,9 @@ export function MilestonesTable({
         {headerRight}
       </CardHeader>
       <CardContent>
+        {empty ? (
+          <div className="text-sm text-slate-500">No milestones available.</div>
+        ) : (
         <Table>
           <TableBody>
             {milestoneSections.length > 0
@@ -168,6 +171,7 @@ export function MilestonesTable({
                 })}
           </TableBody>
         </Table>
+        )}
       </CardContent>
     </Card>
   );

@@ -38,8 +38,20 @@ router.get("/dashboard", requireAuth, requireFirmUser, requirePermission("dashbo
       const v = raw.trim().toLowerCase();
       return v === "1" || v === "true" || v === "yes";
     })();
+    const assignedToUserId = (() => {
+      const raw = one((req.query as unknown as Record<string, unknown>)?.assignedToUserId as string | string[] | undefined);
+      if (!raw) return null;
+      const n = Number.parseInt(raw, 10);
+      if (!Number.isFinite(n) || n <= 0) return null;
+      return n;
+    })();
     if (assignedToMe) {
       const payload = await computeDashboardStats(r, firmId, { assignedToUserId: req.userId ?? undefined });
+      res.json(payload);
+      return;
+    }
+    if (assignedToUserId) {
+      const payload = await computeDashboardStats(r, firmId, { assignedToUserId });
       res.json(payload);
       return;
     }

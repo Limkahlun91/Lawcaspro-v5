@@ -151,13 +151,11 @@ export default function AppDashboard() {
         ))}
       </div>
 
-      {(milestoneSections.length > 0 || milestoneCards.length > 0) && (
-        <MilestonesTable
-          milestoneSections={milestoneSections}
-          milestoneCards={milestoneCards}
-          onNavigate={(href) => setLocation(href)}
-        />
-      )}
+      <MilestonesTable
+        milestoneSections={milestoneSections}
+        milestoneCards={milestoneCards}
+        onNavigate={(href) => setLocation(href)}
+      />
 
       <div className={`grid grid-cols-1 gap-4 ${canSeeAccounting ? "md:grid-cols-3" : ""}`}>
         {canSeeAccounting && (

@@ -220,7 +220,7 @@ function ProjectDocumentsPanel(props: { projectId: number; category: "general" |
                     }
                   }
                   fd.append("file", file);
-                  await apiFetchJson(`/projects/${projectId}/documents`, { method: "POST", body: fd });
+                  const created = await apiFetchJson(`/projects/${projectId}/documents`, { method: "POST", body: fd }) as any;
                   setDocumentName("");
                   setFile(null);
                   setHasExpiry(false);
@@ -229,7 +229,17 @@ function ProjectDocumentsPanel(props: { projectId: number; category: "general" |
                   setBankName("");
                   setDocumentDate("");
                   await fetchDocs();
-                  toast({ title: "Document uploaded" });
+                  const warningText =
+                    typeof created?.warning === "string"
+                      ? created.warning
+                      : Array.isArray(created?.warnings) && typeof created.warnings?.[0] === "string"
+                        ? created.warnings[0]
+                        : null;
+                  if (warningText) {
+                    toast({ title: "Document uploaded (warning)", description: warningText });
+                  } else {
+                    toast({ title: "Document uploaded" });
+                  }
                 } catch (e) {
                   toastError(toast, e, "Upload failed");
                 } finally {

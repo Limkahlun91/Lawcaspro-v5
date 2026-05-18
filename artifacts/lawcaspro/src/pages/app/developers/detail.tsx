@@ -627,14 +627,24 @@ export default function DeveloperDetail() {
                     if (docValidTo) fd.append("validTo", docValidTo);
                   }
                   fd.append("file", docFile);
-                  await apiFetchJson(`/developers/${developerId}/documents`, { method: "POST", body: fd });
+                  const created = await apiFetchJson(`/developers/${developerId}/documents`, { method: "POST", body: fd }) as any;
                   setDocName("");
                   setDocFile(null);
                   setDocHasExpiry(false);
                   setDocValidFrom("");
                   setDocValidTo("");
                   await fetchDocuments();
-                  toast({ title: "Document uploaded" });
+                  const warningText =
+                    typeof created?.warning === "string"
+                      ? created.warning
+                      : Array.isArray(created?.warnings) && typeof created.warnings?.[0] === "string"
+                        ? created.warnings[0]
+                        : null;
+                  if (warningText) {
+                    toast({ title: "Document uploaded (warning)", description: warningText });
+                  } else {
+                    toast({ title: "Document uploaded" });
+                  }
                 } catch (e) {
                   toastError(toast, e, "Upload failed");
                 } finally {
