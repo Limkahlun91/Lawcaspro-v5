@@ -1,6 +1,6 @@
 import express, { type Response, type Router as ExpressRouter } from "express";
 import multer from "multer";
-import pdfParse from "pdf-parse";
+import * as pdfParse from "pdf-parse";
 import OpenAI from "openai";
 import { z } from "zod/v4";
 import { requireAuth, requireFirmUser, requirePermission, writeAuditLog, type AuthRequest } from "../lib/auth.js";
@@ -150,8 +150,10 @@ router.post(
 
       let rawText = "";
       try {
-        const parsed = await pdfParse(file.buffer);
+        const parser = new pdfParse.PDFParse({ data: file.buffer });
+        const parsed = await parser.getText();
         rawText = String(parsed?.text ?? "").trim();
+        await parser.destroy().catch(() => undefined);
       } catch {
         throw new ApiError({ status: 400, code: "PDF_TEXT_EXTRACTION_FAILED", message: "Unable to extract text from PDF", retryable: false });
       }
