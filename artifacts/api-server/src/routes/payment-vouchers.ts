@@ -127,8 +127,26 @@ router.post("/payment-vouchers", sensitiveRateLimiter, requireAuth, requireFirmU
     purpose,
     notes,
     items,
+    lineItems,
     fundStatus,
   } = parsed.data;
+
+  const normalizedLineItems =
+    Array.isArray(lineItems) && lineItems.length > 0
+      ? lineItems.map((x) => ({ purpose: String(x.purpose ?? "").trim(), amount: Number(x.amount) })).filter((x) => x.purpose && Number.isFinite(x.amount) && x.amount > 0)
+      : null;
+
+  const effectiveItems = (Array.isArray(items) && items.length > 0)
+    ? items
+    : (normalizedLineItems && normalizedLineItems.length > 0)
+      ? normalizedLineItems.map((i) => ({ description: i.purpose, itemType: "disbursement" as const, amount: i.amount }))
+      : [{ description: purpose, itemType: "disbursement" as const, amount }];
+
+  const effectiveAmount = effectiveItems.reduce((sum, i) => sum + Number(i.amount), 0);
+  const storedPurpose =
+    normalizedLineItems && normalizedLineItems.length > 1
+      ? `${normalizedLineItems[0].purpose} (+${normalizedLineItems.length - 1} more)`
+      : purpose;
 
   const roleName = await getRoleName(req);
   const roleKind = classifyRole(roleName);
@@ -159,7 +177,7 @@ router.post("/payment-vouchers", sensitiveRateLimiter, requireAuth, requireFirmU
   const approvalStatus = (() => {
     if (voucherType === "account_transfer") return "pending_approval";
     if (effectiveFundStatus === "request_advance") return "pending_approval";
-    if (amount >= approvalThresholdRm()) return "pending_approval";
+    if (effectiveAmount >= approvalThresholdRm()) return "pending_approval";
     return "approved";
   })();
 
@@ -198,15 +216,11 @@ router.post("/payment-vouchers", sensitiveRateLimiter, requireAuth, requireFirmU
     paymentMethod: paymentMethod ?? null,
     bankAccountId: bankAccountId ?? null,
     accountType: accountType ?? null,
-    amount: amount.toFixed(2),
-    purpose,
+    amount: effectiveAmount.toFixed(2),
+    purpose: storedPurpose,
     notes: notes ?? null,
     createdBy: req.userId!,
   }).returning();
-
-  const effectiveItems = (Array.isArray(items) && items.length > 0)
-    ? items
-    : [{ description: purpose, itemType: "disbursement", amount }];
 
   await r.insert(paymentVoucherItemsTable).values(effectiveItems.map((i, idx) => ({
     voucherId: pv.id,

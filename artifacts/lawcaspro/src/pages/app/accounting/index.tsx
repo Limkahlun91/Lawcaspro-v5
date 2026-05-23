@@ -5,7 +5,7 @@ import { useLocation, useSearch } from "wouter";
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from "recharts";
 import {
   DollarSign, TrendingUp, Clock, Briefcase, Plus, Search, FileText,
-  Receipt, CreditCard, BookOpen, ChevronRight, RotateCcw, ArrowUpDown, ListOrdered, Landmark, Printer
+  Receipt, CreditCard, BookOpen, ChevronRight, RotateCcw, ArrowUpDown, ListOrdered, Landmark, Printer, Minus
 } from "lucide-react";
 import { Link } from "wouter";
 import { Button } from "@/components/ui/button";
@@ -829,10 +829,21 @@ function PaymentVouchersTab() {
     payeeName: "",
     beneficiaryBank: "",
     beneficiaryAccountNo: "",
-    purpose: "",
     isAdvance: false,
-    amount: "",
   });
+  const newLineItemId = (): string => {
+    const c = (globalThis as any).crypto;
+    if (c && typeof c.randomUUID === "function") return c.randomUUID();
+    return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  };
+  const [lineItems, setLineItems] = useState<Array<{ id: string; purpose: string; amount: string }>>([
+    { id: newLineItemId(), purpose: "", amount: "" },
+  ]);
+  const totalAmount = lineItems.reduce((sum, x) => {
+    const n = parseFloat(String(x.amount ?? ""));
+    if (!Number.isFinite(n) || n <= 0) return sum;
+    return sum + n;
+  }, 0);
   const [caseQueryText, setCaseQueryText] = useState("");
   const [casePickerOpen, setCasePickerOpen] = useState(false);
   const [selectedCases, setSelectedCases] = useState<Array<{ case_id: number; title: string }>>([]);
@@ -852,23 +863,27 @@ function PaymentVouchersTab() {
 
   const createBatchMut = useMutation({
     mutationFn: async () => {
-      const amount = parseFloat(simpleForm.amount);
-      if (!Number.isFinite(amount) || amount <= 0) throw new Error("Invalid amount");
       if (!simpleForm.payeeName.trim()) throw new Error("Payee name is required");
-      if (!simpleForm.purpose.trim()) throw new Error("Purpose is required");
       if (selectedCases.length === 0) throw new Error("Please select at least one case");
 
       const fundStatus: PaymentVoucherFundStatus = simpleForm.isAdvance ? "request_advance" : "client_paid";
+      const parsedLineItems = lineItems
+        .map((x) => ({ purpose: String(x.purpose ?? "").trim(), amount: parseFloat(String(x.amount ?? "")) }))
+        .filter((x) => x.purpose && Number.isFinite(x.amount) && x.amount > 0);
+      if (parsedLineItems.length === 0) throw new Error("At least one line item is required");
+      const amount = parsedLineItems.reduce((sum, x) => sum + x.amount, 0);
+      if (!Number.isFinite(amount) || amount <= 0) throw new Error("Invalid total amount");
+      const purpose = parsedLineItems.length > 1 ? `${parsedLineItems[0].purpose} (+${parsedLineItems.length - 1} more)` : parsedLineItems[0].purpose;
       const bodyBase = {
         voucherType: "external_payment" as const,
         payeeName: simpleForm.payeeName.trim(),
         beneficiaryBank: simpleForm.beneficiaryBank.trim() ? simpleForm.beneficiaryBank.trim() : null,
         beneficiaryAccountNo: simpleForm.beneficiaryAccountNo.trim() ? simpleForm.beneficiaryAccountNo.trim() : null,
-        purpose: simpleForm.purpose.trim(),
+        purpose,
         amount,
         fundStatus,
         notes: null,
-        items: [{ description: simpleForm.purpose.trim(), itemType: "disbursement" as const, amount }],
+        lineItems: parsedLineItems,
       };
 
       const calls = selectedCases.map((c) => {
@@ -886,7 +901,8 @@ function PaymentVouchersTab() {
     onSuccess: async (rows: any[]) => {
       await qc.invalidateQueries({ queryKey: ["payment-vouchers"] });
       setShowCreate(false);
-      setSimpleForm({ payeeName: "", beneficiaryBank: "", beneficiaryAccountNo: "", purpose: "", isAdvance: false, amount: "" });
+      setSimpleForm({ payeeName: "", beneficiaryBank: "", beneficiaryAccountNo: "", isAdvance: false });
+      setLineItems([{ id: newLineItemId(), purpose: "", amount: "" }]);
       setCaseQueryText("");
       setSelectedCases([]);
       toast({ title: "Payment Vouchers created", description: `${rows.length} voucher(s) created` });
@@ -1029,14 +1045,10 @@ function PaymentVouchersTab() {
                 </div>
 
                 <div className="space-y-1.5">
-                  <label className="text-sm font-medium text-slate-700 block">Amount (RM)</label>
-                  <Input
-                    type="number"
-                    step="0.01"
-                    placeholder="0.00"
-                    value={simpleForm.amount}
-                    onChange={(e) => setSimpleForm((f) => ({ ...f, amount: e.target.value }))}
-                  />
+                  <label className="text-sm font-medium text-slate-700 block">Total Amount (RM)</label>
+                  <div className="h-10 flex items-center px-3 rounded-md border border-slate-200 bg-white text-sm text-slate-900 font-semibold">
+                    {fmt(totalAmount)}
+                  </div>
                 </div>
 
                 <div className="space-y-1.5 md:col-span-2">
@@ -1119,12 +1131,72 @@ function PaymentVouchersTab() {
                 </div>
 
                 <div className="space-y-1.5 md:col-span-2">
-                  <label className="text-sm font-medium text-slate-700 block">Purpose</label>
-                  <Input
-                    placeholder="Brief purpose of payment"
-                    value={simpleForm.purpose}
-                    onChange={(e) => setSimpleForm((f) => ({ ...f, purpose: e.target.value }))}
-                  />
+                  <label className="text-sm font-medium text-slate-700 block">Line Items</label>
+                  <div className="overflow-x-auto rounded-md border border-slate-200 bg-white">
+                    <table className="w-full text-sm">
+                      <thead className="bg-slate-50 border-b border-slate-200">
+                        <tr className="text-left text-slate-600">
+                          <th className="py-2 px-3 font-medium">Purpose</th>
+                          <th className="py-2 px-3 font-medium text-right w-[160px]">Amount (RM)</th>
+                          <th className="py-2 px-3 font-medium text-right w-[56px]"> </th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {lineItems.map((it, idx) => (
+                          <tr key={it.id} className="border-b border-slate-100 last:border-b-0">
+                            <td className="py-2 px-3">
+                              <Input
+                                placeholder="e.g. Stamp duty, registration, disbursement"
+                                value={it.purpose}
+                                onChange={(e) => {
+                                  const next = [...lineItems];
+                                  next[idx] = { ...next[idx], purpose: e.target.value };
+                                  setLineItems(next);
+                                }}
+                              />
+                            </td>
+                            <td className="py-2 px-3 text-right">
+                              <Input
+                                type="number"
+                                step="0.01"
+                                placeholder="0.00"
+                                value={it.amount}
+                                onChange={(e) => {
+                                  const next = [...lineItems];
+                                  next[idx] = { ...next[idx], amount: e.target.value };
+                                  setLineItems(next);
+                                }}
+                              />
+                            </td>
+                            <td className="py-2 px-3 text-right">
+                              <Button
+                                type="button"
+                                variant="outline"
+                                size="icon"
+                                className="h-9 w-9"
+                                disabled={lineItems.length <= 1}
+                                onClick={() => setLineItems((xs) => xs.filter((x) => x.id !== it.id))}
+                                title="Remove"
+                              >
+                                <Minus className="h-4 w-4" />
+                              </Button>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                  <div className="pt-2 flex justify-between items-center">
+                    <Button
+                      type="button"
+                      variant="outline"
+                      className="gap-2"
+                      onClick={() => setLineItems((xs) => [...xs, { id: newLineItemId(), purpose: "", amount: "" }])}
+                    >
+                      <Plus className="w-4 h-4" /> Add Line
+                    </Button>
+                    <div className="text-sm font-semibold text-slate-900">Total: {fmt(totalAmount)}</div>
+                  </div>
                 </div>
 
                 <div className="space-y-1.5 md:col-span-2">

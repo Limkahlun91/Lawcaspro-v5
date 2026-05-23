@@ -49,6 +49,12 @@ export const PaymentVoucherItem = z.object({
 });
 export type PaymentVoucherItem = z.infer<typeof PaymentVoucherItem>;
 
+export const PaymentVoucherLineItem = z.object({
+  purpose: z.string().trim().min(1),
+  amount: z.number().finite().positive(),
+});
+export type PaymentVoucherLineItem = z.infer<typeof PaymentVoucherLineItem>;
+
 export const CreatePaymentVoucherBody = z.object({
   caseId: z.number().int().positive().nullable().optional(),
   voucherType: PaymentVoucherType.optional().default("external_payment"),
@@ -59,6 +65,7 @@ export const CreatePaymentVoucherBody = z.object({
   amount: z.number().finite().positive(),
   fundStatus: PaymentVoucherFundStatus.optional().default("client_paid"),
   items: z.array(PaymentVoucherItem).min(1).optional(),
+  lineItems: z.array(PaymentVoucherLineItem).min(1).optional(),
   notes: z.string().trim().max(5000).nullable().optional(),
 
   payeeBank: z.string().trim().max(255).nullable().optional(),

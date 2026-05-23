@@ -204,14 +204,14 @@ routerInternal.patch("/roles/:roleId", requireAuth, requireFirmUser, requirePerm
   try {
     const params = RoleIdParamsSchema.safeParse(req.params);
     if (!params.success) {
-      res.status(400).json({ error: params.error.message });
+      res.status(400).json({ error: "Invalid data" });
       return;
     }
     const p: RoleIdParams = params.data;
 
     const parsed = UpdateRoleBodySchema.safeParse(req.body);
     if (!parsed.success) {
-      res.status(400).json({ error: parsed.error.message });
+      res.status(400).json({ error: "Invalid data" });
       return;
     }
     const body: UpdateRoleBody = parsed.data;
