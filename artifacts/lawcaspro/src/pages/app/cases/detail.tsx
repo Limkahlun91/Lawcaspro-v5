@@ -7,7 +7,7 @@ import {
 } from "@workspace/api-client-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { ArrowLeft, CheckCircle2, Clock, User, Building2, MapPin, Tag, Receipt, Printer, Upload, Download, Trash2, Plus, X, MoreHorizontal, Share2, AlertTriangle } from "lucide-react";
+import { ArrowLeft, CheckCircle2, Clock, User, Building2, MapPin, Tag, Receipt, Printer, Upload, Download, Trash2, Plus, Minus, X, MoreHorizontal, Share2, AlertTriangle } from "lucide-react";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useToast } from "@/hooks/use-toast";
@@ -21,7 +21,6 @@ import { cn } from "@/lib/utils";
 import { Breadcrumb, BreadcrumbItem, BreadcrumbLink, BreadcrumbList, BreadcrumbPage, BreadcrumbSeparator } from "@/components/ui/breadcrumb";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { QuickAddUserDialog } from "@/components/quick-add-user-dialog";
 import CaseDocumentsTab from "./components/CaseDocumentsTab";
 import CaseBillingTab from "./components/CaseBillingTab";
 import CaseCommunicationsTab from "./components/CaseCommunicationsTab";
@@ -307,8 +306,6 @@ export default function CaseDetail() {
     const rn = roleName.trim();
     return rn === "Partner" || rn === "Manager" || rn.startsWith("Manager");
   })();
-  const [quickAddUserOpen, setQuickAddUserOpen] = useState(false);
-  const [quickAddUserRoleKind, setQuickAddUserRoleKind] = useState<"lawyer" | "clerk">("lawyer");
 
   const {
     data: caseInfo,
@@ -325,11 +322,22 @@ export default function CaseDetail() {
   const users = usersRes?.data || [];
   const lawyerOptions = users.filter((u) => ["Partner", "Senior Lawyer", "Lawyer"].includes(String(u.roleName ?? "").trim()));
   const clerkOptions = users.filter((u) => ["Senior Clerk", "Clerk"].includes(String(u.roleName ?? "").trim()));
-  const currentLawyerId = (Array.isArray((caseInfo as any)?.assignments) ? (caseInfo as any).assignments : [])
-    .find((a: any) => a?.roleInCase === "lawyer")?.userId as number | undefined;
-  const currentClerkId = (Array.isArray((caseInfo as any)?.assignments) ? (caseInfo as any).assignments : [])
-    .find((a: any) => a?.roleInCase === "clerk")?.userId as number | undefined;
-  const canAccessClientInteraction = !!caseId && (canAssignAny || isPartnerOrManager || (Number.isFinite(myUserId) && (myUserId === currentLawyerId || myUserId === currentClerkId)));
+  const currentLawyerIds = (Array.isArray((caseInfo as any)?.assignments) ? (caseInfo as any).assignments : [])
+    .filter((a: any) => a?.roleInCase === "lawyer")
+    .map((a: any) => Number(a?.userId))
+    .filter((id: number) => Number.isInteger(id) && id > 0);
+  const currentClerkIds = (Array.isArray((caseInfo as any)?.assignments) ? (caseInfo as any).assignments : [])
+    .filter((a: any) => a?.roleInCase === "clerk")
+    .map((a: any) => Number(a?.userId))
+    .filter((id: number) => Number.isInteger(id) && id > 0);
+  const canAccessClientInteraction = !!caseId && (canAssignAny || isPartnerOrManager || (Number.isFinite(myUserId) && (currentLawyerIds.includes(myUserId) || currentClerkIds.includes(myUserId))));
+  const [assignedLawyerIds, setAssignedLawyerIds] = useState<string[]>([]);
+  const [assignedClerkIds, setAssignedClerkIds] = useState<string[]>([]);
+  const assignmentsKey = `${currentLawyerIds.slice().sort((a, b) => a - b).join(",")}|${currentClerkIds.slice().sort((a, b) => a - b).join(",")}`;
+  useEffect(() => {
+    setAssignedLawyerIds(currentLawyerIds.length > 0 ? currentLawyerIds.map(String) : [""]);
+    setAssignedClerkIds(currentClerkIds.length > 0 ? currentClerkIds.map(String) : [""]);
+  }, [assignmentsKey]);
 
   const {
     data: workflow,
@@ -355,6 +363,37 @@ export default function CaseDetail() {
       toastError(toast, err, { fallback: "Failed to update case" });
     },
   });
+
+  const updateAssignmentsMutation = useMutation({
+    mutationFn: async (payload: { lawyerIds: number[]; clerkIds: number[] }) => {
+      return apiFetchJson(`/cases/${caseId}/assignments`, { method: "PATCH", body: JSON.stringify(payload) });
+    },
+    onSuccess: async () => {
+      queryClient.invalidateQueries({ queryKey: getListCasesQueryKey() });
+      queryClient.invalidateQueries({ queryKey: getGetCaseQueryKey(caseId) });
+      toast({ title: "Assignments updated" });
+    },
+    onError: (err) => {
+      toastError(toast, err, { fallback: "Failed to update assignments" });
+    },
+  });
+
+  const normalizeSelectedIds = (values: string[]): number[] => {
+    const ids = values
+      .map((v) => Number(String(v || "").trim()))
+      .filter((n) => Number.isInteger(n) && n > 0);
+    return Array.from(new Set(ids));
+  };
+
+  const saveAssignments = (nextLawyers: string[], nextClerks: string[]) => {
+    const lawyerIds = normalizeSelectedIds(nextLawyers);
+    const clerkIds = normalizeSelectedIds(nextClerks);
+    if (lawyerIds.length === 0) {
+      toast({ title: "Assigned Lawyer is required", variant: "destructive" });
+      return;
+    }
+    updateAssignmentsMutation.mutate({ lawyerIds, clerkIds });
+  };
   const saveKeyDatesMutation = useMutation({
     mutationFn: (vars: { scope: string; payload: Record<string, unknown>; keys: string[] }) =>
       apiFetchJson(`/cases/${caseId}/key-dates`, { method: "PATCH", body: JSON.stringify(vars.payload) }),
@@ -1503,20 +1542,6 @@ export default function CaseDetail() {
         className="hidden"
         onChange={(e) => handleStampingFileSelected(e.target.files?.[0] ?? null)}
       />
-      <QuickAddUserDialog
-        open={quickAddUserOpen}
-        onOpenChange={setQuickAddUserOpen}
-        roleKind={quickAddUserRoleKind}
-        onCreated={(created) => {
-          const id = Number(created.id);
-          if (!Number.isFinite(id) || id <= 0) return;
-          if (quickAddUserRoleKind === "lawyer") {
-            updateCaseMutation.mutate({ assignedLawyerId: id });
-          } else {
-            updateCaseMutation.mutate({ assignedClerkId: id });
-          }
-        }}
-      />
       <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4 min-w-0">
         <div className="flex items-start gap-4 min-w-0">
           <Button variant="outline" size="icon" onClick={() => setLocation(returnTo)}>
@@ -1759,38 +1784,64 @@ export default function CaseDetail() {
                     <div className="space-y-1.5">
                       <div className="text-xs font-medium text-slate-500">Assigned Lawyer</div>
                       {canEditAssignments ? (
-                        <div className="flex items-center gap-2">
-                          <Select
-                            value={currentLawyerId ? String(currentLawyerId) : ""}
-                            onValueChange={(v) => {
-                              const id = Number(v);
-                              if (!Number.isInteger(id) || id <= 0) return;
-                              updateCaseMutation.mutate({ assignedLawyerId: id });
-                            }}
-                          >
-                            <SelectTrigger className="h-9 text-sm border-slate-200 bg-white flex-1">
-                              <SelectValue placeholder="Select existing lawyer..." />
-                            </SelectTrigger>
-                            <SelectContent>
-                              {lawyerOptions.map((u) => (
-                                <SelectItem key={u.id} value={String(u.id)}>{u.name}</SelectItem>
-                              ))}
-                            </SelectContent>
-                          </Select>
-                          <Button
-                            type="button"
-                            variant="outline"
-                            size="icon"
-                            className="h-9 w-9"
-                            onClick={() => { setQuickAddUserRoleKind("lawyer"); setQuickAddUserOpen(true); }}
-                            title="Register new employee (lawyer)"
-                          >
-                            <Plus className="h-4 w-4" />
-                          </Button>
+                        <div className="space-y-2">
+                          {assignedLawyerIds.map((v, idx) => (
+                            <div key={`lawyer-${idx}`} className="flex items-center gap-2">
+                              <Select
+                                value={v}
+                                disabled={updateAssignmentsMutation.isPending}
+                                onValueChange={(nextValue) => {
+                                  const next = [...assignedLawyerIds];
+                                  next[idx] = nextValue;
+                                  setAssignedLawyerIds(next);
+                                  saveAssignments(next, assignedClerkIds);
+                                }}
+                              >
+                                <SelectTrigger className="h-9 text-sm border-slate-200 bg-white flex-1">
+                                  <SelectValue placeholder="Select existing lawyer..." />
+                                </SelectTrigger>
+                                <SelectContent>
+                                  {lawyerOptions.map((u) => (
+                                    <SelectItem key={u.id} value={String(u.id)}>{u.name}</SelectItem>
+                                  ))}
+                                </SelectContent>
+                              </Select>
+                              {idx > 0 ? (
+                                <Button
+                                  type="button"
+                                  variant="outline"
+                                  size="icon"
+                                  className="h-9 w-9"
+                                  disabled={updateAssignmentsMutation.isPending}
+                                  onClick={() => {
+                                    const next = assignedLawyerIds.filter((_, i) => i !== idx);
+                                    setAssignedLawyerIds(next.length > 0 ? next : [""]);
+                                    saveAssignments(next, assignedClerkIds);
+                                  }}
+                                  title="Remove"
+                                >
+                                  <Minus className="h-4 w-4" />
+                                </Button>
+                              ) : null}
+                              {idx === assignedLawyerIds.length - 1 ? (
+                                <Button
+                                  type="button"
+                                  variant="outline"
+                                  size="icon"
+                                  className="h-9 w-9"
+                                  disabled={updateAssignmentsMutation.isPending}
+                                  onClick={() => setAssignedLawyerIds((prev) => [...prev, ""])}
+                                  title="Add another lawyer"
+                                >
+                                  <Plus className="h-4 w-4" />
+                                </Button>
+                              ) : null}
+                            </div>
+                          ))}
                         </div>
                       ) : (
                         <div className="text-sm font-semibold text-slate-900">
-                          {(safeAssignments.find((a) => (a as any)?.roleInCase === "lawyer") as any)?.userName ?? "Unassigned"}
+                          {safeAssignments.filter((a) => (a as any)?.roleInCase === "lawyer").map((a: any) => String(a?.userName ?? "").trim()).filter(Boolean).join(", ") || "Unassigned"}
                         </div>
                       )}
                     </div>
@@ -1798,43 +1849,65 @@ export default function CaseDetail() {
                     <div className="space-y-1.5">
                       <div className="text-xs font-medium text-slate-500">Assigned Clerk</div>
                       {canEditAssignments ? (
-                        <div className="flex items-center gap-2">
-                          <Select
-                            value={currentClerkId ? String(currentClerkId) : ""}
-                            onValueChange={(v) => {
-                              if (v === "__none__") {
-                                updateCaseMutation.mutate({ assignedClerkId: null });
-                                return;
-                              }
-                              const id = Number(v);
-                              if (!Number.isInteger(id) || id <= 0) return;
-                              updateCaseMutation.mutate({ assignedClerkId: id });
-                            }}
-                          >
-                            <SelectTrigger className="h-9 text-sm border-slate-200 bg-white flex-1">
-                              <SelectValue placeholder="Select existing clerk..." />
-                            </SelectTrigger>
-                            <SelectContent>
-                              <SelectItem value="__none__">None</SelectItem>
-                              {clerkOptions.map((u) => (
-                                <SelectItem key={u.id} value={String(u.id)}>{u.name}</SelectItem>
-                              ))}
-                            </SelectContent>
-                          </Select>
-                          <Button
-                            type="button"
-                            variant="outline"
-                            size="icon"
-                            className="h-9 w-9"
-                            onClick={() => { setQuickAddUserRoleKind("clerk"); setQuickAddUserOpen(true); }}
-                            title="Register new employee (clerk)"
-                          >
-                            <Plus className="h-4 w-4" />
-                          </Button>
+                        <div className="space-y-2">
+                          {assignedClerkIds.map((v, idx) => (
+                            <div key={`clerk-${idx}`} className="flex items-center gap-2">
+                              <Select
+                                value={v || "__none__"}
+                                disabled={updateAssignmentsMutation.isPending}
+                                onValueChange={(nextValue) => {
+                                  const next = [...assignedClerkIds];
+                                  next[idx] = nextValue === "__none__" ? "" : nextValue;
+                                  setAssignedClerkIds(next);
+                                  saveAssignments(assignedLawyerIds, next);
+                                }}
+                              >
+                                <SelectTrigger className="h-9 text-sm border-slate-200 bg-white flex-1">
+                                  <SelectValue placeholder="Select existing clerk..." />
+                                </SelectTrigger>
+                                <SelectContent>
+                                  <SelectItem value="__none__">None</SelectItem>
+                                  {clerkOptions.map((u) => (
+                                    <SelectItem key={u.id} value={String(u.id)}>{u.name}</SelectItem>
+                                  ))}
+                                </SelectContent>
+                              </Select>
+                              {idx > 0 ? (
+                                <Button
+                                  type="button"
+                                  variant="outline"
+                                  size="icon"
+                                  className="h-9 w-9"
+                                  disabled={updateAssignmentsMutation.isPending}
+                                  onClick={() => {
+                                    const next = assignedClerkIds.filter((_, i) => i !== idx);
+                                    setAssignedClerkIds(next.length > 0 ? next : [""]);
+                                    saveAssignments(assignedLawyerIds, next);
+                                  }}
+                                  title="Remove"
+                                >
+                                  <Minus className="h-4 w-4" />
+                                </Button>
+                              ) : null}
+                              {idx === assignedClerkIds.length - 1 ? (
+                                <Button
+                                  type="button"
+                                  variant="outline"
+                                  size="icon"
+                                  className="h-9 w-9"
+                                  disabled={updateAssignmentsMutation.isPending}
+                                  onClick={() => setAssignedClerkIds((prev) => [...prev, ""])}
+                                  title="Add another clerk"
+                                >
+                                  <Plus className="h-4 w-4" />
+                                </Button>
+                              ) : null}
+                            </div>
+                          ))}
                         </div>
                       ) : (
                         <div className="text-sm font-semibold text-slate-900">
-                          {(safeAssignments.find((a) => (a as any)?.roleInCase === "clerk") as any)?.userName ?? "Unassigned"}
+                          {safeAssignments.filter((a) => (a as any)?.roleInCase === "clerk").map((a: any) => String(a?.userName ?? "").trim()).filter(Boolean).join(", ") || "Unassigned"}
                         </div>
                       )}
                     </div>

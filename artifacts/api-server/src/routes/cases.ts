@@ -3744,6 +3744,103 @@ router.patch("/cases/:caseId", requireAuthHandler, requireFirmUserHandler, requi
   res.json(await formatCaseDetail(r, c));
 }));
 
+const UpdateCaseAssignmentsParams = z.object({ caseId: z.coerce.number().int().positive() });
+const UpdateCaseAssignmentsBody = z.object({
+  lawyerIds: z.array(z.coerce.number().int().positive()).min(1).max(10),
+  clerkIds: z.array(z.coerce.number().int().positive()).max(10).optional().default([]),
+});
+
+router.patch("/cases/:caseId/assignments", requireAuthHandler, requireFirmUserHandler, requirePermission("cases", "update") as RequestHandler, authed(async (req, res) => {
+  const r = req.rlsDb;
+  if (!r) {
+    logger.error({ path: req.path, firmId: req.firmId, userId: req.userId }, "[cases.assignments] missing tenant database context");
+    res.status(500).json({ error: "Internal Server Error" });
+    return;
+  }
+
+  const params = UpdateCaseAssignmentsParams.safeParse(req.params);
+  if (!params.success) {
+    res.status(400).json({ error: params.error.message });
+    return;
+  }
+  const ok = await enforceCaseAccess(r, req, res, params.data.caseId);
+  if (!ok) return;
+
+  const parsed = UpdateCaseAssignmentsBody.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: parsed.error.message });
+    return;
+  }
+
+  const [roleRow] = await r
+    .select({ name: rolesTable.name })
+    .from(rolesTable)
+    .where(and(eq(rolesTable.id, req.roleId!), eq(rolesTable.firmId, req.firmId!)))
+    .limit(1);
+  const roleName = String(roleRow?.name ?? "");
+  const canEditAssignments = roleName === "Partner" || roleName === "Manager" || roleName.startsWith("Manager");
+  if (!canEditAssignments) {
+    res.status(403).json({ error: "Forbidden" });
+    return;
+  }
+
+  const uniq = (xs: number[]) => Array.from(new Set(xs));
+  const lawyerIds = uniq(parsed.data.lawyerIds);
+  const clerkIds = uniq(parsed.data.clerkIds ?? []);
+
+  const overlap = clerkIds.filter((id) => lawyerIds.includes(id));
+  if (overlap.length > 0) {
+    res.status(400).json({ error: "A user cannot be assigned as both lawyer and clerk on the same case" });
+    return;
+  }
+
+  const allIds = uniq([...lawyerIds, ...clerkIds]);
+  const existingUsers = await r
+    .select({ id: usersTable.id })
+    .from(usersTable)
+    .where(and(eq(usersTable.firmId, req.firmId!), inArray(usersTable.id, allIds)));
+  if (existingUsers.length !== allIds.length) {
+    res.status(400).json({ error: "One or more selected users were not found in this firm" });
+    return;
+  }
+
+  const now = new Date();
+  await r.update(caseAssignmentsTable)
+    .set({ unassignedAt: now })
+    .where(and(
+      eq(caseAssignmentsTable.caseId, params.data.caseId),
+      inArray(caseAssignmentsTable.roleInCase, ["lawyer", "clerk"]),
+      sql`${caseAssignmentsTable.unassignedAt} IS NULL`,
+    ));
+
+  await r.insert(caseAssignmentsTable).values([
+    ...lawyerIds.map((id) => ({ caseId: params.data.caseId, userId: id, roleInCase: "lawyer" as const, assignedBy: req.userId, assignedAt: now })),
+    ...clerkIds.map((id) => ({ caseId: params.data.caseId, userId: id, roleInCase: "clerk" as const, assignedBy: req.userId, assignedAt: now })),
+  ]);
+
+  await writeAuditLog({
+    firmId: req.firmId,
+    actorId: req.userId,
+    actorType: "firm_user",
+    action: "cases.assignments.updated",
+    entityType: "case",
+    entityId: params.data.caseId,
+    detail: `lawyers=${lawyerIds.join(",")} clerks=${clerkIds.join(",")}`,
+    ipAddress: req.ip,
+    userAgent: req.headers["user-agent"],
+  }, { db: req.rlsDb });
+
+  const [c] = await r
+    .select()
+    .from(casesTable)
+    .where(and(eq(casesTable.id, params.data.caseId), eq(casesTable.firmId, req.firmId!)));
+  if (!c) {
+    res.status(404).json({ error: "Case not found" });
+    return;
+  }
+  res.json(await formatCaseDetail(r, c));
+}));
+
 router.get("/cases/:caseId/workflow-documents", requireAuthHandler, requireFirmUserHandler, requirePermission("documents", "read") as RequestHandler, authed(async (req, res) => {
   const r = req.rlsDb;
   if (!r) {
