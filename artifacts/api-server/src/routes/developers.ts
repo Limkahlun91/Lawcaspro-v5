@@ -467,6 +467,7 @@ routerInternal.get("/developers/:developerId/documents", requireAuth, requireFir
       developerId: d.developerId,
       documentName: d.documentName,
       fileName: d.fileName,
+      objectPath: d.objectPath,
       mimeType: d.mimeType ?? null,
       fileSize: d.fileSize ?? null,
       hasExpiry: d.hasExpiry,

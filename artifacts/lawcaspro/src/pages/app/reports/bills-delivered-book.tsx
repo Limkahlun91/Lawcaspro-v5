@@ -56,6 +56,10 @@ export default function BillsDeliveredBook() {
   const totalsBilled = Number(totals.totalBilled ?? 0);
   const totalsPaid = Number(totals.totalPaid ?? 0);
   const totalsOutstanding = Number(totals.totalOutstanding ?? 0);
+  const totalsSubtotal = invoices.reduce((s: number, inv: any) => s + Number(inv.subtotal ?? 0), 0);
+  const totalsTax = invoices.reduce((s: number, inv: any) => s + Number(inv.taxTotal ?? 0), 0);
+  const totalsTaxableDisb = invoices.reduce((s: number, inv: any) => s + Number(inv.taxableDisbursements ?? 0), 0);
+  const totalsNonTaxDisb = invoices.reduce((s: number, inv: any) => s + Number(inv.nonTaxableDisbursements ?? 0), 0);
 
   function printReport() { window.print(); }
   async function downloadCsv() {
@@ -192,18 +196,21 @@ export default function BillsDeliveredBook() {
               <thead className="bg-slate-50 border-b">
                 <tr>
                   {[
-                    "Date",
+                    "Issued Date",
                     "Invoice No.",
+                    "Due Date",
                     "File Ref",
                     "Client",
-                    "Taxable Disb. (RM)",
-                    "Non-taxable Disb. (RM)",
+                    "Status",
+                    "Subtotal",
+                    "Tax",
+                    "Gross",
+                    "Paid",
+                    "Due",
+                    "Taxable Disb.",
+                    "Non-taxable Disb.",
                     "Receipt No(s)",
                     "Payment Date(s)",
-                    "Gross (RM)",
-                    "Paid (RM)",
-                    "Due (RM)",
-                    "Status",
                   ].map(h => (
                     <th key={h} className="text-left px-4 py-2.5 text-xs font-medium text-slate-500 uppercase tracking-wide">{h}</th>
                   ))}
@@ -212,29 +219,37 @@ export default function BillsDeliveredBook() {
               <tbody className="divide-y divide-slate-100">
                 {invoices.map((inv: any) => (
                   <tr key={inv.id} className="hover:bg-slate-50/50">
-                    <td className="px-4 py-2.5 text-slate-600">{fmtDate(inv.issuedDate)}</td>
-                    <td className="px-4 py-2.5 font-mono font-medium text-slate-800">{inv.invoiceNo}</td>
-                    <td className="px-4 py-2.5 text-slate-600">{inv.caseRef ?? "—"}</td>
+                    <td className="px-4 py-2.5 text-slate-600 text-center">{fmtDate(inv.issuedDate)}</td>
+                    <td className="px-4 py-2.5 font-mono font-medium text-slate-800 text-center">{inv.invoiceNo}</td>
+                    <td className="px-4 py-2.5 text-slate-600 text-center">{fmtDate(inv.dueDate)}</td>
+                    <td className="px-4 py-2.5 text-slate-600 text-center">{inv.caseRef ?? "—"}</td>
                     <td className="px-4 py-2.5 text-slate-700">{inv.clientName ?? "—"}</td>
-                    <td className="px-4 py-2.5 text-right tabular-nums">{Number(inv.taxableDisbursements ?? 0).toLocaleString("en-MY", { minimumFractionDigits: 2 })}</td>
-                    <td className="px-4 py-2.5 text-right tabular-nums">{Number(inv.nonTaxableDisbursements ?? 0).toLocaleString("en-MY", { minimumFractionDigits: 2 })}</td>
-                    <td className="px-4 py-2.5 text-slate-600">{Array.isArray(inv.receiptNumbers) && inv.receiptNumbers.length > 0 ? inv.receiptNumbers.join(", ") : "—"}</td>
-                    <td className="px-4 py-2.5 text-slate-600">{Array.isArray(inv.paymentDates) && inv.paymentDates.length > 0 ? inv.paymentDates.map((d: string) => fmtDate(d)).join(", ") : "—"}</td>
+                    <td className="px-4 py-2.5 text-center">
+                      <Badge variant="outline" className={`text-xs border-0 capitalize ${STATUS_BADGE[inv.status] ?? ""}`}>{inv.status?.replace("_", " ")}</Badge>
+                    </td>
+                    <td className="px-4 py-2.5 text-right tabular-nums">{Number(inv.subtotal ?? 0).toLocaleString("en-MY", { minimumFractionDigits: 2 })}</td>
+                    <td className="px-4 py-2.5 text-right tabular-nums">{Number(inv.taxTotal ?? 0).toLocaleString("en-MY", { minimumFractionDigits: 2 })}</td>
                     <td className="px-4 py-2.5 text-right tabular-nums">{Number(inv.grandTotal).toLocaleString("en-MY", { minimumFractionDigits: 2 })}</td>
                     <td className="px-4 py-2.5 text-right tabular-nums text-green-700">{Number(inv.amountPaid).toLocaleString("en-MY", { minimumFractionDigits: 2 })}</td>
                     <td className="px-4 py-2.5 text-right tabular-nums text-red-600">{Number(inv.amountDue).toLocaleString("en-MY", { minimumFractionDigits: 2 })}</td>
-                    <td className="px-4 py-2.5">
-                      <Badge variant="outline" className={`text-xs border-0 capitalize ${STATUS_BADGE[inv.status] ?? ""}`}>{inv.status?.replace("_", " ")}</Badge>
-                    </td>
+                    <td className="px-4 py-2.5 text-right tabular-nums">{Number(inv.taxableDisbursements ?? 0).toLocaleString("en-MY", { minimumFractionDigits: 2 })}</td>
+                    <td className="px-4 py-2.5 text-right tabular-nums">{Number(inv.nonTaxableDisbursements ?? 0).toLocaleString("en-MY", { minimumFractionDigits: 2 })}</td>
+                    <td className="px-4 py-2.5 text-slate-600">{Array.isArray(inv.receiptNumbers) && inv.receiptNumbers.length > 0 ? inv.receiptNumbers.join(", ") : "—"}</td>
+                    <td className="px-4 py-2.5 text-slate-600 text-center">{Array.isArray(inv.paymentDates) && inv.paymentDates.length > 0 ? inv.paymentDates.map((d: string) => fmtDate(d)).join(", ") : "—"}</td>
                   </tr>
                 ))}
               </tbody>
               <tfoot className="bg-slate-50 border-t font-medium">
                 <tr>
-                  <td colSpan={4} className="px-4 py-2.5 text-slate-700">Totals ({totalsCount} bills)</td>
+                  <td colSpan={6} className="px-4 py-2.5 text-slate-700">Totals ({totalsCount} bills)</td>
+                  <td className="px-4 py-2.5 text-right tabular-nums">{totalsSubtotal.toLocaleString("en-MY", { minimumFractionDigits: 2 })}</td>
+                  <td className="px-4 py-2.5 text-right tabular-nums">{totalsTax.toLocaleString("en-MY", { minimumFractionDigits: 2 })}</td>
                   <td className="px-4 py-2.5 text-right tabular-nums">{totalsBilled.toLocaleString("en-MY", { minimumFractionDigits: 2 })}</td>
                   <td className="px-4 py-2.5 text-right tabular-nums text-green-700">{totalsPaid.toLocaleString("en-MY", { minimumFractionDigits: 2 })}</td>
                   <td className="px-4 py-2.5 text-right tabular-nums text-red-600">{totalsOutstanding.toLocaleString("en-MY", { minimumFractionDigits: 2 })}</td>
+                  <td className="px-4 py-2.5 text-right tabular-nums">{totalsTaxableDisb.toLocaleString("en-MY", { minimumFractionDigits: 2 })}</td>
+                  <td className="px-4 py-2.5 text-right tabular-nums">{totalsNonTaxDisb.toLocaleString("en-MY", { minimumFractionDigits: 2 })}</td>
+                  <td />
                   <td />
                 </tr>
               </tfoot>

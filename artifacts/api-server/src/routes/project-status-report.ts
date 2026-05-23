@@ -293,9 +293,12 @@ async function buildProjectStatusReport(r: any, firmId: number, filters: ReportF
 
 function setHeaderRow(ws: ExcelJS.Worksheet, rowIdx: number, labels: string[]) {
   const row = ws.getRow(rowIdx);
-  row.values = ["", ...labels];
+  for (let i = 0; i < labels.length; i++) {
+    row.getCell(i + 1).value = labels[i];
+    row.getCell(i + 1).alignment = { horizontal: "center", vertical: "middle" };
+    row.getCell(i + 1).fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFF1F5F9" } };
+  }
   row.font = { bold: true, color: { argb: "FF1B365D" } };
-  row.alignment = { vertical: "middle", horizontal: "center" };
   row.height = 18;
 }
 
@@ -304,6 +307,27 @@ function setNumberCell(ws: ExcelJS.Worksheet, row: number, col: number, value: n
   cell.value = value;
   cell.numFmt = ACCOUNTING_FMT;
   cell.alignment = { horizontal: "right", vertical: "middle" };
+}
+
+function applyZebra(ws: ExcelJS.Worksheet, startRow: number, endRow: number, colCount: number) {
+  for (let r = startRow; r <= endRow; r++) {
+    const isStripe = (r - startRow) % 2 === 1;
+    if (!isStripe) continue;
+    for (let c = 1; c <= colCount; c++) {
+      ws.getRow(r).getCell(c).fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFF8FAFC" } };
+    }
+  }
+}
+
+function styleTotalsRow(ws: ExcelJS.Worksheet, rowIdx: number, colCount: number) {
+  const row = ws.getRow(rowIdx);
+  row.font = { bold: true };
+  for (let c = 1; c <= colCount; c++) {
+    row.getCell(c).border = {
+      top: { style: "thin", color: { argb: "FF94A3B8" } },
+      bottom: { style: "double", color: { argb: "FF94A3B8" } },
+    };
+  }
 }
 
 async function renderWeasyPrintPdf(html: string): Promise<Buffer> {
@@ -459,7 +483,7 @@ router.get("/reports/project-status", requireAuth, requireFirmUser, requirePermi
     }
     res.setHeader("Content-Type", "text/csv; charset=utf-8");
     res.setHeader("Content-Disposition", "attachment; filename=\"project-status-report.csv\"");
-    res.send(lines.join("\n"));
+    res.send("\ufeff" + lines.join("\n"));
     return;
   }
 
@@ -526,6 +550,9 @@ router.get("/reports/project-status", requireAuth, requireFirmUser, requirePermi
       ws.getRow(totalsRow).getCell(c).numFmt = ACCOUNTING_FMT;
       ws.getRow(totalsRow).getCell(c).alignment = { horizontal: "right", vertical: "middle" };
     }
+
+    if (lastDataRow >= firstDataRow) applyZebra(ws, firstDataRow, lastDataRow, 9);
+    styleTotalsRow(ws, totalsRow, 9);
 
     res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
     res.setHeader("Content-Disposition", "attachment; filename=\"project-status-report.xlsx\"");

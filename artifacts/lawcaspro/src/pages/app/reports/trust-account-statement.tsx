@@ -158,7 +158,7 @@ export default function TrustAccountStatement() {
             <table className="w-full text-sm">
               <thead className="bg-slate-50 border-b">
                 <tr>
-                  {["Date", "Case", "Ref", "Description", "Debit (RM)", "Credit (RM)", "Balance (RM)", "Cheque Status"].map(h => (
+                  {["Date", "Case", "Ref", "Description", "Debit", "Credit", "Balance After", "Cheque Status"].map(h => (
                     <th key={h} className="text-left px-4 py-2.5 text-xs font-medium text-slate-500 uppercase tracking-wide">{h}</th>
                   ))}
                 </tr>

@@ -134,7 +134,7 @@ export default function MatterAging() {
                     <table className="w-full text-sm">
                       <thead className="bg-slate-50 border-b">
                         <tr>
-                          {["Invoice No.", "File Ref", "Handling Staff", "Last Chaser", "Issue Date", "Due Date", "Days", "Outstanding (RM)"].map(h => (
+                          {["Invoice No.", "File Ref", "Handling Staff", "Last Chaser Date", "Issue Date", "Due Date", "Days", "Outstanding", "Bucket"].map(h => (
                             <th key={h} className="text-left px-4 py-2 text-xs font-medium text-slate-500 uppercase tracking-wide">{h}</th>
                           ))}
                         </tr>
@@ -142,16 +142,17 @@ export default function MatterAging() {
                       <tbody className="divide-y divide-slate-100">
                         {bucket.items.map((inv: any) => (
                           <tr key={inv.id} className="hover:bg-slate-50/50">
-                            <td className="px-4 py-2 font-mono font-medium text-slate-800">{inv.invoiceNo}</td>
-                            <td className="px-4 py-2 text-slate-600">{inv.caseRef ?? "—"}</td>
+                            <td className="px-4 py-2 font-mono font-medium text-slate-800 text-center">{inv.invoiceNo}</td>
+                            <td className="px-4 py-2 text-slate-600 text-center">{inv.caseRef ?? "—"}</td>
                             <td className="px-4 py-2 text-slate-600">{inv.handlingStaffName ?? "—"}</td>
-                            <td className="px-4 py-2 text-slate-600">{fmtDate(inv.lastChaserDate ?? null)}</td>
-                            <td className="px-4 py-2 text-slate-600">{fmtDate(inv.issuedDate)}</td>
-                            <td className="px-4 py-2 font-medium text-slate-600">{fmtDate(inv.dueDate)}</td>
-                            <td className="px-4 py-2 text-slate-600">{Number(inv.daysOutstanding ?? 0)}</td>
+                            <td className="px-4 py-2 text-slate-600 text-center">{fmtDate(inv.lastChaserDate ?? null)}</td>
+                            <td className="px-4 py-2 text-slate-600 text-center">{fmtDate(inv.issuedDate)}</td>
+                            <td className="px-4 py-2 font-medium text-slate-600 text-center">{fmtDate(inv.dueDate)}</td>
+                            <td className="px-4 py-2 text-slate-600 text-center">{Number(inv.daysOutstanding ?? 0)}</td>
                             <td className="px-4 py-2 text-right tabular-nums font-medium text-slate-800">
                               {Number(inv.amountDue).toLocaleString("en-MY", { minimumFractionDigits: 2 })}
                             </td>
+                            <td className="px-4 py-2 text-slate-600 text-center">{String(inv.bucket ?? bucket.bucket)}</td>
                           </tr>
                         ))}
                       </tbody>

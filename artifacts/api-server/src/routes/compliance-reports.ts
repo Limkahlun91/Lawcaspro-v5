@@ -51,9 +51,12 @@ const ACCOUNTING_FMT = `_(* #,##0.00_);_(* (#,##0.00);_(* "-"??_);_(@_)`;
 
 function setHeaderRow(ws: ExcelJS.Worksheet, rowIdx: number, labels: string[]) {
   const row = ws.getRow(rowIdx);
-  row.values = ["", ...labels];
+  for (let i = 0; i < labels.length; i++) {
+    row.getCell(i + 1).value = labels[i];
+    row.getCell(i + 1).alignment = { horizontal: "center", vertical: "middle" };
+    row.getCell(i + 1).fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFF1F5F9" } };
+  }
   row.font = { bold: true, color: { argb: "FF334155" } };
-  row.alignment = { vertical: "middle" };
   row.height = 18;
 }
 
@@ -82,6 +85,27 @@ function setLeft(ws: ExcelJS.Worksheet, row: number, col: number) {
 
 function setCenter(ws: ExcelJS.Worksheet, row: number, col: number) {
   ws.getRow(row).getCell(col).alignment = { horizontal: "center", vertical: "middle" };
+}
+
+function applyZebra(ws: ExcelJS.Worksheet, startRow: number, endRow: number, colCount: number) {
+  for (let r = startRow; r <= endRow; r++) {
+    const isStripe = (r - startRow) % 2 === 1;
+    if (!isStripe) continue;
+    for (let c = 1; c <= colCount; c++) {
+      ws.getRow(r).getCell(c).fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFF8FAFC" } };
+    }
+  }
+}
+
+function styleTotalsRow(ws: ExcelJS.Worksheet, rowIdx: number, colCount: number) {
+  const row = ws.getRow(rowIdx);
+  row.font = { bold: true };
+  for (let c = 1; c <= colCount; c++) {
+    row.getCell(c).border = {
+      top: { style: "thin", color: { argb: "FF94A3B8" } },
+      bottom: { style: "double", color: { argb: "FF94A3B8" } },
+    };
+  }
 }
 
 // ── Bills Delivered Book ──────────────────────────────────────────────────────
@@ -251,7 +275,7 @@ router.get("/reports/bills-delivered-book", requireAuth, requireFirmUser, requir
     }
     res.setHeader("Content-Type", "text/csv; charset=utf-8");
     res.setHeader("Content-Disposition", `attachment; filename="bills-delivered-book${from ? `_${from}` : ""}${to ? `_${to}` : ""}.csv"`);
-    res.send(lines.join("\n"));
+    res.send("\ufeff" + lines.join("\n"));
     return;
   }
 
@@ -340,6 +364,9 @@ router.get("/reports/bills-delivered-book", requireAuth, requireFirmUser, requir
       ws.getRow(totalsRow).getCell(c).numFmt = ACCOUNTING_FMT;
       setRight(ws, totalsRow, c);
     }
+
+    if (lastDataRow >= 5) applyZebra(ws, 5, lastDataRow, 15);
+    styleTotalsRow(ws, totalsRow, 15);
 
     res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
     res.setHeader("Content-Disposition", `attachment; filename="bills-delivered-book${from ? `_${from}` : ""}${to ? `_${to}` : ""}.xlsx"`);
@@ -443,7 +470,7 @@ router.get("/reports/trust-account-statement", requireAuth, requireFirmUser, req
     }
     res.setHeader("Content-Type", "text/csv; charset=utf-8");
     res.setHeader("Content-Disposition", `attachment; filename="trust-account-statement${caseId ? `_${caseId}` : ""}.csv"`);
-    res.send(lines.join("\n"));
+    res.send("\ufeff" + lines.join("\n"));
     return;
   }
 
@@ -497,6 +524,9 @@ router.get("/reports/trust-account-statement", requireAuth, requireFirmUser, req
     setCell(ws, totalsRow, 7, { formula: `${ws.getColumn(6).letter}${totalsRow}-${ws.getColumn(5).letter}${totalsRow}` });
     ws.getRow(totalsRow).getCell(7).numFmt = ACCOUNTING_FMT;
     setRight(ws, totalsRow, 7);
+
+    if (lastDataRow >= 5) applyZebra(ws, 5, lastDataRow, 8);
+    styleTotalsRow(ws, totalsRow, 8);
 
     const metaRow = totalsRow + 2;
     ws.getRow(metaRow).getCell(1).value = "Ledger Book Balance";
@@ -674,7 +704,7 @@ router.get("/reports/matter-aging", requireAuth, requireFirmUser, requirePermiss
     }
     res.setHeader("Content-Type", "text/csv; charset=utf-8");
     res.setHeader("Content-Disposition", "attachment; filename=\"matter-aging.csv\"");
-    res.send(lines.join("\n"));
+    res.send("\ufeff" + lines.join("\n"));
     return;
   }
 
@@ -742,6 +772,9 @@ router.get("/reports/matter-aging", requireAuth, requireFirmUser, requirePermiss
     setCell(ws, totalsRow, 8, { formula: `SUM(${ws.getColumn(8).letter}5:${ws.getColumn(8).letter}${lastDataRow})` });
     ws.getRow(totalsRow).getCell(8).numFmt = ACCOUNTING_FMT;
     setRight(ws, totalsRow, 8);
+
+    if (lastDataRow >= 5) applyZebra(ws, 5, lastDataRow, 9);
+    styleTotalsRow(ws, totalsRow, 9);
 
     res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
     res.setHeader("Content-Disposition", "attachment; filename=\"matter-aging.xlsx\"");

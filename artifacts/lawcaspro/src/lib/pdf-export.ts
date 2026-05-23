@@ -17,7 +17,11 @@ export type PdfExportOptions = {
 export async function exportElementToPdf({ element, filename, marginMm = 12 }: PdfExportOptions): Promise<void> {
   const root = document.documentElement;
   root.classList.add("pdf-export");
+  const attr = "data-pdf-export-root";
+  const prevAttr = element.getAttribute(attr);
   try {
+    element.setAttribute(attr, "1");
+
     const factory = html2pdf as unknown as Html2PdfFactory;
     await factory()
       .set({
@@ -28,6 +32,29 @@ export async function exportElementToPdf({ element, filename, marginMm = 12 }: P
           scale: 2,
           useCORS: true,
           backgroundColor: "#ffffff",
+          onclone: (doc: Document) => {
+            const style = doc.createElement("style");
+            style.textContent = [
+              "html,body{background:#ffffff !important;color:#1E293B !important;}",
+              `[${attr}="1"],[${attr}="1"] *{color:#1E293B !important;background-color:#ffffff !important;border-color:#E2E8F0 !important;box-shadow:none !important;text-shadow:none !important;}`,
+              `[${attr}="1"] .bg-primary,[${attr}="1"] th{background-color:#1B365D !important;color:#FFFFFF !important;}`,
+              `[${attr}="1"] .text-destructive{color:#B91C1C !important;}`,
+              `[${attr}="1"] .text-primary{color:#1B365D !important;}`,
+            ].join("\n");
+
+            const rootEl = doc.querySelector(`[${attr}="1"]`) as HTMLElement | null;
+            if (!rootEl) return;
+            rootEl.prepend(style);
+
+            const walker = doc.createTreeWalker(rootEl, NodeFilter.SHOW_ELEMENT);
+            let node: Node | null = rootEl;
+            while (node) {
+              const el = node as HTMLElement;
+              const raw = el.getAttribute("style");
+              if (raw && raw.toLowerCase().includes("oklch")) el.removeAttribute("style");
+              node = walker.nextNode();
+            }
+          },
         },
         jsPDF: {
           unit: "mm",
@@ -38,6 +65,8 @@ export async function exportElementToPdf({ element, filename, marginMm = 12 }: P
       .from(element)
       .save();
   } finally {
+    if (prevAttr === null) element.removeAttribute(attr);
+    else element.setAttribute(attr, prevAttr);
     root.classList.remove("pdf-export");
   }
 }

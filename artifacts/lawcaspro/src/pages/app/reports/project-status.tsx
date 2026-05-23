@@ -3,7 +3,6 @@ import { useQuery } from "@tanstack/react-query";
 import { useLocation } from "wouter";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { DateOnlyInput } from "@/components/date-only-input";
 import { ArrowLeft, Download, FileText, Sparkles } from "lucide-react";
 import { QueryFallback } from "@/components/query-fallback";
@@ -12,6 +11,8 @@ import { downloadFromApi } from "@/lib/download";
 import { useToast } from "@/hooks/use-toast";
 import { toastError } from "@/lib/toast-error";
 import { Textarea } from "@/components/ui/textarea";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { useListProjects, useListUsers } from "@workspace/api-client-react";
 
 type Stage = {
   label: string;
@@ -46,6 +47,13 @@ function fmtAmt(v: unknown) {
   return Number(v ?? 0).toLocaleString("en-MY", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
+function ymd(d: Date): string {
+  const yyyy = d.getFullYear();
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  const dd = String(d.getDate()).padStart(2, "0");
+  return `${yyyy}-${mm}-${dd}`;
+}
+
 export default function ProjectStatusReport() {
   const [, setLocation] = useLocation();
   const { toast } = useToast();
@@ -59,6 +67,11 @@ export default function ProjectStatusReport() {
   const [instruction, setInstruction] = useState("");
   const [aiHtml, setAiHtml] = useState<string>("");
   const [aiLoading, setAiLoading] = useState(false);
+
+  const projectsQuery = useListProjects({ page: 1, limit: 200 }, { query: { retry: false } });
+  const usersQuery = useListUsers({ page: 1, limit: 200 }, { query: { retry: false } });
+  const projects = projectsQuery.data?.data ?? [];
+  const users = usersQuery.data?.data ?? [];
 
   const queryKey = useMemo(() => ["report-project-status", applied], [applied]);
   const reportQuery = useQuery<ReportResponse>({
@@ -78,6 +91,31 @@ export default function ProjectStatusReport() {
   const kpi = data?.kpi ?? { totalCases: 0, totalInvoiced: 0, totalCollected: 0, outstandingBalance: 0 };
   const stages = data?.milestoneStages ?? [];
   const rows = data?.rows ?? [];
+
+  function applyDates(nextStart: string, nextEnd: string) {
+    setStartDate(nextStart);
+    setEndDate(nextEnd);
+    setApplied({ projectId: projectId.trim(), staffId: staffId.trim(), startDate: nextStart, endDate: nextEnd });
+  }
+
+  function applyPreset(preset: "1W" | "2W" | "1M" | "3M" | "6M" | "1Y" | "2Y" | "3Y" | "ALL") {
+    if (preset === "ALL") {
+      applyDates("", "");
+      return;
+    }
+    const today = new Date();
+    const end = ymd(today);
+    const startBase = new Date(today);
+    if (preset === "1W") startBase.setDate(startBase.getDate() - 7);
+    if (preset === "2W") startBase.setDate(startBase.getDate() - 14);
+    if (preset === "1M") startBase.setMonth(startBase.getMonth() - 1);
+    if (preset === "3M") startBase.setMonth(startBase.getMonth() - 3);
+    if (preset === "6M") startBase.setMonth(startBase.getMonth() - 6);
+    if (preset === "1Y") startBase.setFullYear(startBase.getFullYear() - 1);
+    if (preset === "2Y") startBase.setFullYear(startBase.getFullYear() - 2);
+    if (preset === "3Y") startBase.setFullYear(startBase.getFullYear() - 3);
+    applyDates(ymd(startBase), end);
+  }
 
   async function download(kind: "csv" | "xlsx") {
     try {
@@ -155,12 +193,32 @@ export default function ProjectStatusReport() {
         <CardContent className="py-4 px-4">
           <div className="grid grid-cols-1 md:grid-cols-6 gap-3 items-end">
             <div className="space-y-1.5">
-              <div className="text-xs text-slate-500">Project ID</div>
-              <Input value={projectId} onChange={(e) => setProjectId(e.target.value)} placeholder="e.g. 12" />
+              <div className="text-xs text-slate-500">Project</div>
+              <Select value={projectId} onValueChange={(v) => setProjectId(v === "__all__" ? "" : v)}>
+                <SelectTrigger>
+                  <SelectValue placeholder="All projects" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="__all__">All projects</SelectItem>
+                  {projects.map((p: any) => (
+                    <SelectItem key={p.id} value={String(p.id)}>{String(p.name ?? `Project #${p.id}`)}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
             </div>
             <div className="space-y-1.5">
-              <div className="text-xs text-slate-500">Staff ID</div>
-              <Input value={staffId} onChange={(e) => setStaffId(e.target.value)} placeholder="e.g. 5" />
+              <div className="text-xs text-slate-500">Assigned Staff</div>
+              <Select value={staffId} onValueChange={(v) => setStaffId(v === "__all__" ? "" : v)}>
+                <SelectTrigger>
+                  <SelectValue placeholder="All staff" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="__all__">All staff</SelectItem>
+                  {users.map((u: any) => (
+                    <SelectItem key={u.id} value={String(u.id)}>{String(u.name ?? `User #${u.id}`)}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
             </div>
             <div className="space-y-1.5">
               <div className="text-xs text-slate-500">Start Date</div>
@@ -170,7 +228,15 @@ export default function ProjectStatusReport() {
               <div className="text-xs text-slate-500">End Date</div>
               <DateOnlyInput valueYmd={endDate} onChangeYmd={setEndDate} />
             </div>
-            <div className="md:col-span-2 flex gap-2">
+            <div className="md:col-span-2 space-y-2">
+              <div className="flex flex-wrap gap-2">
+                {(["1W", "2W", "1M", "3M", "6M", "1Y", "2Y", "3Y", "ALL"] as const).map((p) => (
+                  <Button key={p} size="sm" variant="outline" className="h-8" onClick={() => applyPreset(p)}>
+                    {p === "ALL" ? "All" : p}
+                  </Button>
+                ))}
+              </div>
+              <div className="flex gap-2">
               <Button
                 className="h-9"
                 onClick={() => {
@@ -194,6 +260,7 @@ export default function ProjectStatusReport() {
               >
                 Reset
               </Button>
+              </div>
             </div>
           </div>
         </CardContent>
@@ -309,4 +376,3 @@ export default function ProjectStatusReport() {
     </div>
   );
 }
-

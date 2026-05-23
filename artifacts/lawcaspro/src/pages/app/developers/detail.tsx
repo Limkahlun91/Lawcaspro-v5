@@ -49,6 +49,7 @@ type DeveloperDocument = {
   developerId: number;
   documentName: string;
   fileName: string;
+  objectPath?: string | null;
   mimeType: string | null;
   fileSize: number | null;
   hasExpiry: boolean;
@@ -678,40 +679,57 @@ export default function DeveloperDetail() {
             ) : (
               documents.map((d) => (
                 <div key={d.id} className="grid grid-cols-12 px-4 py-3 border-t text-sm items-center">
-                  <div className="col-span-4">
-                    <div className="font-medium text-slate-900">{d.documentName}</div>
-                    <div className="text-xs text-slate-500">{d.fileName}{d.fileSize ? ` • ${formatBytes(d.fileSize)}` : ""}</div>
-                  </div>
-                  <div className="col-span-3 text-slate-700 text-xs">{formatValidity(d)}</div>
-                  <div className="col-span-3 text-slate-600 text-xs">{new Date(d.createdAt).toLocaleDateString()}</div>
-                  <div className="col-span-2 flex items-center justify-end gap-2">
-                    <Button type="button" variant="outline" size="sm" onClick={() => window.open(`/api/developers/${developerId}/documents/${d.id}/view`, "_blank")}>
-                      <Eye className="h-4 w-4 mr-1" />
-                      View
-                    </Button>
-                    <Button
-                      type="button"
-                      variant="destructive"
-                      size="sm"
-                      disabled={docDeletingId === d.id}
-                      onClick={async () => {
-                        setDocDeletingId(d.id);
-                        try {
-                          await apiRequest(`/developers/${developerId}/documents/${d.id}`, { method: "DELETE" });
-                          await fetchDocuments();
-                          toast({ title: "Document deleted" });
-                        } catch (e) {
-                          toastError(toast, e, "Delete failed");
-                        } finally {
-                          setDocDeletingId(null);
-                        }
-                      }}
-                    >
-                      <Trash2 className="h-4 w-4 mr-1" />
-                      {docDeletingId === d.id ? "Deleting..." : "Delete"}
-                    </Button>
-                  </div>
-                </div>
+                  {(() => {
+                    const isPendingUpload = typeof d.objectPath === "string" && d.objectPath.startsWith("pending_upload");
+                    return (
+                      <>
+                        <div className="col-span-4">
+                          <div className="font-medium text-slate-900">{d.documentName}</div>
+                          <div className="text-xs text-slate-500 flex flex-wrap items-center gap-2">
+                            <span>{d.fileName}{d.fileSize ? ` • ${formatBytes(d.fileSize)}` : ""}</span>
+                            {isPendingUpload && (
+                              <Badge className="bg-amber-100 text-amber-900 border border-amber-200">Upload Failed / Pending</Badge>
+                            )}
+                          </div>
+                        </div>
+                        <div className="col-span-3 text-slate-700 text-xs">{formatValidity(d)}</div>
+                        <div className="col-span-3 text-slate-600 text-xs">{new Date(d.createdAt).toLocaleDateString()}</div>
+                        <div className="col-span-2 flex items-center justify-end gap-2">
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            disabled={isPendingUpload}
+                            onClick={() => window.open(`/api/developers/${developerId}/documents/${d.id}/view`, "_blank")}
+                          >
+                            <Eye className="h-4 w-4 mr-1" />
+                            View
+                          </Button>
+                          <Button
+                            type="button"
+                            variant="destructive"
+                            size="sm"
+                            disabled={docDeletingId === d.id}
+                            onClick={async () => {
+                              setDocDeletingId(d.id);
+                              try {
+                                await apiRequest(`/developers/${developerId}/documents/${d.id}`, { method: "DELETE" });
+                                await fetchDocuments();
+                                toast({ title: "Document deleted" });
+                              } catch (e) {
+                                toastError(toast, e, "Delete failed");
+                              } finally {
+                                setDocDeletingId(null);
+                              }
+                            }}
+                          >
+                            <Trash2 className="h-4 w-4 mr-1" />
+                            {docDeletingId === d.id ? "Deleting..." : "Delete"}
+                          </Button>
+                        </div>
+                      </>
+                    );
+                  })()}
               ))
             )}
           </div>

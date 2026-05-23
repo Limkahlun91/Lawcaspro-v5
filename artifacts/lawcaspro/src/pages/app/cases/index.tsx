@@ -29,6 +29,32 @@ function fmtYmd(ymd: string | null | undefined): string {
   return `${d}/${m}/${y}`;
 }
 
+function normalizeMilestonePresence(raw: string | null): MilestonePresence {
+  if (!raw) return "filled";
+  if (raw === "done") return "completed";
+  return Object.values(MilestonePresence).includes(raw as any) ? (raw as MilestonePresence) : "filled";
+}
+
+function normalizeMilestoneKey(raw: string | null): CaseMilestoneKey | "all" {
+  if (!raw) return "all";
+  if (raw === "loan_executed") return "loan_bank_executed";
+  return Object.values(CaseMilestoneKey).includes(raw as any) ? (raw as CaseMilestoneKey) : "all";
+}
+
+function translateDashboardMilestoneFilter(
+  milestone: CaseMilestoneKey | "all",
+  presence: MilestonePresence
+): { milestone: CaseMilestoneKey | "all"; presence: MilestonePresence } {
+  if (presence !== "pending" && presence !== "completed") return { milestone, presence };
+
+  const translatedPresence: MilestonePresence = presence === "completed" ? "filled" : "missing";
+
+  if (milestone === "spa_stamped") return { milestone: "spa_stamped_date", presence: translatedPresence };
+  if (milestone === "loan_bank_executed") return { milestone: "loan_bank_executed_date", presence: translatedPresence };
+
+  return { milestone, presence };
+}
+
 export default function CasesList() {
   const [location, setLocation] = useLocation();
   const searchString = typeof window !== "undefined" ? window.location.search : (location.includes("?") ? location.slice(location.indexOf("?")) : "");
@@ -64,14 +90,11 @@ export default function CasesList() {
   const [projectId, setProjectId] = useState<string>(() => (sp.get("projectId") ?? "all"));
   const [purchaseMode, setPurchaseMode] = useState<string>(() => (sp.get("purchaseMode") ?? "all"));
   const [titleType, setTitleType] = useState<string>(() => (sp.get("titleType") ?? "all"));
-  const [milestone, setMilestone] = useState<CaseMilestoneKey | "all">(() => {
-    const raw = sp.get("milestone");
-    return raw && Object.values(CaseMilestoneKey).includes(raw as any) ? (raw as CaseMilestoneKey) : "all";
-  });
-  const [milestonePresence, setMilestonePresence] = useState<MilestonePresence>(() => {
-    const raw = sp.get("milestonePresence");
-    return raw && Object.values(MilestonePresence).includes(raw as any) ? (raw as MilestonePresence) : "filled";
-  });
+  const initialMilestone = normalizeMilestoneKey(sp.get("milestone"));
+  const initialPresence = normalizeMilestonePresence(sp.get("milestonePresence"));
+  const initialTranslated = translateDashboardMilestoneFilter(initialMilestone, initialPresence);
+  const [milestone, setMilestone] = useState<CaseMilestoneKey | "all">(() => initialTranslated.milestone);
+  const [milestonePresence, setMilestonePresence] = useState<MilestonePresence>(() => initialTranslated.presence);
   const [page, setPage] = useState<number>(() => Number.isInteger(initialPage) && initialPage > 0 ? initialPage : 1);
   const [limit, setLimit] = useState<number>(() => Number.isInteger(initialLimit) && initialLimit > 0 ? initialLimit : 50);
 
@@ -92,16 +115,11 @@ export default function CasesList() {
     const nextProjectId = q.get("projectId") ?? "all";
     const nextPurchaseMode = q.get("purchaseMode") ?? "all";
     const nextTitleType = q.get("titleType") ?? "all";
-    const nextMilestoneRaw = q.get("milestone");
-    const nextMilestone: CaseMilestoneKey | "all" =
-      nextMilestoneRaw && Object.values(CaseMilestoneKey).includes(nextMilestoneRaw as any)
-        ? (nextMilestoneRaw as CaseMilestoneKey)
-        : "all";
-    const nextPresenceRaw = q.get("milestonePresence");
-    const nextPresence: MilestonePresence =
-      nextPresenceRaw && Object.values(MilestonePresence).includes(nextPresenceRaw as any)
-        ? (nextPresenceRaw as MilestonePresence)
-        : "filled";
+    const normalizedMilestone = normalizeMilestoneKey(q.get("milestone"));
+    const normalizedPresence = normalizeMilestonePresence(q.get("milestonePresence"));
+    const translated = translateDashboardMilestoneFilter(normalizedMilestone, normalizedPresence);
+    const nextMilestone = translated.milestone;
+    const nextPresence = translated.presence;
 
     setSearch((prev) => prev === nextSearch ? prev : nextSearch);
     setSpaStatus((prev) => prev === nextSpaStatus ? prev : nextSpaStatus);

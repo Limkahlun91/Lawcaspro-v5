@@ -13,6 +13,7 @@ import { apiFetchJson, apiRequest } from "@/lib/api-client";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Badge } from "@/components/ui/badge";
 import { Checkbox } from "@/components/ui/checkbox";
 import { DateOnlyInput, normalizeDateOnlyFromApi } from "@/components/date-only-input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -26,6 +27,7 @@ type ProjectDocument = {
   bankName: string | null;
   documentDate: string | null;
   fileName: string;
+  objectPath?: string | null;
   mimeType: string | null;
   fileSize: number | null;
   hasExpiry: boolean;
@@ -329,7 +331,12 @@ function ProjectDocumentsPanel(props: { projectId: number; category: "general" |
                         <span className="text-xs text-slate-600">[Validity: {formatValidity(d)}]</span>
                       )}
                     </div>
-                    <div className="text-xs text-slate-500">{d.fileName}{d.fileSize ? ` • ${formatBytes(d.fileSize)}` : ""}</div>
+                    <div className="text-xs text-slate-500 flex flex-wrap items-center gap-2">
+                      <span>{d.fileName}{d.fileSize ? ` • ${formatBytes(d.fileSize)}` : ""}</span>
+                      {typeof d.objectPath === "string" && d.objectPath.startsWith("pending_upload") && (
+                        <Badge className="bg-amber-100 text-amber-900 border border-amber-200">Upload Failed / Pending</Badge>
+                      )}
+                    </div>
                   </div>
                   <div className="col-span-3 text-xs text-slate-700">
                     {props.category === "mlu"
@@ -338,7 +345,13 @@ function ProjectDocumentsPanel(props: { projectId: number; category: "general" |
                   </div>
                   <div className="col-span-3 text-slate-600 text-xs">{new Date(d.createdAt).toLocaleDateString()}</div>
                   <div className="col-span-2 flex items-center justify-end gap-2">
-                    <Button type="button" variant="outline" size="sm" onClick={() => window.open(`/api/projects/${projectId}/documents/${d.id}/view`, "_blank")}>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      disabled={typeof d.objectPath === "string" && d.objectPath.startsWith("pending_upload")}
+                      onClick={() => window.open(`/api/projects/${projectId}/documents/${d.id}/view`, "_blank")}
+                    >
                       View
                     </Button>
                     <Button

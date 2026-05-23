@@ -526,41 +526,87 @@ function keyDatePatchFromWorkflow(field: KeyDateField, ymd: string): Partial<Cas
 }
 
 async function formatCaseDetail(r: DbConn, c: typeof casesTable.$inferSelect) {
-  const [proj] = await r.select().from(projectsTable).where(eq(projectsTable.id, c.projectId));
-  const [dev] = await r.select().from(developersTable).where(eq(developersTable.id, c.developerId));
+  const proj = await (async () => {
+    try {
+      const [row] = await r
+        .select({ id: projectsTable.id, name: projectsTable.name })
+        .from(projectsTable)
+        .where(eq(projectsTable.id, c.projectId));
+      return row ?? null;
+    } catch {
+      return null;
+    }
+  })();
 
-  const purchaserRows = await r.select().from(casePurchasersTable).where(eq(casePurchasersTable.caseId, c.id));
-  const purchasers = await Promise.all(
-    purchaserRows.map(async (p) => {
-      const [client] = await r.select().from(clientsTable).where(eq(clientsTable.id, p.clientId));
-      return {
-        id: p.id,
-        clientId: p.clientId,
-        clientName: client?.name ?? "Unknown",
-        icNo: client?.icNo ?? null,
-        role: p.role,
-        orderNo: p.orderNo,
-      };
-    })
-  );
+  const dev = await (async () => {
+    try {
+      const [row] = await r
+        .select({ id: developersTable.id, name: developersTable.name })
+        .from(developersTable)
+        .where(eq(developersTable.id, c.developerId));
+      return row ?? null;
+    } catch {
+      return null;
+    }
+  })();
 
-  const assignRows = await r.select().from(caseAssignmentsTable)
-    .where(and(eq(caseAssignmentsTable.caseId, c.id), sql`${caseAssignmentsTable.unassignedAt} IS NULL`));
-  const assignments = await Promise.all(
-    assignRows.map(async (a) => {
-      const [user] = await r
-        .select({ id: usersTable.id, name: usersTable.name })
-        .from(usersTable)
-        .where(eq(usersTable.id, a.userId));
-      return {
-        id: a.id,
-        userId: a.userId,
-        userName: user?.name ?? "Unknown",
-        roleInCase: a.roleInCase,
-        assignedAt: toIsoStringSafe(a.assignedAt),
-      };
-    })
-  );
+  const purchaserRows = await (async () => {
+    try {
+      return await r.select().from(casePurchasersTable).where(eq(casePurchasersTable.caseId, c.id));
+    } catch {
+      return [];
+    }
+  })();
+  const purchasers = await Promise.all(purchaserRows.map(async (p) => {
+    const client = await (async () => {
+      try {
+        const [row] = await r
+          .select({ id: clientsTable.id, name: clientsTable.name, icNo: clientsTable.icNo })
+          .from(clientsTable)
+          .where(eq(clientsTable.id, p.clientId));
+        return row ?? null;
+      } catch {
+        return null;
+      }
+    })();
+    return {
+      id: p.id,
+      clientId: p.clientId,
+      clientName: client?.name ?? "Unknown",
+      icNo: client?.icNo ?? null,
+      role: p.role,
+      orderNo: p.orderNo,
+    };
+  }));
+
+  const assignRows = await (async () => {
+    try {
+      return await r.select().from(caseAssignmentsTable)
+        .where(and(eq(caseAssignmentsTable.caseId, c.id), sql`${caseAssignmentsTable.unassignedAt} IS NULL`));
+    } catch {
+      return [];
+    }
+  })();
+  const assignments = await Promise.all(assignRows.map(async (a) => {
+    const user = await (async () => {
+      try {
+        const [row] = await r
+          .select({ id: usersTable.id, name: usersTable.name })
+          .from(usersTable)
+          .where(eq(usersTable.id, a.userId));
+        return row ?? null;
+      } catch {
+        return null;
+      }
+    })();
+    return {
+      id: a.id,
+      userId: a.userId,
+      userName: user?.name ?? "Unknown",
+      roleInCase: a.roleInCase,
+      assignedAt: toIsoStringSafe(a.assignedAt),
+    };
+  }));
 
   let spaDetails: any = null;
   let propertyDetails: any = null;
@@ -3039,7 +3085,7 @@ router.get("/cases/:caseId", requireAuthHandler, requireFirmUserHandler, require
     }
     res.json(await formatCaseDetail(r, c));
   } catch (e) {
-    console.error("🚨 CRITICAL BACKEND ERROR:", e);
+    console.error("SQL ERR:", e);
     logger.error({ err: e, firmId: req.firmId, userId: req.userId, caseId: params.data.caseId }, "[cases] get case failed");
     res.status(500).json({ error: "Internal Server Error" });
   }
