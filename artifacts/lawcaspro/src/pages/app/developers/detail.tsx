@@ -730,6 +730,7 @@ export default function DeveloperDetail() {
                       </>
                     );
                   })()}
+                </div>
               ))
             )}
           </div>

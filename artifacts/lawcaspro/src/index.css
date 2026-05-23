@@ -188,6 +188,22 @@
     print-color-adjust: exact;
   }
 
+  body.print-report * {
+    visibility: hidden !important;
+  }
+
+  body.print-report #report-printable-area,
+  body.print-report #report-printable-area * {
+    visibility: visible !important;
+  }
+
+  body.print-report #report-printable-area {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 100%;
+  }
+
   .print\:hidden {
     display: none !important;
   }

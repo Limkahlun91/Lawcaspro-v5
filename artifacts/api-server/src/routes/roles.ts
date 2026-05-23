@@ -149,32 +149,37 @@ routerInternal.get("/roles", requireAuth, requireFirmUser, requirePermission("ro
 });
 
 routerInternal.post("/roles", requireAuth, requireFirmUser, requirePermission("roles", "create"), async (req: AuthRequestLike, res: RouteResLike): Promise<void> => {
-  const parsed = CreateRoleBodySchema.safeParse(req.body);
-  if (!parsed.success) {
-    res.status(400).json({ error: parsed.error.message });
-    return;
+  try {
+    const parsed = CreateRoleBodySchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: parsed.error.message });
+      return;
+    }
+    const body: CreateRoleBody = parsed.data;
+
+    const r = rdb(req);
+    const [role] = await r
+      .insert(rolesTable)
+      .values({ firmId: req.firmId!, name: body.name })
+      .returning();
+
+    if (body.permissions?.length) {
+      await r.insert(permissionsTable).values(
+        body.permissions.map((p) => ({
+          roleId: role.id,
+          module: p.module,
+          action: p.action,
+          allowed: p.allowed,
+        }))
+      );
+    }
+
+    await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "roles.create", entityType: "role", entityId: role.id, detail: `name=${role.name}`, ipAddress: req.ip, userAgent: getHeader(req, "user-agent") });
+    res.status(201).json(await enrichRole(r, role));
+  } catch (err) {
+    console.error("SQL ERR:", err);
+    res.status(500).json({ error: "Update failed" });
   }
-  const body: CreateRoleBody = parsed.data;
-
-  const r = rdb(req);
-  const [role] = await r
-    .insert(rolesTable)
-    .values({ firmId: req.firmId!, name: body.name })
-    .returning();
-
-  if (body.permissions?.length) {
-    await r.insert(permissionsTable).values(
-      body.permissions.map((p) => ({
-        roleId: role.id,
-        module: p.module,
-        action: p.action,
-        allowed: p.allowed,
-      }))
-    );
-  }
-
-  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "roles.create", entityType: "role", entityId: role.id, detail: `name=${role.name}`, ipAddress: req.ip, userAgent: getHeader(req, "user-agent") });
-  res.status(201).json(await enrichRole(r, role));
 });
 
 routerInternal.get("/roles/:roleId", requireAuth, requireFirmUser, requirePermission("roles", "read"), async (req: AuthRequestLike, res: RouteResLike): Promise<void> => {
@@ -196,51 +201,56 @@ routerInternal.get("/roles/:roleId", requireAuth, requireFirmUser, requirePermis
 });
 
 routerInternal.patch("/roles/:roleId", requireAuth, requireFirmUser, requirePermission("roles", "update"), async (req: AuthRequestLike, res: RouteResLike): Promise<void> => {
-  const params = RoleIdParamsSchema.safeParse(req.params);
-  if (!params.success) {
-    res.status(400).json({ error: params.error.message });
-    return;
-  }
-  const p: RoleIdParams = params.data;
-
-  const parsed = UpdateRoleBodySchema.safeParse(req.body);
-  if (!parsed.success) {
-    res.status(400).json({ error: parsed.error.message });
-    return;
-  }
-  const body: UpdateRoleBody = parsed.data;
-
-  const updates: Record<string, unknown> = {};
-  if (body.name !== undefined) updates.name = body.name;
-
-  const r = rdb(req);
-  const [role] = await r
-    .update(rolesTable)
-    .set(updates)
-    .where(eq(rolesTable.id, p.roleId))
-    .returning();
-
-  if (!role || role.firmId !== req.firmId) {
-    res.status(404).json({ error: "Role not found" });
-    return;
-  }
-
-  if (body.permissions) {
-    await r.delete(permissionsTable).where(eq(permissionsTable.roleId, role.id));
-    if (body.permissions.length > 0) {
-      await r.insert(permissionsTable).values(
-        body.permissions.map((p) => ({
-          roleId: role.id,
-          module: p.module,
-          action: p.action,
-          allowed: p.allowed,
-        }))
-      );
+  try {
+    const params = RoleIdParamsSchema.safeParse(req.params);
+    if (!params.success) {
+      res.status(400).json({ error: params.error.message });
+      return;
     }
-  }
+    const p: RoleIdParams = params.data;
 
-  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "roles.update", entityType: "role", entityId: role.id, detail: `fields=${Object.keys(updates).join(",")}${body.permissions ? " permissions=replaced" : ""}`, ipAddress: req.ip, userAgent: getHeader(req, "user-agent") });
-  res.json(await enrichRole(r, role));
+    const parsed = UpdateRoleBodySchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: parsed.error.message });
+      return;
+    }
+    const body: UpdateRoleBody = parsed.data;
+
+    const updates: Record<string, unknown> = {};
+    if (body.name !== undefined) updates.name = body.name;
+
+    const r = rdb(req);
+    const [role] = await r
+      .update(rolesTable)
+      .set(updates)
+      .where(eq(rolesTable.id, p.roleId))
+      .returning();
+
+    if (!role || role.firmId !== req.firmId) {
+      res.status(404).json({ error: "Role not found" });
+      return;
+    }
+
+    if (body.permissions) {
+      await r.delete(permissionsTable).where(eq(permissionsTable.roleId, role.id));
+      if (body.permissions.length > 0) {
+        await r.insert(permissionsTable).values(
+          body.permissions.map((p) => ({
+            roleId: role.id,
+            module: p.module,
+            action: p.action,
+            allowed: p.allowed,
+          }))
+        );
+      }
+    }
+
+    await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "roles.update", entityType: "role", entityId: role.id, detail: `fields=${Object.keys(updates).join(",")}${body.permissions ? " permissions=replaced" : ""}`, ipAddress: req.ip, userAgent: getHeader(req, "user-agent") });
+    res.json(await enrichRole(r, role));
+  } catch (err) {
+    console.error("SQL ERR:", err);
+    res.status(500).json({ error: "Update failed" });
+  }
 });
 
 routerInternal.delete("/roles/:roleId", requireAuth, requireFirmUser, requirePermission("roles", "delete"), async (req: AuthRequestLike, res: RouteResLike): Promise<void> => {

@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useLocation } from "wouter";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -13,6 +13,7 @@ import { toastError } from "@/lib/toast-error";
 import { Textarea } from "@/components/ui/textarea";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useListProjects, useListUsers } from "@workspace/api-client-react";
+import { exportElementToPdf } from "@/lib/pdf-export";
 
 type Stage = {
   label: string;
@@ -57,6 +58,7 @@ function ymd(d: Date): string {
 export default function ProjectStatusReport() {
   const [, setLocation] = useLocation();
   const { toast } = useToast();
+  const pageRef = useRef<HTMLDivElement>(null);
 
   const [projectId, setProjectId] = useState("");
   const [staffId, setStaffId] = useState("");
@@ -133,12 +135,9 @@ export default function ProjectStatusReport() {
 
   async function downloadPdf() {
     try {
-      const params = new URLSearchParams();
-      if (applied.projectId) params.set("projectId", applied.projectId);
-      if (applied.staffId) params.set("staffId", applied.staffId);
-      if (applied.startDate) params.set("startDate", applied.startDate);
-      if (applied.endDate) params.set("endDate", applied.endDate);
-      await downloadFromApi(`/reports/project-status/download-pdf?${params.toString()}`, "project-status-report.pdf");
+      const el = pageRef.current;
+      if (!el) return;
+      await exportElementToPdf({ element: el, filename: "project-status-report.pdf" });
     } catch (e: unknown) {
       toastError(toast, e, "PDF export failed");
     }
@@ -164,7 +163,7 @@ export default function ProjectStatusReport() {
   }
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-6" ref={pageRef}>
       <div className="flex items-center gap-3">
         <Button size="sm" variant="outline" className="h-8" onClick={() => setLocation("/app/reports")}>
           <ArrowLeft className="h-3.5 w-3.5 mr-1" /> Back
