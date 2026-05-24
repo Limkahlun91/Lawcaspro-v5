@@ -232,6 +232,56 @@ export const documentBatchJobItemsTable = pgTable("document_batch_job_items", {
   createdAtIdx: index("idx_document_batch_job_items_created_at").on(t.firmId, t.caseId, t.createdAt),
 }));
 
+export const documentGenerationJobsTable = pgTable("document_generation_jobs", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  firmId: integer("firm_id").notNull(),
+  jobType: text("job_type").notNull().default("document_automation"),
+  status: text("status").notNull().default("pending"),
+  action: text("action").notNull().default("download"),
+  caseIds: jsonb("case_ids").notNull().default([]),
+  templateIds: jsonb("template_ids").notNull().default([]),
+  config: jsonb("config").notNull().default({}),
+  totalCount: integer("total_count").notNull().default(0),
+  successCount: integer("success_count").notNull().default(0),
+  failedCount: integer("failed_count").notNull().default(0),
+  pendingCount: integer("pending_count").notNull().default(0),
+  createdBy: integer("created_by"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  startedAt: timestamp("started_at", { withTimezone: true }),
+  finishedAt: timestamp("finished_at", { withTimezone: true }),
+  downloadObjectPath: text("download_object_path"),
+  downloadFileName: text("download_file_name"),
+  downloadMimeType: text("download_mime_type"),
+  errorSummary: text("error_summary"),
+}, (t) => ({
+  firmIdx: index("idx_document_generation_jobs_firm").on(t.firmId),
+  statusIdx: index("idx_document_generation_jobs_status").on(t.firmId, t.status),
+  createdAtIdx: index("idx_document_generation_jobs_created_at").on(t.firmId, t.createdAt),
+}));
+
+export const documentGenerationJobItemsTable = pgTable("document_generation_job_items", {
+  id: serial("id").primaryKey(),
+  jobId: uuid("job_id").notNull(),
+  firmId: integer("firm_id").notNull(),
+  caseId: integer("case_id").notNull(),
+  templateId: integer("template_id").notNull(),
+  status: text("status").notNull().default("pending"),
+  objectPath: text("object_path"),
+  fileName: text("file_name"),
+  mimeType: text("mime_type"),
+  fileSize: integer("file_size"),
+  errorCode: text("error_code"),
+  errorMessage: text("error_message"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  finishedAt: timestamp("finished_at", { withTimezone: true }),
+}, (t) => ({
+  jobIdx: index("idx_document_generation_job_items_job").on(t.jobId),
+  firmIdx: index("idx_document_generation_job_items_firm").on(t.firmId),
+  firmCaseIdx: index("idx_document_generation_job_items_case").on(t.firmId, t.caseId),
+  statusIdx: index("idx_document_generation_job_items_status").on(t.firmId, t.status),
+  createdAtIdx: index("idx_document_generation_job_items_created_at").on(t.firmId, t.caseId, t.createdAt),
+}));
+
 export const documentVariableDefinitionsTable = pgTable("document_variable_definitions", {
   id: serial("id").primaryKey(),
   key: text("key").notNull(),

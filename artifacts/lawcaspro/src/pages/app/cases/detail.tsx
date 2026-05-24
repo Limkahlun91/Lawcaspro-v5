@@ -959,6 +959,23 @@ export default function CaseDetail() {
   const isMasterTitle = titleType === "master";
   const isStrataOrIndividual = titleType === "strata" || titleType === "individual";
   const caseMeta: Record<string, unknown> = caseInfo && typeof caseInfo === "object" ? (caseInfo as unknown as Record<string, unknown>) : {};
+  const propertyDetailsObj = useMemo(() => {
+    const raw = (caseMeta as any).propertyDetails;
+    if (!raw) return {} as Record<string, unknown>;
+    if (typeof raw === "object") return raw as Record<string, unknown>;
+    if (typeof raw !== "string") return {} as Record<string, unknown>;
+    try {
+      const obj = JSON.parse(raw);
+      return obj && typeof obj === "object" ? obj as Record<string, unknown> : ({} as Record<string, unknown>);
+    } catch {
+      return {} as Record<string, unknown>;
+    }
+  }, [caseMeta.propertyDetails]);
+  const propertyAddressBaseline = typeof (propertyDetailsObj as any).propertyAddress === "string" ? String((propertyDetailsObj as any).propertyAddress) : "";
+  const [propertyAddressDraft, setPropertyAddressDraft] = useState("");
+  useEffect(() => {
+    setPropertyAddressDraft(propertyAddressBaseline);
+  }, [propertyAddressBaseline, caseId]);
   const projectMeta: Record<string, unknown> =
     caseMeta.project && typeof caseMeta.project === "object"
       ? (caseMeta.project as Record<string, unknown>)
@@ -1727,7 +1744,9 @@ export default function CaseDetail() {
                       <div className="text-xs font-medium text-slate-500">Property / Project</div>
                       <div className="text-sm font-semibold text-slate-900">
                         {(() => {
-                          const prop = typeof caseMeta.propertyDetails === "string" ? caseMeta.propertyDetails.trim() : "";
+                          const prop = typeof (propertyDetailsObj as any).propertyAddress === "string"
+                            ? String((propertyDetailsObj as any).propertyAddress).trim()
+                            : "";
                           const proj = String((caseInfo as any)?.projectName ?? "").trim();
                           return prop || proj || "—";
                         })()}
@@ -1771,6 +1790,39 @@ export default function CaseDetail() {
                         </div>
                       </>
                     )}
+                  </div>
+
+                  <div className="mt-4 grid grid-cols-1 md:grid-cols-6 gap-3 items-end">
+                    <div className="md:col-span-4 space-y-1.5">
+                      <Label>Property Address *</Label>
+                      <Input
+                        value={propertyAddressDraft}
+                        onChange={(e) => setPropertyAddressDraft(e.target.value)}
+                        disabled={updateCaseMutation.isPending}
+                        placeholder="Enter property address"
+                      />
+                    </div>
+                    <div className="md:col-span-2 flex gap-2">
+                      <Button
+                        type="button"
+                        disabled={updateCaseMutation.isPending}
+                        onClick={() => {
+                          const next = propertyAddressDraft.trim();
+                          if (!next) {
+                            toast({ title: "Property Address is required", variant: "destructive" });
+                            return;
+                          }
+                          updateCaseMutation.mutate({
+                            propertyDetails: {
+                              ...propertyDetailsObj,
+                              propertyAddress: next,
+                            },
+                          });
+                        }}
+                      >
+                        {updateCaseMutation.isPending ? "Saving..." : "Save"}
+                      </Button>
+                    </div>
                   </div>
                 </CardContent>
               </Card>

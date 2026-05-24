@@ -3678,6 +3678,49 @@ router.patch("/cases/:caseId", requireAuthHandler, requireFirmUserHandler, requi
     updates.lawyerStatusUpdatedAt = new Date();
   }
 
+  const bodyRec = (req.body && typeof req.body === "object") ? (req.body as Record<string, unknown>) : {};
+  const incomingPropertyAddress = typeof bodyRec.propertyAddress === "string" ? bodyRec.propertyAddress.trim() : "";
+  const incomingPropertyDetails = bodyRec.propertyDetails;
+  const wantsUpdatePropertyDetails = incomingPropertyDetails !== undefined || bodyRec.propertyAddress !== undefined;
+  if (wantsUpdatePropertyDetails) {
+    const [existing] = await r
+      .select({ propertyDetails: casesTable.propertyDetails })
+      .from(casesTable)
+      .where(and(eq(casesTable.id, params.data.caseId), eq(casesTable.firmId, req.firmId!)))
+      .limit(1);
+
+    const parseJsonObj = (raw: unknown): Record<string, unknown> => {
+      if (!raw) return {};
+      if (typeof raw === "object") return raw as Record<string, unknown>;
+      if (typeof raw !== "string") return {};
+      try {
+        const out = JSON.parse(raw);
+        return out && typeof out === "object" ? out as Record<string, unknown> : {};
+      } catch {
+        return {};
+      }
+    };
+
+    const base = parseJsonObj(existing?.propertyDetails);
+    const incoming =
+      typeof incomingPropertyDetails === "string"
+        ? parseJsonObj(incomingPropertyDetails)
+        : (incomingPropertyDetails && typeof incomingPropertyDetails === "object")
+          ? (incomingPropertyDetails as Record<string, unknown>)
+          : {};
+
+    const next = { ...base, ...incoming };
+    if (bodyRec.propertyAddress !== undefined) {
+      next.propertyAddress = incomingPropertyAddress;
+    }
+    const nextAddress = typeof next.propertyAddress === "string" ? next.propertyAddress.trim() : "";
+    if (!nextAddress) {
+      res.status(422).json({ error: "Please fill in Property Address in Case Details first", code: "PROPERTY_ADDRESS_REQUIRED" });
+      return;
+    }
+    updates.propertyDetails = JSON.stringify({ ...next, propertyAddress: nextAddress });
+  }
+
   const wantsAssignLawyer = parsed.data.assignedLawyerId !== undefined;
   const wantsAssignClerk = (parsed.data as any)?.assignedClerkId !== undefined;
   if (wantsAssignLawyer || wantsAssignClerk) {

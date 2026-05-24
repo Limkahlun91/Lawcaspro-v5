@@ -41,7 +41,13 @@ type PreflightReport = {
     referenceNo: string;
     parcelNo: string | null;
     missing: string[];
+    warnings?: string[];
   }>;
+};
+
+type GenerationJobResponse = {
+  job: Record<string, unknown>;
+  items: Array<Record<string, unknown>>;
 };
 
 type FirmFolder = {
@@ -105,6 +111,7 @@ export default function DocumentAutomationHub() {
   const [duplexMode, setDuplexMode] = useState<"double" | "single" | "custom">("double");
   const [customDuplexRange, setCustomDuplexRange] = useState("");
   const [busy, setBusy] = useState(false);
+  const [jobId, setJobId] = useState<string | null>(null);
   const [smartMessage, setSmartMessage] = useState<string | null>(null);
   const [smartTemplateIdSet, setSmartTemplateIdSet] = useState<Set<number>>(() => new Set());
   const [smartFolderIdSet, setSmartFolderIdSet] = useState<Set<number>>(() => new Set());
@@ -217,6 +224,72 @@ export default function DocumentAutomationHub() {
   const preflightMissing = preflightQuery.data?.cases ?? [];
   const preflightCritical = Boolean(preflightQuery.data?.critical);
   const preflightBlocking = preflightEnabled && (preflightQuery.isFetching || preflightQuery.isLoading || preflightCritical || Boolean(preflightQuery.error));
+
+  const jobQuery = useQuery<GenerationJobResponse>({
+    queryKey: ["document-automation", "job", jobId],
+    queryFn: () => apiFetchJson(`/documents/jobs/${jobId}`),
+    enabled: Boolean(jobId),
+    refetchInterval: (q) => {
+      const st = String((q.state.data?.job as any)?.status ?? "");
+      if (st === "completed" || st === "failed") return false;
+      return 2000;
+    },
+    retry: false,
+  });
+
+  const jobStatus = String((jobQuery.data?.job as any)?.status ?? "");
+  const jobDownloadFileName =
+    safeText((jobQuery.data?.job as any)?.download_file_name) ||
+    safeText((jobQuery.data?.job as any)?.downloadFileName);
+
+  useEffect(() => {
+    if (!jobId) return;
+    if (!jobQuery.data?.job) return;
+
+    if (jobStatus === "failed") {
+      const msg = safeText((jobQuery.data?.job as any)?.error_summary) || "Document generation failed";
+      toast({ title: "Generation failed", description: msg, variant: "destructive" });
+      setJobId(null);
+      setBusy(false);
+      return;
+    }
+    if (jobStatus !== "completed") return;
+
+    const failed = (jobQuery.data?.items ?? []).filter((it) => String((it as any).status ?? "") === "failed");
+    if (failed.length > 0) {
+      toast({ title: "Some documents failed", description: "Open browser console to view failure details." });
+      console.warn("[document-automation.failures]", failed);
+    }
+
+    const doDownload = async () => {
+      const url = `${API_BASE}/documents/jobs/${jobId}/download`;
+      if (activeMode === "print") {
+        window.open(url, "_blank", "noopener,noreferrer");
+        toast({ title: "Printable PDF generated" });
+        return;
+      }
+
+      const resp = await fetch(url, { credentials: "include" });
+      if (!resp.ok) {
+        const text = await resp.text().catch(() => "");
+        throw new Error(text || "Download failed");
+      }
+      const blob = await resp.blob();
+      const filename =
+        parseFilenameFromContentDisposition(resp.headers.get("Content-Disposition")) ||
+        jobDownloadFileName ||
+        "document-automation.zip";
+      downloadBlob(blob, filename);
+      toast({ title: "Export ready", description: filename });
+    };
+
+    doDownload()
+      .catch((err) => toastError(toast, err))
+      .finally(() => {
+        setJobId(null);
+        setBusy(false);
+      });
+  }, [jobId, jobQuery.data, jobStatus, activeMode, jobDownloadFileName, toast]);
 
   function setAllCasesOnPage(checked: boolean) {
     if (!checked) {
@@ -417,6 +490,7 @@ export default function DocumentAutomationHub() {
     }
 
     setBusy(true);
+    let startedJob = false;
     try {
       if (preflightEnabled) {
         const preflight = await preflightQuery.refetch();
@@ -446,7 +520,7 @@ export default function DocumentAutomationHub() {
         },
       };
 
-      const resp = await fetch(`${API_BASE}/documents/automation/generate`, {
+      const resp = await fetch(`${API_BASE}/documents/automation/generate-job`, {
         method: "POST",
         credentials: "include",
         headers: { "content-type": "application/json" },
@@ -456,35 +530,16 @@ export default function DocumentAutomationHub() {
         const text = await resp.text().catch(() => "");
         throw new Error(text || "Request failed");
       }
-
-      const failuresHeader = resp.headers.get("X-Document-Automation-Failures");
-      const blob = await resp.blob();
-      const filename =
-        parseFilenameFromContentDisposition(resp.headers.get("Content-Disposition")) ||
-        (mode === "print" ? "system-print.pdf" : "document-automation.zip");
-
-      if (mode === "print") {
-        const url = URL.createObjectURL(blob);
-        window.open(url, "_blank", "noopener,noreferrer");
-        toast({ title: "Printable PDF generated", description: "Use your browser print dialog to apply duplex/copies (settings are recorded in audit log)." });
-        setTimeout(() => URL.revokeObjectURL(url), 60_000);
-      } else {
-        downloadBlob(blob, filename);
-        toast({ title: "ZIP exported", description: filename });
-      }
-
-      if (failuresHeader) {
-        toast({ title: "Some documents failed", description: "Open browser console to view failure details." });
-        try {
-          console.warn("[document-automation.failures]", JSON.parse(failuresHeader));
-        } catch {
-          console.warn("[document-automation.failures]", failuresHeader);
-        }
-      }
+      const data = await resp.json().catch(() => null) as any;
+      const nextJobId = safeText(data?.jobId);
+      if (!nextJobId) throw new Error("Missing jobId");
+      setJobId(nextJobId);
+      startedJob = true;
+      toast({ title: "Generation started", description: "Processing in background. This page will auto-download when ready." });
     } catch (err) {
       toastError(toast, err);
     } finally {
-      setBusy(false);
+      if (!startedJob) setBusy(false);
     }
   }
 
@@ -760,8 +815,8 @@ export default function DocumentAutomationHub() {
                         Generates PDFs, applies naming rules, and exports a ZIP with the required folder structure.
                       </div>
                       {preflightEnabled && (preflightBlocking || preflightMissing.length > 0) && (
-                        <Alert variant="destructive">
-                          <AlertTitle>Missing data detected</AlertTitle>
+                        <Alert variant={preflightCritical ? "destructive" : "default"}>
+                          <AlertTitle>{preflightCritical ? "Missing data detected" : "Preflight warnings"}</AlertTitle>
                           <AlertDescription>
                             <div className="space-y-1.5">
                               {preflightQuery.isFetching || preflightQuery.isLoading ? (
@@ -771,7 +826,7 @@ export default function DocumentAutomationHub() {
                               ) : (
                                 preflightMissing.map((c) => (
                                   <div key={c.caseId}>
-                                    ⚠️ File Ref: {c.parcelNo || c.referenceNo || `Case ${c.caseId}`} - Missing {c.missing.join(", ")}.
+                                    ⚠️ File Ref: {c.parcelNo || c.referenceNo || `Case ${c.caseId}`} - {c.missing.length > 0 ? `Missing ${c.missing.join(", ")}` : "OK"}{(c.warnings?.length ?? 0) > 0 ? ` • Warning: ${c.warnings?.join(", ")}` : ""}.
                                   </div>
                                 ))
                               )}
@@ -821,8 +876,8 @@ export default function DocumentAutomationHub() {
                       </div>
 
                       {preflightEnabled && (preflightBlocking || preflightMissing.length > 0) && (
-                        <Alert variant="destructive">
-                          <AlertTitle>Missing data detected</AlertTitle>
+                        <Alert variant={preflightCritical ? "destructive" : "default"}>
+                          <AlertTitle>{preflightCritical ? "Missing data detected" : "Preflight warnings"}</AlertTitle>
                           <AlertDescription>
                             <div className="space-y-1.5">
                               {preflightQuery.isFetching || preflightQuery.isLoading ? (
@@ -832,7 +887,7 @@ export default function DocumentAutomationHub() {
                               ) : (
                                 preflightMissing.map((c) => (
                                   <div key={c.caseId}>
-                                    ⚠️ File Ref: {c.parcelNo || c.referenceNo || `Case ${c.caseId}`} - Missing {c.missing.join(", ")}.
+                                    ⚠️ File Ref: {c.parcelNo || c.referenceNo || `Case ${c.caseId}`} - {c.missing.length > 0 ? `Missing ${c.missing.join(", ")}` : "OK"}{(c.warnings?.length ?? 0) > 0 ? ` • Warning: ${c.warnings?.join(", ")}` : ""}.
                                   </div>
                                 ))
                               )}

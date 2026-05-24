@@ -794,16 +794,12 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
 
   async function saveBatchOverridesToCase(): Promise<void> {
     const outgoing = compactStringOverrides(batchVariableChecklistOverrides);
-    try {
-      await apiFetchJson(`/cases/${caseId}/documents/variable-overrides`, {
-        method: "PUT",
-        body: JSON.stringify({ overrides: outgoing }),
-      });
-      await qc.invalidateQueries({ queryKey: ["case-documents-variable-overrides", caseId] });
-      toast({ title: "Saved & updated", description: `${Object.keys(outgoing).length} variables` });
-    } catch (err) {
-      toastError(toast, err, "Save & update failed");
-    }
+    await apiFetchJson(`/cases/${caseId}/documents/variable-overrides`, {
+      method: "PUT",
+      body: JSON.stringify({ overrides: outgoing }),
+    });
+    await qc.invalidateQueries({ queryKey: ["case-documents-variable-overrides", caseId] });
+    toast({ title: "Saved & updated", description: `${Object.keys(outgoing).length} variables` });
   }
 
   async function runBatchGeneratePdf(): Promise<void> {
@@ -811,7 +807,7 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
     const items = batchVariableChecklistItems;
     if (!items.length) return;
 
-    const overrides = compactStringOverrides(batchVariableChecklistOverrides);
+    await saveBatchOverridesToCase();
     const bypassApplicability = Boolean(showAllTemplates && canBypassApplicability);
     setBatchLoopGenerating(true);
     setBatchLoopProgress({ current: 0, total: items.length });
@@ -833,7 +829,7 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
           : undefined;
 
         const endpoint = `/cases/${caseId}/documents/generate`;
-        const payload = { templateId: Number(it.templateId), letterheadId: letterheadIdToSend, bypassApplicability, clauses: selectedClauses, overrides };
+        const payload = { templateId: Number(it.templateId), letterheadId: letterheadIdToSend, bypassApplicability, clauses: selectedClauses, overrides: null };
 
         const res = await apiRequest(endpoint, { method: "POST", body: JSON.stringify(payload), timeoutMs: 60000 });
         const blob = await res.blob();
@@ -2199,7 +2195,16 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
                       if (!variableChecklistItem || !variableChecklistResult) return;
                       setVariableChecklistGenerating(true);
                       try {
-                        await handleGenerate(variableChecklistItem, variableChecklistOverrides);
+                        const base = savedOverridesAsStrings();
+                        const edited = compactStringOverrides(variableChecklistOverrides);
+                        const outgoing = { ...base, ...edited };
+                        await apiFetchJson(`/cases/${caseId}/documents/variable-overrides`, {
+                          method: "PUT",
+                          body: JSON.stringify({ overrides: outgoing }),
+                        });
+                        await qc.invalidateQueries({ queryKey: ["case-documents-variable-overrides", caseId] });
+                        toast({ title: "Variables saved", description: `${Object.keys(outgoing).length} variables` });
+                        await handleGenerate(variableChecklistItem);
                       } finally {
                         setVariableChecklistGenerating(false);
                       }

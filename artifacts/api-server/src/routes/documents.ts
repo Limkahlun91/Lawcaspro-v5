@@ -1095,6 +1095,13 @@ async function buildCaseContext(r: DbConn, caseId: number, firmId: number, cache
   const dateStr = today.toLocaleDateString("en-MY", { day: "2-digit", month: "long", year: "numeric" });
   const dateShort = today.toLocaleDateString("en-MY", { day: "2-digit", month: "2-digit", year: "numeric" });
 
+  const propertyAddressFromCase = (() => {
+    const v = (prop as any)?.propertyAddress ?? (prop as any)?.property_address ?? (prop as any)?.address;
+    return typeof v === "string" ? v.trim() : "";
+  })();
+  const purchaserAddressRaw = typeof (mainPurchaser as any).address === "string" ? String((mainPurchaser as any).address).trim() : "";
+  const purchaserAddress = propertyAddressFromCase || purchaserAddressRaw || "[ADDRESS PENDING]";
+
   const workflowSteps = workflowRows
     .map((row) => {
       const stepKey = typeof (row as any).step_key === "string" ? String((row as any).step_key) : "";
@@ -1358,7 +1365,7 @@ async function buildCaseContext(r: DbConn, caseId: number, firmId: number, cache
     purchaser_name: mainPurchaser.name ?? "",
     purchaser_ic: mainPurchaser.ic_no ?? "",
     purchaser_nationality: mainPurchaser.nationality ?? "",
-    purchaser_address: mainPurchaser.address ?? "",
+    purchaser_address: purchaserAddress,
     purchaser_phone: mainPurchaser.phone ?? "",
     purchaser_email: mainPurchaser.email ?? "",
 
@@ -6903,14 +6910,14 @@ async function runAutomationPreflight(args: {
   templates: Array<{ id: number; name: string }>;
 }): Promise<{
   critical: boolean;
-  cases: Array<{ caseId: number; referenceNo: string; parcelNo: string | null; missing: string[] }>;
+  cases: Array<{ caseId: number; referenceNo: string; parcelNo: string | null; missing: string[]; warnings?: string[] }>;
 }> {
   const cache = createRequestCache();
   const templates = args.templates;
   const templateNameTokens = templates.map((t) => String(t.name ?? "").toLowerCase());
   const loanLike = templateNameTokens.some((n) => n.includes("facility") || n.includes("loan") || n.includes("financier") || n.includes("islamic"));
 
-  const out: Array<{ caseId: number; referenceNo: string; parcelNo: string | null; missing: string[] }> = [];
+  const out: Array<{ caseId: number; referenceNo: string; parcelNo: string | null; missing: string[]; warnings?: string[] }> = [];
 
   for (const caseId of args.caseIds) {
     const context = await buildCaseContext(args.r, caseId, args.firmId, cache);
@@ -6923,9 +6930,11 @@ async function runAutomationPreflight(args: {
     const purchaseMode = typeof (context as any).purchase_mode === "string" ? String((context as any).purchase_mode) : "";
 
     const missing = new Set<string>();
+    const warnings = new Set<string>();
     if (isBlankValue((context as any).purchaser_name)) missing.add("purchaser_name");
     if (isBlankValue((context as any).purchaser_ic)) missing.add("purchaser_ic");
-    if (isBlankValue((context as any).purchaser_address)) missing.add("purchaser_address");
+    const purchaserAddress = String((context as any).purchaser_address ?? "");
+    if (purchaserAddress === "[ADDRESS PENDING]") warnings.add("purchaser_address");
     if (isBlankValue((context as any).parcel_no)) missing.add("parcel_no");
 
     const missingFromBindings = new Set<string>();
@@ -6955,11 +6964,12 @@ async function runAutomationPreflight(args: {
       referenceNo,
       parcelNo,
       missing: Array.from(missing).map(labelForVariableKey).filter(Boolean),
+      warnings: Array.from(warnings).map(labelForVariableKey).filter(Boolean),
     });
   }
 
   const critical = out.some((x) => x.missing.length > 0);
-  return { critical, cases: out.filter((x) => x.missing.length > 0) };
+  return { critical, cases: out.filter((x) => x.missing.length > 0 || (x.warnings?.length ?? 0) > 0) };
 }
 
 router.post("/documents/automation/preflight", requireAuth, requireFirmUser, requirePermission("documents", "generate"), async (req: AuthRequest, res): Promise<void> => {
@@ -7020,6 +7030,415 @@ router.post("/documents/automation/preflight", requireAuth, requireFirmUser, req
     templates: templateRows.map((t) => ({ id: Number((t as any).id), name: String((t as any).name ?? "") })),
   });
   res.json(report);
+});
+
+async function processAutomationGenerationJobStep(r: DbConn, args: { firmId: number; jobId: string }): Promise<void> {
+  const jobRows = await queryRows(r, sql`
+    SELECT *
+    FROM document_generation_jobs
+    WHERE id = ${args.jobId}::uuid AND firm_id = ${args.firmId}
+    LIMIT 1
+  `);
+  const job = jobRows[0];
+  if (!job) return;
+
+  const status = String((job as any).status ?? "");
+  if (status === "completed" || status === "failed") return;
+
+  if (status !== "running") {
+    await queryRows(r, sql`
+      UPDATE document_generation_jobs
+      SET status = 'running',
+          started_at = COALESCE(started_at, now())
+      WHERE id = ${args.jobId}::uuid AND firm_id = ${args.firmId}
+    `);
+  }
+
+  const claimed = await queryRows(r, sql`
+    WITH next AS (
+      SELECT id
+      FROM document_generation_job_items
+      WHERE job_id = ${args.jobId}::uuid
+        AND firm_id = ${args.firmId}
+        AND status = 'pending'
+      ORDER BY id ASC
+      FOR UPDATE SKIP LOCKED
+      LIMIT 1
+    )
+    UPDATE document_generation_job_items i
+    SET status = 'running'
+    FROM next
+    WHERE i.id = next.id
+    RETURNING i.*
+  `);
+
+  const item = claimed[0];
+  if (!item) {
+    const action = String((job as any).action ?? "download");
+    const items = await queryRows(r, sql`
+      SELECT *
+      FROM document_generation_job_items
+      WHERE job_id = ${args.jobId}::uuid AND firm_id = ${args.firmId}
+      ORDER BY id ASC
+    `);
+    const successItems = items.filter((x) => String((x as any).status ?? "") === "success");
+    const failedItems = items.filter((x) => String((x as any).status ?? "") === "failed");
+    const pendingItems = items.filter((x) => {
+      const st = String((x as any).status ?? "");
+      return st === "pending" || st === "running";
+    });
+    if (pendingItems.length > 0) return;
+
+    try {
+      if (successItems.length === 0) {
+        await queryRows(r, sql`
+          UPDATE document_generation_jobs
+          SET status = 'failed',
+              failed_count = ${failedItems.length},
+              pending_count = 0,
+              finished_at = now(),
+              error_summary = ${failedItems.length ? "All items failed" : "No output generated"}
+          WHERE id = ${args.jobId}::uuid AND firm_id = ${args.firmId}
+        `);
+        return;
+      }
+
+      if (action === "print") {
+        const pdfBuffers: Buffer[] = [];
+        for (const it of successItems) {
+          const objectPath = typeof (it as any).object_path === "string" ? String((it as any).object_path) : "";
+          if (!objectPath) continue;
+          pdfBuffers.push(await readSupabasePrivateObjectBytes(objectPath));
+        }
+        const merged = await mergePdfBuffers(pdfBuffers);
+        if (!merged.length) throw new Error("No printable output generated");
+        const objectPath = `/objects/temp-generated/${args.firmId}/document-automation-jobs/${args.jobId}.pdf`;
+        const outName = safeFilenameAscii(`System_Print_${new Date().toISOString().slice(0, 10)}.pdf`) || "system-print.pdf";
+        await supabaseStorage.uploadPrivateObject({ objectPath, fileBytes: merged, contentType: "application/pdf" });
+        await queryRows(r, sql`
+          UPDATE document_generation_jobs
+          SET status = 'completed',
+              total_count = ${items.length},
+              success_count = ${successItems.length},
+              failed_count = ${failedItems.length},
+              pending_count = 0,
+              finished_at = now(),
+              download_object_path = ${objectPath},
+              download_file_name = ${outName},
+              download_mime_type = 'application/pdf'
+          WHERE id = ${args.jobId}::uuid AND firm_id = ${args.firmId}
+        `);
+        return;
+      }
+
+      if (successItems.length === 1) {
+        const oneItem = successItems[0];
+        const objectPath = typeof (oneItem as any).object_path === "string" ? String((oneItem as any).object_path) : "";
+        const fileName = typeof (oneItem as any).file_name === "string" ? String((oneItem as any).file_name) : "";
+        await queryRows(r, sql`
+          UPDATE document_generation_jobs
+          SET status = 'completed',
+              total_count = ${items.length},
+              success_count = ${successItems.length},
+              failed_count = ${failedItems.length},
+              pending_count = 0,
+              finished_at = now(),
+              download_object_path = ${objectPath},
+              download_file_name = ${fileName || `document-${args.jobId}.pdf`},
+              download_mime_type = 'application/pdf'
+          WHERE id = ${args.jobId}::uuid AND firm_id = ${args.firmId}
+        `);
+        return;
+      }
+
+      const entries = successItems
+        .map((it) => ({
+          zipPath: safeFilenameAscii(String((it as any).file_name ?? `document-${(it as any).id}`)) || `document-${(it as any).id}`,
+          objectPath: String((it as any).object_path ?? ""),
+        }))
+        .filter((x) => x.objectPath);
+      if (entries.length === 0) throw new Error("No output generated");
+
+      const zipBytes = await buildZipBufferFromPrivateObjects(entries);
+      const objectPath = `/objects/temp-generated/${args.firmId}/document-automation-jobs/${args.jobId}.zip`;
+      const outName = safeFilenameAscii(`Document_Automation_${new Date().toISOString().slice(0, 10)}.zip`) || "document-automation.zip";
+      await supabaseStorage.uploadPrivateObject({ objectPath, fileBytes: zipBytes, contentType: "application/zip" });
+
+      await queryRows(r, sql`
+        UPDATE document_generation_jobs
+        SET status = 'completed',
+            total_count = ${items.length},
+            success_count = ${successItems.length},
+            failed_count = ${failedItems.length},
+            pending_count = 0,
+            finished_at = now(),
+            download_object_path = ${objectPath},
+            download_file_name = ${outName},
+            download_mime_type = 'application/zip'
+        WHERE id = ${args.jobId}::uuid AND firm_id = ${args.firmId}
+      `);
+    } catch (err) {
+      await queryRows(r, sql`
+        UPDATE document_generation_jobs
+        SET status = 'failed',
+            finished_at = now(),
+            error_summary = ${err instanceof Error ? err.message : "Internal Server Error"}
+        WHERE id = ${args.jobId}::uuid AND firm_id = ${args.firmId}
+      `);
+    }
+    return;
+  }
+
+  const caseId = Number((item as any).case_id);
+  const templateId = Number((item as any).template_id);
+
+  const actorId = reqIdToNumber((job as any).created_by);
+  const runId = await createGenerationRun(r, {
+    firm_id: args.firmId,
+    case_id: caseId,
+    template_source: "firm",
+    template_id: templateId,
+    template_version_id: null,
+    platform_document_id: null,
+    document_name: "Generated document",
+    render_mode: "docx",
+    status: "running",
+    rendered_variables_snapshot: null,
+    checklist_snapshot: null,
+    readiness_snapshot: null,
+    triggered_by: actorId > 0 ? actorId : null,
+    error_code: null,
+    error_message: null,
+  });
+
+  try {
+    const out = await generateFirmDocument({
+      r,
+      firmId: args.firmId,
+      actorId,
+      actorType: "firm_user",
+      ipAddress: undefined,
+      userAgent: undefined,
+      caseId,
+      templateId,
+      runId,
+      outputFormat: "pdf",
+    });
+    await finishGenerationRunSuccess(r, args.firmId, runId, out.caseDocumentId, out.renderedVars, out.checklistSnapshot, out.readinessSnapshot);
+
+    const objectPath = String((out.caseDocument as any)?.objectPath ?? (out.caseDocument as any)?.object_path ?? "");
+    const fileName = String((out.caseDocument as any)?.fileName ?? (out.caseDocument as any)?.file_name ?? "");
+    const mimeType = String((out.caseDocument as any)?.mimeType ?? (out.caseDocument as any)?.mime_type ?? "application/pdf");
+    const fileSize = Number((out.caseDocument as any)?.fileSize ?? (out.caseDocument as any)?.file_size ?? 0) || null;
+
+    await queryRows(r, sql`
+      UPDATE document_generation_job_items
+      SET status = 'success',
+          object_path = ${objectPath || null},
+          file_name = ${fileName || null},
+          mime_type = ${mimeType || null},
+          file_size = ${fileSize as any},
+          finished_at = now()
+      WHERE id = ${Number((item as any).id)} AND firm_id = ${args.firmId}
+    `);
+  } catch (err: unknown) {
+    const e =
+      err instanceof DocumentGenerationError ? err
+      : new DocumentGenerationError(500, "INTERNAL_ERROR", "Internal Server Error");
+    await finishGenerationRunFailed(r, args.firmId, runId, e.code, e.message);
+    await queryRows(r, sql`
+      UPDATE document_generation_job_items
+      SET status = 'failed',
+          error_code = ${e.code},
+          error_message = ${e.message},
+          finished_at = now()
+      WHERE id = ${Number((item as any).id)} AND firm_id = ${args.firmId}
+    `);
+  }
+
+  const counts = await queryRows(r, sql`
+    SELECT
+      COUNT(*) FILTER (WHERE status = 'success') AS success_count,
+      COUNT(*) FILTER (WHERE status = 'failed')  AS failed_count,
+      COUNT(*) FILTER (WHERE status IN ('pending','running')) AS pending_count,
+      COUNT(*) AS total_count
+    FROM document_generation_job_items
+    WHERE job_id = ${args.jobId}::uuid AND firm_id = ${args.firmId}
+  `);
+  const c = counts[0] as any;
+  await queryRows(r, sql`
+    UPDATE document_generation_jobs
+    SET total_count = ${Number(c?.total_count ?? 0)},
+        success_count = ${Number(c?.success_count ?? 0)},
+        failed_count = ${Number(c?.failed_count ?? 0)},
+        pending_count = ${Number(c?.pending_count ?? 0)}
+    WHERE id = ${args.jobId}::uuid AND firm_id = ${args.firmId}
+  `);
+}
+
+function reqIdToNumber(v: unknown): number {
+  const n = typeof v === "number" ? v : typeof v === "string" ? Number(v) : NaN;
+  return Number.isFinite(n) ? Number(n) : 0;
+}
+
+router.post("/documents/automation/generate-job", requireAuth, requireFirmUser, requirePermission("documents", "generate"), async (req: AuthRequest, res): Promise<void> => {
+  const r = getRlsDb(req, res);
+  if (!r) return;
+
+  const bodySchema = z.object({
+    caseIds: z.array(z.union([z.number(), z.string()])).min(1),
+    templateIds: z.array(z.union([z.number(), z.string()])).min(1),
+    config: z.object({
+      action: z.enum(["download", "print"]),
+      copies: z.union([z.number(), z.string()]).optional(),
+      duplexSettings: z.unknown().optional(),
+    }),
+  });
+  const parsed = bodySchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(422).json({ error: "Invalid request body" });
+    return;
+  }
+
+  const caseIds = Array.from(new Set(
+    parsed.data.caseIds
+      .map((x) => (typeof x === "number" ? x : parseInt(x, 10)))
+      .filter((x) => Number.isFinite(x))
+      .map((x) => Math.trunc(x))
+      .filter((x) => x > 0)
+  ));
+  const templateIds = Array.from(new Set(
+    parsed.data.templateIds
+      .map((x) => (typeof x === "number" ? x : parseInt(x, 10)))
+      .filter((x) => Number.isFinite(x))
+      .map((x) => Math.trunc(x))
+      .filter((x) => x > 0)
+  ));
+  if (caseIds.length === 0 || templateIds.length === 0) {
+    res.status(400).json({ error: "caseIds and templateIds are required", code: "MISSING_INPUTS" });
+    return;
+  }
+  if (caseIds.length > 20 || templateIds.length > 25 || caseIds.length * templateIds.length > 300) {
+    res.status(422).json({ error: "Too many items", code: "TOO_MANY_ITEMS" });
+    return;
+  }
+
+  const templateRows = await queryRows(r, sql`
+    SELECT id, name
+    FROM document_templates
+    WHERE firm_id = ${req.firmId!}
+      AND is_template_capable = true
+      AND id IN (${sql.join(templateIds.map((id) => sql`${id}`), sql`, `)})
+    ORDER BY created_at DESC
+  `);
+  if (templateRows.length !== templateIds.length) {
+    res.status(404).json({ error: "One or more templates not found", code: "TEMPLATE_NOT_FOUND" });
+    return;
+  }
+
+  const preflight = await runAutomationPreflight({
+    r,
+    firmId: req.firmId!,
+    caseIds,
+    templates: templateRows.map((t) => ({ id: Number((t as any).id), name: String((t as any).name ?? "") })),
+  });
+  if (preflight.critical) {
+    res.status(422).json({ error: "Missing required case data", code: "MISSING_REQUIRED_DATA", report: preflight });
+    return;
+  }
+
+  const jobId = randomUUID();
+  await queryRows(r, sql`
+    INSERT INTO document_generation_jobs (
+      id, firm_id, job_type, status, action, case_ids, template_ids, config,
+      total_count, success_count, failed_count, pending_count,
+      created_by, created_at
+    ) VALUES (
+      ${jobId}::uuid, ${req.firmId!}, 'document_automation', 'pending', ${parsed.data.config.action},
+      ${caseIds as any}, ${templateIds as any}, ${parsed.data.config as any},
+      ${caseIds.length * templateIds.length}, 0, 0, ${caseIds.length * templateIds.length},
+      ${req.userId as any}, now()
+    )
+  `);
+  for (const caseId of caseIds) {
+    for (const templateId of templateIds) {
+      await queryRows(r, sql`
+        INSERT INTO document_generation_job_items (job_id, firm_id, case_id, template_id, status)
+        VALUES (${jobId}::uuid, ${req.firmId!}, ${caseId}, ${templateId}, 'pending')
+      `);
+    }
+  }
+
+  setTimeout(() => {
+    processAutomationGenerationJobStep(r, { firmId: req.firmId!, jobId })
+      .catch((e) => console.error(e));
+  }, 0);
+
+  res.status(202).json({
+    jobId,
+    statusUrl: `/documents/jobs/${jobId}`,
+    downloadUrl: `/documents/jobs/${jobId}/download`,
+  });
+});
+
+router.get("/documents/jobs/:jobId", requireAuth, requireFirmUser, requirePermission("documents", "read"), async (req: AuthRequest, res): Promise<void> => {
+  const r = getRlsDb(req, res);
+  if (!r) return;
+  const jobId = one((req.params as any).jobId) ?? "";
+  if (!/^[0-9a-fA-F-]{36}$/.test(jobId)) {
+    res.status(400).json({ error: "Invalid jobId" });
+    return;
+  }
+
+  await processAutomationGenerationJobStep(r, { firmId: req.firmId!, jobId });
+
+  const jobs = await queryRows(r, sql`SELECT * FROM document_generation_jobs WHERE id = ${jobId}::uuid AND firm_id = ${req.firmId!}`);
+  const job = jobs[0];
+  if (!job) {
+    res.status(404).json({ error: "Job not found" });
+    return;
+  }
+  const items = await queryRows(r, sql`SELECT * FROM document_generation_job_items WHERE job_id = ${jobId}::uuid AND firm_id = ${req.firmId!} ORDER BY id ASC`);
+  res.json({ job, items });
+});
+
+router.get("/documents/jobs/:jobId/download", requireAuth, requireFirmUser, requirePermission("documents", "export"), async (req: AuthRequest, res): Promise<void> => {
+  const r = getRlsDb(req, res);
+  if (!r) return;
+  const jobId = one((req.params as any).jobId) ?? "";
+  if (!/^[0-9a-fA-F-]{36}$/.test(jobId)) {
+    res.status(400).json({ error: "Invalid jobId" });
+    return;
+  }
+  const jobs = await queryRows(r, sql`SELECT * FROM document_generation_jobs WHERE id = ${jobId}::uuid AND firm_id = ${req.firmId!}`);
+  const job = jobs[0];
+  if (!job) {
+    res.status(404).json({ error: "Job not found" });
+    return;
+  }
+  const objectPath = typeof (job as any).download_object_path === "string" ? String((job as any).download_object_path) : "";
+  if (!objectPath) {
+    res.status(404).json({ error: "Download not available", code: "DOWNLOAD_NOT_READY" });
+    return;
+  }
+  try {
+    const fileName = typeof (job as any).download_file_name === "string" ? String((job as any).download_file_name) : `export-${jobId}.zip`;
+    const fallbackContentType = typeof (job as any).download_mime_type === "string" ? String((job as any).download_mime_type) : "application/zip";
+    await streamSupabasePrivateObjectToResponse({ objectPath, res, fileName, fallbackContentType });
+    await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.generation_jobs.download", entityType: "document_generation_job", entityId: undefined, detail: `jobId=${jobId}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+  } catch (err) {
+    const cfgErr = getSupabaseStorageConfigError(err);
+    if (cfgErr) {
+      res.status(cfgErr.statusCode).json({ error: cfgErr.error, code: "STORAGE_NOT_CONFIGURED" });
+      return;
+    }
+    if (err instanceof ObjectNotFoundError) {
+      res.status(404).json({ error: "File not found" });
+      return;
+    }
+    logger.error({ err, path: req.path, firmId: req.firmId, userId: req.userId, jobId }, "[documents] generation_job_download_failed");
+    res.status(500).json({ error: "Internal Server Error" });
+  }
 });
 
 router.post("/documents/automation/generate", requireAuth, requireFirmUser, requirePermission("documents", "generate"), async (req: AuthRequest, res): Promise<void> => {

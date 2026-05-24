@@ -132,6 +132,15 @@ function ProjectDocumentsPanel(props: { projectId: number; category: "general" |
     return true;
   })();
 
+  useEffect(() => {
+    console.log("File selected:", file);
+  }, [file]);
+
+  const handleSelectFile = () => {
+    if (uploading) return;
+    fileInputRef.current?.click();
+  };
+
   return (
     <div className="space-y-4">
       <Card>
@@ -140,10 +149,10 @@ function ProjectDocumentsPanel(props: { projectId: number; category: "general" |
         </CardHeader>
         <CardContent className="space-y-4">
           {props.category === "mlu" ? (
-            <div className="grid grid-cols-1 md:grid-cols-4 gap-3 items-end">
+            <div className="grid grid-cols-1 md:grid-cols-6 gap-3 items-end">
               <div className="space-y-1.5">
                 <Label>Type</Label>
-                <Select value={mluType} onValueChange={(v) => setMluType(v === "bank_mlu" ? "bank_mlu" : "developer_mlu")}>
+                <Select disabled={uploading} value={mluType} onValueChange={(v) => setMluType(v === "bank_mlu" ? "bank_mlu" : "developer_mlu")}>
                   <SelectTrigger>
                     <SelectValue placeholder="Select type" />
                   </SelectTrigger>
@@ -154,19 +163,28 @@ function ProjectDocumentsPanel(props: { projectId: number; category: "general" |
                 </Select>
               </div>
               <div className="space-y-1.5 md:col-span-2">
+                <Label>Document Name</Label>
+                <Input
+                  value={documentName}
+                  onChange={(e) => setDocumentName(e.target.value)}
+                  placeholder="e.g. MLU - Maybank (Developer)"
+                  disabled={uploading}
+                />
+              </div>
+              <div className="space-y-1.5 md:col-span-2">
                 <Label>{mluType === "developer_mlu" ? "To Bank" : "From Bank"}</Label>
-                <Input value={bankName} onChange={(e) => setBankName(e.target.value)} placeholder="e.g. Maybank" />
+                <Input value={bankName} onChange={(e) => setBankName(e.target.value)} placeholder="e.g. Maybank" disabled={uploading} />
               </div>
               <div className="space-y-1.5">
                 <Label>Document Date</Label>
-                <DateOnlyInput valueYmd={documentDate} onChangeYmd={setDocumentDate} />
+                <DateOnlyInput valueYmd={documentDate} onChangeYmd={setDocumentDate} disabled={uploading} />
               </div>
             </div>
           ) : (
             <div className="grid grid-cols-1 md:grid-cols-7 gap-3 items-end">
               <div className="md:col-span-2 space-y-1.5">
                 <Label>Document Name</Label>
-                <Input list="project-doc-suggestions" value={documentName} onChange={(e) => setDocumentName(e.target.value)} />
+                <Input list="project-doc-suggestions" value={documentName} onChange={(e) => setDocumentName(e.target.value)} disabled={uploading} />
                 {nameSuggestions.length > 0 && (
                   <datalist id="project-doc-suggestions">
                     {nameSuggestions.map((s) => <option key={s} value={s} />)}
@@ -175,7 +193,7 @@ function ProjectDocumentsPanel(props: { projectId: number; category: "general" |
               </div>
               <div className="md:col-span-2 space-y-1.5">
                 <Label>Category</Label>
-                <Select value={uploadCategory} onValueChange={(v) => setUploadCategory(v === "developer_license" ? "developer_license" : v === "advertisement_permit" ? "advertisement_permit" : "general")}>
+                <Select disabled={uploading} value={uploadCategory} onValueChange={(v) => setUploadCategory(v === "developer_license" ? "developer_license" : v === "advertisement_permit" ? "advertisement_permit" : "general")}>
                   <SelectTrigger>
                     <SelectValue placeholder="Select category" />
                   </SelectTrigger>
@@ -189,7 +207,7 @@ function ProjectDocumentsPanel(props: { projectId: number; category: "general" |
               {apOrDl && (
                 <div className="md:col-span-2 space-y-1.5">
                   <Label>License / Permit Number</Label>
-                  <Input value={licenseNumber} onChange={(e) => setLicenseNumber(e.target.value)} placeholder="e.g. AP 1234 / DL 5678" />
+                  <Input value={licenseNumber} onChange={(e) => setLicenseNumber(e.target.value)} placeholder="e.g. AP 1234 / DL 5678" disabled={uploading} />
                 </div>
               )}
               <div className="md:col-span-1 flex items-center gap-2">
@@ -198,11 +216,11 @@ function ProjectDocumentsPanel(props: { projectId: number; category: "general" |
               </div>
               <div className="md:col-span-1 space-y-1.5">
                 <Label>{apOrDl || hasExpiry ? "Valid From *" : "Valid From"}</Label>
-                <DateOnlyInput valueYmd={validFrom} onChangeYmd={setValidFrom} disabled={!(apOrDl || hasExpiry)} />
+                <DateOnlyInput valueYmd={validFrom} onChangeYmd={setValidFrom} disabled={uploading || !(apOrDl || hasExpiry)} />
               </div>
               <div className="md:col-span-1 space-y-1.5">
                 <Label>{apOrDl || hasExpiry ? "Valid To *" : "Valid To"}</Label>
-                <DateOnlyInput valueYmd={validTo} onChangeYmd={setValidTo} disabled={!(apOrDl || hasExpiry)} />
+                <DateOnlyInput valueYmd={validTo} onChangeYmd={setValidTo} disabled={uploading || !(apOrDl || hasExpiry)} />
               </div>
             </div>
           )}
@@ -220,19 +238,20 @@ function ProjectDocumentsPanel(props: { projectId: number; category: "general" |
           />
           <div
             className={`rounded-lg border border-dashed p-4 text-sm ${dragging ? "border-slate-400 bg-slate-50" : "border-slate-200 bg-white"}`}
-            onDragEnter={(e) => { e.preventDefault(); e.stopPropagation(); setDragging(true); }}
-            onDragOver={(e) => { e.preventDefault(); e.stopPropagation(); setDragging(true); }}
-            onDragLeave={(e) => { e.preventDefault(); e.stopPropagation(); setDragging(false); }}
+            onDragEnter={(e) => { e.preventDefault(); setDragging(true); }}
+            onDragOver={(e) => { e.preventDefault(); setDragging(true); }}
+            onDragLeave={(e) => { e.preventDefault(); setDragging(false); }}
             onDrop={(e) => {
               e.preventDefault();
-              e.stopPropagation();
+              if (uploading) return;
               setDragging(false);
               const f = e.dataTransfer.files?.[0] ?? null;
               setFile(f);
             }}
-            onClick={() => fileInputRef.current?.click()}
+            onClick={handleSelectFile}
             role="button"
-            tabIndex={0}
+            tabIndex={uploading ? -1 : 0}
+            aria-disabled={uploading}
           >
             <div className="font-medium text-slate-900">File Upload</div>
             <div className="text-slate-500 mt-1">Drag & drop PDF / image, or click to select.</div>
@@ -242,9 +261,36 @@ function ProjectDocumentsPanel(props: { projectId: number; category: "general" |
           <div className="flex items-center gap-2">
             <Button
               type="button"
-              disabled={!canUpload}
-              onClick={async () => {
-                if (!file) return;
+              onClick={async (e) => {
+                e.preventDefault();
+                console.log("Upload click:", { file, documentName, uploading });
+                if (!documentName.trim()) {
+                  toast({ variant: "destructive", title: "Please enter a document name" });
+                  return;
+                }
+                if (!file) {
+                  toast({ variant: "destructive", title: "Please select a file first" });
+                  handleSelectFile();
+                  return;
+                }
+                if (props.category !== "mlu") {
+                  if (apOrDl) {
+                    if (!licenseNumber.trim()) {
+                      toast({ variant: "destructive", title: "Please enter a license / permit number" });
+                      return;
+                    }
+                    if (!validFrom || !validTo) {
+                      toast({ variant: "destructive", title: "Please fill in Valid From / Valid To" });
+                      return;
+                    }
+                  } else if (hasExpiry) {
+                    if (!validFrom || !validTo) {
+                      toast({ variant: "destructive", title: "Please fill in Valid From / Valid To" });
+                      return;
+                    }
+                  }
+                }
+
                 setUploading(true);
                 try {
                   const fd = new FormData();
@@ -293,6 +339,8 @@ function ProjectDocumentsPanel(props: { projectId: number; category: "general" |
                   setUploading(false);
                 }
               }}
+              disabled={uploading}
+              variant={canUpload ? "default" : "secondary"}
             >
               {uploading ? "Uploading..." : "Upload"}
             </Button>

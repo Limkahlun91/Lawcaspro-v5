@@ -57,6 +57,12 @@ const PermissionItemSchema = z.object({
   allowed: z.boolean(),
 });
 
+const UpdatePermissionItemSchema = z.object({
+  module: z.string().min(1),
+  action: z.string().min(1),
+  allowed: z.boolean().optional().nullable(),
+});
+
 const CreateRoleBodySchema = z.object({
   name: z.string().min(1),
   permissions: z.array(PermissionItemSchema).optional(),
@@ -65,7 +71,7 @@ type CreateRoleBody = z.infer<typeof CreateRoleBodySchema>;
 
 const UpdateRoleBodySchema = z.object({
   name: z.string().min(1).optional(),
-  permissions: z.array(PermissionItemSchema).optional(),
+  permissions: z.array(UpdatePermissionItemSchema).optional(),
 });
 type UpdateRoleBody = z.infer<typeof UpdateRoleBodySchema>;
 
@@ -216,40 +222,98 @@ routerInternal.patch("/roles/:roleId", requireAuth, requireFirmUser, requirePerm
     }
     const body: UpdateRoleBody = parsed.data;
 
-    const updates: Record<string, unknown> = {};
-    if (body.name !== undefined) updates.name = body.name;
-
     const r = rdb(req);
-    const [role] = await r
-      .update(rolesTable)
-      .set(updates)
-      .where(eq(rolesTable.id, p.roleId))
-      .returning();
+    if (body.name === undefined && body.permissions === undefined) {
+      res.status(400).json({ error: "Invalid data" });
+      return;
+    }
 
-    if (!role || role.firmId !== req.firmId) {
+    const normalizedPermissions = body.permissions?.map((perm) => ({
+      module: perm.module,
+      action: perm.action,
+      allowed: perm.allowed ?? false,
+    }));
+
+    const result = await asTransactionCapable(r).transaction(async (tx: DbConn) => {
+      const [existing] = await tx
+        .select()
+        .from(rolesTable)
+        .where(and(eq(rolesTable.id, p.roleId), eq(rolesTable.firmId, req.firmId!)));
+
+      if (!existing) return { ok: false as const };
+
+      const updates: Record<string, unknown> = {};
+      if (body.name !== undefined) updates.name = body.name;
+
+      let role = existing;
+      if (Object.keys(updates).length > 0) {
+        const [updated] = await tx
+          .update(rolesTable)
+          .set(updates)
+          .where(and(eq(rolesTable.id, p.roleId), eq(rolesTable.firmId, req.firmId!)))
+          .returning();
+        if (updated) role = updated;
+      }
+
+      if (normalizedPermissions !== undefined) {
+        if (normalizedPermissions.length === 0) {
+          await tx.delete(permissionsTable).where(eq(permissionsTable.roleId, role.id));
+        } else {
+          const existingPerms = await tx
+            .select({ module: permissionsTable.module, action: permissionsTable.action, allowed: permissionsTable.allowed })
+            .from(permissionsTable)
+            .where(eq(permissionsTable.roleId, role.id));
+
+          const merged = new Map<string, { module: string; action: string; allowed: boolean }>();
+          for (const p of existingPerms) {
+            merged.set(`${p.module}::${p.action}`, { module: p.module, action: p.action, allowed: p.allowed });
+          }
+          for (const p of normalizedPermissions) {
+            merged.set(`${p.module}::${p.action}`, { module: p.module, action: p.action, allowed: p.allowed });
+          }
+
+          const final = Array.from(merged.values());
+          await tx.delete(permissionsTable).where(eq(permissionsTable.roleId, role.id));
+          await tx.insert(permissionsTable).values(
+            final.map((perm) => ({
+              roleId: role.id,
+              module: perm.module,
+              action: perm.action,
+              allowed: perm.allowed,
+            }))
+          );
+        }
+      }
+
+      return {
+        ok: true as const,
+        updatedFields: Object.keys(updates),
+        permissionsReplaced: normalizedPermissions !== undefined,
+        role,
+        enriched: await enrichRole(tx, role),
+      };
+    });
+
+    if (!result.ok) {
       res.status(404).json({ error: "Role not found" });
       return;
     }
 
-    if (body.permissions) {
-      await r.delete(permissionsTable).where(eq(permissionsTable.roleId, role.id));
-      if (body.permissions.length > 0) {
-        await r.insert(permissionsTable).values(
-          body.permissions.map((p) => ({
-            roleId: role.id,
-            module: p.module,
-            action: p.action,
-            allowed: p.allowed,
-          }))
-        );
-      }
-    }
-
-    await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "roles.update", entityType: "role", entityId: role.id, detail: `fields=${Object.keys(updates).join(",")}${body.permissions ? " permissions=replaced" : ""}`, ipAddress: req.ip, userAgent: getHeader(req, "user-agent") });
-    res.json(await enrichRole(r, role));
-  } catch (err) {
-    console.error("SQL ERR:", err);
-    res.status(500).json({ error: "Update failed" });
+    await writeAuditLog({
+      firmId: req.firmId,
+      actorId: req.userId,
+      actorType: req.userType,
+      action: "roles.update",
+      entityType: "role",
+      entityId: result.role.id,
+      detail: `fields=${result.updatedFields.join(",")}${result.permissionsReplaced ? " permissions=merged" : ""}`,
+      ipAddress: req.ip,
+      userAgent: getHeader(req, "user-agent"),
+    });
+    res.json(result.enriched);
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "Failed to update role" });
   }
 });
 
