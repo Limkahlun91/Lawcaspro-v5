@@ -36,8 +36,10 @@ const listQuerySchema = z.object({
 type DbConn = typeof db | NonNullable<AuthRequest["rlsDb"]>;
 const rdb = (req: AuthRequest): DbConn => req.rlsDb ?? db;
 
-function parseJsonObject(s: string | null): Record<string, unknown> | null {
+function parseJsonObject(s: unknown): Record<string, unknown> | null {
   if (!s) return null;
+  if (typeof s === "object" && !Array.isArray(s)) return s as Record<string, unknown>;
+  if (typeof s !== "string") return null;
   try {
     const v = JSON.parse(s);
     if (!v || typeof v !== "object" || Array.isArray(v)) return null;

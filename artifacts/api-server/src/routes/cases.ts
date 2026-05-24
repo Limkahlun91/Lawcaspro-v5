@@ -18,7 +18,7 @@ import {
   sql,
 } from "@workspace/db";
 import {
-  CreateCaseBody, UpdateCaseBody, ListCasesQueryParams,
+  CreateCaseBody, ListCasesQueryParams,
   GetCaseParams, UpdateCaseParams,
   GetCaseWorkflowParams, UpdateWorkflowStepParams, UpdateWorkflowStepBody,
   GetCaseNotesParams, CreateCaseNoteParams, CreateCaseNoteBody
@@ -3830,45 +3830,58 @@ router.patch("/cases/:caseId", requireAuthHandler, requireFirmUserHandler, requi
     const ok = await enforceCaseAccess(r, req, res, params.data.caseId);
     if (!ok) return;
 
-    const PatchCaseBody = UpdateCaseBody.extend({
-      referenceNo: z.string().trim().max(80).optional(),
-      projectId: z.coerce.number().int().positive().optional(),
-      developerId: z.coerce.number().int().positive().optional(),
-      purchaserIds: z.array(z.coerce.number().int().positive()).optional(),
-      purchasers: z.array(z.object({
-        isCompany: z.boolean().optional(),
-        name: z.string(),
-        ic: z.string().nullish(),
-        phone: z.string().nullish(),
-        email: z.string().nullish(),
-        address: z.string().nullish(),
-      }).passthrough()).optional(),
-      caseType: z.string().optional(),
-      parcelNo: z.string().optional(),
-      spaDetails: z.record(z.string(), z.unknown()).optional(),
-      propertyDetails: z.unknown().optional(),
-      propertyAddress: z.string().optional(),
-      loanDetails: z.unknown().optional(),
-      borrowers: z.array(z.object({
-        name: z.string(),
-        ic: z.string().nullish(),
-        hp: z.string().nullish(),
-        email: z.string().nullish(),
-        address: z.string().nullish().transform((v) => (typeof v === "string" ? v : "")).transform((v) => v.trim()),
-      }).passthrough()).optional(),
-      loanPartyType: z.enum(["1st_party", "3rd_party"]).optional(),
-      companyDetails: z.record(z.string(), z.unknown()).optional(),
-      apdlPrice: z.number().finite().nullable().optional(),
-      developerDiscount: z.number().finite().nullable().optional(),
-      bumiputraDiscount: z.number().finite().nullable().optional(),
-    }).superRefine((v, ctx) => {
-      if (v.purchaseMode !== undefined) {
+    const UpdateCaseBody = z.object({
+      status: z.string().trim().optional().nullable(),
+      purchaseMode: z.string().trim().toLowerCase().optional().nullable(),
+      titleType: z.string().trim().toLowerCase().optional().nullable(),
+      spaPrice: z.coerce.number().optional().nullable(),
+      assignedLawyerId: z.coerce.number().optional().nullable(),
+      assignedClerkId: z.coerce.number().optional().nullable(),
+      purchaserIds: z.array(z.coerce.number()).optional().nullable(),
+      purchasers: z.array(
+        z.object({
+          isCompany: z.boolean().optional().nullable(),
+          name: z.string().trim().min(1),
+          ic: z.string().trim().optional().nullable(),
+          phone: z.string().trim().optional().nullable(),
+          email: z.string().trim().optional().nullable(),
+          address: z.string().trim().optional().nullable(),
+        })
+      ).optional().nullable(),
+      referenceNo: z.string().trim().optional().nullable(),
+      projectId: z.coerce.number().optional().nullable(),
+      developerId: z.coerce.number().optional().nullable(),
+      caseType: z.string().trim().optional().nullable(),
+      parcelNo: z.string().trim().optional().nullable(),
+      spaDetails: z.record(z.string(), z.unknown()).optional().nullable(),
+      propertyDetails: z.any().optional().nullable(),
+      loanDetails: z.any().optional().nullable(),
+      companyDetails: z.record(z.string(), z.unknown()).optional().nullable(),
+      lawyerStatus: z.string().trim().optional().nullable(),
+      borrowers: z.array(
+        z.object({
+          name: z.string().trim().min(1),
+          ic: z.string().trim().optional().nullable(),
+          hp: z.string().trim().optional().nullable(),
+          email: z.string().trim().optional().nullable(),
+          address: z.string().trim().optional().nullable(),
+        })
+      ).optional().nullable(),
+      loanPartyType: z.enum(["1st_party", "3rd_party"]).optional().nullable(),
+      apdlPrice: z.coerce.number().optional().nullable(),
+      developerDiscount: z.coerce.number().optional().nullable(),
+      bumiputraDiscount: z.coerce.number().optional().nullable(),
+      propertyAddress: z.string().trim().optional().nullable(),
+    });
+
+    const PatchCaseBody = UpdateCaseBody.superRefine((v, ctx) => {
+      if (v.purchaseMode !== undefined && v.purchaseMode !== null) {
         const pm = String(v.purchaseMode ?? "").trim().toLowerCase();
         if (pm !== "loan" && pm !== "cash" && pm !== "other") {
           ctx.addIssue({ code: "custom", path: ["purchaseMode"], message: "Invalid purchaseMode" });
         }
       }
-      if (v.titleType !== undefined) {
+      if (v.titleType !== undefined && v.titleType !== null) {
         const tt = normalizeTitleType(String(v.titleType ?? ""));
         if (!tt) {
           ctx.addIssue({ code: "custom", path: ["titleType"], message: "Invalid titleType" });
@@ -3926,8 +3939,11 @@ router.patch("/cases/:caseId", requireAuthHandler, requireFirmUserHandler, requi
     }
 
     const updates: Record<string, unknown> = {};
-    if (parsed.data.status !== undefined) updates.status = parsed.data.status;
-    if (parsed.data.referenceNo !== undefined) {
+    if (parsed.data.status !== undefined && parsed.data.status !== null) {
+      const v = String(parsed.data.status ?? "").trim();
+      if (v) updates.status = v;
+    }
+    if (parsed.data.referenceNo !== undefined && parsed.data.referenceNo !== null) {
       const v = String(parsed.data.referenceNo ?? "").trim();
       if (!v) {
         res.status(400).json({ error: "Invalid referenceNo" });
@@ -3935,7 +3951,7 @@ router.patch("/cases/:caseId", requireAuthHandler, requireFirmUserHandler, requi
       }
       updates.referenceNo = v;
     }
-    if (parsed.data.projectId !== undefined) {
+    if (parsed.data.projectId !== undefined && parsed.data.projectId !== null) {
       const [project] = await r.select().from(projectsTable).where(and(eq(projectsTable.id, parsed.data.projectId), eq(projectsTable.firmId, req.firmId!))).limit(1);
       if (!project) {
         res.status(404).json({ error: "Project not found" });
@@ -3951,7 +3967,7 @@ router.patch("/cases/:caseId", requireAuthHandler, requireFirmUserHandler, requi
         updates.developerId = project.developerId;
       }
     }
-    if (parsed.data.developerId !== undefined) {
+    if (parsed.data.developerId !== undefined && parsed.data.developerId !== null) {
       const [dev] = await r
         .select({ id: developersTable.id })
         .from(developersTable)
@@ -3963,8 +3979,10 @@ router.patch("/cases/:caseId", requireAuthHandler, requireFirmUserHandler, requi
       }
       updates.developerId = parsed.data.developerId;
     }
-    if (parsed.data.purchaseMode !== undefined) updates.purchaseMode = String(parsed.data.purchaseMode).trim().toLowerCase();
-    if (parsed.data.titleType !== undefined) {
+    if (parsed.data.purchaseMode !== undefined && parsed.data.purchaseMode !== null) {
+      updates.purchaseMode = String(parsed.data.purchaseMode).trim().toLowerCase();
+    }
+    if (parsed.data.titleType !== undefined && parsed.data.titleType !== null) {
       const tt = normalizeTitleType(String(parsed.data.titleType ?? ""));
       if (!tt) {
         res.status(400).json({ error: "Invalid titleType" });
@@ -3992,8 +4010,9 @@ router.patch("/cases/:caseId", requireAuthHandler, requireFirmUserHandler, requi
 
     const wantsUpdatePropertyDetails = bodyRec.propertyDetails !== undefined || bodyRec.propertyAddress !== undefined;
     if (wantsUpdatePropertyDetails) {
-      const hasIncomingPropertyAddress = typeof bodyRec.propertyAddress === "string";
-      const incomingPropertyAddress = hasIncomingPropertyAddress ? bodyRec.propertyAddress.trim() : "";
+      const rawAddress = (bodyRec as any).propertyAddress;
+      const hasIncomingPropertyAddress = rawAddress !== undefined;
+      const incomingPropertyAddress = typeof rawAddress === "string" ? rawAddress.trim() : "";
       const incomingPropertyDetails = bodyRec.propertyDetails;
       const base = parseJsonObj(existingCase.propertyDetails);
       const incoming =
@@ -4007,7 +4026,7 @@ router.patch("/cases/:caseId", requireAuthHandler, requireFirmUserHandler, requi
       if (hasIncomingPropertyAddress) {
         next.propertyAddress = incomingPropertyAddress;
       }
-      const nextAddress = typeof next.propertyAddress === "string" ? next.propertyAddress.trim() : "";
+      const nextAddress = typeof rawAddress === "string" ? rawAddress.trim() : "";
       if (hasIncomingPropertyAddress && !nextAddress) {
         res.status(422).json({ error: "Please fill in Property Address in Case Details first", code: "PROPERTY_ADDRESS_REQUIRED" });
         return;
@@ -4035,6 +4054,10 @@ router.patch("/cases/:caseId", requireAuthHandler, requireFirmUserHandler, requi
 
     const wantsAssignLawyer = parsed.data.assignedLawyerId !== undefined;
     const wantsAssignClerk = (parsed.data as any)?.assignedClerkId !== undefined;
+    if (wantsAssignLawyer && parsed.data.assignedLawyerId === null) {
+      res.status(400).json({ error: "assignedLawyerId cannot be null" });
+      return;
+    }
     if (wantsAssignLawyer || wantsAssignClerk) {
       const [roleRow] = await r
         .select({ name: rolesTable.name })
