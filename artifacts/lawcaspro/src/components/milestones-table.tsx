@@ -8,7 +8,7 @@ type MilestoneCard = {
   count: number;
   pendingCount?: number;
   doneCount?: number;
-  filter: { milestone?: string; milestonePresence?: string; purchaseMode?: string; titleType?: string };
+  filter: { milestone?: string; milestonePresence?: string; purchaseMode?: string; titleType?: string; assignedToUserId?: string };
 };
 
 type MilestoneSection = { key: string; label: string; total: number; cards: MilestoneCard[] };
@@ -19,7 +19,7 @@ const MILESTONE_SECTION_ROW_CLASS: Record<string, string> = {
   loan_title: "bg-emerald-50",
 };
 
-function buildCasesHref(filter: { milestone?: string | null; milestonePresence?: string | null; purchaseMode?: string | null; titleType?: string | null }) {
+function buildCasesHref(filter: { milestone?: string | null; milestonePresence?: string | null; purchaseMode?: string | null; titleType?: string | null; assignedToUserId?: string | null }) {
   const qs = new URLSearchParams();
   const milestone = (filter as Record<string, unknown>)?.milestone as string | undefined;
   const milestonePresence = (filter as Record<string, unknown>)?.milestonePresence as string | undefined;
@@ -27,6 +27,8 @@ function buildCasesHref(filter: { milestone?: string | null; milestonePresence?:
     qs.set("milestone", milestone);
     qs.set("milestonePresence", milestonePresence);
   }
+  const assignedToUserId = (filter as Record<string, unknown>)?.assignedToUserId as string | undefined;
+  if (assignedToUserId) qs.set("assignedToUserId", assignedToUserId);
   if (filter.purchaseMode) qs.set("purchaseMode", filter.purchaseMode);
   if (filter.titleType) qs.set("titleType", filter.titleType);
   const q = qs.toString();

@@ -39,6 +39,7 @@ import { ensureCaseWorkflowSteps, syncWorkflowStepsFromCaseState } from "../lib/
 import { WORKFLOW_AUTOMATION_RULE_BY_STEP_KEY, deriveStatusFromRequirement } from "../lib/workflowAutomation.js";
 import { computeStampingSummary, deriveStampingItemStatus, type StampingItemInput } from "../lib/stampingProgress.js";
 import { resolveSmartFilename } from "../lib/smartFileNaming.js";
+import { computeDashboardStats } from "../services/dashboard-stats.js";
 
 const router: ExpressRouter = express.Router();
 const supabaseStorage = new SupabaseStorageService();
@@ -2055,6 +2056,66 @@ router.get("/cases/workbench", requireAuthHandler, requireFirmUserHandler, requi
   }
 }));
 
+router.get("/cases/milestones-summary", requireAuthHandler, requireFirmUserHandler, requirePermission("cases", "read") as RequestHandler, authed(async (req, res) => {
+  try {
+    const r = rdb(req);
+    const one = (v: string | string[] | undefined): string | undefined => Array.isArray(v) ? v[0] : v;
+
+    const assignedToMe = (() => {
+      const raw = one((req.query as any)?.assignedToMe);
+      if (!raw) return false;
+      const v = raw.trim().toLowerCase();
+      return v === "1" || v === "true" || v === "yes";
+    })();
+    const assignedToUserId = (() => {
+      const raw = one((req.query as any)?.assignedToUserId);
+      if (!raw) return null;
+      const n = Number.parseInt(raw, 10);
+      if (!Number.isFinite(n) || n <= 0) return null;
+      return n;
+    })();
+
+    const targetUserId = assignedToMe ? (req.userId ?? null) : assignedToUserId;
+    if (!targetUserId) {
+      res.status(400).json({ error: "assignedToMe or assignedToUserId is required" });
+      return;
+    }
+
+    if (targetUserId !== req.userId) {
+      const canAssignAny = await hasRolePermission(r, req.firmId!, req.roleId, "cases", "assign_any");
+      if (!canAssignAny) {
+        res.status(403).json({ error: "Permission denied" });
+        return;
+      }
+      if (!req.roleId) {
+        res.status(403).json({ error: "Permission denied" });
+        return;
+      }
+      const [perm] = await r
+        .select()
+        .from(permissionsTable)
+        .where(and(
+          eq(permissionsTable.roleId, req.roleId),
+          eq(permissionsTable.module, "users"),
+          eq(permissionsTable.action, "read"),
+        ));
+      if (!perm?.allowed) {
+        res.status(403).json({ error: "Permission denied" });
+        return;
+      }
+    }
+
+    const payload = await computeDashboardStats(r, req.firmId!, { assignedToUserId: targetUserId });
+    res.json({
+      milestoneSections: Array.isArray((payload as any)?.milestoneSections) ? (payload as any).milestoneSections : [],
+      milestoneCards: Array.isArray((payload as any)?.milestoneCards) ? (payload as any).milestoneCards : [],
+    });
+  } catch (err) {
+    logger.error({ err, path: req.path, firmId: req.firmId, userId: req.userId }, "[cases.milestones-summary]");
+    res.status(isTransientDbConnectionError(err) ? 503 : 500).json({ error: isTransientDbConnectionError(err) ? "Milestones temporarily unavailable" : "Internal Server Error" });
+  }
+}));
+
 function sanitizeCsvCell(v: unknown): string {
   const s = v === null || v === undefined ? "" : String(v);
   const trimmed = s.trimStart();
@@ -3647,48 +3708,47 @@ router.patch("/cases/:caseId/key-dates", requireAuthHandler, requireFirmUserHand
 }));
 
 router.patch("/cases/:caseId", requireAuthHandler, requireFirmUserHandler, requirePermission("cases", "update") as RequestHandler, authed(async (req, res) => {
-  const r = req.rlsDb;
-  if (!r) {
-    logger.error({ path: req.path, firmId: req.firmId, userId: req.userId }, "[cases] missing tenant database context");
-    res.status(500).json({ error: "Internal Server Error" });
-    return;
-  }
-  const params = UpdateCaseParams.safeParse(req.params);
-  if (!params.success) {
-    res.status(400).json({ error: params.error.message });
-    return;
-  }
+  try {
+    const r = req.rlsDb;
+    if (!r) {
+      logger.error({ path: req.path, firmId: req.firmId, userId: req.userId }, "[cases] missing tenant database context");
+      res.status(500).json({ error: "Internal Server Error" });
+      return;
+    }
+    const params = UpdateCaseParams.safeParse(req.params);
+    if (!params.success) {
+      res.status(400).json({ error: params.error.message });
+      return;
+    }
 
-  const ok = await enforceCaseAccess(r, req, res, params.data.caseId);
-  if (!ok) return;
+    const ok = await enforceCaseAccess(r, req, res, params.data.caseId);
+    if (!ok) return;
 
-  const parsed = UpdateCaseBody.safeParse(req.body);
-  if (!parsed.success) {
-    res.status(400).json({ error: parsed.error.message });
-    return;
-  }
+    const PatchCaseBody = UpdateCaseBody.extend({
+      purchaserIds: z.array(z.coerce.number().int().positive()).optional(),
+      purchasers: z.array(z.object({ name: z.string(), ic: z.string().nullish() })).optional(),
+      caseType: z.string().optional(),
+      parcelNo: z.string().optional(),
+      spaDetails: z.record(z.string(), z.unknown()).optional(),
+      propertyDetails: z.unknown().optional(),
+      propertyAddress: z.string().optional(),
+      loanDetails: z.record(z.string(), z.unknown()).optional(),
+      borrowers: z.array(z.object({
+        name: z.string(),
+        ic: z.string().nullish(),
+        address: z.string().optional().transform((v) => (v ?? "").trim()),
+      })).optional(),
+      loanPartyType: z.enum(["1st_party", "3rd_party"]).optional(),
+      companyDetails: z.record(z.string(), z.unknown()).optional(),
+    });
 
-  const updates: Record<string, unknown> = {};
-  if (parsed.data.status !== undefined) updates.status = parsed.data.status;
-  if (parsed.data.purchaseMode !== undefined) updates.purchaseMode = parsed.data.purchaseMode;
-  if (parsed.data.titleType !== undefined) updates.titleType = parsed.data.titleType;
-  if (parsed.data.spaPrice !== undefined) updates.spaPrice = String(parsed.data.spaPrice);
-  if (parsed.data.lawyerStatus !== undefined) {
-    updates.lawyerStatus = parsed.data.lawyerStatus;
-    updates.lawyerStatusUpdatedAt = new Date();
-  }
+    const parsed = PatchCaseBody.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: parsed.error.message });
+      return;
+    }
 
-  const bodyRec = (req.body && typeof req.body === "object") ? (req.body as Record<string, unknown>) : {};
-  const incomingPropertyAddress = typeof bodyRec.propertyAddress === "string" ? bodyRec.propertyAddress.trim() : "";
-  const incomingPropertyDetails = bodyRec.propertyDetails;
-  const wantsUpdatePropertyDetails = incomingPropertyDetails !== undefined || bodyRec.propertyAddress !== undefined;
-  if (wantsUpdatePropertyDetails) {
-    const [existing] = await r
-      .select({ propertyDetails: casesTable.propertyDetails })
-      .from(casesTable)
-      .where(and(eq(casesTable.id, params.data.caseId), eq(casesTable.firmId, req.firmId!)))
-      .limit(1);
-
+    const bodyRec = (req.body && typeof req.body === "object") ? (req.body as Record<string, unknown>) : {};
     const parseJsonObj = (raw: unknown): Record<string, unknown> => {
       if (!raw) return {};
       if (typeof raw === "object") return raw as Record<string, unknown>;
@@ -3701,90 +3761,307 @@ router.patch("/cases/:caseId", requireAuthHandler, requireFirmUserHandler, requi
       }
     };
 
-    const base = parseJsonObj(existing?.propertyDetails);
-    const incoming =
-      typeof incomingPropertyDetails === "string"
-        ? parseJsonObj(incomingPropertyDetails)
-        : (incomingPropertyDetails && typeof incomingPropertyDetails === "object")
-          ? (incomingPropertyDetails as Record<string, unknown>)
-          : {};
-
-    const next = { ...base, ...incoming };
-    if (bodyRec.propertyAddress !== undefined) {
-      next.propertyAddress = incomingPropertyAddress;
-    }
-    const nextAddress = typeof next.propertyAddress === "string" ? next.propertyAddress.trim() : "";
-    if (!nextAddress) {
-      res.status(422).json({ error: "Please fill in Property Address in Case Details first", code: "PROPERTY_ADDRESS_REQUIRED" });
-      return;
-    }
-    updates.propertyDetails = JSON.stringify({ ...next, propertyAddress: nextAddress });
-  }
-
-  const wantsAssignLawyer = parsed.data.assignedLawyerId !== undefined;
-  const wantsAssignClerk = (parsed.data as any)?.assignedClerkId !== undefined;
-  if (wantsAssignLawyer || wantsAssignClerk) {
-    const [roleRow] = await r
-      .select({ name: rolesTable.name })
-      .from(rolesTable)
-      .where(and(eq(rolesTable.id, req.roleId!), eq(rolesTable.firmId, req.firmId!)))
+    const [existingCase] = await r
+      .select({
+        id: casesTable.id,
+        firmId: casesTable.firmId,
+        purchaseMode: casesTable.purchaseMode,
+        loanPartyType: casesTable.loanPartyType,
+        propertyDetails: casesTable.propertyDetails,
+        spaDetails: casesTable.spaDetails,
+        loanDetails: casesTable.loanDetails,
+        companyDetails: casesTable.companyDetails,
+      })
+      .from(casesTable)
+      .where(and(eq(casesTable.id, params.data.caseId), eq(casesTable.firmId, req.firmId!)))
       .limit(1);
-    const roleName = String(roleRow?.name ?? "");
-    const canEditAssignments = roleName === "Partner" || roleName === "Manager" || roleName.startsWith("Manager");
-    if (!canEditAssignments) {
-      res.status(403).json({ error: "Forbidden" });
+    if (!existingCase) {
+      res.status(404).json({ error: "Case not found" });
       return;
     }
-  }
 
-  if (wantsAssignLawyer) {
-    await r.update(caseAssignmentsTable)
-      .set({ unassignedAt: new Date() })
-      .where(and(eq(caseAssignmentsTable.caseId, params.data.caseId), eq(caseAssignmentsTable.roleInCase, "lawyer"), sql`${caseAssignmentsTable.unassignedAt} IS NULL`));
-    await r.insert(caseAssignmentsTable).values({
-      caseId: params.data.caseId,
-      userId: parsed.data.assignedLawyerId,
-      roleInCase: "lawyer",
-      assignedBy: req.userId,
-    });
-  }
-  if (wantsAssignClerk) {
-    const assignedClerkId = (parsed.data as any).assignedClerkId as number | null | undefined;
-    await r.update(caseAssignmentsTable)
-      .set({ unassignedAt: new Date() })
-      .where(and(eq(caseAssignmentsTable.caseId, params.data.caseId), eq(caseAssignmentsTable.roleInCase, "clerk"), sql`${caseAssignmentsTable.unassignedAt} IS NULL`));
-    if (assignedClerkId !== null && assignedClerkId !== undefined) {
-      await r.insert(caseAssignmentsTable).values({
-        caseId: params.data.caseId,
-        userId: assignedClerkId,
-        roleInCase: "clerk",
-        assignedBy: req.userId,
-      });
+    const updates: Record<string, unknown> = {};
+    if (parsed.data.status !== undefined) updates.status = parsed.data.status;
+    if (parsed.data.purchaseMode !== undefined) updates.purchaseMode = parsed.data.purchaseMode;
+    if (parsed.data.titleType !== undefined) updates.titleType = parsed.data.titleType;
+    if (parsed.data.spaPrice !== undefined) updates.spaPrice = String(parsed.data.spaPrice);
+    if (parsed.data.lawyerStatus !== undefined) {
+      updates.lawyerStatus = parsed.data.lawyerStatus;
+      updates.lawyerStatusUpdatedAt = new Date();
     }
+
+    if (parsed.data.caseType !== undefined) {
+      const v = String(parsed.data.caseType ?? "").trim();
+      updates.caseType = v ? v : null;
+    }
+    if (parsed.data.parcelNo !== undefined) {
+      const v = String(parsed.data.parcelNo ?? "").trim();
+      updates.parcelNo = v ? v : null;
+    }
+
+    const wantsUpdatePropertyDetails = bodyRec.propertyDetails !== undefined || bodyRec.propertyAddress !== undefined;
+    if (wantsUpdatePropertyDetails) {
+      const incomingPropertyAddress = typeof bodyRec.propertyAddress === "string" ? bodyRec.propertyAddress.trim() : "";
+      const incomingPropertyDetails = bodyRec.propertyDetails;
+      const base = parseJsonObj(existingCase.propertyDetails);
+      const incoming =
+        typeof incomingPropertyDetails === "string"
+          ? parseJsonObj(incomingPropertyDetails)
+          : (incomingPropertyDetails && typeof incomingPropertyDetails === "object")
+            ? (incomingPropertyDetails as Record<string, unknown>)
+            : {};
+
+      const next = { ...base, ...incoming };
+      if (bodyRec.propertyAddress !== undefined) {
+        next.propertyAddress = incomingPropertyAddress;
+      }
+      const nextAddress = typeof next.propertyAddress === "string" ? next.propertyAddress.trim() : "";
+      if (!nextAddress) {
+        res.status(422).json({ error: "Please fill in Property Address in Case Details first", code: "PROPERTY_ADDRESS_REQUIRED" });
+        return;
+      }
+      updates.propertyDetails = JSON.stringify({ ...next, propertyAddress: nextAddress });
+    }
+
+    if (parsed.data.spaDetails !== undefined) {
+      const base = parseJsonObj(existingCase.spaDetails);
+      const incoming = parsed.data.spaDetails && typeof parsed.data.spaDetails === "object" ? parsed.data.spaDetails : {};
+      updates.spaDetails = JSON.stringify({ ...base, ...incoming });
+    }
+
+    if (parsed.data.loanDetails !== undefined) {
+      const base = parseJsonObj(existingCase.loanDetails);
+      const incoming = parsed.data.loanDetails && typeof parsed.data.loanDetails === "object" ? parsed.data.loanDetails : {};
+      updates.loanDetails = JSON.stringify({ ...base, ...incoming });
+    }
+
+    if (parsed.data.companyDetails !== undefined) {
+      const base = parseJsonObj(existingCase.companyDetails);
+      const incoming = parsed.data.companyDetails && typeof parsed.data.companyDetails === "object" ? parsed.data.companyDetails : {};
+      updates.companyDetails = JSON.stringify({ ...base, ...incoming });
+    }
+
+    const wantsAssignLawyer = parsed.data.assignedLawyerId !== undefined;
+    const wantsAssignClerk = (parsed.data as any)?.assignedClerkId !== undefined;
+    if (wantsAssignLawyer || wantsAssignClerk) {
+      const [roleRow] = await r
+        .select({ name: rolesTable.name })
+        .from(rolesTable)
+        .where(and(eq(rolesTable.id, req.roleId!), eq(rolesTable.firmId, req.firmId!)))
+        .limit(1);
+      const roleName = String(roleRow?.name ?? "");
+      const canEditAssignments = roleName === "Partner" || roleName === "Manager" || roleName.startsWith("Manager");
+      if (!canEditAssignments) {
+        res.status(403).json({ error: "Forbidden" });
+        return;
+      }
+    }
+
+    const wantsUpdatePurchasers = (parsed.data.purchaserIds !== undefined) || (parsed.data.purchasers !== undefined);
+    let resolvedPurchaserIds: number[] = [];
+    if (wantsUpdatePurchasers) {
+      const purchaserIds = parsed.data.purchaserIds ?? [];
+      const purchasers = parsed.data.purchasers ?? [];
+
+      if (purchaserIds.length > 0) {
+        const rows = await r
+          .select({ id: clientsTable.id })
+          .from(clientsTable)
+          .where(and(eq(clientsTable.firmId, req.firmId!), inArray(clientsTable.id, purchaserIds)));
+        const found = new Set(rows.map((x) => x.id));
+        const missing = purchaserIds.filter((id) => !found.has(id));
+        if (missing.length > 0) {
+          res.status(400).json({ error: "Invalid purchaserIds" });
+          return;
+        }
+        resolvedPurchaserIds = purchaserIds;
+      } else {
+        for (const p of purchasers) {
+          const trimmedName = String(p.name ?? "").trim();
+          if (!trimmedName) continue;
+          const trimmedIc = typeof p.ic === "string" ? p.ic.trim() : null;
+
+          let existingClientId: number | null = null;
+          if (trimmedIc) {
+            const [byIc] = await r
+              .select()
+              .from(clientsTable)
+              .where(and(eq(clientsTable.firmId, req.firmId!), eq(clientsTable.icNo, trimmedIc)));
+            if (byIc) existingClientId = byIc.id;
+          }
+
+          if (!existingClientId) {
+            const byName = await r
+              .select()
+              .from(clientsTable)
+              .where(and(eq(clientsTable.firmId, req.firmId!), sql`LOWER(${clientsTable.name}) = LOWER(${trimmedName})`));
+            if (byName.length === 1) existingClientId = byName[0].id;
+          }
+
+          if (existingClientId) {
+            resolvedPurchaserIds.push(existingClientId);
+          } else {
+            const insertBase = {
+              firmId: req.firmId!,
+              name: trimmedName,
+              icNo: trimmedIc,
+              createdBy: req.userId ?? null,
+            } satisfies typeof clientsTable.$inferInsert;
+            const [client] = await r.insert(clientsTable).values(insertBase).returning();
+            resolvedPurchaserIds.push(client.id);
+          }
+        }
+      }
+
+      resolvedPurchaserIds = Array.from(new Set(resolvedPurchaserIds));
+      if (resolvedPurchaserIds.length === 0) {
+        res.status(400).json({ error: "At least one purchaser is required" });
+        return;
+      }
+    }
+
+    const normalizeBorrowers = (raw: unknown): Array<{ name: string; ic?: string; address: string }> => {
+      if (!Array.isArray(raw)) return [];
+      const out: Array<{ name: string; ic?: string; address: string }> = [];
+      for (const v of raw) {
+        const name = typeof (v as any)?.name === "string" ? String((v as any).name).trim() : "";
+        if (!name) continue;
+        const icRaw = (v as any)?.ic;
+        const ic = typeof icRaw === "string" ? icRaw.trim() : "";
+        const addressRaw = (v as any)?.address;
+        const address = typeof addressRaw === "string" ? addressRaw.trim() : "";
+        out.push(ic ? { name, ic, address } : { name, address });
+      }
+      return out;
+    };
+
+    const effectivePurchaseMode = parsed.data.purchaseMode !== undefined ? parsed.data.purchaseMode : String(existingCase.purchaseMode ?? "");
+    const effectiveLoanPartyType = parsed.data.loanPartyType !== undefined
+      ? parsed.data.loanPartyType
+      : (String(existingCase.loanPartyType ?? "") === "3rd_party" ? "3rd_party" : "1st_party");
+    if (parsed.data.loanPartyType !== undefined) updates.loanPartyType = parsed.data.loanPartyType;
+
+    if (effectivePurchaseMode === "loan") {
+      if (effectiveLoanPartyType === "1st_party") {
+        const ids = wantsUpdatePurchasers ? resolvedPurchaserIds : [];
+        if (ids.length > 0) {
+          const rows = await r
+            .select({ id: clientsTable.id, name: clientsTable.name, ic: clientsTable.icNo, address: clientsTable.address })
+            .from(clientsTable)
+            .where(and(eq(clientsTable.firmId, req.firmId!), inArray(clientsTable.id, ids)));
+          const byId = new Map<number, { name: string; ic: string | null; address: string | null }>();
+          for (const row of rows) byId.set(row.id, { name: String(row.name ?? ""), ic: row.ic ?? null, address: row.address ?? null });
+          const borrowersToStore = ids
+            .map((id) => {
+              const v = byId.get(id);
+              const name = v?.name?.trim() ?? "";
+              const ic = v?.ic ? String(v.ic).trim() : "";
+              const address = v?.address ? String(v.address).trim() : "";
+              return ic ? { name, ic, address } : { name, address };
+            })
+            .filter((b) => b.name.trim().length > 0);
+          updates.borrowers = borrowersToStore;
+        }
+      } else {
+        if (parsed.data.borrowers !== undefined) {
+          updates.borrowers = normalizeBorrowers(parsed.data.borrowers);
+        }
+      }
+    } else {
+      if (parsed.data.borrowers !== undefined) {
+        updates.borrowers = normalizeBorrowers(parsed.data.borrowers);
+      }
+    }
+
+    if (Object.keys(updates).length === 0 && !wantsUpdatePurchasers && !wantsAssignLawyer && !wantsAssignClerk) {
+      res.status(400).json({ error: "No fields to update" });
+      return;
+    }
+
+    const result = await (r as any).transaction(async (tx: DbConn) => {
+      if (wantsAssignLawyer) {
+        await tx.update(caseAssignmentsTable)
+          .set({ unassignedAt: new Date() })
+          .where(and(eq(caseAssignmentsTable.caseId, params.data.caseId), eq(caseAssignmentsTable.roleInCase, "lawyer"), sql`${caseAssignmentsTable.unassignedAt} IS NULL`));
+        await tx.insert(caseAssignmentsTable).values({
+          caseId: params.data.caseId,
+          userId: parsed.data.assignedLawyerId,
+          roleInCase: "lawyer",
+          assignedBy: req.userId,
+        });
+      }
+      if (wantsAssignClerk) {
+        const assignedClerkId = (parsed.data as any).assignedClerkId as number | null | undefined;
+        await tx.update(caseAssignmentsTable)
+          .set({ unassignedAt: new Date() })
+          .where(and(eq(caseAssignmentsTable.caseId, params.data.caseId), eq(caseAssignmentsTable.roleInCase, "clerk"), sql`${caseAssignmentsTable.unassignedAt} IS NULL`));
+        if (assignedClerkId !== null && assignedClerkId !== undefined) {
+          await tx.insert(caseAssignmentsTable).values({
+            caseId: params.data.caseId,
+            userId: assignedClerkId,
+            roleInCase: "clerk",
+            assignedBy: req.userId,
+          });
+        }
+      }
+
+      if (wantsUpdatePurchasers) {
+        await tx.delete(casePurchasersTable).where(eq(casePurchasersTable.caseId, params.data.caseId));
+        for (let i = 0; i < resolvedPurchaserIds.length; i++) {
+          await tx.insert(casePurchasersTable).values({
+            caseId: params.data.caseId,
+            clientId: resolvedPurchaserIds[i],
+            role: i === 0 ? "main" : "joint",
+            orderNo: i + 1,
+          });
+        }
+      }
+
+      let c = existingCase as typeof casesTable.$inferSelect;
+      if (Object.keys(updates).length > 0) {
+        const [updated] = await tx
+          .update(casesTable)
+          .set(updates)
+          .where(and(eq(casesTable.id, params.data.caseId), eq(casesTable.firmId, req.firmId!)))
+          .returning();
+        if (!updated) return null;
+        c = updated;
+      } else {
+        const [fresh] = await tx
+          .select()
+          .from(casesTable)
+          .where(and(eq(casesTable.id, params.data.caseId), eq(casesTable.firmId, req.firmId!)))
+          .limit(1);
+        if (!fresh) return null;
+        c = fresh;
+      }
+
+      await tx.insert(auditLogsTable).values({
+        firmId: req.firmId,
+        actorId: req.userId,
+        actorType: "firm_user",
+        action: "case.updated",
+        entityType: "case",
+        entityId: c.id,
+        detail: JSON.stringify({
+          updates,
+          purchasersUpdated: wantsUpdatePurchasers,
+          assignmentsUpdated: wantsAssignLawyer || wantsAssignClerk,
+        }),
+      });
+
+      return await formatCaseDetail(tx, c);
+    });
+
+    if (!result) {
+      res.status(404).json({ error: "Case not found" });
+      return;
+    }
+    res.json(result);
+  } catch (err) {
+    logger.error({ err, path: req.path, firmId: req.firmId, userId: req.userId }, "[cases] update_failed");
+    res.status(500).json({ error: "Internal Server Error" });
   }
-
-  const [c] = await r
-    .update(casesTable)
-    .set(updates)
-    .where(and(eq(casesTable.id, params.data.caseId), eq(casesTable.firmId, req.firmId!)))
-    .returning();
-
-  if (!c) {
-    res.status(404).json({ error: "Case not found" });
-    return;
-  }
-
-  await r.insert(auditLogsTable).values({
-    firmId: req.firmId,
-    actorId: req.userId,
-    actorType: "firm_user",
-    action: "case.updated",
-    entityType: "case",
-    entityId: c.id,
-    detail: JSON.stringify(updates),
-  });
-
-  res.json(await formatCaseDetail(r, c));
 }));
 
 const UpdateCaseAssignmentsParams = z.object({ caseId: z.coerce.number().int().positive() });

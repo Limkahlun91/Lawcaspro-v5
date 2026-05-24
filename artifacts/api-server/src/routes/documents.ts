@@ -1099,8 +1099,21 @@ async function buildCaseContext(r: DbConn, caseId: number, firmId: number, cache
     const v = (prop as any)?.propertyAddress ?? (prop as any)?.property_address ?? (prop as any)?.address;
     return typeof v === "string" ? v.trim() : "";
   })();
+  const projectName = typeof (c as any).project_name === "string" ? String((c as any).project_name).trim() : "";
+  const projectMukim = typeof (c as any).project_mukim === "string" ? String((c as any).project_mukim).trim() : "";
+  const projectDaerah = typeof (c as any).project_daerah === "string" ? String((c as any).project_daerah).trim() : "";
+  const projectNegeri = typeof (c as any).project_negeri === "string" ? String((c as any).project_negeri).trim() : "";
+  const developerBusinessAddress = typeof (c as any).developer_business_address === "string" ? String((c as any).developer_business_address).trim() : "";
+  const developerAddress = typeof (c as any).developer_address === "string" ? String((c as any).developer_address).trim() : "";
+
+  const projectAddressFromDeveloper = developerBusinessAddress || developerAddress;
+  const projectAddressFromProject = [projectName, projectMukim, projectDaerah, projectNegeri].filter((s) => Boolean(s)).join(", ");
+  const hasProjectInfo = Boolean(projectAddressFromDeveloper || projectAddressFromProject);
+
+  const propertyAddressAuto = propertyAddressFromCase || projectAddressFromDeveloper || projectAddressFromProject;
   const purchaserAddressRaw = typeof (mainPurchaser as any).address === "string" ? String((mainPurchaser as any).address).trim() : "";
-  const purchaserAddress = propertyAddressFromCase || purchaserAddressRaw || "[ADDRESS PENDING]";
+  const purchaserAddress = propertyAddressAuto || (!hasProjectInfo ? purchaserAddressRaw : "") || "[ADDRESS PENDING]";
+  const propertyAddress = propertyAddressAuto || "[ADDRESS PENDING]";
 
   const workflowSteps = workflowRows
     .map((row) => {
@@ -1368,6 +1381,7 @@ async function buildCaseContext(r: DbConn, caseId: number, firmId: number, cache
     purchaser_address: purchaserAddress,
     purchaser_phone: mainPurchaser.phone ?? "",
     purchaser_email: mainPurchaser.email ?? "",
+    property_address: propertyAddress,
 
     // Grammar helpers
     is_plural_purchaser: purchaserRows.length > 1,

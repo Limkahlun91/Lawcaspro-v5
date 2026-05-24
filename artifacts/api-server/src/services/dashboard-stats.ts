@@ -46,6 +46,7 @@ export async function computeDashboardStats(
   const hasCommunications = await tableExists(r, "public.case_communications");
 
   const assignedToUserId = opts?.assignedToUserId;
+  const assignedFilter = assignedToUserId ? { assignedToUserId: String(assignedToUserId) } : {};
   const assignedCasesJoin = assignedToUserId
     ? and(
         eq(caseAssignmentsTable.caseId, casesTable.id),
@@ -280,6 +281,7 @@ export async function computeDashboardStats(
       filter: {
         milestone: m.key,
         milestonePresence: "pending",
+        ...assignedFilter,
         ...(extraFilter ?? {}),
       },
     };
@@ -295,7 +297,7 @@ export async function computeDashboardStats(
       label: "SPA Total",
       total: spaTotal,
       cards: [
-        { key: "spa_total", label: "Total", count: spaTotal, filter: {} },
+        { key: "spa_total", label: "Total", count: spaTotal, filter: { ...assignedFilter } },
         ...spaCards,
       ],
     },
@@ -304,7 +306,7 @@ export async function computeDashboardStats(
       label: "Loan (Master) Total",
       total: loanMasterTotal,
       cards: [
-        { key: "loan_master_total", label: "Total", count: loanMasterTotal, filter: { purchaseMode: "loan", titleType: "master" } },
+        { key: "loan_master_total", label: "Total", count: loanMasterTotal, filter: { ...assignedFilter, purchaseMode: "loan", titleType: "master" } },
         ...loanMasterCards,
       ],
     },
@@ -313,7 +315,7 @@ export async function computeDashboardStats(
       label: "Loan (Title) Total",
       total: loanTitleTotal,
       cards: [
-        { key: "loan_title_total", label: "Total", count: loanTitleTotal, filter: { purchaseMode: "loan", titleType: "individual,strata" } },
+        { key: "loan_title_total", label: "Total", count: loanTitleTotal, filter: { ...assignedFilter, purchaseMode: "loan", titleType: "individual,strata" } },
         ...loanTitleCards,
       ],
     },

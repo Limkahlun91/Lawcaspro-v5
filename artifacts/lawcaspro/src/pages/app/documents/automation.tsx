@@ -10,12 +10,12 @@ import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "@/components/ui/resizable";
 import { cn } from "@/lib/utils";
-import { apiFetchJson } from "@/lib/api-client";
-import { downloadBlob } from "@/lib/download";
+import { apiFetchJson, apiRequest } from "@/lib/api-client";
+import { downloadBlob, parseFilenameFromContentDisposition } from "@/lib/download";
 import { toastError } from "@/lib/toast-error";
 import { useToast } from "@/hooks/use-toast";
 import { ChevronRight, FileText, Printer } from "lucide-react";
-import { API_BASE } from "@/lib/api-base";
+import { API_BASE, apiUrl } from "@/lib/api-base";
 
 type AutomationCaseRow = {
   id: number;
@@ -120,6 +120,7 @@ export default function DocumentAutomationHub() {
   const [bundleMessage, setBundleMessage] = useState<string | null>(null);
   const [bundleTemplateIdSet, setBundleTemplateIdSet] = useState<Set<number>>(() => new Set());
   const [bundleFolderIdSet, setBundleFolderIdSet] = useState<Set<number>>(() => new Set());
+  const handledJobKeyRef = useRef<string>("");
 
   const casesQuery = useQuery<AutomationCasesResponse>({
     queryKey: ["document-automation", "cases", caseSearch],
@@ -246,6 +247,10 @@ export default function DocumentAutomationHub() {
     if (!jobId) return;
     if (!jobQuery.data?.job) return;
 
+    const handleKey = `${jobId}:${jobStatus}`;
+    if ((jobStatus === "completed" || jobStatus === "failed") && handledJobKeyRef.current === handleKey) return;
+    if (jobStatus === "completed" || jobStatus === "failed") handledJobKeyRef.current = handleKey;
+
     if (jobStatus === "failed") {
       const msg = safeText((jobQuery.data?.job as any)?.error_summary) || "Document generation failed";
       toast({ title: "Generation failed", description: msg, variant: "destructive" });
@@ -262,18 +267,14 @@ export default function DocumentAutomationHub() {
     }
 
     const doDownload = async () => {
-      const url = `${API_BASE}/documents/jobs/${jobId}/download`;
+      const url = apiUrl(`/api/documents/jobs/${jobId}/download`);
       if (activeMode === "print") {
         window.open(url, "_blank", "noopener,noreferrer");
         toast({ title: "Printable PDF generated" });
         return;
       }
 
-      const resp = await fetch(url, { credentials: "include" });
-      if (!resp.ok) {
-        const text = await resp.text().catch(() => "");
-        throw new Error(text || "Download failed");
-      }
+      const resp = await apiRequest(`/documents/jobs/${jobId}/download`, { timeoutMs: 60000 });
       const blob = await resp.blob();
       const filename =
         parseFilenameFromContentDisposition(resp.headers.get("Content-Disposition")) ||
@@ -289,7 +290,7 @@ export default function DocumentAutomationHub() {
         setJobId(null);
         setBusy(false);
       });
-  }, [jobId, jobQuery.data, jobStatus, activeMode, jobDownloadFileName, toast]);
+  }, [jobId, jobQuery.data?.job, jobQuery.data?.items, jobStatus, activeMode, jobDownloadFileName, toast]);
 
   function setAllCasesOnPage(checked: boolean) {
     if (!checked) {
@@ -520,18 +521,12 @@ export default function DocumentAutomationHub() {
         },
       };
 
-      const resp = await fetch(`${API_BASE}/documents/automation/generate-job`, {
+      const data = await apiFetchJson<any>("/documents/automation/generate-job", {
         method: "POST",
-        credentials: "include",
-        headers: { "content-type": "application/json" },
         body: JSON.stringify(payload),
+        timeoutMs: 60000,
       });
-      if (!resp.ok) {
-        const text = await resp.text().catch(() => "");
-        throw new Error(text || "Request failed");
-      }
-      const data = await resp.json().catch(() => null) as any;
-      const nextJobId = safeText(data?.jobId);
+      const nextJobId = safeText((data as any)?.jobId);
       if (!nextJobId) throw new Error("Missing jobId");
       setJobId(nextJobId);
       startedJob = true;
@@ -814,6 +809,11 @@ export default function DocumentAutomationHub() {
                       <div className="text-sm text-slate-600">
                         Generates PDFs, applies naming rules, and exports a ZIP with the required folder structure.
                       </div>
+                      {busy && jobId && (
+                        <div className="rounded-md border border-slate-200 bg-slate-50 p-3 text-sm text-slate-700">
+                          Generating document, please wait... (Estimated ~15 seconds)
+                        </div>
+                      )}
                       {preflightEnabled && (preflightBlocking || preflightMissing.length > 0) && (
                         <Alert variant={preflightCritical ? "destructive" : "default"}>
                           <AlertTitle>{preflightCritical ? "Missing data detected" : "Preflight warnings"}</AlertTitle>
@@ -874,6 +874,11 @@ export default function DocumentAutomationHub() {
                       <div className="rounded-md border border-slate-200 bg-slate-50 p-3 text-xs text-slate-600 leading-relaxed">
                         Printing settings are recorded for audit. The actual duplex/copies are applied in your system print dialog.
                       </div>
+                      {busy && jobId && (
+                        <div className="rounded-md border border-slate-200 bg-slate-50 p-3 text-sm text-slate-700">
+                          Generating document, please wait... (Estimated ~15 seconds)
+                        </div>
+                      )}
 
                       {preflightEnabled && (preflightBlocking || preflightMissing.length > 0) && (
                         <Alert variant={preflightCritical ? "destructive" : "default"}>

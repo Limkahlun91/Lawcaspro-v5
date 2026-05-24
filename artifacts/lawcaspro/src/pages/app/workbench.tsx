@@ -92,9 +92,9 @@ export default function Workbench() {
     return Number.isFinite(n) && n > 0 ? n : null;
   })();
   const milestonesQuery = useQuery({
-    queryKey: ["dashboard", "assignedToUserId", milestonesTargetUserId],
+    queryKey: ["cases", "milestones-summary", milestonesTargetUserId],
     queryFn: ({ signal }) =>
-      apiFetchJson(`/dashboard?assignedToUserId=${encodeURIComponent(String(milestonesTargetUserId))}`, { signal }) as Promise<Record<string, unknown>>,
+      apiFetchJson(`/cases/milestones-summary?assignedToUserId=${encodeURIComponent(String(milestonesTargetUserId))}`, { signal }) as Promise<Record<string, unknown>>,
     retry: false,
     enabled: tab === "my-work" && milestonesTargetUserId != null,
   });

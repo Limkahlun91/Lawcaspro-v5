@@ -264,6 +264,12 @@ export function TemplatePdfMappingEditor(props: Props) {
     return varGroups.flatMap((g) => g.vars.map((v) => ({ ...v, group: g.group })));
   }, [varGroups]);
 
+  const varLabelByKey = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const v of allVars) m.set(v.key, v.label);
+    return m;
+  }, [allVars]);
+
   const entries = useMemo(() => {
     return Object.entries(mapping).sort((a, b) => a[0].localeCompare(b[0]));
   }, [mapping]);
@@ -272,8 +278,9 @@ export function TemplatePdfMappingEditor(props: Props) {
     if (!selectedVarKey) return;
     const pageRect = pageContainerRef.current?.getBoundingClientRect();
     if (!pageRect) return;
-    const xPx = e.clientX - pageRect.left;
-    const yPx = e.clientY - pageRect.top;
+    const native = e.nativeEvent as unknown as { offsetX?: number; offsetY?: number };
+    const xPx = typeof native.offsetX === "number" ? native.offsetX : (e.clientX - pageRect.left);
+    const yPx = typeof native.offsetY === "number" ? native.offsetY : (e.clientY - pageRect.top);
     const dims = pageView[page];
     if (!dims) return;
     const x = (xPx / pageRect.width) * dims.w;
@@ -368,7 +375,7 @@ export function TemplatePdfMappingEditor(props: Props) {
 
             <div className="flex-1 overflow-auto bg-slate-50" ref={containerRef}>
               <div className="p-6 flex justify-center">
-                <div ref={pageContainerRef} onClick={handlePdfClick} className="shadow bg-white">
+                <div ref={pageContainerRef} onClick={handlePdfClick} className="shadow bg-white relative">
                   <Document file={props.pdfUrl} onLoadSuccess={(d) => setNumPages(d.numPages)} loading={<div className="p-6 text-sm text-slate-500">Loading PDF…</div>}>
                     <Page
                       pageNumber={page}
@@ -381,6 +388,40 @@ export function TemplatePdfMappingEditor(props: Props) {
                       }}
                     />
                   </Document>
+                  {(() => {
+                    const dims = pageView[page];
+                    if (!dims) return null;
+                    const markers = entries.filter(([, v]) => v.page === page);
+                    if (markers.length === 0) return null;
+                    return (
+                      <div className="absolute inset-0">
+                        {markers.map(([key, v]) => {
+                          const left = Math.max(0, Math.min(100, (v.x / dims.w) * 100));
+                          const top = Math.max(0, Math.min(100, 100 - (v.y / dims.h) * 100));
+                          const label = varLabelByKey.get(key) ?? key;
+                          const selected = selectedVarKey === key;
+                          return (
+                            <button
+                              key={key}
+                              type="button"
+                              className={cn(
+                                "absolute -translate-x-1/2 -translate-y-1/2 rounded border px-1.5 py-0.5 text-[10px] font-semibold shadow-sm",
+                                selected ? "bg-blue-600 text-white border-blue-600" : "bg-white text-slate-800 border-slate-300"
+                              )}
+                              style={{ left: `${left}%`, top: `${top}%` }}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setSelectedVarKey(key);
+                              }}
+                              title={label}
+                            >
+                              {label}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    );
+                  })()}
                 </div>
               </div>
             </div>
