@@ -78,8 +78,8 @@ export async function applyExtractionSuggestion(params: {
           parcel_no = COALESCE(${updates.parcelNo as any}, parcel_no),
           spa_price = COALESCE(${updates.spaPrice as any}, spa_price),
           spa_details = ${JSON.stringify(nextSpa)},
-          property_details = ${JSON.stringify(nextProp)},
-          loan_details = ${JSON.stringify(nextLoan)},
+          property_details = ${nextProp as any}::jsonb,
+          loan_details = ${nextLoan as any}::jsonb,
           updated_at = now()
         WHERE id = ${params.caseId} AND firm_id = ${params.firmId}
       `);

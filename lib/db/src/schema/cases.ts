@@ -4,6 +4,115 @@ import { z } from "zod/v4";
 
 export type CaseBorrower = { name: string; ic?: string | null; address: string };
 
+export type CasePropertyDetails = {
+  propertyAddress?: string;
+  titleCategory?: "Master" | "Strata" | "Individual";
+  lotNo?: string;
+  hakmilikNo?: string;
+  bangunanNo?: string;
+  tingkatNo?: string;
+  petakNo?: string;
+  accessoryPetakNo?: string;
+  carparkNo?: string;
+  carparkLevel?: string;
+  landArea?: string;
+  accessoryArea?: string;
+  bandarMukim?: string;
+  daerah?: string;
+  negeri?: string;
+  parcelNo?: string;
+  floorNo?: string;
+  propertyType?: string;
+  areaSqm?: string | number;
+  buildingNo?: string;
+  carParkNo?: string;
+  purchasePrice?: string | number;
+  progressPayment?: string | number;
+  devDiscount?: string | number;
+  bumiDiscount?: string | number;
+  approvedPurchasePrice?: string | number;
+  [k: string]: unknown;
+};
+
+export type CaseLoanBorrower = { name: string; ic?: string | null; hp?: string; email?: string; address?: string };
+export type CaseLoanDetails = {
+  loanPartyType?: "1st Party" | "3rd Party" | "1st_party" | "3rd_party";
+  borrowers?: CaseLoanBorrower[];
+  endFinancierBank?: string;
+  bankRef?: string;
+  branchAddressLine1?: string;
+  branchAddressLine2?: string;
+  branchAddressLine3?: string;
+  branchAddressLine4?: string;
+  branchAddressLine5?: string;
+  propertyFinancingSum?: string | number;
+  othersSum?: string | number;
+  end_financier?: string;
+  endFinancier?: string;
+  financier?: string;
+  bank?: string;
+  loanAmountNum?: string | number;
+  loanAmount?: string | number;
+  [k: string]: unknown;
+};
+
+export const CasePropertyDetailsSchema = z.object({
+  propertyAddress: z.string().optional(),
+  titleCategory: z.enum(["Master", "Strata", "Individual"]).optional(),
+  lotNo: z.string().optional(),
+  hakmilikNo: z.string().optional(),
+  bangunanNo: z.string().optional(),
+  tingkatNo: z.string().optional(),
+  petakNo: z.string().optional(),
+  accessoryPetakNo: z.string().optional(),
+  carparkNo: z.string().optional(),
+  carparkLevel: z.string().optional(),
+  landArea: z.string().optional(),
+  accessoryArea: z.string().optional(),
+  bandarMukim: z.string().optional(),
+  daerah: z.string().optional(),
+  negeri: z.string().optional(),
+  parcelNo: z.string().optional(),
+  floorNo: z.string().optional(),
+  propertyType: z.string().optional(),
+  areaSqm: z.union([z.string(), z.number()]).optional(),
+  buildingNo: z.string().optional(),
+  carParkNo: z.string().optional(),
+  purchasePrice: z.union([z.string(), z.number()]).optional(),
+  progressPayment: z.union([z.string(), z.number()]).optional(),
+  devDiscount: z.union([z.string(), z.number()]).optional(),
+  bumiDiscount: z.union([z.string(), z.number()]).optional(),
+  approvedPurchasePrice: z.union([z.string(), z.number()]).optional(),
+}).passthrough();
+
+export const CaseLoanBorrowerSchema = z.object({
+  name: z.string(),
+  ic: z.string().nullish(),
+  hp: z.string().optional(),
+  email: z.string().optional(),
+  address: z.string().optional(),
+}).passthrough();
+
+export const CaseLoanDetailsSchema = z.object({
+  loanPartyType: z.enum(["1st Party", "3rd Party", "1st_party", "3rd_party"]).optional(),
+  borrowers: z.array(CaseLoanBorrowerSchema).optional(),
+  endFinancierBank: z.string().optional(),
+  bankRef: z.string().optional(),
+  branchAddressLine1: z.string().optional(),
+  branchAddressLine2: z.string().optional(),
+  branchAddressLine3: z.string().optional(),
+  branchAddressLine4: z.string().optional(),
+  branchAddressLine5: z.string().optional(),
+  propertyFinancingSum: z.union([z.string(), z.number()]).optional(),
+  othersSum: z.union([z.string(), z.number()]).optional(),
+  end_financier: z.string().optional(),
+  endFinancier: z.string().optional(),
+  financier: z.string().optional(),
+  bank: z.string().optional(),
+  loanAmountNum: z.union([z.string(), z.number()]).optional(),
+  loanAmount: z.union([z.string(), z.number()]).optional(),
+}).passthrough();
+
 export const casesTable = pgTable("cases", {
   id: serial("id").primaryKey(),
   firmId: integer("firm_id").notNull(),
@@ -16,6 +125,9 @@ export const casesTable = pgTable("cases", {
   tenure: text("tenure").notNull().default("freehold"),
   trackingToken: uuid("tracking_token").notNull().defaultRandom(),
   spaPrice: numeric("spa_price", { precision: 15, scale: 2 }),
+  apdlPrice: numeric("apdl_price", { precision: 15, scale: 2 }),
+  developerDiscount: numeric("developer_discount", { precision: 15, scale: 2 }),
+  bumiputraDiscount: numeric("bumiputra_discount", { precision: 15, scale: 2 }),
   status: text("status").notNull().default("File Opened / SPA Pending Signing"),
   lawyerStatus: text("lawyer_status"),
   lawyerStatusUpdatedAt: timestamp("lawyer_status_updated_at", { withTimezone: true }),
@@ -24,8 +136,8 @@ export const casesTable = pgTable("cases", {
   caseType: text("case_type"),
   parcelNo: text("parcel_no"),
   spaDetails: text("spa_details"),
-  propertyDetails: text("property_details"),
-  loanDetails: text("loan_details"),
+  propertyDetails: jsonb("property_details").$type<CasePropertyDetails>(),
+  loanDetails: jsonb("loan_details").$type<CaseLoanDetails>(),
   borrowers: jsonb("borrowers").notNull().default([]),
   loanPartyType: text("loan_party_type").notNull().default("1st_party"),
   companyDetails: text("company_details"),

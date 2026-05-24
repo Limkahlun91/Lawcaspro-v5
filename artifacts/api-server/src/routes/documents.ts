@@ -497,6 +497,69 @@ function fmtRM(val: unknown): string {
   return `RM ${n.toLocaleString("en-MY", { minimumFractionDigits: 2 })}`;
 }
 
+function parseMoneyNumber(val: unknown): number | null {
+  if (val === null || val === undefined) return null;
+  if (typeof val === "number") return Number.isFinite(val) ? val : null;
+  const s = String(val).trim();
+  if (!s) return null;
+  const n = Number(s.replace(/[^0-9.]/g, ""));
+  return Number.isFinite(n) ? n : null;
+}
+
+function chunkWords(n: number): string {
+  const ones = [
+    "Zero", "One", "Two", "Three", "Four", "Five", "Six", "Seven", "Eight", "Nine",
+    "Ten", "Eleven", "Twelve", "Thirteen", "Fourteen", "Fifteen", "Sixteen", "Seventeen", "Eighteen", "Nineteen",
+  ] as const;
+  const tens = ["", "", "Twenty", "Thirty", "Forty", "Fifty", "Sixty", "Seventy", "Eighty", "Ninety"] as const;
+
+  if (n < 20) return ones[n] ?? "";
+  if (n < 100) {
+    const t = Math.floor(n / 10);
+    const r = n % 10;
+    return r ? `${tens[t]} ${ones[r]}` : `${tens[t]}`;
+  }
+  const h = Math.floor(n / 100);
+  const r = n % 100;
+  return r ? `${ones[h]} Hundred ${chunkWords(r)}` : `${ones[h]} Hundred`;
+}
+
+function integerToWords(n: number): string {
+  if (!Number.isFinite(n)) return "";
+  if (n === 0) return "Zero";
+  if (n < 0) return `Minus ${integerToWords(Math.abs(n))}`;
+
+  const units = [
+    { value: 1_000_000_000_000, label: "Trillion" },
+    { value: 1_000_000_000, label: "Billion" },
+    { value: 1_000_000, label: "Million" },
+    { value: 1_000, label: "Thousand" },
+  ];
+
+  let remaining = Math.floor(n);
+  const parts: string[] = [];
+  for (const u of units) {
+    if (remaining >= u.value) {
+      const q = Math.floor(remaining / u.value);
+      remaining = remaining % u.value;
+      parts.push(`${integerToWords(q)} ${u.label}`);
+    }
+  }
+  if (remaining > 0) parts.push(chunkWords(remaining));
+  return parts.join(" ").replace(/\s+/g, " ").trim();
+}
+
+function toRinggitMalaysiaWords(amount: number): string {
+  if (!Number.isFinite(amount)) return "";
+  const rounded = Math.round(amount * 100);
+  const ringgit = Math.floor(rounded / 100);
+  const sen = rounded % 100;
+
+  const ringgitWords = integerToWords(ringgit);
+  const senWords = sen ? integerToWords(sen) : "Zero";
+  return `Ringgit Malaysia ${ringgitWords} And ${senWords} Sen Only`;
+}
+
 const FIRM_DOCUMENT_ALLOWED_EXTENSIONS = new Set([
   "docx",
   "pdf",
@@ -903,6 +966,9 @@ async function buildCaseContext(r: DbConn, caseId: number, firmId: number, cache
         c.case_type,
         c.parcel_no,
         c.spa_price,
+        c.apdl_price,
+        c.developer_discount,
+        c.bumiputra_discount,
         c.purchase_mode,
         c.loan_party_type,
         c.title_type,
@@ -1222,7 +1288,7 @@ async function buildCaseContext(r: DbConn, caseId: number, firmId: number, cache
   const officeBanks = bankRows.filter((b) => b.account_type === "office");
   const clientBanks = bankRows.filter((b) => b.account_type === "client");
 
-  const borrowersArr: Array<{ name: string; ic?: string; address?: string }> = (() => {
+  const borrowersArr: Array<{ name: string; ic?: string; address?: string; hp?: string; email?: string }> = (() => {
     const partyType = String((c as any).loan_party_type ?? "");
     if (partyType === "1st_party") {
       return purchaserRows
@@ -1231,9 +1297,14 @@ async function buildCaseContext(r: DbConn, caseId: number, firmId: number, cache
           if (!name) return null;
           const ic = typeof p?.ic_no === "string" ? String(p.ic_no).trim() : "";
           const address = typeof p?.address === "string" ? String(p.address).trim() : "";
-          return ic ? { name, ic, address } : { name, address };
+          const hp = typeof p?.phone === "string" ? String(p.phone).trim() : "";
+          const email = typeof p?.email === "string" ? String(p.email).trim() : "";
+          const base = ic ? { name, ic, address } : { name, address };
+          if (hp) (base as any).hp = hp;
+          if (email) (base as any).email = email;
+          return base as any;
         })
-        .filter(Boolean) as Array<{ name: string; ic?: string; address?: string }>;
+        .filter(Boolean) as Array<{ name: string; ic?: string; address?: string; hp?: string; email?: string }>;
     }
 
     const fromColumn = Array.isArray((c as any).borrowers) ? (c as any).borrowers : null;
@@ -1244,21 +1315,117 @@ async function buildCaseContext(r: DbConn, caseId: number, firmId: number, cache
           if (!name) return null;
           const ic = typeof (b?.ic ?? b?.nric) === "string" ? String(b.ic ?? b.nric).trim() : "";
           const address = typeof b?.address === "string" ? String(b.address).trim() : "";
-          return ic ? { name, ic, address } : { name, address };
+          const hp = typeof (b?.hp ?? b?.phone) === "string" ? String(b.hp ?? b.phone).trim() : "";
+          const email = typeof b?.email === "string" ? String(b.email).trim() : "";
+          const base = ic ? { name, ic, address } : { name, address };
+          if (hp) (base as any).hp = hp;
+          if (email) (base as any).email = email;
+          return base as any;
         })
-        .filter(Boolean) as Array<{ name: string; ic?: string; address?: string }>;
+        .filter(Boolean) as Array<{ name: string; ic?: string; address?: string; hp?: string; email?: string }>;
     }
 
     const b1 = typeof (loan as any)?.borrower1Name === "string" ? String((loan as any).borrower1Name).trim() : "";
     const i1 = typeof (loan as any)?.borrower1Ic === "string" ? String((loan as any).borrower1Ic).trim() : "";
     const b2 = typeof (loan as any)?.borrower2Name === "string" ? String((loan as any).borrower2Name).trim() : "";
     const i2 = typeof (loan as any)?.borrower2Ic === "string" ? String((loan as any).borrower2Ic).trim() : "";
-    const out: Array<{ name: string; ic?: string; address?: string }> = [];
+    const out: Array<{ name: string; ic?: string; address?: string; hp?: string; email?: string }> = [];
     if (b1) out.push(i1 ? { name: b1, ic: i1 } : { name: b1 });
     if (b2) out.push(i2 ? { name: b2, ic: i2 } : { name: b2 });
     return out;
   })();
   const borrowerAddresses = borrowersArr.map((b) => (typeof b.address === "string" ? b.address.trim() : "")).filter(Boolean).join(", ");
+
+  const purchaserFlatVars: Record<string, unknown> = {};
+  for (let i = 0; i < purchaserRows.length; i++) {
+    const idx = i + 1;
+    const p: any = purchaserRows[i] ?? {};
+    purchaserFlatVars[`purchaser_${idx}_name`] = p.name ?? "";
+    purchaserFlatVars[`purchaser_${idx}_ic`] = p.ic_no ?? "";
+    purchaserFlatVars[`purchaser_${idx}_nric`] = p.ic_no ?? "";
+    purchaserFlatVars[`purchaser_${idx}_address`] = p.address ?? "";
+    purchaserFlatVars[`purchaser_${idx}_phone`] = p.phone ?? "";
+    purchaserFlatVars[`purchaser_${idx}_email`] = p.email ?? "";
+  }
+
+  const borrowerFlatVars: Record<string, unknown> = {};
+  for (let i = 0; i < borrowersArr.length; i++) {
+    const idx = i + 1;
+    const b: any = borrowersArr[i] ?? {};
+    borrowerFlatVars[`borrower_${idx}_name`] = b.name ?? "";
+    borrowerFlatVars[`borrower_${idx}_ic`] = b.ic ?? b.nric ?? "";
+    borrowerFlatVars[`borrower_${idx}_address`] = b.address ?? "";
+    borrowerFlatVars[`borrower_${idx}_hp`] = b.hp ?? b.phone ?? "";
+    borrowerFlatVars[`borrower_${idx}_email`] = b.email ?? "";
+  }
+
+  const purchasePriceNum =
+    parseMoneyNumber((c as any).spa_price) ??
+    parseMoneyNumber((prop as any)?.purchasePrice) ??
+    (() => {
+      const apdl = parseMoneyNumber((c as any).apdl_price);
+      if (apdl === null) return null;
+      const devDisc = parseMoneyNumber((c as any).developer_discount) ?? 0;
+      const bumiDisc = parseMoneyNumber((c as any).bumiputra_discount) ?? 0;
+      return apdl - devDisc - bumiDisc;
+    })();
+
+  const percentVars: Record<string, unknown> = {};
+  if (purchasePriceNum !== null) {
+    const pcts: Array<[string, number]> = [
+      ["2_5", 2.5],
+      ["5", 5],
+      ["7_5", 7.5],
+      ["10", 10],
+      ["15", 15],
+      ["17_5", 17.5],
+    ];
+    for (const [key, pct] of pcts) {
+      const v = purchasePriceNum * (pct / 100);
+      percentVars[`purchase_price_${key}_percent_raw`] = v;
+      percentVars[`purchase_price_${key}_percent`] = fmtRM(v);
+    }
+  } else {
+    const keys = ["2_5", "5", "7_5", "10", "15", "17_5"];
+    for (const k of keys) {
+      percentVars[`purchase_price_${k}_percent_raw`] = "";
+      percentVars[`purchase_price_${k}_percent`] = "";
+    }
+  }
+
+  const loanFinancingRaw =
+    (loan as any)?.propertyFinancingSum ??
+    (loan as any)?.financingSum ??
+    (loan as any)?.loanAmountNum ??
+    (loan as any)?.loanAmount ??
+    (loan as any)?.loan_amount ??
+    "";
+  const loanOthersRaw = (loan as any)?.othersSum ?? (loan as any)?.otherCharges ?? (loan as any)?.other_charges ?? "";
+
+  const totalLoanNum = (() => {
+    const total = (loan as any)?.totalLoan ?? (loan as any)?.total_loan;
+    const direct = parseMoneyNumber(total);
+    if (direct !== null) return direct;
+    const a = parseMoneyNumber(loanFinancingRaw) ?? 0;
+    const b = parseMoneyNumber(loanOthersRaw) ?? 0;
+    const sum = a + b;
+    return sum > 0 ? sum : null;
+  })();
+
+  const totalLoanWordsUpper = totalLoanNum !== null ? toRinggitMalaysiaWords(totalLoanNum).toUpperCase() : "";
+
+  const propLotNo = (prop as any)?.lotNo ?? (prop as any)?.lot_no ?? "";
+  const propHakmilikNo = (prop as any)?.hakmilikNo ?? (prop as any)?.hakmilik_no ?? "";
+  const propBangunanNo = (prop as any)?.bangunanNo ?? (prop as any)?.bangunan_no ?? "";
+  const propTingkatNo = (prop as any)?.tingkatNo ?? (prop as any)?.tingkat_no ?? "";
+  const propPetakNo = (prop as any)?.petakNo ?? (prop as any)?.petak_no ?? "";
+  const propAccessoryPetakNo = (prop as any)?.accessoryPetakNo ?? (prop as any)?.accessory_petak_no ?? "";
+  const propCarparkNo = (prop as any)?.carparkNo ?? (prop as any)?.carParkNo ?? (prop as any)?.car_park_no ?? "";
+  const propCarparkLevel = (prop as any)?.carparkLevel ?? (prop as any)?.carParkLevel ?? (prop as any)?.car_park_level ?? "";
+  const propBandarMukim = (prop as any)?.bandarMukim ?? (prop as any)?.bandar_mukim ?? "";
+  const propDaerah = (prop as any)?.daerah ?? "";
+  const propNegeri = (prop as any)?.negeri ?? "";
+  const propTitleTypeLabel = (prop as any)?.titleTypeLabel ?? (prop as any)?.title_type_label ?? "";
 
   return {
     case_id: caseId,
@@ -1269,6 +1436,14 @@ async function buildCaseContext(r: DbConn, caseId: number, firmId: number, cache
     parcel_no: (c as any).parcel_no ?? "",
     spa_price: fmtRM((c as any).spa_price),
     spa_price_raw: (c as any).spa_price ?? "",
+    purchase_price: purchasePriceNum !== null ? fmtRM(purchasePriceNum) : "",
+    purchase_price_raw: purchasePriceNum !== null ? purchasePriceNum : "",
+    apdl_price: fmtRM((c as any).apdl_price),
+    apdl_price_raw: (c as any).apdl_price ?? "",
+    developer_discount: fmtRM((c as any).developer_discount),
+    developer_discount_raw: (c as any).developer_discount ?? "",
+    bumiputra_discount: fmtRM((c as any).bumiputra_discount),
+    bumiputra_discount_raw: (c as any).bumiputra_discount ?? "",
     purchase_mode: (c as any).purchase_mode ?? "",
     title_type: (c as any).title_type ?? "",
     status: (c as any).status ?? "",
@@ -1290,21 +1465,33 @@ async function buildCaseContext(r: DbConn, caseId: number, firmId: number, cache
     spa_email: spa.emailAddress ?? "",
 
     // Property Details
-    property_parcel_no: prop.parcelNo ?? "",
-    property_floor_no: prop.floorNo ?? "",
-    property_building_no: prop.buildingNo ?? "",
-    property_car_park_no: prop.carParkNo ?? "",
-    property_type: prop.propertyType ?? "",
-    property_area_sqm: prop.areaSqm ?? "",
-    property_purchase_price: fmtRM(prop.purchasePrice),
-    property_purchase_price_raw: prop.purchasePrice ?? "",
-    property_progress_payment: prop.progressPayment ?? "",
-    property_dev_discount: fmtRM(prop.devDiscount),
-    property_dev_discount_raw: prop.devDiscount ?? "",
-    property_bumi_discount: fmtRM(prop.bumiDiscount),
-    property_bumi_discount_raw: prop.bumiDiscount ?? "",
-    property_approved_price: fmtRM(prop.approvedPurchasePrice),
-    property_approved_price_raw: prop.approvedPurchasePrice ?? "",
+    property_parcel_no: (prop as any)?.parcelNo ?? (prop as any)?.parcel_no ?? (prop as any)?.unitNo ?? (prop as any)?.unit_no ?? "",
+    property_floor_no: (prop as any)?.floorNo ?? (prop as any)?.floor_no ?? "",
+    property_building_no: (prop as any)?.buildingNo ?? (prop as any)?.building_no ?? "",
+    property_car_park_no: (prop as any)?.carParkNo ?? (prop as any)?.car_park_no ?? propCarparkNo ?? "",
+    property_type: (prop as any)?.propertyType ?? (prop as any)?.property_type ?? "",
+    property_area_sqm: (prop as any)?.areaSqm ?? (prop as any)?.area_sqm ?? "",
+    property_purchase_price: purchasePriceNum !== null ? fmtRM(purchasePriceNum) : "",
+    property_purchase_price_raw: purchasePriceNum !== null ? purchasePriceNum : "",
+    property_progress_payment: (prop as any)?.progressPayment ?? (prop as any)?.progress_payment ?? "",
+    property_dev_discount: fmtRM((c as any).developer_discount),
+    property_dev_discount_raw: (c as any).developer_discount ?? "",
+    property_bumi_discount: fmtRM((c as any).bumiputra_discount),
+    property_bumi_discount_raw: (c as any).bumiputra_discount ?? "",
+    property_approved_price: fmtRM((c as any).apdl_price),
+    property_approved_price_raw: (c as any).apdl_price ?? "",
+    property_title_type_label: propTitleTypeLabel ?? "",
+    property_lot_no: propLotNo ?? "",
+    property_hakmilik_no: propHakmilikNo ?? "",
+    property_bangunan_no: propBangunanNo ?? "",
+    property_tingkat_no: propTingkatNo ?? "",
+    property_petak_no: propPetakNo ?? "",
+    property_accessory_petak_no: propAccessoryPetakNo ?? "",
+    property_carpark_no: propCarparkNo ?? "",
+    property_carpark_level: propCarparkLevel ?? "",
+    property_bandar_mukim: propBandarMukim || projectMukim || "",
+    property_daerah: propDaerah || projectDaerah || "",
+    property_negeri: propNegeri || projectNegeri || "",
 
     // Loan Details
     borrowers: borrowersArr,
@@ -1312,20 +1499,35 @@ async function buildCaseContext(r: DbConn, caseId: number, firmId: number, cache
     borrower1_ic: borrowersArr[0]?.ic ?? "",
     borrower2_name: borrowersArr[1]?.name ?? "",
     borrower2_ic: borrowersArr[1]?.ic ?? "",
+    borrower_1_name: borrowersArr[0]?.name ?? "",
+    borrower_1_ic: borrowersArr[0]?.ic ?? "",
+    borrower_1_hp: borrowersArr[0]?.hp ?? "",
+    borrower_1_email: borrowersArr[0]?.email ?? "",
+    borrower_2_name: borrowersArr[1]?.name ?? "",
+    borrower_2_ic: borrowersArr[1]?.ic ?? "",
+    borrower_2_hp: borrowersArr[1]?.hp ?? "",
+    borrower_2_email: borrowersArr[1]?.email ?? "",
     borrower1_address: borrowersArr[0]?.address ?? "",
     borrower2_address: borrowersArr[1]?.address ?? "",
     borrower_1_address: borrowersArr[0]?.address ?? "",
     borrower_2_address: borrowersArr[1]?.address ?? "",
     borrower_addresses: borrowerAddresses,
-    end_financier: loan.endFinancier ?? "",
-    bank_ref: loan.bankRef ?? "",
-    bank_branch: loan.bankBranch ?? "",
-    financing_sum: fmtRM(loan.financingSum),
-    financing_sum_raw: loan.financingSum ?? "",
-    other_charges: fmtRM(loan.otherCharges),
-    other_charges_raw: loan.otherCharges ?? "",
-    total_loan: fmtRM(loan.totalLoan),
-    total_loan_raw: loan.totalLoan ?? "",
+    end_financier:
+      (loan as any)?.endFinancierBank ??
+      (loan as any)?.endFinancier ??
+      (loan as any)?.end_financier ??
+      (loan as any)?.financier ??
+      (loan as any)?.bank ??
+      "",
+    bank_ref: (loan as any)?.bankRef ?? "",
+    bank_branch: (loan as any)?.branch ?? (loan as any)?.bankBranch ?? "",
+    financing_sum: fmtRM(loanFinancingRaw),
+    financing_sum_raw: loanFinancingRaw ?? "",
+    other_charges: fmtRM(loanOthersRaw),
+    other_charges_raw: loanOthersRaw ?? "",
+    total_loan: totalLoanNum !== null ? fmtRM(totalLoanNum) : "",
+    total_loan_raw: totalLoanNum !== null ? totalLoanNum : "",
+    loan_total_sum_words: totalLoanWordsUpper,
 
     // Company Details
     director1_name: comp.director1Name ?? "",
@@ -1400,6 +1602,10 @@ async function buildCaseContext(r: DbConn, caseId: number, firmId: number, cache
       email: p.email ?? "",
       role: p.role ?? "",
     })),
+
+    ...purchaserFlatVars,
+    ...borrowerFlatVars,
+    ...percentVars,
 
     // Assignments
     lawyer_name: lawyer.user_name ?? "",

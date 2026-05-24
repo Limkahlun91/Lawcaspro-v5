@@ -562,7 +562,14 @@ async function formatCaseDetail(r: DbConn, c: typeof casesTable.$inferSelect) {
     const client = await (async () => {
       try {
         const [row] = await r
-          .select({ id: clientsTable.id, name: clientsTable.name, icNo: clientsTable.icNo })
+          .select({
+            id: clientsTable.id,
+            name: clientsTable.name,
+            icNo: clientsTable.icNo,
+            phone: clientsTable.phone,
+            email: clientsTable.email,
+            address: clientsTable.address,
+          })
           .from(clientsTable)
           .where(eq(clientsTable.id, p.clientId));
         return row ?? null;
@@ -575,6 +582,9 @@ async function formatCaseDetail(r: DbConn, c: typeof casesTable.$inferSelect) {
       clientId: p.clientId,
       clientName: client?.name ?? "Unknown",
       icNo: client?.icNo ?? null,
+      phone: client?.phone ?? null,
+      email: client?.email ?? null,
+      address: client?.address ?? null,
       role: p.role,
       orderNo: p.orderNo,
     };
@@ -613,10 +623,16 @@ async function formatCaseDetail(r: DbConn, c: typeof casesTable.$inferSelect) {
   let propertyDetails: any = null;
   let loanDetails: any = null;
   let companyDetails: any = null;
-  try { if (c.spaDetails) spaDetails = JSON.parse(c.spaDetails); } catch {}
-  try { if (c.propertyDetails) propertyDetails = JSON.parse(c.propertyDetails); } catch {}
-  try { if (c.loanDetails) loanDetails = JSON.parse(c.loanDetails); } catch {}
-  try { if (c.companyDetails) companyDetails = JSON.parse(c.companyDetails); } catch {}
+  const parseMaybeJson = (raw: unknown): unknown => {
+    if (!raw) return null;
+    if (typeof raw === "object") return raw;
+    if (typeof raw !== "string") return null;
+    try { return JSON.parse(raw); } catch { return null; }
+  };
+  spaDetails = parseMaybeJson(c.spaDetails);
+  propertyDetails = parseMaybeJson((c as any).propertyDetails);
+  loanDetails = parseMaybeJson((c as any).loanDetails);
+  companyDetails = parseMaybeJson(c.companyDetails);
 
   const kdExists = await tableExists(r, "public.case_key_dates");
   const [kd] = kdExists
@@ -641,6 +657,9 @@ async function formatCaseDetail(r: DbConn, c: typeof casesTable.$inferSelect) {
     tenure: c.tenure,
     trackingToken: c.trackingToken,
     spaPrice: c.spaPrice ? Number(c.spaPrice) : null,
+    apdlPrice: c.apdlPrice ? Number(c.apdlPrice) : null,
+    developerDiscount: c.developerDiscount ? Number(c.developerDiscount) : null,
+    bumiputraDiscount: c.bumiputraDiscount ? Number(c.bumiputraDiscount) : null,
     status: c.status,
     lawyerStatus: c.lawyerStatus ?? null,
     lawyerStatusUpdatedAt: toIsoStringSafeOrNull(c.lawyerStatusUpdatedAt),
@@ -2718,24 +2737,41 @@ router.post("/cases", requireAuthHandler, requireFirmUserHandler, requirePermiss
     const createCaseSchema = z.object({
       projectId: z.coerce.number().int().positive(),
       developerId: z.coerce.number().int().positive().optional(),
+      referenceNo: z.string().trim().max(80).optional(),
       purchaseMode: z.string().transform((v) => v.trim().toLowerCase()),
       titleType: z.string().transform((v) => v.trim().toLowerCase()),
-      spaPrice: z.coerce.number().optional(),
+      spaPrice: z.number().finite().nullable().optional(),
+      apdlPrice: z.number().finite().nullable().optional(),
+      developerDiscount: z.number().finite().nullable().optional(),
+      bumiputraDiscount: z.number().finite().nullable().optional(),
       assignedLawyerId: z.coerce.number().int().positive().optional(),
       assignedClerkId: z.coerce.number().int().positive().optional(),
       purchaserIds: z.array(z.coerce.number().int().positive()).optional(),
       purchasers: z.array(z.object({
+        isCompany: z.boolean().optional(),
         name: z.string(),
         ic: z.string().nullish(),
-      })).optional(),
+        phone: z.string().nullish(),
+        email: z.string().nullish(),
+        address: z.string().nullish(),
+      }).passthrough()).optional(),
       loanPartyType: z.enum(["1st_party", "3rd_party"]).optional(),
       borrowers: z.array(z.object({
         name: z.string(),
         ic: z.string().nullish(),
-        address: z.string().optional().transform((v) => (v ?? "").trim()),
-      })).optional(),
+        hp: z.string().nullish(),
+        email: z.string().nullish(),
+        address: z.string().nullish().transform((v) => (typeof v === "string" ? v : "")).transform((v) => v.trim()),
+      }).passthrough()).optional(),
+      caseType: z.string().optional(),
+      parcelNo: z.string().optional(),
+      spaDetails: z.record(z.string(), z.unknown()).optional(),
+      propertyDetails: z.unknown().optional(),
+      propertyAddress: z.string().optional(),
+      loanDetails: z.unknown().optional(),
+      companyDetails: z.record(z.string(), z.unknown()).optional(),
     }).superRefine((v, ctx) => {
-      if (v.purchaseMode !== "loan" && v.purchaseMode !== "cash") {
+      if (v.purchaseMode !== "loan" && v.purchaseMode !== "cash" && v.purchaseMode !== "other") {
         ctx.addIssue({ code: "custom", path: ["purchaseMode"], message: "Invalid purchaseMode" });
       }
       const normalizedTitleType = normalizeTitleType(v.titleType);
@@ -2747,6 +2783,12 @@ router.post("/cases", requireAuthHandler, requireFirmUserHandler, requirePermiss
       const hasInlinePurchasers = Array.isArray(v.purchasers) && v.purchasers.some((p) => (p?.name ?? "").trim().length > 0);
       if (!hasPurchaserIds && !hasInlinePurchasers) {
         ctx.addIssue({ code: "custom", path: ["purchasers"], message: "At least one purchaser name is required" });
+      }
+      if (v.apdlPrice !== null && v.apdlPrice !== undefined && v.spaPrice !== null && v.spaPrice !== undefined) {
+        const expected = v.apdlPrice - (v.developerDiscount ?? 0) - (v.bumiputraDiscount ?? 0);
+        if (Math.abs(expected - v.spaPrice) > 0.009) {
+          ctx.addIssue({ code: "custom", path: ["spaPrice"], message: "spaPrice must equal apdlPrice - developerDiscount - bumiputraDiscount" });
+        }
       }
       if (v.purchaseMode === "loan" && v.loanPartyType === "3rd_party") {
         const borrowers = Array.isArray(v.borrowers) ? v.borrowers : [];
@@ -2769,7 +2811,30 @@ router.post("/cases", requireAuthHandler, requireFirmUserHandler, requirePermiss
       return;
     }
 
-    const { projectId, developerId: clientDeveloperId, purchaseMode, titleType, spaPrice, assignedLawyerId, assignedClerkId, purchaserIds, purchasers, loanPartyType, borrowers: requestedBorrowers } = parsed.data;
+    const {
+      projectId,
+      developerId: clientDeveloperId,
+      referenceNo: requestedRefRaw,
+      purchaseMode,
+      titleType,
+      spaPrice,
+      apdlPrice,
+      developerDiscount,
+      bumiputraDiscount,
+      assignedLawyerId,
+      assignedClerkId,
+      purchaserIds,
+      purchasers,
+      loanPartyType,
+      borrowers: requestedBorrowers,
+      caseType,
+      parcelNo,
+      spaDetails,
+      propertyDetails: propertyDetailsRaw,
+      propertyAddress,
+      loanDetails: loanDetailsRaw,
+      companyDetails,
+    } = parsed.data;
     const canAssignAny = await hasRolePermission(r, req.firmId!, req.roleId, "cases", "assign_any");
     const normalizedAssignedLawyerId = assignedLawyerId ?? undefined;
     const normalizedAssignedClerkId = assignedClerkId ?? undefined;
@@ -2788,7 +2853,7 @@ router.post("/cases", requireAuthHandler, requireFirmUserHandler, requirePermiss
       }
     }
 
-    // ── 1. Resolve developerId server-side from projectId ─────────────────────
+    // ── 1. Resolve project & developerId ──────────────────────────────────────
     const [project] = await r.select().from(projectsTable).where(eq(projectsTable.id, projectId));
     if (!project) {
       res.status(404).json({ error: "Project not found" });
@@ -2798,26 +2863,31 @@ router.post("/cases", requireAuthHandler, requireFirmUserHandler, requirePermiss
       res.status(404).json({ error: "Project not found" });
       return;
     }
-    if (!project.developerId) {
-      res.status(422).json({ error: "The selected project has no linked developer. Please edit the project first." });
+    let developerId: number | null = null;
+    if (clientDeveloperId !== undefined) {
+      const [dev] = await r
+        .select({ id: developersTable.id })
+        .from(developersTable)
+        .where(and(eq(developersTable.firmId, req.firmId!), eq(developersTable.id, clientDeveloperId)))
+        .limit(1);
+      if (!dev) {
+        res.status(400).json({ error: "Developer not found" });
+        return;
+      }
+      developerId = clientDeveloperId;
+    } else if (project.developerId) {
+      developerId = project.developerId;
+    }
+    if (!developerId) {
+      res.status(422).json({ error: "Developer is required" });
       return;
     }
-    // If caller sent developerId, validate it matches the project
-    if (clientDeveloperId !== undefined && clientDeveloperId !== project.developerId) {
-      res.status(409).json({
-        error: "developerId does not match the project's developer",
-        expected: project.developerId,
-        received: clientDeveloperId,
-      });
-      return;
-    }
-    const developerId = project.developerId;
     const projectTitleType = normalizeTitleType(String((project as any).titleType ?? "")) ?? "master";
     const projectIsEncumbered = Boolean((project as any).isEncumbered ?? false);
     const projectTenure = (typeof (project as any).tenure === "string" && (String((project as any).tenure) === "leasehold" || String((project as any).tenure) === "freehold"))
       ? String((project as any).tenure)
       : "freehold";
-    const normalizedTitleType = projectTitleType;
+    const normalizedTitleType = normalizeTitleType(titleType) ?? projectTitleType;
 
     const usersToCheck = [normalizedAssignedLawyerId, ...(normalizedAssignedClerkId ? [normalizedAssignedClerkId] : [])].filter((x): x is number => Number.isFinite(x));
     if (usersToCheck.length > 0) {
@@ -2843,9 +2913,12 @@ router.post("/cases", requireAuthHandler, requireFirmUserHandler, requirePermiss
 
     if (resolvedPurchaserIds.length === 0 && purchasers && purchasers.length > 0) {
       for (const p of purchasers) {
-        const trimmedName = p.name.trim();
+        const trimmedName = String(p.name ?? "").trim();
         if (!trimmedName) continue;
-        const trimmedIc = p.ic?.trim() || null;
+        const trimmedIc = typeof p.ic === "string" ? p.ic.trim() : null;
+        const trimmedPhone = typeof p.phone === "string" ? p.phone.trim() : null;
+        const trimmedEmail = typeof p.email === "string" ? p.email.trim() : null;
+        const trimmedAddress = typeof p.address === "string" ? p.address.trim() : null;
 
         let existingClientId: number | null = null;
 
@@ -2878,11 +2951,30 @@ router.post("/cases", requireAuthHandler, requireFirmUserHandler, requirePermiss
         if (existingClientId) {
           resolvedPurchaserIds.push(existingClientId);
           purchasersReused++;
+          if (trimmedPhone || trimmedEmail || trimmedAddress) {
+            const [existing] = await r
+              .select({ id: clientsTable.id, phone: clientsTable.phone, email: clientsTable.email, address: clientsTable.address })
+              .from(clientsTable)
+              .where(and(eq(clientsTable.firmId, req.firmId!), eq(clientsTable.id, existingClientId)))
+              .limit(1);
+            if (existing) {
+              const patch: Record<string, unknown> = {};
+              if (trimmedPhone && !String(existing.phone ?? "").trim()) patch.phone = trimmedPhone;
+              if (trimmedEmail && !String(existing.email ?? "").trim()) patch.email = trimmedEmail;
+              if (trimmedAddress && !String(existing.address ?? "").trim()) patch.address = trimmedAddress;
+              if (Object.keys(patch).length > 0) {
+                await r.update(clientsTable).set(patch).where(and(eq(clientsTable.firmId, req.firmId!), eq(clientsTable.id, existingClientId)));
+              }
+            }
+          }
         } else {
           const insertBase = {
             firmId: req.firmId!,
             name: trimmedName,
             icNo: trimmedIc,
+            phone: trimmedPhone,
+            email: trimmedEmail,
+            address: trimmedAddress,
             createdBy: req.userId ?? null,
           } satisfies typeof clientsTable.$inferInsert;
 
@@ -2902,38 +2994,26 @@ router.post("/cases", requireAuthHandler, requireFirmUserHandler, requirePermiss
       return;
     }
 
-    // ── 3. Build extra fields from body (not in Zod schema) ───────────────────
-    const { caseType, parcelNo, spaDetails, propertyDetails, loanDetails, companyDetails } = req.body as {
-      caseType?: string;
-      parcelNo?: string;
-      spaDetails?: object;
-      propertyDetails?: object;
-      loanDetails?: object;
-      companyDetails?: object;
-    };
+    const refNo = requestedRefRaw?.trim() || `LCP-${req.firmId}-${Date.now()}`;
 
-    const requestedRef = typeof (req.body as any).referenceNo === "string"
-      ? String((req.body as any).referenceNo).trim()
-      : "";
-
-    if (requestedRef.length > 80) {
-      res.status(400).json({ error: "Invalid referenceNo" });
-      return;
-    }
-
-    const refNo = requestedRef || `LCP-${req.firmId}-${Date.now()}`;
-
-    const normalizeBorrowers = (raw: unknown): Array<{ name: string; ic?: string; address: string }> => {
+    const normalizeBorrowers = (raw: unknown): Array<{ name: string; ic?: string; hp?: string; email?: string; address: string }> => {
       if (!Array.isArray(raw)) return [];
-      const out: Array<{ name: string; ic?: string; address: string }> = [];
+      const out: Array<{ name: string; ic?: string; hp?: string; email?: string; address: string }> = [];
       for (const v of raw) {
         const name = typeof (v as any)?.name === "string" ? String((v as any).name).trim() : "";
         if (!name) continue;
         const icRaw = (v as any)?.ic;
         const ic = typeof icRaw === "string" ? icRaw.trim() : "";
+        const hpRaw = (v as any)?.hp;
+        const hp = typeof hpRaw === "string" ? hpRaw.trim() : "";
+        const emailRaw = (v as any)?.email;
+        const email = typeof emailRaw === "string" ? emailRaw.trim() : "";
         const addressRaw = (v as any)?.address;
         const address = typeof addressRaw === "string" ? addressRaw.trim() : "";
-        out.push(ic ? { name, ic, address } : { name, address });
+        const base = ic ? { name, ic, address } : { name, address };
+        if (hp) (base as any).hp = hp;
+        if (email) (base as any).email = email;
+        out.push(base as any);
       }
       return out;
     };
@@ -2941,29 +3021,34 @@ router.post("/cases", requireAuthHandler, requireFirmUserHandler, requirePermiss
     const normalizedRequestedBorrowers = normalizeBorrowers(requestedBorrowers);
     const isLoan = purchaseMode === "loan";
     const effectiveLoanPartyType: "1st_party" | "3rd_party" = isLoan ? (loanPartyType ?? "1st_party") : "1st_party";
-    let borrowersToStore: Array<{ name: string; ic?: string; address: string }> = [];
+    let borrowersToStore: Array<{ name: string; ic?: string; hp?: string; email?: string; address: string }> = [];
 
     if (isLoan) {
       if (effectiveLoanPartyType === "1st_party") {
         const rows = await r
-          .select({ id: clientsTable.id, name: clientsTable.name, ic: clientsTable.icNo, address: clientsTable.address })
+          .select({ id: clientsTable.id, name: clientsTable.name, ic: clientsTable.icNo, phone: clientsTable.phone, email: clientsTable.email, address: clientsTable.address })
           .from(clientsTable)
           .where(and(eq(clientsTable.firmId, req.firmId!), inArray(clientsTable.id, resolvedPurchaserIds)));
-        const byId = new Map<number, { name: string; ic: string | null; address: string | null }>();
-        for (const row of rows) byId.set(row.id, { name: String(row.name ?? ""), ic: row.ic ?? null, address: row.address ?? null });
+        const byId = new Map<number, { name: string; ic: string | null; phone: string | null; email: string | null; address: string | null }>();
+        for (const row of rows) byId.set(row.id, { name: String(row.name ?? ""), ic: row.ic ?? null, phone: row.phone ?? null, email: row.email ?? null, address: row.address ?? null });
         borrowersToStore = resolvedPurchaserIds
           .map((id) => {
             const v = byId.get(id);
             const name = v?.name?.trim() ?? "";
             const ic = v?.ic ? String(v.ic).trim() : "";
+            const hp = v?.phone ? String(v.phone).trim() : "";
+            const email = v?.email ? String(v.email).trim() : "";
             const address = v?.address ? String(v.address).trim() : "";
-            return ic ? { name, ic, address } : { name, address };
+            const base = ic ? { name, ic, address } : { name, address };
+            if (hp) (base as any).hp = hp;
+            if (email) (base as any).email = email;
+            return base as any;
           })
           .filter((b) => b.name.trim().length > 0);
       } else {
         borrowersToStore = normalizedRequestedBorrowers;
-        if (borrowersToStore.length === 0 && loanDetails && typeof loanDetails === "object") {
-          const ld: any = loanDetails as any;
+        if (borrowersToStore.length === 0 && loanDetailsRaw && typeof loanDetailsRaw === "object") {
+          const ld: any = loanDetailsRaw as any;
           const b1 = typeof ld.borrower1Name === "string" ? ld.borrower1Name.trim() : "";
           const i1 = typeof ld.borrower1Ic === "string" ? ld.borrower1Ic.trim() : "";
           const b2 = typeof ld.borrower2Name === "string" ? ld.borrower2Name.trim() : "";
@@ -2976,6 +3061,24 @@ router.post("/cases", requireAuthHandler, requireFirmUserHandler, requirePermiss
       }
     }
 
+    const normalizedPropertyDetails = (() => {
+      if (!propertyDetailsRaw || typeof propertyDetailsRaw !== "object" || Array.isArray(propertyDetailsRaw)) {
+        return propertyAddress ? ({ propertyAddress: String(propertyAddress).trim() } as Record<string, unknown>) : null;
+      }
+      const base = { ...(propertyDetailsRaw as Record<string, unknown>) };
+      if (propertyAddress !== undefined) base.propertyAddress = String(propertyAddress).trim();
+      return base;
+    })();
+
+    const normalizedLoanDetails = (loanDetailsRaw && typeof loanDetailsRaw === "object" && !Array.isArray(loanDetailsRaw))
+      ? (loanDetailsRaw as Record<string, unknown>)
+      : null;
+
+    const spaPriceToInsert = spaPrice !== undefined && spaPrice !== null ? String(spaPrice) : null;
+    const apdlPriceToInsert = apdlPrice !== undefined && apdlPrice !== null ? String(apdlPrice) : null;
+    const developerDiscountToInsert = developerDiscount !== undefined && developerDiscount !== null ? String(developerDiscount) : null;
+    const bumiputraDiscountToInsert = bumiputraDiscount !== undefined && bumiputraDiscount !== null ? String(bumiputraDiscount) : null;
+
     const insertCaseBase = {
       firmId: req.firmId!,
       projectId,
@@ -2985,13 +3088,16 @@ router.post("/cases", requireAuthHandler, requireFirmUserHandler, requirePermiss
       titleType: normalizedTitleType,
       isEncumbered: projectIsEncumbered,
       tenure: projectTenure,
-      spaPrice: spaPrice !== undefined ? String(spaPrice) : null,
+      spaPrice: spaPriceToInsert,
+      apdlPrice: apdlPriceToInsert,
+      developerDiscount: developerDiscountToInsert,
+      bumiputraDiscount: bumiputraDiscountToInsert,
       status: "File Opened / SPA Pending Signing",
       caseType: caseType ?? null,
       parcelNo: parcelNo ?? null,
       spaDetails: spaDetails ? JSON.stringify(spaDetails) : null,
-      propertyDetails: propertyDetails ? JSON.stringify(propertyDetails) : null,
-      loanDetails: loanDetails ? JSON.stringify(loanDetails) : null,
+      propertyDetails: normalizedPropertyDetails,
+      loanDetails: normalizedLoanDetails,
       loanPartyType: purchaseMode === "loan" ? (loanPartyType ?? "1st_party") : "1st_party",
       borrowers: borrowersToStore,
       companyDetails: companyDetails ? JSON.stringify(companyDetails) : null,
@@ -3067,7 +3173,7 @@ router.post("/cases", requireAuthHandler, requireFirmUserHandler, requirePermiss
       }
     }
 
-    const workflowSteps = buildWorkflowSteps(purchaseMode, normalizedTitleType);
+    const workflowSteps = buildWorkflowSteps(purchaseMode === "loan" ? "loan" : "cash", normalizedTitleType);
     if (workflowSteps.length > 0) {
       const wfExists = await tableExists(r, "public.case_workflow_steps");
       if (wfExists) {
@@ -3725,21 +3831,55 @@ router.patch("/cases/:caseId", requireAuthHandler, requireFirmUserHandler, requi
     if (!ok) return;
 
     const PatchCaseBody = UpdateCaseBody.extend({
+      referenceNo: z.string().trim().max(80).optional(),
+      projectId: z.coerce.number().int().positive().optional(),
+      developerId: z.coerce.number().int().positive().optional(),
       purchaserIds: z.array(z.coerce.number().int().positive()).optional(),
-      purchasers: z.array(z.object({ name: z.string(), ic: z.string().nullish() })).optional(),
+      purchasers: z.array(z.object({
+        isCompany: z.boolean().optional(),
+        name: z.string(),
+        ic: z.string().nullish(),
+        phone: z.string().nullish(),
+        email: z.string().nullish(),
+        address: z.string().nullish(),
+      }).passthrough()).optional(),
       caseType: z.string().optional(),
       parcelNo: z.string().optional(),
       spaDetails: z.record(z.string(), z.unknown()).optional(),
       propertyDetails: z.unknown().optional(),
       propertyAddress: z.string().optional(),
-      loanDetails: z.record(z.string(), z.unknown()).optional(),
+      loanDetails: z.unknown().optional(),
       borrowers: z.array(z.object({
         name: z.string(),
         ic: z.string().nullish(),
-        address: z.string().optional().transform((v) => (v ?? "").trim()),
-      })).optional(),
+        hp: z.string().nullish(),
+        email: z.string().nullish(),
+        address: z.string().nullish().transform((v) => (typeof v === "string" ? v : "")).transform((v) => v.trim()),
+      }).passthrough()).optional(),
       loanPartyType: z.enum(["1st_party", "3rd_party"]).optional(),
       companyDetails: z.record(z.string(), z.unknown()).optional(),
+      apdlPrice: z.number().finite().nullable().optional(),
+      developerDiscount: z.number().finite().nullable().optional(),
+      bumiputraDiscount: z.number().finite().nullable().optional(),
+    }).superRefine((v, ctx) => {
+      if (v.purchaseMode !== undefined) {
+        const pm = String(v.purchaseMode ?? "").trim().toLowerCase();
+        if (pm !== "loan" && pm !== "cash" && pm !== "other") {
+          ctx.addIssue({ code: "custom", path: ["purchaseMode"], message: "Invalid purchaseMode" });
+        }
+      }
+      if (v.titleType !== undefined) {
+        const tt = normalizeTitleType(String(v.titleType ?? ""));
+        if (!tt) {
+          ctx.addIssue({ code: "custom", path: ["titleType"], message: "Invalid titleType" });
+        }
+      }
+      if (v.apdlPrice !== null && v.apdlPrice !== undefined && v.spaPrice !== undefined && v.spaPrice !== null) {
+        const expected = v.apdlPrice - (v.developerDiscount ?? 0) - (v.bumiputraDiscount ?? 0);
+        if (Math.abs(expected - v.spaPrice) > 0.009) {
+          ctx.addIssue({ code: "custom", path: ["spaPrice"], message: "spaPrice must equal apdlPrice - developerDiscount - bumiputraDiscount" });
+        }
+      }
     });
 
     const parsed = PatchCaseBody.safeParse(req.body);
@@ -3765,12 +3905,17 @@ router.patch("/cases/:caseId", requireAuthHandler, requireFirmUserHandler, requi
       .select({
         id: casesTable.id,
         firmId: casesTable.firmId,
+        projectId: casesTable.projectId,
+        developerId: casesTable.developerId,
         purchaseMode: casesTable.purchaseMode,
         loanPartyType: casesTable.loanPartyType,
         propertyDetails: casesTable.propertyDetails,
         spaDetails: casesTable.spaDetails,
         loanDetails: casesTable.loanDetails,
         companyDetails: casesTable.companyDetails,
+        apdlPrice: casesTable.apdlPrice,
+        developerDiscount: casesTable.developerDiscount,
+        bumiputraDiscount: casesTable.bumiputraDiscount,
       })
       .from(casesTable)
       .where(and(eq(casesTable.id, params.data.caseId), eq(casesTable.firmId, req.firmId!)))
@@ -3782,9 +3927,55 @@ router.patch("/cases/:caseId", requireAuthHandler, requireFirmUserHandler, requi
 
     const updates: Record<string, unknown> = {};
     if (parsed.data.status !== undefined) updates.status = parsed.data.status;
-    if (parsed.data.purchaseMode !== undefined) updates.purchaseMode = parsed.data.purchaseMode;
-    if (parsed.data.titleType !== undefined) updates.titleType = parsed.data.titleType;
-    if (parsed.data.spaPrice !== undefined) updates.spaPrice = String(parsed.data.spaPrice);
+    if (parsed.data.referenceNo !== undefined) {
+      const v = String(parsed.data.referenceNo ?? "").trim();
+      if (!v) {
+        res.status(400).json({ error: "Invalid referenceNo" });
+        return;
+      }
+      updates.referenceNo = v;
+    }
+    if (parsed.data.projectId !== undefined) {
+      const [project] = await r.select().from(projectsTable).where(and(eq(projectsTable.id, parsed.data.projectId), eq(projectsTable.firmId, req.firmId!))).limit(1);
+      if (!project) {
+        res.status(404).json({ error: "Project not found" });
+        return;
+      }
+      updates.projectId = project.id;
+      updates.isEncumbered = Boolean((project as any).isEncumbered ?? false);
+      const tenure = (typeof (project as any).tenure === "string" && (String((project as any).tenure) === "leasehold" || String((project as any).tenure) === "freehold"))
+        ? String((project as any).tenure)
+        : "freehold";
+      updates.tenure = tenure;
+      if (parsed.data.developerId === undefined && project.developerId) {
+        updates.developerId = project.developerId;
+      }
+    }
+    if (parsed.data.developerId !== undefined) {
+      const [dev] = await r
+        .select({ id: developersTable.id })
+        .from(developersTable)
+        .where(and(eq(developersTable.firmId, req.firmId!), eq(developersTable.id, parsed.data.developerId)))
+        .limit(1);
+      if (!dev) {
+        res.status(400).json({ error: "Developer not found" });
+        return;
+      }
+      updates.developerId = parsed.data.developerId;
+    }
+    if (parsed.data.purchaseMode !== undefined) updates.purchaseMode = String(parsed.data.purchaseMode).trim().toLowerCase();
+    if (parsed.data.titleType !== undefined) {
+      const tt = normalizeTitleType(String(parsed.data.titleType ?? ""));
+      if (!tt) {
+        res.status(400).json({ error: "Invalid titleType" });
+        return;
+      }
+      updates.titleType = tt;
+    }
+    if (parsed.data.spaPrice !== undefined) updates.spaPrice = parsed.data.spaPrice === null ? null : String(parsed.data.spaPrice);
+    if (parsed.data.apdlPrice !== undefined) updates.apdlPrice = parsed.data.apdlPrice === null ? null : String(parsed.data.apdlPrice);
+    if (parsed.data.developerDiscount !== undefined) updates.developerDiscount = parsed.data.developerDiscount === null ? null : String(parsed.data.developerDiscount);
+    if (parsed.data.bumiputraDiscount !== undefined) updates.bumiputraDiscount = parsed.data.bumiputraDiscount === null ? null : String(parsed.data.bumiputraDiscount);
     if (parsed.data.lawyerStatus !== undefined) {
       updates.lawyerStatus = parsed.data.lawyerStatus;
       updates.lawyerStatusUpdatedAt = new Date();
@@ -3801,7 +3992,8 @@ router.patch("/cases/:caseId", requireAuthHandler, requireFirmUserHandler, requi
 
     const wantsUpdatePropertyDetails = bodyRec.propertyDetails !== undefined || bodyRec.propertyAddress !== undefined;
     if (wantsUpdatePropertyDetails) {
-      const incomingPropertyAddress = typeof bodyRec.propertyAddress === "string" ? bodyRec.propertyAddress.trim() : "";
+      const hasIncomingPropertyAddress = typeof bodyRec.propertyAddress === "string";
+      const incomingPropertyAddress = hasIncomingPropertyAddress ? bodyRec.propertyAddress.trim() : "";
       const incomingPropertyDetails = bodyRec.propertyDetails;
       const base = parseJsonObj(existingCase.propertyDetails);
       const incoming =
@@ -3812,15 +4004,15 @@ router.patch("/cases/:caseId", requireAuthHandler, requireFirmUserHandler, requi
             : {};
 
       const next = { ...base, ...incoming };
-      if (bodyRec.propertyAddress !== undefined) {
+      if (hasIncomingPropertyAddress) {
         next.propertyAddress = incomingPropertyAddress;
       }
       const nextAddress = typeof next.propertyAddress === "string" ? next.propertyAddress.trim() : "";
-      if (!nextAddress) {
+      if (hasIncomingPropertyAddress && !nextAddress) {
         res.status(422).json({ error: "Please fill in Property Address in Case Details first", code: "PROPERTY_ADDRESS_REQUIRED" });
         return;
       }
-      updates.propertyDetails = JSON.stringify({ ...next, propertyAddress: nextAddress });
+      updates.propertyDetails = hasIncomingPropertyAddress ? { ...next, propertyAddress: nextAddress } : next;
     }
 
     if (parsed.data.spaDetails !== undefined) {
@@ -3832,7 +4024,7 @@ router.patch("/cases/:caseId", requireAuthHandler, requireFirmUserHandler, requi
     if (parsed.data.loanDetails !== undefined) {
       const base = parseJsonObj(existingCase.loanDetails);
       const incoming = parsed.data.loanDetails && typeof parsed.data.loanDetails === "object" ? parsed.data.loanDetails : {};
-      updates.loanDetails = JSON.stringify({ ...base, ...incoming });
+      updates.loanDetails = { ...base, ...incoming };
     }
 
     if (parsed.data.companyDetails !== undefined) {
@@ -3880,6 +4072,9 @@ router.patch("/cases/:caseId", requireAuthHandler, requireFirmUserHandler, requi
           const trimmedName = String(p.name ?? "").trim();
           if (!trimmedName) continue;
           const trimmedIc = typeof p.ic === "string" ? p.ic.trim() : null;
+          const trimmedPhone = typeof (p as any).phone === "string" ? String((p as any).phone).trim() : null;
+          const trimmedEmail = typeof (p as any).email === "string" ? String((p as any).email).trim() : null;
+          const trimmedAddress = typeof (p as any).address === "string" ? String((p as any).address).trim() : null;
 
           let existingClientId: number | null = null;
           if (trimmedIc) {
@@ -3900,11 +4095,30 @@ router.patch("/cases/:caseId", requireAuthHandler, requireFirmUserHandler, requi
 
           if (existingClientId) {
             resolvedPurchaserIds.push(existingClientId);
+            if (trimmedPhone || trimmedEmail || trimmedAddress) {
+              const [existing] = await r
+                .select({ id: clientsTable.id, phone: clientsTable.phone, email: clientsTable.email, address: clientsTable.address })
+                .from(clientsTable)
+                .where(and(eq(clientsTable.firmId, req.firmId!), eq(clientsTable.id, existingClientId)))
+                .limit(1);
+              if (existing) {
+                const patch: Record<string, unknown> = {};
+                if (trimmedPhone && !String(existing.phone ?? "").trim()) patch.phone = trimmedPhone;
+                if (trimmedEmail && !String(existing.email ?? "").trim()) patch.email = trimmedEmail;
+                if (trimmedAddress && !String(existing.address ?? "").trim()) patch.address = trimmedAddress;
+                if (Object.keys(patch).length > 0) {
+                  await r.update(clientsTable).set(patch).where(and(eq(clientsTable.firmId, req.firmId!), eq(clientsTable.id, existingClientId)));
+                }
+              }
+            }
           } else {
             const insertBase = {
               firmId: req.firmId!,
               name: trimmedName,
               icNo: trimmedIc,
+              phone: trimmedPhone,
+              email: trimmedEmail,
+              address: trimmedAddress,
               createdBy: req.userId ?? null,
             } satisfies typeof clientsTable.$inferInsert;
             const [client] = await r.insert(clientsTable).values(insertBase).returning();
@@ -3920,17 +4134,24 @@ router.patch("/cases/:caseId", requireAuthHandler, requireFirmUserHandler, requi
       }
     }
 
-    const normalizeBorrowers = (raw: unknown): Array<{ name: string; ic?: string; address: string }> => {
+    const normalizeBorrowers = (raw: unknown): Array<{ name: string; ic?: string; hp?: string; email?: string; address: string }> => {
       if (!Array.isArray(raw)) return [];
-      const out: Array<{ name: string; ic?: string; address: string }> = [];
+      const out: Array<{ name: string; ic?: string; hp?: string; email?: string; address: string }> = [];
       for (const v of raw) {
         const name = typeof (v as any)?.name === "string" ? String((v as any).name).trim() : "";
         if (!name) continue;
         const icRaw = (v as any)?.ic;
         const ic = typeof icRaw === "string" ? icRaw.trim() : "";
+        const hpRaw = (v as any)?.hp;
+        const hp = typeof hpRaw === "string" ? hpRaw.trim() : "";
+        const emailRaw = (v as any)?.email;
+        const email = typeof emailRaw === "string" ? emailRaw.trim() : "";
         const addressRaw = (v as any)?.address;
         const address = typeof addressRaw === "string" ? addressRaw.trim() : "";
-        out.push(ic ? { name, ic, address } : { name, address });
+        const base = ic ? { name, ic, address } : { name, address };
+        if (hp) (base as any).hp = hp;
+        if (email) (base as any).email = email;
+        out.push(base as any);
       }
       return out;
     };
@@ -3946,18 +4167,23 @@ router.patch("/cases/:caseId", requireAuthHandler, requireFirmUserHandler, requi
         const ids = wantsUpdatePurchasers ? resolvedPurchaserIds : [];
         if (ids.length > 0) {
           const rows = await r
-            .select({ id: clientsTable.id, name: clientsTable.name, ic: clientsTable.icNo, address: clientsTable.address })
+            .select({ id: clientsTable.id, name: clientsTable.name, ic: clientsTable.icNo, phone: clientsTable.phone, email: clientsTable.email, address: clientsTable.address })
             .from(clientsTable)
             .where(and(eq(clientsTable.firmId, req.firmId!), inArray(clientsTable.id, ids)));
-          const byId = new Map<number, { name: string; ic: string | null; address: string | null }>();
-          for (const row of rows) byId.set(row.id, { name: String(row.name ?? ""), ic: row.ic ?? null, address: row.address ?? null });
+          const byId = new Map<number, { name: string; ic: string | null; phone: string | null; email: string | null; address: string | null }>();
+          for (const row of rows) byId.set(row.id, { name: String(row.name ?? ""), ic: row.ic ?? null, phone: row.phone ?? null, email: row.email ?? null, address: row.address ?? null });
           const borrowersToStore = ids
             .map((id) => {
               const v = byId.get(id);
               const name = v?.name?.trim() ?? "";
               const ic = v?.ic ? String(v.ic).trim() : "";
+              const hp = v?.phone ? String(v.phone).trim() : "";
+              const email = v?.email ? String(v.email).trim() : "";
               const address = v?.address ? String(v.address).trim() : "";
-              return ic ? { name, ic, address } : { name, address };
+              const base = ic ? { name, ic, address } : { name, address };
+              if (hp) (base as any).hp = hp;
+              if (email) (base as any).email = email;
+              return base as any;
             })
             .filter((b) => b.name.trim().length > 0);
           updates.borrowers = borrowersToStore;

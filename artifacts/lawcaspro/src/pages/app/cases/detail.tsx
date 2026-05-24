@@ -25,6 +25,7 @@ import CaseDocumentsTab from "./components/CaseDocumentsTab";
 import CaseBillingTab from "./components/CaseBillingTab";
 import CaseCommunicationsTab from "./components/CaseCommunicationsTab";
 import CaseComplianceTab from "./components/CaseComplianceTab";
+import { CaseFormModal, mapCaseToFormValues } from "./components/case-form/CaseFormModal";
 import { QueryFallback } from "@/components/query-fallback";
 import { toastError } from "@/lib/toast-error";
 import { apiFetchBlob, apiFetchJson, apiRequest } from "@/lib/api-client";
@@ -1085,11 +1086,13 @@ export default function CaseDetail() {
 
   const safeAssignments = Array.isArray((caseInfo as any)?.assignments) ? ((caseInfo as any).assignments as any[]) : [];
   const safePurchasers = Array.isArray((caseInfo as any)?.purchasers) ? ((caseInfo as any).purchasers as any[]) : [];
-  const loanDetailsRaw = typeof (caseInfo as any)?.loanDetails === "string" ? String((caseInfo as any).loanDetails) : "";
   const loanDetailsObj: Record<string, unknown> | null = (() => {
-    if (!loanDetailsRaw) return null;
+    const raw = (caseInfo as any)?.loanDetails;
+    if (!raw) return null;
+    if (typeof raw === "object" && !Array.isArray(raw)) return raw as Record<string, unknown>;
+    if (typeof raw !== "string") return null;
     try {
-      const parsed = JSON.parse(loanDetailsRaw);
+      const parsed = JSON.parse(raw);
       if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
       return parsed as Record<string, unknown>;
     } catch {
@@ -1126,45 +1129,6 @@ export default function CaseDetail() {
   })();
 
   const [editCaseOpen, setEditCaseOpen] = useState(false);
-  const [editPurchasers, setEditPurchasers] = useState<Array<{ name: string; ic: string }>>([]);
-  const [editPurchaseMode, setEditPurchaseMode] = useState<"cash" | "loan">("cash");
-  const [editTitleType, setEditTitleType] = useState<"master" | "individual" | "strata">("master");
-  const [editSpaPrice, setEditSpaPrice] = useState("");
-  const [editLoanBank, setEditLoanBank] = useState("");
-  const [editLoanAmount, setEditLoanAmount] = useState("");
-  const [editParcelNo, setEditParcelNo] = useState("");
-  const [editPropertyAddress, setEditPropertyAddress] = useState("");
-  const [editPropertyType, setEditPropertyType] = useState("");
-  const [editBuildingNo, setEditBuildingNo] = useState("");
-  const [editFloorNo, setEditFloorNo] = useState("");
-  const [editAreaSqm, setEditAreaSqm] = useState("");
-
-  useEffect(() => {
-    if (!editCaseOpen) return;
-    setEditPurchasers(
-      safePurchasers.map((p: any) => ({
-        name: typeof p?.clientName === "string" ? String(p.clientName) : "",
-        ic: typeof p?.icNo === "string" ? String(p.icNo) : "",
-      }))
-    );
-    setEditPurchaseMode(String((caseInfo as any)?.purchaseMode ?? "") === "loan" ? "loan" : "cash");
-    {
-      const tt = normalizeTitleType(String((caseInfo as any)?.titleType ?? ""));
-      setEditTitleType(tt === "individual" || tt === "strata" ? tt : "master");
-    }
-    setEditSpaPrice(String((caseInfo as any)?.spaPrice ?? ""));
-    setEditLoanBank(loanBank);
-    setEditLoanAmount(String(loanAmountValue ?? ""));
-    setEditParcelNo(typeof (caseInfo as any)?.parcelNo === "string" ? String((caseInfo as any).parcelNo) : "");
-    setEditPropertyAddress(propertyAddressBaseline);
-    setEditPropertyType(typeof (propertyDetailsObj as any)?.propertyType === "string" ? String((propertyDetailsObj as any).propertyType) : "");
-    setEditBuildingNo(typeof (propertyDetailsObj as any)?.buildingNo === "string" ? String((propertyDetailsObj as any).buildingNo) : "");
-    setEditFloorNo(typeof (propertyDetailsObj as any)?.floorNo === "string" ? String((propertyDetailsObj as any).floorNo) : "");
-    {
-      const v = (propertyDetailsObj as any)?.areaSqm;
-      setEditAreaSqm(typeof v === "number" ? String(v) : typeof v === "string" ? v : "");
-    }
-  }, [editCaseOpen, safePurchasers, loanBank, caseInfo, propertyAddressBaseline]);
 
   const saveScope = (scope: "SPA" | "Loan" | "Bank / LU / NOA" | "Bank / LU" | "MOT / Completion") => {
     const tab: keyof typeof scopeKeys =
@@ -1687,257 +1651,23 @@ export default function CaseDetail() {
         </div>
       </div>
 
-      <Dialog open={editCaseOpen} onOpenChange={setEditCaseOpen}>
-        <DialogContent className="max-w-[900px] w-[95vw]">
-          <DialogHeader>
-            <DialogTitle>Edit Case</DialogTitle>
-          </DialogHeader>
-
-          <div className="space-y-6">
-            <div className="space-y-2">
-              <div className="text-sm font-medium text-slate-900">Purchasers</div>
-              <div className="space-y-2">
-                {editPurchasers.map((p, idx) => (
-                  <div key={idx} className="grid grid-cols-1 md:grid-cols-12 gap-2 items-end">
-                    <div className="md:col-span-7 space-y-1.5">
-                      <Label>Name</Label>
-                      <Input
-                        value={p.name}
-                        onChange={(e) => {
-                          const next = e.target.value;
-                          setEditPurchasers((prev) => prev.map((x, i) => (i === idx ? { ...x, name: next } : x)));
-                        }}
-                        disabled={updateCaseMutation.isPending}
-                      />
-                    </div>
-                    <div className="md:col-span-4 space-y-1.5">
-                      <Label>IC No</Label>
-                      <Input
-                        value={p.ic}
-                        onChange={(e) => {
-                          const next = e.target.value;
-                          setEditPurchasers((prev) => prev.map((x, i) => (i === idx ? { ...x, ic: next } : x)));
-                        }}
-                        disabled={updateCaseMutation.isPending}
-                      />
-                    </div>
-                    <div className="md:col-span-1">
-                      <Button
-                        type="button"
-                        variant="outline"
-                        onClick={() => setEditPurchasers((prev) => prev.filter((_, i) => i !== idx))}
-                        disabled={updateCaseMutation.isPending}
-                      >
-                        Remove
-                      </Button>
-                    </div>
-                  </div>
-                ))}
-                <Button
-                  type="button"
-                  variant="outline"
-                  onClick={() => setEditPurchasers((prev) => [...prev, { name: "", ic: "" }])}
-                  disabled={updateCaseMutation.isPending}
-                >
-                  Add Purchaser
-                </Button>
-              </div>
-            </div>
-
-            <div className="grid grid-cols-1 md:grid-cols-12 gap-3 items-end">
-              <div className="md:col-span-4 space-y-1.5">
-                <Label>Purchase Mode</Label>
-                <Select value={editPurchaseMode} onValueChange={(v) => setEditPurchaseMode(v === "loan" ? "loan" : "cash")} disabled={updateCaseMutation.isPending}>
-                  <SelectTrigger>
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="cash">Cash</SelectItem>
-                    <SelectItem value="loan">Loan</SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
-              <div className="md:col-span-4 space-y-1.5">
-                <Label>Title Type</Label>
-                <Select value={editTitleType} onValueChange={(v) => setEditTitleType(v === "individual" ? "individual" : v === "strata" ? "strata" : "master")} disabled={updateCaseMutation.isPending}>
-                  <SelectTrigger>
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="master">Master</SelectItem>
-                    <SelectItem value="individual">Individual</SelectItem>
-                    <SelectItem value="strata">Strata</SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
-              <div className="md:col-span-4 space-y-1.5">
-                <Label>SPA Price</Label>
-                <Input
-                  value={editSpaPrice}
-                  onChange={(e) => setEditSpaPrice(e.target.value)}
-                  disabled={updateCaseMutation.isPending}
-                  inputMode="decimal"
-                  placeholder="e.g. 500000"
-                />
-              </div>
-            </div>
-
-            <div className="grid grid-cols-1 md:grid-cols-12 gap-3">
-              <div className="md:col-span-6 space-y-1.5">
-                <Label>Loan Bank</Label>
-                <Input
-                  value={editLoanBank}
-                  onChange={(e) => setEditLoanBank(e.target.value)}
-                  disabled={updateCaseMutation.isPending}
-                  placeholder="e.g. Maybank"
-                />
-              </div>
-              <div className="md:col-span-6 space-y-1.5">
-                <Label>Loan Amount</Label>
-                <Input
-                  value={editLoanAmount}
-                  onChange={(e) => setEditLoanAmount(e.target.value)}
-                  disabled={updateCaseMutation.isPending}
-                  inputMode="decimal"
-                  placeholder="e.g. 450000"
-                />
-              </div>
-            </div>
-
-            <div className="grid grid-cols-1 md:grid-cols-12 gap-3">
-              <div className="md:col-span-6 space-y-1.5">
-                <Label>Parcel No</Label>
-                <Input
-                  value={editParcelNo}
-                  onChange={(e) => setEditParcelNo(e.target.value)}
-                  disabled={updateCaseMutation.isPending}
-                />
-              </div>
-              <div className="md:col-span-6 space-y-1.5">
-                <Label>Property Type</Label>
-                <Input
-                  value={editPropertyType}
-                  onChange={(e) => setEditPropertyType(e.target.value)}
-                  disabled={updateCaseMutation.isPending}
-                />
-              </div>
-            </div>
-
-            <div className="grid grid-cols-1 md:grid-cols-12 gap-3">
-              <div className="md:col-span-4 space-y-1.5">
-                <Label>Building No</Label>
-                <Input
-                  value={editBuildingNo}
-                  onChange={(e) => setEditBuildingNo(e.target.value)}
-                  disabled={updateCaseMutation.isPending}
-                />
-              </div>
-              <div className="md:col-span-4 space-y-1.5">
-                <Label>Floor No</Label>
-                <Input
-                  value={editFloorNo}
-                  onChange={(e) => setEditFloorNo(e.target.value)}
-                  disabled={updateCaseMutation.isPending}
-                />
-              </div>
-              <div className="md:col-span-4 space-y-1.5">
-                <Label>Area (sqm)</Label>
-                <Input
-                  value={editAreaSqm}
-                  onChange={(e) => setEditAreaSqm(e.target.value)}
-                  disabled={updateCaseMutation.isPending}
-                  inputMode="decimal"
-                />
-              </div>
-            </div>
-
-            <div className="space-y-1.5">
-              <Label>Property Address *</Label>
-              <Textarea
-                value={editPropertyAddress}
-                onChange={(e) => setEditPropertyAddress(e.target.value)}
-                disabled={updateCaseMutation.isPending}
-                className="min-h-[92px]"
-                placeholder="Enter property address"
-              />
-            </div>
-          </div>
-
-          <DialogFooter>
-            <Button
-              type="button"
-              variant="outline"
-              onClick={() => setEditCaseOpen(false)}
-              disabled={updateCaseMutation.isPending}
-            >
-              Cancel
-            </Button>
-            <Button
-              type="button"
-              onClick={() => {
-                const purchaserPayload = editPurchasers
-                  .map((p) => ({
-                    name: p.name.trim(),
-                    ic: p.ic.trim() ? p.ic.trim() : null,
-                  }))
-                  .filter((p) => p.name.length > 0);
-                const addr = editPropertyAddress.trim();
-                if (!addr) {
-                  toast({ title: "Property Address is required", variant: "destructive" });
-                  return;
-                }
-                if (purchaserPayload.length === 0) {
-                  toast({ title: "At least 1 purchaser is required", variant: "destructive" });
-                  return;
-                }
-                const spaPriceNum = (() => {
-                  const raw = editSpaPrice.trim();
-                  if (!raw) return undefined;
-                  const n = Number(raw.replace(/[^0-9.]/g, ""));
-                  return Number.isFinite(n) ? n : undefined;
-                })();
-                const loanAmountNum = (() => {
-                  const raw = editLoanAmount.trim();
-                  if (!raw) return undefined;
-                  const n = Number(raw.replace(/[^0-9.]/g, ""));
-                  return Number.isFinite(n) ? n : undefined;
-                })();
-                const propertyDetailsNext = {
-                  ...propertyDetailsObj,
-                  propertyAddress: addr,
-                  propertyType: editPropertyType.trim(),
-                  buildingNo: editBuildingNo.trim(),
-                  floorNo: editFloorNo.trim(),
-                  areaSqm: editAreaSqm.trim(),
-                };
-                const loanDetailsNext = {
-                  ...(loanDetailsObj ?? {}),
-                  end_financier: editLoanBank.trim(),
-                  ...(loanAmountNum !== undefined ? { loanAmountNum } : {}),
-                };
-                updateCaseMutation.mutate(
-                  {
-                    purchasers: purchaserPayload,
-                    purchaseMode: editPurchaseMode,
-                    titleType: editTitleType,
-                    ...(spaPriceNum !== undefined ? { spaPrice: spaPriceNum } : {}),
-                    loanDetails: loanDetailsNext,
-                    parcelNo: editParcelNo.trim(),
-                    propertyAddress: addr,
-                    propertyDetails: propertyDetailsNext,
-                  } as any,
-                  {
-                    onSuccess: () => setEditCaseOpen(false),
-                  }
-                );
-              }}
-              disabled={updateCaseMutation.isPending}
-            >
-              {updateCaseMutation.isPending ? "Saving..." : "Save Changes"}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      <CaseFormModal
+        open={editCaseOpen}
+        onOpenChange={setEditCaseOpen}
+        mode="edit"
+        title="Edit Case"
+        initialValues={caseInfo ? mapCaseToFormValues(caseInfo) : undefined}
+        onSubmit={async (payload) => {
+          await apiFetchJson(`/cases/${caseId}`, {
+            method: "PATCH",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify(payload),
+          });
+          await queryClient.invalidateQueries({ queryKey: getListCasesQueryKey() });
+          await queryClient.invalidateQueries({ queryKey: getGetCaseQueryKey(caseId) });
+          await queryClient.invalidateQueries({ queryKey: getGetCaseWorkflowQueryKey(caseId) });
+        }}
+      />
 
       <Dialog open={shareTrackingOpen} onOpenChange={setShareTrackingOpen}>
         <DialogContent>
