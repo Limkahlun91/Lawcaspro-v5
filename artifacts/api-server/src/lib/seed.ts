@@ -1,6 +1,6 @@
 import bcrypt from "bcryptjs";
 import { and, eq } from "drizzle-orm";
-import { db, firmsTable, rolesTable, usersTable } from "@workspace/db";
+import { db, firmsTable, rolesTable, subscriptionPlansTable, usersTable } from "@workspace/db";
 import { logger } from "./logger";
 
 function isTruthyEnv(value: string | undefined): boolean {
@@ -20,12 +20,26 @@ function requireEnv(name: string): string {
 async function ensureFirm(params: { name: string; slug: string }) {
   const [existing] = await db.select().from(firmsTable).where(eq(firmsTable.slug, params.slug));
   if (existing) return existing;
+  const planId = await (async () => {
+    const [row] = await db
+      .select({ id: subscriptionPlansTable.id })
+      .from(subscriptionPlansTable)
+      .where(eq(subscriptionPlansTable.name, "starter"))
+      .limit(1);
+    if (row) return row.id;
+    const [created] = await db
+      .insert(subscriptionPlansTable)
+      .values({ name: "starter", priceMonthly: "0", isActive: true })
+      .returning({ id: subscriptionPlansTable.id });
+    return created.id;
+  })();
   const [created] = await db
     .insert(firmsTable)
     .values({
       name: params.name,
       slug: params.slug,
-      subscriptionPlan: "professional",
+      subscriptionPlanId: planId,
+      subscriptionStatus: "active",
       status: "active",
     })
     .returning();

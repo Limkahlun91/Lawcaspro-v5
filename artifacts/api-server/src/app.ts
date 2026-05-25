@@ -120,8 +120,10 @@ app.use((req: ReqLike, res: ResLike, next: Next) => {
   const path = req.path ?? "";
   const shouldWrap =
     path.startsWith("/api/auth") ||
+    path.startsWith("/api/founder") ||
     path.startsWith("/api/platform") ||
     path.startsWith("/api/support-sessions") ||
+    path.startsWith("/api/subscription-plans") ||
     path.startsWith("/api/audit-logs");
   if (!shouldWrap) {
     next();

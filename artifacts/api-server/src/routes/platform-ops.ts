@@ -1,8 +1,8 @@
 import express, { type Router as ExpressRouter } from "express";
 import { and, desc, eq, ilike, sql } from "drizzle-orm";
-import { auditLogsTable, platformApprovalEventsTable, platformApprovalRequestsTable, platformMaintenanceActionStepsTable, platformMaintenanceActionsTable, platformRestoreActionStepsTable, platformRestoreActionsTable } from "@workspace/db";
+import { auditLogsTable, platformApprovalEventsTable, platformApprovalRequestsTable, platformMaintenanceActionStepsTable, platformMaintenanceActionsTable, platformRestoreActionStepsTable, platformRestoreActionsTable, rolesTable } from "@workspace/db";
 import { isTransientDbConnectionError, withAuthSafeDb } from "../lib/auth-safe-db.js";
-import { requireAuth, requireFounder, type AuthRequest, writeAuditLog } from "../lib/auth.js";
+import { requireAuth, requireFirmUser, requireFounder, type AuthRequest, writeAuditLog } from "../lib/auth.js";
 import { ApiError, one, parseIntParam, sendError, sendOk } from "../lib/api-response.js";
 import { assertActiveSupportSessionForFirm, assertFounderPermission, createApprovalRequest, createStepUpChallenge, defaultStepUpPhrase, evaluateDecisionForExecute, evaluateDecisionForPreview, loadFounderGovernanceContext } from "../services/founder-governance/index.js";
 import { FOUNDER_ACTION_REGISTRY, FOUNDER_RESTORE_OPERATION_REGISTRY } from "../services/platform-action-registry.js";
@@ -63,6 +63,60 @@ const parseLimit = (raw: unknown, fallback = 50): number => {
   if (!Number.isFinite(n)) return fallback;
   return Math.min(Math.max(n, 1), 100);
 };
+
+async function maybeRequireFirmUser(req: AuthRequest, res: express.Response, next: express.NextFunction): Promise<void> {
+  if (req.userType !== "firm_user") {
+    next();
+    return;
+  }
+  await requireFirmUser(req, res, next);
+}
+
+async function isFirmPartnerForFirm(req: AuthRequest, firmId: number): Promise<boolean> {
+  if (req.userType !== "firm_user") return false;
+  if (!req.firmId || !req.roleId) return false;
+  if (req.firmId !== firmId) return false;
+  const r = req.rlsDb;
+  if (!r) return false;
+  const [role] = await r
+    .select({ name: rolesTable.name })
+    .from(rolesTable)
+    .where(and(eq(rolesTable.id, req.roleId), eq(rolesTable.firmId, req.firmId)))
+    .limit(1);
+  const name = String(role?.name ?? "").trim().toLowerCase();
+  return name.includes("partner");
+}
+
+async function requireFounderOrFirmPartnerForFirmId(req: AuthRequest, res: express.Response, next: express.NextFunction): Promise<void> {
+  const firmId = parseIntParam("firmId", (req.params as any)?.firmId, { required: true, min: 1 });
+  if (!firmId) {
+    res.status(400).json({ error: "Missing firmId" });
+    return;
+  }
+  if (req.userType === "founder") {
+    await requireFounder(req, res, next);
+    return;
+  }
+  try {
+    const ok = await isFirmPartnerForFirm(req, firmId);
+    if (!ok) {
+      await writeAuditLog({
+        firmId: req.firmId ?? null,
+        actorId: req.userId ?? null,
+        actorType: req.userType ?? "unknown",
+        action: "auth.forbidden.partner_required",
+        detail: `${req.method} ${req.path} firmId=${firmId}`,
+        ipAddress: req.ip,
+        userAgent: req.headers["user-agent"],
+      });
+      res.status(403).json({ error: "Partner access required" });
+      return;
+    }
+    next();
+  } catch {
+    res.status(503).json({ error: "Auth temporarily unavailable" });
+  }
+}
 
 router.get("/platform/firms/:firmId/ops/summary", requireAuth, requireFounder, async (req: AuthRequest, res) => {
   try {
@@ -234,14 +288,16 @@ router.get("/platform/firms/:firmId/maintenance/actions", requireAuth, requireFo
   }
 });
 
-router.get("/platform/firms/:firmId/actions", requireAuth, requireFounder, async (req: AuthRequest, res) => {
+router.get("/platform/firms/:firmId/actions", requireAuth, maybeRequireFirmUser, requireFounderOrFirmPartnerForFirmId, async (req: AuthRequest, res) => {
   try {
     const firmId = parseIntParam("firmId", req.params.firmId, { required: true, min: 1 })!;
     const limit = parseLimit((req.query as any).limit, 50);
     const items = await withAuthSafeDb(async (authDb) => {
-      const ctx = await loadFounderGovernanceContext(authDb, req);
-      assertFounderPermission(ctx, "founder.maintenance.read");
-      assertActiveSupportSessionForFirm(ctx, firmId);
+      if (req.userType === "founder") {
+        const ctx = await loadFounderGovernanceContext(authDb, req);
+        assertFounderPermission(ctx, "founder.maintenance.read");
+        assertActiveSupportSessionForFirm(ctx, firmId);
+      }
       return await authDb
         .select()
         .from(platformMaintenanceActionsTable)
@@ -555,7 +611,7 @@ router.get("/platform/firms/:firmId/maintenance/search", requireAuth, requireFou
   }
 });
 
-router.get("/platform/firms/:firmId/snapshots", requireAuth, requireFounder, async (req: AuthRequest, res) => {
+router.get("/platform/firms/:firmId/snapshots", requireAuth, maybeRequireFirmUser, requireFounderOrFirmPartnerForFirmId, async (req: AuthRequest, res) => {
   try {
     const firmId = parseIntParam("firmId", req.params.firmId, { required: true, min: 1 })!;
     const one = (v: unknown): string | undefined =>
@@ -602,9 +658,11 @@ router.get("/platform/firms/:firmId/snapshots", requireAuth, requireFounder, asy
     })();
 
     const result = await withAuthSafeDb(async (authDb) => {
-      const ctx = await loadFounderGovernanceContext(authDb, req);
-      assertFounderPermission(ctx, "founder.snapshot.read");
-      assertActiveSupportSessionForFirm(ctx, firmId);
+      if (req.userType === "founder") {
+        const ctx = await loadFounderGovernanceContext(authDb, req);
+        assertFounderPermission(ctx, "founder.snapshot.read");
+        assertActiveSupportSessionForFirm(ctx, firmId);
+      }
       const rows = await listSnapshotsPaged(authDb, { firmId, limit: Math.min(limit + 1, 101), before, snapshotType, status, pinned, targetEntityType, targetEntityId, triggerType });
       const hasMore = rows.length > limit;
       const items = rows.slice(0, limit);
@@ -647,7 +705,7 @@ router.get("/platform/firms/:firmId/snapshots", requireAuth, requireFounder, asy
   }
 });
 
-router.post("/platform/firms/:firmId/snapshots", requireAuth, requireFounder, async (req: AuthRequest, res) => {
+router.post("/platform/firms/:firmId/snapshots", requireAuth, maybeRequireFirmUser, requireFounderOrFirmPartnerForFirmId, async (req: AuthRequest, res) => {
   try {
     const firmId = parseIntParam("firmId", req.params.firmId, { required: true, min: 1 })!;
     const body = req.body as {
@@ -669,9 +727,11 @@ router.post("/platform/firms/:firmId/snapshots", requireAuth, requireFounder, as
     if (reason.length < 10) throw new ApiError({ status: 422, code: "INVALID_INPUT", message: "Reason must be at least 10 characters", retryable: false });
     const storage = new SupabaseStorageService();
     const result = await withAuthSafeDb(async (authDb) => {
-      const ctx = await loadFounderGovernanceContext(authDb, req);
-      assertFounderPermission(ctx, "founder.snapshot.create");
-      assertActiveSupportSessionForFirm(ctx, firmId);
+      if (req.userType === "founder") {
+        const ctx = await loadFounderGovernanceContext(authDb, req);
+        assertFounderPermission(ctx, "founder.snapshot.create");
+        assertActiveSupportSessionForFirm(ctx, firmId);
+      }
       const snap = await createSnapshot(authDb, {
         firmId,
         snapshotType,
@@ -719,15 +779,17 @@ router.post("/platform/firms/:firmId/snapshots", requireAuth, requireFounder, as
   }
 });
 
-router.get("/platform/firms/:firmId/snapshots/:snapshotId", requireAuth, requireFounder, async (req: AuthRequest, res) => {
+router.get("/platform/firms/:firmId/snapshots/:snapshotId", requireAuth, maybeRequireFirmUser, requireFounderOrFirmPartnerForFirmId, async (req: AuthRequest, res) => {
   try {
     const firmId = parseIntParam("firmId", req.params.firmId, { required: true, min: 1 })!;
     const snapshotId = String(req.params.snapshotId ?? "").trim();
     if (!snapshotId) throw new ApiError({ status: 400, code: "MISSING_REQUIRED_FIELD", message: "snapshotId is required", retryable: false });
     const data = await withAuthSafeDb(async (authDb) => {
-      const ctx = await loadFounderGovernanceContext(authDb, req);
-      assertFounderPermission(ctx, "founder.snapshot.read");
-      assertActiveSupportSessionForFirm(ctx, firmId);
+      if (req.userType === "founder") {
+        const ctx = await loadFounderGovernanceContext(authDb, req);
+        assertFounderPermission(ctx, "founder.snapshot.read");
+        assertActiveSupportSessionForFirm(ctx, firmId);
+      }
       return await getSnapshotDetail(authDb, firmId, snapshotId);
     }, { retry: true, allowUnsafe: true, ctx: { route: "GET /platform/firms/:firmId/snapshots/:snapshotId", firmId } });
     sendOk(res, { item: data.snapshot, items: data.items });

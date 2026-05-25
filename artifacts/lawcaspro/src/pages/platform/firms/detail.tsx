@@ -289,6 +289,12 @@ export default function FirmDetail() {
   const [status, setStatus] = useState<string>("");
   const [plan, setPlan] = useState<string>("");
 
+  const plansQuery = useQuery({
+    queryKey: ["subscription-plans"],
+    queryFn: async () => unwrapApiData<{ items: Array<{ id: number; name: string; isActive: boolean }> }>(await apiFetchJson("/subscription-plans")),
+    retry: false,
+  });
+
   const usersQuery = useQuery<FirmUser[]>({
     queryKey: ["platform-firm-users", firmId],
     queryFn: async () => listItems<FirmUser>(await apiFetchJson(`/platform/firms/${firmId}/users`)),
@@ -442,9 +448,11 @@ export default function FirmDetail() {
               <Select value={plan} onValueChange={setPlan}>
                 <SelectTrigger><SelectValue /></SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="starter">Starter</SelectItem>
-                  <SelectItem value="professional">Professional</SelectItem>
-                  <SelectItem value="enterprise">Enterprise</SelectItem>
+                  {(plansQuery.data?.items ?? [])
+                    .filter((p) => p && p.isActive)
+                    .map((p) => (
+                      <SelectItem key={p.id} value={p.name}>{p.name}</SelectItem>
+                    ))}
                 </SelectContent>
               </Select>
             </div>

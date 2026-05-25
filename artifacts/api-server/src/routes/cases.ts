@@ -31,6 +31,7 @@ import { loanStatusSql, milestoneDateSql, milestoneDateYmdSql, milestonePresence
 import { daysAgoSql } from "../lib/dateSql.js";
 import { parseDateOnlyInput } from "../lib/dateOnly.js";
 import { logger } from "../lib/logger.js";
+import { ApiError } from "../lib/api-response.js";
 import { isTransientDbConnectionError } from "../lib/auth-safe-db.js";
 import { ObjectNotFoundError, SupabaseStorageService, getSupabaseStorageConfigError } from "../lib/objectStorage.js";
 import { CASE_ATTACHMENT_ALLOWED_EXTENSIONS, WORKFLOW_DOCUMENT_ALLOWED_KEYS, fileExtLower, workflowDocumentLabel, workflowDocumentLegacyKeys, normalizeWorkflowDocumentKeyFromDb, type WorkflowDocumentMilestoneKey } from "../lib/caseWorkflowDocuments.js";
@@ -38,6 +39,7 @@ import { LOAN_STAMPING_ITEM_KEYS, type LoanStampingItemKey, isLoanStampingItemKe
 import { ensureCaseWorkflowSteps, syncWorkflowStepsFromCaseState } from "../lib/workflowAutomationService.js";
 import { WORKFLOW_AUTOMATION_RULE_BY_STEP_KEY, deriveStatusFromRequirement } from "../lib/workflowAutomation.js";
 import { computeStampingSummary, deriveStampingItemStatus, type StampingItemInput } from "../lib/stampingProgress.js";
+import { checkFirmQuota } from "../lib/quota.js";
 import { resolveSmartFilename } from "../lib/smartFileNaming.js";
 import { computeDashboardStats } from "../services/dashboard-stats.js";
 
@@ -2809,6 +2811,16 @@ router.post("/cases", requireAuthHandler, requireFirmUserHandler, requirePermiss
       }, "cases.create validation failed");
       res.status(400).json({ error: "Validation failed", fields: parsed.error.flatten().fieldErrors });
       return;
+    }
+
+    try {
+      await checkFirmQuota(r, req.firmId!, "cases");
+    } catch (err) {
+      if (err instanceof ApiError) {
+        res.status(err.status).json({ error: err.message, code: err.code });
+        return;
+      }
+      throw err;
     }
 
     const {

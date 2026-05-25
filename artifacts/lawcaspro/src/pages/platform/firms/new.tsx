@@ -1,16 +1,19 @@
+import { useEffect } from "react";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
 import { useCreateFirm } from "@workspace/api-client-react";
 import { useLocation, Link } from "wouter";
 import { useToast } from "@/hooks/use-toast";
+import { apiFetchJson } from "@/lib/api-client";
+import { unwrapApiData } from "@/lib/api-contract";
 import { Button } from "@/components/ui/button";
 import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { ArrowLeft } from "lucide-react";
-import { useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { getListFirmsQueryKey } from "@workspace/api-client-react";
 
 const createFirmSchema = z.object({
@@ -28,18 +31,33 @@ export default function NewFirm() {
   const [, setLocation] = useLocation();
   const { toast } = useToast();
   const queryClient = useQueryClient();
+
+  const plansQuery = useQuery({
+    queryKey: ["subscription-plans"],
+    queryFn: async () => unwrapApiData<{ items: Array<{ id: number; name: string; isActive: boolean }> }>(await apiFetchJson("/subscription-plans")),
+    retry: false,
+  });
   
   const form = useForm<FormValues>({
     resolver: zodResolver(createFirmSchema),
     defaultValues: {
       name: "",
       slug: "",
-      subscriptionPlan: "professional",
+      subscriptionPlan: "",
       partnerName: "",
       partnerEmail: "",
       partnerPassword: "",
     },
   });
+
+  useEffect(() => {
+    const items = plansQuery.data?.items ?? [];
+    const active = items.filter((p) => p && p.isActive);
+    if (active.length === 0) return;
+    const current = form.getValues("subscriptionPlan");
+    if (current && active.some((p) => p.name === current)) return;
+    form.setValue("subscriptionPlan", active[0]!.name, { shouldValidate: true });
+  }, [plansQuery.data, form]);
 
   const createFirmMutation = useCreateFirm();
 
@@ -129,16 +147,18 @@ export default function NewFirm() {
                 render={({ field }) => (
                   <FormItem>
                     <FormLabel>Subscription Plan</FormLabel>
-                    <Select onValueChange={field.onChange} defaultValue={field.value}>
+                    <Select onValueChange={field.onChange} value={field.value}>
                       <FormControl>
                         <SelectTrigger>
                           <SelectValue placeholder="Select a plan" />
                         </SelectTrigger>
                       </FormControl>
                       <SelectContent>
-                        <SelectItem value="starter">Starter</SelectItem>
-                        <SelectItem value="professional">Professional</SelectItem>
-                        <SelectItem value="enterprise">Enterprise</SelectItem>
+                        {(plansQuery.data?.items ?? [])
+                          .filter((p) => p && p.isActive)
+                          .map((p) => (
+                            <SelectItem key={p.id} value={p.name}>{p.name}</SelectItem>
+                          ))}
                       </SelectContent>
                     </Select>
                     <FormMessage />

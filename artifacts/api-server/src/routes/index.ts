@@ -38,6 +38,8 @@ import platformApprovalsRouter from "./platform-approvals.js";
 import platformOpsCenterRouter from "./platform-ops-center.js";
 import developerPortalRouter from "./developer.js";
 import aiRouter from "./ai.js";
+import subscriptionPlansRouter from "./subscription-plans.js";
+import founderBillingRouter from "./founder/billing.js";
 
 type RouterLike = {
   use: (...args: unknown[]) => RouterLike;
@@ -70,6 +72,8 @@ routerInternal.use(platformApprovalsRouter);
 routerInternal.use(platformOpsCenterRouter);
 routerInternal.use(developerPortalRouter);
 routerInternal.use(aiRouter);
+routerInternal.use(subscriptionPlansRouter);
+routerInternal.use(founderBillingRouter);
 routerInternal.use(hubRouter);
 routerInternal.use(quotationsRouter);
 routerInternal.use(firmSettingsRouter);

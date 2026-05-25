@@ -7,6 +7,7 @@ import {
   db,
   casesTable,
   firmsTable,
+  subscriptionPlansTable,
   platformClausesTable,
   platformDocumentsTable,
   platformMessageAttachmentsTable,
@@ -238,7 +239,17 @@ routerInternal.get("/platform/firms", requireAuth, requireFounder, async (req: A
   const limit = params.success ? (params.data.limit ?? 20) : 20;
   const offset = (page - 1) * limit;
 
-  let query = db.select().from(firmsTable);
+  let query = db
+    .select({
+      id: firmsTable.id,
+      name: firmsTable.name,
+      slug: firmsTable.slug,
+      status: firmsTable.status,
+      subscriptionPlan: subscriptionPlansTable.name,
+      createdAt: firmsTable.createdAt,
+    })
+    .from(firmsTable)
+    .leftJoin(subscriptionPlansTable, eq(firmsTable.subscriptionPlanId, subscriptionPlansTable.id));
   if (search) query = query.where(ilike(firmsTable.name, `%${search}%`)) as typeof query;
   if (status) query = query.where(eq(firmsTable.status, status)) as typeof query;
 
@@ -283,6 +294,7 @@ routerInternal.get("/platform/firms", requireAuth, requireFounder, async (req: A
       const commCount = typeof commC === "string" || typeof commC === "number" ? Number(commC) : 0;
       return {
         ...firm,
+        subscriptionPlan: firm.subscriptionPlan ?? "starter",
         userCount: Number(userCountRes?.c ?? 0),
         partnerCount: Number(partnerCountRes?.c ?? 0),
         caseCount: Number(caseCountRes?.c ?? 0),
@@ -312,6 +324,15 @@ routerInternal.post("/platform/firms", requireAuth, requireFounder, async (req: 
 
   try {
     const result = await withAuthSafeDb(async (authDb) => {
+      const planName = (subscriptionPlan ?? "starter").trim();
+      const [plan] = await authDb
+        .select({ id: subscriptionPlansTable.id, name: subscriptionPlansTable.name })
+        .from(subscriptionPlansTable)
+        .where(and(eq(subscriptionPlansTable.isActive, true), ilike(subscriptionPlansTable.name, planName)))
+        .limit(1);
+      if (!plan) {
+        return { ok: false as const, status: 400, error: "Invalid subscription plan", code: "INVALID_PLAN" };
+      }
       const [existingFirm] = await authDb
         .select({ id: firmsTable.id })
         .from(firmsTable)
@@ -330,7 +351,7 @@ routerInternal.post("/platform/firms", requireAuth, requireFounder, async (req: 
 
       const [firm] = await authDb
         .insert(firmsTable)
-        .values({ name: nameNormalized, slug: slugNormalized, subscriptionPlan: subscriptionPlan ?? "starter", status: "active" })
+        .values({ name: nameNormalized, slug: slugNormalized, subscriptionPlanId: plan.id, subscriptionStatus: "active", status: "active" })
         .returning();
 
       const [partnerRole] = await authDb
@@ -366,7 +387,7 @@ routerInternal.post("/platform/firms", requireAuth, requireFounder, async (req: 
         { db: authDb }
       );
 
-      return { ok: true as const, firm };
+      return { ok: true as const, firm, planName: plan.name };
     });
 
     if (!result.ok) {
@@ -374,7 +395,8 @@ routerInternal.post("/platform/firms", requireAuth, requireFounder, async (req: 
       return;
     }
 
-    res.status(201).json({ ...result.firm, userCount: 1, partnerCount: 1, caseCount: 0 });
+    const firmOut = { ...result.firm, subscriptionPlan: result.planName };
+    res.status(201).json({ ...firmOut, userCount: 1, partnerCount: 1, caseCount: 0 });
   } catch (err) {
     logger.error({ err, userId: req.userId }, "platform.create_firm.error");
     const mapped = mapCreateFirmError(err);
@@ -388,14 +410,25 @@ routerInternal.get("/platform/firms/:firmId", requireAuth, requireFounder, async
     res.status(400).json({ error: params.error.message });
     return;
   }
-  const [firm] = await db.select().from(firmsTable).where(eq(firmsTable.id, params.data.firmId));
+  const [firm] = await db
+    .select({
+      id: firmsTable.id,
+      name: firmsTable.name,
+      slug: firmsTable.slug,
+      status: firmsTable.status,
+      subscriptionPlan: subscriptionPlansTable.name,
+      createdAt: firmsTable.createdAt,
+    })
+    .from(firmsTable)
+    .leftJoin(subscriptionPlansTable, eq(firmsTable.subscriptionPlanId, subscriptionPlansTable.id))
+    .where(eq(firmsTable.id, params.data.firmId));
   if (!firm) {
     res.status(404).json({ error: "Firm not found" });
     return;
   }
   const [userCountRes] = await db.select({ c: count() }).from(usersTable).where(eq(usersTable.firmId, firm.id));
   const [caseCountRes] = await db.select({ c: count() }).from(casesTable).where(eq(casesTable.firmId, firm.id));
-  res.json({ ...firm, userCount: Number(userCountRes?.c ?? 0), partnerCount: 0, caseCount: Number(caseCountRes?.c ?? 0) });
+  res.json({ ...firm, subscriptionPlan: firm.subscriptionPlan ?? "starter", userCount: Number(userCountRes?.c ?? 0), partnerCount: 0, caseCount: Number(caseCountRes?.c ?? 0) });
 });
 
 routerInternal.patch("/platform/firms/:firmId", requireAuth, requireFounder, async (req: AuthRequestLike, res: RouteResLike): Promise<void> => {
@@ -411,14 +444,31 @@ routerInternal.patch("/platform/firms/:firmId", requireAuth, requireFounder, asy
   }
   const updates: Record<string, unknown> = {};
   if (parsed.data.name !== undefined) updates.name = parsed.data.name;
-  if (parsed.data.subscriptionPlan !== undefined) updates.subscriptionPlan = parsed.data.subscriptionPlan;
+  if (parsed.data.subscriptionPlan !== undefined) {
+    const planName = parsed.data.subscriptionPlan.trim();
+    const [plan] = await db
+      .select({ id: subscriptionPlansTable.id, name: subscriptionPlansTable.name })
+      .from(subscriptionPlansTable)
+      .where(and(eq(subscriptionPlansTable.isActive, true), ilike(subscriptionPlansTable.name, planName)))
+      .limit(1);
+    if (!plan) {
+      res.status(400).json({ error: "Invalid subscription plan", code: "INVALID_PLAN" });
+      return;
+    }
+    updates.subscriptionPlanId = plan.id;
+  }
   if (parsed.data.status !== undefined) updates.status = parsed.data.status;
   const [firm] = await db.update(firmsTable).set(updates).where(eq(firmsTable.id, params.data.firmId)).returning();
   if (!firm) {
     res.status(404).json({ error: "Firm not found" });
     return;
   }
-  res.json({ ...firm, userCount: 0, partnerCount: 0, caseCount: 0 });
+  const [plan] = await db
+    .select({ name: subscriptionPlansTable.name })
+    .from(subscriptionPlansTable)
+    .where(eq(subscriptionPlansTable.id, firm.subscriptionPlanId))
+    .limit(1);
+  res.json({ ...firm, subscriptionPlan: plan?.name ?? "starter", userCount: 0, partnerCount: 0, caseCount: 0 });
 });
 
 // ─── Firm Users ───────────────────────────────────────────────────────────────

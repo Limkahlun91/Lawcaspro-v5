@@ -17,6 +17,7 @@ import {
   firmDashboardStatsCacheTable,
   firmBankAccountsTable,
   firmsTable,
+  subscriptionPlansTable,
   platformMaintenanceActionsTable,
   platformMaintenanceActionStepsTable,
   platformRestoreActionsTable,
@@ -1413,14 +1414,24 @@ export async function restoreSettingsFromSnapshot(
     const settingsGroup = typeof settingsGroupRaw === "string" && settingsGroupRaw.trim() ? settingsGroupRaw.trim() : null;
 
     if (!settingsGroup || settingsGroup === "firm_profile") {
+      const subscriptionPlanId = await (async () => {
+        const raw = typeof firm?.subscriptionPlan === "string" ? firm.subscriptionPlan.trim() : "";
+        if (!raw) return undefined;
+        const [plan] = await authDb
+          .select({ id: subscriptionPlansTable.id })
+          .from(subscriptionPlansTable)
+          .where(and(eq(subscriptionPlansTable.isActive, true), ilike(subscriptionPlansTable.name, raw)))
+          .limit(1);
+        return plan?.id;
+      })();
       await authDb.update(firmsTable).set({
         ...(settingsGroup ? {} : { name: typeof firm?.name === "string" ? firm.name : undefined }),
         address: firm?.address ?? null,
         stNumber: firm?.stNumber ?? null,
         tinNumber: firm?.tinNumber ?? null,
         ...(settingsGroup ? {} : {
-          subscriptionPlan: typeof firm?.subscriptionPlan === "string" ? firm.subscriptionPlan : undefined,
           status: typeof firm?.status === "string" ? firm.status : undefined,
+          subscriptionPlanId,
         }),
       }).where(eq(firmsTable.id, opts.firmId));
     }

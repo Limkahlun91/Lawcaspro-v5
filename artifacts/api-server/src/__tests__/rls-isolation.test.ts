@@ -61,24 +61,33 @@ describe("PostgreSQL RLS — tenant isolation at DB level", () => {
   let firmAId: number;
   let firmBId: number;
   let testClientId: number;
+  let starterPlanId: number;
 
   beforeAll(async () => {
     const ts = Date.now();
 
+    const p = await rawQuery(
+      `INSERT INTO subscription_plans (name, price_monthly, is_active, features, created_at, updated_at)
+       VALUES ('starter', 0, true, '{}'::jsonb, NOW(), NOW())
+       ON CONFLICT (name) DO UPDATE SET name = EXCLUDED.name
+       RETURNING id`,
+    );
+    starterPlanId = p.rows[0].id;
+
     // Create two test firms
     const fA = await rawQuery(
-      `INSERT INTO firms (name, slug, subscription_plan, status, created_at, updated_at)
-       VALUES ('RLS Test Firm A', $1, 'starter', 'active', NOW(), NOW())
+      `INSERT INTO firms (name, slug, subscription_plan_id, subscription_status, status, created_at, updated_at)
+       VALUES ('RLS Test Firm A', $1, $2, 'active', 'active', NOW(), NOW())
        RETURNING id`,
-      [`rls-test-a-${ts}`],
+      [`rls-test-a-${ts}`, starterPlanId],
     );
     firmAId = fA.rows[0].id;
 
     const fB = await rawQuery(
-      `INSERT INTO firms (name, slug, subscription_plan, status, created_at, updated_at)
-       VALUES ('RLS Test Firm B', $1, 'starter', 'active', NOW(), NOW())
+      `INSERT INTO firms (name, slug, subscription_plan_id, subscription_status, status, created_at, updated_at)
+       VALUES ('RLS Test Firm B', $1, $2, 'active', 'active', NOW(), NOW())
        RETURNING id`,
-      [`rls-test-b-${ts}`],
+      [`rls-test-b-${ts}`, starterPlanId],
     );
     firmBId = fB.rows[0].id;
 
@@ -95,6 +104,7 @@ describe("PostgreSQL RLS — tenant isolation at DB level", () => {
   afterAll(async () => {
     await rawQuery("DELETE FROM clients WHERE id = $1", [testClientId]);
     await rawQuery("DELETE FROM firms WHERE id = $1 OR id = $2", [firmAId, firmBId]);
+    if (starterPlanId) await rawQuery("DELETE FROM subscription_plans WHERE id = $1", [starterPlanId]);
   });
 
   it("app_user with firm B context cannot see firm A clients", async () => {

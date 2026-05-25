@@ -8,6 +8,8 @@ import {
   GetUserParams, UpdateUserParams
 } from "@workspace/api-zod";
 import { ensureRolePermissionsInitialized, requireAuth, requireFirmUser, requirePermission, type AuthRequest, writeAuditLog } from "../lib/auth.js";
+import { ApiError } from "../lib/api-response.js";
+import { checkFirmQuota } from "../lib/quota.js";
 import { logger } from "../lib/logger.js";
 
 type ReqLike = IncomingMessage & {
@@ -220,6 +222,9 @@ routerInternal.post("/users", requireAuth, requireFirmUser, requirePermission("u
         return { kind: "bad_role" as const };
       }
       const isDeveloperUser = role.name === "Developer_User";
+
+      await checkFirmQuota(tx as any, req.firmId!, "users");
+
       if (isDeveloperUser) {
         const normalizedDeveloperId = developerId === null || developerId === undefined ? null : Number(developerId);
         if (!normalizedDeveloperId || !Number.isInteger(normalizedDeveloperId) || normalizedDeveloperId <= 0) {
@@ -304,6 +309,10 @@ routerInternal.post("/users", requireAuth, requireFirmUser, requirePermission("u
     );
     if (code === "23505") {
       res.status(400).json({ error: "Email already in use" });
+      return;
+    }
+    if (err instanceof ApiError) {
+      res.status(err.status).json({ error: err.message, code: err.code });
       return;
     }
     res.status(503).json({ error: "Failed to create user" });
