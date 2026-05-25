@@ -1,6 +1,6 @@
 import express, { type NextFunction, type Response, type Router as ExpressRouter } from "express";
-import { eq, and, desc } from "drizzle-orm";
-import { db, firmBankAccountsTable, ledgerEntriesTable, paymentVoucherItemsTable, paymentVouchersTable, rolesTable, sql } from "@workspace/db";
+import { eq, and, desc, asc } from "drizzle-orm";
+import { caseLedgersTable, db, casePurchasersTable, casesTable, clientsTable, firmBankAccountsTable, ledgerEntriesTable, paymentVoucherItemsTable, paymentVouchersTable, rolesTable, sql } from "@workspace/db";
 import { CreatePaymentVoucherBody, PaymentVoucherTransitionBody } from "@workspace/api-zod";
 import { requireAuth, requireFirmUser, requirePermission, requireReAuth, type AuthRequest, writeAuditLog } from "../lib/auth.js";
 import { sensitiveRateLimiter } from "../lib/rate-limit.js";
@@ -103,7 +103,23 @@ router.get("/payment-vouchers/:id", requireAuth, requireFirmUser, requireAccount
   const [pv] = await r.select().from(paymentVouchersTable).where(and(eq(paymentVouchersTable.id, id), eq(paymentVouchersTable.firmId, req.firmId!)));
   if (!pv) { res.status(404).json({ error: "Payment voucher not found" }); return; }
   const items = await r.select().from(paymentVoucherItemsTable).where(eq(paymentVoucherItemsTable.voucherId, id)).orderBy(paymentVoucherItemsTable.sortOrder);
-  res.json({ ...pv, items });
+  const caseId = pv.caseId ? Number(pv.caseId) : NaN;
+  const caseInfo = Number.isFinite(caseId) && caseId > 0
+    ? await r
+      .select({
+        referenceNo: casesTable.referenceNo,
+        clientName: clientsTable.name,
+        orderNo: casePurchasersTable.orderNo,
+      })
+      .from(casesTable)
+      .leftJoin(casePurchasersTable, eq(casePurchasersTable.caseId, casesTable.id))
+      .leftJoin(clientsTable, eq(clientsTable.id, casePurchasersTable.clientId))
+      .where(and(eq(casesTable.firmId, req.firmId!), eq(casesTable.id, caseId)))
+      .orderBy(asc(casePurchasersTable.orderNo))
+    : [];
+  const caseReferenceNo = caseInfo?.[0]?.referenceNo ? String(caseInfo[0].referenceNo) : null;
+  const clientNames = Array.from(new Set(caseInfo.map((x) => String(x.clientName ?? "").trim()).filter(Boolean))).join(", ");
+  res.json({ ...pv, items, caseReferenceNo, clientNames: clientNames || null });
 });
 
 // Create
@@ -396,6 +412,36 @@ router.post("/payment-vouchers/:id/transition", sensitiveRateLimiter, requireAut
         description: `Payment Voucher ${pv.voucherNo} — ${pv.payeeName}`,
         referenceNo: pv.voucherNo, sourceType: "payment_voucher", sourceId: id, createdBy: req.userId!,
       });
+    }
+
+    const pvCaseId = pv.caseId ? Number(pv.caseId) : NaN;
+    if (Number.isFinite(pvCaseId) && pvCaseId > 0) {
+      const [existing] = await r
+        .select({ id: caseLedgersTable.id })
+        .from(caseLedgersTable)
+        .where(and(
+          eq(caseLedgersTable.firmId, req.firmId!),
+          eq(caseLedgersTable.caseId, pvCaseId),
+          eq(caseLedgersTable.sourceType, "payment_voucher"),
+          eq(caseLedgersTable.sourceId, id),
+        ))
+        .limit(1);
+      if (!existing) {
+        const fundStatus = String(pv.fundStatus ?? "client_paid");
+        const entryCategory = fundStatus === "request_advance" ? "office" : "client";
+        const entryType = fundStatus === "request_advance" ? "disbursement_paid" : "trust_paid";
+        await r.insert(caseLedgersTable).values({
+          firmId: req.firmId!,
+          caseId: pvCaseId,
+          transactionDate: now.toISOString().slice(0, 10),
+          entryCategory,
+          entryType,
+          description: `PV ${pv.voucherNo} — ${String(pv.purpose ?? "").trim()}`,
+          amount: amt,
+          sourceType: "payment_voucher",
+          sourceId: id,
+        } as any);
+      }
     }
   } else if (parsed.data.action === "acknowledge_file_return") {
     if (pv.status !== "paid_pending_collection") { res.status(400).json({ error: "Invalid status", code: "INVALID_STATUS" }); return; }

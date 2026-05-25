@@ -79,6 +79,8 @@ type CaseLedgerEntry = {
   entryType: "invoice_billed" | "payment_received" | "disbursement_paid" | "trust_received" | "trust_paid";
   description: string;
   amount: number;
+  sourceType?: string | null;
+  sourceId?: number | null;
   createdAt?: string | null;
 };
 
@@ -278,7 +280,15 @@ function CaseLedgerTab({ caseId }: { caseId: number }) {
                       <td className="py-2 px-3 whitespace-nowrap">{e.transactionDate}</td>
                       <td className="py-2 px-3">{e.entryCategory}</td>
                       <td className="py-2 px-3 font-mono text-xs">{e.entryType}</td>
-                      <td className="py-2 px-3">{e.description}</td>
+                      <td className="py-2 px-3">
+                        {e.sourceType === "payment_voucher" && typeof e.sourceId === "number" ? (
+                          <Link href={`/app/accounting?tab=payment-vouchers&printVoucherId=${e.sourceId}`} className="text-amber-700 hover:underline">
+                            {e.description}
+                          </Link>
+                        ) : (
+                          e.description
+                        )}
+                      </td>
                       <td className="py-2 px-3 text-right font-mono text-xs">{fmtMoney(e.amount)}</td>
                     </tr>
                   ))}

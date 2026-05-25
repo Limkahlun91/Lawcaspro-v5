@@ -213,8 +213,11 @@ export const caseLedgersTable = pgTable("case_ledgers", {
   entryType: text("entry_type").notNull(),
   description: text("description").notNull(),
   amount: numeric("amount", { precision: 12, scale: 2 }).notNull(),
+  sourceType: text("source_type"),
+  sourceId: integer("source_id"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow().$onUpdate(() => new Date()),
 }, (t) => ({
   firmCaseIdx: index("idx_case_ledgers_firm_case").on(t.firmId, t.caseId, t.transactionDate),
+  firmCaseSourceIdx: index("idx_case_ledgers_source").on(t.firmId, t.caseId, t.sourceType, t.sourceId),
 }));

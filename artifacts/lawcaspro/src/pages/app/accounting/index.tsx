@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { useLocation, useSearch } from "wouter";
@@ -803,6 +803,9 @@ function QuotationsTab() {
 // ── PAYMENT VOUCHERS TAB ──────────────────────────────────────────────────────
 
 function PaymentVouchersTab() {
+  const searchString = useSearch();
+  const printVoucherIdParam = useMemo(() => new URLSearchParams(searchString).get("printVoucherId"), [searchString]);
+  const didAutoPrintRef = useRef(false);
   const [showCreate, setShowCreate] = useState(false);
   const { toast } = useToast();
   const qc = useQueryClient();
@@ -938,6 +941,8 @@ function PaymentVouchersTab() {
     w.document.close();
     const pv = await apiFetchJson<any>(`/payment-vouchers/${voucherId}`);
     const items = Array.isArray(pv.items) ? pv.items : [];
+    const caseReferenceNo = typeof pv.caseReferenceNo === "string" ? pv.caseReferenceNo : "";
+    const clientNames = typeof pv.clientNames === "string" ? pv.clientNames : "";
     const rowsHtml = items
       .map((it: any) => `<tr><td style="padding:6px 8px;border-bottom:1px solid #eee;">${String(it.description ?? "")}</td><td style="padding:6px 8px;border-bottom:1px solid #eee;text-align:right;">${fmt(it.amount)}</td></tr>`)
       .join("");
@@ -977,6 +982,8 @@ function PaymentVouchersTab() {
             <div class="meta">
               <div><b>Voucher No:</b> ${String(pv.voucherNo ?? "")}</div>
               <div><b>Payee:</b> ${String(pv.payeeName ?? "")}</div>
+              <div><b>File Reference:</b> ${caseReferenceNo ? String(caseReferenceNo) : "—"}</div>
+              <div><b>Client Name:</b> ${clientNames ? String(clientNames) : "—"}</div>
               <div><b>Purpose:</b> ${String(pv.purpose ?? "")}</div>
               <div><b>Fund Status:</b> ${fundStatusLabel(String(pv.fundStatus ?? ""))}</div>
               <div><b>Total:</b> ${fmt(pv.amount)}</div>
@@ -1003,6 +1010,18 @@ function PaymentVouchersTab() {
     w.focus();
     w.print();
   }
+
+  useEffect(() => {
+    if (didAutoPrintRef.current) return;
+    const id = printVoucherIdParam ? Number(printVoucherIdParam) : NaN;
+    if (!Number.isFinite(id) || id <= 0) return;
+    didAutoPrintRef.current = true;
+    const qs = new URLSearchParams(searchString);
+    qs.delete("printVoucherId");
+    const next = qs.toString();
+    window.history.replaceState(null, "", `/app/accounting${next ? `?${next}` : ""}`);
+    printVoucher(id).catch(() => void 0);
+  }, [printVoucherIdParam, searchString]);
 
   async function submitMarkPaid(): Promise<void> {
     if (!markPaidVoucherId) return;

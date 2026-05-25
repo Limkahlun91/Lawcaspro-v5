@@ -75,7 +75,6 @@ export default function CasesList() {
     const next = intake ? `/app/cases/new?intake=${encodeURIComponent(intake)}` : "/app/cases/new";
     setLocation(next);
   }, [mode, intake, setLocation]);
-  if (mode === "create") return null;
 
   const initialPageRaw = sp.get("page");
   const initialLimitRaw = sp.get("limit");
@@ -380,6 +379,8 @@ export default function CasesList() {
     a.remove();
     URL.revokeObjectURL(url);
   };
+
+  if (mode === "create") return null;
 
   return (
     <div className="space-y-4 pb-24">
