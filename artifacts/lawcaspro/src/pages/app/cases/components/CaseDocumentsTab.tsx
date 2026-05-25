@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { useToast } from "@/hooks/use-toast";
 import { ToastAction } from "@/components/ui/toast";
-import { FileText, Upload, Trash2, Download, Plus, ChevronUp, ChevronDown, X, Sparkles } from "lucide-react";
+import { FileText, Upload, Trash2, Download, Plus, ChevronUp, ChevronDown, X, Sparkles, Loader2 } from "lucide-react";
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription,
 } from "@/components/ui/dialog";
@@ -21,7 +21,7 @@ import { isFirmDocumentTypeLetterLike } from "@/lib/documents/letterLike";
 import { DOCUMENT_TYPE_LABELS, normalizeDocumentType } from "@workspace/documents-registry";
 import { QueryFallback } from "@/components/query-fallback";
 import { apiFetchBlob, apiFetchJson, apiRequest } from "@/lib/api-client";
-import { downloadBlob } from "@/lib/download";
+import { downloadBlob, downloadFromApi } from "@/lib/download";
 import { toastError } from "@/lib/toast-error";
 import { printWordBlob } from "@/lib/documents/BrowserPrinter";
 import { useAuth } from "@/lib/auth-context";
@@ -188,6 +188,7 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [isUploading, setIsUploading] = useState(false);
   const [isGenerating, setIsGenerating] = useState(false);
+  const [oneClickGeneratingTemplateId, setOneClickGeneratingTemplateId] = useState<number | null>(null);
   const [batchGenerateResult, setBatchGenerateResult] = useState<null | { jobId: string; items: Array<Record<string, unknown>> }>(null);
   const [selectedChecklistKeys, setSelectedChecklistKeys] = useState<Set<string>>(new Set());
 
@@ -622,6 +623,84 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
       setVariableChecklistProgress(0);
       setVariableChecklistError(err instanceof Error ? err.message : "Generation failed");
       throw err;
+    }
+  }
+
+  async function generateAndDownloadBlind(item: ChecklistItem): Promise<void> {
+    if (!canGenerate) return;
+    if (item.kind !== "template" || typeof item.templateId !== "number") return;
+    if (item.source !== "firm") return;
+    const templateId = Number(item.templateId);
+    if (!Number.isFinite(templateId) || templateId <= 0) return;
+
+    setOneClickGeneratingTemplateId(templateId);
+    let pollId: number | null = null;
+    try {
+      const qs = new URLSearchParams();
+      qs.set("blind", "true");
+      const created = await apiFetchJson<{ jobId: string }>(`/documents/automation/generate-job?${qs.toString()}`, {
+        method: "POST",
+        timeoutMs: 30000,
+        body: JSON.stringify({
+          caseIds: [caseId],
+          templateIds: [templateId],
+          config: { action: "download" },
+        }),
+      });
+      const jobId = typeof created?.jobId === "string" ? created.jobId : "";
+      if (!jobId) throw new Error("jobId is missing");
+
+      const pollOnce = async (): Promise<boolean> => {
+        const status = await apiFetchJson<any>(`/documents/jobs/${jobId}`, { timeoutMs: 15000 });
+        const job = asRecord(status?.job) ?? {};
+        const items = Array.isArray(status?.items) ? status.items : [];
+        const st = String(job.status ?? "");
+        if (st === "completed") {
+          await qc.invalidateQueries({ queryKey: ["case-documents", caseId] });
+          await qc.invalidateQueries({ queryKey: ["case-documents-checklist", caseId] });
+          const fileName = typeof job.download_file_name === "string" ? String(job.download_file_name) : "document.pdf";
+          await downloadFromApi(`/documents/jobs/${jobId}/download`, fileName);
+          toast({ title: "Downloaded" });
+          return true;
+        }
+        if (st === "failed") {
+          const msg =
+            typeof job.error_summary === "string"
+              ? job.error_summary
+              : (items[0] && asRecord(items[0])?.error_message ? String(asRecord(items[0])?.error_message) : "Generation failed");
+          throw new Error(msg);
+        }
+        return false;
+      };
+
+      const done = await pollOnce();
+      if (done) return;
+
+      await new Promise<void>((resolve, reject) => {
+        pollId = window.setInterval(() => {
+          pollOnce()
+            .then((ok) => {
+              if (!ok) return;
+              if (pollId) {
+                window.clearInterval(pollId);
+                pollId = null;
+              }
+              resolve();
+            })
+            .catch((e) => {
+              if (pollId) {
+                window.clearInterval(pollId);
+                pollId = null;
+              }
+              reject(e);
+            });
+        }, 3000);
+      });
+    } catch (err) {
+      toastError(toast, err, "Generation failed");
+    } finally {
+      if (pollId) window.clearInterval(pollId);
+      setOneClickGeneratingTemplateId(null);
     }
   }
 
@@ -1711,8 +1790,20 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
                                         Download
                                       </Button>
                                     ) : it.kind === "template" ? (
-                                      <Button size="sm" onClick={() => openVariableChecklist(it)} disabled={!canGenerate || !applicable || !ready || isGenerating}>
-                                        Generate
+                                      <Button
+                                        size="sm"
+                                        className="gap-2"
+                                        onClick={() => generateAndDownloadBlind(it)}
+                                        disabled={!canGenerate || isGenerating || oneClickGeneratingTemplateId === it.templateId || it.source !== "firm"}
+                                      >
+                                        {oneClickGeneratingTemplateId === it.templateId ? (
+                                          <>
+                                            <Loader2 className="h-4 w-4 animate-spin" />
+                                            Generating...
+                                          </>
+                                        ) : (
+                                          "Generate & Download"
+                                        )}
                                       </Button>
                                     ) : null}
                                   </div>

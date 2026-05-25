@@ -405,18 +405,23 @@ function extractDocxTemplateErrorDetail(err: unknown): { message: string; tags: 
   return { message: base.slice(0, 300), tags: uniqueTags };
 }
 
-function fillMissingScalarsForRender(placeholders: string[], input: Record<string, unknown>): Record<string, unknown> {
+function fillMissingScalarsForRender(
+  placeholders: string[],
+  input: Record<string, unknown>,
+  opts?: { missingMode?: "placeholder" | "empty" }
+): Record<string, unknown> {
   const out: Record<string, unknown> = { ...input };
+  const missingMode = opts?.missingMode === "empty" ? "empty" : "placeholder";
   for (const k of placeholders) {
     if (!k) continue;
     const v = out[k];
     if (Array.isArray(v)) continue;
     if (v === null || v === undefined) {
-      out[k] = `[MISSING: ${k}]`;
+      out[k] = missingMode === "empty" ? "" : `[MISSING: ${k}]`;
       continue;
     }
     if (typeof v === "string" && v.trim() === "") {
-      out[k] = `[MISSING: ${k}]`;
+      out[k] = missingMode === "empty" ? "" : `[MISSING: ${k}]`;
       continue;
     }
   }
@@ -5516,11 +5521,12 @@ function isPdfTextBoxMappings(v: unknown): v is {
   return true;
 }
 
-async function renderPdfTextBoxMappedTemplate(args: { pdfBytes: Buffer; data: Record<string, unknown>; mappings: unknown }): Promise<Buffer> {
+async function renderPdfTextBoxMappedTemplate(args: { pdfBytes: Buffer; data: Record<string, unknown>; mappings: unknown; missingMode?: "placeholder" | "empty" }): Promise<Buffer> {
   if (!Buffer.isBuffer(args.pdfBytes) || args.pdfBytes.length === 0) {
     throw new DocumentGenerationError(400, "TEMPLATE_FILE_BUFFER_MISSING", "Template file buffer is missing or corrupted in the database.");
   }
   if (!isPdfTextBoxMappings(args.mappings) || !args.mappings.pages.length) return args.pdfBytes;
+  const missingMode = args.missingMode === "empty" ? "empty" : "placeholder";
   try {
     const pdfDoc = await PDFDocument.load(args.pdfBytes);
     const fontCache = new Map<"Helvetica" | "Times-Roman" | "Courier", any>();
@@ -5550,9 +5556,9 @@ async function renderPdfTextBoxMappedTemplate(args: { pdfBytes: Buffer; data: Re
         let text = tb.content || "";
         text = text.replace(/\{\{\s*([a-zA-Z0-9_.-]+)\s*\}\}/g, (_m: string, key: string) => {
           const val = (args.data as Record<string, unknown>)[key];
-          if (val === undefined || val === null) return `[MISSING: ${key}]`;
+          if (val === undefined || val === null) return missingMode === "empty" ? "" : `[MISSING: ${key}]`;
           const s = String(val);
-          return s.trim() ? s : `[MISSING: ${key}]`;
+          return s.trim() ? s : (missingMode === "empty" ? "" : `[MISSING: ${key}]`);
         });
         const fontSize = tb.fontSize || 10;
         const pdfY = pageHeight - tb.y - fontSize;
@@ -5582,12 +5588,13 @@ async function renderPdfTextBoxMappedTemplate(args: { pdfBytes: Buffer; data: Re
   }
 }
 
-async function renderPdfMappedTemplate(args: { pdfBytes: Buffer; data: Record<string, unknown>; mappingConfig: unknown }): Promise<Buffer> {
+async function renderPdfMappedTemplate(args: { pdfBytes: Buffer; data: Record<string, unknown>; mappingConfig: unknown; missingMode?: "placeholder" | "empty" }): Promise<Buffer> {
   if (!Buffer.isBuffer(args.pdfBytes) || args.pdfBytes.length === 0) {
     throw new DocumentGenerationError(400, "TEMPLATE_FILE_BUFFER_MISSING", "Template file buffer is missing or corrupted in the database.");
   }
   const mappings = normalizePdfMappingConfig(args.mappingConfig);
   if (!mappings.length) return args.pdfBytes;
+  const missingMode = args.missingMode === "empty" ? "empty" : "placeholder";
   try {
     const pdf = await PDFDocument.load(args.pdfBytes);
     const fontCache = new Map<PdfFontFamily, any>();
@@ -5610,8 +5617,10 @@ async function renderPdfMappedTemplate(args: { pdfBytes: Buffer; data: Record<st
 
     for (const m of mappings) {
       const raw = (args.data as any)[m.key];
-      const valueRaw = raw === null || raw === undefined ? `[MISSING: ${m.key}]` : String(raw);
-      const value = valueRaw.trim() ? valueRaw : `[MISSING: ${m.key}]`;
+      const valueRaw = raw === null || raw === undefined
+        ? (missingMode === "empty" ? "" : `[MISSING: ${m.key}]`)
+        : String(raw);
+      const value = valueRaw.trim() ? valueRaw : (missingMode === "empty" ? "" : `[MISSING: ${m.key}]`);
       const page = pdf.getPage(m.page - 1);
       if (!page) continue;
       const font = await getFont(m.fontFamily);
@@ -5656,6 +5665,7 @@ async function generateFirmDocument({
   runId,
   bypassApplicability,
   force,
+  blind,
   clauses,
   overrides,
   outputFormat,
@@ -5673,11 +5683,13 @@ async function generateFirmDocument({
   runId: number;
   bypassApplicability?: boolean;
   force?: boolean;
+  blind?: boolean;
   clauses?: SelectedClauseRef[];
   overrides?: Record<string, unknown> | null;
   outputFormat?: "docx" | "pdf";
 }): Promise<{ caseDocument: Record<string, unknown>; caseDocumentId: number | null; templateVersionId: number | null; checklistSnapshot: unknown; readinessSnapshot: unknown; renderedVars: unknown; outputBytes?: Buffer; outputContentType?: string; }> {
-  const forceMode = Boolean(force);
+  const blindMode = Boolean(blind);
+  const forceMode = Boolean(force || blindMode);
   const cache = createRequestCache();
   const [templateRows, context] = await Promise.all([
     queryRowsCached(r, cache, `document_templates:${firmId}:${templateId}`, sql`SELECT * FROM document_templates WHERE id = ${templateId} AND firm_id = ${firmId}`),
@@ -5866,7 +5878,7 @@ async function generateFirmDocument({
     throw new DocumentGenerationError(422, "TEMPLATE_BINDING_MISSING", "Missing required variables", { missingRequiredVariables: preview.missingRequiredVariables });
   }
   let input: Record<string, unknown> = preview.usedMode === "bindings" ? preview.resolvedVariables : (context as any);
-  input = fillMissingScalarsForRender(effectivePlaceholders, input);
+  input = fillMissingScalarsForRender(effectivePlaceholders, input, { missingMode: blindMode ? "empty" : "placeholder" });
   let clauseSnapshot: Record<string, unknown> | null = null;
   let checklistEval = evaluateTemplateChecklist({
     checklistMode: (template as any).checklist_mode,
@@ -5905,7 +5917,7 @@ async function generateFirmDocument({
     });
     fileContents = applied.docxBytes;
     input = applied.data;
-    input = fillMissingScalarsForRender(effectivePlaceholders, input);
+    input = fillMissingScalarsForRender(effectivePlaceholders, input, { missingMode: blindMode ? "empty" : "placeholder" });
     clauseSnapshot = {
       insertionModeUsed: decision.insertionModeUsed,
       insertionTarget: decision.insertionTarget,
@@ -5998,9 +6010,9 @@ async function generateFirmDocument({
     outFormat = "pdf";
     const mappingConfig = (template as any).pdf_mapping_config ?? null;
     outputBytes = await (isPdfTextBoxMappings(mappingConfig)
-      ? renderPdfTextBoxMappedTemplate({ pdfBytes: fileContents, data: input, mappings: mappingConfig })
+      ? renderPdfTextBoxMappedTemplate({ pdfBytes: fileContents, data: input, mappings: mappingConfig, missingMode: blindMode ? "empty" : "placeholder" })
       : normalizePdfMappingConfig(mappingConfig).length > 0
-        ? renderPdfMappedTemplate({ pdfBytes: fileContents, data: input, mappingConfig })
+        ? renderPdfMappedTemplate({ pdfBytes: fileContents, data: input, mappingConfig, missingMode: blindMode ? "empty" : "placeholder" })
         : renderPdfFormTemplate({ pdfBytes: fileContents, data: input, flatten: true }));
     outputContentType = "application/pdf";
   } else {
@@ -6014,7 +6026,8 @@ async function generateFirmDocument({
       delimiters: { start: "{{", end: "}}" },
       nullGetter(part: any) {
         const k = typeof part?.value === "string" ? String(part.value) : "";
-        return k ? `[MISSING: ${k}]` : "";
+        if (!k) return "";
+        return blindMode ? "" : `[MISSING: ${k}]`;
       },
     });
     attachDocxImageModule(doc);
@@ -7615,6 +7628,7 @@ async function processAutomationGenerationJobStep(r: DbConn, args: { firmId: num
 
   const actorId = reqIdToNumber((job as any).created_by);
   const force = Boolean((job as any)?.config && typeof (job as any).config === "object" && (job as any).config.force);
+  const blind = Boolean((job as any)?.config && typeof (job as any).config === "object" && (job as any).config.blind);
   const runId = await createGenerationRun(r, {
     firm_id: args.firmId,
     case_id: caseId,
@@ -7645,6 +7659,7 @@ async function processAutomationGenerationJobStep(r: DbConn, args: { firmId: num
       templateId,
       runId,
       force,
+      blind,
       outputFormat: "pdf",
     });
     await finishGenerationRunSuccess(r, args.firmId, runId, out.caseDocumentId, out.renderedVars, out.checklistSnapshot, out.readinessSnapshot);
@@ -7761,9 +7776,12 @@ router.post("/documents/automation/generate-job", requireAuth, requireFirmUser, 
 
   const qForce = String(one((req.query as any).force) ?? "").trim().toLowerCase();
   const force = qForce === "1" || qForce === "true" || qForce === "yes";
+  const qBlind = String(one((req.query as any).blind) ?? "").trim().toLowerCase();
+  const blind = qBlind === "1" || qBlind === "true" || qBlind === "yes";
+  const effectiveForce = force || blind;
   const qValidate = String(one((req.query as any).validate) ?? "").trim().toLowerCase();
   const validate = qValidate === "1" || qValidate === "true" || qValidate === "yes";
-  if (validate && !force) {
+  if (validate && !effectiveForce) {
     const preflight = await runAutomationPreflight({
       r,
       firmId: req.firmId!,
@@ -7777,7 +7795,7 @@ router.post("/documents/automation/generate-job", requireAuth, requireFirmUser, 
   }
 
   const jobId = randomUUID();
-  const jobConfig = { ...parsed.data.config, force, createdRoleId: req.roleId ?? null };
+  const jobConfig = { ...parsed.data.config, force: effectiveForce, blind, createdRoleId: req.roleId ?? null };
   await queryRows(r, sql`
     INSERT INTO document_generation_jobs (
       id, firm_id, job_type, status, action, case_ids, template_ids, config,
