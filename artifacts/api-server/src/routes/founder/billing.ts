@@ -68,7 +68,11 @@ router.get("/founder/billing/ledger", requireAuth, requireFounder, requireFounde
         SELECT
           f.id,
           ${month},
-          COALESCE(f.custom_price_monthly, p.price_monthly, 0),
+          CASE
+            WHEN f.is_custom_plan IS TRUE AND f.custom_price_monthly IS NOT NULL AND f.custom_price_monthly > 0
+              THEN f.custom_price_monthly
+            ELSE COALESCE(p.price_monthly, 0)
+          END,
           'unpaid',
           now(),
           now()
@@ -76,6 +80,21 @@ router.get("/founder/billing/ledger", requireAuth, requireFounder, requireFounde
         LEFT JOIN subscription_plans p ON p.id = f.subscription_plan_id
         LEFT JOIN firm_invoices i ON i.firm_id = f.id AND i.billing_month = ${month}
         WHERE i.id IS NULL
+      `);
+
+      await tx.execute(sql`
+        UPDATE firm_invoices i
+        SET amount = CASE
+          WHEN f.is_custom_plan IS TRUE AND f.custom_price_monthly IS NOT NULL AND f.custom_price_monthly > 0
+            THEN f.custom_price_monthly
+          ELSE COALESCE(p.price_monthly, 0)
+        END,
+        updated_at = now()
+        FROM firms f
+        LEFT JOIN subscription_plans p ON p.id = f.subscription_plan_id
+        WHERE i.firm_id = f.id
+          AND i.billing_month = ${month}
+          AND i.status <> 'paid'
       `);
     });
 
@@ -88,7 +107,11 @@ router.get("/founder/billing/ledger", requireAuth, requireFounder, requireFounde
         f.custom_price_monthly AS custom_price_monthly,
         i.id AS invoice_id,
         i.billing_month AS billing_month,
-        i.amount AS amount,
+        CASE
+          WHEN f.is_custom_plan IS TRUE AND f.custom_price_monthly IS NOT NULL AND f.custom_price_monthly > 0
+            THEN f.custom_price_monthly
+          ELSE COALESCE(p.price_monthly, i.amount, 0)
+        END AS amount,
         i.status AS status,
         i.paid_at AS paid_at,
         i.payment_method AS payment_method

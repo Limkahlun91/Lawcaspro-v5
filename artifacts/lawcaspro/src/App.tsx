@@ -40,6 +40,7 @@ import PlatformAuditLogs from "@/pages/platform/audit-logs";
 import PlatformDocuments from "@/pages/platform/documents";
 import PlatformMessages from "@/pages/platform/messages";
 import FounderBillingPage from "@/pages/founder/billing";
+import PlatformSubscriptionPlansPage from "@/pages/platform/subscription-plans";
 
 // App Pages
 import AppDashboard from "@/pages/app/dashboard";
@@ -130,6 +131,7 @@ function PlatformRoutes() {
           <Route path="/platform/firms/:id" component={FirmDetail} />
           <Route path="/platform/firms" component={FirmsList} />
           <Route path="/platform/billing" component={FounderBillingPage} />
+          <Route path="/platform/subscription-plans" component={PlatformSubscriptionPlansPage} />
           <Route path="/platform/documents" component={PlatformDocuments} />
           <Route path="/platform/messages" component={PlatformMessages} />
           <Route path="/platform/monitoring" component={PlatformMonitoring} />

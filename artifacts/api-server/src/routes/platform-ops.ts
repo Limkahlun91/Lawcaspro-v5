@@ -429,6 +429,7 @@ router.post("/platform/firms/:firmId/maintenance/preview", requireAuth, requireF
     const body = req.body as {
       action_code?: MaintenanceActionCode;
       target?: { entity_type?: TargetEntityType; entity_id?: string; label?: string; module_code?: ModuleCode };
+      force?: boolean;
     };
     const actionCode = body?.action_code;
     if (!actionCode) throw new ApiError({ status: 400, code: "MISSING_REQUIRED_FIELD", message: "action_code is required", retryable: false });
@@ -439,6 +440,16 @@ router.post("/platform/firms/:firmId/maintenance/preview", requireAuth, requireF
       assertActiveSupportSessionForFirm(ctx, firmId);
 
       const p = await previewMaintenanceAction(authDb, { firmId, actionCode, target: body.target });
+      if (body.force && p.dependency_summary?.has_blockers) {
+        const warnings = Array.isArray(p.warnings) ? p.warnings : [];
+        const blockers = Array.isArray(p.dependency_summary.blocking_items) ? p.dependency_summary.blocking_items : [];
+        for (const b of blockers) {
+          const label = b?.label ? String(b.label) : `${String(b?.type ?? "item")}:${String(b?.id ?? "")}`;
+          warnings.push({ code: "DEPENDENCY_IGNORED", message: `Ignored dependency blocker (force): ${label}` });
+        }
+        p.warnings = warnings;
+        p.dependency_summary = { has_blockers: false, blocking_items: [] };
+      }
       const actionId = await createMaintenanceActionPreviewRecord(authDb, { firmId, preview: p, requestedByUserId: req.userId!, requestedByEmail: req.email ?? null });
 
       const decision = evaluateDecisionForPreview({
@@ -524,6 +535,7 @@ router.post("/platform/firms/:firmId/maintenance/execute", requireAuth, requireF
       step_up_challenge_id?: string;
       step_up_phrase?: string;
       emergency_flag?: boolean;
+      force?: boolean;
     };
     const actionId = String(body?.action_id ?? "").trim();
     if (!actionId) throw new ApiError({ status: 400, code: "MISSING_REQUIRED_FIELD", message: "action_id is required", retryable: false });
@@ -541,6 +553,7 @@ router.post("/platform/firms/:firmId/maintenance/execute", requireAuth, requireF
         typedConfirmation: typed,
         confirmFirm: body?.confirm_firm ?? null,
         confirmTarget: body?.confirm_target ?? null,
+        force: !!body.force,
         approvalRequestId: body.approval_request_id ? String(body.approval_request_id) : null,
         stepUpChallengeId: body.step_up_challenge_id ? String(body.step_up_challenge_id) : null,
         stepUpPhrase: body.step_up_phrase ? String(body.step_up_phrase) : null,
@@ -599,6 +612,7 @@ router.get("/platform/firms/:firmId/maintenance/search", requireAuth, requireFou
       return Number.isFinite(n) ? n : 10;
     })();
     if (!entityType) throw new ApiError({ status: 400, code: "MISSING_REQUIRED_FIELD", message: "entity_type is required", retryable: false });
+    if (!keyword.trim()) throw new ApiError({ status: 400, code: "MISSING_REQUIRED_FIELD", message: "q is required", retryable: false });
     const items = await withAuthSafeDb(async (authDb) => {
       const ctx = await loadFounderGovernanceContext(authDb, req);
       assertFounderPermission(ctx, "founder.maintenance.read");
@@ -916,7 +930,6 @@ router.post("/platform/firms/:firmId/restore/preview", requireAuth, requireFound
       if (scopeType !== inferredScope) {
         throw new ApiError({ status: 422, code: "UNSUPPORTED_OPERATION", message: "Restore scope does not match snapshot type", retryable: false, details: { snapshot_type: snapshotType, restore_scope_type: scopeType } });
       }
-      if (scopeType === "firm") throw new ApiError({ status: 422, code: "UNSUPPORTED_OPERATION", message: "Firm-wide restore is not supported", retryable: false });
 
       const riskLevel = scopeType === "settings" ? "medium" : "high";
       const impact: Record<string, number> = { snapshot_items: detail.items.length };
@@ -1026,6 +1039,7 @@ router.post("/platform/firms/:firmId/restore/execute", requireAuth, requireFound
       };
 
       if (op.restoreScopeType === "settings") return await restoreSettingsFromSnapshot(authDb, common);
+      if (op.restoreScopeType === "firm") return await restoreSettingsFromSnapshot(authDb, common);
       if (op.restoreScopeType === "module" && op.moduleCode === "projects") return await restoreProjectsModuleFromSnapshot(authDb, common);
       if (op.restoreScopeType === "record" && op.targetEntityType === "case") return await restoreCaseRecordFromSnapshot(authDb, common);
       if (op.restoreScopeType === "record" && op.targetEntityType === "project") return await restoreProjectRecordFromSnapshot(authDb, common);

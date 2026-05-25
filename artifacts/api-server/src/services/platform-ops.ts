@@ -1,7 +1,8 @@
 import crypto from "crypto";
-import { and, desc, eq, ilike, isNull, sql } from "drizzle-orm";
+import { and, desc, eq, ilike, isNull, or, sql } from "drizzle-orm";
 import {
   auditLogsTable,
+  casePurchasersTable,
   caseDocumentChecklistItemsTable,
   caseDocumentsTable,
   caseKeyDatesTable,
@@ -9,6 +10,7 @@ import {
   caseWorkflowDocumentsTable,
   caseWorkflowStepsTable,
   casesTable,
+  clientsTable,
   developersTable,
   documentBatchJobsTable,
   documentExtractionJobsTable,
@@ -471,14 +473,14 @@ async function buildSnapshotPayload(
   if (opts.snapshotType === "firm") {
     const [firm] = await authDb.select().from(firmsTable).where(eq(firmsTable.id, firmId));
     if (!firm) throw new ApiError({ status: 404, code: "FIRM_NOT_FOUND", message: "Firm not found", retryable: false });
-    const projects = await authDb.select({ id: projectsTable.id }).from(projectsTable).where(and(eq(projectsTable.firmId, firmId), isNull(projectsTable.archivedAt)));
-    const users = await authDb.select({ id: usersTable.id }).from(usersTable).where(eq(usersTable.firmId, firmId));
-    const cases = await authDb.select({ id: casesTable.id }).from(casesTable).where(and(eq(casesTable.firmId, firmId), isNull(casesTable.deletedAt)));
-    itemCounts.projects = projects.length;
-    itemCounts.users = users.length;
-    itemCounts.cases = cases.length;
-    items.push({ itemType: "firm_summary", itemId: String(firm.id), itemLabel: firm.name, moduleCode: "firm", payloadFragment: { counts: itemCounts } });
-    const payload = { kind: "firm_summary", firm, counts: itemCounts };
+    const bankAccounts = await authDb.select().from(firmBankAccountsTable).where(eq(firmBankAccountsTable.firmId, firmId));
+    itemCounts.firm = 1;
+    itemCounts.bank_accounts = bankAccounts.length;
+    items.push({ itemType: "firm", itemId: String(firm.id), itemLabel: firm.name, moduleCode: "settings", payloadFragment: { firm } });
+    for (const b of bankAccounts) {
+      items.push({ itemType: "bank_account", itemId: String(b.id), itemLabel: b.bankName, moduleCode: "settings", payloadFragment: { bankAccount: b } });
+    }
+    const payload = { kind: "settings", firm, bankAccounts, settingsGroup: null };
     return { payload, items, itemCounts, metadata };
   }
 
@@ -760,6 +762,7 @@ export async function executeMaintenanceAction(
     typedConfirmation: string | null;
     confirmFirm?: string | null;
     confirmTarget?: string | null;
+    force?: boolean;
     approvalRequestId?: string | null;
     stepUpChallengeId?: string | null;
     stepUpPhrase?: string | null;
@@ -782,7 +785,7 @@ export async function executeMaintenanceAction(
 
   const preview = action.previewPayload as unknown as MaintenancePreview | null;
   if (!preview) throw new ApiError({ status: 409, code: "TARGET_STATE_CONFLICT", message: "Preview payload missing", retryable: true });
-  if (preview.dependency_summary?.has_blockers) throw new ApiError({ status: 409, code: "DEPENDENCY_BLOCKED", message: "Action is blocked by dependencies", retryable: false, details: preview.dependency_summary });
+  if (preview.dependency_summary?.has_blockers && !opts.force) throw new ApiError({ status: 409, code: "DEPENDENCY_BLOCKED", message: "Action is blocked by dependencies", retryable: false, details: preview.dependency_summary });
 
   const required = requiredTypedConfirmation(action.riskLevel as RiskLevel);
   if (required) {
@@ -1127,13 +1130,35 @@ export async function searchTargets(
   const q = `%${opts.keyword.trim()}%`;
   if (!opts.keyword.trim()) return [];
   if (opts.entityType === "case") {
-    const rows = await authDb.select({
-      id: casesTable.id,
-      referenceNo: casesTable.referenceNo,
-      status: casesTable.status,
-      updatedAt: casesTable.updatedAt,
-    }).from(casesTable).where(and(eq(casesTable.firmId, opts.firmId), isNull(casesTable.deletedAt), ilike(casesTable.referenceNo, q))).orderBy(desc(casesTable.updatedAt)).limit(limit);
-    return rows.map((r) => ({ ...r, label: r.referenceNo, entity_type: "case" }));
+    const rows = await authDb
+      .select({
+        id: casesTable.id,
+        referenceNo: casesTable.referenceNo,
+        status: casesTable.status,
+        updatedAt: casesTable.updatedAt,
+        clientName: sql<string | null>`MAX(${clientsTable.name})`,
+      })
+      .from(casesTable)
+      .leftJoin(casePurchasersTable, eq(casePurchasersTable.caseId, casesTable.id))
+      .leftJoin(clientsTable, eq(clientsTable.id, casePurchasersTable.clientId))
+      .where(
+        and(
+          eq(casesTable.firmId, opts.firmId),
+          isNull(casesTable.deletedAt),
+          or(
+            ilike(casesTable.referenceNo, q),
+            ilike(clientsTable.name, q),
+          ),
+        )
+      )
+      .groupBy(casesTable.id)
+      .orderBy(desc(casesTable.updatedAt))
+      .limit(limit);
+    return rows.map((r) => {
+      const name = typeof r.clientName === "string" ? r.clientName.trim() : "";
+      const label = name ? `${r.referenceNo} · ${name}` : r.referenceNo;
+      return { ...r, label, entity_type: "case" };
+    });
   }
   if (opts.entityType === "project") {
     const rows = await authDb.select({

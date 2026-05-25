@@ -1,0 +1,236 @@
+import { useMemo, useState } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { apiFetchJson } from "@/lib/api-client";
+import { unwrapApiData } from "@/lib/api-contract";
+import { toastError } from "@/lib/toast-error";
+import { useToast } from "@/hooks/use-toast";
+import { PlatformPage, PlatformPageHeader } from "@/components/platform/page";
+import { Card, CardContent } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
+import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Textarea } from "@/components/ui/textarea";
+import { Switch } from "@/components/ui/switch";
+
+type Plan = {
+  id: number;
+  name: string;
+  priceMonthly: string;
+  maxUsers: number | null;
+  maxCasesPerMonth: number | null;
+  features: Record<string, unknown>;
+  isActive: boolean;
+  createdAt: string;
+  updatedAt: string;
+};
+
+const stringifyJson = (v: unknown): string => {
+  try {
+    return JSON.stringify(v ?? {}, null, 2);
+  } catch {
+    return "{}";
+  }
+};
+
+export default function PlatformSubscriptionPlansPage() {
+  const { toast } = useToast();
+  const qc = useQueryClient();
+  const [open, setOpen] = useState(false);
+  const [editing, setEditing] = useState<Plan | null>(null);
+
+  const [name, setName] = useState("");
+  const [priceMonthly, setPriceMonthly] = useState("");
+  const [maxUsers, setMaxUsers] = useState<string>("");
+  const [maxCasesPerMonth, setMaxCasesPerMonth] = useState<string>("");
+  const [isActive, setIsActive] = useState(true);
+  const [featuresText, setFeaturesText] = useState("{}");
+
+  const plansQuery = useQuery({
+    queryKey: ["subscription-plans-admin"],
+    queryFn: async () => unwrapApiData<{ items: Plan[] }>(await apiFetchJson("/subscription-plans")),
+    retry: false,
+  });
+
+  const items = useMemo(() => {
+    const rows = plansQuery.data?.items ?? [];
+    return Array.isArray(rows) ? rows : [];
+  }, [plansQuery.data]);
+
+  const resetForm = () => {
+    setEditing(null);
+    setName("");
+    setPriceMonthly("");
+    setMaxUsers("");
+    setMaxCasesPerMonth("");
+    setIsActive(true);
+    setFeaturesText("{}");
+  };
+
+  const openCreate = () => {
+    resetForm();
+    setOpen(true);
+  };
+
+  const openEdit = (p: Plan) => {
+    setEditing(p);
+    setName(p.name ?? "");
+    setPriceMonthly(String(p.priceMonthly ?? ""));
+    setMaxUsers(p.maxUsers == null ? "" : String(p.maxUsers));
+    setMaxCasesPerMonth(p.maxCasesPerMonth == null ? "" : String(p.maxCasesPerMonth));
+    setIsActive(!!p.isActive);
+    setFeaturesText(stringifyJson(p.features));
+    setOpen(true);
+  };
+
+  const upsertMutation = useMutation({
+    mutationFn: async () => {
+      const trimmedName = name.trim();
+      if (!trimmedName) throw new Error("Name is required");
+      const trimmedPrice = priceMonthly.trim();
+      if (!trimmedPrice) throw new Error("Price is required");
+      let features: Record<string, unknown> = {};
+      try {
+        const parsed = JSON.parse(featuresText || "{}");
+        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("Features must be a JSON object");
+        features = parsed as Record<string, unknown>;
+      } catch (e) {
+        throw new Error(e instanceof Error ? e.message : "Invalid features JSON");
+      }
+
+      const body = {
+        name: trimmedName,
+        priceMonthly: trimmedPrice,
+        maxUsers: maxUsers.trim() ? Number(maxUsers) : null,
+        maxCasesPerMonth: maxCasesPerMonth.trim() ? Number(maxCasesPerMonth) : null,
+        features,
+        isActive,
+      };
+
+      if (editing) {
+        const res = await apiFetchJson(`/subscription-plans/${editing.id}`, { method: "PUT", body: JSON.stringify(body) });
+        return unwrapApiData(res);
+      }
+
+      const res = await apiFetchJson("/subscription-plans", { method: "POST", body: JSON.stringify(body) });
+      return unwrapApiData(res);
+    },
+    onSuccess: async () => {
+      toast({ title: editing ? "Plan updated" : "Plan created" });
+      setOpen(false);
+      resetForm();
+      await qc.invalidateQueries({ queryKey: ["subscription-plans-admin"] });
+      await qc.invalidateQueries({ queryKey: ["subscription-plans"] });
+    },
+    onError: (e) => toastError(toast, e, "Save failed"),
+  });
+
+  return (
+    <PlatformPage>
+      <PlatformPageHeader
+        title="Subscription Plans"
+        description="Database-driven plans (pricing, limits, and feature flags)."
+        actions={<Button onClick={openCreate}>New Plan</Button>}
+      />
+
+      <Card>
+        <CardContent className="p-0">
+          {plansQuery.isLoading ? (
+            <div className="p-8 text-center text-slate-500">Loading...</div>
+          ) : plansQuery.isError ? (
+            <div className="p-8 text-center text-slate-500">Failed to load plans</div>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm text-left">
+                <thead className="text-xs text-slate-500 uppercase bg-slate-50 border-b border-slate-200">
+                  <tr>
+                    <th className="px-6 py-3 font-semibold">Name</th>
+                    <th className="px-6 py-3 font-semibold text-right">Price (RM)</th>
+                    <th className="px-6 py-3 font-semibold text-right">Max Users</th>
+                    <th className="px-6 py-3 font-semibold text-right">Max Cases / Month</th>
+                    <th className="px-6 py-3 font-semibold">Status</th>
+                    <th className="px-6 py-3 font-semibold">Features</th>
+                    <th className="px-6 py-3 font-semibold text-right">Actions</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {items.map((p) => {
+                    const featuresCount = p.features && typeof p.features === "object" ? Object.keys(p.features).length : 0;
+                    return (
+                      <tr key={p.id} className="hover:bg-slate-50/50">
+                        <td className="px-6 py-4 font-medium text-slate-900">{p.name}</td>
+                        <td className="px-6 py-4 text-right text-slate-900">RM {Number(p.priceMonthly ?? 0).toFixed(2)}</td>
+                        <td className="px-6 py-4 text-right text-slate-700">{p.maxUsers == null ? "—" : p.maxUsers}</td>
+                        <td className="px-6 py-4 text-right text-slate-700">{p.maxCasesPerMonth == null ? "—" : p.maxCasesPerMonth}</td>
+                        <td className="px-6 py-4">
+                          {p.isActive ? (
+                            <Badge className="bg-emerald-600 hover:bg-emerald-600 text-white">Active</Badge>
+                          ) : (
+                            <Badge variant="outline">Inactive</Badge>
+                          )}
+                        </td>
+                        <td className="px-6 py-4 text-slate-700">{featuresCount} keys</td>
+                        <td className="px-6 py-4 text-right">
+                          <Button variant="outline" size="sm" onClick={() => openEdit(p)}>Edit</Button>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                  {items.length === 0 ? (
+                    <tr>
+                      <td colSpan={7} className="px-6 py-10 text-center text-slate-500">No plans.</td>
+                    </tr>
+                  ) : null}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+      <Dialog open={open} onOpenChange={(v) => { if (!v) { setOpen(false); resetForm(); } }}>
+        <DialogContent className="max-w-2xl">
+          <DialogHeader>
+            <DialogTitle>{editing ? "Edit Plan" : "New Plan"}</DialogTitle>
+          </DialogHeader>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div className="space-y-2">
+              <Label>Name</Label>
+              <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Professional Plan" />
+            </div>
+            <div className="space-y-2">
+              <Label>Price Monthly (RM)</Label>
+              <Input value={priceMonthly} onChange={(e) => setPriceMonthly(e.target.value)} placeholder="e.g. 199.00" />
+            </div>
+            <div className="space-y-2">
+              <Label>Max Users (optional)</Label>
+              <Input value={maxUsers} onChange={(e) => setMaxUsers(e.target.value)} placeholder="e.g. 20" />
+            </div>
+            <div className="space-y-2">
+              <Label>Max Cases Per Month (optional)</Label>
+              <Input value={maxCasesPerMonth} onChange={(e) => setMaxCasesPerMonth(e.target.value)} placeholder="e.g. 200" />
+            </div>
+            <div className="flex items-center justify-between rounded border border-slate-200 px-3 py-2 md:col-span-2">
+              <div className="text-sm text-slate-700">Active</div>
+              <Switch checked={isActive} onCheckedChange={setIsActive} />
+            </div>
+            <div className="space-y-2 md:col-span-2">
+              <Label>Features (JSON)</Label>
+              <Textarea value={featuresText} onChange={(e) => setFeaturesText(e.target.value)} className="min-h-[240px] font-mono text-xs" />
+            </div>
+          </div>
+
+          <DialogFooter className="gap-2">
+            <Button variant="outline" onClick={() => { setOpen(false); resetForm(); }} disabled={upsertMutation.isPending}>Cancel</Button>
+            <Button onClick={() => upsertMutation.mutate()} disabled={upsertMutation.isPending}>
+              {upsertMutation.isPending ? "Saving..." : "Save"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </PlatformPage>
+  );
+}
+
