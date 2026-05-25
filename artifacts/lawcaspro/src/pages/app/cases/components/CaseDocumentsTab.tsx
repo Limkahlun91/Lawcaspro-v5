@@ -216,6 +216,10 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
   const [variableChecklistGenerating, setVariableChecklistGenerating] = useState(false);
   const [variableChecklistLongRunning, setVariableChecklistLongRunning] = useState(false);
   const [variableChecklistProgress, setVariableChecklistProgress] = useState(0);
+  const [variableChecklistError, setVariableChecklistError] = useState<string | null>(null);
+  const [variableChecklistJobId, setVariableChecklistJobId] = useState<string | null>(null);
+  const variableChecklistPollRef = useRef<number | null>(null);
+  const variableChecklistLongTimerRef = useRef<number | null>(null);
 
   const [selectedDocIds, setSelectedDocIds] = useState<Set<number>>(new Set());
   const [isBatchExporting, setIsBatchExporting] = useState(false);
@@ -459,6 +463,14 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
   }
 
   const closeVariableChecklist = () => {
+    if (variableChecklistPollRef.current) {
+      window.clearInterval(variableChecklistPollRef.current);
+      variableChecklistPollRef.current = null;
+    }
+    if (variableChecklistLongTimerRef.current) {
+      window.clearTimeout(variableChecklistLongTimerRef.current);
+      variableChecklistLongTimerRef.current = null;
+    }
     setVariableChecklistOpen(false);
     setVariableChecklistLoading(false);
     setVariableChecklistItem(null);
@@ -469,6 +481,8 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
     setVariableChecklistGenerating(false);
     setVariableChecklistLongRunning(false);
     setVariableChecklistProgress(0);
+    setVariableChecklistError(null);
+    setVariableChecklistJobId(null);
   };
 
   async function openVariableChecklist(item: ChecklistItem) {
@@ -481,6 +495,8 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
     setVariableChecklistOverrides({});
     setVariableChecklistLongRunning(false);
     setVariableChecklistProgress(0);
+    setVariableChecklistError(null);
+    setVariableChecklistJobId(null);
     try {
       const result = await apiFetchJson<DocumentPreviewResponse>(`/cases/${caseId}/documents/preview-variables`, {
         method: "POST",
@@ -492,6 +508,120 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
       closeVariableChecklist();
     } finally {
       setVariableChecklistLoading(false);
+    }
+  }
+
+  async function startVariableChecklistJob(args: { item: ChecklistItem; force: boolean; saveOverrides: boolean }): Promise<void> {
+    if (!args.item || args.item.kind !== "template" || typeof args.item.templateId !== "number") return;
+    if (variableChecklistPollRef.current) {
+      window.clearInterval(variableChecklistPollRef.current);
+      variableChecklistPollRef.current = null;
+    }
+    if (variableChecklistLongTimerRef.current) {
+      window.clearTimeout(variableChecklistLongTimerRef.current);
+      variableChecklistLongTimerRef.current = null;
+    }
+
+    setVariableChecklistError(null);
+    setVariableChecklistJobId(null);
+    setVariableChecklistProgress(5);
+    setVariableChecklistLongRunning(false);
+    variableChecklistLongTimerRef.current = window.setTimeout(() => setVariableChecklistLongRunning(true), 8000);
+
+    try {
+      if (args.saveOverrides) {
+        const base = savedOverridesAsStrings();
+        const edited = compactStringOverrides(variableChecklistOverrides);
+        const outgoing = { ...base, ...edited };
+        await apiFetchJson(`/cases/${caseId}/documents/variable-overrides`, {
+          method: "PUT",
+          body: JSON.stringify({ overrides: outgoing }),
+        });
+        await qc.invalidateQueries({ queryKey: ["case-documents-variable-overrides", caseId] });
+      }
+
+      const qs = new URLSearchParams();
+      if (args.force) qs.set("force", "true");
+      const created = await apiFetchJson<{ jobId: string; statusUrl: string; downloadUrl: string }>(
+        `/documents/automation/generate-job${qs.toString() ? `?${qs.toString()}` : ""}`,
+        {
+          method: "POST",
+          timeoutMs: 30000,
+          body: JSON.stringify({
+            caseIds: [caseId],
+            templateIds: [Number(args.item.templateId)],
+            config: { action: "download" },
+          }),
+        }
+      );
+
+      const jobId = typeof created?.jobId === "string" ? created.jobId : "";
+      if (!jobId) throw new Error("jobId is missing");
+      setVariableChecklistJobId(jobId);
+
+      const pollOnce = async (): Promise<void> => {
+        const status = await apiFetchJson<any>(`/documents/jobs/${jobId}`, { timeoutMs: 15000 });
+        const job = asRecord(status?.job) ?? {};
+        const items = Array.isArray(status?.items) ? status.items : [];
+        const total = typeof job.total_count === "number" ? job.total_count : Number(job.total_count ?? 0);
+        const success = typeof job.success_count === "number" ? job.success_count : Number(job.success_count ?? 0);
+        const failed = typeof job.failed_count === "number" ? job.failed_count : Number(job.failed_count ?? 0);
+        const done = Math.max(0, success + failed);
+        const pct = total > 0 ? Math.max(5, Math.min(99, Math.round((done / total) * 100))) : 5;
+        setVariableChecklistProgress(pct);
+
+        const st = String(job.status ?? "");
+        if (st === "completed") {
+          setVariableChecklistProgress(100);
+          await qc.invalidateQueries({ queryKey: ["case-documents", caseId] });
+          await qc.invalidateQueries({ queryKey: ["case-documents-checklist", caseId] });
+          try {
+            const a = document.createElement("a");
+            a.href = `/documents/jobs/${jobId}/download`;
+            a.rel = "noreferrer";
+            a.click();
+          } catch {
+          }
+          toast({ title: args.force ? "Draft downloaded" : "PDF generated" });
+          closeVariableChecklist();
+          return;
+        }
+        if (st === "failed") {
+          const msg = typeof job.error_summary === "string" ? job.error_summary : (items[0] && asRecord(items[0])?.error_message ? String(asRecord(items[0])?.error_message) : "Generation failed");
+          throw new Error(msg);
+        }
+      };
+
+      await pollOnce();
+      variableChecklistPollRef.current = window.setInterval(() => {
+        pollOnce().catch((e) => {
+          if (variableChecklistPollRef.current) {
+            window.clearInterval(variableChecklistPollRef.current);
+            variableChecklistPollRef.current = null;
+          }
+          if (variableChecklistLongTimerRef.current) {
+            window.clearTimeout(variableChecklistLongTimerRef.current);
+            variableChecklistLongTimerRef.current = null;
+          }
+          setVariableChecklistLongRunning(false);
+          setVariableChecklistProgress(0);
+          setVariableChecklistError(e instanceof Error ? e.message : "Generation failed");
+          setVariableChecklistGenerating(false);
+        });
+      }, 3000);
+    } catch (err) {
+      if (variableChecklistPollRef.current) {
+        window.clearInterval(variableChecklistPollRef.current);
+        variableChecklistPollRef.current = null;
+      }
+      if (variableChecklistLongTimerRef.current) {
+        window.clearTimeout(variableChecklistLongTimerRef.current);
+        variableChecklistLongTimerRef.current = null;
+      }
+      setVariableChecklistLongRunning(false);
+      setVariableChecklistProgress(0);
+      setVariableChecklistError(err instanceof Error ? err.message : "Generation failed");
+      throw err;
     }
   }
 
@@ -2054,6 +2184,11 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
                   <div className="mt-1 text-xs text-slate-600">
                     Placeholders: {variableChecklistResult.previewSummary.placeholdersCount} · Missing required: {variableChecklistResult.previewSummary.missingRequiredCount}
                   </div>
+                  {variableChecklistError ? (
+                    <div className="mt-2 text-xs font-medium text-red-700">
+                      Generation failed: {variableChecklistError}
+                    </div>
+                  ) : null}
                   {variableChecklistLongRunning ? (
                     <div className="mt-2 text-xs text-slate-600">
                       Still generating… download will start automatically when ready.
@@ -2197,48 +2332,32 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
                     onClick={async () => {
                       if (!variableChecklistItem || !variableChecklistResult) return;
                       setVariableChecklistGenerating(true);
+                      setVariableChecklistError(null);
                       try {
-                        const base = savedOverridesAsStrings();
-                        const edited = compactStringOverrides(variableChecklistOverrides);
-                        const outgoing = { ...base, ...edited };
-                        await apiFetchJson(`/cases/${caseId}/documents/variable-overrides`, {
-                          method: "PUT",
-                          body: JSON.stringify({ overrides: outgoing }),
-                        });
-                        await qc.invalidateQueries({ queryKey: ["case-documents-variable-overrides", caseId] });
-                        toast({ title: "Variables saved", description: `${Object.keys(outgoing).length} variables` });
-                        await handleGenerate(variableChecklistItem);
+                        await startVariableChecklistJob({ item: variableChecklistItem, force: false, saveOverrides: true });
                       } finally {
                         setVariableChecklistGenerating(false);
                       }
                     }}
                     disabled={!variableChecklistItem || !canGenerate || variableChecklistGenerating || isGenerating}
                   >
-                    Confirm & Generate
+                    Generate Final PDF
                   </Button>
                   <Button
                     variant="secondary"
                     onClick={async () => {
                       if (!variableChecklistItem || !variableChecklistResult) return;
                       setVariableChecklistGenerating(true);
+                      setVariableChecklistError(null);
                       try {
-                        const base = savedOverridesAsStrings();
-                        const edited = compactStringOverrides(variableChecklistOverrides);
-                        const outgoing = { ...base, ...edited };
-                        await apiFetchJson(`/cases/${caseId}/documents/variable-overrides`, {
-                          method: "PUT",
-                          body: JSON.stringify({ overrides: outgoing }),
-                        });
-                        await qc.invalidateQueries({ queryKey: ["case-documents-variable-overrides", caseId] });
-                        toast({ title: "Variables saved", description: `${Object.keys(outgoing).length} variables` });
-                        await handleGenerate(variableChecklistItem, undefined, { force: true });
+                        await startVariableChecklistJob({ item: variableChecklistItem, force: true, saveOverrides: false });
                       } finally {
                         setVariableChecklistGenerating(false);
                       }
                     }}
                     disabled={!variableChecklistItem || !canGenerate || variableChecklistGenerating || isGenerating}
                   >
-                    Download Draft
+                    Download Draft (Skip Checks)
                   </Button>
                 </div>
               </>
