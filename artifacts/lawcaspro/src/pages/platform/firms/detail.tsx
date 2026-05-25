@@ -14,6 +14,7 @@ import { QueryFallback } from "@/components/query-fallback";
 import { apiFetchJson } from "@/lib/api-client";
 import { toastError } from "@/lib/toast-error";
 import { unwrapApiData } from "@/lib/api-contract";
+import { useAuth } from "@/lib/auth-context";
 import { FirmMaintenanceTab } from "@/pages/platform/firms/maintenance-tab";
 import { FirmSnapshotsTab } from "@/pages/platform/firms/snapshots-tab";
 import { FirmActionHistoryTab } from "@/pages/platform/firms/history-tab";
@@ -37,6 +38,7 @@ interface FirmUser {
 
 function SupportSessionPanel({ firmId, firmName }: { firmId: number; firmName: string }) {
   const { toast } = useToast();
+  const { user } = useAuth();
   const qc = useQueryClient();
   const [reason, setReason] = useState("");
   const [pendingSetId, setPendingSetId] = useState<string | null>(null);
@@ -160,7 +162,9 @@ function SupportSessionPanel({ firmId, firmName }: { firmId: number; firmName: s
             </Button>
           </div>
           <div className="text-xs text-slate-500">
-            Maintenance / snapshots / restore require an approved session. Partner approval happens inside the firm workspace settings.
+            {user?.userType === "founder"
+              ? "Founder can run maintenance / snapshots / restore without waiting for a firm-approved support session."
+              : "Maintenance / snapshots / restore require an approved session. Partner approval happens inside the firm workspace settings."}
           </div>
         </div>
       </CardContent>
