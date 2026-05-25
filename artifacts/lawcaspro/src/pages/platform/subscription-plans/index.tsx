@@ -11,7 +11,7 @@ import { Badge } from "@/components/ui/badge";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Textarea } from "@/components/ui/textarea";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Switch } from "@/components/ui/switch";
 
 type Plan = {
@@ -26,12 +26,24 @@ type Plan = {
   updatedAt: string;
 };
 
-const stringifyJson = (v: unknown): string => {
-  try {
-    return JSON.stringify(v ?? {}, null, 2);
-  } catch {
-    return "{}";
+const FEATURE_CATALOG = [
+  { key: "allow_doc_automation", label: "Document Automation" },
+  { key: "allow_client_portal", label: "Client Portal" },
+  { key: "allow_accounting", label: "Accounting Module" },
+  { key: "custom_branding", label: "Custom Branding" },
+] as const;
+
+type FeatureKey = (typeof FEATURE_CATALOG)[number]["key"];
+
+const FEATURE_KEYS = new Set<string>(FEATURE_CATALOG.map((f) => f.key));
+
+const createFeatureState = (source?: Record<string, unknown> | null): Record<FeatureKey, boolean> => {
+  const s: Record<FeatureKey, boolean> = {} as Record<FeatureKey, boolean>;
+  for (const f of FEATURE_CATALOG) {
+    const v = source?.[f.key];
+    s[f.key] = v === true || v === "true" || v === 1 || v === "1";
   }
+  return s;
 };
 
 export default function PlatformSubscriptionPlansPage() {
@@ -45,7 +57,8 @@ export default function PlatformSubscriptionPlansPage() {
   const [maxUsers, setMaxUsers] = useState<string>("");
   const [maxCasesPerMonth, setMaxCasesPerMonth] = useState<string>("");
   const [isActive, setIsActive] = useState(true);
-  const [featuresText, setFeaturesText] = useState("{}");
+  const [features, setFeatures] = useState<Record<FeatureKey, boolean>>(() => createFeatureState({}));
+  const [extraFeatures, setExtraFeatures] = useState<Record<string, unknown>>({});
 
   const plansQuery = useQuery({
     queryKey: ["subscription-plans-admin"],
@@ -65,7 +78,8 @@ export default function PlatformSubscriptionPlansPage() {
     setMaxUsers("");
     setMaxCasesPerMonth("");
     setIsActive(true);
-    setFeaturesText("{}");
+    setFeatures(createFeatureState({}));
+    setExtraFeatures({});
   };
 
   const openCreate = () => {
@@ -74,14 +88,27 @@ export default function PlatformSubscriptionPlansPage() {
   };
 
   const openEdit = (p: Plan) => {
+    const rawFeatures =
+      p.features && typeof p.features === "object" && !Array.isArray(p.features)
+        ? (p.features as Record<string, unknown>)
+        : {};
     setEditing(p);
     setName(p.name ?? "");
     setPriceMonthly(String(p.priceMonthly ?? ""));
     setMaxUsers(p.maxUsers == null ? "" : String(p.maxUsers));
     setMaxCasesPerMonth(p.maxCasesPerMonth == null ? "" : String(p.maxCasesPerMonth));
     setIsActive(!!p.isActive);
-    setFeaturesText(stringifyJson(p.features));
+    setFeatures(createFeatureState(rawFeatures));
+    setExtraFeatures(Object.fromEntries(Object.entries(rawFeatures).filter(([k]) => !FEATURE_KEYS.has(k))));
     setOpen(true);
+  };
+
+  const setAllFeatures = (checked: boolean) => {
+    setFeatures(() => {
+      const next: Record<FeatureKey, boolean> = {} as Record<FeatureKey, boolean>;
+      for (const f of FEATURE_CATALOG) next[f.key] = checked;
+      return next;
+    });
   };
 
   const upsertMutation = useMutation({
@@ -90,21 +117,17 @@ export default function PlatformSubscriptionPlansPage() {
       if (!trimmedName) throw new Error("Name is required");
       const trimmedPrice = priceMonthly.trim();
       if (!trimmedPrice) throw new Error("Price is required");
-      let features: Record<string, unknown> = {};
-      try {
-        const parsed = JSON.parse(featuresText || "{}");
-        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("Features must be a JSON object");
-        features = parsed as Record<string, unknown>;
-      } catch (e) {
-        throw new Error(e instanceof Error ? e.message : "Invalid features JSON");
-      }
+      const featuresPayload: Record<string, unknown> = {
+        ...extraFeatures,
+        ...Object.fromEntries(FEATURE_CATALOG.map((f) => [f.key, !!features[f.key]])),
+      };
 
       const body = {
         name: trimmedName,
         priceMonthly: trimmedPrice,
         maxUsers: maxUsers.trim() ? Number(maxUsers) : null,
         maxCasesPerMonth: maxCasesPerMonth.trim() ? Number(maxCasesPerMonth) : null,
-        features,
+        features: featuresPayload,
         isActive,
       };
 
@@ -217,8 +240,33 @@ export default function PlatformSubscriptionPlansPage() {
               <Switch checked={isActive} onCheckedChange={setIsActive} />
             </div>
             <div className="space-y-2 md:col-span-2">
-              <Label>Features (JSON)</Label>
-              <Textarea value={featuresText} onChange={(e) => setFeaturesText(e.target.value)} className="min-h-[240px] font-mono text-xs" />
+              <div className="flex items-center justify-between">
+                <Label>Features</Label>
+                <div className="flex gap-2">
+                  <Button type="button" variant="outline" size="sm" onClick={() => setAllFeatures(true)} disabled={upsertMutation.isPending}>
+                    Select All
+                  </Button>
+                  <Button type="button" variant="outline" size="sm" onClick={() => setAllFeatures(false)} disabled={upsertMutation.isPending}>
+                    Deselect All
+                  </Button>
+                </div>
+              </div>
+
+              <div className="rounded border border-slate-200 p-3">
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                  {FEATURE_CATALOG.map((f) => (
+                    <label key={f.key} htmlFor={`feature-${f.key}`} className="flex items-center gap-2 text-sm text-slate-800">
+                      <Checkbox
+                        id={`feature-${f.key}`}
+                        checked={!!features[f.key]}
+                        onCheckedChange={(v) => setFeatures((prev) => ({ ...prev, [f.key]: v === true }))}
+                        disabled={upsertMutation.isPending}
+                      />
+                      <span>{f.label}</span>
+                    </label>
+                  ))}
+                </div>
+              </div>
             </div>
           </div>
 
@@ -233,4 +281,3 @@ export default function PlatformSubscriptionPlansPage() {
     </PlatformPage>
   );
 }
-
