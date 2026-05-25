@@ -68,6 +68,10 @@ type FirmDocumentTemplate = {
   is_template_capable: boolean;
 };
 
+const EMPTY_AUTOMATION_CASES: AutomationCaseRow[] = [];
+const EMPTY_FIRM_FOLDERS: FirmFolder[] = [];
+const EMPTY_FIRM_TEMPLATES: FirmDocumentTemplate[] = [];
+
 function parseFilenameFromContentDisposition(v: string | null): string | null {
   if (!v) return null;
   const m = /filename="([^"]+)"/i.exec(v);
@@ -140,9 +144,9 @@ export default function DocumentAutomationHub() {
     retry: false,
   });
 
-  const cases = casesQuery.data?.items ?? [];
-  const folders = foldersQuery.data ?? [];
-  const templates = templatesQuery.data ?? [];
+  const cases = casesQuery.data?.items ?? EMPTY_AUTOMATION_CASES;
+  const folders = foldersQuery.data ?? EMPTY_FIRM_FOLDERS;
+  const templates = templatesQuery.data ?? EMPTY_FIRM_TEMPLATES;
 
   const caseCacheById = useMemo(() => {
     const m = new Map<number, AutomationCaseRow>();

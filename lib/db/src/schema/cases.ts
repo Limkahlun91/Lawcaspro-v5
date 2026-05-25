@@ -175,6 +175,7 @@ export const caseAssignmentsTable = pgTable("case_assignments", {
 }, (t) => ({
   caseIdIdx: index("idx_case_assignments_case").on(t.caseId),
   userIdIdx: index("idx_case_assignments_user").on(t.userId),
+  userActiveCaseIdx: index("idx_case_assignments_user_active_case").on(t.userId, t.unassignedAt, t.caseId),
 }));
 
 export const caseWorkflowStepsTable = pgTable("case_workflow_steps", {
@@ -193,6 +194,7 @@ export const caseWorkflowStepsTable = pgTable("case_workflow_steps", {
 }, (t) => ({
   caseIdIdx: index("idx_workflow_steps_case").on(t.caseId),
   caseStatusIdx: index("idx_workflow_steps_case_status").on(t.caseId, t.status),
+  stepStatusCaseIdx: index("idx_case_workflow_steps_step_status_case").on(t.stepKey, t.status, t.caseId),
 }));
 
 export const caseNotesTable = pgTable("case_notes", {

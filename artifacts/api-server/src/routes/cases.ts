@@ -42,12 +42,15 @@ import { computeStampingSummary, deriveStampingItemStatus, type StampingItemInpu
 import { checkFirmQuota } from "../lib/quota.js";
 import { resolveSmartFilename } from "../lib/smartFileNaming.js";
 import { computeDashboardStats } from "../services/dashboard-stats.js";
+import { computeMilestonesSummary } from "../services/milestones-summary.js";
 
 const router: ExpressRouter = express.Router();
 const supabaseStorage = new SupabaseStorageService();
 
 type DbConn = typeof db | NonNullable<AuthRequest["rlsDb"]>;
 const rdb = (req: AuthRequest): DbConn => req.rlsDb ?? db;
+
+const milestonesSummaryCache = new Map<string, { expiresAt: number; payload: unknown }>();
 
 type CaseKeyDatesInsert = typeof caseKeyDatesTable.$inferInsert;
 
@@ -2126,11 +2129,21 @@ router.get("/cases/milestones-summary", requireAuthHandler, requireFirmUserHandl
       }
     }
 
-    const payload = await computeDashboardStats(r, req.firmId!, { assignedToUserId: targetUserId });
-    res.json({
+    const cacheKey = `${req.firmId!}:${targetUserId}`;
+    const now = Date.now();
+    const cached = milestonesSummaryCache.get(cacheKey);
+    if (cached && cached.expiresAt > now) {
+      res.json(cached.payload);
+      return;
+    }
+
+    const payload = await computeMilestonesSummary(r, req.firmId!, { assignedToUserId: targetUserId });
+    const resp = {
       milestoneSections: Array.isArray((payload as any)?.milestoneSections) ? (payload as any).milestoneSections : [],
       milestoneCards: Array.isArray((payload as any)?.milestoneCards) ? (payload as any).milestoneCards : [],
-    });
+    };
+    milestonesSummaryCache.set(cacheKey, { expiresAt: now + 30_000, payload: resp });
+    res.json(resp);
   } catch (err) {
     logger.error({ err, path: req.path, firmId: req.firmId, userId: req.userId }, "[cases.milestones-summary]");
     res.status(isTransientDbConnectionError(err) ? 503 : 500).json({ error: isTransientDbConnectionError(err) ? "Milestones temporarily unavailable" : "Internal Server Error" });

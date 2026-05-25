@@ -480,6 +480,7 @@ export default function CaseDetail() {
   const [stepNote, setStepNote] = useState("");
   const [shareTrackingOpen, setShareTrackingOpen] = useState(false);
   const [clientReplyDraft, setClientReplyDraft] = useState("");
+  const [editCaseOpen, setEditCaseOpen] = useState(false);
   const params = new URLSearchParams(searchString);
   const tabFromUrlRaw = params.get("tab") ?? "overview";
   const threadIdFromUrl = params.get("threadId");
@@ -1138,8 +1139,6 @@ export default function CaseDetail() {
     }
     return "";
   })();
-
-  const [editCaseOpen, setEditCaseOpen] = useState(false);
 
   const saveScope = (scope: "SPA" | "Loan" | "Bank / LU / NOA" | "Bank / LU" | "MOT / Completion") => {
     const tab: keyof typeof scopeKeys =

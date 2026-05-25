@@ -94,9 +94,12 @@ export default function Workbench() {
   const milestonesQuery = useQuery({
     queryKey: ["cases", "milestones-summary", milestonesTargetUserId],
     queryFn: ({ signal }) =>
-      apiFetchJson(`/cases/milestones-summary?assignedToUserId=${encodeURIComponent(String(milestonesTargetUserId))}`, { signal }) as Promise<Record<string, unknown>>,
-    retry: false,
+      apiFetchJson(`/cases/milestones-summary?assignedToUserId=${encodeURIComponent(String(milestonesTargetUserId))}`, { signal, timeoutMs: 30000 }) as Promise<Record<string, unknown>>,
+    retry: 1,
     enabled: tab === "my-work" && milestonesTargetUserId != null,
+    staleTime: 30_000,
+    gcTime: 5 * 60_000,
+    refetchOnWindowFocus: false,
   });
 
   useEffect(() => {
