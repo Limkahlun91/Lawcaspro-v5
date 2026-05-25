@@ -19,6 +19,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Checkbox } from "@/components/ui/checkbox";
 import { DOCUMENT_TYPE_LABELS } from "@workspace/documents-registry";
 import { QueryFallback } from "@/components/query-fallback";
+import { ErrorBoundary } from "@/components/common/error-boundary";
 import { apiFetchBlob, apiFetchJson } from "@/lib/api-client";
 import { downloadBlob } from "@/lib/download";
 import { toastError } from "@/lib/toast-error";
@@ -1394,25 +1395,27 @@ export default function DocumentTemplates() {
       </Dialog>
 
       {pdfMappingOpen && activeTemplate && activeIsPdf && pdfMappingPdfUrl ? (
-        <Suspense fallback={<div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center"><div className="bg-white rounded-lg p-6 text-sm text-slate-600">Loading PDF editor...</div></div>}>
-          <PdfMappingEditor
-            docId={activeTemplate.id}
-            docName={activeTemplate.name}
-            pdfUrl={pdfMappingPdfUrl}
-            mappingsGetUrl={`/document-templates/${activeTemplate.id}/pdf-mappings`}
-            mappingsPutUrl={`/document-templates/${activeTemplate.id}/pdf-mappings`}
-            variablesUrlPrimary="/document-variables?active=1"
-            variablesUrlFallback="/platform/document-variables?active=1"
-            onClose={() => {
-              setPdfMappingOpen(false);
-              setPdfMappingPdfUrl((prev) => {
-                if (prev) URL.revokeObjectURL(prev);
-                return "";
-              });
-              void qc.invalidateQueries({ queryKey: ["document-templates"] });
-            }}
-          />
-        </Suspense>
+        <ErrorBoundary title="PDF editor crashed" description="Retry or refresh. Your saved mappings remain in the system.">
+          <Suspense fallback={<div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center"><div className="bg-white rounded-lg p-6 text-sm text-slate-600">Loading PDF editor...</div></div>}>
+            <PdfMappingEditor
+              docId={activeTemplate.id}
+              docName={activeTemplate.name}
+              pdfUrl={pdfMappingPdfUrl}
+              mappingsGetUrl={`/document-templates/${activeTemplate.id}/pdf-mappings`}
+              mappingsPutUrl={`/document-templates/${activeTemplate.id}/pdf-mappings`}
+              variablesUrlPrimary="/document-variables?active=1"
+              variablesUrlFallback="/platform/document-variables?active=1"
+              onClose={() => {
+                setPdfMappingOpen(false);
+                setPdfMappingPdfUrl((prev) => {
+                  if (prev) URL.revokeObjectURL(prev);
+                  return "";
+                });
+                void qc.invalidateQueries({ queryKey: ["document-templates"] });
+              }}
+            />
+          </Suspense>
+        </ErrorBoundary>
       ) : null}
 
       {/* Upload Dialog */}

@@ -25,6 +25,7 @@ import CaseDocumentsTab from "./components/CaseDocumentsTab";
 import CaseBillingTab from "./components/CaseBillingTab";
 import CaseCommunicationsTab from "./components/CaseCommunicationsTab";
 import CaseComplianceTab from "./components/CaseComplianceTab";
+import { ErrorBoundary } from "@/components/common/error-boundary";
 import { CaseFormModal, mapCaseToFormValues } from "./components/case-form/CaseFormModal";
 import { QueryFallback } from "@/components/query-fallback";
 import { toastError } from "@/lib/toast-error";
@@ -2656,7 +2657,9 @@ export default function CaseDetail() {
         </TabsContent>
 
         <TabsContent value="documents">
-          <CaseDocumentsTab caseId={caseId} />
+          <ErrorBoundary title="Documents tab crashed" description="This error is isolated to the Documents tab. Retry or refresh to continue.">
+            <CaseDocumentsTab caseId={caseId} />
+          </ErrorBoundary>
         </TabsContent>
 
         <TabsContent value="billing">

@@ -495,7 +495,7 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
     }
   }
 
-  async function handleGenerate(item: ChecklistItem, overrides?: Record<string, string>) {
+  async function handleGenerate(item: ChecklistItem, overrides?: Record<string, string>, opts?: { force?: boolean }) {
     const isLetterLike = isFirmDocumentTypeLetterLike(item.documentType);
 
     if (isLetterLike && activeLetterheads.length === 0) {
@@ -525,7 +525,10 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
         }, 400);
       } catch {
       }
-      created = await apiFetchJson(`/cases/${caseId}/documents/generate`, {
+      const qs = new URLSearchParams();
+      if (opts?.force) qs.set("force", "true");
+      const url = `/cases/${caseId}/documents/generate${qs.toString() ? `?${qs.toString()}` : ""}`;
+      created = await apiFetchJson(url, {
         method: "POST",
         timeoutMs: 120000,
         body: JSON.stringify({
@@ -2212,6 +2215,30 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
                     disabled={!variableChecklistItem || !canGenerate || variableChecklistGenerating || isGenerating}
                   >
                     Confirm & Generate
+                  </Button>
+                  <Button
+                    variant="secondary"
+                    onClick={async () => {
+                      if (!variableChecklistItem || !variableChecklistResult) return;
+                      setVariableChecklistGenerating(true);
+                      try {
+                        const base = savedOverridesAsStrings();
+                        const edited = compactStringOverrides(variableChecklistOverrides);
+                        const outgoing = { ...base, ...edited };
+                        await apiFetchJson(`/cases/${caseId}/documents/variable-overrides`, {
+                          method: "PUT",
+                          body: JSON.stringify({ overrides: outgoing }),
+                        });
+                        await qc.invalidateQueries({ queryKey: ["case-documents-variable-overrides", caseId] });
+                        toast({ title: "Variables saved", description: `${Object.keys(outgoing).length} variables` });
+                        await handleGenerate(variableChecklistItem, undefined, { force: true });
+                      } finally {
+                        setVariableChecklistGenerating(false);
+                      }
+                    }}
+                    disabled={!variableChecklistItem || !canGenerate || variableChecklistGenerating || isGenerating}
+                  >
+                    Download Draft
                   </Button>
                 </div>
               </>

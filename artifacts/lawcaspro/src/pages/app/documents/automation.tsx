@@ -480,7 +480,7 @@ export default function DocumentAutomationHub() {
     setBundleMessage(`Quick Select Bundle: ${bundleName}`);
   }
 
-  async function runGenerate(mode: "download" | "print") {
+  async function runGenerate(mode: "download" | "print", opts?: { force?: boolean }) {
     if (selectedCaseIds.length === 0) {
       toast({ title: "Please select at least one case" });
       return;
@@ -493,7 +493,7 @@ export default function DocumentAutomationHub() {
     setBusy(true);
     let startedJob = false;
     try {
-      if (preflightEnabled) {
+      if (preflightEnabled && !opts?.force) {
         const preflight = await preflightQuery.refetch();
         if (preflight.error) {
           throw preflight.error;
@@ -521,7 +521,8 @@ export default function DocumentAutomationHub() {
         },
       };
 
-      const data = await apiFetchJson<any>("/documents/automation/generate-job", {
+      const forceQs = opts?.force ? "?force=true" : "";
+      const data = await apiFetchJson<any>(`/documents/automation/generate-job${forceQs}`, {
         method: "POST",
         body: JSON.stringify(payload),
         timeoutMs: 60000,
@@ -530,7 +531,7 @@ export default function DocumentAutomationHub() {
       if (!nextJobId) throw new Error("Missing jobId");
       setJobId(nextJobId);
       startedJob = true;
-      toast({ title: "Generation started", description: "Processing in background. This page will auto-download when ready." });
+      toast({ title: "Generation started", description: opts?.force ? "Draft mode enabled. Missing fields will be marked in the output." : "Processing in background. This page will auto-download when ready." });
     } catch (err) {
       toastError(toast, err);
     } finally {
@@ -834,9 +835,14 @@ export default function DocumentAutomationHub() {
                           </AlertDescription>
                         </Alert>
                       )}
-                      <Button disabled={busy} className="w-full" onClick={() => runGenerate("download")}>
-                        {busy ? "Generating..." : "Generate & Download"}
-                      </Button>
+                      <div className="grid grid-cols-2 gap-3">
+                        <Button disabled={busy} className="w-full" onClick={() => runGenerate("download")}>
+                          {busy ? "Generating..." : "Generate & Download"}
+                        </Button>
+                        <Button disabled={busy} className="w-full" variant="outline" onClick={() => runGenerate("download", { force: true })}>
+                          {busy ? "Generating..." : "Download Draft"}
+                        </Button>
+                      </div>
                     </TabsContent>
 
                     <TabsContent value="print" className="mt-4 space-y-4">

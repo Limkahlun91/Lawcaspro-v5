@@ -23,6 +23,7 @@ import { cn } from "@/lib/utils";
 import { ChevronRight, Download, FileText, Folder, FolderOpen, Pencil, Plus, Trash2, Upload } from "lucide-react";
 import { DOCUMENT_TYPE_LABELS } from "@workspace/documents-registry";
 import { QueryFallback } from "@/components/query-fallback";
+import { ErrorBoundary } from "@/components/common/error-boundary";
 import { toastError } from "@/lib/toast-error";
 import { apiFetchBlob, apiFetchJson } from "@/lib/api-client";
 import { downloadBlob } from "@/lib/download";
@@ -588,25 +589,27 @@ export default function FirmDocuments() {
       </Card>
 
       {pdfMappingOpen && pdfMappingDoc && isPdfDoc(pdfMappingDoc) && pdfMappingPdfUrl ? (
-        <Suspense fallback={<div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center"><div className="bg-white rounded-lg p-6 text-sm text-slate-600">Loading PDF editor...</div></div>}>
-          <PdfMappingEditor
-            docId={pdfMappingDoc.id}
-            docName={pdfMappingDoc.name}
-            pdfUrl={pdfMappingPdfUrl}
-            mappingsGetUrl={`/document-templates/${pdfMappingDoc.id}/pdf-mappings`}
-            mappingsPutUrl={`/document-templates/${pdfMappingDoc.id}/pdf-mappings`}
-            variablesUrlPrimary="/document-variables?active=1"
-            variablesUrlFallback="/platform/document-variables?active=1"
-            onClose={() => {
-              setPdfMappingOpen(false);
-              setPdfMappingPdfUrl((prev) => {
-                if (prev) URL.revokeObjectURL(prev);
-                return "";
-              });
-              void qc.invalidateQueries({ queryKey: ["firm-documents"] });
-            }}
-          />
-        </Suspense>
+        <ErrorBoundary title="PDF editor crashed" description="Retry or refresh. Your saved mappings remain in the system.">
+          <Suspense fallback={<div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center"><div className="bg-white rounded-lg p-6 text-sm text-slate-600">Loading PDF editor...</div></div>}>
+            <PdfMappingEditor
+              docId={pdfMappingDoc.id}
+              docName={pdfMappingDoc.name}
+              pdfUrl={pdfMappingPdfUrl}
+              mappingsGetUrl={`/document-templates/${pdfMappingDoc.id}/pdf-mappings`}
+              mappingsPutUrl={`/document-templates/${pdfMappingDoc.id}/pdf-mappings`}
+              variablesUrlPrimary="/document-variables?active=1"
+              variablesUrlFallback="/platform/document-variables?active=1"
+              onClose={() => {
+                setPdfMappingOpen(false);
+                setPdfMappingPdfUrl((prev) => {
+                  if (prev) URL.revokeObjectURL(prev);
+                  return "";
+                });
+                void qc.invalidateQueries({ queryKey: ["firm-documents"] });
+              }}
+            />
+          </Suspense>
+        </ErrorBoundary>
       ) : null}
 
       <Dialog open={createFolderOpen} onOpenChange={setCreateFolderOpen}>

@@ -412,11 +412,11 @@ function fillMissingScalarsForRender(placeholders: string[], input: Record<strin
     const v = out[k];
     if (Array.isArray(v)) continue;
     if (v === null || v === undefined) {
-      out[k] = "____";
+      out[k] = `[MISSING: ${k}]`;
       continue;
     }
     if (typeof v === "string" && v.trim() === "") {
-      out[k] = "____";
+      out[k] = `[MISSING: ${k}]`;
       continue;
     }
   }
@@ -5550,9 +5550,9 @@ async function renderPdfTextBoxMappedTemplate(args: { pdfBytes: Buffer; data: Re
         let text = tb.content || "";
         text = text.replace(/\{\{\s*([a-zA-Z0-9_.-]+)\s*\}\}/g, (_m: string, key: string) => {
           const val = (args.data as Record<string, unknown>)[key];
-          if (val === undefined || val === null) return "____";
+          if (val === undefined || val === null) return `[MISSING: ${key}]`;
           const s = String(val);
-          return s.trim() ? s : "____";
+          return s.trim() ? s : `[MISSING: ${key}]`;
         });
         const fontSize = tb.fontSize || 10;
         const pdfY = pageHeight - tb.y - fontSize;
@@ -5610,7 +5610,8 @@ async function renderPdfMappedTemplate(args: { pdfBytes: Buffer; data: Record<st
 
     for (const m of mappings) {
       const raw = (args.data as any)[m.key];
-      const value = raw === null || raw === undefined ? "" : String(raw);
+      const valueRaw = raw === null || raw === undefined ? `[MISSING: ${m.key}]` : String(raw);
+      const value = valueRaw.trim() ? valueRaw : `[MISSING: ${m.key}]`;
       const page = pdf.getPage(m.page - 1);
       if (!page) continue;
       const font = await getFont(m.fontFamily);
@@ -5654,6 +5655,7 @@ async function generateFirmDocument({
   letterheadId,
   runId,
   bypassApplicability,
+  force,
   clauses,
   overrides,
   outputFormat,
@@ -5670,10 +5672,12 @@ async function generateFirmDocument({
   letterheadId?: number | null;
   runId: number;
   bypassApplicability?: boolean;
+  force?: boolean;
   clauses?: SelectedClauseRef[];
   overrides?: Record<string, unknown> | null;
   outputFormat?: "docx" | "pdf";
 }): Promise<{ caseDocument: Record<string, unknown>; caseDocumentId: number | null; templateVersionId: number | null; checklistSnapshot: unknown; readinessSnapshot: unknown; renderedVars: unknown; outputBytes?: Buffer; outputContentType?: string; }> {
+  const forceMode = Boolean(force);
   const cache = createRequestCache();
   const [templateRows, context] = await Promise.all([
     queryRowsCached(r, cache, `document_templates:${firmId}:${templateId}`, sql`SELECT * FROM document_templates WHERE id = ${templateId} AND firm_id = ${firmId}`),
@@ -5735,7 +5739,7 @@ async function generateFirmDocument({
     applicabilityRules: (template as any).applicability_rules,
   });
   const overrideUsed = Boolean(bypassApplicability && applicability.manuallyOverridable && applicability.applicabilityStatus === "not_applicable");
-  if (applicability.applicabilityStatus === "not_applicable") {
+  if (!forceMode && applicability.applicabilityStatus === "not_applicable") {
     if (applicability.modeUsed === "rules_only") {
       await writeAuditLog({ firmId, actorId, actorType, action: "documents.case.generate.blocked", entityType: "document_template", entityId: templateId, detail: `applicabilityStatus=not_applicable mode=${applicability.modeUsed} overrideUsed=0 reasons=${applicability.applicabilityReasons.join("|")}`, ipAddress, userAgent });
       throw new DocumentGenerationError(422, "TEMPLATE_APPLICABILITY_BLOCKED", "Template blocked by applicability", { reasons: applicability.applicabilityReasons, mode: applicability.modeUsed });
@@ -5785,7 +5789,7 @@ async function generateFirmDocument({
     documentGroup: String((template as any).document_group ?? "Others"),
     input: readinessInput,
   });
-  if (readiness.status !== "ready") throw new DocumentGenerationError(422, "TEMPLATE_NOT_READY", "Template not ready", { status: readiness.status, missing: readiness.missing });
+  if (!forceMode && readiness.status !== "ready") throw new DocumentGenerationError(422, "TEMPLATE_NOT_READY", "Template not ready", { status: readiness.status, missing: readiness.missing });
 
   const templateVersionId = await ensureFirmTemplatePublishedVersionId(r, firmId, templateId, actorId);
   await queryRows(r, sql`UPDATE document_generation_runs SET template_version_id = ${templateVersionId} WHERE id = ${runId} AND firm_id = ${firmId}`);
@@ -5858,7 +5862,7 @@ async function generateFirmDocument({
     placeholders: effectivePlaceholders,
     overrides: mergedOverrides,
   });
-  if (preview.usedMode === "bindings" && preview.missingRequiredVariables.length > 0) {
+  if (!forceMode && preview.usedMode === "bindings" && preview.missingRequiredVariables.length > 0) {
     throw new DocumentGenerationError(422, "TEMPLATE_BINDING_MISSING", "Missing required variables", { missingRequiredVariables: preview.missingRequiredVariables });
   }
   let input: Record<string, unknown> = preview.usedMode === "bindings" ? preview.resolvedVariables : (context as any);
@@ -5975,7 +5979,7 @@ async function generateFirmDocument({
       && checklistEval.checklistStatus === "blocked"
     );
     const checklistMode = normalizeChecklistMode((template as any).checklist_mode);
-    if (checklistEval.checklistStatus === "blocked") {
+    if (!forceMode && checklistEval.checklistStatus === "blocked") {
       if (checklistMode === "required_to_generate") {
         await writeAuditLog({ firmId, actorId, actorType, action: "documents.case.generate.blocked", entityType: "document_template", entityId: templateId, detail: `checklistStatus=blocked mode=${checklistMode} overrideUsed=0 missing=${checklistEval.missingRequiredItems}`, ipAddress, userAgent });
         throw new DocumentGenerationError(422, "TEMPLATE_CHECKLIST_BLOCKED", "Template blocked by checklist", { checklist: checklistEval, mode: checklistMode });
@@ -6004,7 +6008,15 @@ async function generateFirmDocument({
       throw new DocumentGenerationError(400, "TEMPLATE_FILE_BUFFER_MISSING", "Template file buffer is missing or corrupted in the database.");
     }
     const zip = new PizZip(fileContents);
-    const doc = new Docxtemplater(zip, { paragraphLoop: true, linebreaks: true });
+    const doc = new Docxtemplater(zip, {
+      paragraphLoop: true,
+      linebreaks: true,
+      delimiters: { start: "{{", end: "}}" },
+      nullGetter(part: any) {
+        const k = typeof part?.value === "string" ? String(part.value) : "";
+        return k ? `[MISSING: ${k}]` : "";
+      },
+    });
     attachDocxImageModule(doc);
     await maybeHydrateFirmLogoBuffer(input as any);
     try {
@@ -6404,7 +6416,15 @@ async function generateMasterDocument({
       throw new DocumentGenerationError(400, "TEMPLATE_FILE_BUFFER_MISSING", "Template file buffer is missing or corrupted in the database.");
     }
     const zip = new PizZip(bytesForRender);
-    const doc = new Docxtemplater(zip, { paragraphLoop: true, linebreaks: true });
+    const doc = new Docxtemplater(zip, {
+      paragraphLoop: true,
+      linebreaks: true,
+      delimiters: { start: "{{", end: "}}" },
+      nullGetter(part: any) {
+        const k = typeof part?.value === "string" ? String(part.value) : "";
+        return k ? `[MISSING: ${k}]` : "";
+      },
+    });
     attachDocxImageModule(doc);
     await maybeHydrateFirmLogoBuffer(renderInput as any);
     try {
@@ -6470,9 +6490,9 @@ async function generateMasterDocument({
           let text = tb.content || "";
           text = text.replace(/\{\{\s*([a-zA-Z0-9_.-]+)\s*\}\}/g, (_m: string, key: string) => {
             const val = (renderInput as Record<string, unknown>)[key];
-            if (val === undefined || val === null) return "____";
+            if (val === undefined || val === null) return `[MISSING: ${key}]`;
             const s = String(val);
-            return s.trim() ? s : "____";
+            return s.trim() ? s : `[MISSING: ${key}]`;
           });
           const fontSize = tb.fontSize || 10;
           const pdfY = pageHeight - tb.y - fontSize;
@@ -7403,6 +7423,36 @@ router.post("/documents/automation/preflight", requireAuth, requireFirmUser, req
   res.json(report);
 });
 
+const activeDocumentGenerationJobRunners = new Set<string>();
+
+function startDocumentGenerationJobRunner(r: DbConn, args: { firmId: number; jobId: string }): void {
+  const key = `${args.firmId}:${args.jobId}`;
+  if (activeDocumentGenerationJobRunners.has(key)) return;
+  activeDocumentGenerationJobRunners.add(key);
+  void (async () => {
+    try {
+      for (let i = 0; i < 10_000; i++) {
+        await processAutomationGenerationJobStep(r, args);
+        const rows = await queryRows(r, sql`
+          SELECT status, pending_count
+          FROM document_generation_jobs
+          WHERE id = ${args.jobId}::uuid AND firm_id = ${args.firmId}
+          LIMIT 1
+        `);
+        const job = rows[0] as any;
+        const status = String(job?.status ?? "");
+        const pending = Number(job?.pending_count ?? 0);
+        if (status === "completed" || status === "failed" || pending <= 0) return;
+        await new Promise((resolve) => setTimeout(resolve, 250));
+      }
+    } catch (e) {
+      console.error(e);
+    } finally {
+      activeDocumentGenerationJobRunners.delete(key);
+    }
+  })();
+}
+
 async function processAutomationGenerationJobStep(r: DbConn, args: { firmId: number; jobId: string }): Promise<void> {
   const jobRows = await queryRows(r, sql`
     SELECT *
@@ -7564,6 +7614,7 @@ async function processAutomationGenerationJobStep(r: DbConn, args: { firmId: num
   const templateId = Number((item as any).template_id);
 
   const actorId = reqIdToNumber((job as any).created_by);
+  const force = Boolean((job as any)?.config && typeof (job as any).config === "object" && (job as any).config.force);
   const runId = await createGenerationRun(r, {
     firm_id: args.firmId,
     case_id: caseId,
@@ -7593,6 +7644,7 @@ async function processAutomationGenerationJobStep(r: DbConn, args: { firmId: num
       caseId,
       templateId,
       runId,
+      force,
       outputFormat: "pdf",
     });
     await finishGenerationRunSuccess(r, args.firmId, runId, out.caseDocumentId, out.renderedVars, out.checklistSnapshot, out.readinessSnapshot);
@@ -7707,18 +7759,25 @@ router.post("/documents/automation/generate-job", requireAuth, requireFirmUser, 
     return;
   }
 
-  const preflight = await runAutomationPreflight({
-    r,
-    firmId: req.firmId!,
-    caseIds,
-    templates: templateRows.map((t) => ({ id: Number((t as any).id), name: String((t as any).name ?? "") })),
-  });
-  if (preflight.critical) {
-    res.status(422).json({ error: "Missing required case data", code: "MISSING_REQUIRED_DATA", report: preflight });
-    return;
+  const qForce = String(one((req.query as any).force) ?? "").trim().toLowerCase();
+  const force = qForce === "1" || qForce === "true" || qForce === "yes";
+  const qValidate = String(one((req.query as any).validate) ?? "").trim().toLowerCase();
+  const validate = qValidate === "1" || qValidate === "true" || qValidate === "yes";
+  if (validate && !force) {
+    const preflight = await runAutomationPreflight({
+      r,
+      firmId: req.firmId!,
+      caseIds,
+      templates: templateRows.map((t) => ({ id: Number((t as any).id), name: String((t as any).name ?? "") })),
+    });
+    if (preflight.critical) {
+      res.status(422).json({ error: "Missing required case data", code: "MISSING_REQUIRED_DATA", report: preflight });
+      return;
+    }
   }
 
   const jobId = randomUUID();
+  const jobConfig = { ...parsed.data.config, force, createdRoleId: req.roleId ?? null };
   await queryRows(r, sql`
     INSERT INTO document_generation_jobs (
       id, firm_id, job_type, status, action, case_ids, template_ids, config,
@@ -7726,7 +7785,7 @@ router.post("/documents/automation/generate-job", requireAuth, requireFirmUser, 
       created_by, created_at
     ) VALUES (
       ${jobId}::uuid, ${req.firmId!}, 'document_automation', 'pending', ${parsed.data.config.action},
-      ${caseIds as any}, ${templateIds as any}, ${parsed.data.config as any},
+      ${caseIds as any}, ${templateIds as any}, ${jobConfig as any},
       ${caseIds.length * templateIds.length}, 0, 0, ${caseIds.length * templateIds.length},
       ${req.userId as any}, now()
     )
@@ -7740,10 +7799,7 @@ router.post("/documents/automation/generate-job", requireAuth, requireFirmUser, 
     }
   }
 
-  setTimeout(() => {
-    processAutomationGenerationJobStep(r, { firmId: req.firmId!, jobId })
-      .catch((e) => console.error(e));
-  }, 0);
+  startDocumentGenerationJobRunner(r, { firmId: req.firmId!, jobId });
 
   res.status(202).json({
     jobId,
@@ -7761,7 +7817,7 @@ router.get("/documents/jobs/:jobId", requireAuth, requireFirmUser, requirePermis
     return;
   }
 
-  await processAutomationGenerationJobStep(r, { firmId: req.firmId!, jobId });
+  startDocumentGenerationJobRunner(r, { firmId: req.firmId!, jobId });
 
   const jobs = await queryRows(r, sql`SELECT * FROM document_generation_jobs WHERE id = ${jobId}::uuid AND firm_id = ${req.firmId!}`);
   const job = jobs[0];
@@ -8981,11 +9037,20 @@ router.post("/cases/:caseId/documents/preview", requireAuth, requireFirmUser, re
           if (!Buffer.isBuffer(bytes) || bytes.length === 0) {
             throw new DocumentGenerationError(400, "TEMPLATE_FILE_BUFFER_MISSING", "Template file buffer is missing or corrupted in the database.");
           }
+          const inputForRender = fillMissingScalarsForRender(placeholders, input);
           const zip = new PizZip(bytes);
-          const doc = new Docxtemplater(zip, { paragraphLoop: true, linebreaks: true });
+          const doc = new Docxtemplater(zip, {
+            paragraphLoop: true,
+            linebreaks: true,
+            delimiters: { start: "{{", end: "}}" },
+            nullGetter(part: any) {
+              const k = typeof part?.value === "string" ? String(part.value) : "";
+              return k ? `[MISSING: ${k}]` : "";
+            },
+          });
           attachDocxImageModule(doc);
-          await maybeHydrateFirmLogoBuffer(input as any);
-          doc.render(input);
+          await maybeHydrateFirmLogoBuffer(inputForRender as any);
+          doc.render(inputForRender);
         } catch (err) {
           console.error(err);
           renderable = false;
@@ -9511,6 +9576,8 @@ router.post("/cases/:caseId/documents/generate", requireAuth, requireFirmUser, r
   const safeOverrides = (overrides && typeof overrides === "object" && !Array.isArray(overrides)) ? overrides : null;
   const fmt = String(one((req.query as any).format) ?? "").trim().toLowerCase();
   const wantPdf = fmt === "pdf";
+  const qForce = String(one((req.query as any).force) ?? "").trim().toLowerCase();
+  const force = qForce === "1" || qForce === "true" || qForce === "yes";
 
   const runId = await createGenerationRun(r, {
     firm_id: req.firmId!,
@@ -9545,6 +9612,7 @@ router.post("/cases/:caseId/documents/generate", requireAuth, requireFirmUser, r
       letterheadId,
       runId,
       bypassApplicability: bypass,
+      force,
       clauses,
       overrides: safeOverrides,
       outputFormat: wantPdf ? "pdf" : undefined,
