@@ -3351,6 +3351,62 @@ router.get("/document-templates/:templateId/download", requireAuth, requireFirmU
   }
 });
 
+router.get("/document-templates/:templateId/pdf-mappings", requireAuth, requireFirmUser, requirePermission("documents", "update"), async (req: AuthRequest, res): Promise<void> => {
+  const r = getRlsDb(req, res);
+  if (!r) return;
+  const templateIdStr = one((req.params as any).templateId);
+  const templateId = templateIdStr ? parseInt(templateIdStr, 10) : NaN;
+  if (Number.isNaN(templateId)) {
+    res.status(400).json({ error: "Invalid template ID" });
+    return;
+  }
+  const rows = await queryRows(r, sql`
+    SELECT id, firm_id, extension, pdf_mapping_config
+    FROM document_templates
+    WHERE id = ${templateId} AND firm_id = ${req.firmId!}
+  `);
+  const doc = rows[0];
+  if (!doc) {
+    res.status(404).json({ error: "Template not found" });
+    return;
+  }
+  const ext = typeof (doc as any).extension === "string" ? String((doc as any).extension) : "";
+  if (ext.toLowerCase() !== "pdf") {
+    res.status(409).json({ error: "Template is not a PDF" });
+    return;
+  }
+  res.json({ mappings: (doc as any).pdf_mapping_config ?? { pages: [] } });
+});
+
+router.put("/document-templates/:templateId/pdf-mappings", requireAuth, requireFirmUser, requirePermission("documents", "update"), async (req: AuthRequest, res): Promise<void> => {
+  const r = getRlsDb(req, res);
+  if (!r) return;
+  const templateIdStr = one((req.params as any).templateId);
+  const templateId = templateIdStr ? parseInt(templateIdStr, 10) : NaN;
+  if (Number.isNaN(templateId)) {
+    res.status(400).json({ error: "Invalid template ID" });
+    return;
+  }
+  const body = req.body as Record<string, unknown>;
+  const mappings = body?.mappings;
+  if (!mappings || typeof mappings !== "object" || Array.isArray(mappings)) {
+    res.status(400).json({ error: "Invalid mappings" });
+    return;
+  }
+  const rows = await queryRows(r, sql`
+    UPDATE document_templates
+    SET pdf_mapping_config = ${mappings as any}, updated_at = now()
+    WHERE id = ${templateId} AND firm_id = ${req.firmId!}
+    RETURNING id, pdf_mapping_config
+  `);
+  if (!rows[0]) {
+    res.status(404).json({ error: "Template not found" });
+    return;
+  }
+  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.template.update_pdf_mappings", entityType: "document_template", entityId: templateId, detail: `templateId=${templateId}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+  res.json({ mappings: (rows[0] as any).pdf_mapping_config ?? { pages: [] } });
+});
+
 router.delete("/document-templates/:templateId", requireAuth, requireFirmUser, requirePermission("documents", "delete"), async (req: AuthRequest, res): Promise<void> => {
   const r = getRlsDb(req, res);
   if (!r) return;
@@ -5433,6 +5489,99 @@ function wrapPdfLines(text: string, font: any, fontSize: number, maxWidth: numbe
   return lines.length ? lines : [t];
 }
 
+function isPdfTextBoxMappings(v: unknown): v is {
+  pages: Array<{
+    pageIndex: number;
+    textBoxes: Array<{
+      id: string;
+      x: number;
+      y: number;
+      width: number;
+      height: number;
+      fontSize: number;
+      content: string;
+      alignment?: "left" | "center" | "right";
+      fontFamily?: "Helvetica" | "Times-Roman" | "Courier";
+    }>;
+  }>;
+} {
+  if (!v || typeof v !== "object" || Array.isArray(v)) return false;
+  const pages = (v as any).pages;
+  if (!Array.isArray(pages)) return false;
+  const first = pages[0] as any;
+  if (!first) return true;
+  if (typeof first !== "object" || Array.isArray(first)) return false;
+  if (typeof first.pageIndex !== "number") return false;
+  if (!Array.isArray(first.textBoxes)) return false;
+  return true;
+}
+
+async function renderPdfTextBoxMappedTemplate(args: { pdfBytes: Buffer; data: Record<string, unknown>; mappings: unknown }): Promise<Buffer> {
+  if (!Buffer.isBuffer(args.pdfBytes) || args.pdfBytes.length === 0) {
+    throw new DocumentGenerationError(400, "TEMPLATE_FILE_BUFFER_MISSING", "Template file buffer is missing or corrupted in the database.");
+  }
+  if (!isPdfTextBoxMappings(args.mappings) || !args.mappings.pages.length) return args.pdfBytes;
+  try {
+    const pdfDoc = await PDFDocument.load(args.pdfBytes);
+    const fontCache = new Map<"Helvetica" | "Times-Roman" | "Courier", any>();
+    const getFont = async (family?: string) => {
+      const f =
+        family === "Times-Roman" || family === "Courier" || family === "Helvetica"
+          ? (family as "Helvetica" | "Times-Roman" | "Courier")
+          : "Helvetica";
+      const cached = fontCache.get(f);
+      if (cached) return cached;
+      const font =
+        f === "Times-Roman"
+          ? await pdfDoc.embedFont(StandardFonts.TimesRoman)
+          : f === "Courier"
+            ? await pdfDoc.embedFont(StandardFonts.Courier)
+            : await pdfDoc.embedFont(StandardFonts.Helvetica);
+      fontCache.set(f, font);
+      return font;
+    };
+    const pages = pdfDoc.getPages();
+    for (const pageMapping of args.mappings.pages) {
+      const page = pages[pageMapping.pageIndex];
+      if (!page) continue;
+      const pageHeight = page.getHeight();
+      for (const tb of pageMapping.textBoxes) {
+        const font = await getFont(tb.fontFamily);
+        let text = tb.content || "";
+        text = text.replace(/\{\{\s*([a-zA-Z0-9_.-]+)\s*\}\}/g, (_m: string, key: string) => {
+          const val = (args.data as Record<string, unknown>)[key];
+          if (val === undefined || val === null) return "____";
+          const s = String(val);
+          return s.trim() ? s : "____";
+        });
+        const fontSize = tb.fontSize || 10;
+        const pdfY = pageHeight - tb.y - fontSize;
+        const pdfYBottom = pageHeight - tb.y - tb.height;
+        const lines = wrapText(text, font, fontSize, tb.width);
+        let currentY = pdfY;
+        const align = tb.alignment === "center" || tb.alignment === "right" ? tb.alignment : "left";
+        for (const line of lines) {
+          if (currentY < pdfYBottom) break;
+          const textWidth = font.widthOfTextAtSize(line, fontSize);
+          const x =
+            align === "center"
+              ? Math.max(tb.x, tb.x + (tb.width - textWidth) / 2)
+              : align === "right"
+                ? Math.max(tb.x, tb.x + (tb.width - textWidth))
+                : tb.x;
+          page.drawText(line, { x, y: currentY, size: fontSize, font, color: rgb(0, 0, 0) });
+          currentY -= fontSize * 1.3;
+        }
+      }
+    }
+    const pdfBytes = await pdfDoc.save();
+    return Buffer.from(pdfBytes);
+  } catch (err) {
+    if (err instanceof DocumentGenerationError) throw err;
+    throw new DocumentGenerationError(422, "PDF_TEMPLATE_RENDER_FAILED", "PDF template render failed", { details: err instanceof Error ? err.message : String(err) });
+  }
+}
+
 async function renderPdfMappedTemplate(args: { pdfBytes: Buffer; data: Record<string, unknown>; mappingConfig: unknown }): Promise<Buffer> {
   if (!Buffer.isBuffer(args.pdfBytes) || args.pdfBytes.length === 0) {
     throw new DocumentGenerationError(400, "TEMPLATE_FILE_BUFFER_MISSING", "Template file buffer is missing or corrupted in the database.");
@@ -5844,9 +5993,11 @@ async function generateFirmDocument({
   if (templateExt === "pdf") {
     outFormat = "pdf";
     const mappingConfig = (template as any).pdf_mapping_config ?? null;
-    outputBytes = await (normalizePdfMappingConfig(mappingConfig).length > 0
-      ? renderPdfMappedTemplate({ pdfBytes: fileContents, data: input, mappingConfig })
-      : renderPdfFormTemplate({ pdfBytes: fileContents, data: input, flatten: true }));
+    outputBytes = await (isPdfTextBoxMappings(mappingConfig)
+      ? renderPdfTextBoxMappedTemplate({ pdfBytes: fileContents, data: input, mappings: mappingConfig })
+      : normalizePdfMappingConfig(mappingConfig).length > 0
+        ? renderPdfMappedTemplate({ pdfBytes: fileContents, data: input, mappingConfig })
+        : renderPdfFormTemplate({ pdfBytes: fileContents, data: input, flatten: true }));
     outputContentType = "application/pdf";
   } else {
     if (!Buffer.isBuffer(fileContents) || fileContents.length === 0) {

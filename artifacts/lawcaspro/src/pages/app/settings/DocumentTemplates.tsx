@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from "react";
+import { Suspense, lazy, useState, useRef, useEffect } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -28,7 +28,8 @@ import { hasPermission } from "@/lib/permissions";
 import { ensureArray, listItems } from "@/lib/list-items";
 import { throwIfApiFailure, getApiFailureCodeFromError } from "@/lib/api-failure";
 import { SupportSessionRequired } from "@/components/support-session-required";
-import { TemplatePdfMappingEditor } from "@/components/TemplatePdfMappingEditor";
+
+const PdfMappingEditor = lazy(() => import("@/components/PdfMappingEditor"));
 
 function docTypeLabel(dt: string): string {
   return (DOCUMENT_TYPE_LABELS as Record<string, string>)[dt] ?? dt;
@@ -1392,28 +1393,26 @@ export default function DocumentTemplates() {
         </DialogContent>
       </Dialog>
 
-      {activeTemplate && activeIsPdf ? (
-        <TemplatePdfMappingEditor
-          open={pdfMappingOpen}
-          templateId={activeTemplate.id}
-          templateName={activeTemplate.name}
-          pdfUrl={pdfMappingPdfUrl}
-          initialMappingConfig={activeTemplate.pdf_mapping_config}
-          savePath={`/document-templates/${activeTemplate.id}`}
-          saveBodyKey="pdfMappingConfig"
-          responseMappingKey="pdf_mapping_config"
-          onClose={() => {
-            setPdfMappingOpen(false);
-            setPdfMappingPdfUrl((prev) => {
-              if (prev) URL.revokeObjectURL(prev);
-              return "";
-            });
-          }}
-          onSaved={(next) => {
-            setActiveTemplate((prev) => prev ? ({ ...prev, pdf_mapping_config: next }) : prev);
-            void qc.invalidateQueries({ queryKey: ["document-templates"] });
-          }}
-        />
+      {pdfMappingOpen && activeTemplate && activeIsPdf && pdfMappingPdfUrl ? (
+        <Suspense fallback={<div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center"><div className="bg-white rounded-lg p-6 text-sm text-slate-600">Loading PDF editor...</div></div>}>
+          <PdfMappingEditor
+            docId={activeTemplate.id}
+            docName={activeTemplate.name}
+            pdfUrl={pdfMappingPdfUrl}
+            mappingsGetUrl={`/document-templates/${activeTemplate.id}/pdf-mappings`}
+            mappingsPutUrl={`/document-templates/${activeTemplate.id}/pdf-mappings`}
+            variablesUrlPrimary="/document-variables?active=1"
+            variablesUrlFallback="/platform/document-variables?active=1"
+            onClose={() => {
+              setPdfMappingOpen(false);
+              setPdfMappingPdfUrl((prev) => {
+                if (prev) URL.revokeObjectURL(prev);
+                return "";
+              });
+              void qc.invalidateQueries({ queryKey: ["document-templates"] });
+            }}
+          />
+        </Suspense>
       ) : null}
 
       {/* Upload Dialog */}

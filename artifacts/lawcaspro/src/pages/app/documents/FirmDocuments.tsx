@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Suspense, lazy, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -27,7 +27,8 @@ import { toastError } from "@/lib/toast-error";
 import { apiFetchBlob, apiFetchJson } from "@/lib/api-client";
 import { downloadBlob } from "@/lib/download";
 import { DEFAULT_ALLOWED_MIME_TYPES, DOCX_MIME_TYPES, validateUploadFile } from "@/lib/upload-validation";
-import { TemplatePdfMappingEditor } from "@/components/TemplatePdfMappingEditor";
+
+const PdfMappingEditor = lazy(() => import("@/components/PdfMappingEditor"));
 
 interface FirmFolder {
   id: number;
@@ -586,28 +587,26 @@ export default function FirmDocuments() {
         </CardContent>
       </Card>
 
-      {pdfMappingDoc && isPdfDoc(pdfMappingDoc) ? (
-        <TemplatePdfMappingEditor
-          open={pdfMappingOpen}
-          templateId={pdfMappingDoc.id}
-          templateName={pdfMappingDoc.name}
-          pdfUrl={pdfMappingPdfUrl}
-          initialMappingConfig={pdfMappingDoc.pdf_mapping_config}
-          savePath={`/document-templates/${pdfMappingDoc.id}`}
-          saveBodyKey="pdfMappingConfig"
-          responseMappingKey="pdf_mapping_config"
-          onClose={() => {
-            setPdfMappingOpen(false);
-            setPdfMappingPdfUrl((prev) => {
-              if (prev) URL.revokeObjectURL(prev);
-              return "";
-            });
-          }}
-          onSaved={(next) => {
-            setPdfMappingDoc((prev) => prev ? ({ ...prev, pdf_mapping_config: next }) : prev);
-            void qc.invalidateQueries({ queryKey: ["firm-documents"] });
-          }}
-        />
+      {pdfMappingOpen && pdfMappingDoc && isPdfDoc(pdfMappingDoc) && pdfMappingPdfUrl ? (
+        <Suspense fallback={<div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center"><div className="bg-white rounded-lg p-6 text-sm text-slate-600">Loading PDF editor...</div></div>}>
+          <PdfMappingEditor
+            docId={pdfMappingDoc.id}
+            docName={pdfMappingDoc.name}
+            pdfUrl={pdfMappingPdfUrl}
+            mappingsGetUrl={`/document-templates/${pdfMappingDoc.id}/pdf-mappings`}
+            mappingsPutUrl={`/document-templates/${pdfMappingDoc.id}/pdf-mappings`}
+            variablesUrlPrimary="/document-variables?active=1"
+            variablesUrlFallback="/platform/document-variables?active=1"
+            onClose={() => {
+              setPdfMappingOpen(false);
+              setPdfMappingPdfUrl((prev) => {
+                if (prev) URL.revokeObjectURL(prev);
+                return "";
+              });
+              void qc.invalidateQueries({ queryKey: ["firm-documents"] });
+            }}
+          />
+        </Suspense>
       ) : null}
 
       <Dialog open={createFolderOpen} onOpenChange={setCreateFolderOpen}>

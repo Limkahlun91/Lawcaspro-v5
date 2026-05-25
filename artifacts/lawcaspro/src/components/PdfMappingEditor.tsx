@@ -46,6 +46,19 @@ interface PdfMappings {
   pages: PageMapping[];
 }
 
+type LegacyPdfMappingEntry = {
+  key: string;
+  page: number;
+  x: number;
+  y: number;
+  size: number;
+  value?: string;
+  maxWidth?: number;
+  lineHeight?: number;
+  alignment?: TextAlignment;
+  fontFamily?: PdfFontFamily;
+};
+
 type LegacyVarGroup = {
   group: string;
   vars: { key: string; label: string; type?: string; fields?: string }[];
@@ -76,9 +89,22 @@ interface Props {
   docName: string;
   pdfUrl: string;
   onClose: () => void;
+  mappingsGetUrl?: string;
+  mappingsPutUrl?: string;
+  variablesUrlPrimary?: string;
+  variablesUrlFallback?: string;
 }
 
-export default function PdfMappingEditor({ docId, docName, pdfUrl, onClose }: Props) {
+export default function PdfMappingEditor({
+  docId,
+  docName,
+  pdfUrl,
+  onClose,
+  mappingsGetUrl,
+  mappingsPutUrl,
+  variablesUrlPrimary,
+  variablesUrlFallback,
+}: Props) {
   const { toast } = useToast();
   const containerRef = useRef<HTMLDivElement>(null);
   const contentTextareaRef = useRef<HTMLTextAreaElement | null>(null);
@@ -94,9 +120,97 @@ export default function PdfMappingEditor({ docId, docName, pdfUrl, onClose }: Pr
   const [varPickerOpen, setVarPickerOpen] = useState(false);
   const [pdfScale, setPdfScale] = useState(1);
   const [pdfDimensions, setPdfDimensions] = useState({ width: 0, height: 0 });
+  const [pageView, setPageView] = useState<Record<number, { width: number; height: number }>>({});
+  const [legacyEntries, setLegacyEntries] = useState<LegacyPdfMappingEntry[] | null>(null);
 
   const [dragging, setDragging] = useState<{ boxId: string; startX: number; startY: number; origX: number; origY: number } | null>(null);
   const [resizing, setResizing] = useState<{ boxId: string; startX: number; startY: number; origW: number; origH: number } | null>(null);
+
+  const isRecord = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
+
+  const isPdfMappings = (v: unknown): v is PdfMappings => {
+    if (!isRecord(v)) return false;
+    const pages = (v as any).pages;
+    if (!Array.isArray(pages)) return false;
+    const first = pages[0] as any;
+    if (!first) return true;
+    if (!first || typeof first !== "object" || Array.isArray(first)) return false;
+    if (typeof first.pageIndex !== "number") return false;
+    if (!Array.isArray(first.textBoxes)) return false;
+    return true;
+  };
+
+  const normalizeLegacyPdfMapping = (raw: unknown): LegacyPdfMappingEntry[] => {
+    const out: LegacyPdfMappingEntry[] = [];
+    const pushOne = (key: unknown, coord: any) => {
+      if (typeof key !== "string" || !key.trim()) return;
+      const page = typeof coord?.page === "number" && Number.isFinite(coord.page) ? Math.max(1, Math.floor(coord.page)) : 1;
+      const x = typeof coord?.x === "number" && Number.isFinite(coord.x) ? coord.x : NaN;
+      const y = typeof coord?.y === "number" && Number.isFinite(coord.y) ? coord.y : NaN;
+      if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+      const size = typeof coord?.size === "number" && Number.isFinite(coord.size) ? Math.max(1, coord.size) : 12;
+      const value =
+        typeof coord?.value === "string"
+          ? coord.value
+          : typeof coord?.content === "string"
+            ? coord.content
+            : typeof coord?.expression === "string"
+              ? coord.expression
+              : undefined;
+      const maxWidth = typeof coord?.maxWidth === "number" && Number.isFinite(coord.maxWidth) ? Math.max(1, coord.maxWidth) : undefined;
+      const lineHeight = typeof coord?.lineHeight === "number" && Number.isFinite(coord.lineHeight) ? Math.max(1, coord.lineHeight) : undefined;
+      const alignment =
+        coord?.alignment === "left" || coord?.alignment === "center" || coord?.alignment === "right"
+          ? (coord.alignment as TextAlignment)
+          : undefined;
+      const fontFamily =
+        coord?.fontFamily === "Helvetica" || coord?.fontFamily === "Times-Roman" || coord?.fontFamily === "Courier"
+          ? (coord.fontFamily as PdfFontFamily)
+          : undefined;
+      out.push({ key: key.trim(), page, x, y, size, ...(value ? { value } : {}), ...(maxWidth ? { maxWidth } : {}), ...(lineHeight ? { lineHeight } : {}), ...(alignment ? { alignment } : {}), ...(fontFamily ? { fontFamily } : {}) });
+    };
+    if (Array.isArray(raw)) {
+      for (const item of raw) {
+        if (!item || typeof item !== "object") continue;
+        const rec = item as any;
+        const key = typeof rec.key === "string" ? rec.key : typeof rec.variableKey === "string" ? rec.variableKey : typeof rec.variable === "string" ? rec.variable : undefined;
+        pushOne(key, rec);
+      }
+      return out;
+    }
+    if (raw && typeof raw === "object") {
+      for (const [k, v] of Object.entries(raw as Record<string, unknown>)) pushOne(k, v as any);
+    }
+    return out;
+  };
+
+  const legacyToCanvasMappings = (entries: LegacyPdfMappingEntry[], views: Record<number, { width: number; height: number }>, fallbackHeight: number): PdfMappings => {
+    const byPage = new Map<number, TextBox[]>();
+    for (const e of entries) {
+      const pageIndex = Math.max(0, (e.page || 1) - 1);
+      const pageHeight = views[pageIndex]?.height ?? fallbackHeight;
+      const fontSize = e.size || 10;
+      const yTop = Math.max(0, pageHeight - e.y - fontSize);
+      const tb: TextBox = {
+        id: `legacy_${pageIndex}_${e.key}_${Math.random().toString(36).slice(2, 8)}`,
+        x: Math.max(0, e.x),
+        y: yTop,
+        width: e.maxWidth ?? 200,
+        height: e.lineHeight ?? Math.ceil(fontSize * 1.3),
+        fontSize,
+        alignment: e.alignment ?? "left",
+        fontFamily: e.fontFamily ?? "Helvetica",
+        content: typeof e.value === "string" && e.value.trim() ? e.value : `{{${e.key}}}`,
+      };
+      const list = byPage.get(pageIndex) ?? [];
+      list.push(tb);
+      byPage.set(pageIndex, list);
+    }
+    const pages: PageMapping[] = Array.from(byPage.entries())
+      .map(([pageIndex, textBoxes]) => ({ pageIndex, textBoxes }))
+      .sort((a, b) => a.pageIndex - b.pageIndex);
+    return { pages };
+  };
 
   useEffect(() => {
     loadMappings();
@@ -105,8 +219,18 @@ export default function PdfMappingEditor({ docId, docName, pdfUrl, onClose }: Pr
 
   const loadMappings = async () => {
     try {
-      const data = await apiFetchJson<{ mappings?: PdfMappings }>(`/platform/documents/${docId}/pdf-mappings`, { allowStatuses: [404] });
-      setMappings(data?.mappings || { pages: [] });
+      const data = await apiFetchJson<unknown>(mappingsGetUrl ?? `/platform/documents/${docId}/pdf-mappings`, { allowStatuses: [404] });
+      const raw = isRecord(data) && "mappings" in data ? (data as any).mappings : null;
+      if (!raw) {
+        setMappings({ pages: [] });
+        setLegacyEntries(null);
+      } else if (isPdfMappings(raw)) {
+        setMappings(raw);
+        setLegacyEntries(null);
+      } else {
+        setMappings({ pages: [] });
+        setLegacyEntries(normalizeLegacyPdfMapping(raw));
+      }
     } catch { /* ignore */ }
     setLoading(false);
   };
@@ -115,9 +239,9 @@ export default function PdfMappingEditor({ docId, docName, pdfUrl, onClose }: Pr
     try {
       const data = await (async () => {
         try {
-          return await apiFetchJson<unknown>("/platform/document-variables?active=1");
+          return await apiFetchJson<unknown>(variablesUrlPrimary ?? "/platform/document-variables?active=1");
         } catch {
-          return await apiFetchJson<unknown>("/document-variables?active=1");
+          return await apiFetchJson<unknown>(variablesUrlFallback ?? "/document-variables?active=1");
         }
       })();
       const isLegacyGroups = (v: unknown): v is LegacyVarGroup[] => {
@@ -170,7 +294,7 @@ export default function PdfMappingEditor({ docId, docName, pdfUrl, onClose }: Pr
   const saveMappings = async () => {
     setSaving(true);
     try {
-      await apiFetchJson(`/platform/documents/${docId}/pdf-mappings`, {
+      await apiFetchJson(mappingsPutUrl ?? `/platform/documents/${docId}/pdf-mappings`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ mappings }),
@@ -181,6 +305,15 @@ export default function PdfMappingEditor({ docId, docName, pdfUrl, onClose }: Pr
     }
     setSaving(false);
   };
+
+  useEffect(() => {
+    if (!legacyEntries || legacyEntries.length === 0) return;
+    const values = Object.values(pageView);
+    const fallbackHeight = values[0]?.height ?? pdfDimensions.height;
+    if (!fallbackHeight || !Number.isFinite(fallbackHeight)) return;
+    setMappings(legacyToCanvasMappings(legacyEntries, pageView, fallbackHeight));
+    setLegacyEntries(null);
+  }, [legacyEntries, pageView, pdfDimensions.height]);
 
   const getCurrentPageBoxes = (): TextBox[] => {
     const pm = mappings.pages.find(p => p.pageIndex === currentPage);
@@ -329,6 +462,7 @@ export default function PdfMappingEditor({ docId, docName, pdfUrl, onClose }: Pr
   const onPageLoad = (page: any) => {
     const vp = page.getViewport({ scale: 1 });
     setPdfDimensions({ width: vp.width, height: vp.height });
+    setPageView((prev) => ({ ...prev, [currentPage]: { width: vp.width, height: vp.height } }));
     const container = containerRef.current;
     if (container) {
       const availW = container.clientWidth - 24;
