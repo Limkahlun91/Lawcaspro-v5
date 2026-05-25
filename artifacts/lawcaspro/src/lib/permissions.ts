@@ -22,13 +22,32 @@ export function getPermissions(user: AuthUser | null): Permission[] {
 
 export function hasPermission(user: AuthUser | null, module: string, action: string): boolean {
   const perms = getPermissions(user);
+  const key = `${module}:${action}`;
   if (perms.length > 0) {
-    return perms.some((p) => p.module === module && p.action === action);
+    if (perms.some((p) => p.module === module && p.action === action)) return true;
   }
 
   if (!user || user.userType !== "firm_user") return false;
   const roleName = String((user as unknown as { roleName?: unknown }).roleName ?? "");
-  const key = `${module}:${action}`;
+  const roleLower = roleName.trim().toLowerCase();
+  const isPartner = roleLower.includes("partner");
+  const isLawyer = roleLower.includes("lawyer");
+  const isClerk = roleLower.includes("clerk");
+  const isCoreStaff = isPartner || isLawyer || isClerk;
+  const isDeveloperUser = roleLower === "developer_user" || roleLower.includes("developer");
+
+  const coreStaffBypass = new Set<string>([
+    "dashboard:read",
+    "cases:read",
+    "cases:create",
+    "cases:update",
+    "projects:read",
+    "documents:read",
+  ]);
+
+  if (isCoreStaff && coreStaffBypass.has(key)) return true;
+
+  if (perms.length > 0) return false;
 
   const partner = new Set<string>([
     "dashboard:read",
@@ -64,8 +83,22 @@ export function hasPermission(user: AuthUser | null, module: string, action: str
     "developer_portal:message",
   ]);
 
-  if (roleName === "Partner") return partner.has(key);
-  if (roleName === "Clerk") return clerk.has(key);
-  if (roleName === "Developer_User") return developerUser.has(key);
+  const staff = new Set<string>([
+    "dashboard:read",
+    "cases:read", "cases:create", "cases:update",
+    "projects:read", "projects:create", "projects:update",
+    "developers:read", "developers:create", "developers:update",
+    "documents:read", "documents:export",
+    "communications:read", "communications:create",
+    "accounting:read", "accounting:write",
+    "reports:read",
+    "settings:read",
+    "users:read",
+  ]);
+
+  if (isPartner) return partner.has(key);
+  if (isClerk) return staff.has(key) || clerk.has(key);
+  if (isLawyer) return staff.has(key);
+  if (isDeveloperUser) return developerUser.has(key);
   return false;
 }

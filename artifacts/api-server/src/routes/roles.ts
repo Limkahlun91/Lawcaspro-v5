@@ -3,7 +3,7 @@ import { and, count, eq, or } from "drizzle-orm";
 import { db, permissionsTable, rolesTable, sql, usersTable } from "@workspace/db";
 import type { IncomingHttpHeaders, IncomingMessage } from "node:http";
 import { z } from "zod/v4";
-import { requireAuth, requireFirmUser, requirePermission, type AuthRequest, writeAuditLog } from "../lib/auth.js";
+import { ensureRolePermissionsInitialized, requireAuth, requireFirmUser, requirePermission, type AuthRequest, writeAuditLog } from "../lib/auth.js";
 
 type ReqLike = IncomingMessage & {
   body?: unknown;
@@ -85,6 +85,11 @@ const asTransactionCapable = (conn: DbConn): TransactionCapable => conn as unkno
 
 const standardRoleNames = ["Partner", "Senior Lawyer", "Lawyer", "Senior Clerk", "Clerk", "Manager", "Admin", "Viewer", "Developer_User"] as const;
 
+const shouldAutoGrantRoleByName = (name: string): boolean => {
+  const n = name.trim().toLowerCase();
+  return n.includes("partner") || n.includes("lawyer") || n.includes("clerk");
+};
+
 async function canBackfillStandardRoles(r: DbConn, req: AuthRequest): Promise<boolean> {
   if (!req.roleId) return false;
   const perms = await r
@@ -111,7 +116,15 @@ async function backfillStandardRoles(r: DbConn, firmId: number): Promise<string[
     const existingNames = new Set(existing.map((x: { name: string }) => x.name));
     const missing = standardRoleNames.filter((name) => !existingNames.has(name));
     if (missing.length === 0) return [];
-    await tx.insert(rolesTable).values(missing.map((name) => ({ firmId, name, isSystemRole: true })));
+    const inserted = await tx
+      .insert(rolesTable)
+      .values(missing.map((name) => ({ firmId, name, isSystemRole: true })))
+      .returning({ id: rolesTable.id, name: rolesTable.name });
+    for (const role of inserted) {
+      if (shouldAutoGrantRoleByName(role.name)) {
+        await ensureRolePermissionsInitialized(tx as any, firmId, role.id);
+      }
+    }
     return [...missing];
   });
 }
@@ -178,6 +191,9 @@ routerInternal.post("/roles", requireAuth, requireFirmUser, requirePermission("r
           allowed: p.allowed,
         }))
       );
+    }
+    if (shouldAutoGrantRoleByName(role.name)) {
+      await ensureRolePermissionsInitialized(r as any, req.firmId!, role.id);
     }
 
     await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "roles.create", entityType: "role", entityId: role.id, detail: `name=${role.name}`, ipAddress: req.ip, userAgent: getHeader(req, "user-agent") });
@@ -283,6 +299,9 @@ routerInternal.patch("/roles/:roleId", requireAuth, requireFirmUser, requirePerm
             }))
           );
         }
+      }
+      if (shouldAutoGrantRoleByName(role.name)) {
+        await ensureRolePermissionsInitialized(tx as any, req.firmId!, role.id);
       }
 
       return {

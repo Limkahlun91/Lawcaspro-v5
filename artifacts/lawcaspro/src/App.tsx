@@ -146,13 +146,13 @@ function AppRoutes() {
         <GlobalCaseSearch />
         <Switch>
           <Route path="/app/dashboard" component={() => (
-            <PermissionGuard module="dashboard" action="read">
+            <PermissionGuard module="dashboard" action="read" mode="silent">
               <AppDashboard />
             </PermissionGuard>
           )} />
 
           <Route path="/app/workbench" component={() => (
-            <PermissionGuard module="cases" action="read">
+            <PermissionGuard module="cases" action="read" mode="silent">
               <Workbench />
             </PermissionGuard>
           )} />
@@ -173,7 +173,7 @@ function AppRoutes() {
             </PermissionGuard>
           )} />
           <Route path="/app/cases" component={() => (
-            <PermissionGuard module="cases" action="read">
+            <PermissionGuard module="cases" action="read" mode="silent">
               <CasesList />
             </PermissionGuard>
           )} />
