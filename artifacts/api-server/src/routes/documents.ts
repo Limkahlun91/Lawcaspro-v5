@@ -1799,7 +1799,7 @@ async function buildCaseContext(r: DbConn, caseId: number, firmId: number, cache
   };
 }
 
-router.get("/firm-document-folders", requireAuth, requireFirmUser, requirePermission("documents", "read"), async (req: AuthRequest, res): Promise<void> => {
+router.get("/firm-document-folders", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
   const r = getRlsDb(req, res);
   if (!r) return;
   const rows = await queryRows(
@@ -1957,7 +1957,7 @@ router.delete("/firm-document-folders/:folderId", requireAuth, requireFirmUser, 
   res.sendStatus(204);
 });
 
-router.get("/document-templates", requireAuth, requireFirmUser, requirePermission("documents", "read"), async (req: AuthRequest, res): Promise<void> => {
+router.get("/document-templates", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
   const r = getRlsDb(req, res);
   if (!r) return;
   const folderIdStr = one((req.query as any).folderId);
