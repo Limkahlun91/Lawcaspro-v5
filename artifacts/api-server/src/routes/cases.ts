@@ -2863,6 +2863,18 @@ router.get("/cases", requireAuthHandler, requireFirmUserHandler, requirePermissi
   }
 
   const [totalRes] = await totalQuery.where(and(...conditions));
+  if (process.env.DEBUG_DATA_DUMP === "1") {
+    console.log(
+      "!!! DEBUG_DATA_DUMP:",
+      JSON.stringify({
+        route: "GET /cases",
+        firmId: req.firmId,
+        rowsCount: rows.length,
+        total: Number(totalRes?.c ?? 0),
+        sample: rows.slice(0, 3).map((r) => ({ id: r.id, referenceNo: r.referenceNo })),
+      })
+    );
+  }
 
   const data = rows.map((row) => {
     const purchaserCount = Number(row.purchaserCount ?? 0);

@@ -229,6 +229,7 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
     enabled: viewTab === "checklist" || generateDialogOpen,
     retry: false,
   });
+  const caseData = checklistQuery.data?.case;
 
   type ClauseListItem = {
     id: number;
@@ -953,6 +954,10 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
         <QueryFallback title="Documents unavailable" error={documentsQuery.error} onRetry={() => documentsQuery.refetch()} isRetrying={documentsQuery.isFetching} />
       </div>
     );
+  }
+  if ((viewTab === "checklist" || generateDialogOpen) && !checklistQuery.isLoading && !checklistQuery.isError && !caseData) {
+    console.error("!!! FRONTEND_DEBUG: Case Data is null/undefined");
+    return <div className="p-4">資料載入中或缺失...</div>;
   }
 
   return (

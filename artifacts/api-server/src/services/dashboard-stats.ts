@@ -572,6 +572,38 @@ export async function computeDashboardStats(
       })()
     : [];
 
+  if (process.env.DEBUG_DATA_DUMP === "1") {
+    console.log(
+      "!!! DEBUG_DATA_DUMP:",
+      JSON.stringify({
+        module: "computeDashboardStats",
+        firmId,
+        totals: {
+          totalCases,
+          activeCases,
+          completedCases,
+          totalClients: toNumber0(totalClientsRes?.c),
+          totalDevelopers: toNumber0(totalDevsRes?.c),
+          totalProjects: toNumber0(totalProjsRes?.c),
+        },
+        flags: {
+          hasKeyDates,
+          hasWorkflowSteps,
+          workflowStepsEnabled,
+          hasBillingEntries,
+          hasCommunications,
+          hasCaseLedgers,
+        },
+        shapes: {
+          recentCases: recentCases.length,
+          milestoneSections: Array.isArray(milestoneSections) ? milestoneSections.length : -1,
+          milestoneCards: Array.isArray(milestoneCards) ? milestoneCards.length : -1,
+          completionSlaOverdue: completionSlaOverdue.length,
+        },
+      })
+    );
+  }
+
   return {
     totalCases,
     activeCases,
