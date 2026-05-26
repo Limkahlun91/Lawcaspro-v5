@@ -2921,8 +2921,10 @@ router.get("/cases", requireAuthHandler, requireFirmUserHandler, requirePermissi
       process.env.API_ERROR_DETAILS === "1" ||
       process.env.NODE_ENV !== "production" ||
       Boolean((res as any)?.locals?.allowErrorDetails);
-    if (allowDetails && err instanceof Error) {
-      res.status(500).json({ error: err.message, stack: err.stack });
+    if (allowDetails) {
+      const details = err instanceof Error ? err.message : String(err);
+      const stack = err instanceof Error ? err.stack : undefined;
+      res.status(500).json({ debug: "Database Error", details, stack });
       return;
     }
     res.status(500).json({ error: "Internal Server Error" });
