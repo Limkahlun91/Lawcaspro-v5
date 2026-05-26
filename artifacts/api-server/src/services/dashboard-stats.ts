@@ -290,6 +290,9 @@ export async function computeDashboardStats(
   const spaTotal = await countCases(baseActiveWhere);
   const loanMasterTotal = await countCases(and(baseActiveWhere, loanMasterWhere));
   const loanTitleTotal = await countCases(and(baseActiveWhere, loanTitleWhere));
+
+  let workflowStepsEnabled = hasWorkflowSteps;
+
   const spaMilestones: Array<{ key: CaseMilestoneKey; label: string }> = [
     { key: "spa_stamped", label: "SPA Stamped" },
     { key: "lof_stamped", label: "Letter of Offer Stamped" },
@@ -322,50 +325,103 @@ export async function computeDashboardStats(
   ];
 
   const stepCounts: Record<string, number> = {};
-  if (hasWorkflowSteps) {
-    const countCompletedCasesForStep = async (stepKey: CaseMilestoneKey, extraWhere?: SQL) => {
-      const baseWhere = and(
+  if (workflowStepsEnabled) {
+    try {
+      const countCompletedCasesForStep = async (stepKey: CaseMilestoneKey, extraWhere?: SQL) => {
+        const baseWhere = and(
+          eq(casesTable.firmId, firmId),
+          isNull(casesTable.deletedAt),
+          eq(caseWorkflowStepsTable.stepKey, stepKey),
+          eq(caseWorkflowStepsTable.status, "completed"),
+          ...(extraWhere ? [extraWhere] : []),
+        );
+        const rows = assignedCasesJoin
+          ? await r
+              .select({ caseId: caseWorkflowStepsTable.caseId })
+              .from(caseWorkflowStepsTable)
+              .innerJoin(casesTable, eq(caseWorkflowStepsTable.caseId, casesTable.id))
+              .innerJoin(caseAssignmentsTable, assignedCasesJoin)
+              .where(baseWhere)
+              .groupBy(caseWorkflowStepsTable.caseId)
+          : await r
+              .select({ caseId: caseWorkflowStepsTable.caseId })
+              .from(caseWorkflowStepsTable)
+              .innerJoin(casesTable, eq(caseWorkflowStepsTable.caseId, casesTable.id))
+              .where(baseWhere)
+              .groupBy(caseWorkflowStepsTable.caseId);
+        return rows.length;
+      };
+
+      await Promise.all([
+        ...spaMilestones.map(async (m) => {
+          const done = await countCompletedCasesForStep(m.key);
+          stepCounts[`spa_${m.key}_done`] = done;
+          stepCounts[`spa_${m.key}_pending`] = Math.max(0, spaTotal - done);
+        }),
+        ...loanMasterMilestones.map(async (m) => {
+          const done = await countCompletedCasesForStep(m.key, loanMasterWhere);
+          stepCounts[`loan_master_${m.key}_done`] = done;
+          stepCounts[`loan_master_${m.key}_pending`] = Math.max(0, loanMasterTotal - done);
+        }),
+        ...loanTitleMilestones.map(async (m) => {
+          const done = await countCompletedCasesForStep(m.key, loanTitleWhere);
+          stepCounts[`loan_title_${m.key}_done`] = done;
+          stepCounts[`loan_title_${m.key}_pending`] = Math.max(0, loanTitleTotal - done);
+        }),
+      ]);
+    } catch (err) {
+      if (!isMissingRelationOrColumnError(err)) throw err;
+      workflowStepsEnabled = false;
+    }
+  }
+
+  const keyDateMilestones: Array<{ key: CaseMilestoneKey; label: string }> = [
+    { key: "spa_date", label: "SPA Signed" },
+    { key: "spa_stamped_date", label: "SPA Stamped" },
+    { key: "letter_of_offer_date", label: "Letter of Offer" },
+    { key: "loan_docs_signed_date", label: "Loan Docs Signed" },
+    { key: "advice_to_bank_date", label: "Advised" },
+    { key: "completion_date", label: "Completed" },
+  ];
+
+  const keyDatesColumn = (k: CaseMilestoneKey) => {
+    if (k === "spa_date") return caseKeyDatesTable.spaDate;
+    if (k === "spa_stamped_date") return caseKeyDatesTable.spaStampedDate;
+    if (k === "letter_of_offer_date") return caseKeyDatesTable.letterOfOfferDate;
+    if (k === "loan_docs_signed_date") return caseKeyDatesTable.loanDocsSignedDate;
+    if (k === "advice_to_bank_date") return caseKeyDatesTable.adviceToBankDate;
+    if (k === "completion_date") return caseKeyDatesTable.completionDate;
+    return null;
+  };
+
+  const countMissingKeyDate = async (k: CaseMilestoneKey, extraWhere?: SQL) => {
+    const col = keyDatesColumn(k);
+    if (!hasKeyDates || !col) return 0;
+    try {
+      const base = assignedCasesJoin
+        ? r.select({ c: count() }).from(casesTable)
+            .innerJoin(caseAssignmentsTable, assignedCasesJoin)
+            .leftJoin(caseKeyDatesTable, and(
+              eq(caseKeyDatesTable.caseId, casesTable.id),
+              eq(caseKeyDatesTable.firmId, casesTable.firmId),
+            ))
+        : r.select({ c: count() }).from(casesTable)
+            .leftJoin(caseKeyDatesTable, and(
+              eq(caseKeyDatesTable.caseId, casesTable.id),
+              eq(caseKeyDatesTable.firmId, casesTable.firmId),
+            ));
+      const [row] = await base.where(and(
         eq(casesTable.firmId, firmId),
         isNull(casesTable.deletedAt),
-        eq(caseWorkflowStepsTable.stepKey, stepKey),
-        eq(caseWorkflowStepsTable.status, "completed"),
+        isNull(col),
         ...(extraWhere ? [extraWhere] : []),
-      );
-      const rows = assignedCasesJoin
-        ? await r
-            .select({ caseId: caseWorkflowStepsTable.caseId })
-            .from(caseWorkflowStepsTable)
-            .innerJoin(casesTable, eq(caseWorkflowStepsTable.caseId, casesTable.id))
-            .innerJoin(caseAssignmentsTable, assignedCasesJoin)
-            .where(baseWhere)
-            .groupBy(caseWorkflowStepsTable.caseId)
-        : await r
-            .select({ caseId: caseWorkflowStepsTable.caseId })
-            .from(caseWorkflowStepsTable)
-            .innerJoin(casesTable, eq(caseWorkflowStepsTable.caseId, casesTable.id))
-            .where(baseWhere)
-            .groupBy(caseWorkflowStepsTable.caseId);
-      return rows.length;
-    };
-
-    await Promise.all([
-      ...spaMilestones.map(async (m) => {
-        const done = await countCompletedCasesForStep(m.key);
-        stepCounts[`spa_${m.key}_done`] = done;
-        stepCounts[`spa_${m.key}_pending`] = Math.max(0, spaTotal - done);
-      }),
-      ...loanMasterMilestones.map(async (m) => {
-        const done = await countCompletedCasesForStep(m.key, loanMasterWhere);
-        stepCounts[`loan_master_${m.key}_done`] = done;
-        stepCounts[`loan_master_${m.key}_pending`] = Math.max(0, loanMasterTotal - done);
-      }),
-      ...loanTitleMilestones.map(async (m) => {
-        const done = await countCompletedCasesForStep(m.key, loanTitleWhere);
-        stepCounts[`loan_title_${m.key}_done`] = done;
-        stepCounts[`loan_title_${m.key}_pending`] = Math.max(0, loanTitleTotal - done);
-      }),
-    ]);
-  }
+      ));
+      return toNumber0(row?.c);
+    } catch (err) {
+      if (!isMissingRelationOrColumnError(err)) throw err;
+      return 0;
+    }
+  };
 
   const toMilestoneCard = (segKey: string, total: number, m: { key: CaseMilestoneKey; label: string }, filledKey: string, extraFilter: Record<string, string> | undefined) => {
     const done = stepCounts[`${filledKey}_done`] ?? 0;
@@ -389,7 +445,7 @@ export async function computeDashboardStats(
   const loanMasterCards = loanMasterMilestones.map((m) => toMilestoneCard("loan_master", loanMasterTotal, m, `loan_master_${m.key}`, { purchaseMode: "loan", titleType: "master" }));
   const loanTitleCards = loanTitleMilestones.map((m) => toMilestoneCard("loan_title", loanTitleTotal, m, `loan_title_${m.key}`, { purchaseMode: "loan", titleType: "individual,strata" }));
 
-  const milestoneSections = hasWorkflowSteps ? [
+  const milestoneSections = workflowStepsEnabled ? [
     {
       key: "spa",
       label: "SPA Total",
@@ -419,9 +475,69 @@ export async function computeDashboardStats(
     },
   ] : [];
 
-  const milestoneCards = hasWorkflowSteps
+  const milestoneCards = workflowStepsEnabled
     ? [...spaCards, ...loanMasterCards, ...loanTitleCards]
     : [];
+
+  if (!workflowStepsEnabled && hasKeyDates) {
+    const buildKeyDateCards = async (segKey: string, total: number, extraWhere: SQL | undefined, extraFilter: Record<string, string> | undefined) => {
+      const cards = await Promise.all(
+        keyDateMilestones.map(async (m) => {
+          const missing = await countMissingKeyDate(m.key, extraWhere);
+          return {
+            key: `${segKey}_${String(m.key)}`,
+            label: m.label,
+            count: missing,
+            pendingCount: missing,
+            doneCount: Math.max(0, total - missing),
+            filter: {
+              milestone: m.key,
+              milestonePresence: "missing",
+              ...assignedFilter,
+              ...(extraFilter ?? {}),
+            },
+          };
+        })
+      );
+      return cards;
+    };
+
+    const spaKeyDateCards = await buildKeyDateCards("spa", spaTotal, undefined, undefined);
+    const loanMasterKeyDateCards = await buildKeyDateCards("loan_master", loanMasterTotal, loanMasterWhere, { purchaseMode: "loan", titleType: "master" });
+    const loanTitleKeyDateCards = await buildKeyDateCards("loan_title", loanTitleTotal, loanTitleWhere, { purchaseMode: "loan", titleType: "individual,strata" });
+
+    (milestoneSections as any).push(
+      {
+        key: "spa",
+        label: "SPA Total",
+        total: spaTotal,
+        cards: [
+          { key: "spa_total", label: "Total", count: spaTotal, filter: { ...assignedFilter } },
+          ...spaKeyDateCards,
+        ],
+      },
+      {
+        key: "loan_master",
+        label: "Loan (Master) Total",
+        total: loanMasterTotal,
+        cards: [
+          { key: "loan_master_total", label: "Total", count: loanMasterTotal, filter: { ...assignedFilter, purchaseMode: "loan", titleType: "master" } },
+          ...loanMasterKeyDateCards,
+        ],
+      },
+      {
+        key: "loan_title",
+        label: "Loan (Title) Total",
+        total: loanTitleTotal,
+        cards: [
+          { key: "loan_title_total", label: "Total", count: loanTitleTotal, filter: { ...assignedFilter, purchaseMode: "loan", titleType: "individual,strata" } },
+          ...loanTitleKeyDateCards,
+        ],
+      },
+    );
+
+    (milestoneCards as any).push(...spaKeyDateCards, ...loanMasterKeyDateCards, ...loanTitleKeyDateCards);
+  }
 
   const completionSlaOverdue = hasKeyDates
     ? await (async () => {

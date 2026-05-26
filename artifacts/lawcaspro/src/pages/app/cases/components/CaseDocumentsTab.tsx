@@ -120,38 +120,6 @@ type ChecklistResponse = {
   sections: ChecklistSection[];
 };
 
-type DocumentPreviewResponse = {
-  resolvedVariables: Record<string, unknown>;
-  missingRequiredVariables: Array<{ variableKey: string; reason: string }>;
-  unusedBindings: string[];
-  placeholderWarnings: Array<{ placeholder: string; warning: string }>;
-  clauseInsertion?: null | {
-    selected: Array<{ scope: string; id: number; includeTitle?: boolean }>;
-    previewText: string;
-    warnings: Array<{ clauseId: number; scope: string; unknownVariables: string[] }>;
-    insertionModeUsed?: string | null;
-    insertionTarget?: string | null;
-    insertionError?: string | null;
-    hasClausesPlaceholder?: boolean | null;
-    detectedClauseCodePlaceholders?: string[];
-    duplicateClauseWarnings?: Array<{ scope: string; id: number }>;
-    clauseOrder?: Array<{ scope: string; id: number; includeTitle?: boolean }>;
-    selectedClausesResolved?: Array<{ scope: string; id: number; clauseCode: string; title: string; includeTitle: boolean; body: string }>;
-  };
-  applicabilityResult: { applicable: boolean; reasons: string[]; status?: "applicable" | "warning" | "not_applicable"; matchedRulesCount?: number; failedRulesCount?: number; manuallyOverridable?: boolean };
-  checklistResult?: {
-    checklistStatus: "ready" | "warning" | "blocked";
-    totalItems: number;
-    passedItems: number;
-    missingRequiredItems: number;
-    warningItems: number;
-    manuallyOverridable: boolean;
-    items: Array<{ id: string; label: string; type: string; passed: boolean; required: boolean; message: string; source: string; checkedBy?: number | null; checkedAt?: string | null }>;
-  };
-  renderMode: string;
-  previewSummary: { renderable: boolean; placeholdersCount: number; usedMode: string; missingRequiredCount: number };
-};
-
 interface FirmLetterhead {
   id: number;
   name: string;
@@ -174,7 +142,6 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
   const [selectedLetterheadId, setSelectedLetterheadId] = useState<string>("");
   const [documentName, setDocumentName] = useState("");
   const documentNameToSend = documentName.trim() ? documentName.trim() : undefined;
-  const [rowNamingPreview, setRowNamingPreview] = useState<Record<string, { fileName: string; ruleUsed: string; warnings?: string[] }>>({});
   const [extractionOpen, setExtractionOpen] = useState(false);
   const [extractionDoc, setExtractionDoc] = useState<CaseDocument | null>(null);
   const [extractionLoading, setExtractionLoading] = useState(false);
@@ -210,17 +177,6 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
   const canDelete = hasPermission(user, "documents", "delete");
   const canCreate = hasPermission(user, "documents", "create");
   const canBypassApplicability = hasPermission(user, "documents", "update");
-
-  const [previewOpen, setPreviewOpen] = useState(false);
-  const [previewLoading, setPreviewLoading] = useState(false);
-  const [previewItem, setPreviewItem] = useState<ChecklistItem | null>(null);
-  const [previewResult, setPreviewResult] = useState<DocumentPreviewResponse | null>(null);
-  const [previewNaming, setPreviewNaming] = useState<null | {
-    fileName: string;
-    ruleUsed: string;
-    warnings?: string[];
-    fallbackUsed?: boolean;
-  }>(null);
   const [selectedClauses, setSelectedClauses] = useState<Array<{ scope: "firm" | "platform"; id: number; includeTitle: boolean }>>([]);
   const [clauseQuery, setClauseQuery] = useState("");
   const [clauseIncludeTitleDefault, setClauseIncludeTitleDefault] = useState(true);
@@ -447,6 +403,7 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
     try {
       const qs = new URLSearchParams();
       qs.set("blind", "true");
+      qs.set("force", "true");
       const created = await apiFetchJson<{ jobId: string }>(`/documents/automation/generate-job?${qs.toString()}`, {
         method: "POST",
         timeoutMs: 60000,
@@ -509,71 +466,6 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
     }
   }
 
-  async function handlePreview(item: ChecklistItem) {
-    if (!canGenerate) return;
-    if (item.kind !== "template" || typeof item.templateId !== "number" || !Number.isFinite(item.templateId) || item.source !== "firm") return;
-    setPreviewItem(item);
-    setPreviewOpen(true);
-    setPreviewLoading(true);
-    setPreviewResult(null);
-    setPreviewNaming(null);
-    try {
-      const bypassApplicability = Boolean(showAllTemplates && canBypassApplicability);
-      const result = await apiFetchJson<DocumentPreviewResponse>(`/cases/${caseId}/documents/preview`, {
-        method: "POST",
-        body: JSON.stringify(
-          { templateId: Number(item.templateId), bypassApplicability, clauses: selectedClauses }
-        ),
-      });
-      setPreviewResult(result);
-      try {
-        const naming = await apiFetchJson<{ fileName: string; ruleUsed: string; warnings?: string[]; fallbackUsed?: boolean }>(`/cases/${caseId}/documents/filename-preview`, {
-          method: "POST",
-          body: JSON.stringify(
-            { templateId: Number(item.templateId), documentName: documentNameToSend || item.name, originalFileName: item.fileName ?? "docx", fallbackExt: "docx" }
-          ),
-        });
-        setPreviewNaming(naming);
-      } catch {
-        void 0;
-      }
-    } catch (err) {
-      toastError(toast, err, "Preview failed");
-    } finally {
-      setPreviewLoading(false);
-    }
-  }
-
-  async function previewFileNameForItem(item: ChecklistItem): Promise<void> {
-    if (item.kind !== "template" || typeof item.templateId !== "number" || !Number.isFinite(item.templateId) || item.source !== "firm") return;
-    const key = `${item.source}-${item.templateId}`;
-    try {
-      const naming = await apiFetchJson<{ fileName: string; ruleUsed: string; warnings?: string[] }>(`/cases/${caseId}/documents/filename-preview`, {
-        method: "POST",
-        body: JSON.stringify(
-          { templateId: Number(item.templateId), documentName: documentNameToSend || item.name, originalFileName: item.fileName ?? "docx", fallbackExt: "docx" }
-        ),
-      });
-      setRowNamingPreview((prev) => ({ ...prev, [key]: naming }));
-    } catch (err) {
-      toastError(toast, err, "Filename preview failed");
-    }
-  }
-
-  async function confirmManualChecklist(itemId: string): Promise<void> {
-    if (!previewItem || previewItem.kind !== "template" || typeof previewItem.templateId !== "number") return;
-    if (previewItem.source !== "firm") return;
-    const prefix = `tpl:firm:${previewItem.templateId}`;
-    const checklistKey = `${prefix}:confirm:${itemId}`;
-    try {
-      await apiFetchJson(`/cases/${caseId}/documents/checklist/items/${encodeURIComponent(checklistKey)}/completed`, { method: "POST", body: JSON.stringify({ notes: "confirmed from preview" }) });
-      toast({ title: "Manual confirmation saved" });
-      await handlePreview(previewItem);
-    } catch (err) {
-      toastError(toast, err, "Confirmation failed");
-    }
-  }
-
   function toggleChecklistSelection(it: ChecklistItem) {
     if (it.kind !== "template" || it.source !== "firm" || typeof it.templateId !== "number") return;
     const key = it.checklistKey;
@@ -608,6 +500,7 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
     try {
       const qs = new URLSearchParams();
       qs.set("blind", "true");
+      qs.set("force", "true");
       const created = await apiFetchJson<{ jobId: string }>(`/documents/automation/generate-job?${qs.toString()}`, {
         method: "POST",
         timeoutMs: 60000,
@@ -805,7 +698,6 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
     setShowAllTemplates(false);
     setTemplateSourceFilter("all");
     setTemplateApplicabilityFilter("all");
-    setRowNamingPreview({});
   }
 
   function ensureValidUpload(file: File): boolean {
@@ -1418,11 +1310,6 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
                                 </div>
                                 <div className="shrink-0 flex flex-col items-end gap-2">
                                   <div className="flex items-center gap-2 flex-wrap justify-end">
-                                    {it.kind === "template" ? (
-                                      <Button size="sm" variant="outline" onClick={() => handlePreview(it)} disabled={!canGenerate || previewLoading || it.source !== "firm"}>
-                                        Preview
-                                      </Button>
-                                    ) : null}
                                     {latestDoc ? (
                                       <Button size="sm" variant="outline" onClick={() => handleDownload(latestDoc)} disabled={downloadingDocId === latestDoc.id}>
                                         Download
@@ -1643,268 +1530,6 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
         </CardContent>
       </Card>
 
-      <Dialog open={previewOpen} onOpenChange={(v) => { if (!v) { setPreviewOpen(false); setPreviewItem(null); setPreviewResult(null); } else setPreviewOpen(true); }}>
-        <DialogContent className="sm:max-w-2xl">
-          <DialogHeader>
-            <DialogTitle>Preview</DialogTitle>
-          </DialogHeader>
-          {previewLoading ? (
-            <div className="text-slate-500 py-6">Loading preview...</div>
-          ) : !previewResult ? (
-            <div className="text-slate-500 py-6">No preview data.</div>
-          ) : (
-            <div className="space-y-4">
-              <div className="rounded-lg border border-slate-200 bg-white p-3">
-                <div className="flex items-center justify-between gap-2">
-                  <div className="text-sm font-medium text-slate-900">Clauses</div>
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    onClick={() => { if (previewItem) handlePreview(previewItem); }}
-                    disabled={!previewItem || previewLoading}
-                  >
-                    Update preview
-                  </Button>
-                </div>
-                <div className="mt-2 grid grid-cols-1 sm:grid-cols-2 gap-2">
-                  <Input value={clauseQuery} onChange={(e) => setClauseQuery(e.target.value)} placeholder="Search clauses..." />
-                  <div className="flex items-center gap-2">
-                    <Checkbox checked={clauseIncludeTitleDefault} onCheckedChange={(v) => setClauseIncludeTitleDefault(Boolean(v))} />
-                    <span className="text-sm text-slate-700">Include title</span>
-                  </div>
-                </div>
-                <div className="mt-2 max-h-40 overflow-y-auto space-y-1">
-                  {(clausesQuery.data ?? []).slice(0, 50).map((c) => {
-                    const checked = selectedClauses.some((x) => x.scope === c.scope && x.id === c.id);
-                    return (
-                      <div key={`${c.scope}-${c.id}`} className="flex items-center justify-between gap-2 rounded border border-slate-100 px-2 py-1">
-                        <div className="min-w-0">
-                          <div className="text-sm text-slate-900 truncate">{c.clause_code} • {c.title}</div>
-                          <div className="text-xs text-slate-500 truncate">{c.scope} • {c.category} • {c.language}{c.applicable ? "" : " • not applicable"}</div>
-                        </div>
-                        <Checkbox
-                          checked={checked}
-                          onCheckedChange={(v) => {
-                            const next = selectedClauses.filter((x) => !(x.scope === c.scope && x.id === c.id));
-                            if (Boolean(v)) next.push({ scope: c.scope, id: c.id, includeTitle: clauseIncludeTitleDefault });
-                            setSelectedClauses(next);
-                          }}
-                        />
-                      </div>
-                    );
-                  })}
-                  {(clausesQuery.data ?? []).length === 0 ? <div className="text-sm text-slate-500 py-2">No clauses.</div> : null}
-                </div>
-                {selectedClauses.length > 0 ? (
-                  <div className="mt-3 rounded border border-slate-200 bg-white p-2">
-                    <div className="text-xs text-slate-600">Selected order</div>
-                    <div className="mt-2 space-y-1">
-                      {selectedClauses.map((s, idx) => {
-                        const info = (clausesQuery.data ?? []).find((c) => c.scope === s.scope && c.id === s.id);
-                        const label = info ? `${info.clause_code} • ${info.title}` : `${s.scope}#${s.id}`;
-                        return (
-                          <div key={`${s.scope}-${s.id}`} className="flex items-center justify-between gap-2 rounded border border-slate-100 px-2 py-1">
-                            <div className="min-w-0">
-                              <div className="text-sm text-slate-900 truncate">{idx + 1}. {label}</div>
-                              <div className="mt-1 flex items-center gap-2">
-                                <Checkbox
-                                  checked={s.includeTitle}
-                                  onCheckedChange={(v) => {
-                                    const next = [...selectedClauses];
-                                    next[idx] = { ...next[idx], includeTitle: Boolean(v) };
-                                    setSelectedClauses(next);
-                                  }}
-                                />
-                                <span className="text-xs text-slate-600">Include title</span>
-                              </div>
-                            </div>
-                            <div className="flex items-center gap-1">
-                              <Button
-                                size="icon"
-                                variant="outline"
-                                onClick={() => {
-                                  if (idx === 0) return;
-                                  const next = [...selectedClauses];
-                                  const t = next[idx - 1];
-                                  next[idx - 1] = next[idx];
-                                  next[idx] = t;
-                                  setSelectedClauses(next);
-                                }}
-                                disabled={idx === 0}
-                              >
-                                <ChevronUp className="w-4 h-4" />
-                              </Button>
-                              <Button
-                                size="icon"
-                                variant="outline"
-                                onClick={() => {
-                                  if (idx === selectedClauses.length - 1) return;
-                                  const next = [...selectedClauses];
-                                  const t = next[idx + 1];
-                                  next[idx + 1] = next[idx];
-                                  next[idx] = t;
-                                  setSelectedClauses(next);
-                                }}
-                                disabled={idx === selectedClauses.length - 1}
-                              >
-                                <ChevronDown className="w-4 h-4" />
-                              </Button>
-                              <Button
-                                size="icon"
-                                variant="outline"
-                                onClick={() => setSelectedClauses(selectedClauses.filter((x) => !(x.scope === s.scope && x.id === s.id)))}
-                              >
-                                <X className="w-4 h-4" />
-                              </Button>
-                            </div>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  </div>
-                ) : null}
-                {previewResult.clauseInsertion ? (
-                  <div className="mt-3 text-xs text-slate-600">
-                    Detected: {"{{clauses}}"}={previewResult.clauseInsertion.hasClausesPlaceholder ? "yes" : "no"} • {"{{clause_CODE}}"}={previewResult.clauseInsertion.detectedClauseCodePlaceholders?.length ?? 0}
-                    {previewResult.clauseInsertion.insertionModeUsed ? ` • Mode: ${previewResult.clauseInsertion.insertionModeUsed}` : ""}
-                    {previewResult.clauseInsertion.insertionTarget ? ` • Target: ${previewResult.clauseInsertion.insertionTarget}` : ""}
-                  </div>
-                ) : null}
-                {previewResult.clauseInsertion?.insertionError ? (
-                  <div className="mt-1 text-xs text-rose-700">{previewResult.clauseInsertion.insertionError}</div>
-                ) : null}
-                {previewResult.clauseInsertion?.previewText ? (
-                  <div className="mt-3 rounded border border-slate-200 bg-slate-50 p-2">
-                    <div className="text-xs text-slate-600">Insertion preview</div>
-                    <div className="mt-1 text-sm text-slate-800 whitespace-pre-wrap break-words">{previewResult.clauseInsertion.previewText}</div>
-                  </div>
-                ) : null}
-                {previewResult.clauseInsertion?.warnings?.length ? (
-                  <div className="mt-2 text-xs text-amber-700">
-                    Unknown variables in selected clauses: {previewResult.clauseInsertion.warnings.map((w) => w.unknownVariables).flat().filter(Boolean).slice(0, 10).join(", ")}
-                  </div>
-                ) : null}
-                {previewResult.clauseInsertion?.duplicateClauseWarnings?.length ? (
-                  <div className="mt-1 text-xs text-amber-700">Duplicate clauses were ignored.</div>
-                ) : null}
-              </div>
-              {previewNaming ? (
-                <div className="rounded-lg border border-slate-200 bg-white p-3">
-                  <div className="text-sm font-medium text-slate-900">Filename preview</div>
-                  <div className="mt-1 text-xs text-slate-500 break-words">Rule: {previewNaming.ruleUsed}</div>
-                  <div className="mt-1 text-sm text-slate-700 break-words">{previewNaming.fileName}</div>
-                  {previewNaming.warnings?.length ? (
-                    <div className="mt-1 text-xs text-amber-700 break-words">{previewNaming.warnings.join(" | ")}</div>
-                  ) : null}
-                </div>
-              ) : null}
-              <div className="rounded-lg border border-slate-200 bg-white p-3">
-                <div className="flex items-center justify-between gap-2">
-                  <div className="text-sm font-medium text-slate-900">Applicability</div>
-                  <span className={cn(
-                    "text-xs px-2 py-1 rounded font-medium",
-                    previewResult.applicabilityResult.status === "warning"
-                      ? "bg-amber-50 text-amber-800"
-                      : previewResult.applicabilityResult.applicable
-                        ? "bg-emerald-50 text-emerald-700"
-                        : "bg-rose-50 text-rose-700"
-                  )}>
-                    {previewResult.applicabilityResult.status === "warning" ? "Warning" : previewResult.applicabilityResult.applicable ? "Applicable" : "Blocked"}
-                  </span>
-                </div>
-                {!previewResult.applicabilityResult.applicable && previewResult.applicabilityResult.reasons.length > 0 ? (
-                  <div className="mt-2 text-sm text-rose-700 break-words">{previewResult.applicabilityResult.reasons.join(", ")}</div>
-                ) : null}
-                <div className="mt-2 text-xs text-slate-500">
-                  Mode: {previewResult.previewSummary.usedMode} • Placeholders: {previewResult.previewSummary.placeholdersCount} • Renderable: {previewResult.previewSummary.renderable ? "Yes" : "No"}
-                </div>
-              </div>
-              {previewResult.checklistResult ? (
-                <div className="rounded-lg border border-slate-200 bg-white p-3">
-                  <div className="flex items-center justify-between gap-2">
-                    <div className="text-sm font-medium text-slate-900">Checklist</div>
-                    <span className={cn("text-xs px-2 py-1 rounded font-medium", previewResult.checklistResult.checklistStatus === "ready" ? "bg-emerald-50 text-emerald-700" : previewResult.checklistResult.checklistStatus === "warning" ? "bg-amber-50 text-amber-800" : "bg-rose-50 text-rose-700")}>
-                      {previewResult.checklistResult.checklistStatus}
-                    </span>
-                  </div>
-                  <div className="mt-1 text-xs text-slate-600">
-                    {previewResult.checklistResult.passedItems}/{previewResult.checklistResult.totalItems} passed • missing {previewResult.checklistResult.missingRequiredItems}
-                    {previewResult.checklistResult.manuallyOverridable ? " • manual override available" : ""}
-                  </div>
-                  <div className="mt-2 space-y-1">
-                    {previewResult.checklistResult.items.filter((x) => !x.passed).slice(0, 8).map((x) => (
-                      <div key={x.id} className="flex items-center justify-between gap-2 text-xs text-rose-700">
-                        <span className="break-words">{x.label}: {x.message || "missing"}</span>
-                        {x.type === "manual_confirmation" && canBypassApplicability ? (
-                          <Button size="sm" variant="outline" onClick={() => confirmManualChecklist(x.id)}>
-                            Confirm
-                          </Button>
-                        ) : null}
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              ) : null}
-
-              {previewResult.missingRequiredVariables.length > 0 ? (
-                <div className="rounded-lg border border-rose-200 bg-rose-50 p-3">
-                  <div className="text-sm font-medium text-rose-900">Missing required variables</div>
-                  <div className="mt-2 text-sm text-rose-800 break-words">
-                    {previewResult.missingRequiredVariables.map((m) => m.variableKey).join(", ")}
-                  </div>
-                </div>
-              ) : null}
-
-              {previewResult.placeholderWarnings.length > 0 ? (
-                <div className="rounded-lg border border-amber-200 bg-amber-50 p-3">
-                  <div className="text-sm font-medium text-amber-900">Warnings</div>
-                  <div className="mt-2 space-y-1">
-                    {previewResult.placeholderWarnings.slice(0, 10).map((w, idx) => (
-                      <div key={idx} className="text-sm text-amber-800 break-words">
-                        {w.placeholder}: {w.warning}
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              ) : null}
-
-              <div className="rounded-lg border border-slate-200 bg-white p-3">
-                <div className="text-sm font-medium text-slate-900">Resolved sample values</div>
-                <div className="mt-2 space-y-1">
-                  {Object.entries(previewResult.resolvedVariables).slice(0, 20).map(([k, v]) => (
-                    <div key={k} className="text-xs text-slate-700 break-words">
-                      <span className="font-medium text-slate-900">{k}</span>: {String(v ?? "")}
-                    </div>
-                  ))}
-                </div>
-              </div>
-
-              <div className="flex justify-end gap-2">
-                <Button variant="outline" onClick={() => { setPreviewOpen(false); setPreviewItem(null); setPreviewResult(null); }}>
-                  Close
-                </Button>
-                <Button
-                  onClick={() => {
-                    if (!previewItem) return;
-                    setPreviewOpen(false);
-                    generateAndDownloadBlind(previewItem);
-                  }}
-                  disabled={
-                    !previewItem
-                    || !canGenerate
-                    || previewItem.kind !== "template"
-                    || previewItem.source !== "firm"
-                    || oneClickGeneratingTemplateId === previewItem.templateId
-                  }
-                >
-                  Generate Final
-                </Button>
-              </div>
-            </div>
-          )}
-        </DialogContent>
-      </Dialog>
-
       <Dialog open={generateDialogOpen} onOpenChange={(v) => { if (!v) closeGenerateDialog(); else setGenerateDialogOpen(true); }}>
         <DialogContent className="w-[95vw] sm:w-[80vw] max-w-[95vw] sm:max-w-[80vw] max-h-[80vh] overflow-hidden">
           <DialogHeader>
@@ -1972,11 +1597,6 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
             )}
 
             <div className="flex-1 min-h-0 overflow-y-auto rounded-lg border border-slate-200 bg-white">
-              {selectedClauses.length > 0 ? (
-                <div className="m-3 rounded border border-slate-200 bg-slate-50 p-2 text-xs text-slate-700">
-                  Clauses selected. Use Preview to confirm insertion target before generating.
-                </div>
-              ) : null}
               {checklistQuery.isLoading ? (
                 <div className="text-sm text-slate-500 py-6 text-center">Loading templates…</div>
               ) : checklistQuery.isError ? (
@@ -2041,30 +1661,11 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
                                     {reason ? <div className="mt-1 text-xs text-slate-600 truncate" title={reason}>{reason}</div> : null}
                                   </div>
                                   <div className="flex items-center gap-2 justify-start lg:justify-end flex-wrap">
-                                    <Button size="sm" variant="outline" onClick={() => previewFileNameForItem(it)} disabled={!applicable || !ready || it.source !== "firm"}>
-                                      Filename
-                                    </Button>
-                                    <Button size="sm" variant="outline" onClick={() => { closeGenerateDialog(); handlePreview(it); }} disabled={!applicable || !ready || previewLoading || it.source !== "firm"}>
-                                      Preview
-                                    </Button>
                                     <Button size="sm" onClick={() => generateAndDownloadBlind(it)} disabled={!canGenerate || isGenerating || it.source !== "firm" || oneClickGeneratingTemplateId === it.templateId}>
                                       {oneClickGeneratingTemplateId === it.templateId ? "Generating..." : "Generate Final"}
                                     </Button>
                                   </div>
                                 </div>
-                                {rowNamingPreview[`${it.source}-${it.templateId}`] ? (
-                                  <div className="mt-2 text-xs text-slate-600 break-words">
-                                    Rule: {rowNamingPreview[`${it.source}-${it.templateId}`].ruleUsed}
-                                    <br />
-                                    Name: {rowNamingPreview[`${it.source}-${it.templateId}`].fileName}
-                                    {rowNamingPreview[`${it.source}-${it.templateId}`].warnings?.length ? (
-                                      <>
-                                        <br />
-                                        Warning: {rowNamingPreview[`${it.source}-${it.templateId}`].warnings?.join(", ")}
-                                      </>
-                                    ) : null}
-                                  </div>
-                                ) : null}
                               </div>
                             );
                           })}

@@ -2510,8 +2510,32 @@ router.get("/cases/export.csv", requireAuthHandler, requireFirmUserHandler, requ
 router.get("/cases", requireAuthHandler, requireFirmUserHandler, requirePermission("cases", "read") as RequestHandler, authed(async (req, res) => {
   try {
     const r = rdb(req);
-    const hasKeyDates = await tableExists(r, "public.case_key_dates");
+    let hasKeyDates = await tableExists(r, "public.case_key_dates");
     const hasWorkflowSteps = await tableExists(r, "public.case_workflow_steps");
+    if (hasKeyDates) {
+      try {
+        await r.execute(sql`
+          SELECT
+            ${caseKeyDatesTable.spaDate},
+            ${caseKeyDatesTable.spaStampedDate},
+            ${caseKeyDatesTable.letterOfOfferDate},
+            ${caseKeyDatesTable.loanDocsSignedDate},
+            ${caseKeyDatesTable.completionDate},
+            ${caseKeyDatesTable.completionSlaActivatedAt},
+            ${caseKeyDatesTable.adviceToBankDate}
+          FROM ${caseKeyDatesTable}
+          WHERE ${caseKeyDatesTable.firmId} = ${req.firmId!}
+          LIMIT 1
+        `);
+      } catch (err) {
+        const code = getPgCode(err);
+        if (code === "42P01" || code === "42703") {
+          hasKeyDates = false;
+        } else {
+          throw err;
+        }
+      }
+    }
     const params = ListCasesQueryParams.safeParse(req.query);
     const search = params.success ? params.data.search : undefined;
     const status = params.success ? params.data.status : undefined;
@@ -2546,11 +2570,11 @@ router.get("/cases", requireAuthHandler, requireFirmUserHandler, requirePermissi
 
   const spaStatusExpr = hasWorkflowSteps ? spaStatusSql() : sql<string>`'Pending'`;
   const loanStatusExpr = hasWorkflowSteps ? loanStatusSql() : sql<string | null>`CASE WHEN ${casesTable.purchaseMode} = 'loan' THEN 'Pending' ELSE NULL END`;
-  const mSpaDateExpr = hasKeyDates ? milestoneDateYmdSql("spa_date") : sql<string | null>`NULL`;
-  const mSpaStampedDateExpr = hasKeyDates ? milestoneDateYmdSql("spa_stamped_date") : sql<string | null>`NULL`;
-  const mLetterOfOfferDateExpr = hasKeyDates ? milestoneDateYmdSql("letter_of_offer_date") : sql<string | null>`NULL`;
-  const mLoanDocsSignedDateExpr = hasKeyDates ? milestoneDateYmdSql("loan_docs_signed_date") : sql<string | null>`NULL`;
-  const mCompletionDateExpr = hasKeyDates ? milestoneDateYmdSql("completion_date") : sql<string | null>`NULL`;
+  const mSpaDateExpr = hasKeyDates ? sql<string | null>`(${caseKeyDatesTable.spaDate}::text)` : sql<string | null>`NULL`;
+  const mSpaStampedDateExpr = hasKeyDates ? sql<string | null>`(${caseKeyDatesTable.spaStampedDate}::text)` : sql<string | null>`NULL`;
+  const mLetterOfOfferDateExpr = hasKeyDates ? sql<string | null>`(${caseKeyDatesTable.letterOfOfferDate}::text)` : sql<string | null>`NULL`;
+  const mLoanDocsSignedDateExpr = hasKeyDates ? sql<string | null>`(${caseKeyDatesTable.loanDocsSignedDate}::text)` : sql<string | null>`NULL`;
+  const mCompletionDateExpr = hasKeyDates ? sql<string | null>`(${caseKeyDatesTable.completionDate}::text)` : sql<string | null>`NULL`;
   const completionSlaActivatedAtExpr = hasKeyDates ? sql<string | null>`(${caseKeyDatesTable.completionSlaActivatedAt}::text)` : sql<string | null>`NULL`;
   const completionSlaHoursElapsedExpr = hasKeyDates ? sql<number | null>`CASE
     WHEN ${caseKeyDatesTable.completionSlaActivatedAt} IS NULL THEN NULL
