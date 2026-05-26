@@ -2917,6 +2917,14 @@ router.get("/cases", requireAuthHandler, requireFirmUserHandler, requirePermissi
   } catch (err) {
     console.error("!!! DB_DEBUG: Cases list error:", err);
     logger.error({ err, path: req.path, firmId: req.firmId, userId: req.userId, query: req.query }, "[cases]");
+    const allowDetails =
+      process.env.API_ERROR_DETAILS === "1" ||
+      process.env.NODE_ENV !== "production" ||
+      Boolean((res as any)?.locals?.allowErrorDetails);
+    if (allowDetails && err instanceof Error) {
+      res.status(500).json({ error: err.message, stack: err.stack });
+      return;
+    }
     res.status(500).json({ error: "Internal Server Error" });
   }
 }));

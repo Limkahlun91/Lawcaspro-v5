@@ -54,6 +54,19 @@ app.use(helmet());
 app.use(cors());
 app.use(cookieParser());
 app.use(requestMetaMiddleware() as unknown as MiddlewareLike);
+app.use(((req: ReqLike, res: ResLike, next: Next) => {
+  const token = process.env.API_DEBUG_TOKEN;
+  if (!token) {
+    next();
+    return;
+  }
+  const rawHeader = req.headers?.["x-debug-token"];
+  const provided = Array.isArray(rawHeader) ? rawHeader[0] : rawHeader;
+  if (typeof provided === "string" && provided && provided === token) {
+    (res.locals as any).allowErrorDetails = true;
+  }
+  next();
+}) as unknown as MiddlewareLike);
 
 const createPinoHttpMiddleware = pinoHttp as unknown as (options: unknown) => MiddlewareLike;
 app.use(createPinoHttpMiddleware({ logger }));
