@@ -192,14 +192,14 @@ export function buildCasePayloadFromFormValues(values: CaseFormValues): Record<s
     branchAddressLine3: values.branchAddressLines.line3.trim() || undefined,
     branchAddressLine4: values.branchAddressLines.line4.trim() || undefined,
     branchAddressLine5: values.branchAddressLines.line5.trim() || undefined,
-    propertyFinancingSum: values.financingSum.trim() || undefined,
-    othersSum: values.othersSum.trim() || undefined,
+    propertyFinancingSum: parseMoneyOrNull(values.financingSum) ?? undefined,
+    othersSum: parseMoneyOrNull(values.othersSum) ?? undefined,
   };
 
   return {
     projectId: Number(values.projectId),
     developerId: Number(values.developerId),
-    referenceNo: values.referenceNo.trim(),
+    referenceNo: values.referenceNo.trim() || undefined,
     titleType,
     purchaseMode: values.purchaseMode,
     purchasers,
@@ -235,7 +235,7 @@ export function CaseFormModal(props: {
   const title = props.title ?? (props.mode === "create" ? "Create Case" : "Edit Case");
 
   const handleSubmit = async () => {
-    if (!value.referenceNo.trim()) {
+    if (props.mode === "edit" && !value.referenceNo.trim()) {
       toast({ title: "Our File Ref is required", variant: "destructive" });
       return;
     }

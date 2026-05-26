@@ -2871,7 +2871,7 @@ router.post("/cases", requireAuthHandler, requireFirmUserHandler, requirePermiss
     const money = z.preprocess((v) => {
       if (v === "" || v === undefined || v === null) return null;
       if (typeof v === "number") return v;
-      if (typeof v === "string") return Number(v);
+      if (typeof v === "string") return Number(v.replace(/[^0-9.]/g, ""));
       return v;
     }, z.number().finite().nullable());
 

@@ -20,6 +20,7 @@ import { QueryFallback } from "@/components/query-fallback";
 import { useReAuth } from "@/components/re-auth-dialog";
 import { useAuth } from "@/lib/auth-context";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Checkbox } from "@/components/ui/checkbox";
 import { CreatePaymentVoucherBody, PaymentVoucherTransitionBody, type PaymentVoucherFundStatus } from "@workspace/api-zod";
 import BankAccountsTab from "./bank-accounts";
 import BankReconciliationPage from "./bank-reconciliation";
@@ -436,6 +437,13 @@ function InvoicesTab() {
   const { data, isLoading } = invoicesQuery;
   const invoices = (data ?? []) as any[];
   const { data: quotations = [] } = useListQuotations();
+  const invoicedQuotationIds = new Set(
+    invoices
+      .map((i: any) => i?.quotationId)
+      .filter((v: any) => v !== null && v !== undefined)
+      .map((v: any) => String(v))
+  );
+  const selectableQuotations = quotations.filter((q: any) => !invoicedQuotationIds.has(String(q?.id)));
 
   const createMut = useMutation({
     mutationFn: () => apiFetchJson(`/invoices/from-quotation/${selectedQuotationId}`, {
@@ -485,9 +493,9 @@ function InvoicesTab() {
               <select className="w-full border border-slate-200 rounded-md px-3 py-2 text-sm bg-white"
                 value={selectedQuotationId} onChange={(e) => setSelectedQuotationId(e.target.value)}>
                 <option value="">— Select a quotation —</option>
-                {quotations.map((q: any) => (
-                  <option key={q.id} value={q.id}>
-                    {q.referenceNo} — {q.clientName} (RM {Number(q.totalInclTax ?? 0).toLocaleString("en-MY")})
+                {selectableQuotations.map((q: any) => (
+                  <option key={String(q.id)} value={String(q.id)}>
+                    {String(q.referenceNo ?? "")} — {String(q.clientName ?? "")} (RM {Number(q.totalInclTax ?? 0).toLocaleString("en-MY")})
                   </option>
                 ))}
               </select>
@@ -879,7 +887,7 @@ function PaymentVouchersTab() {
     retry: false,
     enabled: caseQueryText.trim().length >= 2 && casePickerOpen,
   });
-  const caseResults = Array.isArray(caseSearchQuery.data?.data) ? caseSearchQuery.data!.data! : [];
+  const caseResults = Array.isArray(caseSearchQuery.data?.data) ? (caseSearchQuery.data?.data ?? []) : [];
 
   const targetCaseSearchQuery = useQuery({
     queryKey: ["accounting", "cases-search", "target", targetCaseQueryText],
@@ -888,7 +896,7 @@ function PaymentVouchersTab() {
     retry: false,
     enabled: targetCaseQueryText.trim().length >= 2 && targetCasePickerOpen,
   });
-  const targetCaseResults = Array.isArray(targetCaseSearchQuery.data?.data) ? targetCaseSearchQuery.data!.data! : [];
+  const targetCaseResults = Array.isArray(targetCaseSearchQuery.data?.data) ? (targetCaseSearchQuery.data?.data ?? []) : [];
 
   const vouchersQuery = useQuery({ queryKey: ["payment-vouchers"], queryFn: () => apiFetchJson("/payment-vouchers"), retry: false });
   const { data, isLoading } = vouchersQuery;
@@ -899,14 +907,17 @@ function PaymentVouchersTab() {
     mutationFn: async () => {
       if (selectedCases.length === 0) throw new Error("Please select at least one case");
       const voucherType = simpleForm.voucherType;
+      const sourceCase = selectedCases[0] ?? null;
+      const target = targetCase;
       if ((voucherType === "internal_transfer" || voucherType === "file_to_file_transfer") && !(roleKind === "partner" || roleKind === "account")) {
         throw new Error("Forbidden");
       }
       if (simpleForm.isAdvance && voucherType !== "external_payment") throw new Error("Client Advance is only applicable to Payment Voucher");
       if (voucherType === "file_to_file_transfer") {
         if (selectedCases.length !== 1) throw new Error("File-to-file transfer requires exactly 1 source case");
-        if (!targetCase) throw new Error("Target case is required");
-        if (Number(targetCase.case_id) === Number(selectedCases[0]!.case_id)) throw new Error("Target case must be different from source case");
+        if (!sourceCase) throw new Error("Source case is required");
+        if (!target) throw new Error("Target case is required");
+        if (Number(target.case_id) === Number(sourceCase.case_id)) throw new Error("Target case must be different from source case");
       }
       if (voucherType !== "internal_transfer" && voucherType !== "file_to_file_transfer" && !simpleForm.payeeName.trim()) throw new Error("Payee name is required");
 
@@ -935,10 +946,10 @@ function PaymentVouchersTab() {
         lineItems: parsedLineItems,
       };
 
-      const casesToCreate = voucherType === "file_to_file_transfer" ? [selectedCases[0]!] : selectedCases;
+      const casesToCreate = voucherType === "file_to_file_transfer" ? (sourceCase ? [sourceCase] : []) : selectedCases;
       const calls = casesToCreate.map((c) => {
         const payload = voucherType === "file_to_file_transfer"
-          ? { ...bodyBase, caseId: c.case_id, targetCaseId: targetCase!.case_id }
+          ? { ...bodyBase, caseId: c.case_id, targetCaseId: target?.case_id ?? null }
           : { ...bodyBase, caseId: c.case_id };
         const parsed = CreatePaymentVoucherBody.safeParse(payload);
         if (!parsed.success) throw new Error(parsed.error.message);
@@ -1258,7 +1269,7 @@ function PaymentVouchersTab() {
                       <div className="space-y-1">
                         <div className="text-xs text-slate-500">Source Case</div>
                         <div className="h-10 flex items-center px-3 rounded-md border border-slate-200 bg-white text-sm text-slate-700">
-                          {selectedCases.length === 1 ? selectedCases[0]!.title : "Select 1 source case above"}
+                          {selectedCases.length === 1 ? (selectedCases[0]?.title ?? "Select 1 source case above") : "Select 1 source case above"}
                         </div>
                       </div>
                       <div className="space-y-1">
@@ -1403,17 +1414,9 @@ function PaymentVouchersTab() {
                   </div>
                 </div>
 
-                <div className="space-y-1.5 md:col-span-2">
-                  <label className="text-sm font-medium text-slate-700 block">Is Advance Payment?</label>
-                  <div className="flex items-center gap-3">
-                    <input
-                      type="checkbox"
-                      checked={simpleForm.isAdvance}
-                      onChange={(e) => setSimpleForm((f) => ({ ...f, isAdvance: e.target.checked }))}
-                    />
-                    <span className={simpleForm.isAdvance ? "text-xs text-amber-700" : "text-xs text-slate-400"}>
-                      {simpleForm.isAdvance ? "If yes, partner must approve" : "—"}
-                    </span>
+                <div className="md:col-span-2">
+                  <div className="text-xs text-slate-400">
+                    {simpleForm.isAdvance ? "Partner approval required for Client Advance" : "—"}
                   </div>
                 </div>
               </div>

@@ -121,6 +121,12 @@ router.post("/invoices/from-quotation/:quotationId", sensitiveRateLimiter, requi
   if (isNaN(quotationId)) { res.status(400).json({ error: "Invalid quotation ID" }); return; }
   const [q] = await r.select().from(quotationsTable).where(and(eq(quotationsTable.id, quotationId), eq(quotationsTable.firmId, req.firmId!)));
   if (!q) { res.status(404).json({ error: "Quotation not found" }); return; }
+  const [existingInv] = await r
+    .select({ id: invoicesTable.id })
+    .from(invoicesTable)
+    .where(and(eq(invoicesTable.firmId, req.firmId!), eq(invoicesTable.quotationId, quotationId)))
+    .limit(1);
+  if (existingInv) { res.status(409).json({ error: "Quotation already invoiced" }); return; }
   const qItems = await r.select().from(quotationItemsTable).where(eq(quotationItemsTable.quotationId, quotationId)).orderBy(quotationItemsTable.sortOrder);
 
   const subtotal = qItems.reduce((s, i) => s + Number(i.amountExclTax), 0);
