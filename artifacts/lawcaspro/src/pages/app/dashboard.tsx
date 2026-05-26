@@ -45,6 +45,8 @@ export default function AppDashboard() {
     queryKey: ["dashboard"],
     queryFn: () => apiFetchJson("/dashboard") as Promise<Record<string, any>>,
     retry: false,
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
   });
 
   if (isLoading) {

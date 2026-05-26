@@ -201,11 +201,12 @@ export default function DocumentAutomationHub() {
   const someCasesOnPageSelected = cases.some((c) => selectedCaseIdSet.has(c.id)) && !allCasesOnPageSelected;
 
   const jobQuery = useQuery<GenerationJobResponse>({
-    queryKey: ["document-automation", "job", jobId],
+    queryKey: ["jobStatus", jobId],
     queryFn: () => apiFetchJson(`/documents/jobs/${jobId}`),
     enabled: Boolean(jobId),
-    refetchInterval: (q) => {
-      const st = String((q.state.data?.job as any)?.status ?? "");
+    refetchInterval: (query) => {
+      const data = query.state.data as any;
+      const st = String((data?.job as any)?.status ?? data?.status ?? "");
       if (st === "completed" || st === "failed") return false;
       return 1000;
     },
@@ -219,14 +220,15 @@ export default function DocumentAutomationHub() {
 
   useEffect(() => {
     if (!jobId) return;
-    if (!jobQuery.data?.job) return;
+    const job: any = (jobQuery.data as any)?.job;
+    if (!job) return;
 
     const handleKey = `${jobId}:${jobStatus}`;
     if ((jobStatus === "completed" || jobStatus === "failed") && handledJobKeyRef.current === handleKey) return;
     if (jobStatus === "completed" || jobStatus === "failed") handledJobKeyRef.current = handleKey;
 
     if (jobStatus === "failed") {
-      const msg = safeText((jobQuery.data?.job as any)?.error_summary) || "Document generation failed";
+      const msg = safeText(job?.error_summary) || "Document generation failed";
       toast({ title: "Generation failed", description: msg, variant: "destructive" });
       setJobId(null);
       setBusy(false);
@@ -234,7 +236,8 @@ export default function DocumentAutomationHub() {
     }
     if (jobStatus !== "completed") return;
 
-    const failed = (jobQuery.data?.items ?? []).filter((it) => String((it as any).status ?? "") === "failed");
+    const items: any[] = Array.isArray((jobQuery.data as any)?.items) ? ((jobQuery.data as any).items as any[]) : [];
+    const failed = items.filter((it) => String((it as any).status ?? "") === "failed");
     if (failed.length > 0) {
       toast({ title: "Some documents failed", description: "Open browser console to view failure details." });
       console.warn("[document-automation.failures]", failed);
@@ -264,7 +267,7 @@ export default function DocumentAutomationHub() {
         setJobId(null);
         setBusy(false);
       });
-  }, [jobId, jobQuery.data?.job, jobQuery.data?.items, jobStatus, activeMode, jobDownloadFileName, toast]);
+  }, [jobId, jobStatus, activeMode, jobDownloadFileName, toast]);
 
   function setAllCasesOnPage(checked: boolean) {
     if (!checked) {
