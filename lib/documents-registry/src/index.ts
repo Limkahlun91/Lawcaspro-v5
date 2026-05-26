@@ -12,6 +12,9 @@ export const DOCUMENT_TYPES = [
   "letter_forward_bank_execution",
   "letter_forward_bank_lu_to_dev",
   "letter_advice_spa_sol_lu",
+  "letter_send_spa_to_developer_execution",
+  "letter_send_stamped_spa_to_developer",
+  "letter_send_stamped_spa_to_purchaser",
 
   "other",
 ] as const;
@@ -31,6 +34,9 @@ export const DOCUMENT_TYPE_LABELS: Record<DocumentType, string> = {
   letter_forward_bank_execution: "Letter Forward Bank Execution",
   letter_forward_bank_lu_to_dev: "Letter Forward Bank’s LU to Dev.",
   letter_advice_spa_sol_lu: "Letter Advice & SPA Sol. LU",
+  letter_send_spa_to_developer_execution: "Letter Send SPA to Developer execution",
+  letter_send_stamped_spa_to_developer: "Letter Send Stamped SPA to Developer",
+  letter_send_stamped_spa_to_purchaser: "Letter Send Stamped SPA to Purchaser",
   other: "Other",
 };
 
@@ -41,6 +47,9 @@ export const LETTERHEAD_APPLICABLE_DOCUMENT_TYPES = new Set<DocumentType>([
   "letter_forward_bank_execution",
   "letter_forward_bank_lu_to_dev",
   "letter_advice_spa_sol_lu",
+  "letter_send_spa_to_developer_execution",
+  "letter_send_stamped_spa_to_developer",
+  "letter_send_stamped_spa_to_purchaser",
 ]);
 
 export function normalizeDocumentType(input: unknown): DocumentType {
@@ -70,7 +79,10 @@ export type PrintKey =
   | "letter_forward_bank_execution"
   | "letter_forward_bank_lu_to_dev"
   | "noa"
-  | "letter_advice_spa_sol_lu";
+  | "letter_advice_spa_sol_lu"
+  | "letter_send_spa_to_developer_execution"
+  | "letter_send_stamped_spa_to_developer"
+  | "letter_send_stamped_spa_to_purchaser";
 
 export const PRINT_ACTIONS: Record<PrintKey, { documentType: DocumentType; label: string }> = {
   acting_letter: { documentType: "acting_letter", label: "Acting Letter" },
@@ -78,4 +90,7 @@ export const PRINT_ACTIONS: Record<PrintKey, { documentType: DocumentType; label
   letter_forward_bank_lu_to_dev: { documentType: "letter_forward_bank_lu_to_dev", label: "Letter Forward Bank’s LU to Dev." },
   noa: { documentType: "noa", label: "NOA" },
   letter_advice_spa_sol_lu: { documentType: "letter_advice_spa_sol_lu", label: "Letter Advice & SPA Sol. LU" },
+  letter_send_spa_to_developer_execution: { documentType: "letter_send_spa_to_developer_execution", label: "Letter Send SPA to Developer execution" },
+  letter_send_stamped_spa_to_developer: { documentType: "letter_send_stamped_spa_to_developer", label: "Letter Send Stamped SPA to Developer" },
+  letter_send_stamped_spa_to_purchaser: { documentType: "letter_send_stamped_spa_to_purchaser", label: "Letter Send Stamped SPA to Purchaser" },
 };

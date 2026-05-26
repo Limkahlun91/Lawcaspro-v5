@@ -517,8 +517,19 @@ export default function CaseDetail() {
       if (Number.isFinite(docId)) {
         queryClient.invalidateQueries({ queryKey: ["case-documents", caseId] });
       }
-      await printWordBlob(blob, { title: fileName });
-      toast({ title: "Print preview opened" });
+      const key = vars?.printKey ?? "";
+      const downloadKeys = new Set([
+        "letter_send_spa_to_developer_execution",
+        "letter_send_stamped_spa_to_developer",
+        "letter_send_stamped_spa_to_purchaser",
+      ]);
+      if (downloadKeys.has(key)) {
+        downloadBlob(blob, fileName);
+        toast({ title: "Downloaded" });
+      } else {
+        await printWordBlob(blob, { title: fileName });
+        toast({ title: "Print preview opened" });
+      }
 
       if (vars?.printKey === "acting_letter") {
         autoKeyDatesMutation.mutate({ payload: { acting_letter_issued_date: todayYmdLocal() }, statusLabel: "Acting Letter Issued" });
@@ -1435,6 +1446,7 @@ export default function CaseDetail() {
     onChange: (v: string) => void;
     type?: "date" | "text" | "number";
     printerKey?: string;
+    alwaysShowPrinter?: boolean;
   }) {
     const type = props.type ?? "date";
     const isDate = type === "date";
@@ -1471,7 +1483,7 @@ export default function CaseDetail() {
             />
           )}
           {showPrinter && (
-            <div className="opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity">
+            <div className={props.alwaysShowPrinter ? "" : "opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity"}>
               <Button
                 size="icon"
                 variant={canPrint(printerKey, dateVal) ? "default" : "outline"}
@@ -1494,7 +1506,7 @@ export default function CaseDetail() {
   const canDocsWrite = hasPermission(user, "documents", "create") || canDocsUpdate;
   const canDocsDelete = hasPermission(user, "documents", "delete");
 
-  function WorkflowFileCard(props: { label: string; docKey: WorkflowAttachmentDocKey; dateKey: WorkflowAttachmentDateKey; printerKey?: string }) {
+  function WorkflowFileCard(props: { label: string; docKey: WorkflowAttachmentDocKey; dateKey: WorkflowAttachmentDateKey; printerKey?: string; requireEvidenceUpload?: boolean }) {
     const value = keyDatesDraft[props.dateKey] ?? "";
     const doc = workflowDocsByKey.get(props.docKey);
     const uploading = workflowUploadingKey === props.docKey || uploadWorkflowDocMutation.isPending;
@@ -1513,14 +1525,28 @@ export default function CaseDetail() {
         <div className="flex items-center justify-between gap-2">
           <Label className="text-xs text-slate-600">{props.label}</Label>
           <div className="flex items-center gap-1">
-            {derivedStatus && (
-              <Badge
-                variant={derivedStatus === "completed" ? "default" : "outline"}
-                className="text-[10px] whitespace-nowrap"
-              >
-                {String(derivedStatus).replace(/_/g, " ")}
-              </Badge>
-            )}
+            {(() => {
+              const mustUpload = Boolean(props.requireEvidenceUpload);
+              const pending = mustUpload && Boolean(value) && !doc;
+              if (pending) {
+                return (
+                  <Badge variant="destructive" className="text-[10px] whitespace-nowrap">
+                    pending upload
+                  </Badge>
+                );
+              }
+              if (derivedStatus) {
+                return (
+                  <Badge
+                    variant={derivedStatus === "completed" ? "default" : "outline"}
+                    className="text-[10px] whitespace-nowrap"
+                  >
+                    {String(derivedStatus).replace(/_/g, " ")}
+                  </Badge>
+                );
+              }
+              return null;
+            })()}
             {showStatus && (
               <Badge
                 variant={st?.status === "configured" ? "secondary" : "outline"}
@@ -1553,6 +1579,27 @@ export default function CaseDetail() {
             </div>
           )}
         </div>
+        {props.requireEvidenceUpload && value && !doc && canDocsWrite ? (
+          <div
+            className="mt-3 rounded-md border border-dashed border-red-300 bg-red-50 px-3 py-4 text-sm text-red-700 cursor-pointer"
+            onClick={() => openWorkflowUpload(props.docKey, props.dateKey)}
+            onDragOver={(e) => { e.preventDefault(); }}
+            onDrop={async (e) => {
+              e.preventDefault();
+              const f = e.dataTransfer.files?.[0] ?? null;
+              if (!f) return;
+              if (!/\.pdf$/i.test(f.name) && f.type !== "application/pdf") {
+                toast({ title: "PDF required", description: "Please upload a PDF file (Stamped SPA scan).", variant: "destructive" });
+                return;
+              }
+              workflowUploadKeyRef.current = { docKey: props.docKey, dateKey: props.dateKey };
+              await handleWorkflowFileSelected(f);
+            }}
+          >
+            <div className="font-medium">Upload required: Stamped SPA (PDF)</div>
+            <div className="text-xs mt-1 text-red-600">Drop PDF here, or click to upload</div>
+          </div>
+        ) : null}
         <div className="mt-2 flex items-center justify-between gap-2 min-w-0">
           <div className="text-xs text-slate-600 truncate min-w-0" title={doc?.fileName ?? "No file uploaded"}>
             {doc ? doc.fileName : "No file uploaded"}
@@ -2201,12 +2248,30 @@ export default function CaseDetail() {
                       </div>
                       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
                         <FieldCard label="SPA signing" value={keyDatesDraft.spa_signed_date || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, spa_signed_date: v }))} />
-                        <FieldCard label="SPA sent to dev for execution" value={keyDatesDraft.spa_forward_to_developer_execution_on || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, spa_forward_to_developer_execution_on: v }))} />
+                        <FieldCard
+                          label="SPA sent to dev for execution"
+                          value={keyDatesDraft.spa_forward_to_developer_execution_on || ""}
+                          onChange={(v) => setKeyDatesDraft((p) => ({ ...p, spa_forward_to_developer_execution_on: v }))}
+                          printerKey="letter_send_spa_to_developer_execution"
+                          alwaysShowPrinter
+                        />
                         <FieldCard label="Received dev return SPA" value={keyDatesDraft.spa_received_dev_return_spa_on || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, spa_received_dev_return_spa_on: v }))} />
                         <FieldCard label="SPA date" value={keyDatesDraft.spa_date || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, spa_date: v }))} />
-                        <WorkflowFileCard label="SPA stamping" docKey="spa_stamped" dateKey="spa_stamped_date" />
-                        <FieldCard label="Stamped SPA sent to dev" value={keyDatesDraft.stamped_spa_send_to_developer_on || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, stamped_spa_send_to_developer_on: v }))} />
-                        <FieldCard label="Stamped SPA sent to Pur" value={keyDatesDraft.stamped_spa_sent_to_purchaser_on || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, stamped_spa_sent_to_purchaser_on: v }))} />
+                        <WorkflowFileCard label="SPA stamping" docKey="spa_stamped" dateKey="spa_stamped_date" requireEvidenceUpload />
+                        <FieldCard
+                          label="Stamped SPA sent to dev"
+                          value={keyDatesDraft.stamped_spa_send_to_developer_on || ""}
+                          onChange={(v) => setKeyDatesDraft((p) => ({ ...p, stamped_spa_send_to_developer_on: v }))}
+                          printerKey="letter_send_stamped_spa_to_developer"
+                          alwaysShowPrinter
+                        />
+                        <FieldCard
+                          label="Stamped SPA sent to Pur"
+                          value={keyDatesDraft.stamped_spa_sent_to_purchaser_on || ""}
+                          onChange={(v) => setKeyDatesDraft((p) => ({ ...p, stamped_spa_sent_to_purchaser_on: v }))}
+                          printerKey="letter_send_stamped_spa_to_purchaser"
+                          alwaysShowPrinter
+                        />
                       </div>
                     </AccordionContent>
                   </AccordionItem>
