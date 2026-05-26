@@ -2922,6 +2922,12 @@ router.get("/cases", requireAuthHandler, requireFirmUserHandler, requirePermissi
     if (isCompat) {
       try {
         const r = rdb(req);
+        let canAssignAnyFallback = false;
+        try {
+          canAssignAnyFallback = await hasRolePermission(r, req.firmId!, req.roleId, "cases", "assign_any");
+        } catch {
+          canAssignAnyFallback = false;
+        }
         const params2 = ListCasesQueryParams.safeParse(req.query);
         const search2 = params2.success ? params2.data.search : undefined;
         const status2 = params2.success ? params2.data.status : undefined;
@@ -2934,6 +2940,15 @@ router.get("/cases", requireAuthHandler, requireFirmUserHandler, requirePermissi
         const offset2 = (page2 - 1) * limit2;
 
         const conditions2 = [eq(casesTable.firmId, req.firmId!), sql`${casesTable.deletedAt} IS NULL`];
+        if (!canAssignAnyFallback) {
+          conditions2.push(sql`EXISTS (
+            SELECT 1
+            FROM ${caseAssignmentsTable}
+            WHERE ${caseAssignmentsTable.caseId} = ${casesTable.id}
+              AND ${caseAssignmentsTable.userId} = ${req.userId}
+              AND ${caseAssignmentsTable.unassignedAt} IS NULL
+          )`);
+        }
         if (status2) conditions2.push(eq(casesTable.status, status2));
         if (projectId2) conditions2.push(eq(casesTable.projectId, projectId2));
         if (developerId2) conditions2.push(eq(casesTable.developerId, developerId2));
@@ -3001,7 +3016,7 @@ router.get("/cases", requireAuthHandler, requireFirmUserHandler, requirePermissi
           updatedAt: row.updatedAt.toISOString(),
         }));
 
-        res.json({ data, total: Number((totalRow as any)?.c ?? 0), page: page2, limit: limit2 });
+        res.json({ data, total: Number(totalRow?.c ?? 0), page: page2, limit: limit2 });
         return;
       } catch (fallbackErr) {
         logger.error({ err: fallbackErr, path: req.path, firmId: req.firmId, userId: req.userId }, "[cases] compat fallback failed");
