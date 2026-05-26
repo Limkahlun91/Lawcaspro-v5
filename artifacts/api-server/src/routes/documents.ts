@@ -6218,7 +6218,7 @@ async function generateFirmDocument({
     throw new DocumentGenerationError(422, "TEMPLATE_BINDING_MISSING", "Missing required variables", { missingRequiredVariables: preview.missingRequiredVariables });
   }
   let input: Record<string, unknown> = preview.usedMode === "bindings" ? preview.resolvedVariables : (context as any);
-  input = fillMissingScalarsForRender(effectivePlaceholders, input, { missingMode: blindMode ? "empty" : "placeholder" });
+  input = fillMissingScalarsForRender(effectivePlaceholders, input, { missingMode: forceMode ? "empty" : "placeholder" });
   let clauseSnapshot: Record<string, unknown> | null = null;
   let checklistEval = evaluateTemplateChecklist({
     checklistMode: (template as any).checklist_mode,
@@ -6257,7 +6257,7 @@ async function generateFirmDocument({
     });
     fileContents = applied.docxBytes;
     input = applied.data;
-    input = fillMissingScalarsForRender(effectivePlaceholders, input, { missingMode: blindMode ? "empty" : "placeholder" });
+    input = fillMissingScalarsForRender(effectivePlaceholders, input, { missingMode: forceMode ? "empty" : "placeholder" });
     clauseSnapshot = {
       insertionModeUsed: decision.insertionModeUsed,
       insertionTarget: decision.insertionTarget,
@@ -6350,9 +6350,9 @@ async function generateFirmDocument({
     outFormat = "pdf";
     const mappingConfig = (template as any).pdf_mapping_config ?? null;
     outputBytes = await (isPdfTextBoxMappings(mappingConfig)
-      ? renderPdfTextBoxMappedTemplate({ pdfBytes: fileContents, data: input, mappings: mappingConfig, missingMode: blindMode ? "empty" : "placeholder" })
+      ? renderPdfTextBoxMappedTemplate({ pdfBytes: fileContents, data: input, mappings: mappingConfig, missingMode: forceMode ? "empty" : "placeholder" })
       : normalizePdfMappingConfig(mappingConfig).length > 0
-        ? renderPdfMappedTemplate({ pdfBytes: fileContents, data: input, mappingConfig, missingMode: blindMode ? "empty" : "placeholder" })
+        ? renderPdfMappedTemplate({ pdfBytes: fileContents, data: input, mappingConfig, missingMode: forceMode ? "empty" : "placeholder" })
         : renderPdfFormTemplate({ pdfBytes: fileContents, data: input, flatten: true }));
     outputContentType = "application/pdf";
   } else {
@@ -6367,7 +6367,7 @@ async function generateFirmDocument({
       nullGetter(part: any) {
         const k = typeof part?.value === "string" ? String(part.value) : "";
         if (!k) return "";
-        return blindMode ? "" : `[MISSING: ${k}]`;
+        return forceMode ? "" : `[MISSING: ${k}]`;
       },
     });
     attachDocxImageModule(doc);
@@ -8216,14 +8216,16 @@ router.post("/documents/automation/generate-job", requireAuth, requireFirmUser, 
       ${req.userId as any}, now()
     )
   `);
+  const itemValues: Array<ReturnType<typeof sql>> = [];
   for (const caseId of caseIds) {
     for (const templateId of templateIds) {
-      await queryRows(r, sql`
-        INSERT INTO document_generation_job_items (job_id, firm_id, case_id, template_id, status)
-        VALUES (${jobId}::uuid, ${req.firmId!}, ${caseId}, ${templateId}, 'pending')
-      `);
+      itemValues.push(sql`(${jobId}::uuid, ${req.firmId!}, ${caseId}, ${templateId}, 'pending')`);
     }
   }
+  await queryRows(r, sql`
+    INSERT INTO document_generation_job_items (job_id, firm_id, case_id, template_id, status)
+    VALUES ${sql.join(itemValues, sql`, `)}
+  `);
 
   startDocumentGenerationJobRunner(r, { firmId: req.firmId!, jobId });
 

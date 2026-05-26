@@ -35,6 +35,16 @@ function toNumber0(v: unknown): number {
   return Number.isFinite(n) ? n : 0;
 }
 
+function getPgCode(err: unknown): string | null {
+  const code = err && typeof err === "object" ? (err as { code?: unknown }).code : undefined;
+  return typeof code === "string" && code ? code : null;
+}
+
+function isMissingRelationOrColumnError(err: unknown): boolean {
+  const code = getPgCode(err);
+  return code === "42P01" || code === "42703";
+}
+
 export async function computeDashboardStats(
   r: DbConn,
   firmId: number,
@@ -64,12 +74,12 @@ export async function computeDashboardStats(
     return toNumber0(row?.c);
   };
 
-  const totalCases = await countCases(and(eq(casesTable.firmId, firmId)));
-  const cashCases = await countCases(and(eq(casesTable.firmId, firmId), eq(casesTable.purchaseMode, "cash")));
-  const loanCases = await countCases(and(eq(casesTable.firmId, firmId), eq(casesTable.purchaseMode, "loan")));
-  const masterTitleCases = await countCases(and(eq(casesTable.firmId, firmId), eq(casesTable.titleType, "master")));
-  const individualTitleCases = await countCases(and(eq(casesTable.firmId, firmId), eq(casesTable.titleType, "individual")));
-  const strataTitleCases = await countCases(and(eq(casesTable.firmId, firmId), eq(casesTable.titleType, "strata")));
+  const totalCases = await countCases(and(eq(casesTable.firmId, firmId), isNull(casesTable.deletedAt)));
+  const cashCases = await countCases(and(eq(casesTable.firmId, firmId), isNull(casesTable.deletedAt), eq(casesTable.purchaseMode, "cash")));
+  const loanCases = await countCases(and(eq(casesTable.firmId, firmId), isNull(casesTable.deletedAt), eq(casesTable.purchaseMode, "loan")));
+  const masterTitleCases = await countCases(and(eq(casesTable.firmId, firmId), isNull(casesTable.deletedAt), eq(casesTable.titleType, "master")));
+  const individualTitleCases = await countCases(and(eq(casesTable.firmId, firmId), isNull(casesTable.deletedAt), eq(casesTable.titleType, "individual")));
+  const strataTitleCases = await countCases(and(eq(casesTable.firmId, firmId), isNull(casesTable.deletedAt), eq(casesTable.titleType, "strata")));
 
   const completedCases = hasKeyDates
     ? (await (async () => {
@@ -85,11 +95,17 @@ export async function computeDashboardStats(
                 eq(caseKeyDatesTable.caseId, casesTable.id),
                 eq(caseKeyDatesTable.firmId, casesTable.firmId),
               ));
-        const [row] = await base.where(and(
-          eq(casesTable.firmId, firmId),
-          isNotNull(caseKeyDatesTable.completionDate),
-        ));
-        return toNumber0(row?.c);
+        try {
+          const [row] = await base.where(and(
+            eq(casesTable.firmId, firmId),
+            isNull(casesTable.deletedAt),
+            isNotNull(caseKeyDatesTable.completionDate),
+          ));
+          return toNumber0(row?.c);
+        } catch (err) {
+          if (!isMissingRelationOrColumnError(err)) throw err;
+          return 0;
+        }
       })())
     : 0;
   const activeCases = Math.max(0, totalCases - completedCases);
@@ -109,7 +125,7 @@ export async function computeDashboardStats(
         })
         .from(casesTable)
         .innerJoin(caseAssignmentsTable, assignedCasesJoin)
-        .where(eq(casesTable.firmId, firmId))
+        .where(and(eq(casesTable.firmId, firmId), isNull(casesTable.deletedAt)))
         .orderBy(desc(casesTable.updatedAt))
         .limit(20)
     : await r
@@ -125,7 +141,7 @@ export async function computeDashboardStats(
           updatedAt: casesTable.updatedAt,
         })
         .from(casesTable)
-        .where(eq(casesTable.firmId, firmId))
+        .where(and(eq(casesTable.firmId, firmId), isNull(casesTable.deletedAt)))
         .orderBy(desc(casesTable.updatedAt))
         .limit(5);
 
@@ -147,20 +163,25 @@ export async function computeDashboardStats(
         .where(eq(caseAssignmentsTable.caseId, c.id))
         .limit(1);
       const completionSla = hasKeyDates ? await (async () => {
-        const [kd] = await r
-          .select({
-            adviceToBankDate: caseKeyDatesTable.adviceToBankDate,
-            completionSlaActivatedAt: caseKeyDatesTable.completionSlaActivatedAt,
-          })
-          .from(caseKeyDatesTable)
-          .where(and(eq(caseKeyDatesTable.firmId, firmId), eq(caseKeyDatesTable.caseId, c.id)))
-          .limit(1);
-        if (!kd?.completionSlaActivatedAt) return null;
-        if (kd.adviceToBankDate) return null;
-        const ms = Date.now() - (kd.completionSlaActivatedAt instanceof Date ? kd.completionSlaActivatedAt.getTime() : new Date(kd.completionSlaActivatedAt as any).getTime());
-        const hours = Math.max(0, ms / 3600_000);
-        const status = hours >= 72 ? "overdue" : hours >= 48 ? "soon" : "due";
-        return { status, activatedAt: (kd.completionSlaActivatedAt as Date).toISOString(), hoursElapsed: hours };
+        try {
+          const [kd] = await r
+            .select({
+              adviceToBankDate: caseKeyDatesTable.adviceToBankDate,
+              completionSlaActivatedAt: caseKeyDatesTable.completionSlaActivatedAt,
+            })
+            .from(caseKeyDatesTable)
+            .where(and(eq(caseKeyDatesTable.firmId, firmId), eq(caseKeyDatesTable.caseId, c.id)))
+            .limit(1);
+          if (!kd?.completionSlaActivatedAt) return null;
+          if (kd.adviceToBankDate) return null;
+          const ms = Date.now() - (kd.completionSlaActivatedAt instanceof Date ? kd.completionSlaActivatedAt.getTime() : new Date(kd.completionSlaActivatedAt as any).getTime());
+          const hours = Math.max(0, ms / 3600_000);
+          const status = hours >= 72 ? "overdue" : hours >= 48 ? "soon" : "due";
+          return { status, activatedAt: (kd.completionSlaActivatedAt as Date).toISOString(), hoursElapsed: hours };
+        } catch (err) {
+          if (!isMissingRelationOrColumnError(err)) throw err;
+          return null;
+        }
       })() : null;
       return {
         id: c.id,
@@ -402,26 +423,38 @@ export async function computeDashboardStats(
     ? [...spaCards, ...loanMasterCards, ...loanTitleCards]
     : [];
 
-  const completionSlaOverdue = hasKeyDates ? (await queryRows(r, sql`
-    SELECT
-      c.id as case_id,
-      c.reference_no as reference_no,
-      kd.completion_sla_activated_at as activated_at,
-      EXTRACT(epoch FROM (now() - kd.completion_sla_activated_at)) / 3600.0 as hours_elapsed
-    FROM case_key_dates kd
-    JOIN cases c ON c.id = kd.case_id AND c.firm_id = kd.firm_id
-    WHERE kd.firm_id = ${firmId}
-      AND kd.completion_sla_activated_at IS NOT NULL
-      AND kd.advice_to_bank_date IS NULL
-      AND (now() - kd.completion_sla_activated_at) >= interval '72 hours'
-    ORDER BY kd.completion_sla_activated_at ASC
-    LIMIT 20
-  `)).map((x) => ({
-    caseId: toNumber0((x as any).case_id),
-    referenceNo: String((x as any).reference_no ?? ""),
-    activatedAt: (x as any).activated_at ? new Date(String((x as any).activated_at)).toISOString() : null,
-    hoursElapsed: toNumber0((x as any).hours_elapsed),
-  })).filter((x) => x.caseId > 0) : [];
+  const completionSlaOverdue = hasKeyDates
+    ? await (async () => {
+        try {
+          return (await queryRows(r, sql`
+            SELECT
+              c.id as case_id,
+              c.reference_no as reference_no,
+              kd.completion_sla_activated_at as activated_at,
+              EXTRACT(epoch FROM (now() - kd.completion_sla_activated_at)) / 3600.0 as hours_elapsed
+            FROM case_key_dates kd
+            JOIN cases c ON c.id = kd.case_id AND c.firm_id = kd.firm_id
+            WHERE kd.firm_id = ${firmId}
+              AND c.deleted_at IS NULL
+              AND kd.completion_sla_activated_at IS NOT NULL
+              AND kd.advice_to_bank_date IS NULL
+              AND (now() - kd.completion_sla_activated_at) >= interval '72 hours'
+            ORDER BY kd.completion_sla_activated_at ASC
+            LIMIT 20
+          `))
+            .map((x) => ({
+              caseId: toNumber0((x as any).case_id),
+              referenceNo: String((x as any).reference_no ?? ""),
+              activatedAt: (x as any).activated_at ? new Date(String((x as any).activated_at)).toISOString() : null,
+              hoursElapsed: toNumber0((x as any).hours_elapsed),
+            }))
+            .filter((x) => x.caseId > 0);
+        } catch (err) {
+          if (!isMissingRelationOrColumnError(err)) throw err;
+          return [];
+        }
+      })()
+    : [];
 
   return {
     totalCases,

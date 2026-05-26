@@ -306,6 +306,7 @@ router.get("/accounting/summary", requireAuth, requireFirmUser, requirePermissio
     FROM case_billing_entries be
     JOIN cases c ON be.case_id = c.id
     WHERE be.firm_id = ${req.firmId!}
+      AND c.deleted_at IS NULL
     GROUP BY c.id, c.reference_no
     ORDER BY total DESC
     LIMIT 10
