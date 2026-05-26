@@ -2530,7 +2530,7 @@ router.get("/cases", requireAuthHandler, requireFirmUserHandler, requirePermissi
         `);
       } catch (err) {
         const code = getPgCode(err);
-        if (code === "42P01" || code === "42703") {
+        if (code === "42P01" || code === "42703" || code === "42501") {
           hasKeyDates = false;
         } else {
           throw err;
@@ -2553,7 +2553,7 @@ router.get("/cases", requireAuthHandler, requireFirmUserHandler, requirePermissi
         `);
       } catch (err) {
         const code = getPgCode(err);
-        if (code === "42P01" || code === "42703") {
+        if (code === "42P01" || code === "42703" || code === "42501") {
           hasWorkflowSteps = false;
         } else {
           throw err;
@@ -2644,7 +2644,7 @@ router.get("/cases", requireAuthHandler, requireFirmUserHandler, requirePermissi
     "discharge_date",
   ]);
 
-  const conditions = [eq(casesTable.firmId, req.firmId!)];
+  const conditions = [eq(casesTable.firmId, req.firmId!), sql`${casesTable.deletedAt} IS NULL`];
   const canAssignAny = await hasRolePermission(r, req.firmId!, req.roleId, "cases", "assign_any");
   if (!canAssignAny) {
     conditions.push(sql`EXISTS (
@@ -2917,6 +2917,99 @@ router.get("/cases", requireAuthHandler, requireFirmUserHandler, requirePermissi
   } catch (err) {
     console.error("!!! DB_DEBUG: Cases list error:", err);
     logger.error({ err, path: req.path, firmId: req.firmId, userId: req.userId, query: req.query }, "[cases]");
+    const code = getPgCode(err);
+    const isCompat = code === "42P01" || code === "42703" || code === "42501";
+    if (isCompat) {
+      try {
+        const r = rdb(req);
+        const params2 = ListCasesQueryParams.safeParse(req.query);
+        const search2 = params2.success ? params2.data.search : undefined;
+        const status2 = params2.success ? params2.data.status : undefined;
+        const projectId2 = params2.success ? params2.data.projectId : undefined;
+        const developerId2 = params2.success ? params2.data.developerId : undefined;
+        const purchaseMode2 = params2.success ? params2.data.purchaseMode : undefined;
+        const titleType2 = params2.success ? params2.data.titleType : undefined;
+        const page2 = params2.success ? (params2.data.page ?? 1) : 1;
+        const limit2 = params2.success ? (params2.data.limit ?? 20) : 20;
+        const offset2 = (page2 - 1) * limit2;
+
+        const conditions2 = [eq(casesTable.firmId, req.firmId!), sql`${casesTable.deletedAt} IS NULL`];
+        if (status2) conditions2.push(eq(casesTable.status, status2));
+        if (projectId2) conditions2.push(eq(casesTable.projectId, projectId2));
+        if (developerId2) conditions2.push(eq(casesTable.developerId, developerId2));
+        if (purchaseMode2) conditions2.push(eq(casesTable.purchaseMode, purchaseMode2));
+        if (titleType2) {
+          const parts = String(titleType2).split(",").map((s) => s.trim()).filter(Boolean);
+          if (parts.length === 1) conditions2.push(eq(casesTable.titleType, parts[0]));
+          else conditions2.push(or(...parts.map((p) => eq(casesTable.titleType, p))));
+        }
+        if (search2 && search2.trim()) {
+          const like = `%${search2.trim()}%`;
+          conditions2.push(or(
+            sql`${casesTable.referenceNo} ILIKE ${like}`,
+            sql`COALESCE(${casesTable.parcelNo}, '') ILIKE ${like}`
+          ));
+        }
+
+        const baseRows = await r
+          .select({
+            id: casesTable.id,
+            referenceNo: casesTable.referenceNo,
+            status: casesTable.status,
+            purchaseMode: casesTable.purchaseMode,
+            titleType: casesTable.titleType,
+            parcelNo: casesTable.parcelNo,
+            createdAt: casesTable.createdAt,
+            updatedAt: casesTable.updatedAt,
+          })
+          .from(casesTable)
+          .where(and(...conditions2))
+          .orderBy(desc(casesTable.updatedAt))
+          .limit(limit2)
+          .offset(offset2);
+
+        const [totalRow] = await r
+          .select({ c: count() })
+          .from(casesTable)
+          .where(and(...conditions2));
+
+        const data = baseRows.map((row) => ({
+          id: row.id,
+          referenceNo: row.referenceNo,
+          clientName: null,
+          projectName: "Unknown",
+          developerName: "Unknown",
+          property: row.parcelNo ?? null,
+          purchaseMode: row.purchaseMode,
+          titleType: row.titleType,
+          status: row.status,
+          assignedLawyerId: null,
+          assignedLawyerName: null,
+          assignedClerkId: null,
+          assignedClerkName: null,
+          spaStatus: "Pending",
+          loanStatus: row.purchaseMode === "loan" ? "Pending" : null,
+          milestones: {
+            spa_date: null,
+            spa_stamped_date: null,
+            letter_of_offer_date: null,
+            loan_docs_signed_date: null,
+            completion_date: null,
+          },
+          completionSla: null,
+          createdAt: row.createdAt.toISOString(),
+          updatedAt: row.updatedAt.toISOString(),
+        }));
+
+        res.json({ data, total: Number((totalRow as any)?.c ?? 0), page: page2, limit: limit2 });
+        return;
+      } catch (fallbackErr) {
+        logger.error({ err: fallbackErr, path: req.path, firmId: req.firmId, userId: req.userId }, "[cases] compat fallback failed");
+        res.json({ data: [], total: 0, page: 1, limit: 20 });
+        return;
+      }
+    }
+
     const allowDetails =
       process.env.API_ERROR_DETAILS === "1" ||
       process.env.NODE_ENV !== "production" ||
