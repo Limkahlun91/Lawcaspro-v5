@@ -44,6 +44,7 @@ export default function AppDashboard() {
   const { data: stats, isLoading, isError, error, refetch, isFetching } = useQuery({
     queryKey: ["dashboard"],
     queryFn: () => apiFetchJson("/dashboard") as Promise<Record<string, any>>,
+    staleTime: Number.POSITIVE_INFINITY,
     retry: false,
     refetchOnWindowFocus: false,
     refetchOnReconnect: false,

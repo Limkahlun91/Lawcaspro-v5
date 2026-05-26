@@ -62,31 +62,24 @@ export default defineConfig(async () => {
       outDir: path.resolve(dirname, "dist/public"),
       emptyOutDir: true,
       sourcemap: false,
-      chunkSizeWarningLimit: 1000,
+      chunkSizeWarningLimit: 600,
       rollupOptions: {
         output: {
           manualChunks(id) {
-            if (id.includes("/src/pages/app/documents/")) return "page_documents";
-            if (id.includes("/src/pages/app/cases/")) return "page_cases";
-            if (id.includes("/src/pages/app/accounting/")) return "page_accounting";
-            if (id.includes("/src/pages/app/")) return "page_app";
-            if (id.includes("/src/pages/")) return "page_misc";
-            if (id.includes("/src/components/")) return "components";
-            if (id.includes("/src/lib/")) return "lib";
-            if (id.includes("/src/")) return "app_shared";
+            const normalized = id.replace(/\\/g, "/");
 
-            if (!id.includes("node_modules")) return;
+            if (normalized.includes("node_modules/")) {
+              const after = normalized.split("node_modules/").pop() ?? "";
+              const top = after.split("/")[0] ?? "";
+              return top || undefined;
+            }
 
-            if (id.includes("/node_modules/lucide-react/")) return "vendor_lucide";
-            if (id.includes("/node_modules/recharts/")) return "vendor_recharts";
-            if (id.includes("/node_modules/lodash-es/") || id.includes("/node_modules/lodash/")) return "vendor_lodash";
-            if (id.includes("/node_modules/@mui/") || id.includes("/node_modules/mui/")) return "vendor_mui";
-
-            const parts = id.split("node_modules/");
-            const pkgPath = parts[parts.length - 1] || "";
-            const pkgName = pkgPath.startsWith("@") ? pkgPath.split("/").slice(0, 2).join("/") : pkgPath.split("/")[0];
-            if (!pkgName) return;
-            return `vendor_${pkgName.replace(/^@/, "").replace(/[\/@]/g, "_")}`;
+            if (normalized.includes("/src/components/ui/")) return "ui-components";
+            if (normalized.includes("/src/pages/app/documents/")) return "page_documents";
+            if (normalized.includes("/src/pages/app/cases/")) return "page_cases";
+            if (normalized.includes("/src/pages/app/accounting/")) return "page_accounting";
+            if (normalized.includes("/src/pages/app/")) return "page_app";
+            if (normalized.includes("/src/pages/")) return "page_misc";
           },
         },
       },
