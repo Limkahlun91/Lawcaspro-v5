@@ -5,6 +5,8 @@ import { startSnapshotScheduler } from "./jobs/snapshot-scheduler";
 import { startSnapshotRetentionCleanup } from "./jobs/snapshot-retention";
 import { startCompletionSlaMonitor } from "./jobs/completion-sla-monitor";
 
+console.log("!!! VERSION_CHECK: 43ca81e_DEB_LOG !!!");
+
 const rawPort = process.env["PORT"];
 
 if (!rawPort) {
