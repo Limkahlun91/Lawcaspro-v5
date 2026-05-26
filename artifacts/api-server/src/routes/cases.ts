@@ -2509,9 +2509,10 @@ router.get("/cases/export.csv", requireAuthHandler, requireFirmUserHandler, requ
 
 router.get("/cases", requireAuthHandler, requireFirmUserHandler, requirePermission("cases", "read") as RequestHandler, authed(async (req, res) => {
   try {
+    console.log("!!! TEMP_DEBUG: Fetching cases for firm:", req.firmId);
     const r = rdb(req);
     let hasKeyDates = await tableExists(r, "public.case_key_dates");
-    const hasWorkflowSteps = await tableExists(r, "public.case_workflow_steps");
+    let hasWorkflowSteps = await tableExists(r, "public.case_workflow_steps");
     if (hasKeyDates) {
       try {
         await r.execute(sql`
@@ -2531,6 +2532,29 @@ router.get("/cases", requireAuthHandler, requireFirmUserHandler, requirePermissi
         const code = getPgCode(err);
         if (code === "42P01" || code === "42703") {
           hasKeyDates = false;
+        } else {
+          throw err;
+        }
+      }
+    }
+    if (hasWorkflowSteps) {
+      try {
+        await r.execute(sql`
+          SELECT
+            ${caseWorkflowStepsTable.stepName},
+            ${caseWorkflowStepsTable.caseId},
+            ${caseWorkflowStepsTable.pathType},
+            ${caseWorkflowStepsTable.status},
+            ${caseWorkflowStepsTable.stepOrder},
+            ${caseWorkflowStepsTable.stepKey},
+            ${caseWorkflowStepsTable.completedAt}
+          FROM ${caseWorkflowStepsTable}
+          LIMIT 1
+        `);
+      } catch (err) {
+        const code = getPgCode(err);
+        if (code === "42P01" || code === "42703") {
+          hasWorkflowSteps = false;
         } else {
           throw err;
         }
@@ -2671,9 +2695,9 @@ router.get("/cases", requireAuthHandler, requireFirmUserHandler, requirePermissi
   }
   if (spaStatus) {
     if (spaStatus === "NOA Served" && hasKeyDates) {
-      conditions.push(milestonePresenceWhereSql("noa_served_on", "filled"));
+      conditions.push(sql`${caseKeyDatesTable.noaServedOn} IS NOT NULL`);
     } else if (spaStatus === "Completed" && hasKeyDates) {
-      conditions.push(milestonePresenceWhereSql("completion_date", "filled"));
+      conditions.push(sql`${caseKeyDatesTable.completionDate} IS NOT NULL`);
     } else {
       conditions.push(sql`${spaStatusExpr} = ${spaStatus}`);
     }
@@ -2681,7 +2705,7 @@ router.get("/cases", requireAuthHandler, requireFirmUserHandler, requirePermissi
   if (loanStatus) {
     conditions.push(sql`${loanStatusExpr} = ${loanStatus}`);
   }
-  if (hasKeyDates && milestone && milestonePresence && (milestonePresence === "filled" || milestonePresence === "missing")) {
+  if (hasKeyDates && hasWorkflowSteps && milestone && milestonePresence && (milestonePresence === "filled" || milestonePresence === "missing")) {
     if (loanOnlyMilestones.has(milestone)) {
       conditions.push(eq(casesTable.purchaseMode, "loan"));
     }
@@ -2879,6 +2903,7 @@ router.get("/cases", requireAuthHandler, requireFirmUserHandler, requirePermissi
 
     res.json({ data, total: Number(totalRes?.c ?? 0), page, limit });
   } catch (err) {
+    console.error("!!! DB_DEBUG: Cases list error:", err);
     logger.error({ err, path: req.path, firmId: req.firmId, userId: req.userId, query: req.query }, "[cases]");
     res.status(500).json({ error: "Internal Server Error" });
   }

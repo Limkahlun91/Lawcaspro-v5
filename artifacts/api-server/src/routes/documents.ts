@@ -1799,7 +1799,17 @@ async function buildCaseContext(r: DbConn, caseId: number, firmId: number, cache
   };
 }
 
-router.get("/firm-document-folders", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+router.get(
+  "/firm-document-folders",
+  requireAuth,
+  (req: AuthRequest, _res, next): void => {
+    const email = typeof req.email === "string" ? req.email : null;
+    const masked = email ? email.replace(/^(.).+(@.+)$/, "$1***$2") : null;
+    console.log("!!! TEMP_DEBUG: Accessing firm-document-folders route by user:", masked ?? email);
+    next();
+  },
+  requireFirmUser,
+  async (req: AuthRequest, res): Promise<void> => {
   const r = getRlsDb(req, res);
   if (!r) return;
   const rows = await queryRows(
@@ -1957,7 +1967,17 @@ router.delete("/firm-document-folders/:folderId", requireAuth, requireFirmUser, 
   res.sendStatus(204);
 });
 
-router.get("/document-templates", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+router.get(
+  "/document-templates",
+  requireAuth,
+  (req: AuthRequest, _res, next): void => {
+    const email = typeof req.email === "string" ? req.email : null;
+    const masked = email ? email.replace(/^(.).+(@.+)$/, "$1***$2") : null;
+    console.log("!!! TEMP_DEBUG: Accessing document-templates route by user:", masked ?? email);
+    next();
+  },
+  requireFirmUser,
+  async (req: AuthRequest, res): Promise<void> => {
   const r = getRlsDb(req, res);
   if (!r) return;
   const folderIdStr = one((req.query as any).folderId);
