@@ -135,7 +135,7 @@ router.get("/reports/bills-delivered-book", requireAuth, requireFirmUser, requir
     taxTotal: invoicesTable.taxTotal,
     grandTotal: invoicesTable.grandTotal,
     amountPaid: invoicesTable.amountPaid,
-    amountDue: invoicesTable.amountDue,
+    amountDue: sql<string>`CASE WHEN ${invoicesTable.status} = 'void' THEN 0 ELSE ${invoicesTable.amountDue} END`,
   }).from(invoicesTable).where(dateCond).orderBy(desc(invoicesTable.issuedDate));
 
   const invoiceIds = invoices.map((x) => x.id);

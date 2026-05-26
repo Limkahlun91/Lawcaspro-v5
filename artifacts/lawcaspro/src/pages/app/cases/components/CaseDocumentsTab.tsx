@@ -507,32 +507,6 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
     setVariableChecklistJobId(null);
   };
 
-  async function openVariableChecklist(item: ChecklistItem) {
-    if (!canGenerate) return;
-    if (item.kind !== "template" || typeof item.templateId !== "number" || !Number.isFinite(item.templateId) || item.source !== "firm") return;
-    setVariableChecklistOpen(true);
-    setVariableChecklistLoading(true);
-    setVariableChecklistItem(item);
-    setVariableChecklistResult(null);
-    setVariableChecklistOverrides({});
-    setVariableChecklistLongRunning(false);
-    setVariableChecklistProgress(0);
-    setVariableChecklistError(null);
-    setVariableChecklistJobId(null);
-    try {
-      const result = await apiFetchJson<DocumentPreviewResponse>(`/cases/${caseId}/documents/preview-variables`, {
-        method: "POST",
-        body: JSON.stringify({ templateId: Number(item.templateId) }),
-      });
-      setVariableChecklistResult(result);
-    } catch (err) {
-      toastError(toast, err, "Preview failed");
-      closeVariableChecklist();
-    } finally {
-      setVariableChecklistLoading(false);
-    }
-  }
-
   async function startVariableChecklistJob(args: { item: ChecklistItem; force: boolean; saveOverrides: boolean }): Promise<void> {
     if (!args.item || args.item.kind !== "template" || typeof args.item.templateId !== "number") return;
     if (variableChecklistPollRef.current) {
@@ -661,7 +635,7 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
       qs.set("blind", "true");
       const created = await apiFetchJson<{ jobId: string }>(`/documents/automation/generate-job?${qs.toString()}`, {
         method: "POST",
-        timeoutMs: 30000,
+        timeoutMs: 60000,
         body: JSON.stringify({
           caseIds: [caseId],
           templateIds: [templateId],
@@ -962,54 +936,78 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
 
   async function openBatchVariableChecklist(items: ChecklistItem[]) {
     if (!canGenerate) return;
-    setBatchVariableChecklistOpen(true);
-    setBatchVariableChecklistLoading(true);
-    setBatchVariableChecklistItems(items);
-    setBatchVariableChecklistUnionKeys([]);
-    setBatchVariableChecklistMissingKeys(new Set());
-    setBatchVariableChecklistOverrides({});
-    setBatchGeneratedPdfDocIds([]);
-    setBatchLoopProgress({ current: 0, total: 0 });
+    const templateIds = items
+      .filter((it) => it.kind === "template" && it.source === "firm" && typeof it.templateId === "number")
+      .map((it) => Number(it.templateId))
+      .filter((n) => Number.isFinite(n) && n > 0);
+    if (!templateIds.length) return;
+
+    setBatchLoopGenerating(true);
+    setBatchLoopProgress({ current: 0, total: 1 });
+    let pollId: number | null = null;
     try {
-      const previews = await Promise.all(items.map((it) => {
-        return apiFetchJson<DocumentPreviewResponse>(`/cases/${caseId}/documents/preview-variables`, {
-          method: "POST",
-          body: JSON.stringify({ templateId: Number(it.templateId) }),
-        });
-      }));
+      const qs = new URLSearchParams();
+      qs.set("blind", "true");
+      const created = await apiFetchJson<{ jobId: string }>(`/documents/automation/generate-job?${qs.toString()}`, {
+        method: "POST",
+        timeoutMs: 60000,
+        body: JSON.stringify({
+          caseIds: [caseId],
+          templateIds,
+          config: { action: "download" },
+        }),
+      });
+      const jobId = typeof created?.jobId === "string" ? created.jobId : "";
+      if (!jobId) throw new Error("jobId is missing");
 
-      const union = new Set<string>();
-      const missing = new Set<string>();
-      for (const p of previews) {
-        for (const k of Object.keys(p.resolvedVariables ?? {})) union.add(k);
-        for (const m of Array.isArray(p.missingRequiredVariables) ? p.missingRequiredVariables : []) {
-          if (m && typeof (m as any).variableKey === "string") {
-            const k = String((m as any).variableKey);
-            union.add(k);
-            missing.add(k);
-          }
+      const pollOnce = async (): Promise<boolean> => {
+        const status = await apiFetchJson<any>(`/documents/jobs/${jobId}`, { timeoutMs: 15000 });
+        const job = asRecord(status?.job) ?? {};
+        const st = String(job.status ?? "");
+        if (st === "completed") {
+          await qc.invalidateQueries({ queryKey: ["case-documents", caseId] });
+          await qc.invalidateQueries({ queryKey: ["case-documents-checklist", caseId] });
+          const fileName = typeof job.download_file_name === "string" ? String(job.download_file_name) : "documents.zip";
+          await downloadFromApi(`/documents/jobs/${jobId}/download`, fileName);
+          toast({ title: "Downloaded" });
+          return true;
         }
-      }
-
-      const saved = savedOverridesAsStrings();
-      const initial: Record<string, string> = { ...saved };
-      for (const k of union) {
-        if (Object.prototype.hasOwnProperty.call(initial, k)) continue;
-        for (const p of previews) {
-          const v = (p.resolvedVariables ?? {})[k];
-          const s = v === null || v === undefined ? "" : String(v);
-          if (s.trim()) { initial[k] = s; break; }
+        if (st === "failed") {
+          const msg = typeof job.error_summary === "string" ? job.error_summary : "Generation failed";
+          throw new Error(msg);
         }
-      }
+        return false;
+      };
 
-      setBatchVariableChecklistUnionKeys(Array.from(union).sort());
-      setBatchVariableChecklistMissingKeys(missing);
-      setBatchVariableChecklistOverrides(initial);
+      const done = await pollOnce();
+      if (done) return;
+
+      await new Promise<void>((resolve, reject) => {
+        pollId = window.setInterval(() => {
+          pollOnce()
+            .then((ok) => {
+              if (!ok) return;
+              if (pollId) {
+                window.clearInterval(pollId);
+                pollId = null;
+              }
+              resolve();
+            })
+            .catch((e) => {
+              if (pollId) {
+                window.clearInterval(pollId);
+                pollId = null;
+              }
+              reject(e);
+            });
+        }, 3000);
+      });
     } catch (err) {
-      toastError(toast, err, "Batch preview failed");
-      setBatchVariableChecklistOpen(false);
+      toastError(toast, err, "Generation failed");
     } finally {
-      setBatchVariableChecklistLoading(false);
+      if (pollId) window.clearInterval(pollId);
+      setBatchLoopGenerating(false);
+      setBatchLoopProgress({ current: 0, total: 0 });
     }
   }
 
@@ -1889,7 +1887,7 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
                                             Generating...
                                           </>
                                         ) : (
-                                          "Generate & Download"
+                                          "Generate Final"
                                         )}
                                       </Button>
                                     ) : null}
@@ -2306,18 +2304,17 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
                   onClick={() => {
                     if (!previewItem) return;
                     setPreviewOpen(false);
-                    openVariableChecklist(previewItem);
+                    generateAndDownloadBlind(previewItem);
                   }}
                   disabled={
                     !previewItem
                     || !canGenerate
-                    || (!(previewResult.applicabilityResult.applicable || (previewResult.applicabilityResult.manuallyOverridable && canBypassApplicability && showAllTemplates)))
-                    || (previewResult.checklistResult?.checklistStatus === "blocked" && !(previewResult.checklistResult?.manuallyOverridable && canBypassApplicability && showAllTemplates))
-                    || previewResult.missingRequiredVariables.length > 0
-                    || !previewResult.previewSummary.renderable
+                    || previewItem.kind !== "template"
+                    || previewItem.source !== "firm"
+                    || oneClickGeneratingTemplateId === previewItem.templateId
                   }
                 >
-                  Generate
+                  Generate Final
                 </Button>
               </div>
             </div>
@@ -2858,8 +2855,8 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
                                     <Button size="sm" variant="outline" onClick={() => { closeGenerateDialog(); handlePreview(it); }} disabled={!applicable || !ready || previewLoading || it.source !== "firm"}>
                                       Preview
                                     </Button>
-                                    <Button size="sm" onClick={() => openVariableChecklist(it)} disabled={!applicable || !ready || isGenerating || it.source !== "firm"}>
-                                      Generate
+                                    <Button size="sm" onClick={() => generateAndDownloadBlind(it)} disabled={!canGenerate || isGenerating || it.source !== "firm" || oneClickGeneratingTemplateId === it.templateId}>
+                                      {oneClickGeneratingTemplateId === it.templateId ? "Generating..." : "Generate Final"}
                                     </Button>
                                   </div>
                                 </div>

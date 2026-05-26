@@ -77,6 +77,15 @@ async function updateInvoicePaymentStatus(invoiceId: number, firmId: number) {
     .from(receiptAllocationsTable).where(eq(receiptAllocationsTable.invoiceId, invoiceId));
   const paid = Number(allocSum?.total ?? 0);
   const grandTotal = Number(inv.grandTotal);
+  if (inv.status === "void") {
+    await db.update(invoicesTable).set({
+      amountPaid: paid.toFixed(2),
+      amountDue: "0.00",
+      status: "void",
+      updatedAt: new Date(),
+    }).where(eq(invoicesTable.id, invoiceId));
+    return;
+  }
   let status = inv.status;
   if (paid >= grandTotal) status = "paid";
   else if (paid > 0) status = "partially_paid";

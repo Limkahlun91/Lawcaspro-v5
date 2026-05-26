@@ -6,6 +6,7 @@ import OpenAI from "openai";
 import * as XLSX from "xlsx";
 import { z } from "zod";
 import { requireAuth, requireFirmUser, requirePermission, type AuthRequest, writeAuditLog } from "../lib/auth.js";
+import { computeInvoiceMetrics } from "../services/invoice-metrics.js";
 
 type SqlChunk = ReturnType<typeof sql>;
 
@@ -288,6 +289,12 @@ router.get("/cases/:caseId/billing/summary", requireAuth, requireFirmUser, requi
   `);
 
   res.json({ byCategory: rows, overall: overall[0] ?? { total: 0, paid: 0, outstanding: 0 } });
+});
+
+router.get("/accounting/invoice-metrics", requireAuth, requireFirmUser, requirePermission("accounting", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
+  const r = (req.rlsDb ?? db) as unknown as typeof db;
+  const metrics = await computeInvoiceMetrics(r as any, { firmId: req.firmId! });
+  res.json(metrics);
 });
 
 router.get("/accounting/summary", requireAuth, requireFirmUser, requirePermission("accounting", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
@@ -685,10 +692,11 @@ router.get("/accounting/bank-transactions", requireAuth, requireFirmUser, requir
       const outstandingRows = await queryRows(sql`
         SELECT
           case_id,
-          SUM(amount_due) as outstanding
+          SUM(CASE WHEN status = 'void' THEN 0 ELSE amount_due END) as outstanding
         FROM invoices
         WHERE firm_id = ${firmId}
           AND deleted_at IS NULL
+          AND status IN ('issued','partially_paid','paid','void')
           AND case_id IN (${sql.join(candidateIds.map((id) => sql`${id}`), sql`, `)})
         GROUP BY case_id
       `);

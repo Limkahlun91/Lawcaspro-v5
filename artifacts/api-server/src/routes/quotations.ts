@@ -95,8 +95,17 @@ function normalizeItem(item: any, quotationId: number, idx: number, defaultTaxRa
 router.get("/quotations", requireAuth, requireFirmUser, async (req, res): Promise<void> => {
   try {
     const firmId = (req as AuthRequest).firmId!;
+    const caseIdStr = one((req.query as any)?.caseId);
+    const caseId = caseIdStr ? parseInt(caseIdStr, 10) : NaN;
+    if (caseIdStr && (!Number.isInteger(caseId) || caseId <= 0)) {
+      res.status(400).json({ error: "Invalid caseId" });
+      return;
+    }
+    const where = caseIdStr
+      ? and(eq(quotationsTable.firmId, firmId), eq(quotationsTable.caseId, caseId))
+      : eq(quotationsTable.firmId, firmId);
     const rows = await db.select().from(quotationsTable)
-      .where(eq(quotationsTable.firmId, firmId))
+      .where(where)
       .orderBy(desc(quotationsTable.createdAt));
 
     const results = await Promise.all(rows.map(async (q) => {

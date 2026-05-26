@@ -2,7 +2,6 @@ import express, { type Router as ExpressRouter } from "express";
 import { and, asc, count, countDistinct, desc, eq, inArray, isNull } from "drizzle-orm";
 import {
   caseAssignmentsTable,
-  caseBillingEntriesTable,
   caseCommunicationsTable,
   caseWorkflowStepsTable,
   casesTable,
@@ -14,6 +13,7 @@ import {
   type RlsDb,
 } from "@workspace/db";
 import { requireAuth, requireFirmUser, requirePermission, type AuthRequest } from "../lib/auth.js";
+import { computeInvoiceMetrics } from "../services/invoice-metrics.js";
 
 type RouterInternalLike = {
   get: (path: string, ...handlers: unknown[]) => unknown;
@@ -101,12 +101,6 @@ router.get("/reports/overview", requireAuth, requireFirmUser, requirePermission(
       : assignedCaseIds && assignedCaseIds.length > 0
         ? and(eq(casesTable.firmId, firmId), inArray(casesTable.id, assignedCaseIds))
         : and(eq(casesTable.firmId, firmId), eq(casesTable.id, -1));
-
-    const billingCaseWhere = assignedCaseIds
-      ? assignedCaseIds.length > 0
-        ? inArray(caseBillingEntriesTable.caseId, assignedCaseIds)
-        : eq(caseBillingEntriesTable.caseId, -1)
-      : undefined;
 
     const commsCaseWhere = assignedCaseIds
       ? assignedCaseIds.length > 0
@@ -201,29 +195,14 @@ router.get("/reports/overview", requireAuth, requireFirmUser, requirePermission(
 
     const billingTotals = await (async () => {
       if (!canSeeAccounting) {
-        return { total_billed: 0, total_paid: 0, total_outstanding: 0, billed_cases: 0 };
+        return { total_invoiced: 0, total_collected: 0, total_outstanding: 0, invoice_count: 0 };
       }
-      const totalBilledExpr = sql<number>`SUM(${caseBillingEntriesTable.amount} * ${caseBillingEntriesTable.quantity})`;
-      const totalPaidExpr = sql<number>`SUM(CASE WHEN ${caseBillingEntriesTable.isPaid} THEN ${caseBillingEntriesTable.amount} * ${caseBillingEntriesTable.quantity} ELSE 0 END)`;
-      const totalOutstandingExpr = sql<number>`SUM(CASE WHEN NOT ${caseBillingEntriesTable.isPaid} THEN ${caseBillingEntriesTable.amount} * ${caseBillingEntriesTable.quantity} ELSE 0 END)`;
-      const base = r
-        .select({
-          total_billed: totalBilledExpr,
-          total_paid: totalPaidExpr,
-          total_outstanding: totalOutstandingExpr,
-          billed_cases: countDistinct(caseBillingEntriesTable.caseId),
-        })
-        .from(caseBillingEntriesTable)
-        .where(and(
-          eq(caseBillingEntriesTable.firmId, firmId),
-          ...(billingCaseWhere ? [billingCaseWhere] : []),
-        ));
-      const [row] = await base;
+      const metrics = await computeInvoiceMetrics(r as any, { firmId, caseIds: elevated ? undefined : (assignedCaseIds ?? []) });
       return {
-        total_billed: Number(row?.total_billed ?? 0),
-        total_paid: Number(row?.total_paid ?? 0),
-        total_outstanding: Number(row?.total_outstanding ?? 0),
-        billed_cases: Number(row?.billed_cases ?? 0),
+        total_invoiced: metrics.totalInvoiced,
+        total_collected: metrics.totalCollected,
+        total_outstanding: metrics.totalOutstanding,
+        invoice_count: metrics.invoiceCount,
       };
     })();
 

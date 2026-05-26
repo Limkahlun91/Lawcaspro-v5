@@ -160,11 +160,12 @@ export default function Reports() {
         <div className="text-slate-500 py-12 text-center">Loading reports...</div>
       ) : (
         <>
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+          <div className={`grid grid-cols-2 gap-4 ${canSeeAccounting ? "md:grid-cols-4" : "md:grid-cols-2"}`}>
             {[
               { label: "Total Cases", value: String(casesByStatus.reduce((s, r) => s + Number(r.count), 0)), icon: Briefcase, color: "bg-slate-100 text-slate-600", gate: "always" as const },
-              { label: "Total Billed", value: fmt(billing.total_billed), icon: TrendingUp, color: "bg-amber-50 text-amber-600", gate: "accounting" as const },
-              { label: "Outstanding", value: fmt(billing.total_outstanding), icon: TrendingUp, color: "bg-red-50 text-red-500", gate: "accounting" as const },
+              { label: "Total Invoiced", value: fmt(billing.total_invoiced), icon: TrendingUp, color: "bg-amber-50 text-amber-600", gate: "accounting" as const },
+              { label: "Collected", value: fmt(billing.total_collected), icon: TrendingUp, color: "bg-green-50 text-green-600", gate: "accounting" as const },
+              { label: "Outstanding", value: fmt(billing.total_outstanding), icon: Clock, color: "bg-red-50 text-red-500", gate: "accounting" as const },
               { label: "Lawyers Active", value: String(lawyerWorkload.length), icon: Users, color: "bg-blue-50 text-blue-600", gate: "always" as const },
             ].filter((item) => item.gate === "always" || canSeeAccounting).map((item) => (
               <Card key={item.label}>

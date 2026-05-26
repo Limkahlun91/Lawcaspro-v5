@@ -5,7 +5,7 @@ import {
   casesTable, clientsTable, casePurchasersTable, ledgerEntriesTable, caseLedgersTable,
   sql,
 } from "@workspace/db";
-import { requireAuth, requireFirmUser, requirePermission, requireReAuth, type AuthRequest, writeAuditLog } from "../lib/auth.js";
+import { requireAuth, requireFirmUser, requirePartnerOrAccountForInvoices, requirePermission, requireReAuth, type AuthRequest, writeAuditLog } from "../lib/auth.js";
 import { sensitiveRateLimiter } from "../lib/rate-limit.js";
 import { one, queryOne } from "../lib/http.js";
 import { syncCaseFinancialTotals } from "../lib/caseFinancialSync.js";
@@ -47,7 +47,7 @@ router.get("/invoices", requireAuth, requireFirmUser, requirePermission("account
     if (caseId) query = query.where(and(eq(invoicesTable.firmId, req.firmId!), eq(invoicesTable.caseId, caseId)));
     if (status) query = query.where(and(eq(invoicesTable.firmId, req.firmId!), eq(invoicesTable.status, status)));
     const rows = await query.orderBy(desc(invoicesTable.createdAt));
-    res.json(rows);
+    res.json(rows.map((inv) => (String((inv as any).status ?? "") === "void" ? { ...inv, amountDue: "0.00" } : inv)));
   } catch (err) {
     req.log.error({ err, route: req.originalUrl, firmId: req.firmId, userId: req.userId }, "invoices.list_failed");
     res.status(500).json({ error: "Failed to load invoices" });
@@ -114,7 +114,7 @@ router.get("/invoices/:id", requireAuth, requireFirmUser, requirePermission("acc
 });
 
 // Create from quotation
-router.post("/invoices/from-quotation/:quotationId", sensitiveRateLimiter, requireAuth, requireFirmUser, requirePermission("accounting", "write"), async (req: AuthRequest, res: Response): Promise<void> => {
+router.post("/invoices/from-quotation/:quotationId", sensitiveRateLimiter, requireAuth, requireFirmUser, requirePartnerOrAccountForInvoices, requirePermission("accounting", "write"), async (req: AuthRequest, res: Response): Promise<void> => {
   const r = rdb(req);
   const quotationIdStr = one(req.params.quotationId);
   const quotationId = quotationIdStr ? parseInt(quotationIdStr) : NaN;
@@ -158,7 +158,7 @@ router.post("/invoices/from-quotation/:quotationId", sensitiveRateLimiter, requi
 });
 
 // Create manually
-router.post("/invoices", sensitiveRateLimiter, requireAuth, requireFirmUser, requirePermission("accounting", "write"), async (req: AuthRequest, res: Response): Promise<void> => {
+router.post("/invoices", sensitiveRateLimiter, requireAuth, requireFirmUser, requirePartnerOrAccountForInvoices, requirePermission("accounting", "write"), async (req: AuthRequest, res: Response): Promise<void> => {
   const r = rdb(req);
   const { caseId, quotationId, items, notes, issuedDate, dueDate } = req.body;
   const rawItems = Array.isArray(items) ? items : [];
@@ -210,7 +210,7 @@ router.post("/invoices", sensitiveRateLimiter, requireAuth, requireFirmUser, req
 });
 
 // Issue invoice (draft → issued)
-router.post("/invoices/:id/issue", sensitiveRateLimiter, requireAuth, requireFirmUser, requirePermission("accounting", "write"), async (req: AuthRequest, res: Response): Promise<void> => {
+router.post("/invoices/:id/issue", sensitiveRateLimiter, requireAuth, requireFirmUser, requirePartnerOrAccountForInvoices, requirePermission("accounting", "write"), async (req: AuthRequest, res: Response): Promise<void> => {
   const r = rdb(req);
   const idStr = one(req.params.id);
   const id = idStr ? parseInt(idStr) : NaN;
@@ -263,7 +263,7 @@ router.post("/invoices/:id/void", sensitiveRateLimiter, requireAuth, requireFirm
   const [inv] = await r.select().from(invoicesTable).where(and(eq(invoicesTable.id, id), eq(invoicesTable.firmId, req.firmId!)));
   if (!inv) { res.status(404).json({ error: "Invoice not found" }); return; }
   if (inv.status === "paid") { res.status(400).json({ error: "Cannot void a paid invoice. Issue a credit note." }); return; }
-  const [updated] = await r.update(invoicesTable).set({ status: "void", updatedAt: new Date() }).where(eq(invoicesTable.id, id)).returning();
+  const [updated] = await r.update(invoicesTable).set({ status: "void", amountDue: "0.00", updatedAt: new Date() }).where(eq(invoicesTable.id, id)).returning();
   await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "accounting.invoice.void", entityType: "invoice", entityId: id, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
   res.json(updated);
 });

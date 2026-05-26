@@ -153,17 +153,22 @@ function LedgerSummaryInline() {
 }
 
 function OverviewTab() {
+  const { data: invMetrics } = useQuery({
+    queryKey: ["invoice-metrics"],
+    queryFn: () => apiFetchJson<{ totalInvoiced: number; totalCollected: number; totalOutstanding: number; invoiceCount: number }>("/accounting/invoice-metrics"),
+    retry: false,
+  });
   const { data: invData } = useQuery({
     queryKey: ["invoices"],
     queryFn: () => apiFetchJson<InvoiceRow[]>("/invoices"),
     retry: false,
   });
   const invoices = invData ?? [];
-  const invTotals = invoices.reduce((acc, inv) => ({
-    total: acc.total + Number(inv.grandTotal),
-    paid: acc.paid + Number(inv.amountPaid),
-    due: acc.due + Number(inv.amountDue),
-  }), { total: 0, paid: 0, due: 0 });
+  const invTotals = {
+    total: Number(invMetrics?.totalInvoiced ?? 0),
+    paid: Number(invMetrics?.totalCollected ?? 0),
+    due: Number(invMetrics?.totalOutstanding ?? 0),
+  };
 
   const { data: accData } = useQuery<AccountingSummaryResponse>({
     queryKey: ["accounting-summary"],
@@ -179,7 +184,7 @@ function OverviewTab() {
           { label: "Total Invoiced", value: fmt(invTotals.total), icon: FileText, color: "bg-amber-50 text-amber-600" },
           { label: "Collected", value: fmt(invTotals.paid), icon: TrendingUp, color: "bg-green-50 text-green-600" },
           { label: "Outstanding", value: fmt(invTotals.due), icon: Clock, color: "bg-red-50 text-red-500" },
-          { label: "Open Invoices", value: String(invoices.filter(i => i.status !== "void" && i.status !== "paid").length), icon: Briefcase, color: "bg-slate-100 text-slate-600" },
+          { label: "Open Invoices", value: String(invoices.filter(i => i.status === "issued" || i.status === "partially_paid").length), icon: Briefcase, color: "bg-slate-100 text-slate-600" },
         ].map((item) => (
           <Card key={item.label}>
             <CardContent className="pt-6">
@@ -423,6 +428,9 @@ function InvoicesTab() {
   const { toast } = useToast();
   const qc = useQueryClient();
   const [selectedQuotationId, setSelectedQuotationId] = useState("");
+  const { user } = useAuth();
+  const roleName = String((user as any)?.roleName ?? "").trim().toLowerCase();
+  const canCreateInvoices = roleName.includes("partner") || roleName === "account" || roleName === "accounts" || roleName === "accountant" || roleName === "finance";
 
   const invoicesQuery = useQuery({ queryKey: ["invoices"], queryFn: () => apiFetchJson("/invoices"), retry: false });
   const { data, isLoading } = invoicesQuery;
@@ -459,12 +467,16 @@ function InvoicesTab() {
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
           <Input className="pl-9" placeholder="Search invoices…" value={search} onChange={(e) => setSearch(e.target.value)} />
         </div>
-        <Button onClick={() => setShowCreate(true)} className="bg-amber-500 hover:bg-amber-600 text-white gap-2">
-          <Plus className="w-4 h-4" /> New Invoice
-        </Button>
+        {canCreateInvoices ? (
+          <Button onClick={() => setShowCreate(true)} className="bg-amber-500 hover:bg-amber-600 text-white gap-2">
+            <Plus className="w-4 h-4" /> New Invoice
+          </Button>
+        ) : (
+          <div className="text-xs text-slate-500">Only Partner/Account can create invoices</div>
+        )}
       </div>
 
-      {showCreate && (
+      {showCreate && canCreateInvoices && (
         <Card className="border-amber-200 bg-amber-50">
           <CardHeader><CardTitle className="text-base">Create Invoice from Quotation</CardTitle></CardHeader>
           <CardContent className="space-y-4">
@@ -527,7 +539,7 @@ function InvoicesTab() {
                   <td className="px-4 py-3 text-right text-red-500">{fmt(inv.amountDue)}</td>
                   <td className="px-4 py-3 text-right">
                     <div className="flex items-center justify-end gap-2">
-                      {inv.status === "draft" && (
+                      {inv.status === "draft" && canCreateInvoices && (
                         <Button size="sm" variant="outline" className="text-xs h-7"
                           onClick={() => issueMut.mutate(inv.id)}
                           disabled={issueMut.isPending}
@@ -1605,6 +1617,8 @@ function PaymentVouchersTab() {
 
 function LedgerTab() {
   const [accountType, setAccountType] = useState("");
+  const [q, setQ] = useState("");
+  const [sort, setSort] = useState<{ key: "date" | "type" | "amount"; dir: "asc" | "desc" }>({ key: "date", dir: "asc" });
   const ledgerQuery = useQuery({
     queryKey: ["ledger", accountType],
     queryFn: () => apiFetchJson(`/ledger${accountType ? `?accountType=${accountType}` : ""}`),
@@ -1614,6 +1628,51 @@ function LedgerTab() {
   const entries = ((ledgerQuery.data ?? []) as any[]);
   const summary = ((sumQuery.data ?? []) as any[]);
   const acctLabel = (acct: string) => acct === "balance_sheet" ? "Balance Sheet / FD" : acct === "client" ? "Client Account" : "Office Account";
+
+  const filtered = useMemo(() => {
+    const needle = q.trim().toLowerCase();
+    if (!needle) return entries;
+    return entries.filter((e: any) => {
+      const desc = String(e.description ?? "").toLowerCase();
+      const ref = String(e.referenceNo ?? "").toLowerCase();
+      const type = String(e.entryType ?? "").toLowerCase();
+      return desc.includes(needle) || ref.includes(needle) || type.includes(needle);
+    });
+  }, [entries, q]);
+
+  const displayEntries = useMemo(() => {
+    const sorted = [...filtered].sort((a: any, b: any) => {
+      if (sort.key === "date") {
+        const ad = String(a.entryDate ?? "");
+        const bd = String(b.entryDate ?? "");
+        if (ad !== bd) return ad.localeCompare(bd);
+      }
+      if (sort.key === "type") {
+        const at = String(a.entryType ?? "");
+        const bt = String(b.entryType ?? "");
+        if (at !== bt) return at.localeCompare(bt);
+      }
+      if (sort.key === "amount") {
+        const aa = Math.max(Number(a.credit ?? 0), Number(a.debit ?? 0));
+        const ba = Math.max(Number(b.credit ?? 0), Number(b.debit ?? 0));
+        if (aa !== ba) return aa - ba;
+      }
+      const ac = String(a.createdAt ?? "");
+      const bc = String(b.createdAt ?? "");
+      if (ac !== bc) return ac.localeCompare(bc);
+      return Number(a.id ?? 0) - Number(b.id ?? 0);
+    });
+    if (sort.dir === "desc") sorted.reverse();
+    let running = 0;
+    return sorted.map((e: any) => {
+      running += Number(e.credit ?? 0) - Number(e.debit ?? 0);
+      return { ...e, _runningBalance: running };
+    });
+  }, [filtered, sort]);
+
+  const toggleSort = (key: "date" | "type" | "amount") => {
+    setSort((prev) => (prev.key === key ? { key, dir: prev.dir === "asc" ? "desc" : "asc" } : { key, dir: "asc" }));
+  };
 
   return (
     <div className="space-y-4">
@@ -1655,27 +1714,54 @@ function LedgerTab() {
 
       {ledgerQuery.isLoading || sumQuery.isLoading ? (
         <div className="text-center py-12 text-slate-400">Loading…</div>
-      ) : entries.length === 0 ? (
+      ) : displayEntries.length === 0 ? (
         <div className="text-center py-16 text-slate-400">
           <BookOpen className="w-10 h-10 mx-auto mb-3 opacity-30" />
           <p>No ledger entries yet — record receipts or mark payment vouchers as paid</p>
         </div>
       ) : (
         <div className="overflow-x-auto rounded-lg border border-slate-200 bg-white">
+          <div className="border-b border-slate-200 bg-slate-50 px-3 py-2">
+            <div className="relative max-w-md">
+              <Search className="absolute left-3 top-2.5 h-4 w-4 text-slate-400" />
+              <Input
+                className="pl-9 h-9 bg-white"
+                placeholder="Search description, ref no, type…"
+                value={q}
+                onChange={(e) => setQ(e.target.value)}
+              />
+            </div>
+          </div>
           <table className="w-full text-sm">
             <thead>
               <tr className="bg-slate-50 border-b text-slate-500 text-xs uppercase tracking-wide">
-                <th className="px-4 py-3 text-left font-medium">Date</th>
-                <th className="px-4 py-3 text-left font-medium">Type</th>
+                <th className="px-4 py-3 text-left font-medium">
+                  <button className="inline-flex items-center gap-1 hover:text-slate-700" onClick={() => toggleSort("date")}>
+                    Date <ArrowUpDown className="w-3.5 h-3.5" />
+                  </button>
+                </th>
+                <th className="px-4 py-3 text-left font-medium">
+                  <button className="inline-flex items-center gap-1 hover:text-slate-700" onClick={() => toggleSort("type")}>
+                    Type <ArrowUpDown className="w-3.5 h-3.5" />
+                  </button>
+                </th>
                 <th className="px-4 py-3 text-left font-medium">Account</th>
                 <th className="px-4 py-3 text-left font-medium">Description</th>
-                <th className="px-4 py-3 text-right font-medium text-green-600">Credit (In)</th>
-                <th className="px-4 py-3 text-right font-medium text-red-500">Debit (Out)</th>
+                <th className="px-4 py-3 text-right font-medium text-green-600">
+                  <button className="inline-flex items-center gap-1 hover:text-green-700" onClick={() => toggleSort("amount")}>
+                    Credit (In) <ArrowUpDown className="w-3.5 h-3.5" />
+                  </button>
+                </th>
+                <th className="px-4 py-3 text-right font-medium text-red-500">
+                  <button className="inline-flex items-center gap-1 hover:text-red-600" onClick={() => toggleSort("amount")}>
+                    Debit (Out) <ArrowUpDown className="w-3.5 h-3.5" />
+                  </button>
+                </th>
                 <th className="px-4 py-3 text-right font-medium">Balance</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
-              {entries.map((e: any) => (
+              {displayEntries.map((e: any) => (
                 <tr key={e.id} className="hover:bg-slate-50">
                   <td className="px-4 py-2.5 text-slate-500 text-xs font-mono">{e.entryDate}</td>
                   <td className="px-4 py-2.5 capitalize text-slate-600 text-xs">{e.entryType?.replace(/_/g, " ")}</td>
@@ -1691,9 +1777,13 @@ function LedgerTab() {
                   <td className="px-4 py-2.5 text-right text-red-500 font-mono text-xs">
                     {Number(e.debit) > 0 ? fmt(e.debit) : "—"}
                   </td>
-                  <td className={cn("px-4 py-2.5 text-right font-semibold font-mono text-xs",
-                    Number(e.balanceAfter) >= 0 ? "text-slate-800" : "text-red-500")}>
-                    {fmt(e.balanceAfter)}
+                  <td
+                    className={cn(
+                      "px-4 py-2.5 text-right font-semibold font-mono text-xs",
+                      Number(e._runningBalance) >= 0 ? "text-slate-800" : "text-red-500"
+                    )}
+                  >
+                    {fmt(e._runningBalance)}
                   </td>
                 </tr>
               ))}

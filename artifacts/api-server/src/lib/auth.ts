@@ -778,6 +778,45 @@ export async function requirePartner(
   return requirePermission("roles", "manage")(req, res, next);
 }
 
+const normalizeRoleNameForGuard = (v: unknown): string => (typeof v === "string" ? v.trim().toLowerCase() : "");
+
+const isPartnerOrAccountRoleName = (roleName: string): boolean => {
+  const n = normalizeRoleNameForGuard(roleName);
+  if (!n) return false;
+  if (n.includes("partner")) return true;
+  return n === "account" || n === "accounts" || n === "accountant" || n === "finance";
+};
+
+export async function requirePartnerOrAccountForInvoices(
+  req: AuthRequest,
+  res: Response,
+  next: NextFunction
+): Promise<void> {
+  const firmId = req.firmId;
+  const roleId = req.roleId;
+  if (!firmId || !roleId) {
+    res.status(403).json({ error: "Forbidden" });
+    return;
+  }
+  const r = req.rlsDb ?? db;
+  const [role] = await r.select({ name: rolesTable.name }).from(rolesTable).where(and(eq(rolesTable.firmId, firmId), eq(rolesTable.id, roleId)));
+  const roleName = role?.name ?? "";
+  if (!isPartnerOrAccountRoleName(roleName)) {
+    await writeAuditLog({
+      actorId: req.userId,
+      firmId: req.firmId,
+      actorType: req.userType ?? "firm_user",
+      action: "auth.forbidden.invoice_create",
+      detail: `role=${roleName}`,
+      ipAddress: req.ip,
+      userAgent: req.headers["user-agent"],
+    });
+    res.status(403).json({ error: "Only Partner/Account can create invoices" });
+    return;
+  }
+  next();
+}
+
 // ---------------------------------------------------------------------------
 // Short-lived in-memory re-auth token store
 // ---------------------------------------------------------------------------

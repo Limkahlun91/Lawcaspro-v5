@@ -1166,12 +1166,17 @@ async function buildCaseContext(r: DbConn, caseId: number, firmId: number, cache
         SELECT
           spa_signed_date,
           spa_forward_to_developer_execution_on,
+          spa_received_dev_return_spa_on,
           spa_date,
           spa_stamped_date,
           stamped_spa_send_to_developer_on,
           stamped_spa_received_from_developer_on,
+          stamped_spa_sent_to_purchaser_on,
+          li_date,
+          li_received_on,
           letter_of_offer_date,
           letter_of_offer_stamped_date,
+          supp_lo_date,
           loan_docs_pending_date,
           loan_docs_signed_date,
           acting_letter_issued_date,
@@ -1179,23 +1184,50 @@ async function buildCaseContext(r: DbConn, caseId: number, firmId: number, cache
           developer_confirmation_date,
           loan_sent_bank_execution_date,
           loan_bank_executed_date,
+          differential_sum_rm,
+          differential_sum_settled_on,
+          bank_lu_dated,
           bank_lu_received_date,
           bank_lu_forward_to_developer_on,
           developer_lu_received_on,
           developer_lu_dated,
           letter_disclaimer_received_on,
           letter_disclaimer_dated,
+          balance_sum_less_last_5_rm,
+          bankruptcy_search_dated,
           loan_agreement_dated,
           loan_agreement_submitted_stamping_date,
           loan_agreement_stamped_date,
+          statutory_declaration_dated,
+          statutory_declaration_stamped_on,
+          fa_date,
+          fa_adjudication_number,
+          fa_stamp_on,
+          doa_date,
+          doa_stamp_on,
+          poa_date,
+          poa_stamp_on,
+          noa_dated,
+          register_pa_on,
+          pa_no,
           register_poa_on,
           noa_served_on,
           advice_to_bank_date,
           bank_1st_release_on,
+          discharge_title_received_on,
+          request_letter_no_objection,
+          received_letter_no_objection_on,
+          blanket_consent_transfer_req,
+          blanket_consent_transfer_approval,
+          consent_to_charge_req,
+          consent_to_charge_approval,
           mot_received_date,
           mot_signed_date,
+          mot_submit_stamping,
           mot_stamped_date,
           mot_registered_date,
+          charge_submit_stamping,
+          charge_stamped,
           progressive_payment_date,
           full_settlement_date,
           completion_date,
@@ -1318,12 +1350,17 @@ async function buildCaseContext(r: DbConn, caseId: number, firmId: number, cache
 
   addDateTriplet("spa_signed_date", kdVal("spa_signed_date"), null);
   addDateTriplet("spa_forward_to_developer_execution_on", kdVal("spa_forward_to_developer_execution_on"), null);
+  addDateTriplet("spa_received_dev_return_spa_on", kdVal("spa_received_dev_return_spa_on"), null);
   addDateTriplet("spa_date", kdVal("spa_date"), null);
   addDateTriplet("spa_stamped_date", kdVal("spa_stamped_date"), wf("spa_stamped"));
   addDateTriplet("stamped_spa_send_to_developer_on", kdVal("stamped_spa_send_to_developer_on"), null);
   addDateTriplet("stamped_spa_received_from_developer_on", kdVal("stamped_spa_received_from_developer_on"), null);
+  addDateTriplet("stamped_spa_sent_to_purchaser_on", kdVal("stamped_spa_sent_to_purchaser_on"), null);
+  addDateTriplet("li_date", kdVal("li_date"), null);
+  addDateTriplet("li_received_on", kdVal("li_received_on"), null);
   addDateTriplet("letter_of_offer_date", kdVal("letter_of_offer_date"), null);
   addDateTriplet("letter_of_offer_stamped_date", kdVal("letter_of_offer_stamped_date"), wf("lof_stamped"));
+  addDateTriplet("supp_lo_date", kdVal("supp_lo_date"), null);
 
   addDateTriplet("loan_docs_pending_date", kdVal("loan_docs_pending_date"), wf("loan_docs_pending"));
   addDateTriplet("loan_docs_signed_date", kdVal("loan_docs_signed_date"), wf("loan_docs_signed"));
@@ -1332,24 +1369,47 @@ async function buildCaseContext(r: DbConn, caseId: number, firmId: number, cache
   addDateTriplet("developer_confirmation_date", kdVal("developer_confirmation_date"), null);
   addDateTriplet("loan_sent_bank_execution_date", kdVal("loan_sent_bank_execution_date"), wf("loan_sent_bank_exec"));
   addDateTriplet("loan_bank_executed_date", kdVal("loan_bank_executed_date"), wf("loan_bank_executed"));
+  addDateTriplet("differential_sum_settled_on", kdVal("differential_sum_settled_on"), null);
+  addDateTriplet("bank_lu_dated", kdVal("bank_lu_dated"), null);
   addDateTriplet("bank_lu_received_date", kdVal("bank_lu_received_date"), wf("blu_received"));
   addDateTriplet("bank_lu_forward_to_developer_on", kdVal("bank_lu_forward_to_developer_on"), null);
   addDateTriplet("developer_lu_received_on", kdVal("developer_lu_received_on"), null);
   addDateTriplet("developer_lu_dated", kdVal("developer_lu_dated"), null);
   addDateTriplet("letter_disclaimer_received_on", kdVal("letter_disclaimer_received_on"), null);
   addDateTriplet("letter_disclaimer_dated", kdVal("letter_disclaimer_dated"), null);
+  addDateTriplet("bankruptcy_search_dated", kdVal("bankruptcy_search_dated"), null);
   addDateTriplet("loan_agreement_dated", kdVal("loan_agreement_dated"), null);
   addDateTriplet("loan_agreement_submitted_stamping_date", kdVal("loan_agreement_submitted_stamping_date"), null);
   addDateTriplet("loan_agreement_stamped_date", kdVal("loan_agreement_stamped_date"), null);
+  addDateTriplet("statutory_declaration_dated", kdVal("statutory_declaration_dated"), null);
+  addDateTriplet("statutory_declaration_stamped_on", kdVal("statutory_declaration_stamped_on"), null);
+  addDateTriplet("fa_date", kdVal("fa_date"), null);
+  addDateTriplet("fa_stamp_on", kdVal("fa_stamp_on"), null);
+  addDateTriplet("doa_date", kdVal("doa_date"), null);
+  addDateTriplet("doa_stamp_on", kdVal("doa_stamp_on"), null);
+  addDateTriplet("poa_date", kdVal("poa_date"), null);
+  addDateTriplet("poa_stamp_on", kdVal("poa_stamp_on"), null);
+  addDateTriplet("noa_dated", kdVal("noa_dated"), null);
+  addDateTriplet("register_pa_on", kdVal("register_pa_on"), null);
   addDateTriplet("register_poa_on", kdVal("register_poa_on"), wf("pa_registered"));
   addDateTriplet("noa_served_on", kdVal("noa_served_on"), wf("noa_served"));
   addDateTriplet("advice_to_bank_date", kdVal("advice_to_bank_date"), null);
   addDateTriplet("bank_1st_release_on", kdVal("bank_1st_release_on"), null);
+  addDateTriplet("discharge_title_received_on", kdVal("discharge_title_received_on"), null);
+  addDateTriplet("request_letter_no_objection", kdVal("request_letter_no_objection"), null);
+  addDateTriplet("received_letter_no_objection_on", kdVal("received_letter_no_objection_on"), null);
+  addDateTriplet("blanket_consent_transfer_req", kdVal("blanket_consent_transfer_req"), null);
+  addDateTriplet("blanket_consent_transfer_approval", kdVal("blanket_consent_transfer_approval"), null);
+  addDateTriplet("consent_to_charge_req", kdVal("consent_to_charge_req"), null);
+  addDateTriplet("consent_to_charge_approval", kdVal("consent_to_charge_approval"), null);
 
   addDateTriplet("mot_received_date", kdVal("mot_received_date"), wf("mot_received"));
   addDateTriplet("mot_signed_date", kdVal("mot_signed_date"), null);
+  addDateTriplet("mot_submit_stamping", kdVal("mot_submit_stamping"), null);
   addDateTriplet("mot_stamped_date", kdVal("mot_stamped_date"), wf("mot_stamp"));
   addDateTriplet("mot_registered_date", kdVal("mot_registered_date"), null);
+  addDateTriplet("charge_submit_stamping", kdVal("charge_submit_stamping"), null);
+  addDateTriplet("charge_stamped", kdVal("charge_stamped"), null);
 
   addDateTriplet("progressive_payment_date", kdVal("progressive_payment_date"), null);
   addDateTriplet("full_settlement_date", kdVal("full_settlement_date"), null);
@@ -1357,6 +1417,8 @@ async function buildCaseContext(r: DbConn, caseId: number, firmId: number, cache
 
   keyDateVars.letter_disclaimer_reference_nos = typeof kdVal("letter_disclaimer_reference_nos") === "string" ? String(kdVal("letter_disclaimer_reference_nos")) : "";
   keyDateVars.registered_poa_registration_number = typeof kdVal("registered_poa_registration_number") === "string" ? String(kdVal("registered_poa_registration_number")) : "";
+  keyDateVars.fa_adjudication_number = typeof kdVal("fa_adjudication_number") === "string" ? String(kdVal("fa_adjudication_number")) : "";
+  keyDateVars.pa_no = typeof kdVal("pa_no") === "string" ? String(kdVal("pa_no")) : "";
 
   const redemptionSumVal = kdVal("redemption_sum");
   keyDateVars.redemption_sum_raw = redemptionSumVal ?? "";
@@ -1365,6 +1427,14 @@ async function buildCaseContext(r: DbConn, caseId: number, firmId: number, cache
   const firstReleaseVal = kdVal("first_release_amount_rm");
   keyDateVars.first_release_amount_rm_raw = firstReleaseVal ?? "";
   keyDateVars.first_release_amount_rm = fmtRM(firstReleaseVal);
+
+  const differentialSumVal = kdVal("differential_sum_rm");
+  keyDateVars.differential_sum_rm_raw = differentialSumVal ?? "";
+  keyDateVars.differential_sum_rm = fmtRM(differentialSumVal);
+
+  const balanceSumLess5Val = kdVal("balance_sum_less_last_5_rm");
+  keyDateVars.balance_sum_less_last_5_rm_raw = balanceSumLess5Val ?? "";
+  keyDateVars.balance_sum_less_last_5_rm = fmtRM(balanceSumLess5Val);
 
   const officeBanks = bankRows.filter((b) => b.account_type === "office");
   const clientBanks = bankRows.filter((b) => b.account_type === "client");
@@ -8171,7 +8241,9 @@ router.post("/documents/automation/generate-job", requireAuth, requireFirmUser, 
   }
 
   const totalCount = caseIds.length * templateIds.length;
-  if (totalCount <= 5) {
+  const qTurbo = String(one((req.query as any).turbo) ?? "").trim().toLowerCase();
+  const turbo = qTurbo === "1" || qTurbo === "true" || qTurbo === "yes";
+  if (turbo && totalCount <= 5) {
     const actorId = req.userId ?? 0;
     const action = parsed.data.config.action;
 

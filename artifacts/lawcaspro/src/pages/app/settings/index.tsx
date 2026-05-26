@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, useRef } from "react";
 import { getListRolesQueryKey, getListUsersQueryKey, useDeleteUser, useListDevelopers, useListRoles, useListUsers, useUpdateRole, useUpdateUser } from "@workspace/api-client-react";
 import { useQuery, useQueryClient, useMutation } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -882,7 +882,10 @@ function FileReferenceSettingsTab({ canRead, canUpdate }: { canRead: boolean; ca
     enabled: canRead,
   });
 
-  const [rows, setRows] = useState<Array<{ id?: number; caseType: string; formatPattern: string; currentSequence: number }>>([]);
+  const rowKeyCounter = useRef(0);
+  const makeRowKey = (): string => `tmp-${Date.now()}-${rowKeyCounter.current++}`;
+
+  const [rows, setRows] = useState<Array<{ id?: number; rowKey: string; caseType: string; formatPattern: string; currentSequence: number }>>([]);
 
   useEffect(() => {
     if (!settingsQuery.data) return;
@@ -892,7 +895,18 @@ function FileReferenceSettingsTab({ canRead, canUpdate }: { canRead: boolean; ca
       formatPattern: String(x.formatPattern || ""),
       currentSequence: Number(x.currentSequence ?? 0),
     }));
-    setRows(next);
+    setRows((prev) => {
+      const byId = new Map<number, { rowKey: string }>();
+      const byCaseType = new Map<string, { rowKey: string }>();
+      for (const r of prev) {
+        if (typeof r.id === "number" && Number.isFinite(r.id)) byId.set(r.id, r);
+        if (r.caseType) byCaseType.set(r.caseType, r);
+      }
+      return next.map((row) => {
+        const existing = (typeof row.id === "number" ? byId.get(row.id) : undefined) ?? (row.caseType ? byCaseType.get(row.caseType) : undefined);
+        return { ...row, rowKey: existing?.rowKey ?? (typeof row.id === "number" ? `id-${row.id}` : makeRowKey()) };
+      });
+    });
   }, [settingsQuery.data]);
 
   const upsertMutation = useMutation({
@@ -945,7 +959,7 @@ function FileReferenceSettingsTab({ canRead, canUpdate }: { canRead: boolean; ca
                 </thead>
                 <tbody className="divide-y divide-slate-100">
                   {rows.map((row, idx) => (
-                    <tr key={`${row.caseType}-${idx}`} className="hover:bg-slate-50/50">
+                    <tr key={row.rowKey} className="hover:bg-slate-50/50">
                       <td className="px-4 py-2">
                         <Input
                           value={row.caseType}
@@ -1028,7 +1042,7 @@ function FileReferenceSettingsTab({ canRead, canUpdate }: { canRead: boolean; ca
           <div className="flex justify-end">
             <Button
               variant="outline"
-              onClick={() => setRows((prev) => [...prev, { caseType: "", formatPattern: "", currentSequence: 0 }])}
+              onClick={() => setRows((prev) => [...prev, { rowKey: makeRowKey(), caseType: "", formatPattern: "", currentSequence: 0 }])}
               disabled={!canUpdate}
             >
               <Plus className="w-4 h-4 mr-1" />

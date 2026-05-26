@@ -9,6 +9,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { ArrowLeft, CheckCircle2, Clock, User, Building2, MapPin, Tag, Receipt, Printer, Upload, Download, Trash2, Plus, Minus, X, MoreHorizontal, Share2, AlertTriangle } from "lucide-react";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from "@/components/ui/accordion";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useToast } from "@/hooks/use-toast";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -112,6 +113,8 @@ function CaseLedgerTab({ caseId }: { caseId: number }) {
   const [entryType, setEntryType] = useState<CaseLedgerEntry["entryType"]>("invoice_billed");
   const [description, setDescription] = useState("");
   const [amount, setAmount] = useState("");
+  const [entrySearch, setEntrySearch] = useState("");
+  const [entrySort, setEntrySort] = useState<{ key: "date" | "type" | "amount"; dir: "asc" | "desc" }>({ key: "date", dir: "desc" });
 
   const ledgerQuery = useQuery<CaseLedgerResponse>({
     queryKey: ["case-ledger", caseId],
@@ -122,6 +125,31 @@ function CaseLedgerTab({ caseId }: { caseId: number }) {
 
   const entries = Array.isArray(ledgerQuery.data?.data) ? ledgerQuery.data!.data : [];
   const summary = ledgerQuery.data?.summary ?? { total_billed: 0, total_received: 0, outstanding_balance: 0, trust_balance: 0 };
+
+  const displayEntries = useMemo(() => {
+    const needle = entrySearch.trim().toLowerCase();
+    const filtered = needle
+      ? entries.filter((e) => {
+          const desc = String(e.description ?? "").toLowerCase();
+          const ref = typeof e.sourceId === "number" ? String(e.sourceId) : "";
+          return desc.includes(needle) || ref.includes(needle) || String(e.entryType ?? "").toLowerCase().includes(needle);
+        })
+      : entries;
+    const sorted = [...filtered].sort((a, b) => {
+      if (entrySort.key === "date") return String(a.transactionDate ?? "").localeCompare(String(b.transactionDate ?? ""));
+      if (entrySort.key === "type") return String(a.entryType ?? "").localeCompare(String(b.entryType ?? ""));
+      const aa = Math.abs(Number(a.amount ?? 0));
+      const ba = Math.abs(Number(b.amount ?? 0));
+      if (aa !== ba) return aa - ba;
+      return String(a.transactionDate ?? "").localeCompare(String(b.transactionDate ?? ""));
+    });
+    if (entrySort.dir === "desc") sorted.reverse();
+    return sorted;
+  }, [entries, entrySearch, entrySort]);
+
+  const toggleEntrySort = (key: "date" | "type" | "amount") => {
+    setEntrySort((prev) => (prev.key === key ? { key, dir: prev.dir === "asc" ? "desc" : "asc" } : { key, dir: "asc" }));
+  };
 
   const createMutation = useMutation({
     mutationFn: async () => {
@@ -254,28 +282,44 @@ function CaseLedgerTab({ caseId }: { caseId: number }) {
 
       <Card>
         <CardHeader className="pb-3">
-          <CardTitle className="text-base">Entries</CardTitle>
+          <CardTitle className="text-base flex items-center justify-between gap-3">
+            <span>Entries</span>
+            <div className="w-full max-w-sm">
+              <Input
+                value={entrySearch}
+                onChange={(e) => setEntrySearch(e.target.value)}
+                placeholder="Search description, ref no, type…"
+                className="h-9"
+              />
+            </div>
+          </CardTitle>
         </CardHeader>
         <CardContent>
           {ledgerQuery.isError ? <div className="text-sm text-red-600">Failed to load ledger.</div> : null}
           {ledgerQuery.isLoading ? (
             <div className="text-sm text-slate-500 py-6 text-center">Loading...</div>
-          ) : entries.length === 0 ? (
+          ) : displayEntries.length === 0 ? (
             <div className="text-sm text-slate-500 py-6 text-center">No ledger entries yet.</div>
           ) : (
             <div className="overflow-x-auto rounded-md border border-slate-200 bg-white">
               <table className="w-full text-sm">
                 <thead className="bg-slate-50 border-b border-slate-200">
                   <tr className="text-left text-slate-600">
-                    <th className="py-3 px-3 font-medium">Date</th>
+                    <th className="py-3 px-3 font-medium">
+                      <button className="hover:text-slate-900" onClick={() => toggleEntrySort("date")}>Date</button>
+                    </th>
                     <th className="py-3 px-3 font-medium">Category</th>
-                    <th className="py-3 px-3 font-medium">Type</th>
+                    <th className="py-3 px-3 font-medium">
+                      <button className="hover:text-slate-900" onClick={() => toggleEntrySort("type")}>Type</button>
+                    </th>
                     <th className="py-3 px-3 font-medium">Description</th>
-                    <th className="py-3 px-3 font-medium text-right">Amount</th>
+                    <th className="py-3 px-3 font-medium text-right">
+                      <button className="hover:text-slate-900" onClick={() => toggleEntrySort("amount")}>Amount</button>
+                    </th>
                   </tr>
                 </thead>
                 <tbody>
-                  {entries.map((e) => (
+                  {displayEntries.map((e) => (
                     <tr key={e.id} className="border-b border-slate-100">
                       <td className="py-2 px-3 whitespace-nowrap">{e.transactionDate}</td>
                       <td className="py-2 px-3">{e.entryCategory}</td>
@@ -600,6 +644,12 @@ export default function CaseDetail() {
       prevUnreadRef.current = { client: unreadClient, developer: unreadDeveloper };
       return;
     }
+    if (unreadClient > prevUnreadRef.current.client) {
+      queryClient.invalidateQueries({ queryKey: ["case-messages", caseId, "client"] });
+    }
+    if (unreadDeveloper > prevUnreadRef.current.developer) {
+      queryClient.invalidateQueries({ queryKey: ["case-messages", caseId, "developer"] });
+    }
     if (activeTab !== "client-interaction") {
       if (unreadClient > prevUnreadRef.current.client) {
         toast({ title: "New message from client received!" });
@@ -658,7 +708,6 @@ export default function CaseDetail() {
   };
   const canPrint = (printKey: string, dateVal: string) => !printableQuery.isError && Boolean(dateVal) && printState(printKey)?.status === "configured";
   const templateIssuesCount = (printableConfig || []).filter((x) => x?.status && x.status !== "configured").length;
-  const [milestoneTab, setMilestoneTab] = useState<"spa" | "loan" | "bank" | "mot">("spa");
   const [savingScope, setSavingScope] = useState<string>("");
   const [keyDatesDraft, setKeyDatesDraft] = useState<Record<string, string>>({});
   const [keyDatesBaseline, setKeyDatesBaseline] = useState<Record<string, string>>({});
@@ -676,133 +725,167 @@ export default function CaseDetail() {
   const [stampingDraft, setStampingDraft] = useState<LoanStampingItem[]>([]);
   const [stampingDirty, setStampingDirty] = useState(false);
 
-  const parseKeyDates = (src: Record<string, unknown>) => ({
-    spa_signed_date: normalizeDateOnlyFromApi((src as any).spa_signed_date),
-    spa_forward_to_developer_execution_on: normalizeDateOnlyFromApi((src as any).spa_forward_to_developer_execution_on),
-    spa_date: normalizeDateOnlyFromApi((src as any).spa_date),
-    spa_stamped_date: normalizeDateOnlyFromApi((src as any).spa_stamped_date),
-    stamped_spa_send_to_developer_on: normalizeDateOnlyFromApi((src as any).stamped_spa_send_to_developer_on),
-    stamped_spa_received_from_developer_on: normalizeDateOnlyFromApi((src as any).stamped_spa_received_from_developer_on),
-    letter_of_offer_date: normalizeDateOnlyFromApi((src as any).letter_of_offer_date),
-    letter_of_offer_stamped_date: normalizeDateOnlyFromApi((src as any).letter_of_offer_stamped_date),
-    loan_docs_pending_date: normalizeDateOnlyFromApi((src as any).loan_docs_pending_date),
-    loan_docs_signed_date: normalizeDateOnlyFromApi((src as any).loan_docs_signed_date),
-    acting_letter_issued_date: normalizeDateOnlyFromApi((src as any).acting_letter_issued_date),
-    developer_confirmation_received_on: normalizeDateOnlyFromApi((src as any).developer_confirmation_received_on),
-    developer_confirmation_date: normalizeDateOnlyFromApi((src as any).developer_confirmation_date),
-    loan_sent_bank_execution_date: normalizeDateOnlyFromApi((src as any).loan_sent_bank_execution_date),
-    loan_bank_executed_date: normalizeDateOnlyFromApi((src as any).loan_bank_executed_date),
-    bank_lu_received_date: normalizeDateOnlyFromApi((src as any).bank_lu_received_date),
-    bank_lu_forward_to_developer_on: normalizeDateOnlyFromApi((src as any).bank_lu_forward_to_developer_on),
-    developer_lu_received_on: normalizeDateOnlyFromApi((src as any).developer_lu_received_on),
-    developer_lu_dated: normalizeDateOnlyFromApi((src as any).developer_lu_dated),
-    letter_disclaimer_received_on: normalizeDateOnlyFromApi((src as any).letter_disclaimer_received_on),
-    letter_disclaimer_dated: normalizeDateOnlyFromApi((src as any).letter_disclaimer_dated),
-    letter_disclaimer_reference_nos: typeof (src as any).letter_disclaimer_reference_nos === "string" ? String((src as any).letter_disclaimer_reference_nos) : "",
-    redemption_sum: (src as any).redemption_sum !== null && (src as any).redemption_sum !== undefined ? String((src as any).redemption_sum) : "",
-    loan_agreement_dated: normalizeDateOnlyFromApi((src as any).loan_agreement_dated),
-    loan_agreement_submitted_stamping_date: normalizeDateOnlyFromApi((src as any).loan_agreement_submitted_stamping_date),
-    loan_agreement_stamped_date: normalizeDateOnlyFromApi((src as any).loan_agreement_stamped_date),
-    register_poa_on: normalizeDateOnlyFromApi((src as any).register_poa_on),
-    registered_poa_registration_number: typeof (src as any).registered_poa_registration_number === "string" ? String((src as any).registered_poa_registration_number) : "",
-    noa_served_on: normalizeDateOnlyFromApi((src as any).noa_served_on),
-    advice_to_bank_date: normalizeDateOnlyFromApi((src as any).advice_to_bank_date),
-    bank_1st_release_on: normalizeDateOnlyFromApi((src as any).bank_1st_release_on),
-    first_release_amount_rm: (src as any).first_release_amount_rm !== null && (src as any).first_release_amount_rm !== undefined ? String((src as any).first_release_amount_rm) : "",
-    discharge_date: normalizeDateOnlyFromApi((src as any).discharge_date),
-    caveat_lodged_date: normalizeDateOnlyFromApi((src as any).caveat_lodged_date),
-    first_advice_date: normalizeDateOnlyFromApi((src as any).first_advice_date),
-    dev_informed_redemption_date: normalizeDateOnlyFromApi((src as any).dev_informed_redemption_date),
-    request_discharge_date: normalizeDateOnlyFromApi((src as any).request_discharge_date),
-    charge_date: normalizeDateOnlyFromApi((src as any).charge_date),
-    presentation_date: normalizeDateOnlyFromApi((src as any).presentation_date),
-    second_advice_date: normalizeDateOnlyFromApi((src as any).second_advice_date),
-    consent_to_transfer_date: normalizeDateOnlyFromApi((src as any).consent_to_transfer_date),
-    consent_to_charge_date: normalizeDateOnlyFromApi((src as any).consent_to_charge_date),
-    mot_received_date: normalizeDateOnlyFromApi((src as any).mot_received_date),
-    mot_signed_date: normalizeDateOnlyFromApi((src as any).mot_signed_date),
-    mot_stamped_date: normalizeDateOnlyFromApi((src as any).mot_stamped_date),
-    mot_registered_date: normalizeDateOnlyFromApi((src as any).mot_registered_date),
-    progressive_payment_date: normalizeDateOnlyFromApi((src as any).progressive_payment_date),
-    full_settlement_date: normalizeDateOnlyFromApi((src as any).full_settlement_date),
-    completion_date: normalizeDateOnlyFromApi((src as any).completion_date),
-  });
+  const parseKeyDates = (src: Record<string, unknown>) => {
+    const consentTransferApproval =
+      normalizeDateOnlyFromApi((src as any).blanket_consent_transfer_approval)
+      || normalizeDateOnlyFromApi((src as any).consent_to_transfer_date);
+    const consentChargeApproval =
+      normalizeDateOnlyFromApi((src as any).consent_to_charge_approval)
+      || normalizeDateOnlyFromApi((src as any).consent_to_charge_date);
+
+    return {
+      spa_signed_date: normalizeDateOnlyFromApi((src as any).spa_signed_date),
+      spa_forward_to_developer_execution_on: normalizeDateOnlyFromApi((src as any).spa_forward_to_developer_execution_on),
+      spa_received_dev_return_spa_on: normalizeDateOnlyFromApi((src as any).spa_received_dev_return_spa_on),
+      spa_date: normalizeDateOnlyFromApi((src as any).spa_date),
+      spa_stamped_date: normalizeDateOnlyFromApi((src as any).spa_stamped_date),
+      stamped_spa_send_to_developer_on: normalizeDateOnlyFromApi((src as any).stamped_spa_send_to_developer_on),
+      stamped_spa_sent_to_purchaser_on: normalizeDateOnlyFromApi((src as any).stamped_spa_sent_to_purchaser_on),
+
+      li_date: normalizeDateOnlyFromApi((src as any).li_date),
+      li_received_on: normalizeDateOnlyFromApi((src as any).li_received_on),
+      letter_of_offer_date: normalizeDateOnlyFromApi((src as any).letter_of_offer_date),
+      supp_lo_date: normalizeDateOnlyFromApi((src as any).supp_lo_date),
+      acting_letter_issued_date: normalizeDateOnlyFromApi((src as any).acting_letter_issued_date),
+      loan_bank_executed_date: normalizeDateOnlyFromApi((src as any).loan_bank_executed_date),
+      developer_confirmation_received_on: normalizeDateOnlyFromApi((src as any).developer_confirmation_received_on),
+      developer_confirmation_date: normalizeDateOnlyFromApi((src as any).developer_confirmation_date),
+      differential_sum_rm: (src as any).differential_sum_rm !== null && (src as any).differential_sum_rm !== undefined ? String((src as any).differential_sum_rm) : "",
+      differential_sum_settled_on: normalizeDateOnlyFromApi((src as any).differential_sum_settled_on),
+      bank_lu_dated: normalizeDateOnlyFromApi((src as any).bank_lu_dated),
+      bank_lu_forward_to_developer_on: normalizeDateOnlyFromApi((src as any).bank_lu_forward_to_developer_on),
+      developer_lu_received_on: normalizeDateOnlyFromApi((src as any).developer_lu_received_on),
+      developer_lu_dated: normalizeDateOnlyFromApi((src as any).developer_lu_dated),
+      letter_disclaimer_received_on: normalizeDateOnlyFromApi((src as any).letter_disclaimer_received_on),
+      letter_disclaimer_dated: normalizeDateOnlyFromApi((src as any).letter_disclaimer_dated),
+      letter_disclaimer_reference_nos: typeof (src as any).letter_disclaimer_reference_nos === "string" ? String((src as any).letter_disclaimer_reference_nos) : "",
+      redemption_sum: (src as any).redemption_sum !== null && (src as any).redemption_sum !== undefined ? String((src as any).redemption_sum) : "",
+      balance_sum_less_last_5_rm: (src as any).balance_sum_less_last_5_rm !== null && (src as any).balance_sum_less_last_5_rm !== undefined ? String((src as any).balance_sum_less_last_5_rm) : "",
+      bankruptcy_search_dated: normalizeDateOnlyFromApi((src as any).bankruptcy_search_dated),
+
+      statutory_declaration_dated: normalizeDateOnlyFromApi((src as any).statutory_declaration_dated),
+      statutory_declaration_stamped_on: normalizeDateOnlyFromApi((src as any).statutory_declaration_stamped_on),
+      fa_date: normalizeDateOnlyFromApi((src as any).fa_date),
+      fa_adjudication_number: typeof (src as any).fa_adjudication_number === "string" ? String((src as any).fa_adjudication_number) : "",
+      fa_stamp_on: normalizeDateOnlyFromApi((src as any).fa_stamp_on),
+      doa_date: normalizeDateOnlyFromApi((src as any).doa_date),
+      doa_stamp_on: normalizeDateOnlyFromApi((src as any).doa_stamp_on),
+      poa_date: normalizeDateOnlyFromApi((src as any).poa_date),
+      poa_stamp_on: normalizeDateOnlyFromApi((src as any).poa_stamp_on),
+      noa_dated: normalizeDateOnlyFromApi((src as any).noa_dated),
+      register_pa_on: normalizeDateOnlyFromApi((src as any).register_pa_on),
+      pa_no: typeof (src as any).pa_no === "string" ? String((src as any).pa_no) : "",
+
+      advice_to_bank_date: normalizeDateOnlyFromApi((src as any).advice_to_bank_date),
+      bank_1st_release_on: normalizeDateOnlyFromApi((src as any).bank_1st_release_on),
+      first_release_amount_rm: (src as any).first_release_amount_rm !== null && (src as any).first_release_amount_rm !== undefined ? String((src as any).first_release_amount_rm) : "",
+
+      request_letter_no_objection: normalizeDateOnlyFromApi((src as any).request_letter_no_objection),
+      received_letter_no_objection_on: normalizeDateOnlyFromApi((src as any).received_letter_no_objection_on),
+      blanket_consent_transfer_req: normalizeDateOnlyFromApi((src as any).blanket_consent_transfer_req),
+      blanket_consent_transfer_approval: consentTransferApproval,
+      consent_to_charge_req: normalizeDateOnlyFromApi((src as any).consent_to_charge_req),
+      consent_to_charge_approval: consentChargeApproval,
+
+      request_discharge_date: normalizeDateOnlyFromApi((src as any).request_discharge_date),
+      discharge_title_received_on: normalizeDateOnlyFromApi((src as any).discharge_title_received_on),
+      discharge_date: normalizeDateOnlyFromApi((src as any).discharge_date),
+      mot_signed_date: normalizeDateOnlyFromApi((src as any).mot_signed_date),
+      mot_submit_stamping: normalizeDateOnlyFromApi((src as any).mot_submit_stamping),
+      mot_stamped_date: normalizeDateOnlyFromApi((src as any).mot_stamped_date),
+      charge_date: normalizeDateOnlyFromApi((src as any).charge_date),
+      charge_submit_stamping: normalizeDateOnlyFromApi((src as any).charge_submit_stamping),
+      charge_stamped: normalizeDateOnlyFromApi((src as any).charge_stamped),
+
+      completion_date: normalizeDateOnlyFromApi((src as any).completion_date),
+    };
+  };
 
   const scopeKeys = {
     spa: [
-      "spa_date",
       "spa_signed_date",
-      "spa_stamped_date",
       "spa_forward_to_developer_execution_on",
+      "spa_received_dev_return_spa_on",
+      "spa_date",
+      "spa_stamped_date",
       "stamped_spa_send_to_developer_on",
-      "stamped_spa_received_from_developer_on",
+      "stamped_spa_sent_to_purchaser_on",
     ],
     loan: [
-      "loan_docs_signed_date",
+      "li_date",
+      "li_received_on",
       "letter_of_offer_date",
+      "supp_lo_date",
       "acting_letter_issued_date",
-      "loan_sent_bank_execution_date",
       "loan_bank_executed_date",
-      "letter_of_offer_stamped_date",
-      "loan_docs_pending_date",
       "developer_confirmation_received_on",
       "developer_confirmation_date",
-    ],
-    bank: [
-      "noa_served_on",
+      "differential_sum_rm",
+      "differential_sum_settled_on",
+      "bank_lu_dated",
       "bank_lu_forward_to_developer_on",
-      "advice_to_bank_date",
-      "bank_lu_received_date",
       "developer_lu_received_on",
       "developer_lu_dated",
-      "register_poa_on",
-      "registered_poa_registration_number",
-      "bank_1st_release_on",
-      "first_release_amount_rm",
-      "redemption_sum",
-      "discharge_date",
-      "caveat_lodged_date",
-      "first_advice_date",
-      "dev_informed_redemption_date",
-      "request_discharge_date",
-      "charge_date",
-      "presentation_date",
-      "second_advice_date",
       "letter_disclaimer_received_on",
       "letter_disclaimer_dated",
       "letter_disclaimer_reference_nos",
+      "redemption_sum",
+      "balance_sum_less_last_5_rm",
+      "bankruptcy_search_dated",
+      "statutory_declaration_dated",
+      "statutory_declaration_stamped_on",
+      "fa_date",
+      "fa_adjudication_number",
+      "fa_stamp_on",
+      "doa_date",
+      "doa_stamp_on",
+      "poa_date",
+      "poa_stamp_on",
+      "noa_dated",
+      "register_pa_on",
+      "pa_no",
+      "advice_to_bank_date",
+      "bank_1st_release_on",
+      "first_release_amount_rm",
     ],
-    mot: [
-      "completion_date",
-      "full_settlement_date",
-      "progressive_payment_date",
-      "mot_received_date",
+    titleWithConsent: [
+      "request_letter_no_objection",
+      "received_letter_no_objection_on",
+      "blanket_consent_transfer_req",
+      "blanket_consent_transfer_approval",
+      "consent_to_charge_req",
+      "consent_to_charge_approval",
+    ],
+    title: [
+      "request_discharge_date",
+      "discharge_title_received_on",
+      "discharge_date",
       "mot_signed_date",
+      "mot_submit_stamping",
       "mot_stamped_date",
-      "mot_registered_date",
-      "consent_to_transfer_date",
-      "consent_to_charge_date",
+      "charge_date",
+      "charge_submit_stamping",
+      "charge_stamped",
     ],
   } as const;
 
-  const isDirtyTab = (tab: keyof typeof scopeKeys) => {
-    for (const k of scopeKeys[tab]) {
+  const isDirtyScope = (scope: keyof typeof scopeKeys) => {
+    for (const k of scopeKeys[scope]) {
       if ((keyDatesDraft[k] ?? "") !== (keyDatesBaseline[k] ?? "")) return true;
     }
     return false;
   };
-  const dirtySpa = isDirtyTab("spa");
-  const dirtyLoan = isDirtyTab("loan");
-  const dirtyBank = isDirtyTab("bank");
-  const dirtyMot = isDirtyTab("mot");
-  const anyDirty = dirtySpa || dirtyLoan || dirtyBank || dirtyMot;
+  const dirtySpaStatus = isDirtyScope("spa");
+  const dirtyLoanStatus = isDirtyScope("loan");
+  const dirtyTitleWithConsent = isDirtyScope("titleWithConsent");
+  const dirtyTitleCase = isDirtyScope("title");
+  const anyDirty = dirtySpaStatus || dirtyLoanStatus || dirtyTitleWithConsent || dirtyTitleCase;
 
   useEffect(() => {
     setKeyDatesInitialized(false);
     setKeyDatesDraft({});
     setKeyDatesBaseline({});
     setSavingScope("");
-    setMilestoneTab("spa");
   }, [caseId]);
 
   useEffect(() => {
@@ -1020,7 +1103,6 @@ export default function CaseDetail() {
   const tenure = tenureRaw === "leasehold" ? "leasehold" : "freehold";
   const showNoaAndPoa = isMasterTitle;
   const showEncumbranceFields = isEncumbered;
-  const showLeaseholdConsents = tenure === "leasehold" && isStrataOrIndividual;
 
   const visibleWorkflowAttachmentItems = useMemo(() => {
     return WORKFLOW_ATTACHMENT_ITEMS.filter((it) => {
@@ -1148,20 +1230,20 @@ export default function CaseDetail() {
     return "";
   })();
 
-  const saveScope = (scope: "SPA" | "Loan" | "Bank / LU / NOA" | "Bank / LU" | "MOT / Completion") => {
-    const tab: keyof typeof scopeKeys =
-      scope === "SPA" ? "spa" :
-      scope === "Loan" ? "loan" :
-      (scope === "Bank / LU / NOA" || scope === "Bank / LU") ? "bank" :
-      "mot";
+  const saveScope = (scope: "SPA Status" | "Loan Status" | "Title Case with Consent" | "Title Case") => {
+    const key: keyof typeof scopeKeys =
+      scope === "SPA Status" ? "spa" :
+      scope === "Loan Status" ? "loan" :
+      scope === "Title Case with Consent" ? "titleWithConsent" :
+      "title";
     const dirty =
-      tab === "spa" ? dirtySpa :
-      tab === "loan" ? dirtyLoan :
-      tab === "bank" ? dirtyBank :
-      dirtyMot;
+      key === "spa" ? dirtySpaStatus :
+      key === "loan" ? dirtyLoanStatus :
+      key === "titleWithConsent" ? dirtyTitleWithConsent :
+      dirtyTitleCase;
     if (!dirty) return;
 
-    const keys = scopeKeys[tab] as readonly string[];
+    const keys = scopeKeys[key] as readonly string[];
     const payload: Record<string, unknown> = {};
     for (const k of keys) {
       const v = keyDatesDraft[k] || "";
@@ -2087,10 +2169,10 @@ export default function CaseDetail() {
                     SPA Date: {keyDatesDraft.spa_date ? formatYmdToDmy(keyDatesDraft.spa_date) : "—"}
                   </Badge>
                   <Badge variant="outline" className="border-slate-200 text-slate-700">
-                    Loan Docs: {keyDatesDraft.loan_docs_signed_date ? formatYmdToDmy(keyDatesDraft.loan_docs_signed_date) : "—"}
+                    LO Date: {keyDatesDraft.letter_of_offer_date ? formatYmdToDmy(keyDatesDraft.letter_of_offer_date) : "—"}
                   </Badge>
                   <Badge variant="outline" className="border-slate-200 text-slate-700">
-                    Completion: {keyDatesDraft.completion_date ? formatYmdToDmy(keyDatesDraft.completion_date) : "—"}
+                    Charge Stamped: {keyDatesDraft.charge_stamped ? formatYmdToDmy(keyDatesDraft.charge_stamped) : "—"}
                   </Badge>
                 </div>
               </div>
@@ -2099,427 +2181,377 @@ export default function CaseDetail() {
               {keyDatesQuery.isError ? (
                 <QueryFallback title="Key dates unavailable" error={keyDatesQuery.error} onRetry={() => keyDatesQuery.refetch()} isRetrying={keyDatesQuery.isFetching} />
               ) : (
-              <Tabs value={milestoneTab} onValueChange={(v) => setMilestoneTab(v as "spa" | "loan" | "bank" | "mot")} className="w-full">
-                <TabsList className="grid w-full grid-cols-2 md:grid-cols-4 bg-slate-100 p-1">
-                  <TabsTrigger value="spa">
-                    <span className="flex items-center gap-1">SPA{dirtySpa && <span className="h-1.5 w-1.5 rounded-full bg-slate-600" />}</span>
-                  </TabsTrigger>
-                  <TabsTrigger value="loan">
-                    <span className="flex items-center gap-1">Loan{dirtyLoan && <span className="h-1.5 w-1.5 rounded-full bg-slate-600" />}</span>
-                  </TabsTrigger>
-                  <TabsTrigger value="bank">
-                    <span className="flex items-center gap-1">{isMasterTitle ? "Bank / LU / NOA" : "Bank / LU"}{dirtyBank && <span className="h-1.5 w-1.5 rounded-full bg-slate-600" />}</span>
-                  </TabsTrigger>
-                  <TabsTrigger value="mot">
-                    <span className="flex items-center gap-1">MOT / Completion{dirtyMot && <span className="h-1.5 w-1.5 rounded-full bg-slate-600" />}</span>
-                  </TabsTrigger>
-                </TabsList>
-
-                <TabsContent value="spa" className="pt-6 space-y-4">
-                  <div className="flex items-center justify-between">
-                    <div className="text-sm font-semibold text-slate-800">SPA Dates</div>
-                    <Button
-                      size="sm"
-                      variant={dirtySpa ? "default" : "outline"}
-                      className={dirtySpa ? "bg-amber-500 hover:bg-amber-600" : undefined}
-                      onClick={() => saveScope("SPA")}
-                      disabled={saveKeyDatesMutation.isPending || !dirtySpa}
-                    >
-                      {saveKeyDatesMutation.isPending && savingScope === "SPA" ? "Saving..." : dirtySpa ? "Save SPA" : "Saved"}
-                    </Button>
-                  </div>
-                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
-                    <FieldCard label="SPA Date" value={keyDatesDraft.spa_date || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, spa_date: v }))} />
-                    <FieldCard label="SPA Signed" value={keyDatesDraft.spa_signed_date || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, spa_signed_date: v }))} />
-                    <WorkflowFileCard label="SPA STAMPED" docKey="spa_stamped" dateKey="spa_stamped_date" />
-                    <FieldCard label="SPA Forward to Dev. Execution On" value={keyDatesDraft.spa_forward_to_developer_execution_on || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, spa_forward_to_developer_execution_on: v }))} />
-                    <FieldCard label="Stamped SPA Send to Dev. On" value={keyDatesDraft.stamped_spa_send_to_developer_on || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, stamped_spa_send_to_developer_on: v }))} />
-                    <FieldCard label="Stamped SPA Received from Dev. On" value={keyDatesDraft.stamped_spa_received_from_developer_on || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, stamped_spa_received_from_developer_on: v }))} />
-                  </div>
-                </TabsContent>
-
-                <TabsContent value="loan" className="pt-6 space-y-6">
-                  <div className="flex items-center justify-between">
-                    <div className="text-sm font-semibold text-slate-800">Loan Dates</div>
-                    <Button
-                      size="sm"
-                      variant={dirtyLoan ? "default" : "outline"}
-                      className={dirtyLoan ? "bg-amber-500 hover:bg-amber-600" : undefined}
-                      onClick={() => saveScope("Loan")}
-                      disabled={saveKeyDatesMutation.isPending || !dirtyLoan}
-                    >
-                      {saveKeyDatesMutation.isPending && savingScope === "Loan" ? "Saving..." : dirtyLoan ? "Save Loan" : "Saved"}
-                    </Button>
-                  </div>
-                  <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                    <div className="space-y-4">
-                      <div className="text-sm font-semibold text-slate-800">Offer & Signing</div>
-                      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                        <FieldCard label="Loan Docs Signed" value={keyDatesDraft.loan_docs_signed_date || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, loan_docs_signed_date: v }))} />
-                        <FieldCard label="Letter of Offer Date" value={keyDatesDraft.letter_of_offer_date || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, letter_of_offer_date: v }))} />
-                        <FieldCard label="Loan Docs Pending Signing" value={keyDatesDraft.loan_docs_pending_date || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, loan_docs_pending_date: v }))} />
-                        <WorkflowFileCard label="LO STAMPED" docKey="lo_stamped" dateKey="letter_of_offer_stamped_date" />
+                <Accordion type="multiple" defaultValue={["spa", "loan", "titleWithConsent", "title"]} className="w-full">
+                  <AccordionItem value="spa">
+                    <AccordionTrigger className="text-slate-800">
+                      <span className="flex items-center gap-2">SPA Status{dirtySpaStatus && <span className="h-1.5 w-1.5 rounded-full bg-slate-600" />}</span>
+                    </AccordionTrigger>
+                    <AccordionContent>
+                      <div className="flex items-center justify-between pb-3">
+                        <div className="text-sm font-semibold text-slate-800">SPA Status</div>
+                        <Button
+                          size="sm"
+                          variant={dirtySpaStatus ? "default" : "outline"}
+                          className={dirtySpaStatus ? "bg-amber-500 hover:bg-amber-600" : undefined}
+                          onClick={() => saveScope("SPA Status")}
+                          disabled={saveKeyDatesMutation.isPending || !dirtySpaStatus}
+                        >
+                          {saveKeyDatesMutation.isPending && savingScope === "SPA Status" ? "Saving..." : dirtySpaStatus ? "Save" : "Saved"}
+                        </Button>
                       </div>
-                    </div>
-
-                    <div className="space-y-4">
-                      <div className="text-sm font-semibold text-slate-800">Letters & Execution</div>
-                      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                        <FieldCard label="Acting Letter Issued" value={keyDatesDraft.acting_letter_issued_date || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, acting_letter_issued_date: v }))} printerKey="acting_letter" />
-                        <FieldCard label="Loan Sent for Bank Execution" value={keyDatesDraft.loan_sent_bank_execution_date || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, loan_sent_bank_execution_date: v }))} printerKey="letter_forward_bank_execution" />
-                        <FieldCard label="Loan Bank Executed" value={keyDatesDraft.loan_bank_executed_date || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, loan_bank_executed_date: v }))} />
-                        <FieldCard label="Developer Confirmation Received On" value={keyDatesDraft.developer_confirmation_received_on || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, developer_confirmation_received_on: v }))} />
-                        <FieldCard label="Developer Confirmation Date" value={keyDatesDraft.developer_confirmation_date || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, developer_confirmation_date: v }))} />
+                      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+                        <FieldCard label="SPA signing" value={keyDatesDraft.spa_signed_date || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, spa_signed_date: v }))} />
+                        <FieldCard label="SPA sent to dev for execution" value={keyDatesDraft.spa_forward_to_developer_execution_on || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, spa_forward_to_developer_execution_on: v }))} />
+                        <FieldCard label="Received dev return SPA" value={keyDatesDraft.spa_received_dev_return_spa_on || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, spa_received_dev_return_spa_on: v }))} />
+                        <FieldCard label="SPA date" value={keyDatesDraft.spa_date || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, spa_date: v }))} />
+                        <WorkflowFileCard label="SPA stamping" docKey="spa_stamped" dateKey="spa_stamped_date" />
+                        <FieldCard label="Stamped SPA sent to dev" value={keyDatesDraft.stamped_spa_send_to_developer_on || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, stamped_spa_send_to_developer_on: v }))} />
+                        <FieldCard label="Stamped SPA sent to Pur" value={keyDatesDraft.stamped_spa_sent_to_purchaser_on || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, stamped_spa_sent_to_purchaser_on: v }))} />
                       </div>
-                    </div>
-                  </div>
+                    </AccordionContent>
+                  </AccordionItem>
 
-                  <Card>
-                    <CardHeader className="flex flex-row items-center justify-between gap-3">
-                      <div className="min-w-0">
-                        <CardTitle className="text-sm">Stamping</CardTitle>
-                        {progressQuery.data?.stamping && (
-                          <div className="mt-1 text-xs text-slate-600 break-words">
-                            {progressQuery.data.stamping.completed}/{progressQuery.data.stamping.total} completed
-                            {Array.isArray(progressQuery.data.stamping.missing) && progressQuery.data.stamping.missing.length > 0 && (
-                              <span className="ml-2">
-                                Missing: {progressQuery.data.stamping.missing
-                                  .slice(0, 4)
-                                  .map((m: any) => `${m.itemKey}(${String(m.status).replace(/_/g, " ")})`)
-                                  .join(", ")}
-                                {progressQuery.data.stamping.missing.length > 4 ? "…" : ""}
-                              </span>
+                  <AccordionItem value="loan">
+                    <AccordionTrigger className="text-slate-800">
+                      <span className="flex items-center gap-2">Loan Status{dirtyLoanStatus && <span className="h-1.5 w-1.5 rounded-full bg-slate-600" />}</span>
+                    </AccordionTrigger>
+                    <AccordionContent>
+                      <div className="flex items-center justify-between pb-3">
+                        <div className="text-sm font-semibold text-slate-800">Loan Status</div>
+                        <Button
+                          size="sm"
+                          variant={dirtyLoanStatus ? "default" : "outline"}
+                          className={dirtyLoanStatus ? "bg-amber-500 hover:bg-amber-600" : undefined}
+                          onClick={() => saveScope("Loan Status")}
+                          disabled={saveKeyDatesMutation.isPending || !dirtyLoanStatus}
+                        >
+                          {saveKeyDatesMutation.isPending && savingScope === "Loan Status" ? "Saving..." : dirtyLoanStatus ? "Save" : "Saved"}
+                        </Button>
+                      </div>
+
+                      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+                        <FieldCard label="LI Date" value={keyDatesDraft.li_date || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, li_date: v }))} />
+                        <FieldCard label="LI received" value={keyDatesDraft.li_received_on || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, li_received_on: v }))} />
+                        <FieldCard label="LO Date" value={keyDatesDraft.letter_of_offer_date || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, letter_of_offer_date: v }))} />
+                        <FieldCard label="Supp LO/LON/LOV date" value={keyDatesDraft.supp_lo_date || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, supp_lo_date: v }))} />
+                        <FieldCard label="Acting Letter dated" value={keyDatesDraft.acting_letter_issued_date || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, acting_letter_issued_date: v }))} printerKey="acting_letter" />
+                        <FieldCard label="Bank execution dated" value={keyDatesDraft.loan_bank_executed_date || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, loan_bank_executed_date: v }))} />
+                        <FieldCard label="Developer Confirmation receive on" value={keyDatesDraft.developer_confirmation_received_on || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, developer_confirmation_received_on: v }))} />
+                        <FieldCard label="Developer Confirmation dated" value={keyDatesDraft.developer_confirmation_date || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, developer_confirmation_date: v }))} />
+                        <FieldCard label="Differential Sum (RM)" type="number" value={keyDatesDraft.differential_sum_rm || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, differential_sum_rm: v }))} />
+                        <FieldCard label="Differential Sum Settled ON" value={keyDatesDraft.differential_sum_settled_on || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, differential_sum_settled_on: v }))} />
+                        <FieldCard label="Bank's LU dated" value={keyDatesDraft.bank_lu_dated || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, bank_lu_dated: v }))} />
+                        <FieldCard label="Bank's LU sent to developer ON" value={keyDatesDraft.bank_lu_forward_to_developer_on || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, bank_lu_forward_to_developer_on: v }))} printerKey="letter_forward_bank_lu_to_dev" />
+                        <FieldCard label="DEV. LU RECEIVED ON" value={keyDatesDraft.developer_lu_received_on || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, developer_lu_received_on: v }))} />
+                        <FieldCard label="DEV. LU DATED" value={keyDatesDraft.developer_lu_dated || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, developer_lu_dated: v }))} />
+                        <FieldCard label="Disclaimer Letter receive on" value={keyDatesDraft.letter_disclaimer_received_on || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, letter_disclaimer_received_on: v }))} />
+                        <WorkflowFileCard label="Disclaimer Letter Dated" docKey="letter_disclaimer" dateKey="letter_disclaimer_dated" />
+                        <FieldCard label="Disclaimer Lttr Ref. No" type="text" value={keyDatesDraft.letter_disclaimer_reference_nos || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, letter_disclaimer_reference_nos: v }))} />
+                        <FieldCard label="Redemption Sum (RM)" type="number" value={keyDatesDraft.redemption_sum || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, redemption_sum: v }))} />
+                        <FieldCard label="Balance Sum (LESS LAST 5%)" type="number" value={keyDatesDraft.balance_sum_less_last_5_rm || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, balance_sum_less_last_5_rm: v }))} />
+                        <FieldCard label="Bankruptcy Search Dated" value={keyDatesDraft.bankruptcy_search_dated || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, bankruptcy_search_dated: v }))} />
+                      </div>
+
+                      <div className="pt-6 space-y-3">
+                        <div className="text-sm font-semibold text-slate-800">STAMPING SESSION</div>
+                        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+                          <FieldCard label="STATUTORY DECLARATION DATED" value={keyDatesDraft.statutory_declaration_dated || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, statutory_declaration_dated: v }))} />
+                          <FieldCard label="STATUTORY DECLARATION STAMPED ON" value={keyDatesDraft.statutory_declaration_stamped_on || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, statutory_declaration_stamped_on: v }))} />
+                          <FieldCard label="FA DATE" value={keyDatesDraft.fa_date || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, fa_date: v }))} />
+                          <FieldCard label="FA ADJUDICATION NUMBER" type="text" value={keyDatesDraft.fa_adjudication_number || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, fa_adjudication_number: v }))} />
+                          <FieldCard label="FA STAMP ON" value={keyDatesDraft.fa_stamp_on || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, fa_stamp_on: v }))} />
+                          <FieldCard label="DOA DATE" value={keyDatesDraft.doa_date || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, doa_date: v }))} />
+                          <FieldCard label="DOA STAMP ON" value={keyDatesDraft.doa_stamp_on || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, doa_stamp_on: v }))} />
+                          <FieldCard label="POA DATE" value={keyDatesDraft.poa_date || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, poa_date: v }))} />
+                          <FieldCard label="POA STAMP ON" value={keyDatesDraft.poa_stamp_on || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, poa_stamp_on: v }))} />
+                          <FieldCard label="NOA DATED" value={keyDatesDraft.noa_dated || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, noa_dated: v }))} />
+                          <FieldCard label="REGISTER PA ON" value={keyDatesDraft.register_pa_on || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, register_pa_on: v }))} />
+                          <FieldCard label="PA No" type="text" value={keyDatesDraft.pa_no || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, pa_no: v }))} />
+                        </div>
+                      </div>
+
+                      <div className="pt-6 space-y-3">
+                        <div className="text-sm font-semibold text-slate-800">COMPLETION SESSION</div>
+                        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+                          <FieldCard label="ADVICE ON" value={keyDatesDraft.advice_to_bank_date || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, advice_to_bank_date: v }))} printerKey="letter_advice_spa_sol_lu" />
+                          <FieldCard label="1ST RELEASE ON" value={keyDatesDraft.bank_1st_release_on || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, bank_1st_release_on: v }))} />
+                          <FieldCard label="1ST PAYMENT AMOUNT" type="number" value={keyDatesDraft.first_release_amount_rm || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, first_release_amount_rm: v }))} />
+                        </div>
+                      </div>
+
+                      <Card className="mt-6">
+                        <CardHeader className="flex flex-row items-center justify-between gap-3">
+                          <div className="min-w-0">
+                            <CardTitle className="text-sm">Stamping Documents</CardTitle>
+                            {progressQuery.data?.stamping && (
+                              <div className="mt-1 text-xs text-slate-600 break-words">
+                                {progressQuery.data.stamping.completed}/{progressQuery.data.stamping.total} completed
+                                {Array.isArray(progressQuery.data.stamping.missing) && progressQuery.data.stamping.missing.length > 0 && (
+                                  <span className="ml-2">
+                                    Missing: {progressQuery.data.stamping.missing
+                                      .slice(0, 4)
+                                      .map((m: any) => `${m.itemKey}(${String(m.status).replace(/_/g, " ")})`)
+                                      .join(", ")}
+                                    {progressQuery.data.stamping.missing.length > 4 ? "…" : ""}
+                                  </span>
+                                )}
+                              </div>
                             )}
                           </div>
-                        )}
-                      </div>
-                      <div className="flex items-center gap-2">
+                          <div className="flex items-center gap-2">
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              className="gap-1.5"
+                              onClick={addStampingOtherRow}
+                              disabled={!canDocsUpdate}
+                            >
+                              <Plus className="w-4 h-4" />
+                              Add Another Document
+                            </Button>
+                            <Button
+                              size="sm"
+                              variant={stampingDirty ? "default" : "outline"}
+                              className={stampingDirty ? "bg-amber-500 hover:bg-amber-600" : undefined}
+                              onClick={saveStamping}
+                              disabled={!canDocsUpdate || saveStampingMutation.isPending || !stampingDirty}
+                            >
+                              {saveStampingMutation.isPending ? "Saving..." : stampingDirty ? "Save Stamping" : "Saved"}
+                            </Button>
+                          </div>
+                        </CardHeader>
+                        <CardContent>
+                          {loanStampingQuery.isError ? (
+                            <QueryFallback title="Stamping unavailable" error={loanStampingQuery.error} onRetry={() => loanStampingQuery.refetch()} isRetrying={loanStampingQuery.isFetching} />
+                          ) : (
+                            <div className="overflow-x-auto">
+                              <table className="w-full min-w-[980px] text-sm">
+                                <thead className="bg-slate-50 border-b">
+                                  <tr>
+                                    <th className="text-left px-3 py-2 font-medium text-slate-600 w-[320px]">Document</th>
+                                    <th className="text-left px-3 py-2 font-medium text-slate-600 w-[180px]">Dated</th>
+                                    <th className="text-left px-3 py-2 font-medium text-slate-600 w-[180px]">Stamped On</th>
+                                    <th className="text-left px-3 py-2 font-medium text-slate-600">File</th>
+                                    <th className="text-right px-3 py-2 font-medium text-slate-600 w-[140px]">Actions</th>
+                                  </tr>
+                                </thead>
+                                <tbody className="divide-y">
+                                  {visibleStampingItems.fixed.map((row) => (
+                                    <tr key={`fixed-${row.itemKey}`}>
+                                      <td className="px-3 py-2 font-medium text-slate-800">
+                                        <div className="flex items-center gap-2 min-w-0">
+                                          <span className="truncate">{fixedStampingKeys.find((x) => x.key === row.itemKey)?.label}</span>
+                                          {Array.isArray(progressQuery.data?.stampingItems) && (
+                                            (() => {
+                                              const st = progressQuery.data.stampingItems.find((x: any) => x?.itemKey === row.itemKey && (row.id ? x?.id === row.id : true));
+                                              return st?.status ? (
+                                                <Badge variant={st.status === "completed" ? "default" : "outline"} className="text-[10px] whitespace-nowrap">
+                                                  {String(st.status).replace(/_/g, " ")}
+                                                </Badge>
+                                              ) : null;
+                                            })()
+                                          )}
+                                        </div>
+                                      </td>
+                                      <td className="px-3 py-2">
+                                        <DateOnlyInput disabled={!canDocsUpdate} valueYmd={row.datedOn || ""} onChangeYmd={(v) => upsertStampingItem({ ...row, datedOn: v || null })} />
+                                      </td>
+                                      <td className="px-3 py-2">
+                                        <DateOnlyInput disabled={!canDocsUpdate} valueYmd={row.stampedOn || ""} onChangeYmd={(v) => upsertStampingItem({ ...row, stampedOn: v || null })} />
+                                      </td>
+                                      <td className="px-3 py-2">
+                                        <div className="truncate text-slate-600" title={row.fileName || "No file uploaded"}>{row.fileName || "No file uploaded"}</div>
+                                      </td>
+                                      <td className="px-3 py-2 text-right">
+                                        <div className="inline-flex items-center gap-1">
+                                          <Button
+                                            size="icon"
+                                            variant="ghost"
+                                            className="h-8 w-8"
+                                            title="Download"
+                                            disabled={!canDocsRead || !row.id || !row.fileName || stampingDownloadingId === row.id}
+                                            onClick={() => downloadStampingFile(row)}
+                                          >
+                                            <Download className="w-4 h-4" />
+                                          </Button>
+                                          {canDocsUpdate && (
+                                            <Button
+                                              size="icon"
+                                              variant="ghost"
+                                              className="h-8 w-8"
+                                              title="Upload/Replace"
+                                              disabled={ensureStampingItemMutation.isPending || stampingUploadingId === row.id}
+                                              onClick={() => openStampingUpload(row)}
+                                            >
+                                              <Upload className="w-4 h-4" />
+                                            </Button>
+                                          )}
+                                          {canDocsUpdate && (
+                                            <Button
+                                              size="icon"
+                                              variant="ghost"
+                                              className="h-8 w-8 text-red-600"
+                                              title="Remove file"
+                                              disabled={!row.id || !row.fileName || clearStampingFileMutation.isPending}
+                                              onClick={() => row.id && clearStampingFileMutation.mutate(row.id)}
+                                            >
+                                              <X className="w-4 h-4" />
+                                            </Button>
+                                          )}
+                                        </div>
+                                      </td>
+                                    </tr>
+                                  ))}
+                                  {visibleStampingItems.others.map((row) => (
+                                    <tr key={`other-${row.id ?? row.sortOrder}`}>
+                                      <td className="px-3 py-2">
+                                        <div className="flex items-center gap-2 min-w-0">
+                                          <Input
+                                            className="min-w-0"
+                                            value={row.customName ?? ""}
+                                            placeholder="Other document name"
+                                            onChange={(e) => upsertStampingItem({ ...row, customName: e.target.value })}
+                                            disabled={!canDocsUpdate}
+                                          />
+                                          {Array.isArray(progressQuery.data?.stampingItems) && (
+                                            (() => {
+                                              const st = progressQuery.data.stampingItems.find((x: any) => x?.itemKey === "other" && (row.id ? x?.id === row.id : x?.sortOrder === row.sortOrder));
+                                              return st?.status ? (
+                                                <Badge variant={st.status === "completed" ? "default" : "outline"} className="text-[10px] whitespace-nowrap">
+                                                  {String(st.status).replace(/_/g, " ")}
+                                                </Badge>
+                                              ) : null;
+                                            })()
+                                          )}
+                                        </div>
+                                      </td>
+                                      <td className="px-3 py-2">
+                                        <DateOnlyInput disabled={!canDocsUpdate} valueYmd={row.datedOn || ""} onChangeYmd={(v) => upsertStampingItem({ ...row, datedOn: v || null })} />
+                                      </td>
+                                      <td className="px-3 py-2">
+                                        <DateOnlyInput disabled={!canDocsUpdate} valueYmd={row.stampedOn || ""} onChangeYmd={(v) => upsertStampingItem({ ...row, stampedOn: v || null })} />
+                                      </td>
+                                      <td className="px-3 py-2">
+                                        <div className="truncate text-slate-600" title={row.fileName || "No file uploaded"}>{row.fileName || "No file uploaded"}</div>
+                                      </td>
+                                      <td className="px-3 py-2 text-right">
+                                        <div className="inline-flex items-center gap-1">
+                                          <Button
+                                            size="icon"
+                                            variant="ghost"
+                                            className="h-8 w-8"
+                                            title="Download"
+                                            disabled={!canDocsRead || !row.id || !row.fileName || stampingDownloadingId === row.id}
+                                            onClick={() => downloadStampingFile(row)}
+                                          >
+                                            <Download className="w-4 h-4" />
+                                          </Button>
+                                          {canDocsUpdate && (
+                                            <Button
+                                              size="icon"
+                                              variant="ghost"
+                                              className="h-8 w-8"
+                                              title="Upload/Replace"
+                                              disabled={ensureStampingItemMutation.isPending || stampingUploadingId === row.id}
+                                              onClick={() => openStampingUpload(row)}
+                                            >
+                                              <Upload className="w-4 h-4" />
+                                            </Button>
+                                          )}
+                                          {(row.fileName ? canDocsUpdate : row.id ? canDocsDelete : canDocsUpdate) ? (
+                                            <Button
+                                              size="icon"
+                                              variant="ghost"
+                                              className="h-8 w-8 text-red-600"
+                                              title={row.fileName ? "Remove file" : "Remove row"}
+                                              disabled={clearStampingFileMutation.isPending || deleteStampingRowMutation.isPending}
+                                              onClick={() => {
+                                                if (row.fileName && row.id) {
+                                                  clearStampingFileMutation.mutate(row.id);
+                                                  return;
+                                                }
+                                                if (row.id) {
+                                                  deleteStampingRowMutation.mutate(row.id);
+                                                  return;
+                                                }
+                                                removeUnsavedStampingOther(row.sortOrder);
+                                              }}
+                                            >
+                                              <X className="w-4 h-4" />
+                                            </Button>
+                                          ) : null}
+                                        </div>
+                                      </td>
+                                    </tr>
+                                  ))}
+                                </tbody>
+                              </table>
+                            </div>
+                          )}
+                        </CardContent>
+                      </Card>
+                    </AccordionContent>
+                  </AccordionItem>
+
+                  <AccordionItem value="titleWithConsent">
+                    <AccordionTrigger className="text-slate-800">
+                      <span className="flex items-center gap-2">Title Case with Consent{dirtyTitleWithConsent && <span className="h-1.5 w-1.5 rounded-full bg-slate-600" />}</span>
+                    </AccordionTrigger>
+                    <AccordionContent>
+                      <div className="flex items-center justify-between pb-3">
+                        <div className="text-sm font-semibold text-slate-800">Title Case with Consent</div>
                         <Button
                           size="sm"
-                          variant="outline"
-                          className="gap-1.5"
-                          onClick={addStampingOtherRow}
-                          disabled={!canDocsUpdate}
+                          variant={dirtyTitleWithConsent ? "default" : "outline"}
+                          className={dirtyTitleWithConsent ? "bg-amber-500 hover:bg-amber-600" : undefined}
+                          onClick={() => saveScope("Title Case with Consent")}
+                          disabled={saveKeyDatesMutation.isPending || !dirtyTitleWithConsent}
                         >
-                          <Plus className="w-4 h-4" />
-                          Add Another Document
+                          {saveKeyDatesMutation.isPending && savingScope === "Title Case with Consent" ? "Saving..." : dirtyTitleWithConsent ? "Save" : "Saved"}
                         </Button>
+                      </div>
+                      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+                        <FieldCard label="Request Letter of NO Objection" value={keyDatesDraft.request_letter_no_objection || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, request_letter_no_objection: v }))} />
+                        <FieldCard label="Received Letter of NO Objection ON" value={keyDatesDraft.received_letter_no_objection_on || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, received_letter_no_objection_on: v }))} />
+                        <FieldCard label="Blanket Consent / Consent Transfer Req." value={keyDatesDraft.blanket_consent_transfer_req || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, blanket_consent_transfer_req: v }))} />
+                        <FieldCard label="Blanket Consent / Consent Transfer approval" value={keyDatesDraft.blanket_consent_transfer_approval || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, blanket_consent_transfer_approval: v }))} />
+                        <FieldCard label="Consent to Charge Req." value={keyDatesDraft.consent_to_charge_req || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, consent_to_charge_req: v }))} />
+                        <FieldCard label="Consent to Charge approval" value={keyDatesDraft.consent_to_charge_approval || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, consent_to_charge_approval: v }))} />
+                      </div>
+                    </AccordionContent>
+                  </AccordionItem>
+
+                  <AccordionItem value="title">
+                    <AccordionTrigger className="text-slate-800">
+                      <span className="flex items-center gap-2">Title Case{dirtyTitleCase && <span className="h-1.5 w-1.5 rounded-full bg-slate-600" />}</span>
+                    </AccordionTrigger>
+                    <AccordionContent>
+                      <div className="flex items-center justify-between pb-3">
+                        <div className="text-sm font-semibold text-slate-800">Title Case</div>
                         <Button
                           size="sm"
-                          variant={stampingDirty ? "default" : "outline"}
-                          className={stampingDirty ? "bg-amber-500 hover:bg-amber-600" : undefined}
-                          onClick={saveStamping}
-                          disabled={!canDocsUpdate || saveStampingMutation.isPending || !stampingDirty}
+                          variant={dirtyTitleCase ? "default" : "outline"}
+                          className={dirtyTitleCase ? "bg-amber-500 hover:bg-amber-600" : undefined}
+                          onClick={() => saveScope("Title Case")}
+                          disabled={saveKeyDatesMutation.isPending || !dirtyTitleCase}
                         >
-                          {saveStampingMutation.isPending ? "Saving..." : stampingDirty ? "Save Stamping" : "Saved"}
+                          {saveKeyDatesMutation.isPending && savingScope === "Title Case" ? "Saving..." : dirtyTitleCase ? "Save" : "Saved"}
                         </Button>
                       </div>
-                    </CardHeader>
-                    <CardContent>
-                      {loanStampingQuery.isError ? (
-                        <QueryFallback title="Stamping unavailable" error={loanStampingQuery.error} onRetry={() => loanStampingQuery.refetch()} isRetrying={loanStampingQuery.isFetching} />
-                      ) : (
-                        <div className="overflow-x-auto">
-                          <table className="w-full min-w-[980px] text-sm">
-                            <thead className="bg-slate-50 border-b">
-                              <tr>
-                                <th className="text-left px-3 py-2 font-medium text-slate-600 w-[320px]">Document</th>
-                                <th className="text-left px-3 py-2 font-medium text-slate-600 w-[180px]">Dated</th>
-                                <th className="text-left px-3 py-2 font-medium text-slate-600 w-[180px]">Stamped On</th>
-                                <th className="text-left px-3 py-2 font-medium text-slate-600">File</th>
-                                <th className="text-right px-3 py-2 font-medium text-slate-600 w-[140px]">Actions</th>
-                              </tr>
-                            </thead>
-                            <tbody className="divide-y">
-                              {visibleStampingItems.fixed.map((row) => (
-                                <tr key={`fixed-${row.itemKey}`}>
-                                  <td className="px-3 py-2 font-medium text-slate-800">
-                                    <div className="flex items-center gap-2 min-w-0">
-                                      <span className="truncate">{fixedStampingKeys.find((x) => x.key === row.itemKey)?.label}</span>
-                                      {Array.isArray(progressQuery.data?.stampingItems) && (
-                                        (() => {
-                                          const st = progressQuery.data.stampingItems.find((x: any) => x?.itemKey === row.itemKey && (row.id ? x?.id === row.id : true));
-                                          return st?.status ? (
-                                            <Badge variant={st.status === "completed" ? "default" : "outline"} className="text-[10px] whitespace-nowrap">
-                                              {String(st.status).replace(/_/g, " ")}
-                                            </Badge>
-                                          ) : null;
-                                        })()
-                                      )}
-                                    </div>
-                                  </td>
-                                  <td className="px-3 py-2">
-                                    <DateOnlyInput disabled={!canDocsUpdate} valueYmd={row.datedOn || ""} onChangeYmd={(v) => upsertStampingItem({ ...row, datedOn: v || null })} />
-                                  </td>
-                                  <td className="px-3 py-2">
-                                    <DateOnlyInput disabled={!canDocsUpdate} valueYmd={row.stampedOn || ""} onChangeYmd={(v) => upsertStampingItem({ ...row, stampedOn: v || null })} />
-                                  </td>
-                                  <td className="px-3 py-2">
-                                    <div className="truncate text-slate-600" title={row.fileName || "No file uploaded"}>{row.fileName || "No file uploaded"}</div>
-                                  </td>
-                                  <td className="px-3 py-2 text-right">
-                                    <div className="inline-flex items-center gap-1">
-                                      <Button
-                                        size="icon"
-                                        variant="ghost"
-                                        className="h-8 w-8"
-                                        title="Download"
-                                        disabled={!canDocsRead || !row.id || !row.fileName || stampingDownloadingId === row.id}
-                                        onClick={() => downloadStampingFile(row)}
-                                      >
-                                        <Download className="w-4 h-4" />
-                                      </Button>
-                                      {canDocsUpdate && (
-                                        <Button
-                                          size="icon"
-                                          variant="ghost"
-                                          className="h-8 w-8"
-                                          title="Upload/Replace"
-                                          disabled={ensureStampingItemMutation.isPending || stampingUploadingId === row.id}
-                                          onClick={() => openStampingUpload(row)}
-                                        >
-                                          <Upload className="w-4 h-4" />
-                                        </Button>
-                                      )}
-                                      {canDocsUpdate && (
-                                        <Button
-                                          size="icon"
-                                          variant="ghost"
-                                          className="h-8 w-8 text-red-600"
-                                          title="Remove file"
-                                          disabled={!row.id || !row.fileName || clearStampingFileMutation.isPending}
-                                          onClick={() => row.id && clearStampingFileMutation.mutate(row.id)}
-                                        >
-                                          <X className="w-4 h-4" />
-                                        </Button>
-                                      )}
-                                    </div>
-                                  </td>
-                                </tr>
-                              ))}
-                              {visibleStampingItems.others.map((row) => (
-                                <tr key={`other-${row.id ?? row.sortOrder}`}>
-                                  <td className="px-3 py-2">
-                                    <div className="flex items-center gap-2 min-w-0">
-                                      <Input
-                                        className="min-w-0"
-                                        value={row.customName ?? ""}
-                                        placeholder="Other document name"
-                                        onChange={(e) => upsertStampingItem({ ...row, customName: e.target.value })}
-                                        disabled={!canDocsUpdate}
-                                      />
-                                      {Array.isArray(progressQuery.data?.stampingItems) && (
-                                        (() => {
-                                          const st = progressQuery.data.stampingItems.find((x: any) => x?.itemKey === "other" && (row.id ? x?.id === row.id : x?.sortOrder === row.sortOrder));
-                                          return st?.status ? (
-                                            <Badge variant={st.status === "completed" ? "default" : "outline"} className="text-[10px] whitespace-nowrap">
-                                              {String(st.status).replace(/_/g, " ")}
-                                            </Badge>
-                                          ) : null;
-                                        })()
-                                      )}
-                                    </div>
-                                  </td>
-                                  <td className="px-3 py-2">
-                                    <DateOnlyInput disabled={!canDocsUpdate} valueYmd={row.datedOn || ""} onChangeYmd={(v) => upsertStampingItem({ ...row, datedOn: v || null })} />
-                                  </td>
-                                  <td className="px-3 py-2">
-                                    <DateOnlyInput disabled={!canDocsUpdate} valueYmd={row.stampedOn || ""} onChangeYmd={(v) => upsertStampingItem({ ...row, stampedOn: v || null })} />
-                                  </td>
-                                  <td className="px-3 py-2">
-                                    <div className="truncate text-slate-600" title={row.fileName || "No file uploaded"}>{row.fileName || "No file uploaded"}</div>
-                                  </td>
-                                  <td className="px-3 py-2 text-right">
-                                    <div className="inline-flex items-center gap-1">
-                                      <Button
-                                        size="icon"
-                                        variant="ghost"
-                                        className="h-8 w-8"
-                                        title="Download"
-                                        disabled={!canDocsRead || !row.id || !row.fileName || stampingDownloadingId === row.id}
-                                        onClick={() => downloadStampingFile(row)}
-                                      >
-                                        <Download className="w-4 h-4" />
-                                      </Button>
-                                      {canDocsUpdate && (
-                                        <Button
-                                          size="icon"
-                                          variant="ghost"
-                                          className="h-8 w-8"
-                                          title="Upload/Replace"
-                                          disabled={ensureStampingItemMutation.isPending || stampingUploadingId === row.id}
-                                          onClick={() => openStampingUpload(row)}
-                                        >
-                                          <Upload className="w-4 h-4" />
-                                        </Button>
-                                      )}
-                                      {(row.fileName ? canDocsUpdate : row.id ? canDocsDelete : canDocsUpdate) ? (
-                                        <Button
-                                          size="icon"
-                                          variant="ghost"
-                                          className="h-8 w-8 text-red-600"
-                                          title={row.fileName ? "Remove file" : "Remove row"}
-                                          disabled={clearStampingFileMutation.isPending || deleteStampingRowMutation.isPending}
-                                          onClick={() => {
-                                            if (row.fileName && row.id) {
-                                              clearStampingFileMutation.mutate(row.id);
-                                              return;
-                                            }
-                                            if (row.id) {
-                                              deleteStampingRowMutation.mutate(row.id);
-                                              return;
-                                            }
-                                            removeUnsavedStampingOther(row.sortOrder);
-                                          }}
-                                        >
-                                          <X className="w-4 h-4" />
-                                        </Button>
-                                      ) : null}
-                                    </div>
-                                  </td>
-                                </tr>
-                              ))}
-                            </tbody>
-                          </table>
-                        </div>
-                      )}
-                    </CardContent>
-                  </Card>
-                </TabsContent>
-
-                <TabsContent value="bank" className="pt-6 space-y-6">
-                  <div className="flex items-center justify-between">
-                    <div className="text-sm font-semibold text-slate-800">{isMasterTitle ? "Bank / LU / NOA" : "Bank / LU"}</div>
-                    <Button
-                      size="sm"
-                      variant={dirtyBank ? "default" : "outline"}
-                      className={dirtyBank ? "bg-amber-500 hover:bg-amber-600" : undefined}
-                      onClick={() => saveScope(isMasterTitle ? "Bank / LU / NOA" : "Bank / LU")}
-                      disabled={saveKeyDatesMutation.isPending || !dirtyBank}
-                    >
-                      {saveKeyDatesMutation.isPending && (savingScope === "Bank / LU / NOA" || savingScope === "Bank / LU") ? "Saving..." : dirtyBank ? "Save Bank" : "Saved"}
-                    </Button>
-                  </div>
-                  <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                    <div className="space-y-4">
-                      <div className="text-sm font-semibold text-slate-800">Bank / LU</div>
-                      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                        <FieldCard label="Bank LU Forward to Dev. On" value={keyDatesDraft.bank_lu_forward_to_developer_on || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, bank_lu_forward_to_developer_on: v }))} printerKey="letter_forward_bank_lu_to_dev" />
-                        <FieldCard label="Advice to Bank Date" value={keyDatesDraft.advice_to_bank_date || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, advice_to_bank_date: v }))} printerKey="letter_advice_spa_sol_lu" />
-                        <FieldCard label="Bank LU Received" value={keyDatesDraft.bank_lu_received_date || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, bank_lu_received_date: v }))} />
-                        <FieldCard label="Developer LU Received On" value={keyDatesDraft.developer_lu_received_on || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, developer_lu_received_on: v }))} />
-                        <FieldCard label="Developer LU Dated" value={keyDatesDraft.developer_lu_dated || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, developer_lu_dated: v }))} />
+                      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+                        <FieldCard label="Discharge sent to ON" value={keyDatesDraft.request_discharge_date || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, request_discharge_date: v }))} />
+                        <FieldCard label="Discharge & Title Received ON" value={keyDatesDraft.discharge_title_received_on || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, discharge_title_received_on: v }))} />
+                        <FieldCard label="Discharge Date" value={keyDatesDraft.discharge_date || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, discharge_date: v }))} />
+                        <FieldCard label="MOT Date" value={keyDatesDraft.mot_signed_date || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, mot_signed_date: v }))} />
+                        <FieldCard label="MOT Submit Stamping" value={keyDatesDraft.mot_submit_stamping || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, mot_submit_stamping: v }))} />
+                        <FieldCard label="MOT Stamped" value={keyDatesDraft.mot_stamped_date || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, mot_stamped_date: v }))} />
+                        <FieldCard label="Charge Date" value={keyDatesDraft.charge_date || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, charge_date: v }))} />
+                        <FieldCard label="Charge Submit Stamping" value={keyDatesDraft.charge_submit_stamping || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, charge_submit_stamping: v }))} />
+                        <FieldCard label="Charge Stamped" value={keyDatesDraft.charge_stamped || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, charge_stamped: v }))} />
                       </div>
-                    </div>
-
-                    {isMasterTitle ? (
-                      <div className="space-y-4">
-                        <div className="text-sm font-semibold text-slate-800">NOA / POA / Disclaimer</div>
-                        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                          {showNoaAndPoa ? (
-                            <FieldCard label="NOA Served On" value={keyDatesDraft.noa_served_on || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, noa_served_on: v }))} printerKey="noa" />
-                          ) : null}
-                          {showNoaAndPoa ? (
-                            <WorkflowFileCard label="Register POA" docKey="register_poa" dateKey="register_poa_on" />
-                          ) : null}
-                          {showNoaAndPoa ? (
-                            <FieldCard label="Registered POA Registration Number" type="text" value={keyDatesDraft.registered_poa_registration_number || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, registered_poa_registration_number: v }))} />
-                          ) : null}
-                          {showEncumbranceFields ? (
-                            <FieldCard label="Letter Disclaimer Received On" value={keyDatesDraft.letter_disclaimer_received_on || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, letter_disclaimer_received_on: v }))} />
-                          ) : null}
-                          {showEncumbranceFields ? (
-                            <WorkflowFileCard label="Letter Disclaimer" docKey="letter_disclaimer" dateKey="letter_disclaimer_dated" />
-                          ) : null}
-                          {showEncumbranceFields ? (
-                            <FieldCard label="Letter Disclaimer Reference Nos" type="text" value={keyDatesDraft.letter_disclaimer_reference_nos || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, letter_disclaimer_reference_nos: v }))} />
-                          ) : null}
-                        </div>
-
-                        <div className="pt-3 grid grid-cols-1 md:grid-cols-2 gap-3">
-                          {showEncumbranceFields ? (
-                            <FieldCard label="Redemption Sum (RM)" type="number" value={keyDatesDraft.redemption_sum || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, redemption_sum: v }))} />
-                          ) : null}
-                          {showEncumbranceFields ? (
-                            <FieldCard label="Discharge Date" value={keyDatesDraft.discharge_date || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, discharge_date: v }))} />
-                          ) : null}
-                          <FieldCard label="Bank 1st Release On" value={keyDatesDraft.bank_1st_release_on || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, bank_1st_release_on: v }))} />
-                          <FieldCard label="First Release Amount (RM)" type="number" value={keyDatesDraft.first_release_amount_rm || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, first_release_amount_rm: v }))} />
-                        </div>
-                      </div>
-                    ) : (
-                      <div className="space-y-4">
-                        <div className="text-sm font-semibold text-slate-800">Caveat / Encumbrance</div>
-                        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                          <FieldCard label="Caveat Lodged Date" value={keyDatesDraft.caveat_lodged_date || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, caveat_lodged_date: v }))} />
-                          {showEncumbranceFields ? (
-                            <FieldCard label="1st Advice Date" value={keyDatesDraft.first_advice_date || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, first_advice_date: v }))} />
-                          ) : null}
-                          {showEncumbranceFields ? (
-                            <FieldCard label="Dev Informed Redemption Date" value={keyDatesDraft.dev_informed_redemption_date || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, dev_informed_redemption_date: v }))} />
-                          ) : null}
-                          {showEncumbranceFields ? (
-                            <FieldCard label="Request Discharge Date" value={keyDatesDraft.request_discharge_date || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, request_discharge_date: v }))} />
-                          ) : null}
-                          {showEncumbranceFields ? (
-                            <FieldCard label="Discharge Date" value={keyDatesDraft.discharge_date || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, discharge_date: v }))} />
-                          ) : null}
-                          <FieldCard label="Charge Date" value={keyDatesDraft.charge_date || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, charge_date: v }))} />
-                          <FieldCard label="Presentation Date" value={keyDatesDraft.presentation_date || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, presentation_date: v }))} />
-                          <FieldCard label="2nd Advice Date" value={keyDatesDraft.second_advice_date || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, second_advice_date: v }))} />
-                          {showEncumbranceFields ? (
-                            <FieldCard label="Letter Disclaimer Received On" value={keyDatesDraft.letter_disclaimer_received_on || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, letter_disclaimer_received_on: v }))} />
-                          ) : null}
-                          {showEncumbranceFields ? (
-                            <WorkflowFileCard label="Letter Disclaimer" docKey="letter_disclaimer" dateKey="letter_disclaimer_dated" />
-                          ) : null}
-                          {showEncumbranceFields ? (
-                            <FieldCard label="Letter Disclaimer Reference Nos" type="text" value={keyDatesDraft.letter_disclaimer_reference_nos || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, letter_disclaimer_reference_nos: v }))} />
-                          ) : null}
-                        </div>
-
-                        <div className="pt-3 grid grid-cols-1 md:grid-cols-2 gap-3">
-                          {showEncumbranceFields ? (
-                            <FieldCard label="Redemption Sum (RM)" type="number" value={keyDatesDraft.redemption_sum || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, redemption_sum: v }))} />
-                          ) : null}
-                          <FieldCard label="Bank 1st Release On" value={keyDatesDraft.bank_1st_release_on || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, bank_1st_release_on: v }))} />
-                          <FieldCard label="First Release Amount (RM)" type="number" value={keyDatesDraft.first_release_amount_rm || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, first_release_amount_rm: v }))} />
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                </TabsContent>
-
-                <TabsContent value="mot" className="pt-6 space-y-4">
-                  <div className="flex items-center justify-between">
-                    <div className="text-sm font-semibold text-slate-800">MOT / Completion</div>
-                    <Button
-                      size="sm"
-                      variant={dirtyMot ? "default" : "outline"}
-                      className={dirtyMot ? "bg-amber-500 hover:bg-amber-600" : undefined}
-                      onClick={() => saveScope("MOT / Completion")}
-                      disabled={saveKeyDatesMutation.isPending || !dirtyMot}
-                    >
-                      {saveKeyDatesMutation.isPending && savingScope === "MOT / Completion" ? "Saving..." : dirtyMot ? "Save MOT" : "Saved"}
-                    </Button>
-                  </div>
-                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
-                    <FieldCard label="Completion Date" value={keyDatesDraft.completion_date || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, completion_date: v }))} />
-                    <FieldCard label="Full Settlement Date" value={keyDatesDraft.full_settlement_date || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, full_settlement_date: v }))} />
-                    <FieldCard label="Progressive Payment Date" value={keyDatesDraft.progressive_payment_date || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, progressive_payment_date: v }))} />
-                    <FieldCard label="MOT Received" value={keyDatesDraft.mot_received_date || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, mot_received_date: v }))} />
-                    <FieldCard label="MOT Signed" value={keyDatesDraft.mot_signed_date || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, mot_signed_date: v }))} />
-                    <FieldCard label="MOT Stamped" value={keyDatesDraft.mot_stamped_date || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, mot_stamped_date: v }))} />
-                    <FieldCard label="MOT Registered" value={keyDatesDraft.mot_registered_date || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, mot_registered_date: v }))} />
-                    {showLeaseholdConsents ? (
-                      <FieldCard label="Consent to Transfer" value={keyDatesDraft.consent_to_transfer_date || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, consent_to_transfer_date: v }))} />
-                    ) : null}
-                    {showLeaseholdConsents ? (
-                      <FieldCard label="Consent to Charge" value={keyDatesDraft.consent_to_charge_date || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, consent_to_charge_date: v }))} />
-                    ) : null}
-                  </div>
-                </TabsContent>
-              </Tabs>
+                    </AccordionContent>
+                  </AccordionItem>
+                </Accordion>
               )}
             </CardContent>
           </Card>

@@ -1628,12 +1628,17 @@ router.patch("/cases/bulk/key-dates", requireAuthHandler, requireFirmUserHandler
   const dateFieldMap = {
     spa_signed_date: "spaSignedDate",
     spa_forward_to_developer_execution_on: "spaForwardToDeveloperExecutionOn",
+    spa_received_dev_return_spa_on: "spaReceivedDevReturnSpaOn",
     spa_date: "spaDate",
     spa_stamped_date: "spaStampedDate",
     stamped_spa_send_to_developer_on: "stampedSpaSendToDeveloperOn",
     stamped_spa_received_from_developer_on: "stampedSpaReceivedFromDeveloperOn",
+    stamped_spa_sent_to_purchaser_on: "stampedSpaSentToPurchaserOn",
+    li_date: "liDate",
+    li_received_on: "liReceivedOn",
     letter_of_offer_date: "letterOfOfferDate",
     letter_of_offer_stamped_date: "letterOfOfferStampedDate",
+    supp_lo_date: "suppLoDate",
     loan_docs_pending_date: "loanDocsPendingDate",
     loan_docs_signed_date: "loanDocsSignedDate",
     acting_letter_issued_date: "actingLetterIssuedDate",
@@ -1641,31 +1646,54 @@ router.patch("/cases/bulk/key-dates", requireAuthHandler, requireFirmUserHandler
     developer_confirmation_date: "developerConfirmationDate",
     loan_sent_bank_execution_date: "loanSentBankExecutionDate",
     loan_bank_executed_date: "loanBankExecutedDate",
+    differential_sum_settled_on: "differentialSumSettledOn",
+    bank_lu_dated: "bankLuDated",
     bank_lu_received_date: "bankLuReceivedDate",
     bank_lu_forward_to_developer_on: "bankLuForwardToDeveloperOn",
     developer_lu_received_on: "developerLuReceivedOn",
     developer_lu_dated: "developerLuDated",
     letter_disclaimer_received_on: "letterDisclaimerReceivedOn",
     letter_disclaimer_dated: "letterDisclaimerDated",
+    bankruptcy_search_dated: "bankruptcySearchDated",
     loan_agreement_dated: "loanAgreementDated",
     loan_agreement_submitted_stamping_date: "loanAgreementSubmittedStampingDate",
     loan_agreement_stamped_date: "loanAgreementStampedDate",
+    statutory_declaration_dated: "statutoryDeclarationDated",
+    statutory_declaration_stamped_on: "statutoryDeclarationStampedOn",
+    fa_date: "faDate",
+    fa_stamp_on: "faStampOn",
+    doa_date: "doaDate",
+    doa_stamp_on: "doaStampOn",
+    poa_date: "poaDate",
+    poa_stamp_on: "poaStampOn",
+    noa_dated: "noaDated",
+    register_pa_on: "registerPaOn",
     register_poa_on: "registerPoaOn",
     noa_served_on: "noaServedOn",
     advice_to_bank_date: "adviceToBankDate",
     bank_1st_release_on: "bank1stReleaseOn",
     discharge_date: "dischargeDate",
+    discharge_title_received_on: "dischargeTitleReceivedOn",
     caveat_lodged_date: "caveatLodgedDate",
     first_advice_date: "firstAdviceDate",
     dev_informed_redemption_date: "devInformedRedemptionDate",
     request_discharge_date: "requestDischargeDate",
     charge_date: "chargeDate",
+    charge_submit_stamping: "chargeSubmitStamping",
+    charge_stamped: "chargeStamped",
     presentation_date: "presentationDate",
     second_advice_date: "secondAdviceDate",
     consent_to_transfer_date: "consentToTransferDate",
     consent_to_charge_date: "consentToChargeDate",
+    request_letter_no_objection: "requestLetterNoObjection",
+    received_letter_no_objection_on: "receivedLetterNoObjectionOn",
+    blanket_consent_transfer_req: "blanketConsentTransferReq",
+    blanket_consent_transfer_approval: "blanketConsentTransferApproval",
+    consent_to_charge_req: "consentToChargeReq",
+    consent_to_charge_approval: "consentToChargeApproval",
     mot_received_date: "motReceivedDate",
     mot_signed_date: "motSignedDate",
+    mot_submit_stamping: "motSubmitStamping",
     mot_stamped_date: "motStampedDate",
     mot_registered_date: "motRegisteredDate",
     progressive_payment_date: "progressivePaymentDate",
@@ -3352,12 +3380,17 @@ router.get("/cases/:caseId/key-dates", requireAuthHandler, requireFirmUserHandle
   const out: Record<string, unknown> = kd ? {
     spa_signed_date: kd.spaSignedDate ? String(kd.spaSignedDate) : null,
     spa_forward_to_developer_execution_on: kd.spaForwardToDeveloperExecutionOn ? String(kd.spaForwardToDeveloperExecutionOn) : null,
+    spa_received_dev_return_spa_on: (kd as any).spaReceivedDevReturnSpaOn ? String((kd as any).spaReceivedDevReturnSpaOn) : null,
     spa_date: kd.spaDate ? String(kd.spaDate) : null,
     spa_stamped_date: kd.spaStampedDate ? String(kd.spaStampedDate) : null,
     stamped_spa_send_to_developer_on: kd.stampedSpaSendToDeveloperOn ? String(kd.stampedSpaSendToDeveloperOn) : null,
     stamped_spa_received_from_developer_on: kd.stampedSpaReceivedFromDeveloperOn ? String(kd.stampedSpaReceivedFromDeveloperOn) : null,
+    stamped_spa_sent_to_purchaser_on: (kd as any).stampedSpaSentToPurchaserOn ? String((kd as any).stampedSpaSentToPurchaserOn) : null,
+    li_date: (kd as any).liDate ? String((kd as any).liDate) : null,
+    li_received_on: (kd as any).liReceivedOn ? String((kd as any).liReceivedOn) : null,
     letter_of_offer_date: kd.letterOfOfferDate ? String(kd.letterOfOfferDate) : null,
     letter_of_offer_stamped_date: kd.letterOfOfferStampedDate ? String(kd.letterOfOfferStampedDate) : null,
+    supp_lo_date: (kd as any).suppLoDate ? String((kd as any).suppLoDate) : null,
     loan_docs_pending_date: kd.loanDocsPendingDate ? String(kd.loanDocsPendingDate) : null,
     loan_docs_signed_date: kd.loanDocsSignedDate ? String(kd.loanDocsSignedDate) : null,
     acting_letter_issued_date: kd.actingLetterIssuedDate ? String(kd.actingLetterIssuedDate) : null,
@@ -3365,6 +3398,9 @@ router.get("/cases/:caseId/key-dates", requireAuthHandler, requireFirmUserHandle
     developer_confirmation_date: kd.developerConfirmationDate ? String(kd.developerConfirmationDate) : null,
     loan_sent_bank_execution_date: kd.loanSentBankExecutionDate ? String(kd.loanSentBankExecutionDate) : null,
     loan_bank_executed_date: kd.loanBankExecutedDate ? String(kd.loanBankExecutedDate) : null,
+    differential_sum_rm: (kd as any).differentialSumRm ? Number((kd as any).differentialSumRm) : null,
+    differential_sum_settled_on: (kd as any).differentialSumSettledOn ? String((kd as any).differentialSumSettledOn) : null,
+    bank_lu_dated: (kd as any).bankLuDated ? String((kd as any).bankLuDated) : null,
     bank_lu_received_date: kd.bankLuReceivedDate ? String(kd.bankLuReceivedDate) : null,
     bank_lu_forward_to_developer_on: kd.bankLuForwardToDeveloperOn ? String(kd.bankLuForwardToDeveloperOn) : null,
     developer_lu_received_on: kd.developerLuReceivedOn ? String(kd.developerLuReceivedOn) : null,
@@ -3373,9 +3409,23 @@ router.get("/cases/:caseId/key-dates", requireAuthHandler, requireFirmUserHandle
     letter_disclaimer_dated: kd.letterDisclaimerDated ? String(kd.letterDisclaimerDated) : null,
     letter_disclaimer_reference_nos: kd.letterDisclaimerReferenceNos ?? null,
     redemption_sum: kd.redemptionSum ? Number(kd.redemptionSum) : null,
+    balance_sum_less_last_5_rm: (kd as any).balanceSumLessLast5Rm ? Number((kd as any).balanceSumLessLast5Rm) : null,
+    bankruptcy_search_dated: (kd as any).bankruptcySearchDated ? String((kd as any).bankruptcySearchDated) : null,
     loan_agreement_dated: kd.loanAgreementDated ? String(kd.loanAgreementDated) : null,
     loan_agreement_submitted_stamping_date: kd.loanAgreementSubmittedStampingDate ? String(kd.loanAgreementSubmittedStampingDate) : null,
     loan_agreement_stamped_date: kd.loanAgreementStampedDate ? String(kd.loanAgreementStampedDate) : null,
+    statutory_declaration_dated: (kd as any).statutoryDeclarationDated ? String((kd as any).statutoryDeclarationDated) : null,
+    statutory_declaration_stamped_on: (kd as any).statutoryDeclarationStampedOn ? String((kd as any).statutoryDeclarationStampedOn) : null,
+    fa_date: (kd as any).faDate ? String((kd as any).faDate) : null,
+    fa_adjudication_number: (kd as any).faAdjudicationNumber ?? null,
+    fa_stamp_on: (kd as any).faStampOn ? String((kd as any).faStampOn) : null,
+    doa_date: (kd as any).doaDate ? String((kd as any).doaDate) : null,
+    doa_stamp_on: (kd as any).doaStampOn ? String((kd as any).doaStampOn) : null,
+    poa_date: (kd as any).poaDate ? String((kd as any).poaDate) : null,
+    poa_stamp_on: (kd as any).poaStampOn ? String((kd as any).poaStampOn) : null,
+    noa_dated: (kd as any).noaDated ? String((kd as any).noaDated) : null,
+    register_pa_on: (kd as any).registerPaOn ? String((kd as any).registerPaOn) : null,
+    pa_no: (kd as any).paNo ?? null,
     register_poa_on: kd.registerPoaOn ? String(kd.registerPoaOn) : null,
     registered_poa_registration_number: kd.registeredPoaRegistrationNumber ?? null,
     noa_served_on: kd.noaServedOn ? String(kd.noaServedOn) : null,
@@ -3383,17 +3433,27 @@ router.get("/cases/:caseId/key-dates", requireAuthHandler, requireFirmUserHandle
     bank_1st_release_on: kd.bank1stReleaseOn ? String(kd.bank1stReleaseOn) : null,
     first_release_amount_rm: kd.firstReleaseAmountRm ? Number(kd.firstReleaseAmountRm) : null,
     discharge_date: kd.dischargeDate ? String(kd.dischargeDate) : null,
+    discharge_title_received_on: (kd as any).dischargeTitleReceivedOn ? String((kd as any).dischargeTitleReceivedOn) : null,
     caveat_lodged_date: kd.caveatLodgedDate ? String(kd.caveatLodgedDate) : null,
     first_advice_date: kd.firstAdviceDate ? String(kd.firstAdviceDate) : null,
     dev_informed_redemption_date: kd.devInformedRedemptionDate ? String(kd.devInformedRedemptionDate) : null,
     request_discharge_date: kd.requestDischargeDate ? String(kd.requestDischargeDate) : null,
     charge_date: kd.chargeDate ? String(kd.chargeDate) : null,
+    charge_submit_stamping: (kd as any).chargeSubmitStamping ? String((kd as any).chargeSubmitStamping) : null,
+    charge_stamped: (kd as any).chargeStamped ? String((kd as any).chargeStamped) : null,
     presentation_date: kd.presentationDate ? String(kd.presentationDate) : null,
     second_advice_date: kd.secondAdviceDate ? String(kd.secondAdviceDate) : null,
+    request_letter_no_objection: (kd as any).requestLetterNoObjection ? String((kd as any).requestLetterNoObjection) : null,
+    received_letter_no_objection_on: (kd as any).receivedLetterNoObjectionOn ? String((kd as any).receivedLetterNoObjectionOn) : null,
+    blanket_consent_transfer_req: (kd as any).blanketConsentTransferReq ? String((kd as any).blanketConsentTransferReq) : null,
+    blanket_consent_transfer_approval: ((kd as any).blanketConsentTransferApproval ? String((kd as any).blanketConsentTransferApproval) : (kd.consentToTransferDate ? String(kd.consentToTransferDate) : null)),
+    consent_to_charge_req: (kd as any).consentToChargeReq ? String((kd as any).consentToChargeReq) : null,
+    consent_to_charge_approval: ((kd as any).consentToChargeApproval ? String((kd as any).consentToChargeApproval) : (kd.consentToChargeDate ? String(kd.consentToChargeDate) : null)),
     consent_to_transfer_date: kd.consentToTransferDate ? String(kd.consentToTransferDate) : null,
     consent_to_charge_date: kd.consentToChargeDate ? String(kd.consentToChargeDate) : null,
     mot_received_date: kd.motReceivedDate ? String(kd.motReceivedDate) : null,
     mot_signed_date: kd.motSignedDate ? String(kd.motSignedDate) : null,
+    mot_submit_stamping: (kd as any).motSubmitStamping ? String((kd as any).motSubmitStamping) : null,
     mot_stamped_date: kd.motStampedDate ? String(kd.motStampedDate) : null,
     mot_registered_date: kd.motRegisteredDate ? String(kd.motRegisteredDate) : null,
     progressive_payment_date: kd.progressivePaymentDate ? String(kd.progressivePaymentDate) : null,
@@ -3764,6 +3824,26 @@ router.patch("/cases/:caseId/key-dates", requireAuthHandler, requireFirmUserHand
     updateValues.redemptionSum = redemptionSum;
     changed.push("redemption_sum");
   }
+  const differentialSum = parseMoneyInput(body.differential_sum_rm);
+  if (differentialSum === undefined && Object.prototype.hasOwnProperty.call(body, "differential_sum_rm")) {
+    res.status(400).json({ error: "Invalid differential_sum_rm" });
+    return;
+  }
+  if (differentialSum !== undefined) {
+    (insertValues as any).differentialSumRm = differentialSum;
+    (updateValues as any).differentialSumRm = differentialSum;
+    changed.push("differential_sum_rm");
+  }
+  const balanceSumLessLast5 = parseMoneyInput(body.balance_sum_less_last_5_rm);
+  if (balanceSumLessLast5 === undefined && Object.prototype.hasOwnProperty.call(body, "balance_sum_less_last_5_rm")) {
+    res.status(400).json({ error: "Invalid balance_sum_less_last_5_rm" });
+    return;
+  }
+  if (balanceSumLessLast5 !== undefined) {
+    (insertValues as any).balanceSumLessLast5Rm = balanceSumLessLast5;
+    (updateValues as any).balanceSumLessLast5Rm = balanceSumLessLast5;
+    changed.push("balance_sum_less_last_5_rm");
+  }
   const firstRelease = parseMoneyInput(body.first_release_amount_rm);
   if (firstRelease === undefined && Object.prototype.hasOwnProperty.call(body, "first_release_amount_rm")) {
     res.status(400).json({ error: "Invalid first_release_amount_rm" });
@@ -3790,6 +3870,38 @@ router.patch("/cases/:caseId/key-dates", requireAuthHandler, requireFirmUserHand
       return;
     }
     changed.push("registered_poa_registration_number");
+  }
+
+  if (Object.prototype.hasOwnProperty.call(body, "fa_adjudication_number")) {
+    const v = body.fa_adjudication_number;
+    if (v === null) {
+      (insertValues as any).faAdjudicationNumber = null;
+      (updateValues as any).faAdjudicationNumber = null;
+    } else if (typeof v === "string") {
+      const trimmed = v.trim() || null;
+      (insertValues as any).faAdjudicationNumber = trimmed;
+      (updateValues as any).faAdjudicationNumber = trimmed;
+    } else {
+      res.status(400).json({ error: "Invalid fa_adjudication_number" });
+      return;
+    }
+    changed.push("fa_adjudication_number");
+  }
+
+  if (Object.prototype.hasOwnProperty.call(body, "pa_no")) {
+    const v = body.pa_no;
+    if (v === null) {
+      (insertValues as any).paNo = null;
+      (updateValues as any).paNo = null;
+    } else if (typeof v === "string") {
+      const trimmed = v.trim() || null;
+      (insertValues as any).paNo = trimmed;
+      (updateValues as any).paNo = trimmed;
+    } else {
+      res.status(400).json({ error: "Invalid pa_no" });
+      return;
+    }
+    changed.push("pa_no");
   }
 
   const existing = await r
@@ -3833,12 +3945,17 @@ router.patch("/cases/:caseId/key-dates", requireAuthHandler, requireFirmUserHand
   res.json(kd ? {
     spa_signed_date: kd.spaSignedDate ? String(kd.spaSignedDate) : null,
     spa_forward_to_developer_execution_on: kd.spaForwardToDeveloperExecutionOn ? String(kd.spaForwardToDeveloperExecutionOn) : null,
+    spa_received_dev_return_spa_on: (kd as any).spaReceivedDevReturnSpaOn ? String((kd as any).spaReceivedDevReturnSpaOn) : null,
     spa_date: kd.spaDate ? String(kd.spaDate) : null,
     spa_stamped_date: kd.spaStampedDate ? String(kd.spaStampedDate) : null,
     stamped_spa_send_to_developer_on: kd.stampedSpaSendToDeveloperOn ? String(kd.stampedSpaSendToDeveloperOn) : null,
     stamped_spa_received_from_developer_on: kd.stampedSpaReceivedFromDeveloperOn ? String(kd.stampedSpaReceivedFromDeveloperOn) : null,
+    stamped_spa_sent_to_purchaser_on: (kd as any).stampedSpaSentToPurchaserOn ? String((kd as any).stampedSpaSentToPurchaserOn) : null,
+    li_date: (kd as any).liDate ? String((kd as any).liDate) : null,
+    li_received_on: (kd as any).liReceivedOn ? String((kd as any).liReceivedOn) : null,
     letter_of_offer_date: kd.letterOfOfferDate ? String(kd.letterOfOfferDate) : null,
     letter_of_offer_stamped_date: kd.letterOfOfferStampedDate ? String(kd.letterOfOfferStampedDate) : null,
+    supp_lo_date: (kd as any).suppLoDate ? String((kd as any).suppLoDate) : null,
     loan_docs_pending_date: kd.loanDocsPendingDate ? String(kd.loanDocsPendingDate) : null,
     loan_docs_signed_date: kd.loanDocsSignedDate ? String(kd.loanDocsSignedDate) : null,
     acting_letter_issued_date: kd.actingLetterIssuedDate ? String(kd.actingLetterIssuedDate) : null,
@@ -3846,6 +3963,9 @@ router.patch("/cases/:caseId/key-dates", requireAuthHandler, requireFirmUserHand
     developer_confirmation_date: kd.developerConfirmationDate ? String(kd.developerConfirmationDate) : null,
     loan_sent_bank_execution_date: kd.loanSentBankExecutionDate ? String(kd.loanSentBankExecutionDate) : null,
     loan_bank_executed_date: kd.loanBankExecutedDate ? String(kd.loanBankExecutedDate) : null,
+    differential_sum_rm: (kd as any).differentialSumRm ? Number((kd as any).differentialSumRm) : null,
+    differential_sum_settled_on: (kd as any).differentialSumSettledOn ? String((kd as any).differentialSumSettledOn) : null,
+    bank_lu_dated: (kd as any).bankLuDated ? String((kd as any).bankLuDated) : null,
     bank_lu_received_date: kd.bankLuReceivedDate ? String(kd.bankLuReceivedDate) : null,
     bank_lu_forward_to_developer_on: kd.bankLuForwardToDeveloperOn ? String(kd.bankLuForwardToDeveloperOn) : null,
     developer_lu_received_on: kd.developerLuReceivedOn ? String(kd.developerLuReceivedOn) : null,
@@ -3854,9 +3974,23 @@ router.patch("/cases/:caseId/key-dates", requireAuthHandler, requireFirmUserHand
     letter_disclaimer_dated: kd.letterDisclaimerDated ? String(kd.letterDisclaimerDated) : null,
     letter_disclaimer_reference_nos: kd.letterDisclaimerReferenceNos ?? null,
     redemption_sum: kd.redemptionSum ? Number(kd.redemptionSum) : null,
+    balance_sum_less_last_5_rm: (kd as any).balanceSumLessLast5Rm ? Number((kd as any).balanceSumLessLast5Rm) : null,
+    bankruptcy_search_dated: (kd as any).bankruptcySearchDated ? String((kd as any).bankruptcySearchDated) : null,
     loan_agreement_dated: kd.loanAgreementDated ? String(kd.loanAgreementDated) : null,
     loan_agreement_submitted_stamping_date: kd.loanAgreementSubmittedStampingDate ? String(kd.loanAgreementSubmittedStampingDate) : null,
     loan_agreement_stamped_date: kd.loanAgreementStampedDate ? String(kd.loanAgreementStampedDate) : null,
+    statutory_declaration_dated: (kd as any).statutoryDeclarationDated ? String((kd as any).statutoryDeclarationDated) : null,
+    statutory_declaration_stamped_on: (kd as any).statutoryDeclarationStampedOn ? String((kd as any).statutoryDeclarationStampedOn) : null,
+    fa_date: (kd as any).faDate ? String((kd as any).faDate) : null,
+    fa_adjudication_number: (kd as any).faAdjudicationNumber ?? null,
+    fa_stamp_on: (kd as any).faStampOn ? String((kd as any).faStampOn) : null,
+    doa_date: (kd as any).doaDate ? String((kd as any).doaDate) : null,
+    doa_stamp_on: (kd as any).doaStampOn ? String((kd as any).doaStampOn) : null,
+    poa_date: (kd as any).poaDate ? String((kd as any).poaDate) : null,
+    poa_stamp_on: (kd as any).poaStampOn ? String((kd as any).poaStampOn) : null,
+    noa_dated: (kd as any).noaDated ? String((kd as any).noaDated) : null,
+    register_pa_on: (kd as any).registerPaOn ? String((kd as any).registerPaOn) : null,
+    pa_no: (kd as any).paNo ?? null,
     register_poa_on: kd.registerPoaOn ? String(kd.registerPoaOn) : null,
     registered_poa_registration_number: kd.registeredPoaRegistrationNumber ?? null,
     noa_served_on: kd.noaServedOn ? String(kd.noaServedOn) : null,
@@ -3864,15 +3998,27 @@ router.patch("/cases/:caseId/key-dates", requireAuthHandler, requireFirmUserHand
     bank_1st_release_on: kd.bank1stReleaseOn ? String(kd.bank1stReleaseOn) : null,
     first_release_amount_rm: kd.firstReleaseAmountRm ? Number(kd.firstReleaseAmountRm) : null,
     discharge_date: kd.dischargeDate ? String(kd.dischargeDate) : null,
+    discharge_title_received_on: (kd as any).dischargeTitleReceivedOn ? String((kd as any).dischargeTitleReceivedOn) : null,
     caveat_lodged_date: kd.caveatLodgedDate ? String(kd.caveatLodgedDate) : null,
     first_advice_date: kd.firstAdviceDate ? String(kd.firstAdviceDate) : null,
     dev_informed_redemption_date: kd.devInformedRedemptionDate ? String(kd.devInformedRedemptionDate) : null,
     request_discharge_date: kd.requestDischargeDate ? String(kd.requestDischargeDate) : null,
     charge_date: kd.chargeDate ? String(kd.chargeDate) : null,
+    charge_submit_stamping: (kd as any).chargeSubmitStamping ? String((kd as any).chargeSubmitStamping) : null,
+    charge_stamped: (kd as any).chargeStamped ? String((kd as any).chargeStamped) : null,
     presentation_date: kd.presentationDate ? String(kd.presentationDate) : null,
     second_advice_date: kd.secondAdviceDate ? String(kd.secondAdviceDate) : null,
+    request_letter_no_objection: (kd as any).requestLetterNoObjection ? String((kd as any).requestLetterNoObjection) : null,
+    received_letter_no_objection_on: (kd as any).receivedLetterNoObjectionOn ? String((kd as any).receivedLetterNoObjectionOn) : null,
+    blanket_consent_transfer_req: (kd as any).blanketConsentTransferReq ? String((kd as any).blanketConsentTransferReq) : null,
+    blanket_consent_transfer_approval: ((kd as any).blanketConsentTransferApproval ? String((kd as any).blanketConsentTransferApproval) : (kd.consentToTransferDate ? String(kd.consentToTransferDate) : null)),
+    consent_to_charge_req: (kd as any).consentToChargeReq ? String((kd as any).consentToChargeReq) : null,
+    consent_to_charge_approval: ((kd as any).consentToChargeApproval ? String((kd as any).consentToChargeApproval) : (kd.consentToChargeDate ? String(kd.consentToChargeDate) : null)),
+    consent_to_transfer_date: kd.consentToTransferDate ? String(kd.consentToTransferDate) : null,
+    consent_to_charge_date: kd.consentToChargeDate ? String(kd.consentToChargeDate) : null,
     mot_received_date: kd.motReceivedDate ? String(kd.motReceivedDate) : null,
     mot_signed_date: kd.motSignedDate ? String(kd.motSignedDate) : null,
+    mot_submit_stamping: (kd as any).motSubmitStamping ? String((kd as any).motSubmitStamping) : null,
     mot_stamped_date: kd.motStampedDate ? String(kd.motStampedDate) : null,
     mot_registered_date: kd.motRegisteredDate ? String(kd.motRegisteredDate) : null,
     progressive_payment_date: kd.progressivePaymentDate ? String(kd.progressivePaymentDate) : null,
