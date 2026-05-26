@@ -71,6 +71,7 @@ export default function AppDashboard() {
 
   const canSeeAccounting = !!user && hasPermission(user, "accounting", "read") && isAccountingRoleAllowed(user.roleName);
   const billing = (stats.billing ?? {}) as Record<string, number>;
+  const outstandingAdvances = (stats.outstandingAdvances ?? {}) as Record<string, any>;
   type MilestoneCard = {
     key: string;
     label: string;
@@ -157,7 +158,7 @@ export default function AppDashboard() {
         onNavigate={(href) => setLocation(href)}
       />
 
-      <div className={`grid grid-cols-1 gap-4 ${canSeeAccounting ? "md:grid-cols-3" : ""}`}>
+      <div className={`grid grid-cols-1 gap-4 ${canSeeAccounting ? "md:grid-cols-4" : ""}`}>
         {canSeeAccounting && (
           <Card className="cursor-pointer hover:shadow-md transition-shadow" onClick={() => setLocation("/app/accounting")}>
             <CardContent className="pt-5 pb-4">
@@ -183,6 +184,32 @@ export default function AppDashboard() {
                 <div>
                   <div className="text-xs text-slate-500">Outstanding</div>
                   <div className="text-xl font-bold text-red-600">{fmt(billing.totalOutstanding)}</div>
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+        )}
+        {canSeeAccounting && (
+          <Card className="cursor-pointer hover:shadow-md transition-shadow" onClick={() => setLocation("/app/accounting?tab=ledger")}>
+            <CardContent className="pt-5 pb-4">
+              <div className="flex items-start gap-3">
+                <div className="w-10 h-10 rounded-lg bg-amber-50 flex items-center justify-center">
+                  <ArrowRight className="w-5 h-5 text-amber-700" />
+                </div>
+                <div className="flex-1">
+                  <div className="text-xs text-slate-500">Outstanding Client Advances</div>
+                  <div className="text-xl font-bold text-amber-800">{fmt(outstandingAdvances.totalAmount)}</div>
+                  <div className="text-xs text-slate-400 mt-0.5">{Number(outstandingAdvances.caseCount ?? 0)} case(s)</div>
+                  {Array.isArray(outstandingAdvances.topCases) && outstandingAdvances.topCases.length > 0 ? (
+                    <div className="mt-2 space-y-1">
+                      {outstandingAdvances.topCases.slice(0, 3).map((c: any) => (
+                        <div key={String(c.caseId)} className="text-xs text-slate-600 flex items-center justify-between gap-2">
+                          <span className="truncate">{String(c.referenceNo || `Case #${c.caseId}`)}</span>
+                          <span className="font-semibold text-amber-800">{fmt(c.amount)}</span>
+                        </div>
+                      ))}
+                    </div>
+                  ) : null}
                 </div>
               </div>
             </CardContent>

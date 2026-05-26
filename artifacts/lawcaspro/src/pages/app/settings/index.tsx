@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
 import { getListRolesQueryKey, getListUsersQueryKey, useDeleteUser, useListDevelopers, useListRoles, useListUsers, useUpdateRole, useUpdateUser } from "@workspace/api-client-react";
 import { useQuery, useQueryClient, useMutation } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -23,7 +23,7 @@ import { validateUploadFile } from "@/lib/upload-validation";
 
 const apiFetch = apiFetchJson;
 
-const TABS = ["Firm Info", "Users", "Roles & Permissions", "Security", "Document Templates"] as const;
+const TABS = ["Firm Info", "Users", "Roles & Permissions", "Security", "Document Templates", "File Reference"] as const;
 type Tab = typeof TABS[number];
 
 const TAB_KEYS: Record<string, Tab> = {
@@ -32,6 +32,7 @@ const TAB_KEYS: Record<string, Tab> = {
   roles: "Roles & Permissions",
   security: "Security",
   documents: "Document Templates",
+  fileRef: "File Reference",
 };
 
 const PERMISSION_CATALOG: Array<{ module: string; actions: string[] }> = [
@@ -871,6 +872,175 @@ function FirmInfoTab() {
   );
 }
 
+function FileReferenceSettingsTab({ canRead, canUpdate }: { canRead: boolean; canUpdate: boolean }) {
+  const { toast } = useToast();
+  const queryClient = useQueryClient();
+  const settingsQuery = useQuery<{ items: Array<{ id: number; caseType: string; formatPattern: string; currentSequence: number }> }>({
+    queryKey: ["firm-file-ref-settings"],
+    queryFn: () => apiFetchJson("/firm-file-ref-settings"),
+    retry: false,
+    enabled: canRead,
+  });
+
+  const [rows, setRows] = useState<Array<{ id?: number; caseType: string; formatPattern: string; currentSequence: number }>>([]);
+
+  useEffect(() => {
+    if (!settingsQuery.data) return;
+    const next = (settingsQuery.data.items ?? []).map((x) => ({
+      id: Number(x.id),
+      caseType: String(x.caseType || ""),
+      formatPattern: String(x.formatPattern || ""),
+      currentSequence: Number(x.currentSequence ?? 0),
+    }));
+    setRows(next);
+  }, [settingsQuery.data]);
+
+  const upsertMutation = useMutation({
+    mutationFn: (row: { caseType: string; formatPattern: string; currentSequence?: number }) =>
+      apiFetchJson("/firm-file-ref-settings", {
+        method: "PUT",
+        body: JSON.stringify(row),
+      }),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ["firm-file-ref-settings"] });
+      toast({ title: "Saved" });
+    },
+    onError: (e: any) => toastError(toast, e, "Failed to save"),
+  });
+
+  const deleteMutation = useMutation({
+    mutationFn: (caseType: string) => apiFetchJson(`/firm-file-ref-settings/${encodeURIComponent(caseType)}`, { method: "DELETE" }),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ["firm-file-ref-settings"] });
+      toast({ title: "Deleted" });
+    },
+    onError: (e: any) => toastError(toast, e, "Failed to delete"),
+  });
+
+  return (
+    <div className="space-y-4">
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base">Case File Reference Generator</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          <div className="text-sm text-slate-600">
+            Supported variables: {"{YYYY}"} {"{YY}"} {"{MM}"} {"{SEQ:3}"} / {"{SEQ:4}"} {"{INITIALS}"}
+          </div>
+
+          {settingsQuery.isError ? (
+            <QueryFallback title="Unable to load settings" error={settingsQuery.error} onRetry={() => settingsQuery.refetch()} isRetrying={settingsQuery.isFetching} />
+          ) : settingsQuery.isLoading ? (
+            <div className="text-slate-500 py-6 text-center">Loading...</div>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead className="text-xs text-slate-500 uppercase bg-slate-50 border-b border-slate-200">
+                  <tr>
+                    <th className="px-4 py-2 font-semibold">Case Type</th>
+                    <th className="px-4 py-2 font-semibold">Format Pattern</th>
+                    <th className="px-4 py-2 font-semibold text-right">Sequence</th>
+                    <th className="px-4 py-2 font-semibold text-right">Actions</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {rows.map((row, idx) => (
+                    <tr key={`${row.caseType}-${idx}`} className="hover:bg-slate-50/50">
+                      <td className="px-4 py-2">
+                        <Input
+                          value={row.caseType}
+                          onChange={(e) => {
+                            const next = [...rows];
+                            next[idx] = { ...row, caseType: e.target.value };
+                            setRows(next);
+                          }}
+                          disabled={!canUpdate}
+                          placeholder="e.g. subsale"
+                        />
+                      </td>
+                      <td className="px-4 py-2">
+                        <Input
+                          value={row.formatPattern}
+                          onChange={(e) => {
+                            const next = [...rows];
+                            next[idx] = { ...row, formatPattern: e.target.value };
+                            setRows(next);
+                          }}
+                          disabled={!canUpdate}
+                          placeholder="e.g. {INITIALS}/SS/{YY}/{SEQ:4}"
+                        />
+                      </td>
+                      <td className="px-4 py-2 text-right tabular-nums text-slate-600">
+                        {row.currentSequence}
+                      </td>
+                      <td className="px-4 py-2 text-right">
+                        <div className="inline-flex gap-2">
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => {
+                              const caseType = row.caseType.trim();
+                              const formatPattern = row.formatPattern.trim();
+                              if (!caseType) {
+                                toast({ title: "caseType is required", variant: "destructive" });
+                                return;
+                              }
+                              if (!formatPattern) {
+                                toast({ title: "formatPattern is required", variant: "destructive" });
+                                return;
+                              }
+                              upsertMutation.mutate({ caseType, formatPattern });
+                            }}
+                            disabled={!canUpdate || upsertMutation.isPending}
+                          >
+                            Save
+                          </Button>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            className="text-red-600 hover:text-red-700"
+                            onClick={() => {
+                              const caseType = row.caseType.trim();
+                              if (!caseType) return;
+                              deleteMutation.mutate(caseType);
+                            }}
+                            disabled={!canUpdate || deleteMutation.isPending || !row.caseType.trim()}
+                          >
+                            <Trash2 className="w-4 h-4 mr-1" />
+                            Delete
+                          </Button>
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                  {rows.length === 0 ? (
+                    <tr>
+                      <td colSpan={4} className="px-4 py-8 text-center text-slate-500">
+                        No patterns configured yet.
+                      </td>
+                    </tr>
+                  ) : null}
+                </tbody>
+              </table>
+            </div>
+          )}
+
+          <div className="flex justify-end">
+            <Button
+              variant="outline"
+              onClick={() => setRows((prev) => [...prev, { caseType: "", formatPattern: "", currentSequence: 0 }])}
+              disabled={!canUpdate}
+            >
+              <Plus className="w-4 h-4 mr-1" />
+              Add Case Type
+            </Button>
+          </div>
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
+
 export default function Settings() {
   const { user } = useAuth();
   const { toast } = useToast();
@@ -878,6 +1048,7 @@ export default function Settings() {
   const canManageUsers = hasPermission(user, "users", "create") || hasPermission(user, "users", "update") || hasPermission(user, "users", "delete");
   const canManageRoles = hasPermission(user, "roles", "create") || hasPermission(user, "roles", "update") || hasPermission(user, "roles", "delete");
   const canUpdateSettings = hasPermission(user, "settings", "update");
+  const canReadSettings = hasPermission(user, "settings", "read") || canUpdateSettings;
   const canAccessDocuments = hasPermission(user, "documents", "read") || hasPermission(user, "documents", "create") || hasPermission(user, "documents", "update") || hasPermission(user, "documents", "delete");
 
   const searchString = useSearch();
@@ -885,6 +1056,7 @@ export default function Settings() {
   const tabFromUrl = params.get("tab");
   const visibleTabs = ([
     "Firm Info",
+    ...(canReadSettings ? (["File Reference"] as const) : []),
     ...(canManageUsers ? (["Users"] as const) : []),
     ...(canManageRoles ? (["Roles & Permissions"] as const) : []),
     "Security",
@@ -933,6 +1105,8 @@ export default function Settings() {
   const [editUserOpen, setEditUserOpen] = useState(false);
   const [editUser, setEditUser] = useState<any | null>(null);
   const [editName, setEditName] = useState("");
+  const [editInitials, setEditInitials] = useState("");
+  const [editInitialsTouched, setEditInitialsTouched] = useState(false);
   const [editRoleId, setEditRoleId] = useState("");
   const [editDeveloperId, setEditDeveloperId] = useState("");
 
@@ -948,6 +1122,26 @@ export default function Settings() {
   const [editRoleOpen, setEditRoleOpen] = useState(false);
   const [editRole, setEditRole] = useState<any | null>(null);
   const [editRolePermissionSet, setEditRolePermissionSet] = useState<Set<string>>(new Set());
+
+  const deriveInitials = useMemo(() => {
+    return (name: string) => {
+      const base = String(name || "").trim();
+      if (!base) return "";
+      return base
+        .split(/\s+/g)
+        .filter(Boolean)
+        .map((w) => w[0]?.toUpperCase() ?? "")
+        .join("")
+        .replace(/[^A-Z0-9]/g, "")
+        .slice(0, 5);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!editUserOpen) return;
+    if (editInitialsTouched) return;
+    setEditInitials(deriveInitials(editName));
+  }, [editUserOpen, editName, editInitialsTouched, deriveInitials]);
 
   return (
     <div className="space-y-6">
@@ -982,6 +1176,9 @@ export default function Settings() {
       </div>
 
       {activeTab === "Firm Info" && <FirmInfoTab />}
+      {activeTab === "File Reference" && (
+        <FileReferenceSettingsTab canRead={canReadSettings} canUpdate={canUpdateSettings} />
+      )}
       {activeTab === "Document Templates" && (
         <div className="space-y-6">
           <Card>
@@ -1082,6 +1279,8 @@ export default function Settings() {
                                 onClick={() => {
                                   setEditUser(user);
                                   setEditName(user.name || "");
+                                  setEditInitials(user.initials || deriveInitials(user.name || ""));
+                                  setEditInitialsTouched(false);
                                   setEditRoleId(user.roleId ? String(user.roleId) : "");
                                   setEditDeveloperId(user.developerId ? String(user.developerId) : "");
                                   setEditUserOpen(true);
@@ -1147,6 +1346,8 @@ export default function Settings() {
             if (!open) {
               setEditUser(null);
               setEditName("");
+              setEditInitials("");
+              setEditInitialsTouched(false);
               setEditRoleId("");
               setEditDeveloperId("");
             }
@@ -1159,6 +1360,17 @@ export default function Settings() {
                 <div className="space-y-2">
                   <Label>Name</Label>
                   <Input value={editName} onChange={(e) => setEditName(e.target.value)} />
+                </div>
+                <div className="space-y-2">
+                  <Label>Initials (Short Form)</Label>
+                  <Input
+                    value={editInitials}
+                    onChange={(e) => {
+                      setEditInitialsTouched(true);
+                      setEditInitials(e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 5));
+                    }}
+                    placeholder="e.g. LKL"
+                  />
                 </div>
                 <div className="space-y-2">
                   <Label>Role</Label>
@@ -1217,6 +1429,7 @@ export default function Settings() {
                       return;
                     }
                     const payload: any = { name };
+                    payload.initials = editInitials.trim() ? editInitials.trim() : null;
                     if (editRoleId) payload.roleId = Number(editRoleId);
                     if (editRoleId) {
                       const roleId = Number(editRoleId);

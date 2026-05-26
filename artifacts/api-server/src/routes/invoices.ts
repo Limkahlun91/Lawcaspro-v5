@@ -2,12 +2,13 @@ import express, { type Response, type Router as ExpressRouter } from "express";
 import { eq, and, desc } from "drizzle-orm";
 import {
   db, invoicesTable, invoiceItemsTable, quotationsTable, quotationItemsTable,
-  casesTable, clientsTable, casePurchasersTable, ledgerEntriesTable,
+  casesTable, clientsTable, casePurchasersTable, ledgerEntriesTable, caseLedgersTable,
   sql,
 } from "@workspace/db";
 import { requireAuth, requireFirmUser, requirePermission, requireReAuth, type AuthRequest, writeAuditLog } from "../lib/auth.js";
 import { sensitiveRateLimiter } from "../lib/rate-limit.js";
 import { one, queryOne } from "../lib/http.js";
+import { syncCaseFinancialTotals } from "../lib/caseFinancialSync.js";
 
 type RouterInternalLike = {
   get: (path: string, ...handlers: unknown[]) => unknown;
@@ -217,8 +218,38 @@ router.post("/invoices/:id/issue", sensitiveRateLimiter, requireAuth, requireFir
   const [inv] = await r.select().from(invoicesTable).where(and(eq(invoicesTable.id, id), eq(invoicesTable.firmId, req.firmId!)));
   if (!inv) { res.status(404).json({ error: "Invoice not found" }); return; }
   if (inv.status !== "draft") { res.status(400).json({ error: "Only draft invoices can be issued" }); return; }
-  const [updated] = await r.update(invoicesTable).set({ status: "issued", updatedAt: new Date() })
-    .where(eq(invoicesTable.id, id)).returning();
+
+  const updated = await (r as any).transaction(async (tx: DbConn) => {
+    const [row] = await tx.update(invoicesTable).set({ status: "issued", updatedAt: new Date() })
+      .where(eq(invoicesTable.id, id)).returning();
+
+    const caseId = row?.caseId ? Number(row.caseId) : null;
+    if (caseId) {
+      const [exists] = await tx.select({ id: caseLedgersTable.id }).from(caseLedgersTable).where(and(
+        eq(caseLedgersTable.firmId, req.firmId!),
+        eq(caseLedgersTable.caseId, caseId),
+        eq(caseLedgersTable.sourceType, "invoice"),
+        eq(caseLedgersTable.sourceId, id),
+      )).limit(1);
+      if (!exists) {
+        await tx.insert(caseLedgersTable).values({
+          firmId: req.firmId!,
+          caseId,
+          transactionDate: String(row.issuedDate ?? new Date().toISOString().slice(0, 10)),
+          entryCategory: "office",
+          entryType: "invoice_billed",
+          description: `Invoice ${row.invoiceNo}`,
+          amount: Number(row.grandTotal ?? 0).toFixed(2),
+          sourceType: "invoice",
+          sourceId: id,
+        } satisfies typeof caseLedgersTable.$inferInsert);
+      }
+      await syncCaseFinancialTotals(tx, { firmId: req.firmId!, caseId });
+    }
+
+    return row;
+  });
+
   await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "accounting.invoice.issue", entityType: "invoice", entityId: id, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
   res.json(updated);
 });

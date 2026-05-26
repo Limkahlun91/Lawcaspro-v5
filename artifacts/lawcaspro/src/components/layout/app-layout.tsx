@@ -54,6 +54,7 @@ export function AppLayout({ children }: { children: ReactNode }) {
     { label: "Accounting", href: "/app/accounting", icon: Calculator, perm: ["accounting", "read"] as const },
     { label: "Reports", href: "/app/reports", icon: BarChart, perm: ["reports", "read"] as const },
     { label: "Audit Logs", href: "/app/audit-logs", icon: ScrollText, perm: ["audit", "read"] as const },
+    { label: "Doc Gen Logs", href: "/app/documents/generation-logs", icon: ScrollText, perm: ["audit", "read"] as const },
     { label: "Settings", href: "/app/settings", icon: Settings, perm: ["settings", "read"] as const },
   ];
   const visibleNavItems = navItems.filter((i) => {

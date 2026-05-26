@@ -18,7 +18,9 @@ export type PaymentVoucherFundStatus = z.infer<typeof PaymentVoucherFundStatus>;
 export const PaymentVoucherType = z.enum([
   "external_payment",
   "file_transfer",
+  "file_to_file_transfer",
   "account_transfer",
+  "internal_transfer",
 ]);
 export type PaymentVoucherType = z.infer<typeof PaymentVoucherType>;
 
@@ -39,6 +41,8 @@ export type PaymentVoucherPaymentMethod = z.infer<typeof PaymentVoucherPaymentMe
 export const PaymentVoucherDeductFromAccount = z.enum([
   "office",
   "client",
+  "trust",
+  "balance_sheet",
 ]);
 export type PaymentVoucherDeductFromAccount = z.infer<typeof PaymentVoucherDeductFromAccount>;
 
@@ -60,6 +64,7 @@ export const CreatePaymentVoucherBody = z.object({
   voucherType: PaymentVoucherType.optional().default("external_payment"),
   targetCaseId: z.number().int().positive().nullable().optional(),
   targetAccountId: z.number().int().positive().nullable().optional(),
+  isAdvance: z.boolean().optional(),
   payeeName: z.string().trim().min(1),
   purpose: z.string().trim().min(1),
   amount: z.number().finite().positive(),
@@ -74,7 +79,7 @@ export const CreatePaymentVoucherBody = z.object({
   beneficiaryAccountNo: z.string().trim().max(255).nullable().optional(),
   paymentMethod: PaymentVoucherPaymentMethod.optional(),
   bankAccountId: z.number().int().positive().nullable().optional(),
-  accountType: z.enum(["office", "client", "trust"]).optional(),
+  accountType: z.enum(["office", "client", "trust", "balance_sheet"]).optional(),
 });
 export type CreatePaymentVoucherBody = z.infer<typeof CreatePaymentVoucherBody>;
 

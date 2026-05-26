@@ -16,6 +16,7 @@ import { QueryFallback } from "@/components/query-fallback";
 import { toastError } from "@/lib/toast-error";
 import { useAuth } from "@/lib/auth-context";
 import { DateOnlyInput } from "@/components/date-only-input";
+import { TemplateFolderPicker, type TemplateFolderPickerFolder, type TemplateFolderPickerTemplate } from "@/components/documents/TemplateFolderPicker";
 
 async function apiFetchCsv(path: string): Promise<Blob> {
   return await apiFetchBlob(path, { timeoutMs: 60000, headers: { accept: "text/csv" } });
@@ -889,29 +890,30 @@ function BatchGenerateDialog(props: {
     toast,
   } = props;
 
-  type TemplateRow = { id: number; name?: string | null; document_type?: string | null; kind?: string | null };
+  const [mode, setMode] = useState<"download" | "print">("download");
+  const [copies, setCopies] = useState("1");
 
-  const templatesQuery = useQuery<TemplateRow[]>({
-    queryKey: ["document-templates", "templateCapable"],
-    queryFn: () => apiFetchJson<TemplateRow[]>("/document-templates?templateCapable=1"),
+  const foldersQuery = useQuery<TemplateFolderPickerFolder[]>({
+    queryKey: ["document-automation", "folders"],
+    queryFn: () => apiFetchJson<TemplateFolderPickerFolder[]>("/firm-document-folders"),
     enabled: open,
     retry: false,
     staleTime: 60_000,
   });
 
+  const templatesQuery = useQuery<TemplateFolderPickerTemplate[]>({
+    queryKey: ["document-automation", "templates"],
+    queryFn: () => apiFetchJson<TemplateFolderPickerTemplate[]>("/document-templates?templateCapable=true&kind=template"),
+    enabled: open,
+    retry: false,
+    staleTime: 60_000,
+  });
+
+  const folders = Array.isArray(foldersQuery.data) ? foldersQuery.data : [];
   const templates = Array.isArray(templatesQuery.data) ? templatesQuery.data : [];
 
   const selectedTemplateCount = selectedTemplateIds.size;
   const selectedCaseCount = selectedCaseIds.size;
-
-  const toggleTemplate = (id: number) => {
-    setSelectedTemplateIds((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
-  };
 
   const generateAndDownloadZip = async () => {
     const ids = Array.from(selectedCaseIds);
@@ -921,7 +923,7 @@ function BatchGenerateDialog(props: {
     try {
       const res = await apiRequest("/cases/bulk/generate-documents-zip", {
         method: "POST",
-        body: JSON.stringify({ caseIds: ids, templateIds }),
+        body: JSON.stringify({ caseIds: ids, templateIds, actionType: mode, printCopies: mode === "print" ? Number(copies || 1) : undefined }),
         timeoutMs: 180000,
       });
       const blob = await res.blob();
@@ -929,19 +931,37 @@ function BatchGenerateDialog(props: {
       const m = /filename\*=UTF-8''([^;]+)|filename=\"?([^\";]+)\"?/i.exec(cd);
       const fileNameRaw = m?.[1] ?? m?.[2] ?? "batch-documents.zip";
       const fileName = decodeURIComponent(String(fileNameRaw).trim());
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = fileName || "batch-documents.zip";
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      URL.revokeObjectURL(url);
-      toast({ title: "Download started", description: `${ids.length} case(s), ${templateIds.length} template(s)` });
+
+      if (mode === "print") {
+        const url = URL.createObjectURL(blob);
+        const iframe = document.createElement("iframe");
+        iframe.style.position = "fixed";
+        iframe.style.right = "0";
+        iframe.style.bottom = "0";
+        iframe.style.width = "0";
+        iframe.style.height = "0";
+        iframe.src = url;
+        iframe.onload = () => {
+          try { iframe.contentWindow?.focus(); iframe.contentWindow?.print(); } catch {}
+          setTimeout(() => { URL.revokeObjectURL(url); iframe.remove(); }, 60000);
+        };
+        document.body.appendChild(iframe);
+        toast({ title: "Printable PDF ready", description: `${ids.length} case(s), ${templateIds.length} template(s)` });
+      } else {
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = fileName || "batch-documents.zip";
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(url);
+        toast({ title: "Download started", description: `${ids.length} case(s), ${templateIds.length} template(s)` });
+      }
       onOpenChange(false);
       onSuccess();
     } catch (err) {
-      toastError(toast, err, "Batch generate failed");
+      toastError(toast, err, mode === "print" ? "Batch print failed" : "Batch generate failed");
     } finally {
       setBulkGenerateDownloading(false);
     }
@@ -952,32 +972,35 @@ function BatchGenerateDialog(props: {
       <DialogContent>
         <DialogHeader>
           <DialogTitle>Batch Generate Documents</DialogTitle>
-          <DialogDescription>Select templates to generate, then download as ZIP.</DialogDescription>
+          <DialogDescription>Select template folders/files, then download or print.</DialogDescription>
         </DialogHeader>
 
-        {templatesQuery.isError ? (
-          <QueryFallback title="Templates unavailable" error={templatesQuery.error} onRetry={() => templatesQuery.refetch()} isRetrying={templatesQuery.isFetching} />
+        {templatesQuery.isError || foldersQuery.isError ? (
+          <QueryFallback title="Templates unavailable" error={templatesQuery.error || foldersQuery.error} onRetry={() => { foldersQuery.refetch(); templatesQuery.refetch(); }} isRetrying={foldersQuery.isFetching || templatesQuery.isFetching} />
         ) : (
           <div className="space-y-3">
             <div className="text-sm text-slate-600">
               {selectedCaseCount} case(s) selected · {selectedTemplateCount} template(s) selected
             </div>
-            <div className="max-h-[320px] overflow-auto rounded-md border border-slate-200">
-              {templates.length === 0 ? (
-                <div className="p-4 text-sm text-slate-500">No templates found.</div>
-              ) : (
-                <div className="divide-y divide-slate-100">
-                  {templates.map((t) => (
-                    <label key={t.id} className="flex items-center gap-3 px-4 py-3 text-sm cursor-pointer hover:bg-slate-50">
-                      <Checkbox checked={selectedTemplateIds.has(t.id)} onCheckedChange={() => toggleTemplate(t.id)} />
-                      <div className="min-w-0">
-                        <div className="font-medium text-slate-900 truncate">{String(t.name ?? `Template ${t.id}`)}</div>
-                        <div className="text-xs text-slate-500 truncate">{String(t.document_type ?? "")}</div>
-                      </div>
-                    </label>
-                  ))}
-                </div>
-              )}
+            <TemplateFolderPicker
+              folders={folders}
+              templates={templates}
+              selectedTemplateIds={selectedTemplateIds}
+              onChange={(next) => setSelectedTemplateIds(next)}
+            />
+            <div className="flex items-center gap-2">
+              <Select value={mode} onValueChange={(v) => setMode(v === "print" ? "print" : "download")}>
+                <SelectTrigger className="w-[200px]">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="download">Download ZIP</SelectItem>
+                  <SelectItem value="print">System Print</SelectItem>
+                </SelectContent>
+              </Select>
+              {mode === "print" ? (
+                <Input value={copies} onChange={(e) => setCopies(e.target.value)} inputMode="numeric" className="w-[120px]" placeholder="Copies" />
+              ) : null}
             </div>
           </div>
         )}
@@ -991,7 +1014,7 @@ function BatchGenerateDialog(props: {
               generateAndDownloadZip().finally(() => setBulkZipDownloading(false));
             }}
           >
-            Generate &amp; Download ZIP
+            {mode === "print" ? "Generate & Print" : "Generate & Download ZIP"}
           </Button>
         </DialogFooter>
       </DialogContent>

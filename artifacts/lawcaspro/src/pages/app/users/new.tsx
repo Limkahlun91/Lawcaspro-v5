@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
@@ -16,6 +16,7 @@ import { getListUsersQueryKey } from "@workspace/api-client-react";
 
 const createUserSchema = z.object({
   name: z.string().min(1, "Name is required"),
+  initials: z.string().max(5, "Max 5 characters").optional(),
   email: z.string().email("Valid email is required"),
   password: z.string().min(8, "Password must be at least 8 characters"),
   roleId: z.coerce.number().min(1, "Role is required"),
@@ -31,6 +32,7 @@ export default function NewUser() {
   const [, setLocation] = useLocation();
   const { toast } = useToast();
   const queryClient = useQueryClient();
+  const [initialsTouched, setInitialsTouched] = useState(false);
   
   const rolesQuery = useListRoles();
   const roles = rolesQuery.data ?? [];
@@ -39,6 +41,7 @@ export default function NewUser() {
     resolver: zodResolver(createUserSchema),
     defaultValues: {
       name: "",
+      initials: "",
       email: "",
       password: "",
       roleId: 0,
@@ -48,6 +51,27 @@ export default function NewUser() {
       nricNo: "",
     },
   });
+
+  const deriveInitials = useMemo(() => {
+    return (name: string) => {
+      const base = String(name || "").trim();
+      if (!base) return "";
+      return base
+        .split(/\s+/g)
+        .filter(Boolean)
+        .map((w) => w[0]?.toUpperCase() ?? "")
+        .join("")
+        .replace(/[^A-Z0-9]/g, "")
+        .slice(0, 5);
+    };
+  }, []);
+
+  const watchedName = form.watch("name");
+  useEffect(() => {
+    if (initialsTouched) return;
+    const next = deriveInitials(watchedName || "");
+    form.setValue("initials", next, { shouldValidate: true });
+  }, [watchedName, initialsTouched, deriveInitials, form]);
 
   const selectedRoleId = Number(form.watch("roleId") || 0);
   const selectedRole = roles.find((r) => r.id === selectedRoleId);
@@ -119,6 +143,27 @@ export default function NewUser() {
                     <FormLabel>Full Name</FormLabel>
                     <FormControl>
                       <Input placeholder="John Doe" {...field} />
+                    </FormControl>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+              <FormField
+                control={form.control}
+                name="initials"
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel>Initials (Short Form)</FormLabel>
+                    <FormControl>
+                      <Input
+                        placeholder="e.g. JD"
+                        {...field}
+                        value={field.value ?? ""}
+                        onChange={(e) => {
+                          setInitialsTouched(true);
+                          field.onChange(e);
+                        }}
+                      />
                     </FormControl>
                     <FormMessage />
                   </FormItem>

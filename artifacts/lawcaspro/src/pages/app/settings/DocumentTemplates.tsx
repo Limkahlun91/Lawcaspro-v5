@@ -45,6 +45,7 @@ interface DocumentTemplate {
   object_path: string;
   created_at: string;
   is_active?: boolean;
+  print_mode?: string | null;
   applies_to_purchase_mode?: string | null;
   applies_to_title_type?: string | null;
   applies_to_case_type?: string | null;
@@ -159,6 +160,7 @@ export default function DocumentTemplates() {
   const [editCaseType, setEditCaseType] = useState<string>("");
   const [editGroup, setEditGroup] = useState<string>("Others");
   const [editSortOrder, setEditSortOrder] = useState<number>(0);
+  const [editPrintMode, setEditPrintMode] = useState<"double" | "single">("double");
   const [editFileNamingRule, setEditFileNamingRule] = useState<string>("");
   const [editClauseInsertionMode, setEditClauseInsertionMode] = useState<string>("prefer_placeholder_else_append");
   const [previewCaseId, setPreviewCaseId] = useState<string>("");
@@ -205,6 +207,7 @@ export default function DocumentTemplates() {
     setEditCaseType(activeTemplate.applies_to_case_type ?? "");
     setEditGroup(activeTemplate.document_group ?? "Others");
     setEditSortOrder(typeof activeTemplate.sort_order === "number" ? activeTemplate.sort_order : 0);
+    setEditPrintMode((String(activeTemplate.print_mode ?? "double").toLowerCase() === "single" ? "single" : "double") as any);
     setEditFileNamingRule(typeof (activeTemplate as any).file_naming_rule === "string" ? String((activeTemplate as any).file_naming_rule) : "");
     setEditClauseInsertionMode(typeof (activeTemplate as any).clause_insertion_mode === "string" ? String((activeTemplate as any).clause_insertion_mode) : "prefer_placeholder_else_append");
     setPreviewCaseId("");
@@ -736,6 +739,21 @@ export default function DocumentTemplates() {
                           </div>
                           <div className="grid grid-cols-2 gap-3">
                             <div className="space-y-1.5">
+                              <Label>Print Mode</Label>
+                              <Select value={editPrintMode} onValueChange={(v) => setEditPrintMode(v === "single" ? "single" : "double")} disabled={!canUpdate}>
+                                <SelectTrigger>
+                                  <SelectValue />
+                                </SelectTrigger>
+                                <SelectContent>
+                                  <SelectItem value="double">Double-sided (default)</SelectItem>
+                                  <SelectItem value="single">Single-sided</SelectItem>
+                                </SelectContent>
+                              </Select>
+                            </div>
+                            <div />
+                          </div>
+                          <div className="grid grid-cols-2 gap-3">
+                            <div className="space-y-1.5">
                               <Label>Applies to Purchase Mode</Label>
                               <Select value={editPurchaseMode} onValueChange={setEditPurchaseMode}>
                                 <SelectTrigger>
@@ -881,6 +899,7 @@ export default function DocumentTemplates() {
                             appliesToCaseType: editCaseType ? editCaseType : null,
                             documentGroup: editGroup,
                             sortOrder: editSortOrder,
+                            printMode: editPrintMode,
                             fileNamingRule: editFileNamingRule.trim() ? editFileNamingRule.trim() : null,
                             ...(activeIsPdf ? {} : { clauseInsertionMode: editClauseInsertionMode || null }),
                           },
@@ -903,6 +922,7 @@ export default function DocumentTemplates() {
                             appliesToCaseType: editCaseType ? editCaseType : null,
                             documentGroup: editGroup,
                             sortOrder: editSortOrder,
+                            printMode: editPrintMode,
                             fileNamingRule: editFileNamingRule.trim() ? editFileNamingRule.trim() : null,
                             ...(activeIsPdf ? {} : { clauseInsertionMode: editClauseInsertionMode || null }),
                           },

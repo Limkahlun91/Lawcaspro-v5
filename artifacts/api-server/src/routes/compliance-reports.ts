@@ -378,13 +378,13 @@ router.get("/reports/bills-delivered-book", requireAuth, requireFirmUser, requir
   res.json({ invoices: enriched, totals });
 });
 
-// ── Trust Account Statement (per case or firm-wide) ───────────────────────────
+// ── Client Account Statement (Trust) ──────────────────────────────────────────
 router.get("/reports/trust-account-statement", requireAuth, requireFirmUser, requirePermission("reports", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
   const r = req.rlsDb;
   if (!r) { res.status(500).json({ error: "Internal Server Error" }); return; }
   const caseId = one((req.query as any).caseId);
   const format = one((req.query as any).format);
-  let cond = and(eq(ledgerEntriesTable.firmId, req.firmId!), eq(ledgerEntriesTable.accountType, "trust"));
+  let cond = and(eq(ledgerEntriesTable.firmId, req.firmId!), sql`${ledgerEntriesTable.accountType} IN ('client','trust')`);
   if (caseId) {
     const cid = parseInt(caseId, 10);
     if (Number.isNaN(cid)) { res.status(400).json({ error: "Invalid case ID" }); return; }
@@ -476,7 +476,7 @@ router.get("/reports/trust-account-statement", requireAuth, requireFirmUser, req
 
   if (format === "xlsx") {
     const wb = new ExcelJS.Workbook();
-    const ws = wb.addWorksheet("Trust Account Statement");
+    const ws = wb.addWorksheet("Client Account Statement");
     ws.properties.defaultRowHeight = 16;
     ws.getColumn(1).width = 14;
     ws.getColumn(2).width = 10;

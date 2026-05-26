@@ -315,7 +315,7 @@ export default function ProjectStatusReport() {
                   <table className="w-full text-sm">
                     <thead className="bg-slate-50 border-b">
                       <tr>
-                        {["File Ref", "Project Name", "Unit No.", "Purchaser Name", "Assigned Staff", "Current Status", "Total Fees (RM)", "Amount Paid (RM)", "Balance Due (RM)"].map((h) => (
+                        {["File Ref", "Project Name", "Unit No.", "Purchaser Name", "Assigned Staff", "Current Status", "Total Fees (RM)", "Collected (RM)", "Amount Paid (RM)", "Balance Due (RM)"].map((h) => (
                           <th key={h} className="text-left px-4 py-2.5 text-xs font-medium text-slate-500 uppercase tracking-wide">{h}</th>
                         ))}
                       </tr>
@@ -330,6 +330,7 @@ export default function ProjectStatusReport() {
                           <td className="px-4 py-2.5 text-center text-slate-600">{r.assignedStaff || "—"}</td>
                           <td className="px-4 py-2.5 text-slate-600">{r.currentStatus}</td>
                           <td className="px-4 py-2.5 text-right tabular-nums">{fmtAmt(r.totalFeesRm)}</td>
+                          <td className="px-4 py-2.5 text-right tabular-nums text-green-700">{fmtAmt(r.collectedRm)}</td>
                           <td className="px-4 py-2.5 text-right tabular-nums text-green-700">{fmtAmt(r.amountPaidRm)}</td>
                           <td className="px-4 py-2.5 text-right tabular-nums text-red-600">{fmtAmt(r.balanceDueRm)}</td>
                         </tr>

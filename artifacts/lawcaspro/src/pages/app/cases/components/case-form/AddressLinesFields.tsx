@@ -8,10 +8,12 @@ export function AddressLinesFields(props: {
   onChange: (next: AddressLines) => void;
   onBlurCompose?: () => void;
   disabled?: boolean;
+  maxLines?: 1 | 2 | 3 | 4 | 5;
 }) {
   const disabled = Boolean(props.disabled);
   const v = props.value;
   const set = (k: keyof AddressLines, next: string) => props.onChange({ ...v, [k]: next });
+  const maxLines = props.maxLines ?? 5;
 
   return (
     <div className="space-y-2">
@@ -19,9 +21,9 @@ export function AddressLinesFields(props: {
       <div className="grid grid-cols-1 gap-2">
         <Input value={v.line1} onChange={(e) => set("line1", e.target.value)} onBlur={props.onBlurCompose} disabled={disabled} placeholder="Line 1" />
         <Input value={v.line2} onChange={(e) => set("line2", e.target.value)} onBlur={props.onBlurCompose} disabled={disabled} placeholder="Line 2" />
-        <Input value={v.line3} onChange={(e) => set("line3", e.target.value)} onBlur={props.onBlurCompose} disabled={disabled} placeholder="Line 3" />
-        <Input value={v.line4} onChange={(e) => set("line4", e.target.value)} onBlur={props.onBlurCompose} disabled={disabled} placeholder="Line 4" />
-        <Input value={v.line5} onChange={(e) => set("line5", e.target.value)} onBlur={props.onBlurCompose} disabled={disabled} placeholder="Line 5" />
+        {maxLines >= 3 ? <Input value={v.line3} onChange={(e) => set("line3", e.target.value)} onBlur={props.onBlurCompose} disabled={disabled} placeholder="Line 3" /> : null}
+        {maxLines >= 4 ? <Input value={v.line4} onChange={(e) => set("line4", e.target.value)} onBlur={props.onBlurCompose} disabled={disabled} placeholder="Line 4" /> : null}
+        {maxLines >= 5 ? <Input value={v.line5} onChange={(e) => set("line5", e.target.value)} onBlur={props.onBlurCompose} disabled={disabled} placeholder="Line 5" /> : null}
       </div>
     </div>
   );

@@ -1,4 +1,4 @@
-import { pgTable, serial, text, timestamp, integer, boolean, index, uniqueIndex, numeric, date } from "drizzle-orm/pg-core";
+import { pgTable, serial, text, timestamp, integer, boolean, index, uniqueIndex, numeric, date, bigserial } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod/v4";
 
@@ -40,6 +40,19 @@ export const firmBankAccountsTable = pgTable("firm_bank_accounts", {
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow().$onUpdate(() => new Date()),
 }, (t) => ({
   firmIdIdx: index("idx_bank_accounts_firm").on(t.firmId),
+}));
+
+export const firmFileRefSettingsTable = pgTable("firm_file_ref_settings", {
+  id: bigserial("id", { mode: "number" }).primaryKey(),
+  firmId: integer("firm_id").notNull(),
+  caseType: text("case_type").notNull(),
+  formatPattern: text("format_pattern").notNull(),
+  currentSequence: integer("current_sequence").notNull().default(0),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow().$onUpdate(() => new Date()),
+}, (t) => ({
+  firmCaseTypeUnique: uniqueIndex("firm_file_ref_settings_firm_case_type_key").on(t.firmId, t.caseType),
+  firmIdx: index("idx_firm_file_ref_settings_firm").on(t.firmId),
 }));
 
 export const insertFirmSchema = createInsertSchema(firmsTable).omit({ id: true, createdAt: true, updatedAt: true });

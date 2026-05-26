@@ -94,11 +94,19 @@ async function usersNricNoExists(r: DbConn): Promise<boolean> {
   return usersNricNoExistsCache;
 }
 
+let usersInitialsExistsCache: boolean | null = null;
+async function usersInitialsExists(r: DbConn): Promise<boolean> {
+  if (usersInitialsExistsCache !== null) return usersInitialsExistsCache;
+  usersInitialsExistsCache = await columnExists(r, "users", "initials");
+  return usersInitialsExistsCache;
+}
+
 type UserRow = {
   id: number;
   firmId: number | null;
   email: string;
   name: string;
+  initials?: string | null;
   roleId: number | null;
   developerId?: number | null;
   department?: string | null;
@@ -121,6 +129,7 @@ async function enrichUser(r: DbConn, firmId: number, user: UserRow) {
     firmId: user.firmId,
     email: user.email,
     name: user.name,
+    initials: user.initials ?? null,
     roleId: user.roleId ?? null,
     roleName,
     developerId: user.developerId ?? null,
@@ -142,6 +151,7 @@ routerInternal.get("/users", requireAuth, requireFirmUser, requirePermission("us
   const offset = (page - 1) * limit;
 
   const hasDepartment = await usersDepartmentExists(r);
+  const hasInitials = await usersInitialsExists(r);
 
   const where = [
     eq(usersTable.firmId, req.firmId!),
@@ -155,6 +165,7 @@ routerInternal.get("/users", requireAuth, requireFirmUser, requirePermission("us
     firmId: usersTable.firmId,
     email: usersTable.email,
     name: usersTable.name,
+    ...(hasInitials ? { initials: usersTable.initials } : {}),
     roleId: usersTable.roleId,
     developerId: usersTable.developerId,
     status: usersTable.status,
@@ -199,6 +210,8 @@ routerInternal.post("/users", requireAuth, requireFirmUser, requirePermission("u
   }
 
   const { email, name, password, roleId, developerId, department, barCouncilNo, nricNo } = parsed.data;
+  const initialsRaw = typeof (req.body as any)?.initials === "string" ? String((req.body as any).initials) : "";
+  const initials = initialsRaw.trim() ? initialsRaw.trim().toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 5) : null;
   const normalizedEmail = email.toLowerCase();
 
   try {
@@ -245,6 +258,7 @@ routerInternal.post("/users", requireAuth, requireFirmUser, requirePermission("u
       const hasDepartment = await usersDepartmentExists(tx);
       const hasBarCouncilNo = await usersBarCouncilNoExists(tx);
       const hasNricNo = await usersNricNoExists(tx);
+      const hasInitials = await usersInitialsExists(tx);
 
       if (hasBarCouncilNo && isLegalRole && !barCouncilNo?.trim()) {
         return { kind: "missing_bar_council" as const };
@@ -263,6 +277,7 @@ routerInternal.post("/users", requireAuth, requireFirmUser, requirePermission("u
       if (hasDepartment) values.department = department ?? null;
       if (hasBarCouncilNo) values.barCouncilNo = isLegalRole ? (barCouncilNo?.trim() ? barCouncilNo.trim() : null) : null;
       if (hasNricNo) values.nricNo = nricNo?.trim() ? nricNo.trim() : null;
+      if (hasInitials) values.initials = initials;
 
       const [user] = await tx.insert(usersTable).values(values).returning();
       await ensureRolePermissionsInitialized(tx as any, req.firmId!, roleId);
@@ -372,6 +387,11 @@ routerInternal.patch("/users/:userId", requireAuth, requireFirmUser, requirePerm
 
   const updates: Record<string, unknown> = {};
   if (parsed.data.name !== undefined) updates.name = parsed.data.name;
+  if (Object.prototype.hasOwnProperty.call(req.body ?? {}, "initials") && await usersInitialsExists(r)) {
+    const initialsRaw = typeof (req.body as any)?.initials === "string" ? String((req.body as any).initials) : "";
+    const initials = initialsRaw.trim() ? initialsRaw.trim().toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 5) : null;
+    updates.initials = initials;
+  }
   if (parsed.data.roleId !== undefined) updates.roleId = parsed.data.roleId;
   if (Object.prototype.hasOwnProperty.call(parsed.data, "developerId")) {
     updates.developerId = (parsed.data as any).developerId;

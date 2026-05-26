@@ -330,6 +330,14 @@ export default function CaseDetail() {
     query: { enabled: !!caseId, queryKey: getGetCaseQueryKey(caseId) }
   });
 
+  const advancesQuery = useQuery<{ outstanding_advances?: number }>({
+    queryKey: ["case-advances", caseId],
+    queryFn: ({ signal }) => apiFetchJson(`/cases/${caseId}/advances`, { signal }),
+    enabled: Number.isFinite(caseId) && caseId > 0,
+    retry: false,
+  });
+  const outstandingAdvances = Number(advancesQuery.data?.outstanding_advances ?? 0);
+
   const { data: usersRes } = useListUsers({ limit: 200 }, { query: { staleTime: 5 * 60 * 1000 } });
   const users = usersRes?.data || [];
   const lawyerOptions = users.filter((u) => ["Partner", "Senior Lawyer", "Lawyer"].includes(String(u.roleName ?? "").trim()));
@@ -1610,6 +1618,11 @@ export default function CaseDetail() {
             <p className="text-slate-500 mt-1 break-words">
               {[String((caseInfo as any).projectName ?? ""), String((caseInfo as any).developerName ?? "")].filter((x) => x.trim()).join(" • ")}
             </p>
+            {Number.isFinite(outstandingAdvances) && outstandingAdvances > 0 ? (
+              <div className="mt-3 rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-900">
+                ⚠️ This case has <span className="font-semibold">RM {outstandingAdvances.toLocaleString("en-MY", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span> in outstanding advances. Please issue an Invoice / Collect payment.
+              </div>
+            ) : null}
           </div>
         </div>
         <div className="flex items-center gap-2">

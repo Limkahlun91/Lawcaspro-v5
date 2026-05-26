@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -11,6 +11,7 @@ import { useToast } from "@/hooks/use-toast";
 import { apiFetchJson } from "@/lib/api-client";
 import { toastError } from "@/lib/toast-error";
 import { DateOnlyInput } from "@/components/date-only-input";
+import { getStateFromPostcode } from "@/utils/my-address-helper";
 
 interface PartyFormProps {
   open: boolean;
@@ -23,6 +24,13 @@ export default function PartyForm({ open, onOpenChange, onCreated, caseId }: Par
   const { toast } = useToast();
   const [loading, setLoading] = useState(false);
   const [partyType, setPartyType] = useState("natural_person");
+  const [addressLine1, setAddressLine1] = useState("");
+  const [addressLine2, setAddressLine2] = useState("");
+  const [city, setCity] = useState("");
+  const [postcode, setPostcode] = useState("");
+  const [stateValue, setStateValue] = useState("");
+  const [postcodeWarning, setPostcodeWarning] = useState<string | null>(null);
+  const derivedState = useMemo(() => (postcode.length === 5 ? getStateFromPostcode(postcode) : null), [postcode]);
   const [form, setForm] = useState({
     fullName: "",
     nric: "",
@@ -48,6 +56,29 @@ export default function PartyForm({ open, onOpenChange, onCreated, caseId }: Par
   function setField(key: string, value: unknown) {
     setForm(prev => ({ ...prev, [key]: value }));
   }
+
+  useEffect(() => {
+    if (derivedState) {
+      if (stateValue.trim() && stateValue.trim() !== derivedState) setPostcodeWarning(`Warning: Postcode ${postcode} belongs to ${derivedState}`);
+      else setPostcodeWarning(null);
+      setStateValue(derivedState);
+    } else {
+      setPostcodeWarning(null);
+    }
+  }, [derivedState, postcode]);
+
+  useEffect(() => {
+    const lines = [addressLine1, addressLine2].map((x) => x.trim()).filter(Boolean);
+    const pc = postcode.trim();
+    const st = (derivedState ?? stateValue).trim();
+    const c = city.trim();
+    const addr = (() => {
+      if (pc.length !== 5 || !derivedState) return [...lines, c, st].filter(Boolean).join(", ");
+      if (derivedState === "Kuala Lumpur") return [...lines, [c, `${pc} ${derivedState}`].filter(Boolean).join(", ")].filter(Boolean).join(", ");
+      return [...lines, [`${pc}${c ? ` ${c}` : ""}`, derivedState].filter(Boolean).join(", ")].filter(Boolean).join(", ");
+    })();
+    setField("address", addr);
+  }, [addressLine1, addressLine2, city, postcode, stateValue, derivedState]);
 
   async function handleSubmit() {
     if (!form.fullName.trim()) {
@@ -80,6 +111,12 @@ export default function PartyForm({ open, onOpenChange, onCreated, caseId }: Par
         transactionPurpose: "", isPep: false, pepDetails: "",
         isHighRiskJurisdiction: false, hasNomineeArrangement: false, hasLayeredOwnership: false,
       });
+      setAddressLine1("");
+      setAddressLine2("");
+      setCity("");
+      setPostcode("");
+      setStateValue("");
+      setPostcodeWarning(null);
     } catch (err) {
       toastError(toast, err, "Create failed");
     } finally {
@@ -196,9 +233,27 @@ export default function PartyForm({ open, onOpenChange, onCreated, caseId }: Par
             </TabsContent>
 
             <TabsContent value="contact" className="space-y-3 pt-3">
-              <div>
+              <div className="space-y-2">
                 <Label>Address</Label>
-                <Textarea value={form.address} onChange={e => setField("address", e.target.value)} rows={2} />
+                <div className="space-y-3">
+                  <div className="grid grid-cols-1 gap-3">
+                    <Input value={addressLine1} onChange={(e) => setAddressLine1(e.target.value)} placeholder="Line 1" />
+                    <Input value={addressLine2} onChange={(e) => setAddressLine2(e.target.value)} placeholder="Line 2" />
+                  </div>
+                  <div className="grid grid-cols-1 md:grid-cols-12 gap-3">
+                    <div className="md:col-span-4">
+                      <Input value={city} onChange={(e) => setCity(e.target.value)} placeholder="City" />
+                    </div>
+                    <div className="md:col-span-4">
+                      <Input value={postcode} onChange={(e) => setPostcode(e.target.value.replace(/[^0-9]/g, "").slice(0, 5))} inputMode="numeric" placeholder="Postcode" />
+                    </div>
+                    <div className="md:col-span-4">
+                      <Input value={stateValue} onChange={(e) => setStateValue(e.target.value)} disabled={Boolean(derivedState)} placeholder="State" />
+                      {postcodeWarning ? <div className="text-xs text-amber-700 mt-1">{postcodeWarning}</div> : null}
+                    </div>
+                  </div>
+                  <Textarea value={form.address} readOnly rows={2} />
+                </div>
               </div>
               <div className="grid grid-cols-2 gap-3">
                 <div>

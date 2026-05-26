@@ -1,10 +1,56 @@
 import express, { type Router as ExpressRouter } from "express";
 import { eq, and, desc } from "drizzle-orm";
-import { db, firmBankAccountsTable, invoicesTable, ledgerEntriesTable, receiptAllocationsTable, receiptsTable, sql, quotationsTable, clientsTable, casePurchasersTable } from "@workspace/db";
+import { db, firmBankAccountsTable, invoicesTable, ledgerEntriesTable, receiptAllocationsTable, receiptsTable, sql, quotationsTable, clientsTable, casePurchasersTable, caseLedgersTable, casesTable } from "@workspace/db";
 import { requireAuth, requireFirmUser, requirePermission, requireReAuth, type AuthRequest, writeAuditLog } from "../lib/auth.js";
 import { sensitiveRateLimiter } from "../lib/rate-limit.js";
+import { syncCaseFinancialTotals } from "../lib/caseFinancialSync.js";
 
 const one = (v: string | string[] | undefined): string | undefined => (Array.isArray(v) ? v[0] : v);
+
+function normalizeLedgerAccountType(v: unknown): "client" | "office" | "balance_sheet" {
+  const s = typeof v === "string" ? v.trim().toLowerCase() : "";
+  if (s === "trust") return "client";
+  if (s === "balance_sheet" || s === "fixed_deposit") return "balance_sheet";
+  if (s === "office") return "office";
+  return "client";
+}
+
+async function applyAdvanceRecovery(tx: typeof db, args: { firmId: number; caseId: number; receiptId: number; receiptNo: string; receivedDate: string; amount: number }) {
+  const [row] = await tx
+    .select({
+      outstanding: sql<string>`
+        COALESCE(SUM(CASE WHEN ${caseLedgersTable.entryType} = 'advance_paid' THEN ${caseLedgersTable.amount} ELSE 0 END), 0)
+        - COALESCE(SUM(CASE WHEN ${caseLedgersTable.entryType} = 'advance_recovered' THEN ${caseLedgersTable.amount} ELSE 0 END), 0)
+      `,
+    })
+    .from(caseLedgersTable)
+    .where(and(eq(caseLedgersTable.firmId, args.firmId), eq(caseLedgersTable.caseId, args.caseId)))
+    .limit(1);
+  const outstanding = Number(row?.outstanding ?? 0);
+  if (!Number.isFinite(outstanding) || outstanding <= 0) return;
+  const applied = Math.min(outstanding, args.amount);
+  if (!Number.isFinite(applied) || applied <= 0) return;
+
+  const [exists] = await tx.select({ id: caseLedgersTable.id }).from(caseLedgersTable).where(and(
+    eq(caseLedgersTable.firmId, args.firmId),
+    eq(caseLedgersTable.caseId, args.caseId),
+    eq(caseLedgersTable.sourceType, "receipt"),
+    eq(caseLedgersTable.sourceId, args.receiptId),
+    eq(caseLedgersTable.entryType, "advance_recovered"),
+  )).limit(1);
+  if (exists) return;
+  await tx.insert(caseLedgersTable).values({
+    firmId: args.firmId,
+    caseId: args.caseId,
+    transactionDate: args.receivedDate,
+    entryCategory: "office",
+    entryType: "advance_recovered",
+    description: `Advance recovered via Receipt ${args.receiptNo}`,
+    amount: applied.toFixed(2),
+    sourceType: "receipt",
+    sourceId: args.receiptId,
+  } satisfies typeof caseLedgersTable.$inferInsert);
+}
 
 type RouterInternalLike = {
   get: (path: string, ...handlers: unknown[]) => unknown;
@@ -155,49 +201,121 @@ router.post("/receipts", sensitiveRateLimiter, requireAuth, requireFirmUser, req
   const bankAccountIdNum = bankAccountId ? Number(bankAccountId) : null;
   if (bankAccountIdNum !== null && (!Number.isFinite(bankAccountIdNum) || bankAccountIdNum <= 0)) { res.status(400).json({ error: "Invalid bankAccountId" }); return; }
 
-  const receiptNo = await nextReceiptNo(req.firmId!);
-  const [rec] = await db.insert(receiptsTable).values({
-    firmId: req.firmId!,
-    caseId: caseIdNum,
-    invoiceId: invoiceIdNum,
-    receiptNo,
-    paymentMethod: paymentMethod || "bank_transfer",
-    bankAccountId: bankAccountIdNum,
-    accountType: accountType || "client",
-    amount: amountStr,
-    receivedDate: receivedDateStr,
-    referenceNo: referenceNo || null,
-    notes: notes || null,
-    createdBy: req.userId!,
-  }).returning();
+  const paymentAccountType = normalizeLedgerAccountType(accountType);
 
-  // Auto-allocate to invoice if specified
-  const allocList = (Array.isArray(allocations) ? allocations : []) as { invoiceId: number; amount: number }[];
-  if (invoiceIdNum && !allocList.length) {
-    allocList.push({ invoiceId: invoiceIdNum, amount: amountNum });
-  }
-  for (const alloc of allocList) {
-    const allocAmountNum = Number(alloc.amount);
-    if (!Number.isFinite(allocAmountNum) || allocAmountNum <= 0) continue;
-    const allocInvoiceIdNum = alloc.invoiceId ? Number(alloc.invoiceId) : null;
-    await db.insert(receiptAllocationsTable).values({
-      receiptId: rec.id,
-      invoiceId: allocInvoiceIdNum,
-      amount: allocAmountNum.toFixed(2),
+  const created = await (db as any).transaction(async (tx: typeof db) => {
+    const invoice = invoiceIdNum
+      ? await (async () => {
+          const [inv] = await tx.select().from(invoicesTable).where(and(eq(invoicesTable.id, invoiceIdNum), eq(invoicesTable.firmId, req.firmId!)));
+          return inv ?? null;
+        })()
+      : null;
+    if (invoiceIdNum && !invoice) {
+      return { kind: "invoice_not_found" as const };
+    }
+
+    const effectiveCaseId = (() => {
+      const invCaseId = invoice?.caseId ? Number(invoice.caseId) : null;
+      const provided = caseIdNum !== null ? Number(caseIdNum) : null;
+      if (provided && invCaseId && provided !== invCaseId) return "mismatch" as const;
+      return provided ?? invCaseId ?? null;
+    })();
+    if (effectiveCaseId === "mismatch") {
+      return { kind: "case_invoice_mismatch" as const };
+    }
+
+    if (effectiveCaseId) {
+      const [c] = await tx.select({ id: casesTable.id }).from(casesTable).where(and(eq(casesTable.id, effectiveCaseId), eq(casesTable.firmId, req.firmId!))).limit(1);
+      if (!c) return { kind: "case_not_found" as const };
+    }
+
+    const receiptNo = await nextReceiptNo(req.firmId!);
+    const [rec] = await tx.insert(receiptsTable).values({
+      firmId: req.firmId!,
+      caseId: effectiveCaseId,
+      invoiceId: invoiceIdNum,
+      receiptNo,
+      paymentMethod: paymentMethod || "bank_transfer",
+      bankAccountId: bankAccountIdNum,
+      accountType: paymentAccountType,
+      amount: amountStr,
+      receivedDate: receivedDateStr,
+      referenceNo: referenceNo || null,
+      notes: notes || null,
+      createdBy: req.userId!,
+    }).returning();
+
+    const allocList = (Array.isArray(allocations) ? allocations : []) as { invoiceId: number; amount: number }[];
+    if (invoiceIdNum && !allocList.length) {
+      allocList.push({ invoiceId: invoiceIdNum, amount: amountNum });
+    }
+    for (const alloc of allocList) {
+      const allocAmountNum = Number(alloc.amount);
+      if (!Number.isFinite(allocAmountNum) || allocAmountNum <= 0) continue;
+      const allocInvoiceIdNum = alloc.invoiceId ? Number(alloc.invoiceId) : null;
+      if (allocInvoiceIdNum) {
+        const [inv] = await tx.select({ id: invoicesTable.id }).from(invoicesTable).where(and(eq(invoicesTable.id, allocInvoiceIdNum), eq(invoicesTable.firmId, req.firmId!))).limit(1);
+        if (!inv) return { kind: "allocation_invoice_not_found" as const, invoiceId: allocInvoiceIdNum };
+      }
+      await tx.insert(receiptAllocationsTable).values({
+        receiptId: rec.id,
+        invoiceId: allocInvoiceIdNum,
+        amount: allocAmountNum.toFixed(2),
+      });
+    }
+    for (const alloc of allocList) {
+      const allocInvoiceIdNum = alloc.invoiceId ? Number(alloc.invoiceId) : null;
+      if (allocInvoiceIdNum) await updateInvoicePaymentStatus(allocInvoiceIdNum, req.firmId!);
+    }
+
+    await postLedger(req.firmId!, effectiveCaseId, {
+      entryDate: receivedDateStr, entryType: "receipt", accountType: paymentAccountType,
+      debit: 0, credit: amountNum,
+      description: `Receipt ${receiptNo} — ${paymentMethod || "bank_transfer"}`,
+      referenceNo: receiptNo, sourceType: "receipt", sourceId: rec.id, createdBy: req.userId!,
     });
-    if (alloc.invoiceId) await updateInvoicePaymentStatus(alloc.invoiceId, req.firmId!);
-  }
 
-  // Post to ledger
-  await postLedger(req.firmId!, caseIdNum, {
-    entryDate: receivedDateStr, entryType: "receipt", accountType: accountType || "client",
-    debit: 0, credit: amountNum,
-    description: `Receipt ${receiptNo} — ${paymentMethod || "bank_transfer"}`,
-    referenceNo: receiptNo, sourceType: "receipt", sourceId: rec.id, createdBy: req.userId!,
+    if (effectiveCaseId) {
+      const [exists] = await tx.select({ id: caseLedgersTable.id }).from(caseLedgersTable).where(and(
+        eq(caseLedgersTable.firmId, req.firmId!),
+        eq(caseLedgersTable.caseId, effectiveCaseId),
+        eq(caseLedgersTable.sourceType, "receipt"),
+        eq(caseLedgersTable.sourceId, rec.id),
+      )).limit(1);
+      if (!exists) {
+        await tx.insert(caseLedgersTable).values({
+          firmId: req.firmId!,
+          caseId: effectiveCaseId,
+          transactionDate: receivedDateStr,
+          entryCategory: paymentAccountType,
+          entryType: "payment_received",
+          description: `Receipt ${receiptNo}`,
+          amount: amountStr,
+          sourceType: "receipt",
+          sourceId: rec.id,
+        } satisfies typeof caseLedgersTable.$inferInsert);
+      }
+      await applyAdvanceRecovery(tx, {
+        firmId: req.firmId!,
+        caseId: effectiveCaseId,
+        receiptId: rec.id,
+        receiptNo,
+        receivedDate: receivedDateStr,
+        amount: amountNum,
+      });
+      await syncCaseFinancialTotals(tx, { firmId: req.firmId!, caseId: effectiveCaseId });
+    }
+
+    return { kind: "ok" as const, rec };
   });
 
-  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "accounting.receipt.create", entityType: "receipt", entityId: rec.id, detail: `receiptNo=${rec.receiptNo}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
-  res.status(201).json(rec);
+  if (created.kind === "invoice_not_found") { res.status(400).json({ error: "Invalid invoiceId" }); return; }
+  if (created.kind === "case_invoice_mismatch") { res.status(400).json({ error: "caseId does not match invoice caseId" }); return; }
+  if (created.kind === "case_not_found") { res.status(400).json({ error: "Invalid caseId" }); return; }
+  if (created.kind === "allocation_invoice_not_found") { res.status(400).json({ error: "Invalid allocation invoiceId" }); return; }
+
+  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "accounting.receipt.create", entityType: "receipt", entityId: created.rec.id, detail: `receiptNo=${created.rec.receiptNo}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+  res.status(201).json(created.rec);
 });
 
 // Reverse receipt
@@ -209,17 +327,62 @@ router.post("/receipts/:id/reverse", sensitiveRateLimiter, requireAuth, requireF
   if (!rec) { res.status(404).json({ error: "Receipt not found" }); return; }
   if (rec.isReversed) { res.status(400).json({ error: "Already reversed" }); return; }
 
-  await db.update(receiptsTable).set({ isReversed: true, reversedBy: req.userId!, reversedAt: new Date() }).where(eq(receiptsTable.id, id));
-  const allocs = await db.select().from(receiptAllocationsTable).where(eq(receiptAllocationsTable.receiptId, id));
-  for (const a of allocs) { if (a.invoiceId) await updateInvoicePaymentStatus(a.invoiceId, req.firmId!); }
+  const reversed = await (db as any).transaction(async (tx: typeof db) => {
+    await tx.update(receiptsTable).set({ isReversed: true, reversedBy: req.userId!, reversedAt: new Date() }).where(eq(receiptsTable.id, id));
+    const allocs = await tx.select().from(receiptAllocationsTable).where(eq(receiptAllocationsTable.receiptId, id));
+    for (const a of allocs) { if (a.invoiceId) await updateInvoicePaymentStatus(a.invoiceId, req.firmId!); }
 
-  await postLedger(req.firmId!, rec.caseId, {
-    entryDate: new Date().toISOString().slice(0, 10), entryType: "reversal",
-    accountType: rec.accountType, debit: Number(rec.amount), credit: 0,
-    description: `Reversal of Receipt ${rec.receiptNo}`,
-    referenceNo: rec.receiptNo, sourceType: "receipt", sourceId: id, createdBy: req.userId!,
+    await postLedger(req.firmId!, rec.caseId, {
+      entryDate: new Date().toISOString().slice(0, 10), entryType: "reversal",
+      accountType: rec.accountType, debit: Number(rec.amount), credit: 0,
+      description: `Reversal of Receipt ${rec.receiptNo}`,
+      referenceNo: rec.receiptNo, sourceType: "receipt", sourceId: id, createdBy: req.userId!,
+    });
+
+    const caseIdResolved = rec.caseId ? Number(rec.caseId) : null;
+    if (caseIdResolved) {
+      await tx.insert(caseLedgersTable).values({
+        firmId: req.firmId!,
+        caseId: caseIdResolved,
+        transactionDate: new Date().toISOString().slice(0, 10),
+        entryCategory: String(rec.accountType || "client"),
+        entryType: "payment_received",
+        description: `Reversal of Receipt ${rec.receiptNo}`,
+        amount: (-Number(rec.amount)).toFixed(2),
+        sourceType: "receipt_reversal",
+        sourceId: id,
+      } satisfies typeof caseLedgersTable.$inferInsert);
+      const [recovery] = await tx
+        .select({ amount: caseLedgersTable.amount })
+        .from(caseLedgersTable)
+        .where(and(
+          eq(caseLedgersTable.firmId, req.firmId!),
+          eq(caseLedgersTable.caseId, caseIdResolved),
+          eq(caseLedgersTable.sourceType, "receipt"),
+          eq(caseLedgersTable.sourceId, id),
+          eq(caseLedgersTable.entryType, "advance_recovered"),
+        ))
+        .limit(1);
+      if (recovery) {
+        await tx.insert(caseLedgersTable).values({
+          firmId: req.firmId!,
+          caseId: caseIdResolved,
+          transactionDate: new Date().toISOString().slice(0, 10),
+          entryCategory: "office",
+          entryType: "advance_recovered",
+          description: `Reversal of advance recovery via Receipt ${rec.receiptNo}`,
+          amount: (-Number(recovery.amount ?? 0)).toFixed(2),
+          sourceType: "receipt_reversal",
+          sourceId: id,
+        } satisfies typeof caseLedgersTable.$inferInsert);
+      }
+      await syncCaseFinancialTotals(tx, { firmId: req.firmId!, caseId: caseIdResolved });
+    }
+
+    return { ok: true as const };
   });
 
+  if (!reversed.ok) { res.status(500).json({ error: "Internal Server Error" }); return; }
   await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "accounting.receipt.reverse", entityType: "receipt", entityId: id, detail: `receiptNo=${rec.receiptNo}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
   res.json({ success: true });
 });

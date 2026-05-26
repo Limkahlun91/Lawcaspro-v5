@@ -70,7 +70,7 @@ type CaseFilesListResponse = {
   total: number;
 };
 
-const TABS = ["Overview", "File Listing", "Invoices", "Receipts", "Payment Vouchers", "Quotations", "Bank Accounts", "Bank Reconciliation", "Ledger"] as const;
+const TABS = ["Overview", "File Listing", "Payment Vouchers", "Quotations", "Invoices", "Receipts", "Bank Accounts", "Bank Reconciliation", "Ledger"] as const;
 type Tab = typeof TABS[number];
 
 const TAB_KEYS: Record<string, Tab> = {
@@ -132,12 +132,15 @@ function LedgerSummaryInline() {
   const { data } = useQuery({ queryKey: ["ledger-summary"], queryFn: () => apiFetchJson("/ledger/summary"), retry: false });
   const rows = (data ?? []) as any[];
   if (!rows.length) return <div className="text-slate-400 text-sm py-4 text-center">No ledger entries yet</div>;
+  const acctLabel = (acct: string) => acct === "balance_sheet" ? "Balance Sheet / FD" : acct === "client" ? "Client Account" : "Office Account";
+  const order = ["client", "office", "balance_sheet"];
+  const sorted = [...rows].sort((a: any, b: any) => order.indexOf(String(a.accountType)) - order.indexOf(String(b.accountType)));
   return (
     <div className="space-y-3">
-      {rows.map((r: any) => (
+      {sorted.map((r: any) => (
         <div key={r.accountType} className="flex justify-between items-center py-2 border-b last:border-0">
           <div>
-            <div className="text-sm font-medium text-slate-900 capitalize">{r.accountType} Account</div>
+            <div className="text-sm font-medium text-slate-900">{acctLabel(String(r.accountType ?? ""))}</div>
             <div className="text-xs text-slate-400">Dr {fmt(r.totalDebit)} | Cr {fmt(r.totalCredit)}</div>
           </div>
           <div className={cn("text-base font-bold", Number(r.balance) >= 0 ? "text-green-600" : "text-red-500")}>
@@ -630,7 +633,7 @@ function ReceiptsTab() {
                   value={form.accountType} onChange={(e) => setForm((f) => ({ ...f, accountType: e.target.value }))}>
                   <option value="client">Client Account</option>
                   <option value="office">Office Account</option>
-                  <option value="trust">Trust Account</option>
+                  <option value="balance_sheet">Balance Sheet / FD</option>
                 </select>
               </div>
               <div>
@@ -694,7 +697,9 @@ function ReceiptsTab() {
                   <td className="px-4 py-3 text-slate-500">{r.receivedDate}</td>
                   <td className="px-4 py-3 text-slate-600 capitalize">{r.paymentMethod?.replace(/_/g, " ")}</td>
                   <td className="px-4 py-3">
-                    <span className="px-2 py-0.5 rounded-full text-xs bg-slate-100 text-slate-600 capitalize">{r.accountType}</span>
+                    <span className="px-2 py-0.5 rounded-full text-xs bg-slate-100 text-slate-600">
+                      {String(r.accountType ?? "") === "balance_sheet" ? "Balance Sheet / FD" : (String(r.accountType ?? "") === "trust" ? "Client Account" : `${String(r.accountType ?? "").replace(/\b\w/g, (c: string) => c.toUpperCase())} Account`)}
+                    </span>
                   </td>
                   <td className="px-4 py-3 text-right font-semibold text-green-600">{fmt(r.amount)}</td>
                   <td className="px-4 py-3 text-slate-400 text-xs">{r.referenceNo || "—"}</td>
@@ -814,7 +819,7 @@ function PaymentVouchersTab() {
   const firmName = user?.firmName ?? "";
   const roleName = user?.userType === "firm_user" ? (user.roleName ?? "") : "";
   const roleKind =
-    roleName === "Partner"
+    roleName === "Partner" || roleName === "Founder"
       ? "partner"
       : (roleName === "Manager" || roleName === "Senior Lawyer" || roleName === "Lawyer")
         ? "lawyer"
@@ -829,6 +834,7 @@ function PaymentVouchersTab() {
   const todayLabel = new Date().toLocaleDateString("en-MY", { year: "numeric", month: "short", day: "2-digit" });
 
   const [simpleForm, setSimpleForm] = useState({
+    voucherType: "external_payment" as const,
     payeeName: "",
     beneficiaryBank: "",
     beneficiaryAccountNo: "",
@@ -850,6 +856,9 @@ function PaymentVouchersTab() {
   const [caseQueryText, setCaseQueryText] = useState("");
   const [casePickerOpen, setCasePickerOpen] = useState(false);
   const [selectedCases, setSelectedCases] = useState<Array<{ case_id: number; title: string }>>([]);
+  const [targetCaseQueryText, setTargetCaseQueryText] = useState("");
+  const [targetCasePickerOpen, setTargetCasePickerOpen] = useState(false);
+  const [targetCase, setTargetCase] = useState<{ case_id: number; title: string } | null>(null);
 
   const caseSearchQuery = useQuery({
     queryKey: ["accounting", "cases-search", "multi", caseQueryText],
@@ -860,14 +869,34 @@ function PaymentVouchersTab() {
   });
   const caseResults = Array.isArray(caseSearchQuery.data?.data) ? caseSearchQuery.data!.data! : [];
 
+  const targetCaseSearchQuery = useQuery({
+    queryKey: ["accounting", "cases-search", "target", targetCaseQueryText],
+    queryFn: ({ signal }) =>
+      apiFetchJson(`/accounting/cases/search?query=${encodeURIComponent(targetCaseQueryText)}`, { signal }) as Promise<{ data?: any[] }>,
+    retry: false,
+    enabled: targetCaseQueryText.trim().length >= 2 && targetCasePickerOpen,
+  });
+  const targetCaseResults = Array.isArray(targetCaseSearchQuery.data?.data) ? targetCaseSearchQuery.data!.data! : [];
+
   const vouchersQuery = useQuery({ queryKey: ["payment-vouchers"], queryFn: () => apiFetchJson("/payment-vouchers"), retry: false });
   const { data, isLoading } = vouchersQuery;
   const vouchers = (data ?? []) as any[];
+  const markPaidVoucher = markPaidVoucherId ? (vouchers.find((v: any) => Number(v.id) === Number(markPaidVoucherId)) ?? null) : null;
 
   const createBatchMut = useMutation({
     mutationFn: async () => {
-      if (!simpleForm.payeeName.trim()) throw new Error("Payee name is required");
       if (selectedCases.length === 0) throw new Error("Please select at least one case");
+      const voucherType = simpleForm.voucherType;
+      if ((voucherType === "internal_transfer" || voucherType === "file_to_file_transfer") && !(roleKind === "partner" || roleKind === "account")) {
+        throw new Error("Forbidden");
+      }
+      if (simpleForm.isAdvance && voucherType !== "external_payment") throw new Error("Client Advance is only applicable to Payment Voucher");
+      if (voucherType === "file_to_file_transfer") {
+        if (selectedCases.length !== 1) throw new Error("File-to-file transfer requires exactly 1 source case");
+        if (!targetCase) throw new Error("Target case is required");
+        if (Number(targetCase.case_id) === Number(selectedCases[0]!.case_id)) throw new Error("Target case must be different from source case");
+      }
+      if (voucherType !== "internal_transfer" && voucherType !== "file_to_file_transfer" && !simpleForm.payeeName.trim()) throw new Error("Payee name is required");
 
       const fundStatus: PaymentVoucherFundStatus = simpleForm.isAdvance ? "request_advance" : "client_paid";
       const parsedLineItems = lineItems
@@ -878,10 +907,15 @@ function PaymentVouchersTab() {
       if (!Number.isFinite(amount) || amount <= 0) throw new Error("Invalid total amount");
       const purpose = parsedLineItems.length > 1 ? `${parsedLineItems[0].purpose} (+${parsedLineItems.length - 1} more)` : parsedLineItems[0].purpose;
       const bodyBase = {
-        voucherType: "external_payment" as const,
-        payeeName: simpleForm.payeeName.trim(),
-        beneficiaryBank: simpleForm.beneficiaryBank.trim() ? simpleForm.beneficiaryBank.trim() : null,
-        beneficiaryAccountNo: simpleForm.beneficiaryAccountNo.trim() ? simpleForm.beneficiaryAccountNo.trim() : null,
+        voucherType,
+        isAdvance: simpleForm.isAdvance || undefined,
+        payeeName: voucherType === "internal_transfer"
+          ? "Client Account → Office Account Transfer"
+          : voucherType === "file_to_file_transfer"
+            ? "Client Account File-to-File Transfer"
+            : simpleForm.payeeName.trim(),
+        beneficiaryBank: (voucherType === "internal_transfer" || voucherType === "file_to_file_transfer") ? null : (simpleForm.beneficiaryBank.trim() ? simpleForm.beneficiaryBank.trim() : null),
+        beneficiaryAccountNo: (voucherType === "internal_transfer" || voucherType === "file_to_file_transfer") ? null : (simpleForm.beneficiaryAccountNo.trim() ? simpleForm.beneficiaryAccountNo.trim() : null),
         purpose,
         amount,
         fundStatus,
@@ -889,8 +923,11 @@ function PaymentVouchersTab() {
         lineItems: parsedLineItems,
       };
 
-      const calls = selectedCases.map((c) => {
-        const payload = { ...bodyBase, caseId: c.case_id };
+      const casesToCreate = voucherType === "file_to_file_transfer" ? [selectedCases[0]!] : selectedCases;
+      const calls = casesToCreate.map((c) => {
+        const payload = voucherType === "file_to_file_transfer"
+          ? { ...bodyBase, caseId: c.case_id, targetCaseId: targetCase!.case_id }
+          : { ...bodyBase, caseId: c.case_id };
         const parsed = CreatePaymentVoucherBody.safeParse(payload);
         if (!parsed.success) throw new Error(parsed.error.message);
         return apiFetchJson("/payment-vouchers", {
@@ -904,10 +941,12 @@ function PaymentVouchersTab() {
     onSuccess: async (rows: any[]) => {
       await qc.invalidateQueries({ queryKey: ["payment-vouchers"] });
       setShowCreate(false);
-      setSimpleForm({ payeeName: "", beneficiaryBank: "", beneficiaryAccountNo: "", isAdvance: false });
+      setSimpleForm({ voucherType: "external_payment", payeeName: "", beneficiaryBank: "", beneficiaryAccountNo: "", isAdvance: false });
       setLineItems([{ id: newLineItemId(), purpose: "", amount: "" }]);
       setCaseQueryText("");
       setSelectedCases([]);
+      setTargetCaseQueryText("");
+      setTargetCase(null);
       toast({ title: "Payment Vouchers created", description: `${rows.length} voucher(s) created` });
     },
     onError: (e) => toastError(toast, e, "Create failed"),
@@ -940,26 +979,41 @@ function PaymentVouchersTab() {
     w.document.write(`<html><head><title>Preparing voucher…</title></head><body style="font-family: Arial, sans-serif; padding:16px;">Preparing voucher…</body></html>`);
     w.document.close();
     const pv = await apiFetchJson<any>(`/payment-vouchers/${voucherId}`);
+    const isInternal = String(pv.voucherType ?? "") === "internal_transfer";
+    const isLedgerTransfer = String(pv.voucherType ?? "") === "file_to_file_transfer";
     const items = Array.isArray(pv.items) ? pv.items : [];
     const caseReferenceNo = typeof pv.caseReferenceNo === "string" ? pv.caseReferenceNo : "";
     const clientNames = typeof pv.clientNames === "string" ? pv.clientNames : "";
+    const targetCaseReferenceNo = typeof pv.targetCaseReferenceNo === "string" ? pv.targetCaseReferenceNo : "";
+    const targetClientNames = typeof pv.targetClientNames === "string" ? pv.targetClientNames : "";
+    const preparedByName = typeof pv.preparedByName === "string" ? pv.preparedByName : (typeof pv.createdByName === "string" ? pv.createdByName : "");
+    const verifiedByName = typeof pv.lawyerApprovedByName === "string" ? pv.lawyerApprovedByName : "";
+    const approvedByName = typeof pv.partnerApprovedByName === "string" ? pv.partnerApprovedByName : "";
     const rowsHtml = items
       .map((it: any) => `<tr><td style="padding:6px 8px;border-bottom:1px solid #eee;">${String(it.description ?? "")}</td><td style="padding:6px 8px;border-bottom:1px solid #eee;text-align:right;">${fmt(it.amount)}</td></tr>`)
       .join("");
     const printedAt = new Date().toLocaleString("en-MY");
+    const docTitle = isLedgerTransfer ? "LEDGER TRANSFER VOUCHER" : isInternal ? "INTERNAL PAYMENT VOUCHER" : "PAYMENT VOUCHER";
+    const docSubtitle = isLedgerTransfer
+      ? "(CLIENT ACCOUNT: FILE-TO-FILE TRANSFER)"
+      : isInternal
+        ? "(CLIENT ACCOUNT TO OFFICE ACCOUNT TRANSFER)"
+        : "";
+    const pageSize = (isInternal || isLedgerTransfer) ? "A4 portrait" : "A5 portrait";
     w.document.open();
     w.document.write(`
       <html>
         <head>
           <title>${String(pv.voucherNo ?? "Payment Voucher")}</title>
           <style>
-            @page { size: A5 portrait; margin: 10mm; }
+            @page { size: ${pageSize}; margin: 10mm; }
             body { font-family: Arial, sans-serif; margin: 0; color: #111; }
             .page { padding: 10mm; }
             .letterhead { border-bottom: 1px solid #111; padding-bottom: 8px; margin-bottom: 10px; display:flex; justify-content:space-between; gap:12px; }
             .firm { font-weight: 800; font-size: 14px; }
             .doc { text-align:right; }
             .doc .title { font-weight: 800; font-size: 14px; }
+            .doc .subtitle { font-size: 11px; font-weight: 700; margin-top: 2px; }
             .doc .meta { font-size: 11px; color: #444; margin-top: 2px; }
             h1 { font-size: 18px; margin: 0 0 12px; }
             .meta { font-size: 12px; color: #444; margin-bottom: 12px; }
@@ -974,16 +1028,22 @@ function PaymentVouchersTab() {
             <div class="letterhead">
               <div class="firm">${String(firmName || "Firm")}</div>
               <div class="doc">
-                <div class="title">Payment Voucher</div>
+                <div class="title">${docTitle}</div>
+                ${docSubtitle ? `<div class="subtitle">${docSubtitle}</div>` : ""}
                 <div class="meta">Printed: ${printedAt}</div>
               </div>
             </div>
 
             <div class="meta">
               <div><b>Voucher No:</b> ${String(pv.voucherNo ?? "")}</div>
-              <div><b>Payee:</b> ${String(pv.payeeName ?? "")}</div>
-              <div><b>File Reference:</b> ${caseReferenceNo ? String(caseReferenceNo) : "—"}</div>
-              <div><b>Client Name:</b> ${clientNames ? String(clientNames) : "—"}</div>
+              ${isLedgerTransfer
+                ? `<div><b>Transfer From:</b> ${caseReferenceNo ? String(caseReferenceNo) : "—"}${clientNames ? ` - ${String(clientNames)}` : ""}</div>
+                   <div><b>Transfer To:</b> ${targetCaseReferenceNo ? String(targetCaseReferenceNo) : "—"}${targetClientNames ? ` - ${String(targetClientNames)}` : ""}</div>`
+                : isInternal
+                  ? `<div><b>Source A/C:</b> Client Account</div><div><b>Destination A/C:</b> Office Account</div>`
+                  : `<div><b>Payee:</b> ${String(pv.payeeName ?? "")}</div>`}
+              ${isLedgerTransfer ? "" : `<div><b>File Reference:</b> ${caseReferenceNo ? String(caseReferenceNo) : "—"}</div>`}
+              ${isLedgerTransfer ? "" : `<div><b>Client Name:</b> ${clientNames ? String(clientNames) : "—"}</div>`}
               <div><b>Purpose:</b> ${String(pv.purpose ?? "")}</div>
               <div><b>Fund Status:</b> ${fundStatusLabel(String(pv.fundStatus ?? ""))}</div>
               <div><b>Total:</b> ${fmt(pv.amount)}</div>
@@ -996,9 +1056,11 @@ function PaymentVouchersTab() {
               <tbody>${rowsHtml}</tbody>
             </table>
             <div class="sig">
-              <div>Lawyer Approval</div>
-              <div>Partner Approval</div>
-              <div>Account / Paid</div>
+              ${isLedgerTransfer
+                ? `<div>Prepared By: ${preparedByName ? String(preparedByName) : ""}</div><div>Partner Approved By: ${approvedByName ? String(approvedByName) : ""}</div><div>Account / Paid</div>`
+                : isInternal
+                  ? `<div>Prepared By: ${preparedByName ? String(preparedByName) : ""}</div><div>Verified By: ${verifiedByName ? String(verifiedByName) : ""}</div><div>Approved For Transfer By: ${approvedByName ? String(approvedByName) : ""}</div>`
+                  : `<div>Lawyer Approval</div><div>Partner Approval</div><div>Account / Paid</div>`}
             </div>
             <button onclick="window.print()" style="margin-top:16px;">Print</button>
           </div>
@@ -1025,9 +1087,11 @@ function PaymentVouchersTab() {
 
   async function submitMarkPaid(): Promise<void> {
     if (!markPaidVoucherId) return;
+    const vt = markPaidVoucher ? String(markPaidVoucher.voucherType ?? "") : "";
+    const isAdvance = Boolean((markPaidVoucher as any)?.isAdvance);
     const body = {
       action: "mark_paid",
-      accountType: markPaidForm.accountType,
+      accountType: (vt === "internal_transfer" || vt === "file_to_file_transfer") ? "client" : isAdvance ? "office" : markPaidForm.accountType,
       paymentMethod: markPaidForm.paymentMethod,
       bankChequeRefNo: markPaidForm.bankChequeRefNo,
     };
@@ -1109,7 +1173,7 @@ function PaymentVouchersTab() {
                             onClick={() => {
                               if (!Number.isFinite(id) || id <= 0) return;
                               if (already) return;
-                              setSelectedCases((xs) => [...xs, { case_id: id, title }]);
+                              setSelectedCases((xs) => simpleForm.voucherType === "file_to_file_transfer" ? [{ case_id: id, title }] : [...xs, { case_id: id, title }]);
                               setCaseQueryText("");
                             }}
                           >
@@ -1123,31 +1187,140 @@ function PaymentVouchersTab() {
                 </div>
 
                 <div className="space-y-1.5">
+                  <label className="text-sm font-medium text-slate-700 block">Voucher Type</label>
+                  <select
+                    className="w-full border border-slate-200 rounded-md px-3 py-2 text-sm bg-white"
+                    value={simpleForm.voucherType}
+                    onChange={(e) => {
+                      const next = e.target.value === "internal_transfer"
+                        ? "internal_transfer"
+                        : e.target.value === "file_to_file_transfer"
+                          ? "file_to_file_transfer"
+                          : "external_payment";
+                      setSimpleForm((f) => ({
+                        ...f,
+                        voucherType: next,
+                        payeeName: next === "internal_transfer" ? "Client Account → Office Account Transfer" : f.payeeName,
+                        beneficiaryBank: (next === "internal_transfer" || next === "file_to_file_transfer") ? "" : f.beneficiaryBank,
+                        beneficiaryAccountNo: (next === "internal_transfer" || next === "file_to_file_transfer") ? "" : f.beneficiaryAccountNo,
+                        isAdvance: (next === "internal_transfer" || next === "file_to_file_transfer") ? false : f.isAdvance,
+                      }));
+                      if (next !== "file_to_file_transfer") {
+                        setTargetCase(null);
+                        setTargetCaseQueryText("");
+                      }
+                    }}
+                  >
+                    <option value="external_payment">Payment Voucher</option>
+                    {(roleKind === "partner" || roleKind === "account") ? (
+                      <option value="internal_transfer">Internal Payment Voucher</option>
+                    ) : null}
+                    {(roleKind === "partner" || roleKind === "account") ? (
+                      <option value="file_to_file_transfer">File-to-File Transfer</option>
+                    ) : null}
+                  </select>
+                </div>
+
+                <div className="space-y-1.5">
                   <label className="text-sm font-medium text-slate-700 block">Pay To (Payee Name)</label>
                   <Input
                     placeholder="Recipient / payee name"
                     value={simpleForm.payeeName}
                     onChange={(e) => setSimpleForm((f) => ({ ...f, payeeName: e.target.value }))}
+                    disabled={simpleForm.voucherType === "internal_transfer" || simpleForm.voucherType === "file_to_file_transfer"}
                   />
                 </div>
 
-                <div className="space-y-1.5">
-                  <label className="text-sm font-medium text-slate-700 block">Beneficiary Bank</label>
-                  <Input
-                    placeholder="e.g. Maybank Islamic Berhad"
-                    value={simpleForm.beneficiaryBank}
-                    onChange={(e) => setSimpleForm((f) => ({ ...f, beneficiaryBank: e.target.value }))}
-                  />
-                </div>
+                {simpleForm.voucherType === "internal_transfer" ? (
+                  <div className="space-y-1.5 md:col-span-1">
+                    <label className="text-sm font-medium text-slate-700 block">Transfer</label>
+                    <div className="h-10 flex items-center px-3 rounded-md border border-slate-200 bg-white text-sm text-slate-700">
+                      Client Account → Office Account
+                    </div>
+                  </div>
+                ) : simpleForm.voucherType === "file_to_file_transfer" ? (
+                  <div className="space-y-2 md:col-span-2">
+                    <div className="text-sm font-medium text-slate-700">Transfer</div>
+                    <div className="text-sm text-slate-700">Client Account: File-to-File Transfer</div>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                      <div className="space-y-1">
+                        <div className="text-xs text-slate-500">Source Case</div>
+                        <div className="h-10 flex items-center px-3 rounded-md border border-slate-200 bg-white text-sm text-slate-700">
+                          {selectedCases.length === 1 ? selectedCases[0]!.title : "Select 1 source case above"}
+                        </div>
+                      </div>
+                      <div className="space-y-1">
+                        <div className="text-xs text-slate-500">Target Case</div>
+                        <div className="relative">
+                          <Input
+                            placeholder="Search target case..."
+                            value={targetCase ? targetCase.title : targetCaseQueryText}
+                            onChange={(e) => {
+                              setTargetCase(null);
+                              setTargetCaseQueryText(e.target.value);
+                              setTargetCasePickerOpen(true);
+                            }}
+                            onFocus={() => setTargetCasePickerOpen(true)}
+                          />
+                          {targetCasePickerOpen && targetCaseQueryText.trim().length >= 2 ? (
+                            <div className="absolute z-30 mt-1 w-full rounded-md border border-slate-200 bg-white shadow-sm max-h-56 overflow-auto">
+                              {targetCaseResults.map((c: any) => {
+                                const id = Number(c.case_id);
+                                const title = String(c.title ?? "");
+                                return (
+                                  <button
+                                    key={String(id)}
+                                    type="button"
+                                    className="w-full text-left px-3 py-2 text-sm hover:bg-slate-50"
+                                    onMouseDown={(e) => e.preventDefault()}
+                                    onClick={() => {
+                                      if (!Number.isFinite(id) || id <= 0) return;
+                                      setTargetCase({ case_id: id, title });
+                                      setTargetCaseQueryText("");
+                                      setTargetCasePickerOpen(false);
+                                    }}
+                                  >
+                                    {title}
+                                  </button>
+                                );
+                              })}
+                            </div>
+                          ) : null}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                ) : (
+                  <>
+                    <div className="space-y-1.5">
+                      <label className="text-sm font-medium text-slate-700 block">Beneficiary Bank</label>
+                      <Input
+                        placeholder="e.g. Maybank Islamic Berhad"
+                        value={simpleForm.beneficiaryBank}
+                        onChange={(e) => setSimpleForm((f) => ({ ...f, beneficiaryBank: e.target.value }))}
+                      />
+                    </div>
 
-                <div className="space-y-1.5">
-                  <label className="text-sm font-medium text-slate-700 block">Beneficiary Account No.</label>
-                  <Input
-                    placeholder="Bank account number"
-                    value={simpleForm.beneficiaryAccountNo}
-                    onChange={(e) => setSimpleForm((f) => ({ ...f, beneficiaryAccountNo: e.target.value }))}
-                  />
-                </div>
+                    <div className="space-y-1.5">
+                      <label className="text-sm font-medium text-slate-700 block">Beneficiary Account No.</label>
+                      <Input
+                        placeholder="Bank account number"
+                        value={simpleForm.beneficiaryAccountNo}
+                        onChange={(e) => setSimpleForm((f) => ({ ...f, beneficiaryAccountNo: e.target.value }))}
+                      />
+                    </div>
+
+                    <div className="flex items-center gap-2 md:col-span-2">
+                      <Checkbox
+                        checked={simpleForm.isAdvance}
+                        onCheckedChange={(v) => setSimpleForm((f) => ({ ...f, isAdvance: !!v }))}
+                      />
+                      <div className="text-sm text-slate-700">
+                        Client Advance (代墊款) — requires Partner approval
+                      </div>
+                    </div>
+                  </>
+                )}
 
                 <div className="space-y-1.5 md:col-span-2">
                   <label className="text-sm font-medium text-slate-700 block">Line Items</label>
@@ -1305,6 +1478,14 @@ function PaymentVouchersTab() {
                     label: "Mark as Paid",
                     onClick: () => {
                       setMarkPaidVoucherId(pv.id);
+                      setMarkPaidForm((f) => ({
+                        ...f,
+                        accountType: (String(pv.voucherType ?? "") === "internal_transfer" || String(pv.voucherType ?? "") === "file_to_file_transfer")
+                          ? "client"
+                          : pv.isAdvance
+                            ? "office"
+                            : f.accountType,
+                      }));
                       setMarkPaidOpen(true);
                     },
                     show: pv.status === "pending_account" && (roleKind === "partner" || roleKind === "account") && pv.approvalStatus !== "pending_approval" && pv.approvalStatus !== "rejected",
@@ -1357,17 +1538,36 @@ function PaymentVouchersTab() {
             <DialogTitle>Mark as Paid</DialogTitle>
           </DialogHeader>
           <div className="space-y-3">
-            <div>
-              <label className="text-sm font-medium text-slate-700 block mb-1">Deduct From Account</label>
-              <select
-                className="w-full border border-slate-200 rounded-md px-3 py-2 text-sm bg-white"
-                value={markPaidForm.accountType}
-                onChange={(e) => setMarkPaidForm((f) => ({ ...f, accountType: e.target.value }))}
-              >
-                <option value="office">Office Account</option>
-                <option value="client">Client Account</option>
-              </select>
-            </div>
+            {markPaidVoucher && String(markPaidVoucher.voucherType ?? "") === "internal_transfer" ? (
+              <div className="space-y-1">
+                <div className="text-sm font-medium text-slate-700">Transfer</div>
+                <div className="text-sm text-slate-700">Source A/C: Client Account</div>
+                <div className="text-sm text-slate-700">Destination A/C: Office Account</div>
+              </div>
+            ) : markPaidVoucher && String(markPaidVoucher.voucherType ?? "") === "file_to_file_transfer" ? (
+              <div className="space-y-1">
+                <div className="text-sm font-medium text-slate-700">Ledger Transfer</div>
+                <div className="text-sm text-slate-700">Account: Client Account</div>
+              </div>
+            ) : markPaidVoucher && Boolean((markPaidVoucher as any).isAdvance) ? (
+              <div className="space-y-1">
+                <div className="text-sm font-medium text-slate-700">Client Advance</div>
+                <div className="text-sm text-slate-700">Deduct From: Office Account</div>
+              </div>
+            ) : (
+              <div>
+                <label className="text-sm font-medium text-slate-700 block mb-1">Deduct From Account</label>
+                <select
+                  className="w-full border border-slate-200 rounded-md px-3 py-2 text-sm bg-white"
+                  value={markPaidForm.accountType}
+                  onChange={(e) => setMarkPaidForm((f) => ({ ...f, accountType: e.target.value }))}
+                >
+                  <option value="office">Office Account</option>
+                  <option value="client">Client Account</option>
+                  <option value="balance_sheet">Balance Sheet / FD</option>
+                </select>
+              </div>
+            )}
             <div>
               <label className="text-sm font-medium text-slate-700 block mb-1">Payment Method</label>
               <select
@@ -1413,18 +1613,19 @@ function LedgerTab() {
   const sumQuery = useQuery({ queryKey: ["ledger-summary"], queryFn: () => apiFetchJson("/ledger/summary"), retry: false });
   const entries = ((ledgerQuery.data ?? []) as any[]);
   const summary = ((sumQuery.data ?? []) as any[]);
+  const acctLabel = (acct: string) => acct === "balance_sheet" ? "Balance Sheet / FD" : acct === "client" ? "Client Account" : "Office Account";
 
   return (
     <div className="space-y-4">
       <div className="grid grid-cols-3 gap-4">
-        {["client", "office", "trust"].map((acct) => {
+        {["client", "office", "balance_sheet"].map((acct) => {
           const s = summary.find((r: any) => r.accountType === acct) ?? { totalDebit: 0, totalCredit: 0, balance: 0 };
           return (
             <Card key={acct}
               className={cn("cursor-pointer transition-all hover:shadow-md", accountType === acct && "ring-2 ring-amber-400")}
               onClick={() => setAccountType(accountType === acct ? "" : acct)}>
               <CardContent className="pt-4 pb-4">
-                <div className="text-xs text-slate-500 capitalize mb-1">{acct} Account</div>
+                <div className="text-xs text-slate-500 mb-1">{acctLabel(acct)}</div>
                 <div className={cn("text-xl font-bold", Number(s.balance) >= 0 ? "text-green-600" : "text-red-500")}>
                   {fmt(s.balance)}
                 </div>
@@ -1447,7 +1648,7 @@ function LedgerTab() {
       {accountType && (
         <div className="text-sm text-slate-500 flex items-center gap-2">
           <ArrowUpDown className="w-3.5 h-3.5" />
-          Showing <span className="font-medium capitalize">{accountType}</span> account
+          Showing <span className="font-medium">{acctLabel(accountType)}</span>
           <button className="text-amber-600 underline ml-1" onClick={() => setAccountType("")}>clear filter</button>
         </div>
       )}
@@ -1479,7 +1680,9 @@ function LedgerTab() {
                   <td className="px-4 py-2.5 text-slate-500 text-xs font-mono">{e.entryDate}</td>
                   <td className="px-4 py-2.5 capitalize text-slate-600 text-xs">{e.entryType?.replace(/_/g, " ")}</td>
                   <td className="px-4 py-2.5">
-                    <span className="px-1.5 py-0.5 rounded bg-slate-100 text-slate-600 text-xs capitalize">{e.accountType}</span>
+                    <span className="px-1.5 py-0.5 rounded bg-slate-100 text-slate-600 text-xs">
+                      {acctLabel(String(e.accountType ?? "") === "trust" ? "client" : String(e.accountType ?? ""))}
+                    </span>
                   </td>
                   <td className="px-4 py-2.5 text-slate-700 max-w-xs truncate text-xs">{e.description}</td>
                   <td className="px-4 py-2.5 text-right text-green-600 font-mono text-xs">

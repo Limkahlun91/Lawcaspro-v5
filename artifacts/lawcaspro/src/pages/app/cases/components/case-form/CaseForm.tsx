@@ -10,9 +10,27 @@ import { Plus, Trash2 } from "lucide-react";
 import { useListDevelopers, useListProjects } from "@workspace/api-client-react";
 import { AddressLinesFields } from "./AddressLinesFields";
 import { PricingBreakdown } from "./PricingBreakdown";
-import { emptyAddressLines, joinAddressLines } from "./address";
+import { composeMalaysiaAddress, emptyAddressLines, joinAddressLines, normalizeMalaysiaPostcodeInput } from "./address";
 import type { BorrowerForm, CaseFormValues, LoanPartyType, PurchaserForm, PurchaseMode, TitleCategory } from "./types";
 import { toRinggitMalaysiaWords } from "@/lib/ringgit-words";
+import { getStateFromPostcode } from "@/utils/my-address-helper";
+
+const MALAYSIA_STATE_OPTIONS = [
+  "Kuala Lumpur",
+  "Selangor",
+  "Johor",
+  "Penang",
+  "Perak",
+  "Pahang",
+  "Kelantan",
+  "Terengganu",
+  "Kedah",
+  "Perlis",
+  "Negeri Sembilan",
+  "Melaka",
+  "Sabah",
+  "Sarawak",
+] as const;
 
 function newPurchaser(): PurchaserForm {
   return {
@@ -22,6 +40,9 @@ function newPurchaser(): PurchaserForm {
     icOrCompanyNo: "",
     tel: "",
     email: "",
+    postcode: "",
+    city: "",
+    state: "",
     addressLines: emptyAddressLines(),
     address: "",
   };
@@ -34,6 +55,9 @@ function newBorrower(): BorrowerForm {
     ic: "",
     hp: "",
     email: "",
+    postcode: "",
+    city: "",
+    state: "",
     addressLines: emptyAddressLines(),
     address: "",
   };
@@ -87,6 +111,7 @@ export function createDefaultCaseFormValues(): CaseFormValues {
       bandarMukim: "",
       daerah: "",
       negeri: "",
+      postcode: "",
       propertyAddressLines: emptyAddressLines(),
       propertyAddress: "",
     },
@@ -110,6 +135,8 @@ export function CaseForm(props: {
   const set = props.onChange;
   const [activeTab, setActiveTab] = useState<"spa" | "loan" | "property">("spa");
   const [developerManuallyChanged, setDeveloperManuallyChanged] = useState(false);
+  const [refOverride, setRefOverride] = useState(false);
+  const [postcodeWarnings, setPostcodeWarnings] = useState<Record<string, string>>({});
 
   const { data: projectsRes } = useListProjects({ limit: 200 }, { query: { staleTime: 5 * 60 * 1000 } });
   const projects = projectsRes?.data || [];
@@ -169,6 +196,9 @@ export function CaseForm(props: {
         ic: p.icOrCompanyNo,
         hp: p.tel,
         email: p.email,
+        postcode: p.postcode,
+        city: p.city,
+        state: p.state,
         addressLines: p.addressLines,
         address: p.address,
       })),
@@ -186,12 +216,13 @@ export function CaseForm(props: {
     return toRinggitMalaysiaWords(totalLoan);
   }, [totalLoan]);
 
-  const canSubmit = Boolean(v.referenceNo.trim() && v.projectId && v.developerId && v.titleCategory);
+  const canSubmit = Boolean(v.projectId && v.developerId && v.titleCategory);
 
   const onComposePurchaserAddress = (id: string) => {
     const nextPurchasers = v.purchasers.map((p) => {
       if (p.id !== id) return p;
-      return { ...p, address: joinAddressLines(p.addressLines) };
+      const composed = composeMalaysiaAddress({ lines: p.addressLines, postcode: p.postcode, city: p.city, state: p.state });
+      return { ...p, address: composed.address, state: composed.derivedState ?? p.state };
     });
     set({ ...v, purchasers: nextPurchasers });
   };
@@ -199,7 +230,8 @@ export function CaseForm(props: {
   const onComposeBorrowerAddress = (id: string) => {
     const nextBorrowers = v.borrowers.map((b) => {
       if (b.id !== id) return b;
-      return { ...b, address: joinAddressLines(b.addressLines) };
+      const composed = composeMalaysiaAddress({ lines: b.addressLines, postcode: b.postcode, city: b.city, state: b.state });
+      return { ...b, address: composed.address, state: composed.derivedState ?? b.state };
     });
     set({ ...v, borrowers: nextBorrowers });
   };
@@ -209,7 +241,13 @@ export function CaseForm(props: {
   };
 
   const onComposePropertyAddress = () => {
-    set({ ...v, property: { ...v.property, propertyAddress: joinAddressLines(v.property.propertyAddressLines) } });
+    const composed = composeMalaysiaAddress({
+      lines: v.property.propertyAddressLines,
+      postcode: v.property.postcode,
+      city: v.property.bandarMukim,
+      state: v.property.negeri,
+    });
+    set({ ...v, property: { ...v.property, propertyAddress: composed.address, negeri: composed.derivedState ?? v.property.negeri } });
   };
 
   return (
@@ -217,7 +255,26 @@ export function CaseForm(props: {
       <div className="grid grid-cols-1 md:grid-cols-12 gap-3">
         <div className="md:col-span-4 space-y-1.5">
           <Label>Our File Ref *</Label>
-          <Input value={v.referenceNo} onChange={(e) => set({ ...v, referenceNo: e.target.value })} disabled={submitting} />
+          <div className="flex items-center gap-2">
+            <Input
+              value={refOverride ? v.referenceNo : ""}
+              onChange={(e) => set({ ...v, referenceNo: e.target.value })}
+              disabled={submitting || !refOverride}
+              placeholder={refOverride ? "" : "Auto-generated"}
+            />
+            <label className="flex items-center gap-2 text-xs text-slate-600 whitespace-nowrap">
+              <Checkbox
+                checked={refOverride}
+                onCheckedChange={(checked) => {
+                  const next = Boolean(checked);
+                  setRefOverride(next);
+                  if (!next) set({ ...v, referenceNo: "" });
+                }}
+                disabled={submitting}
+              />
+              Override
+            </label>
+          </div>
         </div>
         <div className="md:col-span-4 space-y-1.5">
           <Label>Project *</Label>
@@ -353,7 +410,90 @@ export function CaseForm(props: {
                   onChange={(next) => set({ ...v, purchasers: v.purchasers.map((x) => x.id === p.id ? { ...x, addressLines: next } : x) })}
                   onBlurCompose={() => onComposePurchaserAddress(p.id)}
                   disabled={submitting}
+                  maxLines={2}
                 />
+
+                <div className="grid grid-cols-1 md:grid-cols-12 gap-3">
+                  <div className="md:col-span-4 space-y-1.5">
+                    <Label>City</Label>
+                    <Input
+                      value={p.city}
+                      onChange={(e) => {
+                        const nextCity = e.target.value;
+                        const nextPurchasers = v.purchasers.map((x) => {
+                          if (x.id !== p.id) return x;
+                          const composed = composeMalaysiaAddress({ lines: x.addressLines, postcode: x.postcode, city: nextCity, state: x.state });
+                          return { ...x, city: nextCity, address: composed.address, state: composed.derivedState ?? x.state };
+                        });
+                        set({ ...v, purchasers: nextPurchasers });
+                      }}
+                      disabled={submitting}
+                      placeholder="e.g. Muar"
+                    />
+                  </div>
+                  <div className="md:col-span-4 space-y-1.5">
+                    <Label>Postcode</Label>
+                    <Input
+                      value={p.postcode}
+                      onChange={(e) => {
+                        const nextPostcode = normalizeMalaysiaPostcodeInput(e.target.value);
+                        const derived = nextPostcode.length === 5 ? getStateFromPostcode(nextPostcode) : null;
+                        const key = `purchaser:${p.id}`;
+                        setPostcodeWarnings((prev) => {
+                          const next = { ...prev };
+                          if (derived && p.state.trim() && p.state.trim() !== derived) next[key] = `Warning: Postcode ${nextPostcode} belongs to ${derived}`;
+                          else delete next[key];
+                          return next;
+                        });
+                        const nextPurchasers = v.purchasers.map((x) => {
+                          if (x.id !== p.id) return x;
+                          const nextState = derived ?? x.state;
+                          const composed = composeMalaysiaAddress({ lines: x.addressLines, postcode: nextPostcode, city: x.city, state: nextState });
+                          return { ...x, postcode: nextPostcode, state: derived ?? x.state, address: composed.address };
+                        });
+                        set({ ...v, purchasers: nextPurchasers });
+                      }}
+                      disabled={submitting}
+                      inputMode="numeric"
+                      placeholder="e.g. 84000"
+                    />
+                  </div>
+                  <div className="md:col-span-4 space-y-1.5">
+                    <Label>State</Label>
+                    <Select
+                      value={p.state}
+                      onValueChange={(nextState) => {
+                        const key = `purchaser:${p.id}`;
+                        const derived = p.postcode.length === 5 ? getStateFromPostcode(p.postcode) : null;
+                        setPostcodeWarnings((prev) => {
+                          const next = { ...prev };
+                          if (derived && nextState.trim() && nextState.trim() !== derived) next[key] = `Warning: Postcode ${p.postcode} belongs to ${derived}`;
+                          else delete next[key];
+                          return next;
+                        });
+                        const nextPurchasers = v.purchasers.map((x) => {
+                          if (x.id !== p.id) return x;
+                          const composed = composeMalaysiaAddress({ lines: x.addressLines, postcode: x.postcode, city: x.city, state: nextState });
+                          return { ...x, state: nextState, address: composed.address };
+                        });
+                        set({ ...v, purchasers: nextPurchasers });
+                      }}
+                      disabled={submitting || Boolean(p.postcode.length === 5 && getStateFromPostcode(p.postcode))}
+                    >
+                      <SelectTrigger>
+                        <SelectValue placeholder="Select state" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {MALAYSIA_STATE_OPTIONS.map((s) => (
+                          <SelectItem key={s} value={s}>{s}</SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                    {postcodeWarnings[`purchaser:${p.id}`] ? (
+                      <div className="text-xs text-amber-700 mt-1">{postcodeWarnings[`purchaser:${p.id}`]}</div>
+                    ) : null}
+                  </div>
+                </div>
               </div>
             ))}
           </div>
@@ -388,6 +528,9 @@ export function CaseForm(props: {
                         ic: p.icOrCompanyNo,
                         hp: p.tel,
                         email: p.email,
+                        postcode: p.postcode,
+                        city: p.city,
+                        state: p.state,
                         addressLines: p.addressLines,
                         address: p.address,
                       }));
@@ -454,7 +597,90 @@ export function CaseForm(props: {
                       onChange={(next) => set({ ...v, borrowers: v.borrowers.map((x) => x.id === b.id ? { ...x, addressLines: next } : x) })}
                       onBlurCompose={() => onComposeBorrowerAddress(b.id)}
                       disabled={submitting}
+                      maxLines={2}
                     />
+
+                    <div className="grid grid-cols-1 md:grid-cols-12 gap-3">
+                      <div className="md:col-span-4 space-y-1.5">
+                        <Label>City</Label>
+                        <Input
+                          value={b.city}
+                          onChange={(e) => {
+                            const nextCity = e.target.value;
+                            const nextBorrowers = v.borrowers.map((x) => {
+                              if (x.id !== b.id) return x;
+                              const composed = composeMalaysiaAddress({ lines: x.addressLines, postcode: x.postcode, city: nextCity, state: x.state });
+                              return { ...x, city: nextCity, address: composed.address, state: composed.derivedState ?? x.state };
+                            });
+                            set({ ...v, borrowers: nextBorrowers });
+                          }}
+                          disabled={submitting}
+                          placeholder="e.g. Muar"
+                        />
+                      </div>
+                      <div className="md:col-span-4 space-y-1.5">
+                        <Label>Postcode</Label>
+                        <Input
+                          value={b.postcode}
+                          onChange={(e) => {
+                            const nextPostcode = normalizeMalaysiaPostcodeInput(e.target.value);
+                            const derived = nextPostcode.length === 5 ? getStateFromPostcode(nextPostcode) : null;
+                            const key = `borrower:${b.id}`;
+                            setPostcodeWarnings((prev) => {
+                              const next = { ...prev };
+                              if (derived && b.state.trim() && b.state.trim() !== derived) next[key] = `Warning: Postcode ${nextPostcode} belongs to ${derived}`;
+                              else delete next[key];
+                              return next;
+                            });
+                            const nextBorrowers = v.borrowers.map((x) => {
+                              if (x.id !== b.id) return x;
+                              const nextState = derived ?? x.state;
+                              const composed = composeMalaysiaAddress({ lines: x.addressLines, postcode: nextPostcode, city: x.city, state: nextState });
+                              return { ...x, postcode: nextPostcode, state: derived ?? x.state, address: composed.address };
+                            });
+                            set({ ...v, borrowers: nextBorrowers });
+                          }}
+                          disabled={submitting}
+                          inputMode="numeric"
+                          placeholder="e.g. 84000"
+                        />
+                      </div>
+                      <div className="md:col-span-4 space-y-1.5">
+                        <Label>State</Label>
+                        <Select
+                          value={b.state}
+                          onValueChange={(nextState) => {
+                            const key = `borrower:${b.id}`;
+                            const derived = b.postcode.length === 5 ? getStateFromPostcode(b.postcode) : null;
+                            setPostcodeWarnings((prev) => {
+                              const next = { ...prev };
+                              if (derived && nextState.trim() && nextState.trim() !== derived) next[key] = `Warning: Postcode ${b.postcode} belongs to ${derived}`;
+                              else delete next[key];
+                              return next;
+                            });
+                            const nextBorrowers = v.borrowers.map((x) => {
+                              if (x.id !== b.id) return x;
+                              const composed = composeMalaysiaAddress({ lines: x.addressLines, postcode: x.postcode, city: x.city, state: nextState });
+                              return { ...x, state: nextState, address: composed.address };
+                            });
+                            set({ ...v, borrowers: nextBorrowers });
+                          }}
+                          disabled={submitting || Boolean(b.postcode.length === 5 && getStateFromPostcode(b.postcode))}
+                        >
+                          <SelectTrigger>
+                            <SelectValue placeholder="Select state" />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {MALAYSIA_STATE_OPTIONS.map((s) => (
+                              <SelectItem key={s} value={s}>{s}</SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                        {postcodeWarnings[`borrower:${b.id}`] ? (
+                          <div className="text-xs text-amber-700 mt-1">{postcodeWarnings[`borrower:${b.id}`]}</div>
+                        ) : null}
+                      </div>
+                    </div>
                   </div>
                 ))}
               </div>
@@ -532,12 +758,78 @@ export function CaseForm(props: {
               <Input value={v.property.bandarMukim} onChange={(e) => set({ ...v, property: { ...v.property, bandarMukim: e.target.value } })} disabled={submitting} />
             </div>
             <div className="md:col-span-4 space-y-1.5">
+              <Label>Postcode</Label>
+              <Input
+                value={v.property.postcode}
+                onChange={(e) => {
+                  const nextPostcode = normalizeMalaysiaPostcodeInput(e.target.value);
+                  const derived = nextPostcode.length === 5 ? getStateFromPostcode(nextPostcode) : null;
+                  setPostcodeWarnings((prev) => {
+                    const next = { ...prev };
+                    if (derived && v.property.negeri.trim() && v.property.negeri.trim() !== derived) next["property"] = `Warning: Postcode ${nextPostcode} belongs to ${derived}`;
+                    else delete next["property"];
+                    return next;
+                  });
+                  const nextNegeri = derived ?? v.property.negeri;
+                  const composed = composeMalaysiaAddress({
+                    lines: v.property.propertyAddressLines,
+                    postcode: nextPostcode,
+                    city: v.property.bandarMukim,
+                    state: nextNegeri,
+                  });
+                  set({
+                    ...v,
+                    property: {
+                      ...v.property,
+                      postcode: nextPostcode,
+                      negeri: derived ?? v.property.negeri,
+                      propertyAddress: composed.address,
+                    },
+                  });
+                }}
+                disabled={submitting}
+                inputMode="numeric"
+                placeholder="e.g. 52100"
+              />
+            </div>
+            <div className="md:col-span-4 space-y-1.5">
               <Label>Daerah</Label>
               <Input value={v.property.daerah} onChange={(e) => set({ ...v, property: { ...v.property, daerah: e.target.value } })} disabled={submitting} />
             </div>
             <div className="md:col-span-4 space-y-1.5">
               <Label>Negeri</Label>
-              <Input value={v.property.negeri} onChange={(e) => set({ ...v, property: { ...v.property, negeri: e.target.value } })} disabled={submitting} />
+              <Select
+                value={v.property.negeri}
+                onValueChange={(nextState) => {
+                  const derived = v.property.postcode.length === 5 ? getStateFromPostcode(v.property.postcode) : null;
+                  setPostcodeWarnings((prev) => {
+                    const next = { ...prev };
+                    if (derived && nextState.trim() && nextState.trim() !== derived) next["property"] = `Warning: Postcode ${v.property.postcode} belongs to ${derived}`;
+                    else delete next["property"];
+                    return next;
+                  });
+                  const composed = composeMalaysiaAddress({
+                    lines: v.property.propertyAddressLines,
+                    postcode: v.property.postcode,
+                    city: v.property.bandarMukim,
+                    state: nextState,
+                  });
+                  set({ ...v, property: { ...v.property, negeri: nextState, propertyAddress: composed.address } });
+                }}
+                disabled={submitting || Boolean(v.property.postcode.length === 5 && getStateFromPostcode(v.property.postcode))}
+              >
+                <SelectTrigger>
+                  <SelectValue placeholder="Select state" />
+                </SelectTrigger>
+                <SelectContent>
+                  {MALAYSIA_STATE_OPTIONS.map((s) => (
+                    <SelectItem key={s} value={s}>{s}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              {postcodeWarnings["property"] ? (
+                <div className="text-xs text-amber-700 mt-1">{postcodeWarnings["property"]}</div>
+              ) : null}
             </div>
           </div>
 

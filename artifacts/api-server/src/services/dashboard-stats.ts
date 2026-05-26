@@ -44,6 +44,7 @@ export async function computeDashboardStats(
   const hasWorkflowSteps = await tableExists(r, "public.case_workflow_steps");
   const hasBillingEntries = await tableExists(r, "public.case_billing_entries");
   const hasCommunications = await tableExists(r, "public.case_communications");
+  const hasCaseLedgers = await tableExists(r, "public.case_ledgers");
 
   const assignedToUserId = opts?.assignedToUserId;
   const assignedFilter = assignedToUserId ? { assignedToUserId: String(assignedToUserId) } : {};
@@ -172,6 +173,65 @@ export async function computeDashboardStats(
         FROM case_billing_entries WHERE firm_id = ${firmId}
       `))[0] ?? {}
     : {};
+
+  const outstandingAdvances = hasCaseLedgers
+    ? (await (async () => {
+        const [totals] = await queryRows(r, sql`
+          SELECT
+            COUNT(*) as case_count,
+            COALESCE(SUM(outstanding_amount), 0) as total_amount
+          FROM (
+            SELECT
+              cl.case_id,
+              (
+                COALESCE(SUM(CASE WHEN cl.entry_type = 'advance_paid' THEN cl.amount ELSE 0 END), 0)
+                - COALESCE(SUM(CASE WHEN cl.entry_type = 'advance_recovered' THEN cl.amount ELSE 0 END), 0)
+              ) as outstanding_amount
+            FROM case_ledgers cl
+            WHERE cl.firm_id = ${firmId}
+            GROUP BY cl.case_id
+            HAVING (
+              COALESCE(SUM(CASE WHEN cl.entry_type = 'advance_paid' THEN cl.amount ELSE 0 END), 0)
+              - COALESCE(SUM(CASE WHEN cl.entry_type = 'advance_recovered' THEN cl.amount ELSE 0 END), 0)
+            ) > 0
+          ) t
+        `);
+        const rows = await queryRows(r, sql`
+          SELECT
+            cl.case_id as case_id,
+            c.reference_no as reference_no,
+            COALESCE((
+              SELECT string_agg(DISTINCT cc.name, ', ')
+              FROM case_purchasers cp
+              JOIN clients cc ON cc.id = cp.client_id
+              WHERE cp.case_id = c.id
+            ), '') as client_names,
+            (
+              COALESCE(SUM(CASE WHEN cl.entry_type = 'advance_paid' THEN cl.amount ELSE 0 END), 0)
+              - COALESCE(SUM(CASE WHEN cl.entry_type = 'advance_recovered' THEN cl.amount ELSE 0 END), 0)
+            ) as outstanding_amount
+          FROM case_ledgers cl
+          JOIN cases c ON c.id = cl.case_id AND c.firm_id = cl.firm_id
+          WHERE cl.firm_id = ${firmId}
+          GROUP BY cl.case_id, c.reference_no
+          HAVING (
+            COALESCE(SUM(CASE WHEN cl.entry_type = 'advance_paid' THEN cl.amount ELSE 0 END), 0)
+            - COALESCE(SUM(CASE WHEN cl.entry_type = 'advance_recovered' THEN cl.amount ELSE 0 END), 0)
+          ) > 0
+          ORDER BY outstanding_amount DESC
+          LIMIT 10
+        `);
+        const topCases = rows.map((rr) => ({
+          caseId: toNumber0(rr.case_id),
+          referenceNo: String(rr.reference_no ?? ""),
+          clientNames: String(rr.client_names ?? "") || null,
+          amount: toNumber0((rr as any).outstanding_amount),
+        })).filter((x) => x.caseId > 0 && x.amount > 0);
+        const caseCount = toNumber0((totals as any)?.case_count);
+        const totalAmount = toNumber0((totals as any)?.total_amount);
+        return { caseCount, totalAmount, topCases };
+      })())
+    : { caseCount: 0, totalAmount: 0, topCases: [] as any[] };
 
   const commsThisMonth = hasCommunications
     ? Number((await queryRows(r, sql`
@@ -346,6 +406,7 @@ export async function computeDashboardStats(
         totalOutstanding: toNumber0(row.total_outstanding),
       };
     })(),
+    outstandingAdvances,
     commsThisMonth,
     milestoneSections,
     milestoneCards,

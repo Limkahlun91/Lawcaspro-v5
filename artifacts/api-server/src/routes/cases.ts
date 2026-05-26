@@ -41,6 +41,7 @@ import { WORKFLOW_AUTOMATION_RULE_BY_STEP_KEY, deriveStatusFromRequirement } fro
 import { computeStampingSummary, deriveStampingItemStatus, type StampingItemInput } from "../lib/stampingProgress.js";
 import { checkFirmQuota } from "../lib/quota.js";
 import { resolveSmartFilename } from "../lib/smartFileNaming.js";
+import { allocateCaseReferenceNo } from "../lib/fileReferenceGenerator.js";
 import { computeDashboardStats } from "../services/dashboard-stats.js";
 import { computeMilestonesSummary } from "../services/milestones-summary.js";
 
@@ -2822,7 +2823,11 @@ router.post("/cases", requireAuthHandler, requireFirmUserHandler, requirePermiss
         userId: req.userId,
         fields: parsed.error.flatten().fieldErrors,
       }, "cases.create validation failed");
-      res.status(400).json({ error: "Validation failed", fields: parsed.error.flatten().fieldErrors });
+      const errors = parsed.error.issues.map((i) => ({
+        path: i.path.map((p) => String(p)).join("."),
+        message: i.message,
+      }));
+      res.status(400).json({ error: "Validation failed", errors, fields: parsed.error.flatten().fieldErrors });
       return;
     }
 
@@ -2863,10 +2868,8 @@ router.post("/cases", requireAuthHandler, requireFirmUserHandler, requirePermiss
     const canAssignAny = await hasRolePermission(r, req.firmId!, req.roleId, "cases", "assign_any");
     const normalizedAssignedLawyerId = assignedLawyerId ?? undefined;
     const normalizedAssignedClerkId = assignedClerkId ?? undefined;
-    if (canAssignAny && !normalizedAssignedLawyerId) {
-      res.status(400).json({ error: "assignedLawyerId is required" });
-      return;
-    }
+    const normalizedCaseType = (typeof caseType === "string" && caseType.trim()) ? caseType.trim() : null;
+    const effectiveAssignedLawyerId = canAssignAny ? (normalizedAssignedLawyerId ?? (req.userId ?? undefined)) : normalizedAssignedLawyerId;
     if (!canAssignAny) {
       if (normalizedAssignedLawyerId !== undefined && normalizedAssignedLawyerId !== req.userId) {
         res.status(403).json({ error: "You cannot assign cases to other users" });
@@ -3019,7 +3022,7 @@ router.post("/cases", requireAuthHandler, requireFirmUserHandler, requirePermiss
       return;
     }
 
-    const refNo = requestedRefRaw?.trim() || `LCP-${req.firmId}-${Date.now()}`;
+    const requestedRef = requestedRefRaw?.trim() || "";
 
     const normalizeBorrowers = (raw: unknown): Array<{ name: string; ic?: string; hp?: string; email?: string; address: string }> => {
       if (!Array.isArray(raw)) return [];
@@ -3108,7 +3111,6 @@ router.post("/cases", requireAuthHandler, requireFirmUserHandler, requirePermiss
       firmId: req.firmId!,
       projectId,
       developerId,
-      referenceNo: refNo,
       purchaseMode,
       titleType: normalizedTitleType,
       isEncumbered: projectIsEncumbered,
@@ -3118,7 +3120,7 @@ router.post("/cases", requireAuthHandler, requireFirmUserHandler, requirePermiss
       developerDiscount: developerDiscountToInsert,
       bumiputraDiscount: bumiputraDiscountToInsert,
       status: "File Opened / SPA Pending Signing",
-      caseType: caseType ?? null,
+      caseType: normalizedCaseType,
       parcelNo: parcelNo ?? null,
       spaDetails: spaDetails ? JSON.stringify(spaDetails) : null,
       propertyDetails: normalizedPropertyDetails,
@@ -3127,7 +3129,7 @@ router.post("/cases", requireAuthHandler, requireFirmUserHandler, requirePermiss
       borrowers: borrowersToStore,
       companyDetails: companyDetails ? JSON.stringify(companyDetails) : null,
       createdBy: req.userId ?? null,
-    } satisfies typeof casesTable.$inferInsert;
+    } satisfies Omit<typeof casesTable.$inferInsert, "referenceNo">;
 
     let ctxFirmId: string | null = null;
     let ctxIsFounder: string | null = null;
@@ -3154,11 +3156,52 @@ router.post("/cases", requireAuthHandler, requireFirmUserHandler, requirePermiss
       ctxIsFounder,
     }, "create route tenant context");
 
-    let newCase: typeof casesTable.$inferSelect;
-    [newCase] = await r
-      .insert(casesTable)
-      .values(insertCaseBase)
-      .returning();
+    const assignedInitialsUserId = effectiveAssignedLawyerId ?? req.userId ?? null;
+    const normalizeInitials = (v: unknown): string => {
+      const raw = typeof v === "string" ? v.trim().toUpperCase() : "";
+      const clean = raw.replace(/[^A-Z0-9]/g, "").slice(0, 5);
+      return clean || "NA";
+    };
+
+    const { newCase, refNo } = await (r as any).transaction(async (tx: DbConn) => {
+      const initials = await (async (): Promise<string> => {
+        if (!assignedInitialsUserId) return "NA";
+        try {
+          const [u] = await tx
+            .select({ initials: usersTable.initials })
+            .from(usersTable)
+            .where(and(eq(usersTable.id, assignedInitialsUserId), eq(usersTable.firmId, req.firmId!)))
+            .limit(1);
+          return normalizeInitials(u?.initials);
+        } catch {
+          return "NA";
+        }
+      })();
+
+      const refNoResolved = await (async (): Promise<string> => {
+        if (requestedRef) return requestedRef;
+        try {
+          return await allocateCaseReferenceNo(tx as any, {
+            firmId: req.firmId!,
+            caseType: normalizedCaseType ?? "default",
+            initials,
+            defaultPattern: "{YY}/{SEQ:4}",
+          });
+        } catch (err: any) {
+          const code = typeof err?.code === "string" ? err.code : "";
+          if (code === "42P01" || code === "42703") {
+            return `LCP-${req.firmId}-${Date.now()}`;
+          }
+          throw err;
+        }
+      })();
+
+      const [created] = await tx
+        .insert(casesTable)
+        .values({ ...insertCaseBase, referenceNo: refNoResolved } satisfies typeof casesTable.$inferInsert)
+        .returning();
+      return { newCase: created as typeof casesTable.$inferSelect, refNo: refNoResolved };
+    });
 
     for (let i = 0; i < resolvedPurchaserIds.length; i++) {
       await r.insert(casePurchasersTable).values({
@@ -3178,13 +3221,13 @@ router.post("/cases", requireAuthHandler, requireFirmUserHandler, requirePermiss
         assignedBy: req.userId,
       });
     } else {
-      if (!normalizedAssignedLawyerId) {
+      if (!effectiveAssignedLawyerId) {
         res.status(400).json({ error: "assignedLawyerId is required" });
         return;
       }
       await r.insert(caseAssignmentsTable).values({
         caseId: newCase.id,
-        userId: normalizedAssignedLawyerId,
+        userId: effectiveAssignedLawyerId,
         roleInCase: "lawyer",
         assignedBy: req.userId,
       });
@@ -6037,6 +6080,7 @@ router.get("/cases/:caseId/ledger", requireAuthHandler, requireFirmUserHandler, 
   const totalReceived = sumByType("payment_received");
   const outstandingBalance = totalBilled - totalReceived;
   const trustBalance = sumByType("trust_received") - sumByType("trust_paid");
+  const outstandingAdvances = sumByType("advance_paid") - sumByType("advance_recovered");
 
   res.json({
     summary: {
@@ -6044,6 +6088,7 @@ router.get("/cases/:caseId/ledger", requireAuthHandler, requireFirmUserHandler, 
       total_received: totalReceived,
       outstanding_balance: outstandingBalance,
       trust_balance: trustBalance,
+      outstanding_advances: outstandingAdvances,
     },
     data: rows.map((x) => ({
       id: String(x.id),
@@ -6058,6 +6103,31 @@ router.get("/cases/:caseId/ledger", requireAuthHandler, requireFirmUserHandler, 
       updatedAt: toIsoStringSafe(x.updatedAt),
     })),
   });
+}));
+
+router.get("/cases/:caseId/advances", requireAuthHandler, requireFirmUserHandler, requirePermission("cases", "read") as RequestHandler, authed(async (req, res) => {
+  const r = req.rlsDb;
+  if (!r) {
+    logger.error({ path: req.path, firmId: req.firmId, userId: req.userId }, "[cases] missing tenant database context");
+    res.status(500).json({ error: "Internal Server Error" });
+    return;
+  }
+  const params = GetCaseLedgerParams.safeParse(req.params);
+  if (!params.success) { res.status(400).json({ error: params.error.message }); return; }
+  const ok = await enforceCaseAccess(r, req, res, params.data.caseId);
+  if (!ok) return;
+
+  const [row] = await r
+    .select({
+      outstanding: sql<string>`
+        COALESCE(SUM(CASE WHEN ${caseLedgersTable.entryType} = 'advance_paid' THEN ${caseLedgersTable.amount} ELSE 0 END), 0)
+        - COALESCE(SUM(CASE WHEN ${caseLedgersTable.entryType} = 'advance_recovered' THEN ${caseLedgersTable.amount} ELSE 0 END), 0)
+      `,
+    })
+    .from(caseLedgersTable)
+    .where(and(eq(caseLedgersTable.firmId, req.firmId!), eq(caseLedgersTable.caseId, params.data.caseId)))
+    .limit(1);
+  res.json({ outstanding_advances: Number(row?.outstanding ?? 0) });
 }));
 
 router.post("/cases/:caseId/ledger", requireAuthHandler, requireFirmUserHandler, requirePermission("accounting", "write") as RequestHandler, authed(async (req, res) => {

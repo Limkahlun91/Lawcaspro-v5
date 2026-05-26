@@ -28,6 +28,7 @@ import { useAuth } from "@/lib/auth-context";
 import { hasPermission } from "@/lib/permissions";
 import { getGetCaseWorkflowQueryKey, getListCasesQueryKey } from "@workspace/api-client-react";
 import { validateUploadFile } from "@/lib/upload-validation";
+import { TemplateFolderPicker, type TemplateFolderPickerFolder, type TemplateFolderPickerTemplate } from "@/components/documents/TemplateFolderPicker";
 
 function docTypeLabel(dt: string): string {
   return (DOCUMENT_TYPE_LABELS as Record<string, string>)[dt] ?? dt;
@@ -225,6 +226,11 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
   const [selectedDocIds, setSelectedDocIds] = useState<Set<number>>(new Set());
   const [isBatchExporting, setIsBatchExporting] = useState(false);
   const [downloadingDocId, setDownloadingDocId] = useState<number | null>(null);
+  const [enterpriseDialogOpen, setEnterpriseDialogOpen] = useState(false);
+  const [enterpriseSelectedTemplateIds, setEnterpriseSelectedTemplateIds] = useState<Set<number>>(() => new Set());
+  const [enterpriseMode, setEnterpriseMode] = useState<"download" | "print">("download");
+  const [enterpriseCopies, setEnterpriseCopies] = useState("1");
+  const [enterpriseBusy, setEnterpriseBusy] = useState(false);
 
 
   const canGenerate = hasPermission(user, "documents", "generate");
@@ -273,6 +279,21 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
     retry: false,
   });
   const documents = documentsQuery.data ?? [];
+
+  const enterpriseFoldersQuery = useQuery<TemplateFolderPickerFolder[]>({
+    queryKey: ["case-documents", caseId, "enterprise", "folders"],
+    queryFn: () => apiFetchJson<TemplateFolderPickerFolder[]>("/firm-document-folders"),
+    enabled: enterpriseDialogOpen,
+    retry: false,
+  });
+  const enterpriseTemplatesQuery = useQuery<TemplateFolderPickerTemplate[]>({
+    queryKey: ["case-documents", caseId, "enterprise", "templates"],
+    queryFn: () => apiFetchJson<TemplateFolderPickerTemplate[]>("/document-templates?templateCapable=true&kind=template"),
+    enabled: enterpriseDialogOpen,
+    retry: false,
+  });
+  const enterpriseFolders = enterpriseFoldersQuery.data ?? [];
+  const enterpriseTemplates = enterpriseTemplatesQuery.data ?? [];
 
   const checklistQuery = useQuery<ChecklistResponse>({
     queryKey: ["case-documents-checklist", caseId, showAllTemplates],
@@ -1138,6 +1159,64 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
     }
   }
 
+  async function handleEnterpriseGenerate(): Promise<void> {
+    if (!canGenerate) return;
+    const templateIds = Array.from(enterpriseSelectedTemplateIds);
+    if (templateIds.length === 0) return;
+    setEnterpriseBusy(true);
+    try {
+      const res = await apiRequest("/cases/bulk/generate-documents-zip", {
+        method: "POST",
+        body: JSON.stringify({
+          caseIds: [caseId],
+          templateIds,
+          actionType: enterpriseMode,
+          printCopies: enterpriseMode === "print" ? Number(enterpriseCopies || 1) : undefined,
+        }),
+        timeoutMs: 180000,
+      });
+      const blob = await res.blob();
+      const cd = res.headers.get("content-disposition") ?? "";
+      const m = /filename\*=UTF-8''([^;]+)|filename=\"?([^\";]+)\"?/i.exec(cd);
+      const fileNameRaw = m?.[1] ?? m?.[2] ?? (enterpriseMode === "print" ? "system-print.pdf" : "document-automation.zip");
+      const fileName = decodeURIComponent(String(fileNameRaw).trim());
+
+      if (enterpriseMode === "print") {
+        const url = URL.createObjectURL(blob);
+        const iframe = document.createElement("iframe");
+        iframe.style.position = "fixed";
+        iframe.style.right = "0";
+        iframe.style.bottom = "0";
+        iframe.style.width = "0";
+        iframe.style.height = "0";
+        iframe.src = url;
+        iframe.onload = () => {
+          try { iframe.contentWindow?.focus(); iframe.contentWindow?.print(); } catch {}
+          setTimeout(() => { URL.revokeObjectURL(url); iframe.remove(); }, 60000);
+        };
+        document.body.appendChild(iframe);
+        toast({ title: "Printable PDF ready" });
+      } else {
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = fileName || "document-automation.zip";
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(url);
+        toast({ title: "Download started" });
+      }
+
+      setEnterpriseDialogOpen(false);
+      setEnterpriseSelectedTemplateIds(new Set());
+    } catch (err) {
+      toastError(toast, err, enterpriseMode === "print" ? "Print failed" : "Generate failed");
+    } finally {
+      setEnterpriseBusy(false);
+    }
+  }
+
   function closeGenerateDialog() {
     setGenerateDialogOpen(false);
     setDocumentName("");
@@ -1428,6 +1507,14 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
             >
               <Upload className="w-3.5 h-3.5" />
               Upload
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => setEnterpriseDialogOpen(true)}
+              disabled={!canGenerate}
+            >
+              Batch Download / Print
             </Button>
             <Button
               size="sm"
@@ -3175,6 +3262,54 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
               Close
             </Button>
           </div>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={enterpriseDialogOpen} onOpenChange={setEnterpriseDialogOpen}>
+        <DialogContent className="max-w-2xl">
+          <DialogHeader>
+            <DialogTitle>Batch Generate (PDF) - Download / Print</DialogTitle>
+            <DialogDescription>Select template folders/files. Output is always PDF.</DialogDescription>
+          </DialogHeader>
+
+          {enterpriseFoldersQuery.isError || enterpriseTemplatesQuery.isError ? (
+            <QueryFallback
+              title="Templates unavailable"
+              error={enterpriseFoldersQuery.error || enterpriseTemplatesQuery.error}
+              onRetry={() => { enterpriseFoldersQuery.refetch(); enterpriseTemplatesQuery.refetch(); }}
+              isRetrying={enterpriseFoldersQuery.isFetching || enterpriseTemplatesQuery.isFetching}
+            />
+          ) : (
+            <div className="space-y-3">
+              <TemplateFolderPicker
+                folders={enterpriseFolders}
+                templates={enterpriseTemplates}
+                selectedTemplateIds={enterpriseSelectedTemplateIds}
+                onChange={setEnterpriseSelectedTemplateIds}
+              />
+              <div className="flex items-center gap-2">
+                <Select value={enterpriseMode} onValueChange={(v) => setEnterpriseMode(v === "print" ? "print" : "download")}>
+                  <SelectTrigger className="w-[200px]">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="download">Download ZIP</SelectItem>
+                    <SelectItem value="print">System Print</SelectItem>
+                  </SelectContent>
+                </Select>
+                {enterpriseMode === "print" ? (
+                  <Input value={enterpriseCopies} onChange={(e) => setEnterpriseCopies(e.target.value)} inputMode="numeric" className="w-[120px]" placeholder="Copies" />
+                ) : null}
+                <Button
+                  onClick={() => handleEnterpriseGenerate()}
+                  disabled={enterpriseBusy || enterpriseSelectedTemplateIds.size === 0}
+                  className="ml-auto"
+                >
+                  {enterpriseBusy ? "Generating..." : enterpriseMode === "print" ? "Generate & Print" : "Generate & Download"}
+                </Button>
+              </div>
+            </div>
+          )}
         </DialogContent>
       </Dialog>
     </div>

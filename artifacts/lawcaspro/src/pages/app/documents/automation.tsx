@@ -237,7 +237,7 @@ export default function DocumentAutomationHub() {
     refetchInterval: (q) => {
       const st = String((q.state.data?.job as any)?.status ?? "");
       if (st === "completed" || st === "failed") return false;
-      return 2000;
+      return 1000;
     },
     retry: false,
   });
@@ -531,6 +531,37 @@ export default function DocumentAutomationHub() {
         body: JSON.stringify(payload),
         timeoutMs: 60000,
       });
+
+      const turboStatus = safeText((data as any)?.status);
+      const turboUrl = safeText((data as any)?.downloadUrl);
+      if (turboStatus === "completed" && turboUrl) {
+        const turboFileName = safeText((data as any)?.fileName) || (mode === "print" ? "system-print.pdf" : "document-automation.zip");
+        const failedCount = Number((data as any)?.failedCount ?? 0);
+
+        if (mode === "print") {
+          window.open(turboUrl, "_blank", "noopener,noreferrer");
+          toast({ title: "Printable PDF generated" });
+        } else {
+          try {
+            const resp = await fetch(turboUrl);
+            if (!resp.ok) throw new Error(`Download failed (${resp.status})`);
+            const blob = await resp.blob();
+            downloadBlob(blob, turboFileName);
+            toast({ title: "Export ready", description: turboFileName });
+          } catch {
+            window.open(turboUrl, "_blank", "noopener,noreferrer");
+            toast({ title: "Export ready", description: "Your browser will start the download shortly." });
+          }
+        }
+
+        if (failedCount > 0) {
+          toast({ title: "Some documents failed", description: "Open browser console to view failure details." });
+          console.warn("[document-automation.failures]", data);
+        }
+        setBusy(false);
+        return;
+      }
+
       const nextJobId = safeText((data as any)?.jobId);
       if (!nextJobId) throw new Error("Missing jobId");
       setJobId(nextJobId);
@@ -814,9 +845,9 @@ export default function DocumentAutomationHub() {
                       <div className="text-sm text-slate-600">
                         Generates PDFs, applies naming rules, and exports a ZIP with the required folder structure.
                       </div>
-                      {busy && jobId && (
+                      {busy && (
                         <div className="rounded-md border border-slate-200 bg-slate-50 p-3 text-sm text-slate-700">
-                          Generating document, please wait... (Estimated ~15 seconds)
+                          Generating...
                         </div>
                       )}
                       {preflightEnabled && (preflightBlocking || preflightMissing.length > 0) && (
@@ -884,9 +915,9 @@ export default function DocumentAutomationHub() {
                       <div className="rounded-md border border-slate-200 bg-slate-50 p-3 text-xs text-slate-600 leading-relaxed">
                         Printing settings are recorded for audit. The actual duplex/copies are applied in your system print dialog.
                       </div>
-                      {busy && jobId && (
+                      {busy && (
                         <div className="rounded-md border border-slate-200 bg-slate-50 p-3 text-sm text-slate-700">
-                          Generating document, please wait... (Estimated ~15 seconds)
+                          Generating...
                         </div>
                       )}
 

@@ -1,10 +1,12 @@
 import { useEffect, useState } from "react";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { useToast } from "@/hooks/use-toast";
+import { getHttpStatus, isApiErrorLike } from "@/lib/error-message";
 import { toastError } from "@/lib/toast-error";
 import { CaseForm, createDefaultCaseFormValues } from "./CaseForm";
 import type { CaseFormValues, LoanPartyType, PurchaseMode, TitleCategory } from "./types";
-import { joinAddressLines } from "./address";
+import { composeMalaysiaAddress, joinAddressLines } from "./address";
+import { getStateFromPostcode } from "@/utils/my-address-helper";
 
 function parseMoneyOrNull(v: string): number | null {
   const n = Number(String(v ?? "").replace(/[^0-9.]/g, ""));
@@ -30,6 +32,16 @@ export function mapCaseToFormValues(caseInfo: any): CaseFormValues {
     icOrCompanyNo: String(p?.icNo ?? ""),
     tel: String(p?.phone ?? ""),
     email: String(p?.email ?? ""),
+    postcode: (() => {
+      const m = String(p?.address ?? "").match(/\b(\d{5})\b/);
+      return m ? m[1] : "";
+    })(),
+    city: "",
+    state: (() => {
+      const m = String(p?.address ?? "").match(/\b(\d{5})\b/);
+      const pc = m ? m[1] : "";
+      return pc ? (getStateFromPostcode(pc) ?? "") : "";
+    })(),
     addressLines: { line1: "", line2: "", line3: "", line4: "", line5: "" },
     address: String(p?.address ?? ""),
   }));
@@ -41,6 +53,16 @@ export function mapCaseToFormValues(caseInfo: any): CaseFormValues {
     ic: String(b?.ic ?? ""),
     hp: String(b?.hp ?? ""),
     email: String(b?.email ?? ""),
+    postcode: (() => {
+      const m = String(b?.address ?? "").match(/\b(\d{5})\b/);
+      return m ? m[1] : "";
+    })(),
+    city: "",
+    state: (() => {
+      const m = String(b?.address ?? "").match(/\b(\d{5})\b/);
+      const pc = m ? m[1] : "";
+      return pc ? (getStateFromPostcode(pc) ?? "") : "";
+    })(),
     addressLines: { line1: "", line2: "", line3: "", line4: "", line5: "" },
     address: String(b?.address ?? ""),
   })) : [v.borrowers[0]];
@@ -83,6 +105,7 @@ export function mapCaseToFormValues(caseInfo: any): CaseFormValues {
       bandarMukim: String((propertyDetails as any)?.bandarMukim ?? ""),
       daerah: String((propertyDetails as any)?.daerah ?? ""),
       negeri: String((propertyDetails as any)?.negeri ?? ""),
+      postcode: String((propertyDetails as any)?.postcode ?? ""),
       propertyAddress: String((propertyDetails as any)?.propertyAddress ?? ""),
       propertyAddressLines: { line1: "", line2: "", line3: "", line4: "", line5: "" },
     },
@@ -101,7 +124,10 @@ export function buildCasePayloadFromFormValues(values: CaseFormValues): Record<s
       ic: p.icOrCompanyNo.trim() ? p.icOrCompanyNo.trim() : null,
       phone: p.tel.trim() ? p.tel.trim() : null,
       email: p.email.trim() ? p.email.trim() : null,
-      address: p.address.trim() ? p.address.trim() : joinAddressLines(p.addressLines),
+      address: (() => {
+        const composed = composeMalaysiaAddress({ lines: p.addressLines, postcode: p.postcode, city: p.city, state: p.state });
+        return (p.address.trim() ? p.address.trim() : composed.address).trim() || null;
+      })(),
     }))
     .filter((p) => p.name.length > 0);
 
@@ -111,16 +137,24 @@ export function buildCasePayloadFromFormValues(values: CaseFormValues): Record<s
       ic: b.ic.trim() ? b.ic.trim() : null,
       hp: b.hp.trim() ? b.hp.trim() : null,
       email: b.email.trim() ? b.email.trim() : null,
-      address: b.address.trim() ? b.address.trim() : joinAddressLines(b.addressLines),
+      address: (() => {
+        const composed = composeMalaysiaAddress({ lines: b.addressLines, postcode: b.postcode, city: b.city, state: b.state });
+        return (b.address.trim() ? b.address.trim() : composed.address).trim() || null;
+      })(),
     }))
     .filter((b) => b.name.length > 0);
 
   const titleType = values.titleCategory;
   const propertyAddressComposed = (() => {
-    const raw = values.property.propertyAddress.trim()
-      ? values.property.propertyAddress.trim()
-      : joinAddressLines(values.property.propertyAddressLines);
-    const v = String(raw ?? "").trim();
+    const raw = values.property.propertyAddress.trim();
+    if (raw) return raw;
+    const composed = composeMalaysiaAddress({
+      lines: values.property.propertyAddressLines,
+      postcode: values.property.postcode,
+      city: values.property.bandarMukim,
+      state: values.property.negeri,
+    });
+    const v = String(composed.address ?? "").trim();
     return v ? v : "";
   })();
   const propertyDetails: Record<string, unknown> = {
@@ -143,6 +177,7 @@ export function buildCasePayloadFromFormValues(values: CaseFormValues): Record<s
     bandarMukim: values.property.bandarMukim.trim() || undefined,
     daerah: values.property.daerah.trim() || undefined,
     negeri: values.property.negeri.trim() || undefined,
+    postcode: values.property.postcode.trim() || undefined,
     propertyAddress: propertyAddressComposed || undefined,
   };
 
@@ -226,6 +261,34 @@ export function CaseFormModal(props: {
       toast({ title: props.mode === "create" ? "Case created" : "Case updated" });
       props.onOpenChange(false);
     } catch (err) {
+      const status = getHttpStatus(err);
+      if (status === 400 && isApiErrorLike(err)) {
+        const data = err.data as any;
+        const lines: string[] = [];
+        if (Array.isArray(data?.errors)) {
+          for (const e of data.errors) {
+            const path = typeof e?.path === "string" && e.path.trim() ? e.path.trim() : "";
+            const msg = typeof e?.message === "string" && e.message.trim() ? e.message.trim() : "";
+            if (!path && !msg) continue;
+            lines.push(path ? `${path}: ${msg || "Invalid"}` : msg);
+          }
+        } else if (data?.fields && typeof data.fields === "object") {
+          for (const [k, v] of Object.entries(data.fields as Record<string, unknown>)) {
+            const arr = Array.isArray(v) ? v : [];
+            for (const msg of arr) {
+              if (typeof msg === "string" && msg.trim()) lines.push(`${k}: ${msg.trim()}`);
+            }
+          }
+        }
+        if (lines.length > 0) {
+          toast({
+            title: "Validation failed",
+            description: lines.join("\n"),
+            variant: "destructive",
+          });
+          return;
+        }
+      }
       toastError(toast, err, props.mode === "create" ? "Create failed" : "Update failed");
     } finally {
       setSubmitting(false);

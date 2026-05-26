@@ -128,6 +128,8 @@ export const casesTable = pgTable("cases", {
   apdlPrice: numeric("apdl_price", { precision: 15, scale: 2 }),
   developerDiscount: numeric("developer_discount", { precision: 15, scale: 2 }),
   bumiputraDiscount: numeric("bumiputra_discount", { precision: 15, scale: 2 }),
+  amountPaid: numeric("amount_paid", { precision: 18, scale: 2 }).notNull().default("0"),
+  outstandingBalance: numeric("outstanding_balance", { precision: 18, scale: 2 }).notNull().default("0"),
   status: text("status").notNull().default("File Opened / SPA Pending Signing"),
   lawyerStatus: text("lawyer_status"),
   lawyerStatusUpdatedAt: timestamp("lawyer_status_updated_at", { withTimezone: true }),

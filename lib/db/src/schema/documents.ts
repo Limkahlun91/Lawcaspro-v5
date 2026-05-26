@@ -8,6 +8,7 @@ export const documentTemplatesTable = pgTable("document_templates", {
   kind: text("kind").notNull().default("template"),
   documentType: text("document_type").notNull().default("other"),
   isActive: boolean("is_active").notNull().default(true),
+  printMode: text("print_mode").notNull().default("double"),
   fileNamingRule: text("file_naming_rule"),
   clauseInsertionMode: text("clause_insertion_mode"),
   pdfMappingConfig: jsonb("pdf_mapping_config"),

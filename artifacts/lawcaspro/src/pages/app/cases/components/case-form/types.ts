@@ -17,6 +17,9 @@ export type PurchaserForm = {
   icOrCompanyNo: string;
   tel: string;
   email: string;
+  postcode: string;
+  city: string;
+  state: string;
   addressLines: AddressLines;
   address: string;
 };
@@ -27,6 +30,9 @@ export type BorrowerForm = {
   ic: string;
   hp: string;
   email: string;
+  postcode: string;
+  city: string;
+  state: string;
   addressLines: AddressLines;
   address: string;
 };
@@ -71,6 +77,7 @@ export type CaseFormValues = {
     bandarMukim: string;
     daerah: string;
     negeri: string;
+    postcode: string;
     propertyAddressLines: AddressLines;
     propertyAddress: string;
   };
