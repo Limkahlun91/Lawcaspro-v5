@@ -4,14 +4,13 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Checkbox } from "@/components/ui/checkbox";
-import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "@/components/ui/resizable";
 import { cn } from "@/lib/utils";
 import { apiFetchJson, apiRequest } from "@/lib/api-client";
-import { downloadBlob, parseFilenameFromContentDisposition } from "@/lib/download";
+import { downloadBlob } from "@/lib/download";
 import { toastError } from "@/lib/toast-error";
 import { useToast } from "@/hooks/use-toast";
 import { ChevronRight, FileText, Printer } from "lucide-react";
@@ -32,17 +31,6 @@ type AutomationCasesResponse = {
   items: AutomationCaseRow[];
   page: number;
   limit: number;
-};
-
-type PreflightReport = {
-  critical: boolean;
-  cases: Array<{
-    caseId: number;
-    referenceNo: string;
-    parcelNo: string | null;
-    missing: string[];
-    warnings?: string[];
-  }>;
 };
 
 type GenerationJobResponse = {
@@ -72,13 +60,6 @@ const EMPTY_AUTOMATION_CASES: AutomationCaseRow[] = [];
 const EMPTY_FIRM_FOLDERS: FirmFolder[] = [];
 const EMPTY_FIRM_TEMPLATES: FirmDocumentTemplate[] = [];
 
-function parseFilenameFromContentDisposition(v: string | null): string | null {
-  if (!v) return null;
-  const m = /filename="([^"]+)"/i.exec(v);
-  if (m?.[1]) return m[1];
-  return null;
-}
-
 function includesAllTokens(haystack: string, tokens: string[]): boolean {
   const normalize = (s: string): string =>
     s
@@ -103,6 +84,13 @@ function includesAnyToken(haystack: string, tokens: string[]): boolean {
 
 function safeText(v: unknown): string {
   return typeof v === "string" ? v.trim() : "";
+}
+
+function parseFilenameFromDisposition(v: string | null): string | null {
+  if (!v) return null;
+  const m = /filename="([^"]+)"/i.exec(v);
+  if (m?.[1]) return m[1];
+  return null;
 }
 
 export default function DocumentAutomationHub() {
@@ -187,9 +175,6 @@ export default function DocumentAutomationHub() {
   const selectedCaseIdSet = useMemo(() => new Set(selectedCaseIds), [selectedCaseIds]);
   const selectedTemplateIdSet = useMemo(() => new Set(selectedTemplateIds), [selectedTemplateIds]);
 
-  const selectedCaseKey = useMemo(() => selectedCaseIds.slice().sort((a, b) => a - b).join(","), [selectedCaseIds]);
-  const selectedTemplateKey = useMemo(() => selectedTemplateIds.slice().sort((a, b) => a - b).join(","), [selectedTemplateIds]);
-
   const folderById = useMemo(() => {
     const m = new Map<number, FirmFolder>();
     for (const f of folders) m.set(f.id, f);
@@ -214,21 +199,6 @@ export default function DocumentAutomationHub() {
 
   const allCasesOnPageSelected = cases.length > 0 && cases.every((c) => selectedCaseIdSet.has(c.id));
   const someCasesOnPageSelected = cases.some((c) => selectedCaseIdSet.has(c.id)) && !allCasesOnPageSelected;
-
-  const preflightEnabled = selectedCaseIds.length > 0 && selectedTemplateIds.length > 0;
-  const preflightQuery = useQuery<PreflightReport>({
-    queryKey: ["document-automation", "preflight", selectedCaseKey, selectedTemplateKey],
-    queryFn: () =>
-      apiFetchJson("/documents/automation/preflight", {
-        method: "POST",
-        body: JSON.stringify({ caseIds: selectedCaseIds, templateIds: selectedTemplateIds }),
-      }),
-    enabled: preflightEnabled,
-    retry: false,
-  });
-  const preflightMissing = preflightQuery.data?.cases ?? [];
-  const preflightCritical = Boolean(preflightQuery.data?.critical);
-  const preflightBlocking = preflightEnabled && (preflightQuery.isFetching || preflightQuery.isLoading || preflightCritical || Boolean(preflightQuery.error));
 
   const jobQuery = useQuery<GenerationJobResponse>({
     queryKey: ["document-automation", "job", jobId],
@@ -281,7 +251,7 @@ export default function DocumentAutomationHub() {
       const resp = await apiRequest(`/documents/jobs/${jobId}/download`, { timeoutMs: 60000 });
       const blob = await resp.blob();
       const filename =
-        parseFilenameFromContentDisposition(resp.headers.get("Content-Disposition")) ||
+        parseFilenameFromDisposition(resp.headers.get("Content-Disposition")) ||
         jobDownloadFileName ||
         "document-automation.zip";
       downloadBlob(blob, filename);
@@ -484,7 +454,7 @@ export default function DocumentAutomationHub() {
     setBundleMessage(`Quick Select Bundle: ${bundleName}`);
   }
 
-  async function runGenerate(mode: "download" | "print", opts?: { force?: boolean }) {
+  async function runGenerate(mode: "download" | "print") {
     if (selectedCaseIds.length === 0) {
       toast({ title: "Please select at least one case" });
       return;
@@ -497,17 +467,6 @@ export default function DocumentAutomationHub() {
     setBusy(true);
     let startedJob = false;
     try {
-      if (preflightEnabled && !opts?.force) {
-        const preflight = await preflightQuery.refetch();
-        if (preflight.error) {
-          throw preflight.error;
-        }
-        if (preflight.data?.critical) {
-          toast({ title: "Missing required case data", description: "Please fix missing fields before generating." });
-          return;
-        }
-      }
-
       const duplexSettings =
         mode === "print"
           ? duplexMode === "custom"
@@ -525,8 +484,10 @@ export default function DocumentAutomationHub() {
         },
       };
 
-      const forceQs = opts?.force ? "?force=true" : "";
-      const data = await apiFetchJson<any>(`/documents/automation/generate-job${forceQs}`, {
+      const qs = new URLSearchParams();
+      qs.set("blind", "true");
+      qs.set("force", "true");
+      const data = await apiFetchJson<any>(`/documents/automation/generate-job?${qs.toString()}`, {
         method: "POST",
         body: JSON.stringify(payload),
         timeoutMs: 60000,
@@ -566,7 +527,7 @@ export default function DocumentAutomationHub() {
       if (!nextJobId) throw new Error("Missing jobId");
       setJobId(nextJobId);
       startedJob = true;
-      toast({ title: "Generation started", description: opts?.force ? "Draft mode enabled. Missing fields will be marked in the output." : "Processing in background. This page will auto-download when ready." });
+      toast({ title: "Generation started", description: "Processing in background. This page will auto-download when ready." });
     } catch (err) {
       toastError(toast, err);
     } finally {
@@ -850,34 +811,9 @@ export default function DocumentAutomationHub() {
                           Generating...
                         </div>
                       )}
-                      {preflightEnabled && (preflightBlocking || preflightMissing.length > 0) && (
-                        <Alert variant={preflightCritical ? "destructive" : "default"}>
-                          <AlertTitle>{preflightCritical ? "Missing data detected" : "Preflight warnings"}</AlertTitle>
-                          <AlertDescription>
-                            <div className="space-y-1.5">
-                              {preflightQuery.isFetching || preflightQuery.isLoading ? (
-                                <div>Running pre-flight validation...</div>
-                              ) : preflightQuery.error ? (
-                                <div>Pre-flight validation failed. Please retry.</div>
-                              ) : (
-                                preflightMissing.map((c) => (
-                                  <div key={c.caseId}>
-                                    ⚠️ File Ref: {c.parcelNo || c.referenceNo || `Case ${c.caseId}`} - {c.missing.length > 0 ? `Missing ${c.missing.join(", ")}` : "OK"}{(c.warnings?.length ?? 0) > 0 ? ` • Warning: ${c.warnings?.join(", ")}` : ""}.
-                                  </div>
-                                ))
-                              )}
-                            </div>
-                          </AlertDescription>
-                        </Alert>
-                      )}
-                      <div className="grid grid-cols-2 gap-3">
-                        <Button disabled={busy} className="w-full" onClick={() => runGenerate("download")}>
-                          {busy ? "Generating..." : "Generate & Download"}
-                        </Button>
-                        <Button disabled={busy} className="w-full" variant="outline" onClick={() => runGenerate("download", { force: true })}>
-                          {busy ? "Generating..." : "Download Draft"}
-                        </Button>
-                      </div>
+                      <Button disabled={busy} className="w-full" onClick={() => runGenerate("download")}>
+                        {busy ? "Generating..." : "Generate & Download"}
+                      </Button>
                     </TabsContent>
 
                     <TabsContent value="print" className="mt-4 space-y-4">
@@ -920,29 +856,7 @@ export default function DocumentAutomationHub() {
                           Generating...
                         </div>
                       )}
-
-                      {preflightEnabled && (preflightBlocking || preflightMissing.length > 0) && (
-                        <Alert variant={preflightCritical ? "destructive" : "default"}>
-                          <AlertTitle>{preflightCritical ? "Missing data detected" : "Preflight warnings"}</AlertTitle>
-                          <AlertDescription>
-                            <div className="space-y-1.5">
-                              {preflightQuery.isFetching || preflightQuery.isLoading ? (
-                                <div>Running pre-flight validation...</div>
-                              ) : preflightQuery.error ? (
-                                <div>Pre-flight validation failed. Please retry.</div>
-                              ) : (
-                                preflightMissing.map((c) => (
-                                  <div key={c.caseId}>
-                                    ⚠️ File Ref: {c.parcelNo || c.referenceNo || `Case ${c.caseId}`} - {c.missing.length > 0 ? `Missing ${c.missing.join(", ")}` : "OK"}{(c.warnings?.length ?? 0) > 0 ? ` • Warning: ${c.warnings?.join(", ")}` : ""}.
-                                  </div>
-                                ))
-                              )}
-                            </div>
-                          </AlertDescription>
-                        </Alert>
-                      )}
-
-                      <Button disabled={busy || preflightBlocking} className="w-full" onClick={() => runGenerate("print")}>
+                      <Button disabled={busy} className="w-full" onClick={() => runGenerate("print")}>
                         {busy ? "Generating..." : "Generate Printable PDF"}
                       </Button>
                     </TabsContent>
