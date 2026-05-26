@@ -11,6 +11,7 @@ import {
   caseKeyDatesTable,
   caseWorkflowDocumentsTable,
   caseLoanStampingItemsTable,
+  caseLoanSuppDocumentsTable,
   caseListSavedViewsTable,
   caseLedgersTable,
   projectsTable, developersTable, clientsTable, usersTable, rolesTable, auditLogsTable,
@@ -3405,6 +3406,8 @@ router.get("/cases/:caseId/key-dates", requireAuthHandler, requireFirmUserHandle
     bank_lu_forward_to_developer_on: kd.bankLuForwardToDeveloperOn ? String(kd.bankLuForwardToDeveloperOn) : null,
     developer_lu_received_on: kd.developerLuReceivedOn ? String(kd.developerLuReceivedOn) : null,
     developer_lu_dated: kd.developerLuDated ? String(kd.developerLuDated) : null,
+    master_lu_exempted: Boolean((kd as any).masterLuExempted),
+    encumbrance_free_exempted: Boolean((kd as any).encumbranceFreeExempted),
     letter_disclaimer_received_on: kd.letterDisclaimerReceivedOn ? String(kd.letterDisclaimerReceivedOn) : null,
     letter_disclaimer_dated: kd.letterDisclaimerDated ? String(kd.letterDisclaimerDated) : null,
     letter_disclaimer_reference_nos: kd.letterDisclaimerReferenceNos ?? null,
@@ -3414,6 +3417,10 @@ router.get("/cases/:caseId/key-dates", requireAuthHandler, requireFirmUserHandle
     loan_agreement_dated: kd.loanAgreementDated ? String(kd.loanAgreementDated) : null,
     loan_agreement_submitted_stamping_date: kd.loanAgreementSubmittedStampingDate ? String(kd.loanAgreementSubmittedStampingDate) : null,
     loan_agreement_stamped_date: kd.loanAgreementStampedDate ? String(kd.loanAgreementStampedDate) : null,
+    received_executed_document_on_1: (kd as any).receivedExecutedDocumentOn1 ? String((kd as any).receivedExecutedDocumentOn1) : null,
+    received_unexecuted_document_on: (kd as any).receivedUnexecutedDocumentOn ? String((kd as any).receivedUnexecutedDocumentOn) : null,
+    resent_bank_execution_dated: (kd as any).resentBankExecutionDated ? String((kd as any).resentBankExecutionDated) : null,
+    received_executed_document_on_2: (kd as any).receivedExecutedDocumentOn2 ? String((kd as any).receivedExecutedDocumentOn2) : null,
     statutory_declaration_dated: (kd as any).statutoryDeclarationDated ? String((kd as any).statutoryDeclarationDated) : null,
     statutory_declaration_stamped_on: (kd as any).statutoryDeclarationStampedOn ? String((kd as any).statutoryDeclarationStampedOn) : null,
     fa_date: (kd as any).faDate ? String((kd as any).faDate) : null,
@@ -3728,12 +3735,17 @@ router.patch("/cases/:caseId/key-dates", requireAuthHandler, requireFirmUserHand
   const dateFieldMap = {
     spa_signed_date: "spaSignedDate",
     spa_forward_to_developer_execution_on: "spaForwardToDeveloperExecutionOn",
+    spa_received_dev_return_spa_on: "spaReceivedDevReturnSpaOn",
     spa_date: "spaDate",
     spa_stamped_date: "spaStampedDate",
     stamped_spa_send_to_developer_on: "stampedSpaSendToDeveloperOn",
     stamped_spa_received_from_developer_on: "stampedSpaReceivedFromDeveloperOn",
+    stamped_spa_sent_to_purchaser_on: "stampedSpaSentToPurchaserOn",
+    li_date: "liDate",
+    li_received_on: "liReceivedOn",
     letter_of_offer_date: "letterOfOfferDate",
     letter_of_offer_stamped_date: "letterOfOfferStampedDate",
+    supp_lo_date: "suppLoDate",
     loan_docs_pending_date: "loanDocsPendingDate",
     loan_docs_signed_date: "loanDocsSignedDate",
     acting_letter_issued_date: "actingLetterIssuedDate",
@@ -3741,31 +3753,58 @@ router.patch("/cases/:caseId/key-dates", requireAuthHandler, requireFirmUserHand
     developer_confirmation_date: "developerConfirmationDate",
     loan_sent_bank_execution_date: "loanSentBankExecutionDate",
     loan_bank_executed_date: "loanBankExecutedDate",
+    differential_sum_settled_on: "differentialSumSettledOn",
+    bank_lu_dated: "bankLuDated",
     bank_lu_received_date: "bankLuReceivedDate",
     bank_lu_forward_to_developer_on: "bankLuForwardToDeveloperOn",
     developer_lu_received_on: "developerLuReceivedOn",
     developer_lu_dated: "developerLuDated",
     letter_disclaimer_received_on: "letterDisclaimerReceivedOn",
     letter_disclaimer_dated: "letterDisclaimerDated",
+    bankruptcy_search_dated: "bankruptcySearchDated",
     loan_agreement_dated: "loanAgreementDated",
     loan_agreement_submitted_stamping_date: "loanAgreementSubmittedStampingDate",
     loan_agreement_stamped_date: "loanAgreementStampedDate",
+    received_executed_document_on_1: "receivedExecutedDocumentOn1",
+    received_unexecuted_document_on: "receivedUnexecutedDocumentOn",
+    resent_bank_execution_dated: "resentBankExecutionDated",
+    received_executed_document_on_2: "receivedExecutedDocumentOn2",
+    statutory_declaration_dated: "statutoryDeclarationDated",
+    statutory_declaration_stamped_on: "statutoryDeclarationStampedOn",
+    fa_date: "faDate",
+    fa_stamp_on: "faStampOn",
+    doa_date: "doaDate",
+    doa_stamp_on: "doaStampOn",
+    poa_date: "poaDate",
+    poa_stamp_on: "poaStampOn",
+    noa_dated: "noaDated",
+    register_pa_on: "registerPaOn",
     register_poa_on: "registerPoaOn",
     noa_served_on: "noaServedOn",
     advice_to_bank_date: "adviceToBankDate",
     bank_1st_release_on: "bank1stReleaseOn",
     discharge_date: "dischargeDate",
+    discharge_title_received_on: "dischargeTitleReceivedOn",
     caveat_lodged_date: "caveatLodgedDate",
     first_advice_date: "firstAdviceDate",
     dev_informed_redemption_date: "devInformedRedemptionDate",
     request_discharge_date: "requestDischargeDate",
     charge_date: "chargeDate",
+    charge_submit_stamping: "chargeSubmitStamping",
+    charge_stamped: "chargeStamped",
     presentation_date: "presentationDate",
     second_advice_date: "secondAdviceDate",
+    request_letter_no_objection: "requestLetterNoObjection",
+    received_letter_no_objection_on: "receivedLetterNoObjectionOn",
+    blanket_consent_transfer_req: "blanketConsentTransferReq",
+    blanket_consent_transfer_approval: "blanketConsentTransferApproval",
+    consent_to_charge_req: "consentToChargeReq",
+    consent_to_charge_approval: "consentToChargeApproval",
     consent_to_transfer_date: "consentToTransferDate",
     consent_to_charge_date: "consentToChargeDate",
     mot_received_date: "motReceivedDate",
     mot_signed_date: "motSignedDate",
+    mot_submit_stamping: "motSubmitStamping",
     mot_stamped_date: "motStampedDate",
     mot_registered_date: "motRegisteredDate",
     progressive_payment_date: "progressivePaymentDate",
@@ -3783,6 +3822,16 @@ router.patch("/cases/:caseId/key-dates", requireAuthHandler, requireFirmUserHand
   const updateValues: Partial<CaseKeyDatesInsert> & { updatedAt: Date } = { updatedAt: new Date() };
 
   const changed: string[] = [];
+
+  const parseBool = (v: unknown): boolean | undefined => {
+    if (typeof v === "boolean") return v;
+    if (typeof v === "string") {
+      const s = v.trim().toLowerCase();
+      if (s === "true" || s === "1" || s === "yes") return true;
+      if (s === "false" || s === "0" || s === "no") return false;
+    }
+    return undefined;
+  };
   const apiKeys = Object.keys(dateFieldMap) as Array<keyof typeof dateFieldMap>;
   for (const apiKey of apiKeys) {
     if (!Object.prototype.hasOwnProperty.call(body, apiKey)) continue;
@@ -3828,6 +3877,50 @@ router.patch("/cases/:caseId/key-dates", requireAuthHandler, requireFirmUserHand
   if (differentialSum === undefined && Object.prototype.hasOwnProperty.call(body, "differential_sum_rm")) {
     res.status(400).json({ error: "Invalid differential_sum_rm" });
     return;
+  }
+
+  const masterLuExempted = Object.prototype.hasOwnProperty.call(body, "master_lu_exempted") ? parseBool(body.master_lu_exempted) : undefined;
+  if (masterLuExempted === undefined && Object.prototype.hasOwnProperty.call(body, "master_lu_exempted")) {
+    res.status(400).json({ error: "Invalid master_lu_exempted" });
+    return;
+  }
+  if (masterLuExempted !== undefined) {
+    (insertValues as any).masterLuExempted = masterLuExempted;
+    (updateValues as any).masterLuExempted = masterLuExempted;
+    changed.push("master_lu_exempted");
+    if (masterLuExempted) {
+      (insertValues as any).bankLuDated = null;
+      insertValues.bankLuReceivedDate = null;
+      insertValues.bankLuForwardToDeveloperOn = null;
+      insertValues.developerLuReceivedOn = null;
+      insertValues.developerLuDated = null;
+      (updateValues as any).bankLuDated = null;
+      updateValues.bankLuReceivedDate = null;
+      updateValues.bankLuForwardToDeveloperOn = null;
+      updateValues.developerLuReceivedOn = null;
+      updateValues.developerLuDated = null;
+      changed.push("bank_lu_dated", "bank_lu_received_date", "bank_lu_forward_to_developer_on", "developer_lu_received_on", "developer_lu_dated");
+    }
+  }
+
+  const encumbranceExempted = Object.prototype.hasOwnProperty.call(body, "encumbrance_free_exempted") ? parseBool(body.encumbrance_free_exempted) : undefined;
+  if (encumbranceExempted === undefined && Object.prototype.hasOwnProperty.call(body, "encumbrance_free_exempted")) {
+    res.status(400).json({ error: "Invalid encumbrance_free_exempted" });
+    return;
+  }
+  if (encumbranceExempted !== undefined) {
+    (insertValues as any).encumbranceFreeExempted = encumbranceExempted;
+    (updateValues as any).encumbranceFreeExempted = encumbranceExempted;
+    changed.push("encumbrance_free_exempted");
+    if (encumbranceExempted) {
+      insertValues.letterDisclaimerReceivedOn = null;
+      insertValues.letterDisclaimerDated = null;
+      insertValues.letterDisclaimerReferenceNos = null;
+      updateValues.letterDisclaimerReceivedOn = null;
+      updateValues.letterDisclaimerDated = null;
+      updateValues.letterDisclaimerReferenceNos = null;
+      changed.push("letter_disclaimer_received_on", "letter_disclaimer_dated", "letter_disclaimer_reference_nos");
+    }
   }
   if (differentialSum !== undefined) {
     (insertValues as any).differentialSumRm = differentialSum;
@@ -3904,13 +3997,104 @@ router.patch("/cases/:caseId/key-dates", requireAuthHandler, requireFirmUserHand
     changed.push("pa_no");
   }
 
-  const existing = await r
-    .select({ id: caseKeyDatesTable.id })
+  const [currentKd] = await r
+    .select({
+      id: caseKeyDatesTable.id,
+      spaStampedDate: caseKeyDatesTable.spaStampedDate,
+      letterOfOfferStampedDate: caseKeyDatesTable.letterOfOfferStampedDate,
+      actingLetterIssuedDate: caseKeyDatesTable.actingLetterIssuedDate,
+      loanBankExecutedDate: caseKeyDatesTable.loanBankExecutedDate,
+      developerConfirmationDate: caseKeyDatesTable.developerConfirmationDate,
+      registeredPoaOn: caseKeyDatesTable.registerPoaOn,
+      registeredPoaRegistrationNumber: caseKeyDatesTable.registeredPoaRegistrationNumber,
+      differentialSumRm: (caseKeyDatesTable as any).differentialSumRm,
+    })
     .from(caseKeyDatesTable)
-    .where(and(eq(caseKeyDatesTable.caseId, params.data.caseId), eq(caseKeyDatesTable.firmId, req.firmId!)));
+    .where(and(eq(caseKeyDatesTable.caseId, params.data.caseId), eq(caseKeyDatesTable.firmId, req.firmId!)))
+    .limit(1);
+
+  const wantsLoStamp = Object.prototype.hasOwnProperty.call(body, "letter_of_offer_stamped_date");
+  const wantsActingLetter = Object.prototype.hasOwnProperty.call(body, "acting_letter_issued_date");
+  const wantsBankExec = Object.prototype.hasOwnProperty.call(body, "loan_bank_executed_date");
+  const wantsDeveloperConfirmation = Object.prototype.hasOwnProperty.call(body, "developer_confirmation_date");
+  const wantsRegisteredPoa = Object.prototype.hasOwnProperty.call(body, "register_poa_on") || Object.prototype.hasOwnProperty.call(body, "registered_poa_registration_number");
+
+  const effectiveSpaStampedDate = (updateValues as any).spaStampedDate ?? currentKd?.spaStampedDate ?? null;
+  const effectiveLoStampedDate = (updateValues as any).letterOfOfferStampedDate ?? currentKd?.letterOfOfferStampedDate ?? null;
+  const effectiveActingLetterDate = (updateValues as any).actingLetterIssuedDate ?? currentKd?.actingLetterIssuedDate ?? null;
+  const effectiveBankExecDate = (updateValues as any).loanBankExecutedDate ?? currentKd?.loanBankExecutedDate ?? null;
+  const effectiveDeveloperConfirmationDate = (updateValues as any).developerConfirmationDate ?? currentKd?.developerConfirmationDate ?? null;
+  const effectiveDifferentialSumRm = (updateValues as any).differentialSumRm ?? (currentKd as any)?.differentialSumRm ?? null;
+  const effectiveRegisteredPoaOn = (updateValues as any).registerPoaOn ?? currentKd?.registeredPoaOn ?? null;
+  const effectiveRegisteredPoaRegNo = (updateValues as any).registeredPoaRegistrationNumber ?? currentKd?.registeredPoaRegistrationNumber ?? null;
+
+  const requiresWorkflowDocsCheck = wantsLoStamp || wantsActingLetter || wantsBankExec || wantsRegisteredPoa;
+  const wfExists = requiresWorkflowDocsCheck ? await tableExists(r, "public.case_workflow_documents") : true;
+  if (requiresWorkflowDocsCheck && !wfExists) {
+    res.status(503).json({ error: "Workflow documents not available" });
+    return;
+  }
+  const hasWorkflowDoc = async (milestoneKey: string): Promise<boolean> => {
+    const [row] = await r
+      .select({ id: caseWorkflowDocumentsTable.id })
+      .from(caseWorkflowDocumentsTable)
+      .where(and(
+        eq(caseWorkflowDocumentsTable.firmId, req.firmId!),
+        eq(caseWorkflowDocumentsTable.caseId, params.data.caseId),
+        eq(caseWorkflowDocumentsTable.milestoneKey, milestoneKey),
+        sql`${caseWorkflowDocumentsTable.deletedAt} IS NULL`,
+      ))
+      .limit(1);
+    return Boolean(row?.id);
+  };
+
+  if (wantsDeveloperConfirmation) {
+    if (effectiveDeveloperConfirmationDate && !effectiveDifferentialSumRm) {
+      res.status(422).json({ error: "Differential Sum (RM) is required when Developer Confirmation dated is set" });
+      return;
+    }
+  }
+
+  if (wantsLoStamp) {
+    if (effectiveLoStampedDate && !(await hasWorkflowDoc("lo_stamped"))) {
+      res.status(422).json({ error: "Stamped LO PDF is required for LO Stamping date" });
+      return;
+    }
+  }
+
+  if (wantsActingLetter) {
+    if (effectiveActingLetterDate) {
+      if (!effectiveLoStampedDate || !(await hasWorkflowDoc("lo_stamped"))) {
+        res.status(422).json({ error: "LO stamping date + Stamped LO PDF are required before setting Acting Letter dated" });
+        return;
+      }
+    }
+  }
+
+  if (wantsBankExec) {
+    if (effectiveBankExecDate) {
+      const spaOk = Boolean(effectiveSpaStampedDate) && (await hasWorkflowDoc("spa_stamped"));
+      const loOk = Boolean(effectiveLoStampedDate) && (await hasWorkflowDoc("lo_stamped"));
+      if (!spaOk || !loOk) {
+        res.status(422).json({ error: "SPA stamping (date+file) and LO stamping (date+file) are required before setting Bank execution dated" });
+        return;
+      }
+    }
+  }
+
+  if (wantsRegisteredPoa) {
+    if (effectiveRegisteredPoaOn) {
+      const hasNo = typeof effectiveRegisteredPoaRegNo === "string" && effectiveRegisteredPoaRegNo.trim();
+      const hasFile = await hasWorkflowDoc("register_poa");
+      if (!hasNo || !hasFile) {
+        res.status(422).json({ error: "Registered POA requires Presentation Number and file upload" });
+        return;
+      }
+    }
+  }
 
   let kd: any;
-  if (existing[0]) {
+  if (currentKd?.id) {
     const [updated] = await r
       .update(caseKeyDatesTable)
       .set(updateValues)
@@ -3970,6 +4154,8 @@ router.patch("/cases/:caseId/key-dates", requireAuthHandler, requireFirmUserHand
     bank_lu_forward_to_developer_on: kd.bankLuForwardToDeveloperOn ? String(kd.bankLuForwardToDeveloperOn) : null,
     developer_lu_received_on: kd.developerLuReceivedOn ? String(kd.developerLuReceivedOn) : null,
     developer_lu_dated: kd.developerLuDated ? String(kd.developerLuDated) : null,
+    master_lu_exempted: Boolean((kd as any).masterLuExempted),
+    encumbrance_free_exempted: Boolean((kd as any).encumbranceFreeExempted),
     letter_disclaimer_received_on: kd.letterDisclaimerReceivedOn ? String(kd.letterDisclaimerReceivedOn) : null,
     letter_disclaimer_dated: kd.letterDisclaimerDated ? String(kd.letterDisclaimerDated) : null,
     letter_disclaimer_reference_nos: kd.letterDisclaimerReferenceNos ?? null,
@@ -3979,6 +4165,10 @@ router.patch("/cases/:caseId/key-dates", requireAuthHandler, requireFirmUserHand
     loan_agreement_dated: kd.loanAgreementDated ? String(kd.loanAgreementDated) : null,
     loan_agreement_submitted_stamping_date: kd.loanAgreementSubmittedStampingDate ? String(kd.loanAgreementSubmittedStampingDate) : null,
     loan_agreement_stamped_date: kd.loanAgreementStampedDate ? String(kd.loanAgreementStampedDate) : null,
+    received_executed_document_on_1: (kd as any).receivedExecutedDocumentOn1 ? String((kd as any).receivedExecutedDocumentOn1) : null,
+    received_unexecuted_document_on: (kd as any).receivedUnexecutedDocumentOn ? String((kd as any).receivedUnexecutedDocumentOn) : null,
+    resent_bank_execution_dated: (kd as any).resentBankExecutionDated ? String((kd as any).resentBankExecutionDated) : null,
+    received_executed_document_on_2: (kd as any).receivedExecutedDocumentOn2 ? String((kd as any).receivedExecutedDocumentOn2) : null,
     statutory_declaration_dated: (kd as any).statutoryDeclarationDated ? String((kd as any).statutoryDeclarationDated) : null,
     statutory_declaration_stamped_on: (kd as any).statutoryDeclarationStampedOn ? String((kd as any).statutoryDeclarationStampedOn) : null,
     fa_date: (kd as any).faDate ? String((kd as any).faDate) : null,
@@ -5701,6 +5891,335 @@ router.get("/cases/:caseId/loan-stamping/:id/download", requireAuthHandler, requ
       return;
     }
     logger.error({ err, path: req.path, firmId: req.firmId, userId: req.userId, caseId, id }, "[cases] loan_stamping_download_failed");
+    res.status(500).json({ error: "Failed to download file" });
+  }
+}));
+
+router.get("/cases/:caseId/supp-lo-documents", requireAuthHandler, requireFirmUserHandler, requirePermission("documents", "read") as RequestHandler, authed(async (req, res) => {
+  const r = req.rlsDb;
+  if (!r) {
+    logger.error({ path: req.path, firmId: req.firmId, userId: req.userId }, "[cases] missing tenant database context");
+    res.status(500).json({ error: "Internal Server Error" });
+    return;
+  }
+  const caseIdStr = one((req.params as any).caseId);
+  const caseId = caseIdStr ? Number(caseIdStr) : NaN;
+  if (!Number.isFinite(caseId)) {
+    res.status(400).json({ error: "Invalid caseId" });
+    return;
+  }
+  const ok = await enforceCaseAccess(r, req, res, caseId);
+  if (!ok) return;
+  const exists = await tableExists(r, "public.case_loan_supp_documents");
+  if (!exists) {
+    res.json([]);
+    return;
+  }
+  const rows = await r
+    .select({
+      id: caseLoanSuppDocumentsTable.id,
+      documentName: caseLoanSuppDocumentsTable.documentName,
+      documentDate: caseLoanSuppDocumentsTable.documentDate,
+      objectPath: caseLoanSuppDocumentsTable.objectPath,
+      fileName: caseLoanSuppDocumentsTable.fileName,
+      mimeType: caseLoanSuppDocumentsTable.mimeType,
+      fileSize: caseLoanSuppDocumentsTable.fileSize,
+      sortOrder: caseLoanSuppDocumentsTable.sortOrder,
+      createdAt: caseLoanSuppDocumentsTable.createdAt,
+      updatedAt: caseLoanSuppDocumentsTable.updatedAt,
+    })
+    .from(caseLoanSuppDocumentsTable)
+    .where(and(
+      eq(caseLoanSuppDocumentsTable.firmId, req.firmId!),
+      eq(caseLoanSuppDocumentsTable.caseId, caseId),
+      sql`${caseLoanSuppDocumentsTable.deletedAt} IS NULL`,
+    ))
+    .orderBy(asc(caseLoanSuppDocumentsTable.sortOrder), asc(caseLoanSuppDocumentsTable.id));
+  res.json(rows.map((x) => ({
+    ...x,
+    documentDate: x.documentDate ? String(x.documentDate) : null,
+    createdAt: toIsoStringSafeOrNull(x.createdAt),
+    updatedAt: toIsoStringSafeOrNull(x.updatedAt),
+  })));
+}));
+
+router.post("/cases/:caseId/supp-lo-documents", requireAuthHandler, requireFirmUserHandler, requirePermission("documents", "update") as RequestHandler, authed(async (req, res) => {
+  const r = req.rlsDb;
+  if (!r) {
+    logger.error({ path: req.path, firmId: req.firmId, userId: req.userId }, "[cases] missing tenant database context");
+    res.status(500).json({ error: "Internal Server Error" });
+    return;
+  }
+  const caseIdStr = one((req.params as any).caseId);
+  const caseId = caseIdStr ? Number(caseIdStr) : NaN;
+  if (!Number.isFinite(caseId)) {
+    res.status(400).json({ error: "Invalid caseId" });
+    return;
+  }
+  const exists = await tableExists(r, "public.case_loan_supp_documents");
+  if (!exists) {
+    res.status(503).json({ error: "Supplementary loan documents not available" });
+    return;
+  }
+  const ok = await enforceCaseAccess(r, req, res, caseId);
+  if (!ok) return;
+  const body = asObject(req.body) ?? {};
+  const documentName = asString(body.documentName);
+  const documentDateRaw = body.documentDate;
+  const sortOrder = asNumber(body.sortOrder);
+  if (!documentName?.trim()) {
+    res.status(422).json({ error: "Missing documentName" });
+    return;
+  }
+  const documentDate = Object.prototype.hasOwnProperty.call(body, "documentDate") ? parseDateOnlyInput(documentDateRaw) : undefined;
+  if (documentDate === undefined && Object.prototype.hasOwnProperty.call(body, "documentDate")) {
+    res.status(422).json({ error: "Invalid documentDate" });
+    return;
+  }
+  const [row] = await r
+    .insert(caseLoanSuppDocumentsTable)
+    .values({
+      firmId: req.firmId!,
+      caseId,
+      documentName: documentName.trim(),
+      documentDate: typeof documentDate === "string" ? documentDate : null,
+      sortOrder: Number.isFinite(sortOrder) ? sortOrder : 0,
+      uploadedBy: req.userId ?? null,
+    })
+    .returning();
+  await writeAuditLog({
+    firmId: req.firmId,
+    actorId: req.userId,
+    actorType: req.userType,
+    action: "cases.supp_lo_document.created",
+    entityType: "case",
+    entityId: caseId,
+    detail: `suppLoDocumentId=${row.id} name=${row.documentName}`,
+    ipAddress: req.ip,
+    userAgent: req.headers["user-agent"],
+  });
+  res.status(201).json({ ...row, documentDate: row.documentDate ? String(row.documentDate) : null, createdAt: toIsoStringSafeOrNull(row.createdAt), updatedAt: toIsoStringSafeOrNull(row.updatedAt) });
+}));
+
+router.patch("/cases/:caseId/supp-lo-documents/:id", requireAuthHandler, requireFirmUserHandler, requirePermission("documents", "update") as RequestHandler, authed(async (req, res) => {
+  const r = req.rlsDb;
+  if (!r) {
+    logger.error({ path: req.path, firmId: req.firmId, userId: req.userId }, "[cases] missing tenant database context");
+    res.status(500).json({ error: "Internal Server Error" });
+    return;
+  }
+  const caseIdStr = one((req.params as any).caseId);
+  const idStr = one((req.params as any).id);
+  const caseId = caseIdStr ? Number(caseIdStr) : NaN;
+  const id = idStr ? Number(idStr) : NaN;
+  if (!Number.isFinite(caseId) || !Number.isFinite(id)) {
+    res.status(400).json({ error: "Invalid params" });
+    return;
+  }
+  const exists = await tableExists(r, "public.case_loan_supp_documents");
+  if (!exists) {
+    res.status(503).json({ error: "Supplementary loan documents not available" });
+    return;
+  }
+  const ok = await enforceCaseAccess(r, req, res, caseId);
+  if (!ok) return;
+  const body = asObject(req.body) ?? {};
+  const nextName = Object.prototype.hasOwnProperty.call(body, "documentName") ? asString(body.documentName) : undefined;
+  const nextDateRaw = body.documentDate;
+  const nextObjectPath = Object.prototype.hasOwnProperty.call(body, "objectPath") ? asString(body.objectPath) : undefined;
+  const nextFileName = Object.prototype.hasOwnProperty.call(body, "fileName") ? asString(body.fileName) : undefined;
+  const nextMimeType = Object.prototype.hasOwnProperty.call(body, "mimeType") ? asString(body.mimeType) : undefined;
+  const nextFileSize = Object.prototype.hasOwnProperty.call(body, "fileSize") ? asNumber(body.fileSize) : undefined;
+  const nextSortOrder = Object.prototype.hasOwnProperty.call(body, "sortOrder") ? asNumber(body.sortOrder) : undefined;
+
+  const parsedDate = Object.prototype.hasOwnProperty.call(body, "documentDate") ? parseDateOnlyInput(nextDateRaw) : undefined;
+  if (parsedDate === undefined && Object.prototype.hasOwnProperty.call(body, "documentDate")) {
+    res.status(422).json({ error: "Invalid documentDate" });
+    return;
+  }
+
+  if (nextObjectPath !== undefined) {
+    const prefix = `/objects/cases/${req.firmId}/case-${caseId}/supp-lo/${id}/`;
+    if (!nextObjectPath.startsWith(prefix)) {
+      res.status(400).json({ error: "Invalid objectPath" });
+      return;
+    }
+  }
+  if (nextFileName !== undefined) {
+    if (!nextFileName?.trim()) {
+      res.status(400).json({ error: "Missing fileName" });
+      return;
+    }
+    const ext = fileExtLower(nextFileName);
+    if (!CASE_ATTACHMENT_ALLOWED_EXTENSIONS.has(ext)) {
+      res.status(422).json({ error: "Unsupported file type. Allowed: pdf, doc, docx, jpg, jpeg, png" });
+      return;
+    }
+  }
+
+  const setValues: Record<string, unknown> = { updatedAt: new Date() };
+  if (nextName !== undefined) {
+    if (!nextName?.trim()) {
+      res.status(422).json({ error: "Missing documentName" });
+      return;
+    }
+    setValues.documentName = nextName.trim();
+  }
+  if (parsedDate !== undefined) setValues.documentDate = typeof parsedDate === "string" ? parsedDate : null;
+  if (nextSortOrder !== undefined && Number.isFinite(nextSortOrder)) setValues.sortOrder = nextSortOrder;
+  if (nextObjectPath !== undefined) setValues.objectPath = nextObjectPath;
+  if (nextFileName !== undefined) setValues.fileName = nextFileName;
+  if (nextMimeType !== undefined) setValues.mimeType = nextMimeType;
+  if (nextFileSize !== undefined && Number.isFinite(nextFileSize)) setValues.fileSize = nextFileSize;
+  if (Object.prototype.hasOwnProperty.call(body, "fileSize") && (nextFileSize === null || nextFileSize === undefined)) setValues.fileSize = null;
+
+  const [row] = await r
+    .update(caseLoanSuppDocumentsTable)
+    .set(setValues)
+    .where(and(eq(caseLoanSuppDocumentsTable.id, id), eq(caseLoanSuppDocumentsTable.firmId, req.firmId!), eq(caseLoanSuppDocumentsTable.caseId, caseId), sql`${caseLoanSuppDocumentsTable.deletedAt} IS NULL`))
+    .returning();
+  if (!row) {
+    res.status(404).json({ error: "Not found" });
+    return;
+  }
+  await writeAuditLog({
+    firmId: req.firmId,
+    actorId: req.userId,
+    actorType: req.userType,
+    action: "cases.supp_lo_document.updated",
+    entityType: "case",
+    entityId: caseId,
+    detail: `suppLoDocumentId=${id}`,
+    ipAddress: req.ip,
+    userAgent: req.headers["user-agent"],
+  });
+  res.json({ ...row, documentDate: row.documentDate ? String(row.documentDate) : null, createdAt: toIsoStringSafeOrNull(row.createdAt), updatedAt: toIsoStringSafeOrNull(row.updatedAt) });
+}));
+
+router.delete("/cases/:caseId/supp-lo-documents/:id", requireAuthHandler, requireFirmUserHandler, requirePermission("documents", "update") as RequestHandler, authed(async (req, res) => {
+  const r = req.rlsDb;
+  if (!r) {
+    logger.error({ path: req.path, firmId: req.firmId, userId: req.userId }, "[cases] missing tenant database context");
+    res.status(500).json({ error: "Internal Server Error" });
+    return;
+  }
+  const caseIdStr = one((req.params as any).caseId);
+  const idStr = one((req.params as any).id);
+  const caseId = caseIdStr ? Number(caseIdStr) : NaN;
+  const id = idStr ? Number(idStr) : NaN;
+  if (!Number.isFinite(caseId) || !Number.isFinite(id)) {
+    res.status(400).json({ error: "Invalid params" });
+    return;
+  }
+  const exists = await tableExists(r, "public.case_loan_supp_documents");
+  if (!exists) {
+    res.status(404).json({ error: "Not found" });
+    return;
+  }
+  const ok = await enforceCaseAccess(r, req, res, caseId);
+  if (!ok) return;
+  const [existing] = await r
+    .select({ objectPath: caseLoanSuppDocumentsTable.objectPath, fileName: caseLoanSuppDocumentsTable.fileName })
+    .from(caseLoanSuppDocumentsTable)
+    .where(and(eq(caseLoanSuppDocumentsTable.id, id), eq(caseLoanSuppDocumentsTable.firmId, req.firmId!), eq(caseLoanSuppDocumentsTable.caseId, caseId), sql`${caseLoanSuppDocumentsTable.deletedAt} IS NULL`))
+    .limit(1);
+  if (!existing) {
+    res.status(404).json({ error: "Not found" });
+    return;
+  }
+  if (existing.objectPath) {
+    try {
+      await supabaseStorage.deletePrivateObject(existing.objectPath);
+    } catch (err) {
+      if (err instanceof ObjectNotFoundError) {
+        void err;
+      } else {
+        const cfgErr = getSupabaseStorageConfigError(err);
+        if (cfgErr) {
+          res.status(cfgErr.statusCode).json({ error: cfgErr.error });
+          return;
+        }
+        logger.error({ err, path: req.path, firmId: req.firmId, userId: req.userId, caseId, id }, "[cases] supp_lo_document_delete_object_failed");
+      }
+    }
+  }
+  await r
+    .update(caseLoanSuppDocumentsTable)
+    .set({ deletedAt: new Date(), updatedAt: new Date() })
+    .where(and(eq(caseLoanSuppDocumentsTable.id, id), eq(caseLoanSuppDocumentsTable.firmId, req.firmId!), eq(caseLoanSuppDocumentsTable.caseId, caseId), sql`${caseLoanSuppDocumentsTable.deletedAt} IS NULL`));
+  await writeAuditLog({
+    firmId: req.firmId,
+    actorId: req.userId,
+    actorType: req.userType,
+    action: "cases.supp_lo_document.deleted",
+    entityType: "case",
+    entityId: caseId,
+    detail: `suppLoDocumentId=${id} fileName=${existing.fileName ?? ""}`,
+    ipAddress: req.ip,
+    userAgent: req.headers["user-agent"],
+  });
+  res.status(204).end();
+}));
+
+router.get("/cases/:caseId/supp-lo-documents/:id/download", requireAuthHandler, requireFirmUserHandler, requirePermission("documents", "read") as RequestHandler, authed(async (req, res) => {
+  const r = req.rlsDb;
+  if (!r) {
+    logger.error({ path: req.path, firmId: req.firmId, userId: req.userId }, "[cases] missing tenant database context");
+    res.status(500).json({ error: "Internal Server Error" });
+    return;
+  }
+  const caseIdStr = one((req.params as any).caseId);
+  const idStr = one((req.params as any).id);
+  const caseId = caseIdStr ? Number(caseIdStr) : NaN;
+  const id = idStr ? Number(idStr) : NaN;
+  if (!Number.isFinite(caseId) || !Number.isFinite(id)) {
+    res.status(400).json({ error: "Invalid params" });
+    return;
+  }
+  const exists = await tableExists(r, "public.case_loan_supp_documents");
+  if (!exists) {
+    res.status(404).json({ error: "Not found" });
+    return;
+  }
+  const ok = await enforceCaseAccess(r, req, res, caseId);
+  if (!ok) return;
+  const [row] = await r
+    .select({ objectPath: caseLoanSuppDocumentsTable.objectPath, fileName: caseLoanSuppDocumentsTable.fileName, mimeType: caseLoanSuppDocumentsTable.mimeType })
+    .from(caseLoanSuppDocumentsTable)
+    .where(and(eq(caseLoanSuppDocumentsTable.id, id), eq(caseLoanSuppDocumentsTable.firmId, req.firmId!), eq(caseLoanSuppDocumentsTable.caseId, caseId), sql`${caseLoanSuppDocumentsTable.deletedAt} IS NULL`));
+  if (!row || !row.objectPath || !row.fileName) {
+    res.status(404).json({ error: "File not found" });
+    return;
+  }
+  await writeAuditLog({
+    firmId: req.firmId,
+    actorId: req.userId,
+    actorType: req.userType,
+    action: "cases.supp_lo_document.download",
+    entityType: "case",
+    entityId: caseId,
+    detail: `suppLoDocumentId=${id} fileName=${row.fileName}`,
+    ipAddress: req.ip,
+    userAgent: req.headers["user-agent"],
+  });
+  try {
+    await streamSupabasePrivateObjectToResponse({
+      objectPath: row.objectPath,
+      res,
+      fileName: row.fileName,
+      fallbackContentType: row.mimeType ?? "application/octet-stream",
+    });
+  } catch (err) {
+    if (err instanceof ObjectNotFoundError) {
+      res.status(404).json({ error: "File not found" });
+      return;
+    }
+    const cfgErr = getSupabaseStorageConfigError(err);
+    if (cfgErr) {
+      res.status(cfgErr.statusCode).json({ error: cfgErr.error });
+      return;
+    }
+    logger.error({ err, path: req.path, firmId: req.firmId, userId: req.userId, caseId, id }, "[cases] supp_lo_document_download_failed");
     res.status(500).json({ error: "Failed to download file" });
   }
 }));

@@ -124,6 +124,26 @@ export const caseLoanStampingItemsTable = pgTable("case_loan_stamping_items", {
   sortIdx: index("idx_case_loan_stamping_items_sort").on(t.firmId, t.caseId, t.sortOrder),
 }));
 
+export const caseLoanSuppDocumentsTable = pgTable("case_loan_supp_documents", {
+  id: serial("id").primaryKey(),
+  firmId: integer("firm_id").notNull(),
+  caseId: integer("case_id").notNull(),
+  documentName: text("document_name").notNull(),
+  documentDate: date("document_date"),
+  objectPath: text("object_path"),
+  fileName: text("file_name"),
+  mimeType: text("mime_type"),
+  fileSize: integer("file_size"),
+  uploadedBy: integer("uploaded_by"),
+  sortOrder: integer("sort_order").notNull().default(0),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow().$onUpdate(() => new Date()),
+  deletedAt: timestamp("deleted_at", { withTimezone: true }),
+}, (t) => ({
+  firmCaseIdx: index("idx_case_loan_supp_documents_firm_case").on(t.firmId, t.caseId),
+  sortIdx: index("idx_case_loan_supp_documents_sort").on(t.firmId, t.caseId, t.sortOrder),
+}));
+
 export const documentTemplateVersionsTable = pgTable("document_template_versions", {
   id: serial("id").primaryKey(),
   firmId: integer("firm_id").notNull(),

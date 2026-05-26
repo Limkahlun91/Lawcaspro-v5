@@ -1198,6 +1198,10 @@ async function buildCaseContext(r: DbConn, caseId: number, firmId: number, cache
           loan_agreement_dated,
           loan_agreement_submitted_stamping_date,
           loan_agreement_stamped_date,
+          received_executed_document_on_1,
+          received_unexecuted_document_on,
+          resent_bank_execution_dated,
+          received_executed_document_on_2,
           statutory_declaration_dated,
           statutory_declaration_stamped_on,
           fa_date,
@@ -1381,6 +1385,10 @@ async function buildCaseContext(r: DbConn, caseId: number, firmId: number, cache
   addDateTriplet("loan_agreement_dated", kdVal("loan_agreement_dated"), null);
   addDateTriplet("loan_agreement_submitted_stamping_date", kdVal("loan_agreement_submitted_stamping_date"), null);
   addDateTriplet("loan_agreement_stamped_date", kdVal("loan_agreement_stamped_date"), null);
+  addDateTriplet("received_executed_document_on_1", kdVal("received_executed_document_on_1"), null);
+  addDateTriplet("received_unexecuted_document_on", kdVal("received_unexecuted_document_on"), null);
+  addDateTriplet("resent_bank_execution_dated", kdVal("resent_bank_execution_dated"), null);
+  addDateTriplet("received_executed_document_on_2", kdVal("received_executed_document_on_2"), null);
   addDateTriplet("statutory_declaration_dated", kdVal("statutory_declaration_dated"), null);
   addDateTriplet("statutory_declaration_stamped_on", kdVal("statutory_declaration_stamped_on"), null);
   addDateTriplet("fa_date", kdVal("fa_date"), null);
@@ -10402,13 +10410,40 @@ router.post("/cases/:caseId/documents/print", requireAuth, requireFirmUser, requ
     return;
   }
   const caseType = typeof (context as any).case_type === "string" ? String((context as any).case_type) : "";
-  const template = templateRows.find((t) => {
+  const caseTypeMatches = (t: Record<string, unknown>): boolean => {
     const applies = (t as any).applies_to_case_type;
     if (applies === null || applies === undefined) return true;
     const s = String(applies);
     if (!s || s.toLowerCase() === "any") return true;
     return caseType ? s === caseType : false;
-  });
+  };
+
+  const matchedByCaseType = templateRows.filter((t) => caseTypeMatches(t as any));
+
+  const bankNameRaw = typeof (context as any).end_financier === "string"
+    ? String((context as any).end_financier).trim()
+    : typeof (context as any).loan_end_financier === "string"
+      ? String((context as any).loan_end_financier).trim()
+      : "";
+  const normalizeBankToken = (s: string): string => s
+    .toLowerCase()
+    .replace(/\(.*?\)/g, " ")
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\b(berhad|bhd|bank|islamic|had|the)\b/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  const bankToken = bankNameRaw ? normalizeBankToken(bankNameRaw) : "";
+  const bankTokens = bankToken ? bankToken.split(" ").filter(Boolean) : [];
+
+  const template =
+    printKey === "letter_forward_bank_execution" && bankTokens.length > 0
+      ? matchedByCaseType.find((t) => {
+          const name = String((t as any).name ?? "").toLowerCase();
+          const fileName = String((t as any).file_name ?? "").toLowerCase();
+          const hay = `${name} ${fileName}`;
+          return bankTokens.some((tok) => tok.length >= 3 && hay.includes(tok));
+        }) ?? matchedByCaseType[0]
+      : matchedByCaseType[0];
   if (!template) {
     const msg = `找不到對應的 ${cfg.label} 模板` + (caseType ? `（Case Type=${caseType}）` : "");
     res.status(404).json({ error: msg, code: "TEMPLATE_NOT_CONFIGURED", documentType: cfg.documentType, caseType });

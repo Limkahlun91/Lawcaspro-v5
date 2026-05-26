@@ -10,6 +10,7 @@ import { Button } from "@/components/ui/button";
 import { ArrowLeft, CheckCircle2, Clock, User, Building2, MapPin, Tag, Receipt, Printer, Upload, Download, Trash2, Plus, Minus, X, MoreHorizontal, Share2, AlertTriangle } from "lucide-react";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from "@/components/ui/accordion";
+import { Checkbox } from "@/components/ui/checkbox";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useToast } from "@/hooks/use-toast";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -532,9 +533,15 @@ export default function CaseDetail() {
       }
 
       if (vars?.printKey === "acting_letter") {
-        autoKeyDatesMutation.mutate({ payload: { acting_letter_issued_date: todayYmdLocal() }, statusLabel: "Acting Letter Issued" });
+        const existing = typeof keyDatesDraft.acting_letter_issued_date === "string" ? keyDatesDraft.acting_letter_issued_date : "";
+        if (!existing) {
+          autoKeyDatesMutation.mutate({ payload: { acting_letter_issued_date: todayYmdLocal() }, statusLabel: "Acting Letter Issued" });
+        }
       } else if (vars?.printKey === "letter_advice_spa_sol_lu") {
-        autoKeyDatesMutation.mutate({ payload: { advice_to_bank_date: todayYmdLocal() }, statusLabel: "Advised" });
+        const existing = typeof keyDatesDraft.advice_to_bank_date === "string" ? keyDatesDraft.advice_to_bank_date : "";
+        if (!existing) {
+          autoKeyDatesMutation.mutate({ payload: { advice_to_bank_date: todayYmdLocal() }, statusLabel: "Advised" });
+        }
       }
     },
     onError: (err) => toastError(toast, err, "Print failed"),
@@ -606,6 +613,44 @@ export default function CaseDetail() {
     enabled: !!caseId,
     retry: false,
   });
+
+  type SuppLoDocument = {
+    id: number;
+    documentName: string;
+    documentDate: string | null;
+    objectPath: string | null;
+    fileName: string | null;
+    mimeType: string | null;
+    fileSize: number | null;
+    sortOrder: number | null;
+    createdAt: string | null;
+    updatedAt: string | null;
+  };
+
+  type SuppLoDocumentDraft = {
+    rowKey: string;
+    id: number | null;
+    documentName: string;
+    documentDate: string;
+    objectPath: string | null;
+    fileName: string | null;
+    mimeType: string | null;
+    fileSize: number | null;
+    sortOrder: number;
+  };
+
+  const suppLoDocsQuery = useQuery<SuppLoDocument[]>({
+    queryKey: ["case-supp-lo-documents", caseId],
+    queryFn: ({ signal }) => apiFetchJson(`/cases/${caseId}/supp-lo-documents`, { signal }),
+    enabled: !!caseId,
+    retry: false,
+  });
+
+  const [suppLoDocsDraft, setSuppLoDocsDraft] = useState<SuppLoDocumentDraft[]>([]);
+  const suppLoFileInputRef = useRef<HTMLInputElement>(null);
+  const suppLoUploadRowKeyRef = useRef<string | null>(null);
+  const [suppLoUploadingRowKey, setSuppLoUploadingRowKey] = useState<string | null>(null);
+  const [suppLoDownloadingId, setSuppLoDownloadingId] = useState<number | null>(null);
 
   type CaseMessage = {
     id: string;
@@ -720,8 +765,8 @@ export default function CaseDetail() {
   const canPrint = (printKey: string, dateVal: string) => !printableQuery.isError && Boolean(dateVal) && printState(printKey)?.status === "configured";
   const templateIssuesCount = (printableConfig || []).filter((x) => x?.status && x.status !== "configured").length;
   const [savingScope, setSavingScope] = useState<string>("");
-  const [keyDatesDraft, setKeyDatesDraft] = useState<Record<string, string>>({});
-  const [keyDatesBaseline, setKeyDatesBaseline] = useState<Record<string, string>>({});
+  const [keyDatesDraft, setKeyDatesDraft] = useState<Record<string, string | boolean>>({});
+  const [keyDatesBaseline, setKeyDatesBaseline] = useState<Record<string, string | boolean>>({});
   const [keyDatesInitialized, setKeyDatesInitialized] = useState(false);
 
   const workflowFileInputRef = useRef<HTMLInputElement>(null);
@@ -756,6 +801,7 @@ export default function CaseDetail() {
       li_date: normalizeDateOnlyFromApi((src as any).li_date),
       li_received_on: normalizeDateOnlyFromApi((src as any).li_received_on),
       letter_of_offer_date: normalizeDateOnlyFromApi((src as any).letter_of_offer_date),
+      letter_of_offer_stamped_date: normalizeDateOnlyFromApi((src as any).letter_of_offer_stamped_date),
       supp_lo_date: normalizeDateOnlyFromApi((src as any).supp_lo_date),
       acting_letter_issued_date: normalizeDateOnlyFromApi((src as any).acting_letter_issued_date),
       loan_bank_executed_date: normalizeDateOnlyFromApi((src as any).loan_bank_executed_date),
@@ -764,15 +810,22 @@ export default function CaseDetail() {
       differential_sum_rm: (src as any).differential_sum_rm !== null && (src as any).differential_sum_rm !== undefined ? String((src as any).differential_sum_rm) : "",
       differential_sum_settled_on: normalizeDateOnlyFromApi((src as any).differential_sum_settled_on),
       bank_lu_dated: normalizeDateOnlyFromApi((src as any).bank_lu_dated),
+      bank_lu_received_date: normalizeDateOnlyFromApi((src as any).bank_lu_received_date),
       bank_lu_forward_to_developer_on: normalizeDateOnlyFromApi((src as any).bank_lu_forward_to_developer_on),
       developer_lu_received_on: normalizeDateOnlyFromApi((src as any).developer_lu_received_on),
       developer_lu_dated: normalizeDateOnlyFromApi((src as any).developer_lu_dated),
+      master_lu_exempted: Boolean((src as any).master_lu_exempted),
+      encumbrance_free_exempted: Boolean((src as any).encumbrance_free_exempted),
       letter_disclaimer_received_on: normalizeDateOnlyFromApi((src as any).letter_disclaimer_received_on),
       letter_disclaimer_dated: normalizeDateOnlyFromApi((src as any).letter_disclaimer_dated),
       letter_disclaimer_reference_nos: typeof (src as any).letter_disclaimer_reference_nos === "string" ? String((src as any).letter_disclaimer_reference_nos) : "",
       redemption_sum: (src as any).redemption_sum !== null && (src as any).redemption_sum !== undefined ? String((src as any).redemption_sum) : "",
       balance_sum_less_last_5_rm: (src as any).balance_sum_less_last_5_rm !== null && (src as any).balance_sum_less_last_5_rm !== undefined ? String((src as any).balance_sum_less_last_5_rm) : "",
       bankruptcy_search_dated: normalizeDateOnlyFromApi((src as any).bankruptcy_search_dated),
+      received_executed_document_on_1: normalizeDateOnlyFromApi((src as any).received_executed_document_on_1),
+      received_unexecuted_document_on: normalizeDateOnlyFromApi((src as any).received_unexecuted_document_on),
+      resent_bank_execution_dated: normalizeDateOnlyFromApi((src as any).resent_bank_execution_dated),
+      received_executed_document_on_2: normalizeDateOnlyFromApi((src as any).received_executed_document_on_2),
 
       statutory_declaration_dated: normalizeDateOnlyFromApi((src as any).statutory_declaration_dated),
       statutory_declaration_stamped_on: normalizeDateOnlyFromApi((src as any).statutory_declaration_stamped_on),
@@ -786,6 +839,8 @@ export default function CaseDetail() {
       noa_dated: normalizeDateOnlyFromApi((src as any).noa_dated),
       register_pa_on: normalizeDateOnlyFromApi((src as any).register_pa_on),
       pa_no: typeof (src as any).pa_no === "string" ? String((src as any).pa_no) : "",
+      register_poa_on: normalizeDateOnlyFromApi((src as any).register_poa_on),
+      registered_poa_registration_number: typeof (src as any).registered_poa_registration_number === "string" ? String((src as any).registered_poa_registration_number) : "",
 
       advice_to_bank_date: normalizeDateOnlyFromApi((src as any).advice_to_bank_date),
       bank_1st_release_on: normalizeDateOnlyFromApi((src as any).bank_1st_release_on),
@@ -826,6 +881,7 @@ export default function CaseDetail() {
       "li_date",
       "li_received_on",
       "letter_of_offer_date",
+      "letter_of_offer_stamped_date",
       "supp_lo_date",
       "acting_letter_issued_date",
       "loan_bank_executed_date",
@@ -833,7 +889,14 @@ export default function CaseDetail() {
       "developer_confirmation_date",
       "differential_sum_rm",
       "differential_sum_settled_on",
+      "received_executed_document_on_1",
+      "received_unexecuted_document_on",
+      "resent_bank_execution_dated",
+      "received_executed_document_on_2",
+      "master_lu_exempted",
+      "encumbrance_free_exempted",
       "bank_lu_dated",
+      "bank_lu_received_date",
       "bank_lu_forward_to_developer_on",
       "developer_lu_received_on",
       "developer_lu_dated",
@@ -855,6 +918,8 @@ export default function CaseDetail() {
       "noa_dated",
       "register_pa_on",
       "pa_no",
+      "register_poa_on",
+      "registered_poa_registration_number",
       "advice_to_bank_date",
       "bank_1st_release_on",
       "first_release_amount_rm",
@@ -914,6 +979,52 @@ export default function CaseDetail() {
   }, [keyDates, keyDatesInitialized, anyDirty]);
 
   useEffect(() => {
+    if (!keyDatesInitialized) return;
+
+    const priceRaw = (caseInfo as any)?.spaPrice;
+    const purchasePrice = typeof priceRaw === "number"
+      ? priceRaw
+      : typeof priceRaw === "string"
+        ? Number(priceRaw.replace(/[^0-9.]/g, "").trim())
+        : NaN;
+
+    const rawLoanDetails = (caseInfo as any)?.loanDetails;
+    const loanDetailsObj: Record<string, unknown> | null = (() => {
+      if (!rawLoanDetails) return null;
+      if (typeof rawLoanDetails === "object" && !Array.isArray(rawLoanDetails)) return rawLoanDetails as Record<string, unknown>;
+      if (typeof rawLoanDetails !== "string") return null;
+      try {
+        const parsed = JSON.parse(rawLoanDetails);
+        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+        return parsed as Record<string, unknown>;
+      } catch {
+        return null;
+      }
+    })();
+
+    const loanAmountRaw = loanDetailsObj?.loanAmountNum ?? loanDetailsObj?.loanAmount ?? loanDetailsObj?.loan_amount ?? loanDetailsObj?.amount;
+    const loanAmount = typeof loanAmountRaw === "number"
+      ? loanAmountRaw
+      : typeof loanAmountRaw === "string"
+        ? Number(loanAmountRaw.replace(/[^0-9.]/g, "").trim())
+        : NaN;
+
+    if (!Number.isFinite(purchasePrice) || !Number.isFinite(loanAmount)) return;
+
+    const redemptionRaw = typeof keyDatesDraft.redemption_sum === "string" ? keyDatesDraft.redemption_sum : "";
+    const redemption = redemptionRaw ? Number(redemptionRaw.replace(/[^0-9.]/g, "").trim()) : 0;
+    if (!Number.isFinite(redemption)) return;
+
+    const computed = loanAmount - redemption - (purchasePrice * 0.05);
+    const next = Number.isFinite(computed) ? computed.toFixed(2) : "";
+    setKeyDatesDraft((d) => {
+      const current = typeof d.balance_sum_less_last_5_rm === "string" ? d.balance_sum_less_last_5_rm : "";
+      if (current === next) return d;
+      return { ...d, balance_sum_less_last_5_rm: next };
+    });
+  }, [caseInfo, keyDatesDraft.redemption_sum, keyDatesInitialized]);
+
+  useEffect(() => {
     if (stampingDirty) return;
     const rows = Array.isArray(loanStampingQuery.data) ? loanStampingQuery.data : [];
     setStampingDraft(rows.map((x, idx) => ({
@@ -941,6 +1052,184 @@ export default function CaseDetail() {
     }
     return map;
   }, [workflowDocsQuery.data]);
+
+  useEffect(() => {
+    const rows = Array.isArray(suppLoDocsQuery.data) ? suppLoDocsQuery.data : [];
+    setSuppLoDocsDraft((prev) => {
+      const unsaved = prev.filter((x) => x.id == null);
+      const prevKeys = new Map<number, string>();
+      for (const r of prev) {
+        if (r.id != null) prevKeys.set(r.id, r.rowKey);
+      }
+      const nextSaved: SuppLoDocumentDraft[] = rows.map((r, idx) => ({
+        rowKey: prevKeys.get(r.id) ?? `id-${r.id}`,
+        id: r.id,
+        documentName: r.documentName ?? "",
+        documentDate: r.documentDate ? String(r.documentDate) : "",
+        objectPath: r.objectPath ?? null,
+        fileName: r.fileName ?? null,
+        mimeType: r.mimeType ?? null,
+        fileSize: typeof r.fileSize === "number" ? r.fileSize : null,
+        sortOrder: Number.isFinite(r.sortOrder as number) ? Number(r.sortOrder) : idx * 10,
+      }));
+      return [...unsaved, ...nextSaved];
+    });
+  }, [suppLoDocsQuery.data]);
+
+  const createSuppLoDocMutation = useMutation({
+    mutationFn: async (vars: { documentName: string; documentDate: string | null; sortOrder: number }) => {
+      if (!caseId) throw new Error("Missing caseId");
+      return await apiFetchJson<SuppLoDocument>(`/cases/${caseId}/supp-lo-documents`, {
+        method: "POST",
+        body: JSON.stringify({ documentName: vars.documentName, documentDate: vars.documentDate, sortOrder: vars.sortOrder }),
+      });
+    },
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ["case-supp-lo-documents", caseId] });
+    },
+    onError: (err) => toastError(toast, err, "Failed to create document"),
+  });
+
+  const patchSuppLoDocMutation = useMutation({
+    mutationFn: async (vars: { id: number; patch: Partial<Pick<SuppLoDocument, "documentName" | "documentDate" | "objectPath" | "fileName" | "mimeType" | "fileSize" | "sortOrder">> }) => {
+      if (!caseId) throw new Error("Missing caseId");
+      return await apiFetchJson<SuppLoDocument>(`/cases/${caseId}/supp-lo-documents/${vars.id}`, {
+        method: "PATCH",
+        body: JSON.stringify(vars.patch),
+      });
+    },
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ["case-supp-lo-documents", caseId] });
+    },
+    onError: (err) => toastError(toast, err, "Failed to update document"),
+  });
+
+  const deleteSuppLoDocMutation = useMutation({
+    mutationFn: async (id: number) => {
+      if (!caseId) throw new Error("Missing caseId");
+      return await apiFetchJson(`/cases/${caseId}/supp-lo-documents/${id}`, { method: "DELETE", allowStatuses: [204] });
+    },
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ["case-supp-lo-documents", caseId] });
+      toast({ title: "Deleted" });
+    },
+    onError: (err) => toastError(toast, err, "Failed to delete document"),
+  });
+
+  const addSuppLoDocDraft = () => {
+    const nextSortOrder = (() => {
+      const max = suppLoDocsDraft.reduce((m, r) => Math.max(m, r.sortOrder), 0);
+      return (Number.isFinite(max) ? max : 0) + 10;
+    })();
+    setSuppLoDocsDraft((prev) => prev.concat({
+      rowKey: `tmp-${crypto.randomUUID()}`,
+      id: null,
+      documentName: "",
+      documentDate: "",
+      objectPath: null,
+      fileName: null,
+      mimeType: null,
+      fileSize: null,
+      sortOrder: nextSortOrder,
+    }));
+  };
+
+  const ensureSuppLoDocCreated = async (rowKey: string): Promise<number | null> => {
+    const row = suppLoDocsDraft.find((x) => x.rowKey === rowKey);
+    if (!row) return null;
+    if (row.id != null) return row.id;
+    if (!row.documentName.trim()) {
+      toast({ title: "Document Name required", variant: "destructive" });
+      return null;
+    }
+    const created = await createSuppLoDocMutation.mutateAsync({
+      documentName: row.documentName.trim(),
+      documentDate: row.documentDate ? row.documentDate : null,
+      sortOrder: row.sortOrder,
+    });
+    setSuppLoDocsDraft((prev) => prev.map((x) => x.rowKey === rowKey ? {
+      ...x,
+      id: created.id,
+      documentName: created.documentName ?? x.documentName,
+      documentDate: created.documentDate ? String(created.documentDate) : x.documentDate,
+      objectPath: created.objectPath ?? null,
+      fileName: created.fileName ?? null,
+      mimeType: created.mimeType ?? null,
+      fileSize: typeof created.fileSize === "number" ? created.fileSize : null,
+      sortOrder: Number.isFinite(created.sortOrder as number) ? Number(created.sortOrder) : x.sortOrder,
+    } : x));
+    return created.id;
+  };
+
+  const suppLoObjectPath = (id: number, file: File) => {
+    const firmId = user?.firmId;
+    return `/objects/cases/${firmId}/case-${caseId}/supp-lo/${id}/${crypto.randomUUID()}-${safeFileNamePart(file.name)}`;
+  };
+
+  const openSuppLoUpload = async (rowKey: string) => {
+    const id = await ensureSuppLoDocCreated(rowKey);
+    if (!id) return;
+    suppLoUploadRowKeyRef.current = rowKey;
+    if (suppLoFileInputRef.current) {
+      suppLoFileInputRef.current.value = "";
+      suppLoFileInputRef.current.click();
+    }
+  };
+
+  const handleSuppLoFileSelected = async (file: File | null) => {
+    const rowKey = suppLoUploadRowKeyRef.current;
+    if (!file || !rowKey) return;
+    const row = suppLoDocsDraft.find((x) => x.rowKey === rowKey);
+    if (!row) return;
+    const id = row.id ?? await ensureSuppLoDocCreated(rowKey);
+    if (!id) return;
+    if (!canDocsWrite) {
+      toast({ title: "Permission denied", description: "You do not have permission to upload documents.", variant: "destructive" });
+      return;
+    }
+    const v = validateUploadFile(file, { allowedMimeTypes: DEFAULT_ALLOWED_MIME_TYPES });
+    if (!v.ok) {
+      toast({ title: "Invalid file", description: v.message, variant: "destructive" });
+      return;
+    }
+    if (!user?.firmId) {
+      toast({ title: "No firm context", description: "Please sign in again." });
+      return;
+    }
+    setSuppLoUploadingRowKey(rowKey);
+    try {
+      const objectPath = suppLoObjectPath(id, file);
+      const uploaded = await uploadToPrivateCasePath(objectPath, file);
+      await patchSuppLoDocMutation.mutateAsync({
+        id,
+        patch: {
+          objectPath: uploaded.objectPath,
+          fileName: file.name,
+          mimeType: file.type || null,
+          fileSize: file.size,
+        },
+      });
+      toast({ title: "Upload success" });
+    } finally {
+      setSuppLoUploadingRowKey(null);
+      suppLoUploadRowKeyRef.current = null;
+      if (suppLoFileInputRef.current) suppLoFileInputRef.current.value = "";
+    }
+  };
+
+  const downloadSuppLoDoc = async (row: SuppLoDocumentDraft) => {
+    if (!row.id) return;
+    if (suppLoDownloadingId === row.id) return;
+    setSuppLoDownloadingId(row.id);
+    try {
+      const blob = await apiFetchBlob(`/cases/${caseId}/supp-lo-documents/${row.id}/download`);
+      downloadBlob(blob, row.fileName || "download");
+    } catch (err) {
+      toastDownloadError(err);
+    } finally {
+      setSuppLoDownloadingId(null);
+    }
+  };
 
   const toastDownloadError = (err: unknown) => {
     const status = (err as any)?.status;
@@ -1256,8 +1545,14 @@ export default function CaseDetail() {
 
     const keys = scopeKeys[key] as readonly string[];
     const payload: Record<string, unknown> = {};
+    const booleanKeys = new Set(["master_lu_exempted", "encumbrance_free_exempted"]);
     for (const k of keys) {
-      const v = keyDatesDraft[k] || "";
+      const raw = keyDatesDraft[k];
+      if (booleanKeys.has(k)) {
+        payload[k] = Boolean(raw);
+        continue;
+      }
+      const v = typeof raw === "string" ? raw : "";
       payload[k] = v ? v : null;
     }
 
@@ -1447,6 +1742,9 @@ export default function CaseDetail() {
     type?: "date" | "text" | "number";
     printerKey?: string;
     alwaysShowPrinter?: boolean;
+    disabled?: boolean;
+    required?: boolean;
+    readOnly?: boolean;
   }) {
     const type = props.type ?? "date";
     const isDate = type === "date";
@@ -1456,30 +1754,38 @@ export default function CaseDetail() {
     const st = showPrinter ? printState(printerKey) : null;
     const showStatus = showPrinter && st?.status !== "configured";
     const statusLabel = showStatus ? printStatusLabel(st) : "";
+    const showRequired = Boolean(props.required) && !dateVal;
 
     return (
       <div className="group rounded-lg border border-slate-200 bg-white p-3">
         <div className="flex items-center justify-between gap-2">
           <Label className="text-xs text-slate-600">{props.label}</Label>
-          {showStatus && (
-            <Badge
-              variant={st?.status === "configured" ? "secondary" : "outline"}
-              className="text-[10px] whitespace-nowrap"
-              title={st?.hint}
-            >
-              {statusLabel}
-            </Badge>
-          )}
+          <div className="flex items-center gap-1">
+            {showRequired ? (
+              <Badge variant="destructive" className="text-[10px] whitespace-nowrap">required</Badge>
+            ) : null}
+            {showStatus && (
+              <Badge
+                variant={st?.status === "configured" ? "secondary" : "outline"}
+                className="text-[10px] whitespace-nowrap"
+                title={st?.hint}
+              >
+                {statusLabel}
+              </Badge>
+            )}
+          </div>
         </div>
         <div className="mt-2 flex items-center gap-2">
           {isDate ? (
-            <DateOnlyInput className="flex-1" valueYmd={props.value} onChangeYmd={props.onChange} />
+            <DateOnlyInput className="flex-1" valueYmd={props.value} onChangeYmd={props.onChange} disabled={props.disabled} />
           ) : (
             <Input
               className="flex-1"
               type={type}
               value={props.value}
               onChange={(e) => props.onChange(e.target.value)}
+              disabled={props.disabled}
+              readOnly={props.readOnly}
             />
           )}
           {showPrinter && (
@@ -1490,7 +1796,7 @@ export default function CaseDetail() {
                 className={canPrint(printerKey, dateVal) ? "bg-slate-900 hover:bg-slate-800" : undefined}
                 title={printTitle(printerKey, dateVal)}
                 onClick={() => printMutation.mutate({ printKey: printerKey })}
-                disabled={printMutation.isPending || !canPrint(printerKey, dateVal)}
+                disabled={printMutation.isPending || props.disabled || !canPrint(printerKey, dateVal)}
               >
                 <Printer className="w-4 h-4" />
               </Button>
@@ -1506,11 +1812,11 @@ export default function CaseDetail() {
   const canDocsWrite = hasPermission(user, "documents", "create") || canDocsUpdate;
   const canDocsDelete = hasPermission(user, "documents", "delete");
 
-  function WorkflowFileCard(props: { label: string; docKey: WorkflowAttachmentDocKey; dateKey: WorkflowAttachmentDateKey; printerKey?: string; requireEvidenceUpload?: boolean }) {
-    const value = keyDatesDraft[props.dateKey] ?? "";
+  function WorkflowFileCard(props: { label: string; docKey: WorkflowAttachmentDocKey; dateKey: WorkflowAttachmentDateKey; printerKey?: string; requireEvidenceUpload?: boolean; evidenceLabel?: string; disabled?: boolean }) {
+    const value = String(keyDatesDraft[props.dateKey] ?? "");
     const doc = workflowDocsByKey.get(props.docKey);
     const uploading = workflowUploadingKey === props.docKey || uploadWorkflowDocMutation.isPending;
-    const canUpload = canDocsWrite && Boolean(value) && !uploading && !deleteWorkflowDocMutation.isPending;
+    const canUpload = canDocsWrite && Boolean(value) && !uploading && !deleteWorkflowDocMutation.isPending && !props.disabled;
     const derivedStatus = Array.isArray(progressQuery.data?.attachments)
       ? progressQuery.data.attachments.find((x: any) => x?.docKey === props.docKey)?.status
       : null;
@@ -1531,7 +1837,7 @@ export default function CaseDetail() {
               if (pending) {
                 return (
                   <Badge variant="destructive" className="text-[10px] whitespace-nowrap">
-                    pending upload
+                    incomplete
                   </Badge>
                 );
               }
@@ -1561,8 +1867,9 @@ export default function CaseDetail() {
         <div className="mt-2 flex items-center gap-2">
           <DateOnlyInput
             className="flex-1"
-            valueYmd={value}
+            valueYmd={String(value)}
             onChangeYmd={(v) => setKeyDatesDraft((d) => ({ ...d, [props.dateKey]: v }))}
+            disabled={props.disabled}
           />
           {showPrinter && (
             <div className="opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity">
@@ -1572,14 +1879,14 @@ export default function CaseDetail() {
                 className={canPrint(printerKey, value) ? "bg-slate-900 hover:bg-slate-800" : undefined}
                 title={printTitle(printerKey, value)}
                 onClick={() => printMutation.mutate({ printKey: printerKey })}
-                disabled={printMutation.isPending || !canPrint(printerKey, value)}
+                disabled={printMutation.isPending || props.disabled || !canPrint(printerKey, value)}
               >
                 <Printer className="w-4 h-4" />
               </Button>
             </div>
           )}
         </div>
-        {props.requireEvidenceUpload && value && !doc && canDocsWrite ? (
+        {props.requireEvidenceUpload && value && !doc && canDocsWrite && !props.disabled ? (
           <div
             className="mt-3 rounded-md border border-dashed border-red-300 bg-red-50 px-3 py-4 text-sm text-red-700 cursor-pointer"
             onClick={() => openWorkflowUpload(props.docKey, props.dateKey)}
@@ -1589,14 +1896,14 @@ export default function CaseDetail() {
               const f = e.dataTransfer.files?.[0] ?? null;
               if (!f) return;
               if (!/\.pdf$/i.test(f.name) && f.type !== "application/pdf") {
-                toast({ title: "PDF required", description: "Please upload a PDF file (Stamped SPA scan).", variant: "destructive" });
+                toast({ title: "PDF required", description: "Please upload a PDF file.", variant: "destructive" });
                 return;
               }
               workflowUploadKeyRef.current = { docKey: props.docKey, dateKey: props.dateKey };
               await handleWorkflowFileSelected(f);
             }}
           >
-            <div className="font-medium">Upload required: Stamped SPA (PDF)</div>
+            <div className="font-medium">Upload required: {props.evidenceLabel ?? "PDF"}</div>
             <div className="text-xs mt-1 text-red-600">Drop PDF here, or click to upload</div>
           </div>
         ) : null}
@@ -1710,6 +2017,13 @@ export default function CaseDetail() {
         accept={WORKFLOW_ATTACHMENT_ACCEPT}
         className="hidden"
         onChange={(e) => handleStampingFileSelected(e.target.files?.[0] ?? null)}
+      />
+      <input
+        ref={suppLoFileInputRef}
+        type="file"
+        accept={WORKFLOW_ATTACHMENT_ACCEPT}
+        className="hidden"
+        onChange={(e) => handleSuppLoFileSelected(e.target.files?.[0] ?? null)}
       />
       <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4 min-w-0">
         <div className="flex items-start gap-4 min-w-0">
@@ -2298,23 +2612,247 @@ export default function CaseDetail() {
                         <FieldCard label="LI Date" value={keyDatesDraft.li_date || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, li_date: v }))} />
                         <FieldCard label="LI received" value={keyDatesDraft.li_received_on || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, li_received_on: v }))} />
                         <FieldCard label="LO Date" value={keyDatesDraft.letter_of_offer_date || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, letter_of_offer_date: v }))} />
-                        <FieldCard label="Supp LO/LON/LOV date" value={keyDatesDraft.supp_lo_date || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, supp_lo_date: v }))} />
-                        <FieldCard label="Acting Letter dated" value={keyDatesDraft.acting_letter_issued_date || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, acting_letter_issued_date: v }))} printerKey="acting_letter" />
-                        <FieldCard label="Bank execution dated" value={keyDatesDraft.loan_bank_executed_date || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, loan_bank_executed_date: v }))} />
+                        <WorkflowFileCard label="LO Stamping date" docKey="lo_stamped" dateKey="letter_of_offer_stamped_date" requireEvidenceUpload evidenceLabel="Stamped LO (PDF)" />
+                        <FieldCard
+                          label="Acting Letter dated"
+                          value={keyDatesDraft.acting_letter_issued_date || ""}
+                          onChange={(v) => setKeyDatesDraft((p) => ({ ...p, acting_letter_issued_date: v }))}
+                          printerKey="acting_letter"
+                          alwaysShowPrinter
+                          disabled={!(keyDatesDraft.letter_of_offer_stamped_date && workflowDocsByKey.get("lo_stamped"))}
+                          required={Boolean(keyDatesDraft.letter_of_offer_stamped_date && workflowDocsByKey.get("lo_stamped"))}
+                        />
+                        <FieldCard
+                          label="Bank execution dated"
+                          value={keyDatesDraft.loan_bank_executed_date || ""}
+                          onChange={(v) => setKeyDatesDraft((p) => ({ ...p, loan_bank_executed_date: v }))}
+                          printerKey="letter_forward_bank_execution"
+                          alwaysShowPrinter
+                          disabled={!(keyDatesDraft.spa_stamped_date && workflowDocsByKey.get("spa_stamped") && keyDatesDraft.letter_of_offer_stamped_date && workflowDocsByKey.get("lo_stamped"))}
+                          required={Boolean(keyDatesDraft.spa_stamped_date && workflowDocsByKey.get("spa_stamped") && keyDatesDraft.letter_of_offer_stamped_date && workflowDocsByKey.get("lo_stamped"))}
+                        />
+                        <FieldCard label="Received Executed document on" value={keyDatesDraft.received_executed_document_on_1 || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, received_executed_document_on_1: v }))} />
+                        <FieldCard label="Received Unexecuted document on" value={keyDatesDraft.received_unexecuted_document_on || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, received_unexecuted_document_on: v }))} />
+                        <FieldCard label="Re-Sent Bank execution dated" value={keyDatesDraft.resent_bank_execution_dated || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, resent_bank_execution_dated: v }))} />
+                        <FieldCard label="Received Executed document on (2)" value={keyDatesDraft.received_executed_document_on_2 || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, received_executed_document_on_2: v }))} />
                         <FieldCard label="Developer Confirmation receive on" value={keyDatesDraft.developer_confirmation_received_on || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, developer_confirmation_received_on: v }))} />
                         <FieldCard label="Developer Confirmation dated" value={keyDatesDraft.developer_confirmation_date || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, developer_confirmation_date: v }))} />
-                        <FieldCard label="Differential Sum (RM)" type="number" value={keyDatesDraft.differential_sum_rm || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, differential_sum_rm: v }))} />
+                        <FieldCard
+                          label="Differential Sum (RM)"
+                          type="number"
+                          value={keyDatesDraft.differential_sum_rm || ""}
+                          onChange={(v) => setKeyDatesDraft((p) => ({ ...p, differential_sum_rm: v }))}
+                          required={Boolean(keyDatesDraft.developer_confirmation_date)}
+                        />
                         <FieldCard label="Differential Sum Settled ON" value={keyDatesDraft.differential_sum_settled_on || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, differential_sum_settled_on: v }))} />
-                        <FieldCard label="Bank's LU dated" value={keyDatesDraft.bank_lu_dated || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, bank_lu_dated: v }))} />
-                        <FieldCard label="Bank's LU sent to developer ON" value={keyDatesDraft.bank_lu_forward_to_developer_on || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, bank_lu_forward_to_developer_on: v }))} printerKey="letter_forward_bank_lu_to_dev" />
-                        <FieldCard label="DEV. LU RECEIVED ON" value={keyDatesDraft.developer_lu_received_on || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, developer_lu_received_on: v }))} />
-                        <FieldCard label="DEV. LU DATED" value={keyDatesDraft.developer_lu_dated || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, developer_lu_dated: v }))} />
-                        <FieldCard label="Disclaimer Letter receive on" value={keyDatesDraft.letter_disclaimer_received_on || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, letter_disclaimer_received_on: v }))} />
-                        <WorkflowFileCard label="Disclaimer Letter Dated" docKey="letter_disclaimer" dateKey="letter_disclaimer_dated" />
-                        <FieldCard label="Disclaimer Lttr Ref. No" type="text" value={keyDatesDraft.letter_disclaimer_reference_nos || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, letter_disclaimer_reference_nos: v }))} />
                         <FieldCard label="Redemption Sum (RM)" type="number" value={keyDatesDraft.redemption_sum || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, redemption_sum: v }))} />
-                        <FieldCard label="Balance Sum (LESS LAST 5%)" type="number" value={keyDatesDraft.balance_sum_less_last_5_rm || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, balance_sum_less_last_5_rm: v }))} />
+                        <FieldCard label="Balance Sum (LESS LAST 5%)" type="number" value={keyDatesDraft.balance_sum_less_last_5_rm || ""} onChange={() => {}} readOnly />
                         <FieldCard label="Bankruptcy Search Dated" value={keyDatesDraft.bankruptcy_search_dated || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, bankruptcy_search_dated: v }))} />
+                      </div>
+
+                      <div className="pt-6 space-y-3">
+                        <div className="flex items-center justify-between gap-3">
+                          <div className="text-sm font-semibold text-slate-800">Supp LO / LON / LOV</div>
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            className="gap-1.5"
+                            onClick={addSuppLoDocDraft}
+                            disabled={!canDocsUpdate}
+                          >
+                            <Plus className="w-4 h-4" />
+                            Add Document
+                          </Button>
+                        </div>
+                        {suppLoDocsQuery.isError ? (
+                          <QueryFallback title="Supplementary loan documents unavailable" error={suppLoDocsQuery.error} onRetry={() => suppLoDocsQuery.refetch()} isRetrying={suppLoDocsQuery.isFetching} />
+                        ) : (
+                          <div className="space-y-2">
+                            {suppLoDocsDraft.length === 0 ? (
+                              <div className="text-sm text-slate-500">No supplementary documents.</div>
+                            ) : null}
+                            {suppLoDocsDraft.map((row) => {
+                              const pending = Boolean(row.documentDate) && !row.fileName;
+                              return (
+                                <div key={row.rowKey} className="rounded-lg border border-slate-200 bg-white p-3">
+                                  <div className="flex items-center justify-between gap-2">
+                                    <div className="flex items-center gap-2 min-w-0">
+                                      <div className="text-xs text-slate-600 truncate" title={row.documentName || "Untitled"}>
+                                        {row.documentName || "Untitled"}
+                                      </div>
+                                      {pending ? (
+                                        <Badge variant="destructive" className="text-[10px] whitespace-nowrap">incomplete</Badge>
+                                      ) : null}
+                                    </div>
+                                    <div className="flex items-center gap-1 shrink-0">
+                                      {canDocsRead && row.id && row.fileName ? (
+                                        <Button
+                                          size="icon"
+                                          variant="ghost"
+                                          className="h-8 w-8"
+                                          title="Download"
+                                          onClick={() => downloadSuppLoDoc(row)}
+                                          disabled={suppLoDownloadingId === row.id}
+                                        >
+                                          <Download className="w-4 h-4" />
+                                        </Button>
+                                      ) : null}
+                                      {canDocsWrite ? (
+                                        <Button
+                                          size="icon"
+                                          variant="ghost"
+                                          className="h-8 w-8"
+                                          title="Upload"
+                                          onClick={() => { void openSuppLoUpload(row.rowKey); }}
+                                          disabled={suppLoUploadingRowKey === row.rowKey || createSuppLoDocMutation.isPending || patchSuppLoDocMutation.isPending}
+                                        >
+                                          <Upload className="w-4 h-4" />
+                                        </Button>
+                                      ) : null}
+                                      {canDocsUpdate ? (
+                                        <Button
+                                          size="icon"
+                                          variant="ghost"
+                                          className="h-8 w-8 text-red-600"
+                                          title="Delete"
+                                          onClick={() => {
+                                            if (!row.id) {
+                                              setSuppLoDocsDraft((prev) => prev.filter((x) => x.rowKey !== row.rowKey));
+                                              return;
+                                            }
+                                            deleteSuppLoDocMutation.mutate(row.id, {
+                                              onSuccess: () => setSuppLoDocsDraft((prev) => prev.filter((x) => x.id !== row.id)),
+                                            });
+                                          }}
+                                          disabled={deleteSuppLoDocMutation.isPending}
+                                        >
+                                          <Trash2 className="w-4 h-4" />
+                                        </Button>
+                                      ) : null}
+                                    </div>
+                                  </div>
+                                  <div className="mt-3 grid grid-cols-1 md:grid-cols-3 gap-3">
+                                    <div className="space-y-1">
+                                      <Label className="text-xs text-slate-600">Document Name</Label>
+                                      <Input
+                                        value={row.documentName}
+                                        onChange={(e) => {
+                                          const next = e.target.value;
+                                          setSuppLoDocsDraft((prev) => prev.map((x) => x.rowKey === row.rowKey ? { ...x, documentName: next } : x));
+                                        }}
+                                        onBlur={() => {
+                                          const name = row.documentName.trim();
+                                          if (!name) return;
+                                          if (row.id == null) {
+                                            void ensureSuppLoDocCreated(row.rowKey);
+                                            return;
+                                          }
+                                          patchSuppLoDocMutation.mutate({ id: row.id, patch: { documentName: name } });
+                                        }}
+                                        disabled={!canDocsUpdate}
+                                      />
+                                    </div>
+                                    <div className="space-y-1">
+                                      <Label className="text-xs text-slate-600">Date</Label>
+                                      <DateOnlyInput
+                                        valueYmd={row.documentDate}
+                                        onChangeYmd={(v) => setSuppLoDocsDraft((prev) => prev.map((x) => x.rowKey === row.rowKey ? { ...x, documentDate: v } : x))}
+                                        disabled={!canDocsUpdate}
+                                      />
+                                      <div className="text-[10px] text-slate-500 truncate" title={row.fileName ?? "No file uploaded"}>
+                                        {row.fileName ?? "No file uploaded"}
+                                      </div>
+                                    </div>
+                                    <div className="space-y-1">
+                                      <Label className="text-xs text-slate-600">Save</Label>
+                                      <Button
+                                        size="sm"
+                                        variant="outline"
+                                        className="w-full"
+                                        onClick={() => {
+                                          const name = row.documentName.trim();
+                                          if (!name) {
+                                            toast({ title: "Document Name required", variant: "destructive" });
+                                            return;
+                                          }
+                                          if (row.id == null) {
+                                            void ensureSuppLoDocCreated(row.rowKey);
+                                            return;
+                                          }
+                                          patchSuppLoDocMutation.mutate({
+                                            id: row.id,
+                                            patch: { documentName: name, documentDate: row.documentDate ? row.documentDate : null, sortOrder: row.sortOrder },
+                                          });
+                                        }}
+                                        disabled={!canDocsUpdate || createSuppLoDocMutation.isPending || patchSuppLoDocMutation.isPending}
+                                      >
+                                        Save
+                                      </Button>
+                                    </div>
+                                  </div>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        )}
+                      </div>
+
+                      <div className="pt-6 space-y-3">
+                        <div className="flex items-center justify-between gap-3">
+                          <div className="text-sm font-semibold text-slate-800">Bank's LU & DEV. LU</div>
+                          <div className="flex items-center gap-2">
+                            <Label className="text-xs text-slate-600">Exempted (Master LU)</Label>
+                            <Checkbox
+                              checked={Boolean(keyDatesDraft.master_lu_exempted)}
+                              onCheckedChange={(checked) => {
+                                const next = checked === true;
+                                setKeyDatesDraft((p) => ({
+                                  ...p,
+                                  master_lu_exempted: next,
+                                  bank_lu_dated: next ? "" : (p.bank_lu_dated || ""),
+                                  bank_lu_received_date: next ? "" : (p.bank_lu_received_date || ""),
+                                  bank_lu_forward_to_developer_on: next ? "" : (p.bank_lu_forward_to_developer_on || ""),
+                                  developer_lu_received_on: next ? "" : (p.developer_lu_received_on || ""),
+                                  developer_lu_dated: next ? "" : (p.developer_lu_dated || ""),
+                                }));
+                              }}
+                            />
+                          </div>
+                        </div>
+                        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+                          <FieldCard label="Bank's LU dated" value={keyDatesDraft.bank_lu_dated || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, bank_lu_dated: v }))} disabled={Boolean(keyDatesDraft.master_lu_exempted)} />
+                          <FieldCard label="Bank's LU received on" value={keyDatesDraft.bank_lu_received_date || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, bank_lu_received_date: v }))} disabled={Boolean(keyDatesDraft.master_lu_exempted)} />
+                          <FieldCard label="Bank's LU sent to developer ON" value={keyDatesDraft.bank_lu_forward_to_developer_on || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, bank_lu_forward_to_developer_on: v }))} printerKey="letter_forward_bank_lu_to_dev" disabled={Boolean(keyDatesDraft.master_lu_exempted)} />
+                          <FieldCard label="DEV. LU RECEIVED ON" value={keyDatesDraft.developer_lu_received_on || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, developer_lu_received_on: v }))} disabled={Boolean(keyDatesDraft.master_lu_exempted)} />
+                          <FieldCard label="DEV. LU DATED" value={keyDatesDraft.developer_lu_dated || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, developer_lu_dated: v }))} disabled={Boolean(keyDatesDraft.master_lu_exempted)} />
+                        </div>
+                      </div>
+
+                      <div className="pt-6 space-y-3">
+                        <div className="flex items-center justify-between gap-3">
+                          <div className="text-sm font-semibold text-slate-800">Disclaimer Letter</div>
+                          <div className="flex items-center gap-2">
+                            <Label className="text-xs text-slate-600">Exempted (Free from encumbrances)</Label>
+                            <Checkbox
+                              checked={Boolean(keyDatesDraft.encumbrance_free_exempted)}
+                              onCheckedChange={(checked) => {
+                                const next = checked === true;
+                                setKeyDatesDraft((p) => ({
+                                  ...p,
+                                  encumbrance_free_exempted: next,
+                                  letter_disclaimer_received_on: next ? "" : (p.letter_disclaimer_received_on || ""),
+                                  letter_disclaimer_dated: next ? "" : (p.letter_disclaimer_dated || ""),
+                                  letter_disclaimer_reference_nos: next ? "" : (p.letter_disclaimer_reference_nos || ""),
+                                }));
+                              }}
+                            />
+                          </div>
+                        </div>
+                        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+                          <FieldCard label="Disclaimer Letter receive on" value={keyDatesDraft.letter_disclaimer_received_on || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, letter_disclaimer_received_on: v }))} disabled={Boolean(keyDatesDraft.encumbrance_free_exempted)} />
+                          <WorkflowFileCard label="Disclaimer Letter Dated" docKey="letter_disclaimer" dateKey="letter_disclaimer_dated" disabled={Boolean(keyDatesDraft.encumbrance_free_exempted)} />
+                          <FieldCard label="Disclaimer Lttr Ref. No" type="text" value={keyDatesDraft.letter_disclaimer_reference_nos || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, letter_disclaimer_reference_nos: v }))} disabled={Boolean(keyDatesDraft.encumbrance_free_exempted)} />
+                        </div>
                       </div>
 
                       <div className="pt-6 space-y-3">
@@ -2330,8 +2868,14 @@ export default function CaseDetail() {
                           <FieldCard label="POA DATE" value={keyDatesDraft.poa_date || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, poa_date: v }))} />
                           <FieldCard label="POA STAMP ON" value={keyDatesDraft.poa_stamp_on || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, poa_stamp_on: v }))} />
                           <FieldCard label="NOA DATED" value={keyDatesDraft.noa_dated || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, noa_dated: v }))} />
-                          <FieldCard label="REGISTER PA ON" value={keyDatesDraft.register_pa_on || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, register_pa_on: v }))} />
-                          <FieldCard label="PA No" type="text" value={keyDatesDraft.pa_no || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, pa_no: v }))} />
+                          <FieldCard
+                            label="Presentation Number"
+                            type="text"
+                            value={keyDatesDraft.registered_poa_registration_number || ""}
+                            onChange={(v) => setKeyDatesDraft((p) => ({ ...p, registered_poa_registration_number: v }))}
+                            required={Boolean(keyDatesDraft.register_poa_on)}
+                          />
+                          <WorkflowFileCard label="Registered Power of Attorney" docKey="register_poa" dateKey="register_poa_on" requireEvidenceUpload evidenceLabel="Registered POA (PDF)" />
                         </div>
                       </div>
 
