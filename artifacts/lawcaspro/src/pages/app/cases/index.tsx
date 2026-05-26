@@ -605,6 +605,22 @@ export default function CasesList() {
                           <span className="text-slate-400"> · </span>
                           <span className="font-semibold">Comp</span>: {fmtYmd(c.milestones.completion_date)}
                         </div>
+                        {(c as any).completionSla?.status ? (
+                          <div className="mt-1">
+                            <span
+                              className={[
+                                "inline-flex items-center px-2 py-0.5 rounded text-[11px] font-semibold",
+                                (c as any).completionSla.status === "overdue"
+                                  ? "bg-red-100 text-red-700"
+                                  : (c as any).completionSla.status === "soon"
+                                    ? "bg-amber-100 text-amber-800"
+                                    : "bg-emerald-100 text-emerald-800",
+                              ].join(" ")}
+                            >
+                              Advice SLA: {(c as any).completionSla.status === "overdue" ? "Overdue" : (c as any).completionSla.status === "soon" ? "Soon" : "Due"}
+                            </span>
+                          </div>
+                        ) : null}
                       </td>
                       <td className="px-6 py-4 text-slate-600 text-xs">
                         {fmtYmd(c.updatedAt.slice(0, 10))}

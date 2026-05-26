@@ -231,6 +231,33 @@ export default function AppDashboard() {
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+        {Array.isArray((stats as any).completionSlaOverdue) && (stats as any).completionSlaOverdue.length > 0 ? (
+          <Card className="md:col-span-2 border-red-200 bg-red-50/40">
+            <CardHeader className="pb-3">
+              <CardTitle className="text-red-700">Completion SLA Overdue</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <div className="text-sm text-red-700">
+                {(stats as any).completionSlaOverdue.length} case(s) overdue for Advice on.
+              </div>
+              <div className="mt-3 space-y-2">
+                {(stats as any).completionSlaOverdue.slice(0, 5).map((c: any) => (
+                  <div key={String(c.caseId)} className="flex items-center justify-between gap-3">
+                    <button
+                      className="text-sm font-semibold text-red-700 hover:text-red-800 truncate"
+                      onClick={() => setLocation(`/app/cases/${c.caseId}?returnTo=${encodeURIComponent("/app/dashboard")}`)}
+                    >
+                      {String(c.referenceNo || `Case #${c.caseId}`)}
+                    </button>
+                    <span className="text-xs text-red-700">
+                      {Math.floor(Number(c.hoursElapsed ?? 0))}h
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </CardContent>
+          </Card>
+        ) : null}
         {/* Case Breakdown */}
         <Card>
           <CardHeader className="pb-3">
@@ -294,6 +321,22 @@ export default function AppDashboard() {
                     {c.assignedLawyerName && (
                       <div className="text-xs text-slate-400 mt-0.5">{String(c.assignedLawyerName)}</div>
                     )}
+                    {c.completionSla?.status ? (
+                      <div className="mt-1">
+                        <span
+                          className={[
+                            "inline-flex items-center px-2 py-0.5 rounded text-[11px] font-semibold",
+                            c.completionSla.status === "overdue"
+                              ? "bg-red-100 text-red-700"
+                              : c.completionSla.status === "soon"
+                                ? "bg-amber-100 text-amber-800"
+                                : "bg-emerald-100 text-emerald-800",
+                          ].join(" ")}
+                        >
+                          Advice SLA: {c.completionSla.status === "overdue" ? "Overdue" : c.completionSla.status === "soon" ? "Soon" : "Due"}
+                        </span>
+                      </div>
+                    ) : null}
                   </div>
                   <div className="shrink-0">
                     <StatusBadge status={String(c.status)} />

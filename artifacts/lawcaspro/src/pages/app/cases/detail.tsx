@@ -843,6 +843,8 @@ export default function CaseDetail() {
       registered_poa_registration_number: typeof (src as any).registered_poa_registration_number === "string" ? String((src as any).registered_poa_registration_number) : "",
 
       advice_to_bank_date: normalizeDateOnlyFromApi((src as any).advice_to_bank_date),
+      completion_sla_activated_at: typeof (src as any).completion_sla_activated_at === "string" ? String((src as any).completion_sla_activated_at) : "",
+      completion_sla_notified_48h_at: typeof (src as any).completion_sla_notified_48h_at === "string" ? String((src as any).completion_sla_notified_48h_at) : "",
       bank_1st_release_on: normalizeDateOnlyFromApi((src as any).bank_1st_release_on),
       first_release_amount_rm: (src as any).first_release_amount_rm !== null && (src as any).first_release_amount_rm !== undefined ? String((src as any).first_release_amount_rm) : "",
 
@@ -1745,6 +1747,7 @@ export default function CaseDetail() {
     disabled?: boolean;
     required?: boolean;
     readOnly?: boolean;
+    statusTag?: { label: string; tone: "green" | "amber" | "red" };
   }) {
     const type = props.type ?? "date";
     const isDate = type === "date";
@@ -1761,6 +1764,20 @@ export default function CaseDetail() {
         <div className="flex items-center justify-between gap-2">
           <Label className="text-xs text-slate-600">{props.label}</Label>
           <div className="flex items-center gap-1">
+            {props.statusTag ? (
+              <span
+                className={[
+                  "inline-flex items-center px-2 py-0.5 rounded text-[10px] font-semibold whitespace-nowrap",
+                  props.statusTag.tone === "red"
+                    ? "bg-red-100 text-red-700"
+                    : props.statusTag.tone === "amber"
+                      ? "bg-amber-100 text-amber-800"
+                      : "bg-emerald-100 text-emerald-800",
+                ].join(" ")}
+              >
+                {props.statusTag.label}
+              </span>
+            ) : null}
             {showRequired ? (
               <Badge variant="destructive" className="text-[10px] whitespace-nowrap">required</Badge>
             ) : null}
@@ -2882,7 +2899,40 @@ export default function CaseDetail() {
                       <div className="pt-6 space-y-3">
                         <div className="text-sm font-semibold text-slate-800">COMPLETION SESSION</div>
                         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
-                          <FieldCard label="ADVICE ON" value={keyDatesDraft.advice_to_bank_date || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, advice_to_bank_date: v }))} printerKey="letter_advice_spa_sol_lu" />
+                          {(() => {
+                            const prereqsOk =
+                              Boolean(keyDatesDraft.differential_sum_settled_on) &&
+                              Boolean(keyDatesDraft.noa_dated) &&
+                              Boolean(keyDatesDraft.register_poa_on) &&
+                              Boolean(keyDatesDraft.registered_poa_registration_number) &&
+                              Boolean(workflowDocsByKey.get("register_poa"));
+                            const locked = !prereqsOk;
+                            const adviceVal = keyDatesDraft.advice_to_bank_date || "";
+                            const activatedAtIso = typeof keyDatesDraft.completion_sla_activated_at === "string" ? keyDatesDraft.completion_sla_activated_at : "";
+                            const hoursElapsed = (() => {
+                              if (!activatedAtIso) return 0;
+                              const ms = Date.now() - new Date(activatedAtIso).getTime();
+                              return Number.isFinite(ms) ? Math.max(0, ms / 3600_000) : 0;
+                            })();
+                            const tag = (() => {
+                              if (locked) return { label: "Locked", tone: "amber" as const };
+                              if (adviceVal) return null;
+                              if (hoursElapsed >= 72) return { label: "Overdue", tone: "red" as const };
+                              if (hoursElapsed >= 48) return { label: "Soon", tone: "amber" as const };
+                              return { label: "Due", tone: "green" as const };
+                            })();
+                            return (
+                              <FieldCard
+                                label="ADVICE ON"
+                                value={adviceVal}
+                                onChange={(v) => setKeyDatesDraft((p) => ({ ...p, advice_to_bank_date: v }))}
+                                printerKey="letter_advice_spa_sol_lu"
+                                disabled={locked}
+                                required={prereqsOk}
+                                statusTag={tag ?? undefined}
+                              />
+                            );
+                          })()}
                           <FieldCard label="1ST RELEASE ON" value={keyDatesDraft.bank_1st_release_on || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, bank_1st_release_on: v }))} />
                           <FieldCard label="1ST PAYMENT AMOUNT" type="number" value={keyDatesDraft.first_release_amount_rm || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, first_release_amount_rm: v }))} />
                         </div>

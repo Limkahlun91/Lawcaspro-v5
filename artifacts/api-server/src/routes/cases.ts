@@ -191,6 +191,73 @@ async function tableExists(r: DbConn, reg: string): Promise<boolean> {
   return Boolean(rows[0]?.reg);
 }
 
+const getPgCode = (err: unknown): string | null => {
+  const code = err && typeof err === "object" ? (err as { code?: unknown }).code : undefined;
+  return typeof code === "string" && code ? code : null;
+};
+const isUndefinedColumnError = (err: unknown): boolean => getPgCode(err) === "42703";
+
+async function queryRows(r: DbConn, q: unknown): Promise<Record<string, unknown>[]> {
+  const result = await r.execute(q as any);
+  return Array.isArray(result) ? (result as Record<string, unknown>[]) : ("rows" in (result as any) ? ((result as any).rows as Record<string, unknown>[]) : []);
+}
+
+function pickValue(row: unknown, ...keys: string[]): unknown {
+  if (!row || typeof row !== "object") return undefined;
+  for (const k of keys) {
+    if (Object.prototype.hasOwnProperty.call(row, k)) return (row as any)[k];
+  }
+  return undefined;
+}
+
+function pickString(row: unknown, ...keys: string[]): string | null {
+  const v = pickValue(row, ...keys);
+  return v === undefined || v === null ? null : String(v);
+}
+
+function pickNumber(row: unknown, ...keys: string[]): number | null {
+  const v = pickValue(row, ...keys);
+  if (v === undefined || v === null) return null;
+  const n = typeof v === "number" ? v : Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
+function pickDateString(row: unknown, ...keys: string[]): string | null {
+  const v = pickValue(row, ...keys);
+  return v === undefined || v === null ? null : String(v);
+}
+
+function pickIsoString(row: unknown, ...keys: string[]): string | null {
+  const v = pickValue(row, ...keys);
+  if (!v) return null;
+  if (v instanceof Date) return v.toISOString();
+  const s = String(v);
+  return s ? s : null;
+}
+
+async function fetchKeyDatesRow(r: DbConn, firmId: number, caseId: number): Promise<Record<string, unknown> | null> {
+  const kdExists = await tableExists(r, "public.case_key_dates");
+  if (!kdExists) return null;
+
+  try {
+    const [kd] = await r
+      .select()
+      .from(caseKeyDatesTable)
+      .where(and(eq(caseKeyDatesTable.caseId, caseId), eq(caseKeyDatesTable.firmId, firmId)))
+      .limit(1);
+    return kd ? (kd as any) : null;
+  } catch (err) {
+    if (!isUndefinedColumnError(err)) throw err;
+    const rows = await queryRows(r, sql`
+      SELECT *
+      FROM case_key_dates
+      WHERE firm_id = ${firmId} AND case_id = ${caseId}
+      LIMIT 1
+    `);
+    return rows[0] ?? null;
+  }
+}
+
 const one = (v: unknown): string | undefined => {
   if (typeof v === "string") return v;
   if (Array.isArray(v)) return typeof v[0] === "string" ? v[0] : undefined;
@@ -494,22 +561,23 @@ function dateToYmd(d: Date): string {
   return d.toISOString().slice(0, 10);
 }
 
-function shouldBackfillKeyDate(field: KeyDateField, kd: typeof caseKeyDatesTable.$inferSelect | null): boolean {
+function shouldBackfillKeyDate(field: KeyDateField, kd: Record<string, unknown> | null): boolean {
   if (!kd) return true;
+  const has = (...keys: string[]): boolean => Boolean(pickValue(kd, ...keys));
   switch (field) {
-    case "spa_signed_date": return !kd.spaSignedDate;
-    case "spa_stamped_date": return !kd.spaStampedDate;
-    case "letter_of_offer_stamped_date": return !kd.letterOfOfferStampedDate;
-    case "loan_docs_pending_date": return !kd.loanDocsPendingDate;
-    case "loan_docs_signed_date": return !kd.loanDocsSignedDate;
-    case "acting_letter_issued_date": return !kd.actingLetterIssuedDate;
-    case "advice_to_bank_date": return !kd.adviceToBankDate;
-    case "loan_sent_bank_execution_date": return !kd.loanSentBankExecutionDate;
-    case "loan_bank_executed_date": return !kd.loanBankExecutedDate;
-    case "bank_lu_received_date": return !kd.bankLuReceivedDate;
-    case "noa_served_on": return !kd.noaServedOn;
-    case "register_poa_on": return !kd.registerPoaOn;
-    case "letter_disclaimer_dated": return !kd.letterDisclaimerDated;
+    case "spa_signed_date": return !has("spaSignedDate", "spa_signed_date");
+    case "spa_stamped_date": return !has("spaStampedDate", "spa_stamped_date");
+    case "letter_of_offer_stamped_date": return !has("letterOfOfferStampedDate", "letter_of_offer_stamped_date");
+    case "loan_docs_pending_date": return !has("loanDocsPendingDate", "loan_docs_pending_date");
+    case "loan_docs_signed_date": return !has("loanDocsSignedDate", "loan_docs_signed_date");
+    case "acting_letter_issued_date": return !has("actingLetterIssuedDate", "acting_letter_issued_date");
+    case "advice_to_bank_date": return !has("adviceToBankDate", "advice_to_bank_date");
+    case "loan_sent_bank_execution_date": return !has("loanSentBankExecutionDate", "loan_sent_bank_execution_date");
+    case "loan_bank_executed_date": return !has("loanBankExecutedDate", "loan_bank_executed_date");
+    case "bank_lu_received_date": return !has("bankLuReceivedDate", "bank_lu_received_date");
+    case "noa_served_on": return !has("noaServedOn", "noa_served_on");
+    case "register_poa_on": return !has("registerPoaOn", "register_poa_on");
+    case "letter_disclaimer_dated": return !has("letterDisclaimerDated", "letter_disclaimer_dated");
     default: return false;
   }
 }
@@ -641,13 +709,14 @@ async function formatCaseDetail(r: DbConn, c: typeof casesTable.$inferSelect) {
   loanDetails = parseMaybeJson((c as any).loanDetails);
   companyDetails = parseMaybeJson(c.companyDetails);
 
-  const kdExists = await tableExists(r, "public.case_key_dates");
-  const [kd] = kdExists
-    ? await r
-        .select()
-        .from(caseKeyDatesTable)
-        .where(and(eq(caseKeyDatesTable.caseId, c.id), eq(caseKeyDatesTable.firmId, c.firmId)))
-    : [];
+  const kd = await (async () => {
+    try {
+      return await fetchKeyDatesRow(r, c.firmId, c.id);
+    } catch (err) {
+      logger.error({ err, pgCode: getPgCode(err), firmId: c.firmId, caseId: c.id }, "[cases] fetch key-dates failed");
+      return null;
+    }
+  })();
 
   return {
     id: c.id,
@@ -679,48 +748,48 @@ async function formatCaseDetail(r: DbConn, c: typeof casesTable.$inferSelect) {
     loanDetails,
     companyDetails,
     keyDates: kd ? {
-      spa_signed_date: kd.spaSignedDate ? String(kd.spaSignedDate) : null,
-      spa_forward_to_developer_execution_on: kd.spaForwardToDeveloperExecutionOn ? String(kd.spaForwardToDeveloperExecutionOn) : null,
-      spa_date: kd.spaDate ? String(kd.spaDate) : null,
-      spa_stamped_date: kd.spaStampedDate ? String(kd.spaStampedDate) : null,
-      stamped_spa_send_to_developer_on: kd.stampedSpaSendToDeveloperOn ? String(kd.stampedSpaSendToDeveloperOn) : null,
-      stamped_spa_received_from_developer_on: kd.stampedSpaReceivedFromDeveloperOn ? String(kd.stampedSpaReceivedFromDeveloperOn) : null,
-      letter_of_offer_date: kd.letterOfOfferDate ? String(kd.letterOfOfferDate) : null,
-      letter_of_offer_stamped_date: kd.letterOfOfferStampedDate ? String(kd.letterOfOfferStampedDate) : null,
-      loan_docs_pending_date: kd.loanDocsPendingDate ? String(kd.loanDocsPendingDate) : null,
-      loan_docs_signed_date: kd.loanDocsSignedDate ? String(kd.loanDocsSignedDate) : null,
-      acting_letter_issued_date: kd.actingLetterIssuedDate ? String(kd.actingLetterIssuedDate) : null,
-      developer_confirmation_received_on: kd.developerConfirmationReceivedOn ? String(kd.developerConfirmationReceivedOn) : null,
-      developer_confirmation_date: kd.developerConfirmationDate ? String(kd.developerConfirmationDate) : null,
-      loan_sent_bank_execution_date: kd.loanSentBankExecutionDate ? String(kd.loanSentBankExecutionDate) : null,
-      loan_bank_executed_date: kd.loanBankExecutedDate ? String(kd.loanBankExecutedDate) : null,
-      bank_lu_received_date: kd.bankLuReceivedDate ? String(kd.bankLuReceivedDate) : null,
-      bank_lu_forward_to_developer_on: kd.bankLuForwardToDeveloperOn ? String(kd.bankLuForwardToDeveloperOn) : null,
-      developer_lu_received_on: kd.developerLuReceivedOn ? String(kd.developerLuReceivedOn) : null,
-      developer_lu_dated: kd.developerLuDated ? String(kd.developerLuDated) : null,
-      letter_disclaimer_received_on: kd.letterDisclaimerReceivedOn ? String(kd.letterDisclaimerReceivedOn) : null,
-      letter_disclaimer_dated: kd.letterDisclaimerDated ? String(kd.letterDisclaimerDated) : null,
-      letter_disclaimer_reference_nos: kd.letterDisclaimerReferenceNos ?? null,
-      redemption_sum: kd.redemptionSum ? Number(kd.redemptionSum) : null,
-      loan_agreement_dated: kd.loanAgreementDated ? String(kd.loanAgreementDated) : null,
-      loan_agreement_submitted_stamping_date: kd.loanAgreementSubmittedStampingDate ? String(kd.loanAgreementSubmittedStampingDate) : null,
-      loan_agreement_stamped_date: kd.loanAgreementStampedDate ? String(kd.loanAgreementStampedDate) : null,
-      register_poa_on: kd.registerPoaOn ? String(kd.registerPoaOn) : null,
-      registered_poa_registration_number: kd.registeredPoaRegistrationNumber ?? null,
-      noa_served_on: kd.noaServedOn ? String(kd.noaServedOn) : null,
-      advice_to_bank_date: kd.adviceToBankDate ? String(kd.adviceToBankDate) : null,
-      bank_1st_release_on: kd.bank1stReleaseOn ? String(kd.bank1stReleaseOn) : null,
-      first_release_amount_rm: kd.firstReleaseAmountRm ? Number(kd.firstReleaseAmountRm) : null,
-      discharge_date: kd.dischargeDate ? String(kd.dischargeDate) : null,
-      consent_to_transfer_date: kd.consentToTransferDate ? String(kd.consentToTransferDate) : null,
-      consent_to_charge_date: kd.consentToChargeDate ? String(kd.consentToChargeDate) : null,
-      mot_received_date: kd.motReceivedDate ? String(kd.motReceivedDate) : null,
-      mot_signed_date: kd.motSignedDate ? String(kd.motSignedDate) : null,
-      mot_stamped_date: kd.motStampedDate ? String(kd.motStampedDate) : null,
-      mot_registered_date: kd.motRegisteredDate ? String(kd.motRegisteredDate) : null,
-      progressive_payment_date: kd.progressivePaymentDate ? String(kd.progressivePaymentDate) : null,
-      full_settlement_date: kd.fullSettlementDate ? String(kd.fullSettlementDate) : null,
-      completion_date: kd.completionDate ? String(kd.completionDate) : null,
+      spa_signed_date: pickDateString(kd, "spaSignedDate", "spa_signed_date"),
+      spa_forward_to_developer_execution_on: pickDateString(kd, "spaForwardToDeveloperExecutionOn", "spa_forward_to_developer_execution_on"),
+      spa_date: pickDateString(kd, "spaDate", "spa_date"),
+      spa_stamped_date: pickDateString(kd, "spaStampedDate", "spa_stamped_date"),
+      stamped_spa_send_to_developer_on: pickDateString(kd, "stampedSpaSendToDeveloperOn", "stamped_spa_send_to_developer_on"),
+      stamped_spa_received_from_developer_on: pickDateString(kd, "stampedSpaReceivedFromDeveloperOn", "stamped_spa_received_from_developer_on"),
+      letter_of_offer_date: pickDateString(kd, "letterOfOfferDate", "letter_of_offer_date"),
+      letter_of_offer_stamped_date: pickDateString(kd, "letterOfOfferStampedDate", "letter_of_offer_stamped_date"),
+      loan_docs_pending_date: pickDateString(kd, "loanDocsPendingDate", "loan_docs_pending_date"),
+      loan_docs_signed_date: pickDateString(kd, "loanDocsSignedDate", "loan_docs_signed_date"),
+      acting_letter_issued_date: pickDateString(kd, "actingLetterIssuedDate", "acting_letter_issued_date"),
+      developer_confirmation_received_on: pickDateString(kd, "developerConfirmationReceivedOn", "developer_confirmation_received_on"),
+      developer_confirmation_date: pickDateString(kd, "developerConfirmationDate", "developer_confirmation_date"),
+      loan_sent_bank_execution_date: pickDateString(kd, "loanSentBankExecutionDate", "loan_sent_bank_execution_date"),
+      loan_bank_executed_date: pickDateString(kd, "loanBankExecutedDate", "loan_bank_executed_date"),
+      bank_lu_received_date: pickDateString(kd, "bankLuReceivedDate", "bank_lu_received_date"),
+      bank_lu_forward_to_developer_on: pickDateString(kd, "bankLuForwardToDeveloperOn", "bank_lu_forward_to_developer_on"),
+      developer_lu_received_on: pickDateString(kd, "developerLuReceivedOn", "developer_lu_received_on"),
+      developer_lu_dated: pickDateString(kd, "developerLuDated", "developer_lu_dated"),
+      letter_disclaimer_received_on: pickDateString(kd, "letterDisclaimerReceivedOn", "letter_disclaimer_received_on"),
+      letter_disclaimer_dated: pickDateString(kd, "letterDisclaimerDated", "letter_disclaimer_dated"),
+      letter_disclaimer_reference_nos: pickString(kd, "letterDisclaimerReferenceNos", "letter_disclaimer_reference_nos"),
+      redemption_sum: pickNumber(kd, "redemptionSum", "redemption_sum"),
+      loan_agreement_dated: pickDateString(kd, "loanAgreementDated", "loan_agreement_dated"),
+      loan_agreement_submitted_stamping_date: pickDateString(kd, "loanAgreementSubmittedStampingDate", "loan_agreement_submitted_stamping_date"),
+      loan_agreement_stamped_date: pickDateString(kd, "loanAgreementStampedDate", "loan_agreement_stamped_date"),
+      register_poa_on: pickDateString(kd, "registerPoaOn", "register_poa_on"),
+      registered_poa_registration_number: pickString(kd, "registeredPoaRegistrationNumber", "registered_poa_registration_number"),
+      noa_served_on: pickDateString(kd, "noaServedOn", "noa_served_on"),
+      advice_to_bank_date: pickDateString(kd, "adviceToBankDate", "advice_to_bank_date"),
+      bank_1st_release_on: pickDateString(kd, "bank1stReleaseOn", "bank_1st_release_on"),
+      first_release_amount_rm: pickNumber(kd, "firstReleaseAmountRm", "first_release_amount_rm"),
+      discharge_date: pickDateString(kd, "dischargeDate", "discharge_date"),
+      consent_to_transfer_date: pickDateString(kd, "consentToTransferDate", "consent_to_transfer_date"),
+      consent_to_charge_date: pickDateString(kd, "consentToChargeDate", "consent_to_charge_date"),
+      mot_received_date: pickDateString(kd, "motReceivedDate", "mot_received_date"),
+      mot_signed_date: pickDateString(kd, "motSignedDate", "mot_signed_date"),
+      mot_stamped_date: pickDateString(kd, "motStampedDate", "mot_stamped_date"),
+      mot_registered_date: pickDateString(kd, "motRegisteredDate", "mot_registered_date"),
+      progressive_payment_date: pickDateString(kd, "progressivePaymentDate", "progressive_payment_date"),
+      full_settlement_date: pickDateString(kd, "fullSettlementDate", "full_settlement_date"),
+      completion_date: pickDateString(kd, "completionDate", "completion_date"),
     } : null,
     purchasers,
     assignments,
@@ -2482,6 +2551,18 @@ router.get("/cases", requireAuthHandler, requireFirmUserHandler, requirePermissi
   const mLetterOfOfferDateExpr = hasKeyDates ? milestoneDateYmdSql("letter_of_offer_date") : sql<string | null>`NULL`;
   const mLoanDocsSignedDateExpr = hasKeyDates ? milestoneDateYmdSql("loan_docs_signed_date") : sql<string | null>`NULL`;
   const mCompletionDateExpr = hasKeyDates ? milestoneDateYmdSql("completion_date") : sql<string | null>`NULL`;
+  const completionSlaActivatedAtExpr = hasKeyDates ? sql<string | null>`(${caseKeyDatesTable.completionSlaActivatedAt}::text)` : sql<string | null>`NULL`;
+  const completionSlaHoursElapsedExpr = hasKeyDates ? sql<number | null>`CASE
+    WHEN ${caseKeyDatesTable.completionSlaActivatedAt} IS NULL THEN NULL
+    ELSE EXTRACT(epoch FROM (now() - ${caseKeyDatesTable.completionSlaActivatedAt})) / 3600.0
+  END` : sql<number | null>`NULL`;
+  const completionSlaStatusExpr = hasKeyDates ? sql<string | null>`CASE
+    WHEN ${caseKeyDatesTable.adviceToBankDate} IS NOT NULL THEN NULL
+    WHEN ${caseKeyDatesTable.completionSlaActivatedAt} IS NULL THEN NULL
+    WHEN (now() - ${caseKeyDatesTable.completionSlaActivatedAt}) >= interval '72 hours' THEN 'overdue'
+    WHEN (now() - ${caseKeyDatesTable.completionSlaActivatedAt}) >= interval '48 hours' THEN 'soon'
+    ELSE 'due'
+  END` : sql<string | null>`NULL`;
 
   const loanOnlyMilestones: Set<CaseMilestoneKey> = new Set([
     "letter_of_offer_date",
@@ -2705,6 +2786,9 @@ router.get("/cases", requireAuthHandler, requireFirmUserHandler, requirePermissi
       mLetterOfOfferDate: mLetterOfOfferDateExpr,
       mLoanDocsSignedDate: mLoanDocsSignedDateExpr,
       mCompletionDate: mCompletionDateExpr,
+      completionSlaStatus: completionSlaStatusExpr,
+      completionSlaActivatedAt: completionSlaActivatedAtExpr,
+      completionSlaHoursElapsed: completionSlaHoursElapsedExpr,
     })
     .from(casesTable)
     .leftJoin(projectsTable, eq(projectsTable.id, casesTable.projectId))
@@ -2759,6 +2843,11 @@ router.get("/cases", requireAuthHandler, requireFirmUserHandler, requirePermissi
         loan_docs_signed_date: row.mLoanDocsSignedDate ?? null,
         completion_date: row.mCompletionDate ?? null,
       },
+      completionSla: row.completionSlaStatus ? {
+        status: row.completionSlaStatus,
+        activatedAt: row.completionSlaActivatedAt ?? null,
+        hoursElapsed: Number(row.completionSlaHoursElapsed ?? 0),
+      } : null,
       createdAt: row.createdAt.toISOString(),
       updatedAt: row.updatedAt.toISOString(),
     };
@@ -2779,16 +2868,23 @@ router.post("/cases", requireAuthHandler, requireFirmUserHandler, requirePermiss
       res.status(500).json({ error: "Internal Server Error" });
       return;
     }
+    const money = z.preprocess((v) => {
+      if (v === "" || v === undefined || v === null) return null;
+      if (typeof v === "number") return v;
+      if (typeof v === "string") return Number(v);
+      return v;
+    }, z.number().finite().nullable());
+
     const createCaseSchema = z.object({
       projectId: z.coerce.number().int().positive(),
       developerId: z.coerce.number().int().positive().optional(),
       referenceNo: z.string().trim().max(80).optional(),
-      purchaseMode: z.string().transform((v) => v.trim().toLowerCase()),
-      titleType: z.string().transform((v) => v.trim().toLowerCase()),
-      spaPrice: z.number().finite().nullable().optional(),
-      apdlPrice: z.number().finite().nullable().optional(),
-      developerDiscount: z.number().finite().nullable().optional(),
-      bumiputraDiscount: z.number().finite().nullable().optional(),
+      purchaseMode: z.string().optional().default("cash").transform((v) => v.trim().toLowerCase()),
+      titleType: z.string().optional().default("master").transform((v) => v.trim().toLowerCase()),
+      spaPrice: money.optional(),
+      apdlPrice: money.optional(),
+      developerDiscount: money.optional(),
+      bumiputraDiscount: money.optional(),
       assignedLawyerId: z.coerce.number().int().positive().optional(),
       assignedClerkId: z.coerce.number().int().positive().optional(),
       purchaserIds: z.array(z.coerce.number().int().positive()).optional(),
@@ -2815,7 +2911,7 @@ router.post("/cases", requireAuthHandler, requireFirmUserHandler, requirePermiss
       propertyAddress: z.string().optional(),
       loanDetails: z.unknown().optional(),
       companyDetails: z.record(z.string(), z.unknown()).optional(),
-    }).superRefine((v, ctx) => {
+    }).passthrough().superRefine((v, ctx) => {
       if (v.purchaseMode !== "loan" && v.purchaseMode !== "cash" && v.purchaseMode !== "other") {
         ctx.addIssue({ code: "custom", path: ["purchaseMode"], message: "Invalid purchaseMode" });
       }
@@ -3349,11 +3445,88 @@ router.get("/cases/:caseId", requireAuthHandler, requireFirmUserHandler, require
     }
     res.json(await formatCaseDetail(r, c));
   } catch (e) {
-    console.error("SQL ERR:", e);
-    logger.error({ err: e, firmId: req.firmId, userId: req.userId, caseId: params.data.caseId }, "[cases] get case failed");
+    logger.error({ err: e, pgCode: getPgCode(e), firmId: req.firmId, userId: req.userId, caseId: params.data.caseId }, "[cases] get case failed");
     res.status(500).json({ error: "Internal Server Error" });
   }
 }));
+
+async function updateCompletionSlaState(r: DbConn, firmId: number, caseId: number): Promise<{ activatedAt: string | null; notified48hAt: string | null }> {
+  const kdExists = await tableExists(r, "public.case_key_dates");
+  if (!kdExists) return { activatedAt: null, notified48hAt: null };
+
+  let kd: any = null;
+  try {
+    [kd] = await r
+      .select({
+        id: caseKeyDatesTable.id,
+        differentialSumSettledOn: caseKeyDatesTable.differentialSumSettledOn,
+        noaDated: caseKeyDatesTable.noaDated,
+        registerPoaOn: caseKeyDatesTable.registerPoaOn,
+        registeredPoaRegistrationNumber: caseKeyDatesTable.registeredPoaRegistrationNumber,
+        adviceToBankDate: caseKeyDatesTable.adviceToBankDate,
+        completionSlaActivatedAt: caseKeyDatesTable.completionSlaActivatedAt,
+        completionSlaNotified48hAt: caseKeyDatesTable.completionSlaNotified48hAt,
+      })
+      .from(caseKeyDatesTable)
+      .where(and(eq(caseKeyDatesTable.firmId, firmId), eq(caseKeyDatesTable.caseId, caseId)))
+      .limit(1);
+  } catch (err) {
+    if (isUndefinedColumnError(err)) return { activatedAt: null, notified48hAt: null };
+    throw err;
+  }
+  if (!kd) return { activatedAt: null, notified48hAt: null };
+
+  const wfExists = await tableExists(r, "public.case_workflow_documents");
+  const poaKeys = ["register_poa", ...(workflowDocumentLegacyKeys("register_poa" as WorkflowDocumentMilestoneKey) ?? [])];
+  const hasPoaFile = wfExists
+    ? Boolean((await r
+        .select({ id: caseWorkflowDocumentsTable.id })
+        .from(caseWorkflowDocumentsTable)
+        .where(and(
+          eq(caseWorkflowDocumentsTable.firmId, firmId),
+          eq(caseWorkflowDocumentsTable.caseId, caseId),
+          inArray(caseWorkflowDocumentsTable.milestoneKey, poaKeys),
+          sql`${caseWorkflowDocumentsTable.deletedAt} IS NULL`,
+          sql`${caseWorkflowDocumentsTable.objectPath} IS NOT NULL`,
+          sql`${caseWorkflowDocumentsTable.fileName} IS NOT NULL`,
+        ))
+        .limit(1))[0])
+    : false;
+
+  const ready = Boolean(kd.differentialSumSettledOn && kd.noaDated && kd.registerPoaOn && kd.registeredPoaRegistrationNumber?.trim() && hasPoaFile);
+  const shouldClear = Boolean(kd.adviceToBankDate) || (!ready && Boolean(kd.completionSlaActivatedAt));
+  const shouldActivate = ready && !kd.completionSlaActivatedAt && !kd.adviceToBankDate;
+
+  if (shouldClear) {
+    const [row] = await r
+      .update(caseKeyDatesTable)
+      .set({ completionSlaActivatedAt: null, completionSlaNotified48hAt: null })
+      .where(and(eq(caseKeyDatesTable.firmId, firmId), eq(caseKeyDatesTable.caseId, caseId)))
+      .returning({ completionSlaActivatedAt: caseKeyDatesTable.completionSlaActivatedAt, completionSlaNotified48hAt: caseKeyDatesTable.completionSlaNotified48hAt });
+    return {
+      activatedAt: row?.completionSlaActivatedAt ? row.completionSlaActivatedAt.toISOString() : null,
+      notified48hAt: row?.completionSlaNotified48hAt ? row.completionSlaNotified48hAt.toISOString() : null,
+    };
+  }
+
+  if (shouldActivate) {
+    const [row] = await r
+      .update(caseKeyDatesTable)
+      .set({ completionSlaActivatedAt: new Date() })
+      .where(and(eq(caseKeyDatesTable.firmId, firmId), eq(caseKeyDatesTable.caseId, caseId)))
+      .returning({ completionSlaActivatedAt: caseKeyDatesTable.completionSlaActivatedAt, completionSlaNotified48hAt: caseKeyDatesTable.completionSlaNotified48hAt });
+    await writeAuditLog({ firmId, actorId: null, actorType: "system", action: "cases.completion_sla.activated", entityType: "case", entityId: caseId, detail: "Completion SLA activated" });
+    return {
+      activatedAt: row?.completionSlaActivatedAt ? row.completionSlaActivatedAt.toISOString() : null,
+      notified48hAt: row?.completionSlaNotified48hAt ? row.completionSlaNotified48hAt.toISOString() : null,
+    };
+  }
+
+  return {
+    activatedAt: kd.completionSlaActivatedAt ? kd.completionSlaActivatedAt.toISOString() : null,
+    notified48hAt: kd.completionSlaNotified48hAt ? kd.completionSlaNotified48hAt.toISOString() : null,
+  };
+}
 
 router.get("/cases/:caseId/key-dates", requireAuthHandler, requireFirmUserHandler, requirePermission("cases", "read") as RequestHandler, authed(async (req, res) => {
   const r = req.rlsDb;
@@ -3367,105 +3540,107 @@ router.get("/cases/:caseId/key-dates", requireAuthHandler, requireFirmUserHandle
     res.status(400).json({ error: params.error.message });
     return;
   }
-  const kdExists = await tableExists(r, "public.case_key_dates");
-  if (!kdExists) {
-    res.json({});
-    return;
-  }
   const ok = await enforceCaseAccess(r, req, res, params.data.caseId);
   if (!ok) return;
-  const [kd] = await r
-    .select()
-    .from(caseKeyDatesTable)
-    .where(and(eq(caseKeyDatesTable.caseId, params.data.caseId), eq(caseKeyDatesTable.firmId, req.firmId!)));
+  let kd: Record<string, unknown> | null = null;
+  try {
+    kd = await fetchKeyDatesRow(r, req.firmId!, params.data.caseId);
+  } catch (err) {
+    logger.error({ err, pgCode: getPgCode(err), firmId: req.firmId, userId: req.userId, caseId: params.data.caseId }, "[cases] get key-dates failed");
+    res.status(500).json({ error: "Internal Server Error" });
+    return;
+  }
+
   const out: Record<string, unknown> = kd ? {
-    spa_signed_date: kd.spaSignedDate ? String(kd.spaSignedDate) : null,
-    spa_forward_to_developer_execution_on: kd.spaForwardToDeveloperExecutionOn ? String(kd.spaForwardToDeveloperExecutionOn) : null,
-    spa_received_dev_return_spa_on: (kd as any).spaReceivedDevReturnSpaOn ? String((kd as any).spaReceivedDevReturnSpaOn) : null,
-    spa_date: kd.spaDate ? String(kd.spaDate) : null,
-    spa_stamped_date: kd.spaStampedDate ? String(kd.spaStampedDate) : null,
-    stamped_spa_send_to_developer_on: kd.stampedSpaSendToDeveloperOn ? String(kd.stampedSpaSendToDeveloperOn) : null,
-    stamped_spa_received_from_developer_on: kd.stampedSpaReceivedFromDeveloperOn ? String(kd.stampedSpaReceivedFromDeveloperOn) : null,
-    stamped_spa_sent_to_purchaser_on: (kd as any).stampedSpaSentToPurchaserOn ? String((kd as any).stampedSpaSentToPurchaserOn) : null,
-    li_date: (kd as any).liDate ? String((kd as any).liDate) : null,
-    li_received_on: (kd as any).liReceivedOn ? String((kd as any).liReceivedOn) : null,
-    letter_of_offer_date: kd.letterOfOfferDate ? String(kd.letterOfOfferDate) : null,
-    letter_of_offer_stamped_date: kd.letterOfOfferStampedDate ? String(kd.letterOfOfferStampedDate) : null,
-    supp_lo_date: (kd as any).suppLoDate ? String((kd as any).suppLoDate) : null,
-    loan_docs_pending_date: kd.loanDocsPendingDate ? String(kd.loanDocsPendingDate) : null,
-    loan_docs_signed_date: kd.loanDocsSignedDate ? String(kd.loanDocsSignedDate) : null,
-    acting_letter_issued_date: kd.actingLetterIssuedDate ? String(kd.actingLetterIssuedDate) : null,
-    developer_confirmation_received_on: kd.developerConfirmationReceivedOn ? String(kd.developerConfirmationReceivedOn) : null,
-    developer_confirmation_date: kd.developerConfirmationDate ? String(kd.developerConfirmationDate) : null,
-    loan_sent_bank_execution_date: kd.loanSentBankExecutionDate ? String(kd.loanSentBankExecutionDate) : null,
-    loan_bank_executed_date: kd.loanBankExecutedDate ? String(kd.loanBankExecutedDate) : null,
-    differential_sum_rm: (kd as any).differentialSumRm ? Number((kd as any).differentialSumRm) : null,
-    differential_sum_settled_on: (kd as any).differentialSumSettledOn ? String((kd as any).differentialSumSettledOn) : null,
-    bank_lu_dated: (kd as any).bankLuDated ? String((kd as any).bankLuDated) : null,
-    bank_lu_received_date: kd.bankLuReceivedDate ? String(kd.bankLuReceivedDate) : null,
-    bank_lu_forward_to_developer_on: kd.bankLuForwardToDeveloperOn ? String(kd.bankLuForwardToDeveloperOn) : null,
-    developer_lu_received_on: kd.developerLuReceivedOn ? String(kd.developerLuReceivedOn) : null,
-    developer_lu_dated: kd.developerLuDated ? String(kd.developerLuDated) : null,
-    master_lu_exempted: Boolean((kd as any).masterLuExempted),
-    encumbrance_free_exempted: Boolean((kd as any).encumbranceFreeExempted),
-    letter_disclaimer_received_on: kd.letterDisclaimerReceivedOn ? String(kd.letterDisclaimerReceivedOn) : null,
-    letter_disclaimer_dated: kd.letterDisclaimerDated ? String(kd.letterDisclaimerDated) : null,
-    letter_disclaimer_reference_nos: kd.letterDisclaimerReferenceNos ?? null,
-    redemption_sum: kd.redemptionSum ? Number(kd.redemptionSum) : null,
-    balance_sum_less_last_5_rm: (kd as any).balanceSumLessLast5Rm ? Number((kd as any).balanceSumLessLast5Rm) : null,
-    bankruptcy_search_dated: (kd as any).bankruptcySearchDated ? String((kd as any).bankruptcySearchDated) : null,
-    loan_agreement_dated: kd.loanAgreementDated ? String(kd.loanAgreementDated) : null,
-    loan_agreement_submitted_stamping_date: kd.loanAgreementSubmittedStampingDate ? String(kd.loanAgreementSubmittedStampingDate) : null,
-    loan_agreement_stamped_date: kd.loanAgreementStampedDate ? String(kd.loanAgreementStampedDate) : null,
-    received_executed_document_on_1: (kd as any).receivedExecutedDocumentOn1 ? String((kd as any).receivedExecutedDocumentOn1) : null,
-    received_unexecuted_document_on: (kd as any).receivedUnexecutedDocumentOn ? String((kd as any).receivedUnexecutedDocumentOn) : null,
-    resent_bank_execution_dated: (kd as any).resentBankExecutionDated ? String((kd as any).resentBankExecutionDated) : null,
-    received_executed_document_on_2: (kd as any).receivedExecutedDocumentOn2 ? String((kd as any).receivedExecutedDocumentOn2) : null,
-    statutory_declaration_dated: (kd as any).statutoryDeclarationDated ? String((kd as any).statutoryDeclarationDated) : null,
-    statutory_declaration_stamped_on: (kd as any).statutoryDeclarationStampedOn ? String((kd as any).statutoryDeclarationStampedOn) : null,
-    fa_date: (kd as any).faDate ? String((kd as any).faDate) : null,
-    fa_adjudication_number: (kd as any).faAdjudicationNumber ?? null,
-    fa_stamp_on: (kd as any).faStampOn ? String((kd as any).faStampOn) : null,
-    doa_date: (kd as any).doaDate ? String((kd as any).doaDate) : null,
-    doa_stamp_on: (kd as any).doaStampOn ? String((kd as any).doaStampOn) : null,
-    poa_date: (kd as any).poaDate ? String((kd as any).poaDate) : null,
-    poa_stamp_on: (kd as any).poaStampOn ? String((kd as any).poaStampOn) : null,
-    noa_dated: (kd as any).noaDated ? String((kd as any).noaDated) : null,
-    register_pa_on: (kd as any).registerPaOn ? String((kd as any).registerPaOn) : null,
-    pa_no: (kd as any).paNo ?? null,
-    register_poa_on: kd.registerPoaOn ? String(kd.registerPoaOn) : null,
-    registered_poa_registration_number: kd.registeredPoaRegistrationNumber ?? null,
-    noa_served_on: kd.noaServedOn ? String(kd.noaServedOn) : null,
-    advice_to_bank_date: kd.adviceToBankDate ? String(kd.adviceToBankDate) : null,
-    bank_1st_release_on: kd.bank1stReleaseOn ? String(kd.bank1stReleaseOn) : null,
-    first_release_amount_rm: kd.firstReleaseAmountRm ? Number(kd.firstReleaseAmountRm) : null,
-    discharge_date: kd.dischargeDate ? String(kd.dischargeDate) : null,
-    discharge_title_received_on: (kd as any).dischargeTitleReceivedOn ? String((kd as any).dischargeTitleReceivedOn) : null,
-    caveat_lodged_date: kd.caveatLodgedDate ? String(kd.caveatLodgedDate) : null,
-    first_advice_date: kd.firstAdviceDate ? String(kd.firstAdviceDate) : null,
-    dev_informed_redemption_date: kd.devInformedRedemptionDate ? String(kd.devInformedRedemptionDate) : null,
-    request_discharge_date: kd.requestDischargeDate ? String(kd.requestDischargeDate) : null,
-    charge_date: kd.chargeDate ? String(kd.chargeDate) : null,
-    charge_submit_stamping: (kd as any).chargeSubmitStamping ? String((kd as any).chargeSubmitStamping) : null,
-    charge_stamped: (kd as any).chargeStamped ? String((kd as any).chargeStamped) : null,
-    presentation_date: kd.presentationDate ? String(kd.presentationDate) : null,
-    second_advice_date: kd.secondAdviceDate ? String(kd.secondAdviceDate) : null,
-    request_letter_no_objection: (kd as any).requestLetterNoObjection ? String((kd as any).requestLetterNoObjection) : null,
-    received_letter_no_objection_on: (kd as any).receivedLetterNoObjectionOn ? String((kd as any).receivedLetterNoObjectionOn) : null,
-    blanket_consent_transfer_req: (kd as any).blanketConsentTransferReq ? String((kd as any).blanketConsentTransferReq) : null,
-    blanket_consent_transfer_approval: ((kd as any).blanketConsentTransferApproval ? String((kd as any).blanketConsentTransferApproval) : (kd.consentToTransferDate ? String(kd.consentToTransferDate) : null)),
-    consent_to_charge_req: (kd as any).consentToChargeReq ? String((kd as any).consentToChargeReq) : null,
-    consent_to_charge_approval: ((kd as any).consentToChargeApproval ? String((kd as any).consentToChargeApproval) : (kd.consentToChargeDate ? String(kd.consentToChargeDate) : null)),
-    consent_to_transfer_date: kd.consentToTransferDate ? String(kd.consentToTransferDate) : null,
-    consent_to_charge_date: kd.consentToChargeDate ? String(kd.consentToChargeDate) : null,
-    mot_received_date: kd.motReceivedDate ? String(kd.motReceivedDate) : null,
-    mot_signed_date: kd.motSignedDate ? String(kd.motSignedDate) : null,
-    mot_submit_stamping: (kd as any).motSubmitStamping ? String((kd as any).motSubmitStamping) : null,
-    mot_stamped_date: kd.motStampedDate ? String(kd.motStampedDate) : null,
-    mot_registered_date: kd.motRegisteredDate ? String(kd.motRegisteredDate) : null,
-    progressive_payment_date: kd.progressivePaymentDate ? String(kd.progressivePaymentDate) : null,
-    full_settlement_date: kd.fullSettlementDate ? String(kd.fullSettlementDate) : null,
-    completion_date: kd.completionDate ? String(kd.completionDate) : null,
+    spa_signed_date: pickDateString(kd, "spaSignedDate", "spa_signed_date"),
+    spa_forward_to_developer_execution_on: pickDateString(kd, "spaForwardToDeveloperExecutionOn", "spa_forward_to_developer_execution_on"),
+    spa_received_dev_return_spa_on: pickDateString(kd, "spaReceivedDevReturnSpaOn", "spa_received_dev_return_spa_on"),
+    spa_date: pickDateString(kd, "spaDate", "spa_date"),
+    spa_stamped_date: pickDateString(kd, "spaStampedDate", "spa_stamped_date"),
+    stamped_spa_send_to_developer_on: pickDateString(kd, "stampedSpaSendToDeveloperOn", "stamped_spa_send_to_developer_on"),
+    stamped_spa_received_from_developer_on: pickDateString(kd, "stampedSpaReceivedFromDeveloperOn", "stamped_spa_received_from_developer_on"),
+    stamped_spa_sent_to_purchaser_on: pickDateString(kd, "stampedSpaSentToPurchaserOn", "stamped_spa_sent_to_purchaser_on"),
+    li_date: pickDateString(kd, "liDate", "li_date"),
+    li_received_on: pickDateString(kd, "liReceivedOn", "li_received_on"),
+    letter_of_offer_date: pickDateString(kd, "letterOfOfferDate", "letter_of_offer_date"),
+    letter_of_offer_stamped_date: pickDateString(kd, "letterOfOfferStampedDate", "letter_of_offer_stamped_date"),
+    supp_lo_date: pickDateString(kd, "suppLoDate", "supp_lo_date"),
+    loan_docs_pending_date: pickDateString(kd, "loanDocsPendingDate", "loan_docs_pending_date"),
+    loan_docs_signed_date: pickDateString(kd, "loanDocsSignedDate", "loan_docs_signed_date"),
+    acting_letter_issued_date: pickDateString(kd, "actingLetterIssuedDate", "acting_letter_issued_date"),
+    developer_confirmation_received_on: pickDateString(kd, "developerConfirmationReceivedOn", "developer_confirmation_received_on"),
+    developer_confirmation_date: pickDateString(kd, "developerConfirmationDate", "developer_confirmation_date"),
+    loan_sent_bank_execution_date: pickDateString(kd, "loanSentBankExecutionDate", "loan_sent_bank_execution_date"),
+    loan_bank_executed_date: pickDateString(kd, "loanBankExecutedDate", "loan_bank_executed_date"),
+    differential_sum_rm: pickNumber(kd, "differentialSumRm", "differential_sum_rm"),
+    differential_sum_settled_on: pickDateString(kd, "differentialSumSettledOn", "differential_sum_settled_on"),
+    bank_lu_dated: pickDateString(kd, "bankLuDated", "bank_lu_dated"),
+    bank_lu_received_date: pickDateString(kd, "bankLuReceivedDate", "bank_lu_received_date"),
+    bank_lu_forward_to_developer_on: pickDateString(kd, "bankLuForwardToDeveloperOn", "bank_lu_forward_to_developer_on"),
+    developer_lu_received_on: pickDateString(kd, "developerLuReceivedOn", "developer_lu_received_on"),
+    developer_lu_dated: pickDateString(kd, "developerLuDated", "developer_lu_dated"),
+    master_lu_exempted: Boolean(pickValue(kd, "masterLuExempted", "master_lu_exempted")),
+    encumbrance_free_exempted: Boolean(pickValue(kd, "encumbranceFreeExempted", "encumbrance_free_exempted")),
+    letter_disclaimer_received_on: pickDateString(kd, "letterDisclaimerReceivedOn", "letter_disclaimer_received_on"),
+    letter_disclaimer_dated: pickDateString(kd, "letterDisclaimerDated", "letter_disclaimer_dated"),
+    letter_disclaimer_reference_nos: pickString(kd, "letterDisclaimerReferenceNos", "letter_disclaimer_reference_nos"),
+    redemption_sum: pickNumber(kd, "redemptionSum", "redemption_sum"),
+    balance_sum_less_last_5_rm: pickNumber(kd, "balanceSumLessLast5Rm", "balance_sum_less_last_5_rm"),
+    bankruptcy_search_dated: pickDateString(kd, "bankruptcySearchDated", "bankruptcy_search_dated"),
+    loan_agreement_dated: pickDateString(kd, "loanAgreementDated", "loan_agreement_dated"),
+    loan_agreement_submitted_stamping_date: pickDateString(kd, "loanAgreementSubmittedStampingDate", "loan_agreement_submitted_stamping_date"),
+    loan_agreement_stamped_date: pickDateString(kd, "loanAgreementStampedDate", "loan_agreement_stamped_date"),
+    received_executed_document_on_1: pickDateString(kd, "receivedExecutedDocumentOn1", "received_executed_document_on_1"),
+    received_unexecuted_document_on: pickDateString(kd, "receivedUnexecutedDocumentOn", "received_unexecuted_document_on"),
+    resent_bank_execution_dated: pickDateString(kd, "resentBankExecutionDated", "resent_bank_execution_dated"),
+    received_executed_document_on_2: pickDateString(kd, "receivedExecutedDocumentOn2", "received_executed_document_on_2"),
+    statutory_declaration_dated: pickDateString(kd, "statutoryDeclarationDated", "statutory_declaration_dated"),
+    statutory_declaration_stamped_on: pickDateString(kd, "statutoryDeclarationStampedOn", "statutory_declaration_stamped_on"),
+    fa_date: pickDateString(kd, "faDate", "fa_date"),
+    fa_adjudication_number: pickString(kd, "faAdjudicationNumber", "fa_adjudication_number"),
+    fa_stamp_on: pickDateString(kd, "faStampOn", "fa_stamp_on"),
+    doa_date: pickDateString(kd, "doaDate", "doa_date"),
+    doa_stamp_on: pickDateString(kd, "doaStampOn", "doa_stamp_on"),
+    poa_date: pickDateString(kd, "poaDate", "poa_date"),
+    poa_stamp_on: pickDateString(kd, "poaStampOn", "poa_stamp_on"),
+    noa_dated: pickDateString(kd, "noaDated", "noa_dated"),
+    register_pa_on: pickDateString(kd, "registerPaOn", "register_pa_on"),
+    pa_no: pickString(kd, "paNo", "pa_no"),
+    register_poa_on: pickDateString(kd, "registerPoaOn", "register_poa_on"),
+    registered_poa_registration_number: pickString(kd, "registeredPoaRegistrationNumber", "registered_poa_registration_number"),
+    noa_served_on: pickDateString(kd, "noaServedOn", "noa_served_on"),
+    advice_to_bank_date: pickDateString(kd, "adviceToBankDate", "advice_to_bank_date"),
+    completion_sla_activated_at: pickIsoString(kd, "completionSlaActivatedAt", "completion_sla_activated_at"),
+    completion_sla_notified_48h_at: pickIsoString(kd, "completionSlaNotified48hAt", "completion_sla_notified_48h_at"),
+    bank_1st_release_on: pickDateString(kd, "bank1stReleaseOn", "bank_1st_release_on"),
+    first_release_amount_rm: pickNumber(kd, "firstReleaseAmountRm", "first_release_amount_rm"),
+    discharge_date: pickDateString(kd, "dischargeDate", "discharge_date"),
+    discharge_title_received_on: pickDateString(kd, "dischargeTitleReceivedOn", "discharge_title_received_on"),
+    caveat_lodged_date: pickDateString(kd, "caveatLodgedDate", "caveat_lodged_date"),
+    first_advice_date: pickDateString(kd, "firstAdviceDate", "first_advice_date"),
+    dev_informed_redemption_date: pickDateString(kd, "devInformedRedemptionDate", "dev_informed_redemption_date"),
+    request_discharge_date: pickDateString(kd, "requestDischargeDate", "request_discharge_date"),
+    charge_date: pickDateString(kd, "chargeDate", "charge_date"),
+    charge_submit_stamping: pickDateString(kd, "chargeSubmitStamping", "charge_submit_stamping"),
+    charge_stamped: pickDateString(kd, "chargeStamped", "charge_stamped"),
+    presentation_date: pickDateString(kd, "presentationDate", "presentation_date"),
+    second_advice_date: pickDateString(kd, "secondAdviceDate", "second_advice_date"),
+    request_letter_no_objection: pickDateString(kd, "requestLetterNoObjection", "request_letter_no_objection"),
+    received_letter_no_objection_on: pickDateString(kd, "receivedLetterNoObjectionOn", "received_letter_no_objection_on"),
+    blanket_consent_transfer_req: pickDateString(kd, "blanketConsentTransferReq", "blanket_consent_transfer_req"),
+    blanket_consent_transfer_approval: pickDateString(kd, "blanketConsentTransferApproval", "blanket_consent_transfer_approval") ?? pickDateString(kd, "consentToTransferDate", "consent_to_transfer_date"),
+    consent_to_charge_req: pickDateString(kd, "consentToChargeReq", "consent_to_charge_req"),
+    consent_to_charge_approval: pickDateString(kd, "consentToChargeApproval", "consent_to_charge_approval") ?? pickDateString(kd, "consentToChargeDate", "consent_to_charge_date"),
+    consent_to_transfer_date: pickDateString(kd, "consentToTransferDate", "consent_to_transfer_date"),
+    consent_to_charge_date: pickDateString(kd, "consentToChargeDate", "consent_to_charge_date"),
+    mot_received_date: pickDateString(kd, "motReceivedDate", "mot_received_date"),
+    mot_signed_date: pickDateString(kd, "motSignedDate", "mot_signed_date"),
+    mot_submit_stamping: pickDateString(kd, "motSubmitStamping", "mot_submit_stamping"),
+    mot_stamped_date: pickDateString(kd, "motStampedDate", "mot_stamped_date"),
+    mot_registered_date: pickDateString(kd, "motRegisteredDate", "mot_registered_date"),
+    progressive_payment_date: pickDateString(kd, "progressivePaymentDate", "progressive_payment_date"),
+    full_settlement_date: pickDateString(kd, "fullSettlementDate", "full_settlement_date"),
+    completion_date: pickDateString(kd, "completionDate", "completion_date"),
   } : {};
 
   const workflowSteps = await r
@@ -3518,14 +3693,14 @@ router.get("/cases/:caseId/progress", requireAuthHandler, requireFirmUserHandler
 
     await ensureCaseWorkflowSteps(r, req.firmId!, caseId);
 
-    const kdExists = await tableExists(r, "public.case_key_dates");
-    let kd: typeof caseKeyDatesTable.$inferSelect | undefined;
-    if (kdExists) {
-      [kd] = await r
-        .select()
-        .from(caseKeyDatesTable)
-        .where(and(eq(caseKeyDatesTable.caseId, caseId), eq(caseKeyDatesTable.firmId, req.firmId!)));
-    }
+    const kd = await (async () => {
+      try {
+        return await fetchKeyDatesRow(r, req.firmId!, caseId);
+      } catch (err) {
+        logger.error({ err, pgCode: getPgCode(err), firmId: req.firmId, userId: req.userId, caseId }, "[cases] progress fetch key-dates failed");
+        return null;
+      }
+    })();
 
   const docsExists = await tableExists(r, "public.case_workflow_documents");
   const workflowDocsRows = docsExists
@@ -3997,21 +4172,27 @@ router.patch("/cases/:caseId/key-dates", requireAuthHandler, requireFirmUserHand
     changed.push("pa_no");
   }
 
-  const [currentKd] = await r
-    .select({
-      id: caseKeyDatesTable.id,
-      spaStampedDate: caseKeyDatesTable.spaStampedDate,
-      letterOfOfferStampedDate: caseKeyDatesTable.letterOfOfferStampedDate,
-      actingLetterIssuedDate: caseKeyDatesTable.actingLetterIssuedDate,
-      loanBankExecutedDate: caseKeyDatesTable.loanBankExecutedDate,
-      developerConfirmationDate: caseKeyDatesTable.developerConfirmationDate,
-      registeredPoaOn: caseKeyDatesTable.registerPoaOn,
-      registeredPoaRegistrationNumber: caseKeyDatesTable.registeredPoaRegistrationNumber,
-      differentialSumRm: (caseKeyDatesTable as any).differentialSumRm,
-    })
-    .from(caseKeyDatesTable)
-    .where(and(eq(caseKeyDatesTable.caseId, params.data.caseId), eq(caseKeyDatesTable.firmId, req.firmId!)))
-    .limit(1);
+  let currentKd: any = null;
+  try {
+    [currentKd] = await r
+      .select({
+        id: caseKeyDatesTable.id,
+        spaStampedDate: caseKeyDatesTable.spaStampedDate,
+        letterOfOfferStampedDate: caseKeyDatesTable.letterOfOfferStampedDate,
+        actingLetterIssuedDate: caseKeyDatesTable.actingLetterIssuedDate,
+        loanBankExecutedDate: caseKeyDatesTable.loanBankExecutedDate,
+        developerConfirmationDate: caseKeyDatesTable.developerConfirmationDate,
+        registeredPoaOn: caseKeyDatesTable.registerPoaOn,
+        registeredPoaRegistrationNumber: caseKeyDatesTable.registeredPoaRegistrationNumber,
+        differentialSumRm: (caseKeyDatesTable as any).differentialSumRm,
+      })
+      .from(caseKeyDatesTable)
+      .where(and(eq(caseKeyDatesTable.caseId, params.data.caseId), eq(caseKeyDatesTable.firmId, req.firmId!)))
+      .limit(1);
+  } catch (err) {
+    if (!isUndefinedColumnError(err)) throw err;
+    currentKd = null;
+  }
 
   const wantsLoStamp = Object.prototype.hasOwnProperty.call(body, "letter_of_offer_stamped_date");
   const wantsActingLetter = Object.prototype.hasOwnProperty.call(body, "acting_letter_issued_date");
@@ -4126,6 +4307,8 @@ router.patch("/cases/:caseId/key-dates", requireAuthHandler, requireFirmUserHand
     userAgent: req.headers["user-agent"],
   });
 
+  const sla = await updateCompletionSlaState(r, req.firmId!, params.data.caseId);
+
   res.json(kd ? {
     spa_signed_date: kd.spaSignedDate ? String(kd.spaSignedDate) : null,
     spa_forward_to_developer_execution_on: kd.spaForwardToDeveloperExecutionOn ? String(kd.spaForwardToDeveloperExecutionOn) : null,
@@ -4185,6 +4368,8 @@ router.patch("/cases/:caseId/key-dates", requireAuthHandler, requireFirmUserHand
     registered_poa_registration_number: kd.registeredPoaRegistrationNumber ?? null,
     noa_served_on: kd.noaServedOn ? String(kd.noaServedOn) : null,
     advice_to_bank_date: kd.adviceToBankDate ? String(kd.adviceToBankDate) : null,
+    completion_sla_activated_at: sla.activatedAt,
+    completion_sla_notified_48h_at: sla.notified48hAt,
     bank_1st_release_on: kd.bank1stReleaseOn ? String(kd.bank1stReleaseOn) : null,
     first_release_amount_rm: kd.firstReleaseAmountRm ? Number(kd.firstReleaseAmountRm) : null,
     discharge_date: kd.dischargeDate ? String(kd.dischargeDate) : null,
@@ -5046,6 +5231,11 @@ router.post("/cases/:caseId/workflow-documents", requireAuthHandler, requireFirm
     userAgent: req.headers["user-agent"],
   });
 
+  const poaLegacyKeys = workflowDocumentLegacyKeys("register_poa" as WorkflowDocumentMilestoneKey) ?? [];
+  if (milestoneKey === "register_poa" || poaLegacyKeys.includes(milestoneKey)) {
+    await updateCompletionSlaState(r, req.firmId!, caseId);
+  }
+
   res.status(existing ? 200 : 201).json({
     id: row.id,
     caseId: row.caseId,
@@ -5148,6 +5338,10 @@ router.delete("/cases/:caseId/workflow-documents/:id", requireAuthHandler, requi
     ipAddress: req.ip,
     userAgent: req.headers["user-agent"],
   });
+  const poaLegacyKeys = workflowDocumentLegacyKeys("register_poa" as WorkflowDocumentMilestoneKey) ?? [];
+  if (existing.milestoneKey === "register_poa" || poaLegacyKeys.includes(String(existing.milestoneKey))) {
+    await updateCompletionSlaState(r, req.firmId!, caseId);
+  }
   res.status(204).end();
 }));
 
@@ -6359,11 +6553,15 @@ router.patch("/cases/:caseId/workflow/:stepId", requireAuthHandler, requireFirmU
     if (mapped) {
       const kdExists = await tableExists(r, "public.case_key_dates");
       if (kdExists) {
-        const [existingKd] = await r
-          .select()
-          .from(caseKeyDatesTable)
-          .where(and(eq(caseKeyDatesTable.caseId, params.data.caseId), eq(caseKeyDatesTable.firmId, req.firmId!)));
-        if (shouldBackfillKeyDate(mapped, existingKd ?? null)) {
+        const existingKd = await (async () => {
+          try {
+            return await fetchKeyDatesRow(r, req.firmId!, params.data.caseId);
+          } catch (err) {
+            logger.error({ err, pgCode: getPgCode(err), firmId: req.firmId, userId: req.userId, caseId: params.data.caseId }, "[cases] workflow backfill fetch key-dates failed");
+            return null;
+          }
+        })();
+        if (shouldBackfillKeyDate(mapped, existingKd)) {
           const ymd = dateToYmd(step.completedAt);
           if (existingKd) {
             await r

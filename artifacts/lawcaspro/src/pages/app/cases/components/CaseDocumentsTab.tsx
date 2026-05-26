@@ -646,23 +646,19 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
       if (!jobId) throw new Error("jobId is missing");
 
       const pollOnce = async (): Promise<boolean> => {
-        const status = await apiFetchJson<any>(`/documents/jobs/${jobId}`, { timeoutMs: 15000 });
-        const job = asRecord(status?.job) ?? {};
-        const items = Array.isArray(status?.items) ? status.items : [];
-        const st = String(job.status ?? "");
+        const status = await apiFetchJson<any>(`/documents/status/${jobId}`, { timeoutMs: 15000 });
+        const st = String(status?.status ?? "");
         if (st === "completed") {
           await qc.invalidateQueries({ queryKey: ["case-documents", caseId] });
           await qc.invalidateQueries({ queryKey: ["case-documents-checklist", caseId] });
-          const fileName = typeof job.download_file_name === "string" ? String(job.download_file_name) : "document.pdf";
-          await downloadFromApi(`/documents/jobs/${jobId}/download`, fileName);
+          const fileName = typeof status?.fileName === "string" ? String(status.fileName) : "document.pdf";
+          const downloadUrl = typeof status?.downloadUrl === "string" ? String(status.downloadUrl) : `/documents/jobs/${jobId}/download`;
+          await downloadFromApi(downloadUrl, fileName);
           toast({ title: "Downloaded" });
           return true;
         }
         if (st === "failed") {
-          const msg =
-            typeof job.error_summary === "string"
-              ? job.error_summary
-              : (items[0] && asRecord(items[0])?.error_message ? String(asRecord(items[0])?.error_message) : "Generation failed");
+          const msg = typeof status?.error === "string" ? String(status.error) : "Generation failed";
           throw new Error(msg);
         }
         return false;
@@ -689,7 +685,7 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
               }
               reject(e);
             });
-        }, 3000);
+        }, 2000);
       });
     } catch (err) {
       toastError(toast, err, "Generation failed");
@@ -712,29 +708,27 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
       : undefined;
 
     const startedAt = Date.now();
-    let interval: any = null;
+    let progressInterval: any = null;
+    let pollInterval: any = null;
     let longTimer: any = null;
     setIsGenerating(true);
     try {
-      let created: CaseDocument;
       const bypassApplicability = Boolean(showAllTemplates && canBypassApplicability);
       try {
         setVariableChecklistProgress(5);
         setVariableChecklistLongRunning(false);
         longTimer = setTimeout(() => setVariableChecklistLongRunning(true), 15000);
-        interval = setInterval(() => {
+        progressInterval = setInterval(() => {
           const elapsed = Date.now() - startedAt;
           const next = Math.max(5, Math.min(95, Math.round((elapsed / 60000) * 90) + 5));
           setVariableChecklistProgress(next);
         }, 400);
       } catch {
       }
-      const qs = new URLSearchParams();
-      if (opts?.force) qs.set("force", "true");
-      const url = `/cases/${caseId}/documents/generate${qs.toString() ? `?${qs.toString()}` : ""}`;
-      created = await apiFetchJson(url, {
+
+      const created = await apiFetchJson<{ jobId: string; downloadUrl?: string; statusUrl?: string }>(`/cases/${caseId}/documents/generate`, {
         method: "POST",
-        timeoutMs: 120000,
+        timeoutMs: 15000,
         body: JSON.stringify({
           templateId: Number(item.templateId),
           documentName: documentNameToSend,
@@ -744,26 +738,59 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
           overrides: overrides && Object.keys(overrides).length ? overrides : null,
         }),
       });
+      const jobId = typeof created?.jobId === "string" ? created.jobId : "";
+      if (!jobId) throw new Error("jobId is missing");
+      const downloadUrl = typeof created?.downloadUrl === "string" ? created.downloadUrl : `/documents/jobs/${jobId}/download`;
+
+      const pollOnce = async (): Promise<boolean> => {
+        const st = await apiFetchJson<any>(`/documents/status/${jobId}`, { timeoutMs: 15000 });
+        const status = typeof st?.status === "string" ? st.status : "";
+        if (status === "completed") {
+          await qc.invalidateQueries({ queryKey: ["case-documents", caseId] });
+          await qc.invalidateQueries({ queryKey: ["case-documents-checklist", caseId] });
+          const fileName =
+            typeof st?.fileName === "string"
+              ? st.fileName
+              : (item?.name ? `${String(item.name)}.docx` : "document.docx");
+          await downloadFromApi(downloadUrl, fileName);
+          toast({ title: "Downloaded" });
+          return true;
+        }
+        if (status === "failed") {
+          const msg = typeof st?.error === "string" ? st.error : "Generation failed";
+          throw new Error(msg);
+        }
+        return false;
+      };
+
+      const done = await pollOnce();
+      if (!done) {
+        await new Promise<void>((resolve, reject) => {
+          pollInterval = setInterval(() => {
+            pollOnce()
+              .then((ok) => {
+                if (!ok) return;
+                if (pollInterval) {
+                  clearInterval(pollInterval);
+                  pollInterval = null;
+                }
+                resolve();
+              })
+              .catch((e) => {
+                if (pollInterval) {
+                  clearInterval(pollInterval);
+                  pollInterval = null;
+                }
+                reject(e);
+              });
+          }, 2000);
+        });
+      }
+
       setVariableChecklistProgress(100);
       await qc.invalidateQueries({ queryKey: ["case-documents", caseId] });
       await qc.invalidateQueries({ queryKey: ["case-documents-checklist", caseId] });
-      if (variableChecklistLongRunning) {
-        try {
-          await handleDownload(created);
-        } catch {
-        }
-        toast({ title: "Document generated", description: created?.name ? String(created.name) : undefined });
-      } else {
-        toast({
-          title: "Document generated successfully",
-          description: created?.name ? String(created.name) : undefined,
-          action: (
-            <ToastAction altText="Download" onClick={() => handleDownload(created)}>
-              Download
-            </ToastAction>
-          ),
-        });
-      }
+      toast({ title: "Document generated successfully" });
 
       const docType = normalizeDocumentType(item.documentType);
       const autoKeyDate =
@@ -792,39 +819,11 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
       closeGenerateDialog();
       closeVariableChecklist();
     } catch (err: unknown) {
-      const errRec = asRecord(err);
-      const data = asRecord(errRec?.data);
-      const code = typeof data?.code === "string" ? String(data.code) : "";
-      const missingRaw = Array.isArray(data?.missing) ? data?.missing : null;
-      const reasonsRaw = Array.isArray(data?.reasons) ? data?.reasons : null;
-      const missingReq = Array.isArray(data?.missingRequiredVariables) ? data?.missingRequiredVariables : null;
-      if (code === "TEMPLATE_NOT_READY" && missingRaw) {
-        const missingMsgs = missingRaw
-          .map((m) => asRecord(m)?.message)
-          .filter((m): m is string => typeof m === "string" && Boolean(m.trim()));
-        toast({ title: "Template not ready", description: missingMsgs.join(", "), variant: "destructive" });
-      } else if (code === "TEMPLATE_APPLICABILITY_BLOCKED") {
-        const reasons = reasonsRaw?.filter((x): x is string => typeof x === "string" && Boolean(x.trim()));
-        toast({ title: "Template blocked", description: reasons?.length ? reasons.join(", ") : undefined, variant: "destructive" });
-      } else if (code === "TEMPLATE_CHECKLIST_BLOCKED" || code === "TEMPLATE_CHECKLIST_OVERRIDE_REQUIRED") {
-        const checklist = asRecord(data?.checklist);
-        const items = Array.isArray(checklist?.items) ? checklist.items : [];
-        const missingMsgs = items
-          .map((x) => asRecord(x)?.message)
-          .filter((x): x is string => typeof x === "string" && Boolean(x.trim()))
-          .slice(0, 5);
-        toast({ title: "Checklist blocked", description: missingMsgs.length ? missingMsgs.join(", ") : "Missing required checklist items", variant: "destructive" });
-      } else if (code === "TEMPLATE_BINDING_MISSING" && missingReq) {
-        const missingKeys = missingReq
-          .map((m) => asRecord(m)?.variableKey)
-          .filter((m): m is string => typeof m === "string" && Boolean(m.trim()));
-        toast({ title: "Missing required variables", description: missingKeys.join(", "), variant: "destructive" });
-      } else {
-        toastError(toast, err, "Generation failed");
-      }
+      toastError(toast, err, "Generation failed");
     } finally {
       try {
-        if (interval) clearInterval(interval);
+        if (progressInterval) clearInterval(progressInterval);
+        if (pollInterval) clearInterval(pollInterval);
         if (longTimer) clearTimeout(longTimer);
       } catch {
       }
@@ -1000,7 +999,7 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
               }
               reject(e);
             });
-        }, 3000);
+        }, 2000);
       });
     } catch (err) {
       toastError(toast, err, "Generation failed");
@@ -1162,48 +1161,82 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
     const templateIds = Array.from(enterpriseSelectedTemplateIds);
     if (templateIds.length === 0) return;
     setEnterpriseBusy(true);
+    let pollId: any = null;
     try {
-      const res = await apiRequest("/cases/bulk/generate-documents-zip", {
+      const created = await apiFetchJson<{ jobId: string; downloadUrl?: string }>(`/cases/bulk/generate-documents-zip`, {
         method: "POST",
+        timeoutMs: 15000,
         body: JSON.stringify({
           caseIds: [caseId],
           templateIds,
           actionType: enterpriseMode,
           printCopies: enterpriseMode === "print" ? Number(enterpriseCopies || 1) : undefined,
         }),
-        timeoutMs: 180000,
       });
-      const blob = await res.blob();
-      const cd = res.headers.get("content-disposition") ?? "";
-      const m = /filename\*=UTF-8''([^;]+)|filename=\"?([^\";]+)\"?/i.exec(cd);
-      const fileNameRaw = m?.[1] ?? m?.[2] ?? (enterpriseMode === "print" ? "system-print.pdf" : "document-automation.zip");
-      const fileName = decodeURIComponent(String(fileNameRaw).trim());
+      const jobId = typeof created?.jobId === "string" ? created.jobId : "";
+      if (!jobId) throw new Error("Missing jobId");
+      const downloadUrl = typeof created?.downloadUrl === "string" ? created.downloadUrl : `/documents/jobs/${jobId}/download`;
 
-      if (enterpriseMode === "print") {
-        const url = URL.createObjectURL(blob);
-        const iframe = document.createElement("iframe");
-        iframe.style.position = "fixed";
-        iframe.style.right = "0";
-        iframe.style.bottom = "0";
-        iframe.style.width = "0";
-        iframe.style.height = "0";
-        iframe.src = url;
-        iframe.onload = () => {
-          try { iframe.contentWindow?.focus(); iframe.contentWindow?.print(); } catch {}
-          setTimeout(() => { URL.revokeObjectURL(url); iframe.remove(); }, 60000);
-        };
-        document.body.appendChild(iframe);
-        toast({ title: "Printable PDF ready" });
-      } else {
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement("a");
-        a.href = url;
-        a.download = fileName || "document-automation.zip";
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
-        URL.revokeObjectURL(url);
-        toast({ title: "Download started" });
+      const pollOnce = async (): Promise<boolean> => {
+        const st = await apiFetchJson<any>(`/documents/status/${jobId}`, { timeoutMs: 15000 });
+        const status = typeof st?.status === "string" ? st.status : "";
+        if (status === "completed") {
+          const fileName =
+            typeof st?.fileName === "string"
+              ? String(st.fileName)
+              : (enterpriseMode === "print" ? "system-print.pdf" : "document-automation.zip");
+
+          if (enterpriseMode === "print") {
+            const blob = await apiFetchBlob(downloadUrl);
+            const url = URL.createObjectURL(blob);
+            const iframe = document.createElement("iframe");
+            iframe.style.position = "fixed";
+            iframe.style.right = "0";
+            iframe.style.bottom = "0";
+            iframe.style.width = "0";
+            iframe.style.height = "0";
+            iframe.src = url;
+            iframe.onload = () => {
+              try { iframe.contentWindow?.focus(); iframe.contentWindow?.print(); } catch {}
+              setTimeout(() => { URL.revokeObjectURL(url); iframe.remove(); }, 60000);
+            };
+            document.body.appendChild(iframe);
+            toast({ title: "Printable PDF ready" });
+          } else {
+            await downloadFromApi(downloadUrl, fileName || "document-automation.zip");
+            toast({ title: "Download started" });
+          }
+          return true;
+        }
+        if (status === "failed") {
+          const msg = typeof st?.error === "string" ? String(st.error) : "Generation failed";
+          throw new Error(msg);
+        }
+        return false;
+      };
+
+      const done = await pollOnce();
+      if (!done) {
+        await new Promise<void>((resolve, reject) => {
+          pollId = window.setInterval(() => {
+            pollOnce()
+              .then((ok) => {
+                if (!ok) return;
+                if (pollId) {
+                  window.clearInterval(pollId);
+                  pollId = null;
+                }
+                resolve();
+              })
+              .catch((e) => {
+                if (pollId) {
+                  window.clearInterval(pollId);
+                  pollId = null;
+                }
+                reject(e);
+              });
+          }, 2000);
+        });
       }
 
       setEnterpriseDialogOpen(false);
@@ -1211,6 +1244,9 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
     } catch (err) {
       toastError(toast, err, enterpriseMode === "print" ? "Print failed" : "Generate failed");
     } finally {
+      if (pollId) {
+        try { window.clearInterval(pollId); } catch {}
+      }
       setEnterpriseBusy(false);
     }
   }

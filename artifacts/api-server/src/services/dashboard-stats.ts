@@ -146,6 +146,22 @@ export async function computeDashboardStats(
         .leftJoin(usersTable, eq(caseAssignmentsTable.userId, usersTable.id))
         .where(eq(caseAssignmentsTable.caseId, c.id))
         .limit(1);
+      const completionSla = hasKeyDates ? await (async () => {
+        const [kd] = await r
+          .select({
+            adviceToBankDate: caseKeyDatesTable.adviceToBankDate,
+            completionSlaActivatedAt: caseKeyDatesTable.completionSlaActivatedAt,
+          })
+          .from(caseKeyDatesTable)
+          .where(and(eq(caseKeyDatesTable.firmId, firmId), eq(caseKeyDatesTable.caseId, c.id)))
+          .limit(1);
+        if (!kd?.completionSlaActivatedAt) return null;
+        if (kd.adviceToBankDate) return null;
+        const ms = Date.now() - (kd.completionSlaActivatedAt instanceof Date ? kd.completionSlaActivatedAt.getTime() : new Date(kd.completionSlaActivatedAt as any).getTime());
+        const hours = Math.max(0, ms / 3600_000);
+        const status = hours >= 72 ? "overdue" : hours >= 48 ? "soon" : "due";
+        return { status, activatedAt: (kd.completionSlaActivatedAt as Date).toISOString(), hoursElapsed: hours };
+      })() : null;
       return {
         id: c.id,
         referenceNo: c.referenceNo,
@@ -155,6 +171,7 @@ export async function computeDashboardStats(
         titleType: c.titleType,
         status: c.status,
         assignedLawyerName: assignment?.userName ?? null,
+        completionSla,
         createdAt: (c.createdAt instanceof Date ? c.createdAt : new Date(c.createdAt)).toISOString(),
       };
     })
@@ -385,6 +402,27 @@ export async function computeDashboardStats(
     ? [...spaCards, ...loanMasterCards, ...loanTitleCards]
     : [];
 
+  const completionSlaOverdue = hasKeyDates ? (await queryRows(r, sql`
+    SELECT
+      c.id as case_id,
+      c.reference_no as reference_no,
+      kd.completion_sla_activated_at as activated_at,
+      EXTRACT(epoch FROM (now() - kd.completion_sla_activated_at)) / 3600.0 as hours_elapsed
+    FROM case_key_dates kd
+    JOIN cases c ON c.id = kd.case_id AND c.firm_id = kd.firm_id
+    WHERE kd.firm_id = ${firmId}
+      AND kd.completion_sla_activated_at IS NOT NULL
+      AND kd.advice_to_bank_date IS NULL
+      AND (now() - kd.completion_sla_activated_at) >= interval '72 hours'
+    ORDER BY kd.completion_sla_activated_at ASC
+    LIMIT 20
+  `)).map((x) => ({
+    caseId: toNumber0((x as any).case_id),
+    referenceNo: String((x as any).reference_no ?? ""),
+    activatedAt: (x as any).activated_at ? new Date(String((x as any).activated_at)).toISOString() : null,
+    hoursElapsed: toNumber0((x as any).hours_elapsed),
+  })).filter((x) => x.caseId > 0) : [];
+
   return {
     totalCases,
     activeCases,
@@ -408,6 +446,7 @@ export async function computeDashboardStats(
     })(),
     outstandingAdvances,
     commsThisMonth,
+    completionSlaOverdue,
     milestoneSections,
     milestoneCards,
   };

@@ -306,6 +306,9 @@ export const caseKeyDatesTable = pgTable("case_key_dates", {
   bank1stReleaseOn: date("bank_1st_release_on"),
   firstReleaseAmountRm: numeric("first_release_amount_rm", { precision: 15, scale: 2 }),
 
+  completionSlaActivatedAt: timestamp("completion_sla_activated_at", { withTimezone: true }),
+  completionSlaNotified48hAt: timestamp("completion_sla_notified_48h_at", { withTimezone: true }),
+
   dischargeDate: date("discharge_date"),
   dischargeTitleReceivedOn: date("discharge_title_received_on"),
   requestLetterNoObjection: date("request_letter_no_objection"),

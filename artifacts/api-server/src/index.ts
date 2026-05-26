@@ -3,6 +3,7 @@ import { logger } from "./lib/logger";
 import { seedIfEmpty } from "./lib/seed";
 import { startSnapshotScheduler } from "./jobs/snapshot-scheduler";
 import { startSnapshotRetentionCleanup } from "./jobs/snapshot-retention";
+import { startCompletionSlaMonitor } from "./jobs/completion-sla-monitor";
 
 const rawPort = process.env["PORT"];
 
@@ -28,6 +29,7 @@ const server = app.listen(port, () => {
 
 startSnapshotScheduler();
 startSnapshotRetentionCleanup();
+startCompletionSlaMonitor();
 
 server.on("error", (err) => {
   logger.error({ err }, "Error listening on port");

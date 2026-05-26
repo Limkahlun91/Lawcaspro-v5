@@ -5503,6 +5503,7 @@ async function createGenerationRun(r: DbConn, row: Record<string, unknown>): Pro
       firm_id, case_id, template_source,
       template_id, template_version_id, platform_document_id,
       document_name, render_mode, status,
+      request_config, started_at,
       rendered_variables_snapshot, checklist_snapshot, readiness_snapshot,
       triggered_by, triggered_at,
       error_code, error_message
@@ -5510,6 +5511,7 @@ async function createGenerationRun(r: DbConn, row: Record<string, unknown>): Pro
       ${row.firm_id as any}, ${row.case_id as any}, ${row.template_source as any},
       ${row.template_id as any}, ${row.template_version_id as any}, ${row.platform_document_id as any},
       ${row.document_name as any}, ${row.render_mode as any}, ${row.status as any},
+      ${(row.request_config ?? {}) as any}, ${row.started_at as any},
       ${row.rendered_variables_snapshot as any}, ${row.checklist_snapshot as any}, ${row.readiness_snapshot as any},
       ${row.triggered_by as any}, now(),
       ${row.error_code as any}, ${row.error_message as any}
@@ -5543,6 +5545,87 @@ async function finishGenerationRunFailed(r: DbConn, firmId: number, runId: numbe
         error_message = ${errorMessage}
     WHERE id = ${runId} AND firm_id = ${firmId}
   `);
+}
+
+const activeCaseDocumentRunRunners = new Set<string>();
+
+function startCaseDocumentRunRunner(r: DbConn, args: { firmId: number; runId: number }): void {
+  const key = `${args.firmId}:${args.runId}`;
+  if (activeCaseDocumentRunRunners.has(key)) return;
+  activeCaseDocumentRunRunners.add(key);
+  void (async () => {
+    try {
+      const rows = await queryRows(r, sql`
+        SELECT *
+        FROM document_generation_runs
+        WHERE id = ${args.runId} AND firm_id = ${args.firmId}
+        LIMIT 1
+      `);
+      const run = rows[0] as any;
+      if (!run) return;
+      const status = String(run.status ?? "");
+      if (status === "success" || status === "failed") return;
+
+      await queryRows(r, sql`
+        UPDATE document_generation_runs
+        SET status = 'running',
+            started_at = COALESCE(started_at, now())
+        WHERE id = ${args.runId} AND firm_id = ${args.firmId}
+          AND status <> 'success' AND status <> 'failed'
+      `);
+
+      const caseId = typeof run.case_id === "number" ? Number(run.case_id) : Number(run.case_id ?? 0);
+      const templateId = typeof run.template_id === "number" ? Number(run.template_id) : Number(run.template_id ?? 0);
+      const actorId = typeof run.triggered_by === "number" ? Number(run.triggered_by) : Number(run.triggered_by ?? 0);
+      const requestConfig = (run.request_config && typeof run.request_config === "object") ? (run.request_config as any) : {};
+      const bypassApplicabilityRequested = Boolean(requestConfig?.bypassApplicability);
+      const bypassApplicability = bypassApplicabilityRequested ? await canBypassApplicability(r, args.firmId, null) : false;
+      const force = Boolean(requestConfig?.force);
+      const blind = Boolean(requestConfig?.blind);
+      const documentName = typeof requestConfig?.documentName === "string" ? String(requestConfig.documentName) : undefined;
+      const letterheadId = normalizeLetterheadId(requestConfig?.letterheadId);
+      const clauses = Array.isArray(requestConfig?.clauses) ? requestConfig.clauses : undefined;
+      const overrides = (requestConfig?.overrides && typeof requestConfig.overrides === "object" && !Array.isArray(requestConfig.overrides)) ? requestConfig.overrides : null;
+
+      try {
+        const out = await generateFirmDocument({
+          r,
+          firmId: args.firmId,
+          actorId,
+          actorType: "firm_user",
+          ipAddress: "system",
+          userAgent: "system",
+          caseId,
+          templateId,
+          documentName,
+          letterheadId,
+          runId: args.runId,
+          bypassApplicability,
+          force,
+          blind,
+          clauses,
+          overrides,
+        });
+        await finishGenerationRunSuccess(r, args.firmId, args.runId, out.caseDocumentId, out.renderedVars, out.checklistSnapshot, out.readinessSnapshot);
+        await writeAuditLog({ firmId: args.firmId, actorId: actorId || null, actorType: "system", action: "documents.generation.async.succeeded", entityType: "document_generation_run", entityId: args.runId, detail: `caseId=${caseId} templateId=${templateId}`, ipAddress: "system", userAgent: "system" });
+      } catch (err: unknown) {
+        const cfgErr = getSupabaseStorageConfigError(err);
+        if (cfgErr) {
+          await finishGenerationRunFailed(r, args.firmId, args.runId, "STORAGE_NOT_CONFIGURED", cfgErr.error);
+          return;
+        }
+        if (err instanceof ObjectNotFoundError) {
+          await finishGenerationRunFailed(r, args.firmId, args.runId, "TEMPLATE_FILE_NOT_FOUND", "Template file not found");
+          return;
+        }
+        const e = err instanceof DocumentGenerationError ? err : new DocumentGenerationError(500, "INTERNAL_ERROR", "Internal Server Error");
+        await finishGenerationRunFailed(r, args.firmId, args.runId, e.code, e.message);
+      }
+    } catch {
+    } finally {
+      activeCaseDocumentRunRunners.delete(key);
+    }
+  })();
 }
 
 async function convertDocxToPdf(docxBytes: Buffer): Promise<Buffer> {
@@ -6930,120 +7013,16 @@ router.post("/cases/:caseId/documents/batch-generate", requireAuth, requireFirmU
     return;
   }
 
-  const jobId = randomUUID();
-  await queryRows(r, sql`
-    INSERT INTO document_batch_jobs (id, firm_id, case_id, job_type, status, total_count, pending_count, created_by, started_at)
-    VALUES (${jobId}::uuid, ${req.firmId!}, ${caseId}, 'generate', 'running', ${items.length}, ${items.length}, ${req.userId!}, now())
-  `);
-  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.batch_generate", entityType: "document_batch_job", entityId: undefined, detail: `jobId=${jobId} caseId=${caseId} total=${items.length}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
-
-  const results: Array<Record<string, unknown>> = [];
-  let success = 0;
-  let failed = 0;
-
-  for (const raw of items) {
-    const it = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
-    const source = it.source === "master" ? "master" : "firm";
-    const templateId = typeof it.templateId === "number" ? it.templateId : NaN;
-    const documentName = typeof it.documentName === "string" ? it.documentName : undefined;
-    const itemRows = await queryRows(r, sql`
-      INSERT INTO document_batch_job_items (job_id, firm_id, case_id, template_source, template_id, platform_document_id, status)
-      VALUES (${jobId}::uuid, ${req.firmId!}, ${caseId}, ${source}, ${source === "firm" ? templateId : null}, ${source === "master" ? templateId : null}, 'running')
-      RETURNING id
-    `);
-    const itemId = typeof itemRows[0]?.id === "number" ? Number(itemRows[0].id) : null;
-
-    const runId = await createGenerationRun(r, {
-      firm_id: req.firmId!,
-      case_id: caseId,
-      template_source: source,
-      template_id: source === "firm" ? templateId : null,
-      template_version_id: null,
-      platform_document_id: source === "master" ? templateId : null,
-      document_name: documentName ?? "Generated document",
-      render_mode: "docx",
-      status: "running",
-      rendered_variables_snapshot: null,
-      checklist_snapshot: null,
-      readiness_snapshot: null,
-      triggered_by: req.userId!,
-      error_code: null,
-      error_message: null,
-    });
-
-    try {
-      if (Number.isNaN(templateId)) throw new DocumentGenerationError(422, "INVALID_TEMPLATE_ID", "Invalid templateId");
-      if (source === "firm") {
-        const out = await generateFirmDocument({
-          r,
-          firmId: req.firmId!,
-          actorId: req.userId!,
-          actorType: req.userType,
-          ipAddress: req.ip,
-          userAgent: req.headers["user-agent"],
-          caseId,
-          templateId,
-          documentName,
-          letterheadId,
-          runId,
-          bypassApplicability: bypass,
-        });
-        await finishGenerationRunSuccess(r, req.firmId!, runId, out.caseDocumentId, out.renderedVars, out.checklistSnapshot, out.readinessSnapshot);
-        await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.generation.succeeded", entityType: "document_generation_run", entityId: runId, detail: `caseId=${caseId} templateSource=${source} templateId=${templateId} jobId=${jobId}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
-        await queryRows(r, sql`UPDATE document_batch_job_items SET status='success', case_document_id=${out.caseDocumentId}, finished_at=now(), template_version_id=${out.templateVersionId} WHERE id=${itemId ?? 0} AND firm_id=${req.firmId!}`);
-        success += 1;
-        results.push({ itemId, runId, source, templateId, status: "success", caseDocumentId: out.caseDocumentId });
-      } else {
-        const out = await generateMasterDocument({
-          r,
-          firmId: req.firmId!,
-          actorId: req.userId!,
-          actorType: req.userType,
-          ipAddress: req.ip,
-          userAgent: req.headers["user-agent"],
-          caseId,
-          masterDocId: templateId,
-          documentName,
-          letterheadId,
-          runId,
-          bypassApplicability: bypass,
-        });
-        await finishGenerationRunSuccess(r, req.firmId!, runId, out.caseDocumentId, out.renderedVars, out.checklistSnapshot, out.readinessSnapshot);
-        await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.generation.succeeded", entityType: "document_generation_run", entityId: runId, detail: `caseId=${caseId} templateSource=${source} templateId=${templateId} jobId=${jobId}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
-        await queryRows(r, sql`UPDATE document_batch_job_items SET status='success', case_document_id=${out.caseDocumentId}, finished_at=now() WHERE id=${itemId ?? 0} AND firm_id=${req.firmId!}`);
-        success += 1;
-        results.push({ itemId, runId, source, templateId, status: "success", caseDocumentId: out.caseDocumentId, renderMode: out.renderMode });
-      }
-    } catch (err: unknown) {
-      const cfgErr = getSupabaseStorageConfigError(err);
-      const e =
-        cfgErr ? new DocumentGenerationError(cfgErr.statusCode, "STORAGE_NOT_CONFIGURED", cfgErr.error)
-        : err instanceof ObjectNotFoundError
-          ? new DocumentGenerationError(404, source === "firm" ? "TEMPLATE_FILE_NOT_FOUND" : "MASTER_FILE_NOT_FOUND", source === "firm" ? "Template file not found" : "Master file not found")
-          : err instanceof DocumentGenerationError
-            ? err
-            : new DocumentGenerationError(500, "INTERNAL_ERROR", "Internal Server Error");
-      await finishGenerationRunFailed(r, req.firmId!, runId, e.code, e.message);
-      await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.generation.failed", entityType: "document_generation_run", entityId: runId, detail: `caseId=${caseId} templateSource=${source} templateId=${templateId} jobId=${jobId} code=${e.code}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
-      await queryRows(r, sql`UPDATE document_batch_job_items SET status='failed', error_code=${e.code}, error_message=${e.message}, finished_at=now() WHERE id=${itemId ?? 0} AND firm_id=${req.firmId!}`);
-      failed += 1;
-      results.push({ itemId, runId, source, templateId, status: "failed", errorCode: e.code, errorMessage: e.message, ...(e.payload ? { payload: e.payload } : {}) });
-    }
-  }
-
-  const pending = Math.max(items.length - success - failed, 0);
-  const status = failed > 0 ? "completed" : "completed";
-  await queryRows(r, sql`
-    UPDATE document_batch_jobs
-    SET status = ${status},
-        total_count = ${items.length},
-        success_count = ${success},
-        failed_count = ${failed},
-        pending_count = ${pending},
-        finished_at = now()
-    WHERE id = ${jobId}::uuid AND firm_id = ${req.firmId!}
-  `);
-  res.status(201).json({ jobId, total: items.length, success, failed, pending, items: results });
+  res.status(410).json({
+    error: "Batch generate (sync) is deprecated. Please use async job endpoints.",
+    code: "BATCH_GENERATE_DEPRECATED",
+    recommended: {
+      generateJob: "/documents/automation/generate-job",
+      singleGenerate: `/cases/${caseId}/documents/generate`,
+      status: "/documents/status/:jobId",
+    },
+  });
+  return;
 });
 
 router.post("/cases/:caseId/documents/batch-export", requireAuth, requireFirmUser, requirePermission("documents", "export"), async (req: AuthRequest, res): Promise<void> => {
@@ -7395,134 +7374,47 @@ router.post("/cases/bulk/generate-documents-zip", requireAuth, requireFirmUser, 
     const purchaserName = typeof (row as any).purchaser_name === "string" ? String((row as any).purchaser_name) : "";
     if (Number.isFinite(id)) caseInfoById.set(id, { referenceNo: ref, parcelNo, purchaserName });
   }
-
-  const failures: Array<{ caseId: number; templateId: number; error: string; code?: string }> = [];
-  const generated: Array<{ zipPath: string; bytes: Buffer; singleSided: boolean; caseId: number; templateId: number; fileName: string; objectPath: string }> = [];
-  const templateById = new Map<number, Record<string, unknown>>();
-  for (const t of templateRows) {
-    const id = typeof (t as any).id === "number" ? Number((t as any).id) : (typeof (t as any).id === "string" ? parseInt(String((t as any).id), 10) : NaN);
-    if (Number.isFinite(id)) templateById.set(id, t);
-  }
-  const now = new Date();
-  const dateTag = formatDateDdMmYyyy(now);
-
+  const jobId = randomUUID();
+  const jobConfig = {
+    action: actionType,
+    copies: actionType === "print" ? (printCopies ?? 1) : undefined,
+    duplexSettings: undefined,
+    outputFormat: "pdf",
+    force: true,
+    blind: true,
+    createdRoleId: req.roleId ?? null,
+  };
+  await queryRows(r, sql`
+    INSERT INTO document_generation_jobs (
+      id, firm_id, job_type, status, action, case_ids, template_ids, config,
+      total_count, success_count, failed_count, pending_count,
+      created_by, created_at
+    ) VALUES (
+      ${jobId}::uuid, ${req.firmId!}, 'enterprise_bulk', 'pending', ${actionType},
+      ${caseIds as any}, ${templateIds as any}, ${jobConfig as any},
+      ${caseIds.length * templateIds.length}, 0, 0, ${caseIds.length * templateIds.length},
+      ${req.userId as any}, now()
+    )
+  `);
   for (const caseId of caseIds) {
-    const info = caseInfoById.get(caseId);
-    const parcel = sanitizePathSegment(info?.parcelNo || info?.referenceNo || `case-${caseId}`);
-    const purchaserFolder = sanitizePathSegment(info?.purchaserName || parcel || `case-${caseId}`);
     for (const templateId of templateIds) {
-      const t = templateById.get(templateId);
-      if (!t) continue;
-      const templateName = typeof (t as any).name === "string" ? String((t as any).name) : `template-${templateId}`;
-      const originalFileName = typeof (t as any).file_name === "string" ? String((t as any).file_name) : templateName;
-      const originalStem = sanitizePathSegment(stripExtension(originalFileName) || templateName);
-      const strictFileName = `${parcel}_${originalStem}_${dateTag}.pdf`;
-      const zipPath = caseIds.length === 1 ? strictFileName : `${purchaserFolder}/${strictFileName}`;
-      const printMode = typeof (t as any).print_mode === "string" ? String((t as any).print_mode).toLowerCase() : "double";
-      const singleSided = printMode === "single";
-
-      const runId = await createGenerationRun(r, {
-        firm_id: req.firmId!,
-        case_id: caseId,
-        template_source: "firm",
-        template_id: templateId,
-        template_version_id: null,
-        platform_document_id: null,
-        document_name: templateName,
-        render_mode: "docx",
-        status: "running",
-        rendered_variables_snapshot: null,
-        checklist_snapshot: null,
-        readiness_snapshot: null,
-        triggered_by: req.userId!,
-        error_code: null,
-        error_message: null,
-      });
-
-      try {
-        const out = await generateFirmDocument({
-          r,
-          firmId: req.firmId!,
-          actorId: req.userId!,
-          actorType: req.userType,
-          ipAddress: req.ip,
-          userAgent: req.headers["user-agent"],
-          caseId,
-          templateId,
-          documentName: templateName,
-          letterheadId: null,
-          runId,
-          bypassApplicability: true,
-          force: true,
-          blind: true,
-          outputFormat: "pdf",
-        });
-        await finishGenerationRunSuccess(r, req.firmId!, runId, out.caseDocumentId, out.renderedVars, out.checklistSnapshot, out.readinessSnapshot);
-        await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.enterprise.batch.generate.succeeded", entityType: "document_generation_run", entityId: runId, detail: `caseId=${caseId} templateSource=firm templateId=${templateId} action=${actionType}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
-
-        const bytes = out.outputBytes ?? null;
-        if (!bytes) throw new DocumentGenerationError(500, "INTERNAL_ERROR", "Missing output bytes");
-        const objectPath = String((out.caseDocument as any)?.object_path ?? (out.caseDocument as any)?.objectPath ?? "");
-        generated.push({ zipPath, bytes, singleSided, caseId, templateId, fileName: strictFileName, objectPath });
-      } catch (err: unknown) {
-        const cfgErr = getSupabaseStorageConfigError(err);
-        const e =
-          cfgErr ? new DocumentGenerationError(cfgErr.statusCode, "STORAGE_NOT_CONFIGURED", cfgErr.error)
-          : err instanceof ObjectNotFoundError ? new DocumentGenerationError(404, "TEMPLATE_FILE_NOT_FOUND", "Template file not found")
-          : err instanceof DocumentGenerationError ? err
-          : new DocumentGenerationError(500, "INTERNAL_ERROR", "Internal Server Error");
-        await finishGenerationRunFailed(r, req.firmId!, runId, e.code, e.message);
-        await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.enterprise.batch.generate.failed", entityType: "document_generation_run", entityId: runId, detail: `caseId=${caseId} templateSource=firm templateId=${templateId} action=${actionType} code=${e.code}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
-        failures.push({ caseId, templateId, error: e.message, code: e.code });
-      }
+      await queryRows(r, sql`
+        INSERT INTO document_generation_job_items (job_id, firm_id, case_id, template_id, status)
+        VALUES (${jobId}::uuid, ${req.firmId!}, ${caseId}, ${templateId}, 'pending')
+      `);
     }
   }
 
-  if (generated.length === 0) {
-    res.status(422).json({ error: "No documents generated", code: "NO_DOCUMENTS_GENERATED", failures });
-    return;
-  }
+  startDocumentGenerationJobRunner(r, { firmId: req.firmId!, jobId });
 
-  const generatedFiles = generated.map((g) => ({ caseId: g.caseId, templateId: g.templateId, fileName: g.fileName, objectPath: g.objectPath }));
+  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.enterprise.batch.enqueued", entityType: "document_generation_job", entityId: undefined, detail: `jobId=${jobId} cases=${caseIds.length} templates=${templateIds.length} action=${actionType}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
 
-  if (actionType === "print") {
-    const merged = await mergePdfBuffersWithBlankInjection(generated.map((g) => ({ bytes: g.bytes, singleSided: g.singleSided })));
-    if (!merged.length) {
-      res.status(422).json({ error: "No printable output generated", code: "NO_PRINT_OUTPUT" });
-      return;
-    }
-    const outName = safeFilenameAscii(`System_Print_${dateTag}.pdf`) || "system-print.pdf";
-    const objectPath = `/objects/temp-generated/${req.firmId!}/system-print/${randomUUID()}.pdf`;
-    await supabaseStorage.uploadPrivateObject({ objectPath, fileBytes: merged, contentType: "application/pdf" });
-    await writeDocumentGenerationLog(r, { firmId: req.firmId!, userId: req.userId ?? null, actionType, caseIds, generatedFiles: [...generatedFiles, { caseId: caseIds.length === 1 ? caseIds[0]! : 0, templateId: 0, fileName: outName, objectPath }], printCopies, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
-    await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.enterprise.batch.print", entityType: "case", entityId: undefined, detail: `cases=${caseIds.length} templates=${templateIds.length} ok=${generated.length} failed=${failures.length}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
-    res.setHeader("Content-Disposition", contentDispositionAttachment(outName));
-    res.setHeader("Content-Type", "application/pdf");
-    res.status(200).send(merged);
-    return;
-  }
-
-  if (caseIds.length === 1 && templateIds.length === 1 && generated.length === 1) {
-    const single = generated[0]!;
-    await writeDocumentGenerationLog(r, { firmId: req.firmId!, userId: req.userId ?? null, actionType, caseIds, generatedFiles, printCopies: null, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
-    await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.enterprise.batch.download", entityType: "case", entityId: undefined, detail: `cases=${caseIds.length} templates=${templateIds.length} ok=${generated.length} failed=${failures.length}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
-    res.setHeader("Content-Disposition", contentDispositionAttachment(single.fileName));
-    res.setHeader("Content-Type", "application/pdf");
-    res.status(200).send(single.bytes);
-    return;
-  }
-
-  const zipBytes = await buildZipBufferFromBuffers(generated.map((g) => ({ zipPath: g.zipPath, bytes: g.bytes })));
-  const outName = safeFilenameAscii(
-    caseIds.length === 1
-      ? `${sanitizePathSegment(caseInfoById.get(caseIds[0]!)?.parcelNo || caseInfoById.get(caseIds[0]!)?.referenceNo || `case-${caseIds[0]}`)}_Documents_${dateTag}.zip`
-      : `Document_Automation_${dateTag}.zip`
-  ) || "document-automation.zip";
-  await writeDocumentGenerationLog(r, { firmId: req.firmId!, userId: req.userId ?? null, actionType, caseIds, generatedFiles, printCopies: null, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
-  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.enterprise.batch.download", entityType: "case", entityId: undefined, detail: `cases=${caseIds.length} templates=${templateIds.length} ok=${generated.length} failed=${failures.length}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
-  res.setHeader("Content-Disposition", contentDispositionAttachment(outName));
-  res.setHeader("Content-Type", "application/zip");
-  res.status(200).send(zipBytes);
+  res.status(202).json({
+    status: "accepted",
+    jobId,
+    statusUrl: `/documents/status/${jobId}`,
+    downloadUrl: `/documents/jobs/${jobId}/download`,
+  });
 });
 
 router.get("/document-generation-logs", requireAuth, requireFirmUser, requirePermission("audit", "read"), async (req: AuthRequest, res): Promise<void> => {
@@ -7992,13 +7884,39 @@ async function processAutomationGenerationJobStep(r: DbConn, args: { firmId: num
       }
 
       if (action === "print") {
-        const pdfBuffers: Buffer[] = [];
+        const hasPrintMode = await columnExists(r, { schema: "public", table: "document_templates", column: "print_mode" });
+        const templateIds = Array.from(new Set(
+          successItems
+            .map((it) => (it as any).template_id)
+            .filter((x): x is number => typeof x === "number" && Number.isFinite(x))
+            .map((x) => Math.trunc(x))
+            .filter((x) => x > 0)
+        ));
+        const templateRows = templateIds.length
+          ? await queryRows(r, sql`
+              SELECT id, ${hasPrintMode ? sql`print_mode` : sql`'double'::text AS print_mode`}
+              FROM document_templates
+              WHERE firm_id = ${args.firmId}
+                AND id IN (${sql.join(templateIds.map((id) => sql`${id}`), sql`, `)})
+            `)
+          : [];
+        const printModeByTemplateId = new Map<number, string>();
+        for (const t of templateRows) {
+          const id = typeof (t as any).id === "number" ? Number((t as any).id) : NaN;
+          if (!Number.isFinite(id)) continue;
+          printModeByTemplateId.set(id, String((t as any).print_mode ?? "double").toLowerCase());
+        }
+
+        const entries: Array<{ bytes: Buffer; singleSided: boolean }> = [];
         for (const it of successItems) {
           const objectPath = typeof (it as any).object_path === "string" ? String((it as any).object_path) : "";
           if (!objectPath) continue;
-          pdfBuffers.push(await readSupabasePrivateObjectBytes(objectPath));
+          const templateId = typeof (it as any).template_id === "number" ? Number((it as any).template_id) : NaN;
+          const printMode = Number.isFinite(templateId) ? (printModeByTemplateId.get(templateId) ?? "double") : "double";
+          const singleSided = printMode === "single";
+          entries.push({ bytes: await readSupabasePrivateObjectBytes(objectPath), singleSided });
         }
-        const merged = await mergePdfBuffers(pdfBuffers);
+        const merged = await mergePdfBuffersWithBlankInjection(entries);
         if (!merged.length) throw new Error("No printable output generated");
         const objectPath = `/objects/temp-generated/${args.firmId}/document-automation-jobs/${args.jobId}.pdf`;
         const outName = safeFilenameAscii(`System_Print_${new Date().toISOString().slice(0, 10)}.pdf`) || "system-print.pdf";
@@ -8023,6 +7941,7 @@ async function processAutomationGenerationJobStep(r: DbConn, args: { firmId: num
         const oneItem = successItems[0];
         const objectPath = typeof (oneItem as any).object_path === "string" ? String((oneItem as any).object_path) : "";
         const fileName = typeof (oneItem as any).file_name === "string" ? String((oneItem as any).file_name) : "";
+        const mimeType = typeof (oneItem as any).mime_type === "string" ? String((oneItem as any).mime_type) : "";
         await queryRows(r, sql`
           UPDATE document_generation_jobs
           SET status = 'completed',
@@ -8032,8 +7951,8 @@ async function processAutomationGenerationJobStep(r: DbConn, args: { firmId: num
               pending_count = 0,
               finished_at = now(),
               download_object_path = ${objectPath},
-              download_file_name = ${fileName || `document-${args.jobId}.pdf`},
-              download_mime_type = 'application/pdf'
+              download_file_name = ${fileName || `document-${args.jobId}`},
+              download_mime_type = ${mimeType || "application/pdf"}
           WHERE id = ${args.jobId}::uuid AND firm_id = ${args.firmId}
         `);
         return;
@@ -8081,8 +8000,29 @@ async function processAutomationGenerationJobStep(r: DbConn, args: { firmId: num
   const templateId = Number((item as any).template_id);
 
   const actorId = reqIdToNumber((job as any).created_by);
-  const force = Boolean((job as any)?.config && typeof (job as any).config === "object" && (job as any).config.force);
-  const blind = Boolean((job as any)?.config && typeof (job as any).config === "object" && (job as any).config.blind);
+  const jobConfig = (job as any)?.config && typeof (job as any).config === "object" ? (job as any).config as Record<string, unknown> : {};
+  const force = Boolean(jobConfig.force);
+  const blind = Boolean(jobConfig.blind);
+  const documentName = typeof jobConfig.documentName === "string" ? jobConfig.documentName : undefined;
+  const letterheadId = normalizeLetterheadId(jobConfig.letterheadId);
+  const clauses = Array.isArray(jobConfig.clauses)
+    ? (jobConfig.clauses as unknown[])
+      .map((x) => (x && typeof x === "object" ? x as Record<string, unknown> : null))
+      .filter((x): x is Record<string, unknown> => Boolean(x))
+      .map((x) => ({
+        scope: x.scope === "platform" ? ("platform" as const) : ("firm" as const),
+        id: toPositiveInt(x.id) ?? NaN,
+        includeTitle: typeof x.includeTitle === "boolean" ? x.includeTitle : false,
+      }))
+      .filter((x) => Number.isFinite(x.id))
+    : undefined;
+  const overrides = asObjectRecord(jobConfig.overrides);
+  const safeOverrides = (overrides && typeof overrides === "object" && !Array.isArray(overrides)) ? overrides : null;
+  const outputFormat = jobConfig.outputFormat === "pdf" ? ("pdf" as const) : undefined;
+  const bypassReq = Boolean(jobConfig.bypassApplicability);
+  const createdRoleId = reqIdToNumber(jobConfig.createdRoleId);
+  const bypassApplicability = bypassReq ? await canBypassApplicability(r, args.firmId, createdRoleId > 0 ? createdRoleId : null) : false;
+
   const runId = await createGenerationRun(r, {
     firm_id: args.firmId,
     case_id: caseId,
@@ -8090,9 +8030,11 @@ async function processAutomationGenerationJobStep(r: DbConn, args: { firmId: num
     template_id: templateId,
     template_version_id: null,
     platform_document_id: null,
-    document_name: "Generated document",
-    render_mode: "docx",
+    document_name: documentName ?? "Generated document",
+    render_mode: outputFormat === "pdf" ? "pdf" : "docx",
     status: "running",
+    request_config: jobConfig,
+    started_at: null,
     rendered_variables_snapshot: null,
     checklist_snapshot: null,
     readiness_snapshot: null,
@@ -8111,10 +8053,15 @@ async function processAutomationGenerationJobStep(r: DbConn, args: { firmId: num
       userAgent: undefined,
       caseId,
       templateId,
+      documentName,
+      letterheadId,
       runId,
+      bypassApplicability,
       force,
       blind,
-      outputFormat: "pdf",
+      clauses,
+      overrides: safeOverrides,
+      outputFormat,
     });
     await finishGenerationRunSuccess(r, args.firmId, runId, out.caseDocumentId, out.renderedVars, out.checklistSnapshot, out.readinessSnapshot);
 
@@ -8251,153 +8198,12 @@ router.post("/documents/automation/generate-job", requireAuth, requireFirmUser, 
   const totalCount = caseIds.length * templateIds.length;
   const qTurbo = String(one((req.query as any).turbo) ?? "").trim().toLowerCase();
   const turbo = qTurbo === "1" || qTurbo === "true" || qTurbo === "yes";
-  if (turbo && totalCount <= 5) {
-    const actorId = req.userId ?? 0;
-    const action = parsed.data.config.action;
-
-    const pairs = caseIds.flatMap((caseId) => templateIds.map((templateId) => ({ caseId, templateId })));
-    const results = await Promise.all(pairs.map(async ({ caseId, templateId }) => {
-      const runId = await createGenerationRun(r, {
-        firm_id: req.firmId!,
-        case_id: caseId,
-        template_source: "firm",
-        template_id: templateId,
-        template_version_id: null,
-        platform_document_id: null,
-        document_name: "Generated document",
-        render_mode: "docx",
-        status: "running",
-        rendered_variables_snapshot: null,
-        checklist_snapshot: null,
-        readiness_snapshot: null,
-        triggered_by: actorId > 0 ? actorId : null,
-        error_code: null,
-        error_message: null,
-      });
-      try {
-        const out = await generateFirmDocument({
-          r,
-          firmId: req.firmId!,
-          actorId,
-          actorType: "firm_user",
-          ipAddress: req.ip,
-          userAgent: req.headers["user-agent"],
-          caseId,
-          templateId,
-          runId,
-          force: effectiveForce,
-          blind,
-          outputFormat: "pdf",
-        });
-        await finishGenerationRunSuccess(r, req.firmId!, runId, out.caseDocumentId, out.renderedVars, out.checklistSnapshot, out.readinessSnapshot);
-        await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.automation.generate.succeeded", entityType: "document_generation_run", entityId: runId, detail: `caseId=${caseId} templateId=${templateId} turbo=1`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
-        const objectPath = String((out.caseDocument as any)?.objectPath ?? (out.caseDocument as any)?.object_path ?? "");
-        const fileName = String((out.caseDocument as any)?.fileName ?? (out.caseDocument as any)?.file_name ?? "");
-        const mimeType = String((out.caseDocument as any)?.mimeType ?? (out.caseDocument as any)?.mime_type ?? "application/pdf");
-        const fileSize = Number((out.caseDocument as any)?.fileSize ?? (out.caseDocument as any)?.file_size ?? 0) || null;
-        return { ok: true as const, runId, caseId, templateId, objectPath, fileName, mimeType, fileSize };
-      } catch (err: unknown) {
-        const e =
-          err instanceof DocumentGenerationError ? err
-          : new DocumentGenerationError(500, "INTERNAL_ERROR", "Internal Server Error");
-        await finishGenerationRunFailed(r, req.firmId!, runId, e.code, e.message);
-        await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.automation.generate.failed", entityType: "document_generation_run", entityId: runId, detail: `caseId=${caseId} templateId=${templateId} turbo=1 code=${e.code}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
-        return { ok: false as const, runId, caseId, templateId, errorCode: e.code, errorMessage: e.message };
-      }
-    }));
-
-    const success = results.filter((x) => x.ok);
-    const failed = results.filter((x) => !x.ok);
-    if (success.length === 0) {
-      res.status(500).json({
-        status: "failed",
-        error: failed[0]?.errorMessage || "Document generation failed",
-        code: failed[0]?.errorCode || "INTERNAL_ERROR",
-        totalCount,
-        successCount: 0,
-        failedCount: failed.length,
-      });
-      return;
-    }
-
-    try {
-      if (action === "print") {
-        const pdfBuffers = await Promise.all(
-          success
-            .map((it) => (it as any).objectPath as string)
-            .filter(Boolean)
-            .map((p) => readSupabasePrivateObjectBytes(p))
-        );
-        const merged = await mergePdfBuffers(pdfBuffers);
-        if (!merged.length) throw new Error("No printable output generated");
-        const objectPath = `/objects/temp-generated/${req.firmId!}/document-automation-turbo/${randomUUID()}.pdf`;
-        const outName = safeFilenameAscii(`System_Print_${new Date().toISOString().slice(0, 10)}.pdf`) || "system-print.pdf";
-        await supabaseStorage.uploadPrivateObject({ objectPath, fileBytes: merged, contentType: "application/pdf" });
-        const url = await supabaseStorage.createSignedDownloadUrl(objectPath, 60 * 10);
-        res.status(200).json({
-          status: "completed",
-          totalCount,
-          successCount: success.length,
-          failedCount: failed.length,
-          downloadUrl: url,
-          fileName: outName,
-          mimeType: "application/pdf",
-        });
-        return;
-      }
-
-      if (success.length === 1) {
-        const it = success[0] as any;
-        const objectPath = String(it.objectPath ?? "");
-        if (!objectPath) throw new Error("No output generated");
-        const fileName = safeFilenameAscii(String(it.fileName ?? "")) || "document.pdf";
-        const url = await supabaseStorage.createSignedDownloadUrl(objectPath, 60 * 10);
-        res.status(200).json({
-          status: "completed",
-          totalCount,
-          successCount: 1,
-          failedCount: failed.length,
-          downloadUrl: url,
-          fileName,
-          mimeType: "application/pdf",
-        });
-        return;
-      }
-
-      const entries = (success as any[])
-        .map((it) => ({ zipPath: safeFilenameAscii(String(it.fileName ?? `document-${it.runId}`)) || `document-${it.runId}.pdf`, objectPath: String(it.objectPath ?? "") }))
-        .filter((x) => x.objectPath);
-      if (entries.length === 0) throw new Error("No output generated");
-      const buffers = await Promise.all(entries.map(async (e) => ({ zipPath: e.zipPath, bytes: await downloadPrivateObjectBytes(e.objectPath) })));
-      const zipBytes = await buildZipBufferFromBuffers(buffers);
-      const objectPath = `/objects/temp-generated/${req.firmId!}/document-automation-turbo/${randomUUID()}.zip`;
-      const outName = safeFilenameAscii(`Document_Automation_${new Date().toISOString().slice(0, 10)}.zip`) || "document-automation.zip";
-      await supabaseStorage.uploadPrivateObject({ objectPath, fileBytes: zipBytes, contentType: "application/zip" });
-      const url = await supabaseStorage.createSignedDownloadUrl(objectPath, 60 * 10);
-      res.status(200).json({
-        status: "completed",
-        totalCount,
-        successCount: success.length,
-        failedCount: failed.length,
-        downloadUrl: url,
-        fileName: outName,
-        mimeType: "application/zip",
-      });
-      return;
-    } catch (err) {
-      const cfgErr = getSupabaseStorageConfigError(err);
-      if (cfgErr) {
-        res.status(cfgErr.statusCode).json({ error: cfgErr.error, code: "STORAGE_NOT_CONFIGURED" });
-        return;
-      }
-      logger.error({ err, firmId: req.firmId, userId: req.userId, totalCount }, "[documents] turbo_generation_failed");
-      res.status(500).json({ error: "Internal Server Error" });
-      return;
-    }
+  if (turbo) {
+    logger.warn({ firmId: req.firmId, userId: req.userId, totalCount }, "[documents] turbo ignored; always enqueue async job to avoid timeouts");
   }
 
   const jobId = randomUUID();
-  const jobConfig = { ...parsed.data.config, force: effectiveForce, blind, createdRoleId: req.roleId ?? null };
+  const jobConfig = { ...parsed.data.config, outputFormat: "pdf", force: effectiveForce, blind, createdRoleId: req.roleId ?? null };
   await queryRows(r, sql`
     INSERT INTO document_generation_jobs (
       id, firm_id, job_type, status, action, case_ids, template_ids, config,
@@ -8447,6 +8253,48 @@ router.get("/documents/jobs/:jobId", requireAuth, requireFirmUser, requirePermis
   }
   const items = await queryRows(r, sql`SELECT * FROM document_generation_job_items WHERE job_id = ${jobId}::uuid AND firm_id = ${req.firmId!} ORDER BY id ASC`);
   res.json({ job, items });
+});
+
+router.get("/documents/status/:jobId", requireAuth, requireFirmUser, requirePermission("documents", "read"), async (req: AuthRequest, res): Promise<void> => {
+  const r = getRlsDb(req, res);
+  if (!r) return;
+  const jobId = one((req.params as any).jobId) ?? "";
+  if (!/^[0-9a-fA-F-]{36}$/.test(jobId)) {
+    res.status(400).json({ error: "Invalid jobId" });
+    return;
+  }
+
+  startDocumentGenerationJobRunner(r, { firmId: req.firmId!, jobId });
+
+  const jobs = await queryRows(r, sql`SELECT * FROM document_generation_jobs WHERE id = ${jobId}::uuid AND firm_id = ${req.firmId!}`);
+  const job = jobs[0] as any;
+  if (!job) {
+    res.status(404).json({ error: "Job not found" });
+    return;
+  }
+
+  const st = String(job.status ?? "");
+  if (st === "completed") {
+    res.json({
+      jobId,
+      status: "completed",
+      downloadUrl: `/documents/jobs/${jobId}/download`,
+      fileName: typeof job.download_file_name === "string" ? String(job.download_file_name) : null,
+      mimeType: typeof job.download_mime_type === "string" ? String(job.download_mime_type) : null,
+    });
+    return;
+  }
+
+  if (st === "failed") {
+    res.json({
+      jobId,
+      status: "failed",
+      error: typeof job.error_summary === "string" ? String(job.error_summary) : "Generation failed",
+    });
+    return;
+  }
+
+  res.json({ jobId, status: st || "pending" });
 });
 
 router.get("/documents/jobs/:jobId/download", requireAuth, requireFirmUser, requirePermission("documents", "export"), async (req: AuthRequest, res): Promise<void> => {
@@ -8543,21 +8391,6 @@ router.post("/documents/automation/generate", requireAuth, requireFirmUser, requ
     return;
   }
 
-  const config = parsed.data.config;
-  const actionType = config.action === "download" ? "download_zip" : "system_print";
-  const copies =
-    config.action === "print"
-      ? (() => {
-          const n = typeof config.copies === "number" ? config.copies : typeof config.copies === "string" ? parseInt(config.copies, 10) : NaN;
-          return Number.isFinite(n) && n > 0 ? Math.trunc(n) : 1;
-        })()
-      : null;
-
-  if (config.action === "print" && caseIds.length * templateIds.length > 60) {
-    res.status(422).json({ error: "Too many documents for print mode", code: "TOO_MANY_DOCUMENTS_FOR_PRINT", limit: 60 });
-    return;
-  }
-
   const roleRows = await queryRows(r, sql`SELECT name FROM roles WHERE id = ${req.roleId!} AND firm_id = ${req.firmId!} LIMIT 1`);
   const roleName = roleRows[0]?.name ? String(roleRows[0].name).toLowerCase() : "";
   const elevated = roleName.includes("partner") || roleName.includes("manager");
@@ -8646,176 +8479,63 @@ router.post("/documents/automation/generate", requireAuth, requireFirmUser, requ
     return;
   }
 
-  const refByCaseId = new Map<number, string>();
-  const parcelByCaseId = new Map<number, string>();
-  const purchaserByCaseId = new Map<number, string>();
-  for (const row of caseRows) {
-    const id = typeof (row as any).id === "number" ? Number((row as any).id) : NaN;
-    if (!Number.isFinite(id)) continue;
-    const ref = typeof (row as any).reference_no === "string" ? String((row as any).reference_no) : "";
-    const parcel = typeof (row as any).parcel_no === "string" ? String((row as any).parcel_no) : "";
-    const purchaser = typeof (row as any).purchaser_name === "string" ? String((row as any).purchaser_name) : "";
-    refByCaseId.set(id, ref);
-    parcelByCaseId.set(id, parcel);
-    purchaserByCaseId.set(id, purchaser);
+  const config = parsed.data.config;
+  const copies =
+    config.action === "print"
+      ? (() => {
+          const n = typeof config.copies === "number" ? config.copies : typeof config.copies === "string" ? parseInt(config.copies, 10) : NaN;
+          return Number.isFinite(n) && n > 0 ? Math.trunc(n) : 1;
+        })()
+      : undefined;
+
+  if (config.action === "print" && caseIds.length * templateIds.length > 60) {
+    res.status(422).json({ error: "Too many documents for print mode", code: "TOO_MANY_DOCUMENTS_FOR_PRINT", limit: 60 });
+    return;
   }
 
-  const failures: Array<{ caseId: number; templateId: number; error: string; code?: string }> = [];
-  const entries: Array<{ zipPath: string; bytes: Buffer }> = [];
-  const generatedFileNames: string[] = [];
-  const pdfBuffersForPrint: Buffer[] = [];
-
-  const today = new Date();
-  const dateStr = formatDateDdMmYyyy(today);
-  const rootFolder = sanitizePathSegment(`Document Automation Hub_${dateStr}`);
-  const multiCase = caseIds.length > 1;
-
+  const jobId = randomUUID();
+  const jobConfig = { ...config, copies, outputFormat: "pdf", force: true, blind: true, createdRoleId: req.roleId ?? null };
+  await queryRows(r, sql`
+    INSERT INTO document_generation_jobs (
+      id, firm_id, job_type, status, action, case_ids, template_ids, config,
+      total_count, success_count, failed_count, pending_count,
+      created_by, created_at
+    ) VALUES (
+      ${jobId}::uuid, ${req.firmId!}, 'document_automation_legacy', 'pending', ${config.action},
+      ${caseIds as any}, ${templateIds as any}, ${jobConfig as any},
+      ${caseIds.length * templateIds.length}, 0, 0, ${caseIds.length * templateIds.length},
+      ${req.userId as any}, now()
+    )
+  `);
   for (const caseId of caseIds) {
-    const ref = refByCaseId.get(caseId) ?? "";
-    const parcel = parcelByCaseId.get(caseId) ?? "";
-    const purchaser = purchaserByCaseId.get(caseId) ?? "";
-    const parcelSeg = sanitizePathSegment(parcel || ref || `case-${caseId}`);
-    const purchaserFolder = sanitizePathSegment(purchaser || ref || `case-${caseId}`);
-
-    for (const t of templateRows) {
-      const templateId = typeof (t as any).id === "number" ? Number((t as any).id) : NaN;
-      if (!Number.isFinite(templateId)) continue;
-      const templateName = typeof (t as any).name === "string" ? String((t as any).name) : `template-${templateId}`;
-      const templateFileName = typeof (t as any).file_name === "string" ? String((t as any).file_name) : "";
-      const originalBase = sanitizePathSegment(stripExtension(templateFileName || templateName) || templateName);
-      const outFileName = safeFilenameAscii(`${parcelSeg}_${originalBase}_${dateStr}.pdf`).replace(/[\/\\]/g, "_");
-
-      const runId = await createGenerationRun(r, {
-        firm_id: req.firmId!,
-        case_id: caseId,
-        template_source: "firm",
-        template_id: templateId,
-        template_version_id: null,
-        platform_document_id: null,
-        document_name: templateName,
-        render_mode: "pdf",
-        status: "running",
-        rendered_variables_snapshot: null,
-        checklist_snapshot: null,
-        readiness_snapshot: null,
-        triggered_by: req.userId!,
-        error_code: null,
-        error_message: null,
-      });
-
-      try {
-        const out = await generateFirmDocument({
-          r,
-          firmId: req.firmId!,
-          actorId: req.userId!,
-          actorType: req.userType,
-          ipAddress: req.ip,
-          userAgent: req.headers["user-agent"],
-          caseId,
-          templateId,
-          documentName: templateName,
-          letterheadId: null,
-          runId,
-          bypassApplicability: false,
-          outputFormat: "pdf",
-        });
-        await finishGenerationRunSuccess(r, req.firmId!, runId, out.caseDocumentId, out.renderedVars, out.checklistSnapshot, out.readinessSnapshot);
-        await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.automation.generate.succeeded", entityType: "document_generation_run", entityId: runId, detail: `caseId=${caseId} templateId=${templateId}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
-
-        const bytes = out.outputBytes ?? null;
-        const ct = out.outputContentType ?? "";
-        if (!bytes || !Buffer.isBuffer(bytes) || bytes.length === 0) throw new DocumentGenerationError(500, "INTERNAL_ERROR", "Missing output bytes");
-        if (ct && !String(ct).includes("pdf")) throw new DocumentGenerationError(422, "OUTPUT_NOT_PDF", "Generated output is not PDF");
-
-        generatedFileNames.push(outFileName);
-        if (config.action === "print") {
-          pdfBuffersForPrint.push(bytes);
-        } else if (caseIds.length === 1 && templateIds.length === 1) {
-          entries.push({ zipPath: outFileName, bytes });
-        } else {
-          const zipPath = multiCase ? `${rootFolder}/${purchaserFolder}/${outFileName}` : `${rootFolder}/${outFileName}`;
-          entries.push({ zipPath, bytes });
-        }
-      } catch (err: unknown) {
-        const cfgErr = getSupabaseStorageConfigError(err);
-        const e =
-          cfgErr ? new DocumentGenerationError(cfgErr.statusCode, "STORAGE_NOT_CONFIGURED", cfgErr.error)
-          : err instanceof ObjectNotFoundError ? new DocumentGenerationError(404, "TEMPLATE_FILE_NOT_FOUND", "Template file not found")
-          : err instanceof DocumentGenerationError ? err
-          : new DocumentGenerationError(500, "INTERNAL_ERROR", "Internal Server Error");
-        await finishGenerationRunFailed(r, req.firmId!, runId, e.code, e.message);
-        await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.automation.generate.failed", entityType: "document_generation_run", entityId: runId, detail: `caseId=${caseId} templateId=${templateId} code=${e.code}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
-        failures.push({ caseId, templateId, error: e.message, code: e.code });
-      }
+    for (const templateId of templateIds) {
+      await queryRows(r, sql`
+        INSERT INTO document_generation_job_items (job_id, firm_id, case_id, template_id, status)
+        VALUES (${jobId}::uuid, ${req.firmId!}, ${caseId}, ${templateId}, 'pending')
+      `);
     }
   }
 
-  if (config.action === "print" && pdfBuffersForPrint.length === 0) {
-    res.status(422).json({ error: "No documents generated", code: "NO_DOCUMENTS_GENERATED", failures });
-    return;
-  }
-  if (config.action === "download" && entries.length === 0) {
-    res.status(422).json({ error: "No documents generated", code: "NO_DOCUMENTS_GENERATED", failures });
-    return;
-  }
-
-  const printSettings = config.duplexSettings ?? null;
-  const logRows = await queryRows(
-    r,
-    sql`INSERT INTO document_generation_logs (firm_id, user_id, case_id, action_type, file_names, copies_configured, print_settings)
-        VALUES (${req.firmId!}, ${req.userId!}, ${caseIds.length === 1 ? caseIds[0] : null}, ${actionType}, ${JSON.stringify(generatedFileNames)}::jsonb, ${copies}, ${printSettings as any})
-        RETURNING id`
-  );
-  const logId = typeof (logRows[0] as any)?.id === "number" ? Number((logRows[0] as any).id) : undefined;
-
-  if (caseIds.length > 1 && logId) {
-    const values = sql.join(caseIds.map((id) => sql`(${req.firmId!}, ${logId}, ${id})`), sql`, `);
-    await queryRows(r, sql`INSERT INTO document_generation_log_cases (firm_id, log_id, case_id) VALUES ${values} ON CONFLICT DO NOTHING`);
-  }
+  startDocumentGenerationJobRunner(r, { firmId: req.firmId!, jobId });
 
   await writeAuditLog({
     firmId: req.firmId,
     actorId: req.userId,
     actorType: req.userType,
-    action: config.action === "download" ? "documents.automation.download_zip" : "documents.automation.system_print",
-    entityType: "document_generation_log",
-    entityId: logId,
-    detail: `cases=${caseIds.length} templates=${templateIds.length} ok=${generatedFileNames.length} failed=${failures.length}`,
+    action: "documents.automation.enqueued",
+    entityType: "document_generation_job",
+    entityId: undefined,
+    detail: `jobId=${jobId} cases=${caseIds.length} templates=${templateIds.length} action=${config.action}`,
     ipAddress: req.ip,
     userAgent: req.headers["user-agent"],
   });
 
-  if (failures.length) {
-    const txt = JSON.stringify(failures).slice(0, 4000);
-    res.setHeader("X-Document-Automation-Failures", txt);
-  }
-
-  if (config.action === "print") {
-    const merged = await mergePdfBuffers(pdfBuffersForPrint);
-    if (!merged.length) {
-      res.status(422).json({ error: "No printable PDF generated", code: "NO_PRINTABLE_OUTPUT", failures });
-      return;
-    }
-    const outName = safeFilenameAscii(`System_Print_${dateStr}.pdf`) || "system-print.pdf";
-    res.setHeader("Content-Disposition", contentDispositionAttachment(outName));
-    res.setHeader("Content-Type", "application/pdf");
-    res.status(200).send(merged);
-    return;
-  }
-
-  if (caseIds.length === 1 && templateIds.length === 1) {
-    const outName = safeFilenameAscii(entries[0]?.zipPath || `document_${dateStr}.pdf`) || "document.pdf";
-    res.setHeader("Content-Disposition", contentDispositionAttachment(outName));
-    res.setHeader("Content-Type", "application/pdf");
-    res.status(200).send(entries[0].bytes);
-    return;
-  }
-
-  const zipBytes = await buildZipBufferFromBuffers(entries);
-  const outName = safeFilenameAscii(`Document_Automation_${dateStr}.zip`) || "document-automation.zip";
-  res.setHeader("Content-Disposition", contentDispositionAttachment(outName));
-  res.setHeader("Content-Type", "application/zip");
-  res.status(200).send(zipBytes);
+  res.status(202).json({
+    status: "accepted",
+    jobId,
+    statusUrl: `/documents/status/${jobId}`,
+    downloadUrl: `/documents/jobs/${jobId}/download`,
+  });
 });
 
 router.get("/document-batch-jobs/:jobId", requireAuth, requireFirmUser, requirePermission("documents", "read"), async (req: AuthRequest, res): Promise<void> => {
@@ -10196,84 +9916,57 @@ router.post("/cases/:caseId/documents/generate", requireAuth, requireFirmUser, r
   const safeOverrides = (overrides && typeof overrides === "object" && !Array.isArray(overrides)) ? overrides : null;
   const fmt = String(one((req.query as any).format) ?? "").trim().toLowerCase();
   const wantPdf = fmt === "pdf";
-  const qForce = String(one((req.query as any).force) ?? "").trim().toLowerCase();
-  const force = qForce === "1" || qForce === "true" || qForce === "yes";
 
-  const runId = await createGenerationRun(r, {
-    firm_id: req.firmId!,
-    case_id: caseId,
-    template_source: "firm",
-    template_id: tid,
-    template_version_id: null,
-    platform_document_id: null,
-    document_name: documentName ?? "Generated document",
-    render_mode: wantPdf ? "pdf" : "docx",
-    status: "running",
-    rendered_variables_snapshot: null,
-    checklist_snapshot: null,
-    readiness_snapshot: null,
-    triggered_by: req.userId!,
-    error_code: null,
-    error_message: null,
-  });
-
-  try {
-    const bypass = Boolean(bypassApplicability) ? await canBypassApplicability(r, req.firmId!, req.roleId) : false;
-    const out = await generateFirmDocument({
-      r,
-      firmId: req.firmId!,
-      actorId: req.userId!,
-      actorType: req.userType,
-      ipAddress: req.ip,
-      userAgent: req.headers["user-agent"],
-      caseId,
-      templateId: tid,
-      documentName,
-      letterheadId,
-      runId,
-      bypassApplicability: bypass,
-      force,
-      clauses,
-      overrides: safeOverrides,
-      outputFormat: wantPdf ? "pdf" : undefined,
-    });
-    await finishGenerationRunSuccess(r, req.firmId!, runId, out.caseDocumentId, out.renderedVars, out.checklistSnapshot, out.readinessSnapshot);
-    await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.generation.succeeded", entityType: "document_generation_run", entityId: runId, detail: `caseId=${caseId} templateSource=firm templateId=${tid}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
-    if (wantPdf) {
-      const bytes = out.outputBytes;
-      const ct = out.outputContentType ?? "application/pdf";
-      if (!bytes) {
-        res.status(503).json({ error: "PDF conversion failed", code: "DOCX_TO_PDF_FAILED" });
-        return;
-      }
-      const fileName = typeof (out.caseDocument as any)?.file_name === "string" ? String((out.caseDocument as any).file_name) : `case-${caseId}-document.pdf`;
-      const docId = typeof (out.caseDocument as any)?.id === "number" ? String((out.caseDocument as any).id) : "";
-      if (docId) res.setHeader("x-case-document-id", docId);
-      res.setHeader("Content-Disposition", contentDispositionAttachment(fileName));
-      res.setHeader("Content-Type", ct);
-      res.status(201).send(bytes);
-      return;
-    }
-    res.status(201).json(out.caseDocument);
-  } catch (err: unknown) {
-    const cfgErr = getSupabaseStorageConfigError(err);
-    if (cfgErr) {
-      await finishGenerationRunFailed(r, req.firmId!, runId, "STORAGE_NOT_CONFIGURED", cfgErr.error);
-      await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.generation.failed", entityType: "document_generation_run", entityId: runId, detail: `caseId=${caseId} templateSource=firm templateId=${tid} code=STORAGE_NOT_CONFIGURED`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
-      res.status(cfgErr.statusCode).json({ error: cfgErr.error, code: "STORAGE_NOT_CONFIGURED" });
-      return;
-    }
-    if (err instanceof ObjectNotFoundError) {
-      await finishGenerationRunFailed(r, req.firmId!, runId, "TEMPLATE_FILE_NOT_FOUND", "Template file not found");
-      await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.generation.failed", entityType: "document_generation_run", entityId: runId, detail: `caseId=${caseId} templateSource=firm templateId=${tid} code=TEMPLATE_FILE_NOT_FOUND`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
-      res.status(404).json({ error: "Template file not found", code: "TEMPLATE_FILE_NOT_FOUND" });
-      return;
-    }
-    const e = err instanceof DocumentGenerationError ? err : new DocumentGenerationError(500, "INTERNAL_ERROR", "Internal Server Error");
-    await finishGenerationRunFailed(r, req.firmId!, runId, e.code, e.message);
-    await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.generation.failed", entityType: "document_generation_run", entityId: runId, detail: `caseId=${caseId} templateSource=firm templateId=${tid} code=${e.code}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
-    res.status(e.statusCode).json({ error: e.message, code: e.code, ...(e.payload ? e.payload : {}) });
+  const tplRows = await queryRows(r, sql`
+    SELECT id
+    FROM document_templates
+    WHERE id = ${tid} AND firm_id = ${req.firmId!} AND is_template_capable = true
+    LIMIT 1
+  `);
+  if (!tplRows.length) {
+    res.status(404).json({ error: "Template not found", code: "TEMPLATE_NOT_FOUND" });
+    return;
   }
+
+  const jobId = randomUUID();
+  const jobConfig = {
+    action: "download",
+    force: true,
+    blind: true,
+    outputFormat: wantPdf ? "pdf" : "docx",
+    documentName: documentName ?? null,
+    letterheadId: letterheadId ?? null,
+    bypassApplicability: Boolean(bypassApplicability),
+    clauses: clauses ?? null,
+    overrides: safeOverrides ?? null,
+    createdRoleId: req.roleId ?? null,
+  };
+
+  await queryRows(r, sql`
+    INSERT INTO document_generation_jobs (
+      id, firm_id, job_type, status, action, case_ids, template_ids, config,
+      total_count, success_count, failed_count, pending_count,
+      created_by, created_at
+    ) VALUES (
+      ${jobId}::uuid, ${req.firmId!}, 'case_document', 'pending', 'download',
+      ${[caseId] as any}, ${[tid] as any}, ${jobConfig as any},
+      1, 0, 0, 1,
+      ${req.userId as any}, now()
+    )
+  `);
+  await queryRows(r, sql`
+    INSERT INTO document_generation_job_items (job_id, firm_id, case_id, template_id, status)
+    VALUES (${jobId}::uuid, ${req.firmId!}, ${caseId}, ${tid}, 'pending')
+  `);
+
+  startDocumentGenerationJobRunner(r, { firmId: req.firmId!, jobId });
+
+  res.status(202).json({
+    status: "accepted",
+    jobId,
+    statusUrl: `/documents/status/${jobId}`,
+    downloadUrl: `/documents/jobs/${jobId}/download`,
+  });
 });
 
 router.post("/cases/:caseId/documents/generate-from-master", requireAuth, requireFirmUser, requirePermission("documents", "generate"), async (req: AuthRequest, res): Promise<void> => {

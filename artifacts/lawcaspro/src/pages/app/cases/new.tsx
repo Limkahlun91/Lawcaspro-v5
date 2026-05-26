@@ -16,12 +16,21 @@ export default function NewCasePage() {
       }}
       mode="create"
       onSubmit={async (payload) => {
-        const created = await apiFetchJson<any>("/cases", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify(payload),
-        });
-        navigate(`/app/cases/${created.id}`);
+        try {
+          const created = await apiFetchJson<any>("/cases", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify(payload),
+          });
+          navigate(`/app/cases/${created.id}`);
+        } catch (err: any) {
+          console.error("[cases/new] create failed", {
+            status: err?.status,
+            message: err?.message,
+            data: err?.data,
+          });
+          throw err;
+        }
       }}
     />
   );
