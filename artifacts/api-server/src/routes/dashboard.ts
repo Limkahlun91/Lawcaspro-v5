@@ -32,6 +32,12 @@ router.get("/dashboard", requireAuth, requireFirmUser, requirePermission("dashbo
   try {
     const firmId = req.firmId!;
     const r = rdb(req);
+    const refresh = (() => {
+      const raw = one((req.query as unknown as Record<string, unknown>)?.refresh as string | string[] | undefined);
+      if (!raw) return false;
+      const v = raw.trim().toLowerCase();
+      return v === "1" || v === "true" || v === "yes";
+    })();
     const assignedToMe = (() => {
       const raw = one((req.query as unknown as Record<string, unknown>)?.assignedToMe as string | string[] | undefined);
       if (!raw) return false;
@@ -57,13 +63,13 @@ router.get("/dashboard", requireAuth, requireFirmUser, requirePermission("dashbo
     }
 
     const hasCache = await tableExists(r, "public.firm_dashboard_stats_cache");
-    if (hasCache) {
+    if (hasCache && !refresh) {
       const cachedRows = await queryRows(r, sql`
-        SELECT payload_json
-        FROM firm_dashboard_stats_cache
-        WHERE firm_id = ${firmId} AND expires_at > now()
-        LIMIT 1
-      `);
+          SELECT payload_json
+          FROM firm_dashboard_stats_cache
+          WHERE firm_id = ${firmId} AND expires_at > now()
+          LIMIT 1
+        `);
       const cached = cachedRows[0] && typeof cachedRows[0] === "object" ? (cachedRows[0] as any).payload_json : undefined;
       if (cached && typeof cached === "object") {
         res.json(cached);
@@ -90,28 +96,18 @@ router.get("/dashboard", requireAuth, requireFirmUser, requirePermission("dashbo
 
     res.json(payload);
   } catch (err) {
-    console.error("🚨 DASHBOARD REAL QUERY ERROR:", err);
-    console.error(err);
-    logger.error({ err, path: req.path, firmId: req.firmId, userId: req.userId }, "[dashboard]");
-    const fallback = {
-      totalCases: 0,
-      activeCases: 0,
-      completedCases: 0,
-      totalClients: 0,
-      totalDevelopers: 0,
-      totalProjects: 0,
-      cashCases: 0,
-      loanCases: 0,
-      masterTitleCases: 0,
-      individualTitleCases: 0,
-      strataTitleCases: 0,
-      recentCases: [],
-      billing: { totalBilled: 0, totalPaid: 0, totalOutstanding: 0 },
-      commsThisMonth: 0,
-      milestoneSections: [],
-      milestoneCards: [],
-    };
-    res.json(fallback);
+    logger.error({ err, path: req.path, firmId: req.firmId, userId: req.userId, query: req.query }, "[dashboard]");
+    const allowDetails =
+      process.env.API_ERROR_DETAILS === "1" ||
+      process.env.NODE_ENV !== "production" ||
+      Boolean((res as any)?.locals?.allowErrorDetails);
+    if (allowDetails) {
+      const details = err instanceof Error ? err.message : String(err);
+      const stack = err instanceof Error ? err.stack : undefined;
+      res.status(500).json({ error: "Dashboard unavailable", details, stack });
+      return;
+    }
+    res.status(500).json({ error: "Dashboard unavailable" });
     return;
   }
 });

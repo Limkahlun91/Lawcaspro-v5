@@ -7825,7 +7825,18 @@ function startDocumentGenerationJobRunner(r: DbConn, args: { firmId: number; job
         if (status === "completed" || status === "failed" || pending <= 0) return;
       }
     } catch (e) {
-      console.error(e);
+      const message = e instanceof Error ? e.message : String(e);
+      try {
+        await queryRows(r, sql`
+          UPDATE document_generation_jobs
+          SET status = 'failed',
+              pending_count = 0,
+              finished_at = now(),
+              error_summary = ${message.slice(0, 500)}
+          WHERE id = ${args.jobId}::uuid AND firm_id = ${args.firmId}
+        `);
+      } catch {
+      }
     } finally {
       activeDocumentGenerationJobRunners.delete(key);
     }
@@ -7890,14 +7901,48 @@ async function processAutomationGenerationJobStep(r: DbConn, args: { firmId: num
     if (pendingItems.length > 0) return;
 
     try {
+      const missingOutputIds = successItems
+        .filter((it) => !String((it as any).object_path ?? ""))
+        .map((it) => Number((it as any).id))
+        .filter((id) => Number.isFinite(id) && id > 0);
+      if (missingOutputIds.length > 0) {
+        await queryRows(r, sql`
+          UPDATE document_generation_job_items
+          SET status = 'failed',
+              error_code = 'OUTPUT_MISSING',
+              error_message = 'Generated file missing',
+              finished_at = now()
+          WHERE firm_id = ${args.firmId}
+            AND id IN (${sql.join(missingOutputIds.map((id) => sql`${id}`), sql`, `)})
+        `);
+        const items2 = await queryRows(r, sql`
+          SELECT *
+          FROM document_generation_job_items
+          WHERE job_id = ${args.jobId}::uuid AND firm_id = ${args.firmId}
+          ORDER BY id ASC
+        `);
+        items.length = 0;
+        items.push(...items2);
+        successItems.length = 0;
+        successItems.push(...items2.filter((x) => String((x as any).status ?? "") === "success"));
+        failedItems.length = 0;
+        failedItems.push(...items2.filter((x) => String((x as any).status ?? "") === "failed"));
+      }
+
       if (successItems.length === 0) {
+        const failedMsgs = failedItems
+          .map((it) => String((it as any).error_message ?? "").trim())
+          .filter(Boolean);
+        const summary = failedMsgs.length
+          ? `${failedMsgs.slice(0, 3).join(" | ")}${failedMsgs.length > 3 ? ` (+${failedMsgs.length - 3} more)` : ""}`
+          : "No output generated";
         await queryRows(r, sql`
           UPDATE document_generation_jobs
           SET status = 'failed',
               failed_count = ${failedItems.length},
               pending_count = 0,
               finished_at = now(),
-              error_summary = ${failedItems.length ? "All items failed" : "No output generated"}
+              error_summary = ${summary}
           WHERE id = ${args.jobId}::uuid AND firm_id = ${args.firmId}
         `);
         return;
@@ -8089,6 +8134,9 @@ async function processAutomationGenerationJobStep(r: DbConn, args: { firmId: num
     const fileName = String((out.caseDocument as any)?.fileName ?? (out.caseDocument as any)?.file_name ?? "");
     const mimeType = String((out.caseDocument as any)?.mimeType ?? (out.caseDocument as any)?.mime_type ?? "application/pdf");
     const fileSize = Number((out.caseDocument as any)?.fileSize ?? (out.caseDocument as any)?.file_size ?? 0) || null;
+    if (!objectPath) {
+      throw new DocumentGenerationError(500, "OUTPUT_MISSING", "Generated file missing");
+    }
 
     await queryRows(r, sql`
       UPDATE document_generation_job_items

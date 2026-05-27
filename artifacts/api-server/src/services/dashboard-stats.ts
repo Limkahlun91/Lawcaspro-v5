@@ -42,7 +42,7 @@ function getPgCode(err: unknown): string | null {
 
 function isMissingRelationOrColumnError(err: unknown): boolean {
   const code = getPgCode(err);
-  return code === "42P01" || code === "42703";
+  return code === "42P01" || code === "42703" || code === "42501";
 }
 
 export async function computeDashboardStats(

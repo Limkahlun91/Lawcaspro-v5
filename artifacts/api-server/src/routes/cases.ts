@@ -247,14 +247,22 @@ async function fetchKeyDatesRow(r: DbConn, firmId: number, caseId: number): Prom
       .limit(1);
     return kd ? (kd as any) : null;
   } catch (err) {
+    const code = getPgCode(err);
+    if (code === "42P01" || code === "42501") return null;
     if (!isUndefinedColumnError(err)) throw err;
-    const rows = await queryRows(r, sql`
-      SELECT *
-      FROM case_key_dates
-      WHERE firm_id = ${firmId} AND case_id = ${caseId}
-      LIMIT 1
-    `);
-    return rows[0] ?? null;
+    try {
+      const rows = await queryRows(r, sql`
+        SELECT *
+        FROM case_key_dates
+        WHERE firm_id = ${firmId} AND case_id = ${caseId}
+        LIMIT 1
+      `);
+      return rows[0] ?? null;
+    } catch (rawErr) {
+      const rawCode = getPgCode(rawErr);
+      if (rawCode === "42P01" || rawCode === "42501") return null;
+      throw rawErr;
+    }
   }
 }
 
@@ -2917,125 +2925,109 @@ router.get("/cases", requireAuthHandler, requireFirmUserHandler, requirePermissi
   } catch (err) {
     console.error("!!! DB_DEBUG: Cases list error:", err);
     logger.error({ err, path: req.path, firmId: req.firmId, userId: req.userId, query: req.query }, "[cases]");
-    const code = getPgCode(err);
-    const isCompat = code === "42P01" || code === "42703" || code === "42501";
-    if (isCompat) {
+    try {
+      const r = rdb(req);
+      let canAssignAnyFallback = false;
       try {
-        const r = rdb(req);
-        let canAssignAnyFallback = false;
-        try {
-          canAssignAnyFallback = await hasRolePermission(r, req.firmId!, req.roleId, "cases", "assign_any");
-        } catch {
-          canAssignAnyFallback = false;
-        }
-        const params2 = ListCasesQueryParams.safeParse(req.query);
-        const search2 = params2.success ? params2.data.search : undefined;
-        const status2 = params2.success ? params2.data.status : undefined;
-        const projectId2 = params2.success ? params2.data.projectId : undefined;
-        const developerId2 = params2.success ? params2.data.developerId : undefined;
-        const purchaseMode2 = params2.success ? params2.data.purchaseMode : undefined;
-        const titleType2 = params2.success ? params2.data.titleType : undefined;
-        const page2 = params2.success ? (params2.data.page ?? 1) : 1;
-        const limit2 = params2.success ? (params2.data.limit ?? 20) : 20;
-        const offset2 = (page2 - 1) * limit2;
-
-        const conditions2 = [eq(casesTable.firmId, req.firmId!), sql`${casesTable.deletedAt} IS NULL`];
-        if (!canAssignAnyFallback) {
-          conditions2.push(sql`EXISTS (
-            SELECT 1
-            FROM ${caseAssignmentsTable}
-            WHERE ${caseAssignmentsTable.caseId} = ${casesTable.id}
-              AND ${caseAssignmentsTable.userId} = ${req.userId}
-              AND ${caseAssignmentsTable.unassignedAt} IS NULL
-          )`);
-        }
-        if (status2) conditions2.push(eq(casesTable.status, status2));
-        if (projectId2) conditions2.push(eq(casesTable.projectId, projectId2));
-        if (developerId2) conditions2.push(eq(casesTable.developerId, developerId2));
-        if (purchaseMode2) conditions2.push(eq(casesTable.purchaseMode, purchaseMode2));
-        if (titleType2) {
-          const parts = String(titleType2).split(",").map((s) => s.trim()).filter(Boolean);
-          if (parts.length === 1) conditions2.push(eq(casesTable.titleType, parts[0]));
-          else conditions2.push(or(...parts.map((p) => eq(casesTable.titleType, p))));
-        }
-        if (search2 && search2.trim()) {
-          const like = `%${search2.trim()}%`;
-          conditions2.push(or(
-            sql`${casesTable.referenceNo} ILIKE ${like}`,
-            sql`COALESCE(${casesTable.parcelNo}, '') ILIKE ${like}`
-          ));
-        }
-
-        const baseRows = await r
-          .select({
-            id: casesTable.id,
-            referenceNo: casesTable.referenceNo,
-            status: casesTable.status,
-            purchaseMode: casesTable.purchaseMode,
-            titleType: casesTable.titleType,
-            parcelNo: casesTable.parcelNo,
-            createdAt: casesTable.createdAt,
-            updatedAt: casesTable.updatedAt,
-          })
-          .from(casesTable)
-          .where(and(...conditions2))
-          .orderBy(desc(casesTable.updatedAt))
-          .limit(limit2)
-          .offset(offset2);
-
-        const [totalRow] = await r
-          .select({ c: count() })
-          .from(casesTable)
-          .where(and(...conditions2));
-
-        const data = baseRows.map((row) => ({
-          id: row.id,
-          referenceNo: row.referenceNo,
-          clientName: null,
-          projectName: "Unknown",
-          developerName: "Unknown",
-          property: row.parcelNo ?? null,
-          purchaseMode: row.purchaseMode,
-          titleType: row.titleType,
-          status: row.status,
-          assignedLawyerId: null,
-          assignedLawyerName: null,
-          assignedClerkId: null,
-          assignedClerkName: null,
-          spaStatus: "Pending",
-          loanStatus: row.purchaseMode === "loan" ? "Pending" : null,
-          milestones: {
-            spa_date: null,
-            spa_stamped_date: null,
-            letter_of_offer_date: null,
-            loan_docs_signed_date: null,
-            completion_date: null,
-          },
-          completionSla: null,
-          createdAt: row.createdAt.toISOString(),
-          updatedAt: row.updatedAt.toISOString(),
-        }));
-
-        res.json({ data, total: Number(totalRow?.c ?? 0), page: page2, limit: limit2 });
-        return;
-      } catch (fallbackErr) {
-        logger.error({ err: fallbackErr, path: req.path, firmId: req.firmId, userId: req.userId }, "[cases] compat fallback failed");
-        res.json({ data: [], total: 0, page: 1, limit: 20 });
-        return;
+        canAssignAnyFallback = await hasRolePermission(r, req.firmId!, req.roleId, "cases", "assign_any");
+      } catch {
+        canAssignAnyFallback = false;
       }
-    }
+      const params2 = ListCasesQueryParams.safeParse(req.query);
+      const search2 = params2.success ? params2.data.search : undefined;
+      const status2 = params2.success ? params2.data.status : undefined;
+      const projectId2 = params2.success ? params2.data.projectId : undefined;
+      const developerId2 = params2.success ? params2.data.developerId : undefined;
+      const purchaseMode2 = params2.success ? params2.data.purchaseMode : undefined;
+      const titleType2 = params2.success ? params2.data.titleType : undefined;
+      const page2 = params2.success ? (params2.data.page ?? 1) : 1;
+      const limit2 = params2.success ? (params2.data.limit ?? 20) : 20;
+      const offset2 = (page2 - 1) * limit2;
 
-    const allowDetails =
-      process.env.API_ERROR_DETAILS === "1" ||
-      process.env.NODE_ENV !== "production" ||
-      Boolean((res as any)?.locals?.allowErrorDetails);
-    if (allowDetails) {
-      const details = err instanceof Error ? err.message : String(err);
-      const stack = err instanceof Error ? err.stack : undefined;
-      res.status(500).json({ debug: "Database Error", details, stack });
+      const conditions2 = [eq(casesTable.firmId, req.firmId!), sql`${casesTable.deletedAt} IS NULL`];
+      if (!canAssignAnyFallback) {
+        conditions2.push(sql`EXISTS (
+          SELECT 1
+          FROM ${caseAssignmentsTable}
+          WHERE ${caseAssignmentsTable.caseId} = ${casesTable.id}
+            AND ${caseAssignmentsTable.userId} = ${req.userId}
+            AND ${caseAssignmentsTable.unassignedAt} IS NULL
+        )`);
+      }
+      if (status2) conditions2.push(eq(casesTable.status, status2));
+      if (projectId2) conditions2.push(eq(casesTable.projectId, projectId2));
+      if (developerId2) conditions2.push(eq(casesTable.developerId, developerId2));
+      if (purchaseMode2) conditions2.push(eq(casesTable.purchaseMode, purchaseMode2));
+      if (titleType2) {
+        const parts = String(titleType2).split(",").map((s) => s.trim()).filter(Boolean);
+        if (parts.length === 1) conditions2.push(eq(casesTable.titleType, parts[0]));
+        else conditions2.push(or(...parts.map((p) => eq(casesTable.titleType, p))));
+      }
+      if (search2 && search2.trim()) {
+        const like = `%${search2.trim()}%`;
+        conditions2.push(or(
+          sql`${casesTable.referenceNo} ILIKE ${like}`,
+          sql`COALESCE(${casesTable.parcelNo}, '') ILIKE ${like}`
+        ));
+      }
+
+      const baseRows = await r
+        .select({
+          id: casesTable.id,
+          referenceNo: casesTable.referenceNo,
+          status: casesTable.status,
+          purchaseMode: casesTable.purchaseMode,
+          titleType: casesTable.titleType,
+          parcelNo: casesTable.parcelNo,
+          createdAt: casesTable.createdAt,
+          updatedAt: casesTable.updatedAt,
+        })
+        .from(casesTable)
+        .where(and(...conditions2))
+        .orderBy(desc(casesTable.updatedAt))
+        .limit(limit2)
+        .offset(offset2);
+
+      const [totalRow] = await r
+        .select({ c: count() })
+        .from(casesTable)
+        .where(and(...conditions2));
+
+      const data = baseRows.map((row) => ({
+        id: row.id,
+        referenceNo: row.referenceNo,
+        clientName: null,
+        projectName: "Unknown",
+        developerName: "Unknown",
+        property: row.parcelNo ?? null,
+        purchaseMode: row.purchaseMode,
+        titleType: row.titleType,
+        status: row.status,
+        assignedLawyerId: null,
+        assignedLawyerName: null,
+        assignedClerkId: null,
+        assignedClerkName: null,
+        spaStatus: "Pending",
+        loanStatus: row.purchaseMode === "loan" ? "Pending" : null,
+        milestones: {
+          spa_date: null,
+          spa_stamped_date: null,
+          letter_of_offer_date: null,
+          loan_docs_signed_date: null,
+          completion_date: null,
+        },
+        completionSla: null,
+        createdAt: row.createdAt.toISOString(),
+        updatedAt: row.updatedAt.toISOString(),
+      }));
+
+      res.json({ data, total: Number(totalRow?.c ?? 0), page: page2, limit: limit2 });
+      return;
+    } catch (fallbackErr) {
+      logger.error({ err: fallbackErr, path: req.path, firmId: req.firmId, userId: req.userId }, "[cases] list fallback failed");
+      res.json({ data: [], total: 0, page: 1, limit: 20 });
       return;
     }
-    res.status(500).json({ error: "Internal Server Error" });
   }
 }));
 
@@ -6953,28 +6945,69 @@ router.get("/cases/:caseId/messages/unread-count", requireAuthHandler, requireFi
   const channels: Array<"client" | "developer"> = ["client", "developer"];
   const byChannel: Record<"client" | "developer", number> = { client: 0, developer: 0 };
   for (const ch of channels) {
-    const [readStatus] = await r
-      .select({ lastReadAt: caseMessageReadStatusTable.lastReadAt })
-      .from(caseMessageReadStatusTable)
-      .where(and(
-        eq(caseMessageReadStatusTable.firmId, req.firmId!),
-        eq(caseMessageReadStatusTable.caseId, params.data.caseId),
-        eq(caseMessageReadStatusTable.userId, req.userId!),
-        eq(caseMessageReadStatusTable.channel, ch),
-      ));
+    const countUnreadSince = async (lastReadAt: Date, withChannel: boolean): Promise<number> => {
+      try {
+        const [row] = await r
+          .select({ c: sql<number>`COUNT(*)::int` })
+          .from(caseMessagesTable)
+          .where(and(
+            eq(caseMessagesTable.firmId, req.firmId!),
+            eq(caseMessagesTable.caseId, params.data.caseId),
+            ...(withChannel ? [eq(caseMessagesTable.channel, ch)] : []),
+            inArray(caseMessagesTable.senderType, ["client", "developer"]),
+            sql`${caseMessagesTable.createdAt} > ${lastReadAt}`,
+          ));
+        return Number((row as any)?.c ?? 0);
+      } catch (e) {
+        const code = getPgCode(e);
+        if (code === "42703" && withChannel) return await countUnreadSince(lastReadAt, false);
+        if (code === "42P01" || code === "42501" || code === "42703") return 0;
+        throw e;
+      }
+    };
 
-    const lastReadAt = readStatus?.lastReadAt instanceof Date ? readStatus.lastReadAt : new Date(0);
-    const [row] = await r
-      .select({ c: sql<number>`COUNT(*)::int` })
-      .from(caseMessagesTable)
-      .where(and(
-        eq(caseMessagesTable.firmId, req.firmId!),
-        eq(caseMessagesTable.caseId, params.data.caseId),
-        eq(caseMessagesTable.channel, ch),
-        inArray(caseMessagesTable.senderType, ["client", "developer"]),
-        sql`${caseMessagesTable.createdAt} > ${lastReadAt}`,
-      ));
-    byChannel[ch] = Number((row as any)?.c ?? 0);
+    try {
+      const [readStatus] = await r
+        .select({ lastReadAt: caseMessageReadStatusTable.lastReadAt })
+        .from(caseMessageReadStatusTable)
+        .where(and(
+          eq(caseMessageReadStatusTable.firmId, req.firmId!),
+          eq(caseMessageReadStatusTable.caseId, params.data.caseId),
+          eq(caseMessageReadStatusTable.userId, req.userId!),
+          eq(caseMessageReadStatusTable.channel, ch),
+        ));
+      const lastReadAt = readStatus?.lastReadAt instanceof Date ? readStatus.lastReadAt : new Date(0);
+      byChannel[ch] = await countUnreadSince(lastReadAt, true);
+    } catch (e) {
+      const code = getPgCode(e);
+      if (code === "42P01" || code === "42501") {
+        byChannel[ch] = 0;
+        continue;
+      }
+      if (code === "42703") {
+        try {
+          const [readStatusLegacy] = await r
+            .select({ lastReadAt: caseMessageReadStatusTable.lastReadAt })
+            .from(caseMessageReadStatusTable)
+            .where(and(
+              eq(caseMessageReadStatusTable.firmId, req.firmId!),
+              eq(caseMessageReadStatusTable.caseId, params.data.caseId),
+              eq(caseMessageReadStatusTable.userId, req.userId!),
+            ));
+          const lastReadAt = readStatusLegacy?.lastReadAt instanceof Date ? readStatusLegacy.lastReadAt : new Date(0);
+          byChannel[ch] = await countUnreadSince(lastReadAt, true);
+        } catch (legacyErr) {
+          const legacyCode = getPgCode(legacyErr);
+          if (legacyCode === "42P01" || legacyCode === "42501" || legacyCode === "42703") {
+            byChannel[ch] = 0;
+            continue;
+          }
+          throw legacyErr;
+        }
+        continue;
+      }
+      throw e;
+    }
   }
 
   res.json({ totalUnreadCount: byChannel.client + byChannel.developer, unreadCountByChannel: byChannel });
