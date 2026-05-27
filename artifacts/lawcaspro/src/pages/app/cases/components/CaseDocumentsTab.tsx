@@ -401,6 +401,8 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
 
     setOneClickGeneratingTemplateId(templateId);
     let pollId: number | null = null;
+    const startedAt = Date.now();
+    const maxPollMs = 120_000;
     try {
       const qs = new URLSearchParams();
       qs.set("blind", "true");
@@ -418,6 +420,9 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
       if (!jobId) throw new Error("jobId is missing");
 
       const pollOnce = async (): Promise<boolean> => {
+        if (Date.now() - startedAt > maxPollMs) {
+          throw new Error(`Generation still running. Please refresh later. Job ${jobId}`);
+        }
         const status = await apiFetchJson<any>(`/documents/status/${jobId}`, { timeoutMs: 15000 });
         const st = String(status?.status ?? "");
         if (st === "completed") {
@@ -430,8 +435,19 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
           return true;
         }
         if (st === "failed") {
-          const msg = typeof status?.error === "string" ? String(status.error) : "Generation failed";
-          throw new Error(msg);
+          const summary = typeof status?.error === "string" ? String(status.error) : "Generation failed";
+          try {
+            const detail = await apiFetchJson<any>(`/documents/jobs/${jobId}`, { timeoutMs: 15000 });
+            const job = asRecord(detail?.job) ?? {};
+            const items = Array.isArray(detail?.items) ? (detail.items as any[]) : [];
+            const firstFailed = items.find((it) => String(it?.status ?? "") === "failed") ?? null;
+            const itemMsg = firstFailed && typeof firstFailed.error_message === "string" ? String(firstFailed.error_message) : null;
+            const msg = itemMsg ? `${summary}: ${itemMsg}` : (typeof job.error_summary === "string" ? String(job.error_summary) : summary);
+            throw new Error(msg);
+          } catch (e) {
+            const msg = e instanceof Error ? e.message : summary;
+            throw new Error(msg);
+          }
         }
         return false;
       };
@@ -440,7 +456,10 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
       if (done) return;
 
       await new Promise<void>((resolve, reject) => {
+        let inFlight = false;
         pollId = window.setInterval(() => {
+          if (inFlight) return;
+          inFlight = true;
           pollOnce()
             .then((ok) => {
               if (!ok) return;
@@ -456,6 +475,9 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
                 pollId = null;
               }
               reject(e);
+            })
+            .finally(() => {
+              inFlight = false;
             });
         }, 2000);
       });
@@ -498,6 +520,8 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
     setBatchLoopGenerating(true);
     setBatchLoopProgress({ current: 0, total: 1 });
     let pollId: number | null = null;
+    const startedAt = Date.now();
+    const maxPollMs = 120_000;
     try {
       const qs = new URLSearchParams();
       qs.set("blind", "true");
@@ -515,6 +539,9 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
       if (!jobId) throw new Error("jobId is missing");
 
       const pollOnce = async (): Promise<boolean> => {
+        if (Date.now() - startedAt > maxPollMs) {
+          throw new Error(`Generation still running. Please refresh later. Job ${jobId}`);
+        }
         const status = await apiFetchJson<any>(`/documents/jobs/${jobId}`, { timeoutMs: 15000 });
         const job = asRecord(status?.job) ?? {};
         const st = String(job.status ?? "");
@@ -527,8 +554,11 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
           return true;
         }
         if (st === "failed") {
-          const msg = typeof job.error_summary === "string" ? job.error_summary : "Generation failed";
-          throw new Error(msg);
+          const summary = typeof job.error_summary === "string" ? String(job.error_summary) : "Generation failed";
+          const items = Array.isArray(status?.items) ? (status.items as any[]) : [];
+          const firstFailed = items.find((it) => String(it?.status ?? "") === "failed") ?? null;
+          const itemMsg = firstFailed && typeof firstFailed.error_message === "string" ? String(firstFailed.error_message) : null;
+          throw new Error(itemMsg ? `${summary}: ${itemMsg}` : summary);
         }
         return false;
       };
@@ -537,7 +567,10 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
       if (done) return;
 
       await new Promise<void>((resolve, reject) => {
+        let inFlight = false;
         pollId = window.setInterval(() => {
+          if (inFlight) return;
+          inFlight = true;
           pollOnce()
             .then((ok) => {
               if (!ok) return;
@@ -553,6 +586,9 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
                 pollId = null;
               }
               reject(e);
+            })
+            .finally(() => {
+              inFlight = false;
             });
         }, 2000);
       });

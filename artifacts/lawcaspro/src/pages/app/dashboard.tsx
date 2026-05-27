@@ -40,14 +40,22 @@ function StatusBadge({ status }: { status: string }) {
 export default function AppDashboard() {
   const [, setLocation] = useLocation();
   const { user } = useAuth();
+  const firmId = user?.firmId ?? null;
+  const refresh = (() => {
+    if (typeof window === "undefined") return false;
+    const raw = new URLSearchParams(window.location.search).get("refresh");
+    if (!raw) return false;
+    const v = raw.trim().toLowerCase();
+    return v === "1" || v === "true" || v === "yes";
+  })();
 
   const { data: stats, isLoading, isError, error, refetch, isFetching } = useQuery({
-    queryKey: ["dashboard"],
-    queryFn: () => apiFetchJson("/dashboard") as Promise<Record<string, any>>,
-    staleTime: Number.POSITIVE_INFINITY,
+    queryKey: ["dashboard", firmId, refresh ? "refresh" : "cached"],
+    queryFn: () => apiFetchJson(refresh ? "/dashboard?refresh=1" : "/dashboard") as Promise<Record<string, any>>,
+    staleTime: 30_000,
     retry: false,
-    refetchOnWindowFocus: false,
-    refetchOnReconnect: false,
+    refetchOnWindowFocus: true,
+    refetchOnReconnect: true,
   });
 
   if (isLoading) {
