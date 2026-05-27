@@ -41,6 +41,7 @@ const DEFAULT_ALLOWED_MIME_TYPES = new Set([
   "application/pdf",
   "image/jpeg",
   "image/png",
+  "image/webp",
 ]);
 const TEMPLATE_ALLOWED_MIME_TYPES = new Set([
   ...DEFAULT_ALLOWED_MIME_TYPES,
@@ -64,10 +65,11 @@ const upload = multer({
       : lower.endsWith(".jpeg") ? "jpeg"
       : lower.endsWith(".jpg") ? "jpg"
       : lower.endsWith(".png") ? "png"
+      : lower.endsWith(".webp") ? "webp"
       : "";
     const extAllowed = allowTemplateTypes
-      ? ext === "docx" || ext === "doc" || ext === "pdf" || ext === "jpg" || ext === "jpeg" || ext === "png"
-      : ext === "pdf" || ext === "jpg" || ext === "jpeg" || ext === "png";
+      ? ext === "docx" || ext === "doc" || ext === "pdf" || ext === "jpg" || ext === "jpeg" || ext === "png" || ext === "webp"
+      : ext === "pdf" || ext === "jpg" || ext === "jpeg" || ext === "png" || ext === "webp";
     if (!allowed.has(file.mimetype) && !extAllowed) {
       const err = new Error("UNSUPPORTED_FILE_TYPE");
       (err as any).code = "UNSUPPORTED_FILE_TYPE";
@@ -96,7 +98,7 @@ router.post("/storage/uploads/request-url", requireAuth, async (req: AuthRequest
       return;
     }
     if (typeof contentType === "string" && contentType && !DEFAULT_ALLOWED_MIME_TYPES.has(contentType)) {
-      sendError(res as any, new ApiError({ status: 415, code: "UNSUPPORTED_MEDIA_TYPE", message: "Only PDF, JPG, or PNG files are allowed", retryable: false }));
+      sendError(res as any, new ApiError({ status: 415, code: "UNSUPPORTED_MEDIA_TYPE", message: "Only PDF, JPG, PNG, or WebP files are allowed", retryable: false }));
       return;
     }
     const { randomUUID } = await import("crypto");
@@ -206,7 +208,7 @@ router.post(
       if (err && typeof err === "object" && (err as any).code === "UNSUPPORTED_FILE_TYPE") {
         const requestedObjectPath = queryOne((req as any).query, "objectPath");
         const allowTemplateTypes = typeof requestedObjectPath === "string" && requestedObjectPath.startsWith("/objects/templates/");
-        const message = allowTemplateTypes ? "Only DOCX, PDF, JPG, or PNG files are allowed" : "Only PDF, JPG, or PNG files are allowed";
+        const message = allowTemplateTypes ? "Only DOCX, PDF, JPG, PNG, or WebP files are allowed" : "Only PDF, JPG, PNG, or WebP files are allowed";
         sendError(res as any, new ApiError({ status: 415, code: "UNSUPPORTED_MEDIA_TYPE", message, retryable: false }));
         return;
       }

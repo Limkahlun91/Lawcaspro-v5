@@ -433,10 +433,11 @@ function FirmInfoTab() {
   });
 
   const [name, setName] = useState("");
-  const [logoUrl, setLogoUrl] = useState("");
-  const [logoFile, setLogoFile] = useState<File | null>(null);
-  const [logoPreviewUrl, setLogoPreviewUrl] = useState<string | null>(null);
+  const [selectedLogoFile, setSelectedLogoFile] = useState<File | null>(null);
+  const [selectedLogoPreviewUrl, setSelectedLogoPreviewUrl] = useState<string | null>(null);
+  const [savedLogoObjectPath, setSavedLogoObjectPath] = useState<string | null>(null);
   const [savedLogoPreviewUrl, setSavedLogoPreviewUrl] = useState<string | null>(null);
+  const [savedLogoUpdatedAt, setSavedLogoUpdatedAt] = useState<number | null>(null);
   const [address, setAddress] = useState("");
   const [stNumber, setStNumber] = useState("");
   const [tinNumber, setTinNumber] = useState("");
@@ -462,41 +463,58 @@ function FirmInfoTab() {
       setSstNo(settings.sstNo ?? "");
       setPhone(settings.phone ?? "");
       setEmail(settings.email ?? "");
-      setLogoUrl(settings.logoUrl ?? "");
+      setSavedLogoObjectPath(settings.logoUrl ?? "");
     }
   }, [settings]);
 
   useEffect(() => {
-    if (!logoFile) {
-      setLogoPreviewUrl(null);
+    if (!selectedLogoFile) {
+      setSelectedLogoPreviewUrl(null);
       return;
     }
-    const url = URL.createObjectURL(logoFile);
-    setLogoPreviewUrl(url);
-    return () => URL.revokeObjectURL(url);
-  }, [logoFile]);
+    const url = URL.createObjectURL(selectedLogoFile);
+    setSelectedLogoPreviewUrl(url);
+    return () => {
+      setTimeout(() => URL.revokeObjectURL(url), 0);
+    };
+  }, [selectedLogoFile]);
+
+  const savedLogoBlobUrlRef = useRef<string | null>(null);
+  useEffect(() => {
+    return () => {
+      const prev = savedLogoBlobUrlRef.current;
+      if (prev) URL.revokeObjectURL(prev);
+      savedLogoBlobUrlRef.current = null;
+    };
+  }, []);
 
   useEffect(() => {
-    if (!logoUrl) {
+    if (!savedLogoObjectPath) {
       setSavedLogoPreviewUrl(null);
       return;
     }
     let cancelled = false;
-    let url: string | null = null;
     (async () => {
       try {
-        const blob = await apiFetchBlob("/firm-settings/logo");
-        url = URL.createObjectURL(blob);
-        if (!cancelled) setSavedLogoPreviewUrl(url);
+        const qs = savedLogoUpdatedAt ? `?v=${String(savedLogoUpdatedAt)}` : "";
+        const blob = await apiFetchBlob(`/firm-settings/logo${qs}`);
+        const url = URL.createObjectURL(blob);
+        if (cancelled) {
+          URL.revokeObjectURL(url);
+          return;
+        }
+        const prev = savedLogoBlobUrlRef.current;
+        savedLogoBlobUrlRef.current = url;
+        setSavedLogoPreviewUrl(url);
+        if (prev && prev !== url) setTimeout(() => URL.revokeObjectURL(prev), 0);
       } catch {
         if (!cancelled) setSavedLogoPreviewUrl(null);
       }
     })();
     return () => {
       cancelled = true;
-      if (url) URL.revokeObjectURL(url);
     };
-  }, [logoUrl]);
+  }, [savedLogoObjectPath, savedLogoUpdatedAt]);
 
   const updateMutation = useMutation({
     mutationFn: (data: Record<string, unknown>) => apiFetch("/firm-settings", {
@@ -576,22 +594,29 @@ function FirmInfoTab() {
   const uploadLogoMutation = useMutation({
     mutationFn: async () => {
       if (!firmId) throw new Error("Missing firm context");
-      if (!logoFile) throw new Error("No file selected");
-      const v = validateUploadFile(logoFile, { allowedMimeTypes: ["image/jpeg", "image/png"] });
+      if (!selectedLogoFile) throw new Error("No file selected");
+      const v = validateUploadFile(selectedLogoFile, { maxBytes: 2 * 1024 * 1024, allowedMimeTypes: ["image/jpeg", "image/png", "image/webp"] });
       if (!v.ok) throw new Error(v.message);
 
-      const safeName = logoFile.name.replace(/[^a-zA-Z0-9._-]/g, "_");
+      const safeName = selectedLogoFile.name.replace(/[^a-zA-Z0-9._-]/g, "_");
       const objectPath = `/objects/templates/firms/${firmId}/branding/${crypto.randomUUID()}-${safeName}`;
       const formData = new FormData();
-      formData.append("file", logoFile);
+      formData.append("file", selectedLogoFile);
       const result = await apiFetchJson<{ objectPath: string }>(`/storage/upload?objectPath=${encodeURIComponent(objectPath)}`, { method: "POST", body: formData });
-      await apiFetchJson("/firm-settings", { method: "PATCH", body: JSON.stringify({ logoUrl: result.objectPath }) });
-      return result.objectPath;
+      const updated = await apiFetchJson<FirmSettings>("/firm-settings", { method: "PATCH", body: JSON.stringify({ logoUrl: result.objectPath }) });
+      const actual = typeof (updated as any)?.logoUrl === "string" ? String((updated as any).logoUrl) : "";
+      if (actual !== result.objectPath) {
+        throw new Error(`Logo saved path mismatch: expected ${result.objectPath} actual ${actual || "(empty)"}`);
+      }
+      return { objectPath: result.objectPath, updated };
     },
-    onSuccess: (next: string) => {
+    onSuccess: ({ objectPath, updated }: { objectPath: string; updated: FirmSettings }) => {
+      queryClient.setQueryData<FirmSettings>(["firm-settings"], updated);
       queryClient.invalidateQueries({ queryKey: ["firm-settings"] });
-      setLogoUrl(next);
-      setLogoFile(null);
+      setSavedLogoObjectPath(objectPath);
+      setSavedLogoUpdatedAt(Date.now());
+      setSelectedLogoFile(null);
+      setSelectedLogoPreviewUrl(null);
       toast({ title: "Logo uploaded" });
     },
     onError: (e) => toastError(toast, e, "Upload failed"),
@@ -611,6 +636,9 @@ function FirmInfoTab() {
 
   if (isLoading) return <div className="py-12 text-center text-slate-500">Loading...</div>;
 
+  const logoPreviewSrc = selectedLogoPreviewUrl ?? savedLogoPreviewUrl ?? null;
+  const isUploadingLogo = uploadLogoMutation.isPending;
+
   return (
     <div className="space-y-6">
       <Card>
@@ -623,45 +651,43 @@ function FirmInfoTab() {
         <CardContent className="space-y-4">
           <div className="flex items-start gap-4 flex-wrap">
             <div className="w-[220px] h-[120px] border rounded-md bg-white flex items-center justify-center overflow-hidden">
-              {logoPreviewUrl ? (
-                <img src={logoPreviewUrl} alt="Logo preview" className="max-w-full max-h-full object-contain" />
-              ) : savedLogoPreviewUrl ? (
-                <img src={savedLogoPreviewUrl} alt="Firm logo" className="max-w-full max-h-full object-contain" />
+              {logoPreviewSrc ? (
+                <img src={logoPreviewSrc} alt="Firm logo" className="max-w-full max-h-full object-contain" />
               ) : (
                 <div className="text-xs text-slate-400">No logo</div>
               )}
             </div>
 
             <div className="space-y-2">
-              <Label className="text-xs text-slate-500">Upload Logo (PNG/JPG)</Label>
+              <Label className="text-xs text-slate-500">Upload Logo (PNG/JPG/WebP)</Label>
               <Input
                 type="file"
-                accept="image/png,image/jpeg"
-                disabled={!canUpdate || uploadLogoMutation.isPending}
+                accept="image/png,image/jpeg,image/webp"
+                disabled={!canUpdate || isUploadingLogo}
                 onChange={(e) => {
                   const f = e.target.files?.[0] ?? null;
-                  setLogoFile(f);
+                  setSelectedLogoFile(f);
                 }}
               />
               <div className="flex gap-2">
                 <Button
                   variant="outline"
                   onClick={() => uploadLogoMutation.mutate()}
-                  disabled={!canUpdate || !logoFile || uploadLogoMutation.isPending}
+                  disabled={!canUpdate || !selectedLogoFile || isUploadingLogo}
                 >
-                  {uploadLogoMutation.isPending ? "Uploading..." : "Upload & Save"}
+                  {isUploadingLogo ? "Uploading..." : "Upload & Save"}
                 </Button>
-                {logoUrl ? (
+                {savedLogoObjectPath ? (
                   <Button
                     variant="outline"
-                    onClick={() => { navigator.clipboard.writeText(logoUrl); toast({ title: "Copied logo path" }); }}
-                    disabled={uploadLogoMutation.isPending}
+                    onClick={() => { navigator.clipboard.writeText(savedLogoObjectPath); toast({ title: "Copied logo path" }); }}
+                    disabled={isUploadingLogo}
                   >
                     Copy Path
                   </Button>
                 ) : null}
               </div>
-              {logoUrl ? <div className="text-xs text-slate-500 break-all">Saved: {logoUrl}</div> : null}
+              {savedLogoObjectPath ? <div className="text-xs text-slate-500 break-all">Saved: {savedLogoObjectPath}</div> : null}
             </div>
           </div>
         </CardContent>
