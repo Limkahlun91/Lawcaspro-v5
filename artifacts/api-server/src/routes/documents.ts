@@ -35,6 +35,8 @@ import { detectClausePlaceholders } from "../lib/docxPlaceholder.js";
 import { classifyDocumentForExtraction, extractDocumentText, guessDocumentTypeFromText, mapExtractedTextToSuggestions } from "../lib/documentExtraction.js";
 import { applyExtractionSuggestion } from "../lib/extractionWriteback.js";
 import { DataFetchTimeoutError, DocumentEngineService } from "../services/document-engine.service.js";
+import { aggregateGenerationJobFailureSummary, isHeartbeatStale } from "../services/document-generation.service.js";
+import { normalizeMissingRequiredVariables } from "../services/document-variable.service.js";
 import { formatMalaysiaAddressStringForDocument } from "../utils/my-address-helper.js";
 
 type RouterInternalLike = {
@@ -7803,14 +7805,92 @@ router.post("/documents/automation/preflight", requireAuth, requireFirmUser, req
   res.json(report);
 });
 
-const activeDocumentGenerationJobRunners = new Set<string>();
+type GenerationJobRunnerMeta = { startedAt: number; lastHeartbeatAt: number };
+
+const activeDocumentGenerationJobRunners = new Map<string, GenerationJobRunnerMeta>();
+
+function touchActiveRunnerHeartbeat(args: { firmId: number; jobId: string }): void {
+  const key = `${args.firmId}:${args.jobId}`;
+  const meta = activeDocumentGenerationJobRunners.get(key);
+  if (meta) meta.lastHeartbeatAt = Date.now();
+}
+
+async function touchJobHeartbeat(r: DbConn, args: { firmId: number; jobId: string }): Promise<void> {
+  touchActiveRunnerHeartbeat(args);
+  try {
+    await queryRows(r, sql`
+      UPDATE document_generation_jobs
+      SET last_heartbeat_at = now()
+      WHERE id = ${args.jobId}::uuid AND firm_id = ${args.firmId}
+    `);
+  } catch {
+  }
+}
+
+async function recoverStaleDocumentGenerationJob(r: DbConn, args: { firmId: number; jobId: string; staleMs: number }): Promise<void> {
+  const jobs = await queryRows(r, sql`
+    SELECT status, last_heartbeat_at
+    FROM document_generation_jobs
+    WHERE id = ${args.jobId}::uuid AND firm_id = ${args.firmId}
+    LIMIT 1
+  `);
+  const job = jobs[0] as any;
+  if (!job) return;
+  const status = String(job.status ?? "");
+  if (status !== "pending" && status !== "running") return;
+  if (!isHeartbeatStale(job.last_heartbeat_at, args.staleMs)) return;
+
+  await queryRows(r, sql`
+    UPDATE document_generation_job_items
+    SET status = 'pending',
+        phase = 'recovered',
+        diagnostic = jsonb_build_object(
+          'recoveredAt', now(),
+          'reason', 'stale_running_item',
+          'previousStatus', 'running',
+          'startedAt', started_at
+        )
+    WHERE firm_id = ${args.firmId}
+      AND job_id = ${args.jobId}::uuid
+      AND status = 'running'
+      AND started_at IS NOT NULL
+      AND started_at < now() - interval '5 minutes'
+  `);
+
+  await queryRows(r, sql`
+    UPDATE document_generation_jobs
+    SET status = 'pending',
+        recovered_at = now(),
+        last_heartbeat_at = now(),
+        pending_count = (
+          SELECT COUNT(*)
+          FROM document_generation_job_items
+          WHERE firm_id = ${args.firmId}
+            AND job_id = ${args.jobId}::uuid
+            AND status IN ('pending','running')
+        )
+    WHERE id = ${args.jobId}::uuid AND firm_id = ${args.firmId}
+  `);
+
+  const key = `${args.firmId}:${args.jobId}`;
+  activeDocumentGenerationJobRunners.delete(key);
+}
 
 function startDocumentGenerationJobRunner(r: DbConn, args: { firmId: number; jobId: string }): void {
   const key = `${args.firmId}:${args.jobId}`;
-  if (activeDocumentGenerationJobRunners.has(key)) return;
-  activeDocumentGenerationJobRunners.add(key);
+  const existing = activeDocumentGenerationJobRunners.get(key);
+  if (existing && Date.now() - existing.lastHeartbeatAt < 3 * 60_000) return;
+  activeDocumentGenerationJobRunners.set(key, { startedAt: Date.now(), lastHeartbeatAt: Date.now() });
   void (async () => {
     try {
+      await queryRows(r, sql`
+        UPDATE document_generation_jobs
+        SET runner_attempts = COALESCE(runner_attempts, 0) + 1,
+            timeout_at = COALESCE(timeout_at, now() + interval '10 minutes'),
+            last_heartbeat_at = now()
+        WHERE id = ${args.jobId}::uuid AND firm_id = ${args.firmId}
+          AND status IN ('pending','running')
+      `);
       for (let i = 0; i < 10_000; i++) {
         await processAutomationGenerationJobStep(r, args);
         const rows = await queryRows(r, sql`
@@ -7832,6 +7912,7 @@ function startDocumentGenerationJobRunner(r: DbConn, args: { firmId: number; job
           SET status = 'failed',
               pending_count = 0,
               finished_at = now(),
+              error_code = 'RUNNER_FAILED',
               error_summary = ${message.slice(0, 500)}
           WHERE id = ${args.jobId}::uuid AND firm_id = ${args.firmId}
         `);
@@ -7844,6 +7925,7 @@ function startDocumentGenerationJobRunner(r: DbConn, args: { firmId: number; job
 }
 
 async function processAutomationGenerationJobStep(r: DbConn, args: { firmId: number; jobId: string }): Promise<void> {
+  await touchJobHeartbeat(r, args);
   const jobRows = await queryRows(r, sql`
     SELECT *
     FROM document_generation_jobs
@@ -7860,7 +7942,8 @@ async function processAutomationGenerationJobStep(r: DbConn, args: { firmId: num
     await queryRows(r, sql`
       UPDATE document_generation_jobs
       SET status = 'running',
-          started_at = COALESCE(started_at, now())
+          started_at = COALESCE(started_at, now()),
+          last_heartbeat_at = now()
       WHERE id = ${args.jobId}::uuid AND firm_id = ${args.firmId}
     `);
   }
@@ -7877,7 +7960,9 @@ async function processAutomationGenerationJobStep(r: DbConn, args: { firmId: num
       LIMIT 1
     )
     UPDATE document_generation_job_items i
-    SET status = 'running'
+    SET status = 'running',
+        started_at = COALESCE(started_at, now()),
+        phase = 'generating'
     FROM next
     WHERE i.id = next.id
     RETURNING i.*
@@ -7906,11 +7991,21 @@ async function processAutomationGenerationJobStep(r: DbConn, args: { firmId: num
         .map((it) => Number((it as any).id))
         .filter((id) => Number.isFinite(id) && id > 0);
       if (missingOutputIds.length > 0) {
+        const jobConfig = (job as any)?.config && typeof (job as any).config === "object" ? (job as any).config as Record<string, unknown> : {};
+        const expectedOutputFormat = jobConfig.outputFormat === "pdf" ? "pdf" : "docx";
         await queryRows(r, sql`
           UPDATE document_generation_job_items
           SET status = 'failed',
+              phase = 'failed',
               error_code = 'OUTPUT_MISSING',
               error_message = 'Generated file missing',
+              diagnostic = jsonb_build_object(
+                'templateId', template_id,
+                'caseId', case_id,
+                'expectedOutputFormat', ${expectedOutputFormat},
+                'generatedFileName', file_name,
+                'storageTarget', 'case_documents'
+              ),
               finished_at = now()
           WHERE firm_id = ${args.firmId}
             AND id IN (${sql.join(missingOutputIds.map((id) => sql`${id}`), sql`, `)})
@@ -7930,19 +8025,22 @@ async function processAutomationGenerationJobStep(r: DbConn, args: { firmId: num
       }
 
       if (successItems.length === 0) {
-        const failedMsgs = failedItems
-          .map((it) => String((it as any).error_message ?? "").trim())
-          .filter(Boolean);
-        const summary = failedMsgs.length
-          ? `${failedMsgs.slice(0, 3).join(" | ")}${failedMsgs.length > 3 ? ` (+${failedMsgs.length - 3} more)` : ""}`
-          : "No output generated";
+        const agg = aggregateGenerationJobFailureSummary({
+          successCount: 0,
+          failedItems: failedItems.map((it) => ({
+            status: String((it as any).status ?? ""),
+            errorCode: typeof (it as any).error_code === "string" ? String((it as any).error_code) : null,
+            errorMessage: typeof (it as any).error_message === "string" ? String((it as any).error_message) : null,
+          })),
+        });
         await queryRows(r, sql`
           UPDATE document_generation_jobs
           SET status = 'failed',
               failed_count = ${failedItems.length},
               pending_count = 0,
               finished_at = now(),
-              error_summary = ${summary}
+              error_code = ${agg.errorCode},
+              error_summary = ${agg.errorSummary.slice(0, 500)}
           WHERE id = ${args.jobId}::uuid AND firm_id = ${args.firmId}
         `);
         return;
@@ -8029,7 +8127,7 @@ async function processAutomationGenerationJobStep(r: DbConn, args: { firmId: num
           objectPath: String((it as any).object_path ?? ""),
         }))
         .filter((x) => x.objectPath);
-      if (entries.length === 0) throw new Error("No output generated");
+      if (entries.length === 0) throw new Error("No output generated: all job items ended without object_path. Check item diagnostics.");
 
       const zipBytes = await buildZipBufferFromPrivateObjects(entries);
       const objectPath = `/objects/temp-generated/${args.firmId}/document-automation-jobs/${args.jobId}.zip`;
@@ -8050,11 +8148,15 @@ async function processAutomationGenerationJobStep(r: DbConn, args: { firmId: num
         WHERE id = ${args.jobId}::uuid AND firm_id = ${args.firmId}
       `);
     } catch (err) {
+      const message = err instanceof Error ? err.message : "Internal Server Error";
+      const code = message.includes("No output generated") ? "NO_OUTPUT_GENERATED" : "FINALIZE_FAILED";
       await queryRows(r, sql`
         UPDATE document_generation_jobs
         SET status = 'failed',
             finished_at = now(),
-            error_summary = ${err instanceof Error ? err.message : "Internal Server Error"}
+            last_heartbeat_at = now(),
+            error_code = ${code},
+            error_summary = ${message.slice(0, 500)}
         WHERE id = ${args.jobId}::uuid AND firm_id = ${args.firmId}
       `);
     }
@@ -8109,6 +8211,47 @@ async function processAutomationGenerationJobStep(r: DbConn, args: { firmId: num
   });
 
   try {
+    const templateVersionId = await ensureFirmTemplatePublishedVersionId(r, args.firmId, templateId, actorId > 0 ? actorId : null);
+    const versionRows = await queryRows(r, sql`
+      SELECT source_object_path, filename
+      FROM document_template_versions
+      WHERE id = ${templateVersionId} AND firm_id = ${args.firmId}
+      LIMIT 1
+    `);
+    const version = versionRows[0] as any;
+    const sourceTemplatePath = typeof version?.source_object_path === "string" ? String(version.source_object_path) : "";
+    const sourceTemplateFileName = typeof version?.filename === "string" ? String(version.filename) : "";
+    const expectedOutputFormat = outputFormat === "pdf" ? "pdf" : "docx";
+
+    await queryRows(r, sql`
+      UPDATE document_generation_job_items
+      SET template_version_id = ${templateVersionId}
+      WHERE id = ${Number((item as any).id)} AND firm_id = ${args.firmId}
+    `);
+
+    if (!sourceTemplatePath) {
+      throw new DocumentGenerationError(404, "TEMPLATE_OBJECT_PATH_MISSING", "Template object path is missing", {
+        templateId,
+        caseId,
+        expectedOutputFormat,
+        storageTarget: "case_documents",
+        sourceTemplatePath: sourceTemplatePath || null,
+        sourceTemplateFileName: sourceTemplateFileName || null,
+      });
+    }
+
+    const templateExists = await supabaseStorage.privateObjectExists(sourceTemplatePath, { timeoutMs: 2_000 });
+    if (!templateExists) {
+      throw new DocumentGenerationError(404, "TEMPLATE_OBJECT_NOT_FOUND", "Template object not found", {
+        templateId,
+        caseId,
+        expectedOutputFormat,
+        storageTarget: "case_documents",
+        sourceTemplatePath,
+        sourceTemplateFileName: sourceTemplateFileName || null,
+      });
+    }
+
     const out = await generateFirmDocument({
       r,
       firmId: args.firmId,
@@ -8135,29 +8278,65 @@ async function processAutomationGenerationJobStep(r: DbConn, args: { firmId: num
     const mimeType = String((out.caseDocument as any)?.mimeType ?? (out.caseDocument as any)?.mime_type ?? "application/pdf");
     const fileSize = Number((out.caseDocument as any)?.fileSize ?? (out.caseDocument as any)?.file_size ?? 0) || null;
     if (!objectPath) {
-      throw new DocumentGenerationError(500, "OUTPUT_MISSING", "Generated file missing");
+      throw new DocumentGenerationError(500, "OUTPUT_MISSING", "Generated file missing", {
+        templateId,
+        caseId,
+        expectedOutputFormat,
+        generatedFileName: fileName || null,
+        storageTarget: "case_documents",
+        sourceTemplatePath,
+        sourceTemplateFileName: sourceTemplateFileName || null,
+      });
     }
+
+    try {
+      await queryRows(r, sql`
+        UPDATE document_generation_job_items
+        SET status = 'success',
+            phase = 'success',
+            object_path = ${objectPath || null},
+            file_name = ${fileName || null},
+            mime_type = ${mimeType || null},
+            file_size = ${fileSize as any},
+            finished_at = now()
+        WHERE id = ${Number((item as any).id)} AND firm_id = ${args.firmId}
+      `);
+    } catch (e) {
+      throw new DocumentGenerationError(500, "OUTPUT_DB_WRITE_FAILED", "Output metadata write failed", {
+        templateId,
+        caseId,
+        expectedOutputFormat,
+        generatedFileName: fileName || null,
+        storageTarget: "case_documents",
+        objectPath,
+        cause: e instanceof Error ? e.message : String(e),
+      });
+    }
+  } catch (err: unknown) {
+    const cfgErr = getSupabaseStorageConfigError(err);
+    const derived =
+      cfgErr
+        ? new DocumentGenerationError(cfgErr.statusCode, "STORAGE_NOT_CONFIGURED", cfgErr.error)
+        : err instanceof ObjectNotFoundError
+          ? new DocumentGenerationError(404, "TEMPLATE_OBJECT_NOT_FOUND", "Template object not found")
+          : err instanceof DocumentGenerationError
+            ? err
+            : new DocumentGenerationError(500, "INTERNAL_ERROR", "Internal Server Error");
+    await finishGenerationRunFailed(r, args.firmId, runId, derived.code, derived.message);
+
+    const missingRequiredVariables = derived.code === "TEMPLATE_BINDING_MISSING" ? normalizeMissingRequiredVariables(derived.payload) : [];
+    const diagnostic = {
+      ...(derived.payload ?? {}),
+      ...(missingRequiredVariables.length ? { missingRequiredVariables } : {}),
+    };
 
     await queryRows(r, sql`
       UPDATE document_generation_job_items
-      SET status = 'success',
-          object_path = ${objectPath || null},
-          file_name = ${fileName || null},
-          mime_type = ${mimeType || null},
-          file_size = ${fileSize as any},
-          finished_at = now()
-      WHERE id = ${Number((item as any).id)} AND firm_id = ${args.firmId}
-    `);
-  } catch (err: unknown) {
-    const e =
-      err instanceof DocumentGenerationError ? err
-      : new DocumentGenerationError(500, "INTERNAL_ERROR", "Internal Server Error");
-    await finishGenerationRunFailed(r, args.firmId, runId, e.code, e.message);
-    await queryRows(r, sql`
-      UPDATE document_generation_job_items
       SET status = 'failed',
-          error_code = ${e.code},
-          error_message = ${e.message},
+          phase = 'failed',
+          error_code = ${derived.code},
+          error_message = ${derived.message},
+          diagnostic = ${diagnostic as unknown},
           finished_at = now()
       WHERE id = ${Number((item as any).id)} AND firm_id = ${args.firmId}
     `);
@@ -8276,12 +8455,12 @@ router.post("/documents/automation/generate-job", requireAuth, requireFirmUser, 
     INSERT INTO document_generation_jobs (
       id, firm_id, job_type, status, action, case_ids, template_ids, config,
       total_count, success_count, failed_count, pending_count,
-      created_by, created_at
+      created_by, created_at, last_heartbeat_at, timeout_at, runner_attempts
     ) VALUES (
       ${jobId}::uuid, ${req.firmId!}, 'document_automation', 'pending', ${parsed.data.config.action},
       ${caseIds as any}, ${templateIds as any}, ${jobConfig as any},
       ${caseIds.length * templateIds.length}, 0, 0, ${caseIds.length * templateIds.length},
-      ${req.userId as any}, now()
+      ${req.userId as any}, now(), now(), now() + interval '10 minutes', 0
     )
   `);
   const itemValues: Array<ReturnType<typeof sql>> = [];
@@ -8313,6 +8492,7 @@ router.get("/documents/jobs/:jobId", requireAuth, requireFirmUser, requirePermis
     return;
   }
 
+  await recoverStaleDocumentGenerationJob(r, { firmId: req.firmId!, jobId, staleMs: 3 * 60_000 });
   startDocumentGenerationJobRunner(r, { firmId: req.firmId!, jobId });
 
   const jobs = await queryRows(r, sql`SELECT * FROM document_generation_jobs WHERE id = ${jobId}::uuid AND firm_id = ${req.firmId!}`);
@@ -8334,6 +8514,7 @@ router.get("/documents/status/:jobId", requireAuth, requireFirmUser, requirePerm
     return;
   }
 
+  await recoverStaleDocumentGenerationJob(r, { firmId: req.firmId!, jobId, staleMs: 3 * 60_000 });
   startDocumentGenerationJobRunner(r, { firmId: req.firmId!, jobId });
 
   const jobs = await queryRows(r, sql`SELECT * FROM document_generation_jobs WHERE id = ${jobId}::uuid AND firm_id = ${req.firmId!}`);

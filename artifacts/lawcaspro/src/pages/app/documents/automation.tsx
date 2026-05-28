@@ -9,12 +9,13 @@ import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "@/components/ui/resizable";
 import { cn } from "@/lib/utils";
-import { apiFetchJson, apiRequest } from "@/lib/api-client";
+import { apiFetchJson } from "@/lib/api-client";
+import { downloadGenerationJob, getGenerationJob, type NormalizedGenerationJob } from "@/lib/document-generation-client";
 import { downloadBlob } from "@/lib/download";
 import { toastError } from "@/lib/toast-error";
 import { useToast } from "@/hooks/use-toast";
 import { ChevronRight, FileText, Printer } from "lucide-react";
-import { API_BASE, apiUrl } from "@/lib/api-base";
+import { apiUrl } from "@/lib/api-base";
 
 type AutomationCaseRow = {
   id: number;
@@ -31,11 +32,6 @@ type AutomationCasesResponse = {
   items: AutomationCaseRow[];
   page: number;
   limit: number;
-};
-
-type GenerationJobResponse = {
-  job: Record<string, unknown>;
-  items: Array<Record<string, unknown>>;
 };
 
 type FirmFolder = {
@@ -86,6 +82,10 @@ function safeText(v: unknown): string {
   return typeof v === "string" ? v.trim() : "";
 }
 
+function asRecord(v: unknown): Record<string, unknown> | null {
+  return v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : null;
+}
+
 function parseFilenameFromDisposition(v: string | null): string | null {
   if (!v) return null;
   const m = /filename="([^"]+)"/i.exec(v);
@@ -104,6 +104,7 @@ export default function DocumentAutomationHub() {
   const [customDuplexRange, setCustomDuplexRange] = useState("");
   const [busy, setBusy] = useState(false);
   const [jobId, setJobId] = useState<string | null>(null);
+  const [lastJob, setLastJob] = useState<NormalizedGenerationJob | null>(null);
   const [smartMessage, setSmartMessage] = useState<string | null>(null);
   const [smartTemplateIdSet, setSmartTemplateIdSet] = useState<Set<number>>(() => new Set());
   const [smartFolderIdSet, setSmartFolderIdSet] = useState<Set<number>>(() => new Set());
@@ -200,35 +201,36 @@ export default function DocumentAutomationHub() {
   const allCasesOnPageSelected = cases.length > 0 && cases.every((c) => selectedCaseIdSet.has(c.id));
   const someCasesOnPageSelected = cases.some((c) => selectedCaseIdSet.has(c.id)) && !allCasesOnPageSelected;
 
-  const jobQuery = useQuery<GenerationJobResponse>({
+  const jobQuery = useQuery({
     queryKey: ["jobStatus", jobId],
-    queryFn: () => apiFetchJson(`/documents/jobs/${jobId}`),
+    queryFn: () => getGenerationJob(String(jobId)),
     enabled: Boolean(jobId),
     refetchInterval: (query) => {
       const data = query.state.data as any;
-      const st = String((data?.job as any)?.status ?? data?.status ?? "");
+      const st = String(data?.status ?? "");
       if (st === "completed" || st === "failed") return false;
       return 1000;
     },
     retry: false,
   });
 
-  const jobStatus = String((jobQuery.data?.job as any)?.status ?? "");
-  const jobDownloadFileName =
-    safeText((jobQuery.data?.job as any)?.download_file_name) ||
-    safeText((jobQuery.data?.job as any)?.downloadFileName);
+  const jobStatus = String(jobQuery.data?.status ?? "");
+  const jobDownloadFileName = safeText(jobQuery.data?.downloadFileName);
+  const jobForDisplay = jobId ? (jobQuery.data ?? null) : lastJob;
+  const failedItemsForDisplay = jobForDisplay?.items?.filter((it) => String(it.status ?? "") === "failed") ?? [];
 
   useEffect(() => {
     if (!jobId) return;
-    const job: any = (jobQuery.data as any)?.job;
+    const job: any = jobQuery.data as any;
     if (!job) return;
+    setLastJob(job);
 
     const handleKey = `${jobId}:${jobStatus}`;
     if ((jobStatus === "completed" || jobStatus === "failed") && handledJobKeyRef.current === handleKey) return;
     if (jobStatus === "completed" || jobStatus === "failed") handledJobKeyRef.current = handleKey;
 
     if (jobStatus === "failed") {
-      const msg = safeText(job?.error_summary) || "Document generation failed";
+      const msg = safeText(job?.errorSummary) || "Document generation failed";
       toast({ title: "Generation failed", description: msg, variant: "destructive" });
       setJobId(null);
       setBusy(false);
@@ -236,12 +238,8 @@ export default function DocumentAutomationHub() {
     }
     if (jobStatus !== "completed") return;
 
-    const items: any[] = Array.isArray((jobQuery.data as any)?.items) ? ((jobQuery.data as any).items as any[]) : [];
-    const failed = items.filter((it) => String((it as any).status ?? "") === "failed");
-    if (failed.length > 0) {
-      toast({ title: "Some documents failed", description: "Open browser console to view failure details." });
-      console.warn("[document-automation.failures]", failed);
-    }
+    const failed = Array.isArray(job?.items) ? job.items.filter((it: any) => String(it?.status ?? "") === "failed") : [];
+    if (failed.length > 0) toast({ title: "Some documents failed", description: "Please check the job details panel for diagnostics." });
 
     const doDownload = async () => {
       const url = apiUrl(`/api/documents/jobs/${jobId}/download`);
@@ -251,7 +249,7 @@ export default function DocumentAutomationHub() {
         return;
       }
 
-      const resp = await apiRequest(`/documents/jobs/${jobId}/download`, { timeoutMs: 60000 });
+      const resp = await downloadGenerationJob(jobId);
       const blob = await resp.blob();
       const filename =
         parseFilenameFromDisposition(resp.headers.get("Content-Disposition")) ||
@@ -290,6 +288,8 @@ export default function DocumentAutomationHub() {
     return out;
   }, [caseCacheById, selectedCaseIds]);
 
+  const selectedCaseKey = useMemo(() => selectedCaseIds.slice().sort((a, b) => a - b).join(","), [selectedCaseIds]);
+
   const templateIdsInFolder = useMemo(() => {
     const memo = new Map<number | null, number[]>();
     const visit = (folderId: number | null): number[] => {
@@ -310,8 +310,7 @@ export default function DocumentAutomationHub() {
   }
 
   useEffect(() => {
-    const key = selectedCaseIds.slice().sort((a, b) => a - b).join(",");
-    if (!key || smartDismissedKey === key) {
+    if (!selectedCaseKey || smartDismissedKey === selectedCaseKey) {
       smartAppliedKeyRef.current = "";
       setSmartMessage(null);
       setSmartTemplateIdSet(new Set());
@@ -368,7 +367,7 @@ export default function DocumentAutomationHub() {
     }
 
     const nextIdsSorted = Array.from(recommendedTemplateIds).sort((a, b) => a - b);
-    const smartKey = `${key}:${nextIdsSorted.join(",")}`;
+    const smartKey = `${selectedCaseKey}:${nextIdsSorted.join(",")}`;
     if (smartAppliedKeyRef.current === smartKey) return;
     smartAppliedKeyRef.current = smartKey;
 
@@ -394,7 +393,7 @@ export default function DocumentAutomationHub() {
       - The extracted structured fields (bank, amounts, key dates) can then be written back into the Case database,
         allowing the recommender to become data-driven instead of rule-only.
     */
-  }, [folders, folderPathById, selectedCaseIds, selectedCases, smartDismissedKey, templateIdsInFolder, templates]);
+  }, [folders, folderPathById, selectedCaseKey, selectedCases, smartDismissedKey, templateIdsInFolder, templates]);
 
   function setFolderTemplates(folderId: number | null, checked: boolean) {
     const ids = templateIdsInFolder.get(folderId) ?? [];
@@ -864,6 +863,62 @@ export default function DocumentAutomationHub() {
                       </Button>
                     </TabsContent>
                   </Tabs>
+
+                  {jobForDisplay && (
+                    <div className="rounded-md border border-slate-200 bg-white p-3">
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="space-y-0.5">
+                          <div className="text-sm font-semibold text-slate-900">Job</div>
+                          <div className="text-xs text-slate-500">
+                            {jobForDisplay.jobId} · {String(jobForDisplay.status ?? "pending")}
+                          </div>
+                        </div>
+                        <div className="text-xs text-slate-600">
+                          {jobForDisplay.successCount}/{jobForDisplay.totalCount} success · {jobForDisplay.failedCount} failed · {jobForDisplay.pendingCount} pending
+                        </div>
+                      </div>
+
+                      {jobForDisplay.errorSummary && (
+                        <div className="mt-2 rounded border border-slate-200 bg-slate-50 px-2 py-1 text-xs text-slate-700">
+                          {jobForDisplay.errorSummary}
+                        </div>
+                      )}
+
+                      {jobForDisplay.status === "completed" && !jobForDisplay.downloadObjectPath && (
+                        <div className="mt-2 rounded border border-amber-200 bg-amber-50 px-2 py-1 text-xs text-amber-800">
+                          Generation completed but no downloadable output was created. Please check failed item diagnostics.
+                        </div>
+                      )}
+
+                      {failedItemsForDisplay.length > 0 && (
+                        <div className="mt-3 space-y-2">
+                          <div className="text-xs font-medium text-slate-700">Failed Items</div>
+                          <div className="max-h-48 overflow-auto space-y-2">
+                            {failedItemsForDisplay.slice(0, 50).map((it, idx) => {
+                              const diag = asRecord(it.diagnostic) ?? {};
+                              const missing = diag["missingRequiredVariables"];
+                              const missingList = Array.isArray(missing)
+                                ? missing.map((x) => (typeof x === "string" ? x : null)).filter((x): x is string => Boolean(x))
+                                : [];
+                              return (
+                                <div key={`${it.id ?? idx}`} className="rounded border border-slate-200 bg-slate-50 px-2 py-1">
+                                  <div className="text-xs text-slate-800">
+                                    <span className="font-medium">{it.errorCode || "FAILED"}</span>
+                                    {it.errorMessage ? ` · ${it.errorMessage}` : ""}
+                                  </div>
+                                  {missingList.length > 0 && (
+                                    <div className="mt-1 text-[11px] text-slate-600">
+                                      Missing variables: {missingList.join(", ")}
+                                    </div>
+                                  )}
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </div>
               </div>
             </ResizablePanel>

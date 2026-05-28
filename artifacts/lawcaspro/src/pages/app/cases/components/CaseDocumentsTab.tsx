@@ -1,4 +1,4 @@
-import { useEffect, useState, useRef } from "react";
+import { useEffect, useMemo, useState, useRef } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -29,6 +29,7 @@ import { hasPermission } from "@/lib/permissions";
 import { getGetCaseWorkflowQueryKey, getListCasesQueryKey } from "@workspace/api-client-react";
 import { validateUploadFile } from "@/lib/upload-validation";
 import { TemplateFolderPicker, type TemplateFolderPickerFolder, type TemplateFolderPickerTemplate } from "@/components/documents/TemplateFolderPicker";
+import { createGenerationJob, getGenerationJob, type NormalizedGenerationJob } from "@/lib/document-generation-client";
 
 function docTypeLabel(dt: string): string {
   return (DOCUMENT_TYPE_LABELS as Record<string, string>)[dt] ?? dt;
@@ -157,7 +158,7 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
   const [isUploading, setIsUploading] = useState(false);
   const [isGenerating, setIsGenerating] = useState(false);
   const [oneClickGeneratingTemplateId, setOneClickGeneratingTemplateId] = useState<number | null>(null);
-  const [batchGenerateResult, setBatchGenerateResult] = useState<null | { jobId: string; items: Array<Record<string, unknown>> }>(null);
+  const [batchGenerateResult, setBatchGenerateResult] = useState<NormalizedGenerationJob | null>(null);
   const [selectedChecklistKeys, setSelectedChecklistKeys] = useState<Set<string>>(new Set());
   const [batchLoopGenerating, setBatchLoopGenerating] = useState(false);
   const [batchLoopProgress, setBatchLoopProgress] = useState<{ current: number; total: number }>({ current: 0, total: 0 });
@@ -230,6 +231,17 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
     retry: false,
   });
   const caseData = checklistQuery.data?.case;
+  const templateNameById = useMemo(() => {
+    const m = new Map<number, string>();
+    for (const sec of checklistQuery.data?.sections ?? []) {
+      for (const it of sec.items ?? []) {
+        if (it.kind !== "template") continue;
+        if (typeof it.templateId !== "number") continue;
+        m.set(it.templateId, String(it.name ?? ""));
+      }
+    }
+    return m;
+  }, [checklistQuery.data]);
 
   type ClauseListItem = {
     id: number;
@@ -404,50 +416,40 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
     const startedAt = Date.now();
     const maxPollMs = 120_000;
     try {
-      const qs = new URLSearchParams();
-      qs.set("blind", "true");
-      qs.set("force", "true");
-      const created = await apiFetchJson<{ jobId: string }>(`/documents/automation/generate-job?${qs.toString()}`, {
-        method: "POST",
-        timeoutMs: 60000,
-        body: JSON.stringify({
-          caseIds: [caseId],
-          templateIds: [templateId],
-          config: { action: "download" },
-        }),
+      const created = await createGenerationJob({
+        caseIds: [caseId],
+        templateIds: [templateId],
+        config: { action: "download" },
+        blind: true,
+        force: true,
       });
-      const jobId = typeof created?.jobId === "string" ? created.jobId : "";
-      if (!jobId) throw new Error("jobId is missing");
+      const jobId = created.jobId;
 
       const pollOnce = async (): Promise<boolean> => {
         if (Date.now() - startedAt > maxPollMs) {
           throw new Error(`Generation still running. Please refresh later. Job ${jobId}`);
         }
-        const status = await apiFetchJson<any>(`/documents/status/${jobId}`, { timeoutMs: 15000 });
-        const st = String(status?.status ?? "");
+        const job = await getGenerationJob(jobId);
+        setBatchGenerateResult(job);
+        const st = String(job.status ?? "");
         if (st === "completed") {
           await qc.invalidateQueries({ queryKey: ["case-documents", caseId] });
           await qc.invalidateQueries({ queryKey: ["case-documents-checklist", caseId] });
-          const fileName = typeof status?.fileName === "string" ? String(status.fileName) : "document.pdf";
-          const downloadUrl = typeof status?.downloadUrl === "string" ? String(status.downloadUrl) : `/documents/jobs/${jobId}/download`;
-          await downloadFromApi(downloadUrl, fileName);
-          toast({ title: "Downloaded" });
+          const fileName = job.downloadFileName || "document.pdf";
+          if (!job.downloadObjectPath) {
+            throw new Error("Generation completed but no downloadable output was created. Please check failed item diagnostics.");
+          }
+          await downloadFromApi(`/documents/jobs/${jobId}/download`, fileName);
+          toast({ title: "Download started" });
           return true;
         }
         if (st === "failed") {
-          const summary = typeof status?.error === "string" ? String(status.error) : "Generation failed";
-          try {
-            const detail = await apiFetchJson<any>(`/documents/jobs/${jobId}`, { timeoutMs: 15000 });
-            const job = asRecord(detail?.job) ?? {};
-            const items = Array.isArray(detail?.items) ? (detail.items as any[]) : [];
-            const firstFailed = items.find((it) => String(it?.status ?? "") === "failed") ?? null;
-            const itemMsg = firstFailed && typeof firstFailed.error_message === "string" ? String(firstFailed.error_message) : null;
-            const msg = itemMsg ? `${summary}: ${itemMsg}` : (typeof job.error_summary === "string" ? String(job.error_summary) : summary);
-            throw new Error(msg);
-          } catch (e) {
-            const msg = e instanceof Error ? e.message : summary;
-            throw new Error(msg);
-          }
+          const summary = job.errorSummary || "Generation failed";
+          const firstFailed = job.items.find((it) => String(it.status ?? "") === "failed") ?? null;
+          const code = firstFailed?.errorCode ? String(firstFailed.errorCode) : "";
+          const msg = firstFailed?.errorMessage ? String(firstFailed.errorMessage) : "";
+          const detail = code && msg ? `${code}: ${msg}` : msg || code;
+          throw new Error(detail ? `${summary}: ${detail}` : summary);
         }
         return false;
       };
@@ -523,42 +525,40 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
     const startedAt = Date.now();
     const maxPollMs = 120_000;
     try {
-      const qs = new URLSearchParams();
-      qs.set("blind", "true");
-      qs.set("force", "true");
-      const created = await apiFetchJson<{ jobId: string }>(`/documents/automation/generate-job?${qs.toString()}`, {
-        method: "POST",
-        timeoutMs: 60000,
-        body: JSON.stringify({
-          caseIds: [caseId],
-          templateIds,
-          config: { action: "download" },
-        }),
+      const created = await createGenerationJob({
+        caseIds: [caseId],
+        templateIds,
+        config: { action: "download" },
+        blind: true,
+        force: true,
       });
-      const jobId = typeof created?.jobId === "string" ? created.jobId : "";
-      if (!jobId) throw new Error("jobId is missing");
+      const jobId = created.jobId;
 
       const pollOnce = async (): Promise<boolean> => {
         if (Date.now() - startedAt > maxPollMs) {
           throw new Error(`Generation still running. Please refresh later. Job ${jobId}`);
         }
-        const status = await apiFetchJson<any>(`/documents/jobs/${jobId}`, { timeoutMs: 15000 });
-        const job = asRecord(status?.job) ?? {};
+        const job = await getGenerationJob(jobId);
+        setBatchGenerateResult(job);
         const st = String(job.status ?? "");
         if (st === "completed") {
           await qc.invalidateQueries({ queryKey: ["case-documents", caseId] });
           await qc.invalidateQueries({ queryKey: ["case-documents-checklist", caseId] });
-          const fileName = typeof job.download_file_name === "string" ? String(job.download_file_name) : "documents.zip";
+          const fileName = job.downloadFileName || "documents.zip";
+          if (!job.downloadObjectPath) {
+            throw new Error("Generation completed but no downloadable output was created. Please check failed item diagnostics.");
+          }
           await downloadFromApi(`/documents/jobs/${jobId}/download`, fileName);
           toast({ title: "Downloaded" });
           return true;
         }
         if (st === "failed") {
-          const summary = typeof job.error_summary === "string" ? String(job.error_summary) : "Generation failed";
-          const items = Array.isArray(status?.items) ? (status.items as any[]) : [];
-          const firstFailed = items.find((it) => String(it?.status ?? "") === "failed") ?? null;
-          const itemMsg = firstFailed && typeof firstFailed.error_message === "string" ? String(firstFailed.error_message) : null;
-          throw new Error(itemMsg ? `${summary}: ${itemMsg}` : summary);
+          const summary = job.errorSummary || "Generation failed";
+          const firstFailed = job.items.find((it) => String(it.status ?? "") === "failed") ?? null;
+          const code = firstFailed?.errorCode ? String(firstFailed.errorCode) : "";
+          const msg = firstFailed?.errorMessage ? String(firstFailed.errorMessage) : "";
+          const detail = code && msg ? `${code}: ${msg}` : msg || code;
+          throw new Error(detail ? `${summary}: ${detail}` : summary);
         }
         return false;
       };
@@ -655,13 +655,14 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
       const downloadUrl = typeof created?.downloadUrl === "string" ? created.downloadUrl : `/documents/jobs/${jobId}/download`;
 
       const pollOnce = async (): Promise<boolean> => {
-        const st = await apiFetchJson<any>(`/documents/status/${jobId}`, { timeoutMs: 15000 });
-        const status = typeof st?.status === "string" ? st.status : "";
+        const job = await getGenerationJob(jobId);
+        setBatchGenerateResult(job);
+        const status = typeof job.status === "string" ? job.status : "";
         if (status === "completed") {
-          const fileName =
-            typeof st?.fileName === "string"
-              ? String(st.fileName)
-              : (enterpriseMode === "print" ? "system-print.pdf" : "document-automation.zip");
+          const fileName = job.downloadFileName || (enterpriseMode === "print" ? "system-print.pdf" : "document-automation.zip");
+          if (!job.downloadObjectPath) {
+            throw new Error("Generation completed but no downloadable output was created. Please check failed item diagnostics.");
+          }
 
           if (enterpriseMode === "print") {
             const blob = await apiFetchBlob(downloadUrl);
@@ -686,8 +687,12 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
           return true;
         }
         if (status === "failed") {
-          const msg = typeof st?.error === "string" ? String(st.error) : "Generation failed";
-          throw new Error(msg);
+          const summary = job.errorSummary || "Generation failed";
+          const firstFailed = job.items.find((it) => String(it.status ?? "") === "failed") ?? null;
+          const code = firstFailed?.errorCode ? String(firstFailed.errorCode) : "";
+          const msg = firstFailed?.errorMessage ? String(firstFailed.errorMessage) : "";
+          const detail = code && msg ? `${code}: ${msg}` : msg || code;
+          throw new Error(detail ? `${summary}: ${detail}` : summary);
         }
         return false;
       };
@@ -1235,16 +1240,42 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
                   )}
                   {batchGenerateResult && (
                     <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
-                      <div className="text-sm font-medium text-slate-900">Last batch job: {batchGenerateResult.jobId}</div>
+                      <div className="text-sm font-medium text-slate-900">Last generation job: {batchGenerateResult.jobId}</div>
+                      <div className="mt-1 text-xs text-slate-600">
+                        {String(batchGenerateResult.status ?? "pending")} · {batchGenerateResult.successCount}/{batchGenerateResult.totalCount} success · {batchGenerateResult.failedCount} failed · {batchGenerateResult.pendingCount} pending
+                      </div>
+                      {batchGenerateResult.errorSummary && (
+                        <div className="mt-2 rounded border border-slate-200 bg-white px-2 py-1 text-xs text-slate-700">
+                          {batchGenerateResult.errorSummary}
+                        </div>
+                      )}
+                      {batchGenerateResult.status === "completed" && !batchGenerateResult.downloadObjectPath && (
+                        <div className="mt-2 rounded border border-amber-200 bg-amber-50 px-2 py-1 text-xs text-amber-800">
+                          Generation completed but no downloadable output was created. Please check failed item diagnostics.
+                        </div>
+                      )}
                       <div className="mt-2 space-y-1">
                         {batchGenerateResult.items.filter((x) => x.status === "failed").length === 0 ? (
                           <div className="text-sm text-emerald-700">All items succeeded.</div>
                         ) : (
-                          batchGenerateResult.items.filter((x) => x.status === "failed").map((x, idx) => (
-                            <div key={idx} className="text-sm text-slate-700 break-words">
-                              {String(x.source ?? "")} #{String(x.templateId ?? "")}: {String(x.errorCode ?? "")} {String(x.errorMessage ?? "")}
-                            </div>
-                          ))
+                          batchGenerateResult.items
+                            .filter((x) => x.status === "failed")
+                            .slice(0, 50)
+                            .map((x, idx) => {
+                              const templateId = typeof x.templateId === "number" ? x.templateId : null;
+                              const name = templateId ? templateNameById.get(templateId) : null;
+                              const diag = asRecord(x.diagnostic) ?? {};
+                              const missing = diag["missingRequiredVariables"];
+                              const missingList = Array.isArray(missing)
+                                ? missing.map((m) => (typeof m === "string" ? m : null)).filter((m): m is string => Boolean(m))
+                                : [];
+                              return (
+                                <div key={`${x.id ?? idx}`} className="text-sm text-slate-700 break-words">
+                                  {templateId ? `Template #${templateId}` : "Template"}{name ? ` (${name})` : ""}: {String(x.errorCode ?? "")} {String(x.errorMessage ?? "")}
+                                  {missingList.length > 0 ? ` | Missing variables: ${missingList.join(", ")}` : ""}
+                                </div>
+                              );
+                            })
                         )}
                       </div>
                     </div>
@@ -1280,6 +1311,24 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
 
                             const canSelectForBatch = canGenerate && it.kind === "template" && it.source === "firm";
                             const selected = selectedChecklistKeys.has(it.checklistKey);
+
+                            const generateFinalDisabledReason = (() => {
+                              if (it.kind !== "template") return "Template is not generation capable";
+                              if (!canGenerate) return "No permission";
+                              if (it.source !== "firm") return "Unsupported template source";
+                              if (!applicable) return "Not applicable to this case";
+                              if (it.readiness && it.readiness.status !== "ready") {
+                                const missingMsgs = (it.readiness.missing ?? []).map((m) => String(m.message ?? "").trim()).filter(Boolean);
+                                const hasTemplateMissing = (it.readiness.missing ?? []).some((m) => String(m.code ?? "").toLowerCase().includes("template") && String(m.code ?? "").toLowerCase().includes("missing"));
+                                const hasStorageMissing = (it.readiness.missing ?? []).some((m) => String(m.code ?? "").toLowerCase().includes("storage") && String(m.code ?? "").toLowerCase().includes("missing"));
+                                if (hasStorageMissing) return "Storage object missing";
+                                if (hasTemplateMissing) return "Template file missing";
+                                if (missingMsgs.length > 0) return `Missing required variables: ${missingMsgs.slice(0, 3).join(", ")}${missingMsgs.length > 3 ? "..." : ""}`;
+                                return "Missing required variables";
+                              }
+                              if (it.blocked) return "Missing required variables";
+                              return "";
+                            })();
 
                             const statusTone =
                               it.status === "completed" ? "bg-emerald-50 text-emerald-700"
@@ -1386,21 +1435,26 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
                                         Download
                                       </Button>
                                     ) : it.kind === "template" ? (
-                                      <Button
-                                        size="sm"
-                                        className="gap-2"
-                                        onClick={() => generateAndDownloadBlind(it)}
-                                        disabled={!canGenerate || isGenerating || oneClickGeneratingTemplateId === it.templateId || it.source !== "firm"}
-                                      >
-                                        {oneClickGeneratingTemplateId === it.templateId ? (
-                                          <>
-                                            <Loader2 className="h-4 w-4 animate-spin" />
-                                            Generating...
-                                          </>
-                                        ) : (
-                                          "Generate Final"
-                                        )}
-                                      </Button>
+                                      <div className="flex flex-col items-end gap-1">
+                                        <Button
+                                          size="sm"
+                                          className="gap-2"
+                                          onClick={() => generateAndDownloadBlind(it)}
+                                          disabled={Boolean(generateFinalDisabledReason) || isGenerating || oneClickGeneratingTemplateId === it.templateId}
+                                        >
+                                          {oneClickGeneratingTemplateId === it.templateId ? (
+                                            <>
+                                              <Loader2 className="h-4 w-4 animate-spin" />
+                                              Generating...
+                                            </>
+                                          ) : (
+                                            "Generate Final"
+                                          )}
+                                        </Button>
+                                        {generateFinalDisabledReason && oneClickGeneratingTemplateId !== it.templateId ? (
+                                          <div className="text-[11px] text-slate-500 text-right max-w-56 break-words">{generateFinalDisabledReason}</div>
+                                        ) : null}
+                                      </div>
                                     ) : null}
                                   </div>
                                   <div className="flex items-center gap-2 flex-wrap justify-end">

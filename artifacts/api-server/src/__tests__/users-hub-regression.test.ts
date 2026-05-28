@@ -153,6 +153,10 @@ vi.mock("@workspace/db", async (orig) => {
   return { ...actual, db: fakeDb as unknown as typeof actual.db };
 });
 
+vi.mock("../lib/quota", () => ({
+  checkFirmQuota: async () => undefined,
+}));
+
 vi.mock("../lib/auth", async (orig) => {
   const actual = await orig<typeof import("../lib/auth")>();
   return {
