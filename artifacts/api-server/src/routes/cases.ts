@@ -2301,7 +2301,7 @@ router.get("/cases/export.csv", requireAuthHandler, requireFirmUserHandler, requ
   };
 
   let milestone = one(req.query.milestone as any) as CaseMilestoneKey | undefined;
-  let milestonePresence = normalizePresence(one(req.query.milestonePresence as any));
+  let milestonePresence = normalizePresence(one(req.query.milestonePresence as any)) ?? normalizePresence(one((req.query as any).milestoneStatus));
   if (!milestone) {
     const legacyKeys: CaseMilestoneKey[] = [
       "spa_stamped",

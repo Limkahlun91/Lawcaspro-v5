@@ -69,6 +69,108 @@ function buildDashboardDegradedPayload(error?: unknown): Record<string, unknown>
   return base;
 }
 
+type DashboardSummaryData = {
+  totalCases: number;
+  totalClients: number;
+  totalProjects: number;
+  totalDevelopers: number;
+};
+
+async function computeDashboardSummary(r: DbConn, args: { firmId: number; assignedToUserId?: number | null }): Promise<{ ok: true; data: DashboardSummaryData; errors: Array<{ section: string; code: string | null; message: string }> } | { ok: false; error: string }> {
+  const errors: Array<{ section: string; code: string | null; message: string }> = [];
+  const firmId = args.firmId;
+  const assignedToUserId = typeof args.assignedToUserId === "number" && args.assignedToUserId > 0 ? args.assignedToUserId : null;
+  const summary: DashboardSummaryData = { totalCases: 0, totalClients: 0, totalProjects: 0, totalDevelopers: 0 };
+
+  const countCases = await (async () => {
+    try {
+      const rows = assignedToUserId
+        ? await queryRows(r, sql`
+          SELECT COUNT(DISTINCT c.id)::int AS c
+          FROM cases c
+          JOIN case_assignments ca ON ca.case_id = c.id AND ca.user_id = ${assignedToUserId} AND ca.unassigned_at IS NULL
+          WHERE c.firm_id = ${firmId} AND c.deleted_at IS NULL
+        `)
+        : await queryRows(r, sql`SELECT COUNT(*)::int AS c FROM cases WHERE firm_id = ${firmId} AND deleted_at IS NULL`);
+      summary.totalCases = Number((rows[0] as any)?.c ?? 0);
+      return true;
+    } catch (err) {
+      errors.push({ section: "cases.count", code: getPgCode(err), message: err instanceof Error ? err.message : String(err) });
+      return false;
+    }
+  })();
+
+  await (async () => {
+    try {
+      const rows = await queryRows(r, sql`SELECT COUNT(*)::int AS c FROM clients WHERE firm_id = ${firmId}`);
+      summary.totalClients = Number((rows[0] as any)?.c ?? 0);
+    } catch (err) {
+      errors.push({ section: "clients.count", code: getPgCode(err), message: err instanceof Error ? err.message : String(err) });
+    }
+  })();
+
+  await (async () => {
+    try {
+      const rows = await queryRows(r, sql`SELECT COUNT(*)::int AS c FROM projects WHERE firm_id = ${firmId}`);
+      summary.totalProjects = Number((rows[0] as any)?.c ?? 0);
+    } catch (err) {
+      errors.push({ section: "projects.count", code: getPgCode(err), message: err instanceof Error ? err.message : String(err) });
+    }
+  })();
+
+  await (async () => {
+    try {
+      const rows = await queryRows(r, sql`SELECT COUNT(*)::int AS c FROM developers WHERE firm_id = ${firmId}`);
+      summary.totalDevelopers = Number((rows[0] as any)?.c ?? 0);
+    } catch (err) {
+      errors.push({ section: "developers.count", code: getPgCode(err), message: err instanceof Error ? err.message : String(err) });
+    }
+  })();
+
+  if (!countCases && errors.length === 0) return { ok: false, error: "Dashboard summary failed" };
+  return { ok: true, data: summary, errors };
+}
+
+router.get("/dashboard/summary", requireAuth, requireFirmUser, requirePermission("dashboard", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
+  const firmId = req.firmId!;
+  const r = rdb(req);
+  const requestId = one(req.headers["x-request-id"] as any) || one(req.headers["x-vercel-id"] as any) || undefined;
+  const assignedToMe = (() => {
+    const raw = one((req.query as unknown as Record<string, unknown>)?.assignedToMe as string | string[] | undefined);
+    if (!raw) return false;
+    const v = raw.trim().toLowerCase();
+    return v === "1" || v === "true" || v === "yes";
+  })();
+  const assignedToUserId = (() => {
+    const raw = one((req.query as unknown as Record<string, unknown>)?.assignedToUserId as string | string[] | undefined);
+    if (!raw) return null;
+    const n = Number.parseInt(raw, 10);
+    if (!Number.isFinite(n) || n <= 0) return null;
+    return n;
+  })();
+  const effectiveAssignedToUserId = assignedToMe ? (req.userId ?? null) : assignedToUserId;
+
+  const timeoutMs = 1800;
+  type SummaryOk = { ok: true; data: DashboardSummaryData; errors: Array<{ section: string; code: string | null; message: string }> };
+  type SummaryErr = { ok: false; error: string };
+  const out: SummaryOk | SummaryErr = await (async () => {
+    try {
+      return await Promise.race([
+        computeDashboardSummary(r, { firmId, assignedToUserId: effectiveAssignedToUserId }),
+        new Promise<SummaryErr>((resolve) => setTimeout(() => resolve({ ok: false, error: "Dashboard summary timed out" }), timeoutMs)),
+      ]);
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) } satisfies SummaryErr;
+    }
+  })();
+
+  if (out.ok === true) {
+    res.status(200).json({ ok: true, partial: out.errors.length > 0, data: out.data, errors: out.errors, requestId });
+    return;
+  }
+  res.status(200).json({ ok: true, partial: true, data: { totalCases: 0, totalClients: 0, totalProjects: 0, totalDevelopers: 0 }, errors: [{ section: "summary", code: null, message: out.error }], requestId });
+});
+
 router.get("/debug/dashboard", requireAuth, requireFirmUser, async (req: AuthRequest, res: Response): Promise<void> => {
   const allowDetails =
     process.env.API_ERROR_DETAILS === "1" ||
@@ -271,134 +373,60 @@ router.get("/dashboard", requireAuth, requireFirmUser, requirePermission("dashbo
       if (!Number.isFinite(n) || n <= 0) return null;
       return n;
     })();
-    if (assignedToMe) {
-      const payload = await computeDashboardStats(r, firmId, { assignedToUserId: req.userId ?? undefined, includeErrorDetails: allowDetails });
-      (payload as any).ok = true;
-      if (requestId) (payload as any).requestId = requestId;
-      res.json(payload);
-      return;
-    }
-    if (assignedToUserId) {
-      const payload = await computeDashboardStats(r, firmId, { assignedToUserId, includeErrorDetails: allowDetails });
-      (payload as any).ok = true;
-      if (requestId) (payload as any).requestId = requestId;
-      res.json(payload);
-      return;
-    }
-
-    const hasCache = await (async () => {
-      try {
-        return await tableExists(r, "public.firm_dashboard_stats_cache");
-      } catch (err) {
-        logger.warn({ err, code: getPgCode(err), firmId, userId: req.userId }, "[dashboard] cache_table_exists_failed");
-        return false;
-      }
-    })();
-
-    const cachedAny = hasCache && !refresh
-      ? await (async () => {
-          try {
-            const rows = await queryRows(r, sql`
-              SELECT payload_json, computed_at, expires_at
-              FROM firm_dashboard_stats_cache
-              WHERE firm_id = ${firmId}
-              ORDER BY computed_at DESC
-              LIMIT 1
-            `);
-            const row = rows[0] as any;
-            const payload = row?.payload_json && typeof row.payload_json === "object" ? row.payload_json : null;
-            const computedAt = row?.computed_at ? String(row.computed_at) : null;
-            const expiresAt = row?.expires_at ? String(row.expires_at) : null;
-            return payload ? { payload, computedAt, expiresAt } : null;
-          } catch (err) {
-            logger.warn({ err, code: getPgCode(err), firmId, userId: req.userId, requestId }, "[dashboard] cache_read_failed");
-            return null;
-          }
-        })()
-      : null;
-
-    const isFreshCache = (() => {
-      if (!cachedAny?.payload) return false;
-      const exp = cachedAny.expiresAt ? new Date(cachedAny.expiresAt).getTime() : 0;
-      if (!Number.isFinite(exp) || exp <= 0) return false;
-      return exp > Date.now();
-    })();
-
-    if (cachedAny?.payload && isFreshCache) {
-      const out = cachedAny.payload as any;
-      out.ok = true;
-      if (requestId) out.requestId = requestId;
-      res.json(out);
-      return;
-    }
-
-    const deadlineMs = (() => {
-      const raw = process.env.DASHBOARD_DEADLINE_MS ? Number.parseInt(process.env.DASHBOARD_DEADLINE_MS, 10) : 2000;
-      return Number.isFinite(raw) ? Math.min(Math.max(raw, 500), 10_000) : 2000;
-    })();
-    const stmtTimeoutMs = (() => {
-      const raw = process.env.DASHBOARD_STATEMENT_TIMEOUT_MS ? Number.parseInt(process.env.DASHBOARD_STATEMENT_TIMEOUT_MS, 10) : 1200;
-      return Number.isFinite(raw) ? Math.min(Math.max(raw, 200), 5000) : 1200;
-    })();
-
-    const compute = async () => {
-      const deadlineAt = Date.now() + deadlineMs;
-      const maybeTx = r as any;
-      if (typeof maybeTx?.transaction !== "function") {
-        return await computeDashboardStats(r, firmId, { includeErrorDetails: allowDetails, deadlineAt });
-      }
-      return await asTransactionCapable(r).transaction(async (tx: DbConn) => {
-        await tx.execute(sql`SET LOCAL statement_timeout = ${`${stmtTimeoutMs}ms`}`);
-        return await computeDashboardStats(tx as any, firmId, { includeErrorDetails: allowDetails, deadlineAt });
+    const effectiveAssignedToUserId = assignedToMe ? (req.userId ?? null) : assignedToUserId;
+    const summary = await computeDashboardSummary(r, { firmId, assignedToUserId: effectiveAssignedToUserId });
+    const unavailableFields = [
+      "milestoneCards",
+      "milestoneSections",
+      "recentCases",
+      "billing",
+      "outstandingAdvances",
+      "commsThisMonth",
+      "completionSlaOverdue",
+    ];
+    if (summary.ok === true) {
+      const degraded = summary.errors.length > 0;
+      res.status(200).json({
+        ok: true,
+        degraded,
+        partial: true,
+        requestId,
+        warnings: summary.errors.map((e) => ({ module: e.section, code: e.code, message: e.message })),
+        unavailableFields,
+        dashboard: {
+          totalCases: summary.data.totalCases,
+          activeCases: summary.data.totalCases,
+          completedCases: 0,
+          totalClients: summary.data.totalClients,
+          totalDevelopers: summary.data.totalDevelopers,
+          totalProjects: summary.data.totalProjects,
+          milestoneSections: [],
+          recentCases: [],
+          alerts: [],
+        },
       });
-    };
-
-    const payload = await (async () => {
-      try {
-        return await Promise.race([
-          compute(),
-          new Promise<Record<string, unknown>>((_, reject) => {
-            setTimeout(() => reject(new Error("DASHBOARD_TIMEOUT")), deadlineMs);
-          }),
-        ]);
-      } catch (err) {
-        if (cachedAny?.payload) {
-          const out = cachedAny.payload as Record<string, unknown>;
-          (out as any).ok = true;
-          (out as any).degraded = true;
-          (out as any).stale = true;
-          (out as any).reason = err instanceof Error && err.message === "DASHBOARD_TIMEOUT" ? "timeout_stale_cache" : "exception_stale_cache";
-          if (requestId) (out as any).requestId = requestId;
-          if (cachedAny.computedAt) (out as any).cacheComputedAt = cachedAny.computedAt;
-          if (cachedAny.expiresAt) (out as any).cacheExpiresAt = cachedAny.expiresAt;
-          return out;
-        }
-        throw err;
-      }
-    })();
-    (payload as any).ok = true;
-    if (requestId) (payload as any).requestId = requestId;
-
-    if (hasCache && !(payload as any)?.degraded && (payload as any)?.ok !== false) {
-      const ttlSec = (() => {
-        const raw = process.env.DASHBOARD_CACHE_TTL_SEC ? Number.parseInt(process.env.DASHBOARD_CACHE_TTL_SEC, 10) : 300;
-        return Number.isFinite(raw) ? Math.min(Math.max(raw, 30), 3600) : 300;
-      })();
-      try {
-        await queryRows(r, sql`
-          INSERT INTO firm_dashboard_stats_cache (firm_id, payload_json, computed_at, expires_at)
-          VALUES (${firmId}, ${payload as any}::jsonb, now(), now() + (${ttlSec}::text || ' seconds')::interval)
-          ON CONFLICT (firm_id) DO UPDATE SET
-            payload_json = EXCLUDED.payload_json,
-            computed_at = EXCLUDED.computed_at,
-            expires_at = EXCLUDED.expires_at
-        `);
-      } catch (err) {
-        logger.warn({ err, code: getPgCode(err), firmId, userId: req.userId }, "[dashboard] cache_write_failed");
-      }
+      return;
     }
-
-    res.json(payload);
+    res.status(200).json({
+      ok: true,
+      degraded: true,
+      partial: true,
+      requestId,
+      warnings: [{ module: "summary", code: null, message: summary.error }],
+      unavailableFields,
+      dashboard: {
+        totalCases: 0,
+        activeCases: 0,
+        completedCases: 0,
+        totalClients: 0,
+        totalDevelopers: 0,
+        totalProjects: 0,
+        milestoneSections: [],
+        recentCases: [],
+        alerts: [],
+      },
+    });
+    return;
   } catch (err) {
     const requestId = one(req.headers["x-request-id"] as any) || one(req.headers["x-vercel-id"] as any) || undefined;
     const timeout = err instanceof Error && err.message === "DASHBOARD_TIMEOUT";

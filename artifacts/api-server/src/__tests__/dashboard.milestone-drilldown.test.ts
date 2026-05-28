@@ -16,8 +16,10 @@ vi.mock("../lib/auth.js", () => {
       req.rlsDb = {
         execute: async () => {
           i += 1;
-          if (i === 1) return { rows: [{ reg: "firm_dashboard_stats_cache" }] };
-          if (i === 2) return { rows: [{ payload_json: { ok: false, degraded: true, totalCases: 0 } }] };
+          if (i === 1) return { rows: [{ c: 5 }] };
+          if (i === 2) return { rows: [{ c: 3 }] };
+          if (i === 3) return { rows: [{ c: 2 }] };
+          if (i === 4) return { rows: [{ c: 1 }] };
           return { rows: [] };
         },
       };
@@ -27,28 +29,8 @@ vi.mock("../lib/auth.js", () => {
   };
 });
 
-vi.mock("../services/dashboard-stats.js", () => {
-  return {
-    computeDashboardStats: vi.fn(async () => ({
-      ok: true,
-      degraded: false,
-      totalCases: 5,
-      activeCases: 4,
-      completedCases: 1,
-      totalClients: 1,
-      totalDevelopers: 1,
-      totalProjects: 1,
-      recentCases: [],
-      milestoneSections: [],
-      milestoneCards: [],
-      billing: { totalBilled: 0, totalPaid: 0, totalOutstanding: 0 },
-      commsThisMonth: 0,
-    })),
-  };
-});
-
 describe("Dashboard cache does not pin degraded payload", () => {
-  it("ignores degraded cached payload and recomputes", async () => {
+  it("returns summary-only dashboard without timing out", async () => {
     const mod = await import("../routes/dashboard.js");
     const router = mod.default;
     const app = express();
@@ -57,6 +39,9 @@ describe("Dashboard cache does not pin degraded payload", () => {
     const res = await request(app).get("/dashboard");
     expect(res.status).toBe(200);
     expect(res.body.ok).toBe(true);
-    expect(res.body.totalCases).toBe(5);
+    expect(res.body.dashboard.totalCases).toBe(5);
+    expect(res.body.dashboard.totalClients).toBe(3);
+    expect(res.body.dashboard.totalProjects).toBe(2);
+    expect(res.body.dashboard.totalDevelopers).toBe(1);
   });
 });

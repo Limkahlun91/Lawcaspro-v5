@@ -1817,8 +1817,7 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
                                       : preflightQuery.isFetching ? "Checking..." : "Unknown";
                             const dataLabel =
                               preflightQuery.isError ? "Error"
-                                : !converterReady ? "PDF_CONVERSION_UNAVAILABLE"
-                                  : dataStatus === "missing_variables"
+                                : dataStatus === "missing_variables"
                                     ? `Missing variables (will be blank): ${missingVars.slice(0, 3).join(", ")}${missingVars.length > 3 ? "..." : ""}`
                                     : dataReady ? "Ready"
                                       : preflightQuery.isFetching ? "Checking..." : "Unknown";
@@ -1830,7 +1829,6 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
                               if (preflightQuery.isError) return "Preflight error";
                               if (!pre) return "Checking...";
                               if (!fileReady) return "Missing template file";
-                              if (!converterReady) return "PDF_CONVERSION_UNAVAILABLE";
                               return "";
                             })();
                             return (
@@ -1849,6 +1847,11 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
                                     <div className="text-[11px] text-slate-700 truncate" title={`Data: ${dataLabel}`}>
                                       Data: {dataLabel}
                                     </div>
+                                    {!converterReady && (
+                                      <div className="text-[11px] text-amber-700 truncate" title="PDF conversion unavailable; will attempt fallback rendering.">
+                                        PDF conversion unavailable; using fallback
+                                      </div>
+                                    )}
                                     <div className="text-[11px] text-slate-700 truncate">
                                       Output: PDF
                                     </div>

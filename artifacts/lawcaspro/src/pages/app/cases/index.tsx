@@ -95,7 +95,9 @@ export default function CasesList() {
   const [titleType, setTitleType] = useState<string>(() => (sp.get("titleType") ?? "all"));
   const legacyInitial = parseLegacyMilestoneParams(sp);
   const initialMilestone = legacyInitial ? legacyInitial.milestone : normalizeMilestoneKey(sp.get("milestone"));
-  const initialPresence = legacyInitial ? legacyInitial.presence : normalizeMilestonePresence(sp.get("milestonePresence"));
+  const initialPresence = legacyInitial
+    ? legacyInitial.presence
+    : normalizeMilestonePresence(sp.get("milestoneStatus") ?? sp.get("milestonePresence"));
   const [milestone, setMilestone] = useState<CaseMilestoneKey | "all">(() => initialMilestone);
   const [milestonePresence, setMilestonePresence] = useState<MilestonePresence>(() => initialPresence);
   const [page, setPage] = useState<number>(() => Number.isInteger(initialPage) && initialPage > 0 ? initialPage : 1);
@@ -121,7 +123,7 @@ export default function CasesList() {
     const nextTitleType = q.get("titleType") ?? "all";
     const legacy = parseLegacyMilestoneParams(q);
     const nextMilestone = legacy ? legacy.milestone : normalizeMilestoneKey(q.get("milestone"));
-    const nextPresence = legacy ? legacy.presence : normalizeMilestonePresence(q.get("milestonePresence"));
+    const nextPresence = legacy ? legacy.presence : normalizeMilestonePresence(q.get("milestoneStatus") ?? q.get("milestonePresence"));
 
     setSearch((prev) => prev === nextSearch ? prev : nextSearch);
     setSpaStatus((prev) => prev === nextSpaStatus ? prev : nextSpaStatus);
@@ -158,7 +160,10 @@ export default function CasesList() {
     setIf("purchaseMode", purchaseMode);
     setIf("titleType", titleType);
     setIf("milestone", milestone === "all" ? undefined : milestone);
-    if (milestone !== "all") nextSp.set("milestonePresence", milestonePresence);
+    if (milestone !== "all") {
+      const status = milestonePresence === "completed" ? "done" : milestonePresence;
+      nextSp.set("milestoneStatus", status);
+    }
     nextSp.set("page", String(page));
     nextSp.set("limit", String(limit));
 
