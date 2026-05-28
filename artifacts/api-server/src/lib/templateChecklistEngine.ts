@@ -66,6 +66,7 @@ export function evaluateTemplateChecklist(params: {
   checklistItems?: unknown;
   caseContext: Record<string, unknown>;
   resolvedVariables?: Record<string, unknown>;
+  usedVariableKeys?: string[] | Set<string> | null;
   uploadedDocuments?: Array<{ fileName?: string | null; documentType?: string | null; checklistKey?: string | null; source?: string | null; hasFile?: boolean }>;
   milestones?: Record<string, { completed: boolean }>;
   manualConfirmations?: Record<string, { checkedBy?: number | null; checkedAt?: string | null; passed: boolean }>;
@@ -89,6 +90,18 @@ export function evaluateTemplateChecklist(params: {
   const docs = params.uploadedDocuments ?? [];
   const milestones = params.milestones ?? {};
   const confirms = params.manualConfirmations ?? {};
+  const usedVariableKeys = (() => {
+    const v = params.usedVariableKeys;
+    if (v === undefined) return undefined;
+    if (v === null) return null;
+    const arr = Array.isArray(v) ? v : Array.from(v);
+    const out = new Set<string>();
+    for (const k of arr) {
+      const s = typeof k === "string" ? k.trim() : "";
+      if (s) out.add(s);
+    }
+    return out;
+  })();
 
   const out: TemplateChecklistResultItem[] = [];
   for (const it of items) {
@@ -108,10 +121,18 @@ export function evaluateTemplateChecklist(params: {
       if (!passed && !message) message = `Missing case field: ${fieldKey || "unknown"}`;
     } else if (it.type === "required_generated_variable") {
       const variableKey = typeof cfg.variableKey === "string" ? cfg.variableKey : "";
-      const v = variableKey ? (vars[variableKey] ?? ctx[variableKey]) : null;
-      passed = !(v === null || v === undefined || String(v).trim() === "");
-      source = `variable.${variableKey || "unknown"}`;
-      if (!passed && !message) message = `Missing generated variable: ${variableKey || "unknown"}`;
+      if (usedVariableKeys === null) {
+        passed = true;
+        source = "variables_snapshot_unavailable";
+      } else if (usedVariableKeys && variableKey && !usedVariableKeys.has(variableKey)) {
+        passed = true;
+        source = `variable.${variableKey}.unused`;
+      } else {
+        const v = variableKey ? (vars[variableKey] ?? ctx[variableKey]) : null;
+        passed = !(v === null || v === undefined || String(v).trim() === "");
+        source = `variable.${variableKey || "unknown"}`;
+        if (!passed && !message) message = `Missing generated variable: ${variableKey || "unknown"}`;
+      }
     } else if (it.type === "required_uploaded_document") {
       const checklistKey = typeof cfg.checklistKey === "string" ? cfg.checklistKey : "";
       const docType = typeof cfg.documentType === "string" ? cfg.documentType.toLowerCase() : "";
@@ -161,4 +182,3 @@ export function evaluateTemplateChecklist(params: {
     items: out,
   };
 }
-

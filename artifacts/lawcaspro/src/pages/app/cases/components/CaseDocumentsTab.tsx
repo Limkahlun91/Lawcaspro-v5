@@ -103,6 +103,8 @@ type ChecklistItem = {
     manuallyOverridable: boolean;
     items: Array<{ id: string; label: string; type: string; passed: boolean; required: boolean; message: string; source: string; checkedBy?: number | null; checkedAt?: string | null }>;
   } | null;
+  dataReadiness?: { status: "ready" | "missing_data" | "unknown"; missing: string[] };
+  debug?: Record<string, unknown>;
   templateId?: number;
   name: string;
   documentType?: string;
@@ -1738,23 +1740,31 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
                             const readinessKnown = isTemplateFileReadinessKnown(readinessStatus);
                             const ready = isTemplateFileReady(readinessStatus);
                             const fileStatusLabel = templateFileReadinessLabel(readinessStatus);
+                            const dataStatus = it.dataReadiness?.status ?? "unknown";
+                            const dataReady = dataStatus === "ready";
+                            const dataMissing = dataStatus === "missing_data";
+                            const checklistWorkflowStatus = it.checklistResult?.checklistStatus ?? "ready";
+                            const checklistWorkflowReady = checklistWorkflowStatus !== "blocked";
                             const reason = !applicable
                               ? (it.applicability?.reasons ?? []).join(", ")
                               : !readinessKnown
                                 ? "Checking template file..."
                                 : !ready
                                   ? (it.readiness?.missing ?? []).map((m) => m.message).filter(Boolean).slice(0, 3).join(", ")
+                                  : dataMissing
+                                    ? `Missing data: ${(it.dataReadiness?.missing ?? []).slice(0, 3).join(", ")}${(it.dataReadiness?.missing ?? []).length > 3 ? "..." : ""}`
+                                    : !checklistWorkflowReady
+                                      ? "Checklist incomplete"
                                 : "";
-                            const statusLabel =
-                              it.applicability?.status === "warning"
-                                ? "Warning"
-                                : !applicable
-                                  ? "Blocked"
-                                  : !readinessKnown
-                                    ? "Checking..."
-                                    : ready
-                                      ? "Ready"
-                                      : fileStatusLabel;
+                            const statusLabel = it.applicability?.status === "warning"
+                              ? "Warning"
+                              : !applicable
+                                ? "Blocked"
+                                : !readinessKnown
+                                  ? "Checking..."
+                                  : ready && dataReady && checklistWorkflowReady
+                                    ? "Ready"
+                                    : "Incomplete";
                             const statusDotClass =
                               it.applicability?.status === "warning"
                                 ? "bg-sky-600"
@@ -1762,7 +1772,7 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
                                   ? "bg-rose-600"
                                   : !readinessKnown
                                     ? "bg-slate-400"
-                                    : ready
+                                    : (ready && dataReady && checklistWorkflowReady)
                                       ? "bg-emerald-600"
                                       : "bg-slate-400";
                             return (
@@ -1772,7 +1782,6 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
                                     <div className="text-sm font-medium text-slate-900 truncate" title={it.name}>{it.name}</div>
                                     <div className="mt-1 text-xs text-slate-600 truncate">
                                       {(it.source === "firm" ? "Firm" : it.source)} · {it.documentGroup}
-                                      {it.checklistResult ? ` · Checklist ${it.checklistResult.checklistStatus}` : ""}
                                     </div>
                                   </div>
                                   <div className="min-w-0">
@@ -1780,10 +1789,31 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
                                       <span className={cn("h-2 w-2 rounded-full", statusDotClass)} title={statusLabel} />
                                       <span className="text-xs text-slate-700">{statusLabel}</span>
                                     </div>
+                                    <div className="mt-1 text-[11px] text-slate-600 truncate" title={`Checklist: ${checklistWorkflowStatus}`}>
+                                      Checklist: {checklistWorkflowStatus}
+                                    </div>
+                                    <div className="text-[11px] text-slate-600 truncate" title={dataMissing ? `Missing: ${(it.dataReadiness?.missing ?? []).join(", ")}` : `Data: ${dataStatus}`}>
+                                      Data: {dataMissing ? `Missing (${(it.dataReadiness?.missing ?? []).slice(0, 2).join(", ")}${(it.dataReadiness?.missing ?? []).length > 2 ? "..." : ""})` : dataStatus === "ready" ? "Ready" : "Checking..."}
+                                    </div>
+                                    <div className="text-[11px] text-slate-600 truncate" title={`File: ${ready ? "ready" : fileStatusLabel}`}>
+                                      File: {!readinessKnown ? "Checking..." : ready ? "Ready" : fileStatusLabel}
+                                    </div>
                                     {reason ? <div className="mt-1 text-xs text-slate-600 truncate" title={reason}>{reason}</div> : null}
                                   </div>
                                   <div className="flex items-center gap-2 justify-start lg:justify-end flex-wrap">
-                                    <Button size="sm" onClick={() => generateAndDownloadBlind(it)} disabled={!canGenerate || isGenerating || it.source !== "firm" || oneClickGeneratingTemplateId === it.templateId || blocksTemplateGenerate(readinessStatus)}>
+                                    <Button
+                                      size="sm"
+                                      onClick={() => generateAndDownloadBlind(it)}
+                                      disabled={
+                                        !canGenerate
+                                        || isGenerating
+                                        || it.source !== "firm"
+                                        || oneClickGeneratingTemplateId === it.templateId
+                                        || blocksTemplateGenerate(readinessStatus)
+                                        || dataMissing
+                                        || checklistWorkflowStatus === "blocked"
+                                      }
+                                    >
                                       {oneClickGeneratingTemplateId === it.templateId ? "Generating..." : "Generate Final"}
                                     </Button>
                                   </div>

@@ -42,17 +42,32 @@ function pushMissing(list: MissingItem[], code: string, message: string) {
   list.push({ code, message });
 }
 
+function toKeySet(v: unknown): Set<string> | null {
+  if (v === null || v === undefined) return null;
+  if (v instanceof Set) return new Set(Array.from(v).map((x) => String(x)));
+  if (Array.isArray(v)) return new Set(v.map((x) => String(x)));
+  return null;
+}
+
 export function evaluateTemplateReadiness(params: {
   documentGroup: string;
   input: TemplateReadinessInputs;
+  usedVariableKeys?: string[] | Set<string> | null;
 }): TemplateReadinessResult {
   const group = (params.documentGroup || "Others").trim();
   const input = params.input;
+  const usedKeys = toKeySet(params.usedVariableKeys);
   const missing: MissingItem[] = [];
 
   if (!input.referenceNo) pushMissing(missing, "missing_reference_no", "Missing case reference number");
-  if (!input.purchaser1Name) pushMissing(missing, "missing_purchaser_name", "Missing purchaser name");
-  if (!input.purchaser1Ic) pushMissing(missing, "missing_purchaser_nric", "Missing purchaser NRIC");
+  const needsPurchaserName = usedKeys ? (
+    ["purchaser_name", "purchaser_full_name", "buyer_name", "client_name", "purchaser_names"].some((k) => usedKeys.has(k))
+  ) : false;
+  const needsPurchaserIc = usedKeys ? (
+    ["purchaser_ic", "purchaser_nric", "purchaser_id_no", "buyer_nric", "buyer_id_no", "client_nric", "purchaser_nrics"].some((k) => usedKeys.has(k))
+  ) : false;
+  if (needsPurchaserName && !input.purchaser1Name) pushMissing(missing, "missing_purchaser_name", "Missing purchaser name");
+  if (needsPurchaserIc && !input.purchaser1Ic) pushMissing(missing, "missing_purchaser_nric", "Missing purchaser NRIC");
 
   const g = group.toLowerCase();
 

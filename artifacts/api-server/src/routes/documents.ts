@@ -216,7 +216,12 @@ function buildApplicabilityContext(caseContext: Record<string, unknown>): Record
     developer_name: c.developer_name ?? null,
     bank_name: c.end_financier ?? c.loan_end_financier ?? null,
     has_loan: String(c.purchase_mode ?? "").toLowerCase() === "loan",
-    purchaser_count: [1, 2].filter((i) => Boolean(c[`spa_purchaser${i}_name`])).length,
+    purchaser_count: (() => {
+      const ps = Array.isArray(c.purchasers) ? (c.purchasers as any[]) : [];
+      const countFromLoop = ps.filter((p) => p && typeof p === "object" && String((p as any).name ?? "").trim()).length;
+      if (countFromLoop > 0) return countFromLoop;
+      return [1, 2].filter((i) => Boolean(c[`spa_purchaser${i}_name`])).length;
+    })(),
     borrower_count: [1, 2].filter((i) => Boolean(c[`borrower${i}_name`])).length,
     has_company_party: Boolean(c.spa_purchaser1_is_company || c.spa_purchaser2_is_company || c.borrower1_is_company || c.borrower2_is_company),
   };
@@ -1037,7 +1042,13 @@ async function applyLetterheadToDocxBuffer({
   return baseZip.generate({ type: "nodebuffer", compression: "DEFLATE" });
 }
 
-async function buildCaseContext(r: DbConn, caseId: number, firmId: number, cache?: RequestCache): Promise<Record<string, unknown> | null> {
+async function buildCaseContext(
+  r: DbConn,
+  caseId: number,
+  firmId: number,
+  cache?: RequestCache,
+  opts?: { includeDebug?: boolean },
+): Promise<Record<string, unknown> | null> {
   const caseRows = await queryRowsCached(
     r,
     cache,
@@ -1097,7 +1108,7 @@ async function buildCaseContext(r: DbConn, caseId: number, firmId: number, cache
   const [
     firmRows,
     bankRows,
-    purchaserRows,
+    purchaserRowsFromClients,
     assignmentRows,
     workflowRows,
     kdRows,
@@ -1251,9 +1262,72 @@ async function buildCaseContext(r: DbConn, caseId: number, firmId: number, cache
   const firm = firmRows[0] ?? {};
   const lawyer = assignmentRows.find((x) => x.role_in_case === "lawyer") ?? {};
   const clerk = assignmentRows.find((x) => x.role_in_case === "clerk") ?? {};
-  const mainPurchaser = purchaserRows.find((p) => p.role === "main") ?? purchaserRows[0] ?? {};
-
+  const partyPurchaserRows = await (async (): Promise<Record<string, unknown>[]> => {
+    if ((purchaserRowsFromClients?.length ?? 0) > 0) return [];
+    try {
+      const hasCaseParties = await tableExistsCached(r, cache, "public.case_parties");
+      const hasParties = await tableExistsCached(r, cache, "public.parties");
+      if (!hasCaseParties || !hasParties) return [];
+      return await queryRowsCached(
+        r,
+        cache,
+        `case_parties_purchasers:${firmId}:${caseId}`,
+        sql`
+          SELECT
+            CASE WHEN cp.order_no = 1 THEN 'main' ELSE cp.party_role END AS role,
+            cp.order_no,
+            p.full_name AS name,
+            COALESCE(p.nric, p.passport_no, p.company_reg_no) AS ic_no,
+            p.nationality,
+            p.address,
+            p.phone,
+            p.email
+          FROM case_parties cp
+          JOIN parties p ON p.id = cp.party_id AND p.firm_id = cp.firm_id
+          WHERE cp.firm_id = ${firmId}
+            AND cp.case_id = ${caseId}
+            AND cp.party_role IN ('purchaser', 'client')
+          ORDER BY cp.order_no ASC, cp.id ASC
+        `,
+      );
+    } catch {
+      return [];
+    }
+  })();
   const spa = safeJson((c as any).spa_details);
+  let purchaserSourceUsed =
+    (purchaserRowsFromClients?.length ?? 0) > 0 ? "case_purchasers"
+      : partyPurchaserRows.length > 0 ? "case_parties"
+        : "none";
+  let purchaserRowsResolved = ((purchaserRowsFromClients?.length ?? 0) > 0 ? purchaserRowsFromClients : partyPurchaserRows) as any[];
+  const spaPurchaserRows = (() => {
+    if ((purchaserRowsResolved?.length ?? 0) > 0) return [] as any[];
+    const arr = Array.isArray((spa as any)?.purchasers) ? (spa as any).purchasers : [];
+    const mapped = arr
+      .map((p: any, idx: number) => {
+        const name = typeof p?.name === "string" ? p.name.trim() : "";
+        if (!name) return null;
+        const ic = typeof (p?.ic ?? p?.nric ?? p?.id_no ?? p?.identity_no) === "string" ? String(p.ic ?? p.nric ?? p.id_no ?? p.identity_no).trim() : "";
+        return {
+          role: idx === 0 ? "main" : "purchaser",
+          order_no: idx + 1,
+          name,
+          ic_no: ic,
+          nationality: typeof p?.nationality === "string" ? p.nationality : "",
+          address: typeof p?.address === "string" ? p.address : "",
+          phone: typeof p?.phone === "string" ? p.phone : "",
+          email: typeof p?.email === "string" ? p.email : "",
+        };
+      })
+      .filter(Boolean) as any[];
+    return mapped;
+  })();
+  if ((purchaserRowsResolved?.length ?? 0) === 0 && spaPurchaserRows.length > 0) {
+    purchaserRowsResolved = spaPurchaserRows;
+    purchaserSourceUsed = "spa_details";
+  }
+  const mainPurchaser = purchaserRowsResolved.find((p) => p.role === "main") ?? purchaserRowsResolved[0] ?? {};
+
   const prop = safeJson((c as any).property_details);
   const loan = safeJson((c as any).loan_details);
   const loanPartyTypeRaw = typeof (c as any).loan_party_type === "string" ? String((c as any).loan_party_type).trim() : "";
@@ -1261,8 +1335,8 @@ async function buildCaseContext(r: DbConn, caseId: number, firmId: number, cache
   const isThirdPartyLoan = loanPartyType === "3rd_party" && String((c as any).purchase_mode ?? "") === "loan";
   const isDirectLoan = !isThirdPartyLoan;
   if (loanPartyType === "1st_party" && String((c as any).purchase_mode ?? "") === "loan") {
-    const p1 = purchaserRows[0] ?? null;
-    const p2 = purchaserRows[1] ?? null;
+    const p1 = purchaserRowsResolved[0] ?? null;
+    const p2 = purchaserRowsResolved[1] ?? null;
     (loan as any).borrower1Name = p1 && typeof (p1 as any).name === "string" ? String((p1 as any).name) : "";
     (loan as any).borrower1Ic = p1 && typeof (p1 as any).ic_no === "string" ? String((p1 as any).ic_no) : "";
     (loan as any).borrower2Name = p2 && typeof (p2 as any).name === "string" ? String((p2 as any).name) : "";
@@ -1452,7 +1526,7 @@ async function buildCaseContext(r: DbConn, caseId: number, firmId: number, cache
   const borrowersArr: Array<{ name: string; ic?: string; address?: string; hp?: string; email?: string }> = (() => {
     const partyType = String((c as any).loan_party_type ?? "");
     if (partyType === "1st_party") {
-      return purchaserRows
+      return purchaserRowsResolved
         .map((p: any) => {
           const name = typeof p?.name === "string" ? p.name.trim() : "";
           if (!name) return null;
@@ -1498,9 +1572,9 @@ async function buildCaseContext(r: DbConn, caseId: number, firmId: number, cache
   const borrowerAddresses = borrowersArr.map((b) => (typeof b.address === "string" ? b.address.trim() : "")).filter(Boolean).join(", ");
 
   const purchaserFlatVars: Record<string, unknown> = {};
-  for (let i = 0; i < purchaserRows.length; i++) {
+  for (let i = 0; i < purchaserRowsResolved.length; i++) {
     const idx = i + 1;
-    const p: any = purchaserRows[i] ?? {};
+    const p: any = purchaserRowsResolved[i] ?? {};
     purchaserFlatVars[`purchaser_${idx}_name`] = p.name ?? "";
     purchaserFlatVars[`purchaser_${idx}_ic`] = p.ic_no ?? "";
     purchaserFlatVars[`purchaser_${idx}_nric`] = p.ic_no ?? "";
@@ -1587,6 +1661,21 @@ async function buildCaseContext(r: DbConn, caseId: number, firmId: number, cache
   const propDaerah = (prop as any)?.daerah ?? "";
   const propNegeri = (prop as any)?.negeri ?? "";
   const propTitleTypeLabel = (prop as any)?.titleTypeLabel ?? (prop as any)?.title_type_label ?? "";
+
+  const purchaserNames = purchaserRowsResolved
+    .map((p: any) => (typeof p?.name === "string" ? p.name.trim() : ""))
+    .filter(Boolean);
+  const purchaserNrics = purchaserRowsResolved
+    .map((p: any) => (typeof p?.ic_no === "string" ? String(p.ic_no).trim() : ""))
+    .filter(Boolean);
+  const purchaserNamePrimary = typeof (mainPurchaser as any).name === "string" && String((mainPurchaser as any).name).trim()
+    ? String((mainPurchaser as any).name).trim()
+    : (purchaserNames[0] ?? "");
+  const purchaserIcPrimary = typeof (mainPurchaser as any).ic_no === "string" && String((mainPurchaser as any).ic_no).trim()
+    ? String((mainPurchaser as any).ic_no).trim()
+    : (purchaserNrics[0] ?? "");
+  const purchaserNamesJoined = purchaserNames.join(", ");
+  const purchaserNricsJoined = purchaserNrics.join(", ");
 
   return {
     case_id: caseId,
@@ -1738,8 +1827,18 @@ async function buildCaseContext(r: DbConn, caseId: number, firmId: number, cache
     contact_1_salutation: firstDevContact && typeof (firstDevContact as any).salutation === "string" ? String((firstDevContact as any).salutation) : "",
 
     // Purchaser (Main)
-    purchaser_name: mainPurchaser.name ?? "",
-    purchaser_ic: mainPurchaser.ic_no ?? "",
+    purchaser_name: purchaserNamePrimary,
+    purchaser_ic: purchaserIcPrimary,
+    purchaser_nric: purchaserIcPrimary,
+    purchaser_id_no: purchaserIcPrimary,
+    purchaser_full_name: purchaserNamePrimary,
+    buyer_name: purchaserNamePrimary,
+    buyer_nric: purchaserIcPrimary,
+    buyer_id_no: purchaserIcPrimary,
+    client_name: purchaserNamePrimary,
+    client_nric: purchaserIcPrimary,
+    purchaser_names: purchaserNamesJoined,
+    purchaser_nrics: purchaserNricsJoined,
     purchaser_nationality: mainPurchaser.nationality ?? "",
     purchaser_address: purchaserAddress,
     purchaser_phone: mainPurchaser.phone ?? "",
@@ -1747,12 +1846,12 @@ async function buildCaseContext(r: DbConn, caseId: number, firmId: number, cache
     property_address: propertyAddress,
 
     // Grammar helpers
-    is_plural_purchaser: purchaserRows.length > 1,
+    is_plural_purchaser: purchaserRowsResolved.length > 1,
     is_3rd_party_loan: isThirdPartyLoan,
     is_direct_loan: isDirectLoan,
 
     // All Purchasers (loop)
-    purchasers: purchaserRows.map((p, i) => ({
+    purchasers: purchaserRowsResolved.map((p, i) => ({
       index: i + 1,
       name: p.name ?? "",
       ic: p.ic_no ?? "",
@@ -1767,6 +1866,16 @@ async function buildCaseContext(r: DbConn, caseId: number, firmId: number, cache
     ...purchaserFlatVars,
     ...borrowerFlatVars,
     ...percentVars,
+    ...(opts?.includeDebug ? {
+      __debug_purchaser_source_used: purchaserSourceUsed,
+      __debug_purchaser_records_found: purchaserRowsResolved.length,
+      __debug_primary_purchaser: {
+        name: purchaserNamePrimary,
+        icNo: purchaserIcPrimary,
+        role: (mainPurchaser as any)?.role ?? null,
+        orderNo: (mainPurchaser as any)?.order_no ?? null,
+      },
+    } : {}),
 
     // Assignments
     lawyer_name: lawyer.user_name ?? "",
@@ -1801,17 +1910,7 @@ async function buildCaseContext(r: DbConn, caseId: number, firmId: number, cache
   };
 }
 
-router.get(
-  "/firm-document-folders",
-  requireAuth,
-  (req: AuthRequest, _res, next): void => {
-    const email = typeof req.email === "string" ? req.email : null;
-    const masked = email ? email.replace(/^(.).+(@.+)$/, "$1***$2") : null;
-    console.log("!!! TEMP_DEBUG: Accessing firm-document-folders route by user:", masked ?? email);
-    next();
-  },
-  requireFirmUser,
-  async (req: AuthRequest, res): Promise<void> => {
+router.get("/firm-document-folders", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
   const r = getRlsDb(req, res);
   if (!r) return;
   const rows = await queryRows(
@@ -4228,7 +4327,8 @@ router.get("/cases/:caseId/documents/checklist", requireAuth, requireFirmUser, r
   const includeAllRequested = truthy((req.query as any).includeAll);
   const includeAll = includeAllRequested ? await canBypassApplicability(r, req.firmId!, req.roleId) : false;
 
-  const context = await buildCaseContext(r, caseId, req.firmId!);
+  const includeDebug = process.env.API_ERROR_DETAILS === "1" || process.env.NODE_ENV !== "production";
+  const context = await buildCaseContext(r, caseId, req.firmId!, undefined, { includeDebug });
   if (!context) {
     res.status(404).json({ error: "Case not found" });
     return;
@@ -4301,6 +4401,7 @@ router.get("/cases/:caseId/documents/checklist", requireAuth, requireFirmUser, r
 
   const firmTemplateIds = firmTemplates.map((t) => Number((t as any).id)).filter((id) => Number.isFinite(id));
   const firmPublishedVersionByTemplateId = new Map<number, Record<string, unknown>>();
+  const firmUsedVariableKeysByTemplateId = new Map<number, string[] | null>();
   if (firmTemplateIds.length > 0) {
     const hasVersions = await (async () => {
       try {
@@ -4312,7 +4413,7 @@ router.get("/cases/:caseId/documents/checklist", requireAuth, requireFirmUser, r
     if (hasVersions) {
       const publishedVersions = await queryRows(r, sql`
         SELECT DISTINCT ON (template_id)
-          template_id, id, source_object_path, filename, status, published_at
+          template_id, id, source_object_path, filename, status, published_at, variables_snapshot
         FROM document_template_versions
         WHERE firm_id = ${req.firmId!}
           AND template_id IN (${sql.join(firmTemplateIds.map((id) => sql`${id}`), sql`, `)})
@@ -4323,6 +4424,13 @@ router.get("/cases/:caseId/documents/checklist", requireAuth, requireFirmUser, r
         const tid = typeof (row as any).template_id === "number" ? Number((row as any).template_id) : Number((row as any).template_id);
         if (!Number.isFinite(tid)) continue;
         firmPublishedVersionByTemplateId.set(tid, row as any);
+        const snapshot = (row as any).variables_snapshot;
+        if (snapshot === null || snapshot === undefined) {
+          firmUsedVariableKeysByTemplateId.set(tid, null);
+        } else {
+          const placeholders = placeholdersFromVariablesSnapshot(snapshot);
+          firmUsedVariableKeysByTemplateId.set(tid, placeholders);
+        }
       }
     }
   }
@@ -4358,8 +4466,20 @@ router.get("/cases/:caseId/documents/checklist", requireAuth, requireFirmUser, r
   const caseType = typeof (context as any).case_type === "string" ? String((context as any).case_type) : null;
   const referenceNo = typeof (context as any).reference_no === "string" ? String((context as any).reference_no) : null;
   const projectName = typeof (context as any).project_name === "string" ? String((context as any).project_name) : null;
-  const purchaser1Name = typeof (context as any).spa_purchaser1_name === "string" ? String((context as any).spa_purchaser1_name) : null;
-  const purchaser1Ic = typeof (context as any).spa_purchaser1_ic === "string" ? String((context as any).spa_purchaser1_ic) : null;
+  const purchaser1Name =
+    typeof (context as any).purchaser_name === "string" && String((context as any).purchaser_name).trim()
+      ? String((context as any).purchaser_name)
+      : typeof (context as any).spa_purchaser1_name === "string" && String((context as any).spa_purchaser1_name).trim()
+        ? String((context as any).spa_purchaser1_name)
+        : null;
+  const purchaser1Ic =
+    typeof (context as any).purchaser_nric === "string" && String((context as any).purchaser_nric).trim()
+      ? String((context as any).purchaser_nric)
+      : typeof (context as any).purchaser_ic === "string" && String((context as any).purchaser_ic).trim()
+        ? String((context as any).purchaser_ic)
+        : typeof (context as any).spa_purchaser1_ic === "string" && String((context as any).spa_purchaser1_ic).trim()
+          ? String((context as any).spa_purchaser1_ic)
+          : null;
   const loanTotal = typeof (context as any).total_loan_raw === "string" ? String((context as any).total_loan_raw) : (typeof (context as any).total_loan === "string" ? String((context as any).total_loan) : null);
   const loanEndFinancier = typeof (context as any).end_financier === "string" ? String((context as any).end_financier) : null;
 
@@ -4487,6 +4607,8 @@ router.get("/cases/:caseId/documents/checklist", requireAuth, requireFirmUser, r
         checkedAt?: string | null;
       }>;
     } | null;
+    dataReadiness?: { status: "ready" | "missing_data" | "unknown"; missing: string[] };
+    debug?: Record<string, unknown>;
     templateId?: number;
     templateVersionId?: number | null;
     objectPathUsed?: string | null;
@@ -4595,7 +4717,12 @@ router.get("/cases/:caseId/documents/checklist", requireAuth, requireFirmUser, r
         developer_name: (context as any).developer_name ?? null,
         bank_name: (context as any).end_financier ?? null,
         has_loan: ((context as any).purchase_mode ?? "").toLowerCase() === "loan",
-        purchaser_count: [1, 2].filter((i) => Boolean((context as any)[`spa_purchaser${i}_name`])).length,
+        purchaser_count: (() => {
+          const ps = Array.isArray((context as any).purchasers) ? ((context as any).purchasers as any[]) : [];
+          const countFromLoop = ps.filter((p) => p && typeof p === "object" && String((p as any).name ?? "").trim()).length;
+          if (countFromLoop > 0) return countFromLoop;
+          return [1, 2].filter((i) => Boolean((context as any)[`spa_purchaser${i}_name`])).length;
+        })(),
         borrower_count: [1, 2].filter((i) => Boolean((context as any)[`borrower${i}_name`])).length,
         has_company_party: Boolean((context as any).spa_purchaser1_is_company || (context as any).spa_purchaser2_is_company || (context as any).borrower1_is_company || (context as any).borrower2_is_company),
       },
@@ -4603,7 +4730,10 @@ router.get("/cases/:caseId/documents/checklist", requireAuth, requireFirmUser, r
       applicabilityRules: (t as any).applicability_rules,
     });
     if (!includeAll && app.applicabilityStatus === "not_applicable") continue;
-    let ready = app.applicabilityStatus === "not_applicable" ? { status: "ready", missing: [] } : evaluateTemplateReadiness({ documentGroup, input: readinessInput });
+    const usedVariableKeys = firmUsedVariableKeysByTemplateId.get(templateId) ?? null;
+    let ready = app.applicabilityStatus === "not_applicable"
+      ? { status: "ready", missing: [] }
+      : evaluateTemplateReadiness({ documentGroup, input: readinessInput, usedVariableKeys });
     if (!isTemplateCapable) {
       ready = { status: "incomplete", missing: [{ code: "template_not_capable", message: "Template is not generation capable" }] };
     } else {
@@ -4650,18 +4780,34 @@ router.get("/cases/:caseId/documents/checklist", requireAuth, requireFirmUser, r
       }
     }
     const checklistKey = `tpl:firm:${templateId}`;
-    const checklistEval = evaluateTemplateChecklist({
+    const checklistItemsRaw = Array.isArray((t as any).checklist_items) ? (t as any).checklist_items : [];
+    const checklistItemsWorkflow = checklistItemsRaw.filter((x: any) => x && typeof x === "object" && (x as any).type !== "required_generated_variable");
+    const checklistItemsData = checklistItemsRaw.filter((x: any) => x && typeof x === "object" && (x as any).type === "required_generated_variable");
+    const checklistEvalWorkflow = evaluateTemplateChecklist({
       checklistMode: (t as any).checklist_mode,
-      checklistItems: (t as any).checklist_items,
+      checklistItems: checklistItemsWorkflow,
       caseContext: context as Record<string, unknown>,
       uploadedDocuments: checklistUploadedDocuments,
       milestones: checklistMilestones,
-      manualConfirmations: buildManualConfirmations(checklistKey, (t as any).checklist_items),
+      manualConfirmations: buildManualConfirmations(checklistKey, checklistItemsRaw),
     });
+    const checklistEvalData = evaluateTemplateChecklist({
+      checklistMode: (t as any).checklist_mode,
+      checklistItems: checklistItemsData,
+      caseContext: context as Record<string, unknown>,
+      usedVariableKeys,
+    });
+    const dataMissingLabels = checklistEvalData.items.filter((x) => !x.passed && x.required).map((x) => String(x.label ?? "").trim()).filter(Boolean);
+    const dataReadiness: { status: "ready" | "missing_data" | "unknown"; missing: string[] } =
+      usedVariableKeys === null
+        ? { status: "unknown", missing: [] as string[] }
+        : dataMissingLabels.length > 0
+          ? { status: "missing_data", missing: dataMissingLabels }
+          : { status: "ready", missing: [] as string[] };
     const { status, blocked, updatedAt, override } = computeStatus({
       checklistKey,
       applicable: app.applicabilityStatus !== "not_applicable",
-      readiness: checklistEval.checklistStatus === "blocked" ? { status: "blocked" } : ready,
+      readiness: checklistEvalWorkflow.checklistStatus === "blocked" ? { status: "blocked" } : ready,
       latestDocument: latestByFirmTemplateId.get(templateId) ?? null,
       baseHasFile: false,
     });
@@ -4707,7 +4853,24 @@ router.get("/cases/:caseId/documents/checklist", requireAuth, requireFirmUser, r
         manuallyOverridable: app.manuallyOverridable,
       },
       readiness: ready,
-      checklistResult: checklistEval,
+      checklistResult: checklistEvalWorkflow,
+      dataReadiness,
+      ...(includeDebug ? {
+        debug: {
+          caseId,
+          templateId,
+          requiredVariables: checklistEvalData.items
+            .filter((x) => x.required)
+            .map((x) => x.source.startsWith("variable.") ? x.source.replace(/^variable\./, "").replace(/\.unused$/, "") : "")
+            .filter(Boolean),
+          resolvedVariableKeys: Object.keys(context).filter((k) => k.startsWith("purchaser") || k.startsWith("__debug_")),
+          missingVariables: dataMissingLabels,
+          purchaserSourceUsed: (context as any).__debug_purchaser_source_used ?? null,
+          purchaserRecordsFound: (context as any).__debug_purchaser_records_found ?? null,
+          primaryPurchaser: (context as any).__debug_primary_purchaser ?? null,
+          usedVariableKeysKnown: usedVariableKeys !== null,
+        },
+      } : {}),
       latestDocument: latestByFirmTemplateId.get(templateId) ?? null,
       completedAt: override?.completed_at ? String(override.completed_at) : null,
       completedBy: override?.completed_by === null ? null : (typeof override?.completed_by === "number" ? Number(override.completed_by) : (override?.completed_by ? Number(override.completed_by) : null)),
@@ -4759,7 +4922,12 @@ router.get("/cases/:caseId/documents/checklist", requireAuth, requireFirmUser, r
         developer_name: (context as any).developer_name ?? null,
         bank_name: (context as any).end_financier ?? null,
         has_loan: ((context as any).purchase_mode ?? "").toLowerCase() === "loan",
-        purchaser_count: [1, 2].filter((i) => Boolean((context as any)[`spa_purchaser${i}_name`])).length,
+        purchaser_count: (() => {
+          const ps = Array.isArray((context as any).purchasers) ? ((context as any).purchasers as any[]) : [];
+          const countFromLoop = ps.filter((p) => p && typeof p === "object" && String((p as any).name ?? "").trim()).length;
+          if (countFromLoop > 0) return countFromLoop;
+          return [1, 2].filter((i) => Boolean((context as any)[`spa_purchaser${i}_name`])).length;
+        })(),
         borrower_count: [1, 2].filter((i) => Boolean((context as any)[`borrower${i}_name`])).length,
         has_company_party: Boolean((context as any).spa_purchaser1_is_company || (context as any).spa_purchaser2_is_company || (context as any).borrower1_is_company || (context as any).borrower2_is_company),
       },
@@ -4767,7 +4935,10 @@ router.get("/cases/:caseId/documents/checklist", requireAuth, requireFirmUser, r
       applicabilityRules: (t as any).applicability_rules,
     });
     if (!includeAll && app.applicabilityStatus === "not_applicable") continue;
-    let ready = app.applicabilityStatus === "not_applicable" ? { status: "ready", missing: [] } : evaluateTemplateReadiness({ documentGroup, input: readinessInput });
+    const usedVariableKeys: string[] | null = null;
+    let ready = app.applicabilityStatus === "not_applicable"
+      ? { status: "ready", missing: [] }
+      : evaluateTemplateReadiness({ documentGroup, input: readinessInput, usedVariableKeys });
     if (!isTemplateCapable) {
       ready = { status: "incomplete", missing: [{ code: "template_not_capable", message: "Template is not generation capable" }] };
     } else {
@@ -4807,18 +4978,29 @@ router.get("/cases/:caseId/documents/checklist", requireAuth, requireFirmUser, r
       }
     }
     const checklistKey = `tpl:master:${templateId}`;
-    const checklistEval = evaluateTemplateChecklist({
+    const checklistItemsRaw = Array.isArray((t as any).checklist_items) ? (t as any).checklist_items : [];
+    const checklistItemsWorkflow = checklistItemsRaw.filter((x: any) => x && typeof x === "object" && (x as any).type !== "required_generated_variable");
+    const checklistItemsData = checklistItemsRaw.filter((x: any) => x && typeof x === "object" && (x as any).type === "required_generated_variable");
+    const checklistEvalWorkflow = evaluateTemplateChecklist({
       checklistMode: (t as any).checklist_mode,
-      checklistItems: (t as any).checklist_items,
+      checklistItems: checklistItemsWorkflow,
       caseContext: context as Record<string, unknown>,
       uploadedDocuments: checklistUploadedDocuments,
       milestones: checklistMilestones,
-      manualConfirmations: buildManualConfirmations(checklistKey, (t as any).checklist_items),
+      manualConfirmations: buildManualConfirmations(checklistKey, checklistItemsRaw),
     });
+    const checklistEvalData = evaluateTemplateChecklist({
+      checklistMode: (t as any).checklist_mode,
+      checklistItems: checklistItemsData,
+      caseContext: context as Record<string, unknown>,
+      usedVariableKeys,
+    });
+    const dataMissingLabels = checklistEvalData.items.filter((x) => !x.passed && x.required).map((x) => String(x.label ?? "").trim()).filter(Boolean);
+    const dataReadiness: { status: "ready" | "missing_data" | "unknown"; missing: string[] } = { status: "unknown", missing: [] as string[] };
     const { status, blocked, updatedAt, override } = computeStatus({
       checklistKey,
       applicable: app.applicabilityStatus !== "not_applicable",
-      readiness: checklistEval.checklistStatus === "blocked" ? { status: "blocked" } : ready,
+      readiness: checklistEvalWorkflow.checklistStatus === "blocked" ? { status: "blocked" } : ready,
       latestDocument: latestByPlatformDocId.get(templateId) ?? null,
       baseHasFile: false,
     });
@@ -4859,7 +5041,24 @@ router.get("/cases/:caseId/documents/checklist", requireAuth, requireFirmUser, r
         manuallyOverridable: app.manuallyOverridable,
       },
       readiness: ready,
-      checklistResult: checklistEval,
+      checklistResult: checklistEvalWorkflow,
+      dataReadiness,
+      ...(includeDebug ? {
+        debug: {
+          caseId,
+          templateId,
+          requiredVariables: checklistEvalData.items
+            .filter((x) => x.required)
+            .map((x) => x.source.startsWith("variable.") ? x.source.replace(/^variable\./, "").replace(/\.unused$/, "") : "")
+            .filter(Boolean),
+          resolvedVariableKeys: Object.keys(context).filter((k) => k.startsWith("purchaser") || k.startsWith("__debug_")),
+          missingVariables: dataMissingLabels,
+          purchaserSourceUsed: (context as any).__debug_purchaser_source_used ?? null,
+          purchaserRecordsFound: (context as any).__debug_purchaser_records_found ?? null,
+          primaryPurchaser: (context as any).__debug_primary_purchaser ?? null,
+          usedVariableKeysKnown: false,
+        },
+      } : {}),
       latestDocument: latestByPlatformDocId.get(templateId) ?? null,
       completedAt: override?.completed_at ? String(override.completed_at) : null,
       completedBy: override?.completed_by === null ? null : (typeof override?.completed_by === "number" ? Number(override.completed_by) : (override?.completed_by ? Number(override.completed_by) : null)),
@@ -6361,8 +6560,20 @@ async function generateFirmDocument({
     caseType: typeof (context as any).case_type === "string" ? String((context as any).case_type) : null,
     referenceNo: typeof (context as any).reference_no === "string" ? String((context as any).reference_no) : null,
     projectName: typeof (context as any).project_name === "string" ? String((context as any).project_name) : null,
-    purchaser1Name: typeof (context as any).spa_purchaser1_name === "string" ? String((context as any).spa_purchaser1_name) : null,
-    purchaser1Ic: typeof (context as any).spa_purchaser1_ic === "string" ? String((context as any).spa_purchaser1_ic) : null,
+    purchaser1Name:
+      typeof (context as any).purchaser_name === "string" && String((context as any).purchaser_name).trim()
+        ? String((context as any).purchaser_name)
+        : typeof (context as any).spa_purchaser1_name === "string" && String((context as any).spa_purchaser1_name).trim()
+          ? String((context as any).spa_purchaser1_name)
+          : null,
+    purchaser1Ic:
+      typeof (context as any).purchaser_nric === "string" && String((context as any).purchaser_nric).trim()
+        ? String((context as any).purchaser_nric)
+        : typeof (context as any).purchaser_ic === "string" && String((context as any).purchaser_ic).trim()
+          ? String((context as any).purchaser_ic)
+          : typeof (context as any).spa_purchaser1_ic === "string" && String((context as any).spa_purchaser1_ic).trim()
+            ? String((context as any).spa_purchaser1_ic)
+            : null,
     loanTotal: typeof (context as any).total_loan_raw === "string" ? String((context as any).total_loan_raw) : null,
     loanEndFinancier: typeof (context as any).end_financier === "string" ? String((context as any).end_financier) : null,
     keyDates,
@@ -6382,6 +6593,7 @@ async function generateFirmDocument({
   const readiness = evaluateTemplateReadiness({
     documentGroup: String((template as any).document_group ?? "Others"),
     input: readinessInput,
+    usedVariableKeys: null,
   });
   if (!forceMode && readiness.status !== "ready") throw new DocumentGenerationError(422, "TEMPLATE_NOT_READY", "Template not ready", { status: readiness.status, missing: readiness.missing });
 
@@ -6467,6 +6679,7 @@ async function generateFirmDocument({
     checklistItems: (template as any).checklist_items,
     caseContext: context as Record<string, unknown>,
     resolvedVariables: input,
+    usedVariableKeys: effectivePlaceholders,
     uploadedDocuments: [],
     milestones: buildChecklistMilestones({ workflowDocs, context }),
     manualConfirmations: {},
@@ -6548,6 +6761,7 @@ async function generateFirmDocument({
       checklistItems: (template as any).checklist_items,
       caseContext: context as Record<string, unknown>,
       resolvedVariables: input,
+      usedVariableKeys: effectivePlaceholders,
       uploadedDocuments: [
         ...caseDocs.map((d) => ({
           fileName: d.file_name ? String(d.file_name) : null,
@@ -6827,8 +7041,20 @@ async function generateMasterDocument({
     caseType: typeof (context as any).case_type === "string" ? String((context as any).case_type) : null,
     referenceNo: typeof (context as any).reference_no === "string" ? String((context as any).reference_no) : null,
     projectName: typeof (context as any).project_name === "string" ? String((context as any).project_name) : null,
-    purchaser1Name: typeof (context as any).spa_purchaser1_name === "string" ? String((context as any).spa_purchaser1_name) : null,
-    purchaser1Ic: typeof (context as any).spa_purchaser1_ic === "string" ? String((context as any).spa_purchaser1_ic) : null,
+    purchaser1Name:
+      typeof (context as any).purchaser_name === "string" && String((context as any).purchaser_name).trim()
+        ? String((context as any).purchaser_name)
+        : typeof (context as any).spa_purchaser1_name === "string" && String((context as any).spa_purchaser1_name).trim()
+          ? String((context as any).spa_purchaser1_name)
+          : null,
+    purchaser1Ic:
+      typeof (context as any).purchaser_nric === "string" && String((context as any).purchaser_nric).trim()
+        ? String((context as any).purchaser_nric)
+        : typeof (context as any).purchaser_ic === "string" && String((context as any).purchaser_ic).trim()
+          ? String((context as any).purchaser_ic)
+          : typeof (context as any).spa_purchaser1_ic === "string" && String((context as any).spa_purchaser1_ic).trim()
+            ? String((context as any).spa_purchaser1_ic)
+            : null,
     loanTotal: typeof (context as any).total_loan_raw === "string" ? String((context as any).total_loan_raw) : null,
     loanEndFinancier: typeof (context as any).end_financier === "string" ? String((context as any).end_financier) : null,
     keyDates,
@@ -6848,6 +7074,7 @@ async function generateMasterDocument({
   const readiness = evaluateTemplateReadiness({
     documentGroup: String((masterDoc as any).document_group ?? (masterDoc as any).category ?? "Others"),
     input: readinessInput,
+    usedVariableKeys: null,
   });
   if (readiness.status !== "ready") throw new DocumentGenerationError(422, "TEMPLATE_NOT_READY", "Template not ready", { status: readiness.status, missing: readiness.missing });
 
@@ -6927,6 +7154,7 @@ async function generateMasterDocument({
     checklistItems: (masterDoc as any).checklist_items,
     caseContext: context as Record<string, unknown>,
     resolvedVariables: renderInput,
+    usedVariableKeys: placeholders,
     uploadedDocuments: [],
     milestones: buildChecklistMilestones({ workflowDocs, context }),
     manualConfirmations: {},
@@ -6963,6 +7191,7 @@ async function generateMasterDocument({
       checklistItems: (masterDoc as any).checklist_items,
       caseContext: context as Record<string, unknown>,
       resolvedVariables: renderInput,
+      usedVariableKeys: placeholders,
       uploadedDocuments: [
         ...caseDocs.map((d) => ({
           fileName: d.file_name ? String(d.file_name) : null,
@@ -7901,19 +8130,100 @@ async function runAutomationPreflight(args: {
   firmId: number;
   caseIds: number[];
   templates: Array<{ id: number; name: string }>;
+  includeDebug?: boolean;
 }): Promise<{
   critical: boolean;
   cases: Array<{ caseId: number; referenceNo: string; parcelNo: string | null; missing: string[]; warnings?: string[] }>;
+  templates: Array<{ templateId: number; templateName: string; fileStatus: string; objectPathUsed: string | null; missing?: string[] }>;
 }> {
   const cache = createRequestCache();
   const templates = args.templates;
   const templateNameTokens = templates.map((t) => String(t.name ?? "").toLowerCase());
   const loanLike = templateNameTokens.some((n) => n.includes("facility") || n.includes("loan") || n.includes("financier") || n.includes("islamic"));
 
+  const templateIds = templates.map((t) => t.id);
+  const publishedByTemplateId = new Map<number, Record<string, unknown>>();
+  const hasVersions = templateIds.length > 0 ? await tableExistsCached(args.r, cache, "public.document_template_versions") : false;
+  if (hasVersions && templateIds.length > 0) {
+    const rows = await queryRowsCached(args.r, cache, `automation_preflight:published_versions:${args.firmId}:${templateIds.join(",")}`, sql`
+      SELECT DISTINCT ON (template_id)
+        template_id, id, source_object_path, filename, status, published_at
+      FROM document_template_versions
+      WHERE firm_id = ${args.firmId}
+        AND template_id IN (${sql.join(templateIds.map((id) => sql`${id}`), sql`, `)})
+        AND status = 'published'
+      ORDER BY template_id, published_at DESC NULLS LAST, id DESC
+    `);
+    for (const row of rows) {
+      const tid = typeof (row as any).template_id === "number" ? Number((row as any).template_id) : Number((row as any).template_id);
+      if (!Number.isFinite(tid)) continue;
+      publishedByTemplateId.set(tid, row as any);
+    }
+  }
+  const templateRows = templateIds.length > 0
+    ? await queryRowsCached(args.r, cache, `automation_preflight:templates:${args.firmId}:${templateIds.join(",")}`, sql`
+      SELECT id, object_path
+      FROM document_templates
+      WHERE firm_id = ${args.firmId}
+        AND id IN (${sql.join(templateIds.map((id) => sql`${id}`), sql`, `)})
+    `)
+    : [];
+  const templatePathById = new Map<number, string>();
+  for (const row of templateRows) {
+    const tid = typeof (row as any).id === "number" ? Number((row as any).id) : Number((row as any).id);
+    if (!Number.isFinite(tid)) continue;
+    templatePathById.set(tid, typeof (row as any).object_path === "string" ? String((row as any).object_path) : "");
+  }
+  const templateReports: Array<{ templateId: number; templateName: string; fileStatus: string; objectPathUsed: string | null; missing?: string[] }> = [];
+  for (const t of templates) {
+    const published = publishedByTemplateId.get(t.id) ?? null;
+    const publishedPathRaw = published && typeof (published as any).source_object_path === "string" ? String((published as any).source_object_path).trim() : "";
+    const templatePathRaw = String(templatePathById.get(t.id) ?? "").trim();
+    const objectPathRaw = publishedPathRaw || templatePathRaw;
+    const objectPathUsed = (() => {
+      if (!objectPathRaw) return "";
+      try {
+        return decodeStoragePath(objectPathRaw);
+      } catch {
+        return "";
+      }
+    })();
+    if (!objectPathUsed) {
+      const status = !published && !templatePathRaw ? "missing_version" : "missing_file";
+      templateReports.push({
+        templateId: t.id,
+        templateName: t.name,
+        fileStatus: status,
+        objectPathUsed: null,
+        missing: ["Template file missing"],
+      });
+      continue;
+    }
+    try {
+      const resp = await supabaseStorage.fetchPrivateObjectResponse(objectPathUsed, { timeoutMs: 1_500 });
+      try {
+        await (resp.body as any)?.cancel?.();
+      } catch {}
+      templateReports.push({ templateId: t.id, templateName: t.name, fileStatus: "ready", objectPathUsed });
+    } catch (err) {
+      const cfgErr = getSupabaseStorageConfigError(err);
+      if (cfgErr) {
+        templateReports.push({ templateId: t.id, templateName: t.name, fileStatus: "storage_unavailable", objectPathUsed, missing: [cfgErr.error] });
+      } else if (err instanceof ObjectNotFoundError) {
+        templateReports.push({ templateId: t.id, templateName: t.name, fileStatus: "missing_file", objectPathUsed, missing: ["Storage object missing"] });
+      } else if (err instanceof StorageRequestTimeoutError) {
+        templateReports.push({ templateId: t.id, templateName: t.name, fileStatus: "storage_unavailable", objectPathUsed, missing: ["Storage request timeout"] });
+      } else {
+        const msg = err instanceof Error ? err.message : String(err);
+        templateReports.push({ templateId: t.id, templateName: t.name, fileStatus: "storage_unavailable", objectPathUsed, missing: [msg || "Storage unavailable"] });
+      }
+    }
+  }
+
   const out: Array<{ caseId: number; referenceNo: string; parcelNo: string | null; missing: string[]; warnings?: string[] }> = [];
 
   for (const caseId of args.caseIds) {
-    const context = await buildCaseContext(args.r, caseId, args.firmId, cache);
+    const context = await buildCaseContext(args.r, caseId, args.firmId, cache, args.includeDebug ? { includeDebug: true } : undefined);
     if (!context) {
       out.push({ caseId, referenceNo: "", parcelNo: null, missing: ["reference_no"] });
       continue;
@@ -7924,11 +8234,6 @@ async function runAutomationPreflight(args: {
 
     const missing = new Set<string>();
     const warnings = new Set<string>();
-    if (isBlankValue((context as any).purchaser_name)) missing.add("purchaser_name");
-    if (isBlankValue((context as any).purchaser_ic)) missing.add("purchaser_ic");
-    const purchaserAddress = String((context as any).purchaser_address ?? "");
-    if (purchaserAddress === "[ADDRESS PENDING]") warnings.add("purchaser_address");
-    if (isBlankValue((context as any).parcel_no)) missing.add("parcel_no");
 
     const missingFromBindings = new Set<string>();
     for (const t of templates) {
@@ -7961,13 +8266,14 @@ async function runAutomationPreflight(args: {
     });
   }
 
-  const critical = out.some((x) => x.missing.length > 0);
-  return { critical, cases: out.filter((x) => x.missing.length > 0 || (x.warnings?.length ?? 0) > 0) };
+  const critical = templateReports.some((t) => t.fileStatus !== "ready") || out.some((x) => x.missing.length > 0);
+  return { critical, cases: out.filter((x) => x.missing.length > 0 || (x.warnings?.length ?? 0) > 0), templates: templateReports };
 }
 
 router.post("/documents/automation/preflight", requireAuth, requireFirmUser, requirePermission("documents", "generate"), async (req: AuthRequest, res): Promise<void> => {
   const r = getRlsDb(req, res);
   if (!r) return;
+  const includeDebug = process.env.API_ERROR_DETAILS === "1" || process.env.NODE_ENV !== "production";
 
   const bodySchema = z.object({
     caseIds: z.array(z.union([z.number(), z.string()])).min(1),
@@ -8021,6 +8327,7 @@ router.post("/documents/automation/preflight", requireAuth, requireFirmUser, req
     firmId: req.firmId!,
     caseIds,
     templates: templateRows.map((t) => ({ id: Number((t as any).id), name: String((t as any).name ?? "") })),
+    includeDebug,
   });
   res.json(report);
 });
@@ -8597,6 +8904,7 @@ async function processAutomationGenerationJobStep(r: DbConn, args: { firmId: num
       });
     }
   } catch (err: unknown) {
+    const allowErrorDetails = process.env.API_ERROR_DETAILS === "1" || process.env.NODE_ENV !== "production";
     const cfgErr = getSupabaseStorageConfigError(err);
     const derived =
       cfgErr
@@ -8608,20 +8916,45 @@ async function processAutomationGenerationJobStep(r: DbConn, args: { firmId: num
             : isDocumentGenerationErrorLike(err)
               ? new DocumentGenerationError(typeof (err as any).statusCode === "number" ? Number((err as any).statusCode) : 500, (err as any).code, (err as any).message, (err as any).payload)
               : new DocumentGenerationError(500, "INTERNAL_ERROR", "Internal Server Error");
-    await finishGenerationRunFailed(r, args.firmId, runId, derived.code, derived.message);
 
     const missingRequiredVariables = derived.code === "TEMPLATE_BINDING_MISSING" ? normalizeMissingRequiredVariables(derived.payload) : [];
+    const mapped = (() => {
+      if (derived.code === "TEMPLATE_OBJECT_NOT_FOUND") {
+        return { code: "TEMPLATE_FILE_MISSING", message: "Template file missing" };
+      }
+      if (derived.code === "TEMPLATE_BINDING_MISSING") {
+        const msg = missingRequiredVariables.length > 0
+          ? `Missing required variables: ${missingRequiredVariables.join(", ")}`
+          : "Missing required variables";
+        return { code: "TEMPLATE_VARIABLES_MISSING", message: msg };
+      }
+      if (derived.code === "TEMPLATE_RENDER_FAILED") {
+        return { code: "DOCX_RENDER_ERROR", message: derived.message };
+      }
+      if (derived.code === "DOCX_TO_PDF_FAILED" || derived.code === "DOCX_TO_PDF_TIMEOUT" || derived.code === "DOCX_TO_PDF_UNAVAILABLE") {
+        return { code: "PDF_CONVERSION_ERROR", message: derived.message };
+      }
+      return { code: derived.code, message: derived.message };
+    })();
+
+    await finishGenerationRunFailed(r, args.firmId, runId, mapped.code, mapped.message);
+
     const diagnostic = {
       ...(derived.payload ?? {}),
       ...(missingRequiredVariables.length ? { missingRequiredVariables } : {}),
+      ...(mapped.code !== derived.code ? { originalErrorCode: derived.code, originalErrorMessage: derived.message } : {}),
+      ...(allowErrorDetails && derived.code === "INTERNAL_ERROR" ? {
+        originalErrorMessage: err instanceof Error ? err.message : String(err ?? ""),
+        ...(err instanceof Error && err.stack ? { originalErrorStack: err.stack } : {}),
+      } : {}),
     };
 
     await queryRows(r, sql`
       UPDATE document_generation_job_items
       SET status = 'failed',
           phase = 'failed',
-          error_code = ${derived.code},
-          error_message = ${derived.message},
+          error_code = ${mapped.code},
+          error_message = ${mapped.message},
           diagnostic = ${diagnostic as unknown},
           finished_at = now()
       WHERE id = ${Number((item as any).id)} AND firm_id = ${args.firmId}
@@ -9899,6 +10232,7 @@ router.post("/cases/:caseId/documents/preview", requireAuth, requireFirmUser, re
           checklistItems: (tpl as any).checklist_items,
           caseContext: context as Record<string, unknown>,
           resolvedVariables: input,
+          usedVariableKeys: placeholders,
           uploadedDocuments: [
             ...caseDocs.map((d) => ({
               fileName: d.file_name ? String(d.file_name) : null,
@@ -10202,6 +10536,7 @@ router.post("/cases/:caseId/documents/preview", requireAuth, requireFirmUser, re
       checklistItems: (doc as any).checklist_items,
       caseContext: context as Record<string, unknown>,
       resolvedVariables: preview.usedMode === "bindings" ? preview.resolvedVariables : (context as Record<string, unknown>),
+      usedVariableKeys: placeholders,
       uploadedDocuments: [
         ...caseDocs.map((d) => ({
           fileName: d.file_name ? String(d.file_name) : null,

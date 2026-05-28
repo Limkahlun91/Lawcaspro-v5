@@ -10,7 +10,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "@/components/ui/resizable";
 import { cn } from "@/lib/utils";
 import { apiFetchJson } from "@/lib/api-client";
-import { downloadGenerationJob, getGenerationJob, type NormalizedGenerationJob } from "@/lib/document-generation-client";
+import { downloadGenerationJob, getGenerationJobStatus, type NormalizedGenerationJob } from "@/lib/document-generation-client";
 import { downloadBlob } from "@/lib/download";
 import { toastError } from "@/lib/toast-error";
 import { useToast } from "@/hooks/use-toast";
@@ -105,6 +105,7 @@ export default function DocumentAutomationHub() {
   const [busy, setBusy] = useState(false);
   const [jobId, setJobId] = useState<string | null>(null);
   const [lastJob, setLastJob] = useState<NormalizedGenerationJob | null>(null);
+  const [preflightReport, setPreflightReport] = useState<any | null>(null);
   const [smartMessage, setSmartMessage] = useState<string | null>(null);
   const [smartTemplateIdSet, setSmartTemplateIdSet] = useState<Set<number>>(() => new Set());
   const [smartFolderIdSet, setSmartFolderIdSet] = useState<Set<number>>(() => new Set());
@@ -211,12 +212,13 @@ export default function DocumentAutomationHub() {
 
   const jobQuery = useQuery({
     queryKey: ["jobStatus", jobId],
-    queryFn: () => getGenerationJob(String(jobId)),
+    queryFn: () => getGenerationJobStatus(String(jobId)),
     enabled: Boolean(jobId),
     refetchInterval: (query) => {
+      if (query.state.status === "error") return false;
       const data = query.state.data as any;
       const st = String(data?.status ?? "");
-      if (st === "completed" || st === "failed") return false;
+      if (st === "completed" || st === "failed" || st === "done" || st === "completed_with_errors" || st === "completed-with-errors") return false;
       return 1000;
     },
     retry: false,
@@ -229,13 +231,27 @@ export default function DocumentAutomationHub() {
 
   useEffect(() => {
     if (!jobId) return;
+    if (!jobQuery.isError) return;
+    toastError(toast, jobQuery.error, "Job status unavailable");
+    setJobId(null);
+    setBusy(false);
+  }, [jobId, jobQuery.isError, jobQuery.error, toast]);
+
+  useEffect(() => {
+    if (!jobId) return;
     const job: any = jobQuery.data as any;
     if (!job) return;
     setLastJob(job);
 
     const handleKey = `${jobId}:${jobStatus}`;
-    if ((jobStatus === "completed" || jobStatus === "failed") && handledJobKeyRef.current === handleKey) return;
-    if (jobStatus === "completed" || jobStatus === "failed") handledJobKeyRef.current = handleKey;
+    const terminal =
+      jobStatus === "completed" ||
+      jobStatus === "failed" ||
+      jobStatus === "done" ||
+      jobStatus === "completed_with_errors" ||
+      jobStatus === "completed-with-errors";
+    if (terminal && handledJobKeyRef.current === handleKey) return;
+    if (terminal) handledJobKeyRef.current = handleKey;
 
     if (jobStatus === "failed") {
       const summary = safeText(job?.errorSummary) || "Document generation failed";
@@ -249,13 +265,16 @@ export default function DocumentAutomationHub() {
       setBusy(false);
       return;
     }
-    if (jobStatus !== "completed") return;
+    if (!terminal) return;
 
     const failed = Array.isArray(job?.items) ? job.items.filter((it: any) => String(it?.status ?? "") === "failed") : [];
     if (failed.length > 0) toast({ title: "Some documents failed", description: "Please check the job details panel for diagnostics." });
 
     const doDownload = async () => {
       const url = apiUrl(`/api/documents/jobs/${jobId}/download`);
+      if (!safeText(job?.downloadObjectPath) && !jobDownloadFileName) {
+        throw new Error("No downloadable output was generated.");
+      }
       if (activeMode === "print") {
         window.open(url, "_blank", "noopener,noreferrer");
         toast({ title: "Printable PDF generated" });
@@ -480,8 +499,20 @@ export default function DocumentAutomationHub() {
     }
 
     setBusy(true);
+    setPreflightReport(null);
     let startedJob = false;
     try {
+      const preflight = await apiFetchJson<any>("/documents/automation/preflight", {
+        method: "POST",
+        body: JSON.stringify({ caseIds: selectedCaseIds, templateIds: selectedTemplateIds }),
+        timeoutMs: 60000,
+      });
+      if (preflight?.critical) {
+        setPreflightReport(preflight);
+        toast({ title: "Preflight failed", description: "Fix missing template files or required data before generating.", variant: "destructive" });
+        return;
+      }
+
       const duplexSettings =
         mode === "print"
           ? duplexMode === "custom"
@@ -876,6 +907,30 @@ export default function DocumentAutomationHub() {
                       </Button>
                     </TabsContent>
                   </Tabs>
+
+                  {preflightReport && (
+                    <div className="rounded-md border border-amber-200 bg-amber-50 p-3">
+                      <div className="text-sm font-semibold text-amber-900">Preflight Issues</div>
+                      <div className="mt-1 text-xs text-amber-800">Resolve these before running Generate &amp; Download.</div>
+                      <div className="mt-2 space-y-2">
+                        {(Array.isArray(preflightReport?.templates) ? preflightReport.templates : [])
+                          .filter((t: any) => String(t?.fileStatus ?? "") !== "ready")
+                          .slice(0, 50)
+                          .map((t: any, idx: number) => (
+                            <div key={`${t?.templateId ?? idx}`} className="text-xs text-amber-900 break-words">
+                              {safeText(t?.templateName) || `Template #${String(t?.templateId ?? "")}`} — {safeText(t?.fileStatus) || "missing_file"} — {(Array.isArray(t?.missing) ? t.missing : []).join(", ") || "Template file missing"}
+                            </div>
+                          ))}
+                        {(Array.isArray(preflightReport?.cases) ? preflightReport.cases : [])
+                          .slice(0, 50)
+                          .map((c: any, idx: number) => (
+                            <div key={`${c?.caseId ?? idx}`} className="text-xs text-amber-900 break-words">
+                              {safeText(c?.referenceNo) || `Case #${String(c?.caseId ?? "")}`} — Missing: {(Array.isArray(c?.missing) ? c.missing : []).join(", ") || "Required data"}
+                            </div>
+                          ))}
+                      </div>
+                    </div>
+                  )}
 
                   {jobForDisplay && (
                     <div className="rounded-md border border-slate-200 bg-white p-3">
