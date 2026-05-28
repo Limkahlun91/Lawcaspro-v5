@@ -6,7 +6,7 @@ const dirname = path.dirname(fileURLToPath(import.meta.url));
 
 export default defineConfig({
   test: {
-    environment: "node",
+    environment: "jsdom",
   },
   resolve: {
     alias: {
@@ -14,4 +14,3 @@ export default defineConfig({
     },
   },
 });
-

@@ -30,6 +30,7 @@ import { getGetCaseWorkflowQueryKey, getListCasesQueryKey } from "@workspace/api
 import { validateUploadFile } from "@/lib/upload-validation";
 import { TemplateFolderPicker, type TemplateFolderPickerFolder, type TemplateFolderPickerTemplate } from "@/components/documents/TemplateFolderPicker";
 import { createGenerationJob, getGenerationJob, type NormalizedGenerationJob } from "@/lib/document-generation-client";
+import { blocksTemplateGenerate, isTemplateFileReadinessKnown, isTemplateFileReady, templateFileReadinessLabel } from "@/lib/template-readiness";
 
 function docTypeLabel(dt: string): string {
   return (DOCUMENT_TYPE_LABELS as Record<string, string>)[dt] ?? dt;
@@ -1733,28 +1734,37 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
                             const checklistOverridable = Boolean(it.checklistResult?.checklistStatus === "blocked" && it.checklistResult?.manuallyOverridable && canBypassApplicability && showAllTemplates);
                             const checklistAllowed = !it.checklistResult || it.checklistResult.checklistStatus !== "blocked" || checklistOverridable;
                             const applicable = (it.applicability?.status !== "not_applicable" || overridable) && checklistAllowed;
-                            const ready = it.readiness?.status === "ready";
+                            const readinessStatus = (it.readiness as any)?.status;
+                            const readinessKnown = isTemplateFileReadinessKnown(readinessStatus);
+                            const ready = isTemplateFileReady(readinessStatus);
+                            const fileStatusLabel = templateFileReadinessLabel(readinessStatus);
                             const reason = !applicable
                               ? (it.applicability?.reasons ?? []).join(", ")
-                              : !ready
-                                ? (it.readiness?.missing ?? []).map((m) => m.message).filter(Boolean).slice(0, 3).join(", ")
+                              : !readinessKnown
+                                ? "Checking template file..."
+                                : !ready
+                                  ? (it.readiness?.missing ?? []).map((m) => m.message).filter(Boolean).slice(0, 3).join(", ")
                                 : "";
                             const statusLabel =
                               it.applicability?.status === "warning"
                                 ? "Warning"
                                 : !applicable
                                   ? "Blocked"
-                                  : ready
-                                    ? "Ready"
-                                    : "Incomplete";
+                                  : !readinessKnown
+                                    ? "Checking..."
+                                    : ready
+                                      ? "Ready"
+                                      : fileStatusLabel;
                             const statusDotClass =
                               it.applicability?.status === "warning"
                                 ? "bg-sky-600"
                                 : !applicable
                                   ? "bg-rose-600"
-                                  : ready
-                                    ? "bg-emerald-600"
-                                    : "bg-slate-400";
+                                  : !readinessKnown
+                                    ? "bg-slate-400"
+                                    : ready
+                                      ? "bg-emerald-600"
+                                      : "bg-slate-400";
                             return (
                               <div key={`${it.source}-${it.templateId}`} className="px-3 py-2">
                                 <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_minmax(0,320px)_auto] items-start lg:items-center gap-2 lg:gap-3">
@@ -1773,7 +1783,7 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
                                     {reason ? <div className="mt-1 text-xs text-slate-600 truncate" title={reason}>{reason}</div> : null}
                                   </div>
                                   <div className="flex items-center gap-2 justify-start lg:justify-end flex-wrap">
-                                    <Button size="sm" onClick={() => generateAndDownloadBlind(it)} disabled={!canGenerate || isGenerating || it.source !== "firm" || oneClickGeneratingTemplateId === it.templateId}>
+                                    <Button size="sm" onClick={() => generateAndDownloadBlind(it)} disabled={!canGenerate || isGenerating || it.source !== "firm" || oneClickGeneratingTemplateId === it.templateId || blocksTemplateGenerate(readinessStatus)}>
                                       {oneClickGeneratingTemplateId === it.templateId ? "Generating..." : "Generate Final"}
                                     </Button>
                                   </div>

@@ -33,6 +33,199 @@ type RouterInternalLike = {
 const expressRouter = express.Router();
 const router = expressRouter as unknown as RouterInternalLike;
 
+function buildDashboardDegradedPayload(error?: unknown): Record<string, unknown> {
+  const base = {
+    ok: false,
+    degraded: true,
+    error: "Dashboard partially unavailable",
+    stats: {
+      totalCases: 0,
+      activeCases: 0,
+      completedCases: 0,
+      totalClients: 0,
+      totalDevelopers: 0,
+      totalProjects: 0,
+      totalOutstanding: 0,
+      pendingMilestones: [],
+      milestoneSections: [],
+      recentCases: [],
+      alerts: [],
+      charts: {},
+    },
+    dashboard: {
+      totalCases: 0,
+      activeCases: 0,
+      completedCases: 0,
+      totalClients: 0,
+      totalDevelopers: 0,
+      totalProjects: 0,
+      milestoneSections: [],
+      recentCases: [],
+      alerts: [],
+    },
+  } as Record<string, unknown>;
+  return base;
+}
+
+router.get("/debug/dashboard", requireAuth, requireFirmUser, async (req: AuthRequest, res: Response): Promise<void> => {
+  const allowDetails =
+    process.env.API_ERROR_DETAILS === "1" ||
+    process.env.NODE_ENV !== "production" ||
+    Boolean((res as any)?.locals?.allowErrorDetails) ||
+    (() => {
+      const headerToken = one(req.headers["x-debug-token"] as any);
+      const expected = process.env.API_DEBUG_TOKEN;
+      if (!expected) return false;
+      return Boolean(headerToken && headerToken === expected);
+    })();
+
+  const firmId = req.firmId!;
+  const r = rdb(req);
+
+  const roleName = await (async () => {
+    const roleId = typeof req.roleId === "number" ? req.roleId : null;
+    if (!roleId) return null;
+    try {
+      const rows = await queryRows(r, sql`SELECT name FROM roles WHERE firm_id = ${firmId} AND id = ${roleId} LIMIT 1`);
+      const n = rows[0] && typeof (rows[0] as any).name === "string" ? String((rows[0] as any).name) : null;
+      return n;
+    } catch {
+      return null;
+    }
+  })();
+
+  const isPartner = Boolean(roleName && roleName.toLowerCase().includes("partner"));
+  if (!allowDetails && !isPartner) {
+    res.status(403).json({ error: "Access denied" });
+    return;
+  }
+
+  const checkTable = async (reg: string) => {
+    try {
+      const exists = await tableExists(r, reg);
+      return { reg, ok: true, exists };
+    } catch (err) {
+      return {
+        reg,
+        ok: false,
+        exists: false,
+        code: getPgCode(err),
+        message: err instanceof Error ? err.message : String(err),
+      };
+    }
+  };
+
+  const tableChecks = await Promise.all([
+    checkTable("public.firm_dashboard_stats_cache"),
+    checkTable("public.cases"),
+    checkTable("public.clients"),
+    checkTable("public.projects"),
+    checkTable("public.developers"),
+    checkTable("public.case_key_dates"),
+    checkTable("public.case_workflow_steps"),
+  ]);
+
+  const hasCache = Boolean(tableChecks.find((x) => x.reg === "public.firm_dashboard_stats_cache")?.exists);
+  const hasCases = Boolean(tableChecks.find((x) => x.reg === "public.cases")?.exists);
+  const hasWorkflow = Boolean(tableChecks.find((x) => x.reg === "public.case_workflow_steps")?.exists);
+
+  const countsProbe = await (async () => {
+    if (!hasCases) return { ok: false, reason: "cases_missing" };
+    try {
+      const rows = await queryRows(r, sql`SELECT COUNT(*)::int AS total_cases FROM cases WHERE firm_id = ${firmId} AND deleted_at IS NULL`);
+      return { ok: true, totalCases: Number((rows[0] as any)?.total_cases ?? 0) };
+    } catch (err) {
+      return { ok: false, code: getPgCode(err), message: err instanceof Error ? err.message : String(err) };
+    }
+  })();
+
+  const milestonesProbe = await (async () => {
+    if (!hasWorkflow) return { ok: false, reason: "case_workflow_steps_missing" };
+    try {
+      const rows = await queryRows(r, sql`
+        SELECT COUNT(DISTINCT ws.case_id)::int AS completed_spa_stamped
+        FROM case_workflow_steps ws
+        JOIN cases c ON c.id = ws.case_id AND c.firm_id = ws.firm_id
+        WHERE ws.firm_id = ${firmId}
+          AND c.deleted_at IS NULL
+          AND ws.step_key = 'spa_stamped'
+          AND ws.status = 'completed'
+      `);
+      return { ok: true, completedSpaStamped: Number((rows[0] as any)?.completed_spa_stamped ?? 0) };
+    } catch (err) {
+      return { ok: false, code: getPgCode(err), message: err instanceof Error ? err.message : String(err) };
+    }
+  })();
+
+  const recentCasesProbe = await (async () => {
+    if (!hasCases) return { ok: false, reason: "cases_missing" };
+    try {
+      const rows = await queryRows(r, sql`
+        SELECT id, reference_no, updated_at
+        FROM cases
+        WHERE firm_id = ${firmId} AND deleted_at IS NULL
+        ORDER BY updated_at DESC
+        LIMIT 1
+      `);
+      return { ok: true, row: rows[0] ?? null };
+    } catch (err) {
+      return { ok: false, code: getPgCode(err), message: err instanceof Error ? err.message : String(err) };
+    }
+  })();
+
+  const cacheReadProbe = await (async () => {
+    if (!hasCache) return { ok: false, reason: "cache_missing" };
+    try {
+      await queryRows(r, sql`SELECT 1 FROM firm_dashboard_stats_cache WHERE firm_id = ${firmId} LIMIT 1`);
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, code: getPgCode(err), message: err instanceof Error ? err.message : String(err) };
+    }
+  })();
+
+  const cacheWriteProbe = await (async () => {
+    if (!hasCache) return { ok: false, reason: "cache_missing" };
+    if (!allowDetails) return { ok: false, reason: "write_probe_requires_debug" };
+    try {
+      await queryRows(r, sql`
+        INSERT INTO firm_dashboard_stats_cache (firm_id, payload_json, computed_at, expires_at)
+        VALUES (${firmId}, ${({}) as any}::jsonb, now(), now())
+        ON CONFLICT (firm_id) DO UPDATE SET payload_json = EXCLUDED.payload_json, computed_at = EXCLUDED.computed_at, expires_at = EXCLUDED.expires_at
+      `);
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, code: getPgCode(err), message: err instanceof Error ? err.message : String(err) };
+    }
+  })();
+
+  const computeProbe = await (async () => {
+    try {
+      const payload = await computeDashboardStats(r, firmId);
+      return { ok: true, keys: Object.keys(payload ?? {}) };
+    } catch (err) {
+      return { ok: false, code: getPgCode(err), message: err instanceof Error ? err.message : String(err), stack: allowDetails && err instanceof Error ? err.stack : undefined };
+    }
+  })();
+
+  res.json({
+    ok: true,
+    firmId,
+    userId: req.userId ?? null,
+    roleId: req.roleId ?? null,
+    roleName,
+    allowDetails,
+    tableChecks,
+    probes: {
+      counts: countsProbe,
+      milestones: milestonesProbe,
+      recentCases: recentCasesProbe,
+      cacheRead: cacheReadProbe,
+      cacheWrite: cacheWriteProbe,
+      computeDashboardStats: computeProbe,
+    },
+  });
+});
+
 router.get("/dashboard", requireAuth, requireFirmUser, requirePermission("dashboard", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
   const allowDetails =
     process.env.API_ERROR_DETAILS === "1" ||
@@ -137,14 +330,15 @@ router.get("/dashboard", requireAuth, requireFirmUser, requirePermission("dashbo
         : { err, path: req.path, firmId: req.firmId, userId: req.userId },
       "[dashboard]",
     );
+    const payload = buildDashboardDegradedPayload(allowDetails ? err : undefined);
     if (allowDetails) {
-      const details = err instanceof Error ? err.message : String(err);
-      const stack = err instanceof Error ? err.stack : undefined;
-      const code = getPgCode(err);
-      res.status(500).json({ error: "Dashboard unavailable", details, code, stack });
-      return;
+      (payload as any).debug = {
+        message: err instanceof Error ? err.message : String(err),
+        stack: err instanceof Error ? err.stack : undefined,
+        code: getPgCode(err),
+      };
     }
-    res.status(500).json({ error: "Dashboard unavailable" });
+    res.status(200).json(payload);
     return;
   }
 });

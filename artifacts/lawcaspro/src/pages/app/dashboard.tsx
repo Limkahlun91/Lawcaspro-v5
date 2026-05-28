@@ -80,9 +80,13 @@ export default function AppDashboard() {
     );
   }
 
+  const degraded = Boolean((stats as any)?.degraded) || Boolean((stats as any)?.ok === false);
+  const dashboard = ((stats as any)?.dashboard && typeof (stats as any).dashboard === "object" ? (stats as any).dashboard : null) as Record<string, any> | null;
+  const resolvedStats = (dashboard ?? stats) as Record<string, any>;
+
   const canSeeAccounting = !!user && hasPermission(user, "accounting", "read") && isAccountingRoleAllowed(user.roleName);
-  const billing = (stats.billing ?? {}) as Record<string, number>;
-  const outstandingAdvances = (stats.outstandingAdvances ?? {}) as Record<string, any>;
+  const billing = (resolvedStats.billing ?? {}) as Record<string, number>;
+  const outstandingAdvances = (resolvedStats.outstandingAdvances ?? {}) as Record<string, any>;
   type MilestoneCard = {
     key: string;
     label: string;
@@ -91,12 +95,12 @@ export default function AppDashboard() {
     doneCount?: number;
     filter: { milestone?: string; milestonePresence?: string; purchaseMode?: string; titleType?: string };
   };
-  const milestoneCards: MilestoneCard[] = Array.isArray((stats as Record<string, any>).milestoneCards)
-    ? ((stats as Record<string, any>).milestoneCards as MilestoneCard[])
+  const milestoneCards: MilestoneCard[] = Array.isArray((resolvedStats as Record<string, any>).milestoneCards)
+    ? ((resolvedStats as Record<string, any>).milestoneCards as MilestoneCard[])
     : [];
   type MilestoneSection = { key: string; label: string; total: number; cards: MilestoneCard[] };
-  const milestoneSections: MilestoneSection[] = Array.isArray((stats as Record<string, any>).milestoneSections)
-    ? ((stats as Record<string, any>).milestoneSections as MilestoneSection[])
+  const milestoneSections: MilestoneSection[] = Array.isArray((resolvedStats as Record<string, any>).milestoneSections)
+    ? ((resolvedStats as Record<string, any>).milestoneSections as MilestoneSection[])
     : [];
 
   return (
@@ -106,20 +110,26 @@ export default function AppDashboard() {
         <p className="text-slate-500 mt-1">Overview of your firm's operations</p>
       </div>
 
+      {degraded ? (
+        <div className="rounded-md border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+          Dashboard partially unavailable
+        </div>
+      ) : null}
+
       {/* Primary stat cards */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
         {[
           {
             label: "Total Cases",
-            value: stats.totalCases,
-            sub: `${stats.activeCases} active · ${stats.completedCases} completed`,
+            value: resolvedStats.totalCases ?? 0,
+            sub: `${resolvedStats.activeCases ?? 0} active · ${resolvedStats.completedCases ?? 0} completed`,
             icon: Briefcase,
             color: "bg-amber-50 text-amber-600",
             href: "/app/cases",
           },
           {
             label: "Clients",
-            value: stats.totalClients,
+            value: resolvedStats.totalClients ?? 0,
             sub: null,
             icon: Users,
             color: "bg-blue-50 text-blue-600",
@@ -127,7 +137,7 @@ export default function AppDashboard() {
           },
           {
             label: "Projects",
-            value: stats.totalProjects,
+            value: resolvedStats.totalProjects ?? 0,
             sub: null,
             icon: Building2,
             color: "bg-green-50 text-green-600",
@@ -135,7 +145,7 @@ export default function AppDashboard() {
           },
           {
             label: "Developers",
-            value: stats.totalDevelopers,
+            value: resolvedStats.totalDevelopers ?? 0,
             sub: null,
             icon: HardHat,
             color: "bg-slate-100 text-slate-600",
@@ -234,7 +244,7 @@ export default function AppDashboard() {
               </div>
               <div>
                 <div className="text-xs text-slate-500">Comms This Month</div>
-                <div className="text-xl font-bold text-slate-900">{stats.commsThisMonth ?? 0}</div>
+                <div className="text-xl font-bold text-slate-900">{resolvedStats.commsThisMonth ?? 0}</div>
               </div>
             </div>
           </CardContent>
@@ -242,17 +252,17 @@ export default function AppDashboard() {
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-        {Array.isArray((stats as any).completionSlaOverdue) && (stats as any).completionSlaOverdue.length > 0 ? (
+        {Array.isArray((resolvedStats as any).completionSlaOverdue) && (resolvedStats as any).completionSlaOverdue.length > 0 ? (
           <Card className="md:col-span-2 border-red-200 bg-red-50/40">
             <CardHeader className="pb-3">
               <CardTitle className="text-red-700">Completion SLA Overdue</CardTitle>
             </CardHeader>
             <CardContent>
               <div className="text-sm text-red-700">
-                {(stats as any).completionSlaOverdue.length} case(s) overdue for Advice on.
+                {(resolvedStats as any).completionSlaOverdue.length} case(s) overdue for Advice on.
               </div>
               <div className="mt-3 space-y-2">
-                {(stats as any).completionSlaOverdue.slice(0, 5).map((c: any) => (
+                {(resolvedStats as any).completionSlaOverdue.slice(0, 5).map((c: any) => (
                   <div key={String(c.caseId)} className="flex items-center justify-between gap-3">
                     <button
                       className="text-sm font-semibold text-red-700 hover:text-red-800 truncate"
@@ -278,8 +288,8 @@ export default function AppDashboard() {
             <div className="space-y-1">
               <div className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">By Financing</div>
               {[
-                { label: "Cash Purchases", value: stats.cashCases, total: stats.totalCases, color: "bg-amber-400" },
-                { label: "Loan Purchases", value: stats.loanCases, total: stats.totalCases, color: "bg-blue-400" },
+                { label: "Cash Purchases", value: resolvedStats.cashCases ?? 0, total: resolvedStats.totalCases ?? 0, color: "bg-amber-400" },
+                { label: "Loan Purchases", value: resolvedStats.loanCases ?? 0, total: resolvedStats.totalCases ?? 0, color: "bg-blue-400" },
               ].map((item) => (
                 <div key={item.label} className="flex items-center gap-3">
                   <div className="text-sm text-slate-600 w-36">{item.label}</div>
@@ -291,14 +301,14 @@ export default function AppDashboard() {
               ))}
               <div className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2 mt-4">By Title Type</div>
               {[
-                { label: "Master Title", value: stats.masterTitleCases, color: "bg-purple-400" },
-                { label: "Individual Title", value: stats.individualTitleCases, color: "bg-green-400" },
-                { label: "Strata Title", value: stats.strataTitleCases, color: "bg-teal-400" },
+                { label: "Master Title", value: resolvedStats.masterTitleCases ?? 0, color: "bg-purple-400" },
+                { label: "Individual Title", value: resolvedStats.individualTitleCases ?? 0, color: "bg-green-400" },
+                { label: "Strata Title", value: resolvedStats.strataTitleCases ?? 0, color: "bg-teal-400" },
               ].map((item) => (
                 <div key={item.label} className="flex items-center gap-3">
                   <div className="text-sm text-slate-600 w-36">{item.label}</div>
                   <div className="flex-1 h-1.5 bg-slate-100 rounded-full overflow-hidden">
-                    <div className={`h-full rounded-full ${item.color}`} style={{ width: `${stats.totalCases ? (item.value / stats.totalCases) * 100 : 0}%` }} />
+                    <div className={`h-full rounded-full ${item.color}`} style={{ width: `${resolvedStats.totalCases ? (item.value / resolvedStats.totalCases) * 100 : 0}%` }} />
                   </div>
                   <div className="text-sm font-semibold text-slate-700 w-6 text-right">{item.value}</div>
                 </div>
@@ -320,7 +330,7 @@ export default function AppDashboard() {
           </CardHeader>
           <CardContent>
             <div className="divide-y divide-slate-50">
-              {(stats.recentCases ?? []).map((c: Record<string, any>) => (
+              {(resolvedStats.recentCases ?? []).map((c: Record<string, any>) => (
                 <div
                   key={String(c.id)}
                   className="py-3 flex items-start justify-between gap-2 cursor-pointer hover:bg-slate-50 -mx-2 px-2 rounded"
@@ -354,7 +364,7 @@ export default function AppDashboard() {
                   </div>
                 </div>
               ))}
-              {!(stats.recentCases?.length) && (
+              {!(resolvedStats.recentCases?.length) && (
                 <div className="text-sm text-slate-400 italic py-4 text-center">No cases yet</div>
               )}
             </div>

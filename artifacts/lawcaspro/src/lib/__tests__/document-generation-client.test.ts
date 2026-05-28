@@ -65,5 +65,34 @@ describe("normalizeGenerationJob", () => {
     expect(out.downloadObjectPath).toBe("/objects/x.zip");
     expect(out.items[0]?.objectPath).toBe("/objects/a.pdf");
   });
-});
 
+  it("preserves TEMPLATE_FILE_MISSING and template_name", () => {
+    const raw = {
+      job: {
+        id: "33333333-3333-3333-3333-333333333333",
+        status: "failed",
+        action: "download",
+        success_count: 0,
+        failed_count: 1,
+        pending_count: 0,
+        total_count: 1,
+        error_summary: "Generation failed",
+      },
+      items: [
+        {
+          id: 3,
+          job_id: "33333333-3333-3333-3333-333333333333",
+          case_id: 11,
+          template_id: 22,
+          template_name: "Acting Letter",
+          status: "failed",
+          error_code: "TEMPLATE_FILE_MISSING",
+          error_message: "Template file missing",
+        },
+      ],
+    };
+    const out = normalizeGenerationJob(raw);
+    expect(out.items[0]?.errorCode).toBe("TEMPLATE_FILE_MISSING");
+    expect(out.items[0]?.templateName).toBe("Acting Letter");
+  });
+});

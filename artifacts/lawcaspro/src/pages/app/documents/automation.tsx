@@ -173,6 +173,14 @@ export default function DocumentAutomationHub() {
     return m;
   }, [templates]);
 
+  const templateNameById = useMemo(() => {
+    const m = new Map<number, string>();
+    for (const t of templates) {
+      if (typeof t.id === "number") m.set(t.id, String(t.name ?? ""));
+    }
+    return m;
+  }, [templates]);
+
   const selectedCaseIdSet = useMemo(() => new Set(selectedCaseIds), [selectedCaseIds]);
   const selectedTemplateIdSet = useMemo(() => new Set(selectedTemplateIds), [selectedTemplateIds]);
 
@@ -230,8 +238,13 @@ export default function DocumentAutomationHub() {
     if (jobStatus === "completed" || jobStatus === "failed") handledJobKeyRef.current = handleKey;
 
     if (jobStatus === "failed") {
-      const msg = safeText(job?.errorSummary) || "Document generation failed";
-      toast({ title: "Generation failed", description: msg, variant: "destructive" });
+      const summary = safeText(job?.errorSummary) || "Document generation failed";
+      const firstFailed = Array.isArray(job?.items) ? job.items.find((it: any) => String(it?.status ?? "") === "failed") : null;
+      const code = safeText(firstFailed?.errorCode);
+      const msg = safeText(firstFailed?.errorMessage);
+      const tplName = safeText(firstFailed?.templateName) || (typeof firstFailed?.templateId === "number" ? (templateNameById.get(firstFailed.templateId) ?? "") : "");
+      const detail = [tplName, code, msg].filter(Boolean).join(" — ");
+      toast({ title: "Generation failed", description: detail ? `${summary}: ${detail}` : summary, variant: "destructive" });
       setJobId(null);
       setBusy(false);
       return;
@@ -900,11 +913,14 @@ export default function DocumentAutomationHub() {
                               const missingList = Array.isArray(missing)
                                 ? missing.map((x) => (typeof x === "string" ? x : null)).filter((x): x is string => Boolean(x))
                                 : [];
+                              const tplName = safeText((it as any).templateName) || (typeof it.templateId === "number" ? (templateNameById.get(it.templateId) ?? "") : "");
                               return (
                                 <div key={`${it.id ?? idx}`} className="rounded border border-slate-200 bg-slate-50 px-2 py-1">
                                   <div className="text-xs text-slate-800">
-                                    <span className="font-medium">{it.errorCode || "FAILED"}</span>
-                                    {it.errorMessage ? ` · ${it.errorMessage}` : ""}
+                                    <span className="font-medium">
+                                      {[tplName, it.errorCode || "FAILED"].filter(Boolean).join(" — ")}
+                                    </span>
+                                    {it.errorMessage ? ` — ${it.errorMessage}` : ""}
                                   </div>
                                   {missingList.length > 0 && (
                                     <div className="mt-1 text-[11px] text-slate-600">

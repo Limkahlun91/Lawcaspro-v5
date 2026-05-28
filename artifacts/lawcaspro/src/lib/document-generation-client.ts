@@ -29,6 +29,7 @@ export type NormalizedGenerationJobItem = {
   jobId?: string;
   caseId?: number;
   templateId?: number;
+  templateName?: string | null;
   status: string;
   objectPath?: string | null;
   fileName?: string | null;
@@ -110,6 +111,7 @@ export function normalizeGenerationJobItem(raw: unknown): NormalizedGenerationJo
     jobId: asString(r.jobId ?? r.job_id) ?? undefined,
     caseId: asNumber(r.caseId ?? r.case_id) ?? undefined,
     templateId: asNumber(r.templateId ?? r.template_id) ?? undefined,
+    templateName: asString((r as any).templateName ?? (r as any).template_name) ?? null,
     status: asString(r.status) ?? "",
     objectPath: asString(r.objectPath ?? r.object_path) ?? null,
     fileName: asString(r.fileName ?? r.file_name) ?? null,

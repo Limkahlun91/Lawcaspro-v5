@@ -4625,7 +4625,7 @@ router.get("/cases/:caseId/documents/checklist", requireAuth, requireFirmUser, r
           status,
           missing: [{ code: status === "missing_version" ? "missing_published_version" : "template_file_missing", message: "Template file missing" }],
         };
-      } else if (!includeAll && ready.status === "ready" && app.applicabilityStatus !== "not_applicable") {
+      } else if (ready.status === "ready") {
         try {
           const resp = await supabaseStorage.fetchPrivateObjectResponse(objectPath, { timeoutMs: 1_500 });
           try {
@@ -4782,7 +4782,7 @@ router.get("/cases/:caseId/documents/checklist", requireAuth, requireFirmUser, r
       })();
       if (!objectPath) {
         ready = { status: "missing_file", missing: [{ code: "template_file_missing", message: "Template file missing" }] };
-      } else if (!includeAll && ready.status === "ready" && app.applicabilityStatus !== "not_applicable") {
+      } else if (ready.status === "ready") {
         try {
           const resp = await supabaseStorage.fetchPrivateObjectResponse(objectPath, { timeoutMs: 1_500 });
           try {
@@ -5855,7 +5855,12 @@ function startCaseDocumentRunRunner(r: DbConn, args: { firmId: number; runId: nu
           await finishGenerationRunFailed(r, args.firmId, args.runId, "TEMPLATE_FILE_NOT_FOUND", "Template file not found");
           return;
         }
-        const e = err instanceof DocumentGenerationError ? err : new DocumentGenerationError(500, "INTERNAL_ERROR", "Internal Server Error");
+        const e =
+          err instanceof DocumentGenerationError
+            ? err
+            : isDocumentGenerationErrorLike(err)
+              ? new DocumentGenerationError(typeof (err as any).statusCode === "number" ? Number((err as any).statusCode) : 500, (err as any).code, (err as any).message, (err as any).payload)
+              : new DocumentGenerationError(500, "INTERNAL_ERROR", "Internal Server Error");
         await finishGenerationRunFailed(r, args.firmId, args.runId, e.code, e.message);
       }
     } catch {
@@ -8030,6 +8035,12 @@ function touchActiveRunnerHeartbeat(args: { firmId: number; jobId: string }): vo
   if (meta) meta.lastHeartbeatAt = Date.now();
 }
 
+function isDocumentGenerationErrorLike(v: unknown): v is { code: string; message: string; statusCode?: number; payload?: unknown } {
+  if (!v || typeof v !== "object") return false;
+  const obj = v as any;
+  return typeof obj.code === "string" && obj.code.length > 0 && typeof obj.message === "string";
+}
+
 async function touchJobHeartbeat(r: DbConn, args: { firmId: number; jobId: string }): Promise<void> {
   touchActiveRunnerHeartbeat(args);
   try {
@@ -8594,7 +8605,9 @@ async function processAutomationGenerationJobStep(r: DbConn, args: { firmId: num
           ? new DocumentGenerationError(404, "TEMPLATE_OBJECT_NOT_FOUND", "Template object not found")
           : err instanceof DocumentGenerationError
             ? err
-            : new DocumentGenerationError(500, "INTERNAL_ERROR", "Internal Server Error");
+            : isDocumentGenerationErrorLike(err)
+              ? new DocumentGenerationError(typeof (err as any).statusCode === "number" ? Number((err as any).statusCode) : 500, (err as any).code, (err as any).message, (err as any).payload)
+              : new DocumentGenerationError(500, "INTERNAL_ERROR", "Internal Server Error");
     await finishGenerationRunFailed(r, args.firmId, runId, derived.code, derived.message);
 
     const missingRequiredVariables = derived.code === "TEMPLATE_BINDING_MISSING" ? normalizeMissingRequiredVariables(derived.payload) : [];
@@ -8774,7 +8787,16 @@ router.get("/documents/jobs/:jobId", requireAuth, requireFirmUser, requirePermis
     res.status(404).json({ error: "Job not found" });
     return;
   }
-  const items = await queryRows(r, sql`SELECT * FROM document_generation_job_items WHERE job_id = ${jobId}::uuid AND firm_id = ${req.firmId!} ORDER BY id ASC`);
+  const items = await queryRows(r, sql`
+    SELECT
+      i.*,
+      t.name AS template_name
+    FROM document_generation_job_items i
+    LEFT JOIN document_templates t
+      ON t.firm_id = i.firm_id AND t.id = i.template_id
+    WHERE i.job_id = ${jobId}::uuid AND i.firm_id = ${req.firmId!}
+    ORDER BY i.id ASC
+  `);
   res.json({ job, items });
 });
 
