@@ -19,6 +19,7 @@ export default defineConfig({
         "src/__tests__/runtime-500-regression.test.ts",
         "src/__tests__/not-found-json.test.ts",
         "src/__tests__/dateOnly.test.ts",
+        "src/__tests__/caseVariableResolver.test.ts",
         "src/__tests__/caseWorkflowDocuments.unit.test.ts",
         "src/__tests__/loanStamping.unit.test.ts",
         "src/__tests__/workflowAutomation.unit.test.ts",

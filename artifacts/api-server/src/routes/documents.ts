@@ -38,6 +38,7 @@ import { DataFetchTimeoutError, DocumentEngineService } from "../services/docume
 import { aggregateGenerationJobFailureSummary, isHeartbeatStale } from "../services/document-generation.service.js";
 import { normalizeMissingRequiredVariables } from "../services/document-variable.service.js";
 import { formatMalaysiaAddressStringForDocument } from "../utils/my-address-helper.js";
+import { applyCaseVariableAliases, selectPurchaserSource } from "../lib/caseVariableResolver.js";
 
 type RouterInternalLike = {
   get: (path: string, ...handlers: unknown[]) => unknown;
@@ -1295,37 +1296,13 @@ async function buildCaseContext(
     }
   })();
   const spa = safeJson((c as any).spa_details);
-  let purchaserSourceUsed =
-    (purchaserRowsFromClients?.length ?? 0) > 0 ? "case_purchasers"
-      : partyPurchaserRows.length > 0 ? "case_parties"
-        : "none";
-  let purchaserRowsResolved = ((purchaserRowsFromClients?.length ?? 0) > 0 ? purchaserRowsFromClients : partyPurchaserRows) as any[];
-  const spaPurchaserRows = (() => {
-    if ((purchaserRowsResolved?.length ?? 0) > 0) return [] as any[];
-    const arr = Array.isArray((spa as any)?.purchasers) ? (spa as any).purchasers : [];
-    const mapped = arr
-      .map((p: any, idx: number) => {
-        const name = typeof p?.name === "string" ? p.name.trim() : "";
-        if (!name) return null;
-        const ic = typeof (p?.ic ?? p?.nric ?? p?.id_no ?? p?.identity_no) === "string" ? String(p.ic ?? p.nric ?? p.id_no ?? p.identity_no).trim() : "";
-        return {
-          role: idx === 0 ? "main" : "purchaser",
-          order_no: idx + 1,
-          name,
-          ic_no: ic,
-          nationality: typeof p?.nationality === "string" ? p.nationality : "",
-          address: typeof p?.address === "string" ? p.address : "",
-          phone: typeof p?.phone === "string" ? p.phone : "",
-          email: typeof p?.email === "string" ? p.email : "",
-        };
-      })
-      .filter(Boolean) as any[];
-    return mapped;
-  })();
-  if ((purchaserRowsResolved?.length ?? 0) === 0 && spaPurchaserRows.length > 0) {
-    purchaserRowsResolved = spaPurchaserRows;
-    purchaserSourceUsed = "spa_details";
-  }
+  const purchaserSelection = selectPurchaserSource({
+    fromCasePurchasers: purchaserRowsFromClients as any[],
+    fromCaseParties: partyPurchaserRows as any[],
+    fromSpaDetails: (spa as any)?.purchasers,
+  });
+  const purchaserSourceUsed = purchaserSelection.purchaserSourceUsed;
+  const purchaserRowsResolved = purchaserSelection.purchaserRows as any[];
   const mainPurchaser = purchaserRowsResolved.find((p) => p.role === "main") ?? purchaserRowsResolved[0] ?? {};
 
   const prop = safeJson((c as any).property_details);
@@ -1677,7 +1654,7 @@ async function buildCaseContext(
   const purchaserNamesJoined = purchaserNames.join(", ");
   const purchaserNricsJoined = purchaserNrics.join(", ");
 
-  return {
+  return applyCaseVariableAliases({
     case_id: caseId,
     reference_no: (c as any).reference_no ?? "",
     date: dateStr,
@@ -1907,7 +1884,7 @@ async function buildCaseContext(
     })),
     ...keyDateVars,
     ...workflowDebugVars,
-  };
+  });
 }
 
 router.get("/firm-document-folders", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
@@ -2272,12 +2249,8 @@ router.post(
     try {
       const fileBuffer = await downloadPrivateObjectBytes(storagePath);
       const out = await DocumentEngineService.generateDocument(caseId, templateId, fileBuffer, caseFirmId, isFounder);
-
-      const contentType =
-        out.fileType === "pdf"
-          ? "application/pdf"
-          : "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
-      res.setHeader("Content-Type", contentType);
+      const pdfBytes = out.fileType === "pdf" ? out.buffer : await convertDocxToPdf(out.buffer);
+      res.setHeader("Content-Type", "application/pdf");
       await writeAuditLog({
         firmId: caseFirmId,
         actorId: req.userId,
@@ -2285,11 +2258,11 @@ router.post(
         action: "documents.generate.succeeded",
         entityType: "case",
         entityId: caseId,
-        detail: `templateId=${templateId} fileType=${out.fileType}`,
+        detail: `templateId=${templateId} inputFileType=${out.fileType} output=pdf`,
         ipAddress: req.ip,
         userAgent: req.headers["user-agent"],
       });
-      res.status(200).send(out.buffer);
+      res.status(200).send(pdfBytes);
     } catch (err: unknown) {
       const cfgErr = getSupabaseStorageConfigError(err);
       if (cfgErr) {
@@ -2304,7 +2277,7 @@ router.post(
           ipAddress: req.ip,
           userAgent: req.headers["user-agent"],
         });
-        res.status(cfgErr.statusCode).json({ error: cfgErr.error, code: "STORAGE_NOT_CONFIGURED" });
+        res.status(cfgErr.statusCode).json({ error: cfgErr.error, code: "TEMPLATE_STORAGE_READ_FAILED" });
         return;
       }
       if (err instanceof DataFetchTimeoutError) {
@@ -2349,8 +2322,47 @@ router.post(
           ipAddress: req.ip,
           userAgent: req.headers["user-agent"],
         });
-        res.status(404).json({ error: "Template file not found", code: "FILE_NOT_FOUND" });
+        res.status(404).json({ error: "Missing template file", code: "TEMPLATE_FILE_MISSING" });
         return;
+      }
+      if (err instanceof DocumentGenerationError && (err.code === "DOCX_TO_PDF_UNAVAILABLE" || err.code === "DOCX_TO_PDF_FAILED" || err.code === "DOCX_TO_PDF_TIMEOUT")) {
+        res.status(503).json({ error: err.message, code: "PDF_CONVERSION_ERROR" });
+        return;
+      }
+      const derived =
+        err instanceof DocumentGenerationError
+          ? err
+          : isDocumentGenerationErrorLike(err)
+            ? new DocumentGenerationError(
+              typeof (err as any).statusCode === "number" ? Number((err as any).statusCode) : 500,
+              (err as any).code,
+              (err as any).message,
+              (err as any).payload
+            )
+            : null;
+      if (derived) {
+        const missingVariables = derived.code === "TEMPLATE_BINDING_MISSING" ? normalizeMissingRequiredVariables(derived.payload) : [];
+        if (derived.code === "TEMPLATE_OBJECT_NOT_FOUND") {
+          res.status(404).json({ error: "Missing template file", code: "TEMPLATE_FILE_MISSING" });
+          return;
+        }
+        if (derived.code === "TEMPLATE_BINDING_MISSING") {
+          const msg = missingVariables.length > 0 ? `Missing variables: ${missingVariables.join(", ")}` : "Missing variables";
+          res.status(422).json({ error: msg, code: "TEMPLATE_VARIABLES_MISSING", missingVariables });
+          return;
+        }
+        if (derived.code === "TEMPLATE_RENDER_FAILED") {
+          res.status(500).json({ error: derived.message, code: "DOCX_RENDER_ERROR" });
+          return;
+        }
+        if (derived.code === "PDF_TEMPLATE_RENDER_FAILED" || derived.code === "PDF_TEMPLATE_NO_FIELDS") {
+          res.status(500).json({ error: derived.message, code: "PDF_MAPPING_ERROR" });
+          return;
+        }
+        if (derived.code === "TEMPLATE_FILE_BUFFER_MISSING") {
+          res.status(503).json({ error: derived.message, code: "TEMPLATE_STORAGE_READ_FAILED" });
+          return;
+        }
       }
       logger.error({ err, path: req.path, firmId: caseFirmId, userId: req.userId, caseId, templateId }, "[documents] generate_failed");
       await writeAuditLog({
@@ -2364,7 +2376,7 @@ router.post(
         ipAddress: req.ip,
         userAgent: req.headers["user-agent"],
       });
-      res.status(503).json({ error: "Failed to generate document", code: "DOCUMENT_GENERATION_FAILED" });
+      res.status(503).json({ error: "Internal Server Error", code: "INTERNAL_ERROR" });
     }
   },
 );
@@ -6595,7 +6607,6 @@ async function generateFirmDocument({
     input: readinessInput,
     usedVariableKeys: null,
   });
-  if (!forceMode && readiness.status !== "ready") throw new DocumentGenerationError(422, "TEMPLATE_NOT_READY", "Template not ready", { status: readiness.status, missing: readiness.missing });
 
   const templateVersionId = await ensureFirmTemplatePublishedVersionId(r, firmId, templateId, actorId);
   await queryRows(r, sql`UPDATE document_generation_runs SET template_version_id = ${templateVersionId} WHERE id = ${runId} AND firm_id = ${firmId}`);
@@ -6852,12 +6863,9 @@ async function generateFirmDocument({
       });
     }
 
-    outFormat = outputFormat === "pdf" ? "pdf" : "docx";
-    outputBytes = outFormat === "pdf" ? await convertDocxToPdf(buffer) : buffer;
-    outputContentType =
-      outFormat === "pdf"
-        ? "application/pdf"
-        : "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+    outFormat = "pdf";
+    outputBytes = await convertDocxToPdf(buffer);
+    outputContentType = "application/pdf";
   }
 
   const normalizedPath = newGeneratedDocObjectPath(firmId, caseId, outFormat);
@@ -7076,7 +7084,6 @@ async function generateMasterDocument({
     input: readinessInput,
     usedVariableKeys: null,
   });
-  if (readiness.status !== "ready") throw new DocumentGenerationError(422, "TEMPLATE_NOT_READY", "Template not ready", { status: readiness.status, missing: readiness.missing });
 
   const masterObjectPath = typeof (masterDoc as any).object_path === "string" ? String((masterDoc as any).object_path) : "";
   if (!masterObjectPath) throw new DocumentGenerationError(404, "MASTER_FILE_MISSING", "Master file missing");
@@ -8270,10 +8277,292 @@ async function runAutomationPreflight(args: {
   return { critical, cases: out.filter((x) => x.missing.length > 0 || (x.warnings?.length ?? 0) > 0), templates: templateReports };
 }
 
+type SimplePreflightItem = {
+  caseId: number;
+  templateId: number;
+  templateName: string;
+  templateType: "pdf" | "docx";
+  templateFileStatus: "ready" | "missing" | "read_failed";
+  converterStatus: "ready" | "missing";
+  dataStatus: "ready" | "missing_variables" | "skipped";
+  missingVariables: string[];
+  output: "pdf";
+  diagnostic?: Record<string, unknown>;
+};
+
+function isBlankResolvedValue(v: unknown): boolean {
+  if (v === null || v === undefined) return true;
+  if (typeof v === "string") return v.trim().length === 0;
+  if (Array.isArray(v)) return v.length === 0;
+  return false;
+}
+
+function extractPlaceholdersFromLegacyPdfMappingConfig(mappingConfig: unknown): string[] {
+  const keys = new Set<string>();
+  const re = /\{\{\s*([^{}\s]+)\s*\}\}/g;
+  const visit = (v: unknown) => {
+    if (typeof v === "string") {
+      let m: RegExpExecArray | null;
+      while ((m = re.exec(v))) {
+        const k = (m[1] ?? "").trim();
+        if (k) keys.add(k);
+      }
+      return;
+    }
+    if (!v || typeof v !== "object") return;
+    if (Array.isArray(v)) {
+      for (const it of v) visit(it);
+      return;
+    }
+    for (const [k, vv] of Object.entries(v as Record<string, unknown>)) {
+      if (k && k.trim()) keys.add(k.trim());
+      visit(vv);
+    }
+  };
+  visit(mappingConfig);
+  return Array.from(keys).sort((a, b) => a.localeCompare(b));
+}
+
+async function runSimpleDocumentGenerationPreflight(args: {
+  r: DbConn;
+  firmId: number;
+  caseIds: number[];
+  templateIds: number[];
+}): Promise<{ ok: boolean; items: SimplePreflightItem[]; failures: SimplePreflightItem[] }> {
+  const cache = createRequestCache();
+  const templateRows = args.templateIds.length > 0
+    ? await queryRowsCached(args.r, cache, `simple_preflight:templates:${args.firmId}:${args.templateIds.join(",")}`, sql`
+        SELECT id, name, object_path, file_name, pdf_mapping_config
+        FROM document_templates
+        WHERE firm_id = ${args.firmId}
+          AND is_template_capable = true
+          AND id IN (${sql.join(args.templateIds.map((id) => sql`${id}`), sql`, `)})
+      `)
+    : [];
+  const templateById = new Map<number, Record<string, unknown>>();
+  for (const row of templateRows) {
+    const tid = typeof (row as any).id === "number" ? Number((row as any).id) : Number((row as any).id);
+    if (!Number.isFinite(tid)) continue;
+    templateById.set(tid, row);
+  }
+
+  const publishedByTemplateId = new Map<number, Record<string, unknown>>();
+  const hasVersions = args.templateIds.length > 0 ? await tableExistsCached(args.r, cache, "public.document_template_versions") : false;
+  if (hasVersions && args.templateIds.length > 0) {
+    const rows = await queryRowsCached(args.r, cache, `simple_preflight:published_versions:${args.firmId}:${args.templateIds.join(",")}`, sql`
+      SELECT DISTINCT ON (template_id)
+        template_id, id, source_object_path, filename, status, published_at, variables_snapshot, pdf_mappings_snapshot
+      FROM document_template_versions
+      WHERE firm_id = ${args.firmId}
+        AND template_id IN (${sql.join(args.templateIds.map((id) => sql`${id}`), sql`, `)})
+        AND status = 'published'
+      ORDER BY template_id, published_at DESC NULLS LAST, id DESC
+    `);
+    for (const row of rows) {
+      const tid = typeof (row as any).template_id === "number" ? Number((row as any).template_id) : Number((row as any).template_id);
+      if (!Number.isFinite(tid)) continue;
+      publishedByTemplateId.set(tid, row);
+    }
+  }
+
+  const templateMetaById = new Map<number, {
+    templateId: number;
+    templateName: string;
+    templateType: "pdf" | "docx";
+    templateFileStatus: "ready" | "missing" | "read_failed";
+    converterStatus: "ready" | "missing";
+    objectPathUsed: string | null;
+    placeholders: string[];
+    diagnostic?: Record<string, unknown>;
+  }>();
+
+  const gotenbergConfigured = typeof process.env.GOTENBERG_URL === "string" && process.env.GOTENBERG_URL.trim().length > 0;
+
+  for (const templateId of args.templateIds) {
+    const t = templateById.get(templateId);
+    const templateName = t ? String((t as any).name ?? "") : "";
+    const published = publishedByTemplateId.get(templateId) ?? null;
+    const publishedPathRaw = published && typeof (published as any).source_object_path === "string" ? String((published as any).source_object_path).trim() : "";
+    const templatePathRaw = t && typeof (t as any).object_path === "string" ? String((t as any).object_path).trim() : "";
+    const objectPathRaw = publishedPathRaw || templatePathRaw;
+    const objectPathUsed = (() => {
+      if (!objectPathRaw) return "";
+      try {
+        return decodeStoragePath(objectPathRaw);
+      } catch {
+        return "";
+      }
+    })();
+    const templateFileName =
+      published && typeof (published as any).filename === "string" && String((published as any).filename).trim()
+        ? String((published as any).filename)
+        : t && typeof (t as any).file_name === "string"
+          ? String((t as any).file_name)
+          : "";
+    const ext = fileExtensionFromName(templateFileName);
+    const templateType: "pdf" | "docx" = ext === "pdf" ? "pdf" : "docx";
+    const converterStatus: "ready" | "missing" = templateType === "docx" && !gotenbergConfigured ? "missing" : "ready";
+
+    if (!objectPathUsed) {
+      templateMetaById.set(templateId, {
+        templateId,
+        templateName,
+        templateType,
+        templateFileStatus: "missing",
+        converterStatus,
+        objectPathUsed: null,
+        placeholders: [],
+        diagnostic: { reason: "template_object_path_missing", templateFileName },
+      });
+      continue;
+    }
+
+    let templateFileStatus: "ready" | "missing" | "read_failed" = "ready";
+    let diagnostic: Record<string, unknown> | undefined = undefined;
+    try {
+      const exists = await supabaseStorage.privateObjectExists(objectPathUsed, { timeoutMs: 2_000 });
+      if (!exists) {
+        templateFileStatus = "missing";
+        diagnostic = { reason: "storage_object_missing", objectPathUsed };
+      }
+    } catch (err) {
+      templateFileStatus = "read_failed";
+      const cfgErr = getSupabaseStorageConfigError(err);
+      diagnostic = cfgErr
+        ? { reason: "storage_not_configured", ...cfgErr, objectPathUsed }
+        : err instanceof StorageRequestTimeoutError
+          ? { reason: "storage_timeout", objectPathUsed }
+          : { reason: "storage_read_failed", message: err instanceof Error ? err.message : String(err ?? ""), objectPathUsed };
+    }
+
+    let placeholders = placeholdersFromVariablesSnapshot((published as any)?.variables_snapshot);
+    if (placeholders.length === 0) {
+      if (templateType === "pdf") {
+        const mappingConfig = (t as any)?.pdf_mapping_config ?? (published as any)?.pdf_mappings_snapshot ?? null;
+        placeholders = isPdfTextBoxMappings(mappingConfig)
+          ? extractPdfMappingPlaceholders(mappingConfig)
+          : extractPlaceholdersFromLegacyPdfMappingConfig(mappingConfig);
+      }
+    }
+
+    if (placeholders.length === 0 && templateFileStatus === "ready") {
+      try {
+        const bytes = await downloadPrivateObjectBytes(objectPathUsed);
+        if (templateType === "docx") placeholders = detectDocxVariables(bytes);
+        else placeholders = await extractPdfFormFieldNames(bytes);
+      } catch (err) {
+        templateFileStatus = "read_failed";
+        diagnostic = { ...(diagnostic ?? {}), reason: "template_read_for_placeholders_failed", message: err instanceof Error ? err.message : String(err ?? "") };
+      }
+    }
+
+    templateMetaById.set(templateId, {
+      templateId,
+      templateName,
+      templateType,
+      templateFileStatus,
+      converterStatus,
+      objectPathUsed,
+      placeholders,
+      ...(diagnostic ? { diagnostic } : {}),
+    });
+  }
+
+  const contextsByCaseId = new Map<number, Record<string, unknown> | null>();
+  for (const caseId of args.caseIds) {
+    contextsByCaseId.set(caseId, await buildCaseContext(args.r, caseId, args.firmId, cache));
+  }
+
+  const items: SimplePreflightItem[] = [];
+  for (const caseId of args.caseIds) {
+    const ctx = contextsByCaseId.get(caseId) ?? null;
+    for (const templateId of args.templateIds) {
+      const meta = templateMetaById.get(templateId);
+      if (!meta) continue;
+
+      const base: SimplePreflightItem = {
+        caseId,
+        templateId,
+        templateName: meta.templateName,
+        templateType: meta.templateType,
+        templateFileStatus: meta.templateFileStatus,
+        converterStatus: meta.converterStatus,
+        dataStatus: "skipped",
+        missingVariables: [],
+        output: "pdf",
+        ...(meta.diagnostic ? { diagnostic: meta.diagnostic } : {}),
+      };
+
+      if (!ctx) {
+        items.push({
+          ...base,
+          dataStatus: "missing_variables",
+          missingVariables: ["case_reference"],
+          diagnostic: { ...(base.diagnostic ?? {}), reason: "case_not_found" },
+        });
+        continue;
+      }
+
+      if (meta.templateFileStatus !== "ready") {
+        items.push(base);
+        continue;
+      }
+
+      if (meta.templateType === "docx" && meta.converterStatus !== "ready") {
+        items.push({
+          ...base,
+          dataStatus: "skipped",
+          diagnostic: { ...(base.diagnostic ?? {}), reason: "pdf_conversion_unavailable" },
+        });
+        continue;
+      }
+
+      const placeholders = meta.placeholders ?? [];
+      if (placeholders.length === 0) {
+        items.push({ ...base, dataStatus: "ready" });
+        continue;
+      }
+
+      try {
+        const preview = await runDocumentPreview(args.r, {
+          firmId: args.firmId,
+          caseContext: ctx,
+          templateRef: { kind: "firm", templateId },
+          placeholders,
+          overrides: null,
+        });
+        const missing = placeholders.filter((k) => {
+          const v = (preview.resolvedVariables as any)?.[k];
+          return isBlankResolvedValue(v);
+        });
+        items.push({
+          ...base,
+          dataStatus: missing.length > 0 ? "missing_variables" : "ready",
+          missingVariables: missing,
+        });
+      } catch (err) {
+        items.push({
+          ...base,
+          dataStatus: "missing_variables",
+          missingVariables: [],
+          diagnostic: { ...(base.diagnostic ?? {}), reason: "variable_preview_failed", message: err instanceof Error ? err.message : String(err ?? "") },
+        });
+      }
+    }
+  }
+
+  const failures = items.filter((it) => {
+    if (it.templateFileStatus !== "ready") return true;
+    if (it.templateType === "docx" && it.converterStatus !== "ready") return true;
+    if (it.dataStatus === "missing_variables") return true;
+    return false;
+  });
+  return { ok: failures.length === 0, items, failures };
+}
+
 router.post("/documents/automation/preflight", requireAuth, requireFirmUser, requirePermission("documents", "generate"), async (req: AuthRequest, res): Promise<void> => {
   const r = getRlsDb(req, res);
   if (!r) return;
-  const includeDebug = process.env.API_ERROR_DETAILS === "1" || process.env.NODE_ENV !== "production";
 
   const bodySchema = z.object({
     caseIds: z.array(z.union([z.number(), z.string()])).min(1),
@@ -8309,27 +8598,78 @@ router.post("/documents/automation/preflight", requireAuth, requireFirmUser, req
     return;
   }
 
-  const templateRows = await queryRows(r, sql`
-    SELECT id, name
-    FROM document_templates
-    WHERE firm_id = ${req.firmId!}
-      AND is_template_capable = true
-      AND id IN (${sql.join(templateIds.map((id) => sql`${id}`), sql`, `)})
-    ORDER BY created_at DESC
-  `);
-  if (templateRows.length !== templateIds.length) {
-    res.status(404).json({ error: "One or more templates not found", code: "TEMPLATE_NOT_FOUND" });
+  const report = await runSimpleDocumentGenerationPreflight({ r, firmId: req.firmId!, caseIds, templateIds });
+  res.json({ ok: report.ok, failures: report.failures, items: report.items });
+});
+
+router.post("/cases/:caseId/documents/preflight", requireAuth, requireFirmUser, requirePermission("documents", "generate"), async (req: AuthRequest, res): Promise<void> => {
+  const r = getRlsDb(req, res);
+  if (!r) return;
+  const caseId = toPositiveInt(one((req.params as any).caseId)) ?? NaN;
+  if (!Number.isFinite(caseId) || caseId <= 0) {
+    res.status(400).json({ error: "Invalid caseId" });
     return;
   }
 
-  const report = await runAutomationPreflight({
-    r,
-    firmId: req.firmId!,
-    caseIds,
-    templates: templateRows.map((t) => ({ id: Number((t as any).id), name: String((t as any).name ?? "") })),
-    includeDebug,
+  const bodySchema = z.object({
+    templateIds: z.array(z.union([z.number(), z.string()])).min(1),
   });
-  res.json(report);
+  const parsed = bodySchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(422).json({ error: "Invalid request body" });
+    return;
+  }
+  const templateIds = Array.from(new Set(
+    parsed.data.templateIds
+      .map((x) => (typeof x === "number" ? x : parseInt(x, 10)))
+      .filter((x) => Number.isFinite(x))
+      .map((x) => Math.trunc(x))
+      .filter((x) => x > 0)
+  ));
+  if (templateIds.length === 0) {
+    res.status(400).json({ error: "templateIds is required", code: "MISSING_INPUTS" });
+    return;
+  }
+  if (templateIds.length > 25) {
+    res.status(422).json({ error: "Too many templates", code: "TOO_MANY_ITEMS" });
+    return;
+  }
+
+  const caseRows = await queryRows(r, sql`SELECT id FROM cases WHERE id = ${caseId} AND firm_id = ${req.firmId!} LIMIT 1`);
+  if (!caseRows[0]) {
+    res.status(404).json({ error: "Case not found", code: "CASE_NOT_FOUND" });
+    return;
+  }
+
+  const report = await runSimpleDocumentGenerationPreflight({ r, firmId: req.firmId!, caseIds: [caseId], templateIds });
+  const byTemplateId = new Map<number, SimplePreflightItem>();
+  for (const it of report.items) {
+    if (it.caseId !== caseId) continue;
+    byTemplateId.set(it.templateId, it);
+  }
+  const items = templateIds.map((tid) => {
+    const it = byTemplateId.get(tid) ?? null;
+    return {
+      templateId: tid,
+      ...(it ? {
+        templateName: it.templateName,
+        templateType: it.templateType,
+        output: "pdf",
+        templateFile: { status: it.templateFileStatus },
+        converter: { status: it.converterStatus },
+        data: { status: it.dataStatus, missingVariables: it.missingVariables },
+        ...(it.diagnostic ? { diagnostic: it.diagnostic } : {}),
+      } : {
+        templateName: "",
+        templateType: "docx" as const,
+        output: "pdf" as const,
+        templateFile: { status: "missing" as const },
+        converter: { status: "ready" as const },
+        data: { status: "skipped" as const, missingVariables: [] as string[] },
+      }),
+    };
+  });
+  res.json({ caseId, items });
 });
 
 type GenerationJobRunnerMeta = { startedAt: number; lastHeartbeatAt: number };
@@ -8435,7 +8775,7 @@ function startDocumentGenerationJobRunner(r: DbConn, args: { firmId: number; job
         const job = rows[0] as any;
         const status = String(job?.status ?? "");
         const pending = Number(job?.pending_count ?? 0);
-        if (status === "completed" || status === "failed" || pending <= 0) return;
+        if (status === "completed" || status === "completed_with_errors" || status === "failed" || pending <= 0) return;
       }
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
@@ -8469,7 +8809,7 @@ async function processAutomationGenerationJobStep(r: DbConn, args: { firmId: num
   if (!job) return;
 
   const status = String((job as any).status ?? "");
-  if (status === "completed" || status === "failed") return;
+  if (status === "completed" || status === "completed_with_errors" || status === "failed") return;
 
   if (status !== "running") {
     await queryRows(r, sql`
@@ -8617,9 +8957,10 @@ async function processAutomationGenerationJobStep(r: DbConn, args: { firmId: num
         const objectPath = `/objects/temp-generated/${args.firmId}/document-automation-jobs/${args.jobId}.pdf`;
         const outName = safeFilenameAscii(`System_Print_${new Date().toISOString().slice(0, 10)}.pdf`) || "system-print.pdf";
         await supabaseStorage.uploadPrivateObject({ objectPath, fileBytes: merged, contentType: "application/pdf" });
+        const finalStatus = failedItems.length > 0 ? "completed_with_errors" : "completed";
         await queryRows(r, sql`
           UPDATE document_generation_jobs
-          SET status = 'completed',
+          SET status = ${finalStatus},
               total_count = ${items.length},
               success_count = ${successItems.length},
               failed_count = ${failedItems.length},
@@ -8638,9 +8979,10 @@ async function processAutomationGenerationJobStep(r: DbConn, args: { firmId: num
         const objectPath = typeof (oneItem as any).object_path === "string" ? String((oneItem as any).object_path) : "";
         const fileName = typeof (oneItem as any).file_name === "string" ? String((oneItem as any).file_name) : "";
         const mimeType = typeof (oneItem as any).mime_type === "string" ? String((oneItem as any).mime_type) : "";
+        const finalStatus = failedItems.length > 0 ? "completed_with_errors" : "completed";
         await queryRows(r, sql`
           UPDATE document_generation_jobs
-          SET status = 'completed',
+          SET status = ${finalStatus},
               total_count = ${items.length},
               success_count = ${successItems.length},
               failed_count = ${failedItems.length},
@@ -8667,9 +9009,10 @@ async function processAutomationGenerationJobStep(r: DbConn, args: { firmId: num
       const outName = safeFilenameAscii(`Document_Automation_${new Date().toISOString().slice(0, 10)}.zip`) || "document-automation.zip";
       await supabaseStorage.uploadPrivateObject({ objectPath, fileBytes: zipBytes, contentType: "application/zip" });
 
+      const finalStatus = failedItems.length > 0 ? "completed_with_errors" : "completed";
       await queryRows(r, sql`
         UPDATE document_generation_jobs
-        SET status = 'completed',
+        SET status = ${finalStatus},
             total_count = ${items.length},
             success_count = ${successItems.length},
             failed_count = ${failedItems.length},
@@ -8682,7 +9025,13 @@ async function processAutomationGenerationJobStep(r: DbConn, args: { firmId: num
       `);
     } catch (err) {
       const message = err instanceof Error ? err.message : "Internal Server Error";
-      const code = message.includes("No output generated") ? "NO_OUTPUT_GENERATED" : "FINALIZE_FAILED";
+      const action = String((job as any).action ?? "download");
+      const code =
+        message.includes("No output generated")
+          ? "NO_OUTPUT_GENERATED"
+          : action === "download"
+            ? "ZIP_CREATION_ERROR"
+            : "FINALIZE_FAILED";
       await queryRows(r, sql`
         UPDATE document_generation_jobs
         SET status = 'failed',
@@ -8908,7 +9257,7 @@ async function processAutomationGenerationJobStep(r: DbConn, args: { firmId: num
     const cfgErr = getSupabaseStorageConfigError(err);
     const derived =
       cfgErr
-        ? new DocumentGenerationError(cfgErr.statusCode, "STORAGE_NOT_CONFIGURED", cfgErr.error)
+        ? new DocumentGenerationError(cfgErr.statusCode, "TEMPLATE_STORAGE_READ_FAILED", cfgErr.error)
         : err instanceof ObjectNotFoundError
           ? new DocumentGenerationError(404, "TEMPLATE_OBJECT_NOT_FOUND", "Template object not found")
           : err instanceof DocumentGenerationError
@@ -8933,6 +9282,12 @@ async function processAutomationGenerationJobStep(r: DbConn, args: { firmId: num
       }
       if (derived.code === "DOCX_TO_PDF_FAILED" || derived.code === "DOCX_TO_PDF_TIMEOUT" || derived.code === "DOCX_TO_PDF_UNAVAILABLE") {
         return { code: "PDF_CONVERSION_ERROR", message: derived.message };
+      }
+      if (derived.code === "PDF_TEMPLATE_RENDER_FAILED" || derived.code === "PDF_TEMPLATE_NO_FIELDS") {
+        return { code: "PDF_MAPPING_ERROR", message: derived.message };
+      }
+      if (derived.code === "TEMPLATE_FILE_BUFFER_MISSING") {
+        return { code: "TEMPLATE_STORAGE_READ_FAILED", message: derived.message };
       }
       return { code: derived.code, message: derived.message };
     })();
@@ -9048,17 +9403,39 @@ router.post("/documents/automation/generate-job", requireAuth, requireFirmUser, 
   const effectiveForce = force || blind;
   const qValidate = String(one((req.query as any).validate) ?? "").trim().toLowerCase();
   const validate = qValidate === "1" || qValidate === "true" || qValidate === "yes";
-  if (validate && !effectiveForce) {
-    const preflight = await runAutomationPreflight({
-      r,
-      firmId: req.firmId!,
-      caseIds,
-      templates: templateRows.map((t) => ({ id: Number((t as any).id), name: String((t as any).name ?? "") })),
+  const preflight = await runSimpleDocumentGenerationPreflight({ r, firmId: req.firmId!, caseIds, templateIds });
+  const failures = effectiveForce
+    ? preflight.failures.filter((f) => f.templateFileStatus !== "ready" || (f.templateType === "docx" && f.converterStatus !== "ready"))
+    : preflight.failures;
+  if (failures.length > 0) {
+    const normalizedFailures = failures.map((f) => {
+      const mapped = (() => {
+        if (f.templateFileStatus === "missing") return { errorCode: "TEMPLATE_FILE_MISSING", errorMessage: "Missing template file" };
+        if (f.templateFileStatus === "read_failed") return { errorCode: "TEMPLATE_STORAGE_READ_FAILED", errorMessage: "Template storage read failed" };
+        if (f.templateType === "docx" && f.converterStatus === "missing") return { errorCode: "PDF_CONVERSION_ERROR", errorMessage: "PDF conversion is not configured" };
+        if (f.dataStatus === "missing_variables") {
+          const msg = f.missingVariables.length > 0 ? `Missing variables: ${f.missingVariables.join(", ")}` : "Missing variables";
+          return { errorCode: "TEMPLATE_VARIABLES_MISSING", errorMessage: msg };
+        }
+        return { errorCode: "INTERNAL_ERROR", errorMessage: "Preflight failed" };
+      })();
+      return {
+        caseId: f.caseId,
+        templateId: f.templateId,
+        templateName: f.templateName,
+        templateType: f.templateType,
+        output: "pdf",
+        ...mapped,
+        ...(f.missingVariables.length ? { missingVariables: f.missingVariables } : {}),
+        ...(f.diagnostic ? { diagnostic: f.diagnostic } : {}),
+      };
     });
-    if (preflight.critical) {
-      res.status(422).json({ error: "Missing required case data", code: "MISSING_REQUIRED_DATA", report: preflight });
-      return;
-    }
+    res.status(422).json({
+      error: validate ? "Preflight failed" : "Preflight failed",
+      code: normalizedFailures[0]?.errorCode ?? "PRECHECK_FAILED",
+      failures: normalizedFailures,
+    });
+    return;
   }
 
   const totalCount = caseIds.length * templateIds.length;
@@ -9153,10 +9530,10 @@ router.get("/documents/status/:jobId", requireAuth, requireFirmUser, requirePerm
   }
 
   const st = String(job.status ?? "");
-  if (st === "completed") {
+  if (st === "completed" || st === "completed_with_errors") {
     res.json({
       jobId,
-      status: "completed",
+      status: st,
       downloadUrl: `/documents/jobs/${jobId}/download`,
       fileName: typeof job.download_file_name === "string" ? String(job.download_file_name) : null,
       mimeType: typeof job.download_mime_type === "string" ? String(job.download_mime_type) : null,

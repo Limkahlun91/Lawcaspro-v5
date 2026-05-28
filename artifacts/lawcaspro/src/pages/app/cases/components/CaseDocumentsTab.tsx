@@ -253,6 +253,42 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
     return m;
   }, [checklistQuery.data]);
 
+  const modalTemplateIds = useMemo(() => {
+    if (!generateDialogOpen) return [] as number[];
+    const items = (checklistQuery.data?.sections ?? []).flatMap((s) => s.items ?? []);
+    const filtered = items.filter((it) => {
+      if (it.kind !== "template") return false;
+      if (typeof it.templateId !== "number") return false;
+      if (!showAllTemplates && it.applicability?.status === "not_applicable") return false;
+      if (templateSourceFilter !== "all" && it.source !== templateSourceFilter) return false;
+      if (templateApplicabilityFilter !== "all" && (it.applicability?.status ?? "applicable") !== templateApplicabilityFilter) return false;
+      return true;
+    });
+    return Array.from(new Set(filtered.map((it) => Number(it.templateId)).filter((n) => Number.isFinite(n) && n > 0)));
+  }, [generateDialogOpen, checklistQuery.data, showAllTemplates, templateSourceFilter, templateApplicabilityFilter]);
+
+  const preflightQuery = useQuery<{ caseId: number; items: any[] }>({
+    queryKey: ["case-documents-preflight", caseId, modalTemplateIds.join(",")],
+    queryFn: ({ signal }) => apiFetchJson(`/cases/${caseId}/documents/preflight`, {
+      method: "POST",
+      timeoutMs: 15000,
+      signal,
+      body: JSON.stringify({ templateIds: modalTemplateIds }),
+    }),
+    enabled: generateDialogOpen && modalTemplateIds.length > 0,
+    retry: false,
+  });
+
+  const preflightByTemplateId = useMemo(() => {
+    const m = new Map<number, any>();
+    for (const it of Array.isArray(preflightQuery.data?.items) ? preflightQuery.data.items : []) {
+      const id = typeof it?.templateId === "number" ? it.templateId : Number(it?.templateId);
+      if (!Number.isFinite(id)) continue;
+      m.set(id, it);
+    }
+    return m;
+  }, [preflightQuery.data]);
+
   type ClauseListItem = {
     id: number;
     scope: "firm" | "platform";
@@ -430,8 +466,7 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
         caseIds: [caseId],
         templateIds: [templateId],
         config: { action: "download" },
-        blind: true,
-        force: true,
+        validate: true,
       });
       const jobId = created.jobId;
 
@@ -442,7 +477,7 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
         const job = await getGenerationJob(jobId);
         setBatchGenerateResult(job);
         const st = String(job.status ?? "");
-        if (st === "completed") {
+        if (st === "completed" || st === "completed_with_errors" || st === "completed-with-errors") {
           await qc.invalidateQueries({ queryKey: ["case-documents", caseId] });
           await qc.invalidateQueries({ queryKey: ["case-documents-checklist", caseId] });
           const fileName = job.downloadFileName || "document.pdf";
@@ -494,7 +529,18 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
         }, 2000);
       });
     } catch (err) {
-      toastError(toast, err, "Generation failed");
+      const failures =
+        err && typeof err === "object" && "data" in (err as any) && Array.isArray((err as any).data?.failures)
+          ? ((err as any).data.failures as any[])
+          : null;
+      if (failures && failures.length > 0) {
+        const first = failures[0] ?? {};
+        const code = typeof first.errorCode === "string" ? first.errorCode : typeof (err as any).code === "string" ? (err as any).code : "PRECHECK_FAILED";
+        const msg = typeof first.errorMessage === "string" ? first.errorMessage : "Preflight failed";
+        toast({ title: "FA", description: `${msg} (${code})`, variant: "destructive" });
+      } else {
+        toastError(toast, err, "Generation failed");
+      }
     } finally {
       if (pollId) window.clearInterval(pollId);
       setOneClickGeneratingTemplateId(null);
@@ -539,8 +585,7 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
         caseIds: [caseId],
         templateIds,
         config: { action: "download" },
-        blind: true,
-        force: true,
+        validate: true,
       });
       const jobId = created.jobId;
 
@@ -551,7 +596,7 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
         const job = await getGenerationJob(jobId);
         setBatchGenerateResult(job);
         const st = String(job.status ?? "");
-        if (st === "completed") {
+        if (st === "completed" || st === "completed_with_errors" || st === "completed-with-errors") {
           await qc.invalidateQueries({ queryKey: ["case-documents", caseId] });
           await qc.invalidateQueries({ queryKey: ["case-documents-checklist", caseId] });
           const fileName = job.downloadFileName || "documents.zip";
@@ -603,7 +648,18 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
         }, 2000);
       });
     } catch (err) {
-      toastError(toast, err, "Generation failed");
+      const failures =
+        err && typeof err === "object" && "data" in (err as any) && Array.isArray((err as any).data?.failures)
+          ? ((err as any).data.failures as any[])
+          : null;
+      if (failures && failures.length > 0) {
+        const first = failures[0] ?? {};
+        const code = typeof first.errorCode === "string" ? first.errorCode : typeof (err as any).code === "string" ? (err as any).code : "PRECHECK_FAILED";
+        const msg = typeof first.errorMessage === "string" ? first.errorMessage : "Preflight failed";
+        toast({ title: "FA", description: `${msg} (${code})`, variant: "destructive" });
+      } else {
+        toastError(toast, err, "Generation failed");
+      }
     } finally {
       if (pollId) window.clearInterval(pollId);
       setBatchLoopGenerating(false);
@@ -1711,6 +1767,15 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
               </div>
             )}
 
+            {preflightQuery.isError ? (
+              <QueryFallback
+                title="Preflight unavailable"
+                error={preflightQuery.error}
+                onRetry={() => preflightQuery.refetch()}
+                isRetrying={preflightQuery.isFetching}
+              />
+            ) : null}
+
             <div className="flex-1 min-h-0 overflow-y-auto rounded-lg border border-slate-200 bg-white">
               {checklistQuery.isLoading ? (
                 <div className="text-sm text-slate-500 py-6 text-center">Loading templates…</div>
@@ -1733,48 +1798,42 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
                         <div className="rounded-md border border-slate-200 divide-y divide-slate-100 bg-white">
                           {filtered.map((it) => {
                             const overridable = Boolean(it.applicability?.status === "not_applicable" && it.applicability?.manuallyOverridable && canBypassApplicability && showAllTemplates);
-                            const checklistOverridable = Boolean(it.checklistResult?.checklistStatus === "blocked" && it.checklistResult?.manuallyOverridable && canBypassApplicability && showAllTemplates);
-                            const checklistAllowed = !it.checklistResult || it.checklistResult.checklistStatus !== "blocked" || checklistOverridable;
-                            const applicable = (it.applicability?.status !== "not_applicable" || overridable) && checklistAllowed;
-                            const readinessStatus = (it.readiness as any)?.status;
-                            const readinessKnown = isTemplateFileReadinessKnown(readinessStatus);
-                            const ready = isTemplateFileReady(readinessStatus);
-                            const fileStatusLabel = templateFileReadinessLabel(readinessStatus);
-                            const dataStatus = it.dataReadiness?.status ?? "unknown";
+                            const applicable = it.applicability?.status !== "not_applicable" || overridable;
+                            const pre = typeof it.templateId === "number" ? preflightByTemplateId.get(it.templateId) : null;
+                            const fileStatus = String(pre?.templateFile?.status ?? "");
+                            const converterStatus = String(pre?.converter?.status ?? "");
+                            const dataStatus = String(pre?.data?.status ?? "");
+                            const missingVars = Array.isArray(pre?.data?.missingVariables)
+                              ? pre.data.missingVariables.map((x: any) => String(x)).filter(Boolean)
+                              : [];
+                            const fileReady = fileStatus === "ready";
                             const dataReady = dataStatus === "ready";
-                            const dataMissing = dataStatus === "missing_data";
-                            const checklistWorkflowStatus = it.checklistResult?.checklistStatus ?? "ready";
-                            const checklistWorkflowReady = checklistWorkflowStatus !== "blocked";
-                            const reason = !applicable
-                              ? (it.applicability?.reasons ?? []).join(", ")
-                              : !readinessKnown
-                                ? "Checking template file..."
-                                : !ready
-                                  ? (it.readiness?.missing ?? []).map((m) => m.message).filter(Boolean).slice(0, 3).join(", ")
-                                  : dataMissing
-                                    ? `Missing data: ${(it.dataReadiness?.missing ?? []).slice(0, 3).join(", ")}${(it.dataReadiness?.missing ?? []).length > 3 ? "..." : ""}`
-                                    : !checklistWorkflowReady
-                                      ? "Checklist incomplete"
-                                : "";
-                            const statusLabel = it.applicability?.status === "warning"
-                              ? "Warning"
-                              : !applicable
-                                ? "Blocked"
-                                : !readinessKnown
-                                  ? "Checking..."
-                                  : ready && dataReady && checklistWorkflowReady
-                                    ? "Ready"
-                                    : "Incomplete";
-                            const statusDotClass =
-                              it.applicability?.status === "warning"
-                                ? "bg-sky-600"
-                                : !applicable
-                                  ? "bg-rose-600"
-                                  : !readinessKnown
-                                    ? "bg-slate-400"
-                                    : (ready && dataReady && checklistWorkflowReady)
-                                      ? "bg-emerald-600"
-                                      : "bg-slate-400";
+                            const converterReady = converterStatus === "ready" || converterStatus === "";
+                            const fileLabel =
+                              preflightQuery.isError ? "Error"
+                                : fileStatus === "ready" ? "Ready"
+                                  : fileStatus === "missing" ? "Missing template file"
+                                    : fileStatus === "read_failed" ? "Storage read failed"
+                                      : preflightQuery.isFetching ? "Checking..." : "Unknown";
+                            const dataLabel =
+                              preflightQuery.isError ? "Error"
+                                : !converterReady ? "PDF_CONVERSION_ERROR"
+                                  : dataReady ? "Ready"
+                                    : dataStatus === "missing_variables"
+                                      ? `Missing variables: ${missingVars.slice(0, 3).join(", ")}${missingVars.length > 3 ? "..." : ""}`
+                                      : preflightQuery.isFetching ? "Checking..." : "Unknown";
+                            const generateFinalDisabledReason = (() => {
+                              if (it.kind !== "template") return "Template is not generation capable";
+                              if (!canGenerate) return "No permission";
+                              if (it.source !== "firm") return "Unsupported template source";
+                              if (!applicable) return (it.applicability?.reasons ?? []).join(", ") || "Not applicable to this case";
+                              if (preflightQuery.isError) return "Preflight error";
+                              if (!pre) return "Checking...";
+                              if (!fileReady) return "Missing template file";
+                              if (!converterReady) return "PDF_CONVERSION_ERROR";
+                              if (!dataReady) return missingVars.length > 0 ? `Missing variables: ${missingVars.join(", ")}` : "Missing variables";
+                              return "";
+                            })();
                             return (
                               <div key={`${it.source}-${it.templateId}`} className="px-3 py-2">
                                 <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_minmax(0,320px)_auto] items-start lg:items-center gap-2 lg:gap-3">
@@ -1785,20 +1844,15 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
                                     </div>
                                   </div>
                                   <div className="min-w-0">
-                                    <div className="flex items-center gap-2">
-                                      <span className={cn("h-2 w-2 rounded-full", statusDotClass)} title={statusLabel} />
-                                      <span className="text-xs text-slate-700">{statusLabel}</span>
+                                    <div className="text-[11px] text-slate-700 truncate" title={`Template file: ${fileLabel}`}>
+                                      Template file: {fileLabel}
                                     </div>
-                                    <div className="mt-1 text-[11px] text-slate-600 truncate" title={`Checklist: ${checklistWorkflowStatus}`}>
-                                      Checklist: {checklistWorkflowStatus}
+                                    <div className="text-[11px] text-slate-700 truncate" title={`Data: ${dataLabel}`}>
+                                      Data: {dataLabel}
                                     </div>
-                                    <div className="text-[11px] text-slate-600 truncate" title={dataMissing ? `Missing: ${(it.dataReadiness?.missing ?? []).join(", ")}` : `Data: ${dataStatus}`}>
-                                      Data: {dataMissing ? `Missing (${(it.dataReadiness?.missing ?? []).slice(0, 2).join(", ")}${(it.dataReadiness?.missing ?? []).length > 2 ? "..." : ""})` : dataStatus === "ready" ? "Ready" : "Checking..."}
+                                    <div className="text-[11px] text-slate-700 truncate">
+                                      Output: PDF
                                     </div>
-                                    <div className="text-[11px] text-slate-600 truncate" title={`File: ${ready ? "ready" : fileStatusLabel}`}>
-                                      File: {!readinessKnown ? "Checking..." : ready ? "Ready" : fileStatusLabel}
-                                    </div>
-                                    {reason ? <div className="mt-1 text-xs text-slate-600 truncate" title={reason}>{reason}</div> : null}
                                   </div>
                                   <div className="flex items-center gap-2 justify-start lg:justify-end flex-wrap">
                                     <Button
@@ -1809,13 +1863,14 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
                                         || isGenerating
                                         || it.source !== "firm"
                                         || oneClickGeneratingTemplateId === it.templateId
-                                        || blocksTemplateGenerate(readinessStatus)
-                                        || dataMissing
-                                        || checklistWorkflowStatus === "blocked"
+                                        || Boolean(generateFinalDisabledReason)
                                       }
                                     >
                                       {oneClickGeneratingTemplateId === it.templateId ? "Generating..." : "Generate Final"}
                                     </Button>
+                                    {generateFinalDisabledReason ? (
+                                      <div className="text-[11px] text-slate-500 max-w-64 break-words">{generateFinalDisabledReason}</div>
+                                    ) : null}
                                   </div>
                                 </div>
                               </div>

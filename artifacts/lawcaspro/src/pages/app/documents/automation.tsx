@@ -502,17 +502,6 @@ export default function DocumentAutomationHub() {
     setPreflightReport(null);
     let startedJob = false;
     try {
-      const preflight = await apiFetchJson<any>("/documents/automation/preflight", {
-        method: "POST",
-        body: JSON.stringify({ caseIds: selectedCaseIds, templateIds: selectedTemplateIds }),
-        timeoutMs: 60000,
-      });
-      if (preflight?.critical) {
-        setPreflightReport(preflight);
-        toast({ title: "Preflight failed", description: "Fix missing template files or required data before generating.", variant: "destructive" });
-        return;
-      }
-
       const duplexSettings =
         mode === "print"
           ? duplexMode === "custom"
@@ -531,8 +520,7 @@ export default function DocumentAutomationHub() {
       };
 
       const qs = new URLSearchParams();
-      qs.set("blind", "true");
-      qs.set("force", "true");
+      qs.set("validate", "true");
       const data = await apiFetchJson<any>(`/documents/automation/generate-job?${qs.toString()}`, {
         method: "POST",
         body: JSON.stringify(payload),
@@ -575,7 +563,19 @@ export default function DocumentAutomationHub() {
       startedJob = true;
       toast({ title: "Generation started", description: "Processing in background. This page will auto-download when ready." });
     } catch (err) {
-      toastError(toast, err);
+      const failures =
+        err && typeof err === "object" && "data" in (err as any) && Array.isArray((err as any).data?.failures)
+          ? ((err as any).data.failures as any[])
+          : null;
+      if (failures && failures.length > 0) {
+        setPreflightReport({ failures });
+        const first = failures[0] ?? {};
+        const code = safeText(first.errorCode) || safeText((err as any).code) || "PRECHECK_FAILED";
+        const msg = safeText(first.errorMessage) || "Preflight failed";
+        toast({ title: "FA", description: `${msg} (${code})`, variant: "destructive" });
+      } else {
+        toastError(toast, err);
+      }
     } finally {
       if (!startedJob) setBusy(false);
     }
@@ -913,19 +913,12 @@ export default function DocumentAutomationHub() {
                       <div className="text-sm font-semibold text-amber-900">Preflight Issues</div>
                       <div className="mt-1 text-xs text-amber-800">Resolve these before running Generate &amp; Download.</div>
                       <div className="mt-2 space-y-2">
-                        {(Array.isArray(preflightReport?.templates) ? preflightReport.templates : [])
-                          .filter((t: any) => String(t?.fileStatus ?? "") !== "ready")
+                        {(Array.isArray(preflightReport?.failures) ? preflightReport.failures : [])
                           .slice(0, 50)
-                          .map((t: any, idx: number) => (
-                            <div key={`${t?.templateId ?? idx}`} className="text-xs text-amber-900 break-words">
-                              {safeText(t?.templateName) || `Template #${String(t?.templateId ?? "")}`} — {safeText(t?.fileStatus) || "missing_file"} — {(Array.isArray(t?.missing) ? t.missing : []).join(", ") || "Template file missing"}
-                            </div>
-                          ))}
-                        {(Array.isArray(preflightReport?.cases) ? preflightReport.cases : [])
-                          .slice(0, 50)
-                          .map((c: any, idx: number) => (
-                            <div key={`${c?.caseId ?? idx}`} className="text-xs text-amber-900 break-words">
-                              {safeText(c?.referenceNo) || `Case #${String(c?.caseId ?? "")}`} — Missing: {(Array.isArray(c?.missing) ? c.missing : []).join(", ") || "Required data"}
+                          .map((f: any, idx: number) => (
+                            <div key={`${f?.caseId ?? idx}:${f?.templateId ?? ""}`} className="text-xs text-amber-900 break-words">
+                              Case #{String(f?.caseId ?? "")} — {safeText(f?.templateName) || `Template #${String(f?.templateId ?? "")}`} — {safeText(f?.errorCode) || "PRECHECK_FAILED"} {safeText(f?.errorMessage)}
+                              {Array.isArray(f?.missingVariables) && f.missingVariables.length > 0 ? ` | Missing: ${f.missingVariables.join(", ")}` : ""}
                             </div>
                           ))}
                       </div>
