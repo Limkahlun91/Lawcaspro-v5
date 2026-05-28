@@ -459,43 +459,45 @@ export async function computeDashboardStats(
     { key: "mot_stamp", label: "MOT Stamped" },
   ];
 
-  const stepCounts: Record<string, { done: number; pending: number }> = {};
+  const stepCounts: Record<string, { doneIds: number[]; pendingIds: number[] }> = {};
   if (workflowStepsEnabled) {
     try {
-      const countCasesForStepPresence = async (stepKey: CaseMilestoneKey, presence: "completed" | "pending", extraWhere?: SQL) => {
+      const listCaseIdsForStepPresence = async (stepKey: CaseMilestoneKey, presence: "completed" | "pending", extraWhere?: SQL) => {
         if (deadlineExceeded()) {
           deadlineSkip("milestones.workflowSteps", ["milestoneCards", "milestoneSections"]);
           workflowStepsEnabled = false;
-          return 0;
+          return [];
         }
         const base = assignedCasesJoin
-          ? r.select({ c: count() }).from(casesTable).innerJoin(caseAssignmentsTable, assignedCasesJoin)
-          : r.select({ c: count() }).from(casesTable);
+          ? r.select({ id: casesTable.id }).from(casesTable).innerJoin(caseAssignmentsTable, assignedCasesJoin)
+          : r.select({ id: casesTable.id }).from(casesTable);
         const where = and(
           eq(casesTable.firmId, firmId),
           isNull(casesTable.deletedAt),
           milestonePresenceWhereSql(stepKey, presence),
           ...(extraWhere ? [extraWhere] : []),
         );
-        const [row] = await base.where(where);
-        return toNumber0(row?.c);
+        const rows = await base.where(where);
+        return rows
+          .map((x) => toNumber0((x as any)?.id))
+          .filter((id) => Number.isFinite(id) && id > 0);
       };
 
       await Promise.all([
         ...spaMilestones.map(async (m) => {
-          const done = await countCasesForStepPresence(m.key, "completed");
-          const pending = await countCasesForStepPresence(m.key, "pending");
-          stepCounts[`spa_${m.key}`] = { done, pending };
+          const doneIds = await listCaseIdsForStepPresence(m.key, "completed");
+          const pendingIds = await listCaseIdsForStepPresence(m.key, "pending");
+          stepCounts[`spa_${m.key}`] = { doneIds, pendingIds };
         }),
         ...loanMasterMilestones.map(async (m) => {
-          const done = await countCasesForStepPresence(m.key, "completed", loanMasterWhere);
-          const pending = await countCasesForStepPresence(m.key, "pending", loanMasterWhere);
-          stepCounts[`loan_master_${m.key}`] = { done, pending };
+          const doneIds = await listCaseIdsForStepPresence(m.key, "completed", loanMasterWhere);
+          const pendingIds = await listCaseIdsForStepPresence(m.key, "pending", loanMasterWhere);
+          stepCounts[`loan_master_${m.key}`] = { doneIds, pendingIds };
         }),
         ...loanTitleMilestones.map(async (m) => {
-          const done = await countCasesForStepPresence(m.key, "completed", loanTitleWhere);
-          const pending = await countCasesForStepPresence(m.key, "pending", loanTitleWhere);
-          stepCounts[`loan_title_${m.key}`] = { done, pending };
+          const doneIds = await listCaseIdsForStepPresence(m.key, "completed", loanTitleWhere);
+          const pendingIds = await listCaseIdsForStepPresence(m.key, "pending", loanTitleWhere);
+          stepCounts[`loan_title_${m.key}`] = { doneIds, pendingIds };
         }),
       ]);
     } catch (err) {
@@ -553,13 +555,14 @@ export async function computeDashboardStats(
   };
 
   const toMilestoneCard = (segKey: string, m: { key: CaseMilestoneKey; label: string }, key: string, extraFilter: Record<string, string> | undefined) => {
-    const counts = stepCounts[key] ?? { done: 0, pending: 0 };
-    const done = counts.done;
-    const pending = counts.pending;
+    const counts = stepCounts[key] ?? { doneIds: [], pendingIds: [] };
+    const done = counts.doneIds.length;
+    const pending = counts.pendingIds.length;
     return {
       key: `${segKey}_${String(m.key)}`,
       label: m.label,
       count: pending,
+      caseIds: counts.pendingIds,
       pendingCount: pending,
       doneCount: done,
       filter: {

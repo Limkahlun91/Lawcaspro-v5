@@ -374,55 +374,36 @@ router.get("/dashboard", requireAuth, requireFirmUser, requirePermission("dashbo
       return n;
     })();
     const effectiveAssignedToUserId = assignedToMe ? (req.userId ?? null) : assignedToUserId;
-    const summary = await computeDashboardSummary(r, { firmId, assignedToUserId: effectiveAssignedToUserId });
-    const unavailableFields = [
-      "milestoneCards",
-      "milestoneSections",
-      "recentCases",
-      "billing",
-      "outstandingAdvances",
-      "commsThisMonth",
-      "completionSlaOverdue",
-    ];
-    if (summary.ok === true) {
-      const degraded = summary.errors.length > 0;
-      res.status(200).json({
-        ok: true,
-        degraded,
-        partial: true,
-        requestId,
-        warnings: summary.errors.map((e) => ({ module: e.section, code: e.code, message: e.message })),
-        unavailableFields,
-        dashboard: {
-          totalCases: summary.data.totalCases,
-          activeCases: summary.data.totalCases,
-          completedCases: 0,
-          totalClients: summary.data.totalClients,
-          totalDevelopers: summary.data.totalDevelopers,
-          totalProjects: summary.data.totalProjects,
-          milestoneSections: [],
-          recentCases: [],
-          alerts: [],
-        },
-      });
-      return;
-    }
+    const stats = await computeDashboardStats(r, firmId, {
+      assignedToUserId: effectiveAssignedToUserId ?? undefined,
+      includeErrorDetails: allowDetails,
+      deadlineAt: Date.now() + 2_800,
+    });
     res.status(200).json({
       ok: true,
-      degraded: true,
-      partial: true,
+      degraded: Boolean((stats as any)?.degraded) || Boolean((stats as any)?.ok === false),
       requestId,
-      warnings: [{ module: "summary", code: null, message: summary.error }],
-      unavailableFields,
+      warnings: Array.isArray((stats as any)?.warnings) ? (stats as any).warnings : [],
+      unavailableFields: Array.isArray((stats as any)?.unavailableFields) ? (stats as any).unavailableFields : [],
       dashboard: {
-        totalCases: 0,
-        activeCases: 0,
-        completedCases: 0,
-        totalClients: 0,
-        totalDevelopers: 0,
-        totalProjects: 0,
-        milestoneSections: [],
-        recentCases: [],
+        totalCases: (stats as any).totalCases ?? 0,
+        activeCases: (stats as any).activeCases ?? 0,
+        completedCases: (stats as any).completedCases ?? 0,
+        totalClients: (stats as any).totalClients ?? 0,
+        totalDevelopers: (stats as any).totalDevelopers ?? 0,
+        totalProjects: (stats as any).totalProjects ?? 0,
+        cashCases: (stats as any).cashCases ?? 0,
+        loanCases: (stats as any).loanCases ?? 0,
+        masterTitleCases: (stats as any).masterTitleCases ?? 0,
+        individualTitleCases: (stats as any).individualTitleCases ?? 0,
+        strataTitleCases: (stats as any).strataTitleCases ?? 0,
+        billing: (stats as any).billing ?? { totalBilled: 0, totalPaid: 0, totalOutstanding: 0 },
+        outstandingAdvances: (stats as any).outstandingAdvances ?? [],
+        commsThisMonth: (stats as any).commsThisMonth ?? [],
+        completionSlaOverdue: (stats as any).completionSlaOverdue ?? [],
+        milestoneSections: Array.isArray((stats as any).milestoneSections) ? (stats as any).milestoneSections : [],
+        milestoneCards: Array.isArray((stats as any).milestoneCards) ? (stats as any).milestoneCards : [],
+        recentCases: Array.isArray((stats as any).recentCases) ? (stats as any).recentCases : [],
         alerts: [],
       },
     });

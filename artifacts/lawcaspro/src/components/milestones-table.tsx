@@ -24,10 +24,17 @@ function buildCasesHref(filter: { milestone?: string | null; milestonePresence?:
   const milestone = (filter as Record<string, unknown>)?.milestone as string | undefined;
   const milestonePresence = (filter as Record<string, unknown>)?.milestonePresence as string | undefined;
   const milestoneStatus = (filter as Record<string, unknown>)?.milestoneStatus as string | undefined;
-  const status = milestoneStatus || milestonePresence;
+  const presence = milestoneStatus || milestonePresence;
+  const status =
+    presence === "completed" ? "done"
+      : presence === "pending" ? "pending"
+        : presence === "missing" ? "missing"
+          : presence === "filled" ? "filled"
+            : presence;
   if (milestone && status) {
     qs.set("milestone", milestone);
-    qs.set("milestoneStatus", status);
+    qs.set("status", status);
+    qs.set("milestonePresence", presence === "done" ? "completed" : presence ?? "");
   }
   const assignedToUserId = (filter as Record<string, unknown>)?.assignedToUserId as string | undefined;
   if (assignedToUserId) qs.set("assignedToUserId", assignedToUserId);

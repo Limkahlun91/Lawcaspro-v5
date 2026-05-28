@@ -62,17 +62,15 @@ export type CreateGenerationJobPayload = {
   };
   blind?: boolean;
   force?: boolean;
-  validate?: boolean;
 };
 
 export async function createGenerationJob(payload: CreateGenerationJobPayload): Promise<{ jobId: string; statusUrl?: string; downloadUrl?: string }> {
   const qs = new URLSearchParams();
   if (payload.blind) qs.set("blind", "true");
   if (payload.force) qs.set("force", "true");
-  if (payload.validate) qs.set("validate", "true");
   const res = await apiFetchJson<unknown>(`/documents/automation/generate-job?${qs.toString()}`, {
     method: "POST",
-    timeoutMs: 60000,
+    timeoutMs: 3000,
     body: JSON.stringify({ caseIds: payload.caseIds, templateIds: payload.templateIds, config: payload.config }),
   });
   const r = asRecord(res) ?? {};
@@ -85,8 +83,20 @@ export async function createGenerationJob(payload: CreateGenerationJobPayload): 
   };
 }
 
+export async function validateGenerationJob(payload: Omit<CreateGenerationJobPayload, "config"> & { config: CreateGenerationJobPayload["config"] }): Promise<unknown> {
+  const qs = new URLSearchParams();
+  qs.set("validate", "true");
+  if (payload.blind) qs.set("blind", "true");
+  if (payload.force) qs.set("force", "true");
+  return await apiFetchJson<unknown>(`/documents/automation/generate-job?${qs.toString()}`, {
+    method: "POST",
+    timeoutMs: 3000,
+    body: JSON.stringify({ caseIds: payload.caseIds, templateIds: payload.templateIds, config: payload.config }),
+  });
+}
+
 export async function getGenerationJob(jobId: string): Promise<NormalizedGenerationJob> {
-  const raw = await apiFetchJson<unknown>(`/documents/jobs/${jobId}`, { timeoutMs: 15000 });
+  const raw = await apiFetchJson<unknown>(`/documents/jobs/${jobId}`, { timeoutMs: 8000 });
   return normalizeGenerationJob(raw);
 }
 
@@ -94,7 +104,7 @@ export async function getGenerationJobStatus(jobId: string): Promise<NormalizedG
   try {
     return await getGenerationJob(jobId);
   } catch {
-    const raw = await apiFetchJson<unknown>(`/documents/status/${jobId}`, { timeoutMs: 15000 });
+    const raw = await apiFetchJson<unknown>(`/documents/status/${jobId}`, { timeoutMs: 8000 });
     return normalizeGenerationJob(raw);
   }
 }

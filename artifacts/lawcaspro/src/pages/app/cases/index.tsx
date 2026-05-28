@@ -98,10 +98,11 @@ export default function CasesList() {
   const initialPresence = legacyInitial
     ? legacyInitial.presence
     : normalizeMilestonePresence(sp.get("milestoneStatus") ?? sp.get("milestonePresence"));
-  const [milestone, setMilestone] = useState<CaseMilestoneKey | "all">(() => initialMilestone);
+    : normalizeMilestonePresence(sp.get("status") ?? sp.get("milestoneStatus") ?? sp.get("milestonePresence"));
   const [milestonePresence, setMilestonePresence] = useState<MilestonePresence>(() => initialPresence);
   const [page, setPage] = useState<number>(() => Number.isInteger(initialPage) && initialPage > 0 ? initialPage : 1);
   const [limit, setLimit] = useState<number>(() => Number.isInteger(initialLimit) && initialLimit > 0 ? initialLimit : 50);
+
 
   useEffect(() => {
     isHydratingFromUrl.current = true;
@@ -123,7 +124,7 @@ export default function CasesList() {
     const nextTitleType = q.get("titleType") ?? "all";
     const legacy = parseLegacyMilestoneParams(q);
     const nextMilestone = legacy ? legacy.milestone : normalizeMilestoneKey(q.get("milestone"));
-    const nextPresence = legacy ? legacy.presence : normalizeMilestonePresence(q.get("milestoneStatus") ?? q.get("milestonePresence"));
+    const nextPresence = legacy ? legacy.presence : normalizeMilestonePresence(q.get("status") ?? q.get("milestoneStatus") ?? q.get("milestonePresence"));
 
     setSearch((prev) => prev === nextSearch ? prev : nextSearch);
     setSpaStatus((prev) => prev === nextSpaStatus ? prev : nextSpaStatus);
@@ -162,7 +163,8 @@ export default function CasesList() {
     setIf("milestone", milestone === "all" ? undefined : milestone);
     if (milestone !== "all") {
       const status = milestonePresence === "completed" ? "done" : milestonePresence;
-      nextSp.set("milestoneStatus", status);
+      nextSp.set("status", status);
+      nextSp.set("milestonePresence", milestonePresence);
     }
     nextSp.set("page", String(page));
     nextSp.set("limit", String(limit));

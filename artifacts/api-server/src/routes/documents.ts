@@ -6096,63 +6096,15 @@ function startCaseDocumentRunRunner(r: DbConn, args: { firmId: number; runId: nu
 async function convertDocxToPdf(docxBytes: Buffer): Promise<Buffer> {
   const baseUrl = typeof process.env.GOTENBERG_URL === "string" ? process.env.GOTENBERG_URL.trim().replace(/\/+$/, "") : "";
   if (!baseUrl) {
-    const pdfDoc = await PDFDocument.create();
-    const page = pdfDoc.addPage([595.28, 841.89]);
-    const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
-    const xmlText = (() => {
-      try {
-        const zip = new PizZip(docxBytes);
-        const xml = zip.file("word/document.xml")?.asText() ?? "";
-        const parts: string[] = [];
-        const re = /<w:t[^>]*>([\s\S]*?)<\/w:t>|<w:tab\s*\/>|<w:br\s*\/>|<\/w:p>/g;
-        for (;;) {
-          const m = re.exec(xml);
-          if (!m) break;
-          if (m[0].startsWith("<w:t")) parts.push(m[1] ?? "");
-          else if (m[0].startsWith("<w:tab")) parts.push("\t");
-          else if (m[0].startsWith("<w:br")) parts.push("\n");
-          else parts.push("\n\n");
-        }
-        const raw = parts.join("");
-        return raw
-          .replace(/&amp;/g, "&")
-          .replace(/&lt;/g, "<")
-          .replace(/&gt;/g, ">")
-          .replace(/&quot;/g, "\"")
-          .replace(/&apos;/g, "'");
-      } catch {
-        return "";
-      }
-    })();
-    const text = xmlText.trim() ? xmlText.trim() : "Document generated (fallback rendering).";
-    const margin = 50;
-    const fontSize = 10;
-    const lineHeight = 14;
-    const maxWidth = page.getWidth() - margin * 2;
-    const tokens = text.replace(/\r\n/g, "\n").split(/\s+/);
-    const lines: string[] = [];
-    let current = "";
-    for (const t of tokens) {
-      const next = current ? `${current} ${t}` : t;
-      if (font.widthOfTextAtSize(next, fontSize) <= maxWidth) current = next;
-      else {
-        if (current) lines.push(current);
-        current = t;
-      }
-    }
-    if (current) lines.push(current);
-    let y = page.getHeight() - margin;
-    for (const ln of lines) {
-      if (y < margin) break;
-      page.drawText(ln, { x: margin, y, size: fontSize, font, color: rgb(0, 0, 0) });
-      y -= lineHeight;
-    }
-    const bytes = await pdfDoc.save();
-    return Buffer.from(bytes);
+    throw new DocumentGenerationError(
+      501,
+      "DOCX_TO_PDF_CONVERTER_NOT_CONFIGURED",
+      "Word template rendered but PDF conversion is not configured on Vercel.",
+    );
   }
 
   const controller = new AbortController();
-  const timeoutMs = 25000;
+  const timeoutMs = 6500;
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const url = `${baseUrl}/forms/libreoffice/convert`;
@@ -6878,11 +6830,13 @@ async function generateFirmDocument({
   if (templateExt === "pdf") {
     outFormat = "pdf";
     const mappingConfig = (template as any).pdf_mapping_config ?? null;
+    const legacyMappings = normalizePdfMappingConfig(mappingConfig);
+    if (!isPdfTextBoxMappings(mappingConfig) && legacyMappings.length === 0) {
+      throw new DocumentGenerationError(422, "PDF_TEMPLATE_MISSING_MAPPING", "PDF template missing mapping");
+    }
     outputBytes = await (isPdfTextBoxMappings(mappingConfig)
       ? renderPdfTextBoxMappedTemplate({ pdfBytes: fileContents, data: input, mappings: mappingConfig, missingMode: "empty" })
-      : normalizePdfMappingConfig(mappingConfig).length > 0
-        ? renderPdfMappedTemplate({ pdfBytes: fileContents, data: input, mappingConfig, missingMode: "empty" })
-        : renderPdfFormTemplate({ pdfBytes: fileContents, data: input, flatten: true }));
+      : renderPdfMappedTemplate({ pdfBytes: fileContents, data: input, mappingConfig, missingMode: "empty" }));
     outputContentType = "application/pdf";
   } else {
     if (!Buffer.isBuffer(fileContents) || fileContents.length === 0) {
@@ -7314,7 +7268,7 @@ async function generateMasterDocument({
       delimiters: { start: "{{", end: "}}" },
       nullGetter(part: any) {
         const k = typeof part?.value === "string" ? String(part.value) : "";
-        return k ? `[MISSING: ${k}]` : "";
+        return k ? "" : "";
       },
     });
     attachDocxImageModule(doc);
@@ -9410,6 +9364,9 @@ router.post("/documents/automation/generate-job", requireAuth, requireFirmUser, 
   const r = getRlsDb(req, res);
   if (!r) return;
 
+  const API_MAX_MS = 8000;
+  const startedAt = Date.now();
+
   const bodySchema = z.object({
     caseIds: z.array(z.union([z.number(), z.string()])).min(1),
     templateIds: z.array(z.union([z.number(), z.string()])).min(1),
@@ -9449,7 +9406,7 @@ router.post("/documents/automation/generate-job", requireAuth, requireFirmUser, 
   }
 
   const templateRows = await queryRows(r, sql`
-    SELECT id, name
+    SELECT id, name, object_path, file_name, pdf_mapping_config
     FROM document_templates
     WHERE firm_id = ${req.firmId!}
       AND is_template_capable = true
@@ -9468,34 +9425,100 @@ router.post("/documents/automation/generate-job", requireAuth, requireFirmUser, 
   const effectiveForce = force || blind;
   const qValidate = String(one((req.query as any).validate) ?? "").trim().toLowerCase();
   const validate = qValidate === "1" || qValidate === "true" || qValidate === "yes";
-  const preflight = await runSimpleDocumentGenerationPreflight({ r, firmId: req.firmId!, caseIds, templateIds });
-  const failures = effectiveForce
-    ? preflight.failures.filter((f) => f.templateFileStatus !== "ready" || (f.templateType === "docx" && f.converterStatus !== "ready"))
-    : preflight.failures;
-  if (failures.length > 0) {
-    const normalizedFailures = failures.map((f) => {
-      const mapped = (() => {
-        if (f.templateFileStatus === "missing") return { errorCode: "TEMPLATE_FILE_MISSING", errorMessage: "Missing template file" };
-        if (f.templateFileStatus === "read_failed") return { errorCode: "TEMPLATE_STORAGE_READ_FAILED", errorMessage: "Template storage read failed" };
-        if (f.templateType === "docx" && f.converterStatus === "missing") return { errorCode: "PDF_CONVERSION_UNAVAILABLE", errorMessage: "PDF conversion is not configured" };
-        return { errorCode: "INTERNAL_ERROR", errorMessage: "Preflight failed" };
+  if (validate) {
+    const deadlineAt = startedAt + Math.min(API_MAX_MS, 3000);
+    const templateById = new Map<number, Record<string, unknown>>();
+    for (const row of templateRows) {
+      const tid = typeof (row as any).id === "number" ? Number((row as any).id) : Number((row as any).id);
+      if (!Number.isFinite(tid)) continue;
+      templateById.set(tid, row);
+    }
+    const gotenbergConfigured = typeof process.env.GOTENBERG_URL === "string" && process.env.GOTENBERG_URL.trim().length > 0;
+    const templateCheckById = new Map<number, { templateName: string; templateType: "pdf" | "docx" | "unsupported"; hardBlocked: boolean; code?: string; message?: string }>();
+    await Promise.all(templateIds.map(async (templateId) => {
+      const t = templateById.get(templateId);
+      const templateName = t ? String((t as any).name ?? "") : "";
+      const fileName = t && typeof (t as any).file_name === "string" ? String((t as any).file_name) : "";
+      const ext = fileExtensionFromName(fileName).toLowerCase();
+      const templateType: "pdf" | "docx" | "unsupported" = ext === "pdf" ? "pdf" : (ext === "docx" ? "docx" : "unsupported");
+      const objectPathRaw = t && typeof (t as any).object_path === "string" ? String((t as any).object_path).trim() : "";
+      const objectPathUsed = (() => {
+        if (!objectPathRaw) return "";
+        try {
+          return decodeStoragePath(objectPathRaw);
+        } catch {
+          return "";
+        }
       })();
+      const mappingConfig = (t as any)?.pdf_mapping_config ?? null;
+      const pdfMappingMissing =
+        templateType === "pdf"
+          ? !(isPdfTextBoxMappings(mappingConfig) || (mappingConfig && typeof mappingConfig === "object" && Object.keys(mappingConfig as Record<string, unknown>).length > 0))
+          : false;
+
+      if (Date.now() > deadlineAt) {
+        templateCheckById.set(templateId, {
+          templateName,
+          templateType: templateType === "unsupported" ? "unsupported" : templateType,
+          hardBlocked: false,
+          code: "REQUEST_STEP_TIMEOUT",
+          message: "Generation step exceeded safe Vercel execution time. Please retry polling.",
+        });
+        return;
+      }
+
+      if (templateType === "unsupported") {
+        templateCheckById.set(templateId, { templateName, templateType, hardBlocked: true, code: "UNSUPPORTED_TEMPLATE_SOURCE", message: "Unsupported template source" });
+        return;
+      }
+
+      if (!objectPathUsed) {
+        templateCheckById.set(templateId, { templateName, templateType, hardBlocked: true, code: "TEMPLATE_FILE_MISSING", message: "Missing template file" });
+        return;
+      }
+
+      if (templateType === "pdf" && pdfMappingMissing) {
+        templateCheckById.set(templateId, { templateName, templateType, hardBlocked: true, code: "PDF_TEMPLATE_MISSING_MAPPING", message: "PDF template missing mapping" });
+        return;
+      }
+
+      try {
+        const exists = await supabaseStorage.privateObjectExists(objectPathUsed, { timeoutMs: 700 });
+        if (!exists) {
+          templateCheckById.set(templateId, { templateName, templateType, hardBlocked: true, code: "STORAGE_OBJECT_NOT_FOUND", message: "Storage object not found" });
+          return;
+        }
+      } catch (err) {
+        const cfgErr = getSupabaseStorageConfigError(err);
+        if (cfgErr) {
+          templateCheckById.set(templateId, { templateName, templateType, hardBlocked: true, code: "STORAGE_NOT_CONFIGURED", message: cfgErr.error });
+          return;
+        }
+      }
+
+      if (templateType === "docx" && !gotenbergConfigured && effectiveForce) {
+        templateCheckById.set(templateId, { templateName, templateType, hardBlocked: true, code: "DOCX_TO_PDF_CONVERTER_NOT_CONFIGURED", message: "Word template rendered but PDF conversion is not configured on Vercel." });
+        return;
+      }
+
+      templateCheckById.set(templateId, { templateName, templateType, hardBlocked: false });
+    }));
+
+    const items = caseIds.flatMap((caseId) => templateIds.map((templateId) => {
+      const t = templateCheckById.get(templateId) ?? { templateName: "", templateType: "docx" as const, hardBlocked: false as const };
       return {
-        caseId: f.caseId,
-        templateId: f.templateId,
-        templateName: f.templateName,
-        templateType: f.templateType,
-        output: "pdf",
-        ...mapped,
-        ...(f.missingVariables.length ? { missingVariables: f.missingVariables } : {}),
-        ...(f.diagnostic ? { diagnostic: f.diagnostic } : {}),
+        caseId,
+        templateId: String(templateId),
+        templateName: t.templateName,
+        hardBlocked: Boolean(t.hardBlocked),
+        warnings: t.hardBlocked ? [] : ["Missing variables will be blank"],
+        outputFormat: "pdf" as const,
+        ...(t.code ? { code: t.code } : {}),
+        ...(t.message ? { message: t.message } : {}),
       };
-    });
-    res.status(422).json({
-      error: validate ? "Preflight failed" : "Preflight failed",
-      code: normalizedFailures[0]?.errorCode ?? "PRECHECK_FAILED",
-      failures: normalizedFailures,
-    });
+    }));
+
+    res.status(200).json({ ok: true, mode: "validate", items });
     return;
   }
 
@@ -9531,29 +9554,27 @@ router.post("/documents/automation/generate-job", requireAuth, requireFirmUser, 
     VALUES ${sql.join(itemValues, sql`, `)}
   `);
 
-  res.status(202).json({
-    jobId,
-    statusUrl: `/documents/jobs/${jobId}`,
-    downloadUrl: `/documents/jobs/${jobId}/download`,
-  });
+  res.status(202).json({ ok: true, jobId, status: "queued" });
 });
 
 router.get("/documents/jobs/:jobId", requireAuth, requireFirmUser, requirePermission("documents", "read"), async (req: AuthRequest, res): Promise<void> => {
   const r = getRlsDb(req, res);
   if (!r) return;
+  const MAX_JOB_STEP_MS = 7000;
+  const MAX_ITEMS_PER_POLL = 1;
   const jobId = one((req.params as any).jobId) ?? "";
   if (!/^[0-9a-fA-F-]{36}$/.test(jobId)) {
-    res.status(400).json({ error: "Invalid jobId" });
+    res.status(400).json({ ok: false, code: "INVALID_JOB_ID", message: "Invalid jobId" });
     return;
   }
 
   await recoverStaleDocumentGenerationJob(r, { firmId: req.firmId!, jobId, staleMs: 3 * 60_000 });
-  await startDocumentGenerationJobRunner(r, { firmId: req.firmId!, jobId }, { maxSteps: 2, maxMs: 1200 });
+  await startDocumentGenerationJobRunner(r, { firmId: req.firmId!, jobId }, { maxSteps: MAX_ITEMS_PER_POLL, maxMs: MAX_JOB_STEP_MS });
 
   const jobs = await queryRows(r, sql`SELECT * FROM document_generation_jobs WHERE id = ${jobId}::uuid AND firm_id = ${req.firmId!}`);
   const job = jobs[0];
   if (!job) {
-    res.status(404).json({ error: "Job not found" });
+    res.status(404).json({ ok: false, code: "JOB_NOT_FOUND", message: "Job not found" });
     return;
   }
   const items = await queryRows(r, sql`
@@ -9566,31 +9587,41 @@ router.get("/documents/jobs/:jobId", requireAuth, requireFirmUser, requirePermis
     WHERE i.job_id = ${jobId}::uuid AND i.firm_id = ${req.firmId!}
     ORDER BY i.id ASC
   `);
-  res.json({ job, items });
+  const status = String((job as any).status ?? "");
+  const jobPayload: Record<string, unknown> = {
+    ...(job as any),
+    ...(status === "completed" || status === "completed_with_errors"
+      ? { downloadUrl: `/documents/jobs/${jobId}/download` }
+      : {}),
+  };
+  res.json({ ok: true, job: jobPayload, items });
 });
 
 router.get("/documents/status/:jobId", requireAuth, requireFirmUser, requirePermission("documents", "read"), async (req: AuthRequest, res): Promise<void> => {
   const r = getRlsDb(req, res);
   if (!r) return;
+  const MAX_JOB_STEP_MS = 7000;
+  const MAX_ITEMS_PER_POLL = 1;
   const jobId = one((req.params as any).jobId) ?? "";
   if (!/^[0-9a-fA-F-]{36}$/.test(jobId)) {
-    res.status(400).json({ error: "Invalid jobId" });
+    res.status(400).json({ ok: false, code: "INVALID_JOB_ID", message: "Invalid jobId" });
     return;
   }
 
   await recoverStaleDocumentGenerationJob(r, { firmId: req.firmId!, jobId, staleMs: 3 * 60_000 });
-  await startDocumentGenerationJobRunner(r, { firmId: req.firmId!, jobId }, { maxSteps: 2, maxMs: 1200 });
+  await startDocumentGenerationJobRunner(r, { firmId: req.firmId!, jobId }, { maxSteps: MAX_ITEMS_PER_POLL, maxMs: MAX_JOB_STEP_MS });
 
   const jobs = await queryRows(r, sql`SELECT * FROM document_generation_jobs WHERE id = ${jobId}::uuid AND firm_id = ${req.firmId!}`);
   const job = jobs[0] as any;
   if (!job) {
-    res.status(404).json({ error: "Job not found" });
+    res.status(404).json({ ok: false, code: "JOB_NOT_FOUND", message: "Job not found" });
     return;
   }
 
   const st = String(job.status ?? "");
   if (st === "completed" || st === "completed_with_errors") {
     res.json({
+      ok: true,
       jobId,
       status: st,
       downloadUrl: `/documents/jobs/${jobId}/download`,
@@ -9602,6 +9633,7 @@ router.get("/documents/status/:jobId", requireAuth, requireFirmUser, requirePerm
 
   if (st === "failed") {
     res.json({
+      ok: true,
       jobId,
       status: "failed",
       error: typeof job.error_summary === "string" ? String(job.error_summary) : "Generation failed",
@@ -9609,7 +9641,7 @@ router.get("/documents/status/:jobId", requireAuth, requireFirmUser, requirePerm
     return;
   }
 
-  res.json({ jobId, status: st || "pending" });
+  res.json({ ok: true, jobId, status: st || "pending" });
 });
 
 router.get("/documents/jobs/:jobId/download", requireAuth, requireFirmUser, requirePermission("documents", "export"), async (req: AuthRequest, res): Promise<void> => {
@@ -9617,18 +9649,18 @@ router.get("/documents/jobs/:jobId/download", requireAuth, requireFirmUser, requ
   if (!r) return;
   const jobId = one((req.params as any).jobId) ?? "";
   if (!/^[0-9a-fA-F-]{36}$/.test(jobId)) {
-    res.status(400).json({ error: "Invalid jobId" });
+    res.status(400).json({ ok: false, code: "INVALID_JOB_ID", message: "Invalid jobId" });
     return;
   }
   const jobs = await queryRows(r, sql`SELECT * FROM document_generation_jobs WHERE id = ${jobId}::uuid AND firm_id = ${req.firmId!}`);
   const job = jobs[0];
   if (!job) {
-    res.status(404).json({ error: "Job not found" });
+    res.status(404).json({ ok: false, code: "JOB_NOT_FOUND", message: "Job not found" });
     return;
   }
   const objectPath = typeof (job as any).download_object_path === "string" ? String((job as any).download_object_path) : "";
   if (!objectPath) {
-    res.status(404).json({ error: "Download not available", code: "DOWNLOAD_NOT_READY" });
+    res.status(404).json({ ok: false, code: "DOWNLOAD_NOT_READY", message: "Download not available" });
     return;
   }
   try {
@@ -10699,7 +10731,7 @@ router.post("/cases/:caseId/documents/preview", requireAuth, requireFirmUser, re
             delimiters: { start: "{{", end: "}}" },
             nullGetter(part: any) {
               const k = typeof part?.value === "string" ? String(part.value) : "";
-              return k ? `[MISSING: ${k}]` : "";
+              return k ? "" : "";
             },
           });
           attachDocxImageModule(doc);
@@ -11275,9 +11307,10 @@ router.post("/cases/:caseId/documents/generate", requireAuth, requireFirmUser, r
   `);
 
   res.status(202).json({
-    status: "accepted",
+    ok: true,
     jobId,
-    statusUrl: `/documents/status/${jobId}`,
+    status: "queued",
+    statusUrl: `/documents/jobs/${jobId}`,
     downloadUrl: `/documents/jobs/${jobId}/download`,
   });
 });

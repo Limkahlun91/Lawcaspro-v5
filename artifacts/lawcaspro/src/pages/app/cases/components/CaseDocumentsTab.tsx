@@ -29,7 +29,7 @@ import { hasPermission } from "@/lib/permissions";
 import { getGetCaseWorkflowQueryKey, getListCasesQueryKey } from "@workspace/api-client-react";
 import { validateUploadFile } from "@/lib/upload-validation";
 import { TemplateFolderPicker, type TemplateFolderPickerFolder, type TemplateFolderPickerTemplate } from "@/components/documents/TemplateFolderPicker";
-import { createGenerationJob, getGenerationJob, type NormalizedGenerationJob } from "@/lib/document-generation-client";
+import { createGenerationJob, getGenerationJob, validateGenerationJob, type NormalizedGenerationJob } from "@/lib/document-generation-client";
 import { blocksTemplateGenerate, isTemplateFileReadinessKnown, isTemplateFileReady, templateFileReadinessLabel } from "@/lib/template-readiness";
 
 function docTypeLabel(dt: string): string {
@@ -462,11 +462,25 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
     const startedAt = Date.now();
     const maxPollMs = 120_000;
     try {
+      const preflight = await validateGenerationJob({
+        caseIds: [caseId],
+        templateIds: [templateId],
+        config: { action: "download" },
+      });
+      const preflightItems = Array.isArray((preflight as any)?.items) ? ((preflight as any).items as any[]) : [];
+      const hardBlocked = preflightItems.filter((it) => Boolean(it?.hardBlocked));
+      if (hardBlocked.length > 0) {
+        const first = hardBlocked[0] ?? {};
+        const code = typeof first.code === "string" ? first.code : "PRECHECK_FAILED";
+        const msg = typeof first.message === "string" ? first.message : "Preflight hard-blocked";
+        toast({ title: "Generation blocked", description: `${msg} (${code})`, variant: "destructive" });
+        return;
+      }
+
       const created = await createGenerationJob({
         caseIds: [caseId],
         templateIds: [templateId],
         config: { action: "download" },
-        validate: true,
       });
       const jobId = created.jobId;
 
@@ -581,11 +595,25 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
     const startedAt = Date.now();
     const maxPollMs = 120_000;
     try {
+      const preflight = await validateGenerationJob({
+        caseIds: [caseId],
+        templateIds,
+        config: { action: "download" },
+      });
+      const preflightItems = Array.isArray((preflight as any)?.items) ? ((preflight as any).items as any[]) : [];
+      const hardBlocked = preflightItems.filter((it) => Boolean(it?.hardBlocked));
+      if (hardBlocked.length > 0) {
+        const first = hardBlocked[0] ?? {};
+        const code = typeof first.code === "string" ? first.code : "PRECHECK_FAILED";
+        const msg = typeof first.message === "string" ? first.message : "Preflight hard-blocked";
+        toast({ title: "Generation blocked", description: `${msg} (${code})`, variant: "destructive" });
+        return;
+      }
+
       const created = await createGenerationJob({
         caseIds: [caseId],
         templateIds,
         config: { action: "download" },
-        validate: true,
       });
       const jobId = created.jobId;
 
@@ -1848,8 +1876,8 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
                                       Data: {dataLabel}
                                     </div>
                                     {!converterReady && (
-                                      <div className="text-[11px] text-amber-700 truncate" title="PDF conversion unavailable; will attempt fallback rendering.">
-                                        PDF conversion unavailable; using fallback
+                                      <div className="text-[11px] text-amber-700 truncate" title="PDF conversion is not configured on Vercel. DOCX templates will fail fast with DOCX_TO_PDF_CONVERTER_NOT_CONFIGURED.">
+                                        PDF conversion not configured on Vercel
                                       </div>
                                     )}
                                     <div className="text-[11px] text-slate-700 truncate">

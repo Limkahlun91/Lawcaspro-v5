@@ -2638,6 +2638,17 @@ router.get("/cases", requireAuthHandler, requireFirmUserHandler, requirePermissi
   const loanStatus = one(req.query.loanStatus as any);
   const milestone = one(req.query.milestone as any) as CaseMilestoneKey | undefined;
   const milestonePresence = one(req.query.milestonePresence as any) as MilestonePresence | undefined;
+  const milestoneStatusAliasRaw = one(req.query.status as any);
+  const milestonePresenceEffective: MilestonePresence | undefined =
+    milestonePresence ??
+    (milestone
+      ? (milestoneStatusAliasRaw === "done" ? "completed"
+        : milestoneStatusAliasRaw === "pending" ? "pending"
+          : milestoneStatusAliasRaw === "completed" ? "completed"
+            : milestoneStatusAliasRaw === "missing" ? "missing"
+              : milestoneStatusAliasRaw === "filled" ? "filled"
+                : undefined)
+      : undefined);
   const sortByRaw = one(req.query.sortBy as any);
   const sortDirRaw = one(req.query.sortDir as any);
   const overdueDaysRaw = one(req.query.overdueDays as any);
@@ -2759,20 +2770,20 @@ router.get("/cases", requireAuthHandler, requireFirmUserHandler, requirePermissi
   if (loanStatus) {
     conditions.push(sql`${loanStatusExpr} = ${loanStatus}`);
   }
-  if (milestone && milestonePresence) {
-    if (milestonePresence === "filled" || milestonePresence === "missing") {
+  if (milestone && milestonePresenceEffective) {
+    if (milestonePresenceEffective === "filled" || milestonePresenceEffective === "missing") {
       if (hasKeyDates && hasWorkflowSteps) {
         if (loanOnlyMilestones.has(milestone)) {
           conditions.push(eq(casesTable.purchaseMode, "loan"));
         }
-        if (milestonePresence === "missing" && encumbranceOnlyWhenMissing.has(milestone)) {
+        if (milestonePresenceEffective === "missing" && encumbranceOnlyWhenMissing.has(milestone)) {
           conditions.push(eq(casesTable.isEncumbered, true));
         }
-        conditions.push(milestonePresenceWhereSql(milestone, milestonePresence));
+        conditions.push(milestonePresenceWhereSql(milestone, milestonePresenceEffective));
       }
-    } else if (milestonePresence === "completed" || milestonePresence === "pending") {
+    } else if (milestonePresenceEffective === "completed" || milestonePresenceEffective === "pending") {
       if (hasWorkflowSteps) {
-        conditions.push(milestonePresenceWhereSql(milestone, milestonePresence));
+        conditions.push(milestonePresenceWhereSql(milestone, milestonePresenceEffective));
       }
     }
   }

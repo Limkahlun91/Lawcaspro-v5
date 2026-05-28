@@ -10,7 +10,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "@/components/ui/resizable";
 import { cn } from "@/lib/utils";
 import { apiFetchJson } from "@/lib/api-client";
-import { downloadGenerationJob, getGenerationJobStatus, type NormalizedGenerationJob } from "@/lib/document-generation-client";
+import { createGenerationJob, downloadGenerationJob, getGenerationJobStatus, validateGenerationJob, type NormalizedGenerationJob } from "@/lib/document-generation-client";
 import { downloadBlob } from "@/lib/download";
 import { toastError } from "@/lib/toast-error";
 import { useToast } from "@/hooks/use-toast";
@@ -519,63 +519,26 @@ export default function DocumentAutomationHub() {
         },
       };
 
-      const qs = new URLSearchParams();
-      qs.set("validate", "true");
-      const data = await apiFetchJson<any>(`/documents/automation/generate-job?${qs.toString()}`, {
-        method: "POST",
-        body: JSON.stringify(payload),
-        timeoutMs: 60000,
-      });
-
-      const turboStatus = safeText((data as any)?.status);
-      const turboUrl = safeText((data as any)?.downloadUrl);
-      if (turboStatus === "completed" && turboUrl) {
-        const turboFileName = safeText((data as any)?.fileName) || (mode === "print" ? "system-print.pdf" : "document-automation.zip");
-        const failedCount = Number((data as any)?.failedCount ?? 0);
-
-        if (mode === "print") {
-          window.open(turboUrl, "_blank", "noopener,noreferrer");
-          toast({ title: "Printable PDF generated" });
-        } else {
-          try {
-            const resp = await fetch(turboUrl);
-            if (!resp.ok) throw new Error(`Download failed (${resp.status})`);
-            const blob = await resp.blob();
-            downloadBlob(blob, turboFileName);
-            toast({ title: "Export ready", description: turboFileName });
-          } catch {
-            window.open(turboUrl, "_blank", "noopener,noreferrer");
-            toast({ title: "Export ready", description: "Your browser will start the download shortly." });
-          }
-        }
-
-        if (failedCount > 0) {
-          toast({ title: "Some documents failed", description: "Open browser console to view failure details." });
-          console.warn("[document-automation.failures]", data);
-        }
+      const preflight = await validateGenerationJob(payload as any);
+      const preflightItems = Array.isArray((preflight as any)?.items) ? ((preflight as any).items as any[]) : [];
+      const hardBlocked = preflightItems.filter((it) => Boolean(it?.hardBlocked));
+      if (hardBlocked.length > 0) {
+        setPreflightReport({ hardBlocked, items: preflightItems });
+        const first = hardBlocked[0] ?? {};
+        const code = safeText(first.code) || "PRECHECK_FAILED";
+        const msg = safeText(first.message) || "Preflight hard-blocked";
+        toast({ title: "Generation blocked", description: `${msg} (${code})`, variant: "destructive" });
         setBusy(false);
         return;
       }
 
-      const nextJobId = safeText((data as any)?.jobId);
-      if (!nextJobId) throw new Error("Missing jobId");
-      setJobId(nextJobId);
+      const created = await createGenerationJob(payload as any);
+      if (!created.jobId) throw new Error("Missing jobId");
+      setJobId(created.jobId);
       startedJob = true;
       toast({ title: "Generation started", description: "Processing in background. This page will auto-download when ready." });
     } catch (err) {
-      const failures =
-        err && typeof err === "object" && "data" in (err as any) && Array.isArray((err as any).data?.failures)
-          ? ((err as any).data.failures as any[])
-          : null;
-      if (failures && failures.length > 0) {
-        setPreflightReport({ failures });
-        const first = failures[0] ?? {};
-        const code = safeText(first.errorCode) || safeText((err as any).code) || "PRECHECK_FAILED";
-        const msg = safeText(first.errorMessage) || "Preflight failed";
-        toast({ title: "FA", description: `${msg} (${code})`, variant: "destructive" });
-      } else {
-        toastError(toast, err);
-      }
+      toastError(toast, err);
     } finally {
       if (!startedJob) setBusy(false);
     }
