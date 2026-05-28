@@ -200,8 +200,16 @@ router.get("/debug/dashboard", requireAuth, requireFirmUser, async (req: AuthReq
 
   const computeProbe = await (async () => {
     try {
-      const payload = await computeDashboardStats(r, firmId);
-      return { ok: true, keys: Object.keys(payload ?? {}) };
+      const payload = await computeDashboardStats(r, firmId, { includeErrorDetails: allowDetails });
+      const warnings = Array.isArray((payload as any)?.warnings) ? (payload as any).warnings : [];
+      const unavailableFields = Array.isArray((payload as any)?.unavailableFields) ? (payload as any).unavailableFields : [];
+      return {
+        ok: true,
+        degraded: Boolean((payload as any)?.degraded) || Boolean((payload as any)?.ok === false),
+        warningsCount: warnings.length,
+        unavailableFields,
+        keys: Object.keys(payload ?? {}),
+      };
     } catch (err) {
       return { ok: false, code: getPgCode(err), message: err instanceof Error ? err.message : String(err), stack: allowDetails && err instanceof Error ? err.stack : undefined };
     }
@@ -261,12 +269,12 @@ router.get("/dashboard", requireAuth, requireFirmUser, requirePermission("dashbo
       return n;
     })();
     if (assignedToMe) {
-      const payload = await computeDashboardStats(r, firmId, { assignedToUserId: req.userId ?? undefined });
+      const payload = await computeDashboardStats(r, firmId, { assignedToUserId: req.userId ?? undefined, includeErrorDetails: allowDetails });
       res.json(payload);
       return;
     }
     if (assignedToUserId) {
-      const payload = await computeDashboardStats(r, firmId, { assignedToUserId });
+      const payload = await computeDashboardStats(r, firmId, { assignedToUserId, includeErrorDetails: allowDetails });
       res.json(payload);
       return;
     }
@@ -295,15 +303,19 @@ router.get("/dashboard", requireAuth, requireFirmUser, requirePermission("dashbo
         }
       })();
       const cached = cachedRows[0] && typeof cachedRows[0] === "object" ? (cachedRows[0] as any).payload_json : undefined;
-      if (cached && typeof cached === "object") {
+      const isBadCache =
+        cached && typeof cached === "object"
+          ? Boolean((cached as any).degraded) || Boolean((cached as any).ok === false) || (Array.isArray((cached as any).warnings) && (cached as any).warnings.length > 0)
+          : false;
+      if (cached && typeof cached === "object" && !isBadCache) {
         res.json(cached);
         return;
       }
     }
 
-    const payload = await computeDashboardStats(r, firmId);
+    const payload = await computeDashboardStats(r, firmId, { includeErrorDetails: allowDetails });
 
-    if (hasCache) {
+    if (hasCache && !(payload as any)?.degraded && (payload as any)?.ok !== false) {
       const ttlSec = (() => {
         const raw = process.env.DASHBOARD_CACHE_TTL_SEC ? Number.parseInt(process.env.DASHBOARD_CACHE_TTL_SEC, 10) : 300;
         return Number.isFinite(raw) ? Math.min(Math.max(raw, 30), 3600) : 300;

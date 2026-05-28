@@ -12,7 +12,7 @@ import {
   type RlsDb,
   db,
 } from "@workspace/db";
-import { type CaseMilestoneKey } from "../lib/caseListLogic";
+import { milestonePresenceWhereSql, type CaseMilestoneKey } from "../lib/caseListLogic";
 
 type DbConn = typeof db | RlsDb;
 
@@ -28,7 +28,14 @@ async function tableExists(r: DbConn, reg: string): Promise<boolean> {
   return Boolean(rows[0]?.reg);
 }
 
-type DashboardStatsOpts = { assignedToUserId?: number };
+type DashboardStatsOpts = { assignedToUserId?: number; includeErrorDetails?: boolean };
+
+type DashboardWarning = {
+  module: string;
+  code: string | null;
+  message: string;
+  stack?: string;
+};
 
 function toNumber0(v: unknown): number {
   const n = typeof v === "number" ? v : typeof v === "string" ? Number(v) : 0;
@@ -58,6 +65,23 @@ export async function computeDashboardStats(
   firmId: number,
   opts?: DashboardStatsOpts,
 ): Promise<Record<string, unknown>> {
+  const warnings: DashboardWarning[] = [];
+  const unavailableFields: string[] = [];
+  const includeErrorDetails = Boolean(opts?.includeErrorDetails);
+
+  const warn = (module: string, err: unknown, fields?: string[]) => {
+    const msg = err instanceof Error ? err.message : String(err);
+    warnings.push({
+      module,
+      code: getPgCode(err),
+      message: msg,
+      ...(includeErrorDetails && err instanceof Error ? { stack: err.stack } : {}),
+    });
+    for (const f of fields ?? []) {
+      if (!unavailableFields.includes(f)) unavailableFields.push(f);
+    }
+  };
+
   const hasKeyDates = await safeTableExists(r, "public.case_key_dates");
   const hasWorkflowSteps = await safeTableExists(r, "public.case_workflow_steps");
   const hasBillingEntries = await safeTableExists(r, "public.case_billing_entries");
@@ -74,24 +98,25 @@ export async function computeDashboardStats(
       )
     : undefined;
 
-  const countCases = async (where?: SQL) => {
+  const countCases = async (where: SQL, fieldKey: string) => {
     try {
       const base = assignedCasesJoin
         ? r.select({ c: count() }).from(casesTable).innerJoin(caseAssignmentsTable, assignedCasesJoin)
         : r.select({ c: count() }).from(casesTable);
-      const [row] = where ? await base.where(where) : await base;
+      const [row] = await base.where(where);
       return toNumber0(row?.c);
-    } catch {
+    } catch (err) {
+      warn(`cases.${fieldKey}`, err, [fieldKey]);
       return 0;
     }
   };
 
-  const totalCases = await countCases(and(eq(casesTable.firmId, firmId), isNull(casesTable.deletedAt)));
-  const cashCases = await countCases(and(eq(casesTable.firmId, firmId), isNull(casesTable.deletedAt), eq(casesTable.purchaseMode, "cash")));
-  const loanCases = await countCases(and(eq(casesTable.firmId, firmId), isNull(casesTable.deletedAt), eq(casesTable.purchaseMode, "loan")));
-  const masterTitleCases = await countCases(and(eq(casesTable.firmId, firmId), isNull(casesTable.deletedAt), eq(casesTable.titleType, "master")));
-  const individualTitleCases = await countCases(and(eq(casesTable.firmId, firmId), isNull(casesTable.deletedAt), eq(casesTable.titleType, "individual")));
-  const strataTitleCases = await countCases(and(eq(casesTable.firmId, firmId), isNull(casesTable.deletedAt), eq(casesTable.titleType, "strata")));
+  const totalCases = await countCases(and(eq(casesTable.firmId, firmId), isNull(casesTable.deletedAt)), "totalCases");
+  const cashCases = await countCases(and(eq(casesTable.firmId, firmId), isNull(casesTable.deletedAt), eq(casesTable.purchaseMode, "cash")), "cashCases");
+  const loanCases = await countCases(and(eq(casesTable.firmId, firmId), isNull(casesTable.deletedAt), eq(casesTable.purchaseMode, "loan")), "loanCases");
+  const masterTitleCases = await countCases(and(eq(casesTable.firmId, firmId), isNull(casesTable.deletedAt), eq(casesTable.titleType, "master")), "masterTitleCases");
+  const individualTitleCases = await countCases(and(eq(casesTable.firmId, firmId), isNull(casesTable.deletedAt), eq(casesTable.titleType, "individual")), "individualTitleCases");
+  const strataTitleCases = await countCases(and(eq(casesTable.firmId, firmId), isNull(casesTable.deletedAt), eq(casesTable.titleType, "strata")), "strataTitleCases");
 
   const completedCases = hasKeyDates
     ? (await (async () => {
@@ -115,7 +140,10 @@ export async function computeDashboardStats(
           ));
           return toNumber0(row?.c);
         } catch (err) {
-          if (!isMissingRelationOrColumnError(err)) throw err;
+          if (!isMissingRelationOrColumnError(err)) {
+            warn("cases.completedCases", err, ["completedCases"]);
+            return 0;
+          }
           return 0;
         }
       })())
@@ -158,7 +186,8 @@ export async function computeDashboardStats(
             .where(and(eq(casesTable.firmId, firmId), isNull(casesTable.deletedAt)))
             .orderBy(desc(casesTable.updatedAt))
             .limit(5);
-    } catch {
+    } catch (err) {
+      warn("cases.recentCases", err, ["recentCases"]);
       return [];
     }
   })();
@@ -240,7 +269,8 @@ export async function computeDashboardStats(
     try {
       const [row] = await r.select({ c: count() }).from(clientsTable).where(eq(clientsTable.firmId, firmId));
       return toNumber0(row?.c);
-    } catch {
+    } catch (err) {
+      warn("counts.totalClients", err, ["totalClients"]);
       return 0;
     }
   })();
@@ -248,7 +278,8 @@ export async function computeDashboardStats(
     try {
       const [row] = await r.select({ c: count() }).from(developersTable).where(eq(developersTable.firmId, firmId));
       return toNumber0(row?.c);
-    } catch {
+    } catch (err) {
+      warn("counts.totalDevelopers", err, ["totalDevelopers"]);
       return 0;
     }
   })();
@@ -256,7 +287,8 @@ export async function computeDashboardStats(
     try {
       const [row] = await r.select({ c: count() }).from(projectsTable).where(eq(projectsTable.firmId, firmId));
       return toNumber0(row?.c);
-    } catch {
+    } catch (err) {
+      warn("counts.totalProjects", err, ["totalProjects"]);
       return 0;
     }
   })();
@@ -271,7 +303,8 @@ export async function computeDashboardStats(
               SUM(CASE WHEN NOT is_paid THEN amount * quantity ELSE 0 END) as total_outstanding
             FROM case_billing_entries WHERE firm_id = ${firmId}
           `))[0] ?? {};
-        } catch {
+        } catch (err) {
+          warn("billing.summary", err, ["billing"]);
           return {};
         }
       })())
@@ -334,7 +367,8 @@ export async function computeDashboardStats(
           const caseCount = toNumber0((totals as any)?.case_count);
           const totalAmount = toNumber0((totals as any)?.total_amount);
           return { caseCount, totalAmount, topCases };
-        } catch {
+        } catch (err) {
+          warn("accounting.outstandingAdvances", err, ["outstandingAdvances"]);
           return { caseCount: 0, totalAmount: 0, topCases: [] as any[] };
         }
       })())
@@ -349,7 +383,8 @@ export async function computeDashboardStats(
             WHERE firm_id = ${firmId}
             AND created_at >= date_trunc('month', NOW())
           `))[0]?.total_this_month ?? 0);
-        } catch {
+        } catch (err) {
+          warn("comms.thisMonth", err, ["commsThisMonth"]);
           return 0;
         }
       })()
@@ -362,9 +397,9 @@ export async function computeDashboardStats(
     or(eq(casesTable.titleType, "individual"), eq(casesTable.titleType, "strata")),
   );
 
-  const spaTotal = await countCases(baseActiveWhere);
-  const loanMasterTotal = await countCases(and(baseActiveWhere, loanMasterWhere));
-  const loanTitleTotal = await countCases(and(baseActiveWhere, loanTitleWhere));
+  const spaTotal = await countCases(baseActiveWhere, "spaTotal");
+  const loanMasterTotal = await countCases(and(baseActiveWhere, loanMasterWhere), "loanMasterTotal");
+  const loanTitleTotal = await countCases(and(baseActiveWhere, loanTitleWhere), "loanTitleTotal");
 
   let workflowStepsEnabled = hasWorkflowSteps;
 
@@ -399,53 +434,42 @@ export async function computeDashboardStats(
     { key: "mot_stamp", label: "MOT Stamped" },
   ];
 
-  const stepCounts: Record<string, number> = {};
+  const stepCounts: Record<string, { done: number; pending: number }> = {};
   if (workflowStepsEnabled) {
     try {
-      const countCompletedCasesForStep = async (stepKey: CaseMilestoneKey, extraWhere?: SQL) => {
-        const baseWhere = and(
+      const countCasesForStepPresence = async (stepKey: CaseMilestoneKey, presence: "completed" | "pending", extraWhere?: SQL) => {
+        const base = assignedCasesJoin
+          ? r.select({ caseId: casesTable.id }).from(casesTable).innerJoin(caseAssignmentsTable, assignedCasesJoin)
+          : r.select({ caseId: casesTable.id }).from(casesTable);
+        const where = and(
           eq(casesTable.firmId, firmId),
           isNull(casesTable.deletedAt),
-          eq(caseWorkflowStepsTable.stepKey, stepKey),
-          eq(caseWorkflowStepsTable.status, "completed"),
+          milestonePresenceWhereSql(stepKey, presence),
           ...(extraWhere ? [extraWhere] : []),
         );
-        const rows = assignedCasesJoin
-          ? await r
-              .select({ caseId: caseWorkflowStepsTable.caseId })
-              .from(caseWorkflowStepsTable)
-              .innerJoin(casesTable, eq(caseWorkflowStepsTable.caseId, casesTable.id))
-              .innerJoin(caseAssignmentsTable, assignedCasesJoin)
-              .where(baseWhere)
-              .groupBy(caseWorkflowStepsTable.caseId)
-          : await r
-              .select({ caseId: caseWorkflowStepsTable.caseId })
-              .from(caseWorkflowStepsTable)
-              .innerJoin(casesTable, eq(caseWorkflowStepsTable.caseId, casesTable.id))
-              .where(baseWhere)
-              .groupBy(caseWorkflowStepsTable.caseId);
+        const rows = await base.where(where);
         return rows.length;
       };
 
       await Promise.all([
         ...spaMilestones.map(async (m) => {
-          const done = await countCompletedCasesForStep(m.key);
-          stepCounts[`spa_${m.key}_done`] = done;
-          stepCounts[`spa_${m.key}_pending`] = Math.max(0, spaTotal - done);
+          const done = await countCasesForStepPresence(m.key, "completed");
+          const pending = await countCasesForStepPresence(m.key, "pending");
+          stepCounts[`spa_${m.key}`] = { done, pending };
         }),
         ...loanMasterMilestones.map(async (m) => {
-          const done = await countCompletedCasesForStep(m.key, loanMasterWhere);
-          stepCounts[`loan_master_${m.key}_done`] = done;
-          stepCounts[`loan_master_${m.key}_pending`] = Math.max(0, loanMasterTotal - done);
+          const done = await countCasesForStepPresence(m.key, "completed", loanMasterWhere);
+          const pending = await countCasesForStepPresence(m.key, "pending", loanMasterWhere);
+          stepCounts[`loan_master_${m.key}`] = { done, pending };
         }),
         ...loanTitleMilestones.map(async (m) => {
-          const done = await countCompletedCasesForStep(m.key, loanTitleWhere);
-          stepCounts[`loan_title_${m.key}_done`] = done;
-          stepCounts[`loan_title_${m.key}_pending`] = Math.max(0, loanTitleTotal - done);
+          const done = await countCasesForStepPresence(m.key, "completed", loanTitleWhere);
+          const pending = await countCasesForStepPresence(m.key, "pending", loanTitleWhere);
+          stepCounts[`loan_title_${m.key}`] = { done, pending };
         }),
       ]);
     } catch (err) {
-      if (!isMissingRelationOrColumnError(err)) throw err;
+      if (!isMissingRelationOrColumnError(err)) warn("milestones.workflowSteps", err, ["milestoneCards", "milestoneSections"]);
       workflowStepsEnabled = false;
     }
   }
@@ -498,9 +522,10 @@ export async function computeDashboardStats(
     }
   };
 
-  const toMilestoneCard = (segKey: string, total: number, m: { key: CaseMilestoneKey; label: string }, filledKey: string, extraFilter: Record<string, string> | undefined) => {
-    const done = stepCounts[`${filledKey}_done`] ?? 0;
-    const pending = stepCounts[`${filledKey}_pending`] ?? Math.max(0, total - done);
+  const toMilestoneCard = (segKey: string, m: { key: CaseMilestoneKey; label: string }, key: string, extraFilter: Record<string, string> | undefined) => {
+    const counts = stepCounts[key] ?? { done: 0, pending: 0 };
+    const done = counts.done;
+    const pending = counts.pending;
     return {
       key: `${segKey}_${String(m.key)}`,
       label: m.label,
@@ -516,9 +541,9 @@ export async function computeDashboardStats(
     };
   };
 
-  const spaCards = spaMilestones.map((m) => toMilestoneCard("spa", spaTotal, m, `spa_${m.key}`, undefined));
-  const loanMasterCards = loanMasterMilestones.map((m) => toMilestoneCard("loan_master", loanMasterTotal, m, `loan_master_${m.key}`, { purchaseMode: "loan", titleType: "master" }));
-  const loanTitleCards = loanTitleMilestones.map((m) => toMilestoneCard("loan_title", loanTitleTotal, m, `loan_title_${m.key}`, { purchaseMode: "loan", titleType: "individual,strata" }));
+  const spaCards = spaMilestones.map((m) => toMilestoneCard("spa", m, `spa_${m.key}`, undefined));
+  const loanMasterCards = loanMasterMilestones.map((m) => toMilestoneCard("loan_master", m, `loan_master_${m.key}`, { purchaseMode: "loan", titleType: "master" }));
+  const loanTitleCards = loanTitleMilestones.map((m) => toMilestoneCard("loan_title", m, `loan_title_${m.key}`, { purchaseMode: "loan" }));
 
   const milestoneSections = workflowStepsEnabled ? [
     {
@@ -680,7 +705,12 @@ export async function computeDashboardStats(
     );
   }
 
+  const degraded = warnings.length > 0 || unavailableFields.length > 0;
   return {
+    ok: !degraded,
+    degraded,
+    warnings,
+    unavailableFields,
     totalCases,
     activeCases,
     completedCases,

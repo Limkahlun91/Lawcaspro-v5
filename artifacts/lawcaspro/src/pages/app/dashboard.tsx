@@ -81,8 +81,17 @@ export default function AppDashboard() {
   }
 
   const degraded = Boolean((stats as any)?.degraded) || Boolean((stats as any)?.ok === false);
+  const warnings: Array<{ module?: string; code?: string | null; message?: string }> = Array.isArray((stats as any)?.warnings) ? (stats as any).warnings : [];
+  const unavailableFields: string[] = Array.isArray((stats as any)?.unavailableFields) ? (stats as any).unavailableFields : [];
+  const debugInfo = (stats as any)?.debug && typeof (stats as any)?.debug === "object" ? (stats as any).debug : null;
   const dashboard = ((stats as any)?.dashboard && typeof (stats as any).dashboard === "object" ? (stats as any).dashboard : null) as Record<string, any> | null;
   const resolvedStats = (dashboard ?? stats) as Record<string, any>;
+
+  const showValue = (field: string, value: unknown): string => {
+    if (degraded && unavailableFields.includes(field)) return "—";
+    if (value === null || value === undefined) return "0";
+    return String(value);
+  };
 
   const canSeeAccounting = !!user && hasPermission(user, "accounting", "read") && isAccountingRoleAllowed(user.roleName);
   const billing = (resolvedStats.billing ?? {}) as Record<string, number>;
@@ -112,7 +121,19 @@ export default function AppDashboard() {
 
       {degraded ? (
         <div className="rounded-md border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
-          Dashboard partially unavailable
+          <div className="font-medium">Dashboard partially unavailable</div>
+          {warnings.length > 0 ? (
+            <div className="mt-1 text-xs text-amber-900/90">
+              {warnings.slice(0, 3).map((w, idx) => (
+                <div key={`${String(w.module ?? "warn")}_${idx}`}>
+                  {String(w.module ?? "unknown")} — {String(w.code ?? "")}{w.code ? " — " : ""}{String(w.message ?? "")}
+                </div>
+              ))}
+            </div>
+          ) : null}
+          {debugInfo ? (
+            <pre className="mt-2 max-h-40 overflow-auto rounded bg-amber-100/60 p-2 text-[11px] leading-snug">{JSON.stringify(debugInfo, null, 2)}</pre>
+          ) : null}
         </div>
       ) : null}
 
@@ -121,15 +142,15 @@ export default function AppDashboard() {
         {[
           {
             label: "Total Cases",
-            value: resolvedStats.totalCases ?? 0,
-            sub: `${resolvedStats.activeCases ?? 0} active · ${resolvedStats.completedCases ?? 0} completed`,
+            value: showValue("totalCases", resolvedStats.totalCases),
+            sub: `${showValue("activeCases", resolvedStats.activeCases)} active · ${showValue("completedCases", resolvedStats.completedCases)} completed`,
             icon: Briefcase,
             color: "bg-amber-50 text-amber-600",
             href: "/app/cases",
           },
           {
             label: "Clients",
-            value: resolvedStats.totalClients ?? 0,
+            value: showValue("totalClients", resolvedStats.totalClients),
             sub: null,
             icon: Users,
             color: "bg-blue-50 text-blue-600",
@@ -137,7 +158,7 @@ export default function AppDashboard() {
           },
           {
             label: "Projects",
-            value: resolvedStats.totalProjects ?? 0,
+            value: showValue("totalProjects", resolvedStats.totalProjects),
             sub: null,
             icon: Building2,
             color: "bg-green-50 text-green-600",
@@ -145,7 +166,7 @@ export default function AppDashboard() {
           },
           {
             label: "Developers",
-            value: resolvedStats.totalDevelopers ?? 0,
+            value: showValue("totalDevelopers", resolvedStats.totalDevelopers),
             sub: null,
             icon: HardHat,
             color: "bg-slate-100 text-slate-600",
@@ -244,7 +265,7 @@ export default function AppDashboard() {
               </div>
               <div>
                 <div className="text-xs text-slate-500">Comms This Month</div>
-                <div className="text-xl font-bold text-slate-900">{resolvedStats.commsThisMonth ?? 0}</div>
+                <div className="text-xl font-bold text-slate-900">{showValue("commsThisMonth", resolvedStats.commsThisMonth)}</div>
               </div>
             </div>
           </CardContent>
