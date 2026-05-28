@@ -29,7 +29,7 @@ import { hasPermission } from "@/lib/permissions";
 import { getGetCaseWorkflowQueryKey, getListCasesQueryKey } from "@workspace/api-client-react";
 import { validateUploadFile } from "@/lib/upload-validation";
 import { TemplateFolderPicker, type TemplateFolderPickerFolder, type TemplateFolderPickerTemplate } from "@/components/documents/TemplateFolderPicker";
-import { createGenerationJob, getGenerationJob, validateGenerationJob, type NormalizedGenerationJob } from "@/lib/document-generation-client";
+import { createGenerationJob, runNextGenerationJob, validateGenerationJob, type NormalizedGenerationJob } from "@/lib/document-generation-client";
 import { blocksTemplateGenerate, isTemplateFileReadinessKnown, isTemplateFileReady, templateFileReadinessLabel } from "@/lib/template-readiness";
 
 function docTypeLabel(dt: string): string {
@@ -488,7 +488,7 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
         if (Date.now() - startedAt > maxPollMs) {
           throw new Error(`Generation still running. Please refresh later. Job ${jobId}`);
         }
-        const job = await getGenerationJob(jobId);
+        const job = await runNextGenerationJob(jobId);
         setBatchGenerateResult(job);
         const st = String(job.status ?? "");
         if (st === "completed" || st === "completed_with_errors" || st === "completed-with-errors") {
@@ -621,7 +621,7 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
         if (Date.now() - startedAt > maxPollMs) {
           throw new Error(`Generation still running. Please refresh later. Job ${jobId}`);
         }
-        const job = await getGenerationJob(jobId);
+        const job = await runNextGenerationJob(jobId);
         setBatchGenerateResult(job);
         const st = String(job.status ?? "");
         if (st === "completed" || st === "completed_with_errors" || st === "completed-with-errors") {
@@ -749,7 +749,7 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
       const downloadUrl = typeof created?.downloadUrl === "string" ? created.downloadUrl : `/documents/jobs/${jobId}/download`;
 
       const pollOnce = async (): Promise<boolean> => {
-        const job = await getGenerationJob(jobId);
+        const job = await runNextGenerationJob(jobId);
         setBatchGenerateResult(job);
         const status = typeof job.status === "string" ? job.status : "";
         if (status === "completed") {

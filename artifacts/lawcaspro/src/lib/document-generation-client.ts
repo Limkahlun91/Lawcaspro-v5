@@ -100,6 +100,11 @@ export async function getGenerationJob(jobId: string): Promise<NormalizedGenerat
   return normalizeGenerationJob(raw);
 }
 
+export async function runNextGenerationJob(jobId: string): Promise<NormalizedGenerationJob> {
+  const raw = await apiFetchJson<unknown>(`/documents/jobs/${jobId}/run-next`, { method: "POST", timeoutMs: 8000 });
+  return normalizeGenerationJob(raw);
+}
+
 export async function getGenerationJobStatus(jobId: string): Promise<NormalizedGenerationJob> {
   try {
     return await getGenerationJob(jobId);

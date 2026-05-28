@@ -10,7 +10,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "@/components/ui/resizable";
 import { cn } from "@/lib/utils";
 import { apiFetchJson } from "@/lib/api-client";
-import { createGenerationJob, downloadGenerationJob, getGenerationJobStatus, validateGenerationJob, type NormalizedGenerationJob } from "@/lib/document-generation-client";
+import { createGenerationJob, downloadGenerationJob, runNextGenerationJob, validateGenerationJob, type NormalizedGenerationJob } from "@/lib/document-generation-client";
 import { downloadBlob } from "@/lib/download";
 import { toastError } from "@/lib/toast-error";
 import { useToast } from "@/hooks/use-toast";
@@ -115,6 +115,7 @@ export default function DocumentAutomationHub() {
   const [bundleTemplateIdSet, setBundleTemplateIdSet] = useState<Set<number>>(() => new Set());
   const [bundleFolderIdSet, setBundleFolderIdSet] = useState<Set<number>>(() => new Set());
   const handledJobKeyRef = useRef<string>("");
+  const warnedLongRef = useRef<string>("");
 
   const casesQuery = useQuery<AutomationCasesResponse>({
     queryKey: ["document-automation", "cases", caseSearch],
@@ -212,13 +213,15 @@ export default function DocumentAutomationHub() {
 
   const jobQuery = useQuery({
     queryKey: ["jobStatus", jobId],
-    queryFn: () => getGenerationJobStatus(String(jobId)),
+    queryFn: () => runNextGenerationJob(String(jobId)),
     enabled: Boolean(jobId),
     refetchInterval: (query) => {
       if (query.state.status === "error") return false;
       const data = query.state.data as any;
       const st = String(data?.status ?? "");
       if (st === "completed" || st === "failed" || st === "done" || st === "completed_with_errors" || st === "completed-with-errors") return false;
+      const updates = Number((query.state as any)?.dataUpdateCount ?? 0);
+      if (Number.isFinite(updates) && updates >= 180) return false;
       return 1000;
     },
     retry: false,
@@ -232,10 +235,39 @@ export default function DocumentAutomationHub() {
   useEffect(() => {
     if (!jobId) return;
     if (!jobQuery.isError) return;
-    toastError(toast, jobQuery.error, "Job status unavailable");
+    const raw: any = jobQuery.error as any;
+    const status = typeof raw?.status === "number" ? raw.status : typeof raw?.response?.status === "number" ? raw.response.status : null;
+    const code = safeText(raw?.data?.error?.code) || safeText(raw?.data?.code);
+    const msg = safeText(raw?.data?.error?.message) || safeText(raw?.data?.message) || safeText(raw?.message) || "Job status unavailable";
+    toast({ title: "Job failed", description: [status ? `HTTP ${status}` : "", code, msg].filter(Boolean).join(" — "), variant: "destructive" });
     setJobId(null);
     setBusy(false);
   }, [jobId, jobQuery.isError, jobQuery.error, toast]);
+
+  useEffect(() => {
+    if (!jobId) return;
+    const updates = Number((jobQuery as any)?.dataUpdateCount ?? 0);
+    if (!Number.isFinite(updates) || updates <= 0) return;
+    const st = String(jobQuery.data?.status ?? "");
+    const terminal =
+      st === "completed" ||
+      st === "failed" ||
+      st === "done" ||
+      st === "completed_with_errors" ||
+      st === "completed-with-errors";
+    if (terminal) return;
+
+    if (updates >= 30 && warnedLongRef.current !== String(jobId)) {
+      warnedLongRef.current = String(jobId);
+      toast({ title: "Generation taking longer than expected", description: "You can wait, or retry if it fails." });
+    }
+
+    if (updates >= 180) {
+      toast({ title: "Generation timed out", description: "Max polling attempts exceeded. Please retry.", variant: "destructive" });
+      setJobId(null);
+      setBusy(false);
+    }
+  }, [jobId, jobQuery.data, toast]);
 
   useEffect(() => {
     if (!jobId) return;

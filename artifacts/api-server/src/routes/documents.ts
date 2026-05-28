@@ -9443,6 +9443,14 @@ router.post("/documents/automation/generate-job", requireAuth, requireFirmUser, 
 
   const API_MAX_MS = 8000;
   const startedAt = Date.now();
+  const requestId = one(req.headers["x-request-id"] as any) || one(req.headers["x-vercel-id"] as any) || undefined;
+  const fail = (httpStatus: number, code: string, message: string, details: unknown, retryable: boolean) => {
+    res.status(httpStatus).json({
+      ok: false,
+      error: { code, message, details, retryable },
+      meta: { request_id: requestId ?? null, timestamp: new Date().toISOString(), duration_ms: Date.now() - startedAt },
+    });
+  };
 
   const bodySchema = z.object({
     caseIds: z.array(z.union([z.number(), z.string()])).min(1),
@@ -9455,7 +9463,7 @@ router.post("/documents/automation/generate-job", requireAuth, requireFirmUser, 
   });
   const parsed = bodySchema.safeParse(req.body);
   if (!parsed.success) {
-    res.status(422).json({ error: "Invalid request body" });
+    fail(422, "INVALID_PAYLOAD", "Invalid request body", { issues: parsed.error.issues }, false);
     return;
   }
 
@@ -9474,11 +9482,11 @@ router.post("/documents/automation/generate-job", requireAuth, requireFirmUser, 
       .filter((x) => x > 0)
   ));
   if (caseIds.length === 0 || templateIds.length === 0) {
-    res.status(400).json({ error: "caseIds and templateIds are required", code: "MISSING_INPUTS" });
+    fail(400, "MISSING_INPUTS", "caseIds and templateIds are required", null, false);
     return;
   }
   if (caseIds.length > 20 || templateIds.length > 25 || caseIds.length * templateIds.length > 300) {
-    res.status(422).json({ error: "Too many items", code: "TOO_MANY_ITEMS" });
+    fail(422, "TOO_MANY_ITEMS", "Too many items", { caseCount: caseIds.length, templateCount: templateIds.length }, false);
     return;
   }
 
@@ -9491,7 +9499,7 @@ router.post("/documents/automation/generate-job", requireAuth, requireFirmUser, 
     ORDER BY created_at DESC
   `);
   if (templateRows.length !== templateIds.length) {
-    res.status(404).json({ error: "One or more templates not found", code: "TEMPLATE_NOT_FOUND" });
+    fail(404, "TEMPLATE_NOT_FOUND", "One or more templates not found", null, false);
     return;
   }
 
@@ -9594,7 +9602,12 @@ router.post("/documents/automation/generate-job", requireAuth, requireFirmUser, 
       };
     }));
 
-    res.status(200).json({ ok: true, mode: "validate", items });
+    res.status(200).json({
+      ok: true,
+      mode: "validate",
+      items,
+      meta: { request_id: requestId ?? null, timestamp: new Date().toISOString(), duration_ms: Date.now() - startedAt },
+    });
     return;
   }
 
@@ -9630,22 +9643,22 @@ router.post("/documents/automation/generate-job", requireAuth, requireFirmUser, 
     VALUES ${sql.join(itemValues, sql`, `)}
   `);
 
-  res.status(202).json({ ok: true, jobId, status: "queued" });
+  res.status(202).json({
+    ok: true,
+    jobId,
+    status: "queued",
+    meta: { request_id: requestId ?? null, timestamp: new Date().toISOString(), duration_ms: Date.now() - startedAt },
+  });
 });
 
 router.get("/documents/jobs/:jobId", requireAuth, requireFirmUser, requirePermission("documents", "read"), async (req: AuthRequest, res): Promise<void> => {
   const r = getRlsDb(req, res);
   if (!r) return;
-  const MAX_JOB_STEP_MS = 7000;
-  const MAX_ITEMS_PER_POLL = 1;
   const jobId = one((req.params as any).jobId) ?? "";
   if (!/^[0-9a-fA-F-]{36}$/.test(jobId)) {
     res.status(400).json({ ok: false, code: "INVALID_JOB_ID", message: "Invalid jobId" });
     return;
   }
-
-  await recoverStaleDocumentGenerationJob(r, { firmId: req.firmId!, jobId, staleMs: 3 * 60_000 });
-  await startDocumentGenerationJobRunner(r, { firmId: req.firmId!, jobId }, { maxSteps: MAX_ITEMS_PER_POLL, maxMs: MAX_JOB_STEP_MS });
 
   const jobs = await queryRows(r, sql`SELECT * FROM document_generation_jobs WHERE id = ${jobId}::uuid AND firm_id = ${req.firmId!}`);
   const job = jobs[0];
@@ -9673,24 +9686,92 @@ router.get("/documents/jobs/:jobId", requireAuth, requireFirmUser, requirePermis
   res.json({ ok: true, job: jobPayload, items });
 });
 
+router.post("/documents/jobs/:jobId/run-next", requireAuth, requireFirmUser, requirePermission("documents", "generate"), async (req: AuthRequest, res): Promise<void> => {
+  const startedAt = Date.now();
+  const r = getRlsDb(req, res);
+  if (!r) return;
+  const requestId = one(req.headers["x-request-id"] as any) || one(req.headers["x-vercel-id"] as any) || undefined;
+  const jobId = one((req.params as any).jobId) ?? "";
+  if (!/^[0-9a-fA-F-]{36}$/.test(jobId)) {
+    res.status(400).json({
+      ok: false,
+      error: { code: "INVALID_JOB_ID", message: "Invalid jobId", details: null, retryable: false },
+      meta: { request_id: requestId ?? null, timestamp: new Date().toISOString(), duration_ms: Date.now() - startedAt },
+    });
+    return;
+  }
+  try {
+    const MAX_JOB_STEP_MS = 8000;
+    const MAX_ITEMS_PER_CALL = 1;
+    await recoverStaleDocumentGenerationJob(r, { firmId: req.firmId!, jobId, staleMs: 3 * 60_000 });
+    await startDocumentGenerationJobRunner(r, { firmId: req.firmId!, jobId }, { maxSteps: MAX_ITEMS_PER_CALL, maxMs: MAX_JOB_STEP_MS });
+
+    const jobs = await queryRows(r, sql`SELECT * FROM document_generation_jobs WHERE id = ${jobId}::uuid AND firm_id = ${req.firmId!}`);
+    const job = jobs[0];
+    if (!job) {
+      res.status(404).json({
+        ok: false,
+        error: { code: "JOB_NOT_FOUND", message: "Job not found", details: null, retryable: false },
+        meta: { request_id: requestId ?? null, timestamp: new Date().toISOString(), duration_ms: Date.now() - startedAt },
+      });
+      return;
+    }
+
+    const items = await queryRows(r, sql`
+      SELECT
+        i.*,
+        t.name AS template_name
+      FROM document_generation_job_items i
+      LEFT JOIN document_templates t
+        ON t.firm_id = i.firm_id AND t.id = i.template_id
+      WHERE i.job_id = ${jobId}::uuid AND i.firm_id = ${req.firmId!}
+      ORDER BY i.id ASC
+    `);
+    const status = String((job as any).status ?? "");
+    const jobPayload: Record<string, unknown> = {
+      ...(job as any),
+      ...(status === "completed" || status === "completed_with_errors"
+        ? { downloadUrl: `/documents/jobs/${jobId}/download` }
+        : {}),
+    };
+    res.status(200).json({
+      ok: true,
+      job: jobPayload,
+      items,
+      meta: { request_id: requestId ?? null, timestamp: new Date().toISOString(), duration_ms: Date.now() - startedAt },
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Internal Server Error";
+    res.status(500).json({
+      ok: false,
+      error: { code: "JOB_RUN_NEXT_FAILED", message, details: null, retryable: true },
+      meta: { request_id: requestId ?? null, timestamp: new Date().toISOString(), duration_ms: Date.now() - startedAt },
+    });
+  }
+});
+
 router.get("/documents/status/:jobId", requireAuth, requireFirmUser, requirePermission("documents", "read"), async (req: AuthRequest, res): Promise<void> => {
   const r = getRlsDb(req, res);
   if (!r) return;
-  const MAX_JOB_STEP_MS = 7000;
-  const MAX_ITEMS_PER_POLL = 1;
+  const startedAt = Date.now();
+  const requestId = one(req.headers["x-request-id"] as any) || one(req.headers["x-vercel-id"] as any) || undefined;
+  const fail = (httpStatus: number, code: string, message: string, details: unknown, retryable: boolean) => {
+    res.status(httpStatus).json({
+      ok: false,
+      error: { code, message, details, retryable },
+      meta: { request_id: requestId ?? null, timestamp: new Date().toISOString(), duration_ms: Date.now() - startedAt },
+    });
+  };
   const jobId = one((req.params as any).jobId) ?? "";
   if (!/^[0-9a-fA-F-]{36}$/.test(jobId)) {
-    res.status(400).json({ ok: false, code: "INVALID_JOB_ID", message: "Invalid jobId" });
+    fail(400, "INVALID_JOB_ID", "Invalid jobId", null, false);
     return;
   }
-
-  await recoverStaleDocumentGenerationJob(r, { firmId: req.firmId!, jobId, staleMs: 3 * 60_000 });
-  await startDocumentGenerationJobRunner(r, { firmId: req.firmId!, jobId }, { maxSteps: MAX_ITEMS_PER_POLL, maxMs: MAX_JOB_STEP_MS });
 
   const jobs = await queryRows(r, sql`SELECT * FROM document_generation_jobs WHERE id = ${jobId}::uuid AND firm_id = ${req.firmId!}`);
   const job = jobs[0] as any;
   if (!job) {
-    res.status(404).json({ ok: false, code: "JOB_NOT_FOUND", message: "Job not found" });
+    fail(404, "JOB_NOT_FOUND", "Job not found", null, false);
     return;
   }
 
@@ -9703,6 +9784,7 @@ router.get("/documents/status/:jobId", requireAuth, requireFirmUser, requirePerm
       downloadUrl: `/documents/jobs/${jobId}/download`,
       fileName: typeof job.download_file_name === "string" ? String(job.download_file_name) : null,
       mimeType: typeof job.download_mime_type === "string" ? String(job.download_mime_type) : null,
+      meta: { request_id: requestId ?? null, timestamp: new Date().toISOString(), duration_ms: Date.now() - startedAt },
     });
     return;
   }
@@ -9713,30 +9795,40 @@ router.get("/documents/status/:jobId", requireAuth, requireFirmUser, requirePerm
       jobId,
       status: "failed",
       error: typeof job.error_summary === "string" ? String(job.error_summary) : "Generation failed",
+      meta: { request_id: requestId ?? null, timestamp: new Date().toISOString(), duration_ms: Date.now() - startedAt },
     });
     return;
   }
 
-  res.json({ ok: true, jobId, status: st || "pending" });
+  res.json({ ok: true, jobId, status: st || "pending", meta: { request_id: requestId ?? null, timestamp: new Date().toISOString(), duration_ms: Date.now() - startedAt } });
 });
 
 router.get("/documents/jobs/:jobId/download", requireAuth, requireFirmUser, requirePermission("documents", "export"), async (req: AuthRequest, res): Promise<void> => {
   const r = getRlsDb(req, res);
   if (!r) return;
+  const startedAt = Date.now();
+  const requestId = one(req.headers["x-request-id"] as any) || one(req.headers["x-vercel-id"] as any) || undefined;
+  const fail = (httpStatus: number, code: string, message: string, details: unknown, retryable: boolean) => {
+    res.status(httpStatus).json({
+      ok: false,
+      error: { code, message, details, retryable },
+      meta: { request_id: requestId ?? null, timestamp: new Date().toISOString(), duration_ms: Date.now() - startedAt },
+    });
+  };
   const jobId = one((req.params as any).jobId) ?? "";
   if (!/^[0-9a-fA-F-]{36}$/.test(jobId)) {
-    res.status(400).json({ ok: false, code: "INVALID_JOB_ID", message: "Invalid jobId" });
+    fail(400, "INVALID_JOB_ID", "Invalid jobId", null, false);
     return;
   }
   const jobs = await queryRows(r, sql`SELECT * FROM document_generation_jobs WHERE id = ${jobId}::uuid AND firm_id = ${req.firmId!}`);
   const job = jobs[0];
   if (!job) {
-    res.status(404).json({ ok: false, code: "JOB_NOT_FOUND", message: "Job not found" });
+    fail(404, "JOB_NOT_FOUND", "Job not found", null, false);
     return;
   }
   const objectPath = typeof (job as any).download_object_path === "string" ? String((job as any).download_object_path) : "";
   if (!objectPath) {
-    res.status(404).json({ ok: false, code: "DOWNLOAD_NOT_READY", message: "Download not available" });
+    fail(404, "DOWNLOAD_NOT_READY", "Download not available", null, true);
     return;
   }
   try {
