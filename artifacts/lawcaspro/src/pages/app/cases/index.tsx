@@ -98,8 +98,9 @@ export default function CasesList() {
   const initialPresence = legacyInitial
     ? legacyInitial.presence
     : normalizeMilestonePresence(
-        sp.get("status") ?? sp.get("milestoneStatus") ?? sp.get("milestonePresence"),
+        sp.get("milestoneStatus") ?? sp.get("milestonePresence") ?? sp.get("status"),
       );
+  const [milestoneFilter, setMilestoneFilter] = useState<CaseMilestoneKey | "all">(() => initialMilestone);
   const [milestonePresence, setMilestonePresence] = useState<MilestonePresence>(() => initialPresence);
   const [page, setPage] = useState<number>(() => Number.isInteger(initialPage) && initialPage > 0 ? initialPage : 1);
   const [limit, setLimit] = useState<number>(() => Number.isInteger(initialLimit) && initialLimit > 0 ? initialLimit : 50);
@@ -125,7 +126,7 @@ export default function CasesList() {
     const nextTitleType = q.get("titleType") ?? "all";
     const legacy = parseLegacyMilestoneParams(q);
     const nextMilestone = legacy ? legacy.milestone : normalizeMilestoneKey(q.get("milestone"));
-    const nextPresence = legacy ? legacy.presence : normalizeMilestonePresence(q.get("status") ?? q.get("milestoneStatus") ?? q.get("milestonePresence"));
+    const nextPresence = legacy ? legacy.presence : normalizeMilestonePresence(q.get("milestoneStatus") ?? q.get("milestonePresence") ?? q.get("status"));
 
     setSearch((prev) => prev === nextSearch ? prev : nextSearch);
     setSpaStatus((prev) => prev === nextSpaStatus ? prev : nextSpaStatus);
@@ -136,7 +137,7 @@ export default function CasesList() {
     setProjectId((prev) => prev === nextProjectId ? prev : nextProjectId);
     setPurchaseMode((prev) => prev === nextPurchaseMode ? prev : nextPurchaseMode);
     setTitleType((prev) => prev === nextTitleType ? prev : nextTitleType);
-    setMilestone((prev) => prev === nextMilestone ? prev : nextMilestone);
+    setMilestoneFilter((prev) => prev === nextMilestone ? prev : nextMilestone);
     setMilestonePresence((prev) => prev === nextPresence ? prev : nextPresence);
     setPage((prev) => prev === (Number.isInteger(nextPage) && nextPage > 0 ? nextPage : 1) ? prev : (Number.isInteger(nextPage) && nextPage > 0 ? nextPage : 1));
     setLimit((prev) => prev === (Number.isInteger(nextLimit) && nextLimit > 0 ? nextLimit : 50) ? prev : (Number.isInteger(nextLimit) && nextLimit > 0 ? nextLimit : 50));
@@ -161,8 +162,8 @@ export default function CasesList() {
     setIf("projectId", projectId);
     setIf("purchaseMode", purchaseMode);
     setIf("titleType", titleType);
-    setIf("milestone", milestone === "all" ? undefined : milestone);
-    if (milestone !== "all") {
+    setIf("milestone", milestoneFilter === "all" ? undefined : milestoneFilter);
+    if (milestoneFilter !== "all") {
       const status = milestonePresence === "completed" ? "done" : milestonePresence;
       nextSp.set("status", status);
       nextSp.set("milestonePresence", milestonePresence);
@@ -182,7 +183,7 @@ export default function CasesList() {
     projectId,
     purchaseMode,
     titleType,
-    milestone,
+    milestoneFilter,
     milestonePresence,
     page,
     limit,
@@ -202,8 +203,8 @@ export default function CasesList() {
     loanStatus: loanStatus !== "all" ? loanStatus : undefined,
     purchaseMode: purchaseMode !== "all" ? purchaseMode : undefined,
     titleType: titleType !== "all" ? titleType : undefined,
-    milestone: milestone !== "all" ? milestone : undefined,
-    milestonePresence: milestone !== "all" ? milestonePresence : undefined,
+    milestone: milestoneFilter !== "all" ? milestoneFilter : undefined,
+    milestonePresence: milestoneFilter !== "all" ? milestonePresence : undefined,
   });
 
   type CaseFilterOptionsResponse = {
@@ -270,8 +271,8 @@ export default function CasesList() {
     if (search.trim()) chips.push({ key: "search", label: `Search: ${search.trim()}`, onClear: () => { setSearch(""); setPage(1); } });
     if (spaStatus !== "all") chips.push({ key: "spaStatus", label: `SPA: ${spaStatus}`, onClear: () => { setSpaStatus("all"); setPage(1); } });
     if (loanStatus !== "all") chips.push({ key: "loanStatus", label: `Loan: ${loanStatus}`, onClear: () => { setLoanStatus("all"); setPage(1); } });
-    if (milestone !== "all") {
-      const label = milestoneLabelByKey.get(milestone) ?? milestone;
+    if (milestoneFilter !== "all") {
+      const label = milestoneLabelByKey.get(milestoneFilter) ?? milestoneFilter;
       const presenceLabel =
         milestonePresence === "missing" ? "Missing"
           : milestonePresence === "filled" ? "Filled"
@@ -280,7 +281,7 @@ export default function CasesList() {
       chips.push({
         key: "milestone",
         label: `${label}: ${presenceLabel}`,
-        onClear: () => { setMilestone("all"); setMilestonePresence("filled"); setPage(1); },
+        onClear: () => { setMilestoneFilter("all"); setMilestonePresence("filled"); setPage(1); },
       });
     }
     if (assignedToUserId !== "all") {
@@ -296,7 +297,7 @@ export default function CasesList() {
     search,
     spaStatus,
     loanStatus,
-    milestone,
+    milestoneFilter,
     milestonePresence,
     lawyerId,
     clerkId,
