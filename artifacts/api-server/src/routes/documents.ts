@@ -4454,10 +4454,11 @@ router.get("/cases/:caseId/documents/checklist", requireAuth, requireFirmUser, r
     const templateId = Number((t as any).id);
     const documentGroup = String((t as any).document_group ?? "Others");
     const extra = firmRulesById.get(templateId) ?? null;
+    const isTemplateCapable = extra && typeof extra.is_template_capable === "boolean" ? Boolean(extra.is_template_capable) : Boolean((t as any).is_template_capable ?? true);
     const app = evaluateTemplateApplicabilityV2({
       legacyTemplate: {
       isActive: extra && typeof extra.is_active === "boolean" ? Boolean(extra.is_active) : Boolean((t as any).is_active ?? true),
-      isTemplateCapable: extra && typeof extra.is_template_capable === "boolean" ? Boolean(extra.is_template_capable) : Boolean((t as any).is_template_capable ?? true),
+      isTemplateCapable,
       appliesToPurchaseMode: extra && typeof extra.purchase_mode === "string" ? String(extra.purchase_mode) : ((t as any).applies_to_purchase_mode ? String((t as any).applies_to_purchase_mode) : null),
       appliesToTitleType: extra && typeof extra.title_type === "string" ? String(extra.title_type) : ((t as any).applies_to_title_type ? String((t as any).applies_to_title_type) : null),
       appliesToCaseType: (t as any).applies_to_case_type ? String((t as any).applies_to_case_type) : null,
@@ -4497,7 +4498,23 @@ router.get("/cases/:caseId/documents/checklist", requireAuth, requireFirmUser, r
       applicabilityRules: (t as any).applicability_rules,
     });
     if (!includeAll && app.applicabilityStatus === "not_applicable") continue;
-    const ready = app.applicabilityStatus === "not_applicable" ? { status: "ready", missing: [] } : evaluateTemplateReadiness({ documentGroup, input: readinessInput });
+    let ready = app.applicabilityStatus === "not_applicable" ? { status: "ready", missing: [] } : evaluateTemplateReadiness({ documentGroup, input: readinessInput });
+    if (!isTemplateCapable) {
+      ready = { status: "incomplete", missing: [{ code: "template_not_capable", message: "Template is not generation capable" }] };
+    } else {
+      const objectPath = String((t as any).object_path ?? "").trim();
+      if (!objectPath) {
+        ready = { status: "missing_file", missing: [{ code: "template_file_missing", message: "Template file missing" }] };
+      } else if (!includeAll && ready.status === "ready" && app.applicabilityStatus !== "not_applicable") {
+        try {
+          const exists = await supabaseStorage.privateObjectExists(objectPath, { timeoutMs: 800 });
+          if (!exists) {
+            ready = { status: "missing_file", missing: [{ code: "storage_object_missing", message: "Storage object missing" }] };
+          }
+        } catch {
+        }
+      }
+    }
     const checklistKey = `tpl:firm:${templateId}`;
     const checklistEval = evaluateTemplateChecklist({
       checklistMode: (t as any).checklist_mode,
@@ -4557,10 +4574,11 @@ router.get("/cases/:caseId/documents/checklist", requireAuth, requireFirmUser, r
     const templateId = Number((t as any).id);
     const documentGroup = String((t as any).document_group ?? (t as any).category ?? "Others");
     const extra = masterRulesById.get(templateId) ?? null;
+    const isTemplateCapable = extra && typeof extra.is_template_capable === "boolean" ? Boolean(extra.is_template_capable) : Boolean((t as any).is_template_capable ?? true);
     const app = evaluateTemplateApplicabilityV2({
       legacyTemplate: {
       isActive: extra && typeof extra.is_active === "boolean" ? Boolean(extra.is_active) : Boolean((t as any).is_active ?? true),
-      isTemplateCapable: extra && typeof extra.is_template_capable === "boolean" ? Boolean(extra.is_template_capable) : Boolean((t as any).is_template_capable ?? true),
+      isTemplateCapable,
       appliesToPurchaseMode: extra && typeof extra.purchase_mode === "string" ? String(extra.purchase_mode) : ((t as any).applies_to_purchase_mode ? String((t as any).applies_to_purchase_mode) : null),
       appliesToTitleType: extra && typeof extra.title_type === "string" ? String(extra.title_type) : ((t as any).applies_to_title_type ? String((t as any).applies_to_title_type) : null),
       appliesToCaseType: (t as any).applies_to_case_type ? String((t as any).applies_to_case_type) : null,
@@ -4600,7 +4618,23 @@ router.get("/cases/:caseId/documents/checklist", requireAuth, requireFirmUser, r
       applicabilityRules: (t as any).applicability_rules,
     });
     if (!includeAll && app.applicabilityStatus === "not_applicable") continue;
-    const ready = app.applicabilityStatus === "not_applicable" ? { status: "ready", missing: [] } : evaluateTemplateReadiness({ documentGroup, input: readinessInput });
+    let ready = app.applicabilityStatus === "not_applicable" ? { status: "ready", missing: [] } : evaluateTemplateReadiness({ documentGroup, input: readinessInput });
+    if (!isTemplateCapable) {
+      ready = { status: "incomplete", missing: [{ code: "template_not_capable", message: "Template is not generation capable" }] };
+    } else {
+      const objectPath = String((t as any).object_path ?? "").trim();
+      if (!objectPath) {
+        ready = { status: "missing_file", missing: [{ code: "template_file_missing", message: "Template file missing" }] };
+      } else if (!includeAll && ready.status === "ready" && app.applicabilityStatus !== "not_applicable") {
+        try {
+          const exists = await supabaseStorage.privateObjectExists(objectPath, { timeoutMs: 800 });
+          if (!exists) {
+            ready = { status: "missing_file", missing: [{ code: "storage_object_missing", message: "Storage object missing" }] };
+          }
+        } catch {
+        }
+      }
+    }
     const checklistKey = `tpl:master:${templateId}`;
     const checklistEval = evaluateTemplateChecklist({
       checklistMode: (t as any).checklist_mode,
