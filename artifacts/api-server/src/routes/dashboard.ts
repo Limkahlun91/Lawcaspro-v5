@@ -6,6 +6,8 @@ import { computeDashboardStats } from "../services/dashboard-stats.js";
 
 type DbConn = typeof db | NonNullable<AuthRequest["rlsDb"]>;
 const rdb = (req: AuthRequest): DbConn => req.rlsDb ?? db;
+type TransactionCapable = { transaction: <T>(fn: (tx: DbConn) => Promise<T>) => Promise<T> };
+const asTransactionCapable = (conn: DbConn): TransactionCapable => conn as unknown as TransactionCapable;
 
 const one = (v: string | string[] | undefined): string | undefined => (Array.isArray(v) ? v[0] : v);
 
@@ -35,7 +37,7 @@ const router = expressRouter as unknown as RouterInternalLike;
 
 function buildDashboardDegradedPayload(error?: unknown): Record<string, unknown> {
   const base = {
-    ok: false,
+    ok: true,
     degraded: true,
     error: "Dashboard partially unavailable",
     stats: {
@@ -249,6 +251,7 @@ router.get("/dashboard", requireAuth, requireFirmUser, requirePermission("dashbo
   try {
     const firmId = req.firmId!;
     const r = rdb(req);
+    const requestId = one(req.headers["x-request-id"] as any) || one(req.headers["x-vercel-id"] as any) || undefined;
     const refresh = (() => {
       const raw = one((req.query as unknown as Record<string, unknown>)?.refresh as string | string[] | undefined);
       if (!raw) return false;
@@ -270,11 +273,15 @@ router.get("/dashboard", requireAuth, requireFirmUser, requirePermission("dashbo
     })();
     if (assignedToMe) {
       const payload = await computeDashboardStats(r, firmId, { assignedToUserId: req.userId ?? undefined, includeErrorDetails: allowDetails });
+      (payload as any).ok = true;
+      if (requestId) (payload as any).requestId = requestId;
       res.json(payload);
       return;
     }
     if (assignedToUserId) {
       const payload = await computeDashboardStats(r, firmId, { assignedToUserId, includeErrorDetails: allowDetails });
+      (payload as any).ok = true;
+      if (requestId) (payload as any).requestId = requestId;
       res.json(payload);
       return;
     }
@@ -288,32 +295,89 @@ router.get("/dashboard", requireAuth, requireFirmUser, requirePermission("dashbo
       }
     })();
 
-    if (hasCache && !refresh) {
-      const cachedRows = await (async () => {
-        try {
-          return await queryRows(r, sql`
-          SELECT payload_json
-          FROM firm_dashboard_stats_cache
-          WHERE firm_id = ${firmId} AND expires_at > now()
-          LIMIT 1
-        `);
-        } catch (err) {
-          logger.warn({ err, code: getPgCode(err), firmId, userId: req.userId }, "[dashboard] cache_read_failed");
-          return [];
-        }
-      })();
-      const cached = cachedRows[0] && typeof cachedRows[0] === "object" ? (cachedRows[0] as any).payload_json : undefined;
-      const isBadCache =
-        cached && typeof cached === "object"
-          ? Boolean((cached as any).degraded) || Boolean((cached as any).ok === false) || (Array.isArray((cached as any).warnings) && (cached as any).warnings.length > 0)
-          : false;
-      if (cached && typeof cached === "object" && !isBadCache) {
-        res.json(cached);
-        return;
-      }
+    const cachedAny = hasCache && !refresh
+      ? await (async () => {
+          try {
+            const rows = await queryRows(r, sql`
+              SELECT payload_json, computed_at, expires_at
+              FROM firm_dashboard_stats_cache
+              WHERE firm_id = ${firmId}
+              ORDER BY computed_at DESC
+              LIMIT 1
+            `);
+            const row = rows[0] as any;
+            const payload = row?.payload_json && typeof row.payload_json === "object" ? row.payload_json : null;
+            const computedAt = row?.computed_at ? String(row.computed_at) : null;
+            const expiresAt = row?.expires_at ? String(row.expires_at) : null;
+            return payload ? { payload, computedAt, expiresAt } : null;
+          } catch (err) {
+            logger.warn({ err, code: getPgCode(err), firmId, userId: req.userId, requestId }, "[dashboard] cache_read_failed");
+            return null;
+          }
+        })()
+      : null;
+
+    const isFreshCache = (() => {
+      if (!cachedAny?.payload) return false;
+      const exp = cachedAny.expiresAt ? new Date(cachedAny.expiresAt).getTime() : 0;
+      if (!Number.isFinite(exp) || exp <= 0) return false;
+      return exp > Date.now();
+    })();
+
+    if (cachedAny?.payload && isFreshCache) {
+      const out = cachedAny.payload as any;
+      out.ok = true;
+      if (requestId) out.requestId = requestId;
+      res.json(out);
+      return;
     }
 
-    const payload = await computeDashboardStats(r, firmId, { includeErrorDetails: allowDetails });
+    const deadlineMs = (() => {
+      const raw = process.env.DASHBOARD_DEADLINE_MS ? Number.parseInt(process.env.DASHBOARD_DEADLINE_MS, 10) : 2000;
+      return Number.isFinite(raw) ? Math.min(Math.max(raw, 500), 10_000) : 2000;
+    })();
+    const stmtTimeoutMs = (() => {
+      const raw = process.env.DASHBOARD_STATEMENT_TIMEOUT_MS ? Number.parseInt(process.env.DASHBOARD_STATEMENT_TIMEOUT_MS, 10) : 1200;
+      return Number.isFinite(raw) ? Math.min(Math.max(raw, 200), 5000) : 1200;
+    })();
+
+    const compute = async () => {
+      const deadlineAt = Date.now() + deadlineMs;
+      const maybeTx = r as any;
+      if (typeof maybeTx?.transaction !== "function") {
+        return await computeDashboardStats(r, firmId, { includeErrorDetails: allowDetails, deadlineAt });
+      }
+      return await asTransactionCapable(r).transaction(async (tx: DbConn) => {
+        await tx.execute(sql`SET LOCAL statement_timeout = ${`${stmtTimeoutMs}ms`}`);
+        return await computeDashboardStats(tx as any, firmId, { includeErrorDetails: allowDetails, deadlineAt });
+      });
+    };
+
+    const payload = await (async () => {
+      try {
+        return await Promise.race([
+          compute(),
+          new Promise<Record<string, unknown>>((_, reject) => {
+            setTimeout(() => reject(new Error("DASHBOARD_TIMEOUT")), deadlineMs);
+          }),
+        ]);
+      } catch (err) {
+        if (cachedAny?.payload) {
+          const out = cachedAny.payload as Record<string, unknown>;
+          (out as any).ok = true;
+          (out as any).degraded = true;
+          (out as any).stale = true;
+          (out as any).reason = err instanceof Error && err.message === "DASHBOARD_TIMEOUT" ? "timeout_stale_cache" : "exception_stale_cache";
+          if (requestId) (out as any).requestId = requestId;
+          if (cachedAny.computedAt) (out as any).cacheComputedAt = cachedAny.computedAt;
+          if (cachedAny.expiresAt) (out as any).cacheExpiresAt = cachedAny.expiresAt;
+          return out;
+        }
+        throw err;
+      }
+    })();
+    (payload as any).ok = true;
+    if (requestId) (payload as any).requestId = requestId;
 
     if (hasCache && !(payload as any)?.degraded && (payload as any)?.ok !== false) {
       const ttlSec = (() => {
@@ -336,13 +400,17 @@ router.get("/dashboard", requireAuth, requireFirmUser, requirePermission("dashbo
 
     res.json(payload);
   } catch (err) {
+    const requestId = one(req.headers["x-request-id"] as any) || one(req.headers["x-vercel-id"] as any) || undefined;
+    const timeout = err instanceof Error && err.message === "DASHBOARD_TIMEOUT";
     logger.error(
       allowDetails
-        ? { err, path: req.path, firmId: req.firmId, userId: req.userId, query: req.query }
-        : { err, path: req.path, firmId: req.firmId, userId: req.userId },
+        ? { err, path: req.path, firmId: req.firmId, userId: req.userId, query: req.query, requestId, timeout }
+        : { err, path: req.path, firmId: req.firmId, userId: req.userId, requestId, timeout },
       "[dashboard]",
     );
     const payload = buildDashboardDegradedPayload(allowDetails ? err : undefined);
+    (payload as any).reason = timeout ? "timeout" : "exception";
+    if (requestId) (payload as any).requestId = requestId;
     if (allowDetails) {
       (payload as any).debug = {
         message: err instanceof Error ? err.message : String(err),

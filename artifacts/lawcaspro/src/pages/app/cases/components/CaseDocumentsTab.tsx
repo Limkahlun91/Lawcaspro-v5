@@ -1807,7 +1807,7 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
                               ? pre.data.missingVariables.map((x: any) => String(x)).filter(Boolean)
                               : [];
                             const fileReady = fileStatus === "ready";
-                            const dataReady = dataStatus === "ready";
+                            const dataReady = dataStatus === "ready" || dataStatus === "missing_variables" || dataStatus === "";
                             const converterReady = converterStatus === "ready" || converterStatus === "";
                             const fileLabel =
                               preflightQuery.isError ? "Error"
@@ -1817,10 +1817,10 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
                                       : preflightQuery.isFetching ? "Checking..." : "Unknown";
                             const dataLabel =
                               preflightQuery.isError ? "Error"
-                                : !converterReady ? "PDF_CONVERSION_ERROR"
-                                  : dataReady ? "Ready"
-                                    : dataStatus === "missing_variables"
-                                      ? `Missing variables: ${missingVars.slice(0, 3).join(", ")}${missingVars.length > 3 ? "..." : ""}`
+                                : !converterReady ? "PDF_CONVERSION_UNAVAILABLE"
+                                  : dataStatus === "missing_variables"
+                                    ? `Missing variables (will be blank): ${missingVars.slice(0, 3).join(", ")}${missingVars.length > 3 ? "..." : ""}`
+                                    : dataReady ? "Ready"
                                       : preflightQuery.isFetching ? "Checking..." : "Unknown";
                             const generateFinalDisabledReason = (() => {
                               if (it.kind !== "template") return "Template is not generation capable";
@@ -1830,8 +1830,7 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
                               if (preflightQuery.isError) return "Preflight error";
                               if (!pre) return "Checking...";
                               if (!fileReady) return "Missing template file";
-                              if (!converterReady) return "PDF_CONVERSION_ERROR";
-                              if (!dataReady) return missingVars.length > 0 ? `Missing variables: ${missingVars.join(", ")}` : "Missing variables";
+                              if (!converterReady) return "PDF_CONVERSION_UNAVAILABLE";
                               return "";
                             })();
                             return (

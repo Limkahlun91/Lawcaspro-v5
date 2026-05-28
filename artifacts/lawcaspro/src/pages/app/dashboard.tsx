@@ -51,10 +51,10 @@ export default function AppDashboard() {
 
   const { data: stats, isLoading, isError, error, refetch, isFetching } = useQuery({
     queryKey: ["dashboard", firmId, refresh ? "refresh" : "cached"],
-    queryFn: () => apiFetchJson(refresh ? "/dashboard?refresh=1" : "/dashboard") as Promise<Record<string, any>>,
+    queryFn: () => apiFetchJson(refresh ? "/dashboard?refresh=1" : "/dashboard", { timeoutMs: 8000 }) as Promise<Record<string, any>>,
     staleTime: 30_000,
     retry: false,
-    refetchOnWindowFocus: true,
+    refetchOnWindowFocus: false,
     refetchOnReconnect: true,
   });
 
@@ -62,17 +62,46 @@ export default function AppDashboard() {
     return <div className="text-slate-400 py-12 text-center text-sm">Loading dashboard...</div>;
   }
 
-  if (isError) {
+  const errStatus = typeof (error as any)?.status === "number" ? Number((error as any).status) : null;
+  if (isError && (errStatus === 401 || errStatus === 403)) {
     return (
       <div className="py-12 flex justify-center">
         <div className="max-w-lg w-full px-4">
-          <QueryFallback title="Dashboard unavailable" error={error} onRetry={() => refetch()} isRetrying={isFetching} />
+          <QueryFallback title="Unauthorized" error={error} onRetry={() => refetch()} isRetrying={isFetching} />
         </div>
       </div>
     );
   }
 
-  if (!stats) {
+  const effectiveStats = (() => {
+    if (!isError) return stats;
+    const unavailableFields = [
+      "totalCases",
+      "activeCases",
+      "completedCases",
+      "totalClients",
+      "totalDevelopers",
+      "totalProjects",
+      "milestoneCards",
+      "milestoneSections",
+      "recentCases",
+      "billing",
+      "outstandingAdvances",
+      "commsThisMonth",
+      "completionSlaOverdue",
+    ];
+    return {
+      ok: true,
+      degraded: true,
+      stale: false,
+      reason: "request_failed",
+      warnings: [{ module: "network", code: null, message: "Dashboard data request failed. Showing partial UI." }],
+      unavailableFields,
+      dashboard: {},
+    } as Record<string, any>;
+  })();
+
+  if (!effectiveStats) {
     return (
       <div className="text-slate-400 py-12 text-center text-sm">
         No dashboard data available
@@ -80,12 +109,12 @@ export default function AppDashboard() {
     );
   }
 
-  const degraded = Boolean((stats as any)?.degraded) || Boolean((stats as any)?.ok === false);
-  const warnings: Array<{ module?: string; code?: string | null; message?: string }> = Array.isArray((stats as any)?.warnings) ? (stats as any).warnings : [];
-  const unavailableFields: string[] = Array.isArray((stats as any)?.unavailableFields) ? (stats as any).unavailableFields : [];
-  const debugInfo = (stats as any)?.debug && typeof (stats as any)?.debug === "object" ? (stats as any).debug : null;
-  const dashboard = ((stats as any)?.dashboard && typeof (stats as any).dashboard === "object" ? (stats as any).dashboard : null) as Record<string, any> | null;
-  const resolvedStats = (dashboard ?? stats) as Record<string, any>;
+  const degraded = Boolean((effectiveStats as any)?.degraded) || Boolean((effectiveStats as any)?.ok === false);
+  const warnings: Array<{ module?: string; code?: string | null; message?: string }> = Array.isArray((effectiveStats as any)?.warnings) ? (effectiveStats as any).warnings : [];
+  const unavailableFields: string[] = Array.isArray((effectiveStats as any)?.unavailableFields) ? (effectiveStats as any).unavailableFields : [];
+  const debugInfo = (effectiveStats as any)?.debug && typeof (effectiveStats as any)?.debug === "object" ? (effectiveStats as any).debug : null;
+  const dashboard = ((effectiveStats as any)?.dashboard && typeof (effectiveStats as any).dashboard === "object" ? (effectiveStats as any).dashboard : null) as Record<string, any> | null;
+  const resolvedStats = (dashboard ?? effectiveStats) as Record<string, any>;
 
   const showValue = (field: string, value: unknown): string => {
     if (degraded && unavailableFields.includes(field)) return "—";

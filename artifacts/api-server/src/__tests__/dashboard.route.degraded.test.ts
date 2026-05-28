@@ -39,7 +39,7 @@ describe("GET /dashboard degraded", () => {
     const res = await request(app).get("/dashboard");
     expect(res.status).toBe(200);
     expect(res.body).toMatchObject({
-      ok: false,
+      ok: true,
       degraded: true,
       error: "Dashboard partially unavailable",
     });
@@ -47,4 +47,3 @@ describe("GET /dashboard degraded", () => {
     expect(res.body.dashboard).toBeTruthy();
   });
 });
-

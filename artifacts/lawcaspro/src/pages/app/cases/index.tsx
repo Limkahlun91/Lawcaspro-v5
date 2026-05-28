@@ -17,6 +17,7 @@ import { toastError } from "@/lib/toast-error";
 import { useAuth } from "@/lib/auth-context";
 import { DateOnlyInput } from "@/components/date-only-input";
 import { TemplateFolderPicker, type TemplateFolderPickerFolder, type TemplateFolderPickerTemplate } from "@/components/documents/TemplateFolderPicker";
+import { normalizeAssignedToUserIdParam } from "./case-filter-utils";
 
 async function apiFetchCsv(path: string): Promise<Blob> {
   return await apiFetchBlob(path, { timeoutMs: 60000, headers: { accept: "text/csv" } });
@@ -66,6 +67,10 @@ export default function CasesList() {
   const roleName = String((user as any)?.roleName ?? "");
   const isPartnerOrManager = roleName.toLowerCase().includes("partner") || roleName.toLowerCase().includes("manager");
 
+  const me = Number.isFinite(myUserId) && myUserId > 0 ? myUserId : null;
+  const normalizeAssignedToUserId = (raw: string | null): string =>
+    normalizeAssignedToUserIdParam(raw, { myUserId: me, isPartnerOrManager });
+
   const mode = sp.get("mode");
   const intake = sp.get("intake") ?? "";
   useEffect(() => {
@@ -84,6 +89,7 @@ export default function CasesList() {
   const [loanStatus, setLoanStatus] = useState<string>(() => (sp.get("loanStatus") ?? "all"));
   const [lawyerId, setLawyerId] = useState<string>(() => (sp.get("assignedLawyerId") ?? "all"));
   const [clerkId, setClerkId] = useState<string>(() => (sp.get("assignedClerkId") ?? "all"));
+  const [assignedToUserId, setAssignedToUserId] = useState<string>(() => normalizeAssignedToUserId(sp.get("assignedToUserId")));
   const [projectId, setProjectId] = useState<string>(() => (sp.get("projectId") ?? "all"));
   const [purchaseMode, setPurchaseMode] = useState<string>(() => (sp.get("purchaseMode") ?? "all"));
   const [titleType, setTitleType] = useState<string>(() => (sp.get("titleType") ?? "all"));
@@ -109,6 +115,7 @@ export default function CasesList() {
     const nextLoanStatus = q.get("loanStatus") ?? "all";
     const nextLawyerId = q.get("assignedLawyerId") ?? "all";
     const nextClerkId = q.get("assignedClerkId") ?? "all";
+    const nextAssignedToUserId = normalizeAssignedToUserId(q.get("assignedToUserId"));
     const nextProjectId = q.get("projectId") ?? "all";
     const nextPurchaseMode = q.get("purchaseMode") ?? "all";
     const nextTitleType = q.get("titleType") ?? "all";
@@ -121,6 +128,7 @@ export default function CasesList() {
     setLoanStatus((prev) => prev === nextLoanStatus ? prev : nextLoanStatus);
     setLawyerId((prev) => prev === nextLawyerId ? prev : nextLawyerId);
     setClerkId((prev) => prev === nextClerkId ? prev : nextClerkId);
+    setAssignedToUserId((prev) => prev === nextAssignedToUserId ? prev : nextAssignedToUserId);
     setProjectId((prev) => prev === nextProjectId ? prev : nextProjectId);
     setPurchaseMode((prev) => prev === nextPurchaseMode ? prev : nextPurchaseMode);
     setTitleType((prev) => prev === nextTitleType ? prev : nextTitleType);
@@ -145,6 +153,7 @@ export default function CasesList() {
     setIf("loanStatus", loanStatus);
     setIf("assignedLawyerId", lawyerId);
     setIf("assignedClerkId", clerkId);
+    setIf("assignedToUserId", assignedToUserId);
     setIf("projectId", projectId);
     setIf("purchaseMode", purchaseMode);
     setIf("titleType", titleType);
@@ -161,6 +170,7 @@ export default function CasesList() {
     loanStatus,
     lawyerId,
     clerkId,
+    assignedToUserId,
     projectId,
     purchaseMode,
     titleType,
@@ -179,6 +189,7 @@ export default function CasesList() {
     projectId: projectId !== "all" ? Number(projectId) : undefined,
     assignedLawyerId: lawyerId !== "all" ? parseInt(lawyerId) : undefined,
     assignedClerkId: clerkId !== "all" ? parseInt(clerkId) : undefined,
+    assignedToUserId: assignedToUserId !== "all" ? parseInt(assignedToUserId) : undefined,
     spaStatus: spaStatus !== "all" ? spaStatus : undefined,
     loanStatus: loanStatus !== "all" ? loanStatus : undefined,
     purchaseMode: purchaseMode !== "all" ? purchaseMode : undefined,
@@ -264,6 +275,11 @@ export default function CasesList() {
         onClear: () => { setMilestone("all"); setMilestonePresence("filled"); setPage(1); },
       });
     }
+    if (assignedToUserId !== "all") {
+      const me = Number.isFinite(myUserId) && myUserId > 0 ? myUserId : null;
+      const label = me && String(me) === assignedToUserId ? "Assigned: Me" : `Assigned: ${assignedToUserId}`;
+      chips.push({ key: "assignedToUserId", label, onClear: () => { setAssignedToUserId("all"); setPage(1); } });
+    }
     if (lawyerId !== "all") chips.push({ key: "assignedLawyerId", label: `Lawyer: ${lawyerNameById.get(lawyerId) ?? lawyerId}`, onClear: () => { setLawyerId("all"); setPage(1); } });
     if (clerkId !== "all") chips.push({ key: "assignedClerkId", label: `Clerk: ${clerkNameById.get(clerkId) ?? clerkId}`, onClear: () => { setClerkId("all"); setPage(1); } });
     if (projectId !== "all") chips.push({ key: "projectId", label: `Project: ${projectNameById.get(projectId) ?? projectId}`, onClear: () => { setProjectId("all"); setPage(1); } });
@@ -276,11 +292,13 @@ export default function CasesList() {
     milestonePresence,
     lawyerId,
     clerkId,
+    assignedToUserId,
     projectId,
     lawyerNameById,
     clerkNameById,
     projectNameById,
     milestoneLabelByKey,
+    myUserId,
   ]);
 
   const [selectedCaseIds, setSelectedCaseIds] = useState<Set<number>>(new Set());
@@ -425,6 +443,7 @@ export default function CasesList() {
               setMilestonePresence("filled");
               setLawyerId("all");
               setClerkId("all");
+              setAssignedToUserId("all");
               setProjectId("all");
               setPage(1);
             }}

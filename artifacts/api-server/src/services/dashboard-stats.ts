@@ -28,7 +28,7 @@ async function tableExists(r: DbConn, reg: string): Promise<boolean> {
   return Boolean(rows[0]?.reg);
 }
 
-type DashboardStatsOpts = { assignedToUserId?: number; includeErrorDetails?: boolean };
+type DashboardStatsOpts = { assignedToUserId?: number; includeErrorDetails?: boolean; deadlineAt?: number };
 
 type DashboardWarning = {
   module: string;
@@ -68,6 +68,7 @@ export async function computeDashboardStats(
   const warnings: DashboardWarning[] = [];
   const unavailableFields: string[] = [];
   const includeErrorDetails = Boolean(opts?.includeErrorDetails);
+  const deadlineAt = typeof opts?.deadlineAt === "number" ? opts.deadlineAt : null;
 
   const warn = (module: string, err: unknown, fields?: string[]) => {
     const msg = err instanceof Error ? err.message : String(err);
@@ -77,6 +78,14 @@ export async function computeDashboardStats(
       message: msg,
       ...(includeErrorDetails && err instanceof Error ? { stack: err.stack } : {}),
     });
+    for (const f of fields ?? []) {
+      if (!unavailableFields.includes(f)) unavailableFields.push(f);
+    }
+  };
+
+  const deadlineExceeded = () => (deadlineAt != null ? Date.now() > deadlineAt : false);
+  const deadlineSkip = (module: string, fields?: string[]) => {
+    warnings.push({ module, code: "DEADLINE", message: "Skipped due to dashboard time budget" });
     for (const f of fields ?? []) {
       if (!unavailableFields.includes(f)) unavailableFields.push(f);
     }
@@ -151,6 +160,10 @@ export async function computeDashboardStats(
   const activeCases = Math.max(0, totalCases - completedCases);
 
   const recentRawRows = await (async () => {
+    if (deadlineExceeded()) {
+      deadlineSkip("cases.recentCases", ["recentCases"]);
+      return [];
+    }
     try {
       return assignedCasesJoin
         ? await r
@@ -295,6 +308,10 @@ export async function computeDashboardStats(
 
   const billing = hasBillingEntries
     ? (await (async () => {
+        if (deadlineExceeded()) {
+          deadlineSkip("billing.summary", ["billing"]);
+          return {};
+        }
         try {
           return (await queryRows(r, sql`
             SELECT
@@ -312,6 +329,10 @@ export async function computeDashboardStats(
 
   const outstandingAdvances = hasCaseLedgers
     ? (await (async () => {
+        if (deadlineExceeded()) {
+          deadlineSkip("accounting.outstandingAdvances", ["outstandingAdvances"]);
+          return { caseCount: 0, totalAmount: 0, topCases: [] as any[] };
+        }
         try {
           const [totals] = await queryRows(r, sql`
           SELECT
@@ -376,6 +397,10 @@ export async function computeDashboardStats(
 
   const commsThisMonth = hasCommunications
     ? await (async () => {
+        if (deadlineExceeded()) {
+          deadlineSkip("comms.thisMonth", ["commsThisMonth"]);
+          return 0;
+        }
         try {
           return Number((await queryRows(r, sql`
             SELECT COUNT(*) as total_this_month
@@ -438,17 +463,22 @@ export async function computeDashboardStats(
   if (workflowStepsEnabled) {
     try {
       const countCasesForStepPresence = async (stepKey: CaseMilestoneKey, presence: "completed" | "pending", extraWhere?: SQL) => {
+        if (deadlineExceeded()) {
+          deadlineSkip("milestones.workflowSteps", ["milestoneCards", "milestoneSections"]);
+          workflowStepsEnabled = false;
+          return 0;
+        }
         const base = assignedCasesJoin
-          ? r.select({ caseId: casesTable.id }).from(casesTable).innerJoin(caseAssignmentsTable, assignedCasesJoin)
-          : r.select({ caseId: casesTable.id }).from(casesTable);
+          ? r.select({ c: count() }).from(casesTable).innerJoin(caseAssignmentsTable, assignedCasesJoin)
+          : r.select({ c: count() }).from(casesTable);
         const where = and(
           eq(casesTable.firmId, firmId),
           isNull(casesTable.deletedAt),
           milestonePresenceWhereSql(stepKey, presence),
           ...(extraWhere ? [extraWhere] : []),
         );
-        const rows = await base.where(where);
-        return rows.length;
+        const [row] = await base.where(where);
+        return toNumber0(row?.c);
       };
 
       await Promise.all([
@@ -641,6 +671,10 @@ export async function computeDashboardStats(
 
   const completionSlaOverdue = hasKeyDates
     ? await (async () => {
+        if (deadlineExceeded()) {
+          deadlineSkip("completionSla.overdue", ["completionSlaOverdue"]);
+          return [];
+        }
         try {
           return (await queryRows(r, sql`
             SELECT

@@ -525,7 +525,7 @@ suite("Documents checklist + applicability", () => {
     }
   });
 
-  it("POST generate returns 422 with missingRequiredVariables when required bindings are missing", async () => {
+  it("POST generate enqueues job even when required bindings are missing", async () => {
     const bytes = (() => {
       const zip = new PizZip();
       zip.file(
@@ -586,9 +586,9 @@ suite("Documents checklist + applicability", () => {
         .post(`/api/cases/${createdCaseId}/documents/generate`)
         .set("Authorization", `Bearer ${token}`)
         .send({ templateId: tplIdReady });
-      expect(res.status).toBe(422);
-      expect(res.body.code).toBe("TEMPLATE_BINDING_MISSING");
-      expect(Array.isArray(res.body.missingRequiredVariables)).toBe(true);
+      expect(res.status).toBe(202);
+      expect(typeof res.body.jobId).toBe("string");
+      expect(String(res.body.status ?? "")).toBe("accepted");
       expect(uploadSpy).not.toHaveBeenCalled();
     } finally {
       uploadSpy.mockRestore();

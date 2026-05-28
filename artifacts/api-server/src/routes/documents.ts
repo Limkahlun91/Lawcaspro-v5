@@ -2326,7 +2326,11 @@ router.post(
         return;
       }
       if (err instanceof DocumentGenerationError && (err.code === "DOCX_TO_PDF_UNAVAILABLE" || err.code === "DOCX_TO_PDF_FAILED" || err.code === "DOCX_TO_PDF_TIMEOUT")) {
-        res.status(503).json({ error: err.message, code: "PDF_CONVERSION_ERROR" });
+        const code =
+          err.code === "DOCX_TO_PDF_UNAVAILABLE"
+            ? "PDF_CONVERSION_UNAVAILABLE"
+            : "PDF_CONVERSION_ERROR";
+        res.status(503).json({ error: err.message, code });
         return;
       }
       const derived =
@@ -2361,6 +2365,14 @@ router.post(
         }
         if (derived.code === "TEMPLATE_FILE_BUFFER_MISSING") {
           res.status(503).json({ error: derived.message, code: "TEMPLATE_STORAGE_READ_FAILED" });
+          return;
+        }
+        if (derived.code === "DOCX_TO_PDF_UNAVAILABLE") {
+          res.status(503).json({ error: derived.message, code: "PDF_CONVERSION_UNAVAILABLE" });
+          return;
+        }
+        if (derived.code === "DOCX_TO_PDF_FAILED" || derived.code === "DOCX_TO_PDF_TIMEOUT") {
+          res.status(503).json({ error: derived.message, code: "PDF_CONVERSION_ERROR" });
           return;
         }
       }
@@ -6679,11 +6691,8 @@ async function generateFirmDocument({
     placeholders: effectivePlaceholders,
     overrides: mergedOverrides,
   });
-  if (!forceMode && preview.usedMode === "bindings" && preview.missingRequiredVariables.length > 0) {
-    throw new DocumentGenerationError(422, "TEMPLATE_BINDING_MISSING", "Missing required variables", { missingRequiredVariables: preview.missingRequiredVariables });
-  }
   let input: Record<string, unknown> = preview.usedMode === "bindings" ? preview.resolvedVariables : (context as any);
-  input = fillMissingScalarsForRender(effectivePlaceholders, input, { missingMode: forceMode ? "empty" : "placeholder" });
+  input = fillMissingScalarsForRender(effectivePlaceholders, input, { missingMode: "empty" });
   let clauseSnapshot: Record<string, unknown> | null = null;
   let checklistEval = evaluateTemplateChecklist({
     checklistMode: (template as any).checklist_mode,
@@ -6723,7 +6732,7 @@ async function generateFirmDocument({
     });
     fileContents = applied.docxBytes;
     input = applied.data;
-    input = fillMissingScalarsForRender(effectivePlaceholders, input, { missingMode: forceMode ? "empty" : "placeholder" });
+    input = fillMissingScalarsForRender(effectivePlaceholders, input, { missingMode: "empty" });
     clauseSnapshot = {
       insertionModeUsed: decision.insertionModeUsed,
       insertionTarget: decision.insertionTarget,
@@ -7105,10 +7114,8 @@ async function generateMasterDocument({
     placeholders,
     overrides: mergedOverrides,
   });
-  if (preview.usedMode === "bindings" && preview.missingRequiredVariables.length > 0) {
-    throw new DocumentGenerationError(422, "TEMPLATE_BINDING_MISSING", "Missing required variables", { missingRequiredVariables: preview.missingRequiredVariables });
-  }
   let renderInput: Record<string, unknown> = preview.usedMode === "bindings" ? preview.resolvedVariables : (context as any);
+  renderInput = fillMissingScalarsForRender(placeholders, renderInput, { missingMode: "empty" });
   let docxBytesForRender: Buffer | null = null;
   let clauseSnapshot: Record<string, unknown> | null = null;
   if (isDocx) {
@@ -7137,6 +7144,7 @@ async function generateMasterDocument({
       });
       docxBytesForRender = applied.docxBytes;
       renderInput = applied.data;
+      renderInput = fillMissingScalarsForRender(placeholders, renderInput, { missingMode: "empty" });
       clauseSnapshot = {
         insertionModeUsed: decision.insertionModeUsed,
         insertionTarget: decision.insertionTarget,
@@ -7883,8 +7891,6 @@ router.post("/cases/bulk/generate-documents-zip", requireAuth, requireFirmUser, 
     }
   }
 
-  startDocumentGenerationJobRunner(r, { firmId: req.firmId!, jobId });
-
   await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.enterprise.batch.enqueued", entityType: "document_generation_job", entityId: undefined, detail: `jobId=${jobId} cases=${caseIds.length} templates=${templateIds.length} action=${actionType}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
 
   res.status(202).json({
@@ -8554,7 +8560,6 @@ async function runSimpleDocumentGenerationPreflight(args: {
   const failures = items.filter((it) => {
     if (it.templateFileStatus !== "ready") return true;
     if (it.templateType === "docx" && it.converterStatus !== "ready") return true;
-    if (it.dataStatus === "missing_variables") return true;
     return false;
   });
   return { ok: failures.length === 0, items, failures };
@@ -8749,52 +8754,57 @@ async function recoverStaleDocumentGenerationJob(r: DbConn, args: { firmId: numb
   activeDocumentGenerationJobRunners.delete(key);
 }
 
-function startDocumentGenerationJobRunner(r: DbConn, args: { firmId: number; jobId: string }): void {
+async function startDocumentGenerationJobRunner(
+  r: DbConn,
+  args: { firmId: number; jobId: string },
+  opts?: { maxSteps?: number; maxMs?: number },
+): Promise<void> {
   const key = `${args.firmId}:${args.jobId}`;
-  const existing = activeDocumentGenerationJobRunners.get(key);
-  if (existing && Date.now() - existing.lastHeartbeatAt < 3 * 60_000) return;
   activeDocumentGenerationJobRunners.set(key, { startedAt: Date.now(), lastHeartbeatAt: Date.now() });
-  void (async () => {
+  const maxSteps = typeof opts?.maxSteps === "number" && Number.isFinite(opts.maxSteps) ? Math.max(1, Math.trunc(opts.maxSteps)) : 3;
+  const maxMs = typeof opts?.maxMs === "number" && Number.isFinite(opts.maxMs) ? Math.max(50, Math.trunc(opts.maxMs)) : 1200;
+  const started = Date.now();
+  try {
+    await recoverStaleDocumentGenerationJob(r, { firmId: args.firmId, jobId: args.jobId, staleMs: 2 * 60_000 });
+    await queryRows(r, sql`
+      UPDATE document_generation_jobs
+      SET runner_attempts = COALESCE(runner_attempts, 0) + 1,
+          timeout_at = COALESCE(timeout_at, now() + interval '10 minutes'),
+          last_heartbeat_at = now()
+      WHERE id = ${args.jobId}::uuid AND firm_id = ${args.firmId}
+        AND status IN ('pending','running')
+    `);
+
+    for (let i = 0; i < maxSteps && Date.now() - started < maxMs; i++) {
+      await processAutomationGenerationJobStep(r, args);
+      const rows = await queryRows(r, sql`
+        SELECT status, pending_count
+        FROM document_generation_jobs
+        WHERE id = ${args.jobId}::uuid AND firm_id = ${args.firmId}
+        LIMIT 1
+      `);
+      const job = rows[0] as any;
+      const status = String(job?.status ?? "");
+      const pending = Number(job?.pending_count ?? 0);
+      if (status === "completed" || status === "completed_with_errors" || status === "failed" || pending <= 0) return;
+    }
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
     try {
       await queryRows(r, sql`
         UPDATE document_generation_jobs
-        SET runner_attempts = COALESCE(runner_attempts, 0) + 1,
-            timeout_at = COALESCE(timeout_at, now() + interval '10 minutes'),
-            last_heartbeat_at = now()
+        SET status = 'failed',
+            pending_count = 0,
+            finished_at = now(),
+            error_code = 'RUNNER_FAILED',
+            error_summary = ${message.slice(0, 500)}
         WHERE id = ${args.jobId}::uuid AND firm_id = ${args.firmId}
-          AND status IN ('pending','running')
       `);
-      for (let i = 0; i < 10_000; i++) {
-        await processAutomationGenerationJobStep(r, args);
-        const rows = await queryRows(r, sql`
-          SELECT status, pending_count
-          FROM document_generation_jobs
-          WHERE id = ${args.jobId}::uuid AND firm_id = ${args.firmId}
-          LIMIT 1
-        `);
-        const job = rows[0] as any;
-        const status = String(job?.status ?? "");
-        const pending = Number(job?.pending_count ?? 0);
-        if (status === "completed" || status === "completed_with_errors" || status === "failed" || pending <= 0) return;
-      }
-    } catch (e) {
-      const message = e instanceof Error ? e.message : String(e);
-      try {
-        await queryRows(r, sql`
-          UPDATE document_generation_jobs
-          SET status = 'failed',
-              pending_count = 0,
-              finished_at = now(),
-              error_code = 'RUNNER_FAILED',
-              error_summary = ${message.slice(0, 500)}
-          WHERE id = ${args.jobId}::uuid AND firm_id = ${args.firmId}
-        `);
-      } catch {
-      }
-    } finally {
-      activeDocumentGenerationJobRunners.delete(key);
+    } catch {
     }
-  })();
+  } finally {
+    activeDocumentGenerationJobRunners.delete(key);
+  }
 }
 
 async function processAutomationGenerationJobStep(r: DbConn, args: { firmId: number; jobId: string }): Promise<void> {
@@ -9280,7 +9290,10 @@ async function processAutomationGenerationJobStep(r: DbConn, args: { firmId: num
       if (derived.code === "TEMPLATE_RENDER_FAILED") {
         return { code: "DOCX_RENDER_ERROR", message: derived.message };
       }
-      if (derived.code === "DOCX_TO_PDF_FAILED" || derived.code === "DOCX_TO_PDF_TIMEOUT" || derived.code === "DOCX_TO_PDF_UNAVAILABLE") {
+      if (derived.code === "DOCX_TO_PDF_UNAVAILABLE") {
+        return { code: "PDF_CONVERSION_UNAVAILABLE", message: derived.message };
+      }
+      if (derived.code === "DOCX_TO_PDF_FAILED" || derived.code === "DOCX_TO_PDF_TIMEOUT") {
         return { code: "PDF_CONVERSION_ERROR", message: derived.message };
       }
       if (derived.code === "PDF_TEMPLATE_RENDER_FAILED" || derived.code === "PDF_TEMPLATE_NO_FIELDS") {
@@ -9412,11 +9425,7 @@ router.post("/documents/automation/generate-job", requireAuth, requireFirmUser, 
       const mapped = (() => {
         if (f.templateFileStatus === "missing") return { errorCode: "TEMPLATE_FILE_MISSING", errorMessage: "Missing template file" };
         if (f.templateFileStatus === "read_failed") return { errorCode: "TEMPLATE_STORAGE_READ_FAILED", errorMessage: "Template storage read failed" };
-        if (f.templateType === "docx" && f.converterStatus === "missing") return { errorCode: "PDF_CONVERSION_ERROR", errorMessage: "PDF conversion is not configured" };
-        if (f.dataStatus === "missing_variables") {
-          const msg = f.missingVariables.length > 0 ? `Missing variables: ${f.missingVariables.join(", ")}` : "Missing variables";
-          return { errorCode: "TEMPLATE_VARIABLES_MISSING", errorMessage: msg };
-        }
+        if (f.templateType === "docx" && f.converterStatus === "missing") return { errorCode: "PDF_CONVERSION_UNAVAILABLE", errorMessage: "PDF conversion is not configured" };
         return { errorCode: "INTERNAL_ERROR", errorMessage: "Preflight failed" };
       })();
       return {
@@ -9470,8 +9479,6 @@ router.post("/documents/automation/generate-job", requireAuth, requireFirmUser, 
     VALUES ${sql.join(itemValues, sql`, `)}
   `);
 
-  startDocumentGenerationJobRunner(r, { firmId: req.firmId!, jobId });
-
   res.status(202).json({
     jobId,
     statusUrl: `/documents/jobs/${jobId}`,
@@ -9489,7 +9496,7 @@ router.get("/documents/jobs/:jobId", requireAuth, requireFirmUser, requirePermis
   }
 
   await recoverStaleDocumentGenerationJob(r, { firmId: req.firmId!, jobId, staleMs: 3 * 60_000 });
-  startDocumentGenerationJobRunner(r, { firmId: req.firmId!, jobId });
+  await startDocumentGenerationJobRunner(r, { firmId: req.firmId!, jobId }, { maxSteps: 2, maxMs: 1200 });
 
   const jobs = await queryRows(r, sql`SELECT * FROM document_generation_jobs WHERE id = ${jobId}::uuid AND firm_id = ${req.firmId!}`);
   const job = jobs[0];
@@ -9520,7 +9527,7 @@ router.get("/documents/status/:jobId", requireAuth, requireFirmUser, requirePerm
   }
 
   await recoverStaleDocumentGenerationJob(r, { firmId: req.firmId!, jobId, staleMs: 3 * 60_000 });
-  startDocumentGenerationJobRunner(r, { firmId: req.firmId!, jobId });
+  await startDocumentGenerationJobRunner(r, { firmId: req.firmId!, jobId }, { maxSteps: 2, maxMs: 1200 });
 
   const jobs = await queryRows(r, sql`SELECT * FROM document_generation_jobs WHERE id = ${jobId}::uuid AND firm_id = ${req.firmId!}`);
   const job = jobs[0] as any;
@@ -9771,8 +9778,6 @@ router.post("/documents/automation/generate", requireAuth, requireFirmUser, requ
       `);
     }
   }
-
-  startDocumentGenerationJobRunner(r, { firmId: req.firmId!, jobId });
 
   await writeAuditLog({
     firmId: req.firmId,
@@ -10634,7 +10639,7 @@ router.post("/cases/:caseId/documents/preview", requireAuth, requireFirmUser, re
           if (!Buffer.isBuffer(bytes) || bytes.length === 0) {
             throw new DocumentGenerationError(400, "TEMPLATE_FILE_BUFFER_MISSING", "Template file buffer is missing or corrupted in the database.");
           }
-          const inputForRender = fillMissingScalarsForRender(placeholders, input);
+          const inputForRender = fillMissingScalarsForRender(placeholders, input, { missingMode: "empty" });
           const zip = new PizZip(bytes);
           const doc = new Docxtemplater(zip, {
             paragraphLoop: true,
@@ -11217,8 +11222,6 @@ router.post("/cases/:caseId/documents/generate", requireAuth, requireFirmUser, r
     VALUES (${jobId}::uuid, ${req.firmId!}, ${caseId}, ${tid}, 'pending')
   `);
 
-  startDocumentGenerationJobRunner(r, { firmId: req.firmId!, jobId });
-
   res.status(202).json({
     status: "accepted",
     jobId,
@@ -11455,7 +11458,7 @@ router.post("/cases/:caseId/documents/print", requireAuth, requireFirmUser, requ
       placeholders: effectivePlaceholders,
       overrides: storedOverrides,
     });
-    const input = fillMissingScalarsForRender(placeholders, preview.usedMode === "bindings" ? preview.resolvedVariables : (context as any));
+    const input = fillMissingScalarsForRender(placeholders, preview.usedMode === "bindings" ? preview.resolvedVariables : (context as any), { missingMode: "empty" });
 
     const templateDocType = template && typeof template === "object" && "document_type" in template ? String((template as any).document_type) : "other";
     const isLetterLike = isLetterheadApplicableDocumentType(templateDocType);
