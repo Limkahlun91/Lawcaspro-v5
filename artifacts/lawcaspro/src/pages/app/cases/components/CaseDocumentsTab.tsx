@@ -1876,8 +1876,8 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
                                       Data: {dataLabel}
                                     </div>
                                     {!converterReady && (
-                                      <div className="text-[11px] text-amber-700 truncate" title="PDF conversion is not configured on Vercel. DOCX templates will fail fast with DOCX_TO_PDF_CONVERTER_NOT_CONFIGURED.">
-                                        PDF conversion not configured on Vercel
+                                      <div className="text-[11px] text-amber-700 truncate" title="PDF conversion is not configured on Vercel. DOCX templates will use fallback PDF rendering.">
+                                        PDF conversion not configured; using fallback
                                       </div>
                                     )}
                                     <div className="text-[11px] text-slate-700 truncate">

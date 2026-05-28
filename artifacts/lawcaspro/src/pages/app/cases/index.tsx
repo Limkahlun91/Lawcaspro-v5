@@ -97,8 +97,9 @@ export default function CasesList() {
   const initialMilestone = legacyInitial ? legacyInitial.milestone : normalizeMilestoneKey(sp.get("milestone"));
   const initialPresence = legacyInitial
     ? legacyInitial.presence
-    : normalizeMilestonePresence(sp.get("milestoneStatus") ?? sp.get("milestonePresence"));
-    : normalizeMilestonePresence(sp.get("status") ?? sp.get("milestoneStatus") ?? sp.get("milestonePresence"));
+    : normalizeMilestonePresence(
+        sp.get("status") ?? sp.get("milestoneStatus") ?? sp.get("milestonePresence"),
+      );
   const [milestonePresence, setMilestonePresence] = useState<MilestonePresence>(() => initialPresence);
   const [page, setPage] = useState<number>(() => Number.isInteger(initialPage) && initialPage > 0 ? initialPage : 1);
   const [limit, setLimit] = useState<number>(() => Number.isInteger(initialLimit) && initialLimit > 0 ? initialLimit : 50);

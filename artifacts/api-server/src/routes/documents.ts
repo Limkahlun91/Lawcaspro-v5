@@ -6096,11 +6096,59 @@ function startCaseDocumentRunRunner(r: DbConn, args: { firmId: number; runId: nu
 async function convertDocxToPdf(docxBytes: Buffer): Promise<Buffer> {
   const baseUrl = typeof process.env.GOTENBERG_URL === "string" ? process.env.GOTENBERG_URL.trim().replace(/\/+$/, "") : "";
   if (!baseUrl) {
-    throw new DocumentGenerationError(
-      501,
-      "DOCX_TO_PDF_CONVERTER_NOT_CONFIGURED",
-      "Word template rendered but PDF conversion is not configured on Vercel.",
-    );
+    const pdfDoc = await PDFDocument.create();
+    const page = pdfDoc.addPage([595.28, 841.89]);
+    const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
+    const xmlText = (() => {
+      try {
+        const zip = new PizZip(docxBytes);
+        const xml = zip.file("word/document.xml")?.asText() ?? "";
+        const parts: string[] = [];
+        const re = /<w:t[^>]*>([\s\S]*?)<\/w:t>|<w:tab\s*\/>|<w:br\s*\/>|<\/w:p>/g;
+        for (;;) {
+          const m = re.exec(xml);
+          if (!m) break;
+          if (m[0].startsWith("<w:t")) parts.push(m[1] ?? "");
+          else if (m[0].startsWith("<w:tab")) parts.push("\t");
+          else if (m[0].startsWith("<w:br")) parts.push("\n");
+          else parts.push("\n\n");
+        }
+        const raw = parts.join("");
+        return raw
+          .replace(/&amp;/g, "&")
+          .replace(/&lt;/g, "<")
+          .replace(/&gt;/g, ">")
+          .replace(/&quot;/g, "\"")
+          .replace(/&apos;/g, "'");
+      } catch {
+        return "";
+      }
+    })();
+    const text = xmlText.trim() ? xmlText.trim() : "Document generated (fallback rendering).";
+    const margin = 50;
+    const fontSize = 10;
+    const lineHeight = 14;
+    const maxWidth = page.getWidth() - margin * 2;
+    const tokens = text.replace(/\r\n/g, "\n").split(/\s+/);
+    const lines: string[] = [];
+    let current = "";
+    for (const t of tokens) {
+      const next = current ? `${current} ${t}` : t;
+      if (font.widthOfTextAtSize(next, fontSize) <= maxWidth) current = next;
+      else {
+        if (current) lines.push(current);
+        current = t;
+      }
+    }
+    if (current) lines.push(current);
+    let y = page.getHeight() - margin;
+    for (const ln of lines) {
+      if (y < margin) break;
+      page.drawText(ln, { x: margin, y, size: fontSize, font, color: rgb(0, 0, 0) });
+      y -= lineHeight;
+    }
+    const bytes = await pdfDoc.save();
+    return Buffer.from(bytes);
   }
 
   const controller = new AbortController();
@@ -6831,12 +6879,11 @@ async function generateFirmDocument({
     outFormat = "pdf";
     const mappingConfig = (template as any).pdf_mapping_config ?? null;
     const legacyMappings = normalizePdfMappingConfig(mappingConfig);
-    if (!isPdfTextBoxMappings(mappingConfig) && legacyMappings.length === 0) {
-      throw new DocumentGenerationError(422, "PDF_TEMPLATE_MISSING_MAPPING", "PDF template missing mapping");
-    }
     outputBytes = await (isPdfTextBoxMappings(mappingConfig)
       ? renderPdfTextBoxMappedTemplate({ pdfBytes: fileContents, data: input, mappings: mappingConfig, missingMode: "empty" })
-      : renderPdfMappedTemplate({ pdfBytes: fileContents, data: input, mappingConfig, missingMode: "empty" }));
+      : legacyMappings.length > 0
+        ? renderPdfMappedTemplate({ pdfBytes: fileContents, data: input, mappingConfig, missingMode: "empty" })
+        : renderPdfFormTemplate({ pdfBytes: fileContents, data: input, flatten: true }));
     outputContentType = "application/pdf";
   } else {
     if (!Buffer.isBuffer(fileContents) || fileContents.length === 0) {
@@ -9020,7 +9067,37 @@ async function processAutomationGenerationJobStep(r: DbConn, args: { firmId: num
         .filter((x) => x.objectPath);
       if (entries.length === 0) throw new Error("No output generated: all job items ended without object_path. Check item diagnostics.");
 
-      const zipBytes = await buildZipBufferFromPrivateObjects(entries);
+      const zipBytes = await (async () => {
+        const zipfile = new yazl.ZipFile();
+        const nameCounts = new Map<string, number>();
+        for (const e of entries) {
+          const base = e.zipPath.replace(/^\/*/, "");
+          const n = (nameCounts.get(base) ?? 0) + 1;
+          nameCounts.set(base, n);
+          const zipPath = n === 1 ? base : base.replace(/(\.[^./\\]+)?$/, (_m, ext) => ` (${n})${ext ?? ""}`);
+          const bytes = await downloadPrivateObjectBytes(e.objectPath);
+          zipfile.addBuffer(bytes, zipPath);
+        }
+        if (failedItems.length > 0) {
+          const lines = failedItems.map((it) => {
+            const caseId = (it as any)?.case_id;
+            const templateId = (it as any)?.template_id;
+            const code = (it as any)?.error_code ?? "";
+            const msg = (it as any)?.error_message ?? "";
+            return `caseId=${String(caseId ?? "")} templateId=${String(templateId ?? "")} code=${String(code ?? "")} message=${String(msg ?? "")}`;
+          });
+          const txt = `Some items failed.\n\n${lines.join("\n")}\n`;
+          zipfile.addBuffer(Buffer.from(txt, "utf8"), "generation-errors.txt");
+        }
+        zipfile.end();
+        const chunks: Buffer[] = [];
+        await new Promise<void>((resolve, reject) => {
+          zipfile.outputStream.on("data", (c: any) => chunks.push(Buffer.isBuffer(c) ? c : Buffer.from(c)));
+          zipfile.outputStream.on("error", reject);
+          zipfile.outputStream.on("end", resolve);
+        });
+        return Buffer.concat(chunks);
+      })();
       const objectPath = `/objects/temp-generated/${args.firmId}/document-automation-jobs/${args.jobId}.zip`;
       const outName = safeFilenameAscii(`Document_Automation_${new Date().toISOString().slice(0, 10)}.zip`) || "document-automation.zip";
       await supabaseStorage.uploadPrivateObject({ objectPath, fileBytes: zipBytes, contentType: "application/zip" });
@@ -9434,7 +9511,7 @@ router.post("/documents/automation/generate-job", requireAuth, requireFirmUser, 
       templateById.set(tid, row);
     }
     const gotenbergConfigured = typeof process.env.GOTENBERG_URL === "string" && process.env.GOTENBERG_URL.trim().length > 0;
-    const templateCheckById = new Map<number, { templateName: string; templateType: "pdf" | "docx" | "unsupported"; hardBlocked: boolean; code?: string; message?: string }>();
+    const templateCheckById = new Map<number, { templateName: string; templateType: "pdf" | "docx" | "unsupported"; hardBlocked: boolean; code?: string; message?: string; warnings?: string[] }>();
     await Promise.all(templateIds.map(async (templateId) => {
       const t = templateById.get(templateId);
       const templateName = t ? String((t as any).name ?? "") : "";
@@ -9478,8 +9555,7 @@ router.post("/documents/automation/generate-job", requireAuth, requireFirmUser, 
       }
 
       if (templateType === "pdf" && pdfMappingMissing) {
-        templateCheckById.set(templateId, { templateName, templateType, hardBlocked: true, code: "PDF_TEMPLATE_MISSING_MAPPING", message: "PDF template missing mapping" });
-        return;
+        templateCheckById.set(templateId, { templateName, templateType, hardBlocked: false, warnings: ["PDF mapping is not configured. Will attempt fallback form fill."] });
       }
 
       try {
@@ -9496,12 +9572,12 @@ router.post("/documents/automation/generate-job", requireAuth, requireFirmUser, 
         }
       }
 
-      if (templateType === "docx" && !gotenbergConfigured && effectiveForce) {
-        templateCheckById.set(templateId, { templateName, templateType, hardBlocked: true, code: "DOCX_TO_PDF_CONVERTER_NOT_CONFIGURED", message: "Word template rendered but PDF conversion is not configured on Vercel." });
+      if (templateType === "docx" && !gotenbergConfigured) {
+        templateCheckById.set(templateId, { templateName, templateType, hardBlocked: false, warnings: ["DOCX to PDF converter is not configured. Will use fallback PDF rendering."] });
         return;
       }
 
-      templateCheckById.set(templateId, { templateName, templateType, hardBlocked: false });
+      templateCheckById.set(templateId, { templateName, templateType, hardBlocked: false, ...(templateCheckById.get(templateId)?.warnings ? { warnings: templateCheckById.get(templateId)?.warnings } : {}) });
     }));
 
     const items = caseIds.flatMap((caseId) => templateIds.map((templateId) => {
@@ -9511,7 +9587,7 @@ router.post("/documents/automation/generate-job", requireAuth, requireFirmUser, 
         templateId: String(templateId),
         templateName: t.templateName,
         hardBlocked: Boolean(t.hardBlocked),
-        warnings: t.hardBlocked ? [] : ["Missing variables will be blank"],
+        warnings: t.hardBlocked ? [] : Array.from(new Set([...(Array.isArray(t.warnings) ? t.warnings : []), "Some variables are missing and will be left blank."])),
         outputFormat: "pdf" as const,
         ...(t.code ? { code: t.code } : {}),
         ...(t.message ? { message: t.message } : {}),

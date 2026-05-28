@@ -377,7 +377,7 @@ router.get("/dashboard", requireAuth, requireFirmUser, requirePermission("dashbo
     const stats = await computeDashboardStats(r, firmId, {
       assignedToUserId: effectiveAssignedToUserId ?? undefined,
       includeErrorDetails: allowDetails,
-      deadlineAt: Date.now() + 2_800,
+      deadlineAt: Date.now() + 4_800,
     });
     res.status(200).json({
       ok: true,
