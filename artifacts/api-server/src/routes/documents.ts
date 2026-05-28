@@ -1972,12 +1972,6 @@ router.delete("/firm-document-folders/:folderId", requireAuth, requireFirmUser, 
 router.get(
   "/document-templates",
   requireAuth,
-  (req: AuthRequest, _res, next): void => {
-    const email = typeof req.email === "string" ? req.email : null;
-    const masked = email ? email.replace(/^(.).+(@.+)$/, "$1***$2") : null;
-    console.log("!!! TEMP_DEBUG: Accessing document-templates route by user:", masked ?? email);
-    next();
-  },
   requireFirmUser,
   async (req: AuthRequest, res): Promise<void> => {
   const r = getRlsDb(req, res);
@@ -2002,6 +1996,89 @@ router.get(
     sql`SELECT * FROM document_templates WHERE ${where} ORDER BY created_at DESC`
   );
   res.json(rows);
+});
+
+router.get("/document-templates/:templateId/readiness", requireAuth, requireFirmUser, requirePermission("documents", "read"), async (req: AuthRequest, res): Promise<void> => {
+  const r = getRlsDb(req, res);
+  if (!r) return;
+  const templateIdStr = one((req.params as any).templateId);
+  const templateId = templateIdStr ? parseInt(templateIdStr, 10) : NaN;
+  if (!Number.isFinite(templateId) || templateId <= 0) {
+    res.status(400).json({ error: "Invalid templateId" });
+    return;
+  }
+
+  const tplRows = await queryRows(
+    r,
+    sql`SELECT * FROM document_templates WHERE firm_id = ${req.firmId!} AND id = ${templateId} AND kind = 'template' LIMIT 1`,
+  );
+  const tpl = tplRows[0] as any;
+  if (!tpl) {
+    res.status(404).json({ error: "Template not found" });
+    return;
+  }
+
+  const versionRows = await queryRows(
+    r,
+    sql`
+      SELECT id, source_object_path, filename, status, published_at
+      FROM document_template_versions
+      WHERE firm_id = ${req.firmId!} AND template_id = ${templateId} AND status = 'published'
+      ORDER BY published_at DESC NULLS LAST, id DESC
+      LIMIT 1
+    `,
+  );
+  const v = versionRows[0] as any;
+  const templateVersionId = v ? Number(v.id) : null;
+
+  const versionPathRaw = v && typeof v.source_object_path === "string" ? String(v.source_object_path).trim() : "";
+  const templatePathRaw = tpl && typeof tpl.object_path === "string" ? String(tpl.object_path).trim() : "";
+  const objectPathRaw = versionPathRaw || templatePathRaw;
+  const objectPathUsed = (() => {
+    if (!objectPathRaw) return null;
+    try {
+      return decodeStoragePath(objectPathRaw) || null;
+    } catch {
+      return objectPathRaw;
+    }
+  })();
+
+  const readinessBase =
+    !v && !templatePathRaw ? { readinessStatus: "missing_version" as const, readinessReason: "Missing published version" }
+    : !objectPathUsed ? { readinessStatus: "missing_file" as const, readinessReason: "Template file missing" }
+      : { readinessStatus: "ready" as const, readinessReason: null as string | null };
+
+  if (readinessBase.readinessStatus !== "ready") {
+    res.json({ ...readinessBase, templateId, templateVersionId, objectPathUsed });
+    return;
+  }
+
+  try {
+    const resp = await supabaseStorage.fetchPrivateObjectResponse(objectPathUsed!, { timeoutMs: 2_000 });
+    try {
+      await (resp.body as any)?.cancel?.();
+    } catch {}
+    res.json({ readinessStatus: "ready", readinessReason: null, templateId, templateVersionId, objectPathUsed });
+  } catch (err) {
+    const cfgErr = getSupabaseStorageConfigError(err);
+    if (cfgErr) {
+      res.json({ readinessStatus: "storage_unavailable", readinessReason: cfgErr.error, templateId, templateVersionId, objectPathUsed });
+      return;
+    }
+    if (err instanceof ObjectNotFoundError) {
+      res.json({ readinessStatus: "missing_file", readinessReason: "Storage object missing", templateId, templateVersionId, objectPathUsed });
+      return;
+    }
+    if (err instanceof StorageRequestTimeoutError) {
+      res.json({ readinessStatus: "storage_unavailable", readinessReason: "Storage request timeout", templateId, templateVersionId, objectPathUsed });
+      return;
+    }
+    const msg = err instanceof Error ? err.message : String(err);
+    const m = msg.match(/\((\d+)\)/);
+    const statusCode = m ? Number(m[1]) : null;
+    const readinessStatus = statusCode === 401 || statusCode === 403 ? "permission_error" : "storage_unavailable";
+    res.json({ readinessStatus, readinessReason: msg || "Storage unavailable", templateId, templateVersionId, objectPathUsed });
+  }
 });
 
 router.post(
@@ -4223,6 +4300,32 @@ router.get("/cases/:caseId/documents/checklist", requireAuth, requireFirmUser, r
   `);
 
   const firmTemplateIds = firmTemplates.map((t) => Number((t as any).id)).filter((id) => Number.isFinite(id));
+  const firmPublishedVersionByTemplateId = new Map<number, Record<string, unknown>>();
+  if (firmTemplateIds.length > 0) {
+    const hasVersions = await (async () => {
+      try {
+        return await tableExists(r, "public.document_template_versions");
+      } catch {
+        return false;
+      }
+    })();
+    if (hasVersions) {
+      const publishedVersions = await queryRows(r, sql`
+        SELECT DISTINCT ON (template_id)
+          template_id, id, source_object_path, filename, status, published_at
+        FROM document_template_versions
+        WHERE firm_id = ${req.firmId!}
+          AND template_id IN (${sql.join(firmTemplateIds.map((id) => sql`${id}`), sql`, `)})
+          AND status = 'published'
+        ORDER BY template_id, published_at DESC NULLS LAST, id DESC
+      `);
+      for (const row of publishedVersions) {
+        const tid = typeof (row as any).template_id === "number" ? Number((row as any).template_id) : Number((row as any).template_id);
+        if (!Number.isFinite(tid)) continue;
+        firmPublishedVersionByTemplateId.set(tid, row as any);
+      }
+    }
+  }
   const firmRulesRows = firmTemplateIds.length === 0 ? [] : await queryRows(r, sql`
     SELECT *
     FROM document_template_applicability_rules
@@ -4385,6 +4488,8 @@ router.get("/cases/:caseId/documents/checklist", requireAuth, requireFirmUser, r
       }>;
     } | null;
     templateId?: number;
+    templateVersionId?: number | null;
+    objectPathUsed?: string | null;
     name: string;
     documentType?: string;
     documentGroup: string;
@@ -4502,16 +4607,45 @@ router.get("/cases/:caseId/documents/checklist", requireAuth, requireFirmUser, r
     if (!isTemplateCapable) {
       ready = { status: "incomplete", missing: [{ code: "template_not_capable", message: "Template is not generation capable" }] };
     } else {
-      const objectPath = String((t as any).object_path ?? "").trim();
+      const published = firmPublishedVersionByTemplateId.get(templateId) ?? null;
+      const publishedPathRaw = published && typeof (published as any).source_object_path === "string" ? String((published as any).source_object_path).trim() : "";
+      const templatePathRaw = String((t as any).object_path ?? "").trim();
+      const objectPathRaw = publishedPathRaw || templatePathRaw;
+      const objectPath = (() => {
+        if (!objectPathRaw) return "";
+        try {
+          return decodeStoragePath(objectPathRaw);
+        } catch {
+          return "";
+        }
+      })();
       if (!objectPath) {
-        ready = { status: "missing_file", missing: [{ code: "template_file_missing", message: "Template file missing" }] };
+        const status = !published && !templatePathRaw ? "missing_version" : "missing_file";
+        ready = {
+          status,
+          missing: [{ code: status === "missing_version" ? "missing_published_version" : "template_file_missing", message: "Template file missing" }],
+        };
       } else if (!includeAll && ready.status === "ready" && app.applicabilityStatus !== "not_applicable") {
         try {
-          const exists = await supabaseStorage.privateObjectExists(objectPath, { timeoutMs: 800 });
-          if (!exists) {
+          const resp = await supabaseStorage.fetchPrivateObjectResponse(objectPath, { timeoutMs: 1_500 });
+          try {
+            await (resp.body as any)?.cancel?.();
+          } catch {}
+        } catch (err) {
+          const cfgErr = getSupabaseStorageConfigError(err);
+          if (cfgErr) {
+            ready = { status: "storage_unavailable", missing: [{ code: "storage_unavailable", message: cfgErr.error }] };
+          } else if (err instanceof ObjectNotFoundError) {
             ready = { status: "missing_file", missing: [{ code: "storage_object_missing", message: "Storage object missing" }] };
+          } else if (err instanceof StorageRequestTimeoutError) {
+            ready = { status: "storage_unavailable", missing: [{ code: "storage_timeout", message: "Storage request timeout" }] };
+          } else {
+            const msg = err instanceof Error ? err.message : String(err);
+            const m = msg.match(/\((\d+)\)/);
+            const statusCode = m ? Number(m[1]) : null;
+            const status = statusCode === 401 || statusCode === 403 ? "permission_error" : "storage_unavailable";
+            ready = { status, missing: [{ code: status, message: msg || "Storage unavailable" }] };
           }
-        } catch {
         }
       }
     }
@@ -4543,6 +4677,21 @@ router.get("/cases/:caseId/documents/checklist", requireAuth, requireFirmUser, r
       updatedAt,
       notes: typeof override?.notes === "string" ? String(override.notes) : null,
       templateId,
+      templateVersionId: Number.isFinite(Number((firmPublishedVersionByTemplateId.get(templateId) as any)?.id))
+        ? Number((firmPublishedVersionByTemplateId.get(templateId) as any).id)
+        : null,
+      objectPathUsed: (() => {
+        const published = firmPublishedVersionByTemplateId.get(templateId) ?? null;
+        const publishedPathRaw = published && typeof (published as any).source_object_path === "string" ? String((published as any).source_object_path).trim() : "";
+        const templatePathRaw = String((t as any).object_path ?? "").trim();
+        const objectPathRaw = publishedPathRaw || templatePathRaw;
+        if (!objectPathRaw) return null;
+        try {
+          return decodeStoragePath(objectPathRaw) || null;
+        } catch {
+          return objectPathRaw;
+        }
+      })(),
       name: String((t as any).name ?? ""),
       documentType: String((t as any).document_type ?? "other"),
       documentGroup,
@@ -4622,16 +4771,38 @@ router.get("/cases/:caseId/documents/checklist", requireAuth, requireFirmUser, r
     if (!isTemplateCapable) {
       ready = { status: "incomplete", missing: [{ code: "template_not_capable", message: "Template is not generation capable" }] };
     } else {
-      const objectPath = String((t as any).object_path ?? "").trim();
+      const objectPathRaw = String((t as any).object_path ?? "").trim();
+      const objectPath = (() => {
+        if (!objectPathRaw) return "";
+        try {
+          return decodeStoragePath(objectPathRaw);
+        } catch {
+          return "";
+        }
+      })();
       if (!objectPath) {
         ready = { status: "missing_file", missing: [{ code: "template_file_missing", message: "Template file missing" }] };
       } else if (!includeAll && ready.status === "ready" && app.applicabilityStatus !== "not_applicable") {
         try {
-          const exists = await supabaseStorage.privateObjectExists(objectPath, { timeoutMs: 800 });
-          if (!exists) {
+          const resp = await supabaseStorage.fetchPrivateObjectResponse(objectPath, { timeoutMs: 1_500 });
+          try {
+            await (resp.body as any)?.cancel?.();
+          } catch {}
+        } catch (err) {
+          const cfgErr = getSupabaseStorageConfigError(err);
+          if (cfgErr) {
+            ready = { status: "storage_unavailable", missing: [{ code: "storage_unavailable", message: cfgErr.error }] };
+          } else if (err instanceof ObjectNotFoundError) {
             ready = { status: "missing_file", missing: [{ code: "storage_object_missing", message: "Storage object missing" }] };
+          } else if (err instanceof StorageRequestTimeoutError) {
+            ready = { status: "storage_unavailable", missing: [{ code: "storage_timeout", message: "Storage request timeout" }] };
+          } else {
+            const msg = err instanceof Error ? err.message : String(err);
+            const m = msg.match(/\((\d+)\)/);
+            const statusCode = m ? Number(m[1]) : null;
+            const status = statusCode === 401 || statusCode === 403 ? "permission_error" : "storage_unavailable";
+            ready = { status, missing: [{ code: status, message: msg || "Storage unavailable" }] };
           }
-        } catch {
         }
       }
     }
@@ -4663,6 +4834,16 @@ router.get("/cases/:caseId/documents/checklist", requireAuth, requireFirmUser, r
       updatedAt,
       notes: typeof override?.notes === "string" ? String(override.notes) : null,
       templateId,
+      templateVersionId: null,
+      objectPathUsed: (() => {
+        const raw = String((t as any).object_path ?? "").trim();
+        if (!raw) return null;
+        try {
+          return decodeStoragePath(raw) || null;
+        } catch {
+          return raw;
+        }
+      })(),
       name: String((t as any).name ?? ""),
       documentType: String((t as any).category ?? "other"),
       documentGroup,
@@ -8253,7 +8434,15 @@ async function processAutomationGenerationJobStep(r: DbConn, args: { firmId: num
       LIMIT 1
     `);
     const version = versionRows[0] as any;
-    const sourceTemplatePath = typeof version?.source_object_path === "string" ? String(version.source_object_path) : "";
+    const sourceTemplatePathRaw = typeof version?.source_object_path === "string" ? String(version.source_object_path) : "";
+    const sourceTemplatePathDecoded = (() => {
+      if (!sourceTemplatePathRaw) return "";
+      try {
+        return decodeStoragePath(sourceTemplatePathRaw);
+      } catch {
+        return "";
+      }
+    })();
     const sourceTemplateFileName = typeof version?.filename === "string" ? String(version.filename) : "";
     const expectedOutputFormat = outputFormat === "pdf" ? "pdf" : "docx";
 
@@ -8263,21 +8452,71 @@ async function processAutomationGenerationJobStep(r: DbConn, args: { firmId: num
       WHERE id = ${Number((item as any).id)} AND firm_id = ${args.firmId}
     `);
 
+    const templateRows = await queryRows(r, sql`
+      SELECT object_path, name
+      FROM document_templates
+      WHERE id = ${templateId} AND firm_id = ${args.firmId}
+      LIMIT 1
+    `);
+    const templateRow = templateRows[0] as any;
+    const fallbackTemplatePathRaw = templateRow && typeof templateRow.object_path === "string" ? String(templateRow.object_path) : "";
+    const fallbackTemplatePathDecoded = (() => {
+      if (!fallbackTemplatePathRaw) return "";
+      try {
+        return decodeStoragePath(fallbackTemplatePathRaw);
+      } catch {
+        return "";
+      }
+    })();
+    const sourceTemplatePath = sourceTemplatePathDecoded || fallbackTemplatePathDecoded;
+    const source = sourceTemplatePathDecoded ? "published_version" : fallbackTemplatePathDecoded ? "template_object_path" : "none";
+
     if (!sourceTemplatePath) {
-      throw new DocumentGenerationError(404, "TEMPLATE_OBJECT_PATH_MISSING", "Template object path is missing", {
+      throw new DocumentGenerationError(404, "TEMPLATE_FILE_MISSING", "Template file missing", {
         templateId,
+        templateName: templateRow && typeof templateRow.name === "string" ? String(templateRow.name) : null,
+        templateVersionId,
+        source,
         caseId,
         expectedOutputFormat,
         storageTarget: "case_documents",
-        sourceTemplatePath: sourceTemplatePath || null,
+        sourceTemplatePath: sourceTemplatePathRaw || null,
+        sourceTemplatePathDecoded: sourceTemplatePathDecoded || null,
+        fallbackTemplatePath: fallbackTemplatePathRaw || null,
+        fallbackTemplatePathDecoded: fallbackTemplatePathDecoded || null,
         sourceTemplateFileName: sourceTemplateFileName || null,
       });
     }
 
-    const templateExists = await supabaseStorage.privateObjectExists(sourceTemplatePath, { timeoutMs: 2_000 });
+    const templateExists = await (async () => {
+      try {
+        return await supabaseStorage.privateObjectExists(sourceTemplatePath, { timeoutMs: 2_000 });
+      } catch (err) {
+        const cfgErr = getSupabaseStorageConfigError(err);
+        if (cfgErr) {
+          throw new DocumentGenerationError(cfgErr.statusCode, "TEMPLATE_STORAGE_READ_FAILED", cfgErr.error, {
+            templateId,
+            templateVersionId,
+            source,
+            objectPath: sourceTemplatePath,
+          });
+        }
+        if (err instanceof StorageRequestTimeoutError) {
+          throw new DocumentGenerationError(503, "TEMPLATE_STORAGE_READ_FAILED", "Storage request timeout", {
+            templateId,
+            templateVersionId,
+            source,
+            objectPath: sourceTemplatePath,
+          });
+        }
+        throw err;
+      }
+    })();
     if (!templateExists) {
-      throw new DocumentGenerationError(404, "TEMPLATE_OBJECT_NOT_FOUND", "Template object not found", {
+      throw new DocumentGenerationError(404, "TEMPLATE_FILE_MISSING", "Template file missing", {
         templateId,
+        templateVersionId,
+        source,
         caseId,
         expectedOutputFormat,
         storageTarget: "case_documents",

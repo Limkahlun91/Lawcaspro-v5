@@ -63,7 +63,14 @@ interface CaseDocument {
 }
 
 type ApplicabilityStatus = "applicable" | "warning" | "not_applicable";
-type ReadinessStatus = "ready" | "missing_data" | "missing_file" | "incomplete";
+type ReadinessStatus =
+  | "ready"
+  | "missing_data"
+  | "missing_file"
+  | "missing_version"
+  | "storage_unavailable"
+  | "permission_error"
+  | "incomplete";
 
 type ChecklistStatus =
   | "pending"
@@ -1318,6 +1325,10 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
                               if (it.source !== "firm") return "Unsupported template source";
                               if (!applicable) return "Not applicable to this case";
                               if (it.readiness && it.readiness.status !== "ready") {
+                                if (it.readiness.status === "missing_file") return "Template file missing";
+                                if (it.readiness.status === "missing_version") return "Missing published version";
+                                if (it.readiness.status === "storage_unavailable") return "Storage unavailable";
+                                if (it.readiness.status === "permission_error") return "Storage permission error";
                                 const missingMsgs = (it.readiness.missing ?? []).map((m) => String(m.message ?? "").trim()).filter(Boolean);
                                 const hasTemplateMissing = (it.readiness.missing ?? []).some((m) => String(m.code ?? "").toLowerCase().includes("template") && String(m.code ?? "").toLowerCase().includes("missing"));
                                 const hasStorageMissing = (it.readiness.missing ?? []).some((m) => String(m.code ?? "").toLowerCase().includes("storage") && String(m.code ?? "").toLowerCase().includes("missing"));
@@ -1387,7 +1398,13 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
                                     ) : null}
                                     {it.readiness ? (
                                       <span className={cn("text-[10px] px-1.5 py-0.5 rounded font-medium", ready ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-800")}>
-                                        {ready ? "Ready" : (it.readiness?.status || "Incomplete")}
+                                        {ready
+                                          ? "Ready"
+                                          : it.readiness.status === "missing_file" ? "Missing template file"
+                                            : it.readiness.status === "missing_version" ? "Missing published version"
+                                              : it.readiness.status === "storage_unavailable" ? "Storage unavailable"
+                                                : it.readiness.status === "permission_error" ? "Storage permission error"
+                                                  : (it.readiness?.status || "Incomplete")}
                                       </span>
                                     ) : null}
                                     <span className={cn("text-[10px] px-1.5 py-0.5 rounded font-medium capitalize", statusTone)}>

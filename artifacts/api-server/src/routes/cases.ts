@@ -28,7 +28,7 @@ import { z } from "zod/v4";
 import { requireAuth, requireFirmUser, requirePermission, writeAuditLog, type AuthRequest } from "../lib/auth.js";
 import { buildWorkflowSteps } from "../lib/workflow.js";
 import { KEY_DATE_FIELD_TO_STEP_KEY, WORKFLOW_STEP_KEY_TO_KEY_DATE_FIELD, type KeyDateField } from "../lib/keyDatesWorkflow.js";
-import { loanStatusSql, milestoneDateSql, milestoneDateYmdSql, milestonePresenceWhereSql, spaStatusSql, type CaseMilestoneKey, type MilestonePresence } from "../lib/caseListLogic.js";
+import { loanStatusSql, milestoneDateSql, milestoneDateYmdSql, milestonePresenceWhereSql, normalizeMilestoneFilter, spaStatusSql, type CaseMilestoneKey, type MilestonePresence } from "../lib/caseListLogic.js";
 import { daysAgoSql } from "../lib/dateSql.js";
 import { parseDateOnlyInput } from "../lib/dateOnly.js";
 import { logger } from "../lib/logger.js";
@@ -2288,8 +2288,54 @@ router.get("/cases/export.csv", requireAuthHandler, requireFirmUserHandler, requ
   const search = one(req.query.search as any);
   const spaStatus = one(req.query.spaStatus as any);
   const loanStatus = one(req.query.loanStatus as any);
-  const milestone = one(req.query.milestone as any) as CaseMilestoneKey | undefined;
-  const milestonePresence = one(req.query.milestonePresence as any) as MilestonePresence | undefined;
+
+  const normalizePresence = (raw: string | undefined): MilestonePresence | undefined => {
+    if (!raw) return undefined;
+    const v = raw.trim().toLowerCase();
+    if (v === "done") return "completed";
+    if (v === "pending") return "pending";
+    if (v === "completed") return "completed";
+    if (v === "filled") return "filled";
+    if (v === "missing") return "missing";
+    return undefined;
+  };
+
+  let milestone = one(req.query.milestone as any) as CaseMilestoneKey | undefined;
+  let milestonePresence = normalizePresence(one(req.query.milestonePresence as any));
+  if (!milestone) {
+    const legacyKeys: CaseMilestoneKey[] = [
+      "spa_stamped",
+      "lof_stamped",
+      "loan_docs_pending",
+      "loan_docs_signed",
+      "acting_letter_issued",
+      "advised",
+      "loan_sent_bank_exec",
+      "loan_bank_executed",
+      "blu_received",
+      "mot_received",
+      "mot_submitted_stamping",
+      "mot_stamp",
+      "noa_served",
+      "pa_registered",
+      "letter_disclaimer",
+    ];
+    for (const k of legacyKeys) {
+      const v = one((req.query as any)[k]);
+      const vv = v ? v.trim().toLowerCase() : "";
+      if (vv === "done") {
+        milestone = k;
+        milestonePresence = "completed";
+        break;
+      }
+      if (vv === "pending") {
+        milestone = k;
+        milestonePresence = "pending";
+        break;
+      }
+    }
+  }
+  ({ milestone, presence: milestonePresence } = normalizeMilestoneFilter(milestone, milestonePresence));
   const sortByRaw = one(req.query.sortBy as any);
   const sortDirRaw = one(req.query.sortDir as any);
   const overdueDaysRaw = one(req.query.overdueDays as any);
@@ -2713,14 +2759,22 @@ router.get("/cases", requireAuthHandler, requireFirmUserHandler, requirePermissi
   if (loanStatus) {
     conditions.push(sql`${loanStatusExpr} = ${loanStatus}`);
   }
-  if (hasKeyDates && hasWorkflowSteps && milestone && milestonePresence && (milestonePresence === "filled" || milestonePresence === "missing")) {
-    if (loanOnlyMilestones.has(milestone)) {
-      conditions.push(eq(casesTable.purchaseMode, "loan"));
+  if (milestone && milestonePresence) {
+    if (milestonePresence === "filled" || milestonePresence === "missing") {
+      if (hasKeyDates && hasWorkflowSteps) {
+        if (loanOnlyMilestones.has(milestone)) {
+          conditions.push(eq(casesTable.purchaseMode, "loan"));
+        }
+        if (milestonePresence === "missing" && encumbranceOnlyWhenMissing.has(milestone)) {
+          conditions.push(eq(casesTable.isEncumbered, true));
+        }
+        conditions.push(milestonePresenceWhereSql(milestone, milestonePresence));
+      }
+    } else if (milestonePresence === "completed" || milestonePresence === "pending") {
+      if (hasWorkflowSteps) {
+        conditions.push(milestonePresenceWhereSql(milestone, milestonePresence));
+      }
     }
-    if (milestonePresence === "missing" && encumbranceOnlyWhenMissing.has(milestone)) {
-      conditions.push(eq(casesTable.isEncumbered, true));
-    }
-    conditions.push(milestonePresenceWhereSql(milestone, milestonePresence));
   }
   if (search && search.trim()) {
     const like = `%${search.trim()}%`;

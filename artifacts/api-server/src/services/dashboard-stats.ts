@@ -45,16 +45,24 @@ function isMissingRelationOrColumnError(err: unknown): boolean {
   return code === "42P01" || code === "42703" || code === "42501";
 }
 
+async function safeTableExists(r: DbConn, reg: string): Promise<boolean> {
+  try {
+    return await tableExists(r, reg);
+  } catch {
+    return false;
+  }
+}
+
 export async function computeDashboardStats(
   r: DbConn,
   firmId: number,
   opts?: DashboardStatsOpts,
 ): Promise<Record<string, unknown>> {
-  const hasKeyDates = await tableExists(r, "public.case_key_dates");
-  const hasWorkflowSteps = await tableExists(r, "public.case_workflow_steps");
-  const hasBillingEntries = await tableExists(r, "public.case_billing_entries");
-  const hasCommunications = await tableExists(r, "public.case_communications");
-  const hasCaseLedgers = await tableExists(r, "public.case_ledgers");
+  const hasKeyDates = await safeTableExists(r, "public.case_key_dates");
+  const hasWorkflowSteps = await safeTableExists(r, "public.case_workflow_steps");
+  const hasBillingEntries = await safeTableExists(r, "public.case_billing_entries");
+  const hasCommunications = await safeTableExists(r, "public.case_communications");
+  const hasCaseLedgers = await safeTableExists(r, "public.case_ledgers");
 
   const assignedToUserId = opts?.assignedToUserId;
   const assignedFilter = assignedToUserId ? { assignedToUserId: String(assignedToUserId) } : {};
@@ -67,11 +75,15 @@ export async function computeDashboardStats(
     : undefined;
 
   const countCases = async (where?: SQL) => {
-    const base = assignedCasesJoin
-      ? r.select({ c: count() }).from(casesTable).innerJoin(caseAssignmentsTable, assignedCasesJoin)
-      : r.select({ c: count() }).from(casesTable);
-    const [row] = where ? await base.where(where) : await base;
-    return toNumber0(row?.c);
+    try {
+      const base = assignedCasesJoin
+        ? r.select({ c: count() }).from(casesTable).innerJoin(caseAssignmentsTable, assignedCasesJoin)
+        : r.select({ c: count() }).from(casesTable);
+      const [row] = where ? await base.where(where) : await base;
+      return toNumber0(row?.c);
+    } catch {
+      return 0;
+    }
   };
 
   const totalCases = await countCases(and(eq(casesTable.firmId, firmId), isNull(casesTable.deletedAt)));
@@ -110,40 +122,46 @@ export async function computeDashboardStats(
     : 0;
   const activeCases = Math.max(0, totalCases - completedCases);
 
-  const recentRawRows = assignedCasesJoin
-    ? await r
-        .select({
-          id: casesTable.id,
-          referenceNo: casesTable.referenceNo,
-          projectId: casesTable.projectId,
-          developerId: casesTable.developerId,
-          purchaseMode: casesTable.purchaseMode,
-          titleType: casesTable.titleType,
-          status: casesTable.status,
-          createdAt: casesTable.createdAt,
-          updatedAt: casesTable.updatedAt,
-        })
-        .from(casesTable)
-        .innerJoin(caseAssignmentsTable, assignedCasesJoin)
-        .where(and(eq(casesTable.firmId, firmId), isNull(casesTable.deletedAt)))
-        .orderBy(desc(casesTable.updatedAt))
-        .limit(20)
-    : await r
-        .select({
-          id: casesTable.id,
-          referenceNo: casesTable.referenceNo,
-          projectId: casesTable.projectId,
-          developerId: casesTable.developerId,
-          purchaseMode: casesTable.purchaseMode,
-          titleType: casesTable.titleType,
-          status: casesTable.status,
-          createdAt: casesTable.createdAt,
-          updatedAt: casesTable.updatedAt,
-        })
-        .from(casesTable)
-        .where(and(eq(casesTable.firmId, firmId), isNull(casesTable.deletedAt)))
-        .orderBy(desc(casesTable.updatedAt))
-        .limit(5);
+  const recentRawRows = await (async () => {
+    try {
+      return assignedCasesJoin
+        ? await r
+            .select({
+              id: casesTable.id,
+              referenceNo: casesTable.referenceNo,
+              projectId: casesTable.projectId,
+              developerId: casesTable.developerId,
+              purchaseMode: casesTable.purchaseMode,
+              titleType: casesTable.titleType,
+              status: casesTable.status,
+              createdAt: casesTable.createdAt,
+              updatedAt: casesTable.updatedAt,
+            })
+            .from(casesTable)
+            .innerJoin(caseAssignmentsTable, assignedCasesJoin)
+            .where(and(eq(casesTable.firmId, firmId), isNull(casesTable.deletedAt)))
+            .orderBy(desc(casesTable.updatedAt))
+            .limit(20)
+        : await r
+            .select({
+              id: casesTable.id,
+              referenceNo: casesTable.referenceNo,
+              projectId: casesTable.projectId,
+              developerId: casesTable.developerId,
+              purchaseMode: casesTable.purchaseMode,
+              titleType: casesTable.titleType,
+              status: casesTable.status,
+              createdAt: casesTable.createdAt,
+              updatedAt: casesTable.updatedAt,
+            })
+            .from(casesTable)
+            .where(and(eq(casesTable.firmId, firmId), isNull(casesTable.deletedAt)))
+            .orderBy(desc(casesTable.updatedAt))
+            .limit(5);
+    } catch {
+      return [];
+    }
+  })();
 
   const seenRecent = new Set<number>();
   const recentRows = recentRawRows.filter((row) => {
@@ -154,14 +172,35 @@ export async function computeDashboardStats(
 
   const recentCases = await Promise.all(
     recentRows.map(async (c) => {
-      const [proj] = await r.select({ name: projectsTable.name }).from(projectsTable).where(eq(projectsTable.id, c.projectId));
-      const [dev] = await r.select({ name: developersTable.name }).from(developersTable).where(eq(developersTable.id, c.developerId));
-      const [assignment] = await r
-        .select({ userName: usersTable.name })
-        .from(caseAssignmentsTable)
-        .leftJoin(usersTable, eq(caseAssignmentsTable.userId, usersTable.id))
-        .where(eq(caseAssignmentsTable.caseId, c.id))
-        .limit(1);
+      const projectName = await (async () => {
+        try {
+          const [proj] = await r.select({ name: projectsTable.name }).from(projectsTable).where(eq(projectsTable.id, c.projectId));
+          return proj?.name ?? "Unknown";
+        } catch {
+          return "Unknown";
+        }
+      })();
+      const developerName = await (async () => {
+        try {
+          const [dev] = await r.select({ name: developersTable.name }).from(developersTable).where(eq(developersTable.id, c.developerId));
+          return dev?.name ?? "Unknown";
+        } catch {
+          return "Unknown";
+        }
+      })();
+      const assignedLawyerName = await (async () => {
+        try {
+          const [assignment] = await r
+            .select({ userName: usersTable.name })
+            .from(caseAssignmentsTable)
+            .leftJoin(usersTable, eq(caseAssignmentsTable.userId, usersTable.id))
+            .where(eq(caseAssignmentsTable.caseId, c.id))
+            .limit(1);
+          return assignment?.userName ?? null;
+        } catch {
+          return null;
+        }
+      })();
       const completionSla = hasKeyDates ? await (async () => {
         try {
           const [kd] = await r
@@ -178,43 +217,70 @@ export async function computeDashboardStats(
           const hours = Math.max(0, ms / 3600_000);
           const status = hours >= 72 ? "overdue" : hours >= 48 ? "soon" : "due";
           return { status, activatedAt: (kd.completionSlaActivatedAt as Date).toISOString(), hoursElapsed: hours };
-        } catch (err) {
-          if (!isMissingRelationOrColumnError(err)) throw err;
+        } catch {
           return null;
         }
       })() : null;
       return {
         id: c.id,
         referenceNo: c.referenceNo,
-        projectName: proj?.name ?? "Unknown",
-        developerName: dev?.name ?? "Unknown",
+        projectName,
+        developerName,
         purchaseMode: c.purchaseMode,
         titleType: c.titleType,
         status: c.status,
-        assignedLawyerName: assignment?.userName ?? null,
+        assignedLawyerName,
         completionSla,
         createdAt: (c.createdAt instanceof Date ? c.createdAt : new Date(c.createdAt)).toISOString(),
       };
     })
   );
 
-  const [totalClientsRes] = await r.select({ c: count() }).from(clientsTable).where(eq(clientsTable.firmId, firmId));
-  const [totalDevsRes] = await r.select({ c: count() }).from(developersTable).where(eq(developersTable.firmId, firmId));
-  const [totalProjsRes] = await r.select({ c: count() }).from(projectsTable).where(eq(projectsTable.firmId, firmId));
+  const totalClients = await (async () => {
+    try {
+      const [row] = await r.select({ c: count() }).from(clientsTable).where(eq(clientsTable.firmId, firmId));
+      return toNumber0(row?.c);
+    } catch {
+      return 0;
+    }
+  })();
+  const totalDevelopers = await (async () => {
+    try {
+      const [row] = await r.select({ c: count() }).from(developersTable).where(eq(developersTable.firmId, firmId));
+      return toNumber0(row?.c);
+    } catch {
+      return 0;
+    }
+  })();
+  const totalProjects = await (async () => {
+    try {
+      const [row] = await r.select({ c: count() }).from(projectsTable).where(eq(projectsTable.firmId, firmId));
+      return toNumber0(row?.c);
+    } catch {
+      return 0;
+    }
+  })();
 
   const billing = hasBillingEntries
-    ? (await queryRows(r, sql`
-        SELECT
-          SUM(amount * quantity) as total_billed,
-          SUM(CASE WHEN is_paid THEN amount * quantity ELSE 0 END) as total_paid,
-          SUM(CASE WHEN NOT is_paid THEN amount * quantity ELSE 0 END) as total_outstanding
-        FROM case_billing_entries WHERE firm_id = ${firmId}
-      `))[0] ?? {}
+    ? (await (async () => {
+        try {
+          return (await queryRows(r, sql`
+            SELECT
+              SUM(amount * quantity) as total_billed,
+              SUM(CASE WHEN is_paid THEN amount * quantity ELSE 0 END) as total_paid,
+              SUM(CASE WHEN NOT is_paid THEN amount * quantity ELSE 0 END) as total_outstanding
+            FROM case_billing_entries WHERE firm_id = ${firmId}
+          `))[0] ?? {};
+        } catch {
+          return {};
+        }
+      })())
     : {};
 
   const outstandingAdvances = hasCaseLedgers
     ? (await (async () => {
-        const [totals] = await queryRows(r, sql`
+        try {
+          const [totals] = await queryRows(r, sql`
           SELECT
             COUNT(*) as case_count,
             COALESCE(SUM(outstanding_amount), 0) as total_amount
@@ -234,7 +300,7 @@ export async function computeDashboardStats(
             ) > 0
           ) t
         `);
-        const rows = await queryRows(r, sql`
+          const rows = await queryRows(r, sql`
           SELECT
             cl.case_id as case_id,
             c.reference_no as reference_no,
@@ -259,25 +325,34 @@ export async function computeDashboardStats(
           ORDER BY outstanding_amount DESC
           LIMIT 10
         `);
-        const topCases = rows.map((rr) => ({
-          caseId: toNumber0(rr.case_id),
-          referenceNo: String(rr.reference_no ?? ""),
-          clientNames: String(rr.client_names ?? "") || null,
-          amount: toNumber0((rr as any).outstanding_amount),
-        })).filter((x) => x.caseId > 0 && x.amount > 0);
-        const caseCount = toNumber0((totals as any)?.case_count);
-        const totalAmount = toNumber0((totals as any)?.total_amount);
-        return { caseCount, totalAmount, topCases };
+          const topCases = rows.map((rr) => ({
+            caseId: toNumber0(rr.case_id),
+            referenceNo: String(rr.reference_no ?? ""),
+            clientNames: String(rr.client_names ?? "") || null,
+            amount: toNumber0((rr as any).outstanding_amount),
+          })).filter((x) => x.caseId > 0 && x.amount > 0);
+          const caseCount = toNumber0((totals as any)?.case_count);
+          const totalAmount = toNumber0((totals as any)?.total_amount);
+          return { caseCount, totalAmount, topCases };
+        } catch {
+          return { caseCount: 0, totalAmount: 0, topCases: [] as any[] };
+        }
       })())
     : { caseCount: 0, totalAmount: 0, topCases: [] as any[] };
 
   const commsThisMonth = hasCommunications
-    ? Number((await queryRows(r, sql`
-          SELECT COUNT(*) as total_this_month
-          FROM case_communications
-          WHERE firm_id = ${firmId}
-          AND created_at >= date_trunc('month', NOW())
-        `))[0]?.total_this_month ?? 0)
+    ? await (async () => {
+        try {
+          return Number((await queryRows(r, sql`
+            SELECT COUNT(*) as total_this_month
+            FROM case_communications
+            WHERE firm_id = ${firmId}
+            AND created_at >= date_trunc('month', NOW())
+          `))[0]?.total_this_month ?? 0);
+        } catch {
+          return 0;
+        }
+      })()
     : 0;
 
   const baseActiveWhere = and(eq(casesTable.firmId, firmId), isNull(casesTable.deletedAt));
@@ -572,7 +647,8 @@ export async function computeDashboardStats(
       })()
     : [];
 
-  if (process.env.DEBUG_DATA_DUMP === "1") {
+  const debugDumpEnabled = process.env.DEBUG_DATA_DUMP === "1" && process.env.NODE_ENV !== "production";
+  if (debugDumpEnabled) {
     console.log(
       "!!! DEBUG_DATA_DUMP:",
       JSON.stringify({
@@ -582,9 +658,9 @@ export async function computeDashboardStats(
           totalCases,
           activeCases,
           completedCases,
-          totalClients: toNumber0(totalClientsRes?.c),
-          totalDevelopers: toNumber0(totalDevsRes?.c),
-          totalProjects: toNumber0(totalProjsRes?.c),
+          totalClients,
+          totalDevelopers,
+          totalProjects,
         },
         flags: {
           hasKeyDates,
@@ -608,9 +684,9 @@ export async function computeDashboardStats(
     totalCases,
     activeCases,
     completedCases,
-    totalClients: toNumber0(totalClientsRes?.c),
-    totalDevelopers: toNumber0(totalDevsRes?.c),
-    totalProjects: toNumber0(totalProjsRes?.c),
+    totalClients,
+    totalDevelopers,
+    totalProjects,
     cashCases,
     loanCases,
     masterTitleCases,

@@ -209,3 +209,54 @@ export function milestonePresenceWhereSql(milestone: CaseMilestoneKey, presence:
   if (presence === "filled") return sql`${expr} IS NOT NULL`;
   return sql`${expr} IS NULL`;
 }
+
+const STEP_TO_DATE_MILESTONE: Partial<Record<CaseMilestoneKey, CaseMilestoneKey>> = {
+  spa_stamped: "spa_stamped_date",
+  lof_stamped: "letter_of_offer_stamped_date",
+  loan_docs_pending: "loan_docs_pending_date",
+  loan_docs_signed: "loan_docs_signed_date",
+  acting_letter_issued: "acting_letter_issued_date",
+  loan_sent_bank_exec: "loan_sent_bank_execution_date",
+  loan_bank_executed: "loan_bank_executed_date",
+  blu_received: "bank_lu_received_date",
+  advised: "advice_to_bank_date",
+  mot_received: "mot_received_date",
+  mot_stamp: "mot_stamped_date",
+  noa_served: "noa_served_on",
+  pa_registered: "register_poa_on",
+  letter_disclaimer: "letter_disclaimer_dated",
+};
+
+const DATE_TO_STEP_MILESTONE: Partial<Record<CaseMilestoneKey, CaseMilestoneKey>> = Object.fromEntries(
+  Object.entries(STEP_TO_DATE_MILESTONE).map(([step, date]) => [date, step]),
+) as Partial<Record<CaseMilestoneKey, CaseMilestoneKey>>;
+
+export function normalizeMilestoneFilter(
+  milestone?: CaseMilestoneKey,
+  presence?: MilestonePresence,
+): { milestone?: CaseMilestoneKey; presence?: MilestonePresence } {
+  if (!milestone || !presence) return { milestone, presence };
+
+  const isProbablyDateMilestone =
+    milestone.endsWith("_date") || milestone.endsWith("_on") || milestone.endsWith("_dated");
+
+  if (presence === "filled" || presence === "missing") {
+    if (!isProbablyDateMilestone) {
+      const mapped = STEP_TO_DATE_MILESTONE[milestone];
+      if (mapped) return { milestone: mapped, presence };
+    }
+    return { milestone, presence };
+  }
+
+  if (presence === "completed" || presence === "pending") {
+    if (isProbablyDateMilestone) {
+      const mapped = DATE_TO_STEP_MILESTONE[milestone];
+      if (mapped) return { milestone: mapped, presence };
+      const downgraded: MilestonePresence = presence === "completed" ? "filled" : "missing";
+      return { milestone, presence: downgraded };
+    }
+    return { milestone, presence };
+  }
+
+  return { milestone, presence };
+}

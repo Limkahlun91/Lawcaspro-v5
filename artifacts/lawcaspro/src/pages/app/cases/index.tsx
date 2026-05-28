@@ -42,18 +42,15 @@ function normalizeMilestoneKey(raw: string | null): CaseMilestoneKey | "all" {
   return Object.values(CaseMilestoneKey).includes(raw as any) ? (raw as CaseMilestoneKey) : "all";
 }
 
-function translateDashboardMilestoneFilter(
-  milestone: CaseMilestoneKey | "all",
-  presence: MilestonePresence
-): { milestone: CaseMilestoneKey | "all"; presence: MilestonePresence } {
-  if (presence !== "pending" && presence !== "completed") return { milestone, presence };
-
-  const translatedPresence: MilestonePresence = presence === "completed" ? "filled" : "missing";
-
-  if (milestone === "spa_stamped") return { milestone: "spa_stamped_date", presence: translatedPresence };
-  if (milestone === "loan_bank_executed") return { milestone: "loan_bank_executed_date", presence: translatedPresence };
-
-  return { milestone, presence };
+function parseLegacyMilestoneParams(sp: URLSearchParams): { milestone: CaseMilestoneKey; presence: MilestonePresence } | null {
+  for (const key of Object.values(CaseMilestoneKey)) {
+    const v = sp.get(key);
+    if (!v) continue;
+    const vv = v.trim().toLowerCase();
+    if (vv === "done") return { milestone: key as CaseMilestoneKey, presence: "completed" };
+    if (vv === "pending") return { milestone: key as CaseMilestoneKey, presence: "pending" };
+  }
+  return null;
 }
 
 export default function CasesList() {
@@ -90,11 +87,11 @@ export default function CasesList() {
   const [projectId, setProjectId] = useState<string>(() => (sp.get("projectId") ?? "all"));
   const [purchaseMode, setPurchaseMode] = useState<string>(() => (sp.get("purchaseMode") ?? "all"));
   const [titleType, setTitleType] = useState<string>(() => (sp.get("titleType") ?? "all"));
-  const initialMilestone = normalizeMilestoneKey(sp.get("milestone"));
-  const initialPresence = normalizeMilestonePresence(sp.get("milestonePresence"));
-  const initialTranslated = translateDashboardMilestoneFilter(initialMilestone, initialPresence);
-  const [milestone, setMilestone] = useState<CaseMilestoneKey | "all">(() => initialTranslated.milestone);
-  const [milestonePresence, setMilestonePresence] = useState<MilestonePresence>(() => initialTranslated.presence);
+  const legacyInitial = parseLegacyMilestoneParams(sp);
+  const initialMilestone = legacyInitial ? legacyInitial.milestone : normalizeMilestoneKey(sp.get("milestone"));
+  const initialPresence = legacyInitial ? legacyInitial.presence : normalizeMilestonePresence(sp.get("milestonePresence"));
+  const [milestone, setMilestone] = useState<CaseMilestoneKey | "all">(() => initialMilestone);
+  const [milestonePresence, setMilestonePresence] = useState<MilestonePresence>(() => initialPresence);
   const [page, setPage] = useState<number>(() => Number.isInteger(initialPage) && initialPage > 0 ? initialPage : 1);
   const [limit, setLimit] = useState<number>(() => Number.isInteger(initialLimit) && initialLimit > 0 ? initialLimit : 50);
 
@@ -115,11 +112,9 @@ export default function CasesList() {
     const nextProjectId = q.get("projectId") ?? "all";
     const nextPurchaseMode = q.get("purchaseMode") ?? "all";
     const nextTitleType = q.get("titleType") ?? "all";
-    const normalizedMilestone = normalizeMilestoneKey(q.get("milestone"));
-    const normalizedPresence = normalizeMilestonePresence(q.get("milestonePresence"));
-    const translated = translateDashboardMilestoneFilter(normalizedMilestone, normalizedPresence);
-    const nextMilestone = translated.milestone;
-    const nextPresence = translated.presence;
+    const legacy = parseLegacyMilestoneParams(q);
+    const nextMilestone = legacy ? legacy.milestone : normalizeMilestoneKey(q.get("milestone"));
+    const nextPresence = legacy ? legacy.presence : normalizeMilestonePresence(q.get("milestonePresence"));
 
     setSearch((prev) => prev === nextSearch ? prev : nextSearch);
     setSpaStatus((prev) => prev === nextSpaStatus ? prev : nextSpaStatus);

@@ -9,6 +9,11 @@ const rdb = (req: AuthRequest): DbConn => req.rlsDb ?? db;
 
 const one = (v: string | string[] | undefined): string | undefined => (Array.isArray(v) ? v[0] : v);
 
+function getPgCode(err: unknown): string | null {
+  const code = err && typeof err === "object" ? (err as { code?: unknown }).code : undefined;
+  return typeof code === "string" && code ? code : null;
+}
+
 async function queryRows(r: DbConn, query: ReturnType<typeof sql>): Promise<Record<string, unknown>[]> {
   const result = await r.execute(query);
   if (Array.isArray(result)) return result as Record<string, unknown>[];
@@ -29,6 +34,17 @@ const expressRouter = express.Router();
 const router = expressRouter as unknown as RouterInternalLike;
 
 router.get("/dashboard", requireAuth, requireFirmUser, requirePermission("dashboard", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
+  const allowDetails =
+    process.env.API_ERROR_DETAILS === "1" ||
+    process.env.NODE_ENV !== "production" ||
+    Boolean((res as any)?.locals?.allowErrorDetails) ||
+    (() => {
+      const headerToken = one(req.headers["x-debug-token"] as any);
+      const expected = process.env.API_DEBUG_TOKEN;
+      if (!expected) return false;
+      return Boolean(headerToken && headerToken === expected);
+    })();
+
   try {
     const firmId = req.firmId!;
     const r = rdb(req);
@@ -62,14 +78,29 @@ router.get("/dashboard", requireAuth, requireFirmUser, requirePermission("dashbo
       return;
     }
 
-    const hasCache = await tableExists(r, "public.firm_dashboard_stats_cache");
+    const hasCache = await (async () => {
+      try {
+        return await tableExists(r, "public.firm_dashboard_stats_cache");
+      } catch (err) {
+        logger.warn({ err, code: getPgCode(err), firmId, userId: req.userId }, "[dashboard] cache_table_exists_failed");
+        return false;
+      }
+    })();
+
     if (hasCache && !refresh) {
-      const cachedRows = await queryRows(r, sql`
+      const cachedRows = await (async () => {
+        try {
+          return await queryRows(r, sql`
           SELECT payload_json
           FROM firm_dashboard_stats_cache
           WHERE firm_id = ${firmId} AND expires_at > now()
           LIMIT 1
         `);
+        } catch (err) {
+          logger.warn({ err, code: getPgCode(err), firmId, userId: req.userId }, "[dashboard] cache_read_failed");
+          return [];
+        }
+      })();
       const cached = cachedRows[0] && typeof cachedRows[0] === "object" ? (cachedRows[0] as any).payload_json : undefined;
       if (cached && typeof cached === "object") {
         res.json(cached);
@@ -84,27 +115,33 @@ router.get("/dashboard", requireAuth, requireFirmUser, requirePermission("dashbo
         const raw = process.env.DASHBOARD_CACHE_TTL_SEC ? Number.parseInt(process.env.DASHBOARD_CACHE_TTL_SEC, 10) : 300;
         return Number.isFinite(raw) ? Math.min(Math.max(raw, 30), 3600) : 300;
       })();
-      await queryRows(r, sql`
-        INSERT INTO firm_dashboard_stats_cache (firm_id, payload_json, computed_at, expires_at)
-        VALUES (${firmId}, ${payload as any}::jsonb, now(), now() + (${ttlSec}::text || ' seconds')::interval)
-        ON CONFLICT (firm_id) DO UPDATE SET
-          payload_json = EXCLUDED.payload_json,
-          computed_at = EXCLUDED.computed_at,
-          expires_at = EXCLUDED.expires_at
-      `);
+      try {
+        await queryRows(r, sql`
+          INSERT INTO firm_dashboard_stats_cache (firm_id, payload_json, computed_at, expires_at)
+          VALUES (${firmId}, ${payload as any}::jsonb, now(), now() + (${ttlSec}::text || ' seconds')::interval)
+          ON CONFLICT (firm_id) DO UPDATE SET
+            payload_json = EXCLUDED.payload_json,
+            computed_at = EXCLUDED.computed_at,
+            expires_at = EXCLUDED.expires_at
+        `);
+      } catch (err) {
+        logger.warn({ err, code: getPgCode(err), firmId, userId: req.userId }, "[dashboard] cache_write_failed");
+      }
     }
 
     res.json(payload);
   } catch (err) {
-    logger.error({ err, path: req.path, firmId: req.firmId, userId: req.userId, query: req.query }, "[dashboard]");
-    const allowDetails =
-      process.env.API_ERROR_DETAILS === "1" ||
-      process.env.NODE_ENV !== "production" ||
-      Boolean((res as any)?.locals?.allowErrorDetails);
+    logger.error(
+      allowDetails
+        ? { err, path: req.path, firmId: req.firmId, userId: req.userId, query: req.query }
+        : { err, path: req.path, firmId: req.firmId, userId: req.userId },
+      "[dashboard]",
+    );
     if (allowDetails) {
       const details = err instanceof Error ? err.message : String(err);
       const stack = err instanceof Error ? err.stack : undefined;
-      res.status(500).json({ error: "Dashboard unavailable", details, stack });
+      const code = getPgCode(err);
+      res.status(500).json({ error: "Dashboard unavailable", details, code, stack });
       return;
     }
     res.status(500).json({ error: "Dashboard unavailable" });
