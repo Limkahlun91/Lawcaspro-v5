@@ -99,6 +99,8 @@ export default function DocumentAutomationHub() {
   const [selectedCaseIds, setSelectedCaseIds] = useState<number[]>([]);
   const [selectedTemplateIds, setSelectedTemplateIds] = useState<number[]>([]);
   const [activeMode, setActiveMode] = useState<"download" | "print">("download");
+  const [selectedMasterDocIds, setSelectedMasterDocIds] = useState<number[]>([]);
+  const [templateSourceTab, setTemplateSourceTab] = useState<"firm" | "master">("firm");
   const [copies, setCopies] = useState("1");
   const [duplexMode, setDuplexMode] = useState<"double" | "single" | "custom">("double");
   const [customDuplexRange, setCustomDuplexRange] = useState("");
@@ -135,9 +137,33 @@ export default function DocumentAutomationHub() {
     retry: false,
   });
 
+  const firmSettingsQuery = useQuery<{ showMasterDocuments?: boolean }>({
+    queryKey: ["firm-settings", "document-automation"],
+    queryFn: () => apiFetchJson("/firm-settings"),
+    retry: false,
+  });
+  const showMasterDocuments = firmSettingsQuery.data?.showMasterDocuments !== false;
+
+  type SystemFolder = { id: number; name: string; parentId: number | null; sortOrder: number; isDisabled: boolean };
+  type SystemDoc = { id: number; name: string; fileName: string; folderId: number | null };
+  const masterFoldersQuery = useQuery<SystemFolder[]>({
+    queryKey: ["hub-folders", "document-automation"],
+    queryFn: () => apiFetchJson<SystemFolder[]>("/hub/folders"),
+    enabled: showMasterDocuments,
+    retry: false,
+  });
+  const masterDocsQuery = useQuery<SystemDoc[]>({
+    queryKey: ["hub-documents", "document-automation"],
+    queryFn: () => apiFetchJson<SystemDoc[]>("/hub/documents"),
+    enabled: showMasterDocuments,
+    retry: false,
+  });
+
   const cases = casesQuery.data?.items ?? EMPTY_AUTOMATION_CASES;
   const folders = foldersQuery.data ?? EMPTY_FIRM_FOLDERS;
   const templates = templatesQuery.data ?? EMPTY_FIRM_TEMPLATES;
+  const masterFolders = masterFoldersQuery.data ?? [];
+  const masterDocs = masterDocsQuery.data ?? [];
 
   const caseCacheById = useMemo(() => {
     const m = new Map<number, AutomationCaseRow>();
@@ -185,6 +211,7 @@ export default function DocumentAutomationHub() {
 
   const selectedCaseIdSet = useMemo(() => new Set(selectedCaseIds), [selectedCaseIds]);
   const selectedTemplateIdSet = useMemo(() => new Set(selectedTemplateIds), [selectedTemplateIds]);
+  const selectedMasterDocIdSet = useMemo(() => new Set(selectedMasterDocIds), [selectedMasterDocIds]);
 
   const folderById = useMemo(() => {
     const m = new Map<number, FirmFolder>();
@@ -369,9 +396,58 @@ export default function DocumentAutomationHub() {
     return memo;
   }, [folderChildren, templatesByFolder]);
 
+  const masterFolderChildren = useMemo(() => {
+    const byParent = new Map<number | null, SystemFolder[]>();
+    for (const f of masterFolders) {
+      const k = f.parentId ?? null;
+      const arr = byParent.get(k) ?? [];
+      arr.push(f);
+      byParent.set(k, arr);
+    }
+    for (const [k, arr] of byParent) {
+      arr.sort((a, b) => a.sortOrder - b.sortOrder || a.name.localeCompare(b.name));
+      byParent.set(k, arr);
+    }
+    return byParent;
+  }, [masterFolders]);
+
+  const masterDocsByFolder = useMemo(() => {
+    const m = new Map<number | null, SystemDoc[]>();
+    for (const d of masterDocs) {
+      const k = d.folderId ?? null;
+      const arr = m.get(k) ?? [];
+      arr.push(d);
+      m.set(k, arr);
+    }
+    for (const [k, arr] of m) {
+      arr.sort((a, b) => (a.name || "").localeCompare(b.name || ""));
+      m.set(k, arr);
+    }
+    return m;
+  }, [masterDocs]);
+
+  const masterDocIdsInFolder = useMemo(() => {
+    const memo = new Map<number | null, number[]>();
+    const visit = (folderId: number | null): number[] => {
+      if (memo.has(folderId)) return memo.get(folderId)!;
+      const direct = (masterDocsByFolder.get(folderId) ?? []).map((d) => d.id);
+      const children = masterFolderChildren.get(folderId) ?? [];
+      const fromChildren = children.flatMap((c) => visit(c.id));
+      const all = [...direct, ...fromChildren];
+      memo.set(folderId, all);
+      return all;
+    };
+    visit(null);
+    return memo;
+  }, [masterDocsByFolder, masterFolderChildren]);
+
   function toggleSelectTemplate(id: number) {
     setSelectedTemplateIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
   }
+
+  useEffect(() => {
+    if (!showMasterDocuments && templateSourceTab === "master") setTemplateSourceTab("firm");
+  }, [showMasterDocuments, templateSourceTab]);
 
   useEffect(() => {
     if (!selectedCaseKey || smartDismissedKey === selectedCaseKey) {
@@ -478,6 +554,25 @@ export default function DocumentAutomationHub() {
     return { checked: false, indeterminate: true };
   }
 
+  function setMasterFolderDocs(folderId: number | null, checked: boolean) {
+    const ids = masterDocIdsInFolder.get(folderId) ?? [];
+    if (!ids.length) return;
+    if (!checked) {
+      setSelectedMasterDocIds((prev) => prev.filter((id) => !ids.includes(id)));
+      return;
+    }
+    setSelectedMasterDocIds((prev) => Array.from(new Set([...prev, ...ids])));
+  }
+
+  function masterFolderCheckboxState(folderId: number | null): { checked: boolean; indeterminate: boolean } {
+    const ids = masterDocIdsInFolder.get(folderId) ?? [];
+    if (!ids.length) return { checked: false, indeterminate: false };
+    const selectedCount = ids.filter((id) => selectedMasterDocIdSet.has(id)).length;
+    if (selectedCount === 0) return { checked: false, indeterminate: false };
+    if (selectedCount === ids.length) return { checked: true, indeterminate: false };
+    return { checked: false, indeterminate: true };
+  }
+
   function applyBundle(bundleName: string, tokens: string[], coreTemplateTokens?: string[]) {
     if (folders.length === 0 || templates.length === 0) {
       toast({ title: "Templates are still loading" });
@@ -525,8 +620,12 @@ export default function DocumentAutomationHub() {
       toast({ title: "Please select at least one case" });
       return;
     }
-    if (selectedTemplateIds.length === 0) {
-      toast({ title: "Please select at least one template" });
+    if (selectedTemplateIds.length + selectedMasterDocIds.length === 0) {
+      toast({ title: "Please select at least one document" });
+      return;
+    }
+    if (mode === "print" && selectedMasterDocIds.length > 0) {
+      toast({ title: "Print is only supported for firm templates" });
       return;
     }
 
@@ -544,6 +643,10 @@ export default function DocumentAutomationHub() {
       const payload = {
         caseIds: selectedCaseIds,
         templateIds: selectedTemplateIds,
+        templates: [
+          ...selectedTemplateIds.map((id) => ({ source: "firm" as const, id })),
+          ...selectedMasterDocIds.map((id) => ({ source: "master" as const, id })),
+        ],
         config: {
           action: mode,
           copies: mode === "print" ? Number(copies || 1) : undefined,
@@ -657,6 +760,54 @@ export default function DocumentAutomationHub() {
     );
   }
 
+  function MasterFolderNode({ folder, depth }: { folder: SystemFolder; depth: number }) {
+    const children = masterFolderChildren.get(folder.id) ?? [];
+    const [expanded, setExpanded] = useState(true);
+    const cb = masterFolderCheckboxState(folder.id);
+    const hasChildren = children.length > 0;
+    const hasDocs = (masterDocIdsInFolder.get(folder.id) ?? []).length > 0;
+
+    return (
+      <div>
+        <div className="flex items-center gap-2 rounded px-2 py-1 text-xs hover:bg-slate-50" style={{ paddingLeft: `${depth * 14 + 6}px` }}>
+          <button className={cn("p-0.5", !hasChildren && "invisible")} onClick={() => setExpanded((v) => !v)} type="button">
+            <ChevronRight className={cn("h-3 w-3 transition-transform", expanded && "rotate-90")} />
+          </button>
+          <Checkbox checked={cb.indeterminate ? "indeterminate" : cb.checked} disabled={!hasDocs} onCheckedChange={(v) => setMasterFolderDocs(folder.id, v === true)} />
+          <button className="flex-1 truncate text-left" onClick={() => setExpanded((v) => !v)} type="button">
+            {folder.name}
+          </button>
+        </div>
+
+        {expanded && (
+          <div>
+            {(masterDocsByFolder.get(folder.id) ?? []).map((d) => (
+              <div key={d.id} className="flex items-center gap-2 rounded px-2 py-1 text-xs hover:bg-slate-50" style={{ paddingLeft: `${(depth + 1) * 14 + 22}px` }}>
+                <Checkbox
+                  checked={selectedMasterDocIdSet.has(d.id)}
+                  onCheckedChange={(v) => {
+                    const checked = v === true;
+                    setSelectedMasterDocIds((prev) => {
+                      const next = new Set(prev);
+                      if (checked) next.add(d.id);
+                      else next.delete(d.id);
+                      return Array.from(next);
+                    });
+                  }}
+                />
+                <FileText className="h-3.5 w-3.5 text-slate-500" />
+                <div className="flex-1 truncate">{d.name}</div>
+              </div>
+            ))}
+            {children.map((c) => (
+              <MasterFolderNode key={c.id} folder={c} depth={depth + 1} />
+            ))}
+          </div>
+        )}
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-6">
       <div className="flex flex-col gap-1">
@@ -749,81 +900,140 @@ export default function DocumentAutomationHub() {
                       <div className="font-semibold text-slate-900">Template / Folder Selector</div>
                       <div className="text-xs text-slate-500">Select templates or entire folders</div>
                     </div>
-                    <div className="text-xs text-slate-500">Selected: {selectedTemplateIds.length}</div>
+                    <div className="text-xs text-slate-500">Selected: {selectedTemplateIds.length + selectedMasterDocIds.length}</div>
                   </div>
-                  <div className="mt-3 rounded-md border border-slate-200 bg-slate-50 px-3 py-2">
-                    <div className="text-xs font-medium text-slate-700">Quick Select Bundles</div>
-                    <div className="mt-2 flex flex-wrap gap-2">
-                      <Button type="button" variant="secondary" size="sm" onClick={() => applyBundle("RHB Islamic", ["rhb", "islamic"], ["facility", "agreement"])}>
-                        RHB Islamic
-                      </Button>
-                      <Button type="button" variant="secondary" size="sm" onClick={() => applyBundle("Maybank 3rd Party", ["maybank", "3rd", "party"], ["facility", "agreement"])}>
-                        Maybank 3rd Party
-                      </Button>
-                      <Button type="button" variant="secondary" size="sm" onClick={() => applyBundle("Standard SPA", ["spa"], [])}>
-                        Standard SPA
-                      </Button>
-                    </div>
-                    {bundleMessage && (
-                      <div className="mt-2 text-xs text-slate-600">{bundleMessage}</div>
-                    )}
+                  <div className="mt-3">
+                    <Tabs value={templateSourceTab} onValueChange={(v) => setTemplateSourceTab(v === "master" ? "master" : "firm")}>
+                      <TabsList className={cn("grid w-full", showMasterDocuments ? "grid-cols-2" : "grid-cols-1")}>
+                        <TabsTrigger value="firm">Firm Documents</TabsTrigger>
+                        {showMasterDocuments && <TabsTrigger value="master">Master Documents</TabsTrigger>}
+                      </TabsList>
+                    </Tabs>
                   </div>
-                  {smartMessage && (
-                    <div className="mt-3 rounded-md border border-blue-200 bg-blue-50 px-3 py-2 text-xs text-blue-800 flex items-start justify-between gap-3">
-                      <div className="leading-relaxed">{smartMessage}</div>
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        className="h-6 px-2 text-xs text-blue-800 hover:bg-blue-100"
-                        onClick={() => setSmartDismissedKey(selectedCaseKey)}
-                      >
-                        Dismiss
-                      </Button>
-                    </div>
+
+                  {templateSourceTab === "firm" && (
+                    <>
+                      <div className="mt-3 rounded-md border border-slate-200 bg-slate-50 px-3 py-2">
+                        <div className="text-xs font-medium text-slate-700">Quick Select Bundles</div>
+                        <div className="mt-2 flex flex-wrap gap-2">
+                          <Button type="button" variant="secondary" size="sm" onClick={() => applyBundle("RHB Islamic", ["rhb", "islamic"], ["facility", "agreement"])}>
+                            RHB Islamic
+                          </Button>
+                          <Button type="button" variant="secondary" size="sm" onClick={() => applyBundle("Maybank 3rd Party", ["maybank", "3rd", "party"], ["facility", "agreement"])}>
+                            Maybank 3rd Party
+                          </Button>
+                          <Button type="button" variant="secondary" size="sm" onClick={() => applyBundle("Standard SPA", ["spa"], [])}>
+                            Standard SPA
+                          </Button>
+                        </div>
+                        {bundleMessage && (
+                          <div className="mt-2 text-xs text-slate-600">{bundleMessage}</div>
+                        )}
+                      </div>
+                      {smartMessage && (
+                        <div className="mt-3 rounded-md border border-blue-200 bg-blue-50 px-3 py-2 text-xs text-blue-800 flex items-start justify-between gap-3">
+                          <div className="leading-relaxed">{smartMessage}</div>
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            className="h-6 px-2 text-xs text-blue-800 hover:bg-blue-100"
+                            onClick={() => setSmartDismissedKey(selectedCaseKey)}
+                          >
+                            Dismiss
+                          </Button>
+                        </div>
+                      )}
+                    </>
                   )}
                 </div>
 
                 <div className="flex-1 overflow-auto bg-white">
                   <div className="p-2">
-                    {(folderChildren.get(null) ?? []).map((f) => (
-                      <FolderNode key={f.id} folder={f} depth={0} />
-                    ))}
-                    {(templatesByFolder.get(null) ?? []).length > 0 && (
-                      <div className="mt-2">
-                        <div className="px-2 py-1 text-xs font-medium text-slate-500">Uncategorized</div>
-                        {(templatesByFolder.get(null) ?? []).map((t) => (
-                          <div
-                            key={t.id}
-                            className={cn(
-                              "flex items-center gap-2 rounded px-2 py-1 text-xs hover:bg-slate-50",
-                              (smartTemplateIdSet.has(t.id) || bundleTemplateIdSet.has(t.id)) && selectedTemplateIdSet.has(t.id) && "bg-blue-50"
-                            )}
-                          >
-                            <Checkbox
-                              checked={selectedTemplateIdSet.has(t.id)}
-                              onCheckedChange={(v) => {
-                                const checked = v === true;
-                                setSelectedTemplateIds((prev) => {
-                                  const next = new Set(prev);
-                                  if (checked) next.add(t.id);
-                                  else next.delete(t.id);
-                                  return Array.from(next);
-                                });
-                              }}
-                            />
-                            <FileText className="h-3.5 w-3.5 text-slate-500" />
-                            <div className="flex-1 truncate">{t.name}</div>
-                            {(smartTemplateIdSet.has(t.id) || bundleTemplateIdSet.has(t.id)) && selectedTemplateIdSet.has(t.id) && <span className="text-[10px] text-blue-600">✨</span>}
-                          </div>
+                    {templateSourceTab === "firm" && (
+                      <>
+                        {(folderChildren.get(null) ?? []).map((f) => (
+                          <FolderNode key={f.id} folder={f} depth={0} />
                         ))}
-                      </div>
+                        {(templatesByFolder.get(null) ?? []).length > 0 && (
+                          <div className="mt-2">
+                            <div className="px-2 py-1 text-xs font-medium text-slate-500">Uncategorized</div>
+                            {(templatesByFolder.get(null) ?? []).map((t) => (
+                              <div
+                                key={t.id}
+                                className={cn(
+                                  "flex items-center gap-2 rounded px-2 py-1 text-xs hover:bg-slate-50",
+                                  (smartTemplateIdSet.has(t.id) || bundleTemplateIdSet.has(t.id)) && selectedTemplateIdSet.has(t.id) && "bg-blue-50"
+                                )}
+                              >
+                                <Checkbox
+                                  checked={selectedTemplateIdSet.has(t.id)}
+                                  onCheckedChange={(v) => {
+                                    const checked = v === true;
+                                    setSelectedTemplateIds((prev) => {
+                                      const next = new Set(prev);
+                                      if (checked) next.add(t.id);
+                                      else next.delete(t.id);
+                                      return Array.from(next);
+                                    });
+                                  }}
+                                />
+                                <FileText className="h-3.5 w-3.5 text-slate-500" />
+                                <div className="flex-1 truncate">{t.name}</div>
+                                {(smartTemplateIdSet.has(t.id) || bundleTemplateIdSet.has(t.id)) && selectedTemplateIdSet.has(t.id) && <span className="text-[10px] text-blue-600">✨</span>}
+                              </div>
+                            ))}
+                          </div>
+                        )}
+
+                        {templatesQuery.isLoading && (
+                          <div className="px-4 py-10 text-center text-sm text-slate-400">Loading templates...</div>
+                        )}
+                        {!templatesQuery.isLoading && templates.length === 0 && (
+                          <div className="px-4 py-10 text-center text-sm text-slate-400">No templates found</div>
+                        )}
+                      </>
                     )}
 
-                    {templatesQuery.isLoading && (
-                      <div className="px-4 py-10 text-center text-sm text-slate-400">Loading templates...</div>
+                    {templateSourceTab === "master" && !showMasterDocuments && (
+                      <div className="px-4 py-10 text-center text-sm text-slate-400">Master Documents are disabled</div>
                     )}
-                    {!templatesQuery.isLoading && templates.length === 0 && (
-                      <div className="px-4 py-10 text-center text-sm text-slate-400">No templates found</div>
+
+                    {templateSourceTab === "master" && showMasterDocuments && (
+                      <>
+                        {(masterFolderChildren.get(null) ?? []).map((f) => (
+                          <MasterFolderNode key={f.id} folder={f} depth={0} />
+                        ))}
+                        {(masterDocsByFolder.get(null) ?? []).length > 0 && (
+                          <div className="mt-2">
+                            <div className="px-2 py-1 text-xs font-medium text-slate-500">Uncategorized</div>
+                            {(masterDocsByFolder.get(null) ?? []).map((d) => (
+                              <div key={d.id} className="flex items-center gap-2 rounded px-2 py-1 text-xs hover:bg-slate-50">
+                                <Checkbox
+                                  checked={selectedMasterDocIdSet.has(d.id)}
+                                  onCheckedChange={(v) => {
+                                    const checked = v === true;
+                                    setSelectedMasterDocIds((prev) => {
+                                      const next = new Set(prev);
+                                      if (checked) next.add(d.id);
+                                      else next.delete(d.id);
+                                      return Array.from(next);
+                                    });
+                                  }}
+                                />
+                                <FileText className="h-3.5 w-3.5 text-slate-500" />
+                                <div className="flex-1 truncate">{d.name}</div>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+
+                        {masterDocsQuery.isLoading && (
+                          <div className="px-4 py-10 text-center text-sm text-slate-400">Loading documents...</div>
+                        )}
+                        {!masterDocsQuery.isLoading && masterDocs.length === 0 && (
+                          <div className="px-4 py-10 text-center text-sm text-slate-400">No documents found</div>
+                        )}
+                      </>
                     )}
                   </div>
                 </div>
@@ -845,7 +1055,7 @@ export default function DocumentAutomationHub() {
                   <Tabs value={activeMode} onValueChange={(v) => setActiveMode(v === "print" ? "print" : "download")}>
                     <TabsList className="grid grid-cols-2 w-full">
                       <TabsTrigger value="download" className="gap-2"><FileText className="h-4 w-4" />Download ZIP</TabsTrigger>
-                      <TabsTrigger value="print" className="gap-2"><Printer className="h-4 w-4" />System Print</TabsTrigger>
+                      <TabsTrigger value="print" disabled={selectedMasterDocIds.length > 0} className="gap-2"><Printer className="h-4 w-4" />System Print</TabsTrigger>
                     </TabsList>
 
                     <TabsContent value="download" className="mt-4 space-y-3">
@@ -913,12 +1123,11 @@ export default function DocumentAutomationHub() {
                       <div className="text-sm font-semibold text-amber-900">Preflight Issues</div>
                       <div className="mt-1 text-xs text-amber-800">Resolve these before running Generate &amp; Download.</div>
                       <div className="mt-2 space-y-2">
-                        {(Array.isArray(preflightReport?.failures) ? preflightReport.failures : [])
+                        {(Array.isArray(preflightReport?.hardBlocked) ? preflightReport.hardBlocked : [])
                           .slice(0, 50)
                           .map((f: any, idx: number) => (
                             <div key={`${f?.caseId ?? idx}:${f?.templateId ?? ""}`} className="text-xs text-amber-900 break-words">
-                              Case #{String(f?.caseId ?? "")} — {safeText(f?.templateName) || `Template #${String(f?.templateId ?? "")}`} — {safeText(f?.errorCode) || "PRECHECK_FAILED"} {safeText(f?.errorMessage)}
-                              {Array.isArray(f?.missingVariables) && f.missingVariables.length > 0 ? ` | Missing: ${f.missingVariables.join(", ")}` : ""}
+                              Case #{String(f?.caseId ?? "")} — {safeText(f?.templateName) || safeText(f?.templateSource) || `Template #${String(f?.templateId ?? f?.platformDocumentId ?? "")}`} — {safeText(f?.code) || safeText(f?.errorCode) || "PRECHECK_FAILED"} {safeText(f?.message) || safeText(f?.errorMessage)}
                             </div>
                           ))}
                       </div>

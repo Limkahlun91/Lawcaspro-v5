@@ -11,6 +11,7 @@ export const firmsTable = pgTable("firms", {
   subscriptionStatus: text("subscription_status").notNull().default("active"),
   customPriceMonthly: numeric("custom_price_monthly", { precision: 12, scale: 2 }),
   isCustomPlan: boolean("is_custom_plan").notNull().default(false),
+  showMasterDocuments: boolean("show_master_documents").notNull().default(true),
   logoUrl: text("logo_url"),
   address: text("address"),
   stNumber: text("st_number"),

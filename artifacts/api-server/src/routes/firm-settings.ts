@@ -36,6 +36,7 @@ router.get("/firm-settings", requireAuth, requireFirmUser, async (req: AuthReque
       id: firm.id,
       name: firm.name,
       slug: firm.slug,
+      showMasterDocuments: Boolean((firm as any).showMasterDocuments ?? (firm as any).show_master_documents ?? true),
       logoUrl: firm.logoUrl || "",
       address: firm.address || "",
       stNumber: firm.stNumber || "",
@@ -91,7 +92,7 @@ router.patch("/firm-settings", requireAuth, requireFirmUser, requirePermission("
   try {
     const r = rdb(req);
     const firmId = req.firmId!;
-    const { name, logoUrl, address, stNumber, tinNumber, registrationNo, sstNo, phone, email } = req.body;
+    const { name, logoUrl, address, stNumber, tinNumber, registrationNo, sstNo, phone, email, showMasterDocuments } = req.body;
 
     const updates: Record<string, unknown> = {};
     if (name !== undefined) updates.name = name;
@@ -103,6 +104,7 @@ router.patch("/firm-settings", requireAuth, requireFirmUser, requirePermission("
     if (sstNo !== undefined) updates.sstNo = sstNo;
     if (phone !== undefined) updates.phone = phone;
     if (email !== undefined) updates.email = email;
+    if (showMasterDocuments !== undefined) updates.showMasterDocuments = Boolean(showMasterDocuments);
 
     const [updated] = await r.update(firmsTable)
       .set(updates)
@@ -116,6 +118,7 @@ router.patch("/firm-settings", requireAuth, requireFirmUser, requirePermission("
       id: updated.id,
       name: updated.name,
       slug: updated.slug,
+      showMasterDocuments: Boolean((updated as any).showMasterDocuments ?? (updated as any).show_master_documents ?? true),
       logoUrl: updated.logoUrl || "",
       address: updated.address || "",
       stNumber: updated.stNumber || "",

@@ -7086,7 +7086,7 @@ async function generateMasterDocument({
     applicabilityRules: (masterDoc as any).applicability_rules,
   });
   const overrideUsed = Boolean(bypassApplicability && applicability.manuallyOverridable && applicability.applicabilityStatus === "not_applicable");
-  if (applicability.applicabilityStatus === "not_applicable") {
+  if (applicability.applicabilityStatus === "not_applicable" && !bypassApplicability) {
     if (applicability.modeUsed === "rules_only") {
       await writeAuditLog({ firmId, actorId, actorType, action: "documents.case.generate.blocked", entityType: "platform_document", entityId: masterDocId, detail: `applicabilityStatus=not_applicable mode=${applicability.modeUsed} overrideUsed=0 reasons=${applicability.applicabilityReasons.join("|")}`, ipAddress, userAgent });
       throw new DocumentGenerationError(422, "TEMPLATE_APPLICABILITY_BLOCKED", "Template blocked by applicability", { reasons: applicability.applicabilityReasons, mode: applicability.modeUsed });
@@ -7305,7 +7305,7 @@ async function generateMasterDocument({
       && checklistEval.checklistStatus === "blocked"
     );
     const checklistMode = normalizeChecklistMode((masterDoc as any).checklist_mode);
-    if (checklistEval.checklistStatus === "blocked") {
+    if (checklistEval.checklistStatus === "blocked" && !bypassApplicability) {
       if (checklistMode === "required_to_generate") {
         await writeAuditLog({ firmId, actorId, actorType, action: "documents.case.generate.blocked", entityType: "platform_document", entityId: masterDocId, detail: `checklistStatus=blocked mode=${checklistMode} overrideUsed=0 missing=${checklistEval.missingRequiredItems}`, ipAddress, userAgent });
         throw new DocumentGenerationError(422, "TEMPLATE_CHECKLIST_BLOCKED", "Template blocked by checklist", { checklist: checklistEval, mode: checklistMode });
@@ -8781,6 +8781,27 @@ async function touchJobHeartbeat(r: DbConn, args: { firmId: number; jobId: strin
   }
 }
 
+async function updateJobCounts(r: DbConn, args: { firmId: number; jobId: string }): Promise<void> {
+  const counts = await queryRows(r, sql`
+    SELECT
+      COUNT(*) FILTER (WHERE status = 'success') AS success_count,
+      COUNT(*) FILTER (WHERE status = 'failed')  AS failed_count,
+      COUNT(*) FILTER (WHERE status IN ('pending','running')) AS pending_count,
+      COUNT(*) AS total_count
+    FROM document_generation_job_items
+    WHERE job_id = ${args.jobId}::uuid AND firm_id = ${args.firmId}
+  `);
+  const c = counts[0] as any;
+  await queryRows(r, sql`
+    UPDATE document_generation_jobs
+    SET total_count = ${Number(c?.total_count ?? 0)},
+        success_count = ${Number(c?.success_count ?? 0)},
+        failed_count = ${Number(c?.failed_count ?? 0)},
+        pending_count = ${Number(c?.pending_count ?? 0)}
+    WHERE id = ${args.jobId}::uuid AND firm_id = ${args.firmId}
+  `);
+}
+
 async function recoverStaleDocumentGenerationJob(r: DbConn, args: { firmId: number; jobId: string; staleMs: number }): Promise<void> {
   const jobs = await queryRows(r, sql`
     SELECT status, last_heartbeat_at
@@ -9162,7 +9183,9 @@ async function processAutomationGenerationJobStep(r: DbConn, args: { firmId: num
   }
 
   const caseId = Number((item as any).case_id);
-  const templateId = Number((item as any).template_id);
+  const templateSource = String((item as any).template_source ?? "firm");
+  const templateId = templateSource === "firm" ? Number((item as any).template_id) : NaN;
+  const platformDocumentId = templateSource === "master" ? Number((item as any).platform_document_id) : NaN;
 
   const actorId = reqIdToNumber((job as any).created_by);
   const jobConfig = (job as any)?.config && typeof (job as any).config === "object" ? (job as any).config as Record<string, unknown> : {};
@@ -9186,15 +9209,20 @@ async function processAutomationGenerationJobStep(r: DbConn, args: { firmId: num
   const outputFormat = jobConfig.outputFormat === "pdf" ? ("pdf" as const) : undefined;
   const bypassReq = Boolean(jobConfig.bypassApplicability);
   const createdRoleId = reqIdToNumber(jobConfig.createdRoleId);
-  const bypassApplicability = bypassReq ? await canBypassApplicability(r, args.firmId, createdRoleId > 0 ? createdRoleId : null) : false;
+  const bypassApplicability =
+    blind || force
+      ? true
+      : bypassReq
+        ? await canBypassApplicability(r, args.firmId, createdRoleId > 0 ? createdRoleId : null)
+        : false;
 
   const runId = await createGenerationRun(r, {
     firm_id: args.firmId,
     case_id: caseId,
-    template_source: "firm",
-    template_id: templateId,
+    template_source: templateSource === "master" ? "master" : "firm",
+    template_id: templateSource === "firm" && Number.isFinite(templateId) ? templateId : null,
     template_version_id: null,
-    platform_document_id: null,
+    platform_document_id: templateSource === "master" && Number.isFinite(platformDocumentId) ? platformDocumentId : null,
     document_name: documentName ?? "Generated document",
     render_mode: outputFormat === "pdf" ? "pdf" : "docx",
     status: "running",
@@ -9209,6 +9237,58 @@ async function processAutomationGenerationJobStep(r: DbConn, args: { firmId: num
   });
 
   try {
+    if (templateSource === "master") {
+      if (!Number.isFinite(platformDocumentId) || platformDocumentId <= 0) {
+        throw new DocumentGenerationError(400, "INVALID_TEMPLATE_ID", "Invalid master document id", { platformDocumentId });
+      }
+      const out = await generateMasterDocument({
+        r,
+        firmId: args.firmId,
+        actorId,
+        actorType: "firm_user",
+        ipAddress: undefined,
+        userAgent: undefined,
+        caseId,
+        masterDocId: platformDocumentId,
+        documentName,
+        letterheadId,
+        runId,
+        bypassApplicability,
+        clauses,
+        overrides: safeOverrides,
+        outputFormat,
+      });
+      await finishGenerationRunSuccess(r, args.firmId, runId, out.caseDocumentId, out.renderedVars, out.checklistSnapshot, out.readinessSnapshot);
+
+      const objectPath = String((out.caseDocument as any)?.objectPath ?? (out.caseDocument as any)?.object_path ?? "");
+      const fileName = String((out.caseDocument as any)?.fileName ?? (out.caseDocument as any)?.file_name ?? "");
+      const mimeType = String((out.caseDocument as any)?.mimeType ?? (out.caseDocument as any)?.mime_type ?? "application/pdf");
+      const fileSize = Number((out.caseDocument as any)?.fileSize ?? (out.caseDocument as any)?.file_size ?? 0) || null;
+      if (!objectPath) {
+        throw new DocumentGenerationError(500, "OUTPUT_MISSING", "Generated file missing", {
+          platformDocumentId,
+          caseId,
+          expectedOutputFormat: outputFormat ?? "pdf",
+          generatedFileName: fileName || null,
+          storageTarget: "case_documents",
+        });
+      }
+      await queryRows(r, sql`
+        UPDATE document_generation_job_items
+        SET status = 'success',
+            phase = 'success',
+            object_path = ${objectPath || null},
+            file_name = ${fileName || null},
+            mime_type = ${mimeType || null},
+            file_size = ${fileSize as any},
+            finished_at = now()
+        WHERE id = ${Number((item as any).id)} AND firm_id = ${args.firmId}
+      `);
+      await updateJobCounts(r, args);
+      await touchJobHeartbeat(r, args);
+      return;
+    }
+
     const templateVersionId = await ensureFirmTemplatePublishedVersionId(r, args.firmId, templateId, actorId > 0 ? actorId : null);
     const versionRows = await queryRows(r, sql`
       SELECT source_object_path, filename
@@ -9477,12 +9557,22 @@ router.post("/documents/automation/generate-job", requireAuth, requireFirmUser, 
 
   const bodySchema = z.object({
     caseIds: z.array(z.union([z.number(), z.string()])).min(1),
-    templateIds: z.array(z.union([z.number(), z.string()])).min(1),
+    templateIds: z.array(z.union([z.number(), z.string()])).optional(),
+    templates: z.array(z.object({
+      source: z.enum(["firm", "master"]),
+      id: z.union([z.number(), z.string()]),
+    })).optional(),
     config: z.object({
       action: z.enum(["download", "print"]),
       copies: z.union([z.number(), z.string()]).optional(),
       duplexSettings: z.unknown().optional(),
     }),
+  }).superRefine((data, ctx) => {
+    const hasLegacy = Array.isArray(data.templateIds) && data.templateIds.length > 0;
+    const hasNew = Array.isArray(data.templates) && data.templates.length > 0;
+    if (!hasLegacy && !hasNew) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "templateIds or templates is required", path: ["templates"] });
+    }
   });
   const parsed = bodySchema.safeParse(req.body);
   if (!parsed.success) {
@@ -9497,32 +9587,59 @@ router.post("/documents/automation/generate-job", requireAuth, requireFirmUser, 
       .map((x) => Math.trunc(x))
       .filter((x) => x > 0)
   ));
-  const templateIds = Array.from(new Set(
-    parsed.data.templateIds
-      .map((x) => (typeof x === "number" ? x : parseInt(x, 10)))
-      .filter((x) => Number.isFinite(x))
-      .map((x) => Math.trunc(x))
-      .filter((x) => x > 0)
-  ));
-  if (caseIds.length === 0 || templateIds.length === 0) {
-    fail(400, "MISSING_INPUTS", "caseIds and templateIds are required", null, false);
+  const rawRefs: Array<{ source: "firm" | "master"; id: number }> = [];
+  for (const x of (parsed.data.templateIds ?? [])) {
+    const n = typeof x === "number" ? x : parseInt(String(x), 10);
+    if (!Number.isFinite(n) || n <= 0) continue;
+    rawRefs.push({ source: "firm", id: Math.trunc(n) });
+  }
+  for (const t of (parsed.data.templates ?? [])) {
+    const n = typeof t.id === "number" ? t.id : parseInt(String(t.id), 10);
+    if (!Number.isFinite(n) || n <= 0) continue;
+    rawRefs.push({ source: t.source, id: Math.trunc(n) });
+  }
+  const templateRefs = Array.from(new Map(rawRefs.map((x) => [`${x.source}:${x.id}`, x])).values());
+  const firmTemplateIds = templateRefs.filter((x) => x.source === "firm").map((x) => x.id);
+  const masterDocIds = templateRefs.filter((x) => x.source === "master").map((x) => x.id);
+
+  if (caseIds.length === 0 || templateRefs.length === 0) {
+    fail(400, "MISSING_INPUTS", "caseIds and templates are required", null, false);
     return;
   }
-  if (caseIds.length > 20 || templateIds.length > 25 || caseIds.length * templateIds.length > 300) {
-    fail(422, "TOO_MANY_ITEMS", "Too many items", { caseCount: caseIds.length, templateCount: templateIds.length }, false);
+  if (caseIds.length > 20 || templateRefs.length > 25 || caseIds.length * templateRefs.length > 300) {
+    fail(422, "TOO_MANY_ITEMS", "Too many items", { caseCount: caseIds.length, templateCount: templateRefs.length }, false);
+    return;
+  }
+  if (parsed.data.config.action === "print" && masterDocIds.length > 0) {
+    fail(422, "UNSUPPORTED_ACTION", "Print is only supported for firm templates", { action: "print" }, false);
     return;
   }
 
-  const templateRows = await queryRows(r, sql`
-    SELECT id, name, object_path, file_name, pdf_mapping_config
-    FROM document_templates
-    WHERE firm_id = ${req.firmId!}
-      AND is_template_capable = true
-      AND id IN (${sql.join(templateIds.map((id) => sql`${id}`), sql`, `)})
-    ORDER BY created_at DESC
-  `);
-  if (templateRows.length !== templateIds.length) {
-    fail(404, "TEMPLATE_NOT_FOUND", "One or more templates not found", null, false);
+  const templateRows = firmTemplateIds.length
+    ? await queryRows(r, sql`
+      SELECT id, name, object_path, file_name, pdf_mapping_config
+      FROM document_templates
+      WHERE firm_id = ${req.firmId!}
+        AND is_template_capable = true
+        AND id IN (${sql.join(firmTemplateIds.map((id) => sql`${id}`), sql`, `)})
+      ORDER BY created_at DESC
+    `)
+    : [];
+  if (templateRows.length !== firmTemplateIds.length) {
+    fail(404, "TEMPLATE_NOT_FOUND", "One or more firm templates not found", null, false);
+    return;
+  }
+  const masterRows = masterDocIds.length
+    ? await queryRows(r, sql`
+      SELECT id, name, object_path, file_name, pdf_mappings
+      FROM platform_documents
+      WHERE id IN (${sql.join(masterDocIds.map((id) => sql`${id}`), sql`, `)})
+        AND (firm_id IS NULL OR firm_id = ${req.firmId!})
+      ORDER BY created_at DESC
+    `)
+    : [];
+  if (masterRows.length !== masterDocIds.length) {
+    fail(404, "MASTER_DOCUMENT_NOT_FOUND", "One or more master documents not found", null, false);
     return;
   }
 
@@ -9535,16 +9652,23 @@ router.post("/documents/automation/generate-job", requireAuth, requireFirmUser, 
   const validate = qValidate === "1" || qValidate === "true" || qValidate === "yes";
   if (validate) {
     const deadlineAt = startedAt + Math.min(API_MAX_MS, 3000);
-    const templateById = new Map<number, Record<string, unknown>>();
+    const firmTemplateById = new Map<number, Record<string, unknown>>();
     for (const row of templateRows) {
       const tid = typeof (row as any).id === "number" ? Number((row as any).id) : Number((row as any).id);
       if (!Number.isFinite(tid)) continue;
-      templateById.set(tid, row);
+      firmTemplateById.set(tid, row);
+    }
+    const masterById = new Map<number, Record<string, unknown>>();
+    for (const row of masterRows) {
+      const tid = typeof (row as any).id === "number" ? Number((row as any).id) : Number((row as any).id);
+      if (!Number.isFinite(tid)) continue;
+      masterById.set(tid, row);
     }
     const gotenbergConfigured = typeof process.env.GOTENBERG_URL === "string" && process.env.GOTENBERG_URL.trim().length > 0;
-    const templateCheckById = new Map<number, { templateName: string; templateType: "pdf" | "docx" | "unsupported"; hardBlocked: boolean; code?: string; message?: string; warnings?: string[] }>();
-    await Promise.all(templateIds.map(async (templateId) => {
-      const t = templateById.get(templateId);
+    const templateCheckByKey = new Map<string, { source: "firm" | "master"; templateId?: number; platformDocumentId?: number; templateName: string; templateType: "pdf" | "docx" | "unsupported"; hardBlocked: boolean; code?: string; message?: string; warnings?: string[] }>();
+    await Promise.all(templateRefs.map(async (ref) => {
+      const key = `${ref.source}:${ref.id}`;
+      const t = ref.source === "firm" ? firmTemplateById.get(ref.id) : masterById.get(ref.id);
       const templateName = t ? String((t as any).name ?? "") : "";
       const fileName = t && typeof (t as any).file_name === "string" ? String((t as any).file_name) : "";
       const ext = fileExtensionFromName(fileName).toLowerCase();
@@ -9558,14 +9682,16 @@ router.post("/documents/automation/generate-job", requireAuth, requireFirmUser, 
           return "";
         }
       })();
-      const mappingConfig = (t as any)?.pdf_mapping_config ?? null;
+      const mappingConfig = ref.source === "firm" ? (t as any)?.pdf_mapping_config ?? null : (t as any)?.pdf_mappings ?? null;
       const pdfMappingMissing =
         templateType === "pdf"
           ? !(isPdfTextBoxMappings(mappingConfig) || (mappingConfig && typeof mappingConfig === "object" && Object.keys(mappingConfig as Record<string, unknown>).length > 0))
           : false;
 
       if (Date.now() > deadlineAt) {
-        templateCheckById.set(templateId, {
+        templateCheckByKey.set(key, {
+          source: ref.source,
+          ...(ref.source === "firm" ? { templateId: ref.id } : { platformDocumentId: ref.id }),
           templateName,
           templateType: templateType === "unsupported" ? "unsupported" : templateType,
           hardBlocked: false,
@@ -9576,46 +9702,50 @@ router.post("/documents/automation/generate-job", requireAuth, requireFirmUser, 
       }
 
       if (templateType === "unsupported") {
-        templateCheckById.set(templateId, { templateName, templateType, hardBlocked: true, code: "UNSUPPORTED_TEMPLATE_SOURCE", message: "Unsupported template source" });
+        templateCheckByKey.set(key, { source: ref.source, ...(ref.source === "firm" ? { templateId: ref.id } : { platformDocumentId: ref.id }), templateName, templateType, hardBlocked: true, code: "UNSUPPORTED_TEMPLATE_SOURCE", message: "Unsupported template source" });
         return;
       }
 
       if (!objectPathUsed) {
-        templateCheckById.set(templateId, { templateName, templateType, hardBlocked: true, code: "TEMPLATE_FILE_MISSING", message: "Missing template file" });
+        templateCheckByKey.set(key, { source: ref.source, ...(ref.source === "firm" ? { templateId: ref.id } : { platformDocumentId: ref.id }), templateName, templateType, hardBlocked: true, code: "TEMPLATE_FILE_MISSING", message: "Missing template file" });
         return;
       }
 
       if (templateType === "pdf" && pdfMappingMissing) {
-        templateCheckById.set(templateId, { templateName, templateType, hardBlocked: false, warnings: ["PDF mapping is not configured. Will attempt fallback form fill."] });
+        templateCheckByKey.set(key, { source: ref.source, ...(ref.source === "firm" ? { templateId: ref.id } : { platformDocumentId: ref.id }), templateName, templateType, hardBlocked: false, warnings: ["PDF mapping is not configured. Will attempt fallback form fill."] });
       }
 
       try {
         const exists = await supabaseStorage.privateObjectExists(objectPathUsed, { timeoutMs: 700 });
         if (!exists) {
-          templateCheckById.set(templateId, { templateName, templateType, hardBlocked: true, code: "STORAGE_OBJECT_NOT_FOUND", message: "Storage object not found" });
+          templateCheckByKey.set(key, { source: ref.source, ...(ref.source === "firm" ? { templateId: ref.id } : { platformDocumentId: ref.id }), templateName, templateType, hardBlocked: true, code: "STORAGE_OBJECT_NOT_FOUND", message: "Storage object not found" });
           return;
         }
       } catch (err) {
         const cfgErr = getSupabaseStorageConfigError(err);
         if (cfgErr) {
-          templateCheckById.set(templateId, { templateName, templateType, hardBlocked: true, code: "STORAGE_NOT_CONFIGURED", message: cfgErr.error });
+          templateCheckByKey.set(key, { source: ref.source, ...(ref.source === "firm" ? { templateId: ref.id } : { platformDocumentId: ref.id }), templateName, templateType, hardBlocked: true, code: "STORAGE_NOT_CONFIGURED", message: cfgErr.error });
           return;
         }
       }
 
       if (templateType === "docx" && !gotenbergConfigured) {
-        templateCheckById.set(templateId, { templateName, templateType, hardBlocked: false, warnings: ["DOCX to PDF converter is not configured. Will use fallback PDF rendering."] });
+        templateCheckByKey.set(key, { source: ref.source, ...(ref.source === "firm" ? { templateId: ref.id } : { platformDocumentId: ref.id }), templateName, templateType, hardBlocked: false, warnings: ["DOCX to PDF converter is not configured. Will use fallback PDF rendering."] });
         return;
       }
 
-      templateCheckById.set(templateId, { templateName, templateType, hardBlocked: false, ...(templateCheckById.get(templateId)?.warnings ? { warnings: templateCheckById.get(templateId)?.warnings } : {}) });
+      const prevWarnings = templateCheckByKey.get(key)?.warnings;
+      templateCheckByKey.set(key, { source: ref.source, ...(ref.source === "firm" ? { templateId: ref.id } : { platformDocumentId: ref.id }), templateName, templateType, hardBlocked: false, ...(prevWarnings ? { warnings: prevWarnings } : {}) });
     }));
 
-    const items = caseIds.flatMap((caseId) => templateIds.map((templateId) => {
-      const t = templateCheckById.get(templateId) ?? { templateName: "", templateType: "docx" as const, hardBlocked: false as const };
+    const items = caseIds.flatMap((caseId) => templateRefs.map((ref) => {
+      const key = `${ref.source}:${ref.id}`;
+      const t = templateCheckByKey.get(key) ?? { source: ref.source, templateName: "", templateType: "docx" as const, hardBlocked: false as const };
       return {
         caseId,
-        templateId: String(templateId),
+        templateSource: t.source,
+        templateId: t.source === "firm" ? String(ref.id) : null,
+        platformDocumentId: t.source === "master" ? String(ref.id) : null,
         templateName: t.templateName,
         hardBlocked: Boolean(t.hardBlocked),
         warnings: t.hardBlocked ? [] : Array.from(new Set([...(Array.isArray(t.warnings) ? t.warnings : []), "Some variables are missing and will be left blank."])),
@@ -9634,7 +9764,7 @@ router.post("/documents/automation/generate-job", requireAuth, requireFirmUser, 
     return;
   }
 
-  const totalCount = caseIds.length * templateIds.length;
+  const totalCount = caseIds.length * templateRefs.length;
   const qTurbo = String(one((req.query as any).turbo) ?? "").trim().toLowerCase();
   const turbo = qTurbo === "1" || qTurbo === "true" || qTurbo === "yes";
   if (turbo) {
@@ -9642,27 +9772,27 @@ router.post("/documents/automation/generate-job", requireAuth, requireFirmUser, 
   }
 
   const jobId = randomUUID();
-  const jobConfig = { ...parsed.data.config, outputFormat: "pdf", force: effectiveForce, blind, createdRoleId: req.roleId ?? null };
+  const jobConfig = { ...parsed.data.config, outputFormat: "pdf", force: effectiveForce, blind, createdRoleId: req.roleId ?? null, templates: templateRefs };
   await queryRows(r, sql`
     INSERT INTO document_generation_jobs (
-      id, firm_id, job_type, status, action, case_ids, template_ids, config,
+      id, firm_id, job_type, status, action, case_ids, template_ids, platform_document_ids, config,
       total_count, success_count, failed_count, pending_count,
       created_by, created_at, last_heartbeat_at, timeout_at, runner_attempts
     ) VALUES (
       ${jobId}::uuid, ${req.firmId!}, 'document_automation', 'pending', ${parsed.data.config.action},
-      ${caseIds as any}, ${templateIds as any}, ${jobConfig as any},
-      ${caseIds.length * templateIds.length}, 0, 0, ${caseIds.length * templateIds.length},
+      ${caseIds as any}, ${firmTemplateIds as any}, ${masterDocIds as any}, ${jobConfig as any},
+      ${caseIds.length * templateRefs.length}, 0, 0, ${caseIds.length * templateRefs.length},
       ${req.userId as any}, now(), now(), now() + interval '10 minutes', 0
     )
   `);
   const itemValues: Array<ReturnType<typeof sql>> = [];
   for (const caseId of caseIds) {
-    for (const templateId of templateIds) {
-      itemValues.push(sql`(${jobId}::uuid, ${req.firmId!}, ${caseId}, ${templateId}, 'pending')`);
+    for (const ref of templateRefs) {
+      itemValues.push(sql`(${jobId}::uuid, ${req.firmId!}, ${caseId}, ${ref.source}, ${ref.source === "firm" ? ref.id : null}, ${ref.source === "master" ? ref.id : null}, 'pending')`);
     }
   }
   await queryRows(r, sql`
-    INSERT INTO document_generation_job_items (job_id, firm_id, case_id, template_id, status)
+    INSERT INTO document_generation_job_items (job_id, firm_id, case_id, template_source, template_id, platform_document_id, status)
     VALUES ${sql.join(itemValues, sql`, `)}
   `);
 
@@ -9692,10 +9822,12 @@ router.get("/documents/jobs/:jobId", requireAuth, requireFirmUser, requirePermis
   const items = await queryRows(r, sql`
     SELECT
       i.*,
-      t.name AS template_name
+      COALESCE(t.name, pd.name) AS template_name
     FROM document_generation_job_items i
     LEFT JOIN document_templates t
       ON t.firm_id = i.firm_id AND t.id = i.template_id
+    LEFT JOIN platform_documents pd
+      ON pd.id = i.platform_document_id AND (pd.firm_id IS NULL OR pd.firm_id = i.firm_id)
     WHERE i.job_id = ${jobId}::uuid AND i.firm_id = ${req.firmId!}
     ORDER BY i.id ASC
   `);
@@ -9743,10 +9875,12 @@ router.post("/documents/jobs/:jobId/run-next", requireAuth, requireFirmUser, req
     const items = await queryRows(r, sql`
       SELECT
         i.*,
-        t.name AS template_name
+        COALESCE(t.name, pd.name) AS template_name
       FROM document_generation_job_items i
       LEFT JOIN document_templates t
         ON t.firm_id = i.firm_id AND t.id = i.template_id
+      LEFT JOIN platform_documents pd
+        ON pd.id = i.platform_document_id AND (pd.firm_id IS NULL OR pd.firm_id = i.firm_id)
       WHERE i.job_id = ${jobId}::uuid AND i.firm_id = ${req.firmId!}
       ORDER BY i.id ASC
     `);

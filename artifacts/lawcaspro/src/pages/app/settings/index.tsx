@@ -5,6 +5,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
+import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Plus, Search, Save, Trash2, Building2, ShieldCheck, ShieldOff, Monitor, LogOut, Pencil, X } from "lucide-react";
@@ -82,6 +83,7 @@ type FirmSettings = {
   sstNo?: string | null;
   phone?: string | null;
   email?: string | null;
+  showMasterDocuments?: boolean;
   bankAccounts?: FirmBankAccount[];
 };
 
@@ -445,6 +447,7 @@ function FirmInfoTab() {
   const [sstNo, setSstNo] = useState("");
   const [phone, setPhone] = useState("");
   const [email, setEmail] = useState("");
+  const [showMasterDocuments, setShowMasterDocuments] = useState(true);
   const [newBankName, setNewBankName] = useState("");
   const [newAccountNo, setNewAccountNo] = useState("");
   const [newAccountType, setNewAccountType] = useState("office");
@@ -464,6 +467,7 @@ function FirmInfoTab() {
       setPhone(settings.phone ?? "");
       setEmail(settings.email ?? "");
       setSavedLogoObjectPath(settings.logoUrl ?? "");
+      setShowMasterDocuments(settings.showMasterDocuments !== false);
     }
   }, [settings]);
 
@@ -588,7 +592,7 @@ function FirmInfoTab() {
       toast({ title: "You don't have permission to update firm settings", variant: "destructive" });
       return;
     }
-    updateMutation.mutate({ name, address, stNumber, tinNumber, registrationNo, sstNo, phone, email });
+    updateMutation.mutate({ name, address, stNumber, tinNumber, registrationNo, sstNo, phone, email, showMasterDocuments });
   };
 
   const uploadLogoMutation = useMutation({
@@ -689,6 +693,24 @@ function FirmInfoTab() {
               </div>
               {savedLogoObjectPath ? <div className="text-xs text-slate-500 break-all">Saved: {savedLogoObjectPath}</div> : null}
             </div>
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base flex items-center gap-2">
+            <Building2 className="w-4 h-4" />
+            Documents
+          </CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          <div className="flex items-center justify-between gap-3">
+            <div className="min-w-0">
+              <div className="text-sm font-medium text-slate-900">Show Master Documents</div>
+              <div className="text-xs text-slate-600">Controls whether firm users can see platform master templates.</div>
+            </div>
+            <Switch checked={showMasterDocuments} onCheckedChange={setShowMasterDocuments} disabled={!canUpdate || updateMutation.isPending} />
           </div>
         </CardContent>
       </Card>

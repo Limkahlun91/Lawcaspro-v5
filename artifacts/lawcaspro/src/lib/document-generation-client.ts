@@ -28,7 +28,9 @@ export type NormalizedGenerationJobItem = {
   id?: number;
   jobId?: string;
   caseId?: number;
+  templateSource?: "firm" | "master" | string;
   templateId?: number;
+  platformDocumentId?: number;
   templateName?: string | null;
   status: string;
   objectPath?: string | null;
@@ -54,7 +56,8 @@ export type NormalizedGenerationJob = {
 
 export type CreateGenerationJobPayload = {
   caseIds: number[];
-  templateIds: number[];
+  templateIds?: number[];
+  templates?: Array<{ source: "firm" | "master"; id: number }>;
   config: {
     action: "download" | "print";
     copies?: number | string;
@@ -70,8 +73,8 @@ export async function createGenerationJob(payload: CreateGenerationJobPayload): 
   if (payload.force) qs.set("force", "true");
   const res = await apiFetchJson<unknown>(`/documents/automation/generate-job?${qs.toString()}`, {
     method: "POST",
-    timeoutMs: 3000,
-    body: JSON.stringify({ caseIds: payload.caseIds, templateIds: payload.templateIds, config: payload.config }),
+    timeoutMs: 8000,
+    body: JSON.stringify({ caseIds: payload.caseIds, templateIds: payload.templateIds, templates: payload.templates, config: payload.config }),
   });
   const r = asRecord(res) ?? {};
   const jobId = asString(r.jobId ?? r.job_id) ?? "";
@@ -90,8 +93,8 @@ export async function validateGenerationJob(payload: Omit<CreateGenerationJobPay
   if (payload.force) qs.set("force", "true");
   return await apiFetchJson<unknown>(`/documents/automation/generate-job?${qs.toString()}`, {
     method: "POST",
-    timeoutMs: 3000,
-    body: JSON.stringify({ caseIds: payload.caseIds, templateIds: payload.templateIds, config: payload.config }),
+    timeoutMs: 8000,
+    body: JSON.stringify({ caseIds: payload.caseIds, templateIds: payload.templateIds, templates: payload.templates, config: payload.config }),
   });
 }
 
@@ -125,7 +128,9 @@ export function normalizeGenerationJobItem(raw: unknown): NormalizedGenerationJo
     id: asNumber(r.id) ?? undefined,
     jobId: asString(r.jobId ?? r.job_id) ?? undefined,
     caseId: asNumber(r.caseId ?? r.case_id) ?? undefined,
+    templateSource: asString((r as any).templateSource ?? (r as any).template_source) ?? undefined,
     templateId: asNumber(r.templateId ?? r.template_id) ?? undefined,
+    platformDocumentId: asNumber((r as any).platformDocumentId ?? (r as any).platform_document_id) ?? undefined,
     templateName: asString((r as any).templateName ?? (r as any).template_name) ?? null,
     status: asString(r.status) ?? "",
     objectPath: asString(r.objectPath ?? r.object_path) ?? null,

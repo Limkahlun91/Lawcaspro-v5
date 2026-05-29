@@ -4,6 +4,27 @@ import { Minus } from "lucide-react"
 
 import { cn } from "@/lib/utils"
 
+type InputOTPSlotContext = {
+  slots: Array<{ char: string | null; hasFakeCaret: boolean; isActive: boolean }>
+}
+
+function asInputOTPSlotContext(v: unknown): InputOTPSlotContext | null {
+  if (!v || typeof v !== "object") return null
+  const obj = v as Record<string, unknown>
+  if (!Array.isArray(obj.slots)) return null
+  const slots = obj.slots
+    .map((s): InputOTPSlotContext["slots"][number] | null => {
+      if (!s || typeof s !== "object") return null
+      const r = s as Record<string, unknown>
+      const char = typeof r.char === "string" ? r.char : r.char === null ? null : null
+      const hasFakeCaret = r.hasFakeCaret === true
+      const isActive = r.isActive === true
+      return { char, hasFakeCaret, isActive }
+    })
+    .filter((s): s is InputOTPSlotContext["slots"][number] => Boolean(s))
+  return { slots }
+}
+
 const InputOTP = React.forwardRef<
   React.ElementRef<typeof OTPInput>,
   React.ComponentPropsWithoutRef<typeof OTPInput>
@@ -32,8 +53,12 @@ const InputOTPSlot = React.forwardRef<
   React.ElementRef<"div">,
   React.ComponentPropsWithoutRef<"div"> & { index: number }
 >(({ index, className, ...props }, ref) => {
-  const inputOTPContext = React.useContext(OTPInputContext)
-  const { char, hasFakeCaret, isActive } = inputOTPContext.slots[index]
+  const raw = React.useContext(OTPInputContext)
+  const ctx = asInputOTPSlotContext(raw)
+  const slot = ctx?.slots?.[index]
+  const char = slot?.char ?? ""
+  const hasFakeCaret = slot?.hasFakeCaret ?? false
+  const isActive = slot?.isActive ?? false
 
   return (
     <div

@@ -152,6 +152,9 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
   const [templateApplicabilityFilter, setTemplateApplicabilityFilter] = useState<"all" | "applicable" | "warning" | "not_applicable">("all");
   const [selectedLetterheadId, setSelectedLetterheadId] = useState<string>("");
   const [documentName, setDocumentName] = useState("");
+  const [generateSelectedFirmTemplateIds, setGenerateSelectedFirmTemplateIds] = useState<Set<number>>(() => new Set());
+  const [generateSelectedMasterDocIds, setGenerateSelectedMasterDocIds] = useState<Set<number>>(() => new Set());
+  const [generateMasterFolderId, setGenerateMasterFolderId] = useState<number | null>(null);
   const documentNameToSend = documentName.trim() ? documentName.trim() : undefined;
   const [extractionOpen, setExtractionOpen] = useState(false);
   const [extractionDoc, setExtractionDoc] = useState<CaseDocument | null>(null);
@@ -222,22 +225,45 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
   const enterpriseFoldersQuery = useQuery<TemplateFolderPickerFolder[]>({
     queryKey: ["case-documents", caseId, "enterprise", "folders"],
     queryFn: () => apiFetchJson<TemplateFolderPickerFolder[]>("/firm-document-folders"),
-    enabled: enterpriseDialogOpen,
+    enabled: enterpriseDialogOpen || generateDialogOpen,
     retry: false,
   });
   const enterpriseTemplatesQuery = useQuery<TemplateFolderPickerTemplate[]>({
     queryKey: ["case-documents", caseId, "enterprise", "templates"],
     queryFn: () => apiFetchJson<TemplateFolderPickerTemplate[]>("/document-templates?templateCapable=true&kind=template"),
-    enabled: enterpriseDialogOpen,
+    enabled: enterpriseDialogOpen || generateDialogOpen,
     retry: false,
   });
   const enterpriseFolders = enterpriseFoldersQuery.data ?? [];
   const enterpriseTemplates = enterpriseTemplatesQuery.data ?? [];
 
+  const firmSettingsQuery = useQuery<{ showMasterDocuments?: boolean }>({
+    queryKey: ["firm-settings", "case-documents", caseId],
+    queryFn: () => apiFetchJson("/firm-settings"),
+    enabled: generateDialogOpen,
+    retry: false,
+  });
+  const showMasterDocuments = firmSettingsQuery.data?.showMasterDocuments !== false;
+
+  type SystemFolder = { id: number; name: string; parentId: number | null; sortOrder: number; isDisabled: boolean };
+  type SystemDoc = { id: number; name: string; fileName: string; folderId: number | null };
+  const masterFoldersQuery = useQuery<SystemFolder[]>({
+    queryKey: ["hub-folders", "case-documents", caseId],
+    queryFn: () => apiFetchJson<SystemFolder[]>("/hub/folders"),
+    enabled: generateDialogOpen && showMasterDocuments,
+    retry: false,
+  });
+  const masterDocsQuery = useQuery<SystemDoc[]>({
+    queryKey: ["hub-documents", "case-documents", caseId],
+    queryFn: () => apiFetchJson<SystemDoc[]>("/hub/documents"),
+    enabled: generateDialogOpen && showMasterDocuments,
+    retry: false,
+  });
+
   const checklistQuery = useQuery<ChecklistResponse>({
     queryKey: ["case-documents-checklist", caseId, showAllTemplates],
     queryFn: ({ signal }) => apiFetchJson(`/cases/${caseId}/documents/checklist${showAllTemplates && canBypassApplicability ? "?includeAll=1" : ""}`, { signal }),
-    enabled: viewTab === "checklist" || generateDialogOpen,
+    enabled: viewTab === "checklist",
     retry: false,
   });
   const caseData = checklistQuery.data?.case;
@@ -456,6 +482,7 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
     if (item.source !== "firm" && item.source !== "master") return;
     const templateId = Number(item.templateId);
     if (!Number.isFinite(templateId) || templateId <= 0) return;
+    const templates = [{ source: item.source === "master" ? ("master" as const) : ("firm" as const), id: templateId }];
 
     setOneClickGeneratingTemplateId(templateId);
     let pollId: number | null = null;
@@ -464,7 +491,7 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
     try {
       const preflight = await validateGenerationJob({
         caseIds: [caseId],
-        templateIds: [templateId],
+        templates,
         config: { action: "download" },
         blind: true,
       });
@@ -480,7 +507,7 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
 
       const created = await createGenerationJob({
         caseIds: [caseId],
-        templateIds: [templateId],
+        templates,
         config: { action: "download" },
         blind: true,
       });
@@ -585,11 +612,11 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
 
   async function openBatchVariableChecklist(items: ChecklistItem[]) {
     if (!canGenerate) return;
-    const templateIds = items
+    const templates = items
       .filter((it) => it.kind === "template" && (it.source === "firm" || it.source === "master") && typeof it.templateId === "number")
-      .map((it) => Number(it.templateId))
-      .filter((n) => Number.isFinite(n) && n > 0);
-    if (!templateIds.length) return;
+      .map((it) => ({ source: it.source === "master" ? ("master" as const) : ("firm" as const), id: Number(it.templateId) }))
+      .filter((x) => Number.isFinite(x.id) && x.id > 0);
+    if (!templates.length) return;
 
     setBatchLoopGenerating(true);
     setBatchLoopProgress({ current: 0, total: 1 });
@@ -599,7 +626,7 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
     try {
       const preflight = await validateGenerationJob({
         caseIds: [caseId],
-        templateIds,
+        templates,
         config: { action: "download" },
         blind: true,
       });
@@ -615,7 +642,7 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
 
       const created = await createGenerationJob({
         caseIds: [caseId],
-        templateIds,
+        templates,
         config: { action: "download" },
         blind: true,
       });
@@ -838,6 +865,9 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
     setShowAllTemplates(false);
     setTemplateSourceFilter("all");
     setTemplateApplicabilityFilter("all");
+    setGenerateSelectedFirmTemplateIds(new Set());
+    setGenerateSelectedMasterDocIds(new Set());
+    setGenerateMasterFolderId(null);
   }
 
   function ensureValidUpload(file: File): boolean {
@@ -1735,150 +1765,221 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
             <DialogDescription className="sr-only">Document generation options</DialogDescription>
           </DialogHeader>
           <div className="flex flex-col gap-4 h-full">
-            <div className="flex items-center justify-between gap-3">
-              {canBypassApplicability ? (
-                <div className="flex items-center gap-2">
-                  <Button size="sm" variant={showAllTemplates ? "outline" : "default"} onClick={() => setShowAllTemplates(false)}>
-                    Applicable
-                  </Button>
-                  <Button size="sm" variant={showAllTemplates ? "default" : "outline"} onClick={() => setShowAllTemplates(true)}>
-                    All templates
-                  </Button>
-                </div>
-              ) : (
-                <div className="text-sm text-slate-600">Applicable templates</div>
-              )}
-              <Select
-                value={templateSourceFilter}
-                onValueChange={(v) => setTemplateSourceFilter(v === "firm" ? "firm" : v === "master" ? "master" : "all")}
-              >
-                <SelectTrigger className="w-40">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="all">All sources</SelectItem>
-                  <SelectItem value="firm">Firm</SelectItem>
-                  <SelectItem value="master">Master</SelectItem>
-                </SelectContent>
-              </Select>
-              <Select value={templateApplicabilityFilter} onValueChange={(v) => setTemplateApplicabilityFilter(v as any)}>
-                <SelectTrigger className="w-44">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="all">Show all</SelectItem>
-                  <SelectItem value="applicable">Applicable only</SelectItem>
-                  <SelectItem value="warning">With warnings</SelectItem>
-                  <SelectItem value="not_applicable">Not applicable</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-
-            <div className="space-y-1.5">
-              <Label>Document name (optional)</Label>
-              <Input value={documentName} onChange={(e) => setDocumentName(e.target.value)} placeholder="Leave empty to use template name" />
-            </div>
-
             <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-700">
               Firm letterhead: Coming soon (generation will continue without letterhead).
             </div>
 
-            {preflightQuery.isError ? (
-              <QueryFallback
-                title="Preflight unavailable"
-                error={preflightQuery.error}
-                onRetry={() => preflightQuery.refetch()}
-                isRetrying={preflightQuery.isFetching}
-              />
-            ) : null}
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-3 flex-1 min-h-0">
+              <div className="rounded-lg border border-slate-200 bg-white overflow-hidden flex flex-col min-h-0">
+                <div className="px-3 py-2 border-b border-slate-200 text-sm font-medium text-slate-900">Firm Documents</div>
+                <div className="flex-1 min-h-0 overflow-y-auto p-3">
+                  {enterpriseFoldersQuery.isLoading || enterpriseTemplatesQuery.isLoading ? (
+                    <div className="text-sm text-slate-500 py-6 text-center">Loading…</div>
+                  ) : enterpriseFoldersQuery.isError || enterpriseTemplatesQuery.isError ? (
+                    <QueryFallback
+                      title="Templates unavailable"
+                      error={enterpriseFoldersQuery.error ?? enterpriseTemplatesQuery.error}
+                      onRetry={() => { enterpriseFoldersQuery.refetch(); enterpriseTemplatesQuery.refetch(); }}
+                      isRetrying={enterpriseFoldersQuery.isFetching || enterpriseTemplatesQuery.isFetching}
+                    />
+                  ) : (
+                    <TemplateFolderPicker
+                      folders={enterpriseFolders}
+                      templates={enterpriseTemplates}
+                      selectedTemplateIds={generateSelectedFirmTemplateIds}
+                      onChange={(next) => setGenerateSelectedFirmTemplateIds(new Set(next))}
+                    />
+                  )}
+                </div>
+              </div>
 
-            <div className="flex-1 min-h-0 overflow-y-auto rounded-lg border border-slate-200 bg-white">
-              {checklistQuery.isLoading ? (
-                <div className="text-sm text-slate-500 py-6 text-center">Loading templates…</div>
-              ) : checklistQuery.isError ? (
-                <QueryFallback title="Templates unavailable" error={checklistQuery.error} onRetry={() => checklistQuery.refetch()} isRetrying={checklistQuery.isFetching} />
-              ) : (
-                <div className="p-3 space-y-4">
-                  {(checklistQuery.data?.sections ?? []).map((sec) => {
-                    const filtered = (sec.items ?? []).filter((it) => {
-                      if (it.kind !== "template") return false;
-                      if (!showAllTemplates && it.applicability?.status === "not_applicable") return false;
-                      if (templateSourceFilter !== "all" && it.source !== templateSourceFilter) return false;
-                      if (templateApplicabilityFilter !== "all" && (it.applicability?.status ?? "applicable") !== templateApplicabilityFilter) return false;
-                      return true;
-                    });
-                    if (filtered.length === 0) return null;
-                    return (
-                      <div key={sec.section} className="space-y-2">
-                        <div className="text-xs font-semibold text-slate-700">{sec.section}</div>
-                        <div className="rounded-md border border-slate-200 divide-y divide-slate-100 bg-white">
-                          {filtered.map((it) => {
-                            const overridable = Boolean(it.applicability?.status === "not_applicable" && it.applicability?.manuallyOverridable && canBypassApplicability && showAllTemplates);
-                            const applicable = it.applicability?.status !== "not_applicable" || overridable;
-                            const pre = typeof it.templateId === "number" ? preflightByTemplateId.get(it.templateId) : null;
-                            const fileStatus = String(pre?.templateFile?.status ?? "");
-                            const fileReady = fileStatus === "ready";
-                            const fileLabel =
-                              preflightQuery.isError ? "Error"
-                                : fileStatus === "ready" ? "Ready"
-                                  : fileStatus === "missing" ? "Missing template file"
-                                    : fileStatus === "read_failed" ? "Storage read failed"
-                                      : preflightQuery.isFetching ? "Checking..." : "Unknown";
-                            const generateFinalDisabledReason = (() => {
-                              if (it.kind !== "template") return "Template is not generation capable";
-                              if (!canGenerate) return "No permission";
-                              if (preflightQuery.isFetching) return "";
-                              if (pre && !fileReady) return "Missing template file";
-                              return "";
-                            })();
-                            return (
-                              <div key={`${it.source}-${it.templateId}`} className="px-3 py-2">
-                                <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_minmax(0,320px)_auto] items-start lg:items-center gap-2 lg:gap-3">
-                                  <div className="min-w-0">
-                                    <div className="text-sm font-medium text-slate-900 truncate" title={it.name}>{it.name}</div>
-                                    <div className="mt-1 text-xs text-slate-600 truncate">
-                                      {(it.source === "master" ? "Master" : it.source === "firm" ? "Firm" : it.source)} · {it.documentGroup}
-                                    </div>
-                                  </div>
-                                  <div className="min-w-0">
-                                    <div className="text-[11px] text-slate-700 truncate" title={`Template file: ${fileLabel}`}>
-                                      Template file: {fileLabel}
-                                    </div>
-                                    <div className="text-[11px] text-slate-700 truncate">
-                                      Output: PDF
-                                    </div>
-                                  </div>
-                                  <div className="flex items-center gap-2 justify-start lg:justify-end flex-wrap">
-                                    <Button
-                                      size="sm"
-                                      onClick={() => generateAndDownloadBlind(it)}
-                                      disabled={
-                                        !canGenerate
-                                        || isGenerating
-                                        || oneClickGeneratingTemplateId === it.templateId
-                                        || Boolean(generateFinalDisabledReason)
-                                      }
-                                    >
-                                      {oneClickGeneratingTemplateId === it.templateId ? "Generating..." : "Generate Final"}
-                                    </Button>
-                                    {generateFinalDisabledReason ? (
-                                      <div className="text-[11px] text-slate-500 max-w-64 break-words">{generateFinalDisabledReason}</div>
-                                    ) : null}
-                                  </div>
-                                </div>
-                              </div>
-                            );
-                          })}
+              {showMasterDocuments ? (
+                <div className="rounded-lg border border-slate-200 bg-white overflow-hidden flex flex-col min-h-0">
+                  <div className="px-3 py-2 border-b border-slate-200 text-sm font-medium text-slate-900">Master Documents</div>
+                  <div className="flex-1 min-h-0 overflow-hidden grid grid-cols-[200px_minmax(0,1fr)]">
+                    <div className="border-r border-slate-200 overflow-y-auto p-2">
+                      {(masterFoldersQuery.isLoading || masterDocsQuery.isLoading) ? (
+                        <div className="text-sm text-slate-500 py-6 text-center">Loading…</div>
+                      ) : (masterFoldersQuery.isError || masterDocsQuery.isError) ? (
+                        <QueryFallback
+                          title="Master documents unavailable"
+                          error={masterFoldersQuery.error ?? masterDocsQuery.error}
+                          onRetry={() => { masterFoldersQuery.refetch(); masterDocsQuery.refetch(); }}
+                          isRetrying={masterFoldersQuery.isFetching || masterDocsQuery.isFetching}
+                        />
+                      ) : (
+                        <div className="space-y-1">
+                          {(masterFoldersQuery.data ?? [])
+                            .filter((f) => !f.isDisabled && f.parentId === null)
+                            .sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0) || (a.name ?? "").localeCompare(b.name ?? ""))
+                            .map((f) => (
+                              <button
+                                key={f.id}
+                                onClick={() => setGenerateMasterFolderId(f.id)}
+                                className={cn(
+                                  "w-full text-left px-2 py-1 rounded text-xs",
+                                  generateMasterFolderId === f.id ? "bg-amber-50 text-amber-700 border border-amber-200" : "hover:bg-slate-50 text-slate-700 border border-transparent"
+                                )}
+                              >
+                                {f.name}
+                              </button>
+                            ))}
                         </div>
-                      </div>
-                    );
-                  })}
+                      )}
+                    </div>
+                    <div className="overflow-y-auto p-3">
+                      <div className="text-xs text-slate-500 mb-2">Select files</div>
+                      {(masterDocsQuery.data ?? [])
+                        .filter((d) => {
+                          const folderId = d.folderId ?? null;
+                          if (generateMasterFolderId === null) return folderId === null;
+                          return folderId === generateMasterFolderId;
+                        })
+                        .sort((a, b) => (a.name ?? "").localeCompare(b.name ?? ""))
+                        .map((d) => {
+                          const checked = generateSelectedMasterDocIds.has(d.id);
+                          return (
+                            <label key={d.id} className="flex items-center gap-2 py-1.5 text-sm cursor-pointer">
+                              <Checkbox
+                                checked={checked}
+                                onCheckedChange={(v) => {
+                                  const next = new Set(generateSelectedMasterDocIds);
+                                  if (v) next.add(d.id);
+                                  else next.delete(d.id);
+                                  setGenerateSelectedMasterDocIds(next);
+                                }}
+                              />
+                              <div className="min-w-0">
+                                <div className="text-sm text-slate-900 truncate" title={d.name}>{d.name}</div>
+                                <div className="text-[11px] text-slate-500 truncate">{d.fileName}</div>
+                              </div>
+                            </label>
+                          );
+                        })}
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                <div className="rounded-lg border border-slate-200 bg-slate-50 flex items-center justify-center text-sm text-slate-600">
+                  Master documents disabled by firm settings
                 </div>
               )}
             </div>
 
-            <div className="flex justify-end gap-2 pt-2">
-              <Button variant="outline" onClick={closeGenerateDialog} disabled={isGenerating}>Close</Button>
+            <div className="flex items-center justify-between gap-3 pt-1">
+              <div className="text-xs text-slate-500">
+                Missing variables will be left blank. DOCX to PDF conversion falls back when needed.
+              </div>
+              <div className="flex gap-2">
+                <Button variant="outline" onClick={closeGenerateDialog} disabled={isGenerating}>Close</Button>
+                <Button
+                  className="bg-amber-500 hover:bg-amber-600 text-white"
+                  onClick={async () => {
+                    if (!canGenerate || isGenerating) return;
+                    const templates = [
+                      ...Array.from(generateSelectedFirmTemplateIds).map((id) => ({ source: "firm" as const, id })),
+                      ...Array.from(generateSelectedMasterDocIds).map((id) => ({ source: "master" as const, id })),
+                    ];
+                    if (templates.length === 0) return;
+                    setIsGenerating(true);
+                    let pollId: number | null = null;
+                    const startedAt = Date.now();
+                    const maxPollMs = 120_000;
+                    try {
+                      const preflight = await validateGenerationJob({
+                        caseIds: [caseId],
+                        templates,
+                        config: { action: "download" },
+                        blind: true,
+                      });
+                      const preflightItems = Array.isArray((preflight as any)?.items) ? ((preflight as any).items as any[]) : [];
+                      const hardBlocked = preflightItems.filter((it) => Boolean(it?.hardBlocked));
+                      if (hardBlocked.length > 0) {
+                        const first = hardBlocked[0] ?? {};
+                        const code = typeof first.code === "string" ? first.code : "PRECHECK_FAILED";
+                        const msg = typeof first.message === "string" ? first.message : "Preflight hard-blocked";
+                        toast({ title: "Generation blocked", description: `${msg} (${code})`, variant: "destructive" });
+                        return;
+                      }
+
+                      const created = await createGenerationJob({
+                        caseIds: [caseId],
+                        templates,
+                        config: { action: "download" },
+                        blind: true,
+                      });
+                      const jobId = created.jobId;
+
+                      const pollOnce = async (): Promise<boolean> => {
+                        if (Date.now() - startedAt > maxPollMs) {
+                          throw new Error(`Generation still running. Please refresh later. Job ${jobId}`);
+                        }
+                        const job = await runNextGenerationJob(jobId);
+                        setBatchGenerateResult(job);
+                        const st = String(job.status ?? "");
+                        if (st === "completed" || st === "completed_with_errors" || st === "completed-with-errors") {
+                          await qc.invalidateQueries({ queryKey: ["case-documents", caseId] });
+                          await qc.invalidateQueries({ queryKey: ["case-documents-checklist", caseId] });
+                          const fileName = job.downloadFileName || (templates.length > 1 ? "documents.zip" : "document.pdf");
+                          if (!job.downloadObjectPath) {
+                            throw new Error("Generation completed but no downloadable output was created. Please check failed item diagnostics.");
+                          }
+                          await downloadFromApi(`/documents/jobs/${jobId}/download`, fileName);
+                          toast({ title: "Download started" });
+                          return true;
+                        }
+                        if (st === "failed") {
+                          const summary = job.errorSummary || "Generation failed";
+                          const firstFailed = job.items.find((it) => String(it.status ?? "") === "failed") ?? null;
+                          const code = firstFailed?.errorCode ? String(firstFailed.errorCode) : "";
+                          const msg = firstFailed?.errorMessage ? String(firstFailed.errorMessage) : "";
+                          const detail = code && msg ? `${code}: ${msg}` : msg || code;
+                          throw new Error(detail ? `${summary}: ${detail}` : summary);
+                        }
+                        return false;
+                      };
+
+                      const done = await pollOnce();
+                      if (done) return;
+
+                      await new Promise<void>((resolve, reject) => {
+                        let inFlight = false;
+                        pollId = window.setInterval(() => {
+                          if (inFlight) return;
+                          inFlight = true;
+                          pollOnce()
+                            .then((ok) => {
+                              if (!ok) return;
+                              if (pollId) {
+                                window.clearInterval(pollId);
+                                pollId = null;
+                              }
+                              resolve();
+                            })
+                            .catch((e) => {
+                              if (pollId) {
+                                window.clearInterval(pollId);
+                                pollId = null;
+                              }
+                              reject(e);
+                            })
+                            .finally(() => {
+                              inFlight = false;
+                            });
+                        }, 2000);
+                      });
+                    } catch (err) {
+                      toastError(toast, err, "Generation failed");
+                    } finally {
+                      if (pollId) window.clearInterval(pollId);
+                      setIsGenerating(false);
+                    }
+                  }}
+                  disabled={!canGenerate || isGenerating || (generateSelectedFirmTemplateIds.size + generateSelectedMasterDocIds.size) === 0}
+                >
+                  {isGenerating ? "Generating..." : "Generate & Download"}
+                </Button>
+              </div>
             </div>
           </div>
         </DialogContent>

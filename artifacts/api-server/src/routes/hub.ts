@@ -6,6 +6,7 @@ import {
   platformMessagesTable,
   platformMessageAttachmentsTable,
   platformDocumentsTable,
+  firmsTable,
 } from "@workspace/db";
 import { requireAuth, requireFirmUser, requirePermission, writeAuditLog, type AuthRequest } from "../lib/auth.js";
 import { Readable } from "stream";
@@ -262,10 +263,17 @@ router.get("/hub/documents", requireAuth, requireFirmUser, requirePermission("do
       .where(eq(systemFoldersTable.isDisabled, true));
     const disabledIds = disabledFolders.map(f => f.id);
 
+    const [firm] = await r
+      .select({ showMasterDocuments: (firmsTable as any).showMasterDocuments })
+      .from(firmsTable)
+      .where(eq(firmsTable.id, firmId))
+      .limit(1);
+    const showMasterDocuments = firm?.showMasterDocuments !== false;
+
     const allDocs = await r
       .select()
       .from(platformDocumentsTable)
-      .where(or(isNull(platformDocumentsTable.firmId), eq(platformDocumentsTable.firmId, firmId)))
+      .where(showMasterDocuments ? or(isNull(platformDocumentsTable.firmId), eq(platformDocumentsTable.firmId, firmId)) : eq(platformDocumentsTable.firmId, firmId))
       .orderBy(desc(platformDocumentsTable.createdAt));
 
     const unique = allDocs.filter((d, i, arr) => arr.findIndex((x) => x.id === d.id) === i);

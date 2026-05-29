@@ -422,7 +422,16 @@ CREATE POLICY platform_documents_read ON platform_documents FOR SELECT TO PUBLIC
   USING (
     current_setting('app.is_founder', true) = 'true'
     OR firm_id = NULLIF(current_setting('app.current_firm_id', true), '')::integer
-    OR (firm_id IS NULL AND NULLIF(current_setting('app.current_firm_id', true), '') IS NOT NULL)
+    OR (
+      firm_id IS NULL
+      AND NULLIF(current_setting('app.current_firm_id', true), '') IS NOT NULL
+      AND EXISTS (
+        SELECT 1
+        FROM firms f
+        WHERE f.id = NULLIF(current_setting('app.current_firm_id', true), '')::integer
+          AND COALESCE(f.show_master_documents, true) = true
+      )
+    )
   );
 
 CREATE POLICY platform_documents_insert ON platform_documents FOR INSERT TO PUBLIC

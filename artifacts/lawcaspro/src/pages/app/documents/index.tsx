@@ -48,6 +48,8 @@ const TAB_KEYS: Record<string, Tab> = {
   letterhead: "Firm Letter Head",
 };
 
+type FirmSettings = { showMasterDocuments?: boolean };
+
 function formatFileSize(bytes: number | null): string {
   if (!bytes) return "-";
   if (bytes < 1024) return `${bytes} B`;
@@ -380,14 +382,36 @@ export default function DocumentsPage() {
   const searchString = useSearch();
   const params = new URLSearchParams(searchString);
   const tabFromUrl = params.get("tab");
-  const initialTab = (tabFromUrl && TAB_KEYS[tabFromUrl]) ? TAB_KEYS[tabFromUrl] : "Master Documents";
+  const firmSettingsQuery = useQuery<FirmSettings>({
+    queryKey: ["firm-settings", "documents-tab"],
+    queryFn: () => apiFetchJson("/firm-settings"),
+    retry: false,
+  });
+
+  const showMasterDocuments = firmSettingsQuery.data?.showMasterDocuments !== false;
+  const tabs = showMasterDocuments ? TABS : (TABS.filter((t) => t !== "Master Documents") as unknown as typeof TABS);
+  const initialTab = (() => {
+    const fromUrl = (tabFromUrl && TAB_KEYS[tabFromUrl]) ? TAB_KEYS[tabFromUrl] : null;
+    const resolved = fromUrl ?? (showMasterDocuments ? "Master Documents" : "Firm Documents");
+    if (!showMasterDocuments && resolved === "Master Documents") return "Firm Documents";
+    return resolved;
+  })();
   const [activeTab, setActiveTab] = useState<Tab>(initialTab);
 
   useEffect(() => {
     if (tabFromUrl && TAB_KEYS[tabFromUrl]) {
-      setActiveTab(TAB_KEYS[tabFromUrl]);
+      const next = TAB_KEYS[tabFromUrl];
+      if (!showMasterDocuments && next === "Master Documents") {
+        setActiveTab("Firm Documents");
+      } else {
+        setActiveTab(next);
+      }
     }
-  }, [tabFromUrl]);
+  }, [tabFromUrl, showMasterDocuments]);
+
+  useEffect(() => {
+    if (!showMasterDocuments && activeTab === "Master Documents") setActiveTab("Firm Documents");
+  }, [showMasterDocuments, activeTab]);
 
   return (
     <div className="space-y-6">
@@ -400,7 +424,7 @@ export default function DocumentsPage() {
       </div>
 
       <div className="flex border-b border-gray-200">
-        {TABS.map(tab => (
+        {tabs.map(tab => (
           <button
             key={tab}
             onClick={() => setActiveTab(tab)}
@@ -416,7 +440,7 @@ export default function DocumentsPage() {
         ))}
       </div>
 
-      {activeTab === "Master Documents" && <MasterDocumentsTab />}
+      {activeTab === "Master Documents" && showMasterDocuments && <MasterDocumentsTab />}
       {activeTab === "Firm Documents" && <FirmDocuments />}
       {activeTab === "Firm Letter Head" && <FirmLetterHead />}
     </div>
