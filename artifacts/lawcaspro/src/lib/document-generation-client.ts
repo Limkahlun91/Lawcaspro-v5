@@ -69,6 +69,22 @@ export type CreateGenerationJobPayload = {
 
 const GENERATION_TIMEOUT_MS = 60000;
 
+export async function generateDocumentsNow(payload: {
+  caseIds: number[];
+  templates: Array<{ source: "firm" | "master"; id: number }>;
+}): Promise<Response> {
+  return await apiRequest("/documents/automation/generate-now", {
+    method: "POST",
+    timeoutMs: GENERATION_TIMEOUT_MS,
+    body: JSON.stringify({
+      caseIds: payload.caseIds,
+      templates: payload.templates,
+      config: { action: "download", output: "docx_zip" },
+    }),
+    headers: { "Content-Type": "application/json" },
+  });
+}
+
 export async function createGenerationJob(payload: CreateGenerationJobPayload): Promise<{ jobId?: string; statusUrl?: string; downloadUrl?: string; status?: string; fallback?: boolean; message?: string }> {
   const qs = new URLSearchParams();
   if (payload.blind) qs.set("blind", "true");

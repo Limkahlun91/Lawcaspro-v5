@@ -10,12 +10,11 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "@/components/ui/resizable";
 import { cn } from "@/lib/utils";
 import { apiFetchJson } from "@/lib/api-client";
-import { createGenerationJob, downloadGenerationJob, runNextGenerationJob, type NormalizedGenerationJob } from "@/lib/document-generation-client";
-import { downloadBlob, downloadFromApi } from "@/lib/download";
+import { generateDocumentsNow } from "@/lib/document-generation-client";
+import { downloadBlob } from "@/lib/download";
 import { toastError } from "@/lib/toast-error";
 import { useToast } from "@/hooks/use-toast";
 import { ChevronRight, FileText, Printer } from "lucide-react";
-import { apiUrl } from "@/lib/api-base";
 
 type AutomationCaseRow = {
   id: number;
@@ -105,8 +104,6 @@ export default function DocumentAutomationHub() {
   const [duplexMode, setDuplexMode] = useState<"double" | "single" | "custom">("double");
   const [customDuplexRange, setCustomDuplexRange] = useState("");
   const [busy, setBusy] = useState(false);
-  const [jobId, setJobId] = useState<string | null>(null);
-  const [lastJob, setLastJob] = useState<NormalizedGenerationJob | null>(null);
   const [smartMessage, setSmartMessage] = useState<string | null>(null);
   const [smartTemplateIdSet, setSmartTemplateIdSet] = useState<Set<number>>(() => new Set());
   const [smartFolderIdSet, setSmartFolderIdSet] = useState<Set<number>>(() => new Set());
@@ -115,9 +112,6 @@ export default function DocumentAutomationHub() {
   const [bundleMessage, setBundleMessage] = useState<string | null>(null);
   const [bundleTemplateIdSet, setBundleTemplateIdSet] = useState<Set<number>>(() => new Set());
   const [bundleFolderIdSet, setBundleFolderIdSet] = useState<Set<number>>(() => new Set());
-  const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
-  const isTerminalJobStatus = (st: string) =>
-    st === "completed" || st === "failed" || st === "done" || st === "completed_with_errors" || st === "completed-with-errors";
 
   const casesQuery = useQuery<AutomationCasesResponse>({
     queryKey: ["document-automation", "cases", caseSearch],
@@ -244,9 +238,6 @@ export default function DocumentAutomationHub() {
 
   const allCasesOnPageSelected = cases.length > 0 && cases.every((c) => selectedCaseIdSet.has(c.id));
   const someCasesOnPageSelected = cases.some((c) => selectedCaseIdSet.has(c.id)) && !allCasesOnPageSelected;
-
-  const jobForDisplay = lastJob;
-  const failedItemsForDisplay = jobForDisplay?.items?.filter((it) => String(it.status ?? "") === "failed") ?? [];
 
   function setAllCasesOnPage(checked: boolean) {
     if (!checked) {
@@ -514,106 +505,30 @@ export default function DocumentAutomationHub() {
       toast({ title: "Please select at least one document" });
       return;
     }
-    if (mode === "print" && selectedMasterDocIds.length > 0) {
-      toast({ title: "Print is only supported for firm templates" });
-      return;
+    if (mode === "print") {
+      toast({ title: "Print: Coming soon", description: "Current output is DOCX ZIP." });
+      mode = "download";
     }
 
     setBusy(true);
-    let startedJob = false;
     try {
-      const duplexSettings =
-        mode === "print"
-          ? duplexMode === "custom"
-            ? { mode: "custom", range: customDuplexRange }
-            : { mode: duplexMode }
-          : undefined;
-
-      const payload = {
-        caseIds: selectedCaseIds,
-        templateIds: selectedTemplateIds,
-        templates: [
-          ...selectedTemplateIds.map((id) => ({ source: "firm" as const, id })),
-          ...selectedMasterDocIds.map((id) => ({ source: "master" as const, id })),
-        ],
-        config: {
-          action: mode,
-          copies: mode === "print" ? Number(copies || 1) : undefined,
-          duplexSettings,
-        },
-        blind: true,
-      };
-
-      const created = await createGenerationJob(payload as any);
-      if (created.downloadUrl && !created.jobId) {
-        const name = selectedCaseIds.length * (selectedTemplateIds.length + selectedMasterDocIds.length) > 1 ? "documents.zip" : "document.pdf";
-        await downloadFromApi(created.downloadUrl, name);
-        startedJob = true;
-        toast({ title: "Download started" });
-        setBusy(false);
-        return;
+      const templates = [
+        ...selectedTemplateIds.map((id) => ({ source: "firm" as const, id })),
+        ...selectedMasterDocIds.map((id) => ({ source: "master" as const, id })),
+      ];
+      const resp = await generateDocumentsNow({ caseIds: selectedCaseIds, templates });
+      if (!resp.ok) {
+        const text = await resp.text().catch(() => "");
+        throw new Error(text || "Failed to generate documents");
       }
-      if (!created.jobId) {
-        toast({ title: "Generation started", description: created.message ?? "Generation is still processing. Please check Doc Gen Logs." });
-        startedJob = true;
-        setBusy(false);
-        return;
-      }
-      const jid = created.jobId;
-      setJobId(jid);
-      setLastJob(null);
-      startedJob = true;
-      toast({ title: "Generation started", description: "Processing. Your download will start automatically when ready." });
-
-      let lastStep: NormalizedGenerationJob | null = null;
-      let consecutiveErrors = 0;
-      for (let i = 0; i < 180; i++) {
-        try {
-          lastStep = await runNextGenerationJob(jid);
-          setLastJob(lastStep);
-          consecutiveErrors = 0;
-        } catch (err) {
-          consecutiveErrors++;
-          if (consecutiveErrors >= 5) throw err;
-        }
-
-        const st = String(lastStep?.status ?? "");
-        if (isTerminalJobStatus(st)) break;
-        await sleep(1000);
-      }
-
-      const finalStatus = String(lastStep?.status ?? "");
-      if (!isTerminalJobStatus(finalStatus)) {
-        throw new Error("Generation timed out. Please retry.");
-      }
-      if (finalStatus === "failed") {
-        const summary = safeText(lastStep?.errorSummary) || "Document generation failed";
-        const firstFailed = Array.isArray(lastStep?.items) ? lastStep?.items.find((it: any) => String(it?.status ?? "") === "failed") : null;
-        const code = safeText((firstFailed as any)?.errorCode);
-        const msg = safeText((firstFailed as any)?.errorMessage);
-        const tplName = safeText((firstFailed as any)?.templateName) || (typeof (firstFailed as any)?.templateId === "number" ? (templateNameById.get((firstFailed as any).templateId) ?? "") : "");
-        const detail = [tplName, code, msg].filter(Boolean).join(" — ");
-        toast({ title: "Generation failed", description: detail ? `${summary}: ${detail}` : summary, variant: "destructive" });
-        return;
-      }
-
-      const url = apiUrl(`/api/documents/jobs/${jid}/download`);
-      if (mode === "print") {
-        window.open(url, "_blank", "noopener,noreferrer");
-        toast({ title: "Printable PDF generated" });
-        return;
-      }
-      const resp = await downloadGenerationJob(jid);
       const blob = await resp.blob();
-      const filename = parseFilenameFromDisposition(resp.headers.get("Content-Disposition")) || "document-automation.zip";
+      const filename = parseFilenameFromDisposition(resp.headers.get("Content-Disposition")) || `lawcaspro-generated-documents-${Date.now()}.zip`;
       downloadBlob(blob, filename);
-      toast({ title: "Export ready", description: filename });
+      toast({ title: "Download started", description: filename });
     } catch (err) {
       toastError(toast, err);
     } finally {
-      setJobId(null);
       setBusy(false);
-      if (!startedJob) setBusy(false);
     }
   }
 
@@ -1050,65 +965,6 @@ export default function DocumentAutomationHub() {
                       </Button>
                     </TabsContent>
                   </Tabs>
-
-                  {jobForDisplay && (
-                    <div className="rounded-md border border-slate-200 bg-white p-3">
-                      <div className="flex items-start justify-between gap-3">
-                        <div className="space-y-0.5">
-                          <div className="text-sm font-semibold text-slate-900">Job</div>
-                          <div className="text-xs text-slate-500">
-                            {jobForDisplay.jobId} · {String(jobForDisplay.status ?? "pending")}
-                          </div>
-                        </div>
-                        <div className="text-xs text-slate-600">
-                          {jobForDisplay.successCount}/{jobForDisplay.totalCount} success · {jobForDisplay.failedCount} failed · {jobForDisplay.pendingCount} pending
-                        </div>
-                      </div>
-
-                      {jobForDisplay.errorSummary && (
-                        <div className="mt-2 rounded border border-slate-200 bg-slate-50 px-2 py-1 text-xs text-slate-700">
-                          {jobForDisplay.errorSummary}
-                        </div>
-                      )}
-
-                      {jobForDisplay.status === "completed" && !jobForDisplay.downloadObjectPath && (
-                        <div className="mt-2 rounded border border-amber-200 bg-amber-50 px-2 py-1 text-xs text-amber-800">
-                          Generation completed but no downloadable output was created. Please check failed item diagnostics.
-                        </div>
-                      )}
-
-                      {failedItemsForDisplay.length > 0 && (
-                        <div className="mt-3 space-y-2">
-                          <div className="text-xs font-medium text-slate-700">Failed Items</div>
-                          <div className="max-h-48 overflow-auto space-y-2">
-                            {failedItemsForDisplay.slice(0, 50).map((it, idx) => {
-                              const diag = asRecord(it.diagnostic) ?? {};
-                              const missing = diag["missingRequiredVariables"];
-                              const missingList = Array.isArray(missing)
-                                ? missing.map((x) => (typeof x === "string" ? x : null)).filter((x): x is string => Boolean(x))
-                                : [];
-                              const tplName = safeText((it as any).templateName) || (typeof it.templateId === "number" ? (templateNameById.get(it.templateId) ?? "") : "");
-                              return (
-                                <div key={`${it.id ?? idx}`} className="rounded border border-slate-200 bg-slate-50 px-2 py-1">
-                                  <div className="text-xs text-slate-800">
-                                    <span className="font-medium">
-                                      {[tplName, it.errorCode || "FAILED"].filter(Boolean).join(" — ")}
-                                    </span>
-                                    {it.errorMessage ? ` — ${it.errorMessage}` : ""}
-                                  </div>
-                                  {missingList.length > 0 && (
-                                    <div className="mt-1 text-[11px] text-slate-600">
-                                      Missing variables: {missingList.join(", ")}
-                                    </div>
-                                  )}
-                                </div>
-                              );
-                            })}
-                          </div>
-                        </div>
-                      )}
-                    </div>
-                  )}
                 </div>
               </div>
             </ResizablePanel>

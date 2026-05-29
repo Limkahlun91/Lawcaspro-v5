@@ -389,19 +389,15 @@ router.get("/dashboard", requireAuth, requireFirmUser, requirePermission("dashbo
       if (v === "0" || v === "false" || v === "no") return false;
       return v === "1" || v === "true" || v === "yes";
     })();
-    const statsTimeoutMs = includeStats ? 4200 : 1;
     const statsPromise: Promise<{ ok: true; stats: Record<string, unknown> } | { ok: false; error: string }> = includeStats
-      ? Promise.race([
-          (async () => {
-            const stats = await computeDashboardStats(r, firmId, {
-              assignedToUserId: effectiveAssignedToUserId ?? undefined,
-              includeErrorDetails: allowDetails,
-              deadlineAt: Date.now() + 3_600,
-            });
-            return { ok: true, stats } as const;
-          })(),
-          new Promise<{ ok: false; error: string }>((resolve) => setTimeout(() => resolve({ ok: false, error: "DASHBOARD_TIMEOUT" }), statsTimeoutMs)),
-        ])
+      ? (async () => {
+          const stats = await computeDashboardStats(r, firmId, {
+            assignedToUserId: effectiveAssignedToUserId ?? undefined,
+            includeErrorDetails: allowDetails,
+            deadlineAt: Date.now() + 8_000,
+          });
+          return { ok: true, stats } as const;
+        })()
       : Promise.resolve({ ok: false, error: "SKIPPED" });
 
     const [summaryOut, statsOut] = await Promise.all([summaryPromise, statsPromise]);
@@ -415,7 +411,7 @@ router.get("/dashboard", requireAuth, requireFirmUser, requirePermission("dashbo
       ...(summaryOut.ok === true
         ? (summaryOut.errors ?? []).map((e) => ({ module: e.section, code: e.code, message: e.message }))
         : [{ module: "summary", code: null, message: (summaryOut as SummaryErr).error }]),
-      ...(!statsSkipped && statsOut.ok === false ? [{ module: "dashboard", code: "TIMEOUT", message: statsOut.error }] : []),
+      ...(!statsSkipped && statsOut.ok === false ? [{ module: "dashboard", code: "STATS_FAILED", message: statsOut.error }] : []),
     ];
     const unavailableFields: string[] = Array.isArray((stats as any)?.unavailableFields) ? ((stats as any).unavailableFields as string[]) : [];
     if (!statsSkipped && statsOut.ok === false) {

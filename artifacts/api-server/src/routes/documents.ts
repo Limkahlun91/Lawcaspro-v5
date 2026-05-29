@@ -9417,6 +9417,239 @@ function reqIdToNumber(v: unknown): number {
   return Number.isFinite(n) ? Number(n) : 0;
 }
 
+router.post("/documents/automation/generate-now", requireAuth, requireFirmUser, requirePermission("documents", "generate"), async (req: AuthRequest, res): Promise<void> => {
+  const r = getRlsDb(req, res);
+  if (!r) return;
+  const startedAt = Date.now();
+  const requestId = one(req.headers["x-request-id"] as any) || one(req.headers["x-vercel-id"] as any) || undefined;
+
+  const fail = (httpStatus: number, code: string, message: string, details: unknown, retryable: boolean) => {
+    res.status(httpStatus).json({
+      ok: false,
+      error: { code, message, details, retryable },
+      meta: { request_id: requestId ?? null, timestamp: new Date().toISOString(), duration_ms: Date.now() - startedAt },
+    });
+  };
+
+  const bodySchema = z.object({
+    caseIds: z.array(z.union([z.number(), z.string()])).min(1),
+    templates: z.array(z.object({ source: z.enum(["firm", "master"]), id: z.union([z.number(), z.string()]) })).min(1),
+    config: z.object({
+      action: z.literal("download").optional(),
+      output: z.literal("docx_zip").optional(),
+    }).optional(),
+  });
+  const parsed = bodySchema.safeParse(req.body);
+  if (!parsed.success) {
+    fail(422, "INVALID_BODY", "Invalid request body", parsed.error.flatten(), false);
+    return;
+  }
+
+  const caseIds = Array.from(new Set(
+    parsed.data.caseIds
+      .map((x) => (typeof x === "number" ? x : Number.parseInt(x, 10)))
+      .filter((x) => Number.isFinite(x))
+      .map((x) => Math.trunc(x))
+      .filter((x) => x > 0)
+  ));
+  const templates = Array.from(new Map(
+    parsed.data.templates
+      .map((t) => ({
+        source: t.source,
+        id: typeof t.id === "number" ? Math.trunc(t.id) : Number.parseInt(String(t.id), 10),
+      }))
+      .filter((t) => Number.isFinite(t.id) && t.id > 0)
+      .map((t) => [`${t.source}:${t.id}`, t] as const)
+  ).values());
+
+  if (caseIds.length === 0) {
+    fail(400, "NO_CASE_SELECTED", "No case selected", null, false);
+    return;
+  }
+  if (templates.length === 0) {
+    fail(400, "NO_TEMPLATE_SELECTED", "No template selected", null, false);
+    return;
+  }
+  if (caseIds.length > 10 || templates.length > 20 || caseIds.length * templates.length > 40) {
+    fail(422, "TOO_MANY_ITEMS", "Too many items", { caseCount: caseIds.length, templateCount: templates.length }, false);
+    return;
+  }
+
+  const showMasterDocuments = await (async () => {
+    try {
+      const rows = await queryRows(r, sql`SELECT show_master_documents FROM firms WHERE id = ${req.firmId!} LIMIT 1`);
+      const v = (rows[0] as any)?.show_master_documents;
+      return v !== false;
+    } catch (err) {
+      const code = err && typeof err === "object" ? (err as any).code : undefined;
+      if (typeof code === "string" && code === "42703") return true;
+      return true;
+    }
+  })();
+  if (!showMasterDocuments && templates.some((t) => t.source === "master")) {
+    fail(403, "MASTER_DISABLED", "Master Documents are disabled for this firm", null, false);
+    return;
+  }
+
+  const cache = createRequestCache();
+  const templateObjectCache = new Map<string, { name: string; fileName: string; objectPath: string }>();
+  const templateBytesCache = new Map<string, Buffer>();
+  const errors: string[] = [];
+
+  const readTemplateBytes = async (objectPath: string): Promise<Buffer> => {
+    const cached = templateBytesCache.get(objectPath);
+    if (cached) return cached;
+    const bytes = await readSupabasePrivateObjectBytes(objectPath, { timeoutMs: 60_000 });
+    templateBytesCache.set(objectPath, bytes);
+    return bytes;
+  };
+
+  res.setHeader("Content-Type", "application/zip");
+  res.setHeader("Content-Disposition", contentDispositionAttachment(`lawcaspro-generated-documents-${Date.now()}.zip`));
+  res.status(200);
+
+  const zipfile = new yazl.ZipFile();
+  zipfile.outputStream.on("error", (e: any) => {
+    try {
+      logger.error({ err: e, firmId: req.firmId, userId: req.userId }, "[documents.generate-now] zip stream error");
+    } catch {
+    }
+  });
+  zipfile.outputStream.pipe(res);
+
+  const nameCounts = new Map<string, number>();
+  const addZipBuffer = (zipPathRaw: string, bytes: Buffer) => {
+    const base = zipPathRaw.replace(/^\/*/, "");
+    const n = (nameCounts.get(base) ?? 0) + 1;
+    nameCounts.set(base, n);
+    const zipPath = n === 1 ? base : base.replace(/(\.[^./\\]+)?$/, (_m, ext) => ` (${n})${ext ?? ""}`);
+    zipfile.addBuffer(bytes, zipPath);
+  };
+
+  try {
+    for (const caseId of caseIds) {
+      const context = await buildCaseContext(r, caseId, req.firmId!, cache);
+      if (!context) {
+        errors.push(`caseId=${caseId}: CASE_NOT_FOUND`);
+        continue;
+      }
+
+      const caseRefRaw =
+        typeof (context as any).reference_no === "string" && String((context as any).reference_no).trim()
+          ? String((context as any).reference_no).trim()
+          : `case-${caseId}`;
+      const caseRef = safeFilenameAscii(caseRefRaw) || `case-${caseId}`;
+
+      for (const t of templates) {
+        const cacheKey = `${t.source}:${t.id}`;
+        try {
+          const tpl = templateObjectCache.get(cacheKey) ?? await (async () => {
+            if (t.source === "firm") {
+              const rows = await queryRows(r, sql`
+                SELECT id, name, object_path, file_name, is_template_capable
+                FROM document_templates
+                WHERE firm_id = ${req.firmId!} AND id = ${t.id}
+                LIMIT 1
+              `);
+              const row = rows[0] as any;
+              if (!row) return null;
+              if (row.is_template_capable === false) return null;
+              const objectPath = typeof row.object_path === "string" ? decodeStoragePath(String(row.object_path)) : "";
+              const fileName = typeof row.file_name === "string" ? String(row.file_name) : "";
+              const name = typeof row.name === "string" ? String(row.name) : `template-${t.id}`;
+              if (!objectPath) return null;
+              const out = { name, fileName, objectPath };
+              templateObjectCache.set(cacheKey, out);
+              return out;
+            }
+            const rows = await queryRows(r, sql`
+              SELECT id, name, object_path, file_name
+              FROM platform_documents
+              WHERE id = ${t.id}
+                AND (firm_id IS NULL OR firm_id = ${req.firmId!})
+              LIMIT 1
+            `);
+            const row = rows[0] as any;
+            if (!row) return null;
+            const objectPath = typeof row.object_path === "string" ? decodeStoragePath(String(row.object_path)) : "";
+            const fileName = typeof row.file_name === "string" ? String(row.file_name) : "";
+            const name = typeof row.name === "string" ? String(row.name) : `master-${t.id}`;
+            if (!objectPath) return null;
+            const out = { name, fileName, objectPath };
+            templateObjectCache.set(cacheKey, out);
+            return out;
+          })();
+
+          if (!tpl) {
+            errors.push(`${caseRef}: template=${cacheKey} TEMPLATE_NOT_FOUND`);
+            continue;
+          }
+          const ext = fileExtensionFromName(tpl.fileName).toLowerCase();
+          if (ext !== "docx") {
+            errors.push(`${caseRef}: template=${cacheKey} UNSUPPORTED_TEMPLATE_TYPE (${ext || "unknown"})`);
+            continue;
+          }
+
+          const templateBytes = await readTemplateBytes(tpl.objectPath);
+          const zip = new PizZip(templateBytes);
+          const doc = new Docxtemplater(zip, {
+            paragraphLoop: true,
+            linebreaks: true,
+            delimiters: { start: "{{", end: "}}" },
+            nullGetter(part: any) {
+              const k = typeof part?.value === "string" ? String(part.value) : "";
+              if (!k) return "";
+              return "";
+            },
+          });
+          attachDocxImageModule(doc);
+          await maybeHydrateFirmLogoBuffer(context as any);
+          doc.render(context as any);
+          const rendered = doc.getZip().generate({ type: "nodebuffer", compression: "DEFLATE" }) as Buffer;
+
+          const tplName = safeFilenameAscii(tpl.name) || `template-${t.id}`;
+          const zipPath = `${caseRef}_${tplName}.docx`;
+          addZipBuffer(zipPath, rendered);
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err ?? "");
+          errors.push(`${caseRef}: template=${cacheKey} ${msg.slice(0, 400) || "RENDER_FAILED"}`);
+        }
+      }
+    }
+
+    if (errors.length > 0) {
+      addZipBuffer("_GENERATION_WARNINGS.txt", Buffer.from(errors.join("\n"), "utf8"));
+    }
+    zipfile.end();
+
+    await new Promise<void>((resolve, reject) => {
+      res.on("finish", resolve);
+      res.on("error", reject);
+      zipfile.outputStream.on("error", reject);
+    });
+    await writeAuditLog({
+      firmId: req.firmId,
+      actorId: req.userId,
+      actorType: req.userType,
+      action: "documents.automation.generate_now",
+      entityType: "document_generation",
+      entityId: undefined,
+      detail: `cases=${caseIds.length} templates=${templates.length} warnings=${errors.length}`,
+      ipAddress: req.ip,
+      userAgent: req.headers["user-agent"],
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "Internal Server Error";
+    try {
+      logger.error({ err, firmId: req.firmId, userId: req.userId }, "[documents.generate-now] failed");
+    } catch {
+    }
+    if (!res.headersSent) {
+      fail(500, "GENERATE_NOW_FAILED", msg, null, true);
+    }
+  }
+});
+
 router.post("/documents/automation/generate-job", requireAuth, requireFirmUser, requirePermission("documents", "generate"), async (req: AuthRequest, res): Promise<void> => {
   const r = getRlsDb(req, res);
   if (!r) return;

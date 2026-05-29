@@ -29,7 +29,7 @@ import { hasPermission } from "@/lib/permissions";
 import { getGetCaseWorkflowQueryKey, getListCasesQueryKey } from "@workspace/api-client-react";
 import { validateUploadFile } from "@/lib/upload-validation";
 import { TemplateFolderPicker, type TemplateFolderPickerFolder, type TemplateFolderPickerTemplate } from "@/components/documents/TemplateFolderPicker";
-import { createGenerationJob, runNextGenerationJob, type NormalizedGenerationJob } from "@/lib/document-generation-client";
+import { generateDocumentsNow, runNextGenerationJob, type NormalizedGenerationJob } from "@/lib/document-generation-client";
 import { blocksTemplateGenerate, isTemplateFileReadinessKnown, isTemplateFileReady, templateFileReadinessLabel } from "@/lib/template-readiness";
 
 function docTypeLabel(dt: string): string {
@@ -455,6 +455,13 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
     return v && typeof v === "object" ? (v as Record<string, unknown>) : null;
   }
 
+  function parseFilenameFromDisposition(v: string | null): string | null {
+    if (!v) return null;
+    const m = /filename="([^"]+)"/i.exec(v);
+    if (m?.[1]) return m[1];
+    return null;
+  }
+
   function labelFromKey(key: string): string {
     const pretty = String(key ?? "")
       .replace(/_raw$/, "")
@@ -474,83 +481,20 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
     const templates = [{ source: item.source === "master" ? ("master" as const) : ("firm" as const), id: templateId }];
 
     setOneClickGeneratingTemplateId(templateId);
-    let pollId: number | null = null;
-    const startedAt = Date.now();
-    const maxPollMs = 120_000;
     try {
-      const created = await createGenerationJob({
-        caseIds: [caseId],
-        templates,
-        config: { action: "download" },
-        blind: true,
-      });
-      if (created.downloadUrl && !created.jobId) {
-        await qc.invalidateQueries({ queryKey: ["case-documents", caseId] });
-        await downloadFromApi(created.downloadUrl, "document.pdf");
-        toast({ title: "Download started" });
-        return;
+      const resp = await generateDocumentsNow({ caseIds: [caseId], templates });
+      if (!resp.ok) {
+        const text = await resp.text().catch(() => "");
+        throw new Error(text || "Failed to generate documents");
       }
-      if (!created.jobId) {
-        toast({ title: "Generation started", description: created.message ?? "Generation is still processing. Please check Doc Gen Logs." });
-        return;
-      }
-      const jobId = created.jobId;
-
-      const pollOnce = async (): Promise<boolean> => {
-        if (Date.now() - startedAt > maxPollMs) {
-          throw new Error(`Generation still running. Please refresh later. Job ${jobId}`);
-        }
-        const job = await runNextGenerationJob(jobId);
-        setBatchGenerateResult(job);
-        const st = String(job.status ?? "");
-        if (st === "completed" || st === "completed_with_errors" || st === "completed-with-errors") {
-          await qc.invalidateQueries({ queryKey: ["case-documents", caseId] });
-          await qc.invalidateQueries({ queryKey: ["case-documents-checklist", caseId] });
-          const fileName = job.downloadFileName || "document.zip";
-          await downloadFromApi(`/documents/jobs/${jobId}/download`, fileName);
-          toast({ title: "Download started" });
-          return true;
-        }
-        if (st === "failed") {
-          const summary = job.errorSummary || "Generation failed";
-          const firstFailed = job.items.find((it) => String(it.status ?? "") === "failed") ?? null;
-          const code = firstFailed?.errorCode ? String(firstFailed.errorCode) : "";
-          const msg = firstFailed?.errorMessage ? String(firstFailed.errorMessage) : "";
-          const detail = code && msg ? `${code}: ${msg}` : msg || code;
-          throw new Error(detail ? `${summary}: ${detail}` : summary);
-        }
-        return false;
-      };
-
-      const done = await pollOnce();
-      if (done) return;
-
-      await new Promise<void>((resolve, reject) => {
-        let inFlight = false;
-        pollId = window.setInterval(() => {
-          if (inFlight) return;
-          inFlight = true;
-          pollOnce()
-            .then((ok) => {
-              if (!ok) return;
-              if (pollId) {
-                window.clearInterval(pollId);
-                pollId = null;
-              }
-              resolve();
-            })
-            .catch((e) => {
-              if (pollId) {
-                window.clearInterval(pollId);
-                pollId = null;
-              }
-              reject(e);
-            })
-            .finally(() => {
-              inFlight = false;
-            });
-        }, 2000);
-      });
+      const blob = await resp.blob();
+      const filename =
+        parseFilenameFromDisposition(resp.headers.get("Content-Disposition")) ||
+        `lawcaspro-generated-documents-${Date.now()}.zip`;
+      downloadBlob(blob, filename);
+      await qc.invalidateQueries({ queryKey: ["case-documents", caseId] });
+      await qc.invalidateQueries({ queryKey: ["case-documents-checklist", caseId] });
+      toast({ title: "Download started", description: filename });
     } catch (err) {
       const failures =
         err && typeof err === "object" && "data" in (err as any) && Array.isArray((err as any).data?.failures)
@@ -565,7 +509,6 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
         toastError(toast, err, "Generation failed");
       }
     } finally {
-      if (pollId) window.clearInterval(pollId);
       setOneClickGeneratingTemplateId(null);
     }
   }
@@ -600,83 +543,20 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
 
     setBatchLoopGenerating(true);
     setBatchLoopProgress({ current: 0, total: 1 });
-    let pollId: number | null = null;
-    const startedAt = Date.now();
-    const maxPollMs = 120_000;
     try {
-      const created = await createGenerationJob({
-        caseIds: [caseId],
-        templates,
-        config: { action: "download" },
-        blind: true,
-      });
-      if (created.downloadUrl && !created.jobId) {
-        await qc.invalidateQueries({ queryKey: ["case-documents", caseId] });
-        await downloadFromApi(created.downloadUrl, "documents.zip");
-        toast({ title: "Downloaded" });
-        return;
+      const resp = await generateDocumentsNow({ caseIds: [caseId], templates });
+      if (!resp.ok) {
+        const text = await resp.text().catch(() => "");
+        throw new Error(text || "Failed to generate documents");
       }
-      if (!created.jobId) {
-        toast({ title: "Generation started", description: created.message ?? "Generation is still processing. Please check Doc Gen Logs." });
-        return;
-      }
-      const jobId = created.jobId;
-
-      const pollOnce = async (): Promise<boolean> => {
-        if (Date.now() - startedAt > maxPollMs) {
-          throw new Error(`Generation still running. Please refresh later. Job ${jobId}`);
-        }
-        const job = await runNextGenerationJob(jobId);
-        setBatchGenerateResult(job);
-        const st = String(job.status ?? "");
-        if (st === "completed" || st === "completed_with_errors" || st === "completed-with-errors") {
-          await qc.invalidateQueries({ queryKey: ["case-documents", caseId] });
-          await qc.invalidateQueries({ queryKey: ["case-documents-checklist", caseId] });
-          const fileName = job.downloadFileName || "documents.zip";
-          await downloadFromApi(`/documents/jobs/${jobId}/download`, fileName);
-          toast({ title: "Downloaded" });
-          return true;
-        }
-        if (st === "failed") {
-          const summary = job.errorSummary || "Generation failed";
-          const firstFailed = job.items.find((it) => String(it.status ?? "") === "failed") ?? null;
-          const code = firstFailed?.errorCode ? String(firstFailed.errorCode) : "";
-          const msg = firstFailed?.errorMessage ? String(firstFailed.errorMessage) : "";
-          const detail = code && msg ? `${code}: ${msg}` : msg || code;
-          throw new Error(detail ? `${summary}: ${detail}` : summary);
-        }
-        return false;
-      };
-
-      const done = await pollOnce();
-      if (done) return;
-
-      await new Promise<void>((resolve, reject) => {
-        let inFlight = false;
-        pollId = window.setInterval(() => {
-          if (inFlight) return;
-          inFlight = true;
-          pollOnce()
-            .then((ok) => {
-              if (!ok) return;
-              if (pollId) {
-                window.clearInterval(pollId);
-                pollId = null;
-              }
-              resolve();
-            })
-            .catch((e) => {
-              if (pollId) {
-                window.clearInterval(pollId);
-                pollId = null;
-              }
-              reject(e);
-            })
-            .finally(() => {
-              inFlight = false;
-            });
-        }, 2000);
-      });
+      const blob = await resp.blob();
+      const filename =
+        parseFilenameFromDisposition(resp.headers.get("Content-Disposition")) ||
+        `lawcaspro-generated-documents-${Date.now()}.zip`;
+      downloadBlob(blob, filename);
+      await qc.invalidateQueries({ queryKey: ["case-documents", caseId] });
+      await qc.invalidateQueries({ queryKey: ["case-documents-checklist", caseId] });
+      toast({ title: "Downloaded", description: filename });
     } catch (err) {
       const failures =
         err && typeof err === "object" && "data" in (err as any) && Array.isArray((err as any).data?.failures)
@@ -691,7 +571,6 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
         toastError(toast, err, "Generation failed");
       }
     } finally {
-      if (pollId) window.clearInterval(pollId);
       setBatchLoopGenerating(false);
       setBatchLoopProgress({ current: 0, total: 0 });
     }
@@ -1835,91 +1714,23 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
                     ];
                     if (templates.length === 0) return;
                     setIsGenerating(true);
-                    let pollId: number | null = null;
-                    const startedAt = Date.now();
-                    const maxPollMs = 120_000;
                     try {
-                      const created = await createGenerationJob({
-                        caseIds: [caseId],
-                        templates,
-                        config: { action: "download" },
-                        blind: true,
-                      });
-                      if (created.downloadUrl && !created.jobId) {
-                        await qc.invalidateQueries({ queryKey: ["case-documents", caseId] });
-                        const name = templates.length > 1 ? "documents.zip" : "document.pdf";
-                        await downloadFromApi(created.downloadUrl, name);
-                        toast({ title: "Download started" });
-                        return;
+                      const resp = await generateDocumentsNow({ caseIds: [caseId], templates });
+                      if (!resp.ok) {
+                        const text = await resp.text().catch(() => "");
+                        throw new Error(text || "Failed to generate documents");
                       }
-                      if (!created.jobId) {
-                        toast({ title: "Generation started", description: created.message ?? "Generation is still processing. Please check Doc Gen Logs." });
-                        return;
-                      }
-                      const jobId = created.jobId;
-
-                      const pollOnce = async (): Promise<boolean> => {
-                        if (Date.now() - startedAt > maxPollMs) {
-                          throw new Error(`Generation still running. Please refresh later. Job ${jobId}`);
-                        }
-                        const job = await runNextGenerationJob(jobId);
-                        setBatchGenerateResult(job);
-                        const st = String(job.status ?? "");
-                        if (st === "completed" || st === "completed_with_errors" || st === "completed-with-errors") {
-                          await qc.invalidateQueries({ queryKey: ["case-documents", caseId] });
-                          await qc.invalidateQueries({ queryKey: ["case-documents-checklist", caseId] });
-                          const fileName = job.downloadFileName || (templates.length > 1 ? "documents.zip" : "document.pdf");
-                          if (!job.downloadObjectPath) {
-                            throw new Error("Generation completed but no downloadable output was created. Please check failed item diagnostics.");
-                          }
-                          await downloadFromApi(`/documents/jobs/${jobId}/download`, fileName);
-                          toast({ title: "Download started" });
-                          return true;
-                        }
-                        if (st === "failed") {
-                          const summary = job.errorSummary || "Generation failed";
-                          const firstFailed = job.items.find((it) => String(it.status ?? "") === "failed") ?? null;
-                          const code = firstFailed?.errorCode ? String(firstFailed.errorCode) : "";
-                          const msg = firstFailed?.errorMessage ? String(firstFailed.errorMessage) : "";
-                          const detail = code && msg ? `${code}: ${msg}` : msg || code;
-                          throw new Error(detail ? `${summary}: ${detail}` : summary);
-                        }
-                        return false;
-                      };
-
-                      const done = await pollOnce();
-                      if (done) return;
-
-                      await new Promise<void>((resolve, reject) => {
-                        let inFlight = false;
-                        pollId = window.setInterval(() => {
-                          if (inFlight) return;
-                          inFlight = true;
-                          pollOnce()
-                            .then((ok) => {
-                              if (!ok) return;
-                              if (pollId) {
-                                window.clearInterval(pollId);
-                                pollId = null;
-                              }
-                              resolve();
-                            })
-                            .catch((e) => {
-                              if (pollId) {
-                                window.clearInterval(pollId);
-                                pollId = null;
-                              }
-                              reject(e);
-                            })
-                            .finally(() => {
-                              inFlight = false;
-                            });
-                        }, 2000);
-                      });
+                      const blob = await resp.blob();
+                      const filename =
+                        parseFilenameFromDisposition(resp.headers.get("Content-Disposition")) ||
+                        `lawcaspro-generated-documents-${Date.now()}.zip`;
+                      downloadBlob(blob, filename);
+                      await qc.invalidateQueries({ queryKey: ["case-documents", caseId] });
+                      await qc.invalidateQueries({ queryKey: ["case-documents-checklist", caseId] });
+                      toast({ title: "Download started", description: filename });
                     } catch (err) {
                       toastError(toast, err, "Generation failed");
                     } finally {
-                      if (pollId) window.clearInterval(pollId);
                       setIsGenerating(false);
                     }
                   }}

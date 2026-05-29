@@ -1,6 +1,7 @@
 import request from "supertest";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import type { Application } from "express";
+import yazl from "yazl";
 
 const TEST_JOB_ID = "11111111-1111-1111-1111-111111111111";
 
@@ -30,19 +31,68 @@ function makeDb(): FakeDb {
   const queryText = (query: any): string => {
     const chunks = query?.queryChunks;
     if (!Array.isArray(chunks)) return "";
-    return chunks
-      .map((c: any) => {
-        if (typeof c === "string") return "$";
-        const v = c?.value;
-        if (Array.isArray(v)) return v.join("");
-        return "";
-      })
-      .join("");
+    return chunks.map((c: any) => (typeof c === "string" ? c : "?")).join("");
   };
 
   const db: FakeDb = {
     execute: async (query?: unknown) => {
       const text = queryText(query as any);
+      if (text.includes("SELECT show_master_documents FROM firms")) {
+        return [{ show_master_documents: true }];
+      }
+      if (text.includes("FROM cases c") && text.includes("WHERE c.id")) {
+        return [{
+          id: 3,
+          reference_no: "CON-001",
+          case_type: "conveyancing",
+          parcel_no: null,
+          spa_price: null,
+          apdl_price: null,
+          developer_discount: null,
+          bumiputra_discount: null,
+          purchase_mode: "cash",
+          loan_party_type: null,
+          title_type: "individual",
+          status: "active",
+          spa_details: null,
+          property_details: null,
+          loan_details: null,
+          borrowers: null,
+          company_details: null,
+          project_name: null,
+          project_phase: null,
+          project_type: null,
+          project_title_type: null,
+          project_title_subtype: null,
+          project_master_title_no: null,
+          project_master_title_size: null,
+          project_mukim: null,
+          project_daerah: null,
+          project_negeri: null,
+          project_land_use: null,
+          project_development_condition: null,
+          project_developer_name: null,
+          unit_category: null,
+          project_extra_fields: null,
+          developer_name: null,
+          developer_reg_no: null,
+          developer_address: null,
+          developer_business_address: null,
+          developer_contact: null,
+          developer_phone: null,
+          developer_email: null,
+          developer_contacts_json: null,
+        }];
+      }
+      if (text.includes("FROM document_templates") && text.includes("WHERE firm_id")) {
+        return [{
+          id: 7,
+          name: "Acting Letter",
+          object_path: "/objects/templates/firm/1/acting-letter.docx",
+          file_name: "acting-letter.docx",
+          is_template_capable: true,
+        }];
+      }
       if (text.includes("FROM document_generation_jobs")) {
         return [{
           id: TEST_JOB_ID,
@@ -107,14 +157,45 @@ vi.mock("../lib/auth", async (orig) => {
 
 vi.mock("../lib/objectStorage.js", async (orig) => {
   const actual = await orig<typeof import("../lib/objectStorage.js")>();
+  const buildDocxBytes = async () => {
+    const zipfile = new yazl.ZipFile();
+    zipfile.addBuffer(Buffer.from(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+</Types>
+`, "utf8"), "[Content_Types].xml");
+    zipfile.addBuffer(Buffer.from(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
+</Relationships>
+`, "utf8"), "_rels/.rels");
+    zipfile.addBuffer(Buffer.from(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:body>
+    <w:p><w:r><w:t>{{reference_no}}</w:t></w:r></w:p>
+  </w:body>
+</w:document>
+`, "utf8"), "word/document.xml");
+    zipfile.end();
+    const chunks: Buffer[] = [];
+    await new Promise<void>((resolve, reject) => {
+      zipfile.outputStream.on("data", (c: any) => chunks.push(Buffer.isBuffer(c) ? c : Buffer.from(c)));
+      zipfile.outputStream.on("error", reject);
+      zipfile.outputStream.on("end", resolve);
+    });
+    return Buffer.concat(chunks);
+  };
+  const docxBytes = await buildDocxBytes();
   class SupabaseStorageServiceMock {
     assertConfigured() {
     }
     async fetchPrivateObjectResponse(_objectPath: string, _opts?: { timeoutMs?: number }) {
-      return new Response(Buffer.from("hello"), {
+      return new Response(docxBytes, {
         headers: {
           "content-type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-          "content-length": "5",
+          "content-length": String(docxBytes.length),
         },
       });
     }
@@ -221,6 +302,23 @@ describe("Documents automation regressions", () => {
     const body = res.body as Buffer;
     expect(Buffer.isBuffer(body)).toBe(true);
     expect(body.length).toBeGreaterThan(10);
+    expect(body.slice(0, 2).toString("utf8")).toBe("PK");
+  });
+
+  it("POST /api/documents/automation/generate-now returns 200 application/zip", async () => {
+    const res = await request(app)
+      .post("/api/documents/automation/generate-now")
+      .send({ caseIds: [3], templates: [{ source: "firm", id: 7 }], config: { action: "download", output: "docx_zip" } })
+      .buffer(true)
+      .parse((r, cb) => {
+        const chunks: Buffer[] = [];
+        r.on("data", (c) => chunks.push(Buffer.isBuffer(c) ? c : Buffer.from(c)));
+        r.on("end", () => cb(null, Buffer.concat(chunks)));
+      });
+    expect(res.status).toBe(200);
+    expect(String(res.headers["content-type"] ?? "")).toContain("application/zip");
+    const body = res.body as Buffer;
+    expect(Buffer.isBuffer(body)).toBe(true);
     expect(body.slice(0, 2).toString("utf8")).toBe("PK");
   });
 });
