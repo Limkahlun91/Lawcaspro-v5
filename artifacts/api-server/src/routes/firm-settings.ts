@@ -29,50 +29,86 @@ async function queryRows(r: DbConn, query: ReturnType<typeof sql>): Promise<Reco
   return [];
 }
 
-async function columnExists(r: DbConn, args: { table: string; column: string }): Promise<boolean> {
-  const rows = await queryRows(r, sql`
-    SELECT 1
-    FROM information_schema.columns
-    WHERE table_schema = 'public'
-      AND table_name = ${args.table}
-      AND column_name = ${args.column}
-    LIMIT 1
-  `);
-  return rows.length > 0;
-}
-
 router.get("/firm-settings", requireAuth, requireFirmUser, async (req: AuthRequest, res: Response) => {
   const firmId = req.firmId!;
   const defaults = {
     useMasterDocuments: true,
-    showMasterDocuments: true,
     firmLetterheadEnabled: false,
+  };
+  const emptyFirm = {
+    id: firmId,
+    name: "",
+    slug: "",
+    showMasterDocuments: true,
+    logoUrl: "",
+    address: "",
+    stNumber: "",
+    tinNumber: "",
+    registrationNo: "",
+    sstNo: "",
+    phone: "",
+    email: "",
+    bankAccounts: [],
   };
   try {
     const r = rdb(req);
-    const hasShowMaster = await columnExists(r, { table: "firms", column: "show_master_documents" });
-    const firmRows = await queryRows(r, sql`
-      SELECT
-        id,
-        name,
-        slug,
-        logo_url,
-        address,
-        st_number,
-        tin_number,
-        registration_no,
-        sst_no,
-        phone,
-        email
-        ${hasShowMaster ? sql`, show_master_documents` : sql``}
-      FROM firms
-      WHERE id = ${firmId}
-      LIMIT 1
-    `);
-    const firm = firmRows[0] as any;
-    if (!firm) { res.status(404).json({ error: "Firm not found" }); return; }
-
-    const showMasterDocuments = hasShowMaster ? firm.show_master_documents !== false : true;
+    const getPgCode = (err: unknown): string | null => {
+      const code = err && typeof err === "object" ? (err as { code?: unknown }).code : undefined;
+      return typeof code === "string" && code ? code : null;
+    };
+    let firm: any | null = null;
+    let schemaFallback = false;
+    try {
+      const firmRows = await queryRows(r, sql`
+        SELECT
+          id,
+          name,
+          slug,
+          logo_url,
+          address,
+          st_number,
+          tin_number,
+          registration_no,
+          sst_no,
+          phone,
+          email,
+          show_master_documents
+        FROM firms
+        WHERE id = ${firmId}
+        LIMIT 1
+      `);
+      firm = (firmRows[0] as any) ?? null;
+    } catch (err) {
+      const code = getPgCode(err);
+      if (code === "42703") {
+        schemaFallback = true;
+        const firmRows = await queryRows(r, sql`
+          SELECT
+            id,
+            name,
+            slug,
+            logo_url,
+            address,
+            st_number,
+            tin_number,
+            registration_no,
+            sst_no,
+            phone,
+            email
+          FROM firms
+          WHERE id = ${firmId}
+          LIMIT 1
+        `);
+        firm = (firmRows[0] as any) ?? null;
+      } else {
+        throw err;
+      }
+    }
+    if (!firm) {
+      res.status(200).json({ ok: true, data: { ...emptyFirm, ...defaults }, fallback: true });
+      return;
+    }
+    const showMasterDocuments = schemaFallback ? true : firm.show_master_documents !== false;
     const bankAccounts = await (async () => {
       try {
         const rows = await (r as any).select().from(firmBankAccountsTable)
@@ -83,48 +119,37 @@ router.get("/firm-settings", requireAuth, requireFirmUser, async (req: AuthReque
       }
     })();
 
-    res.json({
-      id: Number(firm.id),
-      name: String(firm.name ?? ""),
-      slug: String(firm.slug ?? ""),
-      useMasterDocuments: Boolean(showMasterDocuments),
-      showMasterDocuments: Boolean(showMasterDocuments),
-      firmLetterheadEnabled: false,
-      logoUrl: typeof firm.logo_url === "string" ? firm.logo_url : "",
-      address: typeof firm.address === "string" ? firm.address : "",
-      stNumber: typeof firm.st_number === "string" ? firm.st_number : "",
-      tinNumber: typeof firm.tin_number === "string" ? firm.tin_number : "",
-      registrationNo: typeof firm.registration_no === "string" ? firm.registration_no : "",
-      sstNo: typeof firm.sst_no === "string" ? firm.sst_no : "",
-      phone: typeof firm.phone === "string" ? firm.phone : "",
-      email: typeof firm.email === "string" ? firm.email : "",
-      bankAccounts: bankAccounts.map((b: any) => ({
-        id: b.id,
-        bankName: b.bankName,
-        accountNo: b.accountNo,
-        accountType: b.accountType,
-        isDefault: b.isDefault,
-      })),
+    res.status(200).json({
+      ok: true,
+      data: {
+        id: Number(firm.id),
+        name: String(firm.name ?? ""),
+        slug: String(firm.slug ?? ""),
+        useMasterDocuments: Boolean(showMasterDocuments),
+        showMasterDocuments: Boolean(showMasterDocuments),
+        firmLetterheadEnabled: false,
+        logoUrl: typeof firm.logo_url === "string" ? firm.logo_url : "",
+        address: typeof firm.address === "string" ? firm.address : "",
+        stNumber: typeof firm.st_number === "string" ? firm.st_number : "",
+        tinNumber: typeof firm.tin_number === "string" ? firm.tin_number : "",
+        registrationNo: typeof firm.registration_no === "string" ? firm.registration_no : "",
+        sstNo: typeof firm.sst_no === "string" ? firm.sst_no : "",
+        phone: typeof firm.phone === "string" ? firm.phone : "",
+        email: typeof firm.email === "string" ? firm.email : "",
+        bankAccounts: bankAccounts.map((b: any) => ({
+          id: b.id,
+          bankName: b.bankName,
+          accountNo: b.accountNo,
+          accountType: b.accountType,
+          isDefault: b.isDefault,
+        })),
+      },
+      fallback: schemaFallback,
     });
     return;
   } catch (err: any) {
     req.log.error({ err }, "firm_settings.get failed");
-    res.status(200).json({
-      id: firmId,
-      name: "",
-      slug: "",
-      ...defaults,
-      logoUrl: "",
-      address: "",
-      stNumber: "",
-      tinNumber: "",
-      registrationNo: "",
-      sstNo: "",
-      phone: "",
-      email: "",
-      bankAccounts: [],
-      degraded: true,
-    });
+    res.status(200).json({ ok: true, data: { ...emptyFirm, ...defaults }, fallback: true });
     return;
   }
 });
@@ -162,17 +187,10 @@ router.patch("/firm-settings", requireAuth, requireFirmUser, requirePermission("
     const firmId = req.firmId!;
     const { name, logoUrl, address, stNumber, tinNumber, registrationNo, sstNo, phone, email, showMasterDocuments, useMasterDocuments } = req.body;
     const desiredUseMasterDocuments = useMasterDocuments !== undefined ? Boolean(useMasterDocuments) : (showMasterDocuments !== undefined ? Boolean(showMasterDocuments) : undefined);
-    if (desiredUseMasterDocuments !== undefined) {
-      const hasShowMaster = await columnExists(r, { table: "firms", column: "show_master_documents" });
-      if (!hasShowMaster) {
-        res.status(409).json({
-          error: "Database schema is outdated. Please apply latest migrations.",
-          code: "SCHEMA_OUTDATED",
-          missing: ["firms.show_master_documents"],
-        });
-        return;
-      }
-    }
+    const getPgCode = (err: unknown): string | null => {
+      const code = err && typeof err === "object" ? (err as { code?: unknown }).code : undefined;
+      return typeof code === "string" && code ? code : null;
+    };
 
     const updates: Record<string, unknown> = {};
     if (name !== undefined) updates.name = name;
@@ -186,30 +204,68 @@ router.patch("/firm-settings", requireAuth, requireFirmUser, requirePermission("
     if (email !== undefined) updates.email = email;
     if (desiredUseMasterDocuments !== undefined) updates.showMasterDocuments = Boolean(desiredUseMasterDocuments);
 
-    await r.update(firmsTable)
-      .set(updates)
-      .where(eq(firmsTable.id, firmId))
-      .returning({ id: firmsTable.id });
-    const hasShowMaster = await columnExists(r, { table: "firms", column: "show_master_documents" });
-    const firmRows = await queryRows(r, sql`
-      SELECT
-        id,
-        name,
-        slug,
-        logo_url,
-        address,
-        st_number,
-        tin_number,
-        registration_no,
-        sst_no,
-        phone,
-        email
-        ${hasShowMaster ? sql`, show_master_documents` : sql``}
-      FROM firms
-      WHERE id = ${firmId}
-      LIMIT 1
-    `);
-    const firm = firmRows[0] as any;
+    let schemaFallback = false;
+    try {
+      await r.update(firmsTable)
+        .set(updates)
+        .where(eq(firmsTable.id, firmId))
+        .returning({ id: firmsTable.id });
+    } catch (err) {
+      const code = getPgCode(err);
+      if (code === "42703") {
+        schemaFallback = true;
+      } else {
+        throw err;
+      }
+    }
+
+    let firm: any | null = null;
+    try {
+      const firmRows = await queryRows(r, sql`
+        SELECT
+          id,
+          name,
+          slug,
+          logo_url,
+          address,
+          st_number,
+          tin_number,
+          registration_no,
+          sst_no,
+          phone,
+          email,
+          show_master_documents
+        FROM firms
+        WHERE id = ${firmId}
+        LIMIT 1
+      `);
+      firm = (firmRows[0] as any) ?? null;
+    } catch (err) {
+      const code = getPgCode(err);
+      if (code === "42703") {
+        schemaFallback = true;
+        const firmRows = await queryRows(r, sql`
+          SELECT
+            id,
+            name,
+            slug,
+            logo_url,
+            address,
+            st_number,
+            tin_number,
+            registration_no,
+            sst_no,
+            phone,
+            email
+          FROM firms
+          WHERE id = ${firmId}
+          LIMIT 1
+        `);
+        firm = (firmRows[0] as any) ?? null;
+      } else {
+        throw err;
+      }
+    }
     const bankAccounts = await (async () => {
       try {
         const rows = await (r as any).select().from(firmBankAccountsTable)
@@ -220,52 +276,60 @@ router.patch("/firm-settings", requireAuth, requireFirmUser, requirePermission("
       }
     })();
 
-    const showMasterDocumentsResolved = hasShowMaster ? firm?.show_master_documents !== false : true;
-    res.json({
-      id: firmId,
-      name: String(firm?.name ?? ""),
-      slug: String(firm?.slug ?? ""),
-      useMasterDocuments: Boolean(showMasterDocumentsResolved),
-      showMasterDocuments: Boolean(showMasterDocumentsResolved),
-      firmLetterheadEnabled: false,
-      logoUrl: typeof firm?.logo_url === "string" ? firm.logo_url : "",
-      address: typeof firm?.address === "string" ? firm.address : "",
-      stNumber: typeof firm?.st_number === "string" ? firm.st_number : "",
-      tinNumber: typeof firm?.tin_number === "string" ? firm.tin_number : "",
-      registrationNo: typeof firm?.registration_no === "string" ? firm.registration_no : "",
-      sstNo: typeof firm?.sst_no === "string" ? firm.sst_no : "",
-      phone: typeof firm?.phone === "string" ? firm.phone : "",
-      email: typeof firm?.email === "string" ? firm.email : "",
-      bankAccounts: bankAccounts.map((b: any) => ({
-        id: b.id,
-        bankName: b.bankName,
-        accountNo: b.accountNo,
-        accountType: b.accountType,
-        isDefault: b.isDefault,
-      })),
+    const showMasterDocumentsResolved = schemaFallback ? true : (firm?.show_master_documents !== false);
+    res.status(200).json({
+      ok: true,
+      data: {
+        id: firmId,
+        name: String(firm?.name ?? ""),
+        slug: String(firm?.slug ?? ""),
+        useMasterDocuments: Boolean(showMasterDocumentsResolved),
+        showMasterDocuments: Boolean(showMasterDocumentsResolved),
+        firmLetterheadEnabled: false,
+        logoUrl: typeof firm?.logo_url === "string" ? firm.logo_url : "",
+        address: typeof firm?.address === "string" ? firm.address : "",
+        stNumber: typeof firm?.st_number === "string" ? firm.st_number : "",
+        tinNumber: typeof firm?.tin_number === "string" ? firm.tin_number : "",
+        registrationNo: typeof firm?.registration_no === "string" ? firm.registration_no : "",
+        sstNo: typeof firm?.sst_no === "string" ? firm.sst_no : "",
+        phone: typeof firm?.phone === "string" ? firm.phone : "",
+        email: typeof firm?.email === "string" ? firm.email : "",
+        bankAccounts: bankAccounts.map((b: any) => ({
+          id: b.id,
+          bankName: b.bankName,
+          accountNo: b.accountNo,
+          accountType: b.accountType,
+          isDefault: b.isDefault,
+        })),
+      },
+      fallback: schemaFallback,
     });
-    await writeAuditLog({ firmId, actorId: req.userId, actorType: req.userType, action: "settings.update", entityType: "firm", entityId: firmId, detail: `fields=${Object.keys(updates).join(",")}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+    if (!schemaFallback) {
+      await writeAuditLog({ firmId, actorId: req.userId, actorType: req.userType, action: "settings.update", entityType: "firm", entityId: firmId, detail: `fields=${Object.keys(updates).join(",")}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+    }
     return;
   } catch (err: any) {
     req.log.error({ err }, "firm_settings.update failed");
     res.status(200).json({
-      id: req.firmId ?? null,
-      name: "",
-      slug: "",
-      useMasterDocuments: true,
-      showMasterDocuments: true,
-      firmLetterheadEnabled: false,
-      logoUrl: "",
-      address: "",
-      stNumber: "",
-      tinNumber: "",
-      registrationNo: "",
-      sstNo: "",
-      phone: "",
-      email: "",
-      bankAccounts: [],
-      degraded: true,
-      error: "Update failed",
+      ok: true,
+      data: {
+        id: req.firmId ?? null,
+        name: "",
+        slug: "",
+        useMasterDocuments: true,
+        showMasterDocuments: true,
+        firmLetterheadEnabled: false,
+        logoUrl: "",
+        address: "",
+        stNumber: "",
+        tinNumber: "",
+        registrationNo: "",
+        sstNo: "",
+        phone: "",
+        email: "",
+        bankAccounts: [],
+      },
+      fallback: true,
     });
     return;
   }

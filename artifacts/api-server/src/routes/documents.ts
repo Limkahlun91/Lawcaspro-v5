@@ -9627,17 +9627,12 @@ router.post("/documents/automation/generate-job", requireAuth, requireFirmUser, 
 
   const showMasterDocuments = await (async () => {
     try {
-      const has = await columnExistsCached(r, cache, { schema: "public", table: "firms", column: "show_master_documents" });
-      if (!has) return true;
-      const rows = await queryRowsCached(r, cache, `firms.show_master_documents:${req.firmId!}`, sql`
-        SELECT show_master_documents
-        FROM firms
-        WHERE id = ${req.firmId!}
-        LIMIT 1
-      `);
+      const rows = await queryRows(r, sql`SELECT show_master_documents FROM firms WHERE id = ${req.firmId!} LIMIT 1`);
       const v = (rows[0] as any)?.show_master_documents;
       return v !== false;
-    } catch {
+    } catch (err) {
+      const code = err && typeof err === "object" ? (err as any).code : undefined;
+      if (typeof code === "string" && code === "42703") return true;
       return true;
     }
   })();
@@ -9786,35 +9781,162 @@ router.post("/documents/automation/generate-job", requireAuth, requireFirmUser, 
 
   const jobId = randomUUID();
   const jobConfig = { ...parsed.data.config, outputFormat: "pdf", force: effectiveForce, blind, createdRoleId: req.roleId ?? null, templates: templateRefs };
-  await queryRows(r, sql`
-    INSERT INTO document_generation_jobs (
-      id, firm_id, job_type, status, action, case_ids, template_ids, platform_document_ids, config,
-      total_count, success_count, failed_count, pending_count,
-      created_by, created_at, last_heartbeat_at, timeout_at, runner_attempts
-    ) VALUES (
-      ${jobId}::uuid, ${req.firmId!}, 'document_automation', 'pending', ${parsed.data.config.action},
-      ${caseIds as any}, ${firmTemplateIds as any}, ${masterDocIds as any}, ${jobConfig as any},
-      ${caseIds.length * templateRefs.length}, 0, 0, ${caseIds.length * templateRefs.length},
-      ${req.userId as any}, now(), now(), now() + interval '10 minutes', 0
-    )
-  `);
-  const itemValues: Array<ReturnType<typeof sql>> = [];
-  for (const caseId of caseIds) {
-    for (const ref of templateRefs) {
-      itemValues.push(sql`(${jobId}::uuid, ${req.firmId!}, ${caseId}, ${ref.source}, ${ref.source === "firm" ? ref.id : null}, ${ref.source === "master" ? ref.id : null}, 'pending')`);
+  try {
+    await queryRows(r, sql`
+      INSERT INTO document_generation_jobs (
+        id, firm_id, job_type, status, action, case_ids, template_ids, platform_document_ids, config,
+        total_count, success_count, failed_count, pending_count,
+        created_by, created_at, last_heartbeat_at, timeout_at, runner_attempts
+      ) VALUES (
+        ${jobId}::uuid, ${req.firmId!}, 'document_automation', 'pending', ${parsed.data.config.action},
+        ${caseIds as any}, ${firmTemplateIds as any}, ${masterDocIds as any}, ${jobConfig as any},
+        ${caseIds.length * templateRefs.length}, 0, 0, ${caseIds.length * templateRefs.length},
+        ${req.userId as any}, now(), now(), now() + interval '10 minutes', 0
+      )
+    `);
+    const itemValues: Array<ReturnType<typeof sql>> = [];
+    for (const caseId of caseIds) {
+      for (const ref of templateRefs) {
+        itemValues.push(sql`(${jobId}::uuid, ${req.firmId!}, ${caseId}, ${ref.source}, ${ref.source === "firm" ? ref.id : null}, ${ref.source === "master" ? ref.id : null}, 'pending')`);
+      }
     }
-  }
-  await queryRows(r, sql`
-    INSERT INTO document_generation_job_items (job_id, firm_id, case_id, template_source, template_id, platform_document_id, status)
-    VALUES ${sql.join(itemValues, sql`, `)}
-  `);
+    await queryRows(r, sql`
+      INSERT INTO document_generation_job_items (job_id, firm_id, case_id, template_source, template_id, platform_document_id, status)
+      VALUES ${sql.join(itemValues, sql`, `)}
+    `);
 
-  res.status(202).json({
-    ok: true,
-    jobId,
-    status: "queued",
-    meta: { request_id: requestId ?? null, timestamp: new Date().toISOString(), duration_ms: Date.now() - startedAt },
-  });
+    res.status(200).json({
+      ok: true,
+      jobId,
+      status: "queued",
+      meta: { request_id: requestId ?? null, timestamp: new Date().toISOString(), duration_ms: Date.now() - startedAt },
+    });
+    return;
+  } catch (enqueueErr) {
+    const code = getPgCode(enqueueErr);
+    const enqueueUnavailable = code === "42P01" || code === "42703" || code === "42501";
+    if (!enqueueUnavailable) throw enqueueErr;
+
+    const total = caseIds.length * templateRefs.length;
+    if (total > 8) {
+      res.status(200).json({
+        ok: true,
+        status: "pending",
+        fallback: true,
+        message: "Generation queue unavailable. Please reduce selection size.",
+        meta: { request_id: requestId ?? null, timestamp: new Date().toISOString(), duration_ms: Date.now() - startedAt },
+      });
+      return;
+    }
+
+    const runEntries: Array<{ zipPath: string; bytes: Buffer; caseDocumentId: number; caseId: number }> = [];
+    for (const caseId of caseIds) {
+      for (const ref of templateRefs) {
+        const runId = await createGenerationRun(r, {
+          firm_id: req.firmId!,
+          case_id: caseId,
+          template_source: ref.source,
+          template_id: ref.source === "firm" ? ref.id : null,
+          template_version_id: null,
+          platform_document_id: ref.source === "master" ? ref.id : null,
+          document_name: null,
+          render_mode: "pdf",
+          status: "pending",
+          request_config: jobConfig,
+          started_at: new Date(),
+          rendered_variables_snapshot: null,
+          checklist_snapshot: null,
+          readiness_snapshot: null,
+          triggered_by: req.userId,
+          error_code: null,
+          error_message: null,
+        });
+        try {
+          const out = ref.source === "master"
+            ? await generateMasterDocument({
+                r,
+                firmId: req.firmId!,
+                actorId: req.userId!,
+                actorType: req.userType,
+                ipAddress: req.ip,
+                userAgent: req.headers["user-agent"],
+                caseId,
+                masterDocId: ref.id,
+                documentName: undefined,
+                letterheadId: null,
+                runId,
+                bypassApplicability: true,
+                clauses: undefined,
+                overrides: null,
+                outputFormat: "pdf",
+              })
+            : await generateFirmDocument({
+                r,
+                firmId: req.firmId!,
+                actorId: req.userId!,
+                actorType: req.userType,
+                ipAddress: req.ip,
+                userAgent: req.headers["user-agent"],
+                caseId,
+                templateId: ref.id,
+                documentName: undefined,
+                letterheadId: null,
+                runId,
+                bypassApplicability: true,
+                force: true,
+                blind: true,
+                clauses: undefined,
+                overrides: null,
+                outputFormat: "pdf",
+              });
+          const docId = out.caseDocumentId ?? null;
+          if (!docId) throw new Error("Missing caseDocumentId");
+          await finishGenerationRunSuccess(r, req.firmId!, runId, docId, out.renderedVars, out.checklistSnapshot, out.readinessSnapshot);
+          const bytes = out.outputBytes;
+          if (!Buffer.isBuffer(bytes) || bytes.length === 0) throw new Error("Missing output bytes");
+          const fileName = typeof (out.caseDocument as any)?.file_name === "string" ? String((out.caseDocument as any).file_name) : `case-${caseId}-document.pdf`;
+          runEntries.push({ zipPath: fileName.endsWith(".pdf") ? fileName : `${fileName}.pdf`, bytes, caseDocumentId: docId, caseId });
+        } catch (genErr) {
+          const msg = genErr instanceof Error ? genErr.message : String(genErr);
+          await finishGenerationRunFailed(r, req.firmId!, runId, "INLINE_GENERATION_FAILED", msg);
+          throw genErr;
+        }
+      }
+    }
+
+    if (runEntries.length === 1) {
+      const e = runEntries[0]!;
+      res.status(200).json({
+        ok: true,
+        status: "completed",
+        fallback: true,
+        downloadUrl: `/cases/${e.caseId}/documents/${e.caseDocumentId}/download`,
+      });
+      return;
+    }
+
+    const anchorCaseId = runEntries[0]!.caseId;
+    const zipBytes = await buildZipBufferFromBuffers(runEntries.map((e) => ({ zipPath: e.zipPath, bytes: e.bytes })));
+    const objectPath = `/objects/temp-generated/${req.firmId!}/case-${anchorCaseId}/automation-inline/${jobId}.zip`;
+    await supabaseStorage.uploadPrivateObject({ objectPath, fileBytes: zipBytes, contentType: "application/zip" });
+    const desiredFileName = `generated-documents-${anchorCaseId}.zip`;
+    const uniq = await ensureUniqueCaseDocumentFileName({ r, firmId: req.firmId!, caseId: anchorCaseId, desiredFileName });
+    const rows = await queryRows(r, sql`
+      INSERT INTO case_documents (case_id, firm_id, name, document_type, status, object_path, file_name, file_size, is_uploaded, generated_by, generated_at)
+      VALUES (${anchorCaseId}, ${req.firmId!}, 'Generated Documents (ZIP)', 'other', 'generated', ${objectPath}, ${uniq.fileName}, ${zipBytes.length}, false, ${req.userId!}, now())
+      RETURNING id
+    `);
+    const zipDocId = typeof rows[0]?.id === "number" ? Number(rows[0].id) : null;
+    if (!zipDocId) throw new Error("Failed to create ZIP case document");
+
+    res.status(200).json({
+      ok: true,
+      status: "completed",
+      fallback: true,
+      downloadUrl: `/cases/${anchorCaseId}/documents/${zipDocId}/download`,
+    });
+    return;
+  }
   } catch (err) {
     if (isSchemaError(err)) {
       fail(409, "SCHEMA_OUTDATED", "Database schema is outdated. Please apply latest migrations.", { code: getPgCode(err), message: err instanceof Error ? err.message : String(err) }, false);

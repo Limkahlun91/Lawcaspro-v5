@@ -110,7 +110,10 @@ export default function InvoiceDetail() {
 
   const firmQuery = useQuery<FirmSettings>({
     queryKey: ["firm-settings"],
-    queryFn: () => apiFetchJson<FirmSettings>("/firm-settings"),
+    queryFn: async ({ signal }) => {
+      const res = await apiFetchJson<any>("/firm-settings", { signal, timeoutMs: 8000 });
+      return res && typeof res === "object" && "data" in res ? (res as any).data : res;
+    },
     retry: false,
   });
   const firm = firmQuery.data;

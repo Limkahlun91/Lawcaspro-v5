@@ -196,17 +196,22 @@ describe("Users + Hub regressions", () => {
     expect(res.body).toHaveProperty("roleName");
   });
 
-  it("GET /api/hub/documents returns 200 + [] on empty data", async () => {
+  it("GET /api/hub/documents returns 200 + empty envelope on empty data", async () => {
     mode = "ok";
     const res = await request(app).get("/api/hub/documents");
     expect(res.status).toBe(200);
-    expect(Array.isArray(res.body)).toBe(true);
-    expect(res.body.length).toBe(0);
+    expect(res.body).toHaveProperty("ok", true);
+    expect(Array.isArray(res.body.documents)).toBe(true);
+    expect(Array.isArray(res.body.folders)).toBe(true);
+    expect(res.body.documents.length).toBe(0);
   });
 
-  it("GET /api/hub/documents returns 503 when tenant context is missing (no 500)", async () => {
+  it("GET /api/hub/documents returns 200 + empty envelope when tenant context is missing", async () => {
     mode = "missing_rls";
     const res = await request(app).get("/api/hub/documents");
-    expect(res.status).toBe(503);
+    expect(res.status).toBe(200);
+    expect(res.body).toHaveProperty("ok", true);
+    expect(Array.isArray(res.body.documents)).toBe(true);
+    expect(Array.isArray(res.body.folders)).toBe(true);
   });
 });

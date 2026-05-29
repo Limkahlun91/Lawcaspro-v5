@@ -11,7 +11,7 @@ import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "@/componen
 import { cn } from "@/lib/utils";
 import { apiFetchJson } from "@/lib/api-client";
 import { createGenerationJob, downloadGenerationJob, runNextGenerationJob, type NormalizedGenerationJob } from "@/lib/document-generation-client";
-import { downloadBlob } from "@/lib/download";
+import { downloadBlob, downloadFromApi } from "@/lib/download";
 import { toastError } from "@/lib/toast-error";
 import { useToast } from "@/hooks/use-toast";
 import { ChevronRight, FileText, Printer } from "lucide-react";
@@ -120,25 +120,28 @@ export default function DocumentAutomationHub() {
 
   const casesQuery = useQuery<AutomationCasesResponse>({
     queryKey: ["document-automation", "cases", caseSearch],
-    queryFn: () => apiFetchJson(`/documents/automation/cases?search=${encodeURIComponent(caseSearch)}&page=1&limit=80`),
+    queryFn: ({ signal }) => apiFetchJson(`/documents/automation/cases?search=${encodeURIComponent(caseSearch)}&page=1&limit=80`, { signal, timeoutMs: 8000 }),
     retry: false,
   });
 
   const foldersQuery = useQuery<FirmFolder[]>({
     queryKey: ["document-automation", "folders"],
-    queryFn: () => apiFetchJson("/firm-document-folders"),
+    queryFn: ({ signal }) => apiFetchJson("/firm-document-folders", { signal, timeoutMs: 8000 }),
     retry: false,
   });
 
   const templatesQuery = useQuery<FirmDocumentTemplate[]>({
     queryKey: ["document-automation", "templates"],
-    queryFn: () => apiFetchJson("/document-templates?templateCapable=true&kind=template"),
+    queryFn: ({ signal }) => apiFetchJson("/document-templates?templateCapable=true&kind=template", { signal, timeoutMs: 8000 }),
     retry: false,
   });
 
   const firmSettingsQuery = useQuery<{ showMasterDocuments?: boolean; useMasterDocuments?: boolean }>({
     queryKey: ["firm-settings", "document-automation"],
-    queryFn: () => apiFetchJson("/firm-settings"),
+    queryFn: async ({ signal }) => {
+      const res = await apiFetchJson<any>("/firm-settings", { signal, timeoutMs: 8000 });
+      return res && typeof res === "object" && "data" in res ? (res as any).data : res;
+    },
     retry: false,
   });
   const showMasterDocuments = (firmSettingsQuery.data?.showMasterDocuments ?? firmSettingsQuery.data?.useMasterDocuments) !== false;
@@ -147,13 +150,17 @@ export default function DocumentAutomationHub() {
   type SystemDoc = { id: number; name: string; fileName: string; folderId: number | null };
   const masterFoldersQuery = useQuery<SystemFolder[]>({
     queryKey: ["hub-folders", "document-automation"],
-    queryFn: () => apiFetchJson<SystemFolder[]>("/hub/folders"),
+    queryFn: ({ signal }) => apiFetchJson<SystemFolder[]>("/hub/folders", { signal, timeoutMs: 8000 }),
     enabled: showMasterDocuments,
     retry: false,
   });
   const masterDocsQuery = useQuery<SystemDoc[]>({
     queryKey: ["hub-documents", "document-automation"],
-    queryFn: () => apiFetchJson<SystemDoc[]>("/hub/documents"),
+    queryFn: async ({ signal }) => {
+      const res = await apiFetchJson<any>("/hub/documents", { signal, timeoutMs: 8000 });
+      if (Array.isArray(res)) return res as SystemDoc[];
+      return Array.isArray(res?.documents) ? (res.documents as SystemDoc[]) : [];
+    },
     enabled: showMasterDocuments,
     retry: false,
   });
@@ -654,7 +661,20 @@ export default function DocumentAutomationHub() {
       };
 
       const created = await createGenerationJob(payload as any);
-      if (!created.jobId) throw new Error("Missing jobId");
+      if (created.downloadUrl && !created.jobId) {
+        const name = selectedCaseIds.length * (selectedTemplateIds.length + selectedMasterDocIds.length) > 1 ? "documents.zip" : "document.pdf";
+        await downloadFromApi(created.downloadUrl, name);
+        startedJob = true;
+        toast({ title: "Download started" });
+        setBusy(false);
+        return;
+      }
+      if (!created.jobId) {
+        toast({ title: "Generation started", description: created.message ?? "Generation is still processing. Please check Doc Gen Logs." });
+        startedJob = true;
+        setBusy(false);
+        return;
+      }
       setJobId(created.jobId);
       startedJob = true;
       toast({ title: "Generation started", description: "Processing in background. This page will auto-download when ready." });

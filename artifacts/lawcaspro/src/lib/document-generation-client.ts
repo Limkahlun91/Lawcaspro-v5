@@ -67,7 +67,7 @@ export type CreateGenerationJobPayload = {
   force?: boolean;
 };
 
-export async function createGenerationJob(payload: CreateGenerationJobPayload): Promise<{ jobId: string; statusUrl?: string; downloadUrl?: string }> {
+export async function createGenerationJob(payload: CreateGenerationJobPayload): Promise<{ jobId?: string; statusUrl?: string; downloadUrl?: string; status?: string; fallback?: boolean; message?: string }> {
   const qs = new URLSearchParams();
   if (payload.blind) qs.set("blind", "true");
   if (payload.force) qs.set("force", "true");
@@ -77,12 +77,19 @@ export async function createGenerationJob(payload: CreateGenerationJobPayload): 
     body: JSON.stringify({ caseIds: payload.caseIds, templateIds: payload.templateIds, templates: payload.templates, config: payload.config }),
   });
   const r = asRecord(res) ?? {};
-  const jobId = asString(r.jobId ?? r.job_id) ?? "";
-  if (!jobId) throw new Error("jobId is missing");
+  const jobId = asString(r.jobId ?? r.job_id) ?? undefined;
+  const downloadUrl = asString(r.downloadUrl ?? r.download_url) ?? undefined;
+  const status = asString(r.status) ?? undefined;
+  const fallback = typeof r.fallback === "boolean" ? r.fallback : undefined;
+  const message = asString(r.message) ?? undefined;
+  if (!jobId && !downloadUrl) throw new Error("jobId/downloadUrl is missing");
   return {
-    jobId,
+    ...(jobId ? { jobId } : {}),
     statusUrl: asString(r.statusUrl ?? r.status_url) ?? undefined,
-    downloadUrl: asString(r.downloadUrl ?? r.download_url) ?? undefined,
+    downloadUrl,
+    status,
+    fallback,
+    message,
   };
 }
 

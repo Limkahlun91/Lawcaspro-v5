@@ -217,7 +217,7 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
 
   const documentsQuery = useQuery<CaseDocument[]>({
     queryKey: ["case-documents", caseId],
-    queryFn: () => apiFetchJson(`/cases/${caseId}/documents`),
+    queryFn: ({ signal }) => apiFetchJson(`/cases/${caseId}/documents`, { signal, timeoutMs: 8000 }),
     retry: false,
   });
   const documents = documentsQuery.data ?? [];
@@ -239,7 +239,10 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
 
   const firmSettingsQuery = useQuery<{ showMasterDocuments?: boolean; useMasterDocuments?: boolean }>({
     queryKey: ["firm-settings", "case-documents", caseId],
-    queryFn: () => apiFetchJson("/firm-settings"),
+    queryFn: async ({ signal }) => {
+      const res = await apiFetchJson<any>("/firm-settings", { signal, timeoutMs: 8000 });
+      return res && typeof res === "object" && "data" in res ? (res as any).data : res;
+    },
     enabled: generateDialogOpen,
     retry: false,
   });
@@ -249,13 +252,17 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
   type SystemDoc = { id: number; name: string; fileName: string; folderId: number | null };
   const masterFoldersQuery = useQuery<SystemFolder[]>({
     queryKey: ["hub-folders", "case-documents", caseId],
-    queryFn: () => apiFetchJson<SystemFolder[]>("/hub/folders"),
+    queryFn: ({ signal }) => apiFetchJson<SystemFolder[]>("/hub/folders", { signal, timeoutMs: 8000 }),
     enabled: generateDialogOpen && showMasterDocuments,
     retry: false,
   });
   const masterDocsQuery = useQuery<SystemDoc[]>({
     queryKey: ["hub-documents", "case-documents", caseId],
-    queryFn: () => apiFetchJson<SystemDoc[]>("/hub/documents"),
+    queryFn: async ({ signal }) => {
+      const res = await apiFetchJson<any>("/hub/documents", { signal, timeoutMs: 8000 });
+      if (Array.isArray(res)) return res as SystemDoc[];
+      return Array.isArray(res?.documents) ? (res.documents as SystemDoc[]) : [];
+    },
     enabled: generateDialogOpen && showMasterDocuments,
     retry: false,
   });
@@ -495,6 +502,16 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
         config: { action: "download" },
         blind: true,
       });
+      if (created.downloadUrl && !created.jobId) {
+        await qc.invalidateQueries({ queryKey: ["case-documents", caseId] });
+        await downloadFromApi(created.downloadUrl, "document.pdf");
+        toast({ title: "Download started" });
+        return;
+      }
+      if (!created.jobId) {
+        toast({ title: "Generation started", description: created.message ?? "Generation is still processing. Please check Doc Gen Logs." });
+        return;
+      }
       const jobId = created.jobId;
 
       const pollOnce = async (): Promise<boolean> => {
@@ -614,6 +631,16 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
         config: { action: "download" },
         blind: true,
       });
+      if (created.downloadUrl && !created.jobId) {
+        await qc.invalidateQueries({ queryKey: ["case-documents", caseId] });
+        await downloadFromApi(created.downloadUrl, "documents.zip");
+        toast({ title: "Downloaded" });
+        return;
+      }
+      if (!created.jobId) {
+        toast({ title: "Generation started", description: created.message ?? "Generation is still processing. Please check Doc Gen Logs." });
+        return;
+      }
       const jobId = created.jobId;
 
       const pollOnce = async (): Promise<boolean> => {
@@ -1092,9 +1119,12 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
       </div>
     );
   }
-  if ((viewTab === "checklist" || generateDialogOpen) && !checklistQuery.isLoading && !checklistQuery.isError && !caseData) {
-    console.error("!!! FRONTEND_DEBUG: Case Data is null/undefined");
-    return <div className="p-4">資料載入中或缺失...</div>;
+  if (viewTab === "checklist" && !checklistQuery.isLoading && !checklistQuery.isError && !caseData) {
+    return (
+      <div className="p-4">
+        <QueryFallback title="Checklist unavailable" error={new Error("Case data missing")} onRetry={() => checklistQuery.refetch()} isRetrying={checklistQuery.isFetching} />
+      </div>
+    );
   }
 
   return (
@@ -1858,6 +1888,17 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
                         config: { action: "download" },
                         blind: true,
                       });
+                      if (created.downloadUrl && !created.jobId) {
+                        await qc.invalidateQueries({ queryKey: ["case-documents", caseId] });
+                        const name = templates.length > 1 ? "documents.zip" : "document.pdf";
+                        await downloadFromApi(created.downloadUrl, name);
+                        toast({ title: "Download started" });
+                        return;
+                      }
+                      if (!created.jobId) {
+                        toast({ title: "Generation started", description: created.message ?? "Generation is still processing. Please check Doc Gen Logs." });
+                        return;
+                      }
                       const jobId = created.jobId;
 
                       const pollOnce = async (): Promise<boolean> => {

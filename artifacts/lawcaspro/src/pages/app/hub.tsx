@@ -117,7 +117,11 @@ export default function HubPage() {
 
   const docsQuery = useQuery<SystemDoc[]>({
     queryKey: ["hub-documents"],
-    queryFn: () => apiFetchJson("/hub/documents"),
+    queryFn: async ({ signal }) => {
+      const res = await apiFetchJson<any>("/hub/documents", { signal, timeoutMs: 8000 });
+      if (Array.isArray(res)) return res as SystemDoc[];
+      return Array.isArray(res?.documents) ? (res.documents as SystemDoc[]) : [];
+    },
     enabled: activeTab === "documents",
     retry: false,
   });

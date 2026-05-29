@@ -406,17 +406,18 @@ router.get("/dashboard", requireAuth, requireFirmUser, requirePermission("dashbo
     const [summaryOut, statsOut] = await Promise.all([summaryPromise, statsPromise]);
     const summaryData = summaryOut.ok === true ? summaryOut.data : { totalCases: 0, totalClients: 0, totalProjects: 0, totalDevelopers: 0 };
 
-    const stats = statsOut.ok === true ? statsOut.stats : null;
-    const degraded = statsOut.ok === false || Boolean((stats as any)?.degraded) || Boolean((stats as any)?.ok === false);
+    const statsSkipped = statsOut.ok === false && statsOut.error === "SKIPPED";
+    const stats = statsOut.ok === true ? statsOut.stats : (statsSkipped ? {} : null);
+    const degraded = (!statsSkipped && statsOut.ok === false) || Boolean((stats as any)?.degraded) || Boolean((stats as any)?.ok === false);
     const warnings = [
       ...(Array.isArray((stats as any)?.warnings) ? ((stats as any).warnings as any[]) : []),
       ...(summaryOut.ok === true
         ? (summaryOut.errors ?? []).map((e) => ({ module: e.section, code: e.code, message: e.message }))
         : [{ module: "summary", code: null, message: (summaryOut as SummaryErr).error }]),
-      ...(statsOut.ok === false ? [{ module: "dashboard", code: "TIMEOUT", message: statsOut.error }] : []),
+      ...(!statsSkipped && statsOut.ok === false ? [{ module: "dashboard", code: "TIMEOUT", message: statsOut.error }] : []),
     ];
     const unavailableFields: string[] = Array.isArray((stats as any)?.unavailableFields) ? ((stats as any).unavailableFields as string[]) : [];
-    if (statsOut.ok === false) {
+    if (!statsSkipped && statsOut.ok === false) {
       for (const f of [
         "milestoneCards",
         "milestoneSections",

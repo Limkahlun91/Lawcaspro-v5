@@ -1,6 +1,7 @@
 import express, { type Response, type Router as ExpressRouter } from "express";
 import { eq, or, desc, isNull, and, inArray } from "drizzle-orm";
 import {
+  db,
   usersTable,
   systemFoldersTable,
   platformMessagesTable,
@@ -50,14 +51,16 @@ const expressRouter = express.Router();
 const router = expressRouter as unknown as RouterInternalLike;
 const supabaseStorage = new SupabaseStorageService();
 
-async function queryRows(r: NonNullable<AuthRequest["rlsDb"]>, query: ReturnType<typeof sql>): Promise<Record<string, unknown>[]> {
-  const result = await r.execute(query);
+type DbConn = typeof db | NonNullable<AuthRequest["rlsDb"]>;
+
+async function queryRows(r: DbConn, query: ReturnType<typeof sql>): Promise<Record<string, unknown>[]> {
+  const result = await (r as any).execute(query);
   if (Array.isArray(result)) return result as Record<string, unknown>[];
   if ("rows" in result) return (result as { rows: Record<string, unknown>[] }).rows;
   return [];
 }
 
-async function columnExists(r: NonNullable<AuthRequest["rlsDb"]>, args: { table: string; column: string }): Promise<boolean> {
+async function columnExists(r: DbConn, args: { table: string; column: string }): Promise<boolean> {
   const rows = await queryRows(r, sql`
     SELECT 1
     FROM information_schema.columns
@@ -69,10 +72,8 @@ async function columnExists(r: NonNullable<AuthRequest["rlsDb"]>, args: { table:
   return rows.length > 0;
 }
 
-async function safeGetShowMasterDocuments(r: NonNullable<AuthRequest["rlsDb"]>, firmId: number): Promise<boolean> {
+async function safeGetShowMasterDocuments(r: DbConn, firmId: number): Promise<boolean> {
   try {
-    const has = await columnExists(r, { table: "firms", column: "show_master_documents" });
-    if (!has) return true;
     const rows = await queryRows(r, sql`SELECT show_master_documents FROM firms WHERE id = ${firmId} LIMIT 1`);
     const v = (rows[0] as any)?.show_master_documents;
     return v !== false;
@@ -268,8 +269,8 @@ router.get("/hub/messages/:msgId/attachments/:attachmentId/download", requireAut
 // ─── System Folders (visible to firm, read-only) ────────────────────────────
 
 router.get("/hub/folders", requireAuth, requireFirmUser, requirePermission("documents", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
-  const r = getRlsDb(req, res);
-  if (!r) return;
+  const r = req.rlsDb ?? db;
+  if (!req.rlsDb) req.log.warn({ firmId: req.firmId, userId: req.userId }, "hub.folders rls fallback");
   const folders = await r
     .select()
     .from(systemFoldersTable)
@@ -282,36 +283,55 @@ router.get("/hub/folders", requireAuth, requireFirmUser, requirePermission("docu
 
 router.get("/hub/documents", requireAuth, requireFirmUser, requirePermission("documents", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
   const startedAt = Date.now();
-  const r = getRlsDb(req, res);
-  if (!r) return;
+  const r = req.rlsDb ?? db;
+  if (!req.rlsDb) req.log.warn({ firmId: req.firmId, userId: req.userId }, "hub.documents rls fallback");
   const firmId = req.firmId!;
   const folderIdStr = one((req.query as Record<string, unknown>).folderId);
   const folderId = folderIdStr ? parseInt(folderIdStr, 10) : undefined;
 
   try {
-    const disabledFolders = await r
-      .select({ id: systemFoldersTable.id })
-      .from(systemFoldersTable)
-      .where(eq(systemFoldersTable.isDisabled, true));
-    const disabledIds = disabledFolders.map(f => f.id);
-
     const showMasterDocuments = await safeGetShowMasterDocuments(r, firmId);
 
-    const allDocs = await r
-      .select()
-      .from(platformDocumentsTable)
-      .where(showMasterDocuments ? or(isNull(platformDocumentsTable.firmId), eq(platformDocumentsTable.firmId, firmId)) : eq(platformDocumentsTable.firmId, firmId))
-      .orderBy(desc(platformDocumentsTable.createdAt));
-
-    const unique = allDocs.filter((d, i, arr) => arr.findIndex((x) => x.id === d.id) === i);
-
-    let filtered = unique.filter(d => !d.folderId || !disabledIds.includes(d.folderId));
-
-    if (folderId !== undefined) {
-      filtered = filtered.filter(d => d.folderId === folderId);
+    const folders = await (async () => {
+      try {
+        const rows = await r
+          .select()
+          .from(systemFoldersTable)
+          .where(eq(systemFoldersTable.isDisabled, false))
+          .orderBy(systemFoldersTable.sortOrder, systemFoldersTable.name);
+        return rows;
+      } catch {
+        return [];
+      }
+    })();
+    const disabledIds = new Set<number>();
+    for (const f of folders) {
+      if ((f as any).isDisabled) disabledIds.add((f as any).id);
     }
 
-    res.json(filtered);
+    const documents = await (async () => {
+      try {
+        const allDocs = await r
+          .select()
+          .from(platformDocumentsTable)
+          .where(showMasterDocuments ? or(isNull(platformDocumentsTable.firmId), eq(platformDocumentsTable.firmId, firmId)) : eq(platformDocumentsTable.firmId, firmId))
+          .orderBy(desc(platformDocumentsTable.createdAt));
+        const unique = allDocs.filter((d, i, arr) => arr.findIndex((x) => x.id === d.id) === i);
+        let filtered = unique.filter(d => !d.folderId || !disabledIds.has(d.folderId));
+        if (folderId !== undefined) filtered = filtered.filter(d => d.folderId === folderId);
+        return filtered;
+      } catch (err) {
+        req.log.error({ err, firmId, userId: req.userId }, "hub.documents.query_failed");
+        return [];
+      }
+    })();
+
+    res.status(200).json({
+      ok: true,
+      documents,
+      folders,
+      message: documents.length === 0 ? "No documents available" : undefined,
+    });
   } catch (err) {
     const sqlState = (() => {
       if (!err || typeof err !== "object") return undefined;
@@ -331,7 +351,7 @@ router.get("/hub/documents", requireAuth, requireFirmUser, requirePermission("do
       },
       "hub.documents_failed",
     );
-    res.status(200).json([]);
+    res.status(200).json({ ok: true, documents: [], folders: [], message: "No documents available" });
   }
 });
 

@@ -212,7 +212,7 @@ function MasterDocumentsTab() {
 
   const foldersQuery = useQuery<SystemFolder[]>({
     queryKey: ["hub-folders"],
-    queryFn: ({ signal }) => apiFetchJson("/hub/folders", { signal }),
+    queryFn: ({ signal }) => apiFetchJson("/hub/folders", { signal, timeoutMs: 8000 }),
   });
 
   const docsQuery = useQuery<SystemDoc[]>({
@@ -221,7 +221,9 @@ function MasterDocumentsTab() {
       const url = selectedFolderId !== null
         ? `/hub/documents?folderId=${selectedFolderId}`
         : "/hub/documents";
-      return await apiFetchJson(url, { signal });
+      const res = await apiFetchJson<any>(url, { signal, timeoutMs: 8000 });
+      if (Array.isArray(res)) return res as SystemDoc[];
+      return Array.isArray(res?.documents) ? (res.documents as SystemDoc[]) : [];
     },
   });
 
@@ -384,7 +386,10 @@ export default function DocumentsPage() {
   const tabFromUrl = params.get("tab");
   const firmSettingsQuery = useQuery<FirmSettings>({
     queryKey: ["firm-settings", "documents-tab"],
-    queryFn: () => apiFetchJson("/firm-settings"),
+    queryFn: async ({ signal }) => {
+      const res = await apiFetchJson<any>("/firm-settings", { signal, timeoutMs: 8000 });
+      return res && typeof res === "object" && "data" in res ? (res as any).data : res;
+    },
     retry: false,
   });
 

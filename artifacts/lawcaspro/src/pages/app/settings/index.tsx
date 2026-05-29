@@ -431,7 +431,10 @@ function FirmInfoTab() {
 
   const { data: settings, isLoading } = useQuery<FirmSettings>({
     queryKey: ["firm-settings"],
-    queryFn: ({ signal }) => apiFetch<FirmSettings>("/firm-settings", { signal }),
+    queryFn: async ({ signal }) => {
+      const res = await apiFetchJson<any>("/firm-settings", { signal, timeoutMs: 8000 });
+      return res && typeof res === "object" && "data" in res ? (res as any).data : res;
+    },
   });
 
   const [name, setName] = useState("");
@@ -607,7 +610,8 @@ function FirmInfoTab() {
       const formData = new FormData();
       formData.append("file", selectedLogoFile);
       const result = await apiFetchJson<{ objectPath: string }>(`/storage/upload?objectPath=${encodeURIComponent(objectPath)}`, { method: "POST", body: formData });
-      const updated = await apiFetchJson<FirmSettings>("/firm-settings", { method: "PATCH", body: JSON.stringify({ logoUrl: result.objectPath }) });
+      const raw = await apiFetchJson<any>("/firm-settings", { method: "PATCH", body: JSON.stringify({ logoUrl: result.objectPath }) });
+      const updated = raw && typeof raw === "object" && "data" in raw ? (raw as any).data : raw;
       const actual = typeof (updated as any)?.logoUrl === "string" ? String((updated as any).logoUrl) : "";
       if (actual !== result.objectPath) {
         throw new Error(`Logo saved path mismatch: expected ${result.objectPath} actual ${actual || "(empty)"}`);
