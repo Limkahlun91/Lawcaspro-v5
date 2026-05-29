@@ -384,8 +384,9 @@ router.get("/dashboard", requireAuth, requireFirmUser, requirePermission("dashbo
 
     const includeStats = (() => {
       const raw = one((req.query as unknown as Record<string, unknown>)?.includeStats as string | string[] | undefined);
-      if (!raw) return false;
+      if (!raw) return true;
       const v = raw.trim().toLowerCase();
+      if (v === "0" || v === "false" || v === "no") return false;
       return v === "1" || v === "true" || v === "yes";
     })();
     const statsTimeoutMs = includeStats ? 4200 : 1;
@@ -422,8 +423,6 @@ router.get("/dashboard", requireAuth, requireFirmUser, requirePermission("dashbo
         "milestoneCards",
         "milestoneSections",
         "recentCases",
-        "billing",
-        "outstandingAdvances",
         "commsThisMonth",
         "completionSlaOverdue",
         "cashCases",
@@ -456,8 +455,6 @@ router.get("/dashboard", requireAuth, requireFirmUser, requirePermission("dashbo
         masterTitleCases: (stats as any)?.masterTitleCases ?? 0,
         individualTitleCases: (stats as any)?.individualTitleCases ?? 0,
         strataTitleCases: (stats as any)?.strataTitleCases ?? 0,
-        billing: (stats as any)?.billing ?? { totalBilled: 0, totalPaid: 0, totalOutstanding: 0 },
-        outstandingAdvances: (stats as any)?.outstandingAdvances ?? [],
         commsThisMonth: (stats as any)?.commsThisMonth ?? 0,
         completionSlaOverdue: (stats as any)?.completionSlaOverdue ?? [],
         milestoneSections: Array.isArray((stats as any)?.milestoneSections) ? (stats as any).milestoneSections : [],

@@ -93,9 +93,9 @@ export async function computeDashboardStats(
 
   const hasKeyDates = await safeTableExists(r, "public.case_key_dates");
   const hasWorkflowSteps = await safeTableExists(r, "public.case_workflow_steps");
-  const hasBillingEntries = await safeTableExists(r, "public.case_billing_entries");
   const hasCommunications = await safeTableExists(r, "public.case_communications");
-  const hasCaseLedgers = await safeTableExists(r, "public.case_ledgers");
+  const hasBillingEntries = false;
+  const hasCaseLedgers = false;
 
   const assignedToUserId = opts?.assignedToUserId;
   const assignedFilter = assignedToUserId ? { assignedToUserId: String(assignedToUserId) } : {};

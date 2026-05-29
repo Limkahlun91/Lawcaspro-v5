@@ -1,16 +1,11 @@
 import { useQuery } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Briefcase, Users, Building2, HardHat, DollarSign, TrendingUp, MessageSquare, ArrowRight } from "lucide-react";
+import { Briefcase, Users, Building2, HardHat, MessageSquare, ArrowRight } from "lucide-react";
 import { useLocation } from "wouter";
 import { apiFetchJson } from "@/lib/api-client";
 import { QueryFallback } from "@/components/query-fallback";
 import { useAuth } from "@/lib/auth-context";
-import { hasPermission, isAccountingRoleAllowed } from "@/lib/permissions";
 import { MilestonesTable } from "@/components/milestones-table";
-
-function fmt(val: unknown) {
-  return `RM ${Number(val ?? 0).toLocaleString("en-MY", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-}
 
 const STATUS_SHORT: Record<string, string> = {
   "File Opened / SPA Pending Signing": "SPA Pending",
@@ -85,8 +80,6 @@ export default function AppDashboard() {
       "milestoneCards",
       "milestoneSections",
       "recentCases",
-      "billing",
-      "outstandingAdvances",
       "commsThisMonth",
       "completionSlaOverdue",
     ];
@@ -122,9 +115,6 @@ export default function AppDashboard() {
     return String(value);
   };
 
-  const canSeeAccounting = !!user && hasPermission(user, "accounting", "read") && isAccountingRoleAllowed(user.roleName);
-  const billing = (resolvedStats.billing ?? {}) as Record<string, number>;
-  const outstandingAdvances = (resolvedStats.outstandingAdvances ?? {}) as Record<string, any>;
   type MilestoneCard = {
     key: string;
     label: string;
@@ -229,63 +219,7 @@ export default function AppDashboard() {
         onNavigate={(href) => setLocation(href)}
       />
 
-      <div className={`grid grid-cols-1 gap-4 ${canSeeAccounting ? "md:grid-cols-4" : ""}`}>
-        {canSeeAccounting && (
-          <Card className="cursor-pointer hover:shadow-md transition-shadow" onClick={() => setLocation("/app/accounting")}>
-            <CardContent className="pt-5 pb-4">
-              <div className="flex items-center gap-3">
-                <div className="w-10 h-10 rounded-lg bg-slate-100 flex items-center justify-center">
-                  <DollarSign className="w-5 h-5 text-slate-700" />
-                </div>
-                <div>
-                  <div className="text-xs text-slate-500">Total Billed</div>
-                  <div className="text-xl font-bold text-slate-900">{fmt(billing.totalBilled)}</div>
-                </div>
-              </div>
-            </CardContent>
-          </Card>
-        )}
-        {canSeeAccounting && (
-          <Card className="cursor-pointer hover:shadow-md transition-shadow" onClick={() => setLocation("/app/accounting")}>
-            <CardContent className="pt-5 pb-4">
-              <div className="flex items-center gap-3">
-                <div className="w-10 h-10 rounded-lg bg-red-50 flex items-center justify-center">
-                  <TrendingUp className="w-5 h-5 text-red-500" />
-                </div>
-                <div>
-                  <div className="text-xs text-slate-500">Outstanding</div>
-                  <div className="text-xl font-bold text-red-600">{fmt(billing.totalOutstanding)}</div>
-                </div>
-              </div>
-            </CardContent>
-          </Card>
-        )}
-        {canSeeAccounting && (
-          <Card className="cursor-pointer hover:shadow-md transition-shadow" onClick={() => setLocation("/app/accounting?tab=ledger")}>
-            <CardContent className="pt-5 pb-4">
-              <div className="flex items-start gap-3">
-                <div className="w-10 h-10 rounded-lg bg-amber-50 flex items-center justify-center">
-                  <ArrowRight className="w-5 h-5 text-amber-700" />
-                </div>
-                <div className="flex-1">
-                  <div className="text-xs text-slate-500">Outstanding Client Advances</div>
-                  <div className="text-xl font-bold text-amber-800">{fmt(outstandingAdvances.totalAmount)}</div>
-                  <div className="text-xs text-slate-400 mt-0.5">{Number(outstandingAdvances.caseCount ?? 0)} case(s)</div>
-                  {Array.isArray(outstandingAdvances.topCases) && outstandingAdvances.topCases.length > 0 ? (
-                    <div className="mt-2 space-y-1">
-                      {outstandingAdvances.topCases.slice(0, 3).map((c: any) => (
-                        <div key={String(c.caseId)} className="text-xs text-slate-600 flex items-center justify-between gap-2">
-                          <span className="truncate">{String(c.referenceNo || `Case #${c.caseId}`)}</span>
-                          <span className="font-semibold text-amber-800">{fmt(c.amount)}</span>
-                        </div>
-                      ))}
-                    </div>
-                  ) : null}
-                </div>
-              </div>
-            </CardContent>
-          </Card>
-        )}
+      <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
         <Card className="cursor-pointer hover:shadow-md transition-shadow" onClick={() => setLocation("/app/communications")}>
           <CardContent className="pt-5 pb-4">
             <div className="flex items-center gap-3">

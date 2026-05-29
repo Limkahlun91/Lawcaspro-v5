@@ -131,14 +131,6 @@ type ChecklistResponse = {
   sections: ChecklistSection[];
 };
 
-interface FirmLetterhead {
-  id: number;
-  name: string;
-  is_default: boolean;
-  status: string;
-  footer_mode: "every_page" | "last_page_only";
-}
-
 export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
   const { toast } = useToast();
   const { user } = useAuth();
@@ -150,7 +142,6 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
   const [showAllTemplates, setShowAllTemplates] = useState(false);
   const [templateSourceFilter, setTemplateSourceFilter] = useState<"all" | "firm" | "master">("all");
   const [templateApplicabilityFilter, setTemplateApplicabilityFilter] = useState<"all" | "applicable" | "warning" | "not_applicable">("all");
-  const [selectedLetterheadId, setSelectedLetterheadId] = useState<string>("");
   const [documentName, setDocumentName] = useState("");
   const [generateSelectedFirmTemplateIds, setGenerateSelectedFirmTemplateIds] = useState<Set<number>>(() => new Set());
   const [generateSelectedMasterDocIds, setGenerateSelectedMasterDocIds] = useState<Set<number>>(() => new Set());
@@ -365,15 +356,6 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
     enabled: viewTab === "history",
     retry: false,
   });
-
-  const { data: letterheads = [] } = useQuery<FirmLetterhead[]>({
-    queryKey: ["firm-letterheads"],
-    queryFn: () => apiFetchJson("/firm-letterheads"),
-    retry: false,
-  });
-
-  const activeLetterheads = letterheads.filter(l => l.status === "active");
-  const defaultLetterhead = activeLetterheads.find(l => l.is_default) ?? activeLetterheads[0];
 
   const deleteMutation = useMutation({
     mutationFn: (docId: number) => apiFetchJson(`/cases/${caseId}/documents/${docId}`, { method: "DELETE" }),
@@ -1349,21 +1331,6 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
                       </Button>
                     </div>
                   </div>
-                  {activeLetterheads.length > 0 && (
-                    <div className="space-y-1.5">
-                      <Label>Letterhead (for letter-like templates)</Label>
-                      <Select value={selectedLetterheadId} onValueChange={setSelectedLetterheadId}>
-                        <SelectTrigger>
-                          <SelectValue placeholder={defaultLetterhead ? `Default: ${defaultLetterhead.name}` : "Select letterhead..."} />
-                        </SelectTrigger>
-                        <SelectContent>
-                          {activeLetterheads.map((l) => (
-                            <SelectItem key={l.id} value={String(l.id)}>{l.name}</SelectItem>
-                          ))}
-                        </SelectContent>
-                      </Select>
-                    </div>
-                  )}
                   {batchGenerateResult && (
                     <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
                       <div className="text-sm font-medium text-slate-900">Last generation job: {batchGenerateResult.jobId}</div>

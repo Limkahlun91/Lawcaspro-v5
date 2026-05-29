@@ -29,6 +29,31 @@ async function queryRows(r: DbConn, query: ReturnType<typeof sql>): Promise<Reco
   return [];
 }
 
+function getPgCode(err: unknown): string | null {
+  const code = err && typeof err === "object" ? (err as { code?: unknown }).code : undefined;
+  return typeof code === "string" && code ? code : null;
+}
+
+async function safeGetUseMasterDocuments(r: DbConn, firmId: number): Promise<{ useMasterDocuments: boolean; fallback: boolean }> {
+  try {
+    const rows = await queryRows(r, sql`SELECT use_master_documents FROM firm_settings WHERE firm_id = ${firmId} LIMIT 1`);
+    const v = (rows[0] as any)?.use_master_documents;
+    if (typeof v === "boolean") return { useMasterDocuments: v !== false, fallback: false };
+  } catch (err) {
+    const code = getPgCode(err);
+    if (code !== "42P01" && code !== "42501") throw err;
+  }
+  try {
+    const firmRows = await queryRows(r, sql`SELECT show_master_documents FROM firms WHERE id = ${firmId} LIMIT 1`);
+    const v = (firmRows[0] as any)?.show_master_documents;
+    return { useMasterDocuments: v !== false, fallback: true };
+  } catch (err) {
+    const code = getPgCode(err);
+    if (code === "42703") return { useMasterDocuments: true, fallback: true };
+    return { useMasterDocuments: true, fallback: true };
+  }
+}
+
 router.get("/firm-settings", requireAuth, requireFirmUser, async (req: AuthRequest, res: Response) => {
   const firmId = req.firmId!;
   const defaults = {
@@ -52,12 +77,9 @@ router.get("/firm-settings", requireAuth, requireFirmUser, async (req: AuthReque
   };
   try {
     const r = rdb(req);
-    const getPgCode = (err: unknown): string | null => {
-      const code = err && typeof err === "object" ? (err as { code?: unknown }).code : undefined;
-      return typeof code === "string" && code ? code : null;
-    };
     let firm: any | null = null;
     let schemaFallback = false;
+    const masterSetting = await safeGetUseMasterDocuments(r, firmId);
     try {
       const firmRows = await queryRows(r, sql`
         SELECT
@@ -105,10 +127,10 @@ router.get("/firm-settings", requireAuth, requireFirmUser, async (req: AuthReque
       }
     }
     if (!firm) {
-      res.status(200).json({ ok: true, data: { ...emptyFirm, ...defaults }, fallback: true });
+      res.status(200).json({ ok: true, settings: { useMasterDocuments: true, enableFirmLetterhead: false }, data: { ...emptyFirm, ...defaults }, fallback: true });
       return;
     }
-    const showMasterDocuments = schemaFallback ? true : firm.show_master_documents !== false;
+    const showMasterDocuments = masterSetting.useMasterDocuments;
     const bankAccounts = await (async () => {
       try {
         const rows = await (r as any).select().from(firmBankAccountsTable)
@@ -121,6 +143,7 @@ router.get("/firm-settings", requireAuth, requireFirmUser, async (req: AuthReque
 
     res.status(200).json({
       ok: true,
+      settings: { useMasterDocuments: Boolean(showMasterDocuments), enableFirmLetterhead: false },
       data: {
         id: Number(firm.id),
         name: String(firm.name ?? ""),
@@ -144,12 +167,12 @@ router.get("/firm-settings", requireAuth, requireFirmUser, async (req: AuthReque
           isDefault: b.isDefault,
         })),
       },
-      fallback: schemaFallback,
+      fallback: schemaFallback || masterSetting.fallback,
     });
     return;
   } catch (err: any) {
     req.log.error({ err }, "firm_settings.get failed");
-    res.status(200).json({ ok: true, data: { ...emptyFirm, ...defaults }, fallback: true });
+    res.status(200).json({ ok: true, settings: { useMasterDocuments: true, enableFirmLetterhead: false }, data: { ...emptyFirm, ...defaults }, fallback: true });
     return;
   }
 });
@@ -187,10 +210,6 @@ router.patch("/firm-settings", requireAuth, requireFirmUser, requirePermission("
     const firmId = req.firmId!;
     const { name, logoUrl, address, stNumber, tinNumber, registrationNo, sstNo, phone, email, showMasterDocuments, useMasterDocuments } = req.body;
     const desiredUseMasterDocuments = useMasterDocuments !== undefined ? Boolean(useMasterDocuments) : (showMasterDocuments !== undefined ? Boolean(showMasterDocuments) : undefined);
-    const getPgCode = (err: unknown): string | null => {
-      const code = err && typeof err === "object" ? (err as { code?: unknown }).code : undefined;
-      return typeof code === "string" && code ? code : null;
-    };
 
     const updates: Record<string, unknown> = {};
     if (name !== undefined) updates.name = name;
@@ -216,6 +235,21 @@ router.patch("/firm-settings", requireAuth, requireFirmUser, requirePermission("
         schemaFallback = true;
       } else {
         throw err;
+      }
+    }
+
+    if (desiredUseMasterDocuments !== undefined) {
+      try {
+        await queryRows(r, sql`
+          INSERT INTO firm_settings (firm_id, use_master_documents, enable_firm_letterhead, created_at, updated_at)
+          VALUES (${firmId}, ${Boolean(desiredUseMasterDocuments)}, false, now(), now())
+          ON CONFLICT (firm_id) DO UPDATE
+            SET use_master_documents = EXCLUDED.use_master_documents,
+                updated_at = now()
+        `);
+      } catch (err) {
+        const code = getPgCode(err);
+        if (code !== "42P01" && code !== "42501") throw err;
       }
     }
 
@@ -276,9 +310,11 @@ router.patch("/firm-settings", requireAuth, requireFirmUser, requirePermission("
       }
     })();
 
-    const showMasterDocumentsResolved = schemaFallback ? true : (firm?.show_master_documents !== false);
+    const masterSetting = await safeGetUseMasterDocuments(r, firmId);
+    const showMasterDocumentsResolved = masterSetting.useMasterDocuments;
     res.status(200).json({
       ok: true,
+      settings: { useMasterDocuments: Boolean(showMasterDocumentsResolved), enableFirmLetterhead: false },
       data: {
         id: firmId,
         name: String(firm?.name ?? ""),
@@ -302,7 +338,7 @@ router.patch("/firm-settings", requireAuth, requireFirmUser, requirePermission("
           isDefault: b.isDefault,
         })),
       },
-      fallback: schemaFallback,
+      fallback: schemaFallback || masterSetting.fallback,
     });
     if (!schemaFallback) {
       await writeAuditLog({ firmId, actorId: req.userId, actorType: req.userType, action: "settings.update", entityType: "firm", entityId: firmId, detail: `fields=${Object.keys(updates).join(",")}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
@@ -312,6 +348,7 @@ router.patch("/firm-settings", requireAuth, requireFirmUser, requirePermission("
     req.log.error({ err }, "firm_settings.update failed");
     res.status(200).json({
       ok: true,
+      settings: { useMasterDocuments: true, enableFirmLetterhead: false },
       data: {
         id: req.firmId ?? null,
         name: "",

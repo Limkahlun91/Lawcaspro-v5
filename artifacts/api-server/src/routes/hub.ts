@@ -288,6 +288,7 @@ router.get("/hub/documents", requireAuth, requireFirmUser, requirePermission("do
   const firmId = req.firmId!;
   const folderIdStr = one((req.query as Record<string, unknown>).folderId);
   const folderId = folderIdStr ? parseInt(folderIdStr, 10) : undefined;
+  const warnings: Array<{ source: string; message: string }> = [];
 
   try {
     const showMasterDocuments = await safeGetShowMasterDocuments(r, firmId);
@@ -300,7 +301,8 @@ router.get("/hub/documents", requireAuth, requireFirmUser, requirePermission("do
           .where(eq(systemFoldersTable.isDisabled, false))
           .orderBy(systemFoldersTable.sortOrder, systemFoldersTable.name);
         return rows;
-      } catch {
+      } catch (err) {
+        warnings.push({ source: "folders", message: err instanceof Error ? err.message : String(err) });
         return [];
       }
     })();
@@ -322,6 +324,7 @@ router.get("/hub/documents", requireAuth, requireFirmUser, requirePermission("do
         return filtered;
       } catch (err) {
         req.log.error({ err, firmId, userId: req.userId }, "hub.documents.query_failed");
+        warnings.push({ source: "documents", message: err instanceof Error ? err.message : String(err) });
         return [];
       }
     })();
@@ -330,6 +333,7 @@ router.get("/hub/documents", requireAuth, requireFirmUser, requirePermission("do
       ok: true,
       documents,
       folders,
+      warnings,
       message: documents.length === 0 ? "No documents available" : undefined,
     });
   } catch (err) {
@@ -351,7 +355,7 @@ router.get("/hub/documents", requireAuth, requireFirmUser, requirePermission("do
       },
       "hub.documents_failed",
     );
-    res.status(200).json({ ok: true, documents: [], folders: [], message: "No documents available" });
+    res.status(200).json({ ok: true, documents: [], folders: [], warnings: [], message: "No documents available" });
   }
 });
 

@@ -36,7 +36,7 @@ describe("Dashboard cache does not pin degraded payload", () => {
     const app = express();
     app.use(router);
 
-    const res = await request(app).get("/dashboard");
+    const res = await request(app).get("/dashboard?includeStats=0");
     expect(res.status).toBe(200);
     expect(res.body.ok).toBe(true);
     expect(res.body.dashboard.totalCases).toBe(5);

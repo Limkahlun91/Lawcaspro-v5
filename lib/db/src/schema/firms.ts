@@ -56,6 +56,15 @@ export const firmFileRefSettingsTable = pgTable("firm_file_ref_settings", {
   firmIdx: index("idx_firm_file_ref_settings_firm").on(t.firmId),
 }));
 
+export const firmSettingsTable = pgTable("firm_settings", {
+  firmId: integer("firm_id").primaryKey(),
+  useMasterDocuments: boolean("use_master_documents").notNull().default(true),
+  enableFirmLetterhead: boolean("enable_firm_letterhead").notNull().default(false),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow().$onUpdate(() => new Date()),
+});
+
 export const insertFirmSchema = createInsertSchema(firmsTable).omit({ id: true, createdAt: true, updatedAt: true });
 export type InsertFirm = z.infer<typeof insertFirmSchema>;
 export type Firm = typeof firmsTable.$inferSelect;
+export type FirmSettings = typeof firmSettingsTable.$inferSelect;
