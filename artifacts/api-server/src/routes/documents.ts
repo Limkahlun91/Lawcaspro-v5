@@ -6182,7 +6182,18 @@ async function convertDocxToPdf(docxBytes: Buffer): Promise<Buffer> {
       throw new DocumentGenerationError(503, "DOCX_TO_PDF_FAILED", "PDF conversion failed", { status: resp.status, detail: short });
     }
     const ab = await resp.arrayBuffer();
-    return Buffer.from(ab);
+    const out = Buffer.from(ab);
+    if (!Buffer.isBuffer(out) || out.length < 800) {
+      throw new DocumentGenerationError(503, "DOCX_TO_PDF_FAILED", "PDF conversion returned an empty file", { byteLength: out?.length ?? 0 });
+    }
+    try {
+      const pdf = await PDFDocument.load(out);
+      const pages = pdf.getPageCount();
+      if (!Number.isFinite(pages) || pages <= 0) throw new Error("empty_pages");
+    } catch {
+      throw new DocumentGenerationError(503, "DOCX_TO_PDF_FAILED", "PDF conversion returned an invalid PDF", { byteLength: out.length });
+    }
+    return out;
   } catch (err) {
     if (err instanceof DocumentGenerationError) throw err;
     const aborted = err instanceof Error && err.name === "AbortError";
@@ -6766,7 +6777,7 @@ async function generateFirmDocument({
     overrides: mergedOverrides,
   });
   let input: Record<string, unknown> = preview.usedMode === "bindings" ? preview.resolvedVariables : (context as any);
-  input = fillMissingScalarsForRender(effectivePlaceholders, input, { missingMode: "empty" });
+  input = fillMissingScalarsForRender(effectivePlaceholders, input, { missingMode: "placeholder" });
   let clauseSnapshot: Record<string, unknown> | null = null;
   let checklistEval = evaluateTemplateChecklist({
     checklistMode: (template as any).checklist_mode,
@@ -6806,7 +6817,7 @@ async function generateFirmDocument({
     });
     fileContents = applied.docxBytes;
     input = applied.data;
-    input = fillMissingScalarsForRender(effectivePlaceholders, input, { missingMode: "empty" });
+    input = fillMissingScalarsForRender(effectivePlaceholders, input, { missingMode: "placeholder" });
     clauseSnapshot = {
       insertionModeUsed: decision.insertionModeUsed,
       insertionTarget: decision.insertionTarget,
@@ -6899,9 +6910,9 @@ async function generateFirmDocument({
     const mappingConfig = (template as any).pdf_mapping_config ?? null;
     const legacyMappings = normalizePdfMappingConfig(mappingConfig);
     outputBytes = await (isPdfTextBoxMappings(mappingConfig)
-      ? renderPdfTextBoxMappedTemplate({ pdfBytes: fileContents, data: input, mappings: mappingConfig, missingMode: "empty" })
+      ? renderPdfTextBoxMappedTemplate({ pdfBytes: fileContents, data: input, mappings: mappingConfig, missingMode: "placeholder" })
       : legacyMappings.length > 0
-        ? renderPdfMappedTemplate({ pdfBytes: fileContents, data: input, mappingConfig, missingMode: "empty" })
+        ? renderPdfMappedTemplate({ pdfBytes: fileContents, data: input, mappingConfig, missingMode: "placeholder" })
         : renderPdfFormTemplate({ pdfBytes: fileContents, data: input, flatten: true }));
     outputContentType = "application/pdf";
   } else {
@@ -6917,7 +6928,7 @@ async function generateFirmDocument({
       nullGetter(part: any) {
         const k = typeof part?.value === "string" ? String(part.value) : "";
         if (!k) return "";
-        return "";
+        return `[MISSING: ${k}]`;
       },
     });
     await maybeHydrateFirmLogoBuffer(input as any);
@@ -7195,7 +7206,7 @@ async function generateMasterDocument({
     overrides: mergedOverrides,
   });
   let renderInput: Record<string, unknown> = preview.usedMode === "bindings" ? preview.resolvedVariables : (context as any);
-  renderInput = fillMissingScalarsForRender(placeholders, renderInput, { missingMode: "empty" });
+  renderInput = fillMissingScalarsForRender(placeholders, renderInput, { missingMode: "placeholder" });
   let docxBytesForRender: Buffer | null = null;
   let clauseSnapshot: Record<string, unknown> | null = null;
   if (isDocx) {
@@ -7224,7 +7235,7 @@ async function generateMasterDocument({
       });
       docxBytesForRender = applied.docxBytes;
       renderInput = applied.data;
-      renderInput = fillMissingScalarsForRender(placeholders, renderInput, { missingMode: "empty" });
+      renderInput = fillMissingScalarsForRender(placeholders, renderInput, { missingMode: "placeholder" });
       clauseSnapshot = {
         insertionModeUsed: decision.insertionModeUsed,
         insertionTarget: decision.insertionTarget,
@@ -7342,7 +7353,7 @@ async function generateMasterDocument({
       delimiters: { start: "{{", end: "}}" },
       nullGetter(part: any) {
         const k = typeof part?.value === "string" ? String(part.value) : "";
-        return k ? "" : "";
+        return k ? `[MISSING: ${k}]` : "";
       },
     });
     await maybeHydrateFirmLogoBuffer(renderInput as any);
@@ -9491,7 +9502,7 @@ router.post("/documents/automation/generate-now", requireAuth, requireFirmUser, 
   }
 
   const cache = createRequestCache();
-  const templateObjectCache = new Map<string, { name: string; fileName: string; mimeType: string | null; objectPath: string }>();
+  const templateObjectCache = new Map<string, { name: string; fileName: string; mimeType: string | null; objectPath: string; mappingConfig: unknown }>();
   const templateBytesCache = new Map<string, Buffer>();
   const errors: string[] = [];
 
@@ -9527,6 +9538,23 @@ router.post("/documents/automation/generate-now", requireAuth, requireFirmUser, 
     if (ext === "docx" || mt.includes("wordprocessingml")) return "docx";
     if (ext === "doc" || mt.includes("application/msword")) return "doc";
     return "unknown";
+  };
+
+  const previewAndResolve = async (args: {
+    firmId: number;
+    caseContext: Record<string, unknown>;
+    templateRef: { kind: "firm"; templateId: number } | { kind: "platform"; documentId: number };
+    placeholders: string[];
+  }): Promise<{ input: Record<string, unknown>; usedMode: "bindings" | "legacy"; missingRequiredVariables: Array<{ variableKey: string; reason: string }> }> => {
+    const preview = await runDocumentPreview(r, {
+      firmId: args.firmId,
+      caseContext: args.caseContext,
+      templateRef: args.templateRef,
+      placeholders: args.placeholders,
+    });
+    const base = preview.usedMode === "bindings" ? preview.resolvedVariables : (args.caseContext as any);
+    const input = fillMissingScalarsForRender(args.placeholders, base, { missingMode: "placeholder" });
+    return { input, usedMode: preview.usedMode, missingRequiredVariables: preview.missingRequiredVariables };
   };
 
   try {
@@ -9568,7 +9596,7 @@ router.post("/documents/automation/generate-now", requireAuth, requireFirmUser, 
           const tpl = templateObjectCache.get(cacheKey) ?? await (async () => {
             if (t.source === "firm") {
               const rows = await queryRows(r, sql`
-                SELECT id, name, object_path, file_name, mime_type, is_template_capable
+                SELECT id, name, object_path, file_name, mime_type, is_template_capable, pdf_mapping_config
                 FROM document_templates
                 WHERE firm_id = ${req.firmId!} AND id = ${t.id}
                 LIMIT 1
@@ -9581,12 +9609,12 @@ router.post("/documents/automation/generate-now", requireAuth, requireFirmUser, 
               const mimeType = typeof row.mime_type === "string" ? String(row.mime_type) : null;
               const name = typeof row.name === "string" ? String(row.name) : `template-${t.id}`;
               if (!objectPath) return null;
-              const out = { name, fileName, mimeType, objectPath };
+              const out = { name, fileName, mimeType, objectPath, mappingConfig: row.pdf_mapping_config ?? null };
               templateObjectCache.set(cacheKey, out);
               return out;
             }
             const rows = await queryRows(r, sql`
-              SELECT id, name, object_path, file_name, mime_type
+              SELECT id, name, object_path, file_name, mime_type, pdf_mappings
               FROM platform_documents
               WHERE id = ${t.id}
                 AND (firm_id IS NULL OR firm_id = ${req.firmId!})
@@ -9599,7 +9627,7 @@ router.post("/documents/automation/generate-now", requireAuth, requireFirmUser, 
             const mimeType = typeof row.mime_type === "string" ? String(row.mime_type) : null;
             const name = typeof row.name === "string" ? String(row.name) : `master-${t.id}`;
             if (!objectPath) return null;
-            const out = { name, fileName, mimeType, objectPath };
+            const out = { name, fileName, mimeType, objectPath, mappingConfig: row.pdf_mappings ?? null };
             templateObjectCache.set(cacheKey, out);
             return out;
           })();
@@ -9611,35 +9639,88 @@ router.post("/documents/automation/generate-now", requireAuth, requireFirmUser, 
           const kind = classifyTemplateKind(tpl.fileName, tpl.mimeType);
           const tplNameRaw = safeFilenameAscii(tpl.name) || `template-${t.id}`;
           const tplName = tplNameRaw.replace(/\s+/g, "_");
+          const zipPath = `${caseRef}/${tplName}.pdf`;
 
           if (kind === "pdf") {
             const pdfBytes = await readTemplateBytes(tpl.objectPath);
-            const zipPath = `${caseRef}/${tplName}.pdf`;
-            addZipBuffer(zipPath, pdfBytes);
-            generatedCount += 1;
+            const mappingConfig = tpl.mappingConfig ?? null;
+            const legacyMappings = normalizePdfMappingConfig(mappingConfig);
+            const placeholders = Array.from(new Set([
+              ...(isPdfTextBoxMappings(mappingConfig) ? extractPdfMappingPlaceholders(mappingConfig) : legacyMappings.map((m) => m.key)),
+              ...(await extractPdfFormFieldNames(pdfBytes)),
+            ]));
+            try {
+              const preview = await previewAndResolve({
+                firmId: req.firmId!,
+                caseContext: context as any,
+                templateRef: t.source === "firm" ? { kind: "firm", templateId: t.id } : { kind: "platform", documentId: t.id },
+                placeholders,
+              });
+              const rendered =
+                isPdfTextBoxMappings(mappingConfig)
+                  ? await renderPdfTextBoxMappedTemplate({ pdfBytes, data: preview.input, mappings: mappingConfig, missingMode: "placeholder" })
+                  : legacyMappings.length > 0
+                    ? await renderPdfMappedTemplate({ pdfBytes, data: preview.input, mappingConfig, missingMode: "placeholder" })
+                    : placeholders.length > 0
+                      ? await renderPdfFormTemplate({ pdfBytes, data: preview.input, flatten: true })
+                      : await renderWarningPdfPage([
+                          "PDF template has no mappings or form fields.",
+                          `Template: ${tpl.name}`,
+                        ]);
+              addZipBuffer(zipPath, rendered);
+              generatedCount += 1;
+              if (preview.usedMode === "bindings" && preview.missingRequiredVariables.length > 0) {
+                errors.push(`${caseRef}: template=${cacheKey} MISSING_REQUIRED_VARIABLES ${preview.missingRequiredVariables.map((x) => x.variableKey).join(",")}`);
+              }
+            } catch (err) {
+              const e =
+                err instanceof DocumentGenerationError
+                  ? err
+                  : new DocumentGenerationError(422, "PDF_TEMPLATE_RENDER_FAILED", err instanceof Error ? err.message : String(err ?? ""));
+              const warningPdf = await renderWarningPdfPage([
+                "Generation failed for this PDF template.",
+                `Template: ${tpl.name}`,
+                `Case: ${caseRefRaw}`,
+                `Error: ${e.code}`,
+                String(e.message ?? "").slice(0, 200),
+              ]);
+              addZipBuffer(zipPath, warningPdf);
+              generatedCount += 1;
+              errors.push(`${caseRef}: template=${cacheKey} ${e.code} ${String(e.message ?? "").slice(0, 200)}`);
+            }
             continue;
           }
 
           if (kind === "docx") {
             const templateBytes = await readTemplateBytes(tpl.objectPath);
+            const placeholders = detectDocxVariables(templateBytes);
+            const preview = await previewAndResolve({
+              firmId: req.firmId!,
+              caseContext: context as any,
+              templateRef: t.source === "firm" ? { kind: "firm", templateId: t.id } : { kind: "platform", documentId: t.id },
+              placeholders,
+            });
             const zdoc = new PizZip(templateBytes);
             const doc = new Docxtemplater(zdoc, {
               paragraphLoop: true,
               linebreaks: true,
               modules: [makeDocxImageModule()],
               delimiters: { start: "{{", end: "}}" },
-              nullGetter() {
-                return "";
+              nullGetter(part: any) {
+                const k = typeof part?.value === "string" ? String(part.value) : "";
+                return k ? `[MISSING: ${k}]` : "";
               },
             });
-            await maybeHydrateFirmLogoBuffer(context as any);
-            doc.render(context as any);
+            await maybeHydrateFirmLogoBuffer(preview.input as any);
+            doc.render(preview.input as any);
             const renderedDocx = doc.getZip().generate({ type: "nodebuffer", compression: "DEFLATE" }) as Buffer;
             const conv = await convertDocxToPdfWithFallback(renderedDocx, { allowFallbackOnFailure: true });
             if (conv.fallbackUsed) errors.push(`${caseRef}: template=${cacheKey} DOCX_TO_PDF_FALLBACK_USED`);
-            const zipPath = `${caseRef}/${tplName}.pdf`;
             addZipBuffer(zipPath, conv.pdfBytes);
             generatedCount += 1;
+            if (preview.usedMode === "bindings" && preview.missingRequiredVariables.length > 0) {
+              errors.push(`${caseRef}: template=${cacheKey} MISSING_REQUIRED_VARIABLES ${preview.missingRequiredVariables.map((x) => x.variableKey).join(",")}`);
+            }
             continue;
           }
 
@@ -9649,7 +9730,6 @@ router.post("/documents/automation/generate-now", requireAuth, requireFirmUser, 
               "Please upload a .docx version for full variable merge.",
               `Template: ${tpl.name}`,
             ]);
-            const zipPath = `${caseRef}/${tplName}.pdf`;
             addZipBuffer(zipPath, warningPdf);
             generatedCount += 1;
             errors.push(`${caseRef}: template=${cacheKey} DOC_CONVERSION_UNSUPPORTED`);
@@ -11355,7 +11435,7 @@ router.post("/cases/:caseId/documents/preview", requireAuth, requireFirmUser, re
           if (!Buffer.isBuffer(bytes) || bytes.length === 0) {
             throw new DocumentGenerationError(400, "TEMPLATE_FILE_BUFFER_MISSING", "Template file buffer is missing or corrupted in the database.");
           }
-          const inputForRender = fillMissingScalarsForRender(placeholders, input, { missingMode: "empty" });
+          const inputForRender = fillMissingScalarsForRender(placeholders, input, { missingMode: "placeholder" });
           const zip = new PizZip(bytes);
           const doc = new Docxtemplater(zip, {
             paragraphLoop: true,
@@ -11364,7 +11444,7 @@ router.post("/cases/:caseId/documents/preview", requireAuth, requireFirmUser, re
             delimiters: { start: "{{", end: "}}" },
             nullGetter(part: any) {
               const k = typeof part?.value === "string" ? String(part.value) : "";
-              return k ? "" : "";
+              return k ? `[MISSING: ${k}]` : "";
             },
           });
           await maybeHydrateFirmLogoBuffer(inputForRender as any);
@@ -12174,7 +12254,7 @@ router.post("/cases/:caseId/documents/print", requireAuth, requireFirmUser, requ
       placeholders: effectivePlaceholders,
       overrides: storedOverrides,
     });
-    const input = fillMissingScalarsForRender(placeholders, preview.usedMode === "bindings" ? preview.resolvedVariables : (context as any), { missingMode: "empty" });
+    const input = fillMissingScalarsForRender(effectivePlaceholders, preview.usedMode === "bindings" ? preview.resolvedVariables : (context as any), { missingMode: "placeholder" });
 
     const templateDocType = template && typeof template === "object" && "document_type" in template ? String((template as any).document_type) : "other";
     const isLetterLike = isLetterheadApplicableDocumentType(templateDocType);
@@ -13176,3 +13256,13 @@ router.delete("/cases/:caseId/documents/:docId", requireAuth, requireFirmUser, r
 
 const exportedRouter = expressRouter as unknown as ExpressRouter;
 export default exportedRouter;
+
+export {
+  DocumentGenerationError,
+  convertDocxToPdf,
+  convertDocxToPdfWithFallback,
+  fillMissingScalarsForRender,
+  renderFallbackPdfFromDocx,
+  renderPdfMappedTemplate,
+  renderPdfTextBoxMappedTemplate,
+};
