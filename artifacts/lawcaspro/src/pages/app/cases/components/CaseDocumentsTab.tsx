@@ -21,7 +21,7 @@ import { isFirmDocumentTypeLetterLike } from "@/lib/documents/letterLike";
 import { DOCUMENT_TYPE_LABELS, normalizeDocumentType } from "@workspace/documents-registry";
 import { QueryFallback } from "@/components/query-fallback";
 import { apiFetchBlob, apiFetchJson, apiRequest } from "@/lib/api-client";
-import { downloadBlob, downloadFromApi } from "@/lib/download";
+import { downloadBlob, downloadFromApi, normalizeDownloadFilename } from "@/lib/download";
 import { toastError } from "@/lib/toast-error";
 import { printWordBlob } from "@/lib/documents/BrowserPrinter";
 import { useAuth } from "@/lib/auth-context";
@@ -483,14 +483,16 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
     setOneClickGeneratingTemplateId(templateId);
     try {
       const resp = await generateDocumentsNow({ caseIds: [caseId], templates });
-      if (!resp.ok) {
+      const contentType = resp.headers.get("Content-Type");
+      if (contentType && (contentType.includes("application/json") || contentType.includes("text/"))) {
         const text = await resp.text().catch(() => "");
         throw new Error(text || "Failed to generate documents");
       }
       const blob = await resp.blob();
-      const filename =
+      const raw =
         parseFilenameFromDisposition(resp.headers.get("Content-Disposition")) ||
         `lawcaspro-generated-documents-${Date.now()}.zip`;
+      const filename = normalizeDownloadFilename(raw, contentType);
       downloadBlob(blob, filename);
       await qc.invalidateQueries({ queryKey: ["case-documents", caseId] });
       await qc.invalidateQueries({ queryKey: ["case-documents-checklist", caseId] });
@@ -545,14 +547,16 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
     setBatchLoopProgress({ current: 0, total: 1 });
     try {
       const resp = await generateDocumentsNow({ caseIds: [caseId], templates });
-      if (!resp.ok) {
+      const contentType = resp.headers.get("Content-Type");
+      if (contentType && (contentType.includes("application/json") || contentType.includes("text/"))) {
         const text = await resp.text().catch(() => "");
         throw new Error(text || "Failed to generate documents");
       }
       const blob = await resp.blob();
-      const filename =
+      const raw =
         parseFilenameFromDisposition(resp.headers.get("Content-Disposition")) ||
         `lawcaspro-generated-documents-${Date.now()}.zip`;
+      const filename = normalizeDownloadFilename(raw, contentType);
       downloadBlob(blob, filename);
       await qc.invalidateQueries({ queryKey: ["case-documents", caseId] });
       await qc.invalidateQueries({ queryKey: ["case-documents-checklist", caseId] });
@@ -637,7 +641,13 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
           const fileName = job.downloadFileName || (enterpriseMode === "print" ? "system-print.pdf" : "documents.zip");
 
           if (enterpriseMode === "print") {
-            const blob = await apiFetchBlob(downloadUrl);
+            const res = await apiRequest(downloadUrl, { timeoutMs: 60_000, allowStatuses: [400, 401, 403, 404, 409, 422, 429, 500, 503] });
+            const contentType = res.headers.get("Content-Type");
+            if (!res.ok || !contentType || !contentType.includes("application/pdf")) {
+              const text = await res.text().catch(() => "");
+              throw new Error(text || "Print failed (expected PDF)");
+            }
+            const blob = await res.blob();
             const url = URL.createObjectURL(blob);
             const iframe = document.createElement("iframe");
             iframe.style.position = "fixed";
@@ -1716,14 +1726,16 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
                     setIsGenerating(true);
                     try {
                       const resp = await generateDocumentsNow({ caseIds: [caseId], templates });
-                      if (!resp.ok) {
+                      const contentType = resp.headers.get("Content-Type");
+                      if (contentType && (contentType.includes("application/json") || contentType.includes("text/"))) {
                         const text = await resp.text().catch(() => "");
                         throw new Error(text || "Failed to generate documents");
                       }
                       const blob = await resp.blob();
-                      const filename =
+                      const raw =
                         parseFilenameFromDisposition(resp.headers.get("Content-Disposition")) ||
                         `lawcaspro-generated-documents-${Date.now()}.zip`;
+                      const filename = normalizeDownloadFilename(raw, contentType);
                       downloadBlob(blob, filename);
                       await qc.invalidateQueries({ queryKey: ["case-documents", caseId] });
                       await qc.invalidateQueries({ queryKey: ["case-documents-checklist", caseId] });

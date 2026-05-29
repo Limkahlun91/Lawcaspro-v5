@@ -11,7 +11,7 @@ import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "@/componen
 import { cn } from "@/lib/utils";
 import { apiFetchJson } from "@/lib/api-client";
 import { generateDocumentsNow } from "@/lib/document-generation-client";
-import { downloadBlob } from "@/lib/download";
+import { downloadBlob, normalizeDownloadFilename } from "@/lib/download";
 import { toastError } from "@/lib/toast-error";
 import { useToast } from "@/hooks/use-toast";
 import { ChevronRight, FileText, Printer } from "lucide-react";
@@ -517,12 +517,14 @@ export default function DocumentAutomationHub() {
         ...selectedMasterDocIds.map((id) => ({ source: "master" as const, id })),
       ];
       const resp = await generateDocumentsNow({ caseIds: selectedCaseIds, templates });
-      if (!resp.ok) {
+      const contentType = resp.headers.get("Content-Type");
+      if (contentType && (contentType.includes("application/json") || contentType.includes("text/"))) {
         const text = await resp.text().catch(() => "");
         throw new Error(text || "Failed to generate documents");
       }
       const blob = await resp.blob();
-      const filename = parseFilenameFromDisposition(resp.headers.get("Content-Disposition")) || `lawcaspro-generated-documents-${Date.now()}.zip`;
+      const raw = parseFilenameFromDisposition(resp.headers.get("Content-Disposition")) || `lawcaspro-generated-documents-${Date.now()}.zip`;
+      const filename = normalizeDownloadFilename(raw, contentType);
       downloadBlob(blob, filename);
       toast({ title: "Download started", description: filename });
     } catch (err) {
