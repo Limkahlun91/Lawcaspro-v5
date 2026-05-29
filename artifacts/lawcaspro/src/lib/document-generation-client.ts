@@ -67,13 +67,15 @@ export type CreateGenerationJobPayload = {
   force?: boolean;
 };
 
+const GENERATION_TIMEOUT_MS = 60000;
+
 export async function createGenerationJob(payload: CreateGenerationJobPayload): Promise<{ jobId?: string; statusUrl?: string; downloadUrl?: string; status?: string; fallback?: boolean; message?: string }> {
   const qs = new URLSearchParams();
   if (payload.blind) qs.set("blind", "true");
   if (payload.force) qs.set("force", "true");
   const res = await apiFetchJson<unknown>(`/documents/automation/generate-job?${qs.toString()}`, {
     method: "POST",
-    timeoutMs: 8000,
+    timeoutMs: GENERATION_TIMEOUT_MS,
     body: JSON.stringify({ caseIds: payload.caseIds, templateIds: payload.templateIds, templates: payload.templates, config: payload.config }),
   });
   const r = asRecord(res) ?? {};
@@ -100,18 +102,18 @@ export async function validateGenerationJob(payload: Omit<CreateGenerationJobPay
   if (payload.force) qs.set("force", "true");
   return await apiFetchJson<unknown>(`/documents/automation/generate-job?${qs.toString()}`, {
     method: "POST",
-    timeoutMs: 8000,
+    timeoutMs: GENERATION_TIMEOUT_MS,
     body: JSON.stringify({ caseIds: payload.caseIds, templateIds: payload.templateIds, templates: payload.templates, config: payload.config }),
   });
 }
 
 export async function getGenerationJob(jobId: string): Promise<NormalizedGenerationJob> {
-  const raw = await apiFetchJson<unknown>(`/documents/jobs/${jobId}`, { timeoutMs: 8000 });
+  const raw = await apiFetchJson<unknown>(`/documents/jobs/${jobId}`, { timeoutMs: GENERATION_TIMEOUT_MS });
   return normalizeGenerationJob(raw);
 }
 
 export async function runNextGenerationJob(jobId: string): Promise<NormalizedGenerationJob> {
-  const raw = await apiFetchJson<unknown>(`/documents/jobs/${jobId}/run-next`, { method: "POST", timeoutMs: 8000 });
+  const raw = await apiFetchJson<unknown>(`/documents/jobs/${jobId}/run-next`, { method: "POST", timeoutMs: GENERATION_TIMEOUT_MS });
   return normalizeGenerationJob(raw);
 }
 
@@ -119,7 +121,7 @@ export async function getGenerationJobStatus(jobId: string): Promise<NormalizedG
   try {
     return await getGenerationJob(jobId);
   } catch {
-    const raw = await apiFetchJson<unknown>(`/documents/status/${jobId}`, { timeoutMs: 8000 });
+    const raw = await apiFetchJson<unknown>(`/documents/status/${jobId}`, { timeoutMs: GENERATION_TIMEOUT_MS });
     return normalizeGenerationJob(raw);
   }
 }

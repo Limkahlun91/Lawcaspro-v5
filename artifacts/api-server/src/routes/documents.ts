@@ -526,13 +526,15 @@ async function streamSupabasePrivateObjectToResponse({
   res,
   fileName,
   fallbackContentType,
+  timeoutMs,
 }: {
   objectPath: string;
   res: any;
   fileName: string;
   fallbackContentType: string;
+  timeoutMs?: number;
 }): Promise<void> {
-  const storageResp = await supabaseStorage.fetchPrivateObjectResponse(objectPath);
+  const storageResp = await supabaseStorage.fetchPrivateObjectResponse(objectPath, typeof timeoutMs === "number" ? { timeoutMs } : undefined);
   const ct = storageResp.headers.get("content-type") || fallbackContentType;
   const cl = storageResp.headers.get("content-length");
   if (ct) res.setHeader("Content-Type", ct);
@@ -547,8 +549,8 @@ async function streamSupabasePrivateObjectToResponse({
   });
 }
 
-async function readSupabasePrivateObjectBytes(objectPath: string): Promise<Buffer> {
-  const storageResp = await supabaseStorage.fetchPrivateObjectResponse(objectPath);
+async function readSupabasePrivateObjectBytes(objectPath: string, opts?: { timeoutMs?: number }): Promise<Buffer> {
+  const storageResp = await supabaseStorage.fetchPrivateObjectResponse(objectPath, typeof opts?.timeoutMs === "number" ? { timeoutMs: opts.timeoutMs } : undefined);
   if (!storageResp.body) throw new Error("Failed to read file");
   const nodeStream = Readable.fromWeb(storageResp.body as any);
   const chunks: Buffer[] = [];
@@ -6708,7 +6710,7 @@ async function generateFirmDocument({
         : "";
   const templateExt = fileExtensionFromName(templateFileName);
   const isLetterLike = isLetterheadApplicableDocumentType(templateDocType);
-  const shouldUseLetterhead = templateExt === "docx" && isLetterLike;
+  const shouldUseLetterhead = false;
   const letterheadBytesPromise = shouldUseLetterhead ? (async () => {
     const letterheadIdNum = typeof letterheadId === "number" ? letterheadId : null;
     let lh: Record<string, unknown> | undefined;
@@ -6944,10 +6946,16 @@ async function generateFirmDocument({
       });
     }
 
-    outFormat = "pdf";
-    const conv = await convertDocxToPdfWithFallback(buffer, { allowFallbackOnFailure: true });
-    outputBytes = conv.pdfBytes;
-    outputContentType = "application/pdf";
+    if (outputFormat === "pdf") {
+      outFormat = "pdf";
+      const conv = await convertDocxToPdfWithFallback(buffer, { allowFallbackOnFailure: true });
+      outputBytes = conv.pdfBytes;
+      outputContentType = "application/pdf";
+    } else {
+      outFormat = "docx";
+      outputBytes = buffer;
+      outputContentType = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+    }
   }
 
   const normalizedPath = newGeneratedDocObjectPath(firmId, caseId, outFormat);
@@ -7451,7 +7459,7 @@ async function generateMasterDocument({
 
   if (isDocx) {
     const lhIdNum = typeof letterheadId === "number" ? letterheadId : null;
-    const shouldApply = lhIdNum !== null || isMasterDocumentLetterLike({ name: (masterDoc as any).name, category: (masterDoc as any).category, fileName: masterFileName });
+    const shouldApply = false;
     if (shouldApply) {
       let lh: Record<string, unknown> | undefined;
       if (lhIdNum !== null) {
@@ -8950,7 +8958,6 @@ async function processAutomationGenerationJobStep(r: DbConn, args: { firmId: num
 
   const item = claimed[0];
   if (!item) {
-    const action = String((job as any).action ?? "download");
     const items = await queryRows(r, sql`
       SELECT *
       FROM document_generation_job_items
@@ -9026,126 +9033,6 @@ async function processAutomationGenerationJobStep(r: DbConn, args: { firmId: num
         return;
       }
 
-      if (action === "print") {
-        const hasPrintMode = await columnExists(r, { schema: "public", table: "document_templates", column: "print_mode" });
-        const templateIds = Array.from(new Set(
-          successItems
-            .map((it) => (it as any).template_id)
-            .filter((x): x is number => typeof x === "number" && Number.isFinite(x))
-            .map((x) => Math.trunc(x))
-            .filter((x) => x > 0)
-        ));
-        const templateRows = templateIds.length
-          ? await queryRows(r, sql`
-              SELECT id, ${hasPrintMode ? sql`print_mode` : sql`'double'::text AS print_mode`}
-              FROM document_templates
-              WHERE firm_id = ${args.firmId}
-                AND id IN (${sql.join(templateIds.map((id) => sql`${id}`), sql`, `)})
-            `)
-          : [];
-        const printModeByTemplateId = new Map<number, string>();
-        for (const t of templateRows) {
-          const id = typeof (t as any).id === "number" ? Number((t as any).id) : NaN;
-          if (!Number.isFinite(id)) continue;
-          printModeByTemplateId.set(id, String((t as any).print_mode ?? "double").toLowerCase());
-        }
-
-        const entries: Array<{ bytes: Buffer; singleSided: boolean }> = [];
-        for (const it of successItems) {
-          const objectPath = typeof (it as any).object_path === "string" ? String((it as any).object_path) : "";
-          if (!objectPath) continue;
-          const templateId = typeof (it as any).template_id === "number" ? Number((it as any).template_id) : NaN;
-          const printMode = Number.isFinite(templateId) ? (printModeByTemplateId.get(templateId) ?? "double") : "double";
-          const singleSided = printMode === "single";
-          entries.push({ bytes: await readSupabasePrivateObjectBytes(objectPath), singleSided });
-        }
-        const merged = await mergePdfBuffersWithBlankInjection(entries);
-        if (!merged.length) throw new Error("No printable output generated");
-        const objectPath = `/objects/temp-generated/${args.firmId}/document-automation-jobs/${args.jobId}.pdf`;
-        const outName = safeFilenameAscii(`System_Print_${new Date().toISOString().slice(0, 10)}.pdf`) || "system-print.pdf";
-        await supabaseStorage.uploadPrivateObject({ objectPath, fileBytes: merged, contentType: "application/pdf" });
-        const finalStatus = failedItems.length > 0 ? "completed_with_errors" : "completed";
-        await queryRows(r, sql`
-          UPDATE document_generation_jobs
-          SET status = ${finalStatus},
-              total_count = ${items.length},
-              success_count = ${successItems.length},
-              failed_count = ${failedItems.length},
-              pending_count = 0,
-              finished_at = now(),
-              download_object_path = ${objectPath},
-              download_file_name = ${outName},
-              download_mime_type = 'application/pdf'
-          WHERE id = ${args.jobId}::uuid AND firm_id = ${args.firmId}
-        `);
-        return;
-      }
-
-      if (successItems.length === 1) {
-        const oneItem = successItems[0];
-        const objectPath = typeof (oneItem as any).object_path === "string" ? String((oneItem as any).object_path) : "";
-        const fileName = typeof (oneItem as any).file_name === "string" ? String((oneItem as any).file_name) : "";
-        const mimeType = typeof (oneItem as any).mime_type === "string" ? String((oneItem as any).mime_type) : "";
-        const finalStatus = failedItems.length > 0 ? "completed_with_errors" : "completed";
-        await queryRows(r, sql`
-          UPDATE document_generation_jobs
-          SET status = ${finalStatus},
-              total_count = ${items.length},
-              success_count = ${successItems.length},
-              failed_count = ${failedItems.length},
-              pending_count = 0,
-              finished_at = now(),
-              download_object_path = ${objectPath},
-              download_file_name = ${fileName || `document-${args.jobId}`},
-              download_mime_type = ${mimeType || "application/pdf"}
-          WHERE id = ${args.jobId}::uuid AND firm_id = ${args.firmId}
-        `);
-        return;
-      }
-
-      const entries = successItems
-        .map((it) => ({
-          zipPath: safeFilenameAscii(String((it as any).file_name ?? `document-${(it as any).id}`)) || `document-${(it as any).id}`,
-          objectPath: String((it as any).object_path ?? ""),
-        }))
-        .filter((x) => x.objectPath);
-      if (entries.length === 0) throw new Error("No output generated: all job items ended without object_path. Check item diagnostics.");
-
-      const zipBytes = await (async () => {
-        const zipfile = new yazl.ZipFile();
-        const nameCounts = new Map<string, number>();
-        for (const e of entries) {
-          const base = e.zipPath.replace(/^\/*/, "");
-          const n = (nameCounts.get(base) ?? 0) + 1;
-          nameCounts.set(base, n);
-          const zipPath = n === 1 ? base : base.replace(/(\.[^./\\]+)?$/, (_m, ext) => ` (${n})${ext ?? ""}`);
-          const bytes = await downloadPrivateObjectBytes(e.objectPath);
-          zipfile.addBuffer(bytes, zipPath);
-        }
-        if (failedItems.length > 0) {
-          const lines = failedItems.map((it) => {
-            const caseId = (it as any)?.case_id;
-            const templateId = (it as any)?.template_id;
-            const code = (it as any)?.error_code ?? "";
-            const msg = (it as any)?.error_message ?? "";
-            return `caseId=${String(caseId ?? "")} templateId=${String(templateId ?? "")} code=${String(code ?? "")} message=${String(msg ?? "")}`;
-          });
-          const txt = `Some items failed.\n\n${lines.join("\n")}\n`;
-          zipfile.addBuffer(Buffer.from(txt, "utf8"), "generation-errors.txt");
-        }
-        zipfile.end();
-        const chunks: Buffer[] = [];
-        await new Promise<void>((resolve, reject) => {
-          zipfile.outputStream.on("data", (c: any) => chunks.push(Buffer.isBuffer(c) ? c : Buffer.from(c)));
-          zipfile.outputStream.on("error", reject);
-          zipfile.outputStream.on("end", resolve);
-        });
-        return Buffer.concat(chunks);
-      })();
-      const objectPath = `/objects/temp-generated/${args.firmId}/document-automation-jobs/${args.jobId}.zip`;
-      const outName = safeFilenameAscii(`Document_Automation_${new Date().toISOString().slice(0, 10)}.zip`) || "document-automation.zip";
-      await supabaseStorage.uploadPrivateObject({ objectPath, fileBytes: zipBytes, contentType: "application/zip" });
-
       const finalStatus = failedItems.length > 0 ? "completed_with_errors" : "completed";
       await queryRows(r, sql`
         UPDATE document_generation_jobs
@@ -9154,27 +9041,17 @@ async function processAutomationGenerationJobStep(r: DbConn, args: { firmId: num
             success_count = ${successItems.length},
             failed_count = ${failedItems.length},
             pending_count = 0,
-            finished_at = now(),
-            download_object_path = ${objectPath},
-            download_file_name = ${outName},
-            download_mime_type = 'application/zip'
+            finished_at = now()
         WHERE id = ${args.jobId}::uuid AND firm_id = ${args.firmId}
       `);
     } catch (err) {
       const message = err instanceof Error ? err.message : "Internal Server Error";
-      const action = String((job as any).action ?? "download");
-      const code =
-        message.includes("No output generated")
-          ? "NO_OUTPUT_GENERATED"
-          : action === "download"
-            ? "ZIP_CREATION_ERROR"
-            : "FINALIZE_FAILED";
       await queryRows(r, sql`
         UPDATE document_generation_jobs
         SET status = 'failed',
             finished_at = now(),
             last_heartbeat_at = now(),
-            error_code = ${code},
+            error_code = 'FINALIZE_FAILED',
             error_summary = ${message.slice(0, 500)}
         WHERE id = ${args.jobId}::uuid AND firm_id = ${args.firmId}
       `);
@@ -10009,15 +9886,129 @@ router.get("/documents/jobs/:jobId/download", requireAuth, requireFirmUser, requ
     fail(404, "JOB_NOT_FOUND", "Job not found", null, false);
     return;
   }
-  const objectPath = typeof (job as any).download_object_path === "string" ? String((job as any).download_object_path) : "";
-  if (!objectPath) {
-    fail(404, "DOWNLOAD_NOT_READY", "Download not available", null, true);
+  const st = String((job as any).status ?? "");
+  if (st !== "completed" && st !== "completed_with_errors") {
+    fail(409, "JOB_NOT_COMPLETED", "Job is not completed yet", { status: st || "pending" }, true);
     return;
   }
   try {
-    const fileName = typeof (job as any).download_file_name === "string" ? String((job as any).download_file_name) : `export-${jobId}.zip`;
-    const fallbackContentType = typeof (job as any).download_mime_type === "string" ? String((job as any).download_mime_type) : "application/zip";
-    await streamSupabasePrivateObjectToResponse({ objectPath, res, fileName, fallbackContentType });
+    const objectPath = typeof (job as any).download_object_path === "string" ? String((job as any).download_object_path) : "";
+    if (objectPath) {
+      const fileName = typeof (job as any).download_file_name === "string" ? String((job as any).download_file_name) : `export-${jobId}.zip`;
+      const fallbackContentType = typeof (job as any).download_mime_type === "string" ? String((job as any).download_mime_type) : "application/zip";
+      await streamSupabasePrivateObjectToResponse({ objectPath, res, fileName, fallbackContentType, timeoutMs: 60_000 });
+      await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.generation_jobs.download", entityType: "document_generation_job", entityId: undefined, detail: `jobId=${jobId}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+      return;
+    }
+
+    const items = await queryRows(r, sql`
+      SELECT
+        i.*,
+        COALESCE(t.name, pd.name) AS template_name
+      FROM document_generation_job_items i
+      LEFT JOIN document_templates t
+        ON t.firm_id = i.firm_id AND t.id = i.template_id
+      LEFT JOIN platform_documents pd
+        ON pd.id = i.platform_document_id AND (pd.firm_id IS NULL OR pd.firm_id = i.firm_id)
+      WHERE i.job_id = ${jobId}::uuid AND i.firm_id = ${req.firmId!}
+      ORDER BY i.id ASC
+    `);
+    const successItems = items.filter((x) => String((x as any).status ?? "") === "success" && String((x as any).object_path ?? ""));
+    const failedItems = items.filter((x) => String((x as any).status ?? "") === "failed");
+    if (successItems.length === 0) {
+      fail(404, "NO_OUTPUT", "No output generated", { failedCount: failedItems.length }, false);
+      return;
+    }
+
+    const action = String((job as any).action ?? "download");
+    if (action === "print") {
+      const hasPrintMode = await columnExists(r, { schema: "public", table: "document_templates", column: "print_mode" });
+      const templateIds = Array.from(new Set(
+        successItems
+          .map((it) => (it as any).template_id)
+          .filter((x): x is number => typeof x === "number" && Number.isFinite(x))
+          .map((x) => Math.trunc(x))
+          .filter((x) => x > 0)
+      ));
+      const templateRows = templateIds.length
+        ? await queryRows(r, sql`
+            SELECT id, ${hasPrintMode ? sql`print_mode` : sql`'double'::text AS print_mode`}
+            FROM document_templates
+            WHERE firm_id = ${req.firmId!}
+              AND id IN (${sql.join(templateIds.map((id) => sql`${id}`), sql`, `)})
+          `)
+        : [];
+      const printModeByTemplateId = new Map<number, string>();
+      for (const t of templateRows) {
+        const id = typeof (t as any).id === "number" ? Number((t as any).id) : NaN;
+        if (!Number.isFinite(id)) continue;
+        printModeByTemplateId.set(id, String((t as any).print_mode ?? "double").toLowerCase());
+      }
+
+      const entries: Array<{ bytes: Buffer; singleSided: boolean }> = [];
+      for (const it of successItems) {
+        const op = typeof (it as any).object_path === "string" ? String((it as any).object_path) : "";
+        if (!op) continue;
+        const templateId = typeof (it as any).template_id === "number" ? Number((it as any).template_id) : NaN;
+        const printMode = Number.isFinite(templateId) ? (printModeByTemplateId.get(templateId) ?? "double") : "double";
+        const singleSided = printMode === "single";
+        entries.push({ bytes: await readSupabasePrivateObjectBytes(op, { timeoutMs: 60_000 }), singleSided });
+      }
+      const merged = await mergePdfBuffersWithBlankInjection(entries);
+      if (!merged.length) throw new Error("No printable output generated");
+      const outName = safeFilenameAscii(`System_Print_${new Date().toISOString().slice(0, 10)}.pdf`) || "system-print.pdf";
+      res.setHeader("Content-Type", "application/pdf");
+      res.setHeader("Content-Disposition", contentDispositionAttachment(outName));
+      res.status(200).send(merged);
+      await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.generation_jobs.download", entityType: "document_generation_job", entityId: undefined, detail: `jobId=${jobId} mode=print`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+      return;
+    }
+
+    const zipName = safeFilenameAscii(`Document_Automation_${new Date().toISOString().slice(0, 10)}.zip`) || `document-automation-${jobId}.zip`;
+    res.setHeader("Content-Type", "application/zip");
+    res.setHeader("Content-Disposition", contentDispositionAttachment(zipName));
+    res.status(200);
+
+    const zipfile = new yazl.ZipFile();
+    zipfile.outputStream.on("error", (e: any) => {
+      try {
+        logger.error({ err: e, firmId: req.firmId, jobId }, "[documents] zip stream error");
+      } catch {
+      }
+    });
+    zipfile.outputStream.pipe(res);
+
+    const nameCounts = new Map<string, number>();
+    for (const it of successItems) {
+      const op = typeof (it as any).object_path === "string" ? String((it as any).object_path) : "";
+      if (!op) continue;
+      const rawName = typeof (it as any).file_name === "string" ? String((it as any).file_name) : `document-${String((it as any).id ?? "")}.docx`;
+      const base = (safeFilenameAscii(rawName) || rawName || `document-${String((it as any).id ?? "")}`).replace(/^\/*/, "");
+      const n = (nameCounts.get(base) ?? 0) + 1;
+      nameCounts.set(base, n);
+      const zipPath = n === 1 ? base : base.replace(/(\.[^./\\]+)?$/, (_m, ext) => ` (${n})${ext ?? ""}`);
+      const bytes = await readSupabasePrivateObjectBytes(op, { timeoutMs: 60_000 });
+      zipfile.addBuffer(bytes, zipPath);
+    }
+    if (failedItems.length > 0) {
+      const lines = failedItems.map((it) => {
+        const caseId = (it as any)?.case_id;
+        const templateId = (it as any)?.template_id ?? (it as any)?.platform_document_id;
+        const source = (it as any)?.template_source ?? "";
+        const code = (it as any)?.error_code ?? "";
+        const msg = (it as any)?.error_message ?? "";
+        return `source=${String(source)} caseId=${String(caseId ?? "")} templateId=${String(templateId ?? "")} code=${String(code ?? "")} message=${String(msg ?? "")}`;
+      });
+      const txt = `Some items failed.\n\n${lines.join("\n")}\n`;
+      zipfile.addBuffer(Buffer.from(txt, "utf8"), "generation-errors.txt");
+    }
+    zipfile.end();
+
+    await new Promise<void>((resolve, reject) => {
+      res.on("finish", resolve);
+      res.on("error", reject);
+      zipfile.outputStream.on("error", reject);
+    });
     await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "documents.generation_jobs.download", entityType: "document_generation_job", entityId: undefined, detail: `jobId=${jobId}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
   } catch (err) {
     const cfgErr = getSupabaseStorageConfigError(err);

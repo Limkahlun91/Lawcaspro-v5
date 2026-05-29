@@ -2,6 +2,8 @@ import request from "supertest";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import type { Application } from "express";
 
+const TEST_JOB_ID = "11111111-1111-1111-1111-111111111111";
+
 type FakeDb = {
   execute: (query?: unknown) => Promise<unknown>;
   select: (sel?: unknown) => {
@@ -25,8 +27,49 @@ function queryable(getRows: () => Promise<unknown[]>) {
 }
 
 function makeDb(): FakeDb {
+  const queryText = (query: any): string => {
+    const chunks = query?.queryChunks;
+    if (!Array.isArray(chunks)) return "";
+    return chunks
+      .map((c: any) => {
+        if (typeof c === "string") return "$";
+        const v = c?.value;
+        if (Array.isArray(v)) return v.join("");
+        return "";
+      })
+      .join("");
+  };
+
   const db: FakeDb = {
-    execute: async () => [],
+    execute: async (query?: unknown) => {
+      const text = queryText(query as any);
+      if (text.includes("FROM document_generation_jobs")) {
+        return [{
+          id: TEST_JOB_ID,
+          firm_id: 1,
+          status: "completed",
+          action: "download",
+          download_object_path: null,
+          download_file_name: null,
+          download_mime_type: null,
+        }];
+      }
+      if (text.includes("FROM document_generation_job_items")) {
+        return [{
+          id: 1,
+          job_id: TEST_JOB_ID,
+          firm_id: 1,
+          status: "success",
+          object_path: "/objects/temp-generated/1/document-automation-jobs/one.docx",
+          file_name: "CON-001_Acting-Letter.docx",
+          mime_type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+          template_source: "firm",
+          template_id: 7,
+          platform_document_id: null,
+        }];
+      }
+      return [];
+    },
     select: (_sel?: unknown) => ({
       from: (_table: unknown) => {
         const q = queryable(async () => []);
@@ -59,6 +102,34 @@ vi.mock("../lib/auth", async (orig) => {
     },
     requirePermission: () => (_req: any, _res: any, next: any) => next(),
     writeAuditLog: async () => undefined,
+  };
+});
+
+vi.mock("../lib/objectStorage.js", async (orig) => {
+  const actual = await orig<typeof import("../lib/objectStorage.js")>();
+  class SupabaseStorageServiceMock {
+    assertConfigured() {
+    }
+    async fetchPrivateObjectResponse(_objectPath: string, _opts?: { timeoutMs?: number }) {
+      return new Response(Buffer.from("hello"), {
+        headers: {
+          "content-type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+          "content-length": "5",
+        },
+      });
+    }
+    async privateObjectExists() {
+      return true;
+    }
+    async uploadPrivateObject() {
+    }
+    async deletePrivateObject() {
+    }
+  }
+  return {
+    ...actual,
+    SupabaseStorageService: SupabaseStorageServiceMock as any,
+    getSupabaseStorageConfigError: () => null,
   };
 });
 
@@ -135,5 +206,21 @@ describe("Documents automation regressions", () => {
     expect(res.body.dashboard).toHaveProperty("milestoneSections");
     expect(Array.isArray(res.body.dashboard.milestoneSections)).toBe(true);
   });
-});
 
+  it("GET /api/documents/jobs/:jobId/download returns 200 application/zip even without download_object_path", async () => {
+    const res = await request(app)
+      .get(`/api/documents/jobs/${TEST_JOB_ID}/download`)
+      .buffer(true)
+      .parse((r, cb) => {
+        const chunks: Buffer[] = [];
+        r.on("data", (c) => chunks.push(Buffer.isBuffer(c) ? c : Buffer.from(c)));
+        r.on("end", () => cb(null, Buffer.concat(chunks)));
+      });
+    expect(res.status).toBe(200);
+    expect(String(res.headers["content-type"] ?? "")).toContain("application/zip");
+    const body = res.body as Buffer;
+    expect(Buffer.isBuffer(body)).toBe(true);
+    expect(body.length).toBeGreaterThan(10);
+    expect(body.slice(0, 2).toString("utf8")).toBe("PK");
+  });
+});

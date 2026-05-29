@@ -115,8 +115,9 @@ export default function DocumentAutomationHub() {
   const [bundleMessage, setBundleMessage] = useState<string | null>(null);
   const [bundleTemplateIdSet, setBundleTemplateIdSet] = useState<Set<number>>(() => new Set());
   const [bundleFolderIdSet, setBundleFolderIdSet] = useState<Set<number>>(() => new Set());
-  const handledJobKeyRef = useRef<string>("");
-  const warnedLongRef = useRef<string>("");
+  const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+  const isTerminalJobStatus = (st: string) =>
+    st === "completed" || st === "failed" || st === "done" || st === "completed_with_errors" || st === "completed-with-errors";
 
   const casesQuery = useQuery<AutomationCasesResponse>({
     queryKey: ["document-automation", "cases", caseSearch],
@@ -244,125 +245,8 @@ export default function DocumentAutomationHub() {
   const allCasesOnPageSelected = cases.length > 0 && cases.every((c) => selectedCaseIdSet.has(c.id));
   const someCasesOnPageSelected = cases.some((c) => selectedCaseIdSet.has(c.id)) && !allCasesOnPageSelected;
 
-  const jobQuery = useQuery({
-    queryKey: ["jobStatus", jobId],
-    queryFn: () => runNextGenerationJob(String(jobId)),
-    enabled: Boolean(jobId),
-    refetchInterval: (query) => {
-      if (query.state.status === "error") return false;
-      const data = query.state.data as any;
-      const st = String(data?.status ?? "");
-      if (st === "completed" || st === "failed" || st === "done" || st === "completed_with_errors" || st === "completed-with-errors") return false;
-      const updates = Number((query.state as any)?.dataUpdateCount ?? 0);
-      if (Number.isFinite(updates) && updates >= 180) return false;
-      return 1000;
-    },
-    retry: false,
-  });
-
-  const jobStatus = String(jobQuery.data?.status ?? "");
-  const jobDownloadFileName = safeText(jobQuery.data?.downloadFileName);
-  const jobForDisplay = jobId ? (jobQuery.data ?? null) : lastJob;
+  const jobForDisplay = lastJob;
   const failedItemsForDisplay = jobForDisplay?.items?.filter((it) => String(it.status ?? "") === "failed") ?? [];
-
-  useEffect(() => {
-    if (!jobId) return;
-    if (!jobQuery.isError) return;
-    const raw: any = jobQuery.error as any;
-    const status = typeof raw?.status === "number" ? raw.status : typeof raw?.response?.status === "number" ? raw.response.status : null;
-    const code = safeText(raw?.data?.error?.code) || safeText(raw?.data?.code);
-    const msg = safeText(raw?.data?.error?.message) || safeText(raw?.data?.message) || safeText(raw?.message) || "Job status unavailable";
-    toast({ title: "Job failed", description: [status ? `HTTP ${status}` : "", code, msg].filter(Boolean).join(" — "), variant: "destructive" });
-    setJobId(null);
-    setBusy(false);
-  }, [jobId, jobQuery.isError, jobQuery.error, toast]);
-
-  useEffect(() => {
-    if (!jobId) return;
-    const updates = Number((jobQuery as any)?.dataUpdateCount ?? 0);
-    if (!Number.isFinite(updates) || updates <= 0) return;
-    const st = String(jobQuery.data?.status ?? "");
-    const terminal =
-      st === "completed" ||
-      st === "failed" ||
-      st === "done" ||
-      st === "completed_with_errors" ||
-      st === "completed-with-errors";
-    if (terminal) return;
-
-    if (updates >= 30 && warnedLongRef.current !== String(jobId)) {
-      warnedLongRef.current = String(jobId);
-      toast({ title: "Generation taking longer than expected", description: "You can wait, or retry if it fails." });
-    }
-
-    if (updates >= 180) {
-      toast({ title: "Generation timed out", description: "Max polling attempts exceeded. Please retry.", variant: "destructive" });
-      setJobId(null);
-      setBusy(false);
-    }
-  }, [jobId, jobQuery.data, toast]);
-
-  useEffect(() => {
-    if (!jobId) return;
-    const job: any = jobQuery.data as any;
-    if (!job) return;
-    setLastJob(job);
-
-    const handleKey = `${jobId}:${jobStatus}`;
-    const terminal =
-      jobStatus === "completed" ||
-      jobStatus === "failed" ||
-      jobStatus === "done" ||
-      jobStatus === "completed_with_errors" ||
-      jobStatus === "completed-with-errors";
-    if (terminal && handledJobKeyRef.current === handleKey) return;
-    if (terminal) handledJobKeyRef.current = handleKey;
-
-    if (jobStatus === "failed") {
-      const summary = safeText(job?.errorSummary) || "Document generation failed";
-      const firstFailed = Array.isArray(job?.items) ? job.items.find((it: any) => String(it?.status ?? "") === "failed") : null;
-      const code = safeText(firstFailed?.errorCode);
-      const msg = safeText(firstFailed?.errorMessage);
-      const tplName = safeText(firstFailed?.templateName) || (typeof firstFailed?.templateId === "number" ? (templateNameById.get(firstFailed.templateId) ?? "") : "");
-      const detail = [tplName, code, msg].filter(Boolean).join(" — ");
-      toast({ title: "Generation failed", description: detail ? `${summary}: ${detail}` : summary, variant: "destructive" });
-      setJobId(null);
-      setBusy(false);
-      return;
-    }
-    if (!terminal) return;
-
-    const failed = Array.isArray(job?.items) ? job.items.filter((it: any) => String(it?.status ?? "") === "failed") : [];
-    if (failed.length > 0) toast({ title: "Some documents failed", description: "Please check the job details panel for diagnostics." });
-
-    const doDownload = async () => {
-      const url = apiUrl(`/api/documents/jobs/${jobId}/download`);
-      if (!safeText(job?.downloadObjectPath) && !jobDownloadFileName) {
-        throw new Error("No downloadable output was generated.");
-      }
-      if (activeMode === "print") {
-        window.open(url, "_blank", "noopener,noreferrer");
-        toast({ title: "Printable PDF generated" });
-        return;
-      }
-
-      const resp = await downloadGenerationJob(jobId);
-      const blob = await resp.blob();
-      const filename =
-        parseFilenameFromDisposition(resp.headers.get("Content-Disposition")) ||
-        jobDownloadFileName ||
-        "document-automation.zip";
-      downloadBlob(blob, filename);
-      toast({ title: "Export ready", description: filename });
-    };
-
-    doDownload()
-      .catch((err) => toastError(toast, err))
-      .finally(() => {
-        setJobId(null);
-        setBusy(false);
-      });
-  }, [jobId, jobStatus, activeMode, jobDownloadFileName, toast]);
 
   function setAllCasesOnPage(checked: boolean) {
     if (!checked) {
@@ -675,12 +559,60 @@ export default function DocumentAutomationHub() {
         setBusy(false);
         return;
       }
-      setJobId(created.jobId);
+      const jid = created.jobId;
+      setJobId(jid);
+      setLastJob(null);
       startedJob = true;
-      toast({ title: "Generation started", description: "Processing in background. This page will auto-download when ready." });
+      toast({ title: "Generation started", description: "Processing. Your download will start automatically when ready." });
+
+      let lastStep: NormalizedGenerationJob | null = null;
+      let consecutiveErrors = 0;
+      for (let i = 0; i < 180; i++) {
+        try {
+          lastStep = await runNextGenerationJob(jid);
+          setLastJob(lastStep);
+          consecutiveErrors = 0;
+        } catch (err) {
+          consecutiveErrors++;
+          if (consecutiveErrors >= 5) throw err;
+        }
+
+        const st = String(lastStep?.status ?? "");
+        if (isTerminalJobStatus(st)) break;
+        await sleep(1000);
+      }
+
+      const finalStatus = String(lastStep?.status ?? "");
+      if (!isTerminalJobStatus(finalStatus)) {
+        throw new Error("Generation timed out. Please retry.");
+      }
+      if (finalStatus === "failed") {
+        const summary = safeText(lastStep?.errorSummary) || "Document generation failed";
+        const firstFailed = Array.isArray(lastStep?.items) ? lastStep?.items.find((it: any) => String(it?.status ?? "") === "failed") : null;
+        const code = safeText((firstFailed as any)?.errorCode);
+        const msg = safeText((firstFailed as any)?.errorMessage);
+        const tplName = safeText((firstFailed as any)?.templateName) || (typeof (firstFailed as any)?.templateId === "number" ? (templateNameById.get((firstFailed as any).templateId) ?? "") : "");
+        const detail = [tplName, code, msg].filter(Boolean).join(" — ");
+        toast({ title: "Generation failed", description: detail ? `${summary}: ${detail}` : summary, variant: "destructive" });
+        return;
+      }
+
+      const url = apiUrl(`/api/documents/jobs/${jid}/download`);
+      if (mode === "print") {
+        window.open(url, "_blank", "noopener,noreferrer");
+        toast({ title: "Printable PDF generated" });
+        return;
+      }
+      const resp = await downloadGenerationJob(jid);
+      const blob = await resp.blob();
+      const filename = parseFilenameFromDisposition(resp.headers.get("Content-Disposition")) || "document-automation.zip";
+      downloadBlob(blob, filename);
+      toast({ title: "Export ready", description: filename });
     } catch (err) {
       toastError(toast, err);
     } finally {
+      setJobId(null);
+      setBusy(false);
       if (!startedJob) setBusy(false);
     }
   }

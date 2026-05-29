@@ -506,10 +506,7 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
         if (st === "completed" || st === "completed_with_errors" || st === "completed-with-errors") {
           await qc.invalidateQueries({ queryKey: ["case-documents", caseId] });
           await qc.invalidateQueries({ queryKey: ["case-documents-checklist", caseId] });
-          const fileName = job.downloadFileName || "document.pdf";
-          if (!job.downloadObjectPath) {
-            throw new Error("Generation completed but no downloadable output was created. Please check failed item diagnostics.");
-          }
+          const fileName = job.downloadFileName || "document.zip";
           await downloadFromApi(`/documents/jobs/${jobId}/download`, fileName);
           toast({ title: "Download started" });
           return true;
@@ -636,9 +633,6 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
           await qc.invalidateQueries({ queryKey: ["case-documents", caseId] });
           await qc.invalidateQueries({ queryKey: ["case-documents-checklist", caseId] });
           const fileName = job.downloadFileName || "documents.zip";
-          if (!job.downloadObjectPath) {
-            throw new Error("Generation completed but no downloadable output was created. Please check failed item diagnostics.");
-          }
           await downloadFromApi(`/documents/jobs/${jobId}/download`, fileName);
           toast({ title: "Downloaded" });
           return true;
@@ -760,11 +754,8 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
         const job = await runNextGenerationJob(jobId);
         setBatchGenerateResult(job);
         const status = typeof job.status === "string" ? job.status : "";
-        if (status === "completed") {
-          const fileName = job.downloadFileName || (enterpriseMode === "print" ? "system-print.pdf" : "document-automation.zip");
-          if (!job.downloadObjectPath) {
-            throw new Error("Generation completed but no downloadable output was created. Please check failed item diagnostics.");
-          }
+        if (status === "completed" || status === "completed_with_errors" || status === "completed-with-errors") {
+          const fileName = job.downloadFileName || (enterpriseMode === "print" ? "system-print.pdf" : "documents.zip");
 
           if (enterpriseMode === "print") {
             const blob = await apiFetchBlob(downloadUrl);
@@ -838,7 +829,6 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
   function closeGenerateDialog() {
     setGenerateDialogOpen(false);
     setDocumentName("");
-    setSelectedLetterheadId("");
     setShowAllTemplates(false);
     setTemplateSourceFilter("all");
     setTemplateApplicabilityFilter("all");

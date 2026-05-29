@@ -10,7 +10,6 @@ import {
 import { cn } from "@/lib/utils";
 import { useToast } from "@/hooks/use-toast";
 import FirmDocuments from "@/pages/app/documents/FirmDocuments";
-import FirmLetterHead from "@/pages/app/documents/FirmLetterHead";
 import { QueryFallback } from "@/components/query-fallback";
 import { apiFetchBlob, apiFetchJson } from "@/lib/api-client";
 import { downloadBlob } from "@/lib/download";
@@ -39,13 +38,12 @@ interface SystemFolder {
   isDisabled: boolean;
 }
 
-const TABS = ["Master Documents", "Firm Documents", "Firm Letter Head"] as const;
+const TABS = ["Master Documents", "Firm Documents"] as const;
 type Tab = typeof TABS[number];
 
 const TAB_KEYS: Record<string, Tab> = {
   master: "Master Documents",
   firm: "Firm Documents",
-  letterhead: "Firm Letter Head",
 };
 
 type FirmSettings = { showMasterDocuments?: boolean };
@@ -447,7 +445,6 @@ export default function DocumentsPage() {
 
       {activeTab === "Master Documents" && showMasterDocuments && <MasterDocumentsTab />}
       {activeTab === "Firm Documents" && <FirmDocuments />}
-      {activeTab === "Firm Letter Head" && <FirmLetterHead />}
     </div>
   );
 }
