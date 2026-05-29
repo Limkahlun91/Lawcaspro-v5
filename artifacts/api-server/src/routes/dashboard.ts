@@ -374,36 +374,86 @@ router.get("/dashboard", requireAuth, requireFirmUser, requirePermission("dashbo
       return n;
     })();
     const effectiveAssignedToUserId = assignedToMe ? (req.userId ?? null) : assignedToUserId;
-    const stats = await computeDashboardStats(r, firmId, {
-      assignedToUserId: effectiveAssignedToUserId ?? undefined,
-      includeErrorDetails: allowDetails,
-      deadlineAt: Date.now() + 4_800,
-    });
+    type SummaryOk = { ok: true; data: DashboardSummaryData; errors: Array<{ section: string; code: string | null; message: string }> };
+    type SummaryErr = { ok: false; error: string };
+    const summaryTimeoutMs = 1600;
+    const summaryPromise: Promise<SummaryOk | SummaryErr> = Promise.race([
+      computeDashboardSummary(r, { firmId, assignedToUserId: effectiveAssignedToUserId ?? undefined }),
+      new Promise<SummaryErr>((resolve) => setTimeout(() => resolve({ ok: false, error: "Dashboard summary timed out" }), summaryTimeoutMs)),
+    ]);
+
+    const statsTimeoutMs = 4200;
+    const statsPromise: Promise<{ ok: true; stats: Record<string, unknown> } | { ok: false; error: string }> = Promise.race([
+      (async () => {
+        const stats = await computeDashboardStats(r, firmId, {
+          assignedToUserId: effectiveAssignedToUserId ?? undefined,
+          includeErrorDetails: allowDetails,
+          deadlineAt: Date.now() + 3_600,
+        });
+        return { ok: true, stats } as const;
+      })(),
+      new Promise<{ ok: false; error: string }>((resolve) => setTimeout(() => resolve({ ok: false, error: "DASHBOARD_TIMEOUT" }), statsTimeoutMs)),
+    ]);
+
+    const [summaryOut, statsOut] = await Promise.all([summaryPromise, statsPromise]);
+    const summaryData = summaryOut.ok === true ? summaryOut.data : { totalCases: 0, totalClients: 0, totalProjects: 0, totalDevelopers: 0 };
+
+    const stats = statsOut.ok === true ? statsOut.stats : null;
+    const degraded = statsOut.ok === false || Boolean((stats as any)?.degraded) || Boolean((stats as any)?.ok === false);
+    const warnings = [
+      ...(Array.isArray((stats as any)?.warnings) ? ((stats as any).warnings as any[]) : []),
+      ...(summaryOut.ok === true
+        ? (summaryOut.errors ?? []).map((e) => ({ module: e.section, code: e.code, message: e.message }))
+        : [{ module: "summary", code: null, message: (summaryOut as SummaryErr).error }]),
+      ...(statsOut.ok === false ? [{ module: "dashboard", code: "TIMEOUT", message: statsOut.error }] : []),
+    ];
+    const unavailableFields: string[] = Array.isArray((stats as any)?.unavailableFields) ? ((stats as any).unavailableFields as string[]) : [];
+    if (statsOut.ok === false) {
+      for (const f of [
+        "milestoneCards",
+        "milestoneSections",
+        "recentCases",
+        "billing",
+        "outstandingAdvances",
+        "commsThisMonth",
+        "completionSlaOverdue",
+        "cashCases",
+        "loanCases",
+        "masterTitleCases",
+        "individualTitleCases",
+        "strataTitleCases",
+        "activeCases",
+        "completedCases",
+      ]) {
+        if (!unavailableFields.includes(f)) unavailableFields.push(f);
+      }
+    }
+
     res.status(200).json({
       ok: true,
-      degraded: Boolean((stats as any)?.degraded) || Boolean((stats as any)?.ok === false),
+      degraded,
       requestId,
-      warnings: Array.isArray((stats as any)?.warnings) ? (stats as any).warnings : [],
-      unavailableFields: Array.isArray((stats as any)?.unavailableFields) ? (stats as any).unavailableFields : [],
+      warnings,
+      unavailableFields,
       dashboard: {
-        totalCases: (stats as any).totalCases ?? 0,
-        activeCases: (stats as any).activeCases ?? 0,
-        completedCases: (stats as any).completedCases ?? 0,
-        totalClients: (stats as any).totalClients ?? 0,
-        totalDevelopers: (stats as any).totalDevelopers ?? 0,
-        totalProjects: (stats as any).totalProjects ?? 0,
-        cashCases: (stats as any).cashCases ?? 0,
-        loanCases: (stats as any).loanCases ?? 0,
-        masterTitleCases: (stats as any).masterTitleCases ?? 0,
-        individualTitleCases: (stats as any).individualTitleCases ?? 0,
-        strataTitleCases: (stats as any).strataTitleCases ?? 0,
-        billing: (stats as any).billing ?? { totalBilled: 0, totalPaid: 0, totalOutstanding: 0 },
-        outstandingAdvances: (stats as any).outstandingAdvances ?? [],
-        commsThisMonth: (stats as any).commsThisMonth ?? [],
-        completionSlaOverdue: (stats as any).completionSlaOverdue ?? [],
-        milestoneSections: Array.isArray((stats as any).milestoneSections) ? (stats as any).milestoneSections : [],
-        milestoneCards: Array.isArray((stats as any).milestoneCards) ? (stats as any).milestoneCards : [],
-        recentCases: Array.isArray((stats as any).recentCases) ? (stats as any).recentCases : [],
+        totalCases: (stats as any)?.totalCases ?? summaryData.totalCases ?? 0,
+        activeCases: (stats as any)?.activeCases ?? 0,
+        completedCases: (stats as any)?.completedCases ?? 0,
+        totalClients: (stats as any)?.totalClients ?? summaryData.totalClients ?? 0,
+        totalDevelopers: (stats as any)?.totalDevelopers ?? summaryData.totalDevelopers ?? 0,
+        totalProjects: (stats as any)?.totalProjects ?? summaryData.totalProjects ?? 0,
+        cashCases: (stats as any)?.cashCases ?? 0,
+        loanCases: (stats as any)?.loanCases ?? 0,
+        masterTitleCases: (stats as any)?.masterTitleCases ?? 0,
+        individualTitleCases: (stats as any)?.individualTitleCases ?? 0,
+        strataTitleCases: (stats as any)?.strataTitleCases ?? 0,
+        billing: (stats as any)?.billing ?? { totalBilled: 0, totalPaid: 0, totalOutstanding: 0 },
+        outstandingAdvances: (stats as any)?.outstandingAdvances ?? [],
+        commsThisMonth: (stats as any)?.commsThisMonth ?? 0,
+        completionSlaOverdue: (stats as any)?.completionSlaOverdue ?? [],
+        milestoneSections: Array.isArray((stats as any)?.milestoneSections) ? (stats as any).milestoneSections : [],
+        milestoneCards: Array.isArray((stats as any)?.milestoneCards) ? (stats as any).milestoneCards : [],
+        recentCases: Array.isArray((stats as any)?.recentCases) ? (stats as any).recentCases : [],
         alerts: [],
       },
     });

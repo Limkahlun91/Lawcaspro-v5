@@ -148,7 +148,7 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
   const [viewTab, setViewTab] = useState<"list" | "checklist" | "history">("list");
   const [generateDialogOpen, setGenerateDialogOpen] = useState(false);
   const [showAllTemplates, setShowAllTemplates] = useState(false);
-  const [templateSourceFilter, setTemplateSourceFilter] = useState<"all" | "firm">("all");
+  const [templateSourceFilter, setTemplateSourceFilter] = useState<"all" | "firm" | "master">("all");
   const [templateApplicabilityFilter, setTemplateApplicabilityFilter] = useState<"all" | "applicable" | "warning" | "not_applicable">("all");
   const [selectedLetterheadId, setSelectedLetterheadId] = useState<string>("");
   const [documentName, setDocumentName] = useState("");
@@ -453,7 +453,7 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
   async function generateAndDownloadBlind(item: ChecklistItem): Promise<void> {
     if (!canGenerate) return;
     if (item.kind !== "template" || typeof item.templateId !== "number") return;
-    if (item.source !== "firm") return;
+    if (item.source !== "firm" && item.source !== "master") return;
     const templateId = Number(item.templateId);
     if (!Number.isFinite(templateId) || templateId <= 0) return;
 
@@ -466,6 +466,7 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
         caseIds: [caseId],
         templateIds: [templateId],
         config: { action: "download" },
+        blind: true,
       });
       const preflightItems = Array.isArray((preflight as any)?.items) ? ((preflight as any).items as any[]) : [];
       const hardBlocked = preflightItems.filter((it) => Boolean(it?.hardBlocked));
@@ -481,6 +482,7 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
         caseIds: [caseId],
         templateIds: [templateId],
         config: { action: "download" },
+        blind: true,
       });
       const jobId = created.jobId;
 
@@ -562,7 +564,7 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
   }
 
   function toggleChecklistSelection(it: ChecklistItem) {
-    if (it.kind !== "template" || it.source !== "firm" || typeof it.templateId !== "number") return;
+    if (it.kind !== "template" || (it.source !== "firm" && it.source !== "master") || typeof it.templateId !== "number") return;
     const key = it.checklistKey;
     setSelectedChecklistKeys((prev) => {
       const next = new Set(prev);
@@ -584,7 +586,7 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
   async function openBatchVariableChecklist(items: ChecklistItem[]) {
     if (!canGenerate) return;
     const templateIds = items
-      .filter((it) => it.kind === "template" && it.source === "firm" && typeof it.templateId === "number")
+      .filter((it) => it.kind === "template" && (it.source === "firm" || it.source === "master") && typeof it.templateId === "number")
       .map((it) => Number(it.templateId))
       .filter((n) => Number.isFinite(n) && n > 0);
     if (!templateIds.length) return;
@@ -599,6 +601,7 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
         caseIds: [caseId],
         templateIds,
         config: { action: "download" },
+        blind: true,
       });
       const preflightItems = Array.isArray((preflight as any)?.items) ? ((preflight as any).items as any[]) : [];
       const hardBlocked = preflightItems.filter((it) => Boolean(it?.hardBlocked));
@@ -614,6 +617,7 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
         caseIds: [caseId],
         templateIds,
         config: { action: "download" },
+        blind: true,
       });
       const jobId = created.jobId;
 
@@ -700,7 +704,7 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
     if (!canGenerate || keys.size === 0) return;
     const allItems = (checklistQuery.data?.sections ?? []).flatMap((s) => s.items ?? []);
     const selected = allItems
-      .filter((it) => it.kind === "template" && it.source === "firm" && typeof it.templateId === "number")
+      .filter((it) => it.kind === "template" && (it.source === "firm" || it.source === "master") && typeof it.templateId === "number")
       .filter((it) => keys.has(it.checklistKey));
     if (selected.length === 0) return;
     await openBatchVariableChecklist(selected);
@@ -1403,28 +1407,22 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
                                 ? (it.readiness?.missing ?? []).map((m) => m.message).filter(Boolean).slice(0, 3).join(", ")
                                 : "";
 
-                            const canSelectForBatch = canGenerate && it.kind === "template" && it.source === "firm";
+                            const canSelectForBatch = canGenerate && it.kind === "template" && (it.source === "firm" || it.source === "master");
                             const selected = selectedChecklistKeys.has(it.checklistKey);
 
                             const generateFinalDisabledReason = (() => {
                               if (it.kind !== "template") return "Template is not generation capable";
                               if (!canGenerate) return "No permission";
-                              if (it.source !== "firm") return "Unsupported template source";
-                              if (!applicable) return "Not applicable to this case";
                               if (it.readiness && it.readiness.status !== "ready") {
                                 if (it.readiness.status === "missing_file") return "Template file missing";
                                 if (it.readiness.status === "missing_version") return "Missing published version";
                                 if (it.readiness.status === "storage_unavailable") return "Storage unavailable";
                                 if (it.readiness.status === "permission_error") return "Storage permission error";
-                                const missingMsgs = (it.readiness.missing ?? []).map((m) => String(m.message ?? "").trim()).filter(Boolean);
                                 const hasTemplateMissing = (it.readiness.missing ?? []).some((m) => String(m.code ?? "").toLowerCase().includes("template") && String(m.code ?? "").toLowerCase().includes("missing"));
                                 const hasStorageMissing = (it.readiness.missing ?? []).some((m) => String(m.code ?? "").toLowerCase().includes("storage") && String(m.code ?? "").toLowerCase().includes("missing"));
                                 if (hasStorageMissing) return "Storage object missing";
                                 if (hasTemplateMissing) return "Template file missing";
-                                if (missingMsgs.length > 0) return `Missing required variables: ${missingMsgs.slice(0, 3).join(", ")}${missingMsgs.length > 3 ? "..." : ""}`;
-                                return "Missing required variables";
                               }
-                              if (it.blocked) return "Missing required variables";
                               return "";
                             })();
 
@@ -1441,7 +1439,8 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
                             const updatedLabel = it.updatedAt ? new Date(it.updatedAt).toLocaleString("en-MY") : null;
 
                             const sourceLabel =
-                              it.source === "firm" ? "Firm"
+                              it.source === "master" ? "Master"
+                              : it.source === "firm" ? "Firm"
                               : it.source === "workflow" ? "Workflow"
                               : it.source === "stamping" ? "Loan stamping"
                               : "Manual";
@@ -1751,7 +1750,7 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
               )}
               <Select
                 value={templateSourceFilter}
-                onValueChange={(v) => setTemplateSourceFilter(v === "firm" ? "firm" : "all")}
+                onValueChange={(v) => setTemplateSourceFilter(v === "firm" ? "firm" : v === "master" ? "master" : "all")}
               >
                 <SelectTrigger className="w-40">
                   <SelectValue />
@@ -1759,6 +1758,7 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
                 <SelectContent>
                   <SelectItem value="all">All sources</SelectItem>
                   <SelectItem value="firm">Firm</SelectItem>
+                  <SelectItem value="master">Master</SelectItem>
                 </SelectContent>
               </Select>
               <Select value={templateApplicabilityFilter} onValueChange={(v) => setTemplateApplicabilityFilter(v as any)}>
@@ -1779,21 +1779,9 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
               <Input value={documentName} onChange={(e) => setDocumentName(e.target.value)} placeholder="Leave empty to use template name" />
             </div>
 
-            {activeLetterheads.length > 0 && (
-              <div className="space-y-1.5">
-                <Label>Letterhead (for letter-like templates)</Label>
-                <Select value={selectedLetterheadId} onValueChange={setSelectedLetterheadId}>
-                  <SelectTrigger>
-                    <SelectValue placeholder={defaultLetterhead ? `Default: ${defaultLetterhead.name}` : "Select letterhead..."} />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {activeLetterheads.map((l) => (
-                      <SelectItem key={l.id} value={String(l.id)}>{l.name}</SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
-            )}
+            <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-700">
+              Firm letterhead: Coming soon (generation will continue without letterhead).
+            </div>
 
             {preflightQuery.isError ? (
               <QueryFallback
@@ -1829,34 +1817,18 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
                             const applicable = it.applicability?.status !== "not_applicable" || overridable;
                             const pre = typeof it.templateId === "number" ? preflightByTemplateId.get(it.templateId) : null;
                             const fileStatus = String(pre?.templateFile?.status ?? "");
-                            const converterStatus = String(pre?.converter?.status ?? "");
-                            const dataStatus = String(pre?.data?.status ?? "");
-                            const missingVars = Array.isArray(pre?.data?.missingVariables)
-                              ? pre.data.missingVariables.map((x: any) => String(x)).filter(Boolean)
-                              : [];
                             const fileReady = fileStatus === "ready";
-                            const dataReady = dataStatus === "ready" || dataStatus === "missing_variables" || dataStatus === "";
-                            const converterReady = converterStatus === "ready" || converterStatus === "";
                             const fileLabel =
                               preflightQuery.isError ? "Error"
                                 : fileStatus === "ready" ? "Ready"
                                   : fileStatus === "missing" ? "Missing template file"
                                     : fileStatus === "read_failed" ? "Storage read failed"
                                       : preflightQuery.isFetching ? "Checking..." : "Unknown";
-                            const dataLabel =
-                              preflightQuery.isError ? "Error"
-                                : dataStatus === "missing_variables"
-                                    ? `Missing variables (will be blank): ${missingVars.slice(0, 3).join(", ")}${missingVars.length > 3 ? "..." : ""}`
-                                    : dataReady ? "Ready"
-                                      : preflightQuery.isFetching ? "Checking..." : "Unknown";
                             const generateFinalDisabledReason = (() => {
                               if (it.kind !== "template") return "Template is not generation capable";
                               if (!canGenerate) return "No permission";
-                              if (it.source !== "firm") return "Unsupported template source";
-                              if (!applicable) return (it.applicability?.reasons ?? []).join(", ") || "Not applicable to this case";
-                              if (preflightQuery.isError) return "Preflight error";
-                              if (!pre) return "Checking...";
-                              if (!fileReady) return "Missing template file";
+                              if (preflightQuery.isFetching) return "";
+                              if (pre && !fileReady) return "Missing template file";
                               return "";
                             })();
                             return (
@@ -1865,21 +1837,13 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
                                   <div className="min-w-0">
                                     <div className="text-sm font-medium text-slate-900 truncate" title={it.name}>{it.name}</div>
                                     <div className="mt-1 text-xs text-slate-600 truncate">
-                                      {(it.source === "firm" ? "Firm" : it.source)} · {it.documentGroup}
+                                      {(it.source === "master" ? "Master" : it.source === "firm" ? "Firm" : it.source)} · {it.documentGroup}
                                     </div>
                                   </div>
                                   <div className="min-w-0">
                                     <div className="text-[11px] text-slate-700 truncate" title={`Template file: ${fileLabel}`}>
                                       Template file: {fileLabel}
                                     </div>
-                                    <div className="text-[11px] text-slate-700 truncate" title={`Data: ${dataLabel}`}>
-                                      Data: {dataLabel}
-                                    </div>
-                                    {!converterReady && (
-                                      <div className="text-[11px] text-amber-700 truncate" title="PDF conversion is not configured on Vercel. DOCX templates will use fallback PDF rendering.">
-                                        PDF conversion not configured; using fallback
-                                      </div>
-                                    )}
                                     <div className="text-[11px] text-slate-700 truncate">
                                       Output: PDF
                                     </div>
@@ -1891,7 +1855,6 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
                                       disabled={
                                         !canGenerate
                                         || isGenerating
-                                        || it.source !== "firm"
                                         || oneClickGeneratingTemplateId === it.templateId
                                         || Boolean(generateFinalDisabledReason)
                                       }

@@ -549,11 +549,16 @@ export default function DocumentAutomationHub() {
           copies: mode === "print" ? Number(copies || 1) : undefined,
           duplexSettings,
         },
+        blind: true,
       };
 
       const preflight = await validateGenerationJob(payload as any);
       const preflightItems = Array.isArray((preflight as any)?.items) ? ((preflight as any).items as any[]) : [];
-      const hardBlocked = preflightItems.filter((it) => Boolean(it?.hardBlocked));
+      const hardBlocked = preflightItems.filter((it) => {
+        if (!it || !it.hardBlocked) return false;
+        const code = safeText(it.code).toUpperCase();
+        return code === "TEMPLATE_FILE_MISSING" || code === "STORAGE_OBJECT_NOT_FOUND" || code === "STORAGE_NOT_CONFIGURED";
+      });
       if (hardBlocked.length > 0) {
         setPreflightReport({ hardBlocked, items: preflightItems });
         const first = hardBlocked[0] ?? {};

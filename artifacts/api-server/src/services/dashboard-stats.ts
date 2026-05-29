@@ -159,124 +159,88 @@ export async function computeDashboardStats(
     : 0;
   const activeCases = Math.max(0, totalCases - completedCases);
 
-  const recentRawRows = await (async () => {
+  const recentCases = await (async () => {
     if (deadlineExceeded()) {
       deadlineSkip("cases.recentCases", ["recentCases"]);
       return [];
     }
     try {
-      return assignedCasesJoin
-        ? await r
-            .select({
-              id: casesTable.id,
-              referenceNo: casesTable.referenceNo,
-              projectId: casesTable.projectId,
-              developerId: casesTable.developerId,
-              purchaseMode: casesTable.purchaseMode,
-              titleType: casesTable.titleType,
-              status: casesTable.status,
-              createdAt: casesTable.createdAt,
-              updatedAt: casesTable.updatedAt,
-            })
-            .from(casesTable)
-            .innerJoin(caseAssignmentsTable, assignedCasesJoin)
-            .where(and(eq(casesTable.firmId, firmId), isNull(casesTable.deletedAt)))
-            .orderBy(desc(casesTable.updatedAt))
-            .limit(20)
-        : await r
-            .select({
-              id: casesTable.id,
-              referenceNo: casesTable.referenceNo,
-              projectId: casesTable.projectId,
-              developerId: casesTable.developerId,
-              purchaseMode: casesTable.purchaseMode,
-              titleType: casesTable.titleType,
-              status: casesTable.status,
-              createdAt: casesTable.createdAt,
-              updatedAt: casesTable.updatedAt,
-            })
-            .from(casesTable)
-            .where(and(eq(casesTable.firmId, firmId), isNull(casesTable.deletedAt)))
-            .orderBy(desc(casesTable.updatedAt))
-            .limit(5);
+      const rows = await queryRows(r, sql`
+        SELECT *
+        FROM (
+          SELECT DISTINCT ON (c.id)
+            c.id,
+            c.reference_no,
+            c.purchase_mode,
+            c.title_type,
+            c.status,
+            c.created_at,
+            c.updated_at,
+            COALESCE(p.name, 'Unknown') AS project_name,
+            COALESCE(d.name, 'Unknown') AS developer_name,
+            u.name AS assigned_lawyer_name,
+            kd.advice_to_bank_date,
+            kd.completion_sla_activated_at
+          FROM cases c
+          ${assignedToUserId
+            ? sql`JOIN case_assignments caf ON caf.case_id = c.id AND caf.user_id = ${assignedToUserId} AND caf.unassigned_at IS NULL`
+            : sql``}
+          LEFT JOIN projects p ON p.id = c.project_id
+          LEFT JOIN developers d ON d.id = c.developer_id
+          LEFT JOIN LATERAL (
+            SELECT ca.user_id
+            FROM case_assignments ca
+            WHERE ca.case_id = c.id AND ca.unassigned_at IS NULL
+            ORDER BY ca.id DESC
+            LIMIT 1
+          ) ca1 ON TRUE
+          LEFT JOIN users u ON u.id = ca1.user_id
+          ${hasKeyDates ? sql`LEFT JOIN case_key_dates kd ON kd.case_id = c.id AND kd.firm_id = c.firm_id` : sql`LEFT JOIN LATERAL (SELECT NULL::date AS advice_to_bank_date, NULL::timestamptz AS completion_sla_activated_at) kd ON TRUE`}
+          WHERE c.firm_id = ${firmId} AND c.deleted_at IS NULL
+          ORDER BY c.id, c.updated_at DESC
+        ) x
+        ORDER BY x.updated_at DESC
+        LIMIT 5
+      `);
+
+      return rows.map((row) => {
+        const completionSlaActivatedAt = (row as any).completion_sla_activated_at as unknown;
+        const adviceToBankDate = (row as any).advice_to_bank_date as unknown;
+        const completionSla = (() => {
+          if (!completionSlaActivatedAt) return null;
+          if (adviceToBankDate) return null;
+          const t = completionSlaActivatedAt instanceof Date
+            ? completionSlaActivatedAt.getTime()
+            : new Date(completionSlaActivatedAt as any).getTime();
+          if (!Number.isFinite(t)) return null;
+          const ms = Date.now() - t;
+          const hours = Math.max(0, ms / 3600_000);
+          const status = hours >= 72 ? "overdue" : hours >= 48 ? "soon" : "due";
+          return { status, activatedAt: new Date(t).toISOString(), hoursElapsed: hours };
+        })();
+
+        return {
+          id: Number((row as any).id),
+          referenceNo: String((row as any).reference_no ?? ""),
+          projectName: String((row as any).project_name ?? "Unknown"),
+          developerName: String((row as any).developer_name ?? "Unknown"),
+          purchaseMode: (row as any).purchase_mode ?? null,
+          titleType: (row as any).title_type ?? null,
+          status: (row as any).status ?? null,
+          assignedLawyerName: typeof (row as any).assigned_lawyer_name === "string" ? String((row as any).assigned_lawyer_name) : null,
+          completionSla,
+          createdAt: (() => {
+            const v = (row as any).created_at;
+            const dt = v instanceof Date ? v : new Date(v as any);
+            return Number.isFinite(dt.getTime()) ? dt.toISOString() : new Date().toISOString();
+          })(),
+        };
+      });
     } catch (err) {
       warn("cases.recentCases", err, ["recentCases"]);
       return [];
     }
   })();
-
-  const seenRecent = new Set<number>();
-  const recentRows = recentRawRows.filter((row) => {
-    if (seenRecent.has(row.id)) return false;
-    seenRecent.add(row.id);
-    return true;
-  }).slice(0, 5);
-
-  const recentCases = await Promise.all(
-    recentRows.map(async (c) => {
-      const projectName = await (async () => {
-        try {
-          const [proj] = await r.select({ name: projectsTable.name }).from(projectsTable).where(eq(projectsTable.id, c.projectId));
-          return proj?.name ?? "Unknown";
-        } catch {
-          return "Unknown";
-        }
-      })();
-      const developerName = await (async () => {
-        try {
-          const [dev] = await r.select({ name: developersTable.name }).from(developersTable).where(eq(developersTable.id, c.developerId));
-          return dev?.name ?? "Unknown";
-        } catch {
-          return "Unknown";
-        }
-      })();
-      const assignedLawyerName = await (async () => {
-        try {
-          const [assignment] = await r
-            .select({ userName: usersTable.name })
-            .from(caseAssignmentsTable)
-            .leftJoin(usersTable, eq(caseAssignmentsTable.userId, usersTable.id))
-            .where(eq(caseAssignmentsTable.caseId, c.id))
-            .limit(1);
-          return assignment?.userName ?? null;
-        } catch {
-          return null;
-        }
-      })();
-      const completionSla = hasKeyDates ? await (async () => {
-        try {
-          const [kd] = await r
-            .select({
-              adviceToBankDate: caseKeyDatesTable.adviceToBankDate,
-              completionSlaActivatedAt: caseKeyDatesTable.completionSlaActivatedAt,
-            })
-            .from(caseKeyDatesTable)
-            .where(and(eq(caseKeyDatesTable.firmId, firmId), eq(caseKeyDatesTable.caseId, c.id)))
-            .limit(1);
-          if (!kd?.completionSlaActivatedAt) return null;
-          if (kd.adviceToBankDate) return null;
-          const ms = Date.now() - (kd.completionSlaActivatedAt instanceof Date ? kd.completionSlaActivatedAt.getTime() : new Date(kd.completionSlaActivatedAt as any).getTime());
-          const hours = Math.max(0, ms / 3600_000);
-          const status = hours >= 72 ? "overdue" : hours >= 48 ? "soon" : "due";
-          return { status, activatedAt: (kd.completionSlaActivatedAt as Date).toISOString(), hoursElapsed: hours };
-        } catch {
-          return null;
-        }
-      })() : null;
-      return {
-        id: c.id,
-        referenceNo: c.referenceNo,
-        projectName,
-        developerName,
-        purchaseMode: c.purchaseMode,
-        titleType: c.titleType,
-        status: c.status,
-        assignedLawyerName,
-        completionSla,
-        createdAt: (c.createdAt instanceof Date ? c.createdAt : new Date(c.createdAt)).toISOString(),
-      };
-    })
-  );
 
   const totalClients = await (async () => {
     try {

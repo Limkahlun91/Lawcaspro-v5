@@ -95,11 +95,11 @@ export default function CasesList() {
   const [titleType, setTitleType] = useState<string>(() => (sp.get("titleType") ?? "all"));
   const legacyInitial = parseLegacyMilestoneParams(sp);
   const initialMilestone = legacyInitial ? legacyInitial.milestone : normalizeMilestoneKey(sp.get("milestone"));
-  const initialPresence = legacyInitial
-    ? legacyInitial.presence
-    : normalizeMilestonePresence(
-        sp.get("milestoneStatus") ?? sp.get("milestonePresence") ?? sp.get("status"),
-      );
+  const initialPresence = (() => {
+    if (legacyInitial) return legacyInitial.presence;
+    const raw = sp.get("milestoneStatus") ?? sp.get("milestonePresence") ?? sp.get("status");
+    return normalizeMilestonePresence(raw);
+  })();
   const [milestoneFilter, setMilestoneFilter] = useState<CaseMilestoneKey | "all">(() => initialMilestone);
   const [milestonePresence, setMilestonePresence] = useState<MilestonePresence>(() => initialPresence);
   const [page, setPage] = useState<number>(() => Number.isInteger(initialPage) && initialPage > 0 ? initialPage : 1);
@@ -448,7 +448,7 @@ export default function CasesList() {
               setSearch("");
               setSpaStatus("all");
               setLoanStatus("all");
-              setMilestone("all");
+              setMilestoneFilter("all");
               setMilestonePresence("filled");
               setLawyerId("all");
               setClerkId("all");

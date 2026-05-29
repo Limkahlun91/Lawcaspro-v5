@@ -6093,66 +6093,70 @@ function startCaseDocumentRunRunner(r: DbConn, args: { firmId: number; runId: nu
   })();
 }
 
+async function renderFallbackPdfFromDocx(docxBytes: Buffer): Promise<Buffer> {
+  const pdfDoc = await PDFDocument.create();
+  const page = pdfDoc.addPage([595.28, 841.89]);
+  const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
+  const xmlText = (() => {
+    try {
+      const zip = new PizZip(docxBytes);
+      const xml = zip.file("word/document.xml")?.asText() ?? "";
+      const parts: string[] = [];
+      const re = /<w:t[^>]*>([\s\S]*?)<\/w:t>|<w:tab\s*\/>|<w:br\s*\/>|<\/w:p>/g;
+      for (;;) {
+        const m = re.exec(xml);
+        if (!m) break;
+        if (m[0].startsWith("<w:t")) parts.push(m[1] ?? "");
+        else if (m[0].startsWith("<w:tab")) parts.push("\t");
+        else if (m[0].startsWith("<w:br")) parts.push("\n");
+        else parts.push("\n\n");
+      }
+      const raw = parts.join("");
+      return raw
+        .replace(/&amp;/g, "&")
+        .replace(/&lt;/g, "<")
+        .replace(/&gt;/g, ">")
+        .replace(/&quot;/g, "\"")
+        .replace(/&apos;/g, "'");
+    } catch {
+      return "";
+    }
+  })();
+  const text = xmlText.trim() ? xmlText.trim() : "Document generated (fallback rendering).";
+  const margin = 50;
+  const fontSize = 10;
+  const lineHeight = 14;
+  const maxWidth = page.getWidth() - margin * 2;
+  const tokens = text.replace(/\r\n/g, "\n").split(/\s+/);
+  const lines: string[] = [];
+  let current = "";
+  for (const t of tokens) {
+    const next = current ? `${current} ${t}` : t;
+    if (font.widthOfTextAtSize(next, fontSize) <= maxWidth) current = next;
+    else {
+      if (current) lines.push(current);
+      current = t;
+    }
+  }
+  if (current) lines.push(current);
+  let y = page.getHeight() - margin;
+  for (const ln of lines) {
+    if (y < margin) break;
+    page.drawText(ln, { x: margin, y, size: fontSize, font, color: rgb(0, 0, 0) });
+    y -= lineHeight;
+  }
+  const bytes = await pdfDoc.save();
+  return Buffer.from(bytes);
+}
+
 async function convertDocxToPdf(docxBytes: Buffer): Promise<Buffer> {
   const baseUrl = typeof process.env.GOTENBERG_URL === "string" ? process.env.GOTENBERG_URL.trim().replace(/\/+$/, "") : "";
   if (!baseUrl) {
-    const pdfDoc = await PDFDocument.create();
-    const page = pdfDoc.addPage([595.28, 841.89]);
-    const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
-    const xmlText = (() => {
-      try {
-        const zip = new PizZip(docxBytes);
-        const xml = zip.file("word/document.xml")?.asText() ?? "";
-        const parts: string[] = [];
-        const re = /<w:t[^>]*>([\s\S]*?)<\/w:t>|<w:tab\s*\/>|<w:br\s*\/>|<\/w:p>/g;
-        for (;;) {
-          const m = re.exec(xml);
-          if (!m) break;
-          if (m[0].startsWith("<w:t")) parts.push(m[1] ?? "");
-          else if (m[0].startsWith("<w:tab")) parts.push("\t");
-          else if (m[0].startsWith("<w:br")) parts.push("\n");
-          else parts.push("\n\n");
-        }
-        const raw = parts.join("");
-        return raw
-          .replace(/&amp;/g, "&")
-          .replace(/&lt;/g, "<")
-          .replace(/&gt;/g, ">")
-          .replace(/&quot;/g, "\"")
-          .replace(/&apos;/g, "'");
-      } catch {
-        return "";
-      }
-    })();
-    const text = xmlText.trim() ? xmlText.trim() : "Document generated (fallback rendering).";
-    const margin = 50;
-    const fontSize = 10;
-    const lineHeight = 14;
-    const maxWidth = page.getWidth() - margin * 2;
-    const tokens = text.replace(/\r\n/g, "\n").split(/\s+/);
-    const lines: string[] = [];
-    let current = "";
-    for (const t of tokens) {
-      const next = current ? `${current} ${t}` : t;
-      if (font.widthOfTextAtSize(next, fontSize) <= maxWidth) current = next;
-      else {
-        if (current) lines.push(current);
-        current = t;
-      }
-    }
-    if (current) lines.push(current);
-    let y = page.getHeight() - margin;
-    for (const ln of lines) {
-      if (y < margin) break;
-      page.drawText(ln, { x: margin, y, size: fontSize, font, color: rgb(0, 0, 0) });
-      y -= lineHeight;
-    }
-    const bytes = await pdfDoc.save();
-    return Buffer.from(bytes);
+    return await renderFallbackPdfFromDocx(docxBytes);
   }
 
   const controller = new AbortController();
-  const timeoutMs = 6500;
+  const timeoutMs = 4500;
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const url = `${baseUrl}/forms/libreoffice/convert`;
@@ -6185,6 +6189,20 @@ async function convertDocxToPdf(docxBytes: Buffer): Promise<Buffer> {
     throw new DocumentGenerationError(503, "DOCX_TO_PDF_FAILED", "PDF conversion failed");
   } finally {
     clearTimeout(timeout);
+  }
+}
+
+async function convertDocxToPdfWithFallback(docxBytes: Buffer, opts?: { allowFallbackOnFailure?: boolean }): Promise<{ pdfBytes: Buffer; fallbackUsed: boolean }> {
+  const allowFallbackOnFailure = Boolean(opts?.allowFallbackOnFailure);
+  try {
+    const pdfBytes = await convertDocxToPdf(docxBytes);
+    return { pdfBytes, fallbackUsed: false };
+  } catch (err) {
+    if (!allowFallbackOnFailure) throw err;
+    const code = err instanceof DocumentGenerationError ? err.code : null;
+    if (code !== "DOCX_TO_PDF_FAILED" && code !== "DOCX_TO_PDF_TIMEOUT" && code !== "DOCX_TO_PDF_UNAVAILABLE") throw err;
+    const pdfBytes = await renderFallbackPdfFromDocx(docxBytes);
+    return { pdfBytes, fallbackUsed: true };
   }
 }
 
@@ -6703,7 +6721,7 @@ async function generateFirmDocument({
     } else {
       const defaults = await queryRows(r, sql`SELECT * FROM firm_letterheads WHERE firm_id = ${firmId} AND status = 'active' ORDER BY is_default DESC, created_at DESC LIMIT 1`);
       lh = defaults[0];
-      if (!lh) throw new DocumentGenerationError(422, "NO_LETTERHEAD", "No active firm letterhead configured");
+      if (!lh) return null;
     }
     const usedLetterheadId = typeof (lh as any).id === "number" ? Number((lh as any).id) : null;
     const firstPath = String((lh as any).first_page_object_path);
@@ -6927,7 +6945,8 @@ async function generateFirmDocument({
     }
 
     outFormat = "pdf";
-    outputBytes = await convertDocxToPdf(buffer);
+    const conv = await convertDocxToPdfWithFallback(buffer, { allowFallbackOnFailure: true });
+    outputBytes = conv.pdfBytes;
     outputContentType = "application/pdf";
   }
 
@@ -7444,8 +7463,10 @@ async function generateMasterDocument({
       } else {
         const defaults = await queryRows(r, sql`SELECT * FROM firm_letterheads WHERE firm_id = ${firmId} AND status = 'active' ORDER BY is_default DESC, created_at DESC LIMIT 1`);
         lh = defaults[0];
-        if (!lh) throw new DocumentGenerationError(422, "NO_LETTERHEAD", "No active firm letterhead configured");
+        if (!lh) lh = undefined;
       }
+      if (!lh) {
+      } else {
       const firstBytes = await downloadPrivateObjectBytes(String((lh as any).first_page_object_path));
       const contBytes = await downloadPrivateObjectBytes(String((lh as any).continuation_header_object_path));
       const footerPath = (lh as any).footer_object_path ? String((lh as any).footer_object_path) : null;
@@ -7458,11 +7479,13 @@ async function generateMasterDocument({
         footerTemplateDocx: footerBytes,
         footerMode,
       });
+      }
     }
   }
 
   if (outputFormat === "pdf" && isDocx && renderMode === "docx") {
-    buffer = await convertDocxToPdf(buffer);
+    const conv = await convertDocxToPdfWithFallback(buffer, { allowFallbackOnFailure: true });
+    buffer = conv.pdfBytes;
     outputMime = "application/pdf";
     outputExt = ".pdf";
     renderMode = "pdf";
@@ -9701,7 +9724,7 @@ router.post("/documents/jobs/:jobId/run-next", requireAuth, requireFirmUser, req
     return;
   }
   try {
-    const MAX_JOB_STEP_MS = 8000;
+    const MAX_JOB_STEP_MS = 6000;
     const MAX_ITEMS_PER_CALL = 1;
     await recoverStaleDocumentGenerationJob(r, { firmId: req.firmId!, jobId, staleMs: 3 * 60_000 });
     await startDocumentGenerationJobRunner(r, { firmId: req.firmId!, jobId }, { maxSteps: MAX_ITEMS_PER_CALL, maxMs: MAX_JOB_STEP_MS });
