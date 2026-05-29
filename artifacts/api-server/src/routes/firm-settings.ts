@@ -22,30 +22,83 @@ const supabaseStorage = new SupabaseStorageService();
 type DbConn = typeof db | NonNullable<AuthRequest["rlsDb"]>;
 const rdb = (req: AuthRequest): DbConn => req.rlsDb ?? db;
 
+async function queryRows(r: DbConn, query: ReturnType<typeof sql>): Promise<Record<string, unknown>[]> {
+  const result = await (r as any).execute(query);
+  if (Array.isArray(result)) return result as Record<string, unknown>[];
+  if ("rows" in result) return (result as { rows: Record<string, unknown>[] }).rows;
+  return [];
+}
+
+async function columnExists(r: DbConn, args: { table: string; column: string }): Promise<boolean> {
+  const rows = await queryRows(r, sql`
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_schema = 'public'
+      AND table_name = ${args.table}
+      AND column_name = ${args.column}
+    LIMIT 1
+  `);
+  return rows.length > 0;
+}
+
 router.get("/firm-settings", requireAuth, requireFirmUser, async (req: AuthRequest, res: Response) => {
+  const firmId = req.firmId!;
+  const defaults = {
+    useMasterDocuments: true,
+    showMasterDocuments: true,
+    firmLetterheadEnabled: false,
+  };
   try {
     const r = rdb(req);
-    const firmId = req.firmId!;
-    const [firm] = await r.select().from(firmsTable).where(eq(firmsTable.id, firmId));
+    const hasShowMaster = await columnExists(r, { table: "firms", column: "show_master_documents" });
+    const firmRows = await queryRows(r, sql`
+      SELECT
+        id,
+        name,
+        slug,
+        logo_url,
+        address,
+        st_number,
+        tin_number,
+        registration_no,
+        sst_no,
+        phone,
+        email
+        ${hasShowMaster ? sql`, show_master_documents` : sql``}
+      FROM firms
+      WHERE id = ${firmId}
+      LIMIT 1
+    `);
+    const firm = firmRows[0] as any;
     if (!firm) { res.status(404).json({ error: "Firm not found" }); return; }
 
-    const bankAccounts = await r.select().from(firmBankAccountsTable)
-      .where(eq(firmBankAccountsTable.firmId, firmId));
+    const showMasterDocuments = hasShowMaster ? firm.show_master_documents !== false : true;
+    const bankAccounts = await (async () => {
+      try {
+        const rows = await (r as any).select().from(firmBankAccountsTable)
+          .where(eq(firmBankAccountsTable.firmId, firmId));
+        return Array.isArray(rows) ? rows : [];
+      } catch {
+        return [];
+      }
+    })();
 
     res.json({
-      id: firm.id,
-      name: firm.name,
-      slug: firm.slug,
-      showMasterDocuments: Boolean((firm as any).showMasterDocuments ?? (firm as any).show_master_documents ?? true),
-      logoUrl: firm.logoUrl || "",
-      address: firm.address || "",
-      stNumber: firm.stNumber || "",
-      tinNumber: firm.tinNumber || "",
-      registrationNo: firm.registrationNo || "",
-      sstNo: firm.sstNo || "",
-      phone: firm.phone || "",
-      email: firm.email || "",
-      bankAccounts: bankAccounts.map(b => ({
+      id: Number(firm.id),
+      name: String(firm.name ?? ""),
+      slug: String(firm.slug ?? ""),
+      useMasterDocuments: Boolean(showMasterDocuments),
+      showMasterDocuments: Boolean(showMasterDocuments),
+      firmLetterheadEnabled: false,
+      logoUrl: typeof firm.logo_url === "string" ? firm.logo_url : "",
+      address: typeof firm.address === "string" ? firm.address : "",
+      stNumber: typeof firm.st_number === "string" ? firm.st_number : "",
+      tinNumber: typeof firm.tin_number === "string" ? firm.tin_number : "",
+      registrationNo: typeof firm.registration_no === "string" ? firm.registration_no : "",
+      sstNo: typeof firm.sst_no === "string" ? firm.sst_no : "",
+      phone: typeof firm.phone === "string" ? firm.phone : "",
+      email: typeof firm.email === "string" ? firm.email : "",
+      bankAccounts: bankAccounts.map((b: any) => ({
         id: b.id,
         bankName: b.bankName,
         accountNo: b.accountNo,
@@ -56,7 +109,22 @@ router.get("/firm-settings", requireAuth, requireFirmUser, async (req: AuthReque
     return;
   } catch (err: any) {
     req.log.error({ err }, "firm_settings.get failed");
-    res.status(500).json({ error: "Internal Server Error" });
+    res.status(200).json({
+      id: firmId,
+      name: "",
+      slug: "",
+      ...defaults,
+      logoUrl: "",
+      address: "",
+      stNumber: "",
+      tinNumber: "",
+      registrationNo: "",
+      sstNo: "",
+      phone: "",
+      email: "",
+      bankAccounts: [],
+      degraded: true,
+    });
     return;
   }
 });
@@ -92,7 +160,19 @@ router.patch("/firm-settings", requireAuth, requireFirmUser, requirePermission("
   try {
     const r = rdb(req);
     const firmId = req.firmId!;
-    const { name, logoUrl, address, stNumber, tinNumber, registrationNo, sstNo, phone, email, showMasterDocuments } = req.body;
+    const { name, logoUrl, address, stNumber, tinNumber, registrationNo, sstNo, phone, email, showMasterDocuments, useMasterDocuments } = req.body;
+    const desiredUseMasterDocuments = useMasterDocuments !== undefined ? Boolean(useMasterDocuments) : (showMasterDocuments !== undefined ? Boolean(showMasterDocuments) : undefined);
+    if (desiredUseMasterDocuments !== undefined) {
+      const hasShowMaster = await columnExists(r, { table: "firms", column: "show_master_documents" });
+      if (!hasShowMaster) {
+        res.status(409).json({
+          error: "Database schema is outdated. Please apply latest migrations.",
+          code: "SCHEMA_OUTDATED",
+          missing: ["firms.show_master_documents"],
+        });
+        return;
+      }
+    }
 
     const updates: Record<string, unknown> = {};
     if (name !== undefined) updates.name = name;
@@ -104,30 +184,59 @@ router.patch("/firm-settings", requireAuth, requireFirmUser, requirePermission("
     if (sstNo !== undefined) updates.sstNo = sstNo;
     if (phone !== undefined) updates.phone = phone;
     if (email !== undefined) updates.email = email;
-    if (showMasterDocuments !== undefined) updates.showMasterDocuments = Boolean(showMasterDocuments);
+    if (desiredUseMasterDocuments !== undefined) updates.showMasterDocuments = Boolean(desiredUseMasterDocuments);
 
-    const [updated] = await r.update(firmsTable)
+    await r.update(firmsTable)
       .set(updates)
       .where(eq(firmsTable.id, firmId))
-      .returning();
+      .returning({ id: firmsTable.id });
+    const hasShowMaster = await columnExists(r, { table: "firms", column: "show_master_documents" });
+    const firmRows = await queryRows(r, sql`
+      SELECT
+        id,
+        name,
+        slug,
+        logo_url,
+        address,
+        st_number,
+        tin_number,
+        registration_no,
+        sst_no,
+        phone,
+        email
+        ${hasShowMaster ? sql`, show_master_documents` : sql``}
+      FROM firms
+      WHERE id = ${firmId}
+      LIMIT 1
+    `);
+    const firm = firmRows[0] as any;
+    const bankAccounts = await (async () => {
+      try {
+        const rows = await (r as any).select().from(firmBankAccountsTable)
+          .where(eq(firmBankAccountsTable.firmId, firmId));
+        return Array.isArray(rows) ? rows : [];
+      } catch {
+        return [];
+      }
+    })();
 
-    const bankAccounts = await r.select().from(firmBankAccountsTable)
-      .where(eq(firmBankAccountsTable.firmId, firmId));
-
+    const showMasterDocumentsResolved = hasShowMaster ? firm?.show_master_documents !== false : true;
     res.json({
-      id: updated.id,
-      name: updated.name,
-      slug: updated.slug,
-      showMasterDocuments: Boolean((updated as any).showMasterDocuments ?? (updated as any).show_master_documents ?? true),
-      logoUrl: updated.logoUrl || "",
-      address: updated.address || "",
-      stNumber: updated.stNumber || "",
-      tinNumber: updated.tinNumber || "",
-      registrationNo: updated.registrationNo || "",
-      sstNo: updated.sstNo || "",
-      phone: updated.phone || "",
-      email: updated.email || "",
-      bankAccounts: bankAccounts.map(b => ({
+      id: firmId,
+      name: String(firm?.name ?? ""),
+      slug: String(firm?.slug ?? ""),
+      useMasterDocuments: Boolean(showMasterDocumentsResolved),
+      showMasterDocuments: Boolean(showMasterDocumentsResolved),
+      firmLetterheadEnabled: false,
+      logoUrl: typeof firm?.logo_url === "string" ? firm.logo_url : "",
+      address: typeof firm?.address === "string" ? firm.address : "",
+      stNumber: typeof firm?.st_number === "string" ? firm.st_number : "",
+      tinNumber: typeof firm?.tin_number === "string" ? firm.tin_number : "",
+      registrationNo: typeof firm?.registration_no === "string" ? firm.registration_no : "",
+      sstNo: typeof firm?.sst_no === "string" ? firm.sst_no : "",
+      phone: typeof firm?.phone === "string" ? firm.phone : "",
+      email: typeof firm?.email === "string" ? firm.email : "",
+      bankAccounts: bankAccounts.map((b: any) => ({
         id: b.id,
         bankName: b.bankName,
         accountNo: b.accountNo,
@@ -139,7 +248,25 @@ router.patch("/firm-settings", requireAuth, requireFirmUser, requirePermission("
     return;
   } catch (err: any) {
     req.log.error({ err }, "firm_settings.update failed");
-    res.status(500).json({ error: "Internal Server Error" });
+    res.status(200).json({
+      id: req.firmId ?? null,
+      name: "",
+      slug: "",
+      useMasterDocuments: true,
+      showMasterDocuments: true,
+      firmLetterheadEnabled: false,
+      logoUrl: "",
+      address: "",
+      stNumber: "",
+      tinNumber: "",
+      registrationNo: "",
+      sstNo: "",
+      phone: "",
+      email: "",
+      bankAccounts: [],
+      degraded: true,
+      error: "Update failed",
+    });
     return;
   }
 });

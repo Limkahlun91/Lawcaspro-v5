@@ -7,6 +7,7 @@ import {
   platformMessageAttachmentsTable,
   platformDocumentsTable,
   firmsTable,
+  sql,
 } from "@workspace/db";
 import { requireAuth, requireFirmUser, requirePermission, writeAuditLog, type AuthRequest } from "../lib/auth.js";
 import { Readable } from "stream";
@@ -48,6 +49,37 @@ type RouterInternalLike = {
 const expressRouter = express.Router();
 const router = expressRouter as unknown as RouterInternalLike;
 const supabaseStorage = new SupabaseStorageService();
+
+async function queryRows(r: NonNullable<AuthRequest["rlsDb"]>, query: ReturnType<typeof sql>): Promise<Record<string, unknown>[]> {
+  const result = await r.execute(query);
+  if (Array.isArray(result)) return result as Record<string, unknown>[];
+  if ("rows" in result) return (result as { rows: Record<string, unknown>[] }).rows;
+  return [];
+}
+
+async function columnExists(r: NonNullable<AuthRequest["rlsDb"]>, args: { table: string; column: string }): Promise<boolean> {
+  const rows = await queryRows(r, sql`
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_schema = 'public'
+      AND table_name = ${args.table}
+      AND column_name = ${args.column}
+    LIMIT 1
+  `);
+  return rows.length > 0;
+}
+
+async function safeGetShowMasterDocuments(r: NonNullable<AuthRequest["rlsDb"]>, firmId: number): Promise<boolean> {
+  try {
+    const has = await columnExists(r, { table: "firms", column: "show_master_documents" });
+    if (!has) return true;
+    const rows = await queryRows(r, sql`SELECT show_master_documents FROM firms WHERE id = ${firmId} LIMIT 1`);
+    const v = (rows[0] as any)?.show_master_documents;
+    return v !== false;
+  } catch {
+    return true;
+  }
+}
 
 function safeFilenameAscii(filename: string): string {
   const base = filename.replace(/[\r\n"]/g, "").trim();
@@ -263,12 +295,7 @@ router.get("/hub/documents", requireAuth, requireFirmUser, requirePermission("do
       .where(eq(systemFoldersTable.isDisabled, true));
     const disabledIds = disabledFolders.map(f => f.id);
 
-    const [firm] = await r
-      .select({ showMasterDocuments: (firmsTable as any).showMasterDocuments })
-      .from(firmsTable)
-      .where(eq(firmsTable.id, firmId))
-      .limit(1);
-    const showMasterDocuments = firm?.showMasterDocuments !== false;
+    const showMasterDocuments = await safeGetShowMasterDocuments(r, firmId);
 
     const allDocs = await r
       .select()
@@ -304,7 +331,7 @@ router.get("/hub/documents", requireAuth, requireFirmUser, requirePermission("do
       },
       "hub.documents_failed",
     );
-    res.status(503).json({ error: "Failed to load documents" });
+    res.status(200).json([]);
   }
 });
 

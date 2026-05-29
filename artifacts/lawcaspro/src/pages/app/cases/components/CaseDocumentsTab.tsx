@@ -29,7 +29,7 @@ import { hasPermission } from "@/lib/permissions";
 import { getGetCaseWorkflowQueryKey, getListCasesQueryKey } from "@workspace/api-client-react";
 import { validateUploadFile } from "@/lib/upload-validation";
 import { TemplateFolderPicker, type TemplateFolderPickerFolder, type TemplateFolderPickerTemplate } from "@/components/documents/TemplateFolderPicker";
-import { createGenerationJob, runNextGenerationJob, validateGenerationJob, type NormalizedGenerationJob } from "@/lib/document-generation-client";
+import { createGenerationJob, runNextGenerationJob, type NormalizedGenerationJob } from "@/lib/document-generation-client";
 import { blocksTemplateGenerate, isTemplateFileReadinessKnown, isTemplateFileReady, templateFileReadinessLabel } from "@/lib/template-readiness";
 
 function docTypeLabel(dt: string): string {
@@ -237,13 +237,13 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
   const enterpriseFolders = enterpriseFoldersQuery.data ?? [];
   const enterpriseTemplates = enterpriseTemplatesQuery.data ?? [];
 
-  const firmSettingsQuery = useQuery<{ showMasterDocuments?: boolean }>({
+  const firmSettingsQuery = useQuery<{ showMasterDocuments?: boolean; useMasterDocuments?: boolean }>({
     queryKey: ["firm-settings", "case-documents", caseId],
     queryFn: () => apiFetchJson("/firm-settings"),
     enabled: generateDialogOpen,
     retry: false,
   });
-  const showMasterDocuments = firmSettingsQuery.data?.showMasterDocuments !== false;
+  const showMasterDocuments = (firmSettingsQuery.data?.showMasterDocuments ?? firmSettingsQuery.data?.useMasterDocuments) !== false;
 
   type SystemFolder = { id: number; name: string; parentId: number | null; sortOrder: number; isDisabled: boolean };
   type SystemDoc = { id: number; name: string; fileName: string; folderId: number | null };
@@ -489,22 +489,6 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
     const startedAt = Date.now();
     const maxPollMs = 120_000;
     try {
-      const preflight = await validateGenerationJob({
-        caseIds: [caseId],
-        templates,
-        config: { action: "download" },
-        blind: true,
-      });
-      const preflightItems = Array.isArray((preflight as any)?.items) ? ((preflight as any).items as any[]) : [];
-      const hardBlocked = preflightItems.filter((it) => Boolean(it?.hardBlocked));
-      if (hardBlocked.length > 0) {
-        const first = hardBlocked[0] ?? {};
-        const code = typeof first.code === "string" ? first.code : "PRECHECK_FAILED";
-        const msg = typeof first.message === "string" ? first.message : "Preflight hard-blocked";
-        toast({ title: "Generation blocked", description: `${msg} (${code})`, variant: "destructive" });
-        return;
-      }
-
       const created = await createGenerationJob({
         caseIds: [caseId],
         templates,
@@ -624,22 +608,6 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
     const startedAt = Date.now();
     const maxPollMs = 120_000;
     try {
-      const preflight = await validateGenerationJob({
-        caseIds: [caseId],
-        templates,
-        config: { action: "download" },
-        blind: true,
-      });
-      const preflightItems = Array.isArray((preflight as any)?.items) ? ((preflight as any).items as any[]) : [];
-      const hardBlocked = preflightItems.filter((it) => Boolean(it?.hardBlocked));
-      if (hardBlocked.length > 0) {
-        const first = hardBlocked[0] ?? {};
-        const code = typeof first.code === "string" ? first.code : "PRECHECK_FAILED";
-        const msg = typeof first.message === "string" ? first.message : "Preflight hard-blocked";
-        toast({ title: "Generation blocked", description: `${msg} (${code})`, variant: "destructive" });
-        return;
-      }
-
       const created = await createGenerationJob({
         caseIds: [caseId],
         templates,
@@ -1867,9 +1835,7 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
             </div>
 
             <div className="flex items-center justify-between gap-3 pt-1">
-              <div className="text-xs text-slate-500">
-                Missing variables will be left blank. DOCX to PDF conversion falls back when needed.
-              </div>
+              <div className="text-xs text-slate-500" />
               <div className="flex gap-2">
                 <Button variant="outline" onClick={closeGenerateDialog} disabled={isGenerating}>Close</Button>
                 <Button
@@ -1886,22 +1852,6 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
                     const startedAt = Date.now();
                     const maxPollMs = 120_000;
                     try {
-                      const preflight = await validateGenerationJob({
-                        caseIds: [caseId],
-                        templates,
-                        config: { action: "download" },
-                        blind: true,
-                      });
-                      const preflightItems = Array.isArray((preflight as any)?.items) ? ((preflight as any).items as any[]) : [];
-                      const hardBlocked = preflightItems.filter((it) => Boolean(it?.hardBlocked));
-                      if (hardBlocked.length > 0) {
-                        const first = hardBlocked[0] ?? {};
-                        const code = typeof first.code === "string" ? first.code : "PRECHECK_FAILED";
-                        const msg = typeof first.message === "string" ? first.message : "Preflight hard-blocked";
-                        toast({ title: "Generation blocked", description: `${msg} (${code})`, variant: "destructive" });
-                        return;
-                      }
-
                       const created = await createGenerationJob({
                         caseIds: [caseId],
                         templates,

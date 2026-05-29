@@ -10,7 +10,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "@/components/ui/resizable";
 import { cn } from "@/lib/utils";
 import { apiFetchJson } from "@/lib/api-client";
-import { createGenerationJob, downloadGenerationJob, runNextGenerationJob, validateGenerationJob, type NormalizedGenerationJob } from "@/lib/document-generation-client";
+import { createGenerationJob, downloadGenerationJob, runNextGenerationJob, type NormalizedGenerationJob } from "@/lib/document-generation-client";
 import { downloadBlob } from "@/lib/download";
 import { toastError } from "@/lib/toast-error";
 import { useToast } from "@/hooks/use-toast";
@@ -107,7 +107,6 @@ export default function DocumentAutomationHub() {
   const [busy, setBusy] = useState(false);
   const [jobId, setJobId] = useState<string | null>(null);
   const [lastJob, setLastJob] = useState<NormalizedGenerationJob | null>(null);
-  const [preflightReport, setPreflightReport] = useState<any | null>(null);
   const [smartMessage, setSmartMessage] = useState<string | null>(null);
   const [smartTemplateIdSet, setSmartTemplateIdSet] = useState<Set<number>>(() => new Set());
   const [smartFolderIdSet, setSmartFolderIdSet] = useState<Set<number>>(() => new Set());
@@ -137,12 +136,12 @@ export default function DocumentAutomationHub() {
     retry: false,
   });
 
-  const firmSettingsQuery = useQuery<{ showMasterDocuments?: boolean }>({
+  const firmSettingsQuery = useQuery<{ showMasterDocuments?: boolean; useMasterDocuments?: boolean }>({
     queryKey: ["firm-settings", "document-automation"],
     queryFn: () => apiFetchJson("/firm-settings"),
     retry: false,
   });
-  const showMasterDocuments = firmSettingsQuery.data?.showMasterDocuments !== false;
+  const showMasterDocuments = (firmSettingsQuery.data?.showMasterDocuments ?? firmSettingsQuery.data?.useMasterDocuments) !== false;
 
   type SystemFolder = { id: number; name: string; parentId: number | null; sortOrder: number; isDisabled: boolean };
   type SystemDoc = { id: number; name: string; fileName: string; folderId: number | null };
@@ -630,7 +629,6 @@ export default function DocumentAutomationHub() {
     }
 
     setBusy(true);
-    setPreflightReport(null);
     let startedJob = false;
     try {
       const duplexSettings =
@@ -654,23 +652,6 @@ export default function DocumentAutomationHub() {
         },
         blind: true,
       };
-
-      const preflight = await validateGenerationJob(payload as any);
-      const preflightItems = Array.isArray((preflight as any)?.items) ? ((preflight as any).items as any[]) : [];
-      const hardBlocked = preflightItems.filter((it) => {
-        if (!it || !it.hardBlocked) return false;
-        const code = safeText(it.code).toUpperCase();
-        return code === "TEMPLATE_FILE_MISSING" || code === "STORAGE_OBJECT_NOT_FOUND" || code === "STORAGE_NOT_CONFIGURED";
-      });
-      if (hardBlocked.length > 0) {
-        setPreflightReport({ hardBlocked, items: preflightItems });
-        const first = hardBlocked[0] ?? {};
-        const code = safeText(first.code) || "PRECHECK_FAILED";
-        const msg = safeText(first.message) || "Preflight hard-blocked";
-        toast({ title: "Generation blocked", description: `${msg} (${code})`, variant: "destructive" });
-        setBusy(false);
-        return;
-      }
 
       const created = await createGenerationJob(payload as any);
       if (!created.jobId) throw new Error("Missing jobId");
@@ -1117,22 +1098,6 @@ export default function DocumentAutomationHub() {
                       </Button>
                     </TabsContent>
                   </Tabs>
-
-                  {preflightReport && (
-                    <div className="rounded-md border border-amber-200 bg-amber-50 p-3">
-                      <div className="text-sm font-semibold text-amber-900">Preflight Issues</div>
-                      <div className="mt-1 text-xs text-amber-800">Resolve these before running Generate &amp; Download.</div>
-                      <div className="mt-2 space-y-2">
-                        {(Array.isArray(preflightReport?.hardBlocked) ? preflightReport.hardBlocked : [])
-                          .slice(0, 50)
-                          .map((f: any, idx: number) => (
-                            <div key={`${f?.caseId ?? idx}:${f?.templateId ?? ""}`} className="text-xs text-amber-900 break-words">
-                              Case #{String(f?.caseId ?? "")} — {safeText(f?.templateName) || safeText(f?.templateSource) || `Template #${String(f?.templateId ?? f?.platformDocumentId ?? "")}`} — {safeText(f?.code) || safeText(f?.errorCode) || "PRECHECK_FAILED"} {safeText(f?.message) || safeText(f?.errorMessage)}
-                            </div>
-                          ))}
-                      </div>
-                    </div>
-                  )}
 
                   {jobForDisplay && (
                     <div className="rounded-md border border-slate-200 bg-white p-3">

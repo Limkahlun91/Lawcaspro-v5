@@ -382,18 +382,26 @@ router.get("/dashboard", requireAuth, requireFirmUser, requirePermission("dashbo
       new Promise<SummaryErr>((resolve) => setTimeout(() => resolve({ ok: false, error: "Dashboard summary timed out" }), summaryTimeoutMs)),
     ]);
 
-    const statsTimeoutMs = 4200;
-    const statsPromise: Promise<{ ok: true; stats: Record<string, unknown> } | { ok: false; error: string }> = Promise.race([
-      (async () => {
-        const stats = await computeDashboardStats(r, firmId, {
-          assignedToUserId: effectiveAssignedToUserId ?? undefined,
-          includeErrorDetails: allowDetails,
-          deadlineAt: Date.now() + 3_600,
-        });
-        return { ok: true, stats } as const;
-      })(),
-      new Promise<{ ok: false; error: string }>((resolve) => setTimeout(() => resolve({ ok: false, error: "DASHBOARD_TIMEOUT" }), statsTimeoutMs)),
-    ]);
+    const includeStats = (() => {
+      const raw = one((req.query as unknown as Record<string, unknown>)?.includeStats as string | string[] | undefined);
+      if (!raw) return false;
+      const v = raw.trim().toLowerCase();
+      return v === "1" || v === "true" || v === "yes";
+    })();
+    const statsTimeoutMs = includeStats ? 4200 : 1;
+    const statsPromise: Promise<{ ok: true; stats: Record<string, unknown> } | { ok: false; error: string }> = includeStats
+      ? Promise.race([
+          (async () => {
+            const stats = await computeDashboardStats(r, firmId, {
+              assignedToUserId: effectiveAssignedToUserId ?? undefined,
+              includeErrorDetails: allowDetails,
+              deadlineAt: Date.now() + 3_600,
+            });
+            return { ok: true, stats } as const;
+          })(),
+          new Promise<{ ok: false; error: string }>((resolve) => setTimeout(() => resolve({ ok: false, error: "DASHBOARD_TIMEOUT" }), statsTimeoutMs)),
+        ])
+      : Promise.resolve({ ok: false, error: "SKIPPED" });
 
     const [summaryOut, statsOut] = await Promise.all([summaryPromise, statsPromise]);
     const summaryData = summaryOut.ok === true ? summaryOut.data : { totalCases: 0, totalClients: 0, totalProjects: 0, totalDevelopers: 0 };

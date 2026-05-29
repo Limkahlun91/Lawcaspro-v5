@@ -9544,7 +9544,8 @@ router.post("/documents/automation/generate-job", requireAuth, requireFirmUser, 
   const r = getRlsDb(req, res);
   if (!r) return;
 
-  const API_MAX_MS = 8000;
+  const cache = createRequestCache();
+  const API_MAX_MS = 2000;
   const startedAt = Date.now();
   const requestId = one(req.headers["x-request-id"] as any) || one(req.headers["x-vercel-id"] as any) || undefined;
   const fail = (httpStatus: number, code: string, message: string, details: unknown, retryable: boolean) => {
@@ -9615,34 +9616,6 @@ router.post("/documents/automation/generate-job", requireAuth, requireFirmUser, 
     return;
   }
 
-  const templateRows = firmTemplateIds.length
-    ? await queryRows(r, sql`
-      SELECT id, name, object_path, file_name, pdf_mapping_config
-      FROM document_templates
-      WHERE firm_id = ${req.firmId!}
-        AND is_template_capable = true
-        AND id IN (${sql.join(firmTemplateIds.map((id) => sql`${id}`), sql`, `)})
-      ORDER BY created_at DESC
-    `)
-    : [];
-  if (templateRows.length !== firmTemplateIds.length) {
-    fail(404, "TEMPLATE_NOT_FOUND", "One or more firm templates not found", null, false);
-    return;
-  }
-  const masterRows = masterDocIds.length
-    ? await queryRows(r, sql`
-      SELECT id, name, object_path, file_name, pdf_mappings
-      FROM platform_documents
-      WHERE id IN (${sql.join(masterDocIds.map((id) => sql`${id}`), sql`, `)})
-        AND (firm_id IS NULL OR firm_id = ${req.firmId!})
-      ORDER BY created_at DESC
-    `)
-    : [];
-  if (masterRows.length !== masterDocIds.length) {
-    fail(404, "MASTER_DOCUMENT_NOT_FOUND", "One or more master documents not found", null, false);
-    return;
-  }
-
   const qForce = String(one((req.query as any).force) ?? "").trim().toLowerCase();
   const force = qForce === "1" || qForce === "true" || qForce === "yes";
   const qBlind = String(one((req.query as any).blind) ?? "").trim().toLowerCase();
@@ -9650,8 +9623,59 @@ router.post("/documents/automation/generate-job", requireAuth, requireFirmUser, 
   const effectiveForce = force || blind;
   const qValidate = String(one((req.query as any).validate) ?? "").trim().toLowerCase();
   const validate = qValidate === "1" || qValidate === "true" || qValidate === "yes";
-  if (validate) {
-    const deadlineAt = startedAt + Math.min(API_MAX_MS, 3000);
+  const gotenbergConfigured = typeof process.env.GOTENBERG_URL === "string" && process.env.GOTENBERG_URL.trim().length > 0;
+
+  const showMasterDocuments = await (async () => {
+    try {
+      const has = await columnExistsCached(r, cache, { schema: "public", table: "firms", column: "show_master_documents" });
+      if (!has) return true;
+      const rows = await queryRowsCached(r, cache, `firms.show_master_documents:${req.firmId!}`, sql`
+        SELECT show_master_documents
+        FROM firms
+        WHERE id = ${req.firmId!}
+        LIMIT 1
+      `);
+      const v = (rows[0] as any)?.show_master_documents;
+      return v !== false;
+    } catch {
+      return true;
+    }
+  })();
+  if (!showMasterDocuments && masterDocIds.length > 0) {
+    fail(403, "MASTER_DISABLED", "Master Documents are disabled for this firm", null, false);
+    return;
+  }
+  const getPgCode = (err: unknown): string | null => {
+    const code = err && typeof err === "object" ? (err as { code?: unknown }).code : undefined;
+    return typeof code === "string" && code ? code : null;
+  };
+  const isSchemaError = (err: unknown): boolean => {
+    const code = getPgCode(err);
+    return code === "42P01" || code === "42703";
+  };
+
+  try {
+    if (validate) {
+      const deadlineAt = startedAt + Math.min(API_MAX_MS, 1800);
+      const templateRows = firmTemplateIds.length
+        ? await queryRows(r, sql`
+          SELECT id, name, object_path, file_name, pdf_mapping_config
+          FROM document_templates
+          WHERE firm_id = ${req.firmId!}
+            AND is_template_capable = true
+            AND id IN (${sql.join(firmTemplateIds.map((id) => sql`${id}`), sql`, `)})
+          ORDER BY created_at DESC
+        `)
+        : [];
+      const masterRows = masterDocIds.length
+        ? await queryRows(r, sql`
+          SELECT id, name, object_path, file_name, pdf_mappings
+          FROM platform_documents
+          WHERE id IN (${sql.join(masterDocIds.map((id) => sql`${id}`), sql`, `)})
+            AND (firm_id IS NULL OR firm_id = ${req.firmId!})
+          ORDER BY created_at DESC
+        `)
+        : [];
     const firmTemplateById = new Map<number, Record<string, unknown>>();
     for (const row of templateRows) {
       const tid = typeof (row as any).id === "number" ? Number((row as any).id) : Number((row as any).id);
@@ -9664,7 +9688,6 @@ router.post("/documents/automation/generate-job", requireAuth, requireFirmUser, 
       if (!Number.isFinite(tid)) continue;
       masterById.set(tid, row);
     }
-    const gotenbergConfigured = typeof process.env.GOTENBERG_URL === "string" && process.env.GOTENBERG_URL.trim().length > 0;
     const templateCheckByKey = new Map<string, { source: "firm" | "master"; templateId?: number; platformDocumentId?: number; templateName: string; templateType: "pdf" | "docx" | "unsupported"; hardBlocked: boolean; code?: string; message?: string; warnings?: string[] }>();
     await Promise.all(templateRefs.map(async (ref) => {
       const key = `${ref.source}:${ref.id}`;
@@ -9701,6 +9724,11 @@ router.post("/documents/automation/generate-job", requireAuth, requireFirmUser, 
         return;
       }
 
+      if (!t) {
+        templateCheckByKey.set(key, { source: ref.source, ...(ref.source === "firm" ? { templateId: ref.id } : { platformDocumentId: ref.id }), templateName, templateType: "unsupported", hardBlocked: true, code: "TEMPLATE_NOT_FOUND", message: "Template not found" });
+        return;
+      }
+
       if (templateType === "unsupported") {
         templateCheckByKey.set(key, { source: ref.source, ...(ref.source === "firm" ? { templateId: ref.id } : { platformDocumentId: ref.id }), templateName, templateType, hardBlocked: true, code: "UNSUPPORTED_TEMPLATE_SOURCE", message: "Unsupported template source" });
         return;
@@ -9713,20 +9741,6 @@ router.post("/documents/automation/generate-job", requireAuth, requireFirmUser, 
 
       if (templateType === "pdf" && pdfMappingMissing) {
         templateCheckByKey.set(key, { source: ref.source, ...(ref.source === "firm" ? { templateId: ref.id } : { platformDocumentId: ref.id }), templateName, templateType, hardBlocked: false, warnings: ["PDF mapping is not configured. Will attempt fallback form fill."] });
-      }
-
-      try {
-        const exists = await supabaseStorage.privateObjectExists(objectPathUsed, { timeoutMs: 700 });
-        if (!exists) {
-          templateCheckByKey.set(key, { source: ref.source, ...(ref.source === "firm" ? { templateId: ref.id } : { platformDocumentId: ref.id }), templateName, templateType, hardBlocked: true, code: "STORAGE_OBJECT_NOT_FOUND", message: "Storage object not found" });
-          return;
-        }
-      } catch (err) {
-        const cfgErr = getSupabaseStorageConfigError(err);
-        if (cfgErr) {
-          templateCheckByKey.set(key, { source: ref.source, ...(ref.source === "firm" ? { templateId: ref.id } : { platformDocumentId: ref.id }), templateName, templateType, hardBlocked: true, code: "STORAGE_NOT_CONFIGURED", message: cfgErr.error });
-          return;
-        }
       }
 
       if (templateType === "docx" && !gotenbergConfigured) {
@@ -9763,7 +9777,6 @@ router.post("/documents/automation/generate-job", requireAuth, requireFirmUser, 
     });
     return;
   }
-
   const totalCount = caseIds.length * templateRefs.length;
   const qTurbo = String(one((req.query as any).turbo) ?? "").trim().toLowerCase();
   const turbo = qTurbo === "1" || qTurbo === "true" || qTurbo === "yes";
@@ -9802,6 +9815,14 @@ router.post("/documents/automation/generate-job", requireAuth, requireFirmUser, 
     status: "queued",
     meta: { request_id: requestId ?? null, timestamp: new Date().toISOString(), duration_ms: Date.now() - startedAt },
   });
+  } catch (err) {
+    if (isSchemaError(err)) {
+      fail(409, "SCHEMA_OUTDATED", "Database schema is outdated. Please apply latest migrations.", { code: getPgCode(err), message: err instanceof Error ? err.message : String(err) }, false);
+      return;
+    }
+    fail(500, "INTERNAL_ERROR", "Failed to enqueue generation job", { code: getPgCode(err), message: err instanceof Error ? err.message : String(err) }, true);
+    return;
+  }
 });
 
 router.get("/documents/jobs/:jobId", requireAuth, requireFirmUser, requirePermission("documents", "read"), async (req: AuthRequest, res): Promise<void> => {
