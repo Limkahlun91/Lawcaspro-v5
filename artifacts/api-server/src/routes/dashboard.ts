@@ -391,12 +391,17 @@ router.get("/dashboard", requireAuth, requireFirmUser, requirePermission("dashbo
     })();
     const statsPromise: Promise<{ ok: true; stats: Record<string, unknown> } | { ok: false; error: string }> = includeStats
       ? (async () => {
-          const stats = await computeDashboardStats(r, firmId, {
-            assignedToUserId: effectiveAssignedToUserId ?? undefined,
-            includeErrorDetails: allowDetails,
-            deadlineAt: Date.now() + 8_000,
-          });
-          return { ok: true, stats } as const;
+          try {
+            const stats = await computeDashboardStats(r, firmId, {
+              assignedToUserId: effectiveAssignedToUserId ?? undefined,
+              includeErrorDetails: allowDetails,
+              deadlineAt: Date.now() + 8_000,
+            });
+            return { ok: true, stats } as const;
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err ?? "");
+            return { ok: false, error: msg || "Dashboard stats failed" } as const;
+          }
         })()
       : Promise.resolve({ ok: false, error: "SKIPPED" });
 

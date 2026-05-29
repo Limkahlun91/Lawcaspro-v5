@@ -117,14 +117,6 @@ export class DocumentEngineService {
 
   private static renderDocx(templateBuffer: Buffer, variables: Record<string, unknown>): Buffer {
     const zip = new PizZip(templateBuffer);
-    const doc = new Docxtemplater(zip, {
-      paragraphLoop: true,
-      linebreaks: true,
-      delimiters: { start: "{{", end: "}}" },
-      nullGetter() {
-        return "";
-      },
-    });
     const imageModule = new (ImageModule as any)({
       getImage: (tagValue: unknown) => (Buffer.isBuffer(tagValue) ? tagValue : Buffer.alloc(0)),
       getSize: (img: unknown) => {
@@ -132,7 +124,15 @@ export class DocumentEngineService {
         return [160, 60];
       },
     });
-    (doc as any).attachModule(imageModule);
+    const doc = new Docxtemplater(zip, {
+      paragraphLoop: true,
+      linebreaks: true,
+      modules: [imageModule],
+      delimiters: { start: "{{", end: "}}" },
+      nullGetter() {
+        return "";
+      },
+    });
     doc.render(variables);
     return doc.getZip().generate({ type: "nodebuffer", compression: "DEFLATE" });
   }

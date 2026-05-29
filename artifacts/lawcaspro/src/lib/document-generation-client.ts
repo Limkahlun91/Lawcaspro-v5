@@ -79,7 +79,7 @@ export async function generateDocumentsNow(payload: {
     body: JSON.stringify({
       caseIds: payload.caseIds,
       templates: payload.templates,
-      config: { action: "download", output: "docx_zip" },
+      config: { action: "download", outputFormat: "pdf" },
     }),
     headers: { "Content-Type": "application/json" },
   });

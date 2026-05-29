@@ -2,6 +2,7 @@ import request from "supertest";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import type { Application } from "express";
 import yazl from "yazl";
+import { PDFDocument, StandardFonts } from "pdf-lib";
 
 const TEST_JOB_ID = "11111111-1111-1111-1111-111111111111";
 
@@ -88,8 +89,9 @@ function makeDb(): FakeDb {
         return [{
           id: 7,
           name: "Acting Letter",
-          object_path: "/objects/templates/firm/1/acting-letter.docx",
-          file_name: "acting-letter.docx",
+          object_path: "/objects/templates/firm/1/acting-letter.pdf",
+          file_name: "acting-letter.pdf",
+          mime_type: "application/pdf",
           is_template_capable: true,
         }];
       }
@@ -157,45 +159,19 @@ vi.mock("../lib/auth", async (orig) => {
 
 vi.mock("../lib/objectStorage.js", async (orig) => {
   const actual = await orig<typeof import("../lib/objectStorage.js")>();
-  const buildDocxBytes = async () => {
-    const zipfile = new yazl.ZipFile();
-    zipfile.addBuffer(Buffer.from(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
-  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
-  <Default Extension="xml" ContentType="application/xml"/>
-  <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
-</Types>
-`, "utf8"), "[Content_Types].xml");
-    zipfile.addBuffer(Buffer.from(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
-  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
-</Relationships>
-`, "utf8"), "_rels/.rels");
-    zipfile.addBuffer(Buffer.from(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
-  <w:body>
-    <w:p><w:r><w:t>{{reference_no}}</w:t></w:r></w:p>
-  </w:body>
-</w:document>
-`, "utf8"), "word/document.xml");
-    zipfile.end();
-    const chunks: Buffer[] = [];
-    await new Promise<void>((resolve, reject) => {
-      zipfile.outputStream.on("data", (c: any) => chunks.push(Buffer.isBuffer(c) ? c : Buffer.from(c)));
-      zipfile.outputStream.on("error", reject);
-      zipfile.outputStream.on("end", resolve);
-    });
-    return Buffer.concat(chunks);
-  };
-  const docxBytes = await buildDocxBytes();
+  const pdfDoc = await PDFDocument.create();
+  const page = pdfDoc.addPage([595.28, 841.89]);
+  const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
+  page.drawText("Hello PDF", { x: 50, y: 780, size: 12, font });
+  const pdfBytes = Buffer.from(await pdfDoc.save());
   class SupabaseStorageServiceMock {
     assertConfigured() {
     }
     async fetchPrivateObjectResponse(_objectPath: string, _opts?: { timeoutMs?: number }) {
-      return new Response(docxBytes, {
+      return new Response(pdfBytes, {
         headers: {
-          "content-type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-          "content-length": String(docxBytes.length),
+          "content-type": "application/pdf",
+          "content-length": String(pdfBytes.length),
         },
       });
     }
@@ -308,7 +284,7 @@ describe("Documents automation regressions", () => {
   it("POST /api/documents/automation/generate-now returns 200 application/zip", async () => {
     const res = await request(app)
       .post("/api/documents/automation/generate-now")
-      .send({ caseIds: [3], templates: [{ source: "firm", id: 7 }], config: { action: "download", output: "docx_zip" } })
+      .send({ caseIds: [3], templates: [{ source: "firm", id: 7 }], config: { action: "download", outputFormat: "pdf" } })
       .buffer(true)
       .parse((r, cb) => {
         const chunks: Buffer[] = [];
@@ -320,5 +296,6 @@ describe("Documents automation regressions", () => {
     const body = res.body as Buffer;
     expect(Buffer.isBuffer(body)).toBe(true);
     expect(body.slice(0, 2).toString("utf8")).toBe("PK");
+    expect(body.includes(Buffer.from("CON-001/Acting_Letter.pdf", "utf8"))).toBe(true);
   });
 });

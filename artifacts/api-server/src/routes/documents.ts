@@ -58,15 +58,14 @@ type DbConn = typeof db | NonNullable<AuthRequest["rlsDb"]>;
 
 const one = (v: string | string[] | undefined): string | undefined => (Array.isArray(v) ? v[0] : v);
 
-function attachDocxImageModule(doc: any) {
-  const imageModule = new (ImageModule as any)({
+function makeDocxImageModule() {
+  return new (ImageModule as any)({
     getImage: (tagValue: unknown) => (Buffer.isBuffer(tagValue) ? tagValue : Buffer.alloc(0)),
     getSize: (img: unknown) => {
       if (!Buffer.isBuffer(img) || img.length === 0) return [0, 0];
       return [160, 60];
     },
   });
-  doc.attachModule(imageModule);
 }
 
 async function maybeHydrateFirmLogoBuffer(input: Record<string, unknown>): Promise<void> {
@@ -6913,6 +6912,7 @@ async function generateFirmDocument({
     const doc = new Docxtemplater(zip, {
       paragraphLoop: true,
       linebreaks: true,
+      modules: [makeDocxImageModule()],
       delimiters: { start: "{{", end: "}}" },
       nullGetter(part: any) {
         const k = typeof part?.value === "string" ? String(part.value) : "";
@@ -6920,7 +6920,6 @@ async function generateFirmDocument({
         return "";
       },
     });
-    attachDocxImageModule(doc);
     await maybeHydrateFirmLogoBuffer(input as any);
     try {
       doc.render(input);
@@ -7339,13 +7338,13 @@ async function generateMasterDocument({
     const doc = new Docxtemplater(zip, {
       paragraphLoop: true,
       linebreaks: true,
+      modules: [makeDocxImageModule()],
       delimiters: { start: "{{", end: "}}" },
       nullGetter(part: any) {
         const k = typeof part?.value === "string" ? String(part.value) : "";
         return k ? "" : "";
       },
     });
-    attachDocxImageModule(doc);
     await maybeHydrateFirmLogoBuffer(renderInput as any);
     try {
       doc.render(renderInput);
@@ -9436,7 +9435,7 @@ router.post("/documents/automation/generate-now", requireAuth, requireFirmUser, 
     templates: z.array(z.object({ source: z.enum(["firm", "master"]), id: z.union([z.number(), z.string()]) })).min(1),
     config: z.object({
       action: z.literal("download").optional(),
-      output: z.literal("docx_zip").optional(),
+      outputFormat: z.literal("pdf").optional(),
     }).optional(),
   });
   const parsed = bodySchema.safeParse(req.body);
@@ -9492,7 +9491,7 @@ router.post("/documents/automation/generate-now", requireAuth, requireFirmUser, 
   }
 
   const cache = createRequestCache();
-  const templateObjectCache = new Map<string, { name: string; fileName: string; objectPath: string }>();
+  const templateObjectCache = new Map<string, { name: string; fileName: string; mimeType: string | null; objectPath: string }>();
   const templateBytesCache = new Map<string, Buffer>();
   const errors: string[] = [];
 
@@ -9504,29 +9503,52 @@ router.post("/documents/automation/generate-now", requireAuth, requireFirmUser, 
     return bytes;
   };
 
-  res.setHeader("Content-Type", "application/zip");
-  res.setHeader("Content-Disposition", contentDispositionAttachment(`lawcaspro-generated-documents-${Date.now()}.zip`));
-  res.status(200);
-
-  const zipfile = new yazl.ZipFile();
-  zipfile.outputStream.on("error", (e: any) => {
-    try {
-      logger.error({ err: e, firmId: req.firmId, userId: req.userId }, "[documents.generate-now] zip stream error");
-    } catch {
+  const renderWarningPdfPage = async (lines: string[]): Promise<Buffer> => {
+    const pdfDoc = await PDFDocument.create();
+    const page = pdfDoc.addPage([595.28, 841.89]);
+    const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
+    const margin = 48;
+    const fontSize = 12;
+    const lineHeight = 16;
+    let y = page.getHeight() - margin;
+    for (const ln of lines) {
+      if (y < margin) break;
+      page.drawText(ln, { x: margin, y, size: fontSize, font, color: rgb(0, 0, 0) });
+      y -= lineHeight;
     }
-  });
-  zipfile.outputStream.pipe(res);
+    const bytes = await pdfDoc.save();
+    return Buffer.from(bytes);
+  };
 
-  const nameCounts = new Map<string, number>();
-  const addZipBuffer = (zipPathRaw: string, bytes: Buffer) => {
-    const base = zipPathRaw.replace(/^\/*/, "");
-    const n = (nameCounts.get(base) ?? 0) + 1;
-    nameCounts.set(base, n);
-    const zipPath = n === 1 ? base : base.replace(/(\.[^./\\]+)?$/, (_m, ext) => ` (${n})${ext ?? ""}`);
-    zipfile.addBuffer(bytes, zipPath);
+  const classifyTemplateKind = (fileName: string, mimeType: string | null): "pdf" | "docx" | "doc" | "unknown" => {
+    const ext = fileExtensionFromName(fileName).toLowerCase();
+    const mt = (mimeType ?? "").toLowerCase();
+    if (ext === "pdf" || mt.includes("application/pdf")) return "pdf";
+    if (ext === "docx" || mt.includes("wordprocessingml")) return "docx";
+    if (ext === "doc" || mt.includes("application/msword")) return "doc";
+    return "unknown";
   };
 
   try {
+    const zipfile = new yazl.ZipFile();
+    zipfile.outputStream.on("error", (e: any) => {
+      try {
+        logger.error({ err: e, firmId: req.firmId, userId: req.userId }, "[documents.generate-now] zip stream error");
+      } catch {
+      }
+    });
+
+    const nameCounts = new Map<string, number>();
+    const addZipBuffer = (zipPathRaw: string, bytes: Buffer) => {
+      const base = zipPathRaw.replace(/^\/*/, "");
+      const n = (nameCounts.get(base) ?? 0) + 1;
+      nameCounts.set(base, n);
+      const zipPath = n === 1 ? base : base.replace(/(\.[^./\\]+)?$/, (_m, ext) => ` (${n})${ext ?? ""}`);
+      zipfile.addBuffer(bytes, zipPath);
+    };
+
+    let generatedCount = 0;
+
     for (const caseId of caseIds) {
       const context = await buildCaseContext(r, caseId, req.firmId!, cache);
       if (!context) {
@@ -9546,7 +9568,7 @@ router.post("/documents/automation/generate-now", requireAuth, requireFirmUser, 
           const tpl = templateObjectCache.get(cacheKey) ?? await (async () => {
             if (t.source === "firm") {
               const rows = await queryRows(r, sql`
-                SELECT id, name, object_path, file_name, is_template_capable
+                SELECT id, name, object_path, file_name, mime_type, is_template_capable
                 FROM document_templates
                 WHERE firm_id = ${req.firmId!} AND id = ${t.id}
                 LIMIT 1
@@ -9556,14 +9578,15 @@ router.post("/documents/automation/generate-now", requireAuth, requireFirmUser, 
               if (row.is_template_capable === false) return null;
               const objectPath = typeof row.object_path === "string" ? decodeStoragePath(String(row.object_path)) : "";
               const fileName = typeof row.file_name === "string" ? String(row.file_name) : "";
+              const mimeType = typeof row.mime_type === "string" ? String(row.mime_type) : null;
               const name = typeof row.name === "string" ? String(row.name) : `template-${t.id}`;
               if (!objectPath) return null;
-              const out = { name, fileName, objectPath };
+              const out = { name, fileName, mimeType, objectPath };
               templateObjectCache.set(cacheKey, out);
               return out;
             }
             const rows = await queryRows(r, sql`
-              SELECT id, name, object_path, file_name
+              SELECT id, name, object_path, file_name, mime_type
               FROM platform_documents
               WHERE id = ${t.id}
                 AND (firm_id IS NULL OR firm_id = ${req.firmId!})
@@ -9573,9 +9596,10 @@ router.post("/documents/automation/generate-now", requireAuth, requireFirmUser, 
             if (!row) return null;
             const objectPath = typeof row.object_path === "string" ? decodeStoragePath(String(row.object_path)) : "";
             const fileName = typeof row.file_name === "string" ? String(row.file_name) : "";
+            const mimeType = typeof row.mime_type === "string" ? String(row.mime_type) : null;
             const name = typeof row.name === "string" ? String(row.name) : `master-${t.id}`;
             if (!objectPath) return null;
-            const out = { name, fileName, objectPath };
+            const out = { name, fileName, mimeType, objectPath };
             templateObjectCache.set(cacheKey, out);
             return out;
           })();
@@ -9584,32 +9608,55 @@ router.post("/documents/automation/generate-now", requireAuth, requireFirmUser, 
             errors.push(`${caseRef}: template=${cacheKey} TEMPLATE_NOT_FOUND`);
             continue;
           }
-          const ext = fileExtensionFromName(tpl.fileName).toLowerCase();
-          if (ext !== "docx") {
-            errors.push(`${caseRef}: template=${cacheKey} UNSUPPORTED_TEMPLATE_TYPE (${ext || "unknown"})`);
+          const kind = classifyTemplateKind(tpl.fileName, tpl.mimeType);
+          const tplNameRaw = safeFilenameAscii(tpl.name) || `template-${t.id}`;
+          const tplName = tplNameRaw.replace(/\s+/g, "_");
+
+          if (kind === "pdf") {
+            const pdfBytes = await readTemplateBytes(tpl.objectPath);
+            const zipPath = `${caseRef}/${tplName}.pdf`;
+            addZipBuffer(zipPath, pdfBytes);
+            generatedCount += 1;
             continue;
           }
 
-          const templateBytes = await readTemplateBytes(tpl.objectPath);
-          const zip = new PizZip(templateBytes);
-          const doc = new Docxtemplater(zip, {
-            paragraphLoop: true,
-            linebreaks: true,
-            delimiters: { start: "{{", end: "}}" },
-            nullGetter(part: any) {
-              const k = typeof part?.value === "string" ? String(part.value) : "";
-              if (!k) return "";
-              return "";
-            },
-          });
-          attachDocxImageModule(doc);
-          await maybeHydrateFirmLogoBuffer(context as any);
-          doc.render(context as any);
-          const rendered = doc.getZip().generate({ type: "nodebuffer", compression: "DEFLATE" }) as Buffer;
+          if (kind === "docx") {
+            const templateBytes = await readTemplateBytes(tpl.objectPath);
+            const zdoc = new PizZip(templateBytes);
+            const doc = new Docxtemplater(zdoc, {
+              paragraphLoop: true,
+              linebreaks: true,
+              modules: [makeDocxImageModule()],
+              delimiters: { start: "{{", end: "}}" },
+              nullGetter() {
+                return "";
+              },
+            });
+            await maybeHydrateFirmLogoBuffer(context as any);
+            doc.render(context as any);
+            const renderedDocx = doc.getZip().generate({ type: "nodebuffer", compression: "DEFLATE" }) as Buffer;
+            const conv = await convertDocxToPdfWithFallback(renderedDocx, { allowFallbackOnFailure: true });
+            if (conv.fallbackUsed) errors.push(`${caseRef}: template=${cacheKey} DOCX_TO_PDF_FALLBACK_USED`);
+            const zipPath = `${caseRef}/${tplName}.pdf`;
+            addZipBuffer(zipPath, conv.pdfBytes);
+            generatedCount += 1;
+            continue;
+          }
 
-          const tplName = safeFilenameAscii(tpl.name) || `template-${t.id}`;
-          const zipPath = `${caseRef}_${tplName}.docx`;
-          addZipBuffer(zipPath, rendered);
+          if (kind === "doc") {
+            const warningPdf = await renderWarningPdfPage([
+              "This .doc template requires conversion support.",
+              "Please upload a .docx version for full variable merge.",
+              `Template: ${tpl.name}`,
+            ]);
+            const zipPath = `${caseRef}/${tplName}.pdf`;
+            addZipBuffer(zipPath, warningPdf);
+            generatedCount += 1;
+            errors.push(`${caseRef}: template=${cacheKey} DOC_CONVERSION_UNSUPPORTED`);
+            continue;
+          }
+
+          errors.push(`${caseRef}: template=${cacheKey} UNSUPPORTED_TEMPLATE_TYPE (${fileExtensionFromName(tpl.fileName).toLowerCase() || "unknown"})`);
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err ?? "");
           errors.push(`${caseRef}: template=${cacheKey} ${msg.slice(0, 400) || "RENDER_FAILED"}`);
@@ -9620,6 +9667,16 @@ router.post("/documents/automation/generate-now", requireAuth, requireFirmUser, 
     if (errors.length > 0) {
       addZipBuffer("_GENERATION_WARNINGS.txt", Buffer.from(errors.join("\n"), "utf8"));
     }
+
+    if (generatedCount === 0) {
+      fail(500, "NO_DOCUMENT_GENERATED", "No documents were generated", { errors }, false);
+      return;
+    }
+
+    res.setHeader("Content-Type", "application/zip");
+    res.setHeader("Content-Disposition", contentDispositionAttachment(`lawcaspro-generated-documents-${Date.now()}.zip`));
+    res.status(200);
+    zipfile.outputStream.pipe(res);
     zipfile.end();
 
     await new Promise<void>((resolve, reject) => {
@@ -9634,7 +9691,7 @@ router.post("/documents/automation/generate-now", requireAuth, requireFirmUser, 
       action: "documents.automation.generate_now",
       entityType: "document_generation",
       entityId: undefined,
-      detail: `cases=${caseIds.length} templates=${templates.length} warnings=${errors.length}`,
+      detail: `cases=${caseIds.length} templates=${templates.length} pdf=${generatedCount} warnings=${errors.length}`,
       ipAddress: req.ip,
       userAgent: req.headers["user-agent"],
     });
@@ -11303,13 +11360,13 @@ router.post("/cases/:caseId/documents/preview", requireAuth, requireFirmUser, re
           const doc = new Docxtemplater(zip, {
             paragraphLoop: true,
             linebreaks: true,
+            modules: [makeDocxImageModule()],
             delimiters: { start: "{{", end: "}}" },
             nullGetter(part: any) {
               const k = typeof part?.value === "string" ? String(part.value) : "";
               return k ? "" : "";
             },
           });
-          attachDocxImageModule(doc);
           await maybeHydrateFirmLogoBuffer(inputForRender as any);
           doc.render(inputForRender);
         } catch (err) {
@@ -11518,8 +11575,7 @@ router.post("/cases/:caseId/documents/preview", requireAuth, requireFirmUser, re
           throw new DocumentGenerationError(400, "TEMPLATE_FILE_BUFFER_MISSING", "Template file buffer is missing or corrupted in the database.");
         }
         const zip = new PizZip(bytes);
-        const d = new Docxtemplater(zip, { paragraphLoop: true, linebreaks: true });
-        attachDocxImageModule(d);
+        const d = new Docxtemplater(zip, { paragraphLoop: true, linebreaks: true, modules: [makeDocxImageModule()] });
         await maybeHydrateFirmLogoBuffer(input as any);
         d.render(input);
       } catch (err) {
@@ -12175,8 +12231,7 @@ router.post("/cases/:caseId/documents/print", requireAuth, requireFirmUser, requ
     const letterheadBytes = await letterheadBytesPromise;
 
     const zip = new PizZip(fileContents);
-    const doc = new Docxtemplater(zip, { paragraphLoop: true, linebreaks: true });
-    attachDocxImageModule(doc);
+    const doc = new Docxtemplater(zip, { paragraphLoop: true, linebreaks: true, modules: [makeDocxImageModule()] });
     await maybeHydrateFirmLogoBuffer(input as any);
     try {
       doc.render(input);
