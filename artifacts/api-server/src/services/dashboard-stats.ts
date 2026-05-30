@@ -3,7 +3,6 @@ import {
   caseAssignmentsTable,
   caseKeyDatesTable,
   casesTable,
-  caseWorkflowStepsTable,
   clientsTable,
   developersTable,
   projectsTable,
@@ -12,7 +11,6 @@ import {
   type RlsDb,
   db,
 } from "@workspace/db";
-import { milestonePresenceWhereSql, type CaseMilestoneKey } from "../lib/caseListLogic";
 
 type DbConn = typeof db | RlsDb;
 
@@ -92,7 +90,6 @@ export async function computeDashboardStats(
   };
 
   const hasKeyDates = await safeTableExists(r, "public.case_key_dates");
-  const hasWorkflowSteps = await safeTableExists(r, "public.case_workflow_steps");
   const hasCommunications = await safeTableExists(r, "public.case_communications");
   const hasBillingEntries = false;
   const hasCaseLedgers = false;
@@ -379,280 +376,8 @@ export async function computeDashboardStats(
       })()
     : 0;
 
-  const baseActiveWhere = and(eq(casesTable.firmId, firmId), isNull(casesTable.deletedAt));
-  const loanMasterWhere = and(eq(casesTable.purchaseMode, "loan"), eq(casesTable.titleType, "master"));
-  const loanTitleWhere = and(
-    eq(casesTable.purchaseMode, "loan"),
-    or(eq(casesTable.titleType, "individual"), eq(casesTable.titleType, "strata")),
-  );
-
-  const spaTotal = await countCases(baseActiveWhere, "spaTotal");
-  const loanMasterTotal = await countCases(and(baseActiveWhere, loanMasterWhere), "loanMasterTotal");
-  const loanTitleTotal = await countCases(and(baseActiveWhere, loanTitleWhere), "loanTitleTotal");
-
-  let workflowStepsEnabled = hasWorkflowSteps;
-
-  const spaMilestones: Array<{ key: CaseMilestoneKey; label: string }> = [
-    { key: "spa_stamped", label: "SPA Stamped" },
-    { key: "lof_stamped", label: "Letter of Offer Stamped" },
-  ];
-
-  const loanMasterMilestones: Array<{ key: CaseMilestoneKey; label: string }> = [
-    { key: "loan_docs_pending", label: "Loan Docs Pending" },
-    { key: "loan_docs_signed", label: "Loan Docs Signed" },
-    { key: "acting_letter_issued", label: "Acting Letter Issued" },
-    { key: "advised", label: "Advised" },
-    { key: "loan_sent_bank_exec", label: "Loan Sent Bank Exec" },
-    { key: "loan_bank_executed", label: "Loan Bank Executed" },
-    { key: "blu_received", label: "BLU Received" },
-    { key: "noa_served", label: "NOA Served" },
-    { key: "pa_registered", label: "PA Registered" },
-    { key: "letter_disclaimer", label: "Letter Disclaimer" },
-  ];
-
-  const loanTitleMilestones: Array<{ key: CaseMilestoneKey; label: string }> = [
-    { key: "loan_docs_pending", label: "Loan Docs Pending" },
-    { key: "loan_docs_signed", label: "Loan Docs Signed" },
-    { key: "acting_letter_issued", label: "Acting Letter Issued" },
-    { key: "advised", label: "Advised" },
-    { key: "loan_sent_bank_exec", label: "Loan Sent Bank Exec" },
-    { key: "loan_bank_executed", label: "Loan Bank Executed" },
-    { key: "blu_received", label: "BLU Received" },
-    { key: "mot_received", label: "MOT Received" },
-    { key: "mot_submitted_stamping", label: "MOT Submitted Stamping" },
-    { key: "mot_stamp", label: "MOT Stamped" },
-  ];
-
-  const stepCounts: Record<string, { done: number; pending: number; pendingIds: number[] }> = {};
-  if (workflowStepsEnabled) {
-    try {
-      const countCasesForStepPresence = async (stepKey: CaseMilestoneKey, presence: "completed" | "pending", extraWhere?: SQL) => {
-        if (deadlineExceeded()) {
-          deadlineSkip("milestones.workflowSteps", ["milestoneCards", "milestoneSections"]);
-          workflowStepsEnabled = false;
-          return 0;
-        }
-        const base = assignedCasesJoin
-          ? r.select({ c: count() }).from(casesTable).innerJoin(caseAssignmentsTable, assignedCasesJoin)
-          : r.select({ c: count() }).from(casesTable);
-        const where = and(
-          eq(casesTable.firmId, firmId),
-          isNull(casesTable.deletedAt),
-          milestonePresenceWhereSql(stepKey, presence),
-          ...(extraWhere ? [extraWhere] : []),
-        );
-        const [row] = await base.where(where);
-        return toNumber0((row as any)?.c);
-      };
-
-      const listPendingCaseIdsLimited = async (stepKey: CaseMilestoneKey, extraWhere?: SQL) => {
-        if (deadlineExceeded()) return [];
-        const base = assignedCasesJoin
-          ? r.select({ id: casesTable.id }).from(casesTable).innerJoin(caseAssignmentsTable, assignedCasesJoin)
-          : r.select({ id: casesTable.id }).from(casesTable);
-        const where = and(
-          eq(casesTable.firmId, firmId),
-          isNull(casesTable.deletedAt),
-          milestonePresenceWhereSql(stepKey, "pending"),
-          ...(extraWhere ? [extraWhere] : []),
-        );
-        const rows = await base.where(where).limit(200);
-        return rows
-          .map((x) => toNumber0((x as any)?.id))
-          .filter((id) => Number.isFinite(id) && id > 0);
-      };
-
-      await Promise.all([
-        ...spaMilestones.map(async (m) => {
-          const done = await countCasesForStepPresence(m.key, "completed");
-          const pending = await countCasesForStepPresence(m.key, "pending");
-          const pendingIds = pending > 0 ? await listPendingCaseIdsLimited(m.key) : [];
-          stepCounts[`spa_${m.key}`] = { done, pending, pendingIds };
-        }),
-        ...loanMasterMilestones.map(async (m) => {
-          const done = await countCasesForStepPresence(m.key, "completed", loanMasterWhere);
-          const pending = await countCasesForStepPresence(m.key, "pending", loanMasterWhere);
-          const pendingIds = pending > 0 ? await listPendingCaseIdsLimited(m.key, loanMasterWhere) : [];
-          stepCounts[`loan_master_${m.key}`] = { done, pending, pendingIds };
-        }),
-        ...loanTitleMilestones.map(async (m) => {
-          const done = await countCasesForStepPresence(m.key, "completed", loanTitleWhere);
-          const pending = await countCasesForStepPresence(m.key, "pending", loanTitleWhere);
-          const pendingIds = pending > 0 ? await listPendingCaseIdsLimited(m.key, loanTitleWhere) : [];
-          stepCounts[`loan_title_${m.key}`] = { done, pending, pendingIds };
-        }),
-      ]);
-    } catch (err) {
-      if (!isMissingRelationOrColumnError(err)) warn("milestones.workflowSteps", err, ["milestoneCards", "milestoneSections"]);
-      workflowStepsEnabled = false;
-    }
-  }
-
-  const keyDateMilestones: Array<{ key: CaseMilestoneKey; label: string }> = [
-    { key: "spa_date", label: "SPA Signed" },
-    { key: "spa_stamped_date", label: "SPA Stamped" },
-    { key: "letter_of_offer_date", label: "Letter of Offer" },
-    { key: "loan_docs_signed_date", label: "Loan Docs Signed" },
-    { key: "advice_to_bank_date", label: "Advised" },
-    { key: "completion_date", label: "Completed" },
-  ];
-
-  const keyDatesColumn = (k: CaseMilestoneKey) => {
-    if (k === "spa_date") return caseKeyDatesTable.spaDate;
-    if (k === "spa_stamped_date") return caseKeyDatesTable.spaStampedDate;
-    if (k === "letter_of_offer_date") return caseKeyDatesTable.letterOfOfferDate;
-    if (k === "loan_docs_signed_date") return caseKeyDatesTable.loanDocsSignedDate;
-    if (k === "advice_to_bank_date") return caseKeyDatesTable.adviceToBankDate;
-    if (k === "completion_date") return caseKeyDatesTable.completionDate;
-    return null;
-  };
-
-  const countMissingKeyDate = async (k: CaseMilestoneKey, extraWhere?: SQL) => {
-    const col = keyDatesColumn(k);
-    if (!hasKeyDates || !col) return 0;
-    try {
-      const base = assignedCasesJoin
-        ? r.select({ c: count() }).from(casesTable)
-            .innerJoin(caseAssignmentsTable, assignedCasesJoin)
-            .leftJoin(caseKeyDatesTable, and(
-              eq(caseKeyDatesTable.caseId, casesTable.id),
-              eq(caseKeyDatesTable.firmId, casesTable.firmId),
-            ))
-        : r.select({ c: count() }).from(casesTable)
-            .leftJoin(caseKeyDatesTable, and(
-              eq(caseKeyDatesTable.caseId, casesTable.id),
-              eq(caseKeyDatesTable.firmId, casesTable.firmId),
-            ));
-      const [row] = await base.where(and(
-        eq(casesTable.firmId, firmId),
-        isNull(casesTable.deletedAt),
-        isNull(col),
-        ...(extraWhere ? [extraWhere] : []),
-      ));
-      return toNumber0(row?.c);
-    } catch (err) {
-      if (!isMissingRelationOrColumnError(err)) throw err;
-      return 0;
-    }
-  };
-
-  const toMilestoneCard = (segKey: string, m: { key: CaseMilestoneKey; label: string }, key: string, extraFilter: Record<string, string> | undefined) => {
-    const counts = stepCounts[key] ?? { done: 0, pending: 0, pendingIds: [] };
-    const done = counts.done;
-    const pending = counts.pending;
-    return {
-      key: `${segKey}_${String(m.key)}`,
-      label: m.label,
-      count: pending,
-      caseIds: counts.pendingIds,
-      pendingCount: pending,
-      doneCount: done,
-      filter: {
-        milestone: m.key,
-        milestonePresence: "pending",
-        ...assignedFilter,
-        ...(extraFilter ?? {}),
-      },
-    };
-  };
-
-  const spaCards = spaMilestones.map((m) => toMilestoneCard("spa", m, `spa_${m.key}`, undefined));
-  const loanMasterCards = loanMasterMilestones.map((m) => toMilestoneCard("loan_master", m, `loan_master_${m.key}`, { purchaseMode: "loan", titleType: "master" }));
-  const loanTitleCards = loanTitleMilestones.map((m) => toMilestoneCard("loan_title", m, `loan_title_${m.key}`, { purchaseMode: "loan" }));
-
-  const milestoneSections = workflowStepsEnabled ? [
-    {
-      key: "spa",
-      label: "SPA Total",
-      total: spaTotal,
-      cards: [
-        { key: "spa_total", label: "Total", count: spaTotal, filter: { ...assignedFilter } },
-        ...spaCards,
-      ],
-    },
-    {
-      key: "loan_master",
-      label: "Loan (Master) Total",
-      total: loanMasterTotal,
-      cards: [
-        { key: "loan_master_total", label: "Total", count: loanMasterTotal, filter: { ...assignedFilter, purchaseMode: "loan", titleType: "master" } },
-        ...loanMasterCards,
-      ],
-    },
-    {
-      key: "loan_title",
-      label: "Loan (Title) Total",
-      total: loanTitleTotal,
-      cards: [
-        { key: "loan_title_total", label: "Total", count: loanTitleTotal, filter: { ...assignedFilter, purchaseMode: "loan", titleType: "individual,strata" } },
-        ...loanTitleCards,
-      ],
-    },
-  ] : [];
-
-  const milestoneCards = workflowStepsEnabled
-    ? [...spaCards, ...loanMasterCards, ...loanTitleCards]
-    : [];
-
-  if (!workflowStepsEnabled && hasKeyDates) {
-    const buildKeyDateCards = async (segKey: string, total: number, extraWhere: SQL | undefined, extraFilter: Record<string, string> | undefined) => {
-      const cards = await Promise.all(
-        keyDateMilestones.map(async (m) => {
-          const missing = await countMissingKeyDate(m.key, extraWhere);
-          return {
-            key: `${segKey}_${String(m.key)}`,
-            label: m.label,
-            count: missing,
-            pendingCount: missing,
-            doneCount: Math.max(0, total - missing),
-            filter: {
-              milestone: m.key,
-              milestonePresence: "missing",
-              ...assignedFilter,
-              ...(extraFilter ?? {}),
-            },
-          };
-        })
-      );
-      return cards;
-    };
-
-    const spaKeyDateCards = await buildKeyDateCards("spa", spaTotal, undefined, undefined);
-    const loanMasterKeyDateCards = await buildKeyDateCards("loan_master", loanMasterTotal, loanMasterWhere, { purchaseMode: "loan", titleType: "master" });
-    const loanTitleKeyDateCards = await buildKeyDateCards("loan_title", loanTitleTotal, loanTitleWhere, { purchaseMode: "loan", titleType: "individual,strata" });
-
-    (milestoneSections as any).push(
-      {
-        key: "spa",
-        label: "SPA Total",
-        total: spaTotal,
-        cards: [
-          { key: "spa_total", label: "Total", count: spaTotal, filter: { ...assignedFilter } },
-          ...spaKeyDateCards,
-        ],
-      },
-      {
-        key: "loan_master",
-        label: "Loan (Master) Total",
-        total: loanMasterTotal,
-        cards: [
-          { key: "loan_master_total", label: "Total", count: loanMasterTotal, filter: { ...assignedFilter, purchaseMode: "loan", titleType: "master" } },
-          ...loanMasterKeyDateCards,
-        ],
-      },
-      {
-        key: "loan_title",
-        label: "Loan (Title) Total",
-        total: loanTitleTotal,
-        cards: [
-          { key: "loan_title_total", label: "Total", count: loanTitleTotal, filter: { ...assignedFilter, purchaseMode: "loan", titleType: "individual,strata" } },
-          ...loanTitleKeyDateCards,
-        ],
-      },
-    );
-
-    (milestoneCards as any).push(...spaKeyDateCards, ...loanMasterKeyDateCards, ...loanTitleKeyDateCards);
-  }
+  const milestoneSections: any[] = [];
+  const milestoneCards: any[] = [];
 
   const completionSlaOverdue = hasKeyDates
     ? await (async () => {
@@ -708,16 +433,12 @@ export async function computeDashboardStats(
         },
         flags: {
           hasKeyDates,
-          hasWorkflowSteps,
-          workflowStepsEnabled,
           hasBillingEntries,
           hasCommunications,
           hasCaseLedgers,
         },
         shapes: {
           recentCases: recentCases.length,
-          milestoneSections: Array.isArray(milestoneSections) ? milestoneSections.length : -1,
-          milestoneCards: Array.isArray(milestoneCards) ? milestoneCards.length : -1,
           completionSlaOverdue: completionSlaOverdue.length,
         },
       })

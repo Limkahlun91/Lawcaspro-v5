@@ -9505,6 +9505,14 @@ router.post("/documents/automation/generate-now", requireAuth, requireFirmUser, 
   const templateObjectCache = new Map<string, { name: string; fileName: string; mimeType: string | null; objectPath: string; mappingConfig: unknown }>();
   const templateBytesCache = new Map<string, Buffer>();
   const errors: string[] = [];
+  const manifest: Array<{
+    caseId: number;
+    caseRef: string;
+    template: { source: "firm" | "master"; id: number };
+    ok: boolean;
+    zipPath: string;
+    error?: { code: string; message: string };
+  }> = [];
 
   const readTemplateBytes = async (objectPath: string): Promise<Buffer> => {
     const cached = templateBytesCache.get(objectPath);
@@ -9592,6 +9600,7 @@ router.post("/documents/automation/generate-now", requireAuth, requireFirmUser, 
 
       for (const t of templates) {
         const cacheKey = `${t.source}:${t.id}`;
+        const templateKey = `${t.source}-${t.id}`;
         try {
           const tpl = templateObjectCache.get(cacheKey) ?? await (async () => {
             if (t.source === "firm") {
@@ -9632,14 +9641,32 @@ router.post("/documents/automation/generate-now", requireAuth, requireFirmUser, 
             return out;
           })();
 
+          const tplNameRaw = safeFilenameAscii(tpl?.name ?? "") || `template-${t.id}`;
+          const tplName = tplNameRaw.replace(/\s+/g, "_");
+          const zipBase = `${tplName}__${templateKey}`;
+          const zipPathOk = `${caseRef}/${zipBase}.pdf`;
+          const zipPathErr = `${caseRef}/__ERROR__${zipBase}.pdf`;
+
           if (!tpl) {
+            const warningPdf = await renderWarningPdfPage([
+              "Template not found or not template-capable.",
+              `Template: ${cacheKey}`,
+              `Case: ${caseRefRaw}`,
+            ]);
+            addZipBuffer(zipPathErr, warningPdf);
+            generatedCount += 1;
             errors.push(`${caseRef}: template=${cacheKey} TEMPLATE_NOT_FOUND`);
+            manifest.push({
+              caseId,
+              caseRef: caseRefRaw,
+              template: { source: t.source, id: t.id },
+              ok: false,
+              zipPath: zipPathErr,
+              error: { code: "TEMPLATE_NOT_FOUND", message: "Template not found or not template-capable" },
+            });
             continue;
           }
           const kind = classifyTemplateKind(tpl.fileName, tpl.mimeType);
-          const tplNameRaw = safeFilenameAscii(tpl.name) || `template-${t.id}`;
-          const tplName = tplNameRaw.replace(/\s+/g, "_");
-          const zipPath = `${caseRef}/${tplName}.pdf`;
 
           if (kind === "pdf") {
             const pdfBytes = await readTemplateBytes(tpl.objectPath);
@@ -9667,8 +9694,9 @@ router.post("/documents/automation/generate-now", requireAuth, requireFirmUser, 
                           "PDF template has no mappings or form fields.",
                           `Template: ${tpl.name}`,
                         ]);
-              addZipBuffer(zipPath, rendered);
+              addZipBuffer(zipPathOk, rendered);
               generatedCount += 1;
+              manifest.push({ caseId, caseRef: caseRefRaw, template: { source: t.source, id: t.id }, ok: true, zipPath: zipPathOk });
               if (preview.usedMode === "bindings" && preview.missingRequiredVariables.length > 0) {
                 errors.push(`${caseRef}: template=${cacheKey} MISSING_REQUIRED_VARIABLES ${preview.missingRequiredVariables.map((x) => x.variableKey).join(",")}`);
               }
@@ -9684,42 +9712,75 @@ router.post("/documents/automation/generate-now", requireAuth, requireFirmUser, 
                 `Error: ${e.code}`,
                 String(e.message ?? "").slice(0, 200),
               ]);
-              addZipBuffer(zipPath, warningPdf);
+              addZipBuffer(zipPathErr, warningPdf);
               generatedCount += 1;
               errors.push(`${caseRef}: template=${cacheKey} ${e.code} ${String(e.message ?? "").slice(0, 200)}`);
+              manifest.push({
+                caseId,
+                caseRef: caseRefRaw,
+                template: { source: t.source, id: t.id },
+                ok: false,
+                zipPath: zipPathErr,
+                error: { code: e.code, message: String(e.message ?? "").slice(0, 400) },
+              });
             }
             continue;
           }
 
           if (kind === "docx") {
-            const templateBytes = await readTemplateBytes(tpl.objectPath);
-            const placeholders = detectDocxVariables(templateBytes);
-            const preview = await previewAndResolve({
-              firmId: req.firmId!,
-              caseContext: context as any,
-              templateRef: t.source === "firm" ? { kind: "firm", templateId: t.id } : { kind: "platform", documentId: t.id },
-              placeholders,
-            });
-            const zdoc = new PizZip(templateBytes);
-            const doc = new Docxtemplater(zdoc, {
-              paragraphLoop: true,
-              linebreaks: true,
-              modules: [makeDocxImageModule()],
-              delimiters: { start: "{{", end: "}}" },
-              nullGetter(part: any) {
-                const k = typeof part?.value === "string" ? String(part.value) : "";
-                return k ? `[MISSING: ${k}]` : "";
-              },
-            });
-            await maybeHydrateFirmLogoBuffer(preview.input as any);
-            doc.render(preview.input as any);
-            const renderedDocx = doc.getZip().generate({ type: "nodebuffer", compression: "DEFLATE" }) as Buffer;
-            const conv = await convertDocxToPdfWithFallback(renderedDocx, { allowFallbackOnFailure: true });
-            if (conv.fallbackUsed) errors.push(`${caseRef}: template=${cacheKey} DOCX_TO_PDF_FALLBACK_USED`);
-            addZipBuffer(zipPath, conv.pdfBytes);
-            generatedCount += 1;
-            if (preview.usedMode === "bindings" && preview.missingRequiredVariables.length > 0) {
-              errors.push(`${caseRef}: template=${cacheKey} MISSING_REQUIRED_VARIABLES ${preview.missingRequiredVariables.map((x) => x.variableKey).join(",")}`);
+            try {
+              const templateBytes = await readTemplateBytes(tpl.objectPath);
+              const placeholders = detectDocxVariables(templateBytes);
+              const preview = await previewAndResolve({
+                firmId: req.firmId!,
+                caseContext: context as any,
+                templateRef: t.source === "firm" ? { kind: "firm", templateId: t.id } : { kind: "platform", documentId: t.id },
+                placeholders,
+              });
+              const zdoc = new PizZip(templateBytes);
+              const doc = new Docxtemplater(zdoc, {
+                paragraphLoop: true,
+                linebreaks: true,
+                modules: [makeDocxImageModule()],
+                delimiters: { start: "{{", end: "}}" },
+                nullGetter(part: any) {
+                  const k = typeof part?.value === "string" ? String(part.value) : "";
+                  return k ? `[MISSING: ${k}]` : "";
+                },
+              });
+              await maybeHydrateFirmLogoBuffer(preview.input as any);
+              doc.render(preview.input as any);
+              const renderedDocx = doc.getZip().generate({ type: "nodebuffer", compression: "DEFLATE" }) as Buffer;
+              const conv = await convertDocxToPdfWithFallback(renderedDocx, { allowFallbackOnFailure: true });
+              if (conv.fallbackUsed) errors.push(`${caseRef}: template=${cacheKey} DOCX_TO_PDF_FALLBACK_USED`);
+              addZipBuffer(zipPathOk, conv.pdfBytes);
+              generatedCount += 1;
+              manifest.push({ caseId, caseRef: caseRefRaw, template: { source: t.source, id: t.id }, ok: true, zipPath: zipPathOk });
+              if (preview.usedMode === "bindings" && preview.missingRequiredVariables.length > 0) {
+                errors.push(`${caseRef}: template=${cacheKey} MISSING_REQUIRED_VARIABLES ${preview.missingRequiredVariables.map((x) => x.variableKey).join(",")}`);
+              }
+            } catch (err) {
+              const msg = err instanceof Error ? err.message : String(err ?? "");
+              const code = err && typeof err === "object" ? (err as any).code : undefined;
+              const eCode = typeof code === "string" ? `DOCX_RENDER_FAILED_SQLSTATE_${code}` : "DOCX_RENDER_FAILED";
+              const warningPdf = await renderWarningPdfPage([
+                "Generation failed for this DOCX template.",
+                `Template: ${tpl.name}`,
+                `Case: ${caseRefRaw}`,
+                `Error: ${eCode}`,
+                msg.slice(0, 200),
+              ]);
+              addZipBuffer(zipPathErr, warningPdf);
+              generatedCount += 1;
+              errors.push(`${caseRef}: template=${cacheKey} ${msg.slice(0, 400) || "RENDER_FAILED"}`);
+              manifest.push({
+                caseId,
+                caseRef: caseRefRaw,
+                template: { source: t.source, id: t.id },
+                ok: false,
+                zipPath: zipPathErr,
+                error: { code: eCode, message: msg.slice(0, 400) || "RENDER_FAILED" },
+              });
             }
             continue;
           }
@@ -9730,16 +9791,61 @@ router.post("/documents/automation/generate-now", requireAuth, requireFirmUser, 
               "Please upload a .docx version for full variable merge.",
               `Template: ${tpl.name}`,
             ]);
-            addZipBuffer(zipPath, warningPdf);
+            addZipBuffer(zipPathErr, warningPdf);
             generatedCount += 1;
             errors.push(`${caseRef}: template=${cacheKey} DOC_CONVERSION_UNSUPPORTED`);
+            manifest.push({
+              caseId,
+              caseRef: caseRefRaw,
+              template: { source: t.source, id: t.id },
+              ok: false,
+              zipPath: zipPathErr,
+              error: { code: "DOC_CONVERSION_UNSUPPORTED", message: "This .doc template requires conversion support" },
+            });
             continue;
           }
 
-          errors.push(`${caseRef}: template=${cacheKey} UNSUPPORTED_TEMPLATE_TYPE (${fileExtensionFromName(tpl.fileName).toLowerCase() || "unknown"})`);
+          const ext = fileExtensionFromName(tpl.fileName).toLowerCase() || "unknown";
+          const warningPdf = await renderWarningPdfPage([
+            "Unsupported template type.",
+            `Template: ${tpl.name}`,
+            `Case: ${caseRefRaw}`,
+            `Type: ${ext}`,
+          ]);
+          addZipBuffer(zipPathErr, warningPdf);
+          generatedCount += 1;
+          errors.push(`${caseRef}: template=${cacheKey} UNSUPPORTED_TEMPLATE_TYPE (${ext})`);
+          manifest.push({
+            caseId,
+            caseRef: caseRefRaw,
+            template: { source: t.source, id: t.id },
+            ok: false,
+            zipPath: zipPathErr,
+            error: { code: "UNSUPPORTED_TEMPLATE_TYPE", message: ext },
+          });
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err ?? "");
+          const warningPdf = await renderWarningPdfPage([
+            "Generation failed for this template.",
+            `Template: ${cacheKey}`,
+            `Case: ${caseRefRaw}`,
+            msg.slice(0, 200) || "RENDER_FAILED",
+          ]);
+          const tplNameRaw = safeFilenameAscii(cacheKey) || `template-${t.id}`;
+          const tplName = tplNameRaw.replace(/\s+/g, "_");
+          const zipBase = `${tplName}__${templateKey}`;
+          const zipPathErr = `${caseRef}/__ERROR__${zipBase}.pdf`;
+          addZipBuffer(zipPathErr, warningPdf);
+          generatedCount += 1;
           errors.push(`${caseRef}: template=${cacheKey} ${msg.slice(0, 400) || "RENDER_FAILED"}`);
+          manifest.push({
+            caseId,
+            caseRef: caseRefRaw,
+            template: { source: t.source, id: t.id },
+            ok: false,
+            zipPath: zipPathErr,
+            error: { code: "RENDER_FAILED", message: msg.slice(0, 400) || "RENDER_FAILED" },
+          });
         }
       }
     }
@@ -9747,6 +9853,7 @@ router.post("/documents/automation/generate-now", requireAuth, requireFirmUser, 
     if (errors.length > 0) {
       addZipBuffer("_GENERATION_WARNINGS.txt", Buffer.from(errors.join("\n"), "utf8"));
     }
+    addZipBuffer("_manifest.json", Buffer.from(JSON.stringify(manifest, null, 2), "utf8"));
 
     if (generatedCount === 0) {
       fail(500, "NO_DOCUMENT_GENERATED", "No documents were generated", { errors }, false);

@@ -75,22 +75,39 @@ async function queryRows(r: DbConn, query: ReturnType<typeof sql>): Promise<Reco
   return [];
 }
 
+function getPgCode(err: unknown): string | null {
+  const code = err && typeof err === "object" ? (err as { code?: unknown }).code : undefined;
+  return typeof code === "string" && code ? code : null;
+}
+
+function isMissingRelationOrColumnError(err: unknown): boolean {
+  const code = getPgCode(err);
+  return code === "42P01" || code === "42703";
+}
+
 export async function listDocumentVariables(r: DbConn, filters: { category?: string; active?: boolean } = {}): Promise<VariableDefinition[]> {
   const where: any[] = [sql`1=1`];
   if (filters.category) where.push(sql`category = ${filters.category}`);
   if (typeof filters.active === "boolean") where.push(sql`is_active = ${filters.active}`);
-  const rows = await queryRows(
-    r,
-    sql`
-      SELECT
-        id, key, label, description, category, value_type,
-        source_path, formatter, example_value,
-        is_system, is_active, sort_order
-      FROM document_variable_definitions
-      WHERE ${sql.join(where, sql` AND `)}
-      ORDER BY category ASC, sort_order ASC, key ASC
-    `
-  );
+  const rows = await (async () => {
+    try {
+      return await queryRows(
+        r,
+        sql`
+          SELECT
+            id, key, label, description, category, value_type,
+            source_path, formatter, example_value,
+            is_system, is_active, sort_order
+          FROM document_variable_definitions
+          WHERE ${sql.join(where, sql` AND `)}
+          ORDER BY category ASC, sort_order ASC, key ASC
+        `
+      );
+    } catch (err) {
+      if (isMissingRelationOrColumnError(err)) return [];
+      throw err;
+    }
+  })();
   return rows.map((x) => ({
     id: Number(x.id),
     key: String(x.key),
@@ -116,18 +133,25 @@ export async function listDocumentVariablesByKeys(
   if (cleaned.length === 0) return [];
   const where: any[] = [sql`key = ANY(${cleaned}::text[])`];
   if (typeof filters.active === "boolean") where.push(sql`is_active = ${filters.active}`);
-  const rows = await queryRows(
-    r,
-    sql`
-      SELECT
-        id, key, label, description, category, value_type,
-        source_path, formatter, example_value,
-        is_system, is_active, sort_order
-      FROM document_variable_definitions
-      WHERE ${sql.join(where, sql` AND `)}
-      ORDER BY category ASC, sort_order ASC, key ASC
-    `
-  );
+  const rows = await (async () => {
+    try {
+      return await queryRows(
+        r,
+        sql`
+          SELECT
+            id, key, label, description, category, value_type,
+            source_path, formatter, example_value,
+            is_system, is_active, sort_order
+          FROM document_variable_definitions
+          WHERE ${sql.join(where, sql` AND `)}
+          ORDER BY category ASC, sort_order ASC, key ASC
+        `
+      );
+    } catch (err) {
+      if (isMissingRelationOrColumnError(err)) return [];
+      throw err;
+    }
+  })();
   return rows.map((x) => ({
     id: Number(x.id),
     key: String(x.key),

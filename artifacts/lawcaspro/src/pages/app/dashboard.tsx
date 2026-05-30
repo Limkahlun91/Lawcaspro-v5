@@ -5,7 +5,6 @@ import { useLocation } from "wouter";
 import { apiFetchJson } from "@/lib/api-client";
 import { QueryFallback } from "@/components/query-fallback";
 import { useAuth } from "@/lib/auth-context";
-import { MilestonesTable } from "@/components/milestones-table";
 
 const STATUS_SHORT: Record<string, string> = {
   "File Opened / SPA Pending Signing": "SPA Pending",
@@ -77,8 +76,6 @@ export default function AppDashboard() {
       "totalClients",
       "totalDevelopers",
       "totalProjects",
-      "milestoneCards",
-      "milestoneSections",
       "recentCases",
       "commsThisMonth",
       "completionSlaOverdue",
@@ -114,22 +111,6 @@ export default function AppDashboard() {
     if (value === null || value === undefined) return "0";
     return String(value);
   };
-
-  type MilestoneCard = {
-    key: string;
-    label: string;
-    count: number;
-    pendingCount?: number;
-    doneCount?: number;
-    filter: { milestone?: string; milestonePresence?: string; purchaseMode?: string; titleType?: string };
-  };
-  const milestoneCards: MilestoneCard[] = Array.isArray((resolvedStats as Record<string, any>).milestoneCards)
-    ? ((resolvedStats as Record<string, any>).milestoneCards as MilestoneCard[])
-    : [];
-  type MilestoneSection = { key: string; label: string; total: number; cards: MilestoneCard[] };
-  const milestoneSections: MilestoneSection[] = Array.isArray((resolvedStats as Record<string, any>).milestoneSections)
-    ? ((resolvedStats as Record<string, any>).milestoneSections as MilestoneSection[])
-    : [];
 
   return (
     <div className="space-y-6">
@@ -212,12 +193,6 @@ export default function AppDashboard() {
           </Card>
         ))}
       </div>
-
-      <MilestonesTable
-        milestoneSections={milestoneSections}
-        milestoneCards={milestoneCards}
-        onNavigate={(href) => setLocation(href)}
-      />
 
       <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
         <Card className="cursor-pointer hover:shadow-md transition-shadow" onClick={() => setLocation("/app/communications")}>

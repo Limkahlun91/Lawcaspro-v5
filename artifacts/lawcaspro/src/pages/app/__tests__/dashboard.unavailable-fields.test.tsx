@@ -37,10 +37,6 @@ vi.mock("@/lib/permissions", () => ({
   isAccountingRoleAllowed: () => false,
 }));
 
-vi.mock("@/components/milestones-table", () => ({
-  MilestonesTable: () => <div data-testid="milestones-table" />,
-}));
-
 import AppDashboard from "../dashboard";
 
 describe("dashboard unavailableFields UI", () => {
