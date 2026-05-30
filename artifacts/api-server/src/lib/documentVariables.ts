@@ -1,4 +1,5 @@
 import { sql } from "@workspace/db";
+import { extractDbErrorInfo } from "./db-error";
 
 type DbConn = { execute: (q: any) => any };
 
@@ -75,16 +76,6 @@ async function queryRows(r: DbConn, query: ReturnType<typeof sql>): Promise<Reco
   return [];
 }
 
-function getPgCode(err: unknown): string | null {
-  const code = err && typeof err === "object" ? (err as { code?: unknown }).code : undefined;
-  return typeof code === "string" && code ? code : null;
-}
-
-function isMissingRelationOrColumnError(err: unknown): boolean {
-  const code = getPgCode(err);
-  return code === "42P01" || code === "42703";
-}
-
 export async function listDocumentVariables(r: DbConn, filters: { category?: string; active?: boolean } = {}): Promise<VariableDefinition[]> {
   const where: any[] = [sql`1=1`];
   if (filters.category) where.push(sql`category = ${filters.category}`);
@@ -104,8 +95,9 @@ export async function listDocumentVariables(r: DbConn, filters: { category?: str
         `
       );
     } catch (err) {
-      if (isMissingRelationOrColumnError(err)) return [];
-      throw err;
+      const info = extractDbErrorInfo(err);
+      if (info.sqlstate) return [];
+      return [];
     }
   })();
   return rows.map((x) => ({
@@ -148,8 +140,9 @@ export async function listDocumentVariablesByKeys(
         `
       );
     } catch (err) {
-      if (isMissingRelationOrColumnError(err)) return [];
-      throw err;
+      const info = extractDbErrorInfo(err);
+      if (info.sqlstate) return [];
+      return [];
     }
   })();
   return rows.map((x) => ({

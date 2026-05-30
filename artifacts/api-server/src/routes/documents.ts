@@ -39,6 +39,7 @@ import { aggregateGenerationJobFailureSummary, isHeartbeatStale } from "../servi
 import { normalizeMissingRequiredVariables } from "../services/document-variable.service.js";
 import { formatMalaysiaAddressStringForDocument } from "../utils/my-address-helper.js";
 import { applyCaseVariableAliases, selectPurchaserSource } from "../lib/caseVariableResolver.js";
+import { extractDbErrorInfo, type DbErrorInfo } from "../lib/db-error.js";
 
 type RouterInternalLike = {
   get: (path: string, ...handlers: unknown[]) => unknown;
@@ -9508,10 +9509,20 @@ router.post("/documents/automation/generate-now", requireAuth, requireFirmUser, 
   const manifest: Array<{
     caseId: number;
     caseRef: string;
-    template: { source: "firm" | "master"; id: number };
+    template: { source: "firm" | "master"; id: number; name: string | null };
     ok: boolean;
     zipPath: string;
-    error?: { code: string; message: string };
+    error?: {
+      code: string;
+      message: string;
+      sqlstate?: string | null;
+      table?: string | null;
+      column?: string | null;
+      constraint?: string | null;
+      detail?: string | null;
+      hint?: string | null;
+      queryLabel?: string | null;
+    };
   }> = [];
 
   const readTemplateBytes = async (objectPath: string): Promise<Buffer> => {
@@ -9537,6 +9548,53 @@ router.post("/documents/automation/generate-now", requireAuth, requireFirmUser, 
     }
     const bytes = await pdfDoc.save();
     return Buffer.from(bytes);
+  };
+
+  const inferQueryLabel = (msg: string | null): string | null => {
+    const m = String(msg ?? "");
+    if (!m) return null;
+    if (m.includes("document_variable_definitions")) return "VARIABLE_REGISTRY_QUERY";
+    if (m.includes("document_templates")) return "TEMPLATE_METADATA_QUERY";
+    if (m.includes("platform_documents")) return "TEMPLATE_METADATA_QUERY";
+    if (m.includes("FROM cases")) return "CASE_CONTEXT_QUERY";
+    return null;
+  };
+
+  const pickDbInfo = (err: unknown): DbErrorInfo => {
+    if (err instanceof DocumentGenerationError && err.payload && typeof err.payload === "object") {
+      const p = err.payload as any;
+      return {
+        sqlstate: typeof p.sqlstate === "string" ? p.sqlstate : null,
+        table: typeof p.table === "string" ? p.table : null,
+        column: typeof p.column === "string" ? p.column : null,
+        constraint: typeof p.constraint === "string" ? p.constraint : null,
+        detail: typeof p.detail === "string" ? p.detail : null,
+        hint: typeof p.hint === "string" ? p.hint : null,
+        message: typeof p.message === "string" ? p.message : (err.message ?? null),
+      };
+    }
+    return extractDbErrorInfo(err);
+  };
+
+  const pickQueryLabel = (err: unknown): string | null => {
+    if (err instanceof DocumentGenerationError && err.payload && typeof err.payload === "object") {
+      const q = (err.payload as any).queryLabel;
+      if (typeof q === "string" && q) return q;
+    }
+    const info = extractDbErrorInfo(err);
+    return inferQueryLabel(info.message);
+  };
+
+  const formatDbInfoLines = (info: DbErrorInfo, queryLabel: string | null): string[] => {
+    const out: string[] = [];
+    if (queryLabel) out.push(`Query: ${queryLabel}`);
+    if (info.sqlstate) out.push(`SQLSTATE: ${info.sqlstate}`);
+    if (info.table) out.push(`Table: ${info.table}`);
+    if (info.column) out.push(`Column: ${info.column}`);
+    if (info.constraint) out.push(`Constraint: ${info.constraint}`);
+    if (info.detail) out.push(`Detail: ${String(info.detail).slice(0, 160)}`);
+    if (info.hint) out.push(`Hint: ${String(info.hint).slice(0, 160)}`);
+    return out;
   };
 
   const classifyTemplateKind = (fileName: string, mimeType: string | null): "pdf" | "docx" | "doc" | "unknown" => {
@@ -9604,39 +9662,92 @@ router.post("/documents/automation/generate-now", requireAuth, requireFirmUser, 
         try {
           const tpl = templateObjectCache.get(cacheKey) ?? await (async () => {
             if (t.source === "firm") {
-              const rows = await queryRows(r, sql`
-                SELECT id, name, object_path, file_name, mime_type, is_template_capable, pdf_mapping_config
-                FROM document_templates
-                WHERE firm_id = ${req.firmId!} AND id = ${t.id}
-                LIMIT 1
-              `);
+                const rows = await (async () => {
+                  try {
+                    return await queryRows(r, sql`
+                      SELECT
+                        dt.id,
+                        to_jsonb(dt)->'name' as name,
+                        coalesce(to_jsonb(dt)->'object_path', to_jsonb(dt)->'objectPath', to_jsonb(dt)->'storage_path', to_jsonb(dt)->'storagePath') as object_path,
+                        coalesce(to_jsonb(dt)->'file_name', to_jsonb(dt)->'fileName') as file_name,
+                        coalesce(to_jsonb(dt)->'mime_type', to_jsonb(dt)->'mimeType') as mime_type,
+                        coalesce(to_jsonb(dt)->'is_template_capable', to_jsonb(dt)->'isTemplateCapable', 'true'::jsonb) as is_template_capable,
+                        coalesce(
+                          to_jsonb(dt)->'pdf_mapping_config',
+                          to_jsonb(dt)->'pdf_mappings',
+                          to_jsonb(dt)->'pdf_mapping',
+                          to_jsonb(dt)->'mapping',
+                          to_jsonb(dt)->'pdf_form_fields'
+                        ) as mapping_config
+                      FROM document_templates dt
+                      WHERE dt.firm_id = ${req.firmId!} AND dt.id = ${t.id}
+                      LIMIT 1
+                    `);
+                  } catch (err) {
+                    const info = extractDbErrorInfo(err);
+                    throw new DocumentGenerationError(
+                      422,
+                      "TEMPLATE_METADATA_QUERY_FAILED",
+                      "Template metadata query failed",
+                      { queryLabel: "TEMPLATE_METADATA_QUERY", ...info, template: cacheKey },
+                    );
+                  }
+                })();
               const row = rows[0] as any;
               if (!row) return null;
               if (row.is_template_capable === false) return null;
-              const objectPath = typeof row.object_path === "string" ? decodeStoragePath(String(row.object_path)) : "";
-              const fileName = typeof row.file_name === "string" ? String(row.file_name) : "";
-              const mimeType = typeof row.mime_type === "string" ? String(row.mime_type) : null;
-              const name = typeof row.name === "string" ? String(row.name) : `template-${t.id}`;
-              if (!objectPath) return null;
-              const out = { name, fileName, mimeType, objectPath, mappingConfig: row.pdf_mapping_config ?? null };
+                const objectPathRaw = typeof row.object_path === "string" ? String(row.object_path) : "";
+                const objectPath = objectPathRaw ? decodeStoragePath(objectPathRaw) : "";
+                const fileName = typeof row.file_name === "string" ? String(row.file_name) : "";
+                const mimeType = typeof row.mime_type === "string" ? String(row.mime_type) : null;
+                const name = typeof row.name === "string" ? String(row.name) : `template-${t.id}`;
+                if (!objectPath) throw new DocumentGenerationError(422, "TEMPLATE_MISSING_OBJECT_PATH", "Template object_path is missing", { queryLabel: "TEMPLATE_METADATA_QUERY", template: cacheKey });
+                if (!fileName) throw new DocumentGenerationError(422, "TEMPLATE_MISSING_FILE_NAME", "Template file_name is missing", { queryLabel: "TEMPLATE_METADATA_QUERY", template: cacheKey });
+                const out = { name, fileName, mimeType, objectPath, mappingConfig: row.mapping_config ?? null };
               templateObjectCache.set(cacheKey, out);
               return out;
             }
-            const rows = await queryRows(r, sql`
-              SELECT id, name, object_path, file_name, mime_type, pdf_mappings
-              FROM platform_documents
-              WHERE id = ${t.id}
-                AND (firm_id IS NULL OR firm_id = ${req.firmId!})
-              LIMIT 1
-            `);
+              const rows = await (async () => {
+                try {
+                  return await queryRows(r, sql`
+                    SELECT
+                      pd.id,
+                      to_jsonb(pd)->'name' as name,
+                      coalesce(to_jsonb(pd)->'object_path', to_jsonb(pd)->'objectPath', to_jsonb(pd)->'storage_path', to_jsonb(pd)->'storagePath') as object_path,
+                      coalesce(to_jsonb(pd)->'file_name', to_jsonb(pd)->'fileName') as file_name,
+                      coalesce(to_jsonb(pd)->'mime_type', to_jsonb(pd)->'mimeType') as mime_type,
+                      coalesce(
+                        to_jsonb(pd)->'pdf_mappings',
+                        to_jsonb(pd)->'pdf_mapping_config',
+                        to_jsonb(pd)->'pdf_mapping',
+                        to_jsonb(pd)->'mapping',
+                        to_jsonb(pd)->'pdf_form_fields'
+                      ) as mapping_config
+                    FROM platform_documents pd
+                    WHERE pd.id = ${t.id}
+                      AND (pd.firm_id IS NULL OR pd.firm_id = ${req.firmId!})
+                    LIMIT 1
+                  `);
+                } catch (err) {
+                  const info = extractDbErrorInfo(err);
+                  throw new DocumentGenerationError(
+                    422,
+                    "TEMPLATE_METADATA_QUERY_FAILED",
+                    "Template metadata query failed",
+                    { queryLabel: "TEMPLATE_METADATA_QUERY", ...info, template: cacheKey },
+                  );
+                }
+              })();
             const row = rows[0] as any;
             if (!row) return null;
-            const objectPath = typeof row.object_path === "string" ? decodeStoragePath(String(row.object_path)) : "";
-            const fileName = typeof row.file_name === "string" ? String(row.file_name) : "";
-            const mimeType = typeof row.mime_type === "string" ? String(row.mime_type) : null;
+              const objectPathRaw = typeof row.object_path === "string" ? String(row.object_path) : "";
+              const objectPath = objectPathRaw ? decodeStoragePath(objectPathRaw) : "";
+              const fileName = typeof row.file_name === "string" ? String(row.file_name) : "";
+              const mimeType = typeof row.mime_type === "string" ? String(row.mime_type) : null;
             const name = typeof row.name === "string" ? String(row.name) : `master-${t.id}`;
-            if (!objectPath) return null;
-            const out = { name, fileName, mimeType, objectPath, mappingConfig: row.pdf_mappings ?? null };
+              if (!objectPath) throw new DocumentGenerationError(422, "TEMPLATE_MISSING_OBJECT_PATH", "Template object_path is missing", { queryLabel: "TEMPLATE_METADATA_QUERY", template: cacheKey });
+              if (!fileName) throw new DocumentGenerationError(422, "TEMPLATE_MISSING_FILE_NAME", "Template file_name is missing", { queryLabel: "TEMPLATE_METADATA_QUERY", template: cacheKey });
+              const out = { name, fileName, mimeType, objectPath, mappingConfig: row.mapping_config ?? null };
             templateObjectCache.set(cacheKey, out);
             return out;
           })();
@@ -9659,7 +9770,7 @@ router.post("/documents/automation/generate-now", requireAuth, requireFirmUser, 
             manifest.push({
               caseId,
               caseRef: caseRefRaw,
-              template: { source: t.source, id: t.id },
+              template: { source: t.source, id: t.id, name: null },
               ok: false,
               zipPath: zipPathErr,
               error: { code: "TEMPLATE_NOT_FOUND", message: "Template not found or not template-capable" },
@@ -9696,11 +9807,13 @@ router.post("/documents/automation/generate-now", requireAuth, requireFirmUser, 
                         ]);
               addZipBuffer(zipPathOk, rendered);
               generatedCount += 1;
-              manifest.push({ caseId, caseRef: caseRefRaw, template: { source: t.source, id: t.id }, ok: true, zipPath: zipPathOk });
+              manifest.push({ caseId, caseRef: caseRefRaw, template: { source: t.source, id: t.id, name: tpl.name }, ok: true, zipPath: zipPathOk });
               if (preview.usedMode === "bindings" && preview.missingRequiredVariables.length > 0) {
                 errors.push(`${caseRef}: template=${cacheKey} MISSING_REQUIRED_VARIABLES ${preview.missingRequiredVariables.map((x) => x.variableKey).join(",")}`);
               }
             } catch (err) {
+              const info = pickDbInfo(err);
+              const queryLabel = pickQueryLabel(err);
               const e =
                 err instanceof DocumentGenerationError
                   ? err
@@ -9711,6 +9824,7 @@ router.post("/documents/automation/generate-now", requireAuth, requireFirmUser, 
                 `Case: ${caseRefRaw}`,
                 `Error: ${e.code}`,
                 String(e.message ?? "").slice(0, 200),
+                ...formatDbInfoLines(info, queryLabel),
               ]);
               addZipBuffer(zipPathErr, warningPdf);
               generatedCount += 1;
@@ -9718,10 +9832,20 @@ router.post("/documents/automation/generate-now", requireAuth, requireFirmUser, 
               manifest.push({
                 caseId,
                 caseRef: caseRefRaw,
-                template: { source: t.source, id: t.id },
+                template: { source: t.source, id: t.id, name: tpl.name },
                 ok: false,
                 zipPath: zipPathErr,
-                error: { code: e.code, message: String(e.message ?? "").slice(0, 400) },
+                error: {
+                  code: e.code,
+                  message: String(e.message ?? "").slice(0, 400),
+                  sqlstate: info.sqlstate,
+                  table: info.table,
+                  column: info.column,
+                  constraint: info.constraint,
+                  detail: info.detail,
+                  hint: info.hint,
+                  queryLabel,
+                },
               });
             }
             continue;
@@ -9755,20 +9879,22 @@ router.post("/documents/automation/generate-now", requireAuth, requireFirmUser, 
               if (conv.fallbackUsed) errors.push(`${caseRef}: template=${cacheKey} DOCX_TO_PDF_FALLBACK_USED`);
               addZipBuffer(zipPathOk, conv.pdfBytes);
               generatedCount += 1;
-              manifest.push({ caseId, caseRef: caseRefRaw, template: { source: t.source, id: t.id }, ok: true, zipPath: zipPathOk });
+              manifest.push({ caseId, caseRef: caseRefRaw, template: { source: t.source, id: t.id, name: tpl.name }, ok: true, zipPath: zipPathOk });
               if (preview.usedMode === "bindings" && preview.missingRequiredVariables.length > 0) {
                 errors.push(`${caseRef}: template=${cacheKey} MISSING_REQUIRED_VARIABLES ${preview.missingRequiredVariables.map((x) => x.variableKey).join(",")}`);
               }
             } catch (err) {
+              const info = pickDbInfo(err);
+              const queryLabel = pickQueryLabel(err);
               const msg = err instanceof Error ? err.message : String(err ?? "");
-              const code = err && typeof err === "object" ? (err as any).code : undefined;
-              const eCode = typeof code === "string" ? `DOCX_RENDER_FAILED_SQLSTATE_${code}` : "DOCX_RENDER_FAILED";
+              const eCode = info.sqlstate ? `DOCX_RENDER_FAILED_SQLSTATE_${info.sqlstate}` : "DOCX_RENDER_FAILED";
               const warningPdf = await renderWarningPdfPage([
                 "Generation failed for this DOCX template.",
                 `Template: ${tpl.name}`,
                 `Case: ${caseRefRaw}`,
                 `Error: ${eCode}`,
                 msg.slice(0, 200),
+                ...formatDbInfoLines(info, queryLabel),
               ]);
               addZipBuffer(zipPathErr, warningPdf);
               generatedCount += 1;
@@ -9776,10 +9902,20 @@ router.post("/documents/automation/generate-now", requireAuth, requireFirmUser, 
               manifest.push({
                 caseId,
                 caseRef: caseRefRaw,
-                template: { source: t.source, id: t.id },
+                template: { source: t.source, id: t.id, name: tpl.name },
                 ok: false,
                 zipPath: zipPathErr,
-                error: { code: eCode, message: msg.slice(0, 400) || "RENDER_FAILED" },
+                error: {
+                  code: eCode,
+                  message: msg.slice(0, 400) || "RENDER_FAILED",
+                  sqlstate: info.sqlstate,
+                  table: info.table,
+                  column: info.column,
+                  constraint: info.constraint,
+                  detail: info.detail,
+                  hint: info.hint,
+                  queryLabel,
+                },
               });
             }
             continue;
@@ -9797,7 +9933,7 @@ router.post("/documents/automation/generate-now", requireAuth, requireFirmUser, 
             manifest.push({
               caseId,
               caseRef: caseRefRaw,
-              template: { source: t.source, id: t.id },
+              template: { source: t.source, id: t.id, name: tpl.name },
               ok: false,
               zipPath: zipPathErr,
               error: { code: "DOC_CONVERSION_UNSUPPORTED", message: "This .doc template requires conversion support" },
@@ -9818,18 +9954,23 @@ router.post("/documents/automation/generate-now", requireAuth, requireFirmUser, 
           manifest.push({
             caseId,
             caseRef: caseRefRaw,
-            template: { source: t.source, id: t.id },
+            template: { source: t.source, id: t.id, name: tpl.name },
             ok: false,
             zipPath: zipPathErr,
             error: { code: "UNSUPPORTED_TEMPLATE_TYPE", message: ext },
           });
         } catch (err) {
+          const info = pickDbInfo(err);
+          const queryLabel = pickQueryLabel(err);
           const msg = err instanceof Error ? err.message : String(err ?? "");
+          const eCode = err instanceof DocumentGenerationError ? err.code : "RENDER_FAILED";
           const warningPdf = await renderWarningPdfPage([
             "Generation failed for this template.",
             `Template: ${cacheKey}`,
             `Case: ${caseRefRaw}`,
+            `Error: ${eCode}`,
             msg.slice(0, 200) || "RENDER_FAILED",
+            ...formatDbInfoLines(info, queryLabel),
           ]);
           const tplNameRaw = safeFilenameAscii(cacheKey) || `template-${t.id}`;
           const tplName = tplNameRaw.replace(/\s+/g, "_");
@@ -9841,10 +9982,20 @@ router.post("/documents/automation/generate-now", requireAuth, requireFirmUser, 
           manifest.push({
             caseId,
             caseRef: caseRefRaw,
-            template: { source: t.source, id: t.id },
+            template: { source: t.source, id: t.id, name: null },
             ok: false,
             zipPath: zipPathErr,
-            error: { code: "RENDER_FAILED", message: msg.slice(0, 400) || "RENDER_FAILED" },
+            error: {
+              code: eCode,
+              message: msg.slice(0, 400) || "RENDER_FAILED",
+              sqlstate: info.sqlstate,
+              table: info.table,
+              column: info.column,
+              constraint: info.constraint,
+              detail: info.detail,
+              hint: info.hint,
+              queryLabel,
+            },
           });
         }
       }
