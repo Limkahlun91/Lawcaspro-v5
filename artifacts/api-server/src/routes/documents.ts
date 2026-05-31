@@ -10010,8 +10010,7 @@ router.post("/documents/automation/generate-now", requireAuth, requireFirmUser, 
                 errors.push(`${caseRef}: template=${cacheKey} MISSING_REQUIRED_VARIABLES ${preview.missingRequiredVariables.map((x) => x.variableKey).join(",")}`);
               }
             }
-          }
-          else if (kind === "docx") {
+            else if (kind === "docx") {
               const templateBytes = await readTemplateBytes(tpl.objectPath);
               const placeholders = detectDocxVariables(templateBytes);
               const preview = await previewAndResolve(rCase, {
@@ -10056,8 +10055,7 @@ router.post("/documents/automation/generate-now", requireAuth, requireFirmUser, 
                 errors.push(`${caseRef}: template=${cacheKey} MISSING_REQUIRED_VARIABLES ${preview.missingRequiredVariables.map((x) => x.variableKey).join(",")}`);
               }
             }
-          }
-          else if (kind === "doc") {
+            else if (kind === "doc") {
             const warningPdf = await renderWarningPdfPage([
               "This .doc template requires conversion support.",
               "Please upload a .docx version for full variable merge.",
@@ -10076,8 +10074,7 @@ router.post("/documents/automation/generate-now", requireAuth, requireFirmUser, 
                 error: { code: "DOC_CONVERSION_UNSUPPORTED", message: "This .doc template requires conversion support" },
               });
             }
-          }
-          else {
+            else {
             const ext = fileExtensionFromName(tpl.fileName).toLowerCase() || "unknown";
             const warningPdf = await renderWarningPdfPage([
               "Unsupported template type.",
@@ -10098,6 +10095,7 @@ router.post("/documents/automation/generate-now", requireAuth, requireFirmUser, 
                 error: { code: "UNSUPPORTED_TEMPLATE_TYPE", message: ext },
               });
             }
+          }
           }
         } catch (err) {
           try {
