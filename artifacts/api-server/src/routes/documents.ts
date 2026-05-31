@@ -1332,6 +1332,7 @@ async function buildCaseContext(
   const today = new Date();
   const dateStr = today.toLocaleDateString("en-MY", { day: "2-digit", month: "long", year: "numeric" });
   const dateShort = today.toLocaleDateString("en-MY", { day: "2-digit", month: "2-digit", year: "numeric" });
+  const dateIso = today.toISOString().slice(0, 10);
 
   const propertyAddressFromCase = (() => {
     const v = (prop as any)?.propertyAddress ?? (prop as any)?.property_address ?? (prop as any)?.address;
@@ -1661,6 +1662,14 @@ async function buildCaseContext(
     reference_no: (c as any).reference_no ?? "",
     date: dateStr,
     date_short: dateShort,
+    document_date: dateStr,
+    today_date: dateStr,
+    generated_date: dateStr,
+    letter_date: dateStr,
+    document_date_raw: dateIso,
+    today_date_raw: dateIso,
+    generated_date_raw: dateIso,
+    letter_date_raw: dateIso,
     case_type: (c as any).case_type ?? "",
     parcel_no: (c as any).parcel_no ?? "",
     spa_price: fmtRM((c as any).spa_price),
@@ -9512,6 +9521,7 @@ router.post("/documents/automation/generate-now", requireAuth, requireFirmUser, 
     template: { source: "firm" | "master"; id: number; name: string | null };
     ok: boolean;
     zipPath: string;
+    missingPlaceholders?: string[];
     error?: {
       code: string;
       message: string;
@@ -9611,7 +9621,7 @@ router.post("/documents/automation/generate-now", requireAuth, requireFirmUser, 
     caseContext: Record<string, unknown>;
     templateRef: { kind: "firm"; templateId: number } | { kind: "platform"; documentId: number };
     placeholders: string[];
-  }): Promise<{ input: Record<string, unknown>; usedMode: "bindings" | "legacy"; missingRequiredVariables: Array<{ variableKey: string; reason: string }> }> => {
+  }): Promise<{ input: Record<string, unknown>; usedMode: "bindings" | "legacy"; missingRequiredVariables: Array<{ variableKey: string; reason: string }>; missingPlaceholders: string[] }> => {
     const preview = await runDocumentPreview(r, {
       firmId: args.firmId,
       caseContext: args.caseContext,
@@ -9620,7 +9630,13 @@ router.post("/documents/automation/generate-now", requireAuth, requireFirmUser, 
     });
     const base = preview.usedMode === "bindings" ? preview.resolvedVariables : (args.caseContext as any);
     const input = fillMissingScalarsForRender(args.placeholders, base, { missingMode: "placeholder" });
-    return { input, usedMode: preview.usedMode, missingRequiredVariables: preview.missingRequiredVariables };
+    const missingPlaceholders = args.placeholders
+      .filter((k) => {
+        const v = (input as any)[k];
+        return typeof v === "string" && v.startsWith("[MISSING:");
+      })
+      .slice(0, 50);
+    return { input, usedMode: preview.usedMode, missingRequiredVariables: preview.missingRequiredVariables, missingPlaceholders };
   };
 
   try {
@@ -9807,7 +9823,17 @@ router.post("/documents/automation/generate-now", requireAuth, requireFirmUser, 
                         ]);
               addZipBuffer(zipPathOk, rendered);
               generatedCount += 1;
-              manifest.push({ caseId, caseRef: caseRefRaw, template: { source: t.source, id: t.id, name: tpl.name }, ok: true, zipPath: zipPathOk });
+              if (preview.missingPlaceholders.length > 0) {
+                errors.push(`${caseRef}: template=${cacheKey} MISSING_PLACEHOLDERS ${preview.missingPlaceholders.join(",")}`);
+              }
+              manifest.push({
+                caseId,
+                caseRef: caseRefRaw,
+                template: { source: t.source, id: t.id, name: tpl.name },
+                ok: true,
+                zipPath: zipPathOk,
+                missingPlaceholders: preview.missingPlaceholders,
+              });
               if (preview.usedMode === "bindings" && preview.missingRequiredVariables.length > 0) {
                 errors.push(`${caseRef}: template=${cacheKey} MISSING_REQUIRED_VARIABLES ${preview.missingRequiredVariables.map((x) => x.variableKey).join(",")}`);
               }
@@ -9879,7 +9905,17 @@ router.post("/documents/automation/generate-now", requireAuth, requireFirmUser, 
               if (conv.fallbackUsed) errors.push(`${caseRef}: template=${cacheKey} DOCX_TO_PDF_FALLBACK_USED`);
               addZipBuffer(zipPathOk, conv.pdfBytes);
               generatedCount += 1;
-              manifest.push({ caseId, caseRef: caseRefRaw, template: { source: t.source, id: t.id, name: tpl.name }, ok: true, zipPath: zipPathOk });
+              if (preview.missingPlaceholders.length > 0) {
+                errors.push(`${caseRef}: template=${cacheKey} MISSING_PLACEHOLDERS ${preview.missingPlaceholders.join(",")}`);
+              }
+              manifest.push({
+                caseId,
+                caseRef: caseRefRaw,
+                template: { source: t.source, id: t.id, name: tpl.name },
+                ok: true,
+                zipPath: zipPathOk,
+                missingPlaceholders: preview.missingPlaceholders,
+              });
               if (preview.usedMode === "bindings" && preview.missingRequiredVariables.length > 0) {
                 errors.push(`${caseRef}: template=${cacheKey} MISSING_REQUIRED_VARIABLES ${preview.missingRequiredVariables.map((x) => x.variableKey).join(",")}`);
               }

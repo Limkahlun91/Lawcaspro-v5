@@ -114,5 +114,25 @@ export function applyCaseVariableAliases(context: Record<string, unknown>): Reco
   setAlias(out, "loan_bank", out.end_financier);
   setAlias(out, "loan_amount", out.financing_sum);
 
+  const p1 = typeof (out as any).purchaser_1_name === "string" ? String((out as any).purchaser_1_name) : "";
+  const p2 = typeof (out as any).purchaser_2_name === "string" ? String((out as any).purchaser_2_name) : "";
+  const p3 = typeof (out as any).purchaser_3_name === "string" ? String((out as any).purchaser_3_name) : "";
+
+  setAlias(out, "purchaser1_name", p1);
+  setAlias(out, "purchaser2_name", p2);
+  setAlias(out, "purchaser3_name", p3);
+  setAlias(out, "buyer1_name", p1);
+  setAlias(out, "buyer2_name", p2);
+  setAlias(out, "buyer3_name", p3);
+
+  const purchaserNamesJoined =
+    typeof (out as any).purchaser_names === "string" ? String((out as any).purchaser_names)
+      : typeof (out as any).purchasers_names === "string" ? String((out as any).purchasers_names)
+        : "";
+  setAlias(out, "purchaser_names", purchaserNamesJoined);
+  setAlias(out, "purchasers_names", purchaserNamesJoined);
+  setAlias(out, "buyer_names", purchaserNamesJoined);
+  setAlias(out, "client_names", purchaserNamesJoined);
+
   return out;
 }
