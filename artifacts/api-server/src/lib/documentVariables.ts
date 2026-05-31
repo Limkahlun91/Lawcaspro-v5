@@ -76,13 +76,35 @@ async function queryRows(r: DbConn, query: ReturnType<typeof sql>): Promise<Reco
   return [];
 }
 
+async function queryRowsWithSavepoint(r: DbConn, query: ReturnType<typeof sql>): Promise<Record<string, unknown>[]> {
+  const sp = `sp_vars_${Math.random().toString(16).slice(2, 10)}`;
+  try {
+    await r.execute(sql.raw(`SAVEPOINT ${sp}`));
+  } catch {}
+  try {
+    const rows = await queryRows(r, query);
+    try {
+      await r.execute(sql.raw(`RELEASE SAVEPOINT ${sp}`));
+    } catch {}
+    return rows;
+  } catch (err) {
+    try {
+      await r.execute(sql.raw(`ROLLBACK TO SAVEPOINT ${sp}`));
+    } catch {}
+    try {
+      await r.execute(sql.raw(`RELEASE SAVEPOINT ${sp}`));
+    } catch {}
+    throw err;
+  }
+}
+
 export async function listDocumentVariables(r: DbConn, filters: { category?: string; active?: boolean } = {}): Promise<VariableDefinition[]> {
   const where: any[] = [sql`1=1`];
   if (filters.category) where.push(sql`category = ${filters.category}`);
   if (typeof filters.active === "boolean") where.push(sql`is_active = ${filters.active}`);
   const rows = await (async () => {
     try {
-      return await queryRows(
+      return await queryRowsWithSavepoint(
         r,
         sql`
           SELECT
@@ -127,7 +149,7 @@ export async function listDocumentVariablesByKeys(
   if (typeof filters.active === "boolean") where.push(sql`is_active = ${filters.active}`);
   const rows = await (async () => {
     try {
-      return await queryRows(
+      return await queryRowsWithSavepoint(
         r,
         sql`
           SELECT
