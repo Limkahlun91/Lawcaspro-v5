@@ -10274,6 +10274,7 @@ function isPdfTextBoxMappings(v: unknown): v is {
       width: number;
       height: number;
       fontSize: number;
+      lineHeight?: number;
       content: string;
       alignment?: "left" | "center" | "right";
       fontFamily?: "Helvetica" | "Times-Roman" | "Courier";
@@ -10353,7 +10354,11 @@ async function renderPdfTextBoxMappedTemplate(args: {
         const fontSize = tb.fontSize || 10;
         const pdfY = pageHeight - tb.y - fontSize;
         const pdfYBottom = pageHeight - tb.y - tb.height;
-        const lineHeight = Math.ceil(fontSize * 1.2);
+        const lineHeightMultiplier =
+          typeof tb.lineHeight === "number" && Number.isFinite(tb.lineHeight)
+            ? Math.min(3.0, Math.max(0.8, tb.lineHeight))
+            : 1.2;
+        const lineHeight = fontSize * lineHeightMultiplier;
         const lines = wrapPdfTextPreservingNewlines(
           text,
           font,

@@ -5,15 +5,34 @@ import "react-pdf/dist/Page/TextLayer.css";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
-import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
-import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList } from "@/components/ui/command";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import {
-  Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogFooter,
 } from "@/components/ui/dialog";
 import {
-  ChevronLeft, ChevronRight, Plus, Trash2, Save, X, GripVertical,
-  Type, BookOpen, Check, Minus, ChevronsUpDown, AlignLeft, AlignCenter, AlignRight,
+  ChevronLeft,
+  ChevronRight,
+  Plus,
+  Trash2,
+  Save,
+  X,
+  Type,
+  BookOpen,
+  Minus,
+  AlignLeft,
+  AlignCenter,
+  AlignRight,
+  Copy,
 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import { cn } from "@/lib/utils";
@@ -32,6 +51,7 @@ interface TextBox {
   width: number;
   height: number;
   fontSize: number;
+  lineHeight?: number;
   alignment: TextAlignment;
   fontFamily: PdfFontFamily;
   content: string;
@@ -81,7 +101,13 @@ type VariableDefinition = {
 
 type VarGroup = {
   group: string;
-  vars: { key: string; label: string; type?: string }[];
+  vars: {
+    key: string;
+    label: string;
+    type?: string;
+    category?: string;
+    exampleValue?: string | null;
+  }[];
 };
 
 interface Props {
@@ -117,16 +143,33 @@ export default function PdfMappingEditor({
   const [loading, setLoading] = useState(true);
   const [showVarPanel, setShowVarPanel] = useState(false);
   const [varGroups, setVarGroups] = useState<VarGroup[]>([]);
-  const [varPickerOpen, setVarPickerOpen] = useState(false);
+  const [varSearch, setVarSearch] = useState("");
   const [pdfScale, setPdfScale] = useState(1);
   const [pdfDimensions, setPdfDimensions] = useState({ width: 0, height: 0 });
-  const [pageView, setPageView] = useState<Record<number, { width: number; height: number }>>({});
-  const [legacyEntries, setLegacyEntries] = useState<LegacyPdfMappingEntry[] | null>(null);
+  const [pageView, setPageView] = useState<
+    Record<number, { width: number; height: number }>
+  >({});
+  const [legacyEntries, setLegacyEntries] = useState<
+    LegacyPdfMappingEntry[] | null
+  >(null);
 
-  const [dragging, setDragging] = useState<{ boxId: string; startX: number; startY: number; origX: number; origY: number } | null>(null);
-  const [resizing, setResizing] = useState<{ boxId: string; startX: number; startY: number; origW: number; origH: number } | null>(null);
+  const [dragging, setDragging] = useState<{
+    boxId: string;
+    startX: number;
+    startY: number;
+    origX: number;
+    origY: number;
+  } | null>(null);
+  const [resizing, setResizing] = useState<{
+    boxId: string;
+    startX: number;
+    startY: number;
+    origW: number;
+    origH: number;
+  } | null>(null);
 
-  const isRecord = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
+  const isRecord = (v: unknown): v is Record<string, unknown> =>
+    !!v && typeof v === "object" && !Array.isArray(v);
 
   const isPdfMappings = (v: unknown): v is PdfMappings => {
     if (!isRecord(v)) return false;
@@ -134,7 +177,8 @@ export default function PdfMappingEditor({
     if (!Array.isArray(pages)) return false;
     const first = pages[0] as any;
     if (!first) return true;
-    if (!first || typeof first !== "object" || Array.isArray(first)) return false;
+    if (!first || typeof first !== "object" || Array.isArray(first))
+      return false;
     if (typeof first.pageIndex !== "number") return false;
     if (!Array.isArray(first.textBoxes)) return false;
     return true;
@@ -144,11 +188,23 @@ export default function PdfMappingEditor({
     const out: LegacyPdfMappingEntry[] = [];
     const pushOne = (key: unknown, coord: any) => {
       if (typeof key !== "string" || !key.trim()) return;
-      const page = typeof coord?.page === "number" && Number.isFinite(coord.page) ? Math.max(1, Math.floor(coord.page)) : 1;
-      const x = typeof coord?.x === "number" && Number.isFinite(coord.x) ? coord.x : NaN;
-      const y = typeof coord?.y === "number" && Number.isFinite(coord.y) ? coord.y : NaN;
+      const page =
+        typeof coord?.page === "number" && Number.isFinite(coord.page)
+          ? Math.max(1, Math.floor(coord.page))
+          : 1;
+      const x =
+        typeof coord?.x === "number" && Number.isFinite(coord.x)
+          ? coord.x
+          : NaN;
+      const y =
+        typeof coord?.y === "number" && Number.isFinite(coord.y)
+          ? coord.y
+          : NaN;
       if (!Number.isFinite(x) || !Number.isFinite(y)) return;
-      const size = typeof coord?.size === "number" && Number.isFinite(coord.size) ? Math.max(1, coord.size) : 12;
+      const size =
+        typeof coord?.size === "number" && Number.isFinite(coord.size)
+          ? Math.max(1, coord.size)
+          : 12;
       const value =
         typeof coord?.value === "string"
           ? coord.value
@@ -157,34 +213,68 @@ export default function PdfMappingEditor({
             : typeof coord?.expression === "string"
               ? coord.expression
               : undefined;
-      const maxWidth = typeof coord?.maxWidth === "number" && Number.isFinite(coord.maxWidth) ? Math.max(1, coord.maxWidth) : undefined;
-      const lineHeight = typeof coord?.lineHeight === "number" && Number.isFinite(coord.lineHeight) ? Math.max(1, coord.lineHeight) : undefined;
+      const maxWidth =
+        typeof coord?.maxWidth === "number" && Number.isFinite(coord.maxWidth)
+          ? Math.max(1, coord.maxWidth)
+          : undefined;
+      const lineHeight =
+        typeof coord?.lineHeight === "number" &&
+        Number.isFinite(coord.lineHeight)
+          ? Math.max(1, coord.lineHeight)
+          : undefined;
       const alignment =
-        coord?.alignment === "left" || coord?.alignment === "center" || coord?.alignment === "right"
+        coord?.alignment === "left" ||
+        coord?.alignment === "center" ||
+        coord?.alignment === "right"
           ? (coord.alignment as TextAlignment)
           : undefined;
       const fontFamily =
-        coord?.fontFamily === "Helvetica" || coord?.fontFamily === "Times-Roman" || coord?.fontFamily === "Courier"
+        coord?.fontFamily === "Helvetica" ||
+        coord?.fontFamily === "Times-Roman" ||
+        coord?.fontFamily === "Courier"
           ? (coord.fontFamily as PdfFontFamily)
           : undefined;
-      out.push({ key: key.trim(), page, x, y, size, ...(value ? { value } : {}), ...(maxWidth ? { maxWidth } : {}), ...(lineHeight ? { lineHeight } : {}), ...(alignment ? { alignment } : {}), ...(fontFamily ? { fontFamily } : {}) });
+      out.push({
+        key: key.trim(),
+        page,
+        x,
+        y,
+        size,
+        ...(value ? { value } : {}),
+        ...(maxWidth ? { maxWidth } : {}),
+        ...(lineHeight ? { lineHeight } : {}),
+        ...(alignment ? { alignment } : {}),
+        ...(fontFamily ? { fontFamily } : {}),
+      });
     };
     if (Array.isArray(raw)) {
       for (const item of raw) {
         if (!item || typeof item !== "object") continue;
         const rec = item as any;
-        const key = typeof rec.key === "string" ? rec.key : typeof rec.variableKey === "string" ? rec.variableKey : typeof rec.variable === "string" ? rec.variable : undefined;
+        const key =
+          typeof rec.key === "string"
+            ? rec.key
+            : typeof rec.variableKey === "string"
+              ? rec.variableKey
+              : typeof rec.variable === "string"
+                ? rec.variable
+                : undefined;
         pushOne(key, rec);
       }
       return out;
     }
     if (raw && typeof raw === "object") {
-      for (const [k, v] of Object.entries(raw as Record<string, unknown>)) pushOne(k, v as any);
+      for (const [k, v] of Object.entries(raw as Record<string, unknown>))
+        pushOne(k, v as any);
     }
     return out;
   };
 
-  const legacyToCanvasMappings = (entries: LegacyPdfMappingEntry[], views: Record<number, { width: number; height: number }>, fallbackHeight: number): PdfMappings => {
+  const legacyToCanvasMappings = (
+    entries: LegacyPdfMappingEntry[],
+    views: Record<number, { width: number; height: number }>,
+    fallbackHeight: number,
+  ): PdfMappings => {
     const byPage = new Map<number, TextBox[]>();
     for (const e of entries) {
       const pageIndex = Math.max(0, (e.page || 1) - 1);
@@ -200,7 +290,10 @@ export default function PdfMappingEditor({
         fontSize,
         alignment: e.alignment ?? "left",
         fontFamily: e.fontFamily ?? "Helvetica",
-        content: typeof e.value === "string" && e.value.trim() ? e.value : `{{${e.key}}}`,
+        content:
+          typeof e.value === "string" && e.value.trim()
+            ? e.value
+            : `{{${e.key}}}`,
       };
       const list = byPage.get(pageIndex) ?? [];
       list.push(tb);
@@ -219,8 +312,12 @@ export default function PdfMappingEditor({
 
   const loadMappings = async () => {
     try {
-      const data = await apiFetchJson<unknown>(mappingsGetUrl ?? `/platform/documents/${docId}/pdf-mappings`, { allowStatuses: [404] });
-      const raw = isRecord(data) && "mappings" in data ? (data as any).mappings : null;
+      const data = await apiFetchJson<unknown>(
+        mappingsGetUrl ?? `/platform/documents/${docId}/pdf-mappings`,
+        { allowStatuses: [404] },
+      );
+      const raw =
+        isRecord(data) && "mappings" in data ? (data as any).mappings : null;
       if (!raw) {
         setMappings({ pages: [] });
         setLegacyEntries(null);
@@ -231,7 +328,9 @@ export default function PdfMappingEditor({
         setMappings({ pages: [] });
         setLegacyEntries(normalizeLegacyPdfMapping(raw));
       }
-    } catch { /* ignore */ }
+    } catch {
+      /* ignore */
+    }
     setLoading(false);
   };
 
@@ -239,15 +338,24 @@ export default function PdfMappingEditor({
     try {
       const data = await (async () => {
         try {
-          return await apiFetchJson<unknown>(variablesUrlPrimary ?? "/platform/document-variables?active=1");
+          return await apiFetchJson<unknown>(
+            variablesUrlPrimary ?? "/platform/document-variables?active=1",
+          );
         } catch {
-          return await apiFetchJson<unknown>(variablesUrlFallback ?? "/document-variables?active=1");
+          return await apiFetchJson<unknown>(
+            variablesUrlFallback ?? "/document-variables?active=1",
+          );
         }
       })();
       const isLegacyGroups = (v: unknown): v is LegacyVarGroup[] => {
         if (!Array.isArray(v)) return false;
         const first = v[0] as any;
-        return !!first && typeof first === "object" && typeof first.group === "string" && Array.isArray(first.vars);
+        return (
+          !!first &&
+          typeof first === "object" &&
+          typeof first.group === "string" &&
+          Array.isArray(first.vars)
+        );
       };
       if (isLegacyGroups(data)) {
         setVarGroups(data);
@@ -257,7 +365,12 @@ export default function PdfMappingEditor({
       const isVariableDefs = (v: unknown): v is VariableDefinition[] => {
         if (!Array.isArray(v)) return false;
         const first = v[0] as any;
-        return !!first && typeof first === "object" && typeof first.key === "string" && typeof first.label === "string";
+        return (
+          !!first &&
+          typeof first === "object" &&
+          typeof first.key === "string" &&
+          typeof first.label === "string"
+        );
       };
       if (!isVariableDefs(data)) return;
 
@@ -277,7 +390,13 @@ export default function PdfMappingEditor({
       const groupsMap = new Map<string, VarGroup>();
       for (const v of data) {
         const group = groupLabelForCategory(v.category);
-        const item = { key: v.key, label: v.label, type: v.valueType === "array" ? "loop" : undefined };
+        const item = {
+          key: v.key,
+          label: v.label,
+          type: v.valueType === "array" ? "loop" : undefined,
+          category: v.category,
+          exampleValue: v.exampleValue ?? null,
+        };
         const existing = groupsMap.get(group);
         if (existing) existing.vars.push(item);
         else groupsMap.set(group, { group, vars: [item] });
@@ -288,17 +407,22 @@ export default function PdfMappingEditor({
         vars: [...g.vars].sort((a, b) => a.label.localeCompare(b.label)),
       }));
       setVarGroups(groups.sort((a, b) => a.group.localeCompare(b.group)));
-    } catch { /* ignore */ }
+    } catch {
+      /* ignore */
+    }
   };
 
   const saveMappings = async () => {
     setSaving(true);
     try {
-      await apiFetchJson(mappingsPutUrl ?? `/platform/documents/${docId}/pdf-mappings`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ mappings }),
-      });
+      await apiFetchJson(
+        mappingsPutUrl ?? `/platform/documents/${docId}/pdf-mappings`,
+        {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ mappings }),
+        },
+      );
       toast({ title: "Mappings saved" });
     } catch (e) {
       toastError(toast, e, "Failed to save");
@@ -311,19 +435,21 @@ export default function PdfMappingEditor({
     const values = Object.values(pageView);
     const fallbackHeight = values[0]?.height ?? pdfDimensions.height;
     if (!fallbackHeight || !Number.isFinite(fallbackHeight)) return;
-    setMappings(legacyToCanvasMappings(legacyEntries, pageView, fallbackHeight));
+    setMappings(
+      legacyToCanvasMappings(legacyEntries, pageView, fallbackHeight),
+    );
     setLegacyEntries(null);
   }, [legacyEntries, pageView, pdfDimensions.height]);
 
   const getCurrentPageBoxes = (): TextBox[] => {
-    const pm = mappings.pages.find(p => p.pageIndex === currentPage);
+    const pm = mappings.pages.find((p) => p.pageIndex === currentPage);
     return pm?.textBoxes ?? [];
   };
 
   const updateCurrentPageBoxes = (textBoxes: TextBox[]) => {
-    setMappings(prev => {
+    setMappings((prev) => {
       const newPages = [...prev.pages];
-      const idx = newPages.findIndex(p => p.pageIndex === currentPage);
+      const idx = newPages.findIndex((p) => p.pageIndex === currentPage);
       if (idx >= 0) {
         newPages[idx] = { ...newPages[idx], textBoxes };
       } else {
@@ -341,6 +467,7 @@ export default function PdfMappingEditor({
       width: 200,
       height: 30,
       fontSize: 10,
+      lineHeight: 1.2,
       alignment: "left",
       fontFamily: "Helvetica",
       content: "",
@@ -349,18 +476,40 @@ export default function PdfMappingEditor({
     setSelectedBoxId(newBox.id);
   };
 
+  const duplicateSelectedTextBox = () => {
+    if (!selectedBox) return;
+    const copy: TextBox = {
+      ...selectedBox,
+      id: `tb_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+      x: selectedBox.x + 10,
+      y: selectedBox.y + 10,
+      lineHeight:
+        typeof selectedBox.lineHeight === "number"
+          ? selectedBox.lineHeight
+          : 1.2,
+    };
+    updateCurrentPageBoxes([...getCurrentPageBoxes(), copy]);
+    setSelectedBoxId(copy.id);
+  };
+
   const deleteTextBox = (boxId: string) => {
-    updateCurrentPageBoxes(getCurrentPageBoxes().filter(b => b.id !== boxId));
+    updateCurrentPageBoxes(getCurrentPageBoxes().filter((b) => b.id !== boxId));
     if (selectedBoxId === boxId) setSelectedBoxId(null);
   };
 
   const updateTextBox = (boxId: string, updates: Partial<TextBox>) => {
     updateCurrentPageBoxes(
-      getCurrentPageBoxes().map(b => b.id === boxId ? { ...b, ...updates } : b)
+      getCurrentPageBoxes().map((b) =>
+        b.id === boxId ? { ...b, ...updates } : b,
+      ),
     );
   };
 
-  const selectedBox = getCurrentPageBoxes().find(b => b.id === selectedBoxId);
+  const selectedBox = getCurrentPageBoxes().find((b) => b.id === selectedBoxId);
+
+  const clamp = (n: number, min: number, max: number) =>
+    Math.min(max, Math.max(min, n));
+  const roundTo1dp = (n: number) => Math.round(n * 10) / 10;
 
   const cssFontFamily = (font: PdfFontFamily): string => {
     if (font === "Times-Roman") return "Times New Roman, Times, serif";
@@ -369,13 +518,23 @@ export default function PdfMappingEditor({
   };
 
   const insertIntoSelectedContentAtCursor = (insertText: string) => {
-    if (!selectedBoxId) return;
-    const box = getCurrentPageBoxes().find(b => b.id === selectedBoxId);
+    if (!selectedBoxId) {
+      toast({
+        title: "Please select a text box first, or create a new text box.",
+      });
+      return;
+    }
+    const box = getCurrentPageBoxes().find((b) => b.id === selectedBoxId);
     if (!box) return;
     const el = contentTextareaRef.current;
-    const start = el && typeof el.selectionStart === "number" ? el.selectionStart : box.content.length;
-    const end = el && typeof el.selectionEnd === "number" ? el.selectionEnd : start;
-    const next = box.content.slice(0, start) + insertText + box.content.slice(end);
+    const start =
+      el && typeof el.selectionStart === "number"
+        ? el.selectionStart
+        : box.content.length;
+    const end =
+      el && typeof el.selectionEnd === "number" ? el.selectionEnd : start;
+    const next =
+      box.content.slice(0, start) + insertText + box.content.slice(end);
     const nextCursor = start + insertText.length;
     updateTextBox(selectedBoxId, { content: next });
     setTimeout(() => {
@@ -384,8 +543,7 @@ export default function PdfMappingEditor({
       try {
         target.focus();
         target.setSelectionRange(nextCursor, nextCursor);
-      } catch {
-      }
+      } catch {}
     }, 0);
   };
 
@@ -395,37 +553,56 @@ export default function PdfMappingEditor({
     setSelectedBoxId(null);
   };
 
-  const handleMouseDown = (e: React.MouseEvent, boxId: string, mode: "drag" | "resize") => {
+  const handleMouseDown = (
+    e: React.MouseEvent,
+    boxId: string,
+    mode: "drag" | "resize",
+  ) => {
     e.preventDefault();
     e.stopPropagation();
-    const box = getCurrentPageBoxes().find(b => b.id === boxId);
+    const box = getCurrentPageBoxes().find((b) => b.id === boxId);
     if (!box) return;
     setSelectedBoxId(boxId);
     if (mode === "drag") {
-      setDragging({ boxId, startX: e.clientX, startY: e.clientY, origX: box.x, origY: box.y });
+      setDragging({
+        boxId,
+        startX: e.clientX,
+        startY: e.clientY,
+        origX: box.x,
+        origY: box.y,
+      });
     } else {
-      setResizing({ boxId, startX: e.clientX, startY: e.clientY, origW: box.width, origH: box.height });
+      setResizing({
+        boxId,
+        startX: e.clientX,
+        startY: e.clientY,
+        origW: box.width,
+        origH: box.height,
+      });
     }
   };
 
-  const handleMouseMove = useCallback((e: MouseEvent) => {
-    if (dragging) {
-      const dx = (e.clientX - dragging.startX) / pdfScale;
-      const dy = (e.clientY - dragging.startY) / pdfScale;
-      updateTextBox(dragging.boxId, {
-        x: Math.max(0, dragging.origX + dx),
-        y: Math.max(0, dragging.origY + dy),
-      });
-    }
-    if (resizing) {
-      const dx = (e.clientX - resizing.startX) / pdfScale;
-      const dy = (e.clientY - resizing.startY) / pdfScale;
-      updateTextBox(resizing.boxId, {
-        width: Math.max(40, resizing.origW + dx),
-        height: Math.max(16, resizing.origH + dy),
-      });
-    }
-  }, [dragging, resizing, pdfScale]);
+  const handleMouseMove = useCallback(
+    (e: MouseEvent) => {
+      if (dragging) {
+        const dx = (e.clientX - dragging.startX) / pdfScale;
+        const dy = (e.clientY - dragging.startY) / pdfScale;
+        updateTextBox(dragging.boxId, {
+          x: Math.max(0, dragging.origX + dx),
+          y: Math.max(0, dragging.origY + dy),
+        });
+      }
+      if (resizing) {
+        const dx = (e.clientX - resizing.startX) / pdfScale;
+        const dy = (e.clientY - resizing.startY) / pdfScale;
+        updateTextBox(resizing.boxId, {
+          width: Math.max(40, resizing.origW + dx),
+          height: Math.max(16, resizing.origH + dy),
+        });
+      }
+    },
+    [dragging, resizing, pdfScale],
+  );
 
   const handleMouseUp = useCallback(() => {
     setDragging(null);
@@ -443,16 +620,151 @@ export default function PdfMappingEditor({
   }, [dragging, resizing, handleMouseMove, handleMouseUp]);
 
   const insertVariable = (key: string, type?: string) => {
+    const normalizedKey = String(key ?? "")
+      .trim()
+      .replace(/^\{\{\s*/, "")
+      .replace(/\s*\}\}$/, "")
+      .replace(/^\{\s*/, "")
+      .replace(/\s*\}$/, "");
     let varText: string;
     if (type === "loop") {
-      varText = `{#${key}}...{/${key}}`;
+      varText = `{#${normalizedKey}}...{/${normalizedKey}}`;
     } else if (type === "loopField") {
-      varText = `{${key}}`;
+      varText = `{${normalizedKey}}`;
     } else {
-      varText = `{{${key}}}`;
+      varText = `{{${normalizedKey}}}`;
     }
     insertIntoSelectedContentAtCursor(varText);
   };
+
+  const availableVarKeySet = useMemo(() => {
+    const s = new Set<string>();
+    for (const g of varGroups) for (const v of g.vars) if (v.key) s.add(v.key);
+    return s;
+  }, [varGroups]);
+
+  const quickInsertKeys = useMemo(() => {
+    const base = [
+      "reference_no",
+      "parcel_no",
+      "developer_name",
+      "purchasers_inline",
+      "purchaser_name",
+      "purchaser_ic",
+    ];
+    if (availableVarKeySet.has("loan_bank_name")) base.push("loan_bank_name");
+    else if (availableVarKeySet.has("bank_name")) base.push("bank_name");
+    return base;
+  }, [availableVarKeySet]);
+
+  const filteredVarGroups = useMemo(() => {
+    const q = varSearch.trim().toLowerCase();
+    if (!q) return varGroups;
+    const matches = (
+      v: { key: string; label: string; category?: string },
+      group: string,
+    ) => {
+      const hay =
+        `${v.key} ${v.label} ${v.category ?? ""} ${group}`.toLowerCase();
+      return hay.includes(q);
+    };
+    return varGroups
+      .map((g) => ({ ...g, vars: g.vars.filter((v) => matches(v, g.group)) }))
+      .filter((g) => g.vars.length > 0);
+  }, [varGroups, varSearch]);
+
+  const insertVariablePanel = (
+    <div className="border-t">
+      <div className="p-4 bg-blue-50 border-b">
+        <h3 className="text-xs font-semibold text-blue-800 uppercase tracking-wider">
+          Insert Variable
+        </h3>
+        <p className="text-xs text-blue-600 mt-0.5">
+          Insert into content at cursor
+        </p>
+      </div>
+      <div className="p-4 space-y-3">
+        <div>
+          <div className="text-xs font-medium text-slate-600 mb-1">
+            Quick Insert
+          </div>
+          <div className="flex flex-wrap gap-1.5">
+            {quickInsertKeys.map((k) => (
+              <Button
+                key={k}
+                type="button"
+                variant="outline"
+                size="sm"
+                className="h-7 px-2 text-xs"
+                onClick={() => insertVariable(k)}
+              >
+                {k}
+              </Button>
+            ))}
+          </div>
+        </div>
+
+        <div>
+          <label className="text-xs font-medium text-slate-600 mb-1 block">
+            Search
+          </label>
+          <Input
+            value={varSearch}
+            onChange={(e) => setVarSearch(e.target.value)}
+            placeholder="Search by key, label, category..."
+            className="h-8 text-xs"
+          />
+        </div>
+
+        <div className="border rounded-md overflow-hidden">
+          <div className="max-h-[260px] overflow-auto">
+            {filteredVarGroups.length === 0 ? (
+              <div className="p-3 text-xs text-slate-500">No results.</div>
+            ) : (
+              <div className="divide-y">
+                {filteredVarGroups.map((g) => (
+                  <div key={g.group}>
+                    <div className="px-3 py-2 text-[11px] font-semibold text-slate-600 bg-slate-50 border-b">
+                      {g.group}
+                    </div>
+                    <div className="divide-y">
+                      {g.vars.map((v) => (
+                        <button
+                          key={`${g.group}:${v.key}`}
+                          type="button"
+                          className="w-full text-left px-3 py-2 hover:bg-slate-50"
+                          onClick={() => insertVariable(v.key, (v as any).type)}
+                        >
+                          <div className="flex items-start gap-3">
+                            <div className="min-w-0 flex-1">
+                              <div className="text-xs font-medium text-slate-800 truncate">
+                                {v.label}
+                              </div>
+                              <div className="text-[11px] text-slate-500 truncate">
+                                {v.key}
+                              </div>
+                            </div>
+                            <div className="text-[11px] text-slate-400 shrink-0">
+                              {v.category ?? g.group}
+                            </div>
+                          </div>
+                          {v.exampleValue ? (
+                            <div className="text-[11px] text-slate-500 mt-1 line-clamp-2">
+                              Example: {v.exampleValue}
+                            </div>
+                          ) : null}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
 
   const onDocLoad = ({ numPages: n }: { numPages: number }) => {
     setNumPages(n);
@@ -462,7 +774,10 @@ export default function PdfMappingEditor({
   const onPageLoad = (page: any) => {
     const vp = page.getViewport({ scale: 1 });
     setPdfDimensions({ width: vp.width, height: vp.height });
-    setPageView((prev) => ({ ...prev, [currentPage]: { width: vp.width, height: vp.height } }));
+    setPageView((prev) => ({
+      ...prev,
+      [currentPage]: { width: vp.width, height: vp.height },
+    }));
     const container = containerRef.current;
     if (container) {
       const availW = container.clientWidth - 24;
@@ -489,42 +804,92 @@ export default function PdfMappingEditor({
         <div className="flex-1 flex flex-col min-w-0">
           <div className="flex items-center justify-between px-4 py-3 border-b bg-slate-50">
             <div className="flex items-center gap-3">
-              <h2 className="font-semibold text-slate-800 text-sm truncate max-w-[200px]">{docName}</h2>
-              <Badge variant="outline" className="text-xs">PDF Mapping</Badge>
+              <h2 className="font-semibold text-slate-800 text-sm truncate max-w-[200px]">
+                {docName}
+              </h2>
+              <Badge variant="outline" className="text-xs">
+                PDF Mapping
+              </Badge>
             </div>
             <div className="flex items-center gap-2">
               <div className="flex items-center gap-1 border rounded-md px-2 py-1">
-                <Button variant="ghost" size="sm" className="h-6 w-6 p-0" disabled={currentPage === 0} onClick={() => setCurrentPage(p => p - 1)}>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-6 w-6 p-0"
+                  disabled={currentPage === 0}
+                  onClick={() => setCurrentPage((p) => p - 1)}
+                >
                   <ChevronLeft className="w-4 h-4" />
                 </Button>
                 <span className="text-xs text-slate-600 min-w-[60px] text-center">
                   Page {currentPage + 1} / {numPages}
                 </span>
-                <Button variant="ghost" size="sm" className="h-6 w-6 p-0" disabled={currentPage >= numPages - 1} onClick={() => setCurrentPage(p => p + 1)}>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-6 w-6 p-0"
+                  disabled={currentPage >= numPages - 1}
+                  onClick={() => setCurrentPage((p) => p + 1)}
+                >
                   <ChevronRight className="w-4 h-4" />
                 </Button>
               </div>
-              <Button variant="outline" size="sm" className="h-7 gap-1" onClick={addTextBox}>
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-7 gap-1"
+                onClick={addTextBox}
+              >
                 <Plus className="w-3.5 h-3.5" />
                 Add Text Box
               </Button>
-              <Button variant="outline" size="sm" className="h-7 gap-1" onClick={() => setShowVarPanel(!showVarPanel)}>
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-7 gap-1"
+                onClick={() => setShowVarPanel(!showVarPanel)}
+              >
                 <BookOpen className="w-3.5 h-3.5" />
                 Variables
               </Button>
-              <Button size="sm" className="h-7 gap-1" onClick={saveMappings} disabled={saving}>
+              <Button
+                size="sm"
+                className="h-7 gap-1"
+                onClick={saveMappings}
+                disabled={saving}
+              >
                 <Save className="w-3.5 h-3.5" />
                 {saving ? "Saving..." : "Save"}
               </Button>
-              <Button variant="ghost" size="sm" className="h-7 w-7 p-0" onClick={onClose}>
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-7 w-7 p-0"
+                onClick={onClose}
+              >
                 <X className="w-4 h-4" />
               </Button>
             </div>
           </div>
 
-          <div ref={containerRef} className="flex-1 overflow-auto bg-slate-200 p-3 flex justify-center" onClick={handleCanvasClick}>
-            <div className="relative inline-block" style={{ width: pdfDimensions.width * pdfScale, height: pdfDimensions.height * pdfScale }}>
-              <Document file={pdfUrl} onLoadSuccess={onDocLoad} onLoadError={(err) => toastError(toast, err, "PDF load error")}>
+          <div
+            ref={containerRef}
+            className="flex-1 overflow-auto bg-slate-200 p-3 flex justify-center"
+            onClick={handleCanvasClick}
+          >
+            <div
+              className="relative inline-block"
+              style={{
+                width: pdfDimensions.width * pdfScale,
+                height: pdfDimensions.height * pdfScale,
+              }}
+            >
+              <Document
+                file={pdfUrl}
+                onLoadSuccess={onDocLoad}
+                onLoadError={(err) => toastError(toast, err, "PDF load error")}
+              >
                 <Page
                   pageIndex={currentPage}
                   onLoadSuccess={onPageLoad}
@@ -534,7 +899,7 @@ export default function PdfMappingEditor({
                 />
               </Document>
 
-              {boxes.map(box => (
+              {boxes.map((box) => (
                 <div
                   key={box.id}
                   data-textbox
@@ -542,7 +907,7 @@ export default function PdfMappingEditor({
                     "absolute border-2 cursor-move group",
                     selectedBoxId === box.id
                       ? "border-blue-500 bg-blue-50/30"
-                      : "border-amber-400/60 bg-amber-50/20 hover:border-amber-500"
+                      : "border-amber-400/60 bg-amber-50/20 hover:border-amber-500",
                   )}
                   style={{
                     left: box.x * pdfScale,
@@ -550,8 +915,11 @@ export default function PdfMappingEditor({
                     width: box.width * pdfScale,
                     height: box.height * pdfScale,
                   }}
-                  onMouseDown={e => handleMouseDown(e, box.id, "drag")}
-                  onClick={e => { e.stopPropagation(); setSelectedBoxId(box.id); }}
+                  onMouseDown={(e) => handleMouseDown(e, box.id, "drag")}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setSelectedBoxId(box.id);
+                  }}
                 >
                   <div className="absolute inset-0 overflow-hidden px-1 flex items-start">
                     <span
@@ -570,13 +938,18 @@ export default function PdfMappingEditor({
                     <>
                       <button
                         className="absolute -top-2 -right-2 w-5 h-5 bg-red-500 text-white rounded-full flex items-center justify-center text-xs hover:bg-red-600 z-10"
-                        onClick={e => { e.stopPropagation(); deleteTextBox(box.id); }}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          deleteTextBox(box.id);
+                        }}
                       >
                         <X className="w-3 h-3" />
                       </button>
                       <div
                         className="absolute bottom-0 right-0 w-4 h-4 bg-blue-500 cursor-se-resize rounded-tl-sm"
-                        onMouseDown={e => handleMouseDown(e, box.id, "resize")}
+                        onMouseDown={(e) =>
+                          handleMouseDown(e, box.id, "resize")
+                        }
                       />
                     </>
                   )}
@@ -587,197 +960,370 @@ export default function PdfMappingEditor({
         </div>
 
         <div className="w-72 border-l flex flex-col bg-white shrink-0">
-          {selectedBox ? (
-            <div className="flex-1 overflow-y-auto">
-              <div className="p-4 border-b bg-slate-50">
-                <h3 className="text-xs font-semibold text-slate-700 uppercase tracking-wider">Text Box Properties</h3>
-              </div>
-              <div className="p-4 space-y-4">
-                <div>
-                  <label className="text-xs font-medium text-slate-600 mb-1 block">Content</label>
-                  <textarea
-                    className="w-full border rounded-md px-2 py-1.5 text-sm resize-none focus:ring-1 focus:ring-blue-300 focus:border-blue-300"
-                    rows={4}
-                    value={selectedBox.content}
-                    onChange={e => updateTextBox(selectedBox.id, { content: e.target.value })}
-                    placeholder="Type text and/or {{variables}} here..."
-                    ref={contentTextareaRef}
-                  />
-                  <p className="text-xs text-slate-400 mt-1">Use {"{{variable_name}}"} for variables</p>
+          <div className="flex-1 overflow-y-auto">
+            {selectedBox ? (
+              <>
+                <div className="p-4 border-b bg-slate-50">
+                  <h3 className="text-xs font-semibold text-slate-700 uppercase tracking-wider">
+                    Text Box Properties
+                  </h3>
                 </div>
-                <div className="grid grid-cols-2 gap-3">
+                <div className="p-4 space-y-4">
                   <div>
-                    <label className="text-xs font-medium text-slate-600 mb-1 block">Font</label>
-                    <Select
-                      value={selectedBox.fontFamily}
-                      onValueChange={(v) => updateTextBox(selectedBox.id, { fontFamily: v as PdfFontFamily })}
-                    >
-                      <SelectTrigger className="h-8 text-xs">
-                        <SelectValue placeholder="Font" />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="Helvetica">Helvetica</SelectItem>
-                        <SelectItem value="Times-Roman">Times-Roman</SelectItem>
-                        <SelectItem value="Courier">Courier</SelectItem>
-                      </SelectContent>
-                    </Select>
+                    <label className="text-xs font-medium text-slate-600 mb-1 block">
+                      Content
+                    </label>
+                    <textarea
+                      className="w-full border rounded-md px-2 py-1.5 text-sm resize-none focus:ring-1 focus:ring-blue-300 focus:border-blue-300"
+                      rows={4}
+                      value={selectedBox.content}
+                      onChange={(e) =>
+                        updateTextBox(selectedBox.id, {
+                          content: e.target.value,
+                        })
+                      }
+                      onKeyDown={(e) => {
+                        if (e.key !== "Tab") return;
+                        e.preventDefault();
+                        insertIntoSelectedContentAtCursor("\t");
+                      }}
+                      placeholder="Type text and/or {{variables}} here..."
+                      ref={contentTextareaRef}
+                    />
+                    <p className="text-xs text-slate-400 mt-1">
+                      Use {"{{variable_name}}"} for variables
+                    </p>
+                  </div>
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="text-xs font-medium text-slate-600 mb-1 block">
+                        Font
+                      </label>
+                      <Select
+                        value={selectedBox.fontFamily}
+                        onValueChange={(v) =>
+                          updateTextBox(selectedBox.id, {
+                            fontFamily: v as PdfFontFamily,
+                          })
+                        }
+                      >
+                        <SelectTrigger className="h-8 text-xs">
+                          <SelectValue placeholder="Font" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="Helvetica">Helvetica</SelectItem>
+                          <SelectItem value="Times-Roman">
+                            Times-Roman
+                          </SelectItem>
+                          <SelectItem value="Courier">Courier</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    <div>
+                      <label className="text-xs font-medium text-slate-600 mb-1 block">
+                        Alignment
+                      </label>
+                      <div className="flex items-center gap-1">
+                        <Button
+                          type="button"
+                          variant={
+                            selectedBox.alignment === "left"
+                              ? "default"
+                              : "outline"
+                          }
+                          size="sm"
+                          className="h-8 w-10 p-0"
+                          onClick={() =>
+                            updateTextBox(selectedBox.id, { alignment: "left" })
+                          }
+                          title="Left"
+                        >
+                          <AlignLeft className="w-4 h-4" />
+                        </Button>
+                        <Button
+                          type="button"
+                          variant={
+                            selectedBox.alignment === "center"
+                              ? "default"
+                              : "outline"
+                          }
+                          size="sm"
+                          className="h-8 w-10 p-0"
+                          onClick={() =>
+                            updateTextBox(selectedBox.id, {
+                              alignment: "center",
+                            })
+                          }
+                          title="Center"
+                        >
+                          <AlignCenter className="w-4 h-4" />
+                        </Button>
+                        <Button
+                          type="button"
+                          variant={
+                            selectedBox.alignment === "right"
+                              ? "default"
+                              : "outline"
+                          }
+                          size="sm"
+                          className="h-8 w-10 p-0"
+                          onClick={() =>
+                            updateTextBox(selectedBox.id, {
+                              alignment: "right",
+                            })
+                          }
+                          title="Right"
+                        >
+                          <AlignRight className="w-4 h-4" />
+                        </Button>
+                      </div>
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-2 gap-2">
+                    <div>
+                      <label className="text-xs font-medium text-slate-600 mb-1 block">
+                        X
+                      </label>
+                      <Input
+                        type="number"
+                        className="h-7 text-xs"
+                        value={Math.round(selectedBox.x)}
+                        onChange={(e) =>
+                          updateTextBox(selectedBox.id, {
+                            x: Number(e.target.value),
+                          })
+                        }
+                      />
+                    </div>
+                    <div>
+                      <label className="text-xs font-medium text-slate-600 mb-1 block">
+                        Y
+                      </label>
+                      <Input
+                        type="number"
+                        className="h-7 text-xs"
+                        value={Math.round(selectedBox.y)}
+                        onChange={(e) =>
+                          updateTextBox(selectedBox.id, {
+                            y: Number(e.target.value),
+                          })
+                        }
+                      />
+                    </div>
+                    <div>
+                      <label className="text-xs font-medium text-slate-600 mb-1 block">
+                        Width
+                      </label>
+                      <Input
+                        type="number"
+                        className="h-7 text-xs"
+                        value={Math.round(selectedBox.width)}
+                        onChange={(e) =>
+                          updateTextBox(selectedBox.id, {
+                            width: Number(e.target.value),
+                          })
+                        }
+                      />
+                    </div>
+                    <div>
+                      <label className="text-xs font-medium text-slate-600 mb-1 block">
+                        Height
+                      </label>
+                      <Input
+                        type="number"
+                        className="h-7 text-xs"
+                        value={Math.round(selectedBox.height)}
+                        onChange={(e) =>
+                          updateTextBox(selectedBox.id, {
+                            height: Number(e.target.value),
+                          })
+                        }
+                      />
+                    </div>
                   </div>
                   <div>
-                    <label className="text-xs font-medium text-slate-600 mb-1 block">Alignment</label>
-                    <div className="flex items-center gap-1">
+                    <label className="text-xs font-medium text-slate-600 mb-1 block">
+                      Font Size
+                    </label>
+                    <div className="flex items-center gap-2">
                       <Button
-                        type="button"
-                        variant={selectedBox.alignment === "left" ? "default" : "outline"}
+                        variant="outline"
                         size="sm"
-                        className="h-8 w-10 p-0"
-                        onClick={() => updateTextBox(selectedBox.id, { alignment: "left" })}
-                        title="Left"
+                        className="h-7 w-7 p-0"
+                        onClick={() =>
+                          updateTextBox(selectedBox.id, {
+                            fontSize: Math.max(6, selectedBox.fontSize - 1),
+                          })
+                        }
                       >
-                        <AlignLeft className="w-4 h-4" />
+                        <Minus className="w-3 h-3" />
                       </Button>
+                      <Input
+                        type="number"
+                        className="h-7 text-xs text-center w-16"
+                        value={selectedBox.fontSize}
+                        onChange={(e) =>
+                          updateTextBox(selectedBox.id, {
+                            fontSize: Number(e.target.value) || 10,
+                          })
+                        }
+                      />
                       <Button
-                        type="button"
-                        variant={selectedBox.alignment === "center" ? "default" : "outline"}
+                        variant="outline"
                         size="sm"
-                        className="h-8 w-10 p-0"
-                        onClick={() => updateTextBox(selectedBox.id, { alignment: "center" })}
-                        title="Center"
+                        className="h-7 w-7 p-0"
+                        onClick={() =>
+                          updateTextBox(selectedBox.id, {
+                            fontSize: selectedBox.fontSize + 1,
+                          })
+                        }
                       >
-                        <AlignCenter className="w-4 h-4" />
-                      </Button>
-                      <Button
-                        type="button"
-                        variant={selectedBox.alignment === "right" ? "default" : "outline"}
-                        size="sm"
-                        className="h-8 w-10 p-0"
-                        onClick={() => updateTextBox(selectedBox.id, { alignment: "right" })}
-                        title="Right"
-                      >
-                        <AlignRight className="w-4 h-4" />
+                        <Plus className="w-3 h-3" />
                       </Button>
                     </div>
                   </div>
+
+                  <div>
+                    <label className="text-xs font-medium text-slate-600 mb-1 block">
+                      Line Height
+                    </label>
+                    <div className="flex items-center gap-2">
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        className="h-7 w-7 p-0"
+                        onClick={() => {
+                          const cur =
+                            typeof selectedBox.lineHeight === "number" &&
+                            Number.isFinite(selectedBox.lineHeight)
+                              ? selectedBox.lineHeight
+                              : 1.2;
+                          const next = roundTo1dp(clamp(cur - 0.1, 0.8, 3.0));
+                          updateTextBox(selectedBox.id, { lineHeight: next });
+                        }}
+                      >
+                        <Minus className="w-3 h-3" />
+                      </Button>
+                      <Input
+                        type="number"
+                        step={0.1}
+                        min={0.8}
+                        max={3.0}
+                        className="h-7 text-xs text-center w-16"
+                        value={roundTo1dp(
+                          typeof selectedBox.lineHeight === "number" &&
+                            Number.isFinite(selectedBox.lineHeight)
+                            ? selectedBox.lineHeight
+                            : 1.2,
+                        )}
+                        onChange={(e) => {
+                          const n = Number(e.target.value);
+                          if (!Number.isFinite(n)) return;
+                          updateTextBox(selectedBox.id, {
+                            lineHeight: roundTo1dp(clamp(n, 0.8, 3.0)),
+                          });
+                        }}
+                      />
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        className="h-7 w-7 p-0"
+                        onClick={() => {
+                          const cur =
+                            typeof selectedBox.lineHeight === "number" &&
+                            Number.isFinite(selectedBox.lineHeight)
+                              ? selectedBox.lineHeight
+                              : 1.2;
+                          const next = roundTo1dp(clamp(cur + 0.1, 0.8, 3.0));
+                          updateTextBox(selectedBox.id, { lineHeight: next });
+                        }}
+                      >
+                        <Plus className="w-3 h-3" />
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        className="h-7 px-2 text-xs ml-auto"
+                        onClick={() => {
+                          const text = String(selectedBox.content ?? "");
+                          const lineCount = Math.max(
+                            1,
+                            text.split(/\r?\n/).length,
+                          );
+                          const lh =
+                            typeof selectedBox.lineHeight === "number" &&
+                            Number.isFinite(selectedBox.lineHeight)
+                              ? selectedBox.lineHeight
+                              : 1.2;
+                          const padding = 8;
+                          const height = Math.ceil(
+                            lineCount * selectedBox.fontSize * lh + padding,
+                          );
+                          updateTextBox(selectedBox.id, {
+                            height: Math.max(16, height),
+                            lineHeight: roundTo1dp(clamp(lh, 0.8, 3.0)),
+                          });
+                        }}
+                      >
+                        Auto Height
+                      </Button>
+                    </div>
+                  </div>
+
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    className="w-full gap-1"
+                    onClick={duplicateSelectedTextBox}
+                  >
+                    <Copy className="w-3.5 h-3.5" />
+                    Duplicate Text Box
+                  </Button>
+
+                  <Button
+                    variant="destructive"
+                    size="sm"
+                    className="w-full gap-1 mt-2"
+                    onClick={() => deleteTextBox(selectedBox.id)}
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                    Delete Text Box
+                  </Button>
                 </div>
-                <div className="grid grid-cols-2 gap-2">
-                  <div>
-                    <label className="text-xs font-medium text-slate-600 mb-1 block">X</label>
-                    <Input
-                      type="number"
-                      className="h-7 text-xs"
-                      value={Math.round(selectedBox.x)}
-                      onChange={e => updateTextBox(selectedBox.id, { x: Number(e.target.value) })}
-                    />
-                  </div>
-                  <div>
-                    <label className="text-xs font-medium text-slate-600 mb-1 block">Y</label>
-                    <Input
-                      type="number"
-                      className="h-7 text-xs"
-                      value={Math.round(selectedBox.y)}
-                      onChange={e => updateTextBox(selectedBox.id, { y: Number(e.target.value) })}
-                    />
-                  </div>
-                  <div>
-                    <label className="text-xs font-medium text-slate-600 mb-1 block">Width</label>
-                    <Input
-                      type="number"
-                      className="h-7 text-xs"
-                      value={Math.round(selectedBox.width)}
-                      onChange={e => updateTextBox(selectedBox.id, { width: Number(e.target.value) })}
-                    />
-                  </div>
-                  <div>
-                    <label className="text-xs font-medium text-slate-600 mb-1 block">Height</label>
-                    <Input
-                      type="number"
-                      className="h-7 text-xs"
-                      value={Math.round(selectedBox.height)}
-                      onChange={e => updateTextBox(selectedBox.id, { height: Number(e.target.value) })}
-                    />
-                  </div>
-                </div>
-                <div>
-                  <label className="text-xs font-medium text-slate-600 mb-1 block">Font Size</label>
-                  <div className="flex items-center gap-2">
-                    <Button variant="outline" size="sm" className="h-7 w-7 p-0" onClick={() => updateTextBox(selectedBox.id, { fontSize: Math.max(6, selectedBox.fontSize - 1) })}>
-                      <Minus className="w-3 h-3" />
-                    </Button>
-                    <Input
-                      type="number"
-                      className="h-7 text-xs text-center w-16"
-                      value={selectedBox.fontSize}
-                      onChange={e => updateTextBox(selectedBox.id, { fontSize: Number(e.target.value) || 10 })}
-                    />
-                    <Button variant="outline" size="sm" className="h-7 w-7 p-0" onClick={() => updateTextBox(selectedBox.id, { fontSize: selectedBox.fontSize + 1 })}>
-                      <Plus className="w-3 h-3" />
-                    </Button>
-                  </div>
-                </div>
-                <Button variant="destructive" size="sm" className="w-full gap-1 mt-2" onClick={() => deleteTextBox(selectedBox.id)}>
-                  <Trash2 className="w-3.5 h-3.5" />
-                  Delete Text Box
+              </>
+            ) : (
+              <div className="p-6 text-center">
+                <Type className="w-10 h-10 text-slate-300 mx-auto mb-3" />
+                <p className="text-sm font-medium text-slate-500">
+                  No text box selected
+                </p>
+                <p className="text-xs text-slate-400 mt-1">
+                  Click a text box on the PDF to edit its properties, or click
+                  "Add Text Box" to create one.
+                </p>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="mt-4 gap-1"
+                  onClick={addTextBox}
+                >
+                  <Plus className="w-3.5 h-3.5" />
+                  Add Text Box
                 </Button>
               </div>
+            )}
 
-              {showVarPanel && (
-                <div className="border-t">
-                  <div className="p-4 bg-blue-50 border-b">
-                    <h3 className="text-xs font-semibold text-blue-800 uppercase tracking-wider">Insert Variable</h3>
-                    <p className="text-xs text-blue-600 mt-0.5">Search and insert into content at cursor</p>
-                  </div>
-                  <div className="p-4">
-                    <Popover open={varPickerOpen} onOpenChange={setVarPickerOpen}>
-                      <PopoverTrigger asChild>
-                        <Button variant="outline" className="w-full justify-between h-8 text-xs">
-                          Select variable…
-                          <ChevronsUpDown className="w-4 h-4 opacity-60" />
-                        </Button>
-                      </PopoverTrigger>
-                      <PopoverContent className="w-[260px] p-0" align="start">
-                        <Command>
-                          <CommandInput placeholder="Search variables…" />
-                          <CommandList>
-                            <CommandEmpty>No results.</CommandEmpty>
-                            {varGroups.map((g) => (
-                              <CommandGroup key={g.group} heading={g.group}>
-                                {g.vars.map((v) => (
-                                  <CommandItem
-                                    key={v.key}
-                                    value={`${g.group} ${v.label} ${v.key}`}
-                                    onSelect={() => {
-                                      insertVariable(v.key, (v as any).type);
-                                      setVarPickerOpen(false);
-                                    }}
-                                  >
-                                    <span className="truncate">{v.label}</span>
-                                    <span className="ml-auto text-xs text-slate-400">{v.key}</span>
-                                  </CommandItem>
-                                ))}
-                              </CommandGroup>
-                            ))}
-                          </CommandList>
-                        </Command>
-                      </PopoverContent>
-                    </Popover>
-                  </div>
-                </div>
-              )}
-            </div>
-          ) : (
-            <div className="flex-1 flex flex-col items-center justify-center p-6 text-center">
-              <Type className="w-10 h-10 text-slate-300 mb-3" />
-              <p className="text-sm font-medium text-slate-500">No text box selected</p>
-              <p className="text-xs text-slate-400 mt-1">Click a text box on the PDF to edit its properties, or click "Add Text Box" to create one.</p>
-              <Button variant="outline" size="sm" className="mt-4 gap-1" onClick={addTextBox}>
-                <Plus className="w-3.5 h-3.5" />
-                Add Text Box
-              </Button>
-            </div>
-          )}
+            {showVarPanel ? insertVariablePanel : null}
+          </div>
 
           <div className="border-t p-3 bg-slate-50">
             <p className="text-xs text-slate-400">
-              {boxes.length} text box{boxes.length !== 1 ? "es" : ""} on this page
+              {boxes.length} text box{boxes.length !== 1 ? "es" : ""} on this
+              page
             </p>
           </div>
         </div>
