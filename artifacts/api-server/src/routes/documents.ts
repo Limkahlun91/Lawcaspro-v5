@@ -1,5 +1,5 @@
 import express, { type Response, type Router as ExpressRouter } from "express";
-import { caseDocumentsTable, db, documentTemplatesTable, sql } from "@workspace/db";
+import { caseDocumentsTable, clearTenantContext, db, documentTemplatesTable, makeRlsDb, pool, setTenantContext, sql, type PoolClient } from "@workspace/db";
 import { PRINT_ACTIONS, isLetterheadApplicableDocumentType, isMasterDocumentLetterLike } from "@workspace/documents-registry";
 import { requireAuth, requireFirmUser, requireFounder, requireFounderPermission, requirePermission, writeAuditLog, type AuthRequest } from "../lib/auth.js";
 import { logger } from "../lib/logger.js";
@@ -1055,58 +1055,129 @@ async function buildCaseContext(
   const caseRows = await queryRowsCached(
     r,
     cache,
-    `cases:${firmId}:${caseId}`,
+    `cases_json:${firmId}:${caseId}`,
     sql`
-      SELECT
-        c.id,
-        to_jsonb(c)->'reference_no' as reference_no,
-        to_jsonb(c)->'case_type' as case_type,
-        to_jsonb(c)->'parcel_no' as parcel_no,
-        to_jsonb(c)->'spa_price' as spa_price,
-        to_jsonb(c)->'apdl_price' as apdl_price,
-        to_jsonb(c)->'developer_discount' as developer_discount,
-        to_jsonb(c)->'bumiputra_discount' as bumiputra_discount,
-        to_jsonb(c)->'purchase_mode' as purchase_mode,
-        to_jsonb(c)->'loan_party_type' as loan_party_type,
-        to_jsonb(c)->'title_type' as title_type,
-        to_jsonb(c)->'status' as status,
-        to_jsonb(c)->'spa_details' as spa_details,
-        to_jsonb(c)->'property_details' as property_details,
-        to_jsonb(c)->'loan_details' as loan_details,
-        to_jsonb(c)->'borrowers' as borrowers,
-        to_jsonb(c)->'company_details' as company_details,
-        to_jsonb(p)->'name' as project_name,
-        to_jsonb(p)->'phase' as project_phase,
-        to_jsonb(p)->'project_type' as project_type,
-        to_jsonb(p)->'title_type' as project_title_type,
-        to_jsonb(p)->'title_subtype' as project_title_subtype,
-        to_jsonb(p)->'master_title_number' as project_master_title_no,
-        to_jsonb(p)->'master_title_land_size' as project_master_title_size,
-        to_jsonb(p)->'mukim' as project_mukim,
-        to_jsonb(p)->'daerah' as project_daerah,
-        to_jsonb(p)->'negeri' as project_negeri,
-        to_jsonb(p)->'land_use' as project_land_use,
-        to_jsonb(p)->'development_condition' as project_development_condition,
-        to_jsonb(p)->'developer_name' as project_developer_name,
-        to_jsonb(p)->'unit_category' as unit_category,
-        to_jsonb(p)->'extra_fields' as project_extra_fields,
-        to_jsonb(d)->'name' as developer_name,
-        to_jsonb(d)->'company_reg_no' as developer_reg_no,
-        to_jsonb(d)->'address' as developer_address,
-        coalesce(to_jsonb(d)->'business_address', to_jsonb(d)->'businessAddress') as developer_business_address,
-        coalesce(to_jsonb(d)->'contact_person', to_jsonb(d)->'contact') as developer_contact,
-        to_jsonb(d)->'phone' as developer_phone,
-        to_jsonb(d)->'email' as developer_email,
-        coalesce(to_jsonb(d)->'contacts', to_jsonb(d)->'contacts_json') as developer_contacts_json
+      SELECT to_jsonb(c) as case_json
       FROM cases c
-      LEFT JOIN projects p ON p.id = c.project_id AND p.firm_id = c.firm_id
-      LEFT JOIN developers d ON d.id = c.developer_id AND d.firm_id = c.firm_id
       WHERE c.id = ${caseId} AND c.firm_id = ${firmId}
       LIMIT 1
     `
   );
-  if (!caseRows[0]) return null;
-  const c = caseRows[0];
+  const caseJson = caseRows[0]?.case_json;
+  if (!caseJson || typeof caseJson !== "object" || Array.isArray(caseJson)) return null;
+  const cj = caseJson as Record<string, unknown>;
+  const pick = (k1: string, k2?: string) => (k1 in cj ? cj[k1] : (k2 && k2 in cj ? cj[k2] : null));
+
+  const c: Record<string, unknown> = {
+    id: pick("id") ?? caseId,
+    reference_no: pick("reference_no", "referenceNo"),
+    case_type: pick("case_type", "caseType"),
+    parcel_no: pick("parcel_no", "parcelNo"),
+    spa_price: pick("spa_price", "spaPrice"),
+    apdl_price: pick("apdl_price", "apdlPrice"),
+    developer_discount: pick("developer_discount", "developerDiscount"),
+    bumiputra_discount: pick("bumiputra_discount", "bumiputraDiscount"),
+    purchase_mode: pick("purchase_mode", "purchaseMode"),
+    loan_party_type: pick("loan_party_type", "loanPartyType"),
+    title_type: pick("title_type", "titleType"),
+    status: pick("status"),
+    spa_details: pick("spa_details", "spaDetails"),
+    property_details: pick("property_details", "propertyDetails"),
+    loan_details: pick("loan_details", "loanDetails"),
+    borrowers: pick("borrowers"),
+    company_details: pick("company_details", "companyDetails"),
+  };
+
+  const projectId = (() => {
+    const v = pick("project_id", "projectId");
+    const n = typeof v === "number" ? v : typeof v === "string" ? Number.parseInt(v, 10) : NaN;
+    return Number.isFinite(n) ? Math.trunc(n) : null;
+  })();
+  const developerId = (() => {
+    const v = pick("developer_id", "developerId");
+    const n = typeof v === "number" ? v : typeof v === "string" ? Number.parseInt(v, 10) : NaN;
+    return Number.isFinite(n) ? Math.trunc(n) : null;
+  })();
+
+  const projectJson = projectId
+    ? await (async () => {
+        try {
+          const rows = await queryRowsCached(
+            r,
+            cache,
+            `projects_json:${projectId}`,
+            sql`
+              SELECT to_jsonb(p) as project_json
+              FROM projects p
+              WHERE p.id = ${projectId}
+              LIMIT 1
+            `
+          );
+          const pj = rows[0]?.project_json;
+          return pj && typeof pj === "object" && !Array.isArray(pj) ? (pj as Record<string, unknown>) : null;
+        } catch {
+          return null;
+        }
+      })()
+    : null;
+
+  const developerJson = developerId
+    ? await (async () => {
+        try {
+          const rows = await queryRowsCached(
+            r,
+            cache,
+            `developers_json:${developerId}`,
+            sql`
+              SELECT to_jsonb(d) as developer_json
+              FROM developers d
+              WHERE d.id = ${developerId}
+              LIMIT 1
+            `
+          );
+          const dj = rows[0]?.developer_json;
+          return dj && typeof dj === "object" && !Array.isArray(dj) ? (dj as Record<string, unknown>) : null;
+        } catch {
+          return null;
+        }
+      })()
+    : null;
+
+  const p = projectJson ?? {};
+  const d = developerJson ?? {};
+  const pPick = (k1: string, k2?: string) => (k1 in p ? p[k1] : (k2 && k2 in p ? p[k2] : null));
+  const dPick = (k1: string, k2?: string) => (k1 in d ? d[k1] : (k2 && k2 in d ? d[k2] : null));
+
+  c.project_name = pPick("name");
+  c.project_phase = pPick("phase");
+  c.project_type = pPick("project_type", "projectType");
+  c.project_title_type = pPick("title_type", "titleType");
+  c.project_title_subtype = pPick("title_subtype", "titleSubtype");
+  c.project_master_title_no = pPick("master_title_number", "masterTitleNumber");
+  c.project_master_title_size = pPick("master_title_land_size", "masterTitleLandSize");
+  c.project_mukim = pPick("mukim");
+  c.project_daerah = pPick("daerah");
+  c.project_negeri = pPick("negeri");
+  c.project_land_use = pPick("land_use", "landUse");
+  c.project_development_condition = pPick("development_condition", "developmentCondition");
+  c.project_developer_name = pPick("developer_name", "developerName");
+  c.unit_category = pPick("unit_category", "unitCategory");
+  c.project_extra_fields = pPick("extra_fields", "extraFields");
+
+  c.developer_name = dPick("name");
+  c.developer_reg_no = dPick("company_reg_no", "companyRegNo");
+  c.developer_address = dPick("address");
+  c.developer_business_address = dPick("business_address", "businessAddress");
+  c.developer_contact = dPick("contact_person", "contact");
+  c.developer_phone = dPick("phone");
+  c.developer_email = dPick("email");
+  const devContacts = dPick("contacts", "contacts_json");
+  c.developer_contacts_json =
+    typeof devContacts === "string"
+      ? devContacts
+      : devContacts && typeof devContacts === "object"
+        ? JSON.stringify(devContacts)
+        : null;
 
   const [
     firmRows,
@@ -6394,6 +6465,17 @@ function wrapPdfLines(text: string, font: any, fontSize: number, maxWidth: numbe
   return lines.length ? lines : [t];
 }
 
+function wrapPdfTextPreservingNewlines(text: string, font: any, fontSize: number, maxWidth: number): string[] {
+  const raw = String(text ?? "");
+  const chunks = raw.split(/\r?\n/);
+  const out: string[] = [];
+  for (const ch of chunks) {
+    if (maxWidth > 0) out.push(...wrapPdfLines(ch, font, fontSize, maxWidth));
+    else out.push(String(ch ?? ""));
+  }
+  return out.length ? out : [""];
+}
+
 function isPdfTextBoxMappings(v: unknown): v is {
   pages: Array<{
     pageIndex: number;
@@ -6463,7 +6545,8 @@ async function renderPdfTextBoxMappedTemplate(args: { pdfBytes: Buffer; data: Re
         const fontSize = tb.fontSize || 10;
         const pdfY = pageHeight - tb.y - fontSize;
         const pdfYBottom = pageHeight - tb.y - tb.height;
-        const lines = wrapText(text, font, fontSize, tb.width);
+        const lineHeight = Math.ceil(fontSize * 1.2);
+        const lines = wrapPdfTextPreservingNewlines(text, font, fontSize, tb.width);
         let currentY = pdfY;
         const align = tb.alignment === "center" || tb.alignment === "right" ? tb.alignment : "left";
         for (const line of lines) {
@@ -6476,7 +6559,7 @@ async function renderPdfTextBoxMappedTemplate(args: { pdfBytes: Buffer; data: Re
                 ? Math.max(tb.x, tb.x + (tb.width - textWidth))
                 : tb.x;
           page.drawText(line, { x, y: currentY, size: fontSize, font, color: rgb(0, 0, 0) });
-          currentY -= fontSize * 1.3;
+          currentY -= lineHeight;
         }
       }
     }
@@ -9438,8 +9521,6 @@ function reqIdToNumber(v: unknown): number {
 }
 
 router.post("/documents/automation/generate-now", requireAuth, requireFirmUser, requirePermission("documents", "generate"), async (req: AuthRequest, res): Promise<void> => {
-  const r = getRlsDb(req, res);
-  if (!r) return;
   const startedAt = Date.now();
   const requestId = one(req.headers["x-request-id"] as any) || one(req.headers["x-vercel-id"] as any) || undefined;
 
@@ -9451,12 +9532,51 @@ router.post("/documents/automation/generate-now", requireAuth, requireFirmUser, 
     });
   };
 
+  const firmId = req.firmId ?? null;
+  const userId = req.userId ?? null;
+  if (!firmId || !userId) {
+    fail(403, "FIRM_CONTEXT_REQUIRED", "Firm context required", null, false);
+    return;
+  }
+
+  const withTenantDb = async <T>(fn: (r: NonNullable<AuthRequest["rlsDb"]>) => Promise<T>): Promise<T> => {
+    let client: PoolClient | null = null;
+    let ok = false;
+    try {
+      client = await pool.connect();
+      await client.query("BEGIN");
+      await setTenantContext(client, firmId, userId);
+      const rlsDb = makeRlsDb(client);
+      const out = await fn(rlsDb);
+      ok = true;
+      return out;
+    } finally {
+      if (client) {
+        try {
+          if (ok) {
+            try {
+              await client.query("COMMIT");
+            } catch {
+              try { await client.query("ROLLBACK"); } catch {}
+            }
+          } else {
+            try { await client.query("ROLLBACK"); } catch {}
+          }
+        } catch {
+        }
+        try { await clearTenantContext(client); } catch {}
+        client.release(!ok);
+      }
+    }
+  };
+
   const bodySchema = z.object({
     caseIds: z.array(z.union([z.number(), z.string()])).min(1),
     templates: z.array(z.object({ source: z.enum(["firm", "master"]), id: z.union([z.number(), z.string()]) })).min(1),
     config: z.object({
       action: z.literal("download").optional(),
       outputFormat: z.literal("pdf").optional(),
+      includeDiagnostics: z.boolean().optional(),
     }).optional(),
   });
   const parsed = bodySchema.safeParse(req.body);
@@ -9495,16 +9615,20 @@ router.post("/documents/automation/generate-now", requireAuth, requireFirmUser, 
     return;
   }
 
+  const includeDiagnostics = parsed.data.config?.includeDiagnostics === true || process.env.API_ERROR_DETAILS === "1";
+
   const showMasterDocuments = await (async () => {
-    try {
-      const rows = await queryRows(r, sql`SELECT show_master_documents FROM firms WHERE id = ${req.firmId!} LIMIT 1`);
-      const v = (rows[0] as any)?.show_master_documents;
-      return v !== false;
-    } catch (err) {
-      const code = err && typeof err === "object" ? (err as any).code : undefined;
-      if (typeof code === "string" && code === "42703") return true;
-      return true;
-    }
+    return await withTenantDb(async (r) => {
+      try {
+        const rows = await queryRows(r, sql`SELECT show_master_documents FROM firms WHERE id = ${firmId} LIMIT 1`);
+        const v = (rows[0] as any)?.show_master_documents;
+        return v !== false;
+      } catch (err) {
+        const info = extractDbErrorInfo(err);
+        if (info.sqlstate === "42703") return true;
+        return true;
+      }
+    });
   })();
   if (!showMasterDocuments && templates.some((t) => t.source === "master")) {
     fail(403, "MASTER_DISABLED", "Master Documents are disabled for this firm", null, false);
@@ -9616,7 +9740,7 @@ router.post("/documents/automation/generate-now", requireAuth, requireFirmUser, 
     return "unknown";
   };
 
-  const previewAndResolve = async (args: {
+  const previewAndResolve = async (r: DbConn, args: {
     firmId: number;
     caseContext: Record<string, unknown>;
     templateRef: { kind: "firm"; templateId: number } | { kind: "platform"; documentId: number };
@@ -9658,154 +9782,199 @@ router.post("/documents/automation/generate-now", requireAuth, requireFirmUser, 
     };
 
     let generatedCount = 0;
+    let successCount = 0;
+
+    const loadTemplateMeta = async (
+      r: DbConn,
+      t: { source: "firm" | "master"; id: number },
+    ): Promise<{ name: string; fileName: string; mimeType: string | null; objectPath: string; mappingConfig: unknown } | null> => {
+      const cacheKey = `${t.source}:${t.id}`;
+      const cached = templateObjectCache.get(cacheKey);
+      if (cached) return cached;
+
+      const row = await (async () => {
+        try {
+          if (t.source === "firm") {
+            const rows = await queryRows(r, sql`
+              SELECT to_jsonb(dt) as template_json
+              FROM document_templates dt
+              WHERE dt.firm_id = ${firmId} AND dt.id = ${t.id}
+              LIMIT 1
+            `);
+            return rows[0] as any;
+          }
+          const rows = await queryRows(r, sql`
+            SELECT to_jsonb(pd) as template_json
+            FROM platform_documents pd
+            WHERE pd.id = ${t.id}
+              AND (pd.firm_id IS NULL OR pd.firm_id = ${firmId})
+            LIMIT 1
+          `);
+          return rows[0] as any;
+        } catch (err) {
+          const info = extractDbErrorInfo(err);
+          throw new DocumentGenerationError(
+            422,
+            "TEMPLATE_METADATA_QUERY_FAILED",
+            "Template metadata query failed",
+            { queryLabel: "TEMPLATE_METADATA_QUERY", ...info, template: cacheKey },
+          );
+        }
+      })();
+
+      const tplJson = row?.template_json;
+      if (!tplJson || typeof tplJson !== "object" || Array.isArray(tplJson)) return null;
+      const tj = tplJson as Record<string, unknown>;
+      const pick = (k1: string, k2?: string) => (k1 in tj ? tj[k1] : (k2 && k2 in tj ? tj[k2] : null));
+
+      const name = typeof pick("name") === "string" ? String(pick("name")) : `template-${t.id}`;
+      const isTemplateCapable = (() => {
+        const v = pick("is_template_capable", "isTemplateCapable");
+        return v === false ? false : true;
+      })();
+      if (!isTemplateCapable) return null;
+
+      const objectPathRaw = (() => {
+        const v = pick("object_path", "objectPath") ?? pick("storage_path", "storagePath");
+        return typeof v === "string" ? String(v) : "";
+      })();
+      const fileName = (() => {
+        const v = pick("file_name", "fileName");
+        return typeof v === "string" ? String(v) : "";
+      })();
+      const mimeType = (() => {
+        const v = pick("mime_type", "mimeType");
+        return typeof v === "string" ? String(v) : null;
+      })();
+      const mappingConfig =
+        pick("pdf_mapping_config") ??
+        pick("pdf_mappings") ??
+        pick("pdf_mapping") ??
+        pick("mapping") ??
+        pick("pdf_form_fields") ??
+        null;
+
+      const objectPath = objectPathRaw ? decodeStoragePath(objectPathRaw) : "";
+      if (!objectPath) throw new DocumentGenerationError(422, "TEMPLATE_MISSING_OBJECT_PATH", "Template object_path is missing", { queryLabel: "TEMPLATE_METADATA_QUERY", template: cacheKey });
+      if (!fileName) throw new DocumentGenerationError(422, "TEMPLATE_MISSING_FILE_NAME", "Template file_name is missing", { queryLabel: "TEMPLATE_METADATA_QUERY", template: cacheKey });
+
+      const out = { name, fileName, mimeType, objectPath, mappingConfig };
+      templateObjectCache.set(cacheKey, out);
+      return out;
+    };
 
     for (const caseId of caseIds) {
-      const context = await buildCaseContext(r, caseId, req.firmId!, cache);
-      if (!context) {
-        errors.push(`caseId=${caseId}: CASE_NOT_FOUND`);
-        continue;
-      }
-
-      const caseRefRaw =
-        typeof (context as any).reference_no === "string" && String((context as any).reference_no).trim()
-          ? String((context as any).reference_no).trim()
-          : `case-${caseId}`;
-      const caseRef = safeFilenameAscii(caseRefRaw) || `case-${caseId}`;
-
-      for (const t of templates) {
-        const cacheKey = `${t.source}:${t.id}`;
-        const templateKey = `${t.source}-${t.id}`;
+      await withTenantDb(async (rCase) => {
+        let context: Record<string, unknown> | null = null;
+        let caseContextError: unknown = null;
         try {
-          const tpl = templateObjectCache.get(cacheKey) ?? await (async () => {
-            if (t.source === "firm") {
-                const rows = await (async () => {
-                  try {
-                    return await queryRows(r, sql`
-                      SELECT
-                        dt.id,
-                        to_jsonb(dt)->'name' as name,
-                        coalesce(to_jsonb(dt)->'object_path', to_jsonb(dt)->'objectPath', to_jsonb(dt)->'storage_path', to_jsonb(dt)->'storagePath') as object_path,
-                        coalesce(to_jsonb(dt)->'file_name', to_jsonb(dt)->'fileName') as file_name,
-                        coalesce(to_jsonb(dt)->'mime_type', to_jsonb(dt)->'mimeType') as mime_type,
-                        coalesce(to_jsonb(dt)->'is_template_capable', to_jsonb(dt)->'isTemplateCapable', 'true'::jsonb) as is_template_capable,
-                        coalesce(
-                          to_jsonb(dt)->'pdf_mapping_config',
-                          to_jsonb(dt)->'pdf_mappings',
-                          to_jsonb(dt)->'pdf_mapping',
-                          to_jsonb(dt)->'mapping',
-                          to_jsonb(dt)->'pdf_form_fields'
-                        ) as mapping_config
-                      FROM document_templates dt
-                      WHERE dt.firm_id = ${req.firmId!} AND dt.id = ${t.id}
-                      LIMIT 1
-                    `);
-                  } catch (err) {
-                    const info = extractDbErrorInfo(err);
-                    throw new DocumentGenerationError(
-                      422,
-                      "TEMPLATE_METADATA_QUERY_FAILED",
-                      "Template metadata query failed",
-                      { queryLabel: "TEMPLATE_METADATA_QUERY", ...info, template: cacheKey },
-                    );
-                  }
-                })();
-              const row = rows[0] as any;
-              if (!row) return null;
-              if (row.is_template_capable === false) return null;
-                const objectPathRaw = typeof row.object_path === "string" ? String(row.object_path) : "";
-                const objectPath = objectPathRaw ? decodeStoragePath(objectPathRaw) : "";
-                const fileName = typeof row.file_name === "string" ? String(row.file_name) : "";
-                const mimeType = typeof row.mime_type === "string" ? String(row.mime_type) : null;
-                const name = typeof row.name === "string" ? String(row.name) : `template-${t.id}`;
-                if (!objectPath) throw new DocumentGenerationError(422, "TEMPLATE_MISSING_OBJECT_PATH", "Template object_path is missing", { queryLabel: "TEMPLATE_METADATA_QUERY", template: cacheKey });
-                if (!fileName) throw new DocumentGenerationError(422, "TEMPLATE_MISSING_FILE_NAME", "Template file_name is missing", { queryLabel: "TEMPLATE_METADATA_QUERY", template: cacheKey });
-                const out = { name, fileName, mimeType, objectPath, mappingConfig: row.mapping_config ?? null };
-              templateObjectCache.set(cacheKey, out);
-              return out;
-            }
-              const rows = await (async () => {
-                try {
-                  return await queryRows(r, sql`
-                    SELECT
-                      pd.id,
-                      to_jsonb(pd)->'name' as name,
-                      coalesce(to_jsonb(pd)->'object_path', to_jsonb(pd)->'objectPath', to_jsonb(pd)->'storage_path', to_jsonb(pd)->'storagePath') as object_path,
-                      coalesce(to_jsonb(pd)->'file_name', to_jsonb(pd)->'fileName') as file_name,
-                      coalesce(to_jsonb(pd)->'mime_type', to_jsonb(pd)->'mimeType') as mime_type,
-                      coalesce(
-                        to_jsonb(pd)->'pdf_mappings',
-                        to_jsonb(pd)->'pdf_mapping_config',
-                        to_jsonb(pd)->'pdf_mapping',
-                        to_jsonb(pd)->'mapping',
-                        to_jsonb(pd)->'pdf_form_fields'
-                      ) as mapping_config
-                    FROM platform_documents pd
-                    WHERE pd.id = ${t.id}
-                      AND (pd.firm_id IS NULL OR pd.firm_id = ${req.firmId!})
-                    LIMIT 1
-                  `);
-                } catch (err) {
-                  const info = extractDbErrorInfo(err);
-                  throw new DocumentGenerationError(
-                    422,
-                    "TEMPLATE_METADATA_QUERY_FAILED",
-                    "Template metadata query failed",
-                    { queryLabel: "TEMPLATE_METADATA_QUERY", ...info, template: cacheKey },
-                  );
-                }
-              })();
-            const row = rows[0] as any;
-            if (!row) return null;
-              const objectPathRaw = typeof row.object_path === "string" ? String(row.object_path) : "";
-              const objectPath = objectPathRaw ? decodeStoragePath(objectPathRaw) : "";
-              const fileName = typeof row.file_name === "string" ? String(row.file_name) : "";
-              const mimeType = typeof row.mime_type === "string" ? String(row.mime_type) : null;
-            const name = typeof row.name === "string" ? String(row.name) : `master-${t.id}`;
-              if (!objectPath) throw new DocumentGenerationError(422, "TEMPLATE_MISSING_OBJECT_PATH", "Template object_path is missing", { queryLabel: "TEMPLATE_METADATA_QUERY", template: cacheKey });
-              if (!fileName) throw new DocumentGenerationError(422, "TEMPLATE_MISSING_FILE_NAME", "Template file_name is missing", { queryLabel: "TEMPLATE_METADATA_QUERY", template: cacheKey });
-              const out = { name, fileName, mimeType, objectPath, mappingConfig: row.mapping_config ?? null };
-            templateObjectCache.set(cacheKey, out);
-            return out;
-          })();
+          context = await buildCaseContext(rCase, caseId, firmId, cache);
+        } catch (err) {
+          caseContextError = err;
+          context = null;
+        }
 
-          const tplNameRaw = safeFilenameAscii(tpl?.name ?? "") || `template-${t.id}`;
+        const caseRefRaw =
+          context && typeof (context as any).reference_no === "string" && String((context as any).reference_no).trim()
+            ? String((context as any).reference_no).trim()
+            : `case-${caseId}`;
+        const caseRef = safeFilenameAscii(caseRefRaw) || `case-${caseId}`;
+
+        for (let i = 0; i < templates.length; i++) {
+          const t = templates[i]!;
+          const cacheKey = `${t.source}:${t.id}`;
+          const templateKey = `${t.source}-${t.id}`;
+          const sp = `sp_${caseId}_${templateKey}_${i}`.replace(/[^a-zA-Z0-9_]/g, "_");
+          try {
+            await rCase.execute(sql.raw(`SAVEPOINT ${sp}`));
+          } catch {
+          }
+
+          const tplNameRaw = safeFilenameAscii(cacheKey) || `template-${t.id}`;
           const tplName = tplNameRaw.replace(/\s+/g, "_");
           const zipBase = `${tplName}__${templateKey}`;
-          const zipPathOk = `${caseRef}/${zipBase}.pdf`;
-          const zipPathErr = `${caseRef}/__ERROR__${zipBase}.pdf`;
+          let zipPathOk = `${caseRef}/${zipBase}.pdf`;
+          let zipPathErr = `${caseRef}/__ERROR__${zipBase}.pdf`;
 
-          if (!tpl) {
-            const warningPdf = await renderWarningPdfPage([
-              "Template not found or not template-capable.",
-              `Template: ${cacheKey}`,
-              `Case: ${caseRefRaw}`,
-            ]);
-            addZipBuffer(zipPathErr, warningPdf);
-            generatedCount += 1;
-            errors.push(`${caseRef}: template=${cacheKey} TEMPLATE_NOT_FOUND`);
-            manifest.push({
-              caseId,
-              caseRef: caseRefRaw,
-              template: { source: t.source, id: t.id, name: null },
-              ok: false,
-              zipPath: zipPathErr,
-              error: { code: "TEMPLATE_NOT_FOUND", message: "Template not found or not template-capable" },
-            });
-            continue;
-          }
-          const kind = classifyTemplateKind(tpl.fileName, tpl.mimeType);
+          try {
+            if (!context) {
+              const info = pickDbInfo(caseContextError);
+              const warningPdf = await renderWarningPdfPage([
+                "Generation failed for this case context.",
+                `Case: ${caseRefRaw}`,
+                `Template: ${cacheKey}`,
+                "Error: CASE_CONTEXT_QUERY_FAILED",
+                ...formatDbInfoLines(info, "CASE_CONTEXT_QUERY"),
+              ]);
+              addZipBuffer(zipPathErr, warningPdf);
+              generatedCount += 1;
+              errors.push(`${caseRef}: template=${cacheKey} CASE_CONTEXT_QUERY_FAILED`);
+              if (includeDiagnostics) {
+                manifest.push({
+                  caseId,
+                  caseRef: caseRefRaw,
+                  template: { source: t.source, id: t.id, name: null },
+                  ok: false,
+                  zipPath: zipPathErr,
+                  error: {
+                    code: "CASE_CONTEXT_QUERY_FAILED",
+                    message: "Case context query failed",
+                    sqlstate: info.sqlstate,
+                    table: info.table,
+                    column: info.column,
+                    constraint: info.constraint,
+                    detail: info.detail,
+                    hint: info.hint,
+                    queryLabel: "CASE_CONTEXT_QUERY",
+                  },
+                });
+              }
+              continue;
+            }
 
-          if (kind === "pdf") {
-            const pdfBytes = await readTemplateBytes(tpl.objectPath);
-            const mappingConfig = tpl.mappingConfig ?? null;
-            const legacyMappings = normalizePdfMappingConfig(mappingConfig);
-            const placeholders = Array.from(new Set([
-              ...(isPdfTextBoxMappings(mappingConfig) ? extractPdfMappingPlaceholders(mappingConfig) : legacyMappings.map((m) => m.key)),
-              ...(await extractPdfFormFieldNames(pdfBytes)),
-            ]));
-            try {
-              const preview = await previewAndResolve({
-                firmId: req.firmId!,
+            const tpl = await loadTemplateMeta(rCase, t);
+            if (tpl?.name) {
+              const niceNameRaw = safeFilenameAscii(tpl.name) || tplName;
+              const niceName = niceNameRaw.replace(/\s+/g, "_");
+              const niceBase = `${niceName}__${templateKey}`;
+              zipPathOk = `${caseRef}/${niceBase}.pdf`;
+              zipPathErr = `${caseRef}/__ERROR__${niceBase}.pdf`;
+            }
+
+            if (!tpl) {
+              const warningPdf = await renderWarningPdfPage([
+                "Template not found or not template-capable.",
+                `Template: ${cacheKey}`,
+                `Case: ${caseRefRaw}`,
+              ]);
+              addZipBuffer(zipPathErr, warningPdf);
+              generatedCount += 1;
+              errors.push(`${caseRef}: template=${cacheKey} TEMPLATE_NOT_FOUND`);
+              if (includeDiagnostics) {
+                manifest.push({
+                  caseId,
+                  caseRef: caseRefRaw,
+                  template: { source: t.source, id: t.id, name: null },
+                  ok: false,
+                  zipPath: zipPathErr,
+                  error: { code: "TEMPLATE_NOT_FOUND", message: "Template not found or not template-capable" },
+                });
+              }
+              continue;
+            }
+
+            const kind = classifyTemplateKind(tpl.fileName, tpl.mimeType);
+
+            if (kind === "pdf") {
+              const pdfBytes = await readTemplateBytes(tpl.objectPath);
+              const mappingConfig = tpl.mappingConfig ?? null;
+              const legacyMappings = normalizePdfMappingConfig(mappingConfig);
+              const placeholders = Array.from(new Set([
+                ...(isPdfTextBoxMappings(mappingConfig) ? extractPdfMappingPlaceholders(mappingConfig) : legacyMappings.map((m) => m.key)),
+                ...(await extractPdfFormFieldNames(pdfBytes)),
+              ]));
+              const preview = await previewAndResolve(rCase, {
+                firmId,
                 caseContext: context as any,
                 templateRef: t.source === "firm" ? { kind: "firm", templateId: t.id } : { kind: "platform", documentId: t.id },
                 placeholders,
@@ -9823,66 +9992,30 @@ router.post("/documents/automation/generate-now", requireAuth, requireFirmUser, 
                         ]);
               addZipBuffer(zipPathOk, rendered);
               generatedCount += 1;
+              successCount += 1;
               if (preview.missingPlaceholders.length > 0) {
                 errors.push(`${caseRef}: template=${cacheKey} MISSING_PLACEHOLDERS ${preview.missingPlaceholders.join(",")}`);
               }
-              manifest.push({
-                caseId,
-                caseRef: caseRefRaw,
-                template: { source: t.source, id: t.id, name: tpl.name },
-                ok: true,
-                zipPath: zipPathOk,
-                missingPlaceholders: preview.missingPlaceholders,
-              });
+              if (includeDiagnostics) {
+                manifest.push({
+                  caseId,
+                  caseRef: caseRefRaw,
+                  template: { source: t.source, id: t.id, name: tpl.name },
+                  ok: true,
+                  zipPath: zipPathOk,
+                  missingPlaceholders: preview.missingPlaceholders,
+                });
+              }
               if (preview.usedMode === "bindings" && preview.missingRequiredVariables.length > 0) {
                 errors.push(`${caseRef}: template=${cacheKey} MISSING_REQUIRED_VARIABLES ${preview.missingRequiredVariables.map((x) => x.variableKey).join(",")}`);
               }
-            } catch (err) {
-              const info = pickDbInfo(err);
-              const queryLabel = pickQueryLabel(err);
-              const e =
-                err instanceof DocumentGenerationError
-                  ? err
-                  : new DocumentGenerationError(422, "PDF_TEMPLATE_RENDER_FAILED", err instanceof Error ? err.message : String(err ?? ""));
-              const warningPdf = await renderWarningPdfPage([
-                "Generation failed for this PDF template.",
-                `Template: ${tpl.name}`,
-                `Case: ${caseRefRaw}`,
-                `Error: ${e.code}`,
-                String(e.message ?? "").slice(0, 200),
-                ...formatDbInfoLines(info, queryLabel),
-              ]);
-              addZipBuffer(zipPathErr, warningPdf);
-              generatedCount += 1;
-              errors.push(`${caseRef}: template=${cacheKey} ${e.code} ${String(e.message ?? "").slice(0, 200)}`);
-              manifest.push({
-                caseId,
-                caseRef: caseRefRaw,
-                template: { source: t.source, id: t.id, name: tpl.name },
-                ok: false,
-                zipPath: zipPathErr,
-                error: {
-                  code: e.code,
-                  message: String(e.message ?? "").slice(0, 400),
-                  sqlstate: info.sqlstate,
-                  table: info.table,
-                  column: info.column,
-                  constraint: info.constraint,
-                  detail: info.detail,
-                  hint: info.hint,
-                  queryLabel,
-                },
-              });
             }
-            continue;
           }
-
-          if (kind === "docx") {
-            try {
+          else if (kind === "docx") {
               const templateBytes = await readTemplateBytes(tpl.objectPath);
               const placeholders = detectDocxVariables(templateBytes);
-              const preview = await previewAndResolve({
-                firmId: req.firmId!,
+              const preview = await previewAndResolve(rCase, {
+                firmId,
                 caseContext: context as any,
                 templateRef: t.source === "firm" ? { kind: "firm", templateId: t.id } : { kind: "platform", documentId: t.id },
                 placeholders,
@@ -9905,59 +10038,26 @@ router.post("/documents/automation/generate-now", requireAuth, requireFirmUser, 
               if (conv.fallbackUsed) errors.push(`${caseRef}: template=${cacheKey} DOCX_TO_PDF_FALLBACK_USED`);
               addZipBuffer(zipPathOk, conv.pdfBytes);
               generatedCount += 1;
+              successCount += 1;
               if (preview.missingPlaceholders.length > 0) {
                 errors.push(`${caseRef}: template=${cacheKey} MISSING_PLACEHOLDERS ${preview.missingPlaceholders.join(",")}`);
               }
-              manifest.push({
-                caseId,
-                caseRef: caseRefRaw,
-                template: { source: t.source, id: t.id, name: tpl.name },
-                ok: true,
-                zipPath: zipPathOk,
-                missingPlaceholders: preview.missingPlaceholders,
-              });
+              if (includeDiagnostics) {
+                manifest.push({
+                  caseId,
+                  caseRef: caseRefRaw,
+                  template: { source: t.source, id: t.id, name: tpl.name },
+                  ok: true,
+                  zipPath: zipPathOk,
+                  missingPlaceholders: preview.missingPlaceholders,
+                });
+              }
               if (preview.usedMode === "bindings" && preview.missingRequiredVariables.length > 0) {
                 errors.push(`${caseRef}: template=${cacheKey} MISSING_REQUIRED_VARIABLES ${preview.missingRequiredVariables.map((x) => x.variableKey).join(",")}`);
               }
-            } catch (err) {
-              const info = pickDbInfo(err);
-              const queryLabel = pickQueryLabel(err);
-              const msg = err instanceof Error ? err.message : String(err ?? "");
-              const eCode = info.sqlstate ? `DOCX_RENDER_FAILED_SQLSTATE_${info.sqlstate}` : "DOCX_RENDER_FAILED";
-              const warningPdf = await renderWarningPdfPage([
-                "Generation failed for this DOCX template.",
-                `Template: ${tpl.name}`,
-                `Case: ${caseRefRaw}`,
-                `Error: ${eCode}`,
-                msg.slice(0, 200),
-                ...formatDbInfoLines(info, queryLabel),
-              ]);
-              addZipBuffer(zipPathErr, warningPdf);
-              generatedCount += 1;
-              errors.push(`${caseRef}: template=${cacheKey} ${msg.slice(0, 400) || "RENDER_FAILED"}`);
-              manifest.push({
-                caseId,
-                caseRef: caseRefRaw,
-                template: { source: t.source, id: t.id, name: tpl.name },
-                ok: false,
-                zipPath: zipPathErr,
-                error: {
-                  code: eCode,
-                  message: msg.slice(0, 400) || "RENDER_FAILED",
-                  sqlstate: info.sqlstate,
-                  table: info.table,
-                  column: info.column,
-                  constraint: info.constraint,
-                  detail: info.detail,
-                  hint: info.hint,
-                  queryLabel,
-                },
-              });
             }
-            continue;
           }
-
-          if (kind === "doc") {
+          else if (kind === "doc") {
             const warningPdf = await renderWarningPdfPage([
               "This .doc template requires conversion support.",
               "Please upload a .docx version for full variable merge.",
@@ -9966,38 +10066,46 @@ router.post("/documents/automation/generate-now", requireAuth, requireFirmUser, 
             addZipBuffer(zipPathErr, warningPdf);
             generatedCount += 1;
             errors.push(`${caseRef}: template=${cacheKey} DOC_CONVERSION_UNSUPPORTED`);
-            manifest.push({
-              caseId,
-              caseRef: caseRefRaw,
-              template: { source: t.source, id: t.id, name: tpl.name },
-              ok: false,
-              zipPath: zipPathErr,
-              error: { code: "DOC_CONVERSION_UNSUPPORTED", message: "This .doc template requires conversion support" },
-            });
-            continue;
+            if (includeDiagnostics) {
+              manifest.push({
+                caseId,
+                caseRef: caseRefRaw,
+                template: { source: t.source, id: t.id, name: tpl.name },
+                ok: false,
+                zipPath: zipPathErr,
+                error: { code: "DOC_CONVERSION_UNSUPPORTED", message: "This .doc template requires conversion support" },
+              });
+            }
           }
-
-          const ext = fileExtensionFromName(tpl.fileName).toLowerCase() || "unknown";
-          const warningPdf = await renderWarningPdfPage([
-            "Unsupported template type.",
-            `Template: ${tpl.name}`,
-            `Case: ${caseRefRaw}`,
-            `Type: ${ext}`,
-          ]);
-          addZipBuffer(zipPathErr, warningPdf);
-          generatedCount += 1;
-          errors.push(`${caseRef}: template=${cacheKey} UNSUPPORTED_TEMPLATE_TYPE (${ext})`);
-          manifest.push({
-            caseId,
-            caseRef: caseRefRaw,
-            template: { source: t.source, id: t.id, name: tpl.name },
-            ok: false,
-            zipPath: zipPathErr,
-            error: { code: "UNSUPPORTED_TEMPLATE_TYPE", message: ext },
-          });
+          else {
+            const ext = fileExtensionFromName(tpl.fileName).toLowerCase() || "unknown";
+            const warningPdf = await renderWarningPdfPage([
+              "Unsupported template type.",
+              `Template: ${tpl.name}`,
+              `Case: ${caseRefRaw}`,
+              `Type: ${ext}`,
+            ]);
+            addZipBuffer(zipPathErr, warningPdf);
+            generatedCount += 1;
+            errors.push(`${caseRef}: template=${cacheKey} UNSUPPORTED_TEMPLATE_TYPE (${ext})`);
+            if (includeDiagnostics) {
+              manifest.push({
+                caseId,
+                caseRef: caseRefRaw,
+                template: { source: t.source, id: t.id, name: tpl.name },
+                ok: false,
+                zipPath: zipPathErr,
+                error: { code: "UNSUPPORTED_TEMPLATE_TYPE", message: ext },
+              });
+            }
+          }
         } catch (err) {
+          try {
+            await rCase.execute(sql.raw(`ROLLBACK TO SAVEPOINT ${sp}`));
+          } catch {
+          }
           const info = pickDbInfo(err);
-          const queryLabel = pickQueryLabel(err);
+          const queryLabel = pickQueryLabel(err) ?? "UNKNOWN";
           const msg = err instanceof Error ? err.message : String(err ?? "");
           const eCode = err instanceof DocumentGenerationError ? err.code : "RENDER_FAILED";
           const warningPdf = await renderWarningPdfPage([
@@ -10008,42 +10116,47 @@ router.post("/documents/automation/generate-now", requireAuth, requireFirmUser, 
             msg.slice(0, 200) || "RENDER_FAILED",
             ...formatDbInfoLines(info, queryLabel),
           ]);
-          const tplNameRaw = safeFilenameAscii(cacheKey) || `template-${t.id}`;
-          const tplName = tplNameRaw.replace(/\s+/g, "_");
-          const zipBase = `${tplName}__${templateKey}`;
-          const zipPathErr = `${caseRef}/__ERROR__${zipBase}.pdf`;
           addZipBuffer(zipPathErr, warningPdf);
           generatedCount += 1;
           errors.push(`${caseRef}: template=${cacheKey} ${msg.slice(0, 400) || "RENDER_FAILED"}`);
-          manifest.push({
-            caseId,
-            caseRef: caseRefRaw,
-            template: { source: t.source, id: t.id, name: null },
-            ok: false,
-            zipPath: zipPathErr,
-            error: {
-              code: eCode,
-              message: msg.slice(0, 400) || "RENDER_FAILED",
-              sqlstate: info.sqlstate,
-              table: info.table,
-              column: info.column,
-              constraint: info.constraint,
-              detail: info.detail,
-              hint: info.hint,
-              queryLabel,
-            },
-          });
+          if (includeDiagnostics) {
+            manifest.push({
+              caseId,
+              caseRef: caseRefRaw,
+              template: { source: t.source, id: t.id, name: null },
+              ok: false,
+              zipPath: zipPathErr,
+              error: {
+                code: eCode,
+                message: msg.slice(0, 400) || "RENDER_FAILED",
+                sqlstate: info.sqlstate,
+                table: info.table,
+                column: info.column,
+                constraint: info.constraint,
+                detail: info.detail,
+                hint: info.hint,
+                queryLabel,
+              },
+            });
+          }
+        } finally {
+          try {
+            await rCase.execute(sql.raw(`RELEASE SAVEPOINT ${sp}`));
+          } catch {
+          }
         }
-      }
+      });
     }
 
-    if (errors.length > 0) {
-      addZipBuffer("_GENERATION_WARNINGS.txt", Buffer.from(errors.join("\n"), "utf8"));
+    if (includeDiagnostics) {
+      if (errors.length > 0) {
+        addZipBuffer("_GENERATION_WARNINGS.txt", Buffer.from(errors.join("\n"), "utf8"));
+      }
+      addZipBuffer("_manifest.json", Buffer.from(JSON.stringify(manifest, null, 2), "utf8"));
     }
-    addZipBuffer("_manifest.json", Buffer.from(JSON.stringify(manifest, null, 2), "utf8"));
 
     if (generatedCount === 0) {
-      fail(500, "NO_DOCUMENT_GENERATED", "No documents were generated", { errors }, false);
+      fail(422, "NO_DOCUMENT_GENERATED", "No documents were generated", { errors }, false);
       return;
     }
 
@@ -10065,14 +10178,14 @@ router.post("/documents/automation/generate-now", requireAuth, requireFirmUser, 
       action: "documents.automation.generate_now",
       entityType: "document_generation",
       entityId: undefined,
-      detail: `cases=${caseIds.length} templates=${templates.length} pdf=${generatedCount} warnings=${errors.length}`,
+      detail: `cases=${caseIds.length} templates=${templates.length} outputs=${generatedCount} success=${successCount} warnings=${errors.length}`,
       ipAddress: req.ip,
       userAgent: req.headers["user-agent"],
     });
   } catch (err) {
-    const code = err && typeof err === "object" ? (err as any).code : undefined;
+    const info = extractDbErrorInfo(err);
     const baseMsg = err instanceof Error ? err.message : "Internal Server Error";
-    const msg = typeof code === "string" ? `${baseMsg} (SQLSTATE=${code})` : baseMsg;
+    const msg = info.sqlstate ? `${baseMsg} (SQLSTATE=${info.sqlstate})` : baseMsg;
     try {
       logger.error({ err, firmId: req.firmId, userId: req.userId }, "[documents.generate-now] failed");
     } catch {
