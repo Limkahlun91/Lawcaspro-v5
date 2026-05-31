@@ -10074,7 +10074,7 @@ router.post("/documents/automation/generate-now", requireAuth, requireFirmUser, 
                 error: { code: "DOC_CONVERSION_UNSUPPORTED", message: "This .doc template requires conversion support" },
               });
             }
-            else {
+            } else {
             const ext = fileExtensionFromName(tpl.fileName).toLowerCase() || "unknown";
             const warningPdf = await renderWarningPdfPage([
               "Unsupported template type.",
@@ -10095,7 +10095,6 @@ router.post("/documents/automation/generate-now", requireAuth, requireFirmUser, 
                 error: { code: "UNSUPPORTED_TEMPLATE_TYPE", message: ext },
               });
             }
-          }
           }
         } catch (err) {
           try {
@@ -10142,6 +10141,7 @@ router.post("/documents/automation/generate-now", requireAuth, requireFirmUser, 
             await rCase.execute(sql.raw(`RELEASE SAVEPOINT ${sp}`));
           } catch {
           }
+        }
         }
       });
     }
