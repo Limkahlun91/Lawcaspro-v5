@@ -497,6 +497,124 @@ async function columnExistsCached(
   );
 }
 
+type DocGenRunnerSchemaCaps = {
+  jobs: {
+    lastHeartbeatAt: boolean;
+    runnerAttempts: boolean;
+    timeoutAt: boolean;
+    recoveredAt: boolean;
+    errorCode: boolean;
+  };
+  items: {
+    startedAt: boolean;
+    phase: boolean;
+    diagnostic: boolean;
+    templateVersionId: boolean;
+    outputChecksum: boolean;
+    templateSource: boolean;
+    platformDocumentId: boolean;
+  };
+};
+
+async function getDocGenRunnerSchemaCaps(
+  r: DbConn,
+  cache: RequestCache | undefined,
+): Promise<DocGenRunnerSchemaCaps> {
+  const [jobLastHeartbeatAt, jobRunnerAttempts, jobTimeoutAt, jobRecoveredAt, jobErrorCode] =
+    await Promise.all([
+      columnExistsCached(r, cache, {
+        schema: "public",
+        table: "document_generation_jobs",
+        column: "last_heartbeat_at",
+      }),
+      columnExistsCached(r, cache, {
+        schema: "public",
+        table: "document_generation_jobs",
+        column: "runner_attempts",
+      }),
+      columnExistsCached(r, cache, {
+        schema: "public",
+        table: "document_generation_jobs",
+        column: "timeout_at",
+      }),
+      columnExistsCached(r, cache, {
+        schema: "public",
+        table: "document_generation_jobs",
+        column: "recovered_at",
+      }),
+      columnExistsCached(r, cache, {
+        schema: "public",
+        table: "document_generation_jobs",
+        column: "error_code",
+      }),
+    ]);
+  const [
+    itemStartedAt,
+    itemPhase,
+    itemDiagnostic,
+    itemTemplateVersionId,
+    itemOutputChecksum,
+    itemTemplateSource,
+    itemPlatformDocumentId,
+  ] =
+    await Promise.all([
+      columnExistsCached(r, cache, {
+        schema: "public",
+        table: "document_generation_job_items",
+        column: "started_at",
+      }),
+      columnExistsCached(r, cache, {
+        schema: "public",
+        table: "document_generation_job_items",
+        column: "phase",
+      }),
+      columnExistsCached(r, cache, {
+        schema: "public",
+        table: "document_generation_job_items",
+        column: "diagnostic",
+      }),
+      columnExistsCached(r, cache, {
+        schema: "public",
+        table: "document_generation_job_items",
+        column: "template_version_id",
+      }),
+      columnExistsCached(r, cache, {
+        schema: "public",
+        table: "document_generation_job_items",
+        column: "output_checksum",
+      }),
+      columnExistsCached(r, cache, {
+        schema: "public",
+        table: "document_generation_job_items",
+        column: "template_source",
+      }),
+      columnExistsCached(r, cache, {
+        schema: "public",
+        table: "document_generation_job_items",
+        column: "platform_document_id",
+      }),
+    ]);
+
+  return {
+    jobs: {
+      lastHeartbeatAt: jobLastHeartbeatAt,
+      runnerAttempts: jobRunnerAttempts,
+      timeoutAt: jobTimeoutAt,
+      recoveredAt: jobRecoveredAt,
+      errorCode: jobErrorCode,
+    },
+    items: {
+      startedAt: itemStartedAt,
+      phase: itemPhase,
+      diagnostic: itemDiagnostic,
+      templateVersionId: itemTemplateVersionId,
+      outputChecksum: itemOutputChecksum,
+      templateSource: itemTemplateSource,
+      platformDocumentId: itemPlatformDocumentId,
+    },
+  };
+}
+
 async function queryRowsCached(
   r: DbConn,
   cache: RequestCache | undefined,
@@ -14328,7 +14446,10 @@ async function updateJobCounts(
 async function recoverStaleDocumentGenerationJob(
   r: DbConn,
   args: { firmId: number; jobId: string; staleMs: number },
+  caps: DocGenRunnerSchemaCaps,
 ): Promise<void> {
+  if (!caps.jobs.lastHeartbeatAt) return;
+  if (!caps.items.startedAt) return;
   const jobs = await queryRows(
     r,
     sql`
@@ -14344,43 +14465,54 @@ async function recoverStaleDocumentGenerationJob(
   if (status !== "pending" && status !== "running") return;
   if (!isHeartbeatStale(job.last_heartbeat_at, args.staleMs)) return;
 
-  await queryRows(
-    r,
-    sql`
-    UPDATE document_generation_job_items
-    SET status = 'pending',
-        phase = 'recovered',
-        diagnostic = jsonb_build_object(
-          'recoveredAt', now(),
-          'reason', 'stale_running_item',
-          'previousStatus', 'running',
-          'startedAt', started_at
-        )
-    WHERE firm_id = ${args.firmId}
-      AND job_id = ${args.jobId}::uuid
-      AND status = 'running'
-      AND started_at IS NOT NULL
-      AND started_at < now() - interval '5 minutes'
-  `,
-  );
+  {
+    const setParts: Array<ReturnType<typeof sql>> = [sql`status = 'pending'`];
+    if (caps.items.phase) setParts.push(sql`phase = 'recovered'`);
+    if (caps.items.diagnostic)
+      setParts.push(
+        sql`diagnostic = jsonb_build_object(
+              'recoveredAt', now(),
+              'reason', 'stale_running_item',
+              'previousStatus', 'running',
+              'startedAt', started_at
+            )`,
+      );
+    await queryRows(
+      r,
+      sql`
+      UPDATE document_generation_job_items
+      SET ${sql.join(setParts, sql`, `)}
+      WHERE firm_id = ${args.firmId}
+        AND job_id = ${args.jobId}::uuid
+        AND status = 'running'
+        AND started_at IS NOT NULL
+        AND started_at < now() - interval '5 minutes'
+    `,
+    );
+  }
 
-  await queryRows(
-    r,
-    sql`
-    UPDATE document_generation_jobs
-    SET status = 'pending',
-        recovered_at = now(),
-        last_heartbeat_at = now(),
-        pending_count = (
-          SELECT COUNT(*)
-          FROM document_generation_job_items
-          WHERE firm_id = ${args.firmId}
-            AND job_id = ${args.jobId}::uuid
-            AND status IN ('pending','running')
-        )
-    WHERE id = ${args.jobId}::uuid AND firm_id = ${args.firmId}
-  `,
-  );
+  {
+    const setParts: Array<ReturnType<typeof sql>> = [sql`status = 'pending'`];
+    if (caps.jobs.recoveredAt) setParts.push(sql`recovered_at = now()`);
+    if (caps.jobs.lastHeartbeatAt) setParts.push(sql`last_heartbeat_at = now()`);
+    setParts.push(
+      sql`pending_count = (
+            SELECT COUNT(*)
+            FROM document_generation_job_items
+            WHERE firm_id = ${args.firmId}
+              AND job_id = ${args.jobId}::uuid
+              AND status IN ('pending','running')
+          )`,
+    );
+    await queryRows(
+      r,
+      sql`
+      UPDATE document_generation_jobs
+      SET ${sql.join(setParts, sql`, `)}
+      WHERE id = ${args.jobId}::uuid AND firm_id = ${args.firmId}
+    `,
+    );
+  }
 
   const key = `${args.firmId}:${args.jobId}`;
   activeDocumentGenerationJobRunners.delete(key);
@@ -14389,7 +14521,7 @@ async function recoverStaleDocumentGenerationJob(
 async function startDocumentGenerationJobRunner(
   r: DbConn,
   args: { firmId: number; jobId: string },
-  opts?: { maxSteps?: number; maxMs?: number },
+  opts?: { maxSteps?: number; maxMs?: number; caps?: DocGenRunnerSchemaCaps },
 ): Promise<void> {
   const key = `${args.firmId}:${args.jobId}`;
   activeDocumentGenerationJobRunners.set(key, {
@@ -14405,26 +14537,56 @@ async function startDocumentGenerationJobRunner(
       ? Math.max(50, Math.trunc(opts.maxMs))
       : 1200;
   const started = Date.now();
+  const caps =
+    opts?.caps ??
+    ({
+      jobs: {
+        lastHeartbeatAt: true,
+        runnerAttempts: true,
+        timeoutAt: true,
+        recoveredAt: true,
+        errorCode: true,
+      },
+      items: {
+        startedAt: true,
+        phase: true,
+        diagnostic: true,
+        templateVersionId: true,
+        outputChecksum: true,
+        templateSource: true,
+        platformDocumentId: true,
+      },
+    } satisfies DocGenRunnerSchemaCaps);
   try {
     await recoverStaleDocumentGenerationJob(r, {
       firmId: args.firmId,
       jobId: args.jobId,
       staleMs: 2 * 60_000,
-    });
-    await queryRows(
-      r,
-      sql`
-      UPDATE document_generation_jobs
-      SET runner_attempts = COALESCE(runner_attempts, 0) + 1,
-          timeout_at = COALESCE(timeout_at, now() + interval '10 minutes'),
-          last_heartbeat_at = now()
-      WHERE id = ${args.jobId}::uuid AND firm_id = ${args.firmId}
-        AND status IN ('pending','running')
-    `,
-    );
+    }, caps);
+    {
+      const setParts: Array<ReturnType<typeof sql>> = [];
+      if (caps.jobs.runnerAttempts)
+        setParts.push(sql`runner_attempts = COALESCE(runner_attempts, 0) + 1`);
+      if (caps.jobs.timeoutAt)
+        setParts.push(
+          sql`timeout_at = COALESCE(timeout_at, now() + interval '10 minutes')`,
+        );
+      if (caps.jobs.lastHeartbeatAt) setParts.push(sql`last_heartbeat_at = now()`);
+      if (setParts.length > 0) {
+        await queryRows(
+          r,
+          sql`
+          UPDATE document_generation_jobs
+          SET ${sql.join(setParts, sql`, `)}
+          WHERE id = ${args.jobId}::uuid AND firm_id = ${args.firmId}
+            AND status IN ('pending','running')
+        `,
+        );
+      }
+    }
 
     for (let i = 0; i < maxSteps && Date.now() - started < maxMs; i++) {
-      await processAutomationGenerationJobStep(r, args);
+      await processAutomationGenerationJobStep(r, args, caps);
       const rows = await queryRows(
         r,
         sql`
@@ -14448,17 +14610,21 @@ async function startDocumentGenerationJobRunner(
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
     try {
+      const setParts: Array<ReturnType<typeof sql>> = [
+        sql`status = 'failed'`,
+        sql`pending_count = 0`,
+        sql`finished_at = now()`,
+        sql`error_summary = ${message.slice(0, 500)}`,
+      ];
+      if (caps.jobs.errorCode) setParts.push(sql`error_code = 'RUNNER_FAILED'`);
+      if (caps.jobs.lastHeartbeatAt) setParts.push(sql`last_heartbeat_at = now()`);
       await queryRows(
         r,
         sql`
-        UPDATE document_generation_jobs
-        SET status = 'failed',
-            pending_count = 0,
-            finished_at = now(),
-            error_code = 'RUNNER_FAILED',
-            error_summary = ${message.slice(0, 500)}
-        WHERE id = ${args.jobId}::uuid AND firm_id = ${args.firmId}
-      `,
+          UPDATE document_generation_jobs
+          SET ${sql.join(setParts, sql`, `)}
+          WHERE id = ${args.jobId}::uuid AND firm_id = ${args.firmId}
+        `,
       );
     } catch {}
   } finally {
@@ -14469,6 +14635,7 @@ async function startDocumentGenerationJobRunner(
 async function processAutomationGenerationJobStep(
   r: DbConn,
   args: { firmId: number; jobId: string },
+  caps: DocGenRunnerSchemaCaps,
 ): Promise<void> {
   await touchJobHeartbeat(r, args);
   const jobRows = await queryRows(
@@ -14492,39 +14659,46 @@ async function processAutomationGenerationJobStep(
     return;
 
   if (status !== "running") {
+    const setParts: Array<ReturnType<typeof sql>> = [
+      sql`status = 'running'`,
+      sql`started_at = COALESCE(started_at, now())`,
+    ];
+    if (caps.jobs.lastHeartbeatAt) setParts.push(sql`last_heartbeat_at = now()`);
     await queryRows(
       r,
       sql`
-      UPDATE document_generation_jobs
-      SET status = 'running',
-          started_at = COALESCE(started_at, now()),
-          last_heartbeat_at = now()
-      WHERE id = ${args.jobId}::uuid AND firm_id = ${args.firmId}
-    `,
+        UPDATE document_generation_jobs
+        SET ${sql.join(setParts, sql`, `)}
+        WHERE id = ${args.jobId}::uuid AND firm_id = ${args.firmId}
+      `,
     );
   }
 
   const claimed = await queryRows(
     r,
-    sql`
-    WITH next AS (
-      SELECT id
-      FROM document_generation_job_items
-      WHERE job_id = ${args.jobId}::uuid
-        AND firm_id = ${args.firmId}
-        AND status = 'pending'
-      ORDER BY id ASC
-      FOR UPDATE SKIP LOCKED
-      LIMIT 1
-    )
-    UPDATE document_generation_job_items i
-    SET status = 'running',
-        started_at = COALESCE(started_at, now()),
-        phase = 'generating'
-    FROM next
-    WHERE i.id = next.id
-    RETURNING i.*
-  `,
+    (() => {
+      const setParts: Array<ReturnType<typeof sql>> = [sql`status = 'running'`];
+      if (caps.items.startedAt)
+        setParts.push(sql`started_at = COALESCE(started_at, now())`);
+      if (caps.items.phase) setParts.push(sql`phase = 'generating'`);
+      return sql`
+        WITH next AS (
+          SELECT id
+          FROM document_generation_job_items
+          WHERE job_id = ${args.jobId}::uuid
+            AND firm_id = ${args.firmId}
+            AND status = 'pending'
+          ORDER BY id ASC
+          FOR UPDATE SKIP LOCKED
+          LIMIT 1
+        )
+        UPDATE document_generation_job_items i
+        SET ${sql.join(setParts, sql`, `)}
+        FROM next
+        WHERE i.id = next.id
+        RETURNING i.*
+      `;
+    })(),
   );
 
   const item = claimed[0];
@@ -14562,29 +14736,37 @@ async function processAutomationGenerationJobStep(
             : {};
         const expectedOutputFormat =
           jobConfig.outputFormat === "pdf" ? "pdf" : "docx";
-        await queryRows(
-          r,
-          sql`
-          UPDATE document_generation_job_items
-          SET status = 'failed',
-              phase = 'failed',
-              error_code = 'OUTPUT_MISSING',
-              error_message = 'Generated file missing',
-              diagnostic = jsonb_build_object(
-                'templateId', template_id,
-                'caseId', case_id,
-                'expectedOutputFormat', ${expectedOutputFormat},
-                'generatedFileName', file_name,
-                'storageTarget', 'case_documents'
-              ),
-              finished_at = now()
-          WHERE firm_id = ${args.firmId}
-            AND id IN (${sql.join(
-              missingOutputIds.map((id) => sql`${id}`),
-              sql`, `,
-            )})
-        `,
-        );
+        {
+          const setParts: Array<ReturnType<typeof sql>> = [
+            sql`status = 'failed'`,
+            sql`error_code = 'OUTPUT_MISSING'`,
+            sql`error_message = 'Generated file missing'`,
+            sql`finished_at = now()`,
+          ];
+          if (caps.items.phase) setParts.push(sql`phase = 'failed'`);
+          if (caps.items.diagnostic)
+            setParts.push(
+              sql`diagnostic = jsonb_build_object(
+                    'templateId', template_id,
+                    'caseId', case_id,
+                    'expectedOutputFormat', ${expectedOutputFormat},
+                    'generatedFileName', file_name,
+                    'storageTarget', 'case_documents'
+                  )`,
+            );
+          await queryRows(
+            r,
+            sql`
+              UPDATE document_generation_job_items
+              SET ${sql.join(setParts, sql`, `)}
+              WHERE firm_id = ${args.firmId}
+                AND id IN (${sql.join(
+                  missingOutputIds.map((id) => sql`${id}`),
+                  sql`, `,
+                )})
+            `,
+          );
+        }
         const items2 = await queryRows(
           r,
           sql`
@@ -14623,19 +14805,24 @@ async function processAutomationGenerationJobStep(
                 : null,
           })),
         });
-        await queryRows(
-          r,
-          sql`
-          UPDATE document_generation_jobs
-          SET status = 'failed',
-              failed_count = ${failedItems.length},
-              pending_count = 0,
-              finished_at = now(),
-              error_code = ${agg.errorCode},
-              error_summary = ${agg.errorSummary.slice(0, 500)}
-          WHERE id = ${args.jobId}::uuid AND firm_id = ${args.firmId}
-        `,
-        );
+        {
+          const setParts: Array<ReturnType<typeof sql>> = [
+            sql`status = 'failed'`,
+            sql`failed_count = ${failedItems.length}`,
+            sql`pending_count = 0`,
+            sql`finished_at = now()`,
+            sql`error_summary = ${agg.errorSummary.slice(0, 500)}`,
+          ];
+          if (caps.jobs.errorCode) setParts.push(sql`error_code = ${agg.errorCode}`);
+          await queryRows(
+            r,
+            sql`
+              UPDATE document_generation_jobs
+              SET ${sql.join(setParts, sql`, `)}
+              WHERE id = ${args.jobId}::uuid AND firm_id = ${args.firmId}
+            `,
+          );
+        }
         return;
       }
 
@@ -14657,17 +14844,20 @@ async function processAutomationGenerationJobStep(
     } catch (err) {
       const message =
         err instanceof Error ? err.message : "Internal Server Error";
+      const setParts: Array<ReturnType<typeof sql>> = [
+        sql`status = 'failed'`,
+        sql`finished_at = now()`,
+        sql`error_summary = ${message.slice(0, 500)}`,
+      ];
+      if (caps.jobs.lastHeartbeatAt) setParts.push(sql`last_heartbeat_at = now()`);
+      if (caps.jobs.errorCode) setParts.push(sql`error_code = 'FINALIZE_FAILED'`);
       await queryRows(
         r,
         sql`
-        UPDATE document_generation_jobs
-        SET status = 'failed',
-            finished_at = now(),
-            last_heartbeat_at = now(),
-            error_code = 'FINALIZE_FAILED',
-            error_summary = ${message.slice(0, 500)}
-        WHERE id = ${args.jobId}::uuid AND firm_id = ${args.firmId}
-      `,
+          UPDATE document_generation_jobs
+          SET ${sql.join(setParts, sql`, `)}
+          WHERE id = ${args.jobId}::uuid AND firm_id = ${args.firmId}
+        `,
       );
     }
     return;
@@ -14827,20 +15017,25 @@ async function processAutomationGenerationJobStep(
           },
         );
       }
-      await queryRows(
-        r,
-        sql`
-        UPDATE document_generation_job_items
-        SET status = 'success',
-            phase = 'success',
-            object_path = ${objectPath || null},
-            file_name = ${fileName || null},
-            mime_type = ${mimeType || null},
-            file_size = ${fileSize as any},
-            finished_at = now()
-        WHERE id = ${Number((item as any).id)} AND firm_id = ${args.firmId}
-      `,
-      );
+      {
+        const setParts: Array<ReturnType<typeof sql>> = [
+          sql`status = 'success'`,
+          sql`object_path = ${objectPath || null}`,
+          sql`file_name = ${fileName || null}`,
+          sql`mime_type = ${mimeType || null}`,
+          sql`file_size = ${fileSize as any}`,
+          sql`finished_at = now()`,
+        ];
+        if (caps.items.phase) setParts.push(sql`phase = 'success'`);
+        await queryRows(
+          r,
+          sql`
+            UPDATE document_generation_job_items
+            SET ${sql.join(setParts, sql`, `)}
+            WHERE id = ${Number((item as any).id)} AND firm_id = ${args.firmId}
+          `,
+        );
+      }
       await updateJobCounts(r, args);
       await touchJobHeartbeat(r, args);
       return;
@@ -14878,14 +15073,16 @@ async function processAutomationGenerationJobStep(
       typeof version?.filename === "string" ? String(version.filename) : "";
     const expectedOutputFormat = outputFormat === "pdf" ? "pdf" : "docx";
 
-    await queryRows(
-      r,
-      sql`
-      UPDATE document_generation_job_items
-      SET template_version_id = ${templateVersionId}
-      WHERE id = ${Number((item as any).id)} AND firm_id = ${args.firmId}
-    `,
-    );
+    if (caps.items.templateVersionId) {
+      await queryRows(
+        r,
+        sql`
+          UPDATE document_generation_job_items
+          SET template_version_id = ${templateVersionId}
+          WHERE id = ${Number((item as any).id)} AND firm_id = ${args.firmId}
+        `,
+      );
+    }
 
     const templateRows = await queryRows(
       r,
@@ -15064,19 +15261,22 @@ async function processAutomationGenerationJobStep(
     }
 
     try {
+      const setParts: Array<ReturnType<typeof sql>> = [
+        sql`status = 'success'`,
+        sql`object_path = ${objectPath || null}`,
+        sql`file_name = ${fileName || null}`,
+        sql`mime_type = ${mimeType || null}`,
+        sql`file_size = ${fileSize as any}`,
+        sql`finished_at = now()`,
+      ];
+      if (caps.items.phase) setParts.push(sql`phase = 'success'`);
       await queryRows(
         r,
         sql`
-        UPDATE document_generation_job_items
-        SET status = 'success',
-            phase = 'success',
-            object_path = ${objectPath || null},
-            file_name = ${fileName || null},
-            mime_type = ${mimeType || null},
-            file_size = ${fileSize as any},
-            finished_at = now()
-        WHERE id = ${Number((item as any).id)} AND firm_id = ${args.firmId}
-      `,
+          UPDATE document_generation_job_items
+          SET ${sql.join(setParts, sql`, `)}
+          WHERE id = ${Number((item as any).id)} AND firm_id = ${args.firmId}
+        `,
       );
     } catch (e) {
       throw new DocumentGenerationError(
@@ -15204,19 +15404,25 @@ async function processAutomationGenerationJobStep(
         : {}),
     };
 
-    await queryRows(
-      r,
-      sql`
-      UPDATE document_generation_job_items
-      SET status = 'failed',
-          phase = 'failed',
-          error_code = ${mapped.code},
-          error_message = ${mapped.message},
-          diagnostic = ${diagnostic as unknown},
-          finished_at = now()
-      WHERE id = ${Number((item as any).id)} AND firm_id = ${args.firmId}
-    `,
-    );
+    {
+      const setParts: Array<ReturnType<typeof sql>> = [
+        sql`status = 'failed'`,
+        sql`error_code = ${mapped.code}`,
+        sql`error_message = ${mapped.message}`,
+        sql`finished_at = now()`,
+      ];
+      if (caps.items.phase) setParts.push(sql`phase = 'failed'`);
+      if (caps.items.diagnostic)
+        setParts.push(sql`diagnostic = ${diagnostic as unknown}`);
+      await queryRows(
+        r,
+        sql`
+          UPDATE document_generation_job_items
+          SET ${sql.join(setParts, sql`, `)}
+          WHERE id = ${Number((item as any).id)} AND firm_id = ${args.firmId}
+        `,
+      );
+    }
   }
 
   const counts = await queryRows(
@@ -17155,15 +17361,17 @@ router.post(
     try {
       const MAX_JOB_STEP_MS = 6000;
       const MAX_ITEMS_PER_CALL = 1;
+      const cache = createRequestCache();
+      const caps = await getDocGenRunnerSchemaCaps(r, cache);
       await recoverStaleDocumentGenerationJob(r, {
         firmId: req.firmId!,
         jobId,
         staleMs: 3 * 60_000,
-      });
+      }, caps);
       await startDocumentGenerationJobRunner(
         r,
         { firmId: req.firmId!, jobId },
-        { maxSteps: MAX_ITEMS_PER_CALL, maxMs: MAX_JOB_STEP_MS },
+        { maxSteps: MAX_ITEMS_PER_CALL, maxMs: MAX_JOB_STEP_MS, caps },
       );
 
       const jobs = await queryRows(
