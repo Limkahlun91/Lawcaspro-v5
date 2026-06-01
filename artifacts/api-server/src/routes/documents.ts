@@ -14407,7 +14407,7 @@ async function touchJobHeartbeat(
       sql`
       UPDATE document_generation_jobs
       SET last_heartbeat_at = now()
-      WHERE id = ${args.jobId}::uuid AND firm_id = ${args.firmId}
+      WHERE id = ${args.jobId} AND firm_id = ${args.firmId}
     `,
     );
   } catch {}
@@ -14426,7 +14426,7 @@ async function updateJobCounts(
       COUNT(*) FILTER (WHERE status IN ('pending','running')) AS pending_count,
       COUNT(*) AS total_count
     FROM document_generation_job_items
-    WHERE job_id = ${args.jobId}::uuid AND firm_id = ${args.firmId}
+    WHERE job_id = ${args.jobId} AND firm_id = ${args.firmId}
   `,
   );
   const c = counts[0] as any;
@@ -14438,7 +14438,7 @@ async function updateJobCounts(
         success_count = ${Number(c?.success_count ?? 0)},
         failed_count = ${Number(c?.failed_count ?? 0)},
         pending_count = ${Number(c?.pending_count ?? 0)}
-    WHERE id = ${args.jobId}::uuid AND firm_id = ${args.firmId}
+    WHERE id = ${args.jobId} AND firm_id = ${args.firmId}
   `,
   );
 }
@@ -14455,7 +14455,7 @@ async function recoverStaleDocumentGenerationJob(
     sql`
     SELECT status, last_heartbeat_at
     FROM document_generation_jobs
-    WHERE id = ${args.jobId}::uuid AND firm_id = ${args.firmId}
+    WHERE id = ${args.jobId} AND firm_id = ${args.firmId}
     LIMIT 1
   `,
   );
@@ -14483,7 +14483,7 @@ async function recoverStaleDocumentGenerationJob(
       UPDATE document_generation_job_items
       SET ${sql.join(setParts, sql`, `)}
       WHERE firm_id = ${args.firmId}
-        AND job_id = ${args.jobId}::uuid
+        AND job_id = ${args.jobId}
         AND status = 'running'
         AND started_at IS NOT NULL
         AND started_at < now() - interval '5 minutes'
@@ -14500,7 +14500,7 @@ async function recoverStaleDocumentGenerationJob(
             SELECT COUNT(*)
             FROM document_generation_job_items
             WHERE firm_id = ${args.firmId}
-              AND job_id = ${args.jobId}::uuid
+              AND job_id = ${args.jobId}
               AND status IN ('pending','running')
           )`,
     );
@@ -14509,7 +14509,7 @@ async function recoverStaleDocumentGenerationJob(
       sql`
       UPDATE document_generation_jobs
       SET ${sql.join(setParts, sql`, `)}
-      WHERE id = ${args.jobId}::uuid AND firm_id = ${args.firmId}
+      WHERE id = ${args.jobId} AND firm_id = ${args.firmId}
     `,
     );
   }
@@ -14578,7 +14578,7 @@ async function startDocumentGenerationJobRunner(
           sql`
           UPDATE document_generation_jobs
           SET ${sql.join(setParts, sql`, `)}
-          WHERE id = ${args.jobId}::uuid AND firm_id = ${args.firmId}
+          WHERE id = ${args.jobId} AND firm_id = ${args.firmId}
             AND status IN ('pending','running')
         `,
         );
@@ -14592,7 +14592,7 @@ async function startDocumentGenerationJobRunner(
         sql`
         SELECT status, pending_count
         FROM document_generation_jobs
-        WHERE id = ${args.jobId}::uuid AND firm_id = ${args.firmId}
+        WHERE id = ${args.jobId} AND firm_id = ${args.firmId}
         LIMIT 1
       `,
       );
@@ -14623,7 +14623,7 @@ async function startDocumentGenerationJobRunner(
         sql`
           UPDATE document_generation_jobs
           SET ${sql.join(setParts, sql`, `)}
-          WHERE id = ${args.jobId}::uuid AND firm_id = ${args.firmId}
+          WHERE id = ${args.jobId} AND firm_id = ${args.firmId}
         `,
       );
     } catch {}
@@ -14643,7 +14643,7 @@ async function processAutomationGenerationJobStep(
     sql`
     SELECT *
     FROM document_generation_jobs
-    WHERE id = ${args.jobId}::uuid AND firm_id = ${args.firmId}
+    WHERE id = ${args.jobId} AND firm_id = ${args.firmId}
     LIMIT 1
   `,
   );
@@ -14669,7 +14669,7 @@ async function processAutomationGenerationJobStep(
       sql`
         UPDATE document_generation_jobs
         SET ${sql.join(setParts, sql`, `)}
-        WHERE id = ${args.jobId}::uuid AND firm_id = ${args.firmId}
+        WHERE id = ${args.jobId} AND firm_id = ${args.firmId}
       `,
     );
   }
@@ -14685,7 +14685,7 @@ async function processAutomationGenerationJobStep(
         WITH next AS (
           SELECT id
           FROM document_generation_job_items
-          WHERE job_id = ${args.jobId}::uuid
+          WHERE job_id = ${args.jobId}
             AND firm_id = ${args.firmId}
             AND status = 'pending'
           ORDER BY id ASC
@@ -14708,7 +14708,7 @@ async function processAutomationGenerationJobStep(
       sql`
       SELECT *
       FROM document_generation_job_items
-      WHERE job_id = ${args.jobId}::uuid AND firm_id = ${args.firmId}
+      WHERE job_id = ${args.jobId} AND firm_id = ${args.firmId}
       ORDER BY id ASC
     `,
     );
@@ -14772,7 +14772,7 @@ async function processAutomationGenerationJobStep(
           sql`
           SELECT *
           FROM document_generation_job_items
-          WHERE job_id = ${args.jobId}::uuid AND firm_id = ${args.firmId}
+          WHERE job_id = ${args.jobId} AND firm_id = ${args.firmId}
           ORDER BY id ASC
         `,
         );
@@ -14819,7 +14819,7 @@ async function processAutomationGenerationJobStep(
             sql`
               UPDATE document_generation_jobs
               SET ${sql.join(setParts, sql`, `)}
-              WHERE id = ${args.jobId}::uuid AND firm_id = ${args.firmId}
+              WHERE id = ${args.jobId} AND firm_id = ${args.firmId}
             `,
           );
         }
@@ -14838,7 +14838,7 @@ async function processAutomationGenerationJobStep(
             failed_count = ${failedItems.length},
             pending_count = 0,
             finished_at = now()
-        WHERE id = ${args.jobId}::uuid AND firm_id = ${args.firmId}
+        WHERE id = ${args.jobId} AND firm_id = ${args.firmId}
       `,
       );
     } catch (err) {
@@ -14856,7 +14856,7 @@ async function processAutomationGenerationJobStep(
         sql`
           UPDATE document_generation_jobs
           SET ${sql.join(setParts, sql`, `)}
-          WHERE id = ${args.jobId}::uuid AND firm_id = ${args.firmId}
+          WHERE id = ${args.jobId} AND firm_id = ${args.firmId}
         `,
       );
     }
@@ -15434,7 +15434,7 @@ async function processAutomationGenerationJobStep(
       COUNT(*) FILTER (WHERE status IN ('pending','running')) AS pending_count,
       COUNT(*) AS total_count
     FROM document_generation_job_items
-    WHERE job_id = ${args.jobId}::uuid AND firm_id = ${args.firmId}
+    WHERE job_id = ${args.jobId} AND firm_id = ${args.firmId}
   `,
   );
   const c = counts[0] as any;
@@ -15446,7 +15446,7 @@ async function processAutomationGenerationJobStep(
         success_count = ${Number(c?.success_count ?? 0)},
         failed_count = ${Number(c?.failed_count ?? 0)},
         pending_count = ${Number(c?.pending_count ?? 0)}
-    WHERE id = ${args.jobId}::uuid AND firm_id = ${args.firmId}
+    WHERE id = ${args.jobId} AND firm_id = ${args.firmId}
   `,
   );
 }
@@ -17224,7 +17224,7 @@ router.get(
     try {
       const jobs = await queryRows(
         r,
-        sql`SELECT * FROM document_generation_jobs WHERE id = ${jobId}::uuid AND firm_id = ${req.firmId!}`,
+        sql`SELECT * FROM document_generation_jobs WHERE id = ${jobId} AND firm_id = ${req.firmId!}`,
       );
       const job = jobs[0];
       if (!job) {
@@ -17250,7 +17250,7 @@ router.get(
         ON t.firm_id = i.firm_id AND t.id = i.template_id
       LEFT JOIN platform_documents pd
         ON pd.id = i.platform_document_id AND (pd.firm_id IS NULL OR pd.firm_id = i.firm_id)
-      WHERE i.job_id = ${jobId}::uuid AND i.firm_id = ${req.firmId!}
+      WHERE i.job_id = ${jobId} AND i.firm_id = ${req.firmId!}
       ORDER BY i.id ASC
     `,
       );
@@ -17278,16 +17278,24 @@ router.get(
         error: {
           code: "JOB_QUERY_FAILED",
           message: "Failed to load generation job",
+          sqlState: info.sqlstate ?? null,
           details: null,
           retryable: true,
+          detail:
+            process.env.API_ERROR_DETAILS === "1"
+              ? {
+                  sqlstate: info.sqlstate ?? null,
+                  table: info.table ?? null,
+                  column: info.column ?? null,
+                  constraint: info.constraint ?? null,
+                  message: info.message ?? null,
+                }
+              : undefined,
         },
         meta: {
           request_id: requestId ?? null,
           timestamp: new Date().toISOString(),
           duration_ms: Date.now() - startedAt,
-          ...(process.env.API_ERROR_DETAILS === "1"
-            ? { sqlstate: info.sqlstate ?? null }
-            : {}),
         },
       });
     }
@@ -17376,7 +17384,7 @@ router.post(
 
       const jobs = await queryRows(
         r,
-        sql`SELECT * FROM document_generation_jobs WHERE id = ${jobId}::uuid AND firm_id = ${req.firmId!}`,
+        sql`SELECT * FROM document_generation_jobs WHERE id = ${jobId} AND firm_id = ${req.firmId!}`,
       );
       const job = jobs[0];
       if (!job) {
@@ -17408,7 +17416,7 @@ router.post(
         ON t.firm_id = i.firm_id AND t.id = i.template_id
       LEFT JOIN platform_documents pd
         ON pd.id = i.platform_document_id AND (pd.firm_id IS NULL OR pd.firm_id = i.firm_id)
-      WHERE i.job_id = ${jobId}::uuid AND i.firm_id = ${req.firmId!}
+      WHERE i.job_id = ${jobId} AND i.firm_id = ${req.firmId!}
       ORDER BY i.id ASC
     `,
       );
@@ -17472,18 +17480,29 @@ router.post(
       res.status(500).json({
         ok: false,
         error: {
-          code: "JOB_RUN_NEXT_FAILED",
-          message: "Failed to run next generation job step",
-          details: null,
-          retryable: true,
+          code: "RUN_NEXT_FAILED",
+          message:
+            info.sqlstate && (info.sqlstate === "42703" || info.sqlstate === "42P01")
+              ? "Database schema is outdated. Please apply latest migrations."
+              : "Failed to run next generation job step",
+          sqlState: info.sqlstate ?? null,
+          detail:
+            process.env.API_ERROR_DETAILS === "1"
+              ? {
+                  sqlstate: info.sqlstate ?? null,
+                  table: info.table ?? null,
+                  column: info.column ?? null,
+                  constraint: info.constraint ?? null,
+                  message: info.message ?? null,
+                }
+              : undefined,
         },
         meta: {
           request_id: requestId ?? null,
+          jobId,
+          firmId: req.firmId ?? null,
           timestamp: new Date().toISOString(),
           duration_ms: Date.now() - startedAt,
-          ...(process.env.API_ERROR_DETAILS === "1"
-            ? { sqlstate: info.sqlstate ?? null }
-            : {}),
         },
       });
     }
@@ -17528,7 +17547,7 @@ router.get(
 
     const jobs = await queryRows(
       r,
-      sql`SELECT * FROM document_generation_jobs WHERE id = ${jobId}::uuid AND firm_id = ${req.firmId!}`,
+      sql`SELECT * FROM document_generation_jobs WHERE id = ${jobId} AND firm_id = ${req.firmId!}`,
     );
     const job = jobs[0] as any;
     if (!job) {
@@ -17628,7 +17647,7 @@ router.get(
     }
     const jobs = await queryRows(
       r,
-      sql`SELECT * FROM document_generation_jobs WHERE id = ${jobId}::uuid AND firm_id = ${req.firmId!}`,
+      sql`SELECT * FROM document_generation_jobs WHERE id = ${jobId} AND firm_id = ${req.firmId!}`,
     );
     const job = jobs[0];
     if (!job) {
@@ -17692,7 +17711,7 @@ router.get(
         ON t.firm_id = i.firm_id AND t.id = i.template_id
       LEFT JOIN platform_documents pd
         ON pd.id = i.platform_document_id AND (pd.firm_id IS NULL OR pd.firm_id = i.firm_id)
-      WHERE i.job_id = ${jobId}::uuid AND i.firm_id = ${req.firmId!}
+      WHERE i.job_id = ${jobId} AND i.firm_id = ${req.firmId!}
       ORDER BY i.id ASC
     `,
       );
