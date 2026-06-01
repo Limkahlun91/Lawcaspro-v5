@@ -1,12 +1,13 @@
 export type DbErrorInfo = {
-  sqlstate: string | null;
-  table: string | null;
-  column: string | null;
-  constraint: string | null;
-  detail: string | null;
-  hint: string | null;
-  position: string | null;
-  message: string | null;
+  sqlstate?: string | null;
+  sqlState?: string | null;
+  table?: string | null;
+  column?: string | null;
+  constraint?: string | null;
+  detail?: string | null;
+  hint?: string | null;
+  position?: string | null;
+  message?: string | null;
 };
 
 function asRecord(v: unknown): Record<string, unknown> | null {
@@ -62,6 +63,7 @@ export function extractDbErrorInfo(err: unknown): DbErrorInfo {
   const parsed = message ? parseMessageForRelation(message) : { table: null, column: null };
   return {
     sqlstate,
+    sqlState: sqlstate,
     table: table ?? parsed.table,
     column: column ?? parsed.column,
     constraint,

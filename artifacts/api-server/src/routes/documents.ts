@@ -15989,11 +15989,13 @@ router.post(
         const p = err.payload as any;
         return {
           sqlstate: typeof p.sqlstate === "string" ? p.sqlstate : null,
+          sqlState: typeof p.sqlstate === "string" ? p.sqlstate : null,
           table: typeof p.table === "string" ? p.table : null,
           column: typeof p.column === "string" ? p.column : null,
           constraint: typeof p.constraint === "string" ? p.constraint : null,
           detail: typeof p.detail === "string" ? p.detail : null,
           hint: typeof p.hint === "string" ? p.hint : null,
+          position: typeof p.position === "string" ? p.position : null,
           message:
             typeof p.message === "string" ? p.message : (err.message ?? null),
         };
@@ -17354,6 +17356,8 @@ router.get(
     }
 
     try {
+      const cache = createRequestCache();
+      const caps = await getDocGenRunnerSchemaCaps(r, cache);
       const jobs = await queryRows(
         r,
         sql`SELECT * FROM document_generation_jobs WHERE id = ${jobId} AND firm_id = ${req.firmId!}`,
