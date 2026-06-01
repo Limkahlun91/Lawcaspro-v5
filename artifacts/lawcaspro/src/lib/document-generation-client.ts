@@ -124,27 +124,52 @@ export async function validateGenerationJob(payload: Omit<CreateGenerationJobPay
   });
 }
 
-export async function getGenerationJob(jobId: string): Promise<NormalizedGenerationJob> {
-  const raw = await apiFetchJson<unknown>(`/documents/jobs/${jobId}`, { timeoutMs: GENERATION_TIMEOUT_MS });
+export async function getGenerationJob(
+  jobId: string,
+  opts?: { signal?: AbortSignal },
+): Promise<NormalizedGenerationJob> {
+  const raw = await apiFetchJson<unknown>(`/documents/jobs/${jobId}`, {
+    timeoutMs: GENERATION_TIMEOUT_MS,
+    signal: opts?.signal,
+  });
   return normalizeGenerationJob(raw);
 }
 
-export async function runNextGenerationJob(jobId: string): Promise<NormalizedGenerationJob> {
-  const raw = await apiFetchJson<unknown>(`/documents/jobs/${jobId}/run-next`, { method: "POST", timeoutMs: GENERATION_TIMEOUT_MS });
+export async function runNextGenerationJob(
+  jobId: string,
+  opts?: { signal?: AbortSignal },
+): Promise<NormalizedGenerationJob> {
+  const raw = await apiFetchJson<unknown>(`/documents/jobs/${jobId}/run-next`, {
+    method: "POST",
+    timeoutMs: GENERATION_TIMEOUT_MS,
+    signal: opts?.signal,
+  });
   return normalizeGenerationJob(raw);
 }
 
-export async function getGenerationJobStatus(jobId: string): Promise<NormalizedGenerationJob> {
+export async function getGenerationJobStatus(
+  jobId: string,
+  opts?: { signal?: AbortSignal },
+): Promise<NormalizedGenerationJob> {
   try {
-    return await getGenerationJob(jobId);
+    return await getGenerationJob(jobId, opts);
   } catch {
-    const raw = await apiFetchJson<unknown>(`/documents/status/${jobId}`, { timeoutMs: GENERATION_TIMEOUT_MS });
+    const raw = await apiFetchJson<unknown>(`/documents/status/${jobId}`, {
+      timeoutMs: GENERATION_TIMEOUT_MS,
+      signal: opts?.signal,
+    });
     return normalizeGenerationJob(raw);
   }
 }
 
-export async function downloadGenerationJob(jobId: string): Promise<Response> {
-  return await apiRequest(`/documents/jobs/${jobId}/download`, { timeoutMs: 60000 });
+export async function downloadGenerationJob(
+  jobId: string,
+  opts?: { signal?: AbortSignal },
+): Promise<Response> {
+  return await apiRequest(`/documents/jobs/${jobId}/download`, {
+    timeoutMs: 60000,
+    signal: opts?.signal,
+  });
 }
 
 export function normalizeGenerationJobItem(raw: unknown): NormalizedGenerationJobItem {

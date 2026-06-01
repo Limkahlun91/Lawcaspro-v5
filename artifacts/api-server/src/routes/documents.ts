@@ -16967,8 +16967,46 @@ router.get(
   requireFirmUser,
   requirePermission("documents", "read"),
   async (req: AuthRequest, res): Promise<void> => {
+    const startedAt = Date.now();
     const r = getRlsDb(req, res);
     if (!r) return;
+    const requestId =
+      one(req.headers["x-request-id"] as any) ||
+      one(req.headers["x-vercel-id"] as any) ||
+      undefined;
+    // #region debug-point BE:get-job-start
+    (() => {
+      import("node:fs")
+        .then((fs) => {
+          const p = ".dbg/doc-automation-generate-job.env";
+          let u = "http://127.0.0.1:7777/event";
+          let s = "doc-automation-generate-job";
+          try {
+            const e = fs.readFileSync(p, "utf8");
+            u = e.match(/DEBUG_SERVER_URL=(.+)/)?.[1] || u;
+            s = e.match(/DEBUG_SESSION_ID=(.+)/)?.[1] || s;
+          } catch {}
+          fetch(u, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              sessionId: s,
+              runId: `be-${Date.now()}`,
+              hypothesisId: "H2",
+              location: "documents.ts:/documents/jobs/:jobId",
+              msg: "get-job:start",
+              ts: Date.now(),
+              data: {
+                requestId,
+                firmId: req.firmId ?? null,
+                jobId: one((req.params as any).jobId) ?? "",
+              },
+            }),
+          }).catch(() => {});
+        })
+        .catch(() => {});
+    })();
+    // #endregion
     const jobId = one((req.params as any).jobId) ?? "";
     if (!/^[0-9a-fA-F-]{36}$/.test(jobId)) {
       res
@@ -16977,40 +17015,76 @@ router.get(
       return;
     }
 
-    const jobs = await queryRows(
-      r,
-      sql`SELECT * FROM document_generation_jobs WHERE id = ${jobId}::uuid AND firm_id = ${req.firmId!}`,
-    );
-    const job = jobs[0];
-    if (!job) {
-      res
-        .status(404)
-        .json({ ok: false, code: "JOB_NOT_FOUND", message: "Job not found" });
-      return;
+    try {
+      const jobs = await queryRows(
+        r,
+        sql`SELECT * FROM document_generation_jobs WHERE id = ${jobId}::uuid AND firm_id = ${req.firmId!}`,
+      );
+      const job = jobs[0];
+      if (!job) {
+        res.status(404).json({
+          ok: false,
+          error: { code: "JOB_NOT_FOUND", message: "Job not found", details: null, retryable: false },
+          meta: {
+            request_id: requestId ?? null,
+            timestamp: new Date().toISOString(),
+            duration_ms: Date.now() - startedAt,
+          },
+        });
+        return;
+      }
+      const items = await queryRows(
+        r,
+        sql`
+      SELECT
+        i.*,
+        COALESCE(t.name, pd.name) AS template_name
+      FROM document_generation_job_items i
+      LEFT JOIN document_templates t
+        ON t.firm_id = i.firm_id AND t.id = i.template_id
+      LEFT JOIN platform_documents pd
+        ON pd.id = i.platform_document_id AND (pd.firm_id IS NULL OR pd.firm_id = i.firm_id)
+      WHERE i.job_id = ${jobId}::uuid AND i.firm_id = ${req.firmId!}
+      ORDER BY i.id ASC
+    `,
+      );
+      const status = String((job as any).status ?? "");
+      const jobPayload: Record<string, unknown> = {
+        ...(job as any),
+        ...(status === "completed" || status === "completed_with_errors"
+          ? { downloadUrl: `/documents/jobs/${jobId}/download` }
+          : {}),
+      };
+      res.json({
+        ok: true,
+        job: jobPayload,
+        items,
+        meta: {
+          request_id: requestId ?? null,
+          timestamp: new Date().toISOString(),
+          duration_ms: Date.now() - startedAt,
+        },
+      });
+    } catch (err) {
+      const info = extractDbErrorInfo(err);
+      res.status(500).json({
+        ok: false,
+        error: {
+          code: "JOB_QUERY_FAILED",
+          message: "Failed to load generation job",
+          details: null,
+          retryable: true,
+        },
+        meta: {
+          request_id: requestId ?? null,
+          timestamp: new Date().toISOString(),
+          duration_ms: Date.now() - startedAt,
+          ...(process.env.API_ERROR_DETAILS === "1"
+            ? { sqlstate: info.sqlstate ?? null }
+            : {}),
+        },
+      });
     }
-    const items = await queryRows(
-      r,
-      sql`
-    SELECT
-      i.*,
-      COALESCE(t.name, pd.name) AS template_name
-    FROM document_generation_job_items i
-    LEFT JOIN document_templates t
-      ON t.firm_id = i.firm_id AND t.id = i.template_id
-    LEFT JOIN platform_documents pd
-      ON pd.id = i.platform_document_id AND (pd.firm_id IS NULL OR pd.firm_id = i.firm_id)
-    WHERE i.job_id = ${jobId}::uuid AND i.firm_id = ${req.firmId!}
-    ORDER BY i.id ASC
-  `,
-    );
-    const status = String((job as any).status ?? "");
-    const jobPayload: Record<string, unknown> = {
-      ...(job as any),
-      ...(status === "completed" || status === "completed_with_errors"
-        ? { downloadUrl: `/documents/jobs/${jobId}/download` }
-        : {}),
-    };
-    res.json({ ok: true, job: jobPayload, items });
   },
 );
 
@@ -17028,6 +17102,39 @@ router.post(
       one(req.headers["x-vercel-id"] as any) ||
       undefined;
     const jobId = one((req.params as any).jobId) ?? "";
+    // #region debug-point BE:run-next-start
+    (() => {
+      import("node:fs")
+        .then((fs) => {
+          const p = ".dbg/doc-automation-generate-job.env";
+          let u = "http://127.0.0.1:7777/event";
+          let s = "doc-automation-generate-job";
+          try {
+            const e = fs.readFileSync(p, "utf8");
+            u = e.match(/DEBUG_SERVER_URL=(.+)/)?.[1] || u;
+            s = e.match(/DEBUG_SESSION_ID=(.+)/)?.[1] || s;
+          } catch {}
+          fetch(u, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              sessionId: s,
+              runId: `be-${Date.now()}`,
+              hypothesisId: "H1",
+              location: "documents.ts:/documents/jobs/:jobId/run-next",
+              msg: "run-next:start",
+              ts: Date.now(),
+              data: {
+                requestId,
+                firmId: req.firmId ?? null,
+                jobId,
+              },
+            }),
+          }).catch(() => {});
+        })
+        .catch(() => {});
+    })();
+    // #endregion
     if (!/^[0-9a-fA-F-]{36}$/.test(jobId)) {
       res.status(400).json({
         ok: false,
@@ -17115,13 +17222,50 @@ router.post(
         },
       });
     } catch (err) {
-      const message =
-        err instanceof Error ? err.message : "Internal Server Error";
+      const info = extractDbErrorInfo(err);
+      // #region debug-point BE:run-next-failed
+      (() => {
+        import("node:fs")
+          .then((fs) => {
+            const p = ".dbg/doc-automation-generate-job.env";
+            let u = "http://127.0.0.1:7777/event";
+            let s = "doc-automation-generate-job";
+            try {
+              const e = fs.readFileSync(p, "utf8");
+              u = e.match(/DEBUG_SERVER_URL=(.+)/)?.[1] || u;
+              s = e.match(/DEBUG_SESSION_ID=(.+)/)?.[1] || s;
+            } catch {}
+            fetch(u, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                sessionId: s,
+                runId: `be-${Date.now()}`,
+                hypothesisId: "H2",
+                location: "documents.ts:/documents/jobs/:jobId/run-next",
+                msg: "run-next:failed",
+                ts: Date.now(),
+                data: {
+                  requestId,
+                  firmId: req.firmId ?? null,
+                  jobId,
+                  sqlstate: info.sqlstate,
+                  table: info.table,
+                  column: info.column,
+                  constraint: info.constraint,
+                  message: info.message,
+                },
+              }),
+            }).catch(() => {});
+          })
+          .catch(() => {});
+      })();
+      // #endregion
       res.status(500).json({
         ok: false,
         error: {
           code: "JOB_RUN_NEXT_FAILED",
-          message,
+          message: "Failed to run next generation job step",
           details: null,
           retryable: true,
         },
@@ -17129,6 +17273,9 @@ router.post(
           request_id: requestId ?? null,
           timestamp: new Date().toISOString(),
           duration_ms: Date.now() - startedAt,
+          ...(process.env.API_ERROR_DETAILS === "1"
+            ? { sqlstate: info.sqlstate ?? null }
+            : {}),
         },
       });
     }

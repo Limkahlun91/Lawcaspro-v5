@@ -112,6 +112,12 @@ export default function DocumentAutomationHub() {
   const [job, setJob] = useState<NormalizedGenerationJob | null>(null);
   const [jobError, setJobError] = useState<string | null>(null);
   const pollTimerRef = useRef<ReturnType<typeof window.setInterval> | null>(null);
+  const pollInFlightRef = useRef(0);
+  const pollConsecutiveErrorRef = useRef(0);
+  const pollAbortRef = useRef<AbortController | null>(null);
+  const debugRunIdRef = useRef<string>(
+    `fe-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+  );
   const [smartMessage, setSmartMessage] = useState<string | null>(null);
   const [smartTemplateIdSet, setSmartTemplateIdSet] = useState<Set<number>>(() => new Set());
   const [smartFolderIdSet, setSmartFolderIdSet] = useState<Set<number>>(() => new Set());
@@ -121,9 +127,38 @@ export default function DocumentAutomationHub() {
   const [bundleTemplateIdSet, setBundleTemplateIdSet] = useState<Set<number>>(() => new Set());
   const [bundleFolderIdSet, setBundleFolderIdSet] = useState<Set<number>>(() => new Set());
 
+  // #region debug-point FE:emit
+  const emitDbg = (args: {
+    hypothesisId: string;
+    msg: string;
+    data?: Record<string, unknown>;
+  }) => {
+    try {
+      if (!import.meta.env.DEV) return;
+      if (typeof window === "undefined") return;
+      const host = window.location.hostname;
+      if (host !== "localhost" && host !== "127.0.0.1") return;
+      fetch("http://127.0.0.1:7777/event", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          sessionId: "doc-automation-generate-job",
+          runId: debugRunIdRef.current,
+          hypothesisId: args.hypothesisId,
+          location: "DocumentAutomationHub",
+          msg: args.msg,
+          ts: Date.now(),
+          data: args.data ?? {},
+        }),
+      }).catch(() => {});
+    } catch {}
+  };
+  // #endregion
+
   useEffect(() => {
     return () => {
       if (pollTimerRef.current) window.clearInterval(pollTimerRef.current);
+      pollAbortRef.current?.abort();
     };
   }, []);
 
@@ -528,11 +563,20 @@ export default function DocumentAutomationHub() {
     setJob(null);
     setJobError(null);
     if (pollTimerRef.current) window.clearInterval(pollTimerRef.current);
+    pollAbortRef.current?.abort();
     try {
       const templates = [
         ...selectedTemplateIds.map((id) => ({ source: "firm" as const, id })),
         ...selectedMasterDocIds.map((id) => ({ source: "master" as const, id })),
       ];
+      emitDbg({
+        hypothesisId: "H1",
+        msg: "runGenerate:start",
+        data: {
+          selectedCaseIds,
+          templates,
+        },
+      });
       const created = await createGenerationJob({
         caseIds: selectedCaseIds,
         templates,
@@ -540,46 +584,167 @@ export default function DocumentAutomationHub() {
       });
       const jobId = created.jobId;
       if (!jobId) throw new Error("jobId is missing");
+      emitDbg({ hypothesisId: "H1", msg: "runGenerate:job-created", data: { jobId } });
+
+      const formatPollError = (err: unknown): string => {
+        if (err instanceof Error) return err.message;
+        const r = asRecord(err);
+        const errObj = r ? (asRecord(r.error) ?? r) : null;
+        const code = errObj ? safeText((errObj as any).code) : "";
+        const msg = errObj ? safeText((errObj as any).message) : "";
+        if (code && msg) return `${code}: ${msg}`;
+        if (msg) return msg;
+        const txt = String(err ?? "");
+        return txt && txt !== "[object Object]" ? txt : "Request failed";
+      };
+
+      let stopped = false;
+      const stopPolling = () => {
+        stopped = true;
+        if (pollTimerRef.current) window.clearInterval(pollTimerRef.current);
+        pollTimerRef.current = null;
+        pollAbortRef.current?.abort();
+      };
 
       const tick = async () => {
-        const next = await runNextGenerationJob(jobId);
-        setJob(next);
-        const st = String(next.status ?? "");
-        if (st === "completed" || st === "completed_with_errors" || st === "completed-with-errors") {
-          if (pollTimerRef.current) window.clearInterval(pollTimerRef.current);
-          const resp = await downloadGenerationJob(jobId);
-          const contentType = resp.headers.get("Content-Type");
-          if (contentType && (contentType.includes("application/json") || contentType.includes("text/"))) {
-            const text = await resp.text().catch(() => "");
-            throw new Error(text || "Failed to download generated documents");
-          }
-          const blob = await resp.blob();
-          const raw =
-            parseFilenameFromDisposition(resp.headers.get("Content-Disposition")) ||
-            (next.downloadFileName ?? null) ||
-            `lawcaspro-generated-documents-${Date.now()}.zip`;
-          const filename = normalizeDownloadFilename(raw, contentType);
-          downloadBlob(blob, filename);
-          toast({
-            title: st === "completed" ? "Download started" : "Download started (with warnings)",
-            description: filename,
+        const inFlightBefore = pollInFlightRef.current;
+        pollInFlightRef.current += 1;
+        const startedAt = Date.now();
+        if (inFlightBefore > 0) {
+          emitDbg({
+            hypothesisId: "H1",
+            msg: "poll:overlap-detected",
+            data: { jobId, inFlightBefore },
           });
-          setBusy(false);
-          return;
         }
-        if (st === "failed") {
-          if (pollTimerRef.current) window.clearInterval(pollTimerRef.current);
-          setJobError(next.errorSummary ?? "Generation failed");
-          setBusy(false);
+        emitDbg({
+          hypothesisId: "H1",
+          msg: "poll:tick-start",
+          data: { jobId, inFlight: pollInFlightRef.current },
+        });
+        try {
+          pollAbortRef.current?.abort();
+          const ctrl = new AbortController();
+          pollAbortRef.current = ctrl;
+          const next = await runNextGenerationJob(jobId, { signal: ctrl.signal });
+          pollConsecutiveErrorRef.current = 0;
+          setJob(next);
+          const st = String(next.status ?? "");
+          emitDbg({
+            hypothesisId: "H3",
+            msg: "poll:tick-success",
+            data: {
+              jobId,
+              status: st,
+              successCount: next.successCount,
+              failedCount: next.failedCount,
+              pendingCount: next.pendingCount,
+              totalCount: next.totalCount,
+              ms: Date.now() - startedAt,
+            },
+          });
+          if (
+            st === "completed" ||
+            st === "completed_with_errors" ||
+            st === "completed-with-errors"
+          ) {
+            stopPolling();
+            const resp = await downloadGenerationJob(jobId, { signal: ctrl.signal });
+            const contentType = resp.headers.get("Content-Type");
+            if (
+              contentType &&
+              (contentType.includes("application/json") || contentType.includes("text/"))
+            ) {
+              const text = await resp.text().catch(() => "");
+              throw new Error(text || "Failed to download generated documents");
+            }
+            const blob = await resp.blob();
+            const raw =
+              parseFilenameFromDisposition(resp.headers.get("Content-Disposition")) ||
+              (next.downloadFileName ?? null) ||
+              `lawcaspro-generated-documents-${Date.now()}.zip`;
+            const filename = normalizeDownloadFilename(raw, contentType);
+            downloadBlob(blob, filename);
+            toast({
+              title:
+                st === "completed"
+                  ? "Download started"
+                  : "Download started (with warnings)",
+              description: filename,
+            });
+            setBusy(false);
+            emitDbg({
+              hypothesisId: "H3",
+              msg: "poll:completed-download-started",
+              data: { jobId, status: st, filename },
+            });
+            return;
+          }
+          if (st === "failed") {
+            stopPolling();
+            setJobError(next.errorSummary ?? "Generation failed");
+            setBusy(false);
+            emitDbg({
+              hypothesisId: "H3",
+              msg: "poll:job-failed",
+              data: { jobId, errorSummary: next.errorSummary ?? null },
+            });
+          }
+        } catch (err) {
+          pollConsecutiveErrorRef.current += 1;
+          const msg = formatPollError(err);
+          emitDbg({
+            hypothesisId: "H4",
+            msg: "poll:tick-error",
+            data: {
+              jobId,
+              consecutiveErrors: pollConsecutiveErrorRef.current,
+              errorMessage: msg,
+              errorType: typeof err,
+              ms: Date.now() - startedAt,
+            },
+          });
+          throw err;
+        } finally {
+          pollInFlightRef.current = Math.max(0, pollInFlightRef.current - 1);
+          emitDbg({
+            hypothesisId: "H1",
+            msg: "poll:tick-end",
+            data: { jobId, inFlight: pollInFlightRef.current },
+          });
         }
       };
 
-      pollTimerRef.current = window.setInterval(() => {
-        tick().catch((err) => {
-          setJobError(err instanceof Error ? err.message : String(err ?? ""));
-        });
-      }, 1200);
+      const scheduleNext = () => {
+        if (stopped) return;
+        pollTimerRef.current = window.setTimeout(() => {
+          tick()
+            .catch((err) => {
+              const msg = formatPollError(err);
+              setJobError(msg);
+              if (pollConsecutiveErrorRef.current >= 3) {
+                stopPolling();
+                setBusy(false);
+                emitDbg({
+                  hypothesisId: "H4",
+                  msg: "poll:stopped-after-max-errors",
+                  data: {
+                    jobId,
+                    consecutiveErrors: pollConsecutiveErrorRef.current,
+                    errorMessage: msg,
+                  },
+                });
+                return;
+              }
+            })
+            .finally(() => {
+              if (!stopped) scheduleNext();
+            });
+        }, 1200) as unknown as ReturnType<typeof window.setInterval>;
+      };
+
       await tick();
+      scheduleNext();
     } catch (err) {
       toastError(toast, err);
     } finally {
