@@ -11318,20 +11318,53 @@ async function generateFirmDocument({
     };
   }
   {
-    const caseDocs = await queryRows(
-      r,
-      sql`
-      SELECT checklist_key, file_name, document_type, object_path
-      FROM case_documents
-      WHERE firm_id = ${firmId} AND case_id = ${caseId}
-    `,
-    );
-    const confirmPrefix = `tpl:firm:${templateId}:confirm:`;
-    const confirmationRows = (await tableExistsCached(
+    const checklistTableExists = await tableExistsCached(
       r,
       cache,
       "public.case_document_checklist_items",
-    ))
+    );
+    const caseDocs = await queryRows(
+      r,
+      checklistTableExists
+        ? sql`
+            SELECT
+              i.checklist_key,
+              to_jsonb(cd) ->> 'file_name' AS file_name,
+              to_jsonb(cd) ->> 'document_type' AS document_type,
+              to_jsonb(cd) ->> 'object_path' AS object_path
+            FROM case_document_checklist_items i
+            LEFT JOIN case_documents cd
+              ON cd.id = i.case_document_id AND cd.firm_id = i.firm_id
+            WHERE i.firm_id = ${firmId} AND i.case_id = ${caseId}
+            UNION ALL
+            SELECT
+              NULL::text AS checklist_key,
+              to_jsonb(cd) ->> 'file_name' AS file_name,
+              to_jsonb(cd) ->> 'document_type' AS document_type,
+              to_jsonb(cd) ->> 'object_path' AS object_path
+            FROM case_documents cd
+            WHERE cd.firm_id = ${firmId}
+              AND cd.case_id = ${caseId}
+              AND NOT EXISTS (
+                SELECT 1
+                FROM case_document_checklist_items i
+                WHERE i.firm_id = cd.firm_id
+                  AND i.case_id = cd.case_id
+                  AND i.case_document_id = cd.id
+              )
+          `
+        : sql`
+            SELECT
+              NULL::text AS checklist_key,
+              to_jsonb(cd) ->> 'file_name' AS file_name,
+              to_jsonb(cd) ->> 'document_type' AS document_type,
+              to_jsonb(cd) ->> 'object_path' AS object_path
+            FROM case_documents cd
+            WHERE cd.firm_id = ${firmId} AND cd.case_id = ${caseId}
+          `,
+    );
+    const confirmPrefix = `tpl:firm:${templateId}:confirm:`;
+    const confirmationRows = checklistTableExists
       ? await queryRows(
           r,
           sql`
@@ -12044,19 +12077,52 @@ async function generateMasterDocument({
   });
   let checklistOverrideUsed = false;
   {
-    const caseDocs = await queryRows(
-      r,
-      sql`
-      SELECT checklist_key, file_name, document_type, object_path
-      FROM case_documents
-      WHERE firm_id = ${firmId} AND case_id = ${caseId}
-    `,
-    );
-    const confirmPrefix = `tpl:master:${masterDocId}:confirm:`;
-    const confirmationRows = (await tableExists(
+    const checklistTableExists = await tableExists(
       r,
       "public.case_document_checklist_items",
-    ))
+    );
+    const caseDocs = await queryRows(
+      r,
+      checklistTableExists
+        ? sql`
+            SELECT
+              i.checklist_key,
+              to_jsonb(cd) ->> 'file_name' AS file_name,
+              to_jsonb(cd) ->> 'document_type' AS document_type,
+              to_jsonb(cd) ->> 'object_path' AS object_path
+            FROM case_document_checklist_items i
+            LEFT JOIN case_documents cd
+              ON cd.id = i.case_document_id AND cd.firm_id = i.firm_id
+            WHERE i.firm_id = ${firmId} AND i.case_id = ${caseId}
+            UNION ALL
+            SELECT
+              NULL::text AS checklist_key,
+              to_jsonb(cd) ->> 'file_name' AS file_name,
+              to_jsonb(cd) ->> 'document_type' AS document_type,
+              to_jsonb(cd) ->> 'object_path' AS object_path
+            FROM case_documents cd
+            WHERE cd.firm_id = ${firmId}
+              AND cd.case_id = ${caseId}
+              AND NOT EXISTS (
+                SELECT 1
+                FROM case_document_checklist_items i
+                WHERE i.firm_id = cd.firm_id
+                  AND i.case_id = cd.case_id
+                  AND i.case_document_id = cd.id
+              )
+          `
+        : sql`
+            SELECT
+              NULL::text AS checklist_key,
+              to_jsonb(cd) ->> 'file_name' AS file_name,
+              to_jsonb(cd) ->> 'document_type' AS document_type,
+              to_jsonb(cd) ->> 'object_path' AS object_path
+            FROM case_documents cd
+            WHERE cd.firm_id = ${firmId} AND cd.case_id = ${caseId}
+          `,
+    );
+    const confirmPrefix = `tpl:master:${masterDocId}:confirm:`;
+    const confirmationRows = checklistTableExists
       ? await queryRows(
           r,
           sql`
@@ -20208,13 +20274,49 @@ router.post(
             bytes = applied.docxBytes;
             input = applied.data;
           }
+          const checklistTableExists = await tableExists(
+            r,
+            "public.case_document_checklist_items",
+          );
           const caseDocs = await queryRows(
             r,
-            sql`
-          SELECT checklist_key, file_name, document_type, object_path
-          FROM case_documents
-          WHERE firm_id = ${req.firmId!} AND case_id = ${caseId}
-        `,
+            checklistTableExists
+              ? sql`
+                  SELECT
+                    i.checklist_key,
+                    to_jsonb(cd) ->> 'file_name' AS file_name,
+                    to_jsonb(cd) ->> 'document_type' AS document_type,
+                    to_jsonb(cd) ->> 'object_path' AS object_path
+                  FROM case_document_checklist_items i
+                  LEFT JOIN case_documents cd
+                    ON cd.id = i.case_document_id AND cd.firm_id = i.firm_id
+                  WHERE i.firm_id = ${req.firmId!} AND i.case_id = ${caseId}
+                  UNION ALL
+                  SELECT
+                    NULL::text AS checklist_key,
+                    to_jsonb(cd) ->> 'file_name' AS file_name,
+                    to_jsonb(cd) ->> 'document_type' AS document_type,
+                    to_jsonb(cd) ->> 'object_path' AS object_path
+                  FROM case_documents cd
+                  WHERE cd.firm_id = ${req.firmId!}
+                    AND cd.case_id = ${caseId}
+                    AND NOT EXISTS (
+                      SELECT 1
+                      FROM case_document_checklist_items i
+                      WHERE i.firm_id = cd.firm_id
+                        AND i.case_id = cd.case_id
+                        AND i.case_document_id = cd.id
+                    )
+                `
+              : sql`
+                  SELECT
+                    NULL::text AS checklist_key,
+                    to_jsonb(cd) ->> 'file_name' AS file_name,
+                    to_jsonb(cd) ->> 'document_type' AS document_type,
+                    to_jsonb(cd) ->> 'object_path' AS object_path
+                  FROM case_documents cd
+                  WHERE cd.firm_id = ${req.firmId!} AND cd.case_id = ${caseId}
+                `,
           );
           const wfDocs = (await tableExists(
             r,
@@ -20238,10 +20340,7 @@ router.post(
             workflowMap[k] = { hasFile: Boolean(d.object_path && d.file_name) };
           }
           const confirmPrefix = `tpl:firm:${templateId}:confirm:`;
-          const confirmationRows = (await tableExists(
-            r,
-            "public.case_document_checklist_items",
-          ))
+          const confirmationRows = checklistTableExists
             ? await queryRows(
                 r,
                 sql`
@@ -20702,13 +20801,49 @@ router.post(
           };
         }
       }
+      const checklistTableExists = await tableExists(
+        r,
+        "public.case_document_checklist_items",
+      );
       const caseDocs = await queryRows(
         r,
-        sql`
-      SELECT checklist_key, file_name, document_type, object_path
-      FROM case_documents
-      WHERE firm_id = ${req.firmId!} AND case_id = ${caseId}
-    `,
+        checklistTableExists
+          ? sql`
+              SELECT
+                i.checklist_key,
+                to_jsonb(cd) ->> 'file_name' AS file_name,
+                to_jsonb(cd) ->> 'document_type' AS document_type,
+                to_jsonb(cd) ->> 'object_path' AS object_path
+              FROM case_document_checklist_items i
+              LEFT JOIN case_documents cd
+                ON cd.id = i.case_document_id AND cd.firm_id = i.firm_id
+              WHERE i.firm_id = ${req.firmId!} AND i.case_id = ${caseId}
+              UNION ALL
+              SELECT
+                NULL::text AS checklist_key,
+                to_jsonb(cd) ->> 'file_name' AS file_name,
+                to_jsonb(cd) ->> 'document_type' AS document_type,
+                to_jsonb(cd) ->> 'object_path' AS object_path
+              FROM case_documents cd
+              WHERE cd.firm_id = ${req.firmId!}
+                AND cd.case_id = ${caseId}
+                AND NOT EXISTS (
+                  SELECT 1
+                  FROM case_document_checklist_items i
+                  WHERE i.firm_id = cd.firm_id
+                    AND i.case_id = cd.case_id
+                    AND i.case_document_id = cd.id
+                )
+            `
+          : sql`
+              SELECT
+                NULL::text AS checklist_key,
+                to_jsonb(cd) ->> 'file_name' AS file_name,
+                to_jsonb(cd) ->> 'document_type' AS document_type,
+                to_jsonb(cd) ->> 'object_path' AS object_path
+              FROM case_documents cd
+              WHERE cd.firm_id = ${req.firmId!} AND cd.case_id = ${caseId}
+            `,
       );
       const wfDocs = (await tableExists(r, "public.case_workflow_documents"))
         ? await queryRows(
@@ -20729,10 +20864,7 @@ router.post(
         workflowMap[k] = { hasFile: Boolean(d.object_path && d.file_name) };
       }
       const confirmPrefix = `tpl:master:${platformDocumentId}:confirm:`;
-      const confirmationRows = (await tableExists(
-        r,
-        "public.case_document_checklist_items",
-      ))
+      const confirmationRows = checklistTableExists
         ? await queryRows(
             r,
             sql`
