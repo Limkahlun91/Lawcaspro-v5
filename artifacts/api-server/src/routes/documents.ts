@@ -15462,27 +15462,37 @@ async function processAutomationGenerationJobStep(
       mapped.message,
     );
 
+    const rawErrMessage = (() => {
+      if (err instanceof Error && typeof err.message === "string" && err.message)
+        return err.message;
+      if (dbInfo.message) return dbInfo.message;
+      return String(err ?? "");
+    })();
+
     const diagnostic = {
       ...(derived.payload ?? {}),
       ...(missingRequiredVariables.length ? { missingRequiredVariables } : {}),
+      ...(typeof (err as any)?.queryName === "string"
+        ? { queryName: String((err as any).queryName) }
+        : {}),
       ...(dbInfo.sqlstate ? { sqlState: dbInfo.sqlstate } : {}),
       ...(dbInfo.table ? { table: dbInfo.table } : {}),
       ...(dbInfo.column ? { column: dbInfo.column } : {}),
       ...(dbInfo.constraint ? { constraint: dbInfo.constraint } : {}),
+      ...(dbInfo.detail ? { detail: dbInfo.detail } : {}),
+      ...(dbInfo.hint ? { hint: dbInfo.hint } : {}),
+      ...(dbInfo.position ? { position: dbInfo.position } : {}),
       ...(mapped.code !== derived.code
         ? {
-            originalErrorCode: derived.code,
-            originalErrorMessage: derived.message,
+            mappedFromErrorCode: derived.code,
+            mappedFromErrorMessage: derived.message,
           }
         : {}),
-      ...(allowErrorDetails && derived.code === "INTERNAL_ERROR"
-        ? {
-            originalErrorMessage:
-              err instanceof Error ? err.message : String(err ?? ""),
-            ...(err instanceof Error && err.stack
-              ? { originalErrorStack: err.stack }
-              : {}),
-          }
+      ...(rawErrMessage
+        ? { originalErrorMessage: String(rawErrMessage).slice(0, 2000) }
+        : {}),
+      ...(allowErrorDetails && err instanceof Error && err.stack
+        ? { originalErrorStack: err.stack }
         : {}),
     };
 
@@ -17368,18 +17378,29 @@ router.get(
       }
       const items = await queryRows(
         r,
-        sql`
-      SELECT
-        i.*,
-        COALESCE(t.name, pd.name) AS template_name
-      FROM document_generation_job_items i
-      LEFT JOIN document_templates t
-        ON t.firm_id = i.firm_id AND t.id = i.template_id
-      LEFT JOIN platform_documents pd
-        ON pd.id = i.platform_document_id AND (pd.firm_id IS NULL OR pd.firm_id = i.firm_id)
-      WHERE i.job_id = ${jobId} AND i.firm_id = ${req.firmId!}
-      ORDER BY i.id ASC
-    `,
+        caps.items.platformDocumentId
+          ? sql`
+              SELECT
+                i.*,
+                COALESCE(t.name, pd.name) AS template_name
+              FROM document_generation_job_items i
+              LEFT JOIN document_templates t
+                ON t.firm_id = i.firm_id AND t.id = i.template_id
+              LEFT JOIN platform_documents pd
+                ON pd.id = i.platform_document_id AND (pd.firm_id IS NULL OR pd.firm_id = i.firm_id)
+              WHERE i.job_id = ${jobId} AND i.firm_id = ${req.firmId!}
+              ORDER BY i.id ASC
+            `
+          : sql`
+              SELECT
+                i.*,
+                t.name AS template_name
+              FROM document_generation_job_items i
+              LEFT JOIN document_templates t
+                ON t.firm_id = i.firm_id AND t.id = i.template_id
+              WHERE i.job_id = ${jobId} AND i.firm_id = ${req.firmId!}
+              ORDER BY i.id ASC
+            `,
       );
       const status = String((job as any).status ?? "");
       const jobPayload: Record<string, unknown> = {
@@ -17400,6 +17421,37 @@ router.get(
       });
     } catch (err) {
       const info = extractDbErrorInfo(err);
+      const errMessage =
+        err instanceof Error
+          ? err.message
+          : typeof (err as any)?.message === "string"
+            ? String((err as any).message)
+            : info.message ?? "Unknown error";
+      const errCode =
+        typeof (err as any)?.code === "string" ? String((err as any).code) : null;
+      const queryName =
+        typeof (err as any)?.queryName === "string"
+          ? String((err as any).queryName)
+          : null;
+      req.log.error(
+        {
+          route: req.originalUrl,
+          requestId,
+          firmId: req.firmId ?? null,
+          jobId,
+          queryName,
+          errCode,
+          sqlState: info.sqlstate,
+          table: info.table,
+          column: info.column,
+          constraint: info.constraint,
+          detail: info.detail,
+          hint: info.hint,
+          position: info.position,
+          message: errMessage,
+        },
+        "documents.job query failed",
+      );
       res.status(500).json({
         ok: false,
         error: {
@@ -17408,6 +17460,12 @@ router.get(
           sqlState: info.sqlstate ?? null,
           details: null,
           retryable: true,
+          errMessage,
+          errCode,
+          errDetail: info.detail ?? null,
+          errHint: info.hint ?? null,
+          errPosition: info.position ?? null,
+          queryName,
           detail:
             process.env.API_ERROR_DETAILS === "1"
               ? {
@@ -17416,6 +17474,9 @@ router.get(
                   column: info.column ?? null,
                   constraint: info.constraint ?? null,
                   message: info.message ?? null,
+                  detail: info.detail ?? null,
+                  hint: info.hint ?? null,
+                  position: info.position ?? null,
                 }
               : undefined,
         },
@@ -17599,6 +17660,16 @@ router.post(
               failedItem && typeof failedItem.error_message === "string"
                 ? String(failedItem.error_message)
                 : "Generation failed",
+            errMessage:
+              diag && typeof diag.originalErrorMessage === "string"
+                ? String(diag.originalErrorMessage)
+                : null,
+            errCode:
+              diag && typeof diag.sqlState === "string" ? String(diag.sqlState) : null,
+            errDetail: diag && typeof diag.detail === "string" ? String(diag.detail) : null,
+            errHint: diag && typeof diag.hint === "string" ? String(diag.hint) : null,
+            errPosition:
+              diag && typeof diag.position === "string" ? String(diag.position) : null,
             sqlState:
               diag && typeof diag.sqlState === "string" ? diag.sqlState : null,
             queryName:
@@ -17625,6 +17696,10 @@ router.post(
               diag && typeof diag.originalErrorMessage === "string"
                 ? diag.originalErrorMessage
                 : null,
+            originalErrorCode:
+              diag && typeof diag.mappedFromErrorCode === "string"
+                ? String(diag.mappedFromErrorCode)
+                : null,
             retryable: false,
           },
           meta: {
@@ -17649,6 +17724,37 @@ router.post(
       });
     } catch (err) {
       const info = extractDbErrorInfo(err);
+      const errMessage =
+        err instanceof Error
+          ? err.message
+          : typeof (err as any)?.message === "string"
+            ? String((err as any).message)
+            : info.message ?? "Unknown error";
+      const errCode =
+        typeof (err as any)?.code === "string" ? String((err as any).code) : null;
+      const queryName =
+        typeof (err as any)?.queryName === "string"
+          ? String((err as any).queryName)
+          : null;
+      req.log.error(
+        {
+          route: req.originalUrl,
+          requestId,
+          jobId,
+          firmId: req.firmId ?? null,
+          queryName,
+          errCode,
+          sqlState: info.sqlstate,
+          table: info.table,
+          column: info.column,
+          constraint: info.constraint,
+          detail: info.detail,
+          hint: info.hint,
+          position: info.position,
+          message: errMessage,
+        },
+        "documents.run-next failed",
+      );
       // #region debug-point BE:run-next-failed
       (() => {
         import("node:fs")
@@ -17679,6 +17785,9 @@ router.post(
                   table: info.table,
                   column: info.column,
                   constraint: info.constraint,
+                  detail: info.detail,
+                  hint: info.hint,
+                  position: info.position,
                   message: info.message,
                 },
               }),
@@ -17697,6 +17806,12 @@ router.post(
               ? "Database schema is outdated. Please apply latest migrations."
               : "Failed to run next generation job step",
           sqlState: info.sqlstate ?? null,
+          errMessage,
+          errCode,
+          errDetail: info.detail ?? null,
+          errHint: info.hint ?? null,
+          errPosition: info.position ?? null,
+          queryName,
           detail:
             process.env.API_ERROR_DETAILS === "1"
               ? {
@@ -17705,6 +17820,9 @@ router.post(
                   column: info.column ?? null,
                   constraint: info.constraint ?? null,
                   message: info.message ?? null,
+                  detail: info.detail ?? null,
+                  hint: info.hint ?? null,
+                  position: info.position ?? null,
                 }
               : undefined,
         },
@@ -17712,6 +17830,103 @@ router.post(
           request_id: requestId ?? null,
           jobId,
           firmId: req.firmId ?? null,
+          timestamp: new Date().toISOString(),
+          duration_ms: Date.now() - startedAt,
+        },
+      });
+    }
+  },
+);
+
+router.get(
+  "/documents/debug/schema",
+  requireAuth,
+  requireFounder,
+  requireFounderPermission("founder.documents.manage"),
+  async (req: AuthRequest, res): Promise<void> => {
+    if (process.env.API_ERROR_DETAILS !== "1") {
+      res.status(404).json({ ok: false, error: { code: "NOT_FOUND" } });
+      return;
+    }
+    const startedAt = Date.now();
+    const requestId =
+      one(req.headers["x-request-id"] as any) ||
+      one(req.headers["x-vercel-id"] as any) ||
+      undefined;
+    const r = getRlsDb(req, res);
+    if (!r) return;
+    try {
+      const cache = createRequestCache();
+      const caps = await getDocGenRunnerSchemaCaps(r, cache);
+      const tableNames = [
+        "document_generation_jobs",
+        "document_generation_job_items",
+        "document_generation_job_steps",
+        "documents",
+        "document_templates",
+        "firm_documents",
+        "firm_document_templates",
+        "cases",
+        "projects",
+        "developers",
+      ];
+      const existence = await queryRows(
+        r,
+        sql`
+          SELECT
+            t.table_name,
+            to_regclass('public.' || t.table_name) IS NOT NULL AS exists
+          FROM (
+            SELECT UNNEST(ARRAY[${sql.join(
+              tableNames.map((t) => sql`${t}`),
+              sql`, `,
+            )}]) AS table_name
+          ) t
+          ORDER BY t.table_name ASC
+        `,
+      );
+      const columns = await queryRows(
+        r,
+        sql`
+          SELECT table_name, column_name, data_type, ordinal_position
+          FROM information_schema.columns
+          WHERE table_schema = 'public'
+            AND table_name IN (${sql.join(
+              tableNames.map((t) => sql`${t}`),
+              sql`, `,
+            )})
+          ORDER BY table_name, ordinal_position
+        `,
+      );
+      res.json({
+        ok: true,
+        meta: {
+          request_id: requestId ?? null,
+          timestamp: new Date().toISOString(),
+          duration_ms: Date.now() - startedAt,
+        },
+        data: {
+          caps,
+          existence,
+          columns,
+        },
+      });
+    } catch (err) {
+      const info = extractDbErrorInfo(err);
+      res.status(500).json({
+        ok: false,
+        error: {
+          code: "SCHEMA_DEBUG_FAILED",
+          message: "Failed to query schema",
+          sqlState: info.sqlstate ?? null,
+          errMessage: err instanceof Error ? err.message : info.message ?? null,
+          errCode: typeof (err as any)?.code === "string" ? (err as any).code : null,
+          errDetail: info.detail ?? null,
+          errHint: info.hint ?? null,
+          errPosition: info.position ?? null,
+        },
+        meta: {
+          request_id: requestId ?? null,
           timestamp: new Date().toISOString(),
           duration_ms: Date.now() - startedAt,
         },

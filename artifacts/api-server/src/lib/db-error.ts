@@ -5,6 +5,7 @@ export type DbErrorInfo = {
   constraint: string | null;
   detail: string | null;
   hint: string | null;
+  position: string | null;
   message: string | null;
 };
 
@@ -57,6 +58,7 @@ export function extractDbErrorInfo(err: unknown): DbErrorInfo {
   const constraint = getString(rec, "constraint");
   const detail = getString(rec, "detail");
   const hint = getString(rec, "hint");
+  const position = getString(rec, "position");
   const parsed = message ? parseMessageForRelation(message) : { table: null, column: null };
   return {
     sqlstate,
@@ -65,7 +67,7 @@ export function extractDbErrorInfo(err: unknown): DbErrorInfo {
     constraint,
     detail,
     hint,
+    position,
     message: message ? String(message) : null,
   };
 }
-
