@@ -10,7 +10,12 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "@/components/ui/resizable";
 import { cn } from "@/lib/utils";
 import { apiFetchJson } from "@/lib/api-client";
-import { generateDocumentsNow } from "@/lib/document-generation-client";
+import {
+  createGenerationJob,
+  downloadGenerationJob,
+  runNextGenerationJob,
+  type NormalizedGenerationJob,
+} from "@/lib/document-generation-client";
 import { downloadBlob, normalizeDownloadFilename } from "@/lib/download";
 import { toastError } from "@/lib/toast-error";
 import { useToast } from "@/hooks/use-toast";
@@ -104,6 +109,9 @@ export default function DocumentAutomationHub() {
   const [duplexMode, setDuplexMode] = useState<"double" | "single" | "custom">("double");
   const [customDuplexRange, setCustomDuplexRange] = useState("");
   const [busy, setBusy] = useState(false);
+  const [job, setJob] = useState<NormalizedGenerationJob | null>(null);
+  const [jobError, setJobError] = useState<string | null>(null);
+  const pollTimerRef = useRef<ReturnType<typeof window.setInterval> | null>(null);
   const [smartMessage, setSmartMessage] = useState<string | null>(null);
   const [smartTemplateIdSet, setSmartTemplateIdSet] = useState<Set<number>>(() => new Set());
   const [smartFolderIdSet, setSmartFolderIdSet] = useState<Set<number>>(() => new Set());
@@ -112,6 +120,12 @@ export default function DocumentAutomationHub() {
   const [bundleMessage, setBundleMessage] = useState<string | null>(null);
   const [bundleTemplateIdSet, setBundleTemplateIdSet] = useState<Set<number>>(() => new Set());
   const [bundleFolderIdSet, setBundleFolderIdSet] = useState<Set<number>>(() => new Set());
+
+  useEffect(() => {
+    return () => {
+      if (pollTimerRef.current) window.clearInterval(pollTimerRef.current);
+    };
+  }, []);
 
   const casesQuery = useQuery<AutomationCasesResponse>({
     queryKey: ["document-automation", "cases", caseSearch],
@@ -511,26 +525,65 @@ export default function DocumentAutomationHub() {
     }
 
     setBusy(true);
+    setJob(null);
+    setJobError(null);
+    if (pollTimerRef.current) window.clearInterval(pollTimerRef.current);
     try {
       const templates = [
         ...selectedTemplateIds.map((id) => ({ source: "firm" as const, id })),
         ...selectedMasterDocIds.map((id) => ({ source: "master" as const, id })),
       ];
-      const resp = await generateDocumentsNow({ caseIds: selectedCaseIds, templates });
-      const contentType = resp.headers.get("Content-Type");
-      if (contentType && (contentType.includes("application/json") || contentType.includes("text/"))) {
-        const text = await resp.text().catch(() => "");
-        throw new Error(text || "Failed to generate documents");
-      }
-      const blob = await resp.blob();
-      const raw = parseFilenameFromDisposition(resp.headers.get("Content-Disposition")) || `lawcaspro-generated-documents-${Date.now()}.zip`;
-      const filename = normalizeDownloadFilename(raw, contentType);
-      downloadBlob(blob, filename);
-      toast({ title: "Download started", description: filename });
+      const created = await createGenerationJob({
+        caseIds: selectedCaseIds,
+        templates,
+        config: { action: mode },
+      });
+      const jobId = created.jobId;
+      if (!jobId) throw new Error("jobId is missing");
+
+      const tick = async () => {
+        const next = await runNextGenerationJob(jobId);
+        setJob(next);
+        const st = String(next.status ?? "");
+        if (st === "completed" || st === "completed_with_errors" || st === "completed-with-errors") {
+          if (pollTimerRef.current) window.clearInterval(pollTimerRef.current);
+          const resp = await downloadGenerationJob(jobId);
+          const contentType = resp.headers.get("Content-Type");
+          if (contentType && (contentType.includes("application/json") || contentType.includes("text/"))) {
+            const text = await resp.text().catch(() => "");
+            throw new Error(text || "Failed to download generated documents");
+          }
+          const blob = await resp.blob();
+          const raw =
+            parseFilenameFromDisposition(resp.headers.get("Content-Disposition")) ||
+            (next.downloadFileName ?? null) ||
+            `lawcaspro-generated-documents-${Date.now()}.zip`;
+          const filename = normalizeDownloadFilename(raw, contentType);
+          downloadBlob(blob, filename);
+          toast({
+            title: st === "completed" ? "Download started" : "Download started (with warnings)",
+            description: filename,
+          });
+          setBusy(false);
+          return;
+        }
+        if (st === "failed") {
+          if (pollTimerRef.current) window.clearInterval(pollTimerRef.current);
+          setJobError(next.errorSummary ?? "Generation failed");
+          setBusy(false);
+        }
+      };
+
+      pollTimerRef.current = window.setInterval(() => {
+        tick().catch((err) => {
+          setJobError(err instanceof Error ? err.message : String(err ?? ""));
+        });
+      }, 1200);
+      await tick();
     } catch (err) {
       toastError(toast, err);
     } finally {
-      setBusy(false);
+      if (!pollTimerRef.current) setBusy(false);
     }
   }
 
@@ -914,7 +967,18 @@ export default function DocumentAutomationHub() {
                       </div>
                       {busy && (
                         <div className="rounded-md border border-slate-200 bg-slate-50 p-3 text-sm text-slate-700">
-                          Generating...
+                          <div className="font-medium">Generating...</div>
+                          <div className="mt-1 text-xs text-slate-600">
+                            {(() => {
+                              const expectedTotal =
+                                selectedCaseIds.length *
+                                (selectedTemplateIds.length + selectedMasterDocIds.length);
+                              const done = (job?.successCount ?? 0) + (job?.failedCount ?? 0);
+                              const total = job?.totalCount || expectedTotal || 0;
+                              return `Progress: ${done}/${total}  (success=${job?.successCount ?? 0}, failed=${job?.failedCount ?? 0}, pending=${job?.pendingCount ?? 0})`;
+                            })()}
+                          </div>
+                          {jobError && <div className="mt-2 text-xs text-red-700">{jobError}</div>}
                         </div>
                       )}
                       <Button disabled={busy} className="w-full" onClick={() => runGenerate("download")}>
@@ -959,7 +1023,18 @@ export default function DocumentAutomationHub() {
                       </div>
                       {busy && (
                         <div className="rounded-md border border-slate-200 bg-slate-50 p-3 text-sm text-slate-700">
-                          Generating...
+                          <div className="font-medium">Generating...</div>
+                          <div className="mt-1 text-xs text-slate-600">
+                            {(() => {
+                              const expectedTotal =
+                                selectedCaseIds.length *
+                                (selectedTemplateIds.length + selectedMasterDocIds.length);
+                              const done = (job?.successCount ?? 0) + (job?.failedCount ?? 0);
+                              const total = job?.totalCount || expectedTotal || 0;
+                              return `Progress: ${done}/${total}  (success=${job?.successCount ?? 0}, failed=${job?.failedCount ?? 0}, pending=${job?.pendingCount ?? 0})`;
+                            })()}
+                          </div>
+                          {jobError && <div className="mt-2 text-xs text-red-700">{jobError}</div>}
                         </div>
                       )}
                       <Button disabled={busy} className="w-full" onClick={() => runGenerate("print")}>

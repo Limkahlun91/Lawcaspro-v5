@@ -101,6 +101,8 @@ function makeDb(): FakeDb {
           firm_id: 1,
           status: "completed",
           action: "download",
+          case_ids: [3],
+          config: { outputFormat: "pdf", templates: [{ source: "firm", id: 7 }] },
           download_object_path: null,
           download_file_name: null,
           download_mime_type: null,
@@ -111,14 +113,19 @@ function makeDb(): FakeDb {
           id: 1,
           job_id: TEST_JOB_ID,
           firm_id: 1,
+          case_id: 3,
           status: "success",
           object_path: "/objects/temp-generated/1/document-automation-jobs/one.docx",
-          file_name: "CON-001_Acting-Letter.docx",
-          mime_type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+          file_name: "Acting Letter.pdf",
+          mime_type: "application/pdf",
+          template_name: "Acting Letter",
           template_source: "firm",
           template_id: 7,
           platform_document_id: null,
         }];
+      }
+      if (text.includes("FROM cases") && text.includes("id IN")) {
+        return [{ id: 3, reference_no: "CON-001" }];
       }
       return [];
     },
@@ -281,21 +288,12 @@ describe("Documents automation regressions", () => {
     expect(body.slice(0, 2).toString("utf8")).toBe("PK");
   });
 
-  it("POST /api/documents/automation/generate-now returns 200 application/zip", async () => {
+  it("POST /api/documents/automation/generate-now returns 202 jobId (async)", async () => {
     const res = await request(app)
       .post("/api/documents/automation/generate-now")
-      .send({ caseIds: [3], templates: [{ source: "firm", id: 7 }], config: { action: "download", outputFormat: "pdf" } })
-      .buffer(true)
-      .parse((r, cb) => {
-        const chunks: Buffer[] = [];
-        r.on("data", (c) => chunks.push(Buffer.isBuffer(c) ? c : Buffer.from(c)));
-        r.on("end", () => cb(null, Buffer.concat(chunks)));
-      });
-    expect(res.status).toBe(200);
-    expect(String(res.headers["content-type"] ?? "")).toContain("application/zip");
-    const body = res.body as Buffer;
-    expect(Buffer.isBuffer(body)).toBe(true);
-    expect(body.slice(0, 2).toString("utf8")).toBe("PK");
-    expect(body.includes(Buffer.from("CON-001/Acting_Letter.pdf", "utf8"))).toBe(true);
+      .send({ caseIds: [3], templates: [{ source: "firm", id: 7 }], config: { action: "download", outputFormat: "pdf" } });
+    expect(res.status).toBe(202);
+    expect(res.body).toHaveProperty("ok", true);
+    expect(typeof res.body.jobId).toBe("string");
   });
 });

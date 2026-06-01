@@ -68,6 +68,7 @@ export type CreateGenerationJobPayload = {
 };
 
 const GENERATION_TIMEOUT_MS = 60000;
+const CREATE_JOB_TIMEOUT_MS = 15000;
 
 export async function generateDocumentsNow(payload: {
   caseIds: number[];
@@ -91,7 +92,7 @@ export async function createGenerationJob(payload: CreateGenerationJobPayload): 
   if (payload.force) qs.set("force", "true");
   const res = await apiFetchJson<unknown>(`/documents/automation/generate-job?${qs.toString()}`, {
     method: "POST",
-    timeoutMs: GENERATION_TIMEOUT_MS,
+    timeoutMs: CREATE_JOB_TIMEOUT_MS,
     body: JSON.stringify({ caseIds: payload.caseIds, templateIds: payload.templateIds, templates: payload.templates, config: payload.config }),
   });
   const r = asRecord(res) ?? {};
@@ -118,7 +119,7 @@ export async function validateGenerationJob(payload: Omit<CreateGenerationJobPay
   if (payload.force) qs.set("force", "true");
   return await apiFetchJson<unknown>(`/documents/automation/generate-job?${qs.toString()}`, {
     method: "POST",
-    timeoutMs: GENERATION_TIMEOUT_MS,
+    timeoutMs: CREATE_JOB_TIMEOUT_MS,
     body: JSON.stringify({ caseIds: payload.caseIds, templateIds: payload.templateIds, templates: payload.templates, config: payload.config }),
   });
 }

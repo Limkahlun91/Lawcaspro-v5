@@ -1546,22 +1546,32 @@ async function buildCaseContext(
     fallback: T,
   ): Promise<T> => {
     const sp = spNameRaw.replace(/[^a-zA-Z0-9_]/g, "_");
+    let savepointCreated = false;
     try {
       await r.execute(sql.raw(`SAVEPOINT ${sp}`));
-    } catch {}
+      savepointCreated = true;
+    } catch {
+    }
+    if (!savepointCreated) {
+      return await fn();
+    }
     try {
       const out = await fn();
       try {
         await r.execute(sql.raw(`RELEASE SAVEPOINT ${sp}`));
       } catch {}
       return out;
-    } catch {
+    } catch (err) {
+      let rolledBack = false;
       try {
         await r.execute(sql.raw(`ROLLBACK TO SAVEPOINT ${sp}`));
-      } catch {}
+        rolledBack = true;
+      } catch {
+      }
       try {
         await r.execute(sql.raw(`RELEASE SAVEPOINT ${sp}`));
       } catch {}
+      if (!rolledBack) throw err;
       return fallback;
     }
   };
@@ -3476,11 +3486,13 @@ router.post(
       if (
         err instanceof DocumentGenerationError &&
         (err.code === "DOCX_TO_PDF_UNAVAILABLE" ||
+          err.code === "DOCX_PDF_CONVERTER_UNAVAILABLE" ||
           err.code === "DOCX_TO_PDF_FAILED" ||
           err.code === "DOCX_TO_PDF_TIMEOUT")
       ) {
         const code =
-          err.code === "DOCX_TO_PDF_UNAVAILABLE"
+          err.code === "DOCX_TO_PDF_UNAVAILABLE" ||
+          err.code === "DOCX_PDF_CONVERTER_UNAVAILABLE"
             ? "PDF_CONVERSION_UNAVAILABLE"
             : "PDF_CONVERSION_ERROR";
         res.status(503).json({ error: err.message, code });
@@ -3545,7 +3557,10 @@ router.post(
           });
           return;
         }
-        if (derived.code === "DOCX_TO_PDF_UNAVAILABLE") {
+        if (
+          derived.code === "DOCX_TO_PDF_UNAVAILABLE" ||
+          derived.code === "DOCX_PDF_CONVERTER_UNAVAILABLE"
+        ) {
           res.status(503).json({
             error: derived.message,
             code: "PDF_CONVERSION_UNAVAILABLE",
@@ -9858,6 +9873,37 @@ function startCaseDocumentRunRunner(
 }
 
 async function renderFallbackPdfFromDocx(docxBytes: Buffer): Promise<Buffer> {
+  // #region debug-point D:docx-fallback-render
+  (() => {
+    import("node:fs")
+      .then((fs) => {
+        const p = ".dbg/document-generation-stability.env";
+        let u = "http://127.0.0.1:7777/event";
+        let s = "document-generation-stability";
+        try {
+          const e = fs.readFileSync(p, "utf8");
+          u = e.match(/DEBUG_SERVER_URL=(.+)/)?.[1] || u;
+          s = e.match(/DEBUG_SESSION_ID=(.+)/)?.[1] || s;
+        } catch {}
+        fetch(u, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            sessionId: s,
+            runId: "pre",
+            hypothesisId: "D",
+            location: "documents.ts:renderFallbackPdfFromDocx",
+            msg: "[DEBUG] renderFallbackPdfFromDocx used",
+            ts: Date.now(),
+            data: {
+              docxBytesLength: docxBytes?.length ?? null,
+            },
+          }),
+        }).catch(() => {});
+      })
+      .catch(() => {});
+  })();
+  // #endregion
   const pdfDoc = await PDFDocument.create();
   const page = pdfDoc.addPage([595.28, 841.89]);
   const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
@@ -9928,7 +9974,43 @@ async function convertDocxToPdf(docxBytes: Buffer): Promise<Buffer> {
       ? process.env.GOTENBERG_URL.trim().replace(/\/+$/, "")
       : "";
   if (!baseUrl) {
-    return await renderFallbackPdfFromDocx(docxBytes);
+    // #region debug-point D:docx-convert-unavailable
+    (() => {
+      import("node:fs")
+        .then((fs) => {
+          const p = ".dbg/document-generation-stability.env";
+          let u = "http://127.0.0.1:7777/event";
+          let s = "document-generation-stability";
+          try {
+            const e = fs.readFileSync(p, "utf8");
+            u = e.match(/DEBUG_SERVER_URL=(.+)/)?.[1] || u;
+            s = e.match(/DEBUG_SESSION_ID=(.+)/)?.[1] || s;
+          } catch {}
+          fetch(u, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              sessionId: s,
+              runId: "pre",
+              hypothesisId: "D",
+              location: "documents.ts:convertDocxToPdf",
+              msg: "[DEBUG] GOTENBERG_URL missing -> fallback",
+              ts: Date.now(),
+              data: {
+                gotenbergUrlPresent: false,
+                docxBytesLength: docxBytes?.length ?? null,
+              },
+            }),
+          }).catch(() => {});
+        })
+        .catch(() => {});
+    })();
+    // #endregion
+    throw new DocumentGenerationError(
+      503,
+      "DOCX_PDF_CONVERTER_UNAVAILABLE",
+      "DOCX to PDF converter is not configured",
+    );
   }
 
   const controller = new AbortController();
@@ -9951,6 +10033,40 @@ async function convertDocxToPdf(docxBytes: Buffer): Promise<Buffer> {
       body,
       signal: controller.signal,
     });
+    // #region debug-point D:docx-convert-response
+    (() => {
+      import("node:fs")
+        .then((fs) => {
+          const p = ".dbg/document-generation-stability.env";
+          let u = "http://127.0.0.1:7777/event";
+          let s = "document-generation-stability";
+          try {
+            const e = fs.readFileSync(p, "utf8");
+            u = e.match(/DEBUG_SERVER_URL=(.+)/)?.[1] || u;
+            s = e.match(/DEBUG_SESSION_ID=(.+)/)?.[1] || s;
+          } catch {}
+          fetch(u, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              sessionId: s,
+              runId: "pre",
+              hypothesisId: "D",
+              location: "documents.ts:convertDocxToPdf",
+              msg: "[DEBUG] gotenberg response received",
+              ts: Date.now(),
+              data: {
+                gotenbergUrlPresent: true,
+                status: resp.status,
+                ok: resp.ok,
+                contentType: resp.headers.get("content-type"),
+              },
+            }),
+          }).catch(() => {});
+        })
+        .catch(() => {});
+    })();
+    // #endregion
     if (!resp.ok) {
       const txt = await resp.text().catch(() => "");
       const short = txt && txt.length ? txt.slice(0, 200) : "";
@@ -10013,15 +10129,44 @@ async function convertDocxToPdfWithFallback(
     return { pdfBytes, fallbackUsed: false };
   } catch (err) {
     if (!allowFallbackOnFailure) throw err;
-    const code = err instanceof DocumentGenerationError ? err.code : null;
-    if (
-      code !== "DOCX_TO_PDF_FAILED" &&
-      code !== "DOCX_TO_PDF_TIMEOUT" &&
-      code !== "DOCX_TO_PDF_UNAVAILABLE"
-    )
-      throw err;
-    const pdfBytes = await renderFallbackPdfFromDocx(docxBytes);
-    return { pdfBytes, fallbackUsed: true };
+    if (process.env.ALLOW_DOCX_FALLBACK_PDF === "1") {
+      const code = err instanceof DocumentGenerationError ? err.code : null;
+      // #region debug-point D:docx-convert-fallback-on-failure
+      (() => {
+        import("node:fs")
+          .then((fs) => {
+            const p = ".dbg/document-generation-stability.env";
+            let u = "http://127.0.0.1:7777/event";
+            let s = "document-generation-stability";
+            try {
+              const e = fs.readFileSync(p, "utf8");
+              u = e.match(/DEBUG_SERVER_URL=(.+)/)?.[1] || u;
+              s = e.match(/DEBUG_SESSION_ID=(.+)/)?.[1] || s;
+            } catch {}
+            fetch(u, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                sessionId: s,
+                runId: "pre",
+                hypothesisId: "D",
+                location: "documents.ts:convertDocxToPdfWithFallback",
+                msg: "[DEBUG] convertDocxToPdf failed -> fallback",
+                ts: Date.now(),
+                data: {
+                  allowFallbackOnFailure,
+                  errorCode: code,
+                },
+              }),
+            }).catch(() => {});
+          })
+          .catch(() => {});
+      })();
+      // #endregion
+      const pdfBytes = await renderFallbackPdfFromDocx(docxBytes);
+      return { pdfBytes, fallbackUsed: true };
+    }
+    throw err;
   }
 }
 
@@ -15004,7 +15149,10 @@ async function processAutomationGenerationJobStep(
       if (derived.code === "TEMPLATE_RENDER_FAILED") {
         return { code: "DOCX_RENDER_ERROR", message: derived.message };
       }
-      if (derived.code === "DOCX_TO_PDF_UNAVAILABLE") {
+      if (
+        derived.code === "DOCX_TO_PDF_UNAVAILABLE" ||
+        derived.code === "DOCX_PDF_CONVERTER_UNAVAILABLE"
+      ) {
         return { code: "PDF_CONVERSION_UNAVAILABLE", message: derived.message };
       }
       if (
@@ -15149,7 +15297,56 @@ router.post(
         await client.query("BEGIN");
         await setTenantContext(client, firmId, userId);
         const rlsDb = makeRlsDb(client);
-        const out = await fn(rlsDb);
+        let out: T;
+        try {
+          out = await fn(rlsDb);
+        } catch (err) {
+          // #region debug-point A:with-tenant-db-error
+          (() => {
+            import("node:fs")
+              .then((fs) => {
+                const p = ".dbg/document-generation-stability.env";
+                let u = "http://127.0.0.1:7777/event";
+                let s = "document-generation-stability";
+                try {
+                  const e = fs.readFileSync(p, "utf8");
+                  u = e.match(/DEBUG_SERVER_URL=(.+)/)?.[1] || u;
+                  s = e.match(/DEBUG_SESSION_ID=(.+)/)?.[1] || s;
+                } catch {}
+                const info = extractDbErrorInfo(err);
+                fetch(u, {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({
+                    sessionId: s,
+                    runId: "pre",
+                    hypothesisId: "A",
+                    location: "documents.ts:withTenantDb",
+                    msg: "[DEBUG] withTenantDb fn threw",
+                    ts: Date.now(),
+                    traceId: requestId,
+                    data: {
+                      requestId,
+                      firmId,
+                      userId,
+                      sqlstate: info.sqlstate,
+                      table: info.table,
+                      column: info.column,
+                      constraint: info.constraint,
+                      message: info.message,
+                      code:
+                        err instanceof DocumentGenerationError
+                          ? err.code
+                          : undefined,
+                    },
+                  }),
+                }).catch(() => {});
+              })
+              .catch(() => {});
+          })();
+          // #endregion
+          throw err;
+        }
         ok = true;
         return out;
       } finally {
@@ -15258,6 +15455,50 @@ router.post(
       parsed.data.config?.includeDiagnostics === true ||
       process.env.API_ERROR_DETAILS === "1";
 
+    // #region debug-point A:generate-now-start
+    (() => {
+      import("node:fs")
+        .then((fs) => {
+          const p = ".dbg/document-generation-stability.env";
+          let u = "http://127.0.0.1:7777/event";
+          let s = "document-generation-stability";
+          try {
+            const e = fs.readFileSync(p, "utf8");
+            u = e.match(/DEBUG_SERVER_URL=(.+)/)?.[1] || u;
+            s = e.match(/DEBUG_SESSION_ID=(.+)/)?.[1] || s;
+          } catch {}
+          fetch(u, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              sessionId: s,
+              runId: "pre",
+              hypothesisId: "A",
+              location: "documents.ts:/documents/automation/generate-now",
+              msg: "[DEBUG] generate-now start",
+              ts: Date.now(),
+              traceId: requestId,
+              data: {
+                requestId,
+                firmId,
+                userId,
+                caseCount: caseIds.length,
+                templateCount: templates.length,
+                itemCount: caseIds.length * templates.length,
+                includeDiagnostics,
+                limits: {
+                  maxCases: 10,
+                  maxTemplates: 20,
+                  maxItems: 40,
+                },
+              },
+            }),
+          }).catch(() => {});
+        })
+        .catch(() => {});
+    })();
+    // #endregion
+
     const showMasterDocuments = await (async () => {
       return await withTenantDb(async (r) => {
         try {
@@ -15284,6 +15525,80 @@ router.post(
       );
       return;
     }
+
+    const r = getRlsDb(req, res);
+    if (!r) return;
+
+    const jobId = randomUUID();
+    const templateRefs = templates;
+    const firmTemplateIds = templateRefs
+      .filter((x) => x.source === "firm")
+      .map((x) => x.id);
+    const masterDocIds = templateRefs
+      .filter((x) => x.source === "master")
+      .map((x) => x.id);
+    const jobConfig = {
+      action: "download",
+      outputFormat: "pdf",
+      createdRoleId: req.roleId ?? null,
+      templates: templateRefs,
+    };
+
+    try {
+      await queryRows(
+        r,
+        sql`
+          INSERT INTO document_generation_jobs (
+            id, firm_id, job_type, status, action, case_ids, template_ids, platform_document_ids, config,
+            total_count, success_count, failed_count, pending_count,
+            created_by, created_at, last_heartbeat_at, timeout_at, runner_attempts
+          ) VALUES (
+            ${jobId}::uuid, ${firmId}, 'document_automation', 'pending', 'download',
+            ${JSON.stringify(caseIds)}::jsonb, ${JSON.stringify(firmTemplateIds)}::jsonb, ${JSON.stringify(masterDocIds)}::jsonb, ${JSON.stringify(jobConfig)}::jsonb,
+            ${caseIds.length * templateRefs.length}, 0, 0, ${caseIds.length * templateRefs.length},
+            ${userId as any}, now(), now(), now() + interval '10 minutes', 0
+          )
+        `,
+      );
+
+      const itemValues: Array<ReturnType<typeof sql>> = [];
+      for (const caseId of caseIds) {
+        for (const ref of templateRefs) {
+          itemValues.push(
+            sql`(${jobId}::uuid, ${firmId}, ${caseId}, ${ref.source}, ${ref.source === "firm" ? ref.id : null}, ${ref.source === "master" ? ref.id : null}, 'pending')`,
+          );
+        }
+      }
+      await queryRows(
+        r,
+        sql`
+          INSERT INTO document_generation_job_items (job_id, firm_id, case_id, template_source, template_id, platform_document_id, status)
+          VALUES ${sql.join(itemValues, sql`, `)}
+        `,
+      );
+    } catch (err) {
+      const info = extractDbErrorInfo(err);
+      fail(
+        500,
+        "FAILED_TO_ENQUEUE_JOB",
+        "Failed to enqueue generation job",
+        includeDiagnostics ? { sqlstate: info.sqlstate, message: info.message } : null,
+        true,
+      );
+      return;
+    }
+
+    res.status(202).json({
+      ok: true,
+      jobId,
+      status: "pending",
+      meta: {
+        request_id: requestId ?? null,
+        timestamp: new Date().toISOString(),
+        duration_ms: Date.now() - startedAt,
+      },
+    });
+    return;
 
     const cache = createRequestCache();
     const templateObjectCache = new Map<
@@ -15485,6 +15800,46 @@ router.post(
             return rows[0] as any;
           } catch (err) {
             const info = extractDbErrorInfo(err);
+            // #region debug-point C:template-meta-query-failed
+            (() => {
+              import("node:fs")
+                .then((fs) => {
+                  const p = ".dbg/document-generation-stability.env";
+                  let u = "http://127.0.0.1:7777/event";
+                  let s = "document-generation-stability";
+                  try {
+                    const e = fs.readFileSync(p, "utf8");
+                    u = e.match(/DEBUG_SERVER_URL=(.+)/)?.[1] || u;
+                    s = e.match(/DEBUG_SESSION_ID=(.+)/)?.[1] || s;
+                  } catch {}
+                  fetch(u, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                      sessionId: s,
+                      runId: "pre",
+                      hypothesisId: "C",
+                      location: "documents.ts:loadTemplateMeta",
+                      msg: "[DEBUG] template metadata query failed",
+                      ts: Date.now(),
+                      traceId: requestId,
+                      data: {
+                        requestId,
+                        firmId,
+                        userId,
+                        template: cacheKey,
+                        sqlstate: info.sqlstate,
+                        table: info.table,
+                        column: info.column,
+                        constraint: info.constraint,
+                        message: info.message,
+                      },
+                    }),
+                  }).catch(() => {});
+                })
+                .catch(() => {});
+            })();
+            // #endregion
             throw new DocumentGenerationError(
               422,
               "TEMPLATE_METADATA_QUERY_FAILED",
@@ -15572,6 +15927,44 @@ router.post(
           const cacheKey = `${t.source}:${t.id}`;
 
           try {
+            // #region debug-point B:item-start
+            (() => {
+              import("node:fs")
+                .then((fs) => {
+                  const p = ".dbg/document-generation-stability.env";
+                  let u = "http://127.0.0.1:7777/event";
+                  let s = "document-generation-stability";
+                  try {
+                    const e = fs.readFileSync(p, "utf8");
+                    u = e.match(/DEBUG_SERVER_URL=(.+)/)?.[1] || u;
+                    s = e.match(/DEBUG_SESSION_ID=(.+)/)?.[1] || s;
+                  } catch {}
+                  fetch(u, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                      sessionId: s,
+                      runId: "pre",
+                      hypothesisId: "B",
+                      location: "documents.ts:generate-now:item",
+                      msg: "[DEBUG] item start",
+                      ts: Date.now(),
+                      traceId: requestId,
+                      data: {
+                        requestId,
+                        firmId,
+                        userId,
+                        caseIndex,
+                        caseId,
+                        templateIndex,
+                        template: cacheKey,
+                      },
+                    }),
+                  }).catch(() => {});
+                })
+                .catch(() => {});
+            })();
+            // #endregion
             const out = await withTenantDb(async (r) => {
               const context = await buildCaseContext(r, caseId, firmId, cache);
               if (!context) {
@@ -15772,6 +16165,44 @@ router.post(
             outputs.push(out);
             generatedCount += 1;
             successCount += 1;
+            // #region debug-point B:item-success
+            (() => {
+              import("node:fs")
+                .then((fs) => {
+                  const p = ".dbg/document-generation-stability.env";
+                  let u = "http://127.0.0.1:7777/event";
+                  let s = "document-generation-stability";
+                  try {
+                    const e = fs.readFileSync(p, "utf8");
+                    u = e.match(/DEBUG_SERVER_URL=(.+)/)?.[1] || u;
+                    s = e.match(/DEBUG_SESSION_ID=(.+)/)?.[1] || s;
+                  } catch {}
+                  fetch(u, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                      sessionId: s,
+                      runId: "pre",
+                      hypothesisId: "B",
+                      location: "documents.ts:generate-now:item",
+                      msg: "[DEBUG] item success",
+                      ts: Date.now(),
+                      traceId: requestId,
+                      data: {
+                        requestId,
+                        firmId,
+                        userId,
+                        caseId,
+                        template: cacheKey,
+                        zipPath: out.zipPath,
+                        bytesLength: out.bytes?.length ?? null,
+                      },
+                    }),
+                  }).catch(() => {});
+                })
+                .catch(() => {});
+            })();
+            // #endregion
           } catch (err) {
             const info = pickDbInfo(err);
             const queryName = pickQueryLabel(err);
@@ -15830,6 +16261,49 @@ router.post(
                 "[documents.generate-now] item failed",
               );
             } catch {}
+            // #region debug-point B:item-failed
+            (() => {
+              import("node:fs")
+                .then((fs) => {
+                  const p = ".dbg/document-generation-stability.env";
+                  let u = "http://127.0.0.1:7777/event";
+                  let s = "document-generation-stability";
+                  try {
+                    const e = fs.readFileSync(p, "utf8");
+                    u = e.match(/DEBUG_SERVER_URL=(.+)/)?.[1] || u;
+                    s = e.match(/DEBUG_SESSION_ID=(.+)/)?.[1] || s;
+                  } catch {}
+                  fetch(u, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                      sessionId: s,
+                      runId: "pre",
+                      hypothesisId: "B",
+                      location: "documents.ts:generate-now:item",
+                      msg: "[DEBUG] item failed",
+                      ts: Date.now(),
+                      traceId: requestId,
+                      data: {
+                        requestId,
+                        firmId,
+                        userId,
+                        caseId,
+                        template: cacheKey,
+                        errorCode,
+                        queryName,
+                        sqlstate: info.sqlstate,
+                        table: info.table,
+                        column: info.column,
+                        constraint: info.constraint,
+                        originalErrorMessage,
+                      },
+                    }),
+                  }).catch(() => {});
+                })
+                .catch(() => {});
+            })();
+            // #endregion
           }
         }
       }
@@ -16304,10 +16778,9 @@ router.post(
                   : { platformDocumentId: ref.id }),
                 templateName,
                 templateType,
-                hardBlocked: false,
-                warnings: [
-                  "DOCX to PDF converter is not configured. Will use fallback PDF rendering.",
-                ],
+                hardBlocked: true,
+                code: "DOCX_PDF_CONVERTER_UNAVAILABLE",
+                message: "DOCX to PDF converter is not configured",
               });
               return;
             }
@@ -17000,8 +17473,110 @@ router.get(
       });
       zipfile.outputStream.pipe(res);
 
-      const nameCounts = new Map<string, number>();
-      for (const it of successItems) {
+      const jobConfig =
+        (job as any)?.config && typeof (job as any).config === "object"
+          ? ((job as any).config as Record<string, unknown>)
+          : {};
+      const includeDebugFiles =
+        jobConfig.includeDebugFiles === true || jobConfig.includeDiagnostics === true;
+
+      const safeZipSegment = (input: unknown): string => {
+        return String(input || "UNTITLED")
+          .replace(/[\\/:*?"<>|]+/g, "-")
+          .replace(/\s+/g, " ")
+          .trim()
+          .slice(0, 120);
+      };
+
+      const selectedCaseIds = (() => {
+        const raw = (job as any)?.case_ids;
+        const arr = Array.isArray(raw) ? raw : [];
+        return arr
+          .map((x) => (typeof x === "number" ? x : Number.parseInt(String(x), 10)))
+          .filter((x) => Number.isFinite(x))
+          .map((x) => Math.trunc(x))
+          .filter((x) => x > 0);
+      })();
+      const selectedTemplateRefs = (() => {
+        const raw = (jobConfig as any)?.templates;
+        if (!Array.isArray(raw)) return [] as Array<{ source: "firm" | "master"; id: number }>;
+        return raw
+          .map((x) => {
+            const r = x && typeof x === "object" ? (x as any) : null;
+            const source = r?.source === "master" ? ("master" as const) : ("firm" as const);
+            const id = typeof r?.id === "number" ? r.id : Number.parseInt(String(r?.id ?? ""), 10);
+            return Number.isFinite(id) && id > 0 ? { source, id: Math.trunc(id) } : null;
+          })
+          .filter((x): x is { source: "firm" | "master"; id: number } => Boolean(x));
+      })();
+
+      const caseIndexById = new Map<number, number>();
+      for (let i = 0; i < selectedCaseIds.length; i++) {
+        caseIndexById.set(selectedCaseIds[i]!, i);
+      }
+      const templateIndexByKey = new Map<string, number>();
+      for (let i = 0; i < selectedTemplateRefs.length; i++) {
+        const t = selectedTemplateRefs[i]!;
+        templateIndexByKey.set(`${t.source}:${t.id}`, i);
+      }
+
+      const caseRefById = new Map<number, string>();
+      if (selectedCaseIds.length > 0) {
+        const rows = await queryRows(
+          r,
+          sql`
+            SELECT id, reference_no
+            FROM cases
+            WHERE firm_id = ${req.firmId!}
+              AND id IN (${sql.join(
+                selectedCaseIds.map((id) => sql`${id}`),
+                sql`, `,
+              )})
+          `,
+        );
+        for (const row of rows) {
+          const id =
+            typeof (row as any).id === "number"
+              ? Number((row as any).id)
+              : Number.parseInt(String((row as any).id ?? ""), 10);
+          if (!Number.isFinite(id)) continue;
+          const ref =
+            typeof (row as any).reference_no === "string" && String((row as any).reference_no).trim()
+              ? String((row as any).reference_no).trim()
+              : `case-${id}`;
+          caseRefById.set(Math.trunc(id), ref);
+        }
+      }
+
+      const outputExt =
+        jobConfig.outputFormat === "pdf" ? "pdf" : jobConfig.outputFormat === "docx" ? "docx" : "";
+
+      const sortedSuccessItems = [...successItems].sort((a, b) => {
+        const aCaseId = Number((a as any).case_id ?? 0);
+        const bCaseId = Number((b as any).case_id ?? 0);
+        const aCaseIndex = caseIndexById.get(aCaseId) ?? 0;
+        const bCaseIndex = caseIndexById.get(bCaseId) ?? 0;
+        if (aCaseIndex !== bCaseIndex) return aCaseIndex - bCaseIndex;
+
+        const aSource = String((a as any).template_source ?? "firm");
+        const bSource = String((b as any).template_source ?? "firm");
+        const aTplId =
+          aSource === "master"
+            ? Number((a as any).platform_document_id ?? 0)
+            : Number((a as any).template_id ?? 0);
+        const bTplId =
+          bSource === "master"
+            ? Number((b as any).platform_document_id ?? 0)
+            : Number((b as any).template_id ?? 0);
+        const aTplIndex = templateIndexByKey.get(`${aSource}:${aTplId}`) ?? 0;
+        const bTplIndex = templateIndexByKey.get(`${bSource}:${bTplId}`) ?? 0;
+        if (aTplIndex !== bTplIndex) return aTplIndex - bTplIndex;
+
+        return Number((a as any).id ?? 0) - Number((b as any).id ?? 0);
+      });
+
+      const nameCountsByFolder = new Map<string, Map<string, number>>();
+      for (const it of sortedSuccessItems) {
         const op =
           typeof (it as any).object_path === "string"
             ? String((it as any).object_path)
@@ -17011,26 +17586,61 @@ router.get(
           typeof (it as any).file_name === "string"
             ? String((it as any).file_name)
             : `document-${String((it as any).id ?? "")}.docx`;
-        const base = (
-          safeFilenameAscii(rawName) ||
-          rawName ||
-          `document-${String((it as any).id ?? "")}`
-        ).replace(/^\/*/, "");
-        const n = (nameCounts.get(base) ?? 0) + 1;
-        nameCounts.set(base, n);
-        const zipPath =
+
+        const caseId = Number((it as any).case_id ?? NaN);
+        const caseIndex = caseIndexById.get(caseId) ?? 0;
+        const caseRefRaw = caseRefById.get(caseId) ?? `case-${caseId}`;
+        const caseFolder =
+          selectedCaseIds.length > 1
+            ? `${String(caseIndex + 1).padStart(2, "0")}_${safeZipSegment(caseRefRaw)}`
+            : "";
+
+        const templateSource = String((it as any).template_source ?? "firm");
+        const templateId =
+          templateSource === "master"
+            ? Number((it as any).platform_document_id ?? NaN)
+            : Number((it as any).template_id ?? NaN);
+        const templateIndex = templateIndexByKey.get(
+          `${templateSource}:${templateId}`,
+        );
+        const templateOrder =
+          typeof templateIndex === "number" && Number.isFinite(templateIndex)
+            ? templateIndex
+            : 0;
+        const templateName =
+          typeof (it as any).template_name === "string" && String((it as any).template_name).trim()
+            ? String((it as any).template_name).trim()
+            : stripExtension(rawName);
+
+        const ext =
+          outputExt ||
+          fileExtensionFromName(rawName).toLowerCase() ||
+          "pdf";
+        const baseName = `${String(templateOrder + 1).padStart(2, "0")}_${safeZipSegment(
+          stripExtension(templateName),
+        )}.${ext}`;
+
+        const folderKey = caseFolder || "__root__";
+        const nameCounts =
+          nameCountsByFolder.get(folderKey) ?? new Map<string, number>();
+        nameCountsByFolder.set(folderKey, nameCounts);
+        const n = (nameCounts.get(baseName) ?? 0) + 1;
+        nameCounts.set(baseName, n);
+        const zipBase =
           n === 1
-            ? base
-            : base.replace(
+            ? baseName
+            : baseName.replace(
                 /(\.[^./\\]+)?$/,
-                (_m, ext) => ` (${n})${ext ?? ""}`,
+                (_m, ext0) => ` (${n})${ext0 ?? ""}`,
               );
+        const zipPath = caseFolder ? `${caseFolder}/${zipBase}` : zipBase;
+
         const bytes = await readSupabasePrivateObjectBytes(op, {
           timeoutMs: 60_000,
         });
         zipfile.addBuffer(bytes, zipPath);
       }
-      if (failedItems.length > 0) {
+      if (includeDebugFiles && failedItems.length > 0) {
         const lines = failedItems.map((it) => {
           const caseId = (it as any)?.case_id;
           const templateId =
