@@ -10529,6 +10529,52 @@ function wrapPdfTextPreservingNewlines(
   return out.length ? out : [""];
 }
 
+async function renderErrorPdfBytes(args: {
+  title: string;
+  lines: string[];
+}): Promise<Buffer> {
+  const pdfDoc = await PDFDocument.create();
+  const page = pdfDoc.addPage([595.28, 841.89]);
+  const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
+  const margin = 36;
+  const titleFontSize = 14;
+  const fontSize = 10;
+  const lineHeight = 14;
+  const maxWidth = page.getWidth() - margin * 2;
+  const pageHeight = page.getHeight();
+
+  let y = pageHeight - margin - titleFontSize;
+  page.drawText(args.title.slice(0, 160), {
+    x: margin,
+    y,
+    size: titleFontSize,
+    font,
+    color: rgb(0, 0, 0),
+  });
+  y -= titleFontSize + 10;
+
+  const body = args.lines
+    .flatMap((ln) => String(ln ?? "").replace(/\r\n/g, "\n").split("\n"))
+    .flatMap((ln) =>
+      wrapPdfTextPreservingNewlines(String(ln ?? ""), font, fontSize, maxWidth),
+    );
+
+  for (const ln of body) {
+    if (y < margin) break;
+    page.drawText(String(ln ?? "").slice(0, 500), {
+      x: margin,
+      y,
+      size: fontSize,
+      font,
+      color: rgb(0, 0, 0),
+    });
+    y -= lineHeight;
+  }
+
+  const out = await pdfDoc.save();
+  return Buffer.from(out);
+}
+
 function isPdfTextBoxMappings(v: unknown): v is {
   pages: Array<{
     pageIndex: number;
@@ -10725,7 +10771,7 @@ async function renderPdfMappedTemplate(args: {
       const fontSize = m.size;
       const lineHeight = m.lineHeight ?? Math.ceil(fontSize * 1.2);
       const lines = m.maxWidth
-        ? wrapPdfLines(value, font, fontSize, m.maxWidth)
+        ? wrapPdfTextPreservingNewlines(value, font, fontSize, m.maxWidth)
         : value.split(/\r?\n/);
       const align =
         m.alignment === "center" || m.alignment === "right"
@@ -14401,8 +14447,10 @@ function isDocumentGenerationErrorLike(v: unknown): v is {
 async function touchJobHeartbeat(
   r: DbConn,
   args: { firmId: number; jobId: string },
+  caps: DocGenRunnerSchemaCaps,
 ): Promise<void> {
   touchActiveRunnerHeartbeat(args);
+  if (!caps.jobs.lastHeartbeatAt) return;
   try {
     await queryRows(
       r,
@@ -14646,7 +14694,7 @@ async function processAutomationGenerationJobStep(
   args: { firmId: number; jobId: string },
   caps: DocGenRunnerSchemaCaps,
 ): Promise<void> {
-  await touchJobHeartbeat(r, args);
+  await touchJobHeartbeat(r, args, caps);
   const jobRows = await queryRows(
     r,
     sql`
@@ -15057,7 +15105,7 @@ async function processAutomationGenerationJobStep(
         );
       }
       await updateJobCounts(r, args);
-      await touchJobHeartbeat(r, args);
+      await touchJobHeartbeat(r, args, caps);
       return;
     }
 
@@ -15478,7 +15526,7 @@ async function processAutomationGenerationJobStep(
     } catch {}
 
     await updateJobCounts(r, args);
-    await touchJobHeartbeat(r, args);
+    await touchJobHeartbeat(r, args, caps);
     return;
   }
 
@@ -15718,6 +15766,11 @@ router.post(
       parsed.data.config?.includeDiagnostics === true ||
       process.env.API_ERROR_DETAILS === "1";
 
+    const useSync =
+      caseIds.length <= 2 &&
+      templates.length <= 3 &&
+      caseIds.length * templates.length <= 6;
+
     // #region debug-point A:generate-now-start
     (() => {
       import("node:fs")
@@ -15749,6 +15802,7 @@ router.post(
                 templateCount: templates.length,
                 itemCount: caseIds.length * templates.length,
                 includeDiagnostics,
+                useSync,
                 limits: {
                   maxCases: 10,
                   maxTemplates: 20,
@@ -15789,81 +15843,83 @@ router.post(
       return;
     }
 
-    const r = getRlsDb(req, res);
-    if (!r) return;
+    if (!useSync) {
+      const r = getRlsDb(req, res);
+      if (!r) return;
 
-    const jobId = randomUUID();
-    const templateRefs = templates;
-    const firmTemplateIds = templateRefs
-      .filter((x) => x.source === "firm")
-      .map((x) => x.id);
-    const masterDocIds = templateRefs
-      .filter((x) => x.source === "master")
-      .map((x) => x.id);
-    const jobConfig = {
-      action: "download",
-      outputFormat: "pdf",
-      createdRoleId: req.roleId ?? null,
-      templates: templateRefs,
-    };
+      const jobId = randomUUID();
+      const templateRefs = templates;
+      const firmTemplateIds = templateRefs
+        .filter((x) => x.source === "firm")
+        .map((x) => x.id);
+      const masterDocIds = templateRefs
+        .filter((x) => x.source === "master")
+        .map((x) => x.id);
+      const jobConfig = {
+        action: "download",
+        outputFormat: "pdf",
+        createdRoleId: req.roleId ?? null,
+        templates: templateRefs,
+      };
 
-    try {
-      await queryRows(
-        r,
-        sql`
-          INSERT INTO document_generation_jobs (
-            id, firm_id, job_type, status, action, case_ids, template_ids, platform_document_ids, config,
-            total_count, success_count, failed_count, pending_count,
-            created_by, created_at, last_heartbeat_at, timeout_at, runner_attempts
-          ) VALUES (
-            ${jobId}::uuid, ${firmId}, 'document_automation', 'pending', 'download',
-            ${JSON.stringify(caseIds)}::jsonb, ${JSON.stringify(firmTemplateIds)}::jsonb, ${JSON.stringify(masterDocIds)}::jsonb, ${JSON.stringify(jobConfig)}::jsonb,
-            ${caseIds.length * templateRefs.length}, 0, 0, ${caseIds.length * templateRefs.length},
-            ${userId as any}, now(), now(), now() + interval '10 minutes', 0
-          )
-        `,
-      );
+      try {
+        await queryRows(
+          r,
+          sql`
+            INSERT INTO document_generation_jobs (
+              id, firm_id, job_type, status, action, case_ids, template_ids, platform_document_ids, config,
+              total_count, success_count, failed_count, pending_count,
+              created_by, created_at, last_heartbeat_at, timeout_at, runner_attempts
+            ) VALUES (
+              ${jobId}, ${firmId}, 'document_automation', 'pending', 'download',
+              ${JSON.stringify(caseIds)}::jsonb, ${JSON.stringify(firmTemplateIds)}::jsonb, ${JSON.stringify(masterDocIds)}::jsonb, ${JSON.stringify(jobConfig)}::jsonb,
+              ${caseIds.length * templateRefs.length}, 0, 0, ${caseIds.length * templateRefs.length},
+              ${userId as any}, now(), now(), now() + interval '10 minutes', 0
+            )
+          `,
+        );
 
-      const itemValues: Array<ReturnType<typeof sql>> = [];
-      for (const caseId of caseIds) {
-        for (const ref of templateRefs) {
-          itemValues.push(
-            sql`(${jobId}::uuid, ${firmId}, ${caseId}, ${ref.source}, ${ref.source === "firm" ? ref.id : null}, ${ref.source === "master" ? ref.id : null}, 'pending')`,
-          );
+        const itemValues: Array<ReturnType<typeof sql>> = [];
+        for (const caseId of caseIds) {
+          for (const ref of templateRefs) {
+            itemValues.push(
+              sql`(${jobId}, ${firmId}, ${caseId}, ${ref.source}, ${ref.source === "firm" ? ref.id : null}, ${ref.source === "master" ? ref.id : null}, 'pending')`,
+            );
+          }
         }
+        await queryRows(
+          r,
+          sql`
+            INSERT INTO document_generation_job_items (job_id, firm_id, case_id, template_source, template_id, platform_document_id, status)
+            VALUES ${sql.join(itemValues, sql`, `)}
+          `,
+        );
+      } catch (err) {
+        const info = extractDbErrorInfo(err);
+        fail(
+          500,
+          "FAILED_TO_ENQUEUE_JOB",
+          "Failed to enqueue generation job",
+          includeDiagnostics
+            ? { sqlstate: info.sqlstate, message: info.message }
+            : null,
+          true,
+        );
+        return;
       }
-      await queryRows(
-        r,
-        sql`
-          INSERT INTO document_generation_job_items (job_id, firm_id, case_id, template_source, template_id, platform_document_id, status)
-          VALUES ${sql.join(itemValues, sql`, `)}
-        `,
-      );
-    } catch (err) {
-      const info = extractDbErrorInfo(err);
-      fail(
-        500,
-        "FAILED_TO_ENQUEUE_JOB",
-        "Failed to enqueue generation job",
-        includeDiagnostics
-          ? { sqlstate: info.sqlstate, message: info.message }
-          : null,
-        true,
-      );
+
+      res.status(202).json({
+        ok: true,
+        jobId,
+        status: "pending",
+        meta: {
+          request_id: requestId ?? null,
+          timestamp: new Date().toISOString(),
+          duration_ms: Date.now() - startedAt,
+        },
+      });
       return;
     }
-
-    res.status(202).json({
-      ok: true,
-      jobId,
-      status: "pending",
-      meta: {
-        request_id: requestId ?? null,
-        timestamp: new Date().toISOString(),
-        duration_ms: Date.now() - startedAt,
-      },
-    });
-    return;
 
     const cache = createRequestCache();
     const templateObjectCache = new Map<
@@ -16497,6 +16553,24 @@ router.post(
                 ? String((err.payload as any).templateName)
                 : null;
 
+            const errorLines = [
+              `Error Code: ${errorCode}`,
+              ...(queryName ? [`Query: ${queryName}`] : []),
+              ...formatDbInfoLines(info, queryName),
+              `Case ID: ${caseId}`,
+              `Case Ref: ${caseReference}`,
+              `Template: ${cacheKey}`,
+              `Message: ${originalErrorMessage}`,
+            ];
+            const errPdf = await renderErrorPdfBytes({
+              title: "Document generation failed",
+              lines: errorLines,
+            });
+            const errTemplateName = templateName || cacheKey;
+            const errFileName = `${String(templateIndex + 1).padStart(2, "0")}__ERROR__${safeName(errTemplateName)}.pdf`;
+            const errZipPath = `${String(caseIndex + 1).padStart(2, "0")}_${safeName(caseReference)}/${errFileName}`;
+            outputs.push({ zipPath: errZipPath, bytes: errPdf });
+
             itemErrors.push({
               caseId,
               caseReference,
@@ -16573,23 +16647,12 @@ router.post(
         }
       }
 
-      if (itemErrors.length > 0) {
-        fail(
-          422,
-          "GENERATE_NOW_FAILED",
-          "One or more documents failed to generate",
-          { items: itemErrors, includeDiagnostics },
-          false,
-        );
-        return;
-      }
-
       if (outputs.length === 0) {
         fail(
           422,
           "NO_DOCUMENT_GENERATED",
           "No documents were generated",
-          null,
+          { items: itemErrors, includeDiagnostics },
           false,
         );
         return;
