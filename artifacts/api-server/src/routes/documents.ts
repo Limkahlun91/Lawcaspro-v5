@@ -520,34 +520,39 @@ async function getDocGenRunnerSchemaCaps(
   r: DbConn,
   cache: RequestCache | undefined,
 ): Promise<DocGenRunnerSchemaCaps> {
-  const [jobLastHeartbeatAt, jobRunnerAttempts, jobTimeoutAt, jobRecoveredAt, jobErrorCode] =
-    await Promise.all([
-      columnExistsCached(r, cache, {
-        schema: "public",
-        table: "document_generation_jobs",
-        column: "last_heartbeat_at",
-      }),
-      columnExistsCached(r, cache, {
-        schema: "public",
-        table: "document_generation_jobs",
-        column: "runner_attempts",
-      }),
-      columnExistsCached(r, cache, {
-        schema: "public",
-        table: "document_generation_jobs",
-        column: "timeout_at",
-      }),
-      columnExistsCached(r, cache, {
-        schema: "public",
-        table: "document_generation_jobs",
-        column: "recovered_at",
-      }),
-      columnExistsCached(r, cache, {
-        schema: "public",
-        table: "document_generation_jobs",
-        column: "error_code",
-      }),
-    ]);
+  const [
+    jobLastHeartbeatAt,
+    jobRunnerAttempts,
+    jobTimeoutAt,
+    jobRecoveredAt,
+    jobErrorCode,
+  ] = await Promise.all([
+    columnExistsCached(r, cache, {
+      schema: "public",
+      table: "document_generation_jobs",
+      column: "last_heartbeat_at",
+    }),
+    columnExistsCached(r, cache, {
+      schema: "public",
+      table: "document_generation_jobs",
+      column: "runner_attempts",
+    }),
+    columnExistsCached(r, cache, {
+      schema: "public",
+      table: "document_generation_jobs",
+      column: "timeout_at",
+    }),
+    columnExistsCached(r, cache, {
+      schema: "public",
+      table: "document_generation_jobs",
+      column: "recovered_at",
+    }),
+    columnExistsCached(r, cache, {
+      schema: "public",
+      table: "document_generation_jobs",
+      column: "error_code",
+    }),
+  ]);
   const [
     itemStartedAt,
     itemPhase,
@@ -556,44 +561,43 @@ async function getDocGenRunnerSchemaCaps(
     itemOutputChecksum,
     itemTemplateSource,
     itemPlatformDocumentId,
-  ] =
-    await Promise.all([
-      columnExistsCached(r, cache, {
-        schema: "public",
-        table: "document_generation_job_items",
-        column: "started_at",
-      }),
-      columnExistsCached(r, cache, {
-        schema: "public",
-        table: "document_generation_job_items",
-        column: "phase",
-      }),
-      columnExistsCached(r, cache, {
-        schema: "public",
-        table: "document_generation_job_items",
-        column: "diagnostic",
-      }),
-      columnExistsCached(r, cache, {
-        schema: "public",
-        table: "document_generation_job_items",
-        column: "template_version_id",
-      }),
-      columnExistsCached(r, cache, {
-        schema: "public",
-        table: "document_generation_job_items",
-        column: "output_checksum",
-      }),
-      columnExistsCached(r, cache, {
-        schema: "public",
-        table: "document_generation_job_items",
-        column: "template_source",
-      }),
-      columnExistsCached(r, cache, {
-        schema: "public",
-        table: "document_generation_job_items",
-        column: "platform_document_id",
-      }),
-    ]);
+  ] = await Promise.all([
+    columnExistsCached(r, cache, {
+      schema: "public",
+      table: "document_generation_job_items",
+      column: "started_at",
+    }),
+    columnExistsCached(r, cache, {
+      schema: "public",
+      table: "document_generation_job_items",
+      column: "phase",
+    }),
+    columnExistsCached(r, cache, {
+      schema: "public",
+      table: "document_generation_job_items",
+      column: "diagnostic",
+    }),
+    columnExistsCached(r, cache, {
+      schema: "public",
+      table: "document_generation_job_items",
+      column: "template_version_id",
+    }),
+    columnExistsCached(r, cache, {
+      schema: "public",
+      table: "document_generation_job_items",
+      column: "output_checksum",
+    }),
+    columnExistsCached(r, cache, {
+      schema: "public",
+      table: "document_generation_job_items",
+      column: "template_source",
+    }),
+    columnExistsCached(r, cache, {
+      schema: "public",
+      table: "document_generation_job_items",
+      column: "platform_document_id",
+    }),
+  ]);
 
   return {
     jobs: {
@@ -1668,8 +1672,7 @@ async function buildCaseContext(
     try {
       await r.execute(sql.raw(`SAVEPOINT ${sp}`));
       savepointCreated = true;
-    } catch {
-    }
+    } catch {}
     if (!savepointCreated) {
       return await fn();
     }
@@ -1684,8 +1687,7 @@ async function buildCaseContext(
       try {
         await r.execute(sql.raw(`ROLLBACK TO SAVEPOINT ${sp}`));
         rolledBack = true;
-      } catch {
-      }
+      } catch {}
       try {
         await r.execute(sql.raw(`RELEASE SAVEPOINT ${sp}`));
       } catch {}
@@ -14494,7 +14496,8 @@ async function recoverStaleDocumentGenerationJob(
   {
     const setParts: Array<ReturnType<typeof sql>> = [sql`status = 'pending'`];
     if (caps.jobs.recoveredAt) setParts.push(sql`recovered_at = now()`);
-    if (caps.jobs.lastHeartbeatAt) setParts.push(sql`last_heartbeat_at = now()`);
+    if (caps.jobs.lastHeartbeatAt)
+      setParts.push(sql`last_heartbeat_at = now()`);
     setParts.push(
       sql`pending_count = (
             SELECT COUNT(*)
@@ -14558,11 +14561,15 @@ async function startDocumentGenerationJobRunner(
       },
     } satisfies DocGenRunnerSchemaCaps);
   try {
-    await recoverStaleDocumentGenerationJob(r, {
-      firmId: args.firmId,
-      jobId: args.jobId,
-      staleMs: 2 * 60_000,
-    }, caps);
+    await recoverStaleDocumentGenerationJob(
+      r,
+      {
+        firmId: args.firmId,
+        jobId: args.jobId,
+        staleMs: 2 * 60_000,
+      },
+      caps,
+    );
     {
       const setParts: Array<ReturnType<typeof sql>> = [];
       if (caps.jobs.runnerAttempts)
@@ -14571,7 +14578,8 @@ async function startDocumentGenerationJobRunner(
         setParts.push(
           sql`timeout_at = COALESCE(timeout_at, now() + interval '10 minutes')`,
         );
-      if (caps.jobs.lastHeartbeatAt) setParts.push(sql`last_heartbeat_at = now()`);
+      if (caps.jobs.lastHeartbeatAt)
+        setParts.push(sql`last_heartbeat_at = now()`);
       if (setParts.length > 0) {
         await queryRows(
           r,
@@ -14617,7 +14625,8 @@ async function startDocumentGenerationJobRunner(
         sql`error_summary = ${message.slice(0, 500)}`,
       ];
       if (caps.jobs.errorCode) setParts.push(sql`error_code = 'RUNNER_FAILED'`);
-      if (caps.jobs.lastHeartbeatAt) setParts.push(sql`last_heartbeat_at = now()`);
+      if (caps.jobs.lastHeartbeatAt)
+        setParts.push(sql`last_heartbeat_at = now()`);
       await queryRows(
         r,
         sql`
@@ -14663,7 +14672,8 @@ async function processAutomationGenerationJobStep(
       sql`status = 'running'`,
       sql`started_at = COALESCE(started_at, now())`,
     ];
-    if (caps.jobs.lastHeartbeatAt) setParts.push(sql`last_heartbeat_at = now()`);
+    if (caps.jobs.lastHeartbeatAt)
+      setParts.push(sql`last_heartbeat_at = now()`);
     await queryRows(
       r,
       sql`
@@ -14813,7 +14823,8 @@ async function processAutomationGenerationJobStep(
             sql`finished_at = now()`,
             sql`error_summary = ${agg.errorSummary.slice(0, 500)}`,
           ];
-          if (caps.jobs.errorCode) setParts.push(sql`error_code = ${agg.errorCode}`);
+          if (caps.jobs.errorCode)
+            setParts.push(sql`error_code = ${agg.errorCode}`);
           await queryRows(
             r,
             sql`
@@ -14849,8 +14860,10 @@ async function processAutomationGenerationJobStep(
         sql`finished_at = now()`,
         sql`error_summary = ${message.slice(0, 500)}`,
       ];
-      if (caps.jobs.lastHeartbeatAt) setParts.push(sql`last_heartbeat_at = now()`);
-      if (caps.jobs.errorCode) setParts.push(sql`error_code = 'FINALIZE_FAILED'`);
+      if (caps.jobs.lastHeartbeatAt)
+        setParts.push(sql`last_heartbeat_at = now()`);
+      if (caps.jobs.errorCode)
+        setParts.push(sql`error_code = 'FINALIZE_FAILED'`);
       await queryRows(
         r,
         sql`
@@ -14944,6 +14957,13 @@ async function processAutomationGenerationJobStep(
     error_code: null,
     error_message: null,
   });
+
+  let jobItemSavepointCreated = false;
+  const jobItemSavepoint = `dg_job_item_${Number((item as any).id) || 0}`;
+  try {
+    await r.execute(sql.raw(`SAVEPOINT ${jobItemSavepoint}`));
+    jobItemSavepointCreated = true;
+  } catch {}
 
   try {
     if (templateSource === "master") {
@@ -15295,10 +15315,20 @@ async function processAutomationGenerationJobStep(
       );
     }
   } catch (err: unknown) {
+    if (jobItemSavepointCreated) {
+      try {
+        await r.execute(sql.raw(`ROLLBACK TO SAVEPOINT ${jobItemSavepoint}`));
+      } catch {}
+      try {
+        await r.execute(sql.raw(`RELEASE SAVEPOINT ${jobItemSavepoint}`));
+      } catch {}
+    }
+
     const allowErrorDetails =
       process.env.API_ERROR_DETAILS === "1" ||
       process.env.NODE_ENV !== "production";
     const cfgErr = getSupabaseStorageConfigError(err);
+    const dbInfo = extractDbErrorInfo(err);
     const derived = cfgErr
       ? new DocumentGenerationError(
           cfgErr.statusCode,
@@ -15387,6 +15417,10 @@ async function processAutomationGenerationJobStep(
     const diagnostic = {
       ...(derived.payload ?? {}),
       ...(missingRequiredVariables.length ? { missingRequiredVariables } : {}),
+      ...(dbInfo.sqlstate ? { sqlState: dbInfo.sqlstate } : {}),
+      ...(dbInfo.table ? { table: dbInfo.table } : {}),
+      ...(dbInfo.column ? { column: dbInfo.column } : {}),
+      ...(dbInfo.constraint ? { constraint: dbInfo.constraint } : {}),
       ...(mapped.code !== derived.code
         ? {
             originalErrorCode: derived.code,
@@ -15423,6 +15457,29 @@ async function processAutomationGenerationJobStep(
         `,
       );
     }
+
+    try {
+      const jobErrSummary = `${mapped.code}: ${mapped.message}`.slice(0, 500);
+      const setParts: Array<ReturnType<typeof sql>> = [
+        sql`status = 'failed'`,
+        sql`pending_count = 0`,
+        sql`finished_at = now()`,
+        sql`error_summary = ${jobErrSummary}`,
+      ];
+      if (caps.jobs.errorCode) setParts.push(sql`error_code = ${mapped.code}`);
+      await queryRows(
+        r,
+        sql`
+          UPDATE document_generation_jobs
+          SET ${sql.join(setParts, sql`, `)}
+          WHERE id = ${args.jobId} AND firm_id = ${args.firmId}
+        `,
+      );
+    } catch {}
+
+    await updateJobCounts(r, args);
+    await touchJobHeartbeat(r, args);
+    return;
   }
 
   const counts = await queryRows(
@@ -15788,7 +15845,9 @@ router.post(
         500,
         "FAILED_TO_ENQUEUE_JOB",
         "Failed to enqueue generation job",
-        includeDiagnostics ? { sqlstate: info.sqlstate, message: info.message } : null,
+        includeDiagnostics
+          ? { sqlstate: info.sqlstate, message: info.message }
+          : null,
         true,
       );
       return;
@@ -17230,7 +17289,12 @@ router.get(
       if (!job) {
         res.status(404).json({
           ok: false,
-          error: { code: "JOB_NOT_FOUND", message: "Job not found", details: null, retryable: false },
+          error: {
+            code: "JOB_NOT_FOUND",
+            message: "Job not found",
+            details: null,
+            retryable: false,
+          },
           meta: {
             request_id: requestId ?? null,
             timestamp: new Date().toISOString(),
@@ -17371,11 +17435,15 @@ router.post(
       const MAX_ITEMS_PER_CALL = 1;
       const cache = createRequestCache();
       const caps = await getDocGenRunnerSchemaCaps(r, cache);
-      await recoverStaleDocumentGenerationJob(r, {
-        firmId: req.firmId!,
-        jobId,
-        staleMs: 3 * 60_000,
-      }, caps);
+      await recoverStaleDocumentGenerationJob(
+        r,
+        {
+          firmId: req.firmId!,
+          jobId,
+          staleMs: 3 * 60_000,
+        },
+        caps,
+      );
       await startDocumentGenerationJobRunner(
         r,
         { firmId: req.firmId!, jobId },
@@ -17427,6 +17495,85 @@ router.post(
           ? { downloadUrl: `/documents/jobs/${jobId}/download` }
           : {}),
       };
+      if (status === "failed") {
+        const failedItem = items.find(
+          (it) => String((it as any)?.status ?? "") === "failed",
+        ) as any;
+        const failedCaseId = failedItem ? Number(failedItem.case_id) : NaN;
+        const caseRef = await (async () => {
+          if (!Number.isFinite(failedCaseId) || failedCaseId <= 0) return null;
+          try {
+            const rows = await queryRows(
+              r,
+              sql`
+                SELECT reference_no
+                FROM cases
+                WHERE firm_id = ${req.firmId!} AND id = ${failedCaseId}
+                LIMIT 1
+              `,
+            );
+            const row = rows[0] as any;
+            const ref =
+              row && typeof row.reference_no === "string"
+                ? String(row.reference_no)
+                : "";
+            return ref || null;
+          } catch {
+            return null;
+          }
+        })();
+        const diag =
+          failedItem &&
+          failedItem.diagnostic &&
+          typeof failedItem.diagnostic === "object"
+            ? (failedItem.diagnostic as any)
+            : null;
+        res.status(422).json({
+          ok: false,
+          error: {
+            code: "RUN_NEXT_FAILED",
+            message:
+              failedItem && typeof failedItem.error_message === "string"
+                ? String(failedItem.error_message)
+                : "Generation failed",
+            sqlState:
+              diag && typeof diag.sqlState === "string" ? diag.sqlState : null,
+            queryName:
+              diag && typeof diag.queryName === "string"
+                ? diag.queryName
+                : null,
+            caseId: Number.isFinite(failedCaseId) ? failedCaseId : null,
+            caseReference: caseRef,
+            templateId:
+              failedItem && typeof failedItem.template_id === "number"
+                ? failedItem.template_id
+                : failedItem && typeof failedItem.template_id === "string"
+                  ? Number.parseInt(String(failedItem.template_id), 10)
+                  : null,
+            templateName:
+              failedItem && typeof failedItem.template_name === "string"
+                ? String(failedItem.template_name)
+                : null,
+            templateSource:
+              failedItem && typeof failedItem.template_source === "string"
+                ? String(failedItem.template_source)
+                : null,
+            originalErrorMessage:
+              diag && typeof diag.originalErrorMessage === "string"
+                ? diag.originalErrorMessage
+                : null,
+            retryable: false,
+          },
+          meta: {
+            request_id: requestId ?? null,
+            jobId,
+            firmId: req.firmId ?? null,
+            timestamp: new Date().toISOString(),
+            duration_ms: Date.now() - startedAt,
+          },
+        });
+        return;
+      }
       res.status(200).json({
         ok: true,
         job: jobPayload,
@@ -17482,7 +17629,8 @@ router.post(
         error: {
           code: "RUN_NEXT_FAILED",
           message:
-            info.sqlstate && (info.sqlstate === "42703" || info.sqlstate === "42P01")
+            info.sqlstate &&
+            (info.sqlstate === "42703" || info.sqlstate === "42P01")
               ? "Database schema is outdated. Please apply latest migrations."
               : "Failed to run next generation job step",
           sqlState: info.sqlstate ?? null,
@@ -17655,7 +17803,18 @@ router.get(
       return;
     }
     const st = String((job as any).status ?? "");
-    if (st !== "completed" && st !== "completed_with_errors") {
+    const failedCount = Number((job as any).failed_count ?? 0) || 0;
+    if (failedCount > 0) {
+      fail(
+        422,
+        "JOB_HAS_FAILURES",
+        "Job contains failed items",
+        { failedCount },
+        false,
+      );
+      return;
+    }
+    if (st !== "completed") {
       fail(
         409,
         "JOB_NOT_COMPLETED",
@@ -17852,7 +18011,8 @@ router.get(
           ? ((job as any).config as Record<string, unknown>)
           : {};
       const includeDebugFiles =
-        jobConfig.includeDebugFiles === true || jobConfig.includeDiagnostics === true;
+        jobConfig.includeDebugFiles === true ||
+        jobConfig.includeDiagnostics === true;
 
       const safeZipSegment = (input: unknown): string => {
         return String(input || "UNTITLED")
@@ -17866,22 +18026,33 @@ router.get(
         const raw = (job as any)?.case_ids;
         const arr = Array.isArray(raw) ? raw : [];
         return arr
-          .map((x) => (typeof x === "number" ? x : Number.parseInt(String(x), 10)))
+          .map((x) =>
+            typeof x === "number" ? x : Number.parseInt(String(x), 10),
+          )
           .filter((x) => Number.isFinite(x))
           .map((x) => Math.trunc(x))
           .filter((x) => x > 0);
       })();
       const selectedTemplateRefs = (() => {
         const raw = (jobConfig as any)?.templates;
-        if (!Array.isArray(raw)) return [] as Array<{ source: "firm" | "master"; id: number }>;
+        if (!Array.isArray(raw))
+          return [] as Array<{ source: "firm" | "master"; id: number }>;
         return raw
           .map((x) => {
             const r = x && typeof x === "object" ? (x as any) : null;
-            const source = r?.source === "master" ? ("master" as const) : ("firm" as const);
-            const id = typeof r?.id === "number" ? r.id : Number.parseInt(String(r?.id ?? ""), 10);
-            return Number.isFinite(id) && id > 0 ? { source, id: Math.trunc(id) } : null;
+            const source =
+              r?.source === "master" ? ("master" as const) : ("firm" as const);
+            const id =
+              typeof r?.id === "number"
+                ? r.id
+                : Number.parseInt(String(r?.id ?? ""), 10);
+            return Number.isFinite(id) && id > 0
+              ? { source, id: Math.trunc(id) }
+              : null;
           })
-          .filter((x): x is { source: "firm" | "master"; id: number } => Boolean(x));
+          .filter((x): x is { source: "firm" | "master"; id: number } =>
+            Boolean(x),
+          );
       })();
 
       const caseIndexById = new Map<number, number>();
@@ -17915,7 +18086,8 @@ router.get(
               : Number.parseInt(String((row as any).id ?? ""), 10);
           if (!Number.isFinite(id)) continue;
           const ref =
-            typeof (row as any).reference_no === "string" && String((row as any).reference_no).trim()
+            typeof (row as any).reference_no === "string" &&
+            String((row as any).reference_no).trim()
               ? String((row as any).reference_no).trim()
               : `case-${id}`;
           caseRefById.set(Math.trunc(id), ref);
@@ -17923,7 +18095,11 @@ router.get(
       }
 
       const outputExt =
-        jobConfig.outputFormat === "pdf" ? "pdf" : jobConfig.outputFormat === "docx" ? "docx" : "";
+        jobConfig.outputFormat === "pdf"
+          ? "pdf"
+          : jobConfig.outputFormat === "docx"
+            ? "docx"
+            : "";
 
       const sortedSuccessItems = [...successItems].sort((a, b) => {
         const aCaseId = Number((a as any).case_id ?? 0);
@@ -17982,14 +18158,13 @@ router.get(
             ? templateIndex
             : 0;
         const templateName =
-          typeof (it as any).template_name === "string" && String((it as any).template_name).trim()
+          typeof (it as any).template_name === "string" &&
+          String((it as any).template_name).trim()
             ? String((it as any).template_name).trim()
             : stripExtension(rawName);
 
         const ext =
-          outputExt ||
-          fileExtensionFromName(rawName).toLowerCase() ||
-          "pdf";
+          outputExt || fileExtensionFromName(rawName).toLowerCase() || "pdf";
         const baseName = `${String(templateOrder + 1).padStart(2, "0")}_${safeZipSegment(
           stripExtension(templateName),
         )}.${ext}`;
