@@ -1,5 +1,5 @@
 import { Request, Response, NextFunction } from "express";
-import { clearTenantContext, db, makeRlsDb, permissionsTable, pool, RlsDb, rolesTable, sessionsTable, setTenantContext, sql, usersTable, auditLogsTable, platformFounderRolePermissionsTable, platformFounderRolesTable, platformFounderUserRolesTable, type PoolClient } from "@workspace/db";
+import { clearTenantContext, db, makeRlsDb, permissionsTable, pool, RlsDb, rolesTable, sessionsTable, setTenantContext, setTenantContextSession, sql, usersTable, auditLogsTable, platformFounderRolePermissionsTable, platformFounderRolesTable, platformFounderUserRolesTable, type PoolClient } from "@workspace/db";
 import { and, eq } from "drizzle-orm";
 import crypto from "crypto";
 import { logger } from "./logger";
@@ -479,6 +479,71 @@ export async function requireFirmUser(
   res.on("finish", () => { releaseClient(true); });
   res.on("close", () => { releaseClient(false); });
 
+  next();
+}
+
+export async function requireFirmUserSession(
+  req: AuthRequest,
+  res: Response,
+  next: NextFunction
+): Promise<void> {
+  if (req.userType !== "firm_user" || !req.firmId) {
+    writeAuditLog({ actorId: req.userId, firmId: req.firmId, actorType: req.userType ?? "unknown", action: "auth.forbidden.firm_user_required", detail: `${req.method} ${req.path}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+    res.status(403).json({ error: "Firm user access required" });
+    return;
+  }
+
+  let released = false;
+  let client: PoolClient | null = null;
+  try {
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      try {
+        client = await pool.connect();
+        break;
+      } catch (err) {
+        const transient = isTransientDbConnectionError(err);
+        if (!transient || attempt >= 2) throw err;
+        await new Promise<void>((r) => setTimeout(r, 50 * attempt));
+      }
+    }
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    logger.error({ err, message, userId: req.userId ?? null, firmId: req.firmId ?? null }, "auth.firm_user.connect_failed");
+    res.status(503).json({ error: "Tenant context temporarily unavailable", code: "DB_CONNECT" });
+    return;
+  }
+  if (!client) {
+    res.status(503).json({ error: "Tenant context temporarily unavailable", code: "DB_CONNECT" });
+    return;
+  }
+
+  const releaseClient = async (ok: boolean) => {
+    if (released) return;
+    released = true;
+    try {
+      await clearTenantContext(client);
+    } catch {
+    } finally {
+      client.release(!ok);
+    }
+  };
+
+  try {
+    await setTenantContextSession(client, req.firmId, req.userId ?? undefined);
+    req.rlsDb = makeRlsDb(client);
+  } catch (err) {
+    try {
+      await releaseClient(false);
+    } catch {
+    }
+    const message = err instanceof Error ? err.message : String(err);
+    logger.error({ err, message, userId: req.userId, firmId: req.firmId }, "auth.firm_context_error");
+    res.status(503).json({ error: "Tenant context temporarily unavailable", code: "RLS_CONTEXT" });
+    return;
+  }
+
+  res.on("finish", () => { releaseClient(true); });
+  res.on("close", () => { releaseClient(false); });
   next();
 }
 

@@ -24,12 +24,13 @@ import { apiFetchBlob, apiFetchJson, apiRequest } from "@/lib/api-client";
 import { downloadBlob, downloadFromApi, normalizeDownloadFilename } from "@/lib/download";
 import { toastError } from "@/lib/toast-error";
 import { printWordBlob } from "@/lib/documents/BrowserPrinter";
+import { RequestTimeoutError } from "@/lib/fetch-with-timeout";
 import { useAuth } from "@/lib/auth-context";
 import { hasPermission } from "@/lib/permissions";
 import { getGetCaseWorkflowQueryKey, getListCasesQueryKey } from "@workspace/api-client-react";
 import { validateUploadFile } from "@/lib/upload-validation";
 import { TemplateFolderPicker, type TemplateFolderPickerFolder, type TemplateFolderPickerTemplate } from "@/components/documents/TemplateFolderPicker";
-import { generateDocumentsNow, runNextGenerationJob, type NormalizedGenerationJob } from "@/lib/document-generation-client";
+import { generateDocumentsNow, getGenerationJobStatus, runNextGenerationJob, type NormalizedGenerationJob } from "@/lib/document-generation-client";
 import { blocksTemplateGenerate, isTemplateFileReadinessKnown, isTemplateFileReady, templateFileReadinessLabel } from "@/lib/template-readiness";
 
 function docTypeLabel(dt: string): string {
@@ -46,6 +47,13 @@ function todayYmdLocal(): string {
   const mm = pad2(d.getMonth() + 1);
   const dd = pad2(d.getDate());
   return `${yyyy}-${mm}-${dd}`;
+}
+
+function isAbortLikeError(err: unknown): boolean {
+  const name = (err as any)?.name;
+  if (name === "AbortError") return true;
+  const msg = typeof (err as any)?.message === "string" ? String((err as any).message) : "";
+  return msg.toLowerCase().includes("signal is aborted");
 }
 
 interface CaseDocument {
@@ -633,11 +641,35 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
       if (!jobId) throw new Error("Missing jobId");
       const downloadUrl = typeof created?.downloadUrl === "string" ? created.downloadUrl : `/documents/jobs/${jobId}/download`;
 
+      try {
+        const initial = await getGenerationJobStatus(jobId);
+        setBatchGenerateResult(initial);
+      } catch {}
+
+      let inFlight = false;
       const pollOnce = async (): Promise<boolean> => {
-        const job = await runNextGenerationJob(jobId);
-        setBatchGenerateResult(job);
-        const status = typeof job.status === "string" ? job.status : "";
-        if (status === "completed" || status === "completed_with_errors" || status === "completed-with-errors") {
+        if (inFlight) return false;
+        inFlight = true;
+        try {
+          let job: NormalizedGenerationJob;
+          try {
+            job = await runNextGenerationJob(jobId);
+          } catch (err) {
+            if (err instanceof RequestTimeoutError || isAbortLikeError(err)) {
+              const st = await getGenerationJobStatus(jobId);
+              setBatchGenerateResult(st);
+              job = st;
+            } else {
+              throw err;
+            }
+          }
+          setBatchGenerateResult(job);
+          const effectiveStatus = (() => {
+            const status = typeof job.status === "string" ? job.status : "";
+            if (job.totalCount > 0 && job.pendingCount === 0 && job.failedCount === 0 && job.successCount === job.totalCount) return "completed";
+            return status;
+          })();
+          if (effectiveStatus === "completed" || effectiveStatus === "completed_with_errors" || effectiveStatus === "completed-with-errors") {
           const fileName = job.downloadFileName || (enterpriseMode === "print" ? "system-print.pdf" : "documents.zip");
 
           if (enterpriseMode === "print") {
@@ -677,6 +709,9 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
           throw new Error(detail ? `${summary}: ${detail}` : summary);
         }
         return false;
+        } finally {
+          inFlight = false;
+        }
       };
 
       const done = await pollOnce();

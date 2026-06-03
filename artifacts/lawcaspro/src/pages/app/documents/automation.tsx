@@ -748,6 +748,10 @@ export default function DocumentAutomationHub() {
       });
       const jobId = created.jobId;
       if (!jobId) throw new Error("jobId is missing");
+      try {
+        const initial = await getGenerationJobStatus(jobId);
+        setJob(initial);
+      } catch {}
       emitDbg({
         hypothesisId: "H1",
         msg: "runGenerate:job-created",
@@ -797,14 +801,19 @@ export default function DocumentAutomationHub() {
           data: { jobId, inFlight: pollInFlightRef.current },
         });
         try {
-          const ctrl = pollAbortRef.current ?? new AbortController();
+          pollAbortRef.current?.abort();
+          const ctrl = new AbortController();
           pollAbortRef.current = ctrl;
           const next = await runNextGenerationJob(jobId, {
             signal: ctrl.signal,
           });
           pollConsecutiveErrorRef.current = 0;
           setJob(next);
-          const st = String(next.status ?? "");
+          const st = (() => {
+            const status = String(next.status ?? "");
+            if (next.totalCount > 0 && next.pendingCount === 0 && next.failedCount === 0 && next.successCount === next.totalCount) return "completed";
+            return status;
+          })();
           emitDbg({
             hypothesisId: "H3",
             msg: "poll:tick-success",
@@ -870,17 +879,16 @@ export default function DocumentAutomationHub() {
           }
         } catch (err) {
           const shouldStatusCheck =
-            (err instanceof RequestTimeoutError || isAbortLike(err)) &&
-            !pollAbortRef.current?.signal.aborted;
+            err instanceof RequestTimeoutError || isAbortLike(err);
           if (shouldStatusCheck) {
-            toast({
-              title:
-                "Generation request was interrupted, checking job status...",
-            });
             try {
               const st = await getGenerationJobStatus(jobId);
               setJob(st);
-              const status = String(st.status ?? "");
+              const status = (() => {
+                const raw = String(st.status ?? "");
+                if (st.totalCount > 0 && st.pendingCount === 0 && st.failedCount === 0 && st.successCount === st.totalCount) return "completed";
+                return raw;
+              })();
               if (
                 status === "completed" ||
                 status === "completed_with_errors" ||

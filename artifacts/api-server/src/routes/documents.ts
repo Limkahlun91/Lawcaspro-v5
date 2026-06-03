@@ -18,6 +18,7 @@ import {
 import {
   requireAuth,
   requireFirmUser,
+  requireFirmUserSession,
   requireFounder,
   requireFounderPermission,
   requirePermission,
@@ -2926,6 +2927,12 @@ async function buildCaseContext(
 
     // Grammar helpers
     is_plural_purchaser: purchaserRowsResolved.length > 1,
+    purchaser_count: purchaserRowsResolved.length,
+    is_joint_purchaser: purchaserRowsResolved.length > 1 ? "YES" : "",
+    purchasers_inline: purchaserNames.join(", "),
+    purchasers_multiline: purchaserNames.join("\n"),
+    purchasers_nric_inline: purchaserNrics.join(", "),
+    purchasers_nric_multiline: purchaserNrics.join("\n"),
     is_3rd_party_loan: isThirdPartyLoan,
     is_direct_loan: isDirectLoan,
 
@@ -10139,7 +10146,7 @@ async function convertDocxToPdf(docxBytes: Buffer): Promise<Buffer> {
     // #endregion
     throw new DocumentGenerationError(
       503,
-      "DOCX_TO_PDF_CONVERTER_NOT_CONFIGURED",
+      "DOCX_TO_PDF_ENGINE_NOT_CONFIGURED",
       "DOCX to PDF converter is not configured",
     );
   }
@@ -10591,7 +10598,7 @@ async function renderPdfTextBoxMappedTemplate(args: {
   }
   if (!isPdfTextBoxMappings(args.mappings) || !args.mappings.pages.length)
     return args.pdfBytes;
-  const missingMode = args.missingMode === "empty" ? "empty" : "placeholder";
+  const missingMode = args.missingMode === "placeholder" ? "placeholder" : "empty";
   try {
     const pdfDoc = await PDFDocument.load(args.pdfBytes);
     const fontCache = new Map<"Helvetica" | "Times-Roman" | "Courier", any>();
@@ -10702,7 +10709,7 @@ async function renderPdfMappedTemplate(args: {
   }
   const mappings = normalizePdfMappingConfig(args.mappingConfig);
   if (!mappings.length) return args.pdfBytes;
-  const missingMode = args.missingMode === "empty" ? "empty" : "placeholder";
+  const missingMode = args.missingMode === "placeholder" ? "placeholder" : "empty";
   try {
     const pdf = await PDFDocument.load(args.pdfBytes);
     const fontCache = new Map<PdfFontFamily, any>();
@@ -11218,7 +11225,7 @@ async function generateFirmDocument({
       ? preview.resolvedVariables
       : (context as any);
   input = fillMissingScalarsForRender(effectivePlaceholders, input, {
-    missingMode: "placeholder",
+    missingMode: "empty",
   });
   let clauseSnapshot: Record<string, unknown> | null = null;
   let checklistEval = evaluateTemplateChecklist({
@@ -11277,7 +11284,7 @@ async function generateFirmDocument({
     fileContents = applied.docxBytes;
     input = applied.data;
     input = fillMissingScalarsForRender(effectivePlaceholders, input, {
-      missingMode: "placeholder",
+      missingMode: "empty",
     });
     clauseSnapshot = {
       insertionModeUsed: decision.insertionModeUsed,
@@ -11462,14 +11469,14 @@ async function generateFirmDocument({
           pdfBytes: fileContents,
           data: input,
           mappings: mappingConfig,
-          missingMode: "placeholder",
+          missingMode: "empty",
         })
       : legacyMappings.length > 0
         ? renderPdfMappedTemplate({
             pdfBytes: fileContents,
             data: input,
             mappingConfig,
-            missingMode: "placeholder",
+            missingMode: "empty",
           })
         : renderPdfFormTemplate({
             pdfBytes: fileContents,
@@ -11494,7 +11501,7 @@ async function generateFirmDocument({
       nullGetter(part: any) {
         const k = typeof part?.value === "string" ? String(part.value) : "";
         if (!k) return "";
-        return `[MISSING: ${k}]`;
+        return "";
       },
     });
     await maybeHydrateFirmLogoBuffer(input as any);
@@ -11973,7 +11980,7 @@ async function generateMasterDocument({
       ? preview.resolvedVariables
       : (context as any);
   renderInput = fillMissingScalarsForRender(placeholders, renderInput, {
-    missingMode: "placeholder",
+    missingMode: "empty",
   });
   let docxBytesForRender: Buffer | null = null;
   let clauseSnapshot: Record<string, unknown> | null = null;
@@ -12020,7 +12027,7 @@ async function generateMasterDocument({
       docxBytesForRender = applied.docxBytes;
       renderInput = applied.data;
       renderInput = fillMissingScalarsForRender(placeholders, renderInput, {
-        missingMode: "placeholder",
+        missingMode: "empty",
       });
       clauseSnapshot = {
         insertionModeUsed: decision.insertionModeUsed,
@@ -12239,7 +12246,7 @@ async function generateMasterDocument({
       delimiters: { start: "{{", end: "}}" },
       nullGetter(part: any) {
         const k = typeof part?.value === "string" ? String(part.value) : "";
-        return k ? `[MISSING: ${k}]` : "";
+        return "";
       },
     });
     await maybeHydrateFirmLogoBuffer(renderInput as any);
@@ -12321,9 +12328,9 @@ async function generateMasterDocument({
             /\{\{\s*([a-zA-Z0-9_.-]+)\s*\}\}/g,
             (_m: string, key: string) => {
               const val = (renderInput as Record<string, unknown>)[key];
-              if (val === undefined || val === null) return `[MISSING: ${key}]`;
+              if (val === undefined || val === null) return "";
               const s = String(val);
-              return s.trim() ? s : `[MISSING: ${key}]`;
+              return s.trim() ? s : "";
             },
           );
           const fontSize = tb.fontSize || 10;
@@ -14506,30 +14513,33 @@ async function updateJobCounts(
   r: DbConn,
   args: { firmId: number; jobId: string },
 ): Promise<void> {
-  const counts = await queryRows(
-    r,
-    sql`
-    SELECT
-      COUNT(*) FILTER (WHERE status = 'success') AS success_count,
-      COUNT(*) FILTER (WHERE status = 'failed')  AS failed_count,
-      COUNT(*) FILTER (WHERE status IN ('pending','running')) AS pending_count,
-      COUNT(*) AS total_count
-    FROM document_generation_job_items
-    WHERE job_id = ${args.jobId} AND firm_id = ${args.firmId}
-  `,
-  );
-  const c = counts[0] as any;
-  await queryRows(
-    r,
-    sql`
-    UPDATE document_generation_jobs
-    SET total_count = ${Number(c?.total_count ?? 0)},
-        success_count = ${Number(c?.success_count ?? 0)},
-        failed_count = ${Number(c?.failed_count ?? 0)},
-        pending_count = ${Number(c?.pending_count ?? 0)}
-    WHERE id = ${args.jobId} AND firm_id = ${args.firmId}
-  `,
-  );
+  try {
+    const counts = await queryRows(
+      r,
+      sql`
+        SELECT
+          COUNT(*) FILTER (WHERE status = 'success') AS success_count,
+          COUNT(*) FILTER (WHERE status = 'failed')  AS failed_count,
+          COUNT(*) FILTER (WHERE status IN ('pending','running')) AS pending_count,
+          COUNT(*) AS total_count
+        FROM document_generation_job_items
+        WHERE job_id = ${args.jobId} AND firm_id = ${args.firmId}
+      `,
+    );
+    const c = counts[0] as any;
+    await queryRows(
+      r,
+      sql`
+        UPDATE document_generation_jobs
+        SET total_count = ${Number(c?.total_count ?? 0)},
+            success_count = ${Number(c?.success_count ?? 0)},
+            failed_count = ${Number(c?.failed_count ?? 0)},
+            pending_count = ${Number(c?.pending_count ?? 0)}
+        WHERE id = ${args.jobId} AND firm_id = ${args.firmId}
+      `,
+    );
+  } catch {
+  }
 }
 
 async function recoverStaleDocumentGenerationJob(
@@ -17518,7 +17528,7 @@ router.get(
 router.post(
   "/documents/jobs/:jobId/run-next",
   requireAuth,
-  requireFirmUser,
+  requireFirmUserSession,
   requirePermission("documents", "generate"),
   async (req: AuthRequest, res): Promise<void> => {
     const startedAt = Date.now();
@@ -17579,30 +17589,33 @@ router.post(
       });
       return;
     }
+    let locked = false;
     try {
-      const lockRows = await queryRows(
-        r,
-        sql`SELECT pg_try_advisory_xact_lock(hashtext(${jobId}), ${req.firmId!}) AS locked`,
-      );
-      const locked = Boolean((lockRows[0] as any)?.locked);
-      if (!locked) {
-        res.status(409).json({
-          ok: false,
-          error: {
-            code: "RUN_NEXT_IN_FLIGHT",
-            message: "Another runner is processing this job. Please retry.",
-            details: null,
-            retryable: true,
-          },
-          meta: {
-            request_id: requestId ?? null,
-            jobId,
-            firmId: req.firmId ?? null,
-            timestamp: new Date().toISOString(),
-            duration_ms: Date.now() - startedAt,
-          },
-        });
-        return;
+      {
+        const lockRows = await queryRows(
+          r,
+          sql`SELECT pg_try_advisory_lock(hashtext(${jobId}), ${req.firmId!}) AS locked`,
+        );
+        locked = Boolean((lockRows[0] as any)?.locked);
+        if (!locked) {
+          res.status(409).json({
+            ok: false,
+            error: {
+              code: "RUN_NEXT_IN_FLIGHT",
+              message: "Another runner is processing this job. Please retry.",
+              details: null,
+              retryable: true,
+            },
+            meta: {
+              request_id: requestId ?? null,
+              jobId,
+              firmId: req.firmId ?? null,
+              timestamp: new Date().toISOString(),
+              duration_ms: Date.now() - startedAt,
+            },
+          });
+          return;
+        }
       }
       const MAX_JOB_STEP_MS = 6000;
       const MAX_ITEMS_PER_CALL = 1;
@@ -17883,6 +17896,16 @@ router.post(
           duration_ms: Date.now() - startedAt,
         },
       });
+    } finally {
+      if (locked) {
+        try {
+          await queryRows(
+            r,
+            sql`SELECT pg_advisory_unlock(hashtext(${jobId}), ${req.firmId!}) AS unlocked`,
+          );
+        } catch {
+        }
+      }
     }
   },
 );
@@ -18497,212 +18520,6 @@ router.get(
       for (let i = 0; i < selectedCaseIds.length; i++) {
         caseIndexById.set(selectedCaseIds[i]!, i);
       }
-      const firmTemplateIds = selectedTemplateRefs
-        .filter((t) => t.source === "firm")
-        .map((t) => t.id);
-      const masterDocIds = selectedTemplateRefs
-        .filter((t) => t.source === "master")
-        .map((t) => t.id);
-      const [firmTemplates, masterDocs, firmFolders, systemFolders] =
-        await Promise.all([
-          firmTemplateIds.length > 0
-            ? queryRows(
-                r,
-                sql`
-                  SELECT id, name, folder_id, sort_order
-                  FROM document_templates
-                  WHERE firm_id = ${req.firmId!}
-                    AND id IN (${sql.join(
-                      firmTemplateIds.map((id) => sql`${id}`),
-                      sql`, `,
-                    )})
-                `,
-              )
-            : Promise.resolve([]),
-          masterDocIds.length > 0
-            ? queryRows(
-                r,
-                sql`
-                  SELECT id, name, folder_id, sort_order
-                  FROM platform_documents
-                  WHERE id IN (${sql.join(
-                    masterDocIds.map((id) => sql`${id}`),
-                    sql`, `,
-                  )})
-                    AND (firm_id IS NULL OR firm_id = ${req.firmId!})
-                `,
-              )
-            : Promise.resolve([]),
-          queryRows(
-            r,
-            sql`
-              SELECT id, name, parent_id, sort_order
-              FROM firm_document_folders
-              WHERE firm_id = ${req.firmId!}
-            `,
-          ),
-          queryRows(
-            r,
-            sql`
-              SELECT id, name, parent_id, sort_order
-              FROM system_folders
-            `,
-          ),
-        ]);
-
-      const buildFolderPathById = (
-        rows: Record<string, unknown>[],
-      ): Map<number, string> => {
-        const byId = new Map<number, { id: number; name: string; parentId: number | null; sortOrder: number }>();
-        const byParent = new Map<number | null, Array<{ id: number; name: string; parentId: number | null; sortOrder: number }>>();
-        for (const row of rows) {
-          const id =
-            typeof (row as any).id === "number"
-              ? Number((row as any).id)
-              : Number.parseInt(String((row as any).id ?? ""), 10);
-          if (!Number.isFinite(id) || id <= 0) continue;
-          const parentIdRaw = (row as any).parent_id ?? (row as any).parentId;
-          const parentId =
-            typeof parentIdRaw === "number"
-              ? Number(parentIdRaw)
-              : parentIdRaw == null
-                ? null
-                : Number.parseInt(String(parentIdRaw), 10);
-          const name =
-            typeof (row as any).name === "string" ? String((row as any).name) : "";
-          const sortOrderRaw = (row as any).sort_order ?? (row as any).sortOrder;
-          const sortOrder =
-            typeof sortOrderRaw === "number"
-              ? Number(sortOrderRaw)
-              : Number.parseInt(String(sortOrderRaw ?? "0"), 10) || 0;
-          const entry = {
-            id: Math.trunc(id),
-            name,
-            parentId: Number.isFinite(parentId as any) ? Math.trunc(parentId as any) : null,
-            sortOrder: Math.trunc(sortOrder),
-          };
-          byId.set(entry.id, entry);
-          const parentKey = entry.parentId ?? null;
-          const arr = byParent.get(parentKey) ?? [];
-          arr.push(entry);
-          byParent.set(parentKey, arr);
-        }
-        const orderIndexById = new Map<number, number>();
-        for (const [parentKey, arr] of byParent) {
-          arr.sort((a, b) => a.sortOrder - b.sortOrder || a.name.localeCompare(b.name));
-          for (let i = 0; i < arr.length; i++) orderIndexById.set(arr[i]!.id, i);
-          byParent.set(parentKey, arr);
-        }
-        const memo = new Map<number, string>();
-        const build = (id: number): string => {
-          if (memo.has(id)) return memo.get(id)!;
-          const f = byId.get(id);
-          if (!f) return "";
-          const idx = orderIndexById.get(id) ?? 0;
-          const seg = `${String(idx + 1).padStart(2, "0")}_${safeZipSegment(f.name)}`;
-          const parentPath =
-            f.parentId && Number.isFinite(f.parentId) ? build(f.parentId) : "";
-          const out = parentPath ? `${parentPath}/${seg}` : seg;
-          memo.set(id, out);
-          return out;
-        };
-        for (const id of byId.keys()) build(id);
-        return memo;
-      };
-
-      const firmFolderPathById = buildFolderPathById(firmFolders);
-      const systemFolderPathById = buildFolderPathById(systemFolders);
-
-      const templateFolderPathByKey = new Map<string, string>();
-      const templateSortMetaByKey = new Map<
-        string,
-        { folderPath: string; sortOrder: number; name: string }
-      >();
-
-      for (const t of firmTemplates) {
-        const id =
-          typeof (t as any).id === "number"
-            ? Number((t as any).id)
-            : Number.parseInt(String((t as any).id ?? ""), 10);
-        if (!Number.isFinite(id) || id <= 0) continue;
-        const folderIdRaw = (t as any).folder_id ?? (t as any).folderId;
-        const folderId =
-          typeof folderIdRaw === "number"
-            ? Number(folderIdRaw)
-            : folderIdRaw == null
-              ? null
-              : Number.parseInt(String(folderIdRaw), 10);
-        const folderPath =
-          typeof folderId === "number" && Number.isFinite(folderId)
-            ? firmFolderPathById.get(Math.trunc(folderId)) ?? ""
-            : "";
-        const name =
-          typeof (t as any).name === "string" ? String((t as any).name) : "";
-        const sortOrderRaw = (t as any).sort_order ?? (t as any).sortOrder;
-        const sortOrder =
-          typeof sortOrderRaw === "number"
-            ? Number(sortOrderRaw)
-            : Number.parseInt(String(sortOrderRaw ?? "0"), 10) || 0;
-        const key = `firm:${Math.trunc(id)}`;
-        templateFolderPathByKey.set(key, folderPath);
-        templateSortMetaByKey.set(key, {
-          folderPath,
-          sortOrder: Math.trunc(sortOrder),
-          name,
-        });
-      }
-      for (const d of masterDocs) {
-        const id =
-          typeof (d as any).id === "number"
-            ? Number((d as any).id)
-            : Number.parseInt(String((d as any).id ?? ""), 10);
-        if (!Number.isFinite(id) || id <= 0) continue;
-        const folderIdRaw = (d as any).folder_id ?? (d as any).folderId;
-        const folderId =
-          typeof folderIdRaw === "number"
-            ? Number(folderIdRaw)
-            : folderIdRaw == null
-              ? null
-              : Number.parseInt(String(folderIdRaw), 10);
-        const folderPath =
-          typeof folderId === "number" && Number.isFinite(folderId)
-            ? systemFolderPathById.get(Math.trunc(folderId)) ?? ""
-            : "";
-        const name =
-          typeof (d as any).name === "string" ? String((d as any).name) : "";
-        const sortOrderRaw = (d as any).sort_order ?? (d as any).sortOrder;
-        const sortOrder =
-          typeof sortOrderRaw === "number"
-            ? Number(sortOrderRaw)
-            : Number.parseInt(String(sortOrderRaw ?? "0"), 10) || 0;
-        const key = `master:${Math.trunc(id)}`;
-        templateFolderPathByKey.set(key, folderPath);
-        templateSortMetaByKey.set(key, {
-          folderPath,
-          sortOrder: Math.trunc(sortOrder),
-          name,
-        });
-      }
-
-      const templatesByFolderKey = new Map<
-        string,
-        Array<{ key: string; sortOrder: number; name: string }>
-      >();
-      for (const [key, meta] of templateSortMetaByKey) {
-        const folderKey = `${key.startsWith("master:") ? "master" : "firm"}:${meta.folderPath || "__root__"}`;
-        const arr = templatesByFolderKey.get(folderKey) ?? [];
-        arr.push({ key, sortOrder: meta.sortOrder, name: meta.name });
-        templatesByFolderKey.set(folderKey, arr);
-      }
-
-      const templateIndexByKey = new Map<string, number>();
-      for (const [folderKey, arr] of templatesByFolderKey) {
-        arr.sort(
-          (a, b) => a.sortOrder - b.sortOrder || a.name.localeCompare(b.name),
-        );
-        for (let i = 0; i < arr.length; i++) templateIndexByKey.set(arr[i]!.key, i);
-        templatesByFolderKey.set(folderKey, arr);
-      }
 
       const caseRefById = new Map<number, string>();
       if (selectedCaseIds.length > 0) {
@@ -18740,6 +18557,12 @@ router.get(
             ? "docx"
             : "";
 
+      const selectedTemplateIndexByKey = new Map<string, number>();
+      for (let i = 0; i < selectedTemplateRefs.length; i++) {
+        const ref = selectedTemplateRefs[i]!;
+        selectedTemplateIndexByKey.set(`${ref.source}:${ref.id}`, i);
+      }
+
       const sortedSuccessItems = [...successItems].sort((a, b) => {
         const aCaseId = Number((a as any).case_id ?? 0);
         const bCaseId = Number((b as any).case_id ?? 0);
@@ -18759,15 +18582,70 @@ router.get(
             : Number((b as any).template_id ?? 0);
         const aKey = `${aSource}:${aTplId}`;
         const bKey = `${bSource}:${bTplId}`;
-        const aFolder = templateFolderPathByKey.get(aKey) ?? "";
-        const bFolder = templateFolderPathByKey.get(bKey) ?? "";
-        if (aFolder !== bFolder) return aFolder.localeCompare(bFolder);
-        const aTplIndex = templateIndexByKey.get(aKey) ?? 0;
-        const bTplIndex = templateIndexByKey.get(bKey) ?? 0;
+        const aTplIndex = selectedTemplateIndexByKey.get(aKey) ?? 0;
+        const bTplIndex = selectedTemplateIndexByKey.get(bKey) ?? 0;
         if (aTplIndex !== bTplIndex) return aTplIndex - bTplIndex;
 
         return Number((a as any).id ?? 0) - Number((b as any).id ?? 0);
       });
+
+      const rootFolder = safeZipSegment(
+        `Document_Automation_${new Date().toISOString().slice(0, 10)}`,
+      );
+      const rootPrefix = rootFolder ? `${rootFolder}/` : "";
+
+      const purchaser1NameByCaseId = new Map<number, string>();
+      if (selectedCaseIds.length > 0) {
+        const rows = await queryRows(
+          r,
+          sql`
+            SELECT cp.case_id, cl.name
+            FROM case_purchasers cp
+            JOIN clients cl
+              ON cl.id = cp.client_id AND cl.firm_id = cp.firm_id
+            WHERE cp.firm_id = ${req.firmId!}
+              AND cp.case_id IN (${sql.join(
+                selectedCaseIds.map((id) => sql`${id}`),
+                sql`, `,
+              )})
+            ORDER BY cp.case_id ASC, cp.order_no ASC, cp.id ASC
+          `,
+        );
+        for (const row of rows) {
+          const caseId =
+            typeof (row as any).case_id === "number"
+              ? Number((row as any).case_id)
+              : Number.parseInt(String((row as any).case_id ?? ""), 10);
+          if (!Number.isFinite(caseId) || caseId <= 0) continue;
+          if (purchaser1NameByCaseId.has(Math.trunc(caseId))) continue;
+          const name =
+            typeof (row as any).name === "string" ? String((row as any).name) : "";
+          if (name.trim()) purchaser1NameByCaseId.set(Math.trunc(caseId), name.trim());
+        }
+      }
+
+      const normalizeZipFolderBase = (raw: string): string => {
+        const s = safeZipSegment(raw).replace(/[. ]+$/g, "");
+        return s.slice(0, 80);
+      };
+
+      const caseFolderById = new Map<number, string>();
+      const usedFolderBases = new Set<string>();
+      for (let i = 0; i < selectedCaseIds.length; i++) {
+        const caseId = selectedCaseIds[i]!;
+        const caseRefRaw = caseRefById.get(caseId) ?? `case-${caseId}`;
+        const purchaser1Raw = purchaser1NameByCaseId.get(caseId) ?? "";
+        const base0 = normalizeZipFolderBase(purchaser1Raw) || normalizeZipFolderBase(caseRefRaw) || `case-${caseId}`;
+        let base = base0;
+        if (usedFolderBases.has(base)) {
+          const refSeg = normalizeZipFolderBase(caseRefRaw);
+          base = refSeg ? `${base}_${refSeg}` : `${base}_${caseId}`;
+        }
+        if (usedFolderBases.has(base)) base = `${base}_${caseId}`;
+        usedFolderBases.add(base);
+        const prefix = `${String(i + 1).padStart(2, "0")}_`;
+        caseFolderById.set(caseId, `${prefix}${base}`);
+      }
 
       const nameCountsByFolder = new Map<string, Map<string, number>>();
       for (const it of sortedSuccessItems) {
@@ -18782,12 +18660,7 @@ router.get(
             : `document-${String((it as any).id ?? "")}.docx`;
 
         const caseId = Number((it as any).case_id ?? NaN);
-        const caseIndex = caseIndexById.get(caseId) ?? 0;
-        const caseRefRaw = caseRefById.get(caseId) ?? `case-${caseId}`;
-        const caseFolder =
-          selectedCaseIds.length > 1
-            ? `${String(caseIndex + 1).padStart(2, "0")}_${safeZipSegment(caseRefRaw)}`
-            : "";
+        const caseFolder = caseFolderById.get(caseId) ?? `${String(1).padStart(2, "0")}_case-${caseId}`;
 
         const templateSource = String((it as any).template_source ?? "firm");
         const templateId =
@@ -18795,12 +18668,12 @@ router.get(
             ? Number((it as any).platform_document_id ?? NaN)
             : Number((it as any).template_id ?? NaN);
         const templateKey = `${templateSource}:${templateId}`;
-        const templateIndex = templateIndexByKey.get(templateKey);
+        const templateIndex = selectedTemplateIndexByKey.get(templateKey);
         const templateOrder =
           typeof templateIndex === "number" && Number.isFinite(templateIndex)
             ? templateIndex
             : 0;
-        const templateFolder = templateFolderPathByKey.get(templateKey) ?? "";
+        const templateFolder = "";
         const templateName =
           typeof (it as any).template_name === "string" &&
           String((it as any).template_name).trim()
@@ -18826,7 +18699,7 @@ router.get(
                 /(\.[^./\\]+)?$/,
                 (_m, ext0) => ` (${n})${ext0 ?? ""}`,
               );
-        const folderPrefix = [caseFolder, templateFolder].filter(Boolean).join("/");
+        const folderPrefix = `${rootPrefix}${caseFolder}`;
         const zipPath = folderPrefix ? `${folderPrefix}/${zipBase}` : zipBase;
 
         const bytes = await readSupabasePrivateObjectBytes(op, {
@@ -18834,35 +18707,8 @@ router.get(
         });
         zipfile.addBuffer(bytes, zipPath);
       }
-      if (failedItems.length > 0) {
-        const lines = failedItems.map((it) => {
-          const caseId = (it as any)?.case_id;
-          const templateId =
-            (it as any)?.template_id ?? (it as any)?.platform_document_id;
-          const source = (it as any)?.template_source ?? "";
-          const code = (it as any)?.error_code ?? "";
-          const msg = (it as any)?.error_message ?? "";
-          return `source=${String(source)} caseId=${String(caseId ?? "")} templateId=${String(templateId ?? "")} code=${String(code ?? "")} message=${String(msg ?? "")}`;
-        });
-        const txt = `Some items failed.\n\n${lines.join("\n")}\n`;
-        zipfile.addBuffer(Buffer.from(txt, "utf8"), "generation-errors.txt");
-        if (includeDebugFiles) {
-          const details = failedItems.map((it) => ({
-            id: (it as any)?.id ?? null,
-            caseId: (it as any)?.case_id ?? null,
-            templateId:
-              (it as any)?.template_id ?? (it as any)?.platform_document_id,
-            templateSource: (it as any)?.template_source ?? null,
-            errorCode: (it as any)?.error_code ?? null,
-            errorMessage: (it as any)?.error_message ?? null,
-            diagnostic: (it as any)?.diagnostic ?? null,
-          }));
-          zipfile.addBuffer(
-            Buffer.from(JSON.stringify(details, null, 2), "utf8"),
-            "generation-diagnostics.json",
-          );
-        }
-      }
+      void failedCount;
+      void includeDebugFiles;
       zipfile.end();
 
       await new Promise<void>((resolve, reject) => {
@@ -20743,7 +20589,7 @@ router.post(
             const inputForRender = fillMissingScalarsForRender(
               placeholders,
               input,
-              { missingMode: "placeholder" },
+              { missingMode: "empty" },
             );
             const zip = new PizZip(bytes);
             const doc = new Docxtemplater(zip, {
@@ -20754,7 +20600,7 @@ router.post(
               nullGetter(part: any) {
                 const k =
                   typeof part?.value === "string" ? String(part.value) : "";
-                return k ? `[MISSING: ${k}]` : "";
+                return "";
               },
             });
             await maybeHydrateFirmLogoBuffer(inputForRender as any);
@@ -22157,7 +22003,7 @@ router.post(
         preview.usedMode === "bindings"
           ? preview.resolvedVariables
           : (context as any),
-        { missingMode: "placeholder" },
+        { missingMode: "empty" },
       );
 
       const templateDocType =

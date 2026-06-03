@@ -43,20 +43,45 @@ export default function AppDashboard() {
     return v === "1" || v === "true" || v === "yes";
   })();
 
+  const getErrStatus = (e: unknown): number | null => {
+    const raw = (e as any)?.status;
+    return typeof raw === "number" ? raw : null;
+  };
+
+  const isAbortLikeError = (e: unknown): boolean => {
+    const name = (e as any)?.name;
+    if (name === "AbortError") return true;
+    const msg = typeof (e as any)?.message === "string" ? String((e as any).message) : "";
+    return msg.toLowerCase().includes("signal is aborted");
+  };
+
   const { data: stats, isLoading, isError, error, refetch, isFetching } = useQuery({
     queryKey: ["dashboard", firmId, refresh ? "refresh" : "cached"],
-    queryFn: () => apiFetchJson(refresh ? "/dashboard?refresh=1" : "/dashboard", { timeoutMs: 8000 }) as Promise<Record<string, any>>,
+    queryFn: ({ signal }) => apiFetchJson(refresh ? "/dashboard?refresh=1" : "/dashboard", { timeoutMs: refresh ? 15_000 : 12_000, signal }) as Promise<Record<string, any>>,
     staleTime: 30_000,
-    retry: false,
+    retry: (failureCount, err) => {
+      if (failureCount >= 2) return false;
+      if (isAbortLikeError(err)) return false;
+      const status = getErrStatus(err);
+      if (status === 401 || status === 403 || status === 404) return false;
+      if ((err as any)?.retryable === false) return false;
+      return true;
+    },
+    retryDelay: (attemptIndex) => {
+      const base = 300 * Math.pow(2, attemptIndex);
+      const jitter = Math.floor(Math.random() * 200);
+      return base + jitter;
+    },
     refetchOnWindowFocus: false,
     refetchOnReconnect: true,
+    placeholderData: (prev) => prev,
   });
 
   if (isLoading) {
     return <div className="text-slate-400 py-12 text-center text-sm">Loading dashboard...</div>;
   }
 
-  const errStatus = typeof (error as any)?.status === "number" ? Number((error as any).status) : null;
+  const errStatus = getErrStatus(error);
   if (isError && (errStatus === 401 || errStatus === 403)) {
     return (
       <div className="py-12 flex justify-center">
@@ -69,6 +94,8 @@ export default function AppDashboard() {
 
   const effectiveStats = (() => {
     if (!isError) return stats;
+    if (isAbortLikeError(error)) return stats;
+    if (stats) return stats;
     const unavailableFields = [
       "totalCases",
       "activeCases",
