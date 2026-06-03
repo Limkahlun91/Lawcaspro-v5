@@ -3605,16 +3605,18 @@ router.post(
       }
       if (
         err instanceof DocumentGenerationError &&
-        (err.code === "DOCX_TO_PDF_UNAVAILABLE" ||
+        (err.code === "DOCX_TO_PDF_CONVERTER_NOT_CONFIGURED" ||
+          err.code === "DOCX_TO_PDF_UNAVAILABLE" ||
           err.code === "DOCX_PDF_CONVERTER_UNAVAILABLE" ||
           err.code === "DOCX_TO_PDF_FAILED" ||
           err.code === "DOCX_TO_PDF_TIMEOUT")
       ) {
         const code =
+          err.code === "DOCX_TO_PDF_CONVERTER_NOT_CONFIGURED" ||
           err.code === "DOCX_TO_PDF_UNAVAILABLE" ||
           err.code === "DOCX_PDF_CONVERTER_UNAVAILABLE"
-            ? "PDF_CONVERSION_UNAVAILABLE"
-            : "PDF_CONVERSION_ERROR";
+            ? "DOCX_TO_PDF_CONVERTER_NOT_CONFIGURED"
+            : err.code;
         res.status(503).json({ error: err.message, code });
         return;
       }
@@ -3678,12 +3680,13 @@ router.post(
           return;
         }
         if (
+          derived.code === "DOCX_TO_PDF_CONVERTER_NOT_CONFIGURED" ||
           derived.code === "DOCX_TO_PDF_UNAVAILABLE" ||
           derived.code === "DOCX_PDF_CONVERTER_UNAVAILABLE"
         ) {
           res.status(503).json({
             error: derived.message,
-            code: "PDF_CONVERSION_UNAVAILABLE",
+            code: "DOCX_TO_PDF_CONVERTER_NOT_CONFIGURED",
           });
           return;
         }
@@ -3691,9 +3694,7 @@ router.post(
           derived.code === "DOCX_TO_PDF_FAILED" ||
           derived.code === "DOCX_TO_PDF_TIMEOUT"
         ) {
-          res
-            .status(503)
-            .json({ error: derived.message, code: "PDF_CONVERSION_ERROR" });
+          res.status(503).json({ error: derived.message, code: derived.code });
           return;
         }
       }
@@ -10089,11 +10090,20 @@ async function renderFallbackPdfFromDocx(docxBytes: Buffer): Promise<Buffer> {
 }
 
 async function convertDocxToPdf(docxBytes: Buffer): Promise<Buffer> {
-  const baseUrl =
-    typeof process.env.GOTENBERG_URL === "string"
-      ? process.env.GOTENBERG_URL.trim().replace(/\/+$/, "")
-      : "";
-  if (!baseUrl) {
+  const provider =
+    typeof process.env.DOCX_CONVERTER_PROVIDER === "string" &&
+    process.env.DOCX_CONVERTER_PROVIDER.trim()
+      ? process.env.DOCX_CONVERTER_PROVIDER.trim().toLowerCase()
+      : "gotenberg";
+  const baseUrlRaw =
+    (typeof process.env.DOCX_CONVERTER_URL === "string"
+      ? process.env.DOCX_CONVERTER_URL.trim()
+      : "") ||
+    (typeof process.env.GOTENBERG_URL === "string"
+      ? process.env.GOTENBERG_URL.trim()
+      : "");
+  const baseUrl = baseUrlRaw.replace(/\/+$/, "");
+  if (!baseUrl || provider !== "gotenberg") {
     // #region debug-point D:docx-convert-unavailable
     (() => {
       import("node:fs")
@@ -10117,7 +10127,8 @@ async function convertDocxToPdf(docxBytes: Buffer): Promise<Buffer> {
               msg: "[DEBUG] GOTENBERG_URL missing -> fallback",
               ts: Date.now(),
               data: {
-                gotenbergUrlPresent: false,
+                gotenbergUrlPresent: Boolean(baseUrl),
+                provider,
                 docxBytesLength: docxBytes?.length ?? null,
               },
             }),
@@ -10128,13 +10139,17 @@ async function convertDocxToPdf(docxBytes: Buffer): Promise<Buffer> {
     // #endregion
     throw new DocumentGenerationError(
       503,
-      "DOCX_PDF_CONVERTER_UNAVAILABLE",
+      "DOCX_TO_PDF_CONVERTER_NOT_CONFIGURED",
       "DOCX to PDF converter is not configured",
     );
   }
 
   const controller = new AbortController();
-  const timeoutMs = 4500;
+  const timeoutMs = (() => {
+    const raw = process.env.DOCX_TO_PDF_TIMEOUT_MS;
+    const n = typeof raw === "string" ? Number(raw) : NaN;
+    return Number.isFinite(n) && n > 0 ? Math.trunc(n) : 20000;
+  })();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const url = `${baseUrl}/forms/libreoffice/convert`;
@@ -10243,51 +10258,9 @@ async function convertDocxToPdfWithFallback(
   docxBytes: Buffer,
   opts?: { allowFallbackOnFailure?: boolean },
 ): Promise<{ pdfBytes: Buffer; fallbackUsed: boolean }> {
-  const allowFallbackOnFailure = Boolean(opts?.allowFallbackOnFailure);
-  try {
-    const pdfBytes = await convertDocxToPdf(docxBytes);
-    return { pdfBytes, fallbackUsed: false };
-  } catch (err) {
-    if (!allowFallbackOnFailure) throw err;
-    if (process.env.ALLOW_DOCX_FALLBACK_PDF === "1") {
-      const code = err instanceof DocumentGenerationError ? err.code : null;
-      // #region debug-point D:docx-convert-fallback-on-failure
-      (() => {
-        import("node:fs")
-          .then((fs) => {
-            const p = ".dbg/document-generation-stability.env";
-            let u = "http://127.0.0.1:7777/event";
-            let s = "document-generation-stability";
-            try {
-              const e = fs.readFileSync(p, "utf8");
-              u = e.match(/DEBUG_SERVER_URL=(.+)/)?.[1] || u;
-              s = e.match(/DEBUG_SESSION_ID=(.+)/)?.[1] || s;
-            } catch {}
-            fetch(u, {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                sessionId: s,
-                runId: "pre",
-                hypothesisId: "D",
-                location: "documents.ts:convertDocxToPdfWithFallback",
-                msg: "[DEBUG] convertDocxToPdf failed -> fallback",
-                ts: Date.now(),
-                data: {
-                  allowFallbackOnFailure,
-                  errorCode: code,
-                },
-              }),
-            }).catch(() => {});
-          })
-          .catch(() => {});
-      })();
-      // #endregion
-      const pdfBytes = await renderFallbackPdfFromDocx(docxBytes);
-      return { pdfBytes, fallbackUsed: true };
-    }
-    throw err;
-  }
+  void opts;
+  const pdfBytes = await convertDocxToPdf(docxBytes);
+  return { pdfBytes, fallbackUsed: false };
 }
 
 async function mergePdfBuffers(buffers: Buffer[]): Promise<Buffer> {
@@ -10769,7 +10742,13 @@ async function renderPdfMappedTemplate(args: {
       if (!page) continue;
       const font = await getFont(m.fontFamily);
       const fontSize = m.size;
-      const lineHeight = m.lineHeight ?? Math.ceil(fontSize * 1.2);
+      const lineHeight = (() => {
+        const raw =
+          typeof m.lineHeight === "number" && Number.isFinite(m.lineHeight)
+            ? m.lineHeight
+            : 1.2;
+        return raw > 10 ? raw : raw * fontSize;
+      })();
       const lines = m.maxWidth
         ? wrapPdfTextPreservingNewlines(value, font, fontSize, m.maxWidth)
         : value.split(/\r?\n/);
@@ -11555,10 +11534,7 @@ async function generateFirmDocument({
 
     if (outputFormat === "pdf") {
       outFormat = "pdf";
-      const conv = await convertDocxToPdfWithFallback(buffer, {
-        allowFallbackOnFailure: true,
-      });
-      outputBytes = conv.pdfBytes;
+      outputBytes = await convertDocxToPdf(buffer);
       outputContentType = "application/pdf";
     } else {
       outFormat = "docx";
@@ -12467,10 +12443,7 @@ async function generateMasterDocument({
   }
 
   if (outputFormat === "pdf" && isDocx && renderMode === "docx") {
-    const conv = await convertDocxToPdfWithFallback(buffer, {
-      allowFallbackOnFailure: true,
-    });
-    buffer = conv.pdfBytes;
+    buffer = await convertDocxToPdf(buffer);
     outputMime = "application/pdf";
     outputExt = ".pdf";
     renderMode = "pdf";
@@ -15046,32 +15019,7 @@ async function processAutomationGenerationJobStep(
           )
         : false;
 
-  const runId = await createGenerationRun(r, {
-    firm_id: args.firmId,
-    case_id: caseId,
-    template_source: templateSource === "master" ? "master" : "firm",
-    template_id:
-      templateSource === "firm" && Number.isFinite(templateId)
-        ? templateId
-        : null,
-    template_version_id: null,
-    platform_document_id:
-      templateSource === "master" && Number.isFinite(platformDocumentId)
-        ? platformDocumentId
-        : null,
-    document_name: documentName ?? "Generated document",
-    render_mode: outputFormat === "pdf" ? "pdf" : "docx",
-    status: "running",
-    request_config: jobConfig,
-    started_at: null,
-    rendered_variables_snapshot: null,
-    checklist_snapshot: null,
-    readiness_snapshot: null,
-    triggered_by: actorId > 0 ? actorId : null,
-    error_code: null,
-    error_message: null,
-  });
-
+  let runId: number | null = null;
   let jobItemSavepointCreated = false;
   const jobItemSavepoint = `dg_job_item_${Number((item as any).id) || 0}`;
   try {
@@ -15080,6 +15028,31 @@ async function processAutomationGenerationJobStep(
   } catch {}
 
   try {
+    runId = await createGenerationRun(r, {
+      firm_id: args.firmId,
+      case_id: caseId,
+      template_source: templateSource === "master" ? "master" : "firm",
+      template_id:
+        templateSource === "firm" && Number.isFinite(templateId)
+          ? templateId
+          : null,
+      template_version_id: null,
+      platform_document_id:
+        templateSource === "master" && Number.isFinite(platformDocumentId)
+          ? platformDocumentId
+          : null,
+      document_name: documentName ?? "Generated document",
+      render_mode: outputFormat === "pdf" ? "pdf" : "docx",
+      status: "running",
+      request_config: jobConfig,
+      started_at: null,
+      rendered_variables_snapshot: null,
+      checklist_snapshot: null,
+      readiness_snapshot: null,
+      triggered_by: actorId > 0 ? actorId : null,
+      error_code: null,
+      error_message: null,
+    });
     if (templateSource === "master") {
       if (!Number.isFinite(platformDocumentId) || platformDocumentId <= 0) {
         throw new DocumentGenerationError(
@@ -15109,7 +15082,7 @@ async function processAutomationGenerationJobStep(
       await finishGenerationRunSuccess(
         r,
         args.firmId,
-        runId,
+        runId!,
         out.caseDocumentId,
         out.renderedVars,
         out.checklistSnapshot,
@@ -15494,16 +15467,20 @@ async function processAutomationGenerationJobStep(
         return { code: "DOCX_RENDER_ERROR", message: derived.message };
       }
       if (
+        derived.code === "DOCX_TO_PDF_CONVERTER_NOT_CONFIGURED" ||
         derived.code === "DOCX_TO_PDF_UNAVAILABLE" ||
         derived.code === "DOCX_PDF_CONVERTER_UNAVAILABLE"
       ) {
-        return { code: "PDF_CONVERSION_UNAVAILABLE", message: derived.message };
+        return {
+          code: "DOCX_TO_PDF_CONVERTER_NOT_CONFIGURED",
+          message: derived.message,
+        };
       }
       if (
         derived.code === "DOCX_TO_PDF_FAILED" ||
         derived.code === "DOCX_TO_PDF_TIMEOUT"
       ) {
-        return { code: "PDF_CONVERSION_ERROR", message: derived.message };
+        return { code: derived.code, message: derived.message };
       }
       if (
         derived.code === "PDF_TEMPLATE_RENDER_FAILED" ||
@@ -15520,13 +15497,15 @@ async function processAutomationGenerationJobStep(
       return { code: derived.code, message: derived.message };
     })();
 
-    await finishGenerationRunFailed(
-      r,
-      args.firmId,
-      runId,
-      mapped.code,
-      mapped.message,
-    );
+    if (typeof runId === "number" && runId > 0) {
+      await finishGenerationRunFailed(
+        r,
+        args.firmId,
+        runId,
+        mapped.code,
+        mapped.message,
+      );
+    }
 
     const rawErrMessage = (() => {
       if (err instanceof Error && typeof err.message === "string" && err.message)
@@ -15581,25 +15560,6 @@ async function processAutomationGenerationJobStep(
         `,
       );
     }
-
-    try {
-      const jobErrSummary = `${mapped.code}: ${mapped.message}`.slice(0, 500);
-      const setParts: Array<ReturnType<typeof sql>> = [
-        sql`status = 'failed'`,
-        sql`pending_count = 0`,
-        sql`finished_at = now()`,
-        sql`error_summary = ${jobErrSummary}`,
-      ];
-      if (caps.jobs.errorCode) setParts.push(sql`error_code = ${mapped.code}`);
-      await queryRows(
-        r,
-        sql`
-          UPDATE document_generation_jobs
-          SET ${sql.join(setParts, sql`, `)}
-          WHERE id = ${args.jobId} AND firm_id = ${args.firmId}
-        `,
-      );
-    } catch {}
 
     await updateJobCounts(r, args);
     await touchJobHeartbeat(r, args, caps);
@@ -16496,13 +16456,8 @@ router.post(
                     type: "nodebuffer",
                     compression: "DEFLATE",
                   }) as Buffer;
-                  const conv = await convertDocxToPdfWithFallback(
-                    renderedDocx,
-                    {
-                      allowFallbackOnFailure: true,
-                    },
-                  );
-                  return { zipPath, bytes: conv.pdfBytes };
+                  const pdfBytes = await convertDocxToPdf(renderedDocx);
+                  return { zipPath, bytes: pdfBytes };
                 }
 
                 if (kind === "doc") {
@@ -17625,6 +17580,30 @@ router.post(
       return;
     }
     try {
+      const lockRows = await queryRows(
+        r,
+        sql`SELECT pg_try_advisory_xact_lock(hashtext(${jobId}), ${req.firmId!}) AS locked`,
+      );
+      const locked = Boolean((lockRows[0] as any)?.locked);
+      if (!locked) {
+        res.status(409).json({
+          ok: false,
+          error: {
+            code: "RUN_NEXT_IN_FLIGHT",
+            message: "Another runner is processing this job. Please retry.",
+            details: null,
+            retryable: true,
+          },
+          meta: {
+            request_id: requestId ?? null,
+            jobId,
+            firmId: req.firmId ?? null,
+            timestamp: new Date().toISOString(),
+            duration_ms: Date.now() - startedAt,
+          },
+        });
+        return;
+      }
       const MAX_JOB_STEP_MS = 6000;
       const MAX_ITEMS_PER_CALL = 1;
       const cache = createRequestCache();
@@ -18107,6 +18086,127 @@ router.get(
 );
 
 router.get(
+  "/documents/jobs/:jobId/status",
+  requireAuth,
+  requireFirmUser,
+  requirePermission("documents", "read"),
+  async (req: AuthRequest, res): Promise<void> => {
+    const r = getRlsDb(req, res);
+    if (!r) return;
+    const startedAt = Date.now();
+    const requestId =
+      one(req.headers["x-request-id"] as any) ||
+      one(req.headers["x-vercel-id"] as any) ||
+      undefined;
+    const jobId = one((req.params as any).jobId) ?? "";
+    if (!/^[0-9a-fA-F-]{36}$/.test(jobId)) {
+      res.status(400).json({
+        ok: false,
+        error: { code: "INVALID_JOB_ID", message: "Invalid jobId", details: null, retryable: false },
+        meta: {
+          request_id: requestId ?? null,
+          timestamp: new Date().toISOString(),
+          duration_ms: Date.now() - startedAt,
+        },
+      });
+      return;
+    }
+    const jobs = await queryRows(
+      r,
+      sql`SELECT * FROM document_generation_jobs WHERE id = ${jobId} AND firm_id = ${req.firmId!}`,
+    );
+    const job = jobs[0] as any;
+    if (!job) {
+      res.status(404).json({
+        ok: false,
+        error: { code: "JOB_NOT_FOUND", message: "Job not found", details: null, retryable: false },
+        meta: {
+          request_id: requestId ?? null,
+          timestamp: new Date().toISOString(),
+          duration_ms: Date.now() - startedAt,
+        },
+      });
+      return;
+    }
+    const st = String(job.status ?? "");
+    res.json({
+      ok: true,
+      jobId,
+      status: st || "pending",
+      ...(st === "completed" || st === "completed_with_errors"
+        ? { downloadUrl: `/documents/jobs/${jobId}/download` }
+        : {}),
+      ...(st === "failed"
+        ? {
+            error:
+              typeof job.error_summary === "string"
+                ? String(job.error_summary)
+                : "Generation failed",
+          }
+        : {}),
+      meta: {
+        request_id: requestId ?? null,
+        timestamp: new Date().toISOString(),
+        duration_ms: Date.now() - startedAt,
+      },
+    });
+  },
+);
+
+router.get(
+  "/documents/jobs/:jobId/steps",
+  requireAuth,
+  requireFirmUser,
+  requirePermission("documents", "read"),
+  async (req: AuthRequest, res): Promise<void> => {
+    const r = getRlsDb(req, res);
+    if (!r) return;
+    const startedAt = Date.now();
+    const requestId =
+      one(req.headers["x-request-id"] as any) ||
+      one(req.headers["x-vercel-id"] as any) ||
+      undefined;
+    const jobId = one((req.params as any).jobId) ?? "";
+    if (!/^[0-9a-fA-F-]{36}$/.test(jobId)) {
+      res.status(400).json({
+        ok: false,
+        error: { code: "INVALID_JOB_ID", message: "Invalid jobId", details: null, retryable: false },
+        meta: {
+          request_id: requestId ?? null,
+          timestamp: new Date().toISOString(),
+          duration_ms: Date.now() - startedAt,
+        },
+      });
+      return;
+    }
+    const items = await queryRows(
+      r,
+      sql`
+        SELECT
+          i.*,
+          COALESCE(t.name, pd.name) AS template_name
+        FROM document_generation_job_items i
+        LEFT JOIN document_templates t
+          ON t.firm_id = i.firm_id AND t.id = i.template_id
+        LEFT JOIN platform_documents pd
+          ON pd.id = i.platform_document_id AND (pd.firm_id IS NULL OR pd.firm_id = i.firm_id)
+        WHERE i.job_id = ${jobId} AND i.firm_id = ${req.firmId!}
+        ORDER BY i.id ASC
+      `,
+    );
+    res.status(200).json({
+      ok: true,
+      items,
+      meta: {
+        request_id: requestId ?? null,
+        timestamp: new Date().toISOString(),
+        duration_ms: Date.now() - startedAt,
+      },
+    });
+  },
+);
+
+router.get(
   "/documents/jobs/:jobId/download",
   requireAuth,
   requireFirmUser,
@@ -18152,17 +18252,7 @@ router.get(
     }
     const st = String((job as any).status ?? "");
     const failedCount = Number((job as any).failed_count ?? 0) || 0;
-    if (failedCount > 0) {
-      fail(
-        422,
-        "JOB_HAS_FAILURES",
-        "Job contains failed items",
-        { failedCount },
-        false,
-      );
-      return;
-    }
-    if (st !== "completed") {
+    if (st !== "completed" && st !== "completed_with_errors") {
       fail(
         409,
         "JOB_NOT_COMPLETED",
@@ -18407,10 +18497,211 @@ router.get(
       for (let i = 0; i < selectedCaseIds.length; i++) {
         caseIndexById.set(selectedCaseIds[i]!, i);
       }
+      const firmTemplateIds = selectedTemplateRefs
+        .filter((t) => t.source === "firm")
+        .map((t) => t.id);
+      const masterDocIds = selectedTemplateRefs
+        .filter((t) => t.source === "master")
+        .map((t) => t.id);
+      const [firmTemplates, masterDocs, firmFolders, systemFolders] =
+        await Promise.all([
+          firmTemplateIds.length > 0
+            ? queryRows(
+                r,
+                sql`
+                  SELECT id, name, folder_id, sort_order
+                  FROM document_templates
+                  WHERE firm_id = ${req.firmId!}
+                    AND id IN (${sql.join(
+                      firmTemplateIds.map((id) => sql`${id}`),
+                      sql`, `,
+                    )})
+                `,
+              )
+            : Promise.resolve([]),
+          masterDocIds.length > 0
+            ? queryRows(
+                r,
+                sql`
+                  SELECT id, name, folder_id, sort_order
+                  FROM platform_documents
+                  WHERE id IN (${sql.join(
+                    masterDocIds.map((id) => sql`${id}`),
+                    sql`, `,
+                  )})
+                    AND (firm_id IS NULL OR firm_id = ${req.firmId!})
+                `,
+              )
+            : Promise.resolve([]),
+          queryRows(
+            r,
+            sql`
+              SELECT id, name, parent_id, sort_order
+              FROM firm_document_folders
+              WHERE firm_id = ${req.firmId!}
+            `,
+          ),
+          queryRows(
+            r,
+            sql`
+              SELECT id, name, parent_id, sort_order
+              FROM system_folders
+            `,
+          ),
+        ]);
+
+      const buildFolderPathById = (
+        rows: Record<string, unknown>[],
+      ): Map<number, string> => {
+        const byId = new Map<number, { id: number; name: string; parentId: number | null; sortOrder: number }>();
+        const byParent = new Map<number | null, Array<{ id: number; name: string; parentId: number | null; sortOrder: number }>>();
+        for (const row of rows) {
+          const id =
+            typeof (row as any).id === "number"
+              ? Number((row as any).id)
+              : Number.parseInt(String((row as any).id ?? ""), 10);
+          if (!Number.isFinite(id) || id <= 0) continue;
+          const parentIdRaw = (row as any).parent_id ?? (row as any).parentId;
+          const parentId =
+            typeof parentIdRaw === "number"
+              ? Number(parentIdRaw)
+              : parentIdRaw == null
+                ? null
+                : Number.parseInt(String(parentIdRaw), 10);
+          const name =
+            typeof (row as any).name === "string" ? String((row as any).name) : "";
+          const sortOrderRaw = (row as any).sort_order ?? (row as any).sortOrder;
+          const sortOrder =
+            typeof sortOrderRaw === "number"
+              ? Number(sortOrderRaw)
+              : Number.parseInt(String(sortOrderRaw ?? "0"), 10) || 0;
+          const entry = {
+            id: Math.trunc(id),
+            name,
+            parentId: Number.isFinite(parentId as any) ? Math.trunc(parentId as any) : null,
+            sortOrder: Math.trunc(sortOrder),
+          };
+          byId.set(entry.id, entry);
+          const parentKey = entry.parentId ?? null;
+          const arr = byParent.get(parentKey) ?? [];
+          arr.push(entry);
+          byParent.set(parentKey, arr);
+        }
+        const orderIndexById = new Map<number, number>();
+        for (const [parentKey, arr] of byParent) {
+          arr.sort((a, b) => a.sortOrder - b.sortOrder || a.name.localeCompare(b.name));
+          for (let i = 0; i < arr.length; i++) orderIndexById.set(arr[i]!.id, i);
+          byParent.set(parentKey, arr);
+        }
+        const memo = new Map<number, string>();
+        const build = (id: number): string => {
+          if (memo.has(id)) return memo.get(id)!;
+          const f = byId.get(id);
+          if (!f) return "";
+          const idx = orderIndexById.get(id) ?? 0;
+          const seg = `${String(idx + 1).padStart(2, "0")}_${safeZipSegment(f.name)}`;
+          const parentPath =
+            f.parentId && Number.isFinite(f.parentId) ? build(f.parentId) : "";
+          const out = parentPath ? `${parentPath}/${seg}` : seg;
+          memo.set(id, out);
+          return out;
+        };
+        for (const id of byId.keys()) build(id);
+        return memo;
+      };
+
+      const firmFolderPathById = buildFolderPathById(firmFolders);
+      const systemFolderPathById = buildFolderPathById(systemFolders);
+
+      const templateFolderPathByKey = new Map<string, string>();
+      const templateSortMetaByKey = new Map<
+        string,
+        { folderPath: string; sortOrder: number; name: string }
+      >();
+
+      for (const t of firmTemplates) {
+        const id =
+          typeof (t as any).id === "number"
+            ? Number((t as any).id)
+            : Number.parseInt(String((t as any).id ?? ""), 10);
+        if (!Number.isFinite(id) || id <= 0) continue;
+        const folderIdRaw = (t as any).folder_id ?? (t as any).folderId;
+        const folderId =
+          typeof folderIdRaw === "number"
+            ? Number(folderIdRaw)
+            : folderIdRaw == null
+              ? null
+              : Number.parseInt(String(folderIdRaw), 10);
+        const folderPath =
+          typeof folderId === "number" && Number.isFinite(folderId)
+            ? firmFolderPathById.get(Math.trunc(folderId)) ?? ""
+            : "";
+        const name =
+          typeof (t as any).name === "string" ? String((t as any).name) : "";
+        const sortOrderRaw = (t as any).sort_order ?? (t as any).sortOrder;
+        const sortOrder =
+          typeof sortOrderRaw === "number"
+            ? Number(sortOrderRaw)
+            : Number.parseInt(String(sortOrderRaw ?? "0"), 10) || 0;
+        const key = `firm:${Math.trunc(id)}`;
+        templateFolderPathByKey.set(key, folderPath);
+        templateSortMetaByKey.set(key, {
+          folderPath,
+          sortOrder: Math.trunc(sortOrder),
+          name,
+        });
+      }
+      for (const d of masterDocs) {
+        const id =
+          typeof (d as any).id === "number"
+            ? Number((d as any).id)
+            : Number.parseInt(String((d as any).id ?? ""), 10);
+        if (!Number.isFinite(id) || id <= 0) continue;
+        const folderIdRaw = (d as any).folder_id ?? (d as any).folderId;
+        const folderId =
+          typeof folderIdRaw === "number"
+            ? Number(folderIdRaw)
+            : folderIdRaw == null
+              ? null
+              : Number.parseInt(String(folderIdRaw), 10);
+        const folderPath =
+          typeof folderId === "number" && Number.isFinite(folderId)
+            ? systemFolderPathById.get(Math.trunc(folderId)) ?? ""
+            : "";
+        const name =
+          typeof (d as any).name === "string" ? String((d as any).name) : "";
+        const sortOrderRaw = (d as any).sort_order ?? (d as any).sortOrder;
+        const sortOrder =
+          typeof sortOrderRaw === "number"
+            ? Number(sortOrderRaw)
+            : Number.parseInt(String(sortOrderRaw ?? "0"), 10) || 0;
+        const key = `master:${Math.trunc(id)}`;
+        templateFolderPathByKey.set(key, folderPath);
+        templateSortMetaByKey.set(key, {
+          folderPath,
+          sortOrder: Math.trunc(sortOrder),
+          name,
+        });
+      }
+
+      const templatesByFolderKey = new Map<
+        string,
+        Array<{ key: string; sortOrder: number; name: string }>
+      >();
+      for (const [key, meta] of templateSortMetaByKey) {
+        const folderKey = `${key.startsWith("master:") ? "master" : "firm"}:${meta.folderPath || "__root__"}`;
+        const arr = templatesByFolderKey.get(folderKey) ?? [];
+        arr.push({ key, sortOrder: meta.sortOrder, name: meta.name });
+        templatesByFolderKey.set(folderKey, arr);
+      }
+
       const templateIndexByKey = new Map<string, number>();
-      for (let i = 0; i < selectedTemplateRefs.length; i++) {
-        const t = selectedTemplateRefs[i]!;
-        templateIndexByKey.set(`${t.source}:${t.id}`, i);
+      for (const [folderKey, arr] of templatesByFolderKey) {
+        arr.sort(
+          (a, b) => a.sortOrder - b.sortOrder || a.name.localeCompare(b.name),
+        );
+        for (let i = 0; i < arr.length; i++) templateIndexByKey.set(arr[i]!.key, i);
+        templatesByFolderKey.set(folderKey, arr);
       }
 
       const caseRefById = new Map<number, string>();
@@ -18466,8 +18757,13 @@ router.get(
           bSource === "master"
             ? Number((b as any).platform_document_id ?? 0)
             : Number((b as any).template_id ?? 0);
-        const aTplIndex = templateIndexByKey.get(`${aSource}:${aTplId}`) ?? 0;
-        const bTplIndex = templateIndexByKey.get(`${bSource}:${bTplId}`) ?? 0;
+        const aKey = `${aSource}:${aTplId}`;
+        const bKey = `${bSource}:${bTplId}`;
+        const aFolder = templateFolderPathByKey.get(aKey) ?? "";
+        const bFolder = templateFolderPathByKey.get(bKey) ?? "";
+        if (aFolder !== bFolder) return aFolder.localeCompare(bFolder);
+        const aTplIndex = templateIndexByKey.get(aKey) ?? 0;
+        const bTplIndex = templateIndexByKey.get(bKey) ?? 0;
         if (aTplIndex !== bTplIndex) return aTplIndex - bTplIndex;
 
         return Number((a as any).id ?? 0) - Number((b as any).id ?? 0);
@@ -18498,13 +18794,13 @@ router.get(
           templateSource === "master"
             ? Number((it as any).platform_document_id ?? NaN)
             : Number((it as any).template_id ?? NaN);
-        const templateIndex = templateIndexByKey.get(
-          `${templateSource}:${templateId}`,
-        );
+        const templateKey = `${templateSource}:${templateId}`;
+        const templateIndex = templateIndexByKey.get(templateKey);
         const templateOrder =
           typeof templateIndex === "number" && Number.isFinite(templateIndex)
             ? templateIndex
             : 0;
+        const templateFolder = templateFolderPathByKey.get(templateKey) ?? "";
         const templateName =
           typeof (it as any).template_name === "string" &&
           String((it as any).template_name).trim()
@@ -18517,7 +18813,7 @@ router.get(
           stripExtension(templateName),
         )}.${ext}`;
 
-        const folderKey = caseFolder || "__root__";
+        const folderKey = [caseFolder, templateFolder].filter(Boolean).join("/") || "__root__";
         const nameCounts =
           nameCountsByFolder.get(folderKey) ?? new Map<string, number>();
         nameCountsByFolder.set(folderKey, nameCounts);
@@ -18530,14 +18826,15 @@ router.get(
                 /(\.[^./\\]+)?$/,
                 (_m, ext0) => ` (${n})${ext0 ?? ""}`,
               );
-        const zipPath = caseFolder ? `${caseFolder}/${zipBase}` : zipBase;
+        const folderPrefix = [caseFolder, templateFolder].filter(Boolean).join("/");
+        const zipPath = folderPrefix ? `${folderPrefix}/${zipBase}` : zipBase;
 
         const bytes = await readSupabasePrivateObjectBytes(op, {
           timeoutMs: 60_000,
         });
         zipfile.addBuffer(bytes, zipPath);
       }
-      if (includeDebugFiles && failedItems.length > 0) {
+      if (failedItems.length > 0) {
         const lines = failedItems.map((it) => {
           const caseId = (it as any)?.case_id;
           const templateId =
@@ -18549,6 +18846,22 @@ router.get(
         });
         const txt = `Some items failed.\n\n${lines.join("\n")}\n`;
         zipfile.addBuffer(Buffer.from(txt, "utf8"), "generation-errors.txt");
+        if (includeDebugFiles) {
+          const details = failedItems.map((it) => ({
+            id: (it as any)?.id ?? null,
+            caseId: (it as any)?.case_id ?? null,
+            templateId:
+              (it as any)?.template_id ?? (it as any)?.platform_document_id,
+            templateSource: (it as any)?.template_source ?? null,
+            errorCode: (it as any)?.error_code ?? null,
+            errorMessage: (it as any)?.error_message ?? null,
+            diagnostic: (it as any)?.diagnostic ?? null,
+          }));
+          zipfile.addBuffer(
+            Buffer.from(JSON.stringify(details, null, 2), "utf8"),
+            "generation-diagnostics.json",
+          );
+        }
       }
       zipfile.end();
 

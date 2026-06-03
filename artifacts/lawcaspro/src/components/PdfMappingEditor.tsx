@@ -33,6 +33,7 @@ import {
   AlignCenter,
   AlignRight,
   Copy,
+  Star,
 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import { cn } from "@/lib/utils";
@@ -144,6 +145,42 @@ export default function PdfMappingEditor({
   const [showVarPanel, setShowVarPanel] = useState(false);
   const [varGroups, setVarGroups] = useState<VarGroup[]>([]);
   const [varSearch, setVarSearch] = useState("");
+  const recentVarsStorageKey = useMemo(
+    () => `lawcaspro:pdf_mapping_recent_vars:${docId}`,
+    [docId],
+  );
+  const favoriteVarsStorageKey = useMemo(
+    () => `lawcaspro:pdf_mapping_favorite_vars:${docId}`,
+    [docId],
+  );
+  const [recentVarKeys, setRecentVarKeys] = useState<string[]>(() => {
+    if (typeof window === "undefined") return [];
+    try {
+      const raw = window.localStorage.getItem(recentVarsStorageKey);
+      const parsed = raw ? (JSON.parse(raw) as unknown) : null;
+      return Array.isArray(parsed)
+        ? parsed.map((x) => String(x)).filter(Boolean).slice(0, 12)
+        : [];
+    } catch {
+      return [];
+    }
+  });
+  const [favoriteVarKeys, setFavoriteVarKeys] = useState<string[]>(() => {
+    if (typeof window === "undefined") return [];
+    try {
+      const raw = window.localStorage.getItem(favoriteVarsStorageKey);
+      const parsed = raw ? (JSON.parse(raw) as unknown) : null;
+      return Array.isArray(parsed)
+        ? parsed.map((x) => String(x)).filter(Boolean).slice(0, 50)
+        : [];
+    } catch {
+      return [];
+    }
+  });
+  const favoriteVarKeySet = useMemo(
+    () => new Set(favoriteVarKeys),
+    [favoriteVarKeys],
+  );
   const [pdfScale, setPdfScale] = useState(1);
   const [pdfDimensions, setPdfDimensions] = useState({ width: 0, height: 0 });
   const [pageView, setPageView] = useState<
@@ -170,6 +207,28 @@ export default function PdfMappingEditor({
 
   const isRecord = (v: unknown): v is Record<string, unknown> =>
     !!v && typeof v === "object" && !Array.isArray(v);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try {
+      window.localStorage.setItem(
+        recentVarsStorageKey,
+        JSON.stringify(recentVarKeys),
+      );
+    } catch {
+    }
+  }, [recentVarKeys, recentVarsStorageKey]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try {
+      window.localStorage.setItem(
+        favoriteVarsStorageKey,
+        JSON.stringify(favoriteVarKeys),
+      );
+    } catch {
+    }
+  }, [favoriteVarKeys, favoriteVarsStorageKey]);
 
   const isPdfMappings = (v: unknown): v is PdfMappings => {
     if (!isRecord(v)) return false;
@@ -626,6 +685,9 @@ export default function PdfMappingEditor({
       .replace(/\s*\}\}$/, "")
       .replace(/^\{\s*/, "")
       .replace(/\s*\}$/, "");
+    setRecentVarKeys((prev) =>
+      [normalizedKey, ...prev.filter((x) => x !== normalizedKey)].slice(0, 12),
+    );
     let varText: string;
     if (type === "loop") {
       varText = `{#${normalizedKey}}...{/${normalizedKey}}`;
@@ -635,6 +697,27 @@ export default function PdfMappingEditor({
       varText = `{{${normalizedKey}}}`;
     }
     insertIntoSelectedContentAtCursor(varText);
+  };
+
+  const toggleFavoriteVarKey = (key: string) => {
+    const k = String(key || "").trim();
+    if (!k) return;
+    setFavoriteVarKeys((prev) => {
+      const has = prev.includes(k);
+      const next = has ? prev.filter((x) => x !== k) : [k, ...prev];
+      return next.slice(0, 50);
+    });
+  };
+
+  const copyVarToken = async (key: string) => {
+    const k = String(key || "").trim();
+    if (!k) return;
+    try {
+      await navigator.clipboard.writeText(`{{${k}}}`);
+      toast({ title: "Copied", description: `{{${k}}}` });
+    } catch {
+      toast({ title: "Copy failed" });
+    }
   };
 
   const availableVarKeySet = useMemo(() => {
@@ -684,6 +767,50 @@ export default function PdfMappingEditor({
         </p>
       </div>
       <div className="p-4 space-y-3">
+        {favoriteVarKeys.length > 0 ? (
+          <div>
+            <div className="text-xs font-medium text-slate-600 mb-1">
+              Favorites
+            </div>
+            <div className="flex flex-wrap gap-1.5">
+              {favoriteVarKeys.slice(0, 12).map((k) => (
+                <Button
+                  key={k}
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="h-7 px-2 text-xs"
+                  onClick={() => insertVariable(k)}
+                >
+                  {k}
+                </Button>
+              ))}
+            </div>
+          </div>
+        ) : null}
+
+        {recentVarKeys.length > 0 ? (
+          <div>
+            <div className="text-xs font-medium text-slate-600 mb-1">
+              Recent
+            </div>
+            <div className="flex flex-wrap gap-1.5">
+              {recentVarKeys.slice(0, 12).map((k) => (
+                <Button
+                  key={k}
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="h-7 px-2 text-xs"
+                  onClick={() => insertVariable(k)}
+                >
+                  {k}
+                </Button>
+              ))}
+            </div>
+          </div>
+        ) : null}
+
         <div>
           <div className="text-xs font-medium text-slate-600 mb-1">
             Quick Insert
@@ -729,11 +856,18 @@ export default function PdfMappingEditor({
                     </div>
                     <div className="divide-y">
                       {g.vars.map((v) => (
-                        <button
+                        <div
                           key={`${g.group}:${v.key}`}
-                          type="button"
                           className="w-full text-left px-3 py-2 hover:bg-slate-50"
+                          role="button"
+                          tabIndex={0}
                           onClick={() => insertVariable(v.key, (v as any).type)}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter" || e.key === " ") {
+                              e.preventDefault();
+                              insertVariable(v.key, (v as any).type);
+                            }
+                          }}
                         >
                           <div className="flex items-start gap-3">
                             <div className="min-w-0 flex-1">
@@ -744,6 +878,36 @@ export default function PdfMappingEditor({
                                 {v.key}
                               </div>
                             </div>
+                            <div className="flex items-center gap-1 shrink-0">
+                              <button
+                                type="button"
+                                className={cn(
+                                  "p-1 rounded hover:bg-slate-100",
+                                  favoriteVarKeySet.has(v.key) &&
+                                    "text-amber-500",
+                                )}
+                                onClick={(e) => {
+                                  e.preventDefault();
+                                  e.stopPropagation();
+                                  toggleFavoriteVarKey(v.key);
+                                }}
+                                aria-label="Favorite"
+                              >
+                                <Star className="w-3.5 h-3.5" />
+                              </button>
+                              <button
+                                type="button"
+                                className="p-1 rounded hover:bg-slate-100"
+                                onClick={(e) => {
+                                  e.preventDefault();
+                                  e.stopPropagation();
+                                  void copyVarToken(v.key);
+                                }}
+                                aria-label="Copy token"
+                              >
+                                <Copy className="w-3.5 h-3.5" />
+                              </button>
+                            </div>
                             <div className="text-[11px] text-slate-400 shrink-0">
                               {v.category ?? g.group}
                             </div>
@@ -753,7 +917,7 @@ export default function PdfMappingEditor({
                               Example: {v.exampleValue}
                             </div>
                           ) : null}
-                        </button>
+                        </div>
                       ))}
                     </div>
                   </div>

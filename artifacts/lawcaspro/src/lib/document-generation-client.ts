@@ -67,8 +67,8 @@ export type CreateGenerationJobPayload = {
   force?: boolean;
 };
 
-const GENERATION_TIMEOUT_MS = 60000;
-const CREATE_JOB_TIMEOUT_MS = 15000;
+const GENERATION_TIMEOUT_MS = 180000;
+const CREATE_JOB_TIMEOUT_MS = 60000;
 
 export async function generateDocumentsNow(payload: {
   caseIds: number[];
@@ -167,7 +167,7 @@ export async function downloadGenerationJob(
   opts?: { signal?: AbortSignal },
 ): Promise<Response> {
   return await apiRequest(`/documents/jobs/${jobId}/download`, {
-    timeoutMs: 60000,
+    timeoutMs: 180000,
     signal: opts?.signal,
   });
 }

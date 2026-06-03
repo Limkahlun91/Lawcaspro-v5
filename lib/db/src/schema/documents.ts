@@ -53,6 +53,7 @@ export const caseDocumentsTable = pgTable("case_documents", {
   documentType: text("document_type").notNull().default("generated"),
   status: text("status").notNull().default("draft"),
   objectPath: text("object_path").notNull(),
+  checklistKey: text("checklist_key"),
   fileName: text("file_name").notNull(),
   fileSize: integer("file_size"),
   isUploaded: boolean("is_uploaded").notNull().default(false),

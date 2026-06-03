@@ -20,10 +20,12 @@ import {
 } from "@/components/ui/resizable";
 import { cn } from "@/lib/utils";
 import { apiFetchJson } from "@/lib/api-client";
+import { RequestTimeoutError } from "@/lib/fetch-with-timeout";
 import {
   createGenerationJob,
   downloadGenerationJob,
   runNextGenerationJob,
+  getGenerationJobStatus,
   type NormalizedGenerationJob,
 } from "@/lib/document-generation-client";
 import { downloadBlob, normalizeDownloadFilename } from "@/lib/download";
@@ -109,6 +111,18 @@ function parseFilenameFromDisposition(v: string | null): string | null {
   return null;
 }
 
+function isAbortLike(err: unknown): boolean {
+  if (!err || typeof err !== "object") return false;
+  const rec = err as Record<string, unknown>;
+  if (rec.name === "AbortError") return true;
+  if (
+    typeof rec.message === "string" &&
+    rec.message.toLowerCase().includes("signal is aborted")
+  )
+    return true;
+  return false;
+}
+
 export default function DocumentAutomationHub() {
   const { toast } = useToast();
   const [caseSearch, setCaseSearch] = useState("");
@@ -135,6 +149,7 @@ export default function DocumentAutomationHub() {
     null,
   );
   const pollInFlightRef = useRef(0);
+  const runNextInFlightRef = useRef(false);
   const pollConsecutiveErrorRef = useRef(0);
   const pollAbortRef = useRef<AbortController | null>(null);
   const debugRunIdRef = useRef<string>(
@@ -740,6 +755,10 @@ export default function DocumentAutomationHub() {
       });
 
       const formatPollError = (err: unknown): string => {
+        if (err instanceof RequestTimeoutError)
+          return "Generation request timed out, checking job status...";
+        if (isAbortLike(err))
+          return "Generation request was interrupted, checking job status...";
         if (err instanceof Error) return err.message;
         const r = asRecord(err);
         const errObj = r ? (asRecord(r.error) ?? r) : null;
@@ -760,8 +779,10 @@ export default function DocumentAutomationHub() {
       };
 
       const tick = async () => {
+        if (runNextInFlightRef.current) return;
         const inFlightBefore = pollInFlightRef.current;
         pollInFlightRef.current += 1;
+        runNextInFlightRef.current = true;
         const startedAt = Date.now();
         if (inFlightBefore > 0) {
           emitDbg({
@@ -776,8 +797,7 @@ export default function DocumentAutomationHub() {
           data: { jobId, inFlight: pollInFlightRef.current },
         });
         try {
-          pollAbortRef.current?.abort();
-          const ctrl = new AbortController();
+          const ctrl = pollAbortRef.current ?? new AbortController();
           pollAbortRef.current = ctrl;
           const next = await runNextGenerationJob(jobId, {
             signal: ctrl.signal,
@@ -804,9 +824,7 @@ export default function DocumentAutomationHub() {
             st === "completed-with-errors"
           ) {
             stopPolling();
-            const resp = await downloadGenerationJob(jobId, {
-              signal: ctrl.signal,
-            });
+            const resp = await downloadGenerationJob(jobId);
             const contentType = resp.headers.get("Content-Type");
             if (
               contentType &&
@@ -851,8 +869,65 @@ export default function DocumentAutomationHub() {
             });
           }
         } catch (err) {
+          const shouldStatusCheck =
+            (err instanceof RequestTimeoutError || isAbortLike(err)) &&
+            !pollAbortRef.current?.signal.aborted;
+          if (shouldStatusCheck) {
+            toast({
+              title:
+                "Generation request was interrupted, checking job status...",
+            });
+            try {
+              const st = await getGenerationJobStatus(jobId);
+              setJob(st);
+              const status = String(st.status ?? "");
+              if (
+                status === "completed" ||
+                status === "completed_with_errors" ||
+                status === "completed-with-errors"
+              ) {
+                stopPolling();
+                const resp = await downloadGenerationJob(jobId);
+                const contentType = resp.headers.get("Content-Type");
+                if (
+                  contentType &&
+                  (contentType.includes("application/json") ||
+                    contentType.includes("text/"))
+                ) {
+                  const text = await resp.text().catch(() => "");
+                  throw new Error(
+                    text || "Failed to download generated documents",
+                  );
+                }
+                const blob = await resp.blob();
+                const raw =
+                  parseFilenameFromDisposition(
+                    resp.headers.get("Content-Disposition"),
+                  ) ||
+                  (st.downloadFileName ?? null) ||
+                  `lawcaspro-generated-documents-${Date.now()}.zip`;
+                const filename = normalizeDownloadFilename(raw, contentType);
+                downloadBlob(blob, filename);
+                toast({
+                  title:
+                    status === "completed"
+                      ? "Download started"
+                      : "Download started (with warnings)",
+                  description: filename,
+                });
+                setBusy(false);
+                return;
+              }
+              return;
+            } catch {}
+          }
           pollConsecutiveErrorRef.current += 1;
-          const msg = formatPollError(err);
+          const msg =
+            err instanceof RequestTimeoutError
+              ? "Request timed out. Checking job status..."
+              : formatPollError(err).includes("signal is aborted")
+                ? "Generation request was interrupted, checking job status..."
+                : formatPollError(err);
           emitDbg({
             hypothesisId: "H4",
             msg: "poll:tick-error",
@@ -867,6 +942,7 @@ export default function DocumentAutomationHub() {
           throw err;
         } finally {
           pollInFlightRef.current = Math.max(0, pollInFlightRef.current - 1);
+          runNextInFlightRef.current = false;
           emitDbg({
             hypothesisId: "H1",
             msg: "poll:tick-end",
