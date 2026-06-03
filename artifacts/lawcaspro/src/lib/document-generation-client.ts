@@ -47,7 +47,11 @@ export type NormalizedGenerationJob = {
   successCount: number;
   failedCount: number;
   pendingCount: number;
+  runningCount?: number;
   totalCount: number;
+  progress?: { total: number; success: number; failed: number; pending: number; running: number };
+  nextAction?: "run_next" | "download" | "stop";
+  downloadUrl?: string | null;
   downloadObjectPath?: string | null;
   downloadFileName?: string | null;
   errorSummary?: string | null;
@@ -210,6 +214,26 @@ export function normalizeGenerationJob(raw: unknown): NormalizedGenerationJob {
       asString(root.state) ??
       "pending") as DocumentGenerationJobStatus;
 
+  const progressRaw = asRecord((root as any).progress) ?? null;
+  const progress = progressRaw
+    ? {
+        total: toInt(progressRaw.total),
+        success: toInt(progressRaw.success),
+        failed: toInt(progressRaw.failed),
+        pending: toInt(progressRaw.pending),
+        running: toInt(progressRaw.running),
+      }
+    : undefined;
+
+  const nextActionRaw = asString((root as any).nextAction ?? (root as any).next_action);
+  const nextAction =
+    nextActionRaw === "download" || nextActionRaw === "run_next" || nextActionRaw === "stop"
+      ? (nextActionRaw as "run_next" | "download" | "stop")
+      : undefined;
+
+  const downloadUrl =
+    asString((root as any).downloadUrl ?? (root as any).download_url ?? (jobRaw as any).downloadUrl) ?? null;
+
   const downloadObjectPath = asString(jobRaw.downloadObjectPath ?? jobRaw.download_object_path) ?? null;
   const downloadFileName =
     asString(jobRaw.downloadFileName ?? jobRaw.download_file_name) ??
@@ -224,14 +248,24 @@ export function normalizeGenerationJob(raw: unknown): NormalizedGenerationJob {
 
   const items = itemsRaw.map(normalizeGenerationJobItem);
 
+  const successCount = progress ? progress.success : toInt(jobRaw.successCount ?? jobRaw.success_count);
+  const failedCount = progress ? progress.failed : toInt(jobRaw.failedCount ?? jobRaw.failed_count);
+  const pendingCount = progress ? progress.pending : toInt(jobRaw.pendingCount ?? jobRaw.pending_count);
+  const totalCount = progress ? progress.total : toInt(jobRaw.totalCount ?? jobRaw.total_count);
+  const runningCount = progress ? progress.running : undefined;
+
   return {
     jobId,
     status,
     action: (asString(jobRaw.action) ?? "download") as DocumentGenerationJobAction,
-    successCount: toInt(jobRaw.successCount ?? jobRaw.success_count),
-    failedCount: toInt(jobRaw.failedCount ?? jobRaw.failed_count),
-    pendingCount: toInt(jobRaw.pendingCount ?? jobRaw.pending_count),
-    totalCount: toInt(jobRaw.totalCount ?? jobRaw.total_count),
+    successCount,
+    failedCount,
+    pendingCount,
+    totalCount,
+    runningCount,
+    progress,
+    nextAction,
+    downloadUrl,
     downloadObjectPath,
     downloadFileName,
     errorSummary,

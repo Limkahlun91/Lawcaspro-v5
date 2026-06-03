@@ -143,6 +143,7 @@ export default function DocumentAutomationHub() {
   );
   const [customDuplexRange, setCustomDuplexRange] = useState("");
   const [busy, setBusy] = useState(false);
+  const [finalizingZip, setFinalizingZip] = useState(false);
   const [job, setJob] = useState<NormalizedGenerationJob | null>(null);
   const [jobError, setJobError] = useState<string | null>(null);
   const pollTimerRef = useRef<ReturnType<typeof window.setInterval> | null>(
@@ -782,6 +783,59 @@ export default function DocumentAutomationHub() {
         pollAbortRef.current?.abort();
       };
 
+      const downloadWithRetry = async (jobId: string, snapshot: NormalizedGenerationJob) => {
+        for (let attempt = 1; attempt <= 3; attempt++) {
+          const resp = await downloadGenerationJob(jobId);
+          const contentType = resp.headers.get("Content-Type") ?? "";
+          if (resp.status === 409) {
+            if (contentType.includes("application/json") || contentType.includes("text/")) {
+              const body = (await resp.json().catch(() => null)) as any;
+              const code = body?.error?.code ? String(body.error.code) : "";
+              if (code === "JOB_NOT_COMPLETED") {
+                setFinalizingZip(true);
+                toast({
+                  title: "Job is still finalizing, retrying download...",
+                  description: `Attempt ${attempt}/3`,
+                });
+                try {
+                  const st = await getGenerationJobStatus(jobId);
+                  setJob(st);
+                } catch {}
+                await new Promise<void>((r) => setTimeout(r, 500 * attempt));
+                continue;
+              }
+            }
+          }
+          if (!resp.ok) {
+            if (contentType.includes("application/json") || contentType.includes("text/")) {
+              const text = await resp.text().catch(() => "");
+              throw new Error(text || "Failed to download generated documents");
+            }
+            throw new Error("Failed to download generated documents");
+          }
+          if (contentType.includes("application/json") || contentType.includes("text/")) {
+            const text = await resp.text().catch(() => "");
+            throw new Error(text || "Failed to download generated documents");
+          }
+          const blob = await resp.blob();
+          const raw =
+            parseFilenameFromDisposition(resp.headers.get("Content-Disposition")) ||
+            (snapshot.downloadFileName ?? null) ||
+            `lawcaspro-generated-documents-${Date.now()}.zip`;
+          const filename = normalizeDownloadFilename(raw, contentType);
+          downloadBlob(blob, filename);
+          toast({
+            title:
+              String(snapshot.status ?? "") === "completed"
+                ? "Download started"
+                : "Download started (with warnings)",
+            description: filename,
+          });
+          return;
+        }
+        throw new Error("Job is still finalizing. Please retry download.");
+      };
+
       const tick = async () => {
         if (runNextInFlightRef.current) return;
         const inFlightBefore = pollInFlightRef.current;
@@ -809,11 +863,16 @@ export default function DocumentAutomationHub() {
           });
           pollConsecutiveErrorRef.current = 0;
           setJob(next);
-          const st = (() => {
-            const status = String(next.status ?? "");
-            if (next.totalCount > 0 && next.pendingCount === 0 && next.failedCount === 0 && next.successCount === next.totalCount) return "completed";
-            return status;
-          })();
+          const st = String(next.status ?? "");
+          const nextAction =
+            next.nextAction ??
+            (() => {
+              if (next.pendingCount > 0) return "run_next";
+              if ((next.runningCount ?? 0) > 0) return "run_next";
+              if (st === "completed" || st === "completed_with_errors") return "download";
+              if (st === "failed") return "stop";
+              return "run_next";
+            })();
           emitDbg({
             hypothesisId: "H3",
             msg: "poll:tick-success",
@@ -827,47 +886,15 @@ export default function DocumentAutomationHub() {
               ms: Date.now() - startedAt,
             },
           });
-          if (
-            st === "completed" ||
-            st === "completed_with_errors" ||
-            st === "completed-with-errors"
-          ) {
+          if (nextAction === "download") {
             stopPolling();
-            const resp = await downloadGenerationJob(jobId);
-            const contentType = resp.headers.get("Content-Type");
-            if (
-              contentType &&
-              (contentType.includes("application/json") ||
-                contentType.includes("text/"))
-            ) {
-              const text = await resp.text().catch(() => "");
-              throw new Error(text || "Failed to download generated documents");
-            }
-            const blob = await resp.blob();
-            const raw =
-              parseFilenameFromDisposition(
-                resp.headers.get("Content-Disposition"),
-              ) ||
-              (next.downloadFileName ?? null) ||
-              `lawcaspro-generated-documents-${Date.now()}.zip`;
-            const filename = normalizeDownloadFilename(raw, contentType);
-            downloadBlob(blob, filename);
-            toast({
-              title:
-                st === "completed"
-                  ? "Download started"
-                  : "Download started (with warnings)",
-              description: filename,
-            });
+            setFinalizingZip(true);
+            await downloadWithRetry(jobId, next);
+            setFinalizingZip(false);
             setBusy(false);
-            emitDbg({
-              hypothesisId: "H3",
-              msg: "poll:completed-download-started",
-              data: { jobId, status: st, filename },
-            });
             return;
           }
-          if (st === "failed") {
+          if (nextAction === "stop" || st === "failed") {
             stopPolling();
             setJobError(next.errorSummary ?? "Generation failed");
             setBusy(false);
@@ -884,45 +911,21 @@ export default function DocumentAutomationHub() {
             try {
               const st = await getGenerationJobStatus(jobId);
               setJob(st);
-              const status = (() => {
-                const raw = String(st.status ?? "");
-                if (st.totalCount > 0 && st.pendingCount === 0 && st.failedCount === 0 && st.successCount === st.totalCount) return "completed";
-                return raw;
-              })();
-              if (
-                status === "completed" ||
-                status === "completed_with_errors" ||
-                status === "completed-with-errors"
-              ) {
+              const nextAction =
+                st.nextAction ??
+                (() => {
+                  const status = String(st.status ?? "");
+                  if (st.pendingCount > 0) return "run_next";
+                  if ((st.runningCount ?? 0) > 0) return "run_next";
+                  if (status === "completed" || status === "completed_with_errors") return "download";
+                  if (status === "failed") return "stop";
+                  return "run_next";
+                })();
+              if (nextAction === "download") {
                 stopPolling();
-                const resp = await downloadGenerationJob(jobId);
-                const contentType = resp.headers.get("Content-Type");
-                if (
-                  contentType &&
-                  (contentType.includes("application/json") ||
-                    contentType.includes("text/"))
-                ) {
-                  const text = await resp.text().catch(() => "");
-                  throw new Error(
-                    text || "Failed to download generated documents",
-                  );
-                }
-                const blob = await resp.blob();
-                const raw =
-                  parseFilenameFromDisposition(
-                    resp.headers.get("Content-Disposition"),
-                  ) ||
-                  (st.downloadFileName ?? null) ||
-                  `lawcaspro-generated-documents-${Date.now()}.zip`;
-                const filename = normalizeDownloadFilename(raw, contentType);
-                downloadBlob(blob, filename);
-                toast({
-                  title:
-                    status === "completed"
-                      ? "Download started"
-                      : "Download started (with warnings)",
-                  description: filename,
-                });
+                setFinalizingZip(true);
+                await downloadWithRetry(jobId, st);
+                setFinalizingZip(false);
                 setBusy(false);
                 return;
               }
@@ -1579,7 +1582,8 @@ export default function DocumentAutomationHub() {
                                 (job?.failedCount ?? 0);
                               const total =
                                 job?.totalCount || expectedTotal || 0;
-                              return `Progress: ${done}/${total}  (success=${job?.successCount ?? 0}, failed=${job?.failedCount ?? 0}, pending=${job?.pendingCount ?? 0})`;
+                              const fin = finalizingZip ? " Finalizing ZIP..." : "";
+                              return `Progress: ${done}/${total}  (success=${job?.successCount ?? 0}, failed=${job?.failedCount ?? 0}, pending=${job?.pendingCount ?? 0})${fin}`;
                             })()}
                           </div>
                           {jobError && (

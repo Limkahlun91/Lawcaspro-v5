@@ -14542,6 +14542,440 @@ async function updateJobCounts(
   }
 }
 
+type DocGenJobProgress = {
+  total: number;
+  success: number;
+  failed: number;
+  pending: number;
+  running: number;
+};
+
+async function computeDocGenJobProgress(
+  r: DbConn,
+  args: { firmId: number; jobId: string },
+): Promise<DocGenJobProgress> {
+  const rows = await queryRows(
+    r,
+    sql`
+      SELECT
+        COUNT(*) AS total,
+        COUNT(*) FILTER (WHERE status IN ('success','succeeded')) AS success,
+        COUNT(*) FILTER (WHERE status = 'failed') AS failed,
+        COUNT(*) FILTER (WHERE status = 'pending') AS pending,
+        COUNT(*) FILTER (WHERE status IN ('running','processing')) AS running
+      FROM document_generation_job_items
+      WHERE job_id = ${args.jobId} AND firm_id = ${args.firmId}
+    `,
+  );
+  const c = rows[0] as any;
+  return {
+    total: Number(c?.total ?? 0) || 0,
+    success: Number(c?.success ?? 0) || 0,
+    failed: Number(c?.failed ?? 0) || 0,
+    pending: Number(c?.pending ?? 0) || 0,
+    running: Number(c?.running ?? 0) || 0,
+  };
+}
+
+function resolveDocGenNextAction(args: {
+  status: string;
+  progress: DocGenJobProgress;
+}): "run_next" | "download" | "stop" {
+  if (args.progress.pending > 0) return "run_next";
+  if (args.progress.running > 0) return "run_next";
+  if (args.status === "completed" || args.status === "completed_with_errors")
+    return "download";
+  if (args.status === "failed") return "stop";
+  return "run_next";
+}
+
+async function finalizeDocGenJobIfDone(
+  r: DbConn,
+  args: { firmId: number; jobId: string },
+): Promise<{
+  finalized: boolean;
+  status: string;
+  progress: DocGenJobProgress;
+  downloadObjectPath?: string | null;
+  downloadFileName?: string | null;
+}> {
+  const progress = await computeDocGenJobProgress(r, args);
+  const done =
+    progress.total > 0 &&
+    progress.pending === 0 &&
+    progress.running === 0 &&
+    progress.success + progress.failed === progress.total;
+  if (!done) return { finalized: false, status: "running", progress };
+
+  const finalStatus =
+    progress.failed === 0
+      ? "completed"
+      : progress.success > 0
+        ? "completed_with_errors"
+        : "failed";
+
+  const jobs = await queryRows(
+    r,
+    sql`SELECT status, action, download_object_path, download_file_name, download_mime_type, config, case_ids FROM document_generation_jobs WHERE id = ${args.jobId} AND firm_id = ${args.firmId} LIMIT 1`,
+  );
+  const job = jobs[0] as any;
+  const currentStatus = String(job?.status ?? "");
+  if (currentStatus === "completed" || currentStatus === "completed_with_errors" || currentStatus === "failed") {
+    return {
+      finalized: false,
+      status: currentStatus || finalStatus,
+      progress,
+      downloadObjectPath:
+        typeof job?.download_object_path === "string"
+          ? String(job.download_object_path)
+          : null,
+      downloadFileName:
+        typeof job?.download_file_name === "string"
+          ? String(job.download_file_name)
+          : null,
+    };
+  }
+
+  await queryRows(
+    r,
+    sql`
+      UPDATE document_generation_jobs
+      SET status = ${finalStatus},
+          total_count = ${progress.total},
+          success_count = ${progress.success},
+          failed_count = ${progress.failed},
+          pending_count = 0,
+          finished_at = now()
+      WHERE id = ${args.jobId} AND firm_id = ${args.firmId}
+    `,
+  );
+
+  const download =
+    finalStatus === "completed" || finalStatus === "completed_with_errors"
+      ? await ensureDocGenJobDownloadObject(r, {
+          firmId: args.firmId,
+          jobId: args.jobId,
+        })
+      : null;
+
+  return {
+    finalized: true,
+    status: finalStatus,
+    progress,
+    downloadObjectPath: download?.downloadObjectPath ?? null,
+    downloadFileName: download?.downloadFileName ?? null,
+  };
+}
+
+async function ensureDocGenJobDownloadObject(
+  r: DbConn,
+  args: { firmId: number; jobId: string },
+): Promise<{
+  downloadObjectPath: string;
+  downloadFileName: string;
+  downloadMimeType: string;
+} | null> {
+  const rows = await queryRows(
+    r,
+    sql`SELECT status, action, download_object_path, download_file_name, download_mime_type, config, case_ids FROM document_generation_jobs WHERE id = ${args.jobId} AND firm_id = ${args.firmId} LIMIT 1`,
+  );
+  const job = rows[0] as any;
+  if (!job) return null;
+  const st = String(job.status ?? "");
+  if (st !== "completed" && st !== "completed_with_errors") return null;
+  const action = String(job.action ?? "download");
+  if (action === "print") return null;
+
+  const existingPath =
+    typeof job.download_object_path === "string"
+      ? String(job.download_object_path)
+      : "";
+  if (existingPath) {
+    return {
+      downloadObjectPath: existingPath,
+      downloadFileName:
+        typeof job.download_file_name === "string"
+          ? String(job.download_file_name)
+          : `export-${args.jobId}.zip`,
+      downloadMimeType:
+        typeof job.download_mime_type === "string"
+          ? String(job.download_mime_type)
+          : "application/zip",
+    };
+  }
+
+  const startedAt = Date.now();
+  const items = await queryRows(
+    r,
+    sql`
+      SELECT
+        i.*,
+        COALESCE(t.name, pd.name) AS template_name
+      FROM document_generation_job_items i
+      LEFT JOIN document_templates t
+        ON t.firm_id = i.firm_id AND t.id = i.template_id
+      LEFT JOIN platform_documents pd
+        ON pd.id = i.platform_document_id AND (pd.firm_id IS NULL OR pd.firm_id = i.firm_id)
+      WHERE i.job_id = ${args.jobId} AND i.firm_id = ${args.firmId}
+      ORDER BY i.id ASC
+    `,
+  );
+  const successItems = items.filter(
+    (x) =>
+      String((x as any).status ?? "") === "success" &&
+      String((x as any).object_path ?? ""),
+  );
+  if (successItems.length === 0) return null;
+
+  const jobConfig =
+    job?.config && typeof job.config === "object"
+      ? (job.config as Record<string, unknown>)
+      : {};
+
+  const safeZipSegment = (input: unknown): string => {
+    return String(input || "UNTITLED")
+      .replace(/[\\/:*?"<>|]+/g, "-")
+      .replace(/\s+/g, " ")
+      .trim()
+      .slice(0, 120);
+  };
+
+  const selectedCaseIds = (() => {
+    const raw = job?.case_ids;
+    const arr = Array.isArray(raw) ? raw : [];
+    return arr
+      .map((x) => (typeof x === "number" ? x : Number.parseInt(String(x), 10)))
+      .filter((x) => Number.isFinite(x))
+      .map((x) => Math.trunc(x))
+      .filter((x) => x > 0);
+  })();
+
+  const selectedTemplateRefs = (() => {
+    const raw = (jobConfig as any)?.templates;
+    if (!Array.isArray(raw))
+      return [] as Array<{ source: "firm" | "master"; id: number }>;
+    return raw
+      .map((x) => {
+        const r0 = x && typeof x === "object" ? (x as any) : null;
+        const source =
+          r0?.source === "master" ? ("master" as const) : ("firm" as const);
+        const id =
+          typeof r0?.id === "number"
+            ? r0.id
+            : Number.parseInt(String(r0?.id ?? ""), 10);
+        return Number.isFinite(id) && id > 0 ? { source, id: Math.trunc(id) } : null;
+      })
+      .filter((x): x is { source: "firm" | "master"; id: number } => Boolean(x));
+  })();
+
+  const selectedTemplateIndexByKey = new Map<string, number>();
+  for (let i = 0; i < selectedTemplateRefs.length; i++) {
+    const ref = selectedTemplateRefs[i]!;
+    selectedTemplateIndexByKey.set(`${ref.source}:${ref.id}`, i);
+  }
+
+  const caseIndexById = new Map<number, number>();
+  for (let i = 0; i < selectedCaseIds.length; i++) {
+    caseIndexById.set(selectedCaseIds[i]!, i);
+  }
+
+  const caseRefById = new Map<number, string>();
+  if (selectedCaseIds.length > 0) {
+    const rows2 = await queryRows(
+      r,
+      sql`
+        SELECT id, reference_no
+        FROM cases
+        WHERE firm_id = ${args.firmId}
+          AND deleted_at IS NULL
+          AND id IN (${sql.join(
+            selectedCaseIds.map((id) => sql`${id}`),
+            sql`, `,
+          )})
+      `,
+    );
+    for (const row of rows2) {
+      const id =
+        typeof (row as any).id === "number" ? Number((row as any).id) : NaN;
+      if (!Number.isFinite(id)) continue;
+      caseRefById.set(
+        Math.trunc(id),
+        typeof (row as any).reference_no === "string"
+          ? String((row as any).reference_no)
+          : `case-${id}`,
+      );
+    }
+  }
+
+  const purchaser1NameByCaseId = new Map<number, string>();
+  if (selectedCaseIds.length > 0) {
+    const rows3 = await queryRows(
+      r,
+      sql`
+        SELECT cp.case_id, cl.name
+        FROM case_purchasers cp
+        JOIN clients cl
+          ON cl.id = cp.client_id AND cl.firm_id = cp.firm_id
+        WHERE cp.firm_id = ${args.firmId}
+          AND cp.case_id IN (${sql.join(
+            selectedCaseIds.map((id) => sql`${id}`),
+            sql`, `,
+          )})
+        ORDER BY cp.case_id ASC, cp.order_no ASC, cp.id ASC
+      `,
+    );
+    for (const row of rows3) {
+      const caseId =
+        typeof (row as any).case_id === "number"
+          ? Number((row as any).case_id)
+          : Number.parseInt(String((row as any).case_id ?? ""), 10);
+      if (!Number.isFinite(caseId) || caseId <= 0) continue;
+      if (purchaser1NameByCaseId.has(Math.trunc(caseId))) continue;
+      const name =
+        typeof (row as any).name === "string" ? String((row as any).name) : "";
+      if (name.trim()) purchaser1NameByCaseId.set(Math.trunc(caseId), name.trim());
+    }
+  }
+
+  const normalizeZipFolderBase = (raw: string): string => {
+    const s = safeZipSegment(raw).replace(/[. ]+$/g, "");
+    return s.slice(0, 80);
+  };
+
+  const caseFolderById = new Map<number, string>();
+  const usedFolderBases = new Set<string>();
+  for (let i = 0; i < selectedCaseIds.length; i++) {
+    const caseId = selectedCaseIds[i]!;
+    const caseRefRaw = caseRefById.get(caseId) ?? `case-${caseId}`;
+    const purchaser1Raw = purchaser1NameByCaseId.get(caseId) ?? "";
+    const base0 =
+      normalizeZipFolderBase(purchaser1Raw) ||
+      normalizeZipFolderBase(caseRefRaw) ||
+      `case-${caseId}`;
+    let base = base0;
+    if (usedFolderBases.has(base)) {
+      const refSeg = normalizeZipFolderBase(caseRefRaw);
+      base = refSeg ? `${base}_${refSeg}` : `${base}_${caseId}`;
+    }
+    if (usedFolderBases.has(base)) base = `${base}_${caseId}`;
+    usedFolderBases.add(base);
+    const prefix = `${String(i + 1).padStart(2, "0")}_`;
+    caseFolderById.set(caseId, `${prefix}${base}`);
+  }
+
+  const sorted = [...successItems].sort((a, b) => {
+    const aCaseId = Number((a as any).case_id ?? 0);
+    const bCaseId = Number((b as any).case_id ?? 0);
+    const aCaseIndex = caseIndexById.get(aCaseId) ?? 0;
+    const bCaseIndex = caseIndexById.get(bCaseId) ?? 0;
+    if (aCaseIndex !== bCaseIndex) return aCaseIndex - bCaseIndex;
+    const aSource = String((a as any).template_source ?? "firm");
+    const bSource = String((b as any).template_source ?? "firm");
+    const aTplId =
+      aSource === "master"
+        ? Number((a as any).platform_document_id ?? 0)
+        : Number((a as any).template_id ?? 0);
+    const bTplId =
+      bSource === "master"
+        ? Number((b as any).platform_document_id ?? 0)
+        : Number((b as any).template_id ?? 0);
+    const aKey = `${aSource}:${aTplId}`;
+    const bKey = `${bSource}:${bTplId}`;
+    const aTplIndex = selectedTemplateIndexByKey.get(aKey) ?? 0;
+    const bTplIndex = selectedTemplateIndexByKey.get(bKey) ?? 0;
+    if (aTplIndex !== bTplIndex) return aTplIndex - bTplIndex;
+    return Number((a as any).id ?? 0) - Number((b as any).id ?? 0);
+  });
+
+  const rootFolder = safeZipSegment(
+    `Document_Automation_${new Date().toISOString().slice(0, 10)}`,
+  );
+  const rootPrefix = rootFolder ? `${rootFolder}/` : "";
+
+  const outputExt =
+    jobConfig.outputFormat === "pdf"
+      ? "pdf"
+      : jobConfig.outputFormat === "docx"
+        ? "docx"
+        : "pdf";
+
+  const entries: Array<{ zipPath: string; objectPath: string }> = [];
+  for (const it of sorted) {
+    const op =
+      typeof (it as any).object_path === "string"
+        ? String((it as any).object_path)
+        : "";
+    if (!op) continue;
+    const caseId = Number((it as any).case_id ?? NaN);
+    const caseFolder =
+      caseFolderById.get(caseId) ?? `${String(1).padStart(2, "0")}_case-${caseId}`;
+    const templateSource = String((it as any).template_source ?? "firm");
+    const templateId =
+      templateSource === "master"
+        ? Number((it as any).platform_document_id ?? NaN)
+        : Number((it as any).template_id ?? NaN);
+    const templateKey = `${templateSource}:${templateId}`;
+    const templateIndex = selectedTemplateIndexByKey.get(templateKey);
+    const templateOrder =
+      typeof templateIndex === "number" && Number.isFinite(templateIndex)
+        ? templateIndex
+        : 0;
+    const templateName =
+      typeof (it as any).template_name === "string" &&
+      String((it as any).template_name).trim()
+        ? String((it as any).template_name).trim()
+        : `template-${templateId || "unknown"}`;
+    const baseName = safeFilenameAscii(`${templateName}.${outputExt}`) || `document.${outputExt}`;
+    const fileBase = `${String(templateOrder + 1).padStart(2, "0")}_${baseName}`;
+    entries.push({
+      zipPath: `${rootPrefix}${caseFolder}/${fileBase}`,
+      objectPath: op,
+    });
+  }
+
+  const zipBytes = await buildZipBufferFromPrivateObjects(entries);
+  const zipFileName =
+    safeFilenameAscii(
+      `Document_Automation_${new Date().toISOString().slice(0, 10)}.zip`,
+    ) || `document-automation-${args.jobId}.zip`;
+  const objectPath = `/objects/temp-generated/${args.firmId}/document-generation-jobs/${args.jobId}.zip`;
+
+  await supabaseStorage.uploadPrivateObject({
+    objectPath,
+    fileBytes: zipBytes,
+    contentType: "application/zip",
+  });
+
+  await queryRows(
+    r,
+    sql`
+      UPDATE document_generation_jobs
+      SET download_object_path = ${objectPath},
+          download_file_name = ${zipFileName},
+          download_mime_type = 'application/zip'
+      WHERE id = ${args.jobId} AND firm_id = ${args.firmId}
+    `,
+  );
+
+  try {
+    logger.info(
+      {
+        firmId: args.firmId,
+        jobId: args.jobId,
+        bytes: zipBytes.length,
+        finalize_zip_ms: Date.now() - startedAt,
+      },
+      "[documents] job zip finalized",
+    );
+  } catch {}
+
+  return {
+    downloadObjectPath: objectPath,
+    downloadFileName: zipFileName,
+    downloadMimeType: "application/zip",
+  };
+}
+
 async function recoverStaleDocumentGenerationJob(
   r: DbConn,
   args: { firmId: number; jobId: string; staleMs: number },
@@ -14743,6 +15177,8 @@ async function processAutomationGenerationJobStep(
   args: { firmId: number; jobId: string },
   caps: DocGenRunnerSchemaCaps,
 ): Promise<void> {
+  const stepStartedAt = Date.now();
+  const timing: Record<string, number> = {};
   await touchJobHeartbeat(r, args, caps);
   const jobRows = await queryRows(
     r,
@@ -14781,6 +15217,7 @@ async function processAutomationGenerationJobStep(
     );
   }
 
+  const claimStartedAt = Date.now();
   const claimed = await queryRows(
     r,
     (() => {
@@ -14807,6 +15244,7 @@ async function processAutomationGenerationJobStep(
       `;
     })(),
   );
+  timing.claim_item_ms = Date.now() - claimStartedAt;
 
   const item = claimed[0];
   if (!item) {
@@ -14934,21 +15372,7 @@ async function processAutomationGenerationJobStep(
         return;
       }
 
-      const finalStatus =
-        failedItems.length > 0 ? "completed_with_errors" : "completed";
-      await queryRows(
-        r,
-        sql`
-        UPDATE document_generation_jobs
-        SET status = ${finalStatus},
-            total_count = ${items.length},
-            success_count = ${successItems.length},
-            failed_count = ${failedItems.length},
-            pending_count = 0,
-            finished_at = now()
-        WHERE id = ${args.jobId} AND firm_id = ${args.firmId}
-      `,
-      );
+      await finalizeDocGenJobIfDone(r, args);
     } catch (err) {
       const message =
         err instanceof Error ? err.message : "Internal Server Error";
@@ -15038,6 +15462,7 @@ async function processAutomationGenerationJobStep(
   } catch {}
 
   try {
+    const createRunStartedAt = Date.now();
     runId = await createGenerationRun(r, {
       firm_id: args.firmId,
       case_id: caseId,
@@ -15063,6 +15488,7 @@ async function processAutomationGenerationJobStep(
       error_code: null,
       error_message: null,
     });
+    timing.create_run_ms = Date.now() - createRunStartedAt;
     if (templateSource === "master") {
       if (!Number.isFinite(platformDocumentId) || platformDocumentId <= 0) {
         throw new DocumentGenerationError(
@@ -15072,6 +15498,7 @@ async function processAutomationGenerationJobStep(
           { platformDocumentId },
         );
       }
+      const genStartedAt = Date.now();
       const out = await generateMasterDocument({
         r,
         firmId: args.firmId,
@@ -15089,6 +15516,7 @@ async function processAutomationGenerationJobStep(
         overrides: safeOverrides,
         outputFormat,
       });
+      timing.generate_ms = Date.now() - genStartedAt;
       await finishGenerationRunSuccess(
         r,
         args.firmId,
@@ -15135,6 +15563,7 @@ async function processAutomationGenerationJobStep(
         );
       }
       {
+        const updateItemStartedAt = Date.now();
         const setParts: Array<ReturnType<typeof sql>> = [
           sql`status = 'success'`,
           sql`object_path = ${objectPath || null}`,
@@ -15144,6 +15573,13 @@ async function processAutomationGenerationJobStep(
           sql`finished_at = now()`,
         ];
         if (caps.items.phase) setParts.push(sql`phase = 'success'`);
+        if (caps.items.diagnostic)
+          setParts.push(
+            sql`diagnostic = jsonb_build_object(
+                  'timing', ${JSON.stringify(timing)}::jsonb,
+                  'stepTotalMs', ${Date.now() - stepStartedAt}
+                )`,
+          );
         await queryRows(
           r,
           sql`
@@ -15152,9 +15588,34 @@ async function processAutomationGenerationJobStep(
             WHERE id = ${Number((item as any).id)} AND firm_id = ${args.firmId}
           `,
         );
+        timing.update_item_ms = Date.now() - updateItemStartedAt;
       }
-      await updateJobCounts(r, args);
+      {
+        const countsStartedAt = Date.now();
+        await updateJobCounts(r, args);
+        timing.update_counts_ms = Date.now() - countsStartedAt;
+      }
+      {
+        const finalizeStartedAt = Date.now();
+        await finalizeDocGenJobIfDone(r, args);
+        timing.finalize_ms = Date.now() - finalizeStartedAt;
+      }
       await touchJobHeartbeat(r, args, caps);
+      try {
+        logger.info(
+          {
+            firmId: args.firmId,
+            jobId: args.jobId,
+            jobItemId: Number((item as any).id) || null,
+            templateSource,
+            templateId: Number.isFinite(platformDocumentId) ? platformDocumentId : null,
+            caseId,
+            ...timing,
+            total_ms: Date.now() - stepStartedAt,
+          },
+          "[documents] run-next timing",
+        );
+      } catch {}
       return;
     }
 
@@ -15572,6 +16033,7 @@ async function processAutomationGenerationJobStep(
     }
 
     await updateJobCounts(r, args);
+    await finalizeDocGenJobIfDone(r, args);
     await touchJobHeartbeat(r, args, caps);
     return;
   }
@@ -17674,108 +18136,47 @@ router.post(
       ORDER BY i.id ASC
     `,
       );
-      const status = String((job as any).status ?? "");
+      let status = String((job as any).status ?? "");
+      let progress = await computeDocGenJobProgress(r, {
+        firmId: req.firmId!,
+        jobId,
+      });
+
+      if (
+        progress.total > 0 &&
+        progress.pending === 0 &&
+        progress.running === 0 &&
+        (status === "pending" || status === "running")
+      ) {
+        const fin = await finalizeDocGenJobIfDone(r, {
+          firmId: req.firmId!,
+          jobId,
+        });
+        status = fin.status;
+        progress = fin.progress;
+      }
+
+      const nextAction = resolveDocGenNextAction({ status, progress });
+      const downloadUrl =
+        nextAction === "download" ? `/documents/jobs/${jobId}/download` : undefined;
+
       const jobPayload: Record<string, unknown> = {
         ...(job as any),
-        ...(status === "completed" || status === "completed_with_errors"
-          ? { downloadUrl: `/documents/jobs/${jobId}/download` }
-          : {}),
+        status,
+        total_count: progress.total,
+        success_count: progress.success,
+        failed_count: progress.failed,
+        pending_count: progress.pending + progress.running,
+        ...(downloadUrl ? { downloadUrl } : {}),
       };
-      if (status === "failed") {
-        const failedItem = items.find(
-          (it) => String((it as any)?.status ?? "") === "failed",
-        ) as any;
-        const failedCaseId = failedItem ? Number(failedItem.case_id) : NaN;
-        const caseRef = await (async () => {
-          if (!Number.isFinite(failedCaseId) || failedCaseId <= 0) return null;
-          try {
-            const rows = await queryRows(
-              r,
-              sql`
-                SELECT reference_no
-                FROM cases
-                WHERE firm_id = ${req.firmId!} AND id = ${failedCaseId}
-                LIMIT 1
-              `,
-            );
-            const row = rows[0] as any;
-            const ref =
-              row && typeof row.reference_no === "string"
-                ? String(row.reference_no)
-                : "";
-            return ref || null;
-          } catch {
-            return null;
-          }
-        })();
-        const diag =
-          failedItem &&
-          failedItem.diagnostic &&
-          typeof failedItem.diagnostic === "object"
-            ? (failedItem.diagnostic as any)
-            : null;
-        res.status(422).json({
-          ok: false,
-          error: {
-            code: "RUN_NEXT_FAILED",
-            message:
-              failedItem && typeof failedItem.error_message === "string"
-                ? String(failedItem.error_message)
-                : "Generation failed",
-            errMessage:
-              diag && typeof diag.originalErrorMessage === "string"
-                ? String(diag.originalErrorMessage)
-                : null,
-            errCode:
-              diag && typeof diag.sqlState === "string" ? String(diag.sqlState) : null,
-            errDetail: diag && typeof diag.detail === "string" ? String(diag.detail) : null,
-            errHint: diag && typeof diag.hint === "string" ? String(diag.hint) : null,
-            errPosition:
-              diag && typeof diag.position === "string" ? String(diag.position) : null,
-            sqlState:
-              diag && typeof diag.sqlState === "string" ? diag.sqlState : null,
-            queryName:
-              diag && typeof diag.queryName === "string"
-                ? diag.queryName
-                : null,
-            caseId: Number.isFinite(failedCaseId) ? failedCaseId : null,
-            caseReference: caseRef,
-            templateId:
-              failedItem && typeof failedItem.template_id === "number"
-                ? failedItem.template_id
-                : failedItem && typeof failedItem.template_id === "string"
-                  ? Number.parseInt(String(failedItem.template_id), 10)
-                  : null,
-            templateName:
-              failedItem && typeof failedItem.template_name === "string"
-                ? String(failedItem.template_name)
-                : null,
-            templateSource:
-              failedItem && typeof failedItem.template_source === "string"
-                ? String(failedItem.template_source)
-                : null,
-            originalErrorMessage:
-              diag && typeof diag.originalErrorMessage === "string"
-                ? diag.originalErrorMessage
-                : null,
-            originalErrorCode:
-              diag && typeof diag.mappedFromErrorCode === "string"
-                ? String(diag.mappedFromErrorCode)
-                : null,
-            retryable: false,
-          },
-          meta: {
-            request_id: requestId ?? null,
-            jobId,
-            firmId: req.firmId ?? null,
-            timestamp: new Date().toISOString(),
-            duration_ms: Date.now() - startedAt,
-          },
-        });
-        return;
-      }
+
       res.status(200).json({
         ok: true,
+        jobId,
+        status,
+        progress,
+        nextAction,
+        ...(downloadUrl ? { downloadUrl } : {}),
         job: jobPayload,
         items,
         meta: {
@@ -18273,14 +18674,42 @@ router.get(
       fail(404, "JOB_NOT_FOUND", "Job not found", null, false);
       return;
     }
-    const st = String((job as any).status ?? "");
+    let st = String((job as any).status ?? "");
     const failedCount = Number((job as any).failed_count ?? 0) || 0;
     if (st !== "completed" && st !== "completed_with_errors") {
+      try {
+        const fin = await finalizeDocGenJobIfDone(r, {
+          firmId: req.firmId!,
+          jobId,
+        });
+        if (fin.progress.total > 0 && fin.progress.pending === 0 && fin.progress.running === 0) {
+          const jobs2 = await queryRows(
+            r,
+            sql`SELECT * FROM document_generation_jobs WHERE id = ${jobId} AND firm_id = ${req.firmId!}`,
+          );
+          const j2 = jobs2[0] as any;
+          if (j2) {
+            st = String(j2.status ?? fin.status ?? st);
+            (job as any).download_object_path = j2.download_object_path;
+            (job as any).download_file_name = j2.download_file_name;
+            (job as any).download_mime_type = j2.download_mime_type;
+          } else {
+            st = fin.status ?? st;
+          }
+        }
+      } catch {}
+    }
+
+    if (st !== "completed" && st !== "completed_with_errors") {
+      const progress = await computeDocGenJobProgress(r, {
+        firmId: req.firmId!,
+        jobId,
+      });
       fail(
         409,
         "JOB_NOT_COMPLETED",
         "Job is not completed yet",
-        { status: st || "pending" },
+        { status: st || "pending", progress },
         true,
       );
       return;
