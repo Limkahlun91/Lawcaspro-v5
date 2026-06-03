@@ -14809,19 +14809,29 @@ async function ensureDocGenJobDownloadObject(
 
   const purchaser1NameByCaseId = new Map<number, string>();
   if (selectedCaseIds.length > 0) {
+    const hasOrderNo = await columnExists(r, {
+      schema: "public",
+      table: "case_purchasers",
+      column: "order_no",
+    });
     const rows3 = await queryRows(
       r,
       sql`
         SELECT cp.case_id, cl.name
         FROM case_purchasers cp
+        JOIN cases c
+          ON c.id = cp.case_id AND c.firm_id = ${args.firmId}
         JOIN clients cl
-          ON cl.id = cp.client_id AND cl.firm_id = cp.firm_id
-        WHERE cp.firm_id = ${args.firmId}
-          AND cp.case_id IN (${sql.join(
+          ON cl.id = cp.client_id AND cl.firm_id = c.firm_id
+        WHERE cp.case_id IN (${sql.join(
             selectedCaseIds.map((id) => sql`${id}`),
             sql`, `,
           )})
-        ORDER BY cp.case_id ASC, cp.order_no ASC, cp.id ASC
+        ORDER BY cp.case_id ASC, ${
+          hasOrderNo
+            ? sql`COALESCE(cp.order_no, 999999) ASC, cp.id ASC`
+            : sql`cp.id ASC`
+        }
       `,
     );
     for (const row of rows3) {
@@ -18264,10 +18274,23 @@ router.post(
         error: {
           code: "RUN_NEXT_FAILED",
           message:
-            info.sqlstate &&
-            (info.sqlstate === "42703" || info.sqlstate === "42P01")
-              ? "Database schema is outdated. Please apply latest migrations."
-              : "Failed to run next generation job step",
+            (() => {
+              const sqlstate = info.sqlstate ? String(info.sqlstate) : "";
+              const table = info.table ? String(info.table) : "";
+              const looksLikeMigrationDrift =
+                (sqlstate === "42703" || sqlstate === "42P01") &&
+                [
+                  "document_generation_jobs",
+                  "document_generation_job_items",
+                  "case_documents",
+                  "document_template_versions",
+                  "document_templates",
+                  "platform_documents",
+                ].includes(table);
+              return looksLikeMigrationDrift
+                ? "Database schema is outdated. Please apply latest migrations."
+                : "Failed to run next generation job step";
+            })(),
           sqlState: info.sqlstate ?? null,
           errMessage,
           errCode,
@@ -19025,19 +19048,29 @@ router.get(
 
       const purchaser1NameByCaseId = new Map<number, string>();
       if (selectedCaseIds.length > 0) {
+        const hasOrderNo = await columnExists(r, {
+          schema: "public",
+          table: "case_purchasers",
+          column: "order_no",
+        });
         const rows = await queryRows(
           r,
           sql`
             SELECT cp.case_id, cl.name
             FROM case_purchasers cp
+            JOIN cases c
+              ON c.id = cp.case_id AND c.firm_id = ${req.firmId!}
             JOIN clients cl
-              ON cl.id = cp.client_id AND cl.firm_id = cp.firm_id
-            WHERE cp.firm_id = ${req.firmId!}
-              AND cp.case_id IN (${sql.join(
+              ON cl.id = cp.client_id AND cl.firm_id = c.firm_id
+            WHERE cp.case_id IN (${sql.join(
                 selectedCaseIds.map((id) => sql`${id}`),
                 sql`, `,
               )})
-            ORDER BY cp.case_id ASC, cp.order_no ASC, cp.id ASC
+            ORDER BY cp.case_id ASC, ${
+              hasOrderNo
+                ? sql`COALESCE(cp.order_no, 999999) ASC, cp.id ASC`
+                : sql`cp.id ASC`
+            }
           `,
         );
         for (const row of rows) {
