@@ -20,6 +20,9 @@
     "generate": "drizzle-kit generate --config ./drizzle.config.ts",
     "migrate": "drizzle-kit migrate --config ./drizzle.config.ts",
     "migrate-safe": "node scripts/apply-migrations-safe.mjs",
+    "verify-migrations": "node scripts/verify-migrations.mjs",
+    "post-migration-verify": "node scripts/post-migration-verify.mjs",
+    "post-migration-verify-production": "node scripts/post-migration-verify-production.mjs",
     "studio": "drizzle-kit studio --config ./drizzle.config.ts",
     "reconcile": "node scripts/reconcile-live-db.mjs",
     "apply-rls": "node scripts/apply-rls.mjs"

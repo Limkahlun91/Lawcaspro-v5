@@ -1,7 +1,7 @@
-ALTER TABLE cases
-  ADD COLUMN IF NOT EXISTS apdl_price numeric(15, 2),
-  ADD COLUMN IF NOT EXISTS developer_discount numeric(15, 2),
-  ADD COLUMN IF NOT EXISTS bumiputra_discount numeric(15, 2);
+-- 0103_jsonb_safe_conversion_or_rollback.sql
+-- Production-safe JSONB conversion for cases.property_details / cases.loan_details.
+-- Avoids failing on non-JSON legacy text by wrapping as {"raw": "..."}.
+-- Also removes overly strict SPA/APDL price check constraint.
 
 CREATE OR REPLACE FUNCTION safe_jsonb(input_text text)
 RETURNS jsonb
@@ -69,11 +69,3 @@ $do$;
 ALTER TABLE cases
   DROP CONSTRAINT IF EXISTS chk_cases_spa_price_from_apdl;
 
-ALTER TABLE cases
-  ADD CONSTRAINT chk_cases_spa_price_from_apdl CHECK (
-    apdl_price IS NULL
-    OR (
-      spa_price IS NOT NULL
-      AND spa_price = (apdl_price - COALESCE(developer_discount, 0) - COALESCE(bumiputra_discount, 0))
-    )
-  );
