@@ -2750,10 +2750,6 @@ router.get("/cases", requireAuthHandler, requireFirmUserHandler, requirePermissi
   })();
   const roleNameForApproval = await getRoleName(r, req.firmId!, req.roleId);
   const canReviewApproval = isCaseApprovalRoleName(roleNameForApproval);
-  if (approvalStatus === "pending_approval" && !canReviewApproval) {
-    res.status(403).json({ error: "Forbidden" });
-    return;
-  }
 
   const spaStatusExpr = hasWorkflowSteps ? spaStatusSql() : sql<string>`'Pending'`;
   const loanStatusExpr = hasWorkflowSteps ? loanStatusSql() : sql<string | null>`CASE WHEN ${casesTable.purchaseMode} = 'loan' THEN 'Pending' ELSE NULL END`;
@@ -3023,6 +3019,9 @@ router.get("/cases", requireAuthHandler, requireFirmUserHandler, requirePermissi
       submittedAt: casesTable.submittedAt,
       submittedBy: casesTable.submittedBy,
       submittedByName: submittedByNameSql,
+      approvedAt: casesTable.approvedAt,
+      approvedBy: casesTable.approvedBy,
+      approvalNote: casesTable.approvalNote,
       caseType: casesTable.caseType,
       tenure: casesTable.tenure,
       encumbrances: casesTable.encumbrances,
@@ -3091,6 +3090,9 @@ router.get("/cases", requireAuthHandler, requireFirmUserHandler, requirePermissi
       submittedAt: row.submittedAt ? new Date(row.submittedAt as any).toISOString() : null,
       submittedBy: row.submittedBy ?? null,
       submittedByName: row.submittedByName ?? null,
+      approvedAt: row.approvedAt ? new Date(row.approvedAt as any).toISOString() : null,
+      approvedBy: row.approvedBy ?? null,
+      approvalNote: row.approvalNote ?? null,
       caseType: row.caseType,
       tenure: row.tenure,
       encumbrances: row.encumbrances ?? null,
@@ -3148,10 +3150,6 @@ router.get("/cases", requireAuthHandler, requireFirmUserHandler, requirePermissi
       })();
       const roleNameForApproval2 = await getRoleName(r, req.firmId!, req.roleId);
       const canReviewApproval2 = isCaseApprovalRoleName(roleNameForApproval2);
-      if (approvalStatus2 !== "approved" && !canReviewApproval2) {
-        res.status(403).json({ error: "Forbidden" });
-        return;
-      }
 
       const conditions2 = [
         eq(casesTable.firmId, req.firmId!),
@@ -3198,6 +3196,9 @@ router.get("/cases", requireAuthHandler, requireFirmUserHandler, requirePermissi
           approvalStatus: casesTable.approvalStatus,
           submittedAt: casesTable.submittedAt,
           submittedBy: casesTable.submittedBy,
+          approvedAt: casesTable.approvedAt,
+          approvedBy: casesTable.approvedBy,
+          approvalNote: casesTable.approvalNote,
           caseType: casesTable.caseType,
           tenure: casesTable.tenure,
           encumbrances: casesTable.encumbrances,
@@ -3235,6 +3236,9 @@ router.get("/cases", requireAuthHandler, requireFirmUserHandler, requirePermissi
         submittedAt: row.submittedAt ? new Date(row.submittedAt as any).toISOString() : null,
         submittedBy: row.submittedBy ?? null,
         submittedByName: null,
+        approvedAt: row.approvedAt ? new Date(row.approvedAt as any).toISOString() : null,
+        approvedBy: row.approvedBy ?? null,
+        approvalNote: row.approvalNote ?? null,
         caseType: row.caseType,
         tenure: row.tenure,
         encumbrances: row.encumbrances ?? null,

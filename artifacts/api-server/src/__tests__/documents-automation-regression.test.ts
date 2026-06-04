@@ -452,17 +452,37 @@ describe("Documents automation regressions", () => {
     expect(names[0]).not.toContain("_manifest.json");
   });
 
-  it("GET /api/documents/jobs/:jobId/run-next returns 409 RUN_NEXT_IN_FLIGHT on concurrent call", async () => {
+  it("POST /api/documents/jobs/:jobId/run-next is routable (invalid jobId returns 400 INVALID_JOB_ID)", async () => {
+    const res = await request(app).post("/api/documents/jobs/not-a-uuid/run-next");
+    expect(res.status).toBe(400);
+    expect(res.body?.ok).toBe(false);
+    expect(res.body?.error?.code).toBe("INVALID_JOB_ID");
+  });
+
+  it("POST /api/documents/jobs/:jobId/run-next returns 409 RUN_NEXT_IN_FLIGHT on concurrent call", async () => {
     mockJobStatus = "running";
     mockDownloadObjectPath = null;
     lockHeld = false;
     delayNextJobSelectMs = 40;
-    const p1 = request(app).get(`/api/documents/jobs/${TEST_JOB_ID}/run-next`);
+    const p1 = request(app).post(`/api/documents/jobs/${TEST_JOB_ID}/run-next`);
     await new Promise<void>((r) => setTimeout(r, 5));
-    const p2 = request(app).get(`/api/documents/jobs/${TEST_JOB_ID}/run-next`);
+    const p2 = request(app).post(`/api/documents/jobs/${TEST_JOB_ID}/run-next`);
     const [r1, r2] = await Promise.all([p1, p2]);
     const one409 = r1.status === 409 ? r1 : r2.status === 409 ? r2 : null;
     expect(one409?.body?.error?.code).toBe("RUN_NEXT_IN_FLIGHT");
     expect(one409?.body?.error?.retryable).toBe(true);
+  });
+
+  it("GET /api/documents/jobs/:jobId/status is routable (not route-level 404)", async () => {
+    mockJobStatus = "running";
+    const res = await request(app).get(`/api/documents/jobs/${TEST_JOB_ID}/status`);
+    expect([200, 404]).toContain(res.status);
+    if (res.status === 200) {
+      expect(res.body).toHaveProperty("ok", true);
+      expect(res.body).toHaveProperty("jobId", TEST_JOB_ID);
+    }
+    if (res.status === 404) {
+      expect(res.body?.error?.code).toBe("JOB_NOT_FOUND");
+    }
   });
 });

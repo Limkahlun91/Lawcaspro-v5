@@ -129,12 +129,17 @@ export default function CasesList() {
   const [milestonePresence, setMilestonePresence] = useState<MilestonePresence>(() => initialPresence);
   const [page, setPage] = useState<number>(() => Number.isInteger(initialPage) && initialPage > 0 ? initialPage : 1);
   const [limit, setLimit] = useState<number>(() => Number.isInteger(initialLimit) && initialLimit > 0 ? initialLimit : 50);
-  const normalizeApprovalStatus = (raw: string | null): "approved" | "rejected" => {
+  const normalizeApprovalStatus = (
+    raw: string | null,
+  ): "pending_approval" | "approved" | "rejected" => {
     const s = String(raw ?? "").trim().toLowerCase();
+    if (s === "pending_approval") return "pending_approval";
     if (s === "rejected") return "rejected";
     return "approved";
   };
-  const [approvalStatus, setApprovalStatus] = useState<"approved" | "rejected">(() => normalizeApprovalStatus(sp.get("approvalStatus")));
+  const [approvalStatus, setApprovalStatus] = useState<
+    "pending_approval" | "approved" | "rejected"
+  >(() => normalizeApprovalStatus(sp.get("approvalStatus")));
 
 
   useEffect(() => {
@@ -249,7 +254,7 @@ export default function CasesList() {
     limit: number;
   }>({
     queryKey: ["cases", "approval-list", approvalStatus, page, limit, search],
-    enabled: approvalStatus === "rejected",
+    enabled: approvalStatus !== "approved",
     queryFn: () => apiFetchJson(`/cases?approvalStatus=${encodeURIComponent(approvalStatus)}&page=${page}&limit=${limit}&search=${encodeURIComponent(search.trim())}`),
     retry: false,
   });
@@ -298,6 +303,7 @@ export default function CasesList() {
   const pageCount = Math.max(1, Math.ceil(total / limit));
   const safePage = Math.min(page, pageCount);
   const caseById = useMemo(() => new Map(approvalCases.map((c) => [c.id, c])), [approvalCases]);
+  const pendingViewCase = pendingViewCaseId ? (caseById.get(pendingViewCaseId) ?? null) : null;
 
   useEffect(() => {
     if (safePage !== page) setPage(safePage);
@@ -377,6 +383,7 @@ export default function CasesList() {
   const [isBatchGenerateOpen, setIsBatchGenerateOpen] = useState(false);
   const [selectedTemplateIds, setSelectedTemplateIds] = useState<Set<number>>(new Set());
   const [bulkGenerateDownloading, setBulkGenerateDownloading] = useState(false);
+  const [pendingViewCaseId, setPendingViewCaseId] = useState<number | null>(null);
   const resubmitMutation = useMutation({
     mutationFn: async (caseId: number) => {
       return await apiFetchJson(`/cases/${caseId}/resubmit`, { method: "POST" });
@@ -633,6 +640,7 @@ export default function CasesList() {
 
       <Tabs value={approvalStatus} onValueChange={(v) => { setApprovalStatus(normalizeApprovalStatus(v)); setPage(1); }}>
         <TabsList>
+          <TabsTrigger value="pending_approval">Pending Approval</TabsTrigger>
           <TabsTrigger value="approved">Approved Cases</TabsTrigger>
           <TabsTrigger value="rejected">Case Details to Amend</TabsTrigger>
         </TabsList>
@@ -769,6 +777,94 @@ export default function CasesList() {
                       )}
                     </tbody>
                   </>
+                ) : approvalStatus === "pending_approval" ? (
+                  <>
+                    <thead className="text-xs text-slate-500 uppercase bg-slate-50 border-b border-slate-200">
+                      <tr>
+                        <th className="px-6 py-3 font-semibold">Submitted Date</th>
+                        <th className="px-6 py-3 font-semibold">Submitted By</th>
+                        <th className="px-6 py-3 font-semibold">Our Reference</th>
+                        <th className="px-6 py-3 font-semibold">Client / Purchaser</th>
+                        <th className="px-6 py-3 font-semibold">Project / Property</th>
+                        <th className="px-6 py-3 font-semibold">Case Type</th>
+                        <th className="px-6 py-3 font-semibold">Purchase Mode</th>
+                        <th className="px-6 py-3 font-semibold">Title Category</th>
+                        <th className="px-6 py-3 font-semibold">Assigned Lawyer</th>
+                        <th className="px-6 py-3 font-semibold">Assigned Clerk</th>
+                        <th className="px-6 py-3 font-semibold">Approval Status</th>
+                        <th className="px-6 py-3 font-semibold">Action</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                      {approvalCases.map((c: any) => {
+                        const statusRaw = String((c as any).approvalStatus ?? "");
+                        const statusLabel =
+                          statusRaw === "pending_approval"
+                            ? "Pending Approval"
+                            : statusRaw
+                              ? statusRaw
+                              : "—";
+                        return (
+                          <tr key={c.id} className="hover:bg-slate-50/50">
+                            <td className="px-6 py-4 text-slate-600 text-xs">
+                              {fmtIsoToYmd((c as any).submittedAt)}
+                            </td>
+                            <td className="px-6 py-4 text-slate-700 text-xs">
+                              {String((c as any).submittedByName ?? "—") || "—"}
+                            </td>
+                            <td className="px-6 py-4 text-slate-700">
+                              {String((c as any).referenceNo ?? "—") || "—"}
+                            </td>
+                            <td className="px-6 py-4 text-slate-700">
+                              {String((c as any).clientName ?? "—") || "—"}
+                            </td>
+                            <td className="px-6 py-4">
+                              <div className="font-medium text-slate-800">
+                                {String((c as any).projectName ?? "—") || "—"}
+                              </div>
+                              <div className="text-slate-500 text-xs mt-0.5">
+                                {String((c as any).property ?? "") || String((c as any).developerName ?? "—") || "—"}
+                              </div>
+                            </td>
+                            <td className="px-6 py-4 text-slate-700">
+                              {caseTypeLabel((c as any).caseType)}
+                            </td>
+                            <td className="px-6 py-4 text-slate-700">
+                              {String((c as any).purchaseMode ?? "—") || "—"}
+                            </td>
+                            <td className="px-6 py-4 text-slate-700">
+                              {String((c as any).titleType ?? "—") || "—"}
+                            </td>
+                            <td className="px-6 py-4 text-slate-700">
+                              {String((c as any).assignedLawyerName ?? "—") || "—"}
+                            </td>
+                            <td className="px-6 py-4 text-slate-700">
+                              {String((c as any).assignedClerkName ?? "—") || "—"}
+                            </td>
+                            <td className="px-6 py-4 text-slate-700">
+                              {statusLabel}
+                            </td>
+                            <td className="px-6 py-4">
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                onClick={() => setPendingViewCaseId(c.id)}
+                              >
+                                View
+                              </Button>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                      {approvalCases.length === 0 && (
+                        <tr>
+                          <td colSpan={12} className="px-6 py-8 text-center text-slate-500">
+                            No cases found.
+                          </td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </>
                 ) : (
                   <>
                     <thead className="text-xs text-slate-500 uppercase bg-slate-50 border-b border-slate-200">
@@ -816,6 +912,105 @@ export default function CasesList() {
           )}
         </CardContent>
       </Card>
+
+      <Dialog
+        open={approvalStatus === "pending_approval" && pendingViewCaseId !== null}
+        onOpenChange={(open) => {
+          if (!open) setPendingViewCaseId(null);
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Pending Approval (View Only)</DialogTitle>
+            <DialogDescription>Read-only summary for submitted open file approval.</DialogDescription>
+          </DialogHeader>
+          <div className="grid grid-cols-2 gap-4 text-sm">
+            <div>
+              <div className="text-xs text-slate-500">Submitted Date</div>
+              <div className="mt-1 text-slate-800">
+                {fmtIsoToYmd((pendingViewCase as any)?.submittedAt)}
+              </div>
+            </div>
+            <div>
+              <div className="text-xs text-slate-500">Submitted By</div>
+              <div className="mt-1 text-slate-800">
+                {String((pendingViewCase as any)?.submittedByName ?? "—") || "—"}
+              </div>
+            </div>
+            <div>
+              <div className="text-xs text-slate-500">Our Reference</div>
+              <div className="mt-1 text-slate-800">
+                {String((pendingViewCase as any)?.referenceNo ?? "—") || "—"}
+              </div>
+            </div>
+            <div>
+              <div className="text-xs text-slate-500">Client / Purchaser</div>
+              <div className="mt-1 text-slate-800">
+                {String((pendingViewCase as any)?.clientName ?? "—") || "—"}
+              </div>
+            </div>
+            <div>
+              <div className="text-xs text-slate-500">Project</div>
+              <div className="mt-1 text-slate-800">
+                {String((pendingViewCase as any)?.projectName ?? "—") || "—"}
+              </div>
+            </div>
+            <div>
+              <div className="text-xs text-slate-500">Property</div>
+              <div className="mt-1 text-slate-800">
+                {String((pendingViewCase as any)?.property ?? "—") || "—"}
+              </div>
+            </div>
+            <div>
+              <div className="text-xs text-slate-500">Developer</div>
+              <div className="mt-1 text-slate-800">
+                {String((pendingViewCase as any)?.developerName ?? "—") || "—"}
+              </div>
+            </div>
+            <div>
+              <div className="text-xs text-slate-500">Case Type</div>
+              <div className="mt-1 text-slate-800">
+                {caseTypeLabel((pendingViewCase as any)?.caseType)}
+              </div>
+            </div>
+            <div>
+              <div className="text-xs text-slate-500">Purchase Mode</div>
+              <div className="mt-1 text-slate-800">
+                {String((pendingViewCase as any)?.purchaseMode ?? "—") || "—"}
+              </div>
+            </div>
+            <div>
+              <div className="text-xs text-slate-500">Title Category</div>
+              <div className="mt-1 text-slate-800">
+                {String((pendingViewCase as any)?.titleType ?? "—") || "—"}
+              </div>
+            </div>
+            <div>
+              <div className="text-xs text-slate-500">Assigned Lawyer</div>
+              <div className="mt-1 text-slate-800">
+                {String((pendingViewCase as any)?.assignedLawyerName ?? "—") || "—"}
+              </div>
+            </div>
+            <div>
+              <div className="text-xs text-slate-500">Assigned Clerk</div>
+              <div className="mt-1 text-slate-800">
+                {String((pendingViewCase as any)?.assignedClerkName ?? "—") || "—"}
+              </div>
+            </div>
+            <div className="col-span-2">
+              <div className="text-xs text-slate-500">Approval Status</div>
+              <div className="mt-1 text-slate-800">
+                {String((pendingViewCase as any)?.approvalStatus ?? "—") || "—"}
+              </div>
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setPendingViewCaseId(null)}>
+              Close
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <div className="flex items-center justify-between gap-3">
         <div className="text-xs text-slate-500">

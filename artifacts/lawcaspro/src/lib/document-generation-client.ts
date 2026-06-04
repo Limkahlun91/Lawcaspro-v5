@@ -154,13 +154,21 @@ export async function getGenerationJobStatus(
   opts?: { signal?: AbortSignal },
 ): Promise<NormalizedGenerationJob> {
   try {
-    return await getGenerationJob(jobId, opts);
-  } catch {
-    const raw = await apiFetchJson<unknown>(`/documents/status/${jobId}`, {
+    const raw = await apiFetchJson<unknown>(`/documents/jobs/${jobId}/status`, {
       timeoutMs: GENERATION_TIMEOUT_MS,
       signal: opts?.signal,
     });
     return normalizeGenerationJob(raw);
+  } catch {
+    try {
+      return await getGenerationJob(jobId, opts);
+    } catch {
+      const raw = await apiFetchJson<unknown>(`/documents/status/${jobId}`, {
+        timeoutMs: GENERATION_TIMEOUT_MS,
+        signal: opts?.signal,
+      });
+      return normalizeGenerationJob(raw);
+    }
   }
 }
 

@@ -18159,7 +18159,7 @@ router.post(
   },
 );
 
-router.get(
+router.post(
   "/documents/jobs/:jobId/run-next",
   requireAuth,
   requireFirmUserSession,

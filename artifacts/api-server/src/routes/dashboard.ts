@@ -457,6 +457,8 @@ router.get("/dashboard", requireAuth, requireFirmUser, requirePermission("dashbo
         individualTitleCases: (stats as any)?.individualTitleCases ?? 0,
         strataTitleCases: (stats as any)?.strataTitleCases ?? 0,
         commsThisMonth: (stats as any)?.commsThisMonth ?? 0,
+        pendingApprovalCases: (stats as any)?.pendingApprovalCases ?? 0,
+        rejectedCases: (stats as any)?.rejectedCases ?? 0,
         completionSlaOverdue: (stats as any)?.completionSlaOverdue ?? [],
         milestoneSections: Array.isArray((stats as any)?.milestoneSections) ? (stats as any).milestoneSections : [],
         milestoneCards: Array.isArray((stats as any)?.milestoneCards) ? (stats as any).milestoneCards : [],
