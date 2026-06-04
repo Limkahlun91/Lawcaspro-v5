@@ -389,7 +389,11 @@ export default function CasesList() {
       return await apiFetchJson(`/cases/${caseId}/resubmit`, { method: "POST" });
     },
     onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["dashboard"] });
+      queryClient.invalidateQueries({ queryKey: ["case-files"] });
+      queryClient.invalidateQueries({ queryKey: ["cases", "filter-options"] });
       queryClient.invalidateQueries({ queryKey: ["cases", "approval-list"] });
+      queryClient.invalidateQueries({ queryKey: ["cases"] });
       queryClient.invalidateQueries({ queryKey: getListCasesQueryKey() });
       toast({ title: "Resubmitted for approval" });
     },

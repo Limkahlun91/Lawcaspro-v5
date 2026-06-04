@@ -55,6 +55,12 @@ describe("Case file listing (regression)", () => {
     createdCaseId = createRes.body.id;
     const ref = createRes.body.referenceNo;
 
+    const approveRes = await request(app)
+      .post(`/api/cases/${createdCaseId}/approve`)
+      .set("Authorization", `Bearer ${token}`)
+      .send({ referenceNo: ref || "QA-APP-0001", approvalNote: null });
+    expect(approveRes.status).toBe(200);
+
     const detailRes = await request(app)
       .get(`/api/cases/${createdCaseId}`)
       .set("Authorization", `Bearer ${token}`);

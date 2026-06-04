@@ -13,6 +13,7 @@ import { toastError } from "@/lib/toast-error";
 import { apiFetchJson } from "@/lib/api-client";
 import { useToast } from "@/hooks/use-toast";
 import { useAuth } from "@/lib/auth-context";
+import { getListCasesQueryKey } from "@workspace/api-client-react";
 
 type ApprovalStatus = "pending_approval" | "rejected" | "approved";
 
@@ -26,9 +27,11 @@ function fmtIsoToYmd(iso: string | null | undefined): string {
 
 function caseTypeLabel(v: string | null | undefined): string {
   const s = String(v ?? "").trim().toLowerCase();
+  if (!s) return "—";
   if (s === "subsale") return "Subsale";
   if (s === "perfection") return "Perfection";
-  return "Developer Sales";
+  if (s === "developer_sales") return "Developer Sales";
+  return s.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
 }
 
 function buildCaseSummary(c: any): string {
@@ -53,6 +56,22 @@ function buildCaseSummary(c: any): string {
     (c as any)?.purchaseMode ? `Mode: ${(c as any).purchaseMode}` : null,
   ].filter(Boolean);
   return parts.join(" · ") || "—";
+}
+
+function showCell(v: unknown): string {
+  if (v === null || v === undefined) return "—";
+  const s = String(v).trim();
+  return s ? s : "—";
+}
+
+function formatClientParties(parties: any): string {
+  const arr = Array.isArray(parties) ? parties : [];
+  const names = arr
+    .map((p) => (p && typeof p === "object" ? String((p as any).name ?? "").trim() : ""))
+    .filter((x) => x);
+  if (names.length === 0) return "—";
+  if (names.length === 1) return names[0];
+  return `${names[0]} +${names.length - 1}`;
 }
 
 export default function AccountingFileListing() {
@@ -100,14 +119,14 @@ export default function AccountingFileListing() {
   }, [status, search, page, setLocation]);
 
   const listQuery = useQuery<{ data: any[]; total: number; page: number; limit: number }>({
-    queryKey: ["accounting-file-listing", status, search, page, limit],
+    queryKey: ["cases", "approval", status, search, page, limit],
     enabled: canApproveCases && status !== "approved",
     queryFn: () => apiFetchJson(`/cases?approvalStatus=${encodeURIComponent(status)}&page=${page}&limit=${limit}&search=${encodeURIComponent(search.trim())}`),
     retry: false,
   });
 
   const approvedFilesQuery = useQuery<any>({
-    queryKey: ["accounting-file-listing", "approved-files", search, page, limit],
+    queryKey: ["case-files", search, page, limit],
     enabled: canApproveCases && status === "approved",
     queryFn: async () => {
       const params = new URLSearchParams();
@@ -132,8 +151,19 @@ export default function AccountingFileListing() {
         body: JSON.stringify({ referenceNo: vars.referenceNo.trim(), approvalNote: vars.approvalNote.trim() ? vars.approvalNote.trim() : null }),
       });
     },
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["accounting-file-listing"] });
+    onSuccess: async () => {
+      await Promise.all([
+        qc.invalidateQueries({ queryKey: ["dashboard"] }),
+        qc.invalidateQueries({ queryKey: ["cases"] }),
+        qc.invalidateQueries({ queryKey: getListCasesQueryKey() }),
+        qc.invalidateQueries({ queryKey: ["cases", "filter-options"] }),
+        qc.invalidateQueries({ queryKey: ["case-files"] }),
+      ]);
+      await Promise.all([
+        qc.refetchQueries({ queryKey: ["dashboard"], type: "active" }),
+        qc.refetchQueries({ queryKey: ["cases"], type: "active" }),
+        qc.refetchQueries({ queryKey: ["case-files"], type: "active" }),
+      ]);
       toast({ title: "Approved" });
       setReviewOpen(false);
     },
@@ -147,8 +177,19 @@ export default function AccountingFileListing() {
         body: JSON.stringify({ approvalNote: vars.approvalNote.trim() }),
       });
     },
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["accounting-file-listing"] });
+    onSuccess: async () => {
+      await Promise.all([
+        qc.invalidateQueries({ queryKey: ["dashboard"] }),
+        qc.invalidateQueries({ queryKey: ["cases"] }),
+        qc.invalidateQueries({ queryKey: getListCasesQueryKey() }),
+        qc.invalidateQueries({ queryKey: ["cases", "filter-options"] }),
+        qc.invalidateQueries({ queryKey: ["case-files"] }),
+      ]);
+      await Promise.all([
+        qc.refetchQueries({ queryKey: ["dashboard"], type: "active" }),
+        qc.refetchQueries({ queryKey: ["cases"], type: "active" }),
+        qc.refetchQueries({ queryKey: ["case-files"], type: "active" }),
+      ]);
       toast({ title: "Returned for amendment" });
       setReviewOpen(false);
     },
@@ -216,16 +257,28 @@ export default function AccountingFileListing() {
                     <thead>
                       <tr className="text-left text-slate-500 border-b">
                         <th className="py-3 pr-4 min-w-[160px]">File Reference</th>
+                        <th className="py-3 pr-4 min-w-[140px]">Case Type</th>
+                        <th className="py-3 pr-4 min-w-[220px]">Client / Purchaser</th>
+                        <th className="py-3 pr-4 min-w-[260px]">Property / Project</th>
                         <th className="py-3 pr-4 min-w-[140px]">Open Date</th>
                         <th className="py-3 pr-4 min-w-[160px]">Status</th>
+                        <th className="py-3 pr-4 min-w-[120px]">Action</th>
                       </tr>
                     </thead>
                     <tbody>
                       {rows.map((r: any) => (
                         <tr key={r.id} className="border-b last:border-b-0 hover:bg-slate-50">
-                          <td className="py-3 pr-4 font-medium">{String(r.referenceNo ?? "")}</td>
+                          <td className="py-3 pr-4 font-medium">{showCell(r.referenceNo)}</td>
+                          <td className="py-3 pr-4">{caseTypeLabel(r.caseType)}</td>
+                          <td className="py-3 pr-4">{formatClientParties(r.clientParties)}</td>
+                          <td className="py-3 pr-4 text-slate-700">{showCell(r.propertyInfo)}</td>
                           <td className="py-3 pr-4 text-xs">{fmtIsoToYmd(r.openFileDate)}</td>
-                          <td className="py-3 pr-4 text-xs text-slate-700">{String(r.status ?? "")}</td>
+                          <td className="py-3 pr-4 text-xs text-slate-700">{showCell(r.status)}</td>
+                          <td className="py-3 pr-4">
+                            <Button size="sm" variant="outline" onClick={() => setLocation(`/app/cases/${r.id}`)}>
+                              View
+                            </Button>
+                          </td>
                         </tr>
                       ))}
                     </tbody>
@@ -356,4 +409,3 @@ export default function AccountingFileListing() {
     </div>
   );
 }
-

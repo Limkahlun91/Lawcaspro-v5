@@ -132,6 +132,7 @@ async function computeDashboardSummary(r: DbConn, args: { firmId: number; assign
 }
 
 router.get("/dashboard/summary", requireAuth, requireFirmUser, requirePermission("dashboard", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
+  res.setHeader("Cache-Control", "no-store");
   const firmId = req.firmId!;
   const r = rdb(req);
   const requestId = one(req.headers["x-request-id"] as any) || one(req.headers["x-vercel-id"] as any) || undefined;
@@ -339,6 +340,7 @@ router.get("/debug/dashboard", requireAuth, requireFirmUser, async (req: AuthReq
 });
 
 router.get("/dashboard", requireAuth, requireFirmUser, requirePermission("dashboard", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
+  res.setHeader("Cache-Control", "no-store");
   const allowDetails =
     process.env.API_ERROR_DETAILS === "1" ||
     process.env.NODE_ENV !== "production" ||

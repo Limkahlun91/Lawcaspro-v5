@@ -2146,9 +2146,13 @@ export default function CaseDetail() {
             headers: { "content-type": "application/json" },
             body: JSON.stringify(payload),
           });
+          await queryClient.invalidateQueries({ queryKey: ["dashboard"] });
+          await queryClient.invalidateQueries({ queryKey: ["cases"] });
           await queryClient.invalidateQueries({ queryKey: getListCasesQueryKey() });
           await queryClient.invalidateQueries({ queryKey: getGetCaseQueryKey(caseId) });
           await queryClient.invalidateQueries({ queryKey: getGetCaseWorkflowQueryKey(caseId) });
+          await queryClient.invalidateQueries({ queryKey: ["cases", "filter-options"] });
+          await queryClient.invalidateQueries({ queryKey: ["case-files"] });
         }}
       />
 

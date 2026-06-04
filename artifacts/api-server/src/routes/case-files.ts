@@ -65,6 +65,7 @@ function firstNumber(...vals: unknown[]): number | null {
 }
 
 router.get("/case-files", requireAuth, requireFirmUser, async (req: AuthRequest, res: Response): Promise<void> => {
+  res.setHeader("Cache-Control", "no-store");
   const r = rdb(req);
   const parsed = listQuerySchema.safeParse(req.query);
   if (!parsed.success) {
@@ -80,6 +81,7 @@ router.get("/case-files", requireAuth, requireFirmUser, async (req: AuthRequest,
   const whereBase = and(
     eq(casesTable.firmId, req.firmId!),
     sql`${casesTable.deletedAt} IS NULL`,
+    eq(casesTable.approvalStatus, "approved"),
   );
 
   const whereSearch = q
@@ -183,14 +185,15 @@ router.get("/case-files", requireAuth, requireFirmUser, async (req: AuthRequest,
   const [{ count }] = await r
     .select({ count: sql<number>`COUNT(*)` })
     .from(casesTable)
-    .innerJoin(projectsTable, eq(projectsTable.id, casesTable.projectId))
-    .innerJoin(developersTable, eq(developersTable.id, casesTable.developerId))
+    .leftJoin(projectsTable, eq(projectsTable.id, casesTable.projectId))
+    .leftJoin(developersTable, eq(developersTable.id, casesTable.developerId))
     .where(where);
 
   const rows = await r
     .select({
       id: casesTable.id,
       referenceNo: casesTable.referenceNo,
+      caseType: casesTable.caseType,
       purchaseMode: casesTable.purchaseMode,
       spaPrice: casesTable.spaPrice,
       parcelNo: casesTable.parcelNo,
@@ -202,14 +205,15 @@ router.get("/case-files", requireAuth, requireFirmUser, async (req: AuthRequest,
       lawyerName: lawyerNameSql,
       clerkName: clerkNameSql,
       createdAt: casesTable.createdAt,
+      approvedAt: casesTable.approvedAt,
       updatedAt: casesTable.updatedAt,
       completionDate: caseKeyDatesTable.completionDate,
       latestQuotation: latestQuotationSql,
       latestInvoice: latestInvoiceSql,
     })
     .from(casesTable)
-    .innerJoin(projectsTable, eq(projectsTable.id, casesTable.projectId))
-    .innerJoin(developersTable, eq(developersTable.id, casesTable.developerId))
+    .leftJoin(projectsTable, eq(projectsTable.id, casesTable.projectId))
+    .leftJoin(developersTable, eq(developersTable.id, casesTable.developerId))
     .leftJoin(caseKeyDatesTable, and(eq(caseKeyDatesTable.caseId, casesTable.id), eq(caseKeyDatesTable.firmId, casesTable.firmId)))
     .where(where)
     .orderBy(desc(casesTable.updatedAt))
@@ -285,7 +289,7 @@ router.get("/case-files", requireAuth, requireFirmUser, async (req: AuthRequest,
       : firstNumber(prop?.purchasePrice, prop?.spaPrice);
 
     const propertySummary = [
-      row.projectName,
+      row.projectName ?? null,
       firstString(prop?.propertyName, prop?.property, prop?.unitNo, prop?.unit, prop?.address, prop?.propertyAddress),
       row.parcelNo ? `Parcel ${row.parcelNo}` : null,
     ].filter(Boolean).join(" • ");
@@ -313,7 +317,8 @@ router.get("/case-files", requireAuth, requireFirmUser, async (req: AuthRequest,
       partiesList.push({ role, name: p.name, idNo: idNo ?? null });
     }
 
-    const openDate = row.createdAt instanceof Date ? row.createdAt : new Date(row.createdAt);
+    const effectiveOpenDate = row.approvedAt ?? row.createdAt;
+    const openDate = effectiveOpenDate instanceof Date ? effectiveOpenDate : new Date(effectiveOpenDate);
     let closedDate: Date | null = null;
     if (row.completionDate) {
       closedDate = new Date(row.completionDate);
@@ -336,12 +341,13 @@ router.get("/case-files", requireAuth, requireFirmUser, async (req: AuthRequest,
     return {
       id: row.id,
       referenceNo: row.referenceNo,
+      caseType: row.caseType,
       clientParties: partiesList,
       purchasePrice,
       purchaseMode: row.purchaseMode,
       loanBank,
       loanAmount,
-      propertyInfo: propertySummary || row.projectName,
+      propertyInfo: propertySummary || row.projectName || null,
       lawyerInCharge: row.lawyerName,
       clerkInCharge: row.clerkName,
       status: row.status,

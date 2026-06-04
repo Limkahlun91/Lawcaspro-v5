@@ -68,7 +68,7 @@ export default function AppDashboard() {
   const { data: stats, isLoading, isError, error, refetch, isFetching } = useQuery({
     queryKey: ["dashboard", firmId, refresh ? "refresh" : "cached"],
     queryFn: ({ signal }) => apiFetchJson(refresh ? "/dashboard?refresh=1" : "/dashboard", { timeoutMs: refresh ? 15_000 : 12_000, signal }) as Promise<Record<string, any>>,
-    staleTime: 30_000,
+    staleTime: 10_000,
     retry: (failureCount, err) => {
       if (failureCount >= 2) return false;
       if (isAbortLikeError(err)) return false;
@@ -82,7 +82,7 @@ export default function AppDashboard() {
       const jitter = Math.floor(Math.random() * 200);
       return base + jitter;
     },
-    refetchOnWindowFocus: false,
+    refetchOnWindowFocus: true,
     refetchOnReconnect: true,
     placeholderData: (prev) => prev,
   });

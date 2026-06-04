@@ -947,6 +947,7 @@ router.get("/cases/recent", requireAuthHandler, requireFirmUserHandler, requireP
 }));
 
 router.get("/cases/filter-options", requireAuthHandler, requireFirmUserHandler, requirePermission("cases", "read") as RequestHandler, authed(async (req, res) => {
+  res.setHeader("Cache-Control", "no-store");
   const r = rdb(req);
 
   const stepDefs = buildWorkflowSteps("loan", "individual");
@@ -2646,6 +2647,7 @@ router.get("/cases/export.csv", requireAuthHandler, requireFirmUserHandler, requ
 }));
 
 router.get("/cases", requireAuthHandler, requireFirmUserHandler, requirePermission("cases", "read") as RequestHandler, authed(async (req, res) => {
+  res.setHeader("Cache-Control", "no-store");
   try {
     const r = rdb(req);
     let hasKeyDates = await tableExists(r, "public.case_key_dates");

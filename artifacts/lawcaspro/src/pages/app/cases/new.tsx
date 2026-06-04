@@ -1,8 +1,10 @@
 import { useState } from "react";
 import { useLocation } from "wouter";
+import { useQueryClient } from "@tanstack/react-query";
 import { apiFetchJson } from "@/lib/api-client";
 import { useToast } from "@/hooks/use-toast";
 import { useAuth } from "@/lib/auth-context";
+import { getListCasesQueryKey } from "@workspace/api-client-react";
 import { CaseFormModal } from "./components/case-form/CaseFormModal";
 
 export default function NewCasePage() {
@@ -10,6 +12,7 @@ export default function NewCasePage() {
   const [open, setOpen] = useState(true);
   const { toast } = useToast();
   const { user } = useAuth();
+  const qc = useQueryClient();
 
   const roleLower = String((user as any)?.roleName ?? "").trim().toLowerCase();
   const canApproveCases =
@@ -35,6 +38,13 @@ export default function NewCasePage() {
             headers: { "content-type": "application/json" },
             body: JSON.stringify(payload),
           });
+          await Promise.all([
+            qc.invalidateQueries({ queryKey: ["dashboard"] }),
+            qc.invalidateQueries({ queryKey: ["cases"] }),
+            qc.invalidateQueries({ queryKey: getListCasesQueryKey() }),
+            qc.invalidateQueries({ queryKey: ["cases", "filter-options"] }),
+            qc.invalidateQueries({ queryKey: ["case-files"] }),
+          ]);
           toast({
             title: "Open file submitted for approval.",
             description: canApproveCases
