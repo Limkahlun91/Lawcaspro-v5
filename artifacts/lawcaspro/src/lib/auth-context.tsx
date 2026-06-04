@@ -26,8 +26,10 @@ const parsePermissionsPayload = (body: unknown): Array<{ module: string; action:
 interface AuthContextType {
   user: AuthUser | null;
   isLoading: boolean;
+  authStatus: "loading" | "authenticated" | "unauthenticated" | "error";
   permissionsStatus?: "idle" | "loading" | "ready" | "unavailable" | "error";
   retryPermissions?: () => void;
+  retryMe?: () => void;
   login: (user: AuthUser) => void;
   logout: () => void;
 }
@@ -36,7 +38,7 @@ const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<AuthUser | null>(null);
-  const [isLoading, setIsLoading] = useState(true);
+  const [authStatus, setAuthStatus] = useState<"loading" | "authenticated" | "unauthenticated" | "error">("loading");
   const queryClient = useQueryClient();
 
   const meQuery = useQuery<AuthUser | null>({
@@ -46,7 +48,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       const res = await apiRequest("/api/auth/me", {
         allowStatuses: [401],
         signal,
-        timeoutMs: 8000,
+        timeoutMs: 15000,
       });
       if (res.status === 401) return null;
       const body = (await res.json()) as unknown;
@@ -61,16 +63,21 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (isMeLoading) return;
     if (isMeError) {
-      setIsLoading(false);
+      setAuthStatus("error");
       return;
     }
     setUser(me ?? null);
-    setIsLoading(false);
+    setAuthStatus(me ? "authenticated" : "unauthenticated");
   }, [me, isMeLoading, isMeError]);
 
   const permissionsQuery = useQuery<{ permissions: Array<{ module: string; action: string }>; unavailable?: boolean }>({
     queryKey: ["auth-permissions", user?.roleId ?? null],
-    enabled: Boolean(user && user.userType === "firm_user" && user.roleId),
+    enabled: Boolean(
+      user &&
+        user.userType === "firm_user" &&
+        user.roleId &&
+        !(Array.isArray((user as any)?.permissions) && (user as any).permissions.length > 0),
+    ),
     retry: false,
     queryFn: async ({ signal }) => {
       const res = await apiRequest("/api/auth/permissions", {
@@ -112,12 +119,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return onAuthUnauthorized(() => {
       clearStoredAuthToken();
       setUser(null);
+      setAuthStatus("unauthenticated");
       queryClient.setQueryData(ME_QUERY_KEY, null);
     });
   }, [queryClient]);
 
   const login = (newUser: AuthUser) => {
     setUser(newUser);
+    setAuthStatus("authenticated");
     queryClient.setQueryData(ME_QUERY_KEY, newUser);
   };
 
@@ -135,7 +144,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     <AuthContext.Provider
       value={{
         user,
-        isLoading,
+        isLoading: authStatus === "loading",
+        authStatus,
         permissionsStatus: (() => {
           if (!user || user.userType !== "firm_user" || !user.roleId) return "idle";
           if (permissionsQuery.isError) return "error";
@@ -144,6 +154,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           return "ready";
         })(),
         retryPermissions: () => { void permissionsQuery.refetch(); },
+        retryMe: () => { void meQuery.refetch(); },
         login,
         logout: handleLogout,
       }}

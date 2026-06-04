@@ -692,16 +692,24 @@ routerInternal.get("/auth/me", async (req: ReqLike, res: RouteResLike): Promise<
 
   const tokenHash = crypto.createHash("sha256").update(token).digest("hex");
   const ctxBase = { route: getRoute(req), reqId, stage: "start" };
+  const t0 = Date.now();
+  let sessionLookupMs = 0;
+  let tenantContextMs = 0;
+  let roleLookupMs = 0;
+  let permissionsLookupMs = 0;
+  let firmLookupMs = 0;
+  let responseBuildMs = 0;
 
   try {
     const result = await lookupSessionAndUserByTokenHash(tokenHash);
+    sessionLookupMs = Date.now() - t0;
     const session = result?.session;
     const user = result?.user;
 
     if (!session || !user || session.expiresAt < new Date() || user.status !== "active") {
       if (typeof cookieToken === "string") res.clearCookie("auth_token", { path: "/" });
       sendOk(res, null);
-      logger.info({ ...ctxBase, stage: "not_authenticated", ms: Date.now() - startedAt }, "auth.me");
+      logger.info({ ...ctxBase, stage: "not_authenticated", ms: Date.now() - startedAt, sessionLookupMs }, "auth.me");
       return;
     }
 
@@ -716,7 +724,9 @@ routerInternal.get("/auth/me", async (req: ReqLike, res: RouteResLike): Promise<
       const client = await pool.connect();
       let destroy = false;
       try {
+        const start = Date.now();
         await setTenantContextSession(client, firmId, userId);
+        tenantContextMs += Date.now() - start;
         const r = makeRlsDb(client);
         return await fn(r);
       } catch (err) {
@@ -732,57 +742,74 @@ routerInternal.get("/auth/me", async (req: ReqLike, res: RouteResLike): Promise<
     };
 
     let roleName: string | null = null;
-    if (user.roleId) {
-      try {
-        const [role] =
-          user.userType === "firm_user" && user.firmId
-            ? await withFirmRlsDb(user.firmId, user.id, async (r) => {
-                return await r
-                  .select({ name: rolesTable.name })
-                  .from(rolesTable)
-                  .where(and(eq(rolesTable.id, user.roleId!), eq(rolesTable.firmId, user.firmId!)));
-              })
-            : await db.select({ name: rolesTable.name }).from(rolesTable).where(eq(rolesTable.id, user.roleId));
-        roleName = (role as { name?: unknown } | undefined)?.name as string | undefined ?? null;
-      } catch (err) {
-        logger.error({ route: getRoute(req), reqId, stage: "role_lookup", err }, "auth.me.degraded");
-      }
-    }
-
     let firmName: string | null = null;
-    if (user.firmId) {
-      try {
-        const [firm] = await db.select().from(firmsTable).where(eq(firmsTable.id, user.firmId));
-        firmName = (firm as { name?: unknown } | undefined)?.name as string | undefined ?? null;
-      } catch (err) {
-        logger.error({ route: getRoute(req), reqId, stage: "firm_lookup", err }, "auth.me.degraded");
-      }
-    }
-
     let permissions: Array<{ module: string; action: string }> = [];
-    if (user.userType === "firm_user" && user.roleId) {
-      try {
-        if (user.firmId) {
-          await withFirmRlsDb(user.firmId, user.id, async (r) => {
-            try {
-              await ensureRolePermissionsInitialized(r as any, user.firmId!, user.roleId!);
-            } catch (err) {
-              logger.error({ route: getRoute(req), reqId, stage: "permissions_seed", err }, "auth.me.degraded");
-            }
+
+    if (user.userType === "firm_user" && user.firmId) {
+      await withFirmRlsDb(user.firmId, user.id, async (r) => {
+        if (user.roleId) {
+          const start = Date.now();
+          try {
+            const [role] = await r
+              .select({ name: rolesTable.name })
+              .from(rolesTable)
+              .where(and(eq(rolesTable.id, user.roleId!), eq(rolesTable.firmId, user.firmId!)));
+            roleName = (role as { name?: unknown } | undefined)?.name as string | undefined ?? null;
+          } catch (err) {
+            logger.error({ route: getRoute(req), reqId, stage: "role_lookup", err }, "auth.me.degraded");
+            roleName = null;
+          } finally {
+            roleLookupMs += Date.now() - start;
+          }
+
+          const startPerms = Date.now();
+          try {
             permissions = await r
               .select({ module: permissionsTable.module, action: permissionsTable.action })
               .from(permissionsTable)
               .where(and(eq(permissionsTable.roleId, user.roleId!), eq(permissionsTable.allowed, true)));
-          });
-        } else {
-          permissions = await db
-            .select({ module: permissionsTable.module, action: permissionsTable.action })
-            .from(permissionsTable)
-            .where(and(eq(permissionsTable.roleId, user.roleId), eq(permissionsTable.allowed, true)));
+          } catch (err) {
+            logger.error({ route: getRoute(req), reqId, stage: "permissions_lookup", err }, "auth.me.degraded");
+            permissions = [];
+          } finally {
+            permissionsLookupMs += Date.now() - startPerms;
+          }
         }
-      } catch (err) {
-        logger.error({ route: getRoute(req), reqId, stage: "permissions_lookup", err }, "auth.me.degraded");
-        permissions = [];
+
+        const startFirm = Date.now();
+        try {
+          const [firm] = await r
+            .select({ name: firmsTable.name })
+            .from(firmsTable)
+            .where(eq(firmsTable.id, user.firmId!));
+          firmName = (firm as { name?: unknown } | undefined)?.name as string | undefined ?? null;
+        } catch (err) {
+          logger.error({ route: getRoute(req), reqId, stage: "firm_lookup", err }, "auth.me.degraded");
+          firmName = null;
+        } finally {
+          firmLookupMs += Date.now() - startFirm;
+        }
+      });
+    } else {
+      if (user.roleId) {
+        const start = Date.now();
+        const [role] = await db.select({ name: rolesTable.name }).from(rolesTable).where(eq(rolesTable.id, user.roleId));
+        roleName = (role as { name?: unknown } | undefined)?.name as string | undefined ?? null;
+        roleLookupMs += Date.now() - start;
+      }
+      if (user.firmId) {
+        const startFirm = Date.now();
+        const [firm] = await db.select({ name: firmsTable.name }).from(firmsTable).where(eq(firmsTable.id, user.firmId));
+        firmName = (firm as { name?: unknown } | undefined)?.name as string | undefined ?? null;
+        firmLookupMs += Date.now() - startFirm;
+      }
+      if (user.userType === "firm_user" && user.roleId) {
+        const startPerms = Date.now();
+        permissions = await db
+          .select({ module: permissionsTable.module, action: permissionsTable.action })
+          .from(permissionsTable)
+          .where(and(eq(permissionsTable.roleId, user.roleId), eq(permissionsTable.allowed, true)));
+        permissionsLookupMs += Date.now() - startPerms;
       }
     }
 
@@ -790,6 +817,7 @@ routerInternal.get("/auth/me", async (req: ReqLike, res: RouteResLike): Promise<
       ? await loadFounderPermissions({ userId: user.id, userType: "founder", email: user.email } as AuthRequest)
       : { permissions: [], highestLevel: null };
 
+    const startBuild = Date.now();
     sendOk(res, {
       id: user.id,
       userType: user.userType,
@@ -806,7 +834,25 @@ routerInternal.get("/auth/me", async (req: ReqLike, res: RouteResLike): Promise<
       department: null,
       status: user.status,
     });
+    responseBuildMs = Date.now() - startBuild;
     logger.info({ ...ctxBase, stage: "ok", ms: Date.now() - startedAt }, "auth.me");
+    logger.info(
+      {
+        ...ctxBase,
+        stage: "timing",
+        ms: Date.now() - startedAt,
+        sessionLookupMs,
+        tenantContextMs,
+        roleLookupMs,
+        permissionsLookupMs,
+        firmLookupMs,
+        responseBuildMs,
+        userId: user.id,
+        firmId: user.firmId,
+        roleId: user.roleId,
+      },
+      "auth.me_timing",
+    );
   } catch (err) {
     logger.error(
       {

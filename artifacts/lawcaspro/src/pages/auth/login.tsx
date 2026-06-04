@@ -1,7 +1,7 @@
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useAuth } from "@/lib/auth-context";
 import { useToast } from "@/hooks/use-toast";
 import { Button } from "@/components/ui/button";
@@ -42,7 +42,7 @@ function requiresTotp(value: unknown): boolean {
 }
 
 export default function Login() {
-  const { login: setAuthUser } = useAuth();
+  const { login: setAuthUser, user, isLoading } = useAuth();
   const { toast } = useToast();
   const [showPassword, setShowPassword] = useState(false);
   const [isPending, setIsPending] = useState(false);
@@ -55,6 +55,19 @@ export default function Login() {
     resolver: zodResolver(loginSchema),
     defaultValues: { email: "", password: "" },
   });
+
+  useEffect(() => {
+    if (isLoading) return;
+    if (!user) return;
+    const roleName = String((user as any)?.roleName ?? "");
+    const nextPath = (() => {
+      if (user.userType === "founder") return "/platform/dashboard";
+      if (roleName === "Developer_User") return "/developer/dashboard";
+      return "/app/dashboard";
+    })();
+    const base = import.meta.env.BASE_URL ? String(import.meta.env.BASE_URL).replace(/\/$/, "") : "";
+    window.location.assign(`${base}${nextPath}`);
+  }, [isLoading, user]);
 
   async function doLogin(data: LoginFormValues, code?: string) {
     setIsPending(true);
@@ -79,18 +92,14 @@ export default function Login() {
       if (isRecord(body) && typeof body.token === "string" && body.token.trim() !== "") {
         setStoredAuthToken(body.token.trim());
       }
-      const me = await apiFetchJson<AuthUser | null>("/auth/me");
-      const effective = me && isAuthUser(me) ? me : body;
+      const effective = body;
       setAuthUser(effective);
       const nextPath = (() => {
         if (effective.userType === "founder") return "/platform/dashboard";
         const roleName = String((effective as any)?.roleName ?? "");
         if (roleName === "Developer_User") return "/developer/dashboard";
         if (hasPermission(effective, "dashboard", "read")) return "/app/dashboard";
-        if (hasPermission(effective, "cases", "read")) return "/app/workbench";
-        if (hasPermission(effective, "documents", "read")) return "/app/documents";
-        if (hasPermission(effective, "settings", "read")) return "/app/settings";
-        return "/app/workbench";
+        return "/app/dashboard";
       })();
       const base = import.meta.env.BASE_URL ? String(import.meta.env.BASE_URL).replace(/\/$/, "") : "";
       window.location.assign(`${base}${nextPath}`);
