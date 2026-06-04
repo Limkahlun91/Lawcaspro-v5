@@ -1167,15 +1167,44 @@ export default function DocumentAutomationHub() {
               setBusy(false);
               return;
             }
-            if (status === 409 || code === "RUN_NEXT_IN_FLIGHT") {
+            if (code === "RUN_NEXT_IN_FLIGHT") {
               runnerRef.current.state = "statusOnly";
               runnerRef.current.statusOnlyUntil = Date.now() + 15_000;
               await new Promise<void>((r) => setTimeout(r, 1500));
               continue;
             }
+            if (status === 409) {
+              stopPolling();
+              setJobError(formatPollError(err));
+              setBusy(false);
+              return;
+            }
             if (code === "JOB_NOT_FOUND" || status === 404) {
               stopPolling();
-              setJobError("Job not found (JOB_NOT_FOUND). Please start a new job.");
+              try {
+                const st = await getGenerationJobStatus(jobId);
+                setJob(st);
+                const na = st.nextAction ?? "";
+                const s = String(st.status ?? "");
+                if (
+                  na === "download" ||
+                  na === "finalize" ||
+                  na === "stop" ||
+                  s === "finalizing" ||
+                  s === "completed" ||
+                  s === "completed_with_errors" ||
+                  s === "failed" ||
+                  s === "cancelled"
+                ) {
+                  setJobError(
+                    `Run-next failed with JOB_NOT_FOUND, but status indicates the job is "${s}" (nextAction="${na}"). Please use the available action (finalize/download) or start a new job.`,
+                  );
+                } else {
+                  setJobError("Job not found (JOB_NOT_FOUND). Please start a new job.");
+                }
+              } catch {
+                setJobError("Job not found (JOB_NOT_FOUND). Please start a new job.");
+              }
               setBusy(false);
               return;
             }

@@ -18357,6 +18357,108 @@ router.post(
           return;
         }
       }
+      const preJobs = await queryRows(
+        r,
+        sql`SELECT * FROM document_generation_jobs WHERE id = ${jobId} AND firm_id = ${req.firmId!}`,
+      );
+      const preJob = preJobs[0] as any;
+      if (!preJob) {
+        res.status(404).json({
+          ok: false,
+          error: {
+            code: "JOB_NOT_FOUND",
+            message: "Job not found",
+            details: null,
+            retryable: false,
+          },
+          meta: {
+            request_id: requestId ?? null,
+            jobId,
+            firmId: req.firmId ?? null,
+            userId: req.userId ?? null,
+            phase: "pre_run_lookup",
+            timestamp: new Date().toISOString(),
+            duration_ms: Date.now() - startedAt,
+          },
+        });
+        return;
+      }
+      let statusBefore = String(preJob.status ?? "");
+      let progressBefore = await computeDocGenJobProgress(r, {
+        firmId: req.firmId!,
+        jobId,
+      });
+      if (
+        progressBefore.total > 0 &&
+        progressBefore.pending === 0 &&
+        progressBefore.running === 0 &&
+        (statusBefore === "pending" || statusBefore === "running")
+      ) {
+        const fin = await finalizeDocGenJobIfDone(r, {
+          firmId: req.firmId!,
+          jobId,
+        });
+        statusBefore = fin.status;
+        progressBefore = fin.progress;
+      }
+      const nextActionBefore = resolveDocGenNextAction({
+        status: statusBefore,
+        progress: progressBefore,
+        downloadObjectPath:
+          typeof preJob.download_object_path === "string"
+            ? String(preJob.download_object_path)
+            : null,
+      });
+      if (nextActionBefore !== "run_next") {
+        const items = await queryRows(
+          r,
+          sql`
+        SELECT
+          i.*,
+          COALESCE(t.name, pd.name) AS template_name
+        FROM document_generation_job_items i
+        LEFT JOIN document_templates t
+          ON t.firm_id = i.firm_id AND t.id = i.template_id
+        LEFT JOIN platform_documents pd
+          ON pd.id = i.platform_document_id AND (pd.firm_id IS NULL OR pd.firm_id = i.firm_id)
+        WHERE i.job_id = ${jobId} AND i.firm_id = ${req.firmId!}
+        ORDER BY i.id ASC
+      `,
+        );
+        const downloadUrl =
+          nextActionBefore === "download" ? `/documents/jobs/${jobId}/download` : undefined;
+        const jobPayload: Record<string, unknown> = {
+          ...(preJob as any),
+          status: statusBefore,
+          total_count: progressBefore.total,
+          success_count: progressBefore.success,
+          failed_count: progressBefore.failed,
+          pending_count: progressBefore.pending,
+          ...(downloadUrl ? { downloadUrl } : {}),
+        };
+        res.status(200).json({
+          ok: true,
+          jobId,
+          status: statusBefore,
+          progress: progressBefore,
+          nextAction: nextActionBefore,
+          ...(downloadUrl ? { downloadUrl } : {}),
+          job: jobPayload,
+          items,
+          meta: {
+            request_id: requestId ?? null,
+            jobId,
+            firmId: req.firmId ?? null,
+            userId: req.userId ?? null,
+            status_before: statusBefore,
+            status_after: statusBefore,
+            nextAction: nextActionBefore,
+            timestamp: new Date().toISOString(),
+            duration_ms: Date.now() - startedAt,
+          },
+        });
+        return;
+      }
       const MAX_JOB_STEP_MS = 6000;
       const MAX_ITEMS_PER_CALL = 1;
       const cache = createRequestCache();
@@ -18382,16 +18484,26 @@ router.post(
       );
       const job = jobs[0];
       if (!job) {
-        res.status(404).json({
+        const itemCountRows = await queryRows(
+          r,
+          sql`SELECT COUNT(*)::int AS cnt FROM document_generation_job_items WHERE job_id = ${jobId} AND firm_id = ${req.firmId!}`,
+        );
+        const itemCount = Number((itemCountRows[0] as any)?.cnt ?? 0);
+        res.status(409).json({
           ok: false,
           error: {
-            code: "JOB_NOT_FOUND",
-            message: "Job not found",
+            code: "JOB_DISAPPEARED",
+            message: "Job disappeared after processing step",
             details: null,
             retryable: false,
           },
           meta: {
             request_id: requestId ?? null,
+            jobId,
+            firmId: req.firmId ?? null,
+            userId: req.userId ?? null,
+            itemCount,
+            phase: "post_run_lookup",
             timestamp: new Date().toISOString(),
             duration_ms: Date.now() - startedAt,
           },
@@ -18466,6 +18578,12 @@ router.post(
         items,
         meta: {
           request_id: requestId ?? null,
+          jobId,
+          firmId: req.firmId ?? null,
+          userId: req.userId ?? null,
+          status_before: statusBefore,
+          status_after: status,
+          nextAction,
           timestamp: new Date().toISOString(),
           duration_ms: Date.now() - startedAt,
         },

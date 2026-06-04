@@ -632,7 +632,22 @@ export async function requireFirmUser(
   try {
     await client.query("BEGIN");
     await setTenantContext(client, req.firmId, req.userId ?? undefined);
-    req.rlsDb = makeRlsDb(client);
+    const rlsDb = makeRlsDb(client) as any;
+    const originalExecute: unknown = rlsDb.execute;
+    if (typeof originalExecute === "function") {
+      const exec = originalExecute.bind(rlsDb);
+      let chain = Promise.resolve();
+      rlsDb.execute = (query: unknown) => {
+        const run = () => exec(query);
+        const p = chain.then(run, run);
+        chain = p.then(
+          () => undefined,
+          () => undefined,
+        );
+        return p;
+      };
+    }
+    req.rlsDb = rlsDb;
   } catch (err) {
     try {
       await releaseClient(false);
@@ -770,7 +785,22 @@ export async function requireFirmUserSession(
 
   try {
     await setTenantContextSession(client, req.firmId, req.userId ?? undefined);
-    req.rlsDb = makeRlsDb(client);
+    const rlsDb = makeRlsDb(client) as any;
+    const originalExecute: unknown = rlsDb.execute;
+    if (typeof originalExecute === "function") {
+      const exec = originalExecute.bind(rlsDb);
+      let chain = Promise.resolve();
+      rlsDb.execute = (query: unknown) => {
+        const run = () => exec(query);
+        const p = chain.then(run, run);
+        chain = p.then(
+          () => undefined,
+          () => undefined,
+        );
+        return p;
+      };
+    }
+    req.rlsDb = rlsDb;
   } catch (err) {
     try {
       await releaseClient(false);
