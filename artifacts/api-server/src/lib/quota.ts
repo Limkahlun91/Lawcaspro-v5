@@ -1,5 +1,5 @@
 import { and, eq, sql } from "drizzle-orm";
-import { casesTable, firmsTable, subscriptionPlansTable, usersTable, type AppDb, type RlsDb } from "@workspace/db";
+import { db as appDb, casesTable, firmsTable, subscriptionPlansTable, usersTable, type AppDb, type RlsDb } from "@workspace/db";
 import { ApiError } from "./api-response.js";
 
 export type QuotaResourceType = "users" | "cases" | string;
@@ -12,7 +12,8 @@ const firstDayOfCurrentMonth = (): Date => {
 };
 
 export async function checkFirmQuota(dbConn: DbConn, firmId: number, resourceType: QuotaResourceType): Promise<void> {
-  const [firm] = await dbConn
+  const r = appDb;
+  const [firm] = await r
     .select({
       subscriptionStatus: firmsTable.subscriptionStatus,
       subscriptionPlanId: firmsTable.subscriptionPlanId,
@@ -36,7 +37,7 @@ export async function checkFirmQuota(dbConn: DbConn, firmId: number, resourceTyp
 
   if (resourceType === "users") {
     if (firm.maxUsers == null) return;
-    const [cnt] = await dbConn
+    const [cnt] = await r
       .select({ c: sql<number>`count(*)` })
       .from(usersTable)
       .where(and(eq(usersTable.firmId, firmId), eq(usersTable.status, "active")));
@@ -50,7 +51,7 @@ export async function checkFirmQuota(dbConn: DbConn, firmId: number, resourceTyp
   if (resourceType === "cases") {
     if (firm.maxCasesPerMonth == null) return;
     const since = firstDayOfCurrentMonth();
-    const [cnt] = await dbConn
+    const [cnt] = await r
       .select({ c: sql<number>`count(*)` })
       .from(casesTable)
       .where(and(eq(casesTable.firmId, firmId), sql`${casesTable.createdAt} >= ${since}`));
@@ -72,4 +73,3 @@ export async function checkFirmQuota(dbConn: DbConn, firmId: number, resourceTyp
     throw new ApiError({ status: 403, code: "FEATURE_DISABLED", message: `Feature disabled: ${resourceType}`, retryable: false });
   }
 }
-

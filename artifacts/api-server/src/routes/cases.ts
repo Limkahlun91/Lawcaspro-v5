@@ -3846,7 +3846,9 @@ router.post("/cases", requireAuthHandler, requireFirmUserHandler, requirePermiss
           const message = typeof cur.message === "string" ? cur.message : undefined;
           const detail = typeof cur.detail === "string" ? cur.detail : undefined;
           const constraint = typeof cur.constraint === "string" ? cur.constraint : undefined;
-          return { code, message, detail, constraint };
+          const table = typeof cur.table === "string" ? cur.table : undefined;
+          const column = typeof cur.column === "string" ? cur.column : undefined;
+          return { code, message, detail, constraint, table, column };
         }
         cur = cur?.cause;
       }
@@ -3854,7 +3856,14 @@ router.post("/cases", requireAuthHandler, requireFirmUserHandler, requirePermiss
     })();
     req.log.error({ err: e, pg, body: safeReqBody }, "cases.create failed");
     if (process.env.API_ERROR_DETAILS === "1") {
-      res.status(500).json({ error: "Internal Server Error", details: pg?.message ?? null, code: pg?.code ?? null, constraint: pg?.constraint ?? null });
+      res.status(500).json({
+        error: "Internal Server Error",
+        details: pg?.message ?? null,
+        code: pg?.code ?? null,
+        constraint: pg?.constraint ?? null,
+        table: (pg as any)?.table ?? null,
+        column: (pg as any)?.column ?? null,
+      });
       return;
     }
     res.status(500).json({ error: "Internal Server Error" });
