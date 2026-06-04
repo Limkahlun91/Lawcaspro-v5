@@ -94,6 +94,27 @@ export const db = drizzle(pool, { schema });
 export { schema };
 export type AppDb = typeof db;
 
+export function createPoolFromDatabaseUrl(databaseUrlRaw: string) {
+  const databaseUrl = databaseUrlRaw?.trim();
+  if (!databaseUrl) throw new Error("databaseUrl is required");
+  const isPooler = isSupabasePoolerDatabaseUrl(databaseUrl);
+  const loweredDatabaseUrl = databaseUrl.toLowerCase();
+  const stripped = stripSslmodeFromDatabaseUrl(databaseUrl);
+  const shouldUseSsl =
+    isPooler ||
+    stripped.hadSslmode ||
+    loweredDatabaseUrl.includes("supabase.co") ||
+    loweredDatabaseUrl.includes("supabase.com");
+  return new Pool({
+    connectionString: stripped.url,
+    connectionTimeoutMillis: connectTimeoutMs,
+    idleTimeoutMillis: idleTimeoutMs,
+    ...(poolMax ? { max: poolMax } : {}),
+    ...(keepAlive ? { keepAlive: true, keepAliveInitialDelayMillis: keepAliveDelayMs } : {}),
+    ...(shouldUseSsl ? (isPooler ? { ssl: { rejectUnauthorized: false } } : { ssl: true }) : {}),
+  });
+}
+
 export * from "./schema";
 export * from "./tenant-context";
 export type { RlsDb } from "./tenant-context";
@@ -138,4 +159,4 @@ export { caseDocumentVariableOverridesTable } from "./schema";
 
 export { sql } from "drizzle-orm";
 export type { SQL } from "drizzle-orm";
-export type { PoolClient } from "pg";
+export type { Pool, PoolClient } from "pg";
