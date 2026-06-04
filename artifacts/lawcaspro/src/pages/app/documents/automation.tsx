@@ -152,6 +152,21 @@ export default function DocumentAutomationHub() {
   );
   const pollInFlightRef = useRef(0);
   const runNextInFlightRef = useRef(false);
+  const runnerRef = useRef<{
+    running: boolean;
+    jobId: string | null;
+    startedAt: number;
+    runNextAttempts: number;
+    statusOnly: boolean;
+    statusOnlySince: number;
+  }>({
+    running: false,
+    jobId: null,
+    startedAt: 0,
+    runNextAttempts: 0,
+    statusOnly: false,
+    statusOnlySince: 0,
+  });
   const pollConsecutiveErrorRef = useRef(0);
   const pollAbortRef = useRef<AbortController | null>(null);
   const debugRunIdRef = useRef<string>(
@@ -206,6 +221,8 @@ export default function DocumentAutomationHub() {
     return () => {
       if (pollTimerRef.current) window.clearInterval(pollTimerRef.current);
       pollAbortRef.current?.abort();
+      runnerRef.current.running = false;
+      runnerRef.current.jobId = null;
     };
   }, []);
 
@@ -706,6 +723,13 @@ export default function DocumentAutomationHub() {
   }
 
   async function runGenerate(mode: "download" | "print") {
+    if (runnerRef.current.running) {
+      toast({
+        title: "Generation already running",
+        description: "Please wait for the current job to finish before starting a new one.",
+      });
+      return;
+    }
     if (selectedCaseIds.length === 0) {
       toast({ title: "Please select at least one case" });
       return;
@@ -727,6 +751,12 @@ export default function DocumentAutomationHub() {
     setJobError(null);
     if (pollTimerRef.current) window.clearInterval(pollTimerRef.current);
     pollAbortRef.current?.abort();
+    runnerRef.current.running = true;
+    runnerRef.current.jobId = null;
+    runnerRef.current.startedAt = Date.now();
+    runnerRef.current.runNextAttempts = 0;
+    runnerRef.current.statusOnly = false;
+    runnerRef.current.statusOnlySince = 0;
     try {
       const templates = [
         ...selectedTemplateIds.map((id) => ({ source: "firm" as const, id })),
@@ -750,6 +780,7 @@ export default function DocumentAutomationHub() {
       });
       const jobId = created.jobId;
       if (!jobId) throw new Error("jobId is missing");
+      runnerRef.current.jobId = jobId;
       try {
         const initial = await getGenerationJobStatus(jobId);
         setJob(initial);
@@ -782,6 +813,7 @@ export default function DocumentAutomationHub() {
         if (pollTimerRef.current) window.clearInterval(pollTimerRef.current);
         pollTimerRef.current = null;
         pollAbortRef.current?.abort();
+        runnerRef.current.running = false;
       };
 
       const downloadWithRetry = async (jobId: string, snapshot: NormalizedGenerationJob) => {
@@ -853,11 +885,126 @@ export default function DocumentAutomationHub() {
       };
 
       const drive = async () => {
+        const maxRuntimeMs = 10 * 60 * 1000;
+        const getMaxRunNextAttempts = (snapshot: NormalizedGenerationJob | null) => {
+          const totalFromJob = snapshot?.totalCount;
+          const total =
+            typeof totalFromJob === "number" && Number.isFinite(totalFromJob)
+              ? totalFromJob
+              : selectedCaseIds.length *
+                (selectedTemplateIds.length + selectedMasterDocIds.length);
+          const n = Number.isFinite(total) ? Math.max(1, total) : 1;
+          return n + 3;
+        };
+
+        const stopWithError = (message: string) => {
+          stopPolling();
+          setJobError(message);
+          setBusy(false);
+        };
+
         while (!stopped) {
+          if (!runnerRef.current.running || runnerRef.current.jobId !== jobId) {
+            stopPolling();
+            setBusy(false);
+            return;
+          }
+          if (Date.now() - runnerRef.current.startedAt > maxRuntimeMs) {
+            stopWithError("Generation timed out. Please retry.");
+            return;
+          }
           if (runNextInFlightRef.current) {
             await new Promise<void>((r) => setTimeout(r, 120));
             continue;
           }
+          if (runnerRef.current.statusOnly) {
+            runNextInFlightRef.current = true;
+            const startedAt = Date.now();
+            try {
+              pollAbortRef.current?.abort();
+              const ctrl = new AbortController();
+              pollAbortRef.current = ctrl;
+              const st = await getGenerationJobStatus(jobId, { signal: ctrl.signal });
+              setJob(st);
+              const s = String(st.status ?? "");
+
+              if (st.nextAction === "finalize" || s === "finalizing") {
+                setFinalizingZip(true);
+                try {
+                  const fin = await finalizeGenerationJob(jobId, { signal: ctrl.signal });
+                  setJob(fin);
+                } catch {}
+                await new Promise<void>((r) => setTimeout(r, 900));
+                continue;
+              }
+
+              if (st.nextAction === "download" || s === "completed" || s === "completed_with_errors") {
+                stopPolling();
+                setFinalizingZip(true);
+                await downloadWithRetry(jobId, st);
+                setFinalizingZip(false);
+                setBusy(false);
+                return;
+              }
+
+              if (st.nextAction === "stop" || s === "failed" || s === "cancelled") {
+                const hasDocxPdfConfigError =
+                  Array.isArray(st.items) &&
+                  st.items.some((i) => i?.errorCode === "DOCX_TO_PDF_ENGINE_NOT_CONFIGURED");
+                stopWithError(
+                  hasDocxPdfConfigError
+                    ? "Word template cannot be exported to PDF because DOCX-to-PDF converter is not configured."
+                    : (st.errorSummary ?? "Generation failed"),
+                );
+                return;
+              }
+
+              const running =
+                s === "running" ||
+                (typeof st.runningCount === "number" && st.runningCount > 0);
+              const pending =
+                typeof st.pendingCount === "number" && st.pendingCount > 0;
+              if (running || !pending) {
+                await new Promise<void>((r) => setTimeout(r, 1500));
+                continue;
+              }
+
+              runnerRef.current.statusOnly = false;
+              await new Promise<void>((r) => setTimeout(r, 250));
+              continue;
+            } catch (err) {
+              const status =
+                err && typeof err === "object" && "status" in (err as any) && typeof (err as any).status === "number"
+                  ? Number((err as any).status)
+                  : null;
+              if (status === 401) {
+                stopWithError("Session expired. Please sign in again.");
+                return;
+              }
+              pollConsecutiveErrorRef.current += 1;
+              if (pollConsecutiveErrorRef.current >= 3) {
+                stopWithError(formatPollError(err));
+                return;
+              }
+              await new Promise<void>((r) => setTimeout(r, 1200));
+              continue;
+            } finally {
+              runNextInFlightRef.current = false;
+              emitDbg({
+                hypothesisId: "H3",
+                msg: "drive:status-only",
+                data: { jobId, ms: Date.now() - startedAt },
+              });
+            }
+          }
+
+          const maxAttempts = getMaxRunNextAttempts(job);
+          if (runnerRef.current.runNextAttempts >= maxAttempts) {
+            stopWithError("Generation exceeded max attempts. Please retry.");
+            return;
+          }
+
+          runnerRef.current.runNextAttempts += 1;
           runNextInFlightRef.current = true;
           const startedAt = Date.now();
           try {
@@ -938,35 +1085,9 @@ export default function DocumentAutomationHub() {
               return;
             }
             if (status === 409 || code === "RUN_NEXT_IN_FLIGHT") {
-              try {
-                const st = await getGenerationJobStatus(jobId);
-                setJob(st);
-                const s = String(st.status ?? "");
-                if (st.nextAction === "finalize" || s === "finalizing") {
-                  await new Promise<void>((r) => setTimeout(r, 900));
-                  continue;
-                }
-                if (st.nextAction === "download" || s === "completed" || s === "completed_with_errors") {
-                  stopPolling();
-                  setFinalizingZip(true);
-                  await downloadWithRetry(jobId, st);
-                  setFinalizingZip(false);
-                  setBusy(false);
-                  return;
-                }
-                if (st.nextAction === "stop" || s === "failed" || s === "cancelled") {
-                  stopPolling();
-                  const hasDocxPdfConfigError = Array.isArray(st.items) && st.items.some((i) => i?.errorCode === "DOCX_TO_PDF_ENGINE_NOT_CONFIGURED");
-                  setJobError(
-                    hasDocxPdfConfigError
-                      ? "Word template cannot be exported to PDF because DOCX-to-PDF converter is not configured."
-                      : (st.errorSummary ?? "Generation failed"),
-                  );
-                  setBusy(false);
-                  return;
-                }
-              } catch {}
-              await new Promise<void>((r) => setTimeout(r, 900));
+              runnerRef.current.statusOnly = true;
+              if (!runnerRef.current.statusOnlySince) runnerRef.current.statusOnlySince = Date.now();
+              await new Promise<void>((r) => setTimeout(r, 1500));
               continue;
             }
             if (code === "JOB_NOT_FOUND" || status === 404) {
@@ -1020,6 +1141,10 @@ export default function DocumentAutomationHub() {
     } catch (err) {
       toastError(toast, err);
     } finally {
+      runnerRef.current.running = false;
+      runnerRef.current.jobId = null;
+      runnerRef.current.statusOnly = false;
+      runnerRef.current.statusOnlySince = 0;
       if (!pollTimerRef.current) setBusy(false);
     }
   }

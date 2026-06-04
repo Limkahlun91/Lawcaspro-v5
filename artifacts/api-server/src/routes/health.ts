@@ -300,6 +300,61 @@ routerInternal.get("/healthz/db", async (_req: ReqLike, res: ResLike) => {
   }
 });
 
+routerInternal.get("/healthz/rls-role", async (_req: ReqLike, res: ResLike) => {
+  res.setHeader("cache-control", "no-store, max-age=0");
+  res.setHeader("pragma", "no-cache");
+  res.setHeader("expires", "0");
+  const client = await pool.connect();
+  let destroyClient = false;
+  try {
+    const base = await client.query<{
+      role: string;
+      bypass: boolean;
+      superuser: boolean;
+    }>("select current_user as role, rolbypassrls as bypass, rolsuper as superuser from pg_roles where rolname = current_user");
+    const row = base.rows[0] ?? null;
+
+    let canSetRoleAppUser = false;
+    try {
+      await client.query("BEGIN");
+      await client.query("SET LOCAL ROLE app_user");
+      canSetRoleAppUser = true;
+      await client.query("ROLLBACK");
+    } catch {
+      try {
+        await client.query("ROLLBACK");
+      } catch {}
+    }
+
+    const role = row?.role ?? "unknown";
+    const bypassRls = Boolean(row?.bypass);
+    const superuser = Boolean(row?.superuser);
+    const ok = !bypassRls && !superuser;
+    res.status(200).json(
+      ok
+        ? { ok: true, role, bypassRls, superuser, canSetRoleAppUser }
+        : {
+            ok: false,
+            role,
+            bypassRls,
+            superuser,
+            canSetRoleAppUser,
+            error: "DATABASE_URL is not safe for firm-scoped RLS requests",
+          },
+    );
+  } catch (err) {
+    destroyClient = true;
+    const message = err instanceof Error ? err.message : "Query failed";
+    res.status(500).json({ ok: false, error: message });
+  } finally {
+    try {
+      await client.query("RESET ROLE");
+    } catch {
+    }
+    client.release(destroyClient);
+  }
+});
+
 routerInternal.get("/healthz/schema", async (_req: ReqLike, res: ResLike) => {
   if (process.env.NODE_ENV === "production") {
     res.status(404).json({ error: "Not found" });
