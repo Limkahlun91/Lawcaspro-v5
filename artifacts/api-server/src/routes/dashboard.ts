@@ -339,7 +339,10 @@ router.get("/debug/dashboard", requireAuth, requireFirmUser, async (req: AuthReq
   });
 });
 
-router.get("/dashboard", requireAuth, requireFirmUser, requirePermission("dashboard", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
+router.get("/dashboard", (req: AuthRequest, _res: Response, next: any) => {
+  req.timing = { startAt: Date.now(), sections: {} };
+  next();
+}, requireAuth, requireFirmUser, requirePermission("dashboard", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
   res.setHeader("Cache-Control", "no-store");
   const allowDetails =
     process.env.API_ERROR_DETAILS === "1" ||
@@ -353,9 +356,19 @@ router.get("/dashboard", requireAuth, requireFirmUser, requirePermission("dashbo
     })();
 
   try {
+    if (!req.timing) req.timing = { startAt: Date.now(), sections: {} };
     const firmId = req.firmId!;
     const r = rdb(req);
     const requestId = one(req.headers["x-request-id"] as any) || one(req.headers["x-vercel-id"] as any) || undefined;
+    const timings = req.timing.sections;
+    const measure = async <T>(key: string, fn: () => Promise<T>): Promise<T> => {
+      const startedAt = Date.now();
+      try {
+        return await fn();
+      } finally {
+        timings[key] = (timings[key] ?? 0) + (Date.now() - startedAt);
+      }
+    };
     const refresh = (() => {
       const raw = one((req.query as unknown as Record<string, unknown>)?.refresh as string | string[] | undefined);
       if (!raw) return false;
@@ -380,7 +393,7 @@ router.get("/dashboard", requireAuth, requireFirmUser, requirePermission("dashbo
     type SummaryErr = { ok: false; error: string };
     const summaryTimeoutMs = 1600;
     const summaryPromise: Promise<SummaryOk | SummaryErr> = Promise.race([
-      computeDashboardSummary(r, { firmId, assignedToUserId: effectiveAssignedToUserId ?? undefined }),
+      measure("summaryMs", () => computeDashboardSummary(r, { firmId, assignedToUserId: effectiveAssignedToUserId ?? undefined })),
       new Promise<SummaryErr>((resolve) => setTimeout(() => resolve({ ok: false, error: "Dashboard summary timed out" }), summaryTimeoutMs)),
     ]);
 
@@ -394,11 +407,12 @@ router.get("/dashboard", requireAuth, requireFirmUser, requirePermission("dashbo
     const statsPromise: Promise<{ ok: true; stats: Record<string, unknown> } | { ok: false; error: string }> = includeStats
       ? (async () => {
           try {
-            const stats = await computeDashboardStats(r, firmId, {
+            const stats = await measure("statsMs", () => computeDashboardStats(r, firmId, {
               assignedToUserId: effectiveAssignedToUserId ?? undefined,
               includeErrorDetails: allowDetails,
               deadlineAt: Date.now() + 8_000,
-            });
+              timings,
+            }));
             return { ok: true, stats } as const;
           } catch (err) {
             const msg = err instanceof Error ? err.message : String(err ?? "");
@@ -407,7 +421,7 @@ router.get("/dashboard", requireAuth, requireFirmUser, requirePermission("dashbo
         })()
       : Promise.resolve({ ok: false, error: "SKIPPED" });
 
-    const [summaryOut, statsOut] = await Promise.all([summaryPromise, statsPromise]);
+    const [summaryOut, statsOut] = await measure("awaitSummaryAndStatsMs", () => Promise.all([summaryPromise, statsPromise]));
     const summaryData = summaryOut.ok === true ? summaryOut.data : { totalCases: 0, totalClients: 0, totalProjects: 0, totalDevelopers: 0 };
 
     const statsSkipped = statsOut.ok === false && statsOut.error === "SKIPPED";
@@ -468,10 +482,38 @@ router.get("/dashboard", requireAuth, requireFirmUser, requirePermission("dashbo
         alerts: [],
       },
     });
+    timings.totalMs = Date.now() - req.timing.startAt;
+    logger.info(
+      {
+        firmId,
+        userId: req.userId ?? null,
+        requestId: requestId ?? null,
+        includeStats,
+        refresh,
+        totalMs: timings.totalMs,
+        timings,
+      },
+      "dashboard.timing",
+    );
     return;
   } catch (err) {
     const requestId = one(req.headers["x-request-id"] as any) || one(req.headers["x-vercel-id"] as any) || undefined;
     const timeout = err instanceof Error && err.message === "DASHBOARD_TIMEOUT";
+    if (req.timing) {
+      req.timing.sections.totalMs = Date.now() - req.timing.startAt;
+      logger.info(
+        {
+          firmId: req.firmId ?? null,
+          userId: req.userId ?? null,
+          requestId: requestId ?? null,
+          totalMs: req.timing.sections.totalMs,
+          timings: req.timing.sections,
+          errorCode: getPgCode(err),
+          timeout,
+        },
+        "dashboard.timing",
+      );
+    }
     logger.error(
       allowDetails
         ? { err, path: req.path, firmId: req.firmId, userId: req.userId, query: req.query, requestId, timeout }

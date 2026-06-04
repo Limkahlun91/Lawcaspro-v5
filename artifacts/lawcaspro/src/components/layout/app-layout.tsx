@@ -1,4 +1,4 @@
-import { ReactNode } from "react";
+import { ReactNode, useCallback, useRef } from "react";
 import { useAuth } from "@/lib/auth-context";
 import { hasPermission, isAccountingRoleAllowed } from "@/lib/permissions";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
@@ -27,6 +27,7 @@ export function AppLayout({ children }: { children: ReactNode }) {
   const { user, logout } = useAuth();
   const [location] = useLocation();
   const queryClient = useQueryClient();
+  const prefetchStateRef = useRef<Record<string, { timer: any | null; lastAt: number }>>({});
 
   const { data: unreadData } = useQuery({
     queryKey: ["unread-count"],
@@ -69,38 +70,46 @@ export function AppLayout({ children }: { children: ReactNode }) {
       queryClient.prefetchQuery({
         queryKey: getListCasesQueryKey(params),
         queryFn: () => apiFetchJson(`/cases?page=${params.page}&limit=${params.limit}`),
+        staleTime: 30_000,
       });
       queryClient.prefetchQuery({
         queryKey: ["cases", "filter-options"],
         queryFn: () => apiFetchJson("/cases/filter-options"),
+        staleTime: 30_000,
       });
       queryClient.prefetchQuery({
         queryKey: getListProjectsQueryKey({ page: 1, limit: 200 }),
         queryFn: () => apiFetchJson("/projects?page=1&limit=200"),
+        staleTime: 30_000,
       });
       queryClient.prefetchQuery({
         queryKey: getListDevelopersQueryKey({ page: 1, limit: 200 }),
         queryFn: () => apiFetchJson("/developers?page=1&limit=200"),
+        staleTime: 30_000,
       });
       queryClient.prefetchQuery({
         queryKey: getListUsersQueryKey({ page: 1, limit: 200 }),
         queryFn: () => apiFetchJson("/users?page=1&limit=200"),
+        staleTime: 30_000,
       });
     },
     "/app/projects": () => {
       queryClient.prefetchQuery({
         queryKey: getListProjectsQueryKey({ page: 1, limit: 50 }),
         queryFn: () => apiFetchJson("/projects?page=1&limit=50"),
+        staleTime: 30_000,
       });
       queryClient.prefetchQuery({
         queryKey: getListDevelopersQueryKey({ limit: 100 }),
         queryFn: () => apiFetchJson("/developers?limit=100"),
+        staleTime: 30_000,
       });
     },
     "/app/developers": () => {
       queryClient.prefetchQuery({
         queryKey: getListDevelopersQueryKey({ page: 1, limit: 50 }),
         queryFn: () => apiFetchJson("/developers?page=1&limit=50"),
+        staleTime: 30_000,
       });
     },
     "/app/settings": () => {
@@ -108,9 +117,33 @@ export function AppLayout({ children }: { children: ReactNode }) {
       queryClient.prefetchQuery({
         queryKey: getListUsersQueryKey(userParams),
         queryFn: () => apiFetchJson(`/users?page=${userParams.page}&limit=${userParams.limit}`),
+        staleTime: 30_000,
       });
     },
   };
+
+  const schedulePrefetch = useCallback((href: string) => {
+    if (location === href || location.startsWith(`${href}/`)) return;
+    const fn = prefetchByHref[href];
+    if (!fn) return;
+    const now = Date.now();
+    const state = prefetchStateRef.current[href] ?? { timer: null, lastAt: 0 };
+    if (state.lastAt && now - state.lastAt < 30_000) return;
+    if (state.timer) clearTimeout(state.timer);
+    state.timer = setTimeout(() => {
+      state.timer = null;
+      state.lastAt = Date.now();
+      fn();
+    }, 250);
+    prefetchStateRef.current[href] = state;
+  }, [location, prefetchByHref]);
+
+  const cancelPrefetch = useCallback((href: string) => {
+    const state = prefetchStateRef.current[href];
+    if (!state?.timer) return;
+    clearTimeout(state.timer);
+    state.timer = null;
+  }, []);
 
   return (
     <div className="flex min-h-screen w-full bg-slate-50 overflow-x-hidden">
@@ -132,11 +165,11 @@ export function AppLayout({ children }: { children: ReactNode }) {
               item.href === "/app/documents"
                 ? (location === "/app/documents" || (location.startsWith("/app/documents/") && !location.startsWith("/app/documents/automation")))
                 : location === item.href || location.startsWith(`${item.href}/`) || (item.href === "/app/accounting" && location.startsWith("/app/quotations"));
-            const onPrefetch = prefetchByHref[item.href];
             return (
               <Link key={item.href} href={item.href}>
                 <div
-                  onMouseEnter={onPrefetch}
+                  onMouseEnter={() => schedulePrefetch(item.href)}
+                  onMouseLeave={() => cancelPrefetch(item.href)}
                   className={`flex items-center gap-3 px-3 py-2.5 rounded-md text-sm font-medium transition-colors ${
                   isActive 
                     ? "bg-blue-500/10 text-blue-200" 

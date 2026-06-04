@@ -5,6 +5,7 @@ import { useLocation } from "wouter";
 import { apiFetchJson } from "@/lib/api-client";
 import { QueryFallback } from "@/components/query-fallback";
 import { useAuth } from "@/lib/auth-context";
+import { useEffect } from "react";
 
 const STATUS_SHORT: Record<string, string> = {
   "File Opened / SPA Pending Signing": "SPA Pending",
@@ -53,6 +54,13 @@ export default function AppDashboard() {
     return v === "1" || v === "true" || v === "yes";
   })();
 
+  useEffect(() => {
+    if (!refresh) return;
+    const url = new URL(window.location.href);
+    url.searchParams.delete("refresh");
+    window.history.replaceState({}, "", url.pathname + url.search + url.hash);
+  }, [refresh]);
+
   const getErrStatus = (e: unknown): number | null => {
     const raw = (e as any)?.status;
     return typeof raw === "number" ? raw : null;
@@ -65,10 +73,12 @@ export default function AppDashboard() {
     return msg.toLowerCase().includes("signal is aborted");
   };
 
-  const { data: stats, isLoading, isError, error, refetch, isFetching } = useQuery({
-    queryKey: ["dashboard", firmId, refresh ? "refresh" : "cached"],
-    queryFn: ({ signal }) => apiFetchJson(refresh ? "/dashboard?refresh=1" : "/dashboard", { timeoutMs: refresh ? 15_000 : 12_000, signal }) as Promise<Record<string, any>>,
-    staleTime: 10_000,
+  const { data: stats, isLoading, isError, error, refetch, isFetching, dataUpdatedAt } = useQuery({
+    queryKey: ["dashboard", firmId],
+    queryFn: ({ signal }) =>
+      apiFetchJson(refresh ? "/dashboard?refresh=1" : "/dashboard", { timeoutMs: refresh ? 15_000 : 12_000, signal }) as Promise<Record<string, any>>,
+    enabled: Number.isFinite(firmId) && Number(firmId) > 0,
+    staleTime: 30_000,
     retry: (failureCount, err) => {
       if (failureCount >= 2) return false;
       if (isAbortLikeError(err)) return false;
@@ -88,7 +98,26 @@ export default function AppDashboard() {
   });
 
   if (isLoading) {
-    return <div className="text-slate-400 py-12 text-center text-sm">Loading dashboard...</div>;
+    return (
+      <div className="space-y-6">
+        <div>
+          <h1 className="text-3xl font-bold text-slate-900 tracking-tight">Dashboard</h1>
+          <p className="text-slate-500 mt-1">Overview of your firm's operations</p>
+          <div className="mt-2 text-xs text-slate-400">Loading data...</div>
+        </div>
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+          {Array.from({ length: 4 }).map((_, i) => (
+            <Card key={i} className="animate-pulse">
+              <CardContent className="pt-5 pb-4">
+                <div className="h-4 w-24 bg-slate-100 rounded" />
+                <div className="mt-3 h-8 w-20 bg-slate-100 rounded" />
+                <div className="mt-2 h-3 w-32 bg-slate-100 rounded" />
+              </CardContent>
+            </Card>
+          ))}
+        </div>
+      </div>
+    );
   }
 
   const errStatus = getErrStatus(error);
@@ -142,6 +171,10 @@ export default function AppDashboard() {
   const debugInfo = (effectiveStats as any)?.debug && typeof (effectiveStats as any)?.debug === "object" ? (effectiveStats as any).debug : null;
   const dashboard = ((effectiveStats as any)?.dashboard && typeof (effectiveStats as any).dashboard === "object" ? (effectiveStats as any).dashboard : null) as Record<string, any> | null;
   const resolvedStats = (dashboard ?? effectiveStats) as Record<string, any>;
+  const criticalFields = ["totalCases", "activeCases", "completedCases", "totalClients", "totalProjects", "totalDevelopers"];
+  const hasCriticalUnavailable = degraded && criticalFields.some((f) => unavailableFields.includes(f));
+  const showMajorDegradedBanner = hasCriticalUnavailable || (isError && !stats && !isAbortLikeError(error));
+  const lastUpdatedAtLabel = dataUpdatedAt ? new Date(dataUpdatedAt).toLocaleString() : null;
 
   const showValue = (field: string, value: unknown): string => {
     if (degraded && unavailableFields.includes(field)) return "—";
@@ -154,9 +187,15 @@ export default function AppDashboard() {
       <div>
         <h1 className="text-3xl font-bold text-slate-900 tracking-tight">Dashboard</h1>
         <p className="text-slate-500 mt-1">Overview of your firm's operations</p>
+        <div className="mt-2 flex flex-wrap items-center gap-3 text-xs text-slate-400">
+          <span>{isFetching ? "Refreshing..." : lastUpdatedAtLabel ? `Last updated: ${lastUpdatedAtLabel}` : null}</span>
+          <button className="text-amber-700 hover:text-amber-800 underline" onClick={() => refetch()} disabled={isFetching}>
+            Refresh Dashboard
+          </button>
+        </div>
       </div>
 
-      {degraded ? (
+      {showMajorDegradedBanner ? (
         <div className="rounded-md border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
           <div className="font-medium">Dashboard partially unavailable</div>
           {warnings.length > 0 ? (
@@ -171,6 +210,10 @@ export default function AppDashboard() {
           {debugInfo ? (
             <pre className="mt-2 max-h-40 overflow-auto rounded bg-amber-100/60 p-2 text-[11px] leading-snug">{JSON.stringify(debugInfo, null, 2)}</pre>
           ) : null}
+        </div>
+      ) : degraded ? (
+        <div className="rounded-md border border-amber-200 bg-amber-50 px-4 py-2 text-xs text-amber-900">
+          Some widgets are temporarily unavailable. Core stats are still shown.
         </div>
       ) : null}
 

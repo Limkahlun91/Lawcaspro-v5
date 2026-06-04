@@ -15,6 +15,7 @@ export interface AuthRequest extends Request {
   supportSessionId?: number | null;
   founderPermissions?: string[];
   founderRoleLevel?: string | null;
+  timing?: { startAt: number; sections: Record<string, number> };
   /**
    * Per-request RLS-enforced Drizzle instance.
    * Set by requireFirmUser. Runs inside a transaction as app_user with
@@ -194,6 +195,7 @@ export async function requireAuth(
       }
     }
     const ms = Date.now() - lookupStartedAt;
+    if (req.timing) req.timing.sections.authSessionMs = ms;
     if (ms > 1000) {
       logger.warn({ route: req.path, reqId, ms }, "auth.require_auth.slow");
     }
@@ -551,6 +553,7 @@ export async function requireFirmUser(
 
   let released = false;
   let client: PoolClient | null = null;
+  const dbConnectStartedAt = Date.now();
   try {
     for (let attempt = 1; attempt <= 2; attempt++) {
       try {
@@ -589,6 +592,7 @@ export async function requireFirmUser(
     });
     return;
   }
+  if (req.timing) req.timing.sections.tenantContextDbConnectMs = Date.now() - dbConnectStartedAt;
   if (!client) {
     res.status(503).json({
       error: "Tenant context temporarily unavailable",
@@ -630,6 +634,7 @@ export async function requireFirmUser(
   };
 
   try {
+    const tenantContextStartedAt = Date.now();
     const originalQuery = client.query.bind(client);
     let chain = Promise.resolve();
     (client as any).query = (...args: unknown[]) => {
@@ -644,6 +649,7 @@ export async function requireFirmUser(
     await client.query("BEGIN");
     await setTenantContext(client, req.firmId, req.userId ?? undefined);
     req.rlsDb = makeRlsDb(client);
+    if (req.timing) req.timing.sections.tenantContextMs = Date.now() - tenantContextStartedAt;
   } catch (err) {
     try {
       await releaseClient(false);
