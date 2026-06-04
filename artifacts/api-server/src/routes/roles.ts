@@ -83,11 +83,11 @@ type TransactionCapable = {
 };
 const asTransactionCapable = (conn: DbConn): TransactionCapable => conn as unknown as TransactionCapable;
 
-const standardRoleNames = ["Partner", "Senior Lawyer", "Lawyer", "Senior Clerk", "Clerk", "Manager", "Admin", "Viewer", "Developer_User"] as const;
+const standardRoleNames = ["Partner", "Account Admin", "Account Manager", "Senior Lawyer", "Lawyer", "Senior Clerk", "Clerk", "Staff", "Manager", "Admin", "Viewer", "Developer_User"] as const;
 
 const shouldAutoGrantRoleByName = (name: string): boolean => {
   const n = name.trim().toLowerCase();
-  return n.includes("partner") || n.includes("lawyer") || n.includes("clerk");
+  return n.includes("partner") || n.includes("lawyer") || n.includes("clerk") || n === "staff" || (n.includes("account") && (n.includes("admin") || n.includes("manager")));
 };
 
 async function canBackfillStandardRoles(r: DbConn, req: AuthRequest): Promise<boolean> {

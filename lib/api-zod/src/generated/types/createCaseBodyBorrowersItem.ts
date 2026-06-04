@@ -6,15 +6,14 @@
  * OpenAPI spec version: 1.0.0
  */
 
-export interface InlinePurchaser {
-  isCompany?: boolean;
+export type CreateCaseBodyBorrowersItem = {
   name: string;
   /** @nullable */
   ic?: string | null;
   /** @nullable */
-  phone?: string | null;
+  hp?: string | null;
   /** @nullable */
   email?: string | null;
   /** @nullable */
   address?: string | null;
-}
+};

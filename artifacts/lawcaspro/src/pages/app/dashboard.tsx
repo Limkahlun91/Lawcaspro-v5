@@ -235,7 +235,7 @@ export default function AppDashboard() {
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
           {[
             {
-              label: "Pending Approval",
+              label: "OPEN FILE PENDING APPROVAL",
               value: showValue("pendingApprovalCases", (resolvedStats as any).pendingApprovalCases),
               sub: null,
               icon: Briefcase,
@@ -243,7 +243,7 @@ export default function AppDashboard() {
               href: "/app/cases?approvalStatus=pending_approval",
             },
             {
-              label: "Rejected Cases",
+              label: "CASE DETAILS TO AMEND",
               value: showValue("rejectedCases", (resolvedStats as any).rejectedCases),
               sub: null,
               icon: Briefcase,

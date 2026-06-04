@@ -435,7 +435,7 @@ export default function CasesList() {
       setReviewNote("");
       toast({ title: "Case rejected" });
     },
-    onError: (err) => toastError(toast, err, "Reject failed"),
+    onError: (err) => toastError(toast, err, "Return for amendment failed"),
   });
 
   const saveApprovalNoteMutation = useMutation({
@@ -542,8 +542,8 @@ export default function CasesList() {
 
   const approvalStatusLabel = (v: string | null | undefined): string => {
     const s = String(v ?? "").trim().toLowerCase();
-    if (s === "rejected") return "Rejected";
-    if (s === "pending_approval") return "Pending Approval";
+    if (s === "rejected") return "Case Details to Amend";
+    if (s === "pending_approval") return "Open File Pending Approval";
     return "Approved";
   };
 
@@ -705,8 +705,8 @@ export default function CasesList() {
         <Tabs value={approvalStatus} onValueChange={(v) => { setApprovalStatus(normalizeApprovalStatus(v)); setPage(1); }}>
           <TabsList>
             <TabsTrigger value="approved">Approved Cases</TabsTrigger>
-            <TabsTrigger value="pending_approval">Pending Approval</TabsTrigger>
-            <TabsTrigger value="rejected">Rejected</TabsTrigger>
+            <TabsTrigger value="pending_approval">Open File Pending Approval</TabsTrigger>
+            <TabsTrigger value="rejected">Case Details to Amend</TabsTrigger>
           </TabsList>
         </Tabs>
       ) : null}
@@ -1151,8 +1151,8 @@ export default function CasesList() {
       >
         <DialogContent className="max-w-[900px] w-[95vw]">
           <DialogHeader>
-            <DialogTitle>Case Approval Review</DialogTitle>
-            <DialogDescription>Review the case submission and approve or reject.</DialogDescription>
+            <DialogTitle>Open File Review</DialogTitle>
+            <DialogDescription>Review the case submission and approve or return for amendment.</DialogDescription>
           </DialogHeader>
 
           {reviewCaseQuery.isLoading ? (
@@ -1202,16 +1202,16 @@ export default function CasesList() {
                         placeholder="e.g. LCP-2026-000123"
                       />
                       {!isPending ? (
-                        <div className="text-xs text-slate-500">Reference Number can only be set while Pending Approval.</div>
+                        <div className="text-xs text-slate-500">Reference Number can only be set while Open File Pending Approval.</div>
                       ) : null}
                     </div>
                     <div className="md:col-span-12 space-y-1.5">
-                      <Label>Approval Notes</Label>
+                      <Label>Amendment Notes</Label>
                       <Textarea
                         value={reviewNote}
                         onChange={(e) => setReviewNote(e.target.value)}
                         disabled={!isPending || approveCaseMutation.isPending || rejectCaseMutation.isPending || saveApprovalNoteMutation.isPending}
-                        placeholder="Optional notes (required for reject)"
+                        placeholder="Optional notes (required to return for amendment)"
                       />
                     </div>
                   </div>
@@ -1233,7 +1233,7 @@ export default function CasesList() {
                       }}
                       disabled={!isPending || !reviewCaseId || saveApprovalNoteMutation.isPending}
                     >
-                      Save Changes
+                      Save Amendment Notes
                     </Button>
                     <Button
                       variant="destructive"
@@ -1241,14 +1241,14 @@ export default function CasesList() {
                         if (!reviewCaseId) return;
                         if (!isPending) return;
                         if (!reviewNote.trim()) {
-                          toast({ title: "Approval Notes is required for reject", variant: "destructive" });
+                          toast({ title: "Amendment Notes is required", variant: "destructive" });
                           return;
                         }
                         rejectCaseMutation.mutate({ caseId: reviewCaseId, approvalNote: reviewNote.trim() });
                       }}
                       disabled={!isPending || !reviewCaseId || rejectCaseMutation.isPending}
                     >
-                      Reject
+                      Return for Amendment
                     </Button>
                     <Button
                       onClick={() => {
@@ -1262,7 +1262,7 @@ export default function CasesList() {
                       }}
                       disabled={!isPending || !reviewCaseId || approveCaseMutation.isPending}
                     >
-                      Approve
+                      Approve Case
                     </Button>
                   </DialogFooter>
                 </div>

@@ -33,7 +33,10 @@ export function hasPermission(user: AuthUser | null, module: string, action: str
   const isPartner = roleLower.includes("partner");
   const isLawyer = roleLower.includes("lawyer");
   const isClerk = roleLower.includes("clerk");
-  const isCoreStaff = isPartner || isLawyer || isClerk;
+  const isAccountAdmin = roleLower === "account admin" || (roleLower.includes("account") && roleLower.includes("admin"));
+  const isAccountManager = roleLower === "account manager" || (roleLower.includes("account") && roleLower.includes("manager"));
+  const isStaff = roleLower === "staff";
+  const isCoreStaff = isPartner || isLawyer || isClerk || isAccountAdmin || isAccountManager || isStaff;
   const isDeveloperUser = roleLower === "developer_user" || roleLower.includes("developer");
 
   const coreStaffBypass = new Set<string>([
@@ -97,6 +100,7 @@ export function hasPermission(user: AuthUser | null, module: string, action: str
   ]);
 
   if (isPartner) return partner.has(key);
+  if (isAccountAdmin || isAccountManager || isStaff) return staff.has(key);
   if (isClerk) return staff.has(key) || clerk.has(key);
   if (isLawyer) return staff.has(key);
   if (isDeveloperUser) return developerUser.has(key);

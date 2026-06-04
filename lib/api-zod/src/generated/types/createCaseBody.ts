@@ -5,17 +5,41 @@
  * Lawcaspro Legal Operations System API
  * OpenAPI spec version: 1.0.0
  */
+import type { CreateCaseBodyBorrowersItem } from './createCaseBodyBorrowersItem';
+import type { CreateCaseBodyCompanyDetails } from './createCaseBodyCompanyDetails';
+import type { CreateCaseBodyLoanDetails } from './createCaseBodyLoanDetails';
+import type { CreateCaseBodyLoanPartyType } from './createCaseBodyLoanPartyType';
+import type { CreateCaseBodyPropertyDetails } from './createCaseBodyPropertyDetails';
+import type { CreateCaseBodySpaDetails } from './createCaseBodySpaDetails';
 import type { InlinePurchaser } from './inlinePurchaser';
 
 export interface CreateCaseBody {
-  projectId: number;
-  developerId: number;
-  purchaseMode: string;
-  titleType: string;
+  caseType: string;
+  projectId?: number;
+  developerId?: number;
+  referenceNo?: string;
+  purchaseMode?: string;
+  titleType?: string;
+  landCondition?: string;
+  encumbrances?: string;
+  actingFor?: string;
+  perfectionType?: string;
   spaPrice?: number;
-  assignedLawyerId: number;
+  apdlPrice?: number;
+  developerDiscount?: number;
+  bumiputraDiscount?: number;
+  assignedLawyerId?: number;
   assignedClerkId?: number;
-  purchaserIds: number[];
+  purchaserIds?: number[];
   /** Optional inline purchaser creation when purchaserIds is empty */
   purchasers?: InlinePurchaser[];
-}
+  loanPartyType?: CreateCaseBodyLoanPartyType;
+  borrowers?: CreateCaseBodyBorrowersItem[];
+  parcelNo?: string;
+  spaDetails?: CreateCaseBodySpaDetails;
+  propertyDetails?: CreateCaseBodyPropertyDetails;
+  propertyAddress?: string;
+  loanDetails?: CreateCaseBodyLoanDetails;
+  companyDetails?: CreateCaseBodyCompanyDetails;
+  [key: string]: unknown;
+ }

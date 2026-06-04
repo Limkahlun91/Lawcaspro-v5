@@ -7,6 +7,7 @@ import { CaseForm, createDefaultCaseFormValues } from "./CaseForm";
 import type { CaseFormValues, CaseType, Encumbrances, LandCondition, LoanPartyType, PerfectionType, PurchaseMode, TitleCategory } from "./types";
 import { composeMalaysiaAddress, joinAddressLines } from "./address";
 import { getStateFromPostcode } from "@/utils/my-address-helper";
+import { useAuth } from "@/lib/auth-context";
 
 function parseMoneyOrNull(v: string): number | null {
   const n = Number(String(v ?? "").replace(/[^0-9.]/g, ""));
@@ -265,6 +266,16 @@ export function CaseFormModal(props: {
   onSubmit: (payload: Record<string, unknown>) => Promise<void>;
 }) {
   const { toast } = useToast();
+  const { user } = useAuth();
+  const roleName = String((user as any)?.roleName ?? "");
+  const roleLower = roleName.trim().toLowerCase();
+  const canOverrideProjectDerivedFields =
+    roleLower.includes("partner")
+    || roleLower.includes("manager")
+    || roleLower === "account admin"
+    || roleLower === "account manager"
+    || (roleLower.includes("account") && roleLower.includes("admin"))
+    || (roleLower.includes("account") && roleLower.includes("manager"));
   const [submitting, setSubmitting] = useState(false);
   const [value, setValue] = useState<CaseFormValues>(() => props.initialValues ?? createDefaultCaseFormValues());
 
@@ -362,7 +373,14 @@ export function CaseFormModal(props: {
         <DialogHeader>
           <DialogTitle>{title}</DialogTitle>
         </DialogHeader>
-        <CaseForm mode={props.mode} value={value} onChange={setValue} onSubmit={handleSubmit} submitting={submitting} />
+        <CaseForm
+          mode={props.mode}
+          value={value}
+          onChange={setValue}
+          onSubmit={handleSubmit}
+          submitting={submitting}
+          canOverrideProjectDerivedFields={canOverrideProjectDerivedFields}
+        />
       </DialogContent>
     </Dialog>
   );

@@ -133,12 +133,15 @@ export function CaseForm(props: {
   onSubmit: () => void;
   submitting?: boolean;
   submitLabel?: string;
+  canOverrideProjectDerivedFields?: boolean;
 }) {
   const submitting = Boolean(props.submitting);
+  const canOverrideProjectDerivedFields = Boolean(props.canOverrideProjectDerivedFields);
   const v = props.value;
   const set = props.onChange;
   const [activeTab, setActiveTab] = useState<"spa" | "loan" | "property">("spa");
   const [developerManuallyChanged, setDeveloperManuallyChanged] = useState(false);
+  const [titleManuallyChanged, setTitleManuallyChanged] = useState(false);
   const [postcodeWarnings, setPostcodeWarnings] = useState<Record<string, string>>({});
 
   const { data: projectsRes } = useListProjects({ limit: 200 }, { query: { staleTime: 5 * 60 * 1000 } });
@@ -154,13 +157,14 @@ export function CaseForm(props: {
 
   useEffect(() => {
     if (!selectedProject) return;
+    if (v.caseType !== "developer_sales") return;
     const projectDeveloperId = (selectedProject as any)?.developerId ? String((selectedProject as any).developerId) : "";
-    if (projectDeveloperId && !developerManuallyChanged) {
+    if (projectDeveloperId && (!developerManuallyChanged || !canOverrideProjectDerivedFields)) {
       set({ ...v, developerId: projectDeveloperId });
     }
     const tt = String((selectedProject as any)?.titleType ?? "").trim().toLowerCase();
     const titleCategory: TitleCategory = tt === "strata" ? "strata" : tt === "individual" ? "individual" : "master";
-    if (!v.titleCategory) {
+    if (!v.titleCategory || !titleManuallyChanged || !canOverrideProjectDerivedFields) {
       set({ ...v, titleCategory });
     }
     const mukim = String((selectedProject as any)?.mukim ?? "").trim();
@@ -324,6 +328,7 @@ export function CaseForm(props: {
               <Label>Project *</Label>
               <Select value={v.projectId} onValueChange={(next) => {
                 setDeveloperManuallyChanged(false);
+                setTitleManuallyChanged(false);
                 set({ ...v, projectId: next });
               }} disabled={submitting}>
                 <SelectTrigger>
@@ -341,7 +346,7 @@ export function CaseForm(props: {
               <Select value={v.developerId} onValueChange={(next) => {
                 setDeveloperManuallyChanged(true);
                 set({ ...v, developerId: next });
-              }} disabled={submitting}>
+              }} disabled={submitting || (Boolean((selectedProject as any)?.developerId) && !canOverrideProjectDerivedFields)}>
                 <SelectTrigger>
                   <SelectValue placeholder="Select developer" />
                 </SelectTrigger>
@@ -351,10 +356,18 @@ export function CaseForm(props: {
                   ))}
                 </SelectContent>
               </Select>
+              <div className="text-xs text-slate-500">Auto-filled from selected Project</div>
             </div>
             <div className="md:col-span-4 space-y-1.5">
-              <Label>Title Category *</Label>
-              <Select value={v.titleCategory} onValueChange={(next) => set({ ...v, titleCategory: next as any })} disabled={submitting}>
+              <Label>Title Type *</Label>
+              <Select
+                value={v.titleCategory}
+                onValueChange={(next) => {
+                  setTitleManuallyChanged(true);
+                  set({ ...v, titleCategory: next as any });
+                }}
+                disabled={submitting || (Boolean((selectedProject as any)?.titleType) && !canOverrideProjectDerivedFields)}
+              >
                 <SelectTrigger>
                   <SelectValue placeholder="Select title category" />
                 </SelectTrigger>
@@ -364,6 +377,7 @@ export function CaseForm(props: {
                   <SelectItem value="individual">Individual</SelectItem>
                 </SelectContent>
               </Select>
+              <div className="text-xs text-slate-500">Auto-filled from selected Project</div>
             </div>
             <div className="md:col-span-8 space-y-1.5">
               <Label>Purchase Mode *</Label>
@@ -1051,8 +1065,8 @@ export function CaseForm(props: {
                 <SelectValue placeholder="Select encumbrances" />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="no_encumbrance">No Encumbrance</SelectItem>
-                <SelectItem value="has_encumbrance">Has Encumbrance</SelectItem>
+                <SelectItem value="no_encumbrance">Free from Encumbrances</SelectItem>
+                <SelectItem value="has_encumbrance">Encumbrances</SelectItem>
                 <SelectItem value="to_confirm">To Confirm</SelectItem>
               </SelectContent>
             </Select>

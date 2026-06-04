@@ -910,9 +910,12 @@ export async function ensureRolePermissionsInitialized(
       || n === "senior lawyer"
       || n === "clerk"
       || n === "senior clerk"
+      || n === "staff"
       || n === "admin"
       || n === "manager"
       || n === "viewer"
+      || n === "account admin"
+      || n === "account manager"
       || n === "developer_user"
     );
   })();

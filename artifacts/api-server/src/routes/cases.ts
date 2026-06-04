@@ -55,6 +55,60 @@ const milestonesSummaryCache = new Map<string, { expiresAt: number; payload: unk
 
 type CaseKeyDatesInsert = typeof caseKeyDatesTable.$inferInsert;
 
+let casesSchemaHealthCache: { checkedAt: number; ok: boolean; issues: string[] } | null = null;
+
+async function checkCasesSchemaHealth(r: DbConn): Promise<{ ok: boolean; issues: string[] }> {
+  const now = Date.now();
+  const cached = casesSchemaHealthCache;
+  if (cached && now - cached.checkedAt < 60_000) return { ok: cached.ok, issues: cached.issues };
+
+  const mustExist = [
+    "firm_id",
+    "project_id",
+    "developer_id",
+    "reference_no",
+    "case_type",
+    "approval_status",
+    "submitted_by",
+    "submitted_at",
+    "approved_by",
+    "approved_at",
+    "approval_note",
+    "encumbrances",
+    "acting_for",
+    "perfection_type",
+  ] as const;
+
+  const rows = await queryRows(r, sql`
+    select column_name, is_nullable
+    from information_schema.columns
+    where table_schema = 'public'
+      and table_name = 'cases'
+      and column_name = any(${mustExist}::text[])
+  `);
+
+  const byName = new Map<string, { isNullable: boolean }>();
+  for (const row of rows) {
+    const name = typeof row.column_name === "string" ? row.column_name : "";
+    if (!name) continue;
+    const isNullable = String(row.is_nullable ?? "").toUpperCase() === "YES";
+    byName.set(name, { isNullable });
+  }
+
+  const issues: string[] = [];
+  for (const col of mustExist) {
+    if (!byName.has(col)) issues.push(`missing_column:${col}`);
+  }
+  for (const col of ["project_id", "developer_id", "reference_no"] as const) {
+    const info = byName.get(col);
+    if (info && info.isNullable === false) issues.push(`not_nullable:${col}`);
+  }
+
+  const ok = issues.length === 0;
+  casesSchemaHealthCache = { checkedAt: now, ok, issues };
+  return { ok, issues };
+}
+
 const GetCaseMessagesParams = z.object({ caseId: z.coerce.number().int().positive() });
 const CaseMessageChannel = z.enum(["client", "developer"]);
 const CreateCaseMessageBody = z.object({
@@ -759,6 +813,7 @@ async function formatCaseDetail(r: DbConn, c: typeof casesTable.$inferSelect) {
     titleType: c.titleType,
     isEncumbered: c.isEncumbered,
     tenure: c.tenure,
+    landCondition: c.tenure,
     trackingToken: c.trackingToken,
     spaPrice: c.spaPrice ? Number(c.spaPrice) : null,
     apdlPrice: c.apdlPrice ? Number(c.apdlPrice) : null,
@@ -3208,6 +3263,7 @@ router.get("/cases", requireAuthHandler, requireFirmUserHandler, requirePermissi
 }));
 
 router.post("/cases", requireAuthHandler, requireFirmUserHandler, requirePermission("cases", "create") as RequestHandler, authed(async (req, res) => {
+  let safeReqBody: Record<string, unknown> | null = null;
   try {
     const r = req.rlsDb;
     if (!r) {
@@ -3215,6 +3271,22 @@ router.post("/cases", requireAuthHandler, requireFirmUserHandler, requirePermiss
       res.status(500).json({ error: "Internal Server Error" });
       return;
     }
+
+    try {
+      const health = await checkCasesSchemaHealth(r);
+      if (!health.ok) {
+        req.log.error({ route: "POST /api/cases", firmId: req.firmId, userId: req.userId, issues: health.issues }, "cases schema out of date");
+        if (process.env.API_ERROR_DETAILS === "1") {
+          res.status(503).json({ error: "Database schema out of date", code: "DB_MIGRATION_REQUIRED", issues: health.issues });
+          return;
+        }
+        res.status(503).json({ error: "Database schema out of date", code: "DB_MIGRATION_REQUIRED" });
+        return;
+      }
+    } catch (schemaErr) {
+      req.log.error({ err: schemaErr, route: "POST /api/cases", firmId: req.firmId, userId: req.userId }, "cases schema check failed");
+    }
+
     const money = z.preprocess((v) => {
       if (v === "" || v === undefined || v === null) return null;
       if (typeof v === "number") return v;
@@ -3369,11 +3441,23 @@ router.post("/cases", requireAuthHandler, requireFirmUserHandler, requirePermiss
       loanDetails: loanDetailsRaw,
       companyDetails,
     } = parsed.data;
+
+    safeReqBody = {
+      caseType,
+      projectId: projectIdRaw ?? null,
+      developerId: clientDeveloperId ?? null,
+      titleType: titleType ?? null,
+      purchaseMode: purchaseMode ?? null,
+      landCondition: landCondition ?? null,
+      encumbrances: encumbrances ?? null,
+      actingFor: actingFor ?? null,
+      perfectionType: perfectionType ?? null,
+    };
+
     const canAssignAny = await hasRolePermission(r, req.firmId!, req.roleId, "cases", "assign_any");
     const normalizedAssignedLawyerId = assignedLawyerId ?? undefined;
     const normalizedAssignedClerkId = assignedClerkId ?? undefined;
     const normalizedCaseType = normalizeCaseType(caseType);
-    const effectiveAssignedLawyerId = canAssignAny ? (normalizedAssignedLawyerId ?? (req.userId ?? undefined)) : normalizedAssignedLawyerId;
     if (!normalizedCaseType) {
       res.status(400).json({ error: "Invalid caseType" });
       return;
@@ -3711,8 +3795,8 @@ router.post("/cases", requireAuthHandler, requireFirmUserHandler, requirePermiss
       });
     }
 
-    const isSelfAssignOnly = !canAssignAny;
-    if (isSelfAssignOnly) {
+    const wantsExplicitAssignments = Boolean(canAssignAny && (normalizedAssignedLawyerId || normalizedAssignedClerkId));
+    if (!wantsExplicitAssignments) {
       await r.insert(caseAssignmentsTable).values({
         caseId: newCase.id,
         userId: req.userId!,
@@ -3720,16 +3804,14 @@ router.post("/cases", requireAuthHandler, requireFirmUserHandler, requirePermiss
         assignedBy: req.userId,
       });
     } else {
-      if (!effectiveAssignedLawyerId) {
-        res.status(400).json({ error: "assignedLawyerId is required" });
-        return;
+      if (normalizedAssignedLawyerId) {
+        await r.insert(caseAssignmentsTable).values({
+          caseId: newCase.id,
+          userId: normalizedAssignedLawyerId,
+          roleInCase: "lawyer",
+          assignedBy: req.userId,
+        });
       }
-      await r.insert(caseAssignmentsTable).values({
-        caseId: newCase.id,
-        userId: effectiveAssignedLawyerId,
-        roleInCase: "lawyer",
-        assignedBy: req.userId,
-      });
       if (normalizedAssignedClerkId) {
         await r.insert(caseAssignmentsTable).values({
           caseId: newCase.id,
@@ -3770,7 +3852,11 @@ router.post("/cases", requireAuthHandler, requireFirmUserHandler, requirePermiss
       }
       return {};
     })();
-    req.log.error({ err: e, pg }, "cases.create failed");
+    req.log.error({ err: e, pg, body: safeReqBody }, "cases.create failed");
+    if (process.env.API_ERROR_DETAILS === "1") {
+      res.status(500).json({ error: "Internal Server Error", details: pg?.message ?? null, code: pg?.code ?? null, constraint: pg?.constraint ?? null });
+      return;
+    }
     res.status(500).json({ error: "Internal Server Error" });
     return;
   }

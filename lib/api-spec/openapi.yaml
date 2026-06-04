@@ -2065,9 +2065,17 @@ components:
     InlinePurchaser:
       type: object
       properties:
+        isCompany:
+          type: boolean
         name:
           type: string
         ic:
+          type: ["string", "null"]
+        phone:
+          type: ["string", "null"]
+        email:
+          type: ["string", "null"]
+        address:
           type: ["string", "null"]
       required:
         - name
@@ -2234,15 +2242,33 @@ components:
     CreateCaseBody:
       type: object
       properties:
+        caseType:
+          type: string
         projectId:
           type: integer
         developerId:
           type: integer
+        referenceNo:
+          type: string
         purchaseMode:
           type: string
         titleType:
           type: string
+        landCondition:
+          type: string
+        encumbrances:
+          type: string
+        actingFor:
+          type: string
+        perfectionType:
+          type: string
         spaPrice:
+          type: number
+        apdlPrice:
+          type: number
+        developerDiscount:
+          type: number
+        bumiputraDiscount:
           type: number
         assignedLawyerId:
           type: integer
@@ -2257,13 +2283,45 @@ components:
           description: "Optional inline purchaser creation when purchaserIds is empty"
           items:
             $ref: "#/components/schemas/InlinePurchaser"
+        loanPartyType:
+          type: string
+          enum: ["1st_party", "3rd_party"]
+        borrowers:
+          type: array
+          items:
+            type: object
+            properties:
+              name:
+                type: string
+              ic:
+                type: ["string", "null"]
+              hp:
+                type: ["string", "null"]
+              email:
+                type: ["string", "null"]
+              address:
+                type: ["string", "null"]
+            required:
+              - name
+        parcelNo:
+          type: string
+        spaDetails:
+          type: object
+          additionalProperties: true
+        propertyDetails:
+          type: object
+          additionalProperties: true
+        propertyAddress:
+          type: string
+        loanDetails:
+          type: object
+          additionalProperties: true
+        companyDetails:
+          type: object
+          additionalProperties: true
+      additionalProperties: true
       required:
-        - projectId
-        - developerId
-        - purchaseMode
-        - titleType
-        - assignedLawyerId
-        - purchaserIds
+        - caseType
 
     UpdateCaseBody:
       type: object

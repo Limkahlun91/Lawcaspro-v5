@@ -207,11 +207,7 @@ export const ListQuotationsResponse = zod.array(ListQuotationsResponseItem)
 export const CreateQuotationBody = zod.object({
   "referenceNo": zod.string(),
   "stNo": zod.string().optional(),
-  "clientName": zod.string().optional(),
-  "clientDetails": zod.array(zod.object({
-  "name": zod.string(),
-  "tin": zod.string().optional()
-})).optional(),
+  "clientName": zod.string(),
   "caseId": zod.number().optional(),
   "propertyDescription": zod.string().optional(),
   "purchasePrice": zod.string().optional(),
@@ -248,10 +244,6 @@ export const GetQuotationResponse = zod.object({
   "referenceNo": zod.string(),
   "stNo": zod.string().nullish(),
   "clientName": zod.string(),
-  "clientDetails": zod.array(zod.object({
-  "name": zod.string(),
-  "tin": zod.string().optional()
-})).optional(),
   "propertyDescription": zod.string().nullish(),
   "purchasePrice": zod.number().nullish(),
   "bankName": zod.string().nullish(),
@@ -291,10 +283,6 @@ export const UpdateQuotationBody = zod.object({
   "referenceNo": zod.string().optional(),
   "stNo": zod.string().optional(),
   "clientName": zod.string().optional(),
-  "clientDetails": zod.array(zod.object({
-  "name": zod.string(),
-  "tin": zod.string().optional()
-})).optional(),
   "caseId": zod.number().optional(),
   "propertyDescription": zod.string().optional(),
   "purchasePrice": zod.string().optional(),
@@ -1028,18 +1016,45 @@ export const ListCasesResponse = zod.object({
  * @summary Create a case
  */
 export const CreateCaseBody = zod.object({
-  "projectId": zod.number(),
-  "developerId": zod.number(),
-  "purchaseMode": zod.string(),
-  "titleType": zod.string(),
+  "caseType": zod.string(),
+  "projectId": zod.number().optional(),
+  "developerId": zod.number().optional(),
+  "referenceNo": zod.string().optional(),
+  "purchaseMode": zod.string().optional(),
+  "titleType": zod.string().optional(),
+  "landCondition": zod.string().optional(),
+  "encumbrances": zod.string().optional(),
+  "actingFor": zod.string().optional(),
+  "perfectionType": zod.string().optional(),
   "spaPrice": zod.number().optional(),
-  "assignedLawyerId": zod.number(),
+  "apdlPrice": zod.number().optional(),
+  "developerDiscount": zod.number().optional(),
+  "bumiputraDiscount": zod.number().optional(),
+  "assignedLawyerId": zod.number().optional(),
   "assignedClerkId": zod.number().optional(),
-  "purchaserIds": zod.array(zod.number()),
+  "purchaserIds": zod.array(zod.number()).optional(),
   "purchasers": zod.array(zod.object({
+  "isCompany": zod.boolean().optional(),
   "name": zod.string(),
-  "ic": zod.string().nullish()
-})).optional().describe('Optional inline purchaser creation when purchaserIds is empty')
+  "ic": zod.string().nullish(),
+  "phone": zod.string().nullish(),
+  "email": zod.string().nullish(),
+  "address": zod.string().nullish()
+})).optional().describe('Optional inline purchaser creation when purchaserIds is empty'),
+  "loanPartyType": zod.enum(['1st_party', '3rd_party']).optional(),
+  "borrowers": zod.array(zod.object({
+  "name": zod.string(),
+  "ic": zod.string().nullish(),
+  "hp": zod.string().nullish(),
+  "email": zod.string().nullish(),
+  "address": zod.string().nullish()
+})).optional(),
+  "parcelNo": zod.string().optional(),
+  "spaDetails": zod.record(zod.string(), zod.unknown()).optional(),
+  "propertyDetails": zod.record(zod.string(), zod.unknown()).optional(),
+  "propertyAddress": zod.string().optional(),
+  "loanDetails": zod.record(zod.string(), zod.unknown()).optional(),
+  "companyDetails": zod.record(zod.string(), zod.unknown()).optional()
 })
 
 
@@ -1266,3 +1281,5 @@ export const GetRecentCasesResponseItem = zod.object({
   "updatedAt": zod.coerce.date()
 })
 export const GetRecentCasesResponse = zod.array(GetRecentCasesResponseItem)
+
+

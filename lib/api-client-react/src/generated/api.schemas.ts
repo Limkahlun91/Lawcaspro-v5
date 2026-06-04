@@ -497,9 +497,16 @@ export interface CasePurchaser {
 }
 
 export interface InlinePurchaser {
+  isCompany?: boolean;
   name: string;
   /** @nullable */
   ic?: string | null;
+  /** @nullable */
+  phone?: string | null;
+  /** @nullable */
+  email?: string | null;
+  /** @nullable */
+  address?: string | null;
 }
 
 export interface CaseAssignment {
@@ -540,18 +547,64 @@ export interface CaseListResponse {
   limit: number;
 }
 
+export type CreateCaseBodyLoanPartyType = typeof CreateCaseBodyLoanPartyType[keyof typeof CreateCaseBodyLoanPartyType];
+
+
+export const CreateCaseBodyLoanPartyType = {
+  '1st_party': '1st_party',
+  '3rd_party': '3rd_party',
+} as const;
+
+export type CreateCaseBodyBorrowersItem = {
+  name: string;
+  /** @nullable */
+  ic?: string | null;
+  /** @nullable */
+  hp?: string | null;
+  /** @nullable */
+  email?: string | null;
+  /** @nullable */
+  address?: string | null;
+};
+
+export type CreateCaseBodySpaDetails = { [key: string]: unknown };
+
+export type CreateCaseBodyPropertyDetails = { [key: string]: unknown };
+
+export type CreateCaseBodyLoanDetails = { [key: string]: unknown };
+
+export type CreateCaseBodyCompanyDetails = { [key: string]: unknown };
+
 export interface CreateCaseBody {
-  projectId: number;
-  developerId: number;
-  purchaseMode: string;
-  titleType: string;
+  caseType: string;
+  projectId?: number;
+  developerId?: number;
+  referenceNo?: string;
+  purchaseMode?: string;
+  titleType?: string;
+  landCondition?: string;
+  encumbrances?: string;
+  actingFor?: string;
+  perfectionType?: string;
   spaPrice?: number;
-  assignedLawyerId: number;
+  apdlPrice?: number;
+  developerDiscount?: number;
+  bumiputraDiscount?: number;
+  assignedLawyerId?: number;
   assignedClerkId?: number;
-  purchaserIds: number[];
+  purchaserIds?: number[];
   /** Optional inline purchaser creation when purchaserIds is empty */
   purchasers?: InlinePurchaser[];
-}
+  loanPartyType?: CreateCaseBodyLoanPartyType;
+  borrowers?: CreateCaseBodyBorrowersItem[];
+  parcelNo?: string;
+  spaDetails?: CreateCaseBodySpaDetails;
+  propertyDetails?: CreateCaseBodyPropertyDetails;
+  propertyAddress?: string;
+  loanDetails?: CreateCaseBodyLoanDetails;
+  companyDetails?: CreateCaseBodyCompanyDetails;
+  [key: string]: unknown;
+ }
 
 export interface UpdateCaseBody {
   status?: string;
@@ -658,10 +711,6 @@ export interface QuotationDetail {
   referenceNo: string;
   stNo?: string | null;
   clientName: string;
-  clientDetails?: {
-    name: string;
-    tin?: string;
-  }[];
   propertyDescription?: string | null;
   purchasePrice?: number | null;
   bankName?: string | null;
@@ -691,11 +740,7 @@ export type CreateQuotationBodyItemsItem = {
 export interface CreateQuotationBody {
   referenceNo: string;
   stNo?: string;
-  clientName?: string;
-  clientDetails?: {
-    name: string;
-    tin?: string;
-  }[];
+  clientName: string;
   caseId?: number;
   propertyDescription?: string;
   purchasePrice?: string;
@@ -723,10 +768,6 @@ export interface UpdateQuotationBody {
   referenceNo?: string;
   stNo?: string;
   clientName?: string;
-  clientDetails?: {
-    name: string;
-    tin?: string;
-  }[];
   caseId?: number;
   propertyDescription?: string;
   purchasePrice?: string;
@@ -831,3 +872,4 @@ export const ListCasesOverdueDays = {
 export type GetRecentCasesParams = {
 limit?: number;
 };
+

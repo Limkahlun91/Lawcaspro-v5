@@ -10,11 +10,7 @@ import type { CreateQuotationBodyItemsItem } from './createQuotationBodyItemsIte
 export interface CreateQuotationBody {
   referenceNo: string;
   stNo?: string;
-  clientName?: string;
-  clientDetails?: {
-    name: string;
-    tin?: string;
-  }[];
+  clientName: string;
   caseId?: number;
   propertyDescription?: string;
   purchasePrice?: string;
