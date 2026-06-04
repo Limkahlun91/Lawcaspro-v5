@@ -50,7 +50,7 @@ export type NormalizedGenerationJob = {
   runningCount?: number;
   totalCount: number;
   progress?: { total: number; success: number; failed: number; pending: number; running: number };
-  nextAction?: "run_next" | "download" | "stop";
+  nextAction?: "run_next" | "finalize" | "download" | "stop";
   downloadUrl?: string | null;
   downloadObjectPath?: string | null;
   downloadFileName?: string | null;
@@ -64,6 +64,8 @@ export type CreateGenerationJobPayload = {
   templates?: Array<{ source: "firm" | "master"; id: number }>;
   config: {
     action: "download" | "print";
+    outputFormat?: "pdf" | "docx";
+    includeDiagnostics?: boolean;
     copies?: number | string;
     duplexSettings?: unknown;
   };
@@ -73,22 +75,6 @@ export type CreateGenerationJobPayload = {
 
 const GENERATION_TIMEOUT_MS = 180000;
 const CREATE_JOB_TIMEOUT_MS = 60000;
-
-export async function generateDocumentsNow(payload: {
-  caseIds: number[];
-  templates: Array<{ source: "firm" | "master"; id: number }>;
-}): Promise<Response> {
-  return await apiRequest("/documents/automation/generate-now", {
-    method: "POST",
-    timeoutMs: GENERATION_TIMEOUT_MS,
-    body: JSON.stringify({
-      caseIds: payload.caseIds,
-      templates: payload.templates,
-      config: { action: "download", outputFormat: "pdf" },
-    }),
-    headers: { "Content-Type": "application/json" },
-  });
-}
 
 export async function createGenerationJob(payload: CreateGenerationJobPayload): Promise<{ jobId?: string; statusUrl?: string; downloadUrl?: string; status?: string; fallback?: boolean; message?: string }> {
   const qs = new URLSearchParams();
@@ -144,6 +130,18 @@ export async function runNextGenerationJob(
   opts?: { signal?: AbortSignal },
 ): Promise<NormalizedGenerationJob> {
   const raw = await apiFetchJson<unknown>(`/documents/jobs/${jobId}/run-next`, {
+    method: "POST",
+    timeoutMs: GENERATION_TIMEOUT_MS,
+    signal: opts?.signal,
+  });
+  return normalizeGenerationJob(raw);
+}
+
+export async function finalizeGenerationJob(
+  jobId: string,
+  opts?: { signal?: AbortSignal },
+): Promise<NormalizedGenerationJob> {
+  const raw = await apiFetchJson<unknown>(`/documents/jobs/${jobId}/finalize`, {
     method: "POST",
     timeoutMs: GENERATION_TIMEOUT_MS,
     signal: opts?.signal,
@@ -227,8 +225,11 @@ export function normalizeGenerationJob(raw: unknown): NormalizedGenerationJob {
 
   const nextActionRaw = asString((root as any).nextAction ?? (root as any).next_action);
   const nextAction =
-    nextActionRaw === "download" || nextActionRaw === "run_next" || nextActionRaw === "stop"
-      ? (nextActionRaw as "run_next" | "download" | "stop")
+    nextActionRaw === "download" ||
+    nextActionRaw === "run_next" ||
+    nextActionRaw === "finalize" ||
+    nextActionRaw === "stop"
+      ? (nextActionRaw as "run_next" | "finalize" | "download" | "stop")
       : undefined;
 
   const downloadUrl =

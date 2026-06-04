@@ -4,7 +4,7 @@ import { useToast } from "@/hooks/use-toast";
 import { getHttpStatus, isApiErrorLike } from "@/lib/error-message";
 import { toastError } from "@/lib/toast-error";
 import { CaseForm, createDefaultCaseFormValues } from "./CaseForm";
-import type { CaseFormValues, LoanPartyType, PurchaseMode, TitleCategory } from "./types";
+import type { CaseFormValues, CaseType, Encumbrances, LandCondition, LoanPartyType, PerfectionType, PurchaseMode, TitleCategory } from "./types";
 import { composeMalaysiaAddress, joinAddressLines } from "./address";
 import { getStateFromPostcode } from "@/utils/my-address-helper";
 
@@ -67,13 +67,28 @@ export function mapCaseToFormValues(caseInfo: any): CaseFormValues {
     address: String(b?.address ?? ""),
   })) : [v.borrowers[0]];
 
+  const caseTypeRaw = String(caseInfo?.caseType ?? "").trim().toLowerCase();
+  const caseType: CaseType | "" = caseTypeRaw === "subsale" ? "subsale" : caseTypeRaw === "perfection" ? "perfection" : caseTypeRaw === "developer_sales" ? "developer_sales" : "";
+  const landConditionRaw = String(caseInfo?.landCondition ?? "").trim().toLowerCase();
+  const landCondition: LandCondition | "" = landConditionRaw === "freehold" ? "freehold" : landConditionRaw === "leasehold" ? "leasehold" : "";
+  const encumbrancesRaw = String(caseInfo?.encumbrances ?? "").trim().toLowerCase();
+  const encumbrances: Encumbrances | "" = encumbrancesRaw === "no_encumbrance" ? "no_encumbrance" : encumbrancesRaw === "has_encumbrance" ? "has_encumbrance" : encumbrancesRaw === "to_confirm" ? "to_confirm" : "";
+  const actingForRaw = String(caseInfo?.actingFor ?? "").trim().toLowerCase();
+  const actingFor = actingForRaw === "vendor" ? "vendor" : actingForRaw === "purchaser" ? "purchaser" : actingForRaw === "both" ? "both" : "";
+  const perfectionTypeRaw = String(caseInfo?.perfectionType ?? "").trim().toLowerCase();
+  const perfectionType: PerfectionType | "" = perfectionTypeRaw === "transfer_and_charge" ? "transfer_and_charge" : perfectionTypeRaw === "transfer" ? "transfer" : perfectionTypeRaw === "charge" ? "charge" : "";
+
   return {
     ...v,
-    referenceNo: String(caseInfo?.referenceNo ?? ""),
+    caseType,
     projectId: String(caseInfo?.projectId ?? ""),
     developerId: String(caseInfo?.developerId ?? ""),
     titleCategory,
     purchaseMode,
+    landCondition,
+    encumbrances,
+    actingFor: actingFor as any,
+    perfectionType,
     purchasers: mappedPurchasers.length ? mappedPurchasers : v.purchasers,
     loanPartyType: (String(caseInfo?.loanPartyType ?? "") === "3rd_party" ? "3rd_party" : "1st_party") as LoanPartyType,
     borrowers: mappedBorrowers,
@@ -117,6 +132,32 @@ export function mapCaseToFormValues(caseInfo: any): CaseFormValues {
 }
 
 export function buildCasePayloadFromFormValues(values: CaseFormValues): Record<string, unknown> {
+  const toPositiveIntOrUndefined = (v: string): number | undefined => {
+    const n = Number(v);
+    return Number.isInteger(n) && n > 0 ? n : undefined;
+  };
+
+  const base: Record<string, unknown> = {
+    caseType: values.caseType,
+  };
+
+  if (values.caseType === "subsale") {
+    return {
+      ...base,
+      titleType: values.titleCategory || undefined,
+      landCondition: values.landCondition || undefined,
+      encumbrances: values.encumbrances || undefined,
+      actingFor: values.actingFor || undefined,
+    };
+  }
+
+  if (values.caseType === "perfection") {
+    return {
+      ...base,
+      perfectionType: values.perfectionType || undefined,
+    };
+  }
+
   const purchasers = values.purchasers
     .map((p) => ({
       isCompany: Boolean(p.isCompany),
@@ -197,9 +238,9 @@ export function buildCasePayloadFromFormValues(values: CaseFormValues): Record<s
   };
 
   return {
-    projectId: Number(values.projectId),
-    developerId: Number(values.developerId),
-    referenceNo: values.referenceNo.trim() || undefined,
+    ...base,
+    projectId: toPositiveIntOrUndefined(values.projectId),
+    developerId: toPositiveIntOrUndefined(values.developerId),
     titleType,
     purchaseMode: values.purchaseMode,
     purchasers,
@@ -235,30 +276,50 @@ export function CaseFormModal(props: {
   const title = props.title ?? (props.mode === "create" ? "Create Case" : "Edit Case");
 
   const handleSubmit = async () => {
-    if (props.mode === "edit" && !value.referenceNo.trim()) {
-      toast({ title: "Our File Ref is required", variant: "destructive" });
+    if (!value.caseType) {
+      toast({ title: "Case Type is required", variant: "destructive" });
       return;
     }
-    if (!value.projectId) {
-      toast({ title: "Project is required", variant: "destructive" });
-      return;
-    }
-    if (!value.developerId) {
-      toast({ title: "Developer is required", variant: "destructive" });
-      return;
-    }
-    if (!value.titleCategory) {
-      toast({ title: "Title Category is required", variant: "destructive" });
-      return;
-    }
-    if (value.purchasers.filter((p) => p.name.trim().length > 0).length === 0) {
-      toast({ title: "At least 1 purchaser is required", variant: "destructive" });
-      return;
+    if (value.caseType === "developer_sales") {
+      if (!value.projectId) {
+        toast({ title: "Project is required", variant: "destructive" });
+        return;
+      }
+      if (!value.developerId) {
+        toast({ title: "Developer is required", variant: "destructive" });
+        return;
+      }
+      if (!value.titleCategory) {
+        toast({ title: "Title Category is required", variant: "destructive" });
+        return;
+      }
+    } else if (value.caseType === "subsale") {
+      if (!value.titleCategory) {
+        toast({ title: "Title Category is required", variant: "destructive" });
+        return;
+      }
+      if (!value.landCondition) {
+        toast({ title: "Land Condition is required", variant: "destructive" });
+        return;
+      }
+      if (!value.encumbrances) {
+        toast({ title: "Encumbrances is required", variant: "destructive" });
+        return;
+      }
+      if (!value.actingFor) {
+        toast({ title: "Acting is required", variant: "destructive" });
+        return;
+      }
+    } else if (value.caseType === "perfection") {
+      if (!value.perfectionType) {
+        toast({ title: "Perfection Type is required", variant: "destructive" });
+        return;
+      }
     }
     setSubmitting(true);
     try {
       await props.onSubmit(buildCasePayloadFromFormValues(value));
-      toast({ title: props.mode === "create" ? "Case created" : "Case updated" });
+      toast({ title: props.mode === "create" ? "Case submitted for approval." : "Case updated" });
       props.onOpenChange(false);
     } catch (err) {
       const status = getHttpStatus(err);

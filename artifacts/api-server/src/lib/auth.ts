@@ -29,6 +29,14 @@ const getReqId = (req: unknown): string | undefined => {
   return typeof id === "string" ? id : undefined;
 };
 
+const getJobId = (req: unknown): string | undefined => {
+  const params = (req as { params?: Record<string, unknown> } | null)?.params;
+  const v = params?.jobId;
+  if (typeof v === "string") return v;
+  if (Array.isArray(v) && typeof v[0] === "string") return v[0];
+  return undefined;
+};
+
 const FOUNDER_EMAIL = "lun.6923@hotmail.com";
 const FOUNDER_EMAILS = Array.from(
   new Set(
@@ -410,11 +418,43 @@ export async function requireFirmUser(
       return typeof c === "string" ? c : undefined;
     })();
     logger.error({ err, message, sqlState: sqlState ?? null, userId: req.userId ?? null, firmId: req.firmId ?? null }, "auth.firm_user.connect_failed");
-    res.status(503).json({ error: "Tenant context temporarily unavailable", code: "DB_CONNECT" });
+    res.status(503).json({
+      error: "Tenant context temporarily unavailable",
+      code: "DB_CONNECT",
+      meta: {
+        request_id: getReqId(req) ?? null,
+        route: req.path,
+        method: req.method,
+        phase: "db_connect",
+        jobId: getJobId(req) ?? null,
+        firmUserLookupStatus: req.userType === "firm_user" ? "ok" : "not_firm_user",
+        userId: req.userId ?? null,
+        firmId: req.firmId ?? null,
+        authTokenPresent: typeof req.headers.authorization === "string" && req.headers.authorization.length > 0,
+        authHeaderPresent: typeof req.headers.authorization === "string" && req.headers.authorization.length > 0,
+        cookiePresent: typeof req.headers.cookie === "string" && req.headers.cookie.length > 0,
+      },
+    });
     return;
   }
   if (!client) {
-    res.status(503).json({ error: "Tenant context temporarily unavailable", code: "DB_CONNECT" });
+    res.status(503).json({
+      error: "Tenant context temporarily unavailable",
+      code: "DB_CONNECT",
+      meta: {
+        request_id: getReqId(req) ?? null,
+        route: req.path,
+        method: req.method,
+        phase: "db_connect",
+        jobId: getJobId(req) ?? null,
+        firmUserLookupStatus: req.userType === "firm_user" ? "ok" : "not_firm_user",
+        userId: req.userId ?? null,
+        firmId: req.firmId ?? null,
+        authTokenPresent: typeof req.headers.authorization === "string" && req.headers.authorization.length > 0,
+        authHeaderPresent: typeof req.headers.authorization === "string" && req.headers.authorization.length > 0,
+        cookiePresent: typeof req.headers.cookie === "string" && req.headers.cookie.length > 0,
+      },
+    });
     return;
   }
 
@@ -472,7 +512,23 @@ export async function requireFirmUser(
       },
       "auth.firm_context_failed",
     );
-    res.status(503).json({ error: "Tenant context temporarily unavailable", code });
+    res.status(503).json({
+      error: "Tenant context temporarily unavailable",
+      code,
+      meta: {
+        request_id: getReqId(req) ?? null,
+        route: req.path,
+        method: req.method,
+        phase: "set_tenant_context",
+        jobId: getJobId(req) ?? null,
+        firmUserLookupStatus: req.userType === "firm_user" ? "ok" : "not_firm_user",
+        userId: req.userId ?? null,
+        firmId: req.firmId ?? null,
+        authTokenPresent: typeof req.headers.authorization === "string" && req.headers.authorization.length > 0,
+        authHeaderPresent: typeof req.headers.authorization === "string" && req.headers.authorization.length > 0,
+        cookiePresent: typeof req.headers.cookie === "string" && req.headers.cookie.length > 0,
+      },
+    });
     return;
   }
 
@@ -509,11 +565,43 @@ export async function requireFirmUserSession(
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     logger.error({ err, message, userId: req.userId ?? null, firmId: req.firmId ?? null }, "auth.firm_user.connect_failed");
-    res.status(503).json({ error: "Tenant context temporarily unavailable", code: "DB_CONNECT" });
+    res.status(503).json({
+      error: "Tenant context temporarily unavailable",
+      code: "DB_CONNECT",
+      meta: {
+        request_id: getReqId(req) ?? null,
+        route: req.path,
+        method: req.method,
+        phase: "db_connect",
+        jobId: getJobId(req) ?? null,
+        firmUserLookupStatus: req.userType === "firm_user" ? "ok" : "not_firm_user",
+        userId: req.userId ?? null,
+        firmId: req.firmId ?? null,
+        authTokenPresent: typeof req.headers.authorization === "string" && req.headers.authorization.length > 0,
+        authHeaderPresent: typeof req.headers.authorization === "string" && req.headers.authorization.length > 0,
+        cookiePresent: typeof req.headers.cookie === "string" && req.headers.cookie.length > 0,
+      },
+    });
     return;
   }
   if (!client) {
-    res.status(503).json({ error: "Tenant context temporarily unavailable", code: "DB_CONNECT" });
+    res.status(503).json({
+      error: "Tenant context temporarily unavailable",
+      code: "DB_CONNECT",
+      meta: {
+        request_id: getReqId(req) ?? null,
+        route: req.path,
+        method: req.method,
+        phase: "db_connect",
+        jobId: getJobId(req) ?? null,
+        firmUserLookupStatus: req.userType === "firm_user" ? "ok" : "not_firm_user",
+        userId: req.userId ?? null,
+        firmId: req.firmId ?? null,
+        authTokenPresent: typeof req.headers.authorization === "string" && req.headers.authorization.length > 0,
+        authHeaderPresent: typeof req.headers.authorization === "string" && req.headers.authorization.length > 0,
+        cookiePresent: typeof req.headers.cookie === "string" && req.headers.cookie.length > 0,
+      },
+    });
     return;
   }
 
@@ -538,7 +626,23 @@ export async function requireFirmUserSession(
     }
     const message = err instanceof Error ? err.message : String(err);
     logger.error({ err, message, userId: req.userId, firmId: req.firmId }, "auth.firm_context_error");
-    res.status(503).json({ error: "Tenant context temporarily unavailable", code: "RLS_CONTEXT" });
+    res.status(503).json({
+      error: "Tenant context temporarily unavailable",
+      code: "RLS_CONTEXT",
+      meta: {
+        request_id: getReqId(req) ?? null,
+        route: req.path,
+        method: req.method,
+        phase: "set_tenant_context",
+        jobId: getJobId(req) ?? null,
+        firmUserLookupStatus: req.userType === "firm_user" ? "ok" : "not_firm_user",
+        userId: req.userId ?? null,
+        firmId: req.firmId ?? null,
+        authTokenPresent: typeof req.headers.authorization === "string" && req.headers.authorization.length > 0,
+        authHeaderPresent: typeof req.headers.authorization === "string" && req.headers.authorization.length > 0,
+        cookiePresent: typeof req.headers.cookie === "string" && req.headers.cookie.length > 0,
+      },
+    });
     return;
   }
 

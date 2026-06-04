@@ -35,6 +35,16 @@ export default function AppDashboard() {
   const [, setLocation] = useLocation();
   const { user } = useAuth();
   const firmId = user?.firmId ?? null;
+  const roleName = String((user as any)?.roleName ?? "");
+  const canApproveCases = (() => {
+    const n = roleName.trim().toLowerCase();
+    if (!n) return false;
+    if (n.includes("partner")) return true;
+    if (n === "account admin" || n === "account manager") return true;
+    if (n.includes("account") && n.includes("admin")) return true;
+    if (n.includes("account") && n.includes("manager")) return true;
+    return false;
+  })();
   const refresh = (() => {
     if (typeof window === "undefined") return false;
     const raw = new URLSearchParams(window.location.search).get("refresh");
@@ -168,7 +178,7 @@ export default function AppDashboard() {
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
         {[
           {
-            label: "Total Cases",
+            label: "Approved Cases",
             value: showValue("totalCases", resolvedStats.totalCases),
             sub: `${showValue("activeCases", resolvedStats.activeCases)} active · ${showValue("completedCases", resolvedStats.completedCases)} completed`,
             icon: Briefcase,
@@ -220,6 +230,48 @@ export default function AppDashboard() {
           </Card>
         ))}
       </div>
+
+      {canApproveCases ? (
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+          {[
+            {
+              label: "Pending Approval",
+              value: showValue("pendingApprovalCases", (resolvedStats as any).pendingApprovalCases),
+              sub: null,
+              icon: Briefcase,
+              color: "bg-slate-100 text-slate-700",
+              href: "/app/cases?approvalStatus=pending_approval",
+            },
+            {
+              label: "Rejected Cases",
+              value: showValue("rejectedCases", (resolvedStats as any).rejectedCases),
+              sub: null,
+              icon: Briefcase,
+              color: "bg-slate-100 text-slate-700",
+              href: "/app/cases?approvalStatus=rejected",
+            },
+          ].map((item) => (
+            <Card
+              key={item.label}
+              className="cursor-pointer hover:shadow-md transition-shadow"
+              onClick={() => setLocation(item.href)}
+            >
+              <CardContent className="pt-5 pb-4">
+                <div className="flex items-center gap-3">
+                  <div className={`w-10 h-10 rounded-lg flex items-center justify-center ${item.color}`}>
+                    <item.icon className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <div className="text-xs text-slate-500">{item.label}</div>
+                    <div className="text-2xl font-bold text-slate-900 leading-tight">{item.value}</div>
+                    {item.sub && <div className="text-xs text-slate-400 mt-0.5">{item.sub}</div>}
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+          ))}
+        </div>
+      ) : null}
 
       <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
         <Card className="cursor-pointer hover:shadow-md transition-shadow" onClick={() => setLocation("/app/communications")}>

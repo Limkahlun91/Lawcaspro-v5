@@ -11,7 +11,7 @@ import { useListDevelopers, useListProjects } from "@workspace/api-client-react"
 import { AddressLinesFields } from "./AddressLinesFields";
 import { PricingBreakdown } from "./PricingBreakdown";
 import { composeMalaysiaAddress, emptyAddressLines, joinAddressLines, normalizeMalaysiaPostcodeInput } from "./address";
-import type { BorrowerForm, CaseFormValues, LoanPartyType, PurchaserForm, PurchaseMode, TitleCategory } from "./types";
+import type { BorrowerForm, CaseFormValues, CaseType, Encumbrances, LandCondition, LoanPartyType, PerfectionType, PurchaserForm, PurchaseMode, TitleCategory } from "./types";
 import { toRinggitMalaysiaWords } from "@/lib/ringgit-words";
 import { getStateFromPostcode } from "@/utils/my-address-helper";
 
@@ -75,11 +75,15 @@ function fmtMoney(n: number): string {
 
 export function createDefaultCaseFormValues(): CaseFormValues {
   return {
-    referenceNo: "",
+    caseType: "",
     projectId: "",
     developerId: "",
     titleCategory: "",
     purchaseMode: "cash",
+    landCondition: "",
+    encumbrances: "",
+    actingFor: "",
+    perfectionType: "",
     purchasers: [newPurchaser()],
     loanPartyType: "1st_party",
     borrowers: [newBorrower()],
@@ -135,7 +139,6 @@ export function CaseForm(props: {
   const set = props.onChange;
   const [activeTab, setActiveTab] = useState<"spa" | "loan" | "property">("spa");
   const [developerManuallyChanged, setDeveloperManuallyChanged] = useState(false);
-  const [refOverride, setRefOverride] = useState(false);
   const [postcodeWarnings, setPostcodeWarnings] = useState<Record<string, string>>({});
 
   const { data: projectsRes } = useListProjects({ limit: 200 }, { query: { staleTime: 5 * 60 * 1000 } });
@@ -216,7 +219,52 @@ export function CaseForm(props: {
     return toRinggitMalaysiaWords(totalLoan);
   }, [totalLoan]);
 
-  const canSubmit = Boolean(v.projectId && v.developerId && v.titleCategory);
+  const canSubmit = (() => {
+    if (!v.caseType) return false;
+    if (v.caseType === "developer_sales") return Boolean(v.projectId && v.titleCategory && v.purchaseMode);
+    if (v.caseType === "subsale") return Boolean(v.titleCategory && v.landCondition && v.encumbrances && v.actingFor);
+    if (v.caseType === "perfection") return Boolean(v.perfectionType);
+    return false;
+  })();
+
+  const setCaseType = (next: CaseType) => {
+    if (next === v.caseType) return;
+    if (next === "developer_sales") {
+      set({
+        ...v,
+        caseType: next,
+        landCondition: "",
+        encumbrances: "",
+        actingFor: "",
+        perfectionType: "",
+      });
+      return;
+    }
+    if (next === "subsale") {
+      setDeveloperManuallyChanged(false);
+      set({
+        ...v,
+        caseType: next,
+        projectId: "",
+        developerId: "",
+        purchaseMode: "cash",
+        perfectionType: "",
+      });
+      return;
+    }
+    setDeveloperManuallyChanged(false);
+    set({
+      ...v,
+      caseType: next,
+      projectId: "",
+      developerId: "",
+      titleCategory: "",
+      purchaseMode: "cash",
+      landCondition: "",
+      encumbrances: "",
+      actingFor: "",
+    });
+  };
 
   const onComposePurchaserAddress = (id: string) => {
     const nextPurchasers = v.purchasers.map((p) => {
@@ -252,101 +300,97 @@ export function CaseForm(props: {
 
   return (
     <div className="space-y-4">
-      <div className="grid grid-cols-1 md:grid-cols-12 gap-3">
-        <div className="md:col-span-4 space-y-1.5">
-          <Label>Our File Ref *</Label>
-          <div className="flex items-center gap-2">
-            <Input
-              value={refOverride ? v.referenceNo : ""}
-              onChange={(e) => set({ ...v, referenceNo: e.target.value })}
-              disabled={submitting || !refOverride}
-              placeholder={refOverride ? "" : "Auto-generated"}
-            />
-            <label className="flex items-center gap-2 text-xs text-slate-600 whitespace-nowrap">
-              <Checkbox
-                checked={refOverride}
-                onCheckedChange={(checked) => {
-                  const next = Boolean(checked);
-                  setRefOverride(next);
-                  if (!next) set({ ...v, referenceNo: "" });
-                }}
-                disabled={submitting}
-              />
-              Override
-            </label>
-          </div>
-        </div>
-        <div className="md:col-span-4 space-y-1.5">
-          <Label>Project *</Label>
-          <Select value={v.projectId} onValueChange={(next) => {
-            setDeveloperManuallyChanged(false);
-            set({ ...v, projectId: next });
-          }} disabled={submitting}>
-            <SelectTrigger>
-              <SelectValue placeholder="Select project" />
-            </SelectTrigger>
-            <SelectContent>
-              {projects.map((p: any) => (
-                <SelectItem key={p.id} value={String(p.id)}>{String(p.name ?? `Project ${p.id}`)}</SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </div>
-        <div className="md:col-span-4 space-y-1.5">
-          <Label>Developer *</Label>
-          <Select value={v.developerId} onValueChange={(next) => {
-            setDeveloperManuallyChanged(true);
-            set({ ...v, developerId: next });
-          }} disabled={submitting}>
-            <SelectTrigger>
-              <SelectValue placeholder="Select developer" />
-            </SelectTrigger>
-            <SelectContent>
-              {developers.map((d: any) => (
-                <SelectItem key={d.id} value={String(d.id)}>{String(d.name ?? `Developer ${d.id}`)}</SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </div>
-        <div className="md:col-span-4 space-y-1.5">
-          <Label>Title Category *</Label>
-          <Select value={v.titleCategory} onValueChange={(next) => set({ ...v, titleCategory: next as any })} disabled={submitting}>
-            <SelectTrigger>
-              <SelectValue placeholder="Select title category" />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="master">Master</SelectItem>
-              <SelectItem value="strata">Strata</SelectItem>
-              <SelectItem value="individual">Individual</SelectItem>
-            </SelectContent>
-          </Select>
-        </div>
-        <div className="md:col-span-8 space-y-1.5">
-          <Label>Purchase Mode</Label>
-          <div className="flex flex-wrap gap-3 pt-1">
-            {(["cash", "loan", "other"] as PurchaseMode[]).map((m) => (
-              <label key={m} className="flex items-center gap-2 text-sm">
-                <input
-                  type="radio"
-                  checked={v.purchaseMode === m}
-                  onChange={() => set({ ...v, purchaseMode: m })}
-                  disabled={submitting}
-                />
-                {m === "cash" ? "Cash" : m === "loan" ? "Loan" : "Other"}
-              </label>
-            ))}
-          </div>
+      <div className="space-y-1.5">
+        <Label>Case Type *</Label>
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
+          <Button type="button" variant={v.caseType === "developer_sales" ? "default" : "outline"} onClick={() => setCaseType("developer_sales")} disabled={submitting}>
+            Developer Sales
+          </Button>
+          <Button type="button" variant={v.caseType === "subsale" ? "default" : "outline"} onClick={() => setCaseType("subsale")} disabled={submitting}>
+            Subsale
+          </Button>
+          <Button type="button" variant={v.caseType === "perfection" ? "default" : "outline"} onClick={() => setCaseType("perfection")} disabled={submitting}>
+            Perfection
+          </Button>
         </div>
       </div>
 
-      <Separator />
+      {!v.caseType ? (
+        <div className="text-sm text-slate-600">Select a Case Type to continue.</div>
+      ) : v.caseType === "developer_sales" ? (
+        <>
+          <div className="grid grid-cols-1 md:grid-cols-12 gap-3">
+            <div className="md:col-span-4 space-y-1.5">
+              <Label>Project *</Label>
+              <Select value={v.projectId} onValueChange={(next) => {
+                setDeveloperManuallyChanged(false);
+                set({ ...v, projectId: next });
+              }} disabled={submitting}>
+                <SelectTrigger>
+                  <SelectValue placeholder="Select project" />
+                </SelectTrigger>
+                <SelectContent>
+                  {projects.map((p: any) => (
+                    <SelectItem key={p.id} value={String(p.id)}>{String(p.name ?? `Project ${p.id}`)}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="md:col-span-4 space-y-1.5">
+              <Label>Developer *</Label>
+              <Select value={v.developerId} onValueChange={(next) => {
+                setDeveloperManuallyChanged(true);
+                set({ ...v, developerId: next });
+              }} disabled={submitting}>
+                <SelectTrigger>
+                  <SelectValue placeholder="Select developer" />
+                </SelectTrigger>
+                <SelectContent>
+                  {developers.map((d: any) => (
+                    <SelectItem key={d.id} value={String(d.id)}>{String(d.name ?? `Developer ${d.id}`)}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="md:col-span-4 space-y-1.5">
+              <Label>Title Category *</Label>
+              <Select value={v.titleCategory} onValueChange={(next) => set({ ...v, titleCategory: next as any })} disabled={submitting}>
+                <SelectTrigger>
+                  <SelectValue placeholder="Select title category" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="master">Master</SelectItem>
+                  <SelectItem value="strata">Strata</SelectItem>
+                  <SelectItem value="individual">Individual</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="md:col-span-8 space-y-1.5">
+              <Label>Purchase Mode *</Label>
+              <div className="flex flex-wrap gap-3 pt-1">
+                {(["cash", "loan", "other"] as PurchaseMode[]).map((m) => (
+                  <label key={m} className="flex items-center gap-2 text-sm">
+                    <input
+                      type="radio"
+                      checked={v.purchaseMode === m}
+                      onChange={() => set({ ...v, purchaseMode: m })}
+                      disabled={submitting}
+                    />
+                    {m === "cash" ? "Cash" : m === "loan" ? "Loan" : "Other"}
+                  </label>
+                ))}
+              </div>
+            </div>
+          </div>
 
-      <Tabs value={activeTab} onValueChange={(t) => setActiveTab(t as any)}>
-        <TabsList className="grid w-full grid-cols-3">
-          <TabsTrigger value="spa">SPA Details</TabsTrigger>
-          <TabsTrigger value="loan" disabled={v.purchaseMode !== "loan"}>Loan Details</TabsTrigger>
-          <TabsTrigger value="property">Property Details</TabsTrigger>
-        </TabsList>
+          <Separator />
+
+          <Tabs value={activeTab} onValueChange={(t) => setActiveTab(t as any)}>
+            <TabsList className="grid w-full grid-cols-3">
+              <TabsTrigger value="spa">SPA Details</TabsTrigger>
+              <TabsTrigger value="loan" disabled={v.purchaseMode !== "loan"}>Loan Details</TabsTrigger>
+              <TabsTrigger value="property">Property Details</TabsTrigger>
+            </TabsList>
 
         <TabsContent value="spa" className="space-y-4 pt-3">
           <div className="flex items-center justify-between">
@@ -971,7 +1015,79 @@ export function CaseForm(props: {
             <PricingBreakdown purchasePrice={v.purchasePrice} />
           </div>
         </TabsContent>
-      </Tabs>
+          </Tabs>
+        </>
+      ) : v.caseType === "subsale" ? (
+        <div className="grid grid-cols-1 md:grid-cols-12 gap-3">
+          <div className="md:col-span-3 space-y-1.5">
+            <Label>Title Category *</Label>
+            <Select value={v.titleCategory} onValueChange={(next) => set({ ...v, titleCategory: next as any })} disabled={submitting}>
+              <SelectTrigger>
+                <SelectValue placeholder="Select title category" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="master">Master</SelectItem>
+                <SelectItem value="strata">Strata</SelectItem>
+                <SelectItem value="individual">Individual</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+          <div className="md:col-span-3 space-y-1.5">
+            <Label>Land Condition *</Label>
+            <Select value={v.landCondition} onValueChange={(next) => set({ ...v, landCondition: next as LandCondition })} disabled={submitting}>
+              <SelectTrigger>
+                <SelectValue placeholder="Select land condition" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="freehold">Freehold</SelectItem>
+                <SelectItem value="leasehold">Leasehold</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+          <div className="md:col-span-3 space-y-1.5">
+            <Label>Encumbrances *</Label>
+            <Select value={v.encumbrances} onValueChange={(next) => set({ ...v, encumbrances: next as Encumbrances })} disabled={submitting}>
+              <SelectTrigger>
+                <SelectValue placeholder="Select encumbrances" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="no_encumbrance">No Encumbrance</SelectItem>
+                <SelectItem value="has_encumbrance">Has Encumbrance</SelectItem>
+                <SelectItem value="to_confirm">To Confirm</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+          <div className="md:col-span-3 space-y-1.5">
+            <Label>Acting *</Label>
+            <Select value={v.actingFor} onValueChange={(next) => set({ ...v, actingFor: next as any })} disabled={submitting}>
+              <SelectTrigger>
+                <SelectValue placeholder="Select acting" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="vendor">Vendor</SelectItem>
+                <SelectItem value="purchaser">Purchaser</SelectItem>
+                <SelectItem value="both">Both</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+        </div>
+      ) : (
+        <div className="grid grid-cols-1 md:grid-cols-12 gap-3">
+          <div className="md:col-span-4 space-y-1.5">
+            <Label>Perfection Type *</Label>
+            <Select value={v.perfectionType} onValueChange={(next) => set({ ...v, perfectionType: next as PerfectionType })} disabled={submitting}>
+              <SelectTrigger>
+                <SelectValue placeholder="Select perfection type" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="transfer_and_charge">Transfer &amp; Charge</SelectItem>
+                <SelectItem value="transfer">Transfer</SelectItem>
+                <SelectItem value="charge">Charge</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+        </div>
+      )}
 
       <div className="flex justify-end gap-2 pt-2">
         <Button type="button" onClick={props.onSubmit} disabled={!canSubmit || submitting}>

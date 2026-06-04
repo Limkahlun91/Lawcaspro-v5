@@ -266,6 +266,7 @@ export const documentGenerationJobsTable = pgTable("document_generation_jobs", {
   templateIds: jsonb("template_ids").notNull().default([]),
   platformDocumentIds: jsonb("platform_document_ids").notNull().default([]),
   config: jsonb("config").notNull().default({}),
+  jobCache: jsonb("job_cache").notNull().default({}),
   totalCount: integer("total_count").notNull().default(0),
   successCount: integer("success_count").notNull().default(0),
   failedCount: integer("failed_count").notNull().default(0),

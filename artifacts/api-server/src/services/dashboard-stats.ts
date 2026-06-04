@@ -117,12 +117,20 @@ export async function computeDashboardStats(
     }
   };
 
-  const totalCases = await countCases(and(eq(casesTable.firmId, firmId), isNull(casesTable.deletedAt)), "totalCases");
-  const cashCases = await countCases(and(eq(casesTable.firmId, firmId), isNull(casesTable.deletedAt), eq(casesTable.purchaseMode, "cash")), "cashCases");
-  const loanCases = await countCases(and(eq(casesTable.firmId, firmId), isNull(casesTable.deletedAt), eq(casesTable.purchaseMode, "loan")), "loanCases");
-  const masterTitleCases = await countCases(and(eq(casesTable.firmId, firmId), isNull(casesTable.deletedAt), eq(casesTable.titleType, "master")), "masterTitleCases");
-  const individualTitleCases = await countCases(and(eq(casesTable.firmId, firmId), isNull(casesTable.deletedAt), eq(casesTable.titleType, "individual")), "individualTitleCases");
-  const strataTitleCases = await countCases(and(eq(casesTable.firmId, firmId), isNull(casesTable.deletedAt), eq(casesTable.titleType, "strata")), "strataTitleCases");
+  const approvedWhere = and(eq(casesTable.firmId, firmId), isNull(casesTable.deletedAt), eq(casesTable.approvalStatus, "approved"));
+  const pendingWhere = and(eq(casesTable.firmId, firmId), isNull(casesTable.deletedAt), eq(casesTable.approvalStatus, "pending_approval"));
+  const rejectedWhere = and(eq(casesTable.firmId, firmId), isNull(casesTable.deletedAt), eq(casesTable.approvalStatus, "rejected"));
+
+  const approvedCases = await countCases(approvedWhere, "approvedCases");
+  const pendingApprovalCases = await countCases(pendingWhere, "pendingApprovalCases");
+  const rejectedCases = await countCases(rejectedWhere, "rejectedCases");
+
+  const totalCases = approvedCases;
+  const cashCases = await countCases(and(approvedWhere, eq(casesTable.purchaseMode, "cash")), "cashCases");
+  const loanCases = await countCases(and(approvedWhere, eq(casesTable.purchaseMode, "loan")), "loanCases");
+  const masterTitleCases = await countCases(and(approvedWhere, eq(casesTable.titleType, "master")), "masterTitleCases");
+  const individualTitleCases = await countCases(and(approvedWhere, eq(casesTable.titleType, "individual")), "individualTitleCases");
+  const strataTitleCases = await countCases(and(approvedWhere, eq(casesTable.titleType, "strata")), "strataTitleCases");
 
   const completedCases = hasKeyDates
     ? (await (async () => {
@@ -140,8 +148,7 @@ export async function computeDashboardStats(
               ));
         try {
           const [row] = await base.where(and(
-            eq(casesTable.firmId, firmId),
-            isNull(casesTable.deletedAt),
+            approvedWhere,
             isNotNull(caseKeyDatesTable.completionDate),
           ));
           return toNumber0(row?.c);
@@ -193,7 +200,7 @@ export async function computeDashboardStats(
           ) ca1 ON TRUE
           LEFT JOIN users u ON u.id = ca1.user_id
           ${hasKeyDates ? sql`LEFT JOIN case_key_dates kd ON kd.case_id = c.id AND kd.firm_id = c.firm_id` : sql`LEFT JOIN LATERAL (SELECT NULL::date AS advice_to_bank_date, NULL::timestamptz AS completion_sla_activated_at) kd ON TRUE`}
-          WHERE c.firm_id = ${firmId} AND c.deleted_at IS NULL
+          WHERE c.firm_id = ${firmId} AND c.deleted_at IS NULL AND c.approval_status = 'approved'
           ORDER BY c.id, c.updated_at DESC
         ) x
         ORDER BY x.updated_at DESC
@@ -396,6 +403,7 @@ export async function computeDashboardStats(
             JOIN cases c ON c.id = kd.case_id AND c.firm_id = kd.firm_id
             WHERE kd.firm_id = ${firmId}
               AND c.deleted_at IS NULL
+              AND c.approval_status = 'approved'
               AND kd.completion_sla_activated_at IS NOT NULL
               AND kd.advice_to_bank_date IS NULL
               AND (now() - kd.completion_sla_activated_at) >= interval '72 hours'
@@ -451,6 +459,9 @@ export async function computeDashboardStats(
     degraded,
     warnings,
     unavailableFields,
+    approvedCases,
+    pendingApprovalCases,
+    rejectedCases,
     totalCases,
     activeCases,
     completedCases,

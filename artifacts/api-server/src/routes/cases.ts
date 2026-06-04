@@ -42,7 +42,6 @@ import { WORKFLOW_AUTOMATION_RULE_BY_STEP_KEY, deriveStatusFromRequirement } fro
 import { computeStampingSummary, deriveStampingItemStatus, type StampingItemInput } from "../lib/stampingProgress.js";
 import { checkFirmQuota } from "../lib/quota.js";
 import { resolveSmartFilename } from "../lib/smartFileNaming.js";
-import { allocateCaseReferenceNo } from "../lib/fileReferenceGenerator.js";
 import { computeDashboardStats } from "../services/dashboard-stats.js";
 import { computeMilestonesSummary } from "../services/milestones-summary.js";
 
@@ -112,6 +111,25 @@ async function getRoleName(r: DbConn, firmId: number, roleId: number | null | un
     .where(and(eq(rolesTable.id, roleId), eq(rolesTable.firmId, firmId)))
     .limit(1);
   return typeof row?.name === "string" ? row.name : "";
+}
+
+function normalizeCaseType(v: unknown): "developer_sales" | "subsale" | "perfection" | null {
+  const s = typeof v === "string" ? v.trim().toLowerCase() : "";
+  if (!s) return null;
+  if (s === "developer_sales" || s === "developer sales" || s === "primary market" || s === "primary_market") return "developer_sales";
+  if (s === "subsale" || s === "sub sale" || s === "sub_sale" || s === "secondary market" || s === "secondary_market") return "subsale";
+  if (s === "perfection") return "perfection";
+  return null;
+}
+
+function isCaseApprovalRoleName(roleName: string): boolean {
+  const n = roleName.trim().toLowerCase();
+  if (!n) return false;
+  if (n.includes("partner")) return true;
+  if (n === "account admin" || n === "account manager") return true;
+  if (n.includes("account") && n.includes("admin")) return true;
+  if (n.includes("account") && n.includes("manager")) return true;
+  return false;
 }
 
 async function canBypassCaseAssignment(r: DbConn, firmId: number, roleId: number | null | undefined): Promise<boolean> {
@@ -612,6 +630,7 @@ function keyDatePatchFromWorkflow(field: KeyDateField, ymd: string): Partial<Cas
 async function formatCaseDetail(r: DbConn, c: typeof casesTable.$inferSelect) {
   const proj = await (async () => {
     try {
+      if (!c.projectId) return null;
       const [row] = await r
         .select({ id: projectsTable.id, name: projectsTable.name })
         .from(projectsTable)
@@ -624,6 +643,7 @@ async function formatCaseDetail(r: DbConn, c: typeof casesTable.$inferSelect) {
 
   const dev = await (async () => {
     try {
+      if (!c.developerId) return null;
       const [row] = await r
         .select({ id: developersTable.id, name: developersTable.name })
         .from(developersTable)
@@ -750,6 +770,15 @@ async function formatCaseDetail(r: DbConn, c: typeof casesTable.$inferSelect) {
     developerStatus: c.developerStatus ?? null,
     developerStatusUpdatedAt: toIsoStringSafeOrNull(c.developerStatusUpdatedAt),
     caseType: c.caseType,
+    approvalStatus: (c as any).approvalStatus ?? null,
+    submittedBy: (c as any).submittedBy ?? null,
+    submittedAt: toIsoStringSafeOrNull((c as any).submittedAt),
+    approvedBy: (c as any).approvedBy ?? null,
+    approvedAt: toIsoStringSafeOrNull((c as any).approvedAt),
+    approvalNote: (c as any).approvalNote ?? null,
+    encumbrances: (c as any).encumbrances ?? null,
+    actingFor: (c as any).actingFor ?? null,
+    perfectionType: (c as any).perfectionType ?? null,
     parcelNo: c.parcelNo,
     spaDetails,
     propertyDetails,
@@ -2563,7 +2592,6 @@ router.get("/cases/export.csv", requireAuthHandler, requireFirmUserHandler, requ
 
 router.get("/cases", requireAuthHandler, requireFirmUserHandler, requirePermission("cases", "read") as RequestHandler, authed(async (req, res) => {
   try {
-    console.log("!!! TEMP_DEBUG: Fetching cases for firm:", req.firmId);
     const r = rdb(req);
     let hasKeyDates = await tableExists(r, "public.case_key_dates");
     let hasWorkflowSteps = await tableExists(r, "public.case_workflow_steps");
@@ -2656,6 +2684,21 @@ router.get("/cases", requireAuthHandler, requireFirmUserHandler, requirePermissi
   const assignedClerkId = parseIntOrUndef(req.query.assignedClerkId as any);
   const assignedToUserId = parseIntOrUndef(req.query.assignedToUserId as any);
   const overdueDays = overdueDaysRaw ? Number(overdueDaysRaw) : undefined;
+  const approvalStatusRaw = one(req.query.approvalStatus as any);
+  const approvalStatus = (() => {
+    const s = (approvalStatusRaw ?? "").trim().toLowerCase();
+    if (s === "pending_approval") return "pending_approval";
+    if (s === "rejected") return "rejected";
+    if (s === "needs_correction") return "needs_correction";
+    if (s === "approved") return "approved";
+    return "approved";
+  })();
+  const roleNameForApproval = await getRoleName(r, req.firmId!, req.roleId);
+  const canReviewApproval = isCaseApprovalRoleName(roleNameForApproval);
+  if (approvalStatus !== "approved" && !canReviewApproval) {
+    res.status(403).json({ error: "Forbidden" });
+    return;
+  }
 
   const spaStatusExpr = hasWorkflowSteps ? spaStatusSql() : sql<string>`'Pending'`;
   const loanStatusExpr = hasWorkflowSteps ? loanStatusSql() : sql<string | null>`CASE WHEN ${casesTable.purchaseMode} = 'loan' THEN 'Pending' ELSE NULL END`;
@@ -2709,9 +2752,14 @@ router.get("/cases", requireAuthHandler, requireFirmUserHandler, requirePermissi
     "discharge_date",
   ]);
 
-  const conditions = [eq(casesTable.firmId, req.firmId!), sql`${casesTable.deletedAt} IS NULL`];
+  const conditions = [
+    eq(casesTable.firmId, req.firmId!),
+    sql`${casesTable.deletedAt} IS NULL`,
+    eq(casesTable.approvalStatus, approvalStatus),
+  ];
   const canAssignAny = await hasRolePermission(r, req.firmId!, req.roleId, "cases", "assign_any");
-  if (!canAssignAny) {
+  const canAssignAnyEffective = canAssignAny || (approvalStatus !== "approved" && canReviewApproval);
+  if (!canAssignAnyEffective) {
     conditions.push(sql`EXISTS (
       SELECT 1
       FROM ${caseAssignmentsTable}
@@ -2881,6 +2929,12 @@ router.get("/cases", requireAuthHandler, requireFirmUserHandler, requirePermissi
     ORDER BY ${caseAssignmentsTable.assignedAt} DESC
     LIMIT 1
   )`;
+  const submittedByNameSql = sql<string | null>`(
+    SELECT ${usersTable.name}
+    FROM ${usersTable}
+    WHERE ${usersTable.id} = ${casesTable.submittedBy}
+    LIMIT 1
+  )`;
 
   let rowsQuery = r
     .select({
@@ -2910,6 +2964,15 @@ router.get("/cases", requireAuthHandler, requireFirmUserHandler, requirePermissi
       completionSlaStatus: completionSlaStatusExpr,
       completionSlaActivatedAt: completionSlaActivatedAtExpr,
       completionSlaHoursElapsed: completionSlaHoursElapsedExpr,
+      approvalStatus: casesTable.approvalStatus,
+      submittedAt: casesTable.submittedAt,
+      submittedBy: casesTable.submittedBy,
+      submittedByName: submittedByNameSql,
+      caseType: casesTable.caseType,
+      tenure: casesTable.tenure,
+      encumbrances: casesTable.encumbrances,
+      actingFor: casesTable.actingFor,
+      perfectionType: casesTable.perfectionType,
     })
     .from(casesTable)
     .leftJoin(projectsTable, eq(projectsTable.id, casesTable.projectId))
@@ -2969,6 +3032,15 @@ router.get("/cases", requireAuthHandler, requireFirmUserHandler, requirePermissi
       assignedClerkName: row.assignedClerkName ?? null,
       spaStatus: row.spaStatus,
       loanStatus: row.loanStatus ?? null,
+      approvalStatus: row.approvalStatus,
+      submittedAt: row.submittedAt ? new Date(row.submittedAt as any).toISOString() : null,
+      submittedBy: row.submittedBy ?? null,
+      submittedByName: row.submittedByName ?? null,
+      caseType: row.caseType,
+      tenure: row.tenure,
+      encumbrances: row.encumbrances ?? null,
+      actingFor: row.actingFor ?? null,
+      perfectionType: row.perfectionType ?? null,
       milestones: {
         spa_date: row.mSpaDate ?? null,
         spa_stamped_date: row.mSpaStampedDate ?? null,
@@ -3009,8 +3081,30 @@ router.get("/cases", requireAuthHandler, requireFirmUserHandler, requirePermissi
       const limit2 = params2.success ? (params2.data.limit ?? 20) : 20;
       const offset2 = (page2 - 1) * limit2;
 
-      const conditions2 = [eq(casesTable.firmId, req.firmId!), sql`${casesTable.deletedAt} IS NULL`];
-      if (!canAssignAnyFallback) {
+      const one2 = (v: string | string[] | undefined): string | undefined => Array.isArray(v) ? v[0] : v;
+      const approvalStatusRaw2 = one2(req.query.approvalStatus as any);
+      const approvalStatus2 = (() => {
+        const s = (approvalStatusRaw2 ?? "").trim().toLowerCase();
+        if (s === "pending_approval") return "pending_approval";
+        if (s === "rejected") return "rejected";
+        if (s === "needs_correction") return "needs_correction";
+        if (s === "approved") return "approved";
+        return "approved";
+      })();
+      const roleNameForApproval2 = await getRoleName(r, req.firmId!, req.roleId);
+      const canReviewApproval2 = isCaseApprovalRoleName(roleNameForApproval2);
+      if (approvalStatus2 !== "approved" && !canReviewApproval2) {
+        res.status(403).json({ error: "Forbidden" });
+        return;
+      }
+
+      const conditions2 = [
+        eq(casesTable.firmId, req.firmId!),
+        sql`${casesTable.deletedAt} IS NULL`,
+        eq(casesTable.approvalStatus, approvalStatus2),
+      ];
+      const canAssignAnyEffective2 = canAssignAnyFallback || (approvalStatus2 !== "approved" && canReviewApproval2);
+      if (!canAssignAnyEffective2) {
         conditions2.push(sql`EXISTS (
           SELECT 1
           FROM ${caseAssignmentsTable}
@@ -3046,6 +3140,14 @@ router.get("/cases", requireAuthHandler, requireFirmUserHandler, requirePermissi
           parcelNo: casesTable.parcelNo,
           createdAt: casesTable.createdAt,
           updatedAt: casesTable.updatedAt,
+          approvalStatus: casesTable.approvalStatus,
+          submittedAt: casesTable.submittedAt,
+          submittedBy: casesTable.submittedBy,
+          caseType: casesTable.caseType,
+          tenure: casesTable.tenure,
+          encumbrances: casesTable.encumbrances,
+          actingFor: casesTable.actingFor,
+          perfectionType: casesTable.perfectionType,
         })
         .from(casesTable)
         .where(and(...conditions2))
@@ -3074,6 +3176,15 @@ router.get("/cases", requireAuthHandler, requireFirmUserHandler, requirePermissi
         assignedClerkName: null,
         spaStatus: "Pending",
         loanStatus: row.purchaseMode === "loan" ? "Pending" : null,
+        approvalStatus: row.approvalStatus,
+        submittedAt: row.submittedAt ? new Date(row.submittedAt as any).toISOString() : null,
+        submittedBy: row.submittedBy ?? null,
+        submittedByName: null,
+        caseType: row.caseType,
+        tenure: row.tenure,
+        encumbrances: row.encumbrances ?? null,
+        actingFor: row.actingFor ?? null,
+        perfectionType: row.perfectionType ?? null,
         milestones: {
           spa_date: null,
           spa_stamped_date: null,
@@ -3112,11 +3223,16 @@ router.post("/cases", requireAuthHandler, requireFirmUserHandler, requirePermiss
     }, z.number().finite().nullable());
 
     const createCaseSchema = z.object({
-      projectId: z.coerce.number().int().positive(),
+      caseType: z.string().min(1),
+      projectId: z.coerce.number().int().positive().optional(),
       developerId: z.coerce.number().int().positive().optional(),
       referenceNo: z.string().trim().max(80).optional(),
       purchaseMode: z.string().optional().default("cash").transform((v) => v.trim().toLowerCase()),
-      titleType: z.string().optional().default("master").transform((v) => v.trim().toLowerCase()),
+      titleType: z.string().optional().transform((v) => v.trim().toLowerCase()),
+      landCondition: z.string().optional().transform((v) => v.trim().toLowerCase()),
+      encumbrances: z.string().optional().transform((v) => v.trim().toLowerCase()),
+      actingFor: z.string().optional().transform((v) => v.trim().toLowerCase()),
+      perfectionType: z.string().optional().transform((v) => v.trim().toLowerCase()),
       spaPrice: money.optional(),
       apdlPrice: money.optional(),
       developerDiscount: money.optional(),
@@ -3140,7 +3256,6 @@ router.post("/cases", requireAuthHandler, requireFirmUserHandler, requirePermiss
         email: z.string().nullish(),
         address: z.string().nullish().transform((v) => (typeof v === "string" ? v : "")).transform((v) => v.trim()),
       }).passthrough()).optional(),
-      caseType: z.string().optional(),
       parcelNo: z.string().optional(),
       spaDetails: z.record(z.string(), z.unknown()).optional(),
       propertyDetails: z.unknown().optional(),
@@ -3148,19 +3263,44 @@ router.post("/cases", requireAuthHandler, requireFirmUserHandler, requirePermiss
       loanDetails: z.unknown().optional(),
       companyDetails: z.record(z.string(), z.unknown()).optional(),
     }).passthrough().superRefine((v, ctx) => {
+      const normalizedCaseType = normalizeCaseType(v.caseType);
+      if (!normalizedCaseType) {
+        ctx.addIssue({ code: "custom", path: ["caseType"], message: "Invalid caseType" });
+        return;
+      }
       if (v.purchaseMode !== "loan" && v.purchaseMode !== "cash" && v.purchaseMode !== "other") {
         ctx.addIssue({ code: "custom", path: ["purchaseMode"], message: "Invalid purchaseMode" });
       }
-      const normalizedTitleType = normalizeTitleType(v.titleType);
-      if (!normalizedTitleType) {
-        ctx.addIssue({ code: "custom", path: ["titleType"], message: "Invalid titleType" });
+
+      const normalizedTitleType = v.titleType ? normalizeTitleType(v.titleType) : null;
+      const landCondition = (v.landCondition || "").trim().toLowerCase();
+      const encumbrances = (v.encumbrances || "").trim().toLowerCase();
+      const actingFor = (v.actingFor || "").trim().toLowerCase();
+      const perfectionType = (v.perfectionType || "").trim().toLowerCase();
+
+      if (normalizedCaseType === "developer_sales") {
+        if (!Number.isInteger(v.projectId) || Number(v.projectId) <= 0) {
+          ctx.addIssue({ code: "custom", path: ["projectId"], message: "Project is required" });
+        }
+        const tt = normalizedTitleType ?? normalizeTitleType("master");
+        if (!tt) ctx.addIssue({ code: "custom", path: ["titleType"], message: "Invalid titleType" });
+      } else if (normalizedCaseType === "subsale") {
+        if (!normalizedTitleType) ctx.addIssue({ code: "custom", path: ["titleType"], message: "Title Category is required" });
+        if (landCondition !== "freehold" && landCondition !== "leasehold") {
+          ctx.addIssue({ code: "custom", path: ["landCondition"], message: "Land Condition is required" });
+        }
+        if (encumbrances !== "no_encumbrance" && encumbrances !== "has_encumbrance" && encumbrances !== "to_confirm") {
+          ctx.addIssue({ code: "custom", path: ["encumbrances"], message: "Encumbrances is required" });
+        }
+        if (actingFor !== "vendor" && actingFor !== "purchaser" && actingFor !== "both") {
+          ctx.addIssue({ code: "custom", path: ["actingFor"], message: "Acting is required" });
+        }
+      } else if (normalizedCaseType === "perfection") {
+        if (perfectionType !== "transfer_and_charge" && perfectionType !== "transfer" && perfectionType !== "charge") {
+          ctx.addIssue({ code: "custom", path: ["perfectionType"], message: "Perfection Type is required" });
+        }
       }
-      const purchaserIds = v.purchaserIds ?? [];
-      const hasPurchaserIds = purchaserIds.length > 0;
-      const hasInlinePurchasers = Array.isArray(v.purchasers) && v.purchasers.some((p) => (p?.name ?? "").trim().length > 0);
-      if (!hasPurchaserIds && !hasInlinePurchasers) {
-        ctx.addIssue({ code: "custom", path: ["purchasers"], message: "At least one purchaser name is required" });
-      }
+
       if (v.apdlPrice !== null && v.apdlPrice !== undefined && v.spaPrice !== null && v.spaPrice !== undefined) {
         const expected = v.apdlPrice - (v.developerDiscount ?? 0) - (v.bumiputraDiscount ?? 0);
         if (Math.abs(expected - v.spaPrice) > 0.009) {
@@ -3203,11 +3343,15 @@ router.post("/cases", requireAuthHandler, requireFirmUserHandler, requirePermiss
     }
 
     const {
-      projectId,
+      caseType,
+      projectId: projectIdRaw,
       developerId: clientDeveloperId,
-      referenceNo: requestedRefRaw,
       purchaseMode,
       titleType,
+      landCondition,
+      encumbrances,
+      actingFor,
+      perfectionType,
       spaPrice,
       apdlPrice,
       developerDiscount,
@@ -3218,7 +3362,6 @@ router.post("/cases", requireAuthHandler, requireFirmUserHandler, requirePermiss
       purchasers,
       loanPartyType,
       borrowers: requestedBorrowers,
-      caseType,
       parcelNo,
       spaDetails,
       propertyDetails: propertyDetailsRaw,
@@ -3229,8 +3372,12 @@ router.post("/cases", requireAuthHandler, requireFirmUserHandler, requirePermiss
     const canAssignAny = await hasRolePermission(r, req.firmId!, req.roleId, "cases", "assign_any");
     const normalizedAssignedLawyerId = assignedLawyerId ?? undefined;
     const normalizedAssignedClerkId = assignedClerkId ?? undefined;
-    const normalizedCaseType = (typeof caseType === "string" && caseType.trim()) ? caseType.trim() : null;
+    const normalizedCaseType = normalizeCaseType(caseType);
     const effectiveAssignedLawyerId = canAssignAny ? (normalizedAssignedLawyerId ?? (req.userId ?? undefined)) : normalizedAssignedLawyerId;
+    if (!normalizedCaseType) {
+      res.status(400).json({ error: "Invalid caseType" });
+      return;
+    }
     if (!canAssignAny) {
       if (normalizedAssignedLawyerId !== undefined && normalizedAssignedLawyerId !== req.userId) {
         res.status(403).json({ error: "You cannot assign cases to other users" });
@@ -3242,41 +3389,67 @@ router.post("/cases", requireAuthHandler, requireFirmUserHandler, requirePermiss
       }
     }
 
-    // ── 1. Resolve project & developerId ──────────────────────────────────────
-    const [project] = await r.select().from(projectsTable).where(eq(projectsTable.id, projectId));
-    if (!project) {
-      res.status(404).json({ error: "Project not found" });
-      return;
-    }
-    if (project.firmId !== req.firmId) {
-      res.status(404).json({ error: "Project not found" });
-      return;
-    }
-    let developerId: number | null = null;
-    if (clientDeveloperId !== undefined) {
-      const [dev] = await r
-        .select({ id: developersTable.id })
-        .from(developersTable)
-        .where(and(eq(developersTable.firmId, req.firmId!), eq(developersTable.id, clientDeveloperId)))
-        .limit(1);
-      if (!dev) {
-        res.status(400).json({ error: "Developer not found" });
+    const landConditionNorm = typeof landCondition === "string" ? landCondition.trim().toLowerCase() : "";
+    const encumbrancesNorm = typeof encumbrances === "string" ? encumbrances.trim().toLowerCase() : "";
+    const actingForNorm = typeof actingFor === "string" ? actingFor.trim().toLowerCase() : "";
+    const perfectionTypeNorm = typeof perfectionType === "string" ? perfectionType.trim().toLowerCase() : "";
+
+    let effectiveProjectId: number | null = null;
+    let effectiveDeveloperId: number | null = null;
+    let effectiveTenure: "freehold" | "leasehold" = "freehold";
+    let effectiveIsEncumbered = false;
+
+    const normalizedTitleType = (() => {
+      if (normalizedCaseType === "developer_sales") {
+        const n = normalizeTitleType(titleType ?? "");
+        return n ?? "master";
+      }
+      if (normalizedCaseType === "subsale") {
+        const n = normalizeTitleType(titleType ?? "");
+        return n ?? "master";
+      }
+      return "master";
+    })();
+
+    if (normalizedCaseType === "developer_sales") {
+      if (!projectIdRaw) {
+        res.status(400).json({ error: "Project is required" });
         return;
       }
-      developerId = clientDeveloperId;
-    } else if (project.developerId) {
-      developerId = project.developerId;
+      const [project] = await r.select().from(projectsTable).where(eq(projectsTable.id, projectIdRaw));
+      if (!project || project.firmId !== req.firmId) {
+        res.status(404).json({ error: "Project not found" });
+        return;
+      }
+      effectiveProjectId = projectIdRaw;
+      if (clientDeveloperId !== undefined) {
+        const [dev] = await r
+          .select({ id: developersTable.id })
+          .from(developersTable)
+          .where(and(eq(developersTable.firmId, req.firmId!), eq(developersTable.id, clientDeveloperId)))
+          .limit(1);
+        if (!dev) {
+          res.status(400).json({ error: "Developer not found" });
+          return;
+        }
+        effectiveDeveloperId = clientDeveloperId;
+      } else if (project.developerId) {
+        effectiveDeveloperId = project.developerId;
+      }
+      if (!effectiveDeveloperId) {
+        res.status(422).json({ error: "Developer is required" });
+        return;
+      }
+      effectiveIsEncumbered = Boolean((project as any).isEncumbered ?? false);
+      const projectTenure = String((project as any).tenure ?? "").trim().toLowerCase();
+      effectiveTenure = projectTenure === "leasehold" ? "leasehold" : "freehold";
+    } else if (normalizedCaseType === "subsale") {
+      effectiveTenure = landConditionNorm === "leasehold" ? "leasehold" : "freehold";
+      effectiveIsEncumbered = encumbrancesNorm === "has_encumbrance";
+    } else {
+      effectiveTenure = "freehold";
+      effectiveIsEncumbered = false;
     }
-    if (!developerId) {
-      res.status(422).json({ error: "Developer is required" });
-      return;
-    }
-    const projectTitleType = normalizeTitleType(String((project as any).titleType ?? "")) ?? "master";
-    const projectIsEncumbered = Boolean((project as any).isEncumbered ?? false);
-    const projectTenure = (typeof (project as any).tenure === "string" && (String((project as any).tenure) === "leasehold" || String((project as any).tenure) === "freehold"))
-      ? String((project as any).tenure)
-      : "freehold";
-    const normalizedTitleType = normalizeTitleType(titleType) ?? projectTitleType;
 
     const usersToCheck = [normalizedAssignedLawyerId, ...(normalizedAssignedClerkId ? [normalizedAssignedClerkId] : [])].filter((x): x is number => Number.isFinite(x));
     if (usersToCheck.length > 0) {
@@ -3378,13 +3551,6 @@ router.post("/cases", requireAuthHandler, requireFirmUserHandler, requirePermiss
       }
     }
 
-    if (resolvedPurchaserIds.length === 0) {
-      res.status(400).json({ error: "At least one purchaser name is required" });
-      return;
-    }
-
-    const requestedRef = requestedRefRaw?.trim() || "";
-
     const normalizeBorrowers = (raw: unknown): Array<{ name: string; ic?: string; hp?: string; email?: string; address: string }> => {
       if (!Array.isArray(raw)) return [];
       const out: Array<{ name: string; ic?: string; hp?: string; email?: string; address: string }> = [];
@@ -3414,6 +3580,9 @@ router.post("/cases", requireAuthHandler, requireFirmUserHandler, requirePermiss
 
     if (isLoan) {
       if (effectiveLoanPartyType === "1st_party") {
+        if (resolvedPurchaserIds.length === 0) {
+          borrowersToStore = [];
+        } else {
         const rows = await r
           .select({ id: clientsTable.id, name: clientsTable.name, ic: clientsTable.icNo, phone: clientsTable.phone, email: clientsTable.email, address: clientsTable.address })
           .from(clientsTable)
@@ -3434,6 +3603,7 @@ router.post("/cases", requireAuthHandler, requireFirmUserHandler, requirePermiss
             return base as any;
           })
           .filter((b) => b.name.trim().length > 0);
+        }
       } else {
         borrowersToStore = normalizedRequestedBorrowers;
         if (borrowersToStore.length === 0 && loanDetailsRaw && typeof loanDetailsRaw === "object") {
@@ -3470,17 +3640,17 @@ router.post("/cases", requireAuthHandler, requireFirmUserHandler, requirePermiss
 
     const insertCaseBase = {
       firmId: req.firmId!,
-      projectId,
-      developerId,
+      projectId: effectiveProjectId,
+      developerId: effectiveDeveloperId,
       purchaseMode,
       titleType: normalizedTitleType,
-      isEncumbered: projectIsEncumbered,
-      tenure: projectTenure,
+      isEncumbered: effectiveIsEncumbered,
+      tenure: effectiveTenure,
       spaPrice: spaPriceToInsert,
       apdlPrice: apdlPriceToInsert,
       developerDiscount: developerDiscountToInsert,
       bumiputraDiscount: bumiputraDiscountToInsert,
-      status: "File Opened / SPA Pending Signing",
+      status: "Pending Approval",
       caseType: normalizedCaseType,
       parcelNo: parcelNo ?? null,
       spaDetails: spaDetails ? JSON.stringify(spaDetails) : null,
@@ -3490,6 +3660,12 @@ router.post("/cases", requireAuthHandler, requireFirmUserHandler, requirePermiss
       borrowers: borrowersToStore,
       companyDetails: companyDetails ? JSON.stringify(companyDetails) : null,
       createdBy: req.userId ?? null,
+      approvalStatus: "pending_approval",
+      submittedBy: req.userId ?? null,
+      submittedAt: new Date(),
+      encumbrances: normalizedCaseType === "subsale" ? (encumbrancesNorm || null) : null,
+      actingFor: normalizedCaseType === "subsale" ? (actingForNorm || null) : null,
+      perfectionType: normalizedCaseType === "perfection" ? (perfectionTypeNorm || null) : null,
     } satisfies Omit<typeof casesTable.$inferInsert, "referenceNo">;
 
     let ctxFirmId: string | null = null;
@@ -3517,52 +3693,14 @@ router.post("/cases", requireAuthHandler, requireFirmUserHandler, requirePermiss
       ctxIsFounder,
     }, "create route tenant context");
 
-    const assignedInitialsUserId = effectiveAssignedLawyerId ?? req.userId ?? null;
-    const normalizeInitials = (v: unknown): string => {
-      const raw = typeof v === "string" ? v.trim().toUpperCase() : "";
-      const clean = raw.replace(/[^A-Z0-9]/g, "").slice(0, 5);
-      return clean || "NA";
-    };
-
-    const { newCase, refNo } = await (r as any).transaction(async (tx: DbConn) => {
-      const initials = await (async (): Promise<string> => {
-        if (!assignedInitialsUserId) return "NA";
-        try {
-          const [u] = await tx
-            .select({ initials: usersTable.initials })
-            .from(usersTable)
-            .where(and(eq(usersTable.id, assignedInitialsUserId), eq(usersTable.firmId, req.firmId!)))
-            .limit(1);
-          return normalizeInitials(u?.initials);
-        } catch {
-          return "NA";
-        }
-      })();
-
-      const refNoResolved = await (async (): Promise<string> => {
-        if (requestedRef) return requestedRef;
-        try {
-          return await allocateCaseReferenceNo(tx as any, {
-            firmId: req.firmId!,
-            caseType: normalizedCaseType ?? "default",
-            initials,
-            defaultPattern: "{YY}/{SEQ:4}",
-          });
-        } catch (err: any) {
-          const code = typeof err?.code === "string" ? err.code : "";
-          if (code === "42P01" || code === "42703") {
-            return `LCP-${req.firmId}-${Date.now()}`;
-          }
-          throw err;
-        }
-      })();
-
-      const [created] = await tx
-        .insert(casesTable)
-        .values({ ...insertCaseBase, referenceNo: refNoResolved } satisfies typeof casesTable.$inferInsert)
-        .returning();
-      return { newCase: created as typeof casesTable.$inferSelect, refNo: refNoResolved };
-    });
+    const [newCase] = await r
+      .insert(casesTable)
+      .values({ ...insertCaseBase, referenceNo: null } satisfies typeof casesTable.$inferInsert)
+      .returning();
+    if (!newCase) {
+      res.status(500).json({ error: "Internal Server Error" });
+      return;
+    }
 
     for (let i = 0; i < resolvedPurchaserIds.length; i++) {
       await r.insert(casePurchasersTable).values({
@@ -3602,23 +3740,6 @@ router.post("/cases", requireAuthHandler, requireFirmUserHandler, requirePermiss
       }
     }
 
-    const workflowSteps = buildWorkflowSteps(purchaseMode === "loan" ? "loan" : "cash", normalizedTitleType);
-    if (workflowSteps.length > 0) {
-      const wfExists = await tableExists(r, "public.case_workflow_steps");
-      if (wfExists) {
-        await r.insert(caseWorkflowStepsTable).values(
-          workflowSteps.map((s) => ({
-            caseId: newCase.id,
-            stepKey: s.stepKey,
-            stepName: s.stepName,
-            stepOrder: s.stepOrder,
-            pathType: s.pathType,
-            status: "pending",
-          }))
-        );
-      }
-    }
-
     await writeAuditLog({
       firmId: req.firmId,
       actorId: req.userId,
@@ -3626,13 +3747,13 @@ router.post("/cases", requireAuthHandler, requireFirmUserHandler, requirePermiss
       action: "cases.create",
       entityType: "case",
       entityId: newCase.id,
-      detail: `referenceNo=${refNo} purchasersCreated=${purchasersCreated} purchasersReused=${purchasersReused}`,
+      detail: `referenceNo=null purchasersCreated=${purchasersCreated} purchasersReused=${purchasersReused} approvalStatus=pending_approval`,
       ipAddress: req.ip,
       userAgent: req.headers["user-agent"],
     });
 
     const detail = await formatCaseDetail(r, newCase);
-    res.status(201).json({ ...detail, purchasersCreated, purchasersReused });
+    res.status(201).json({ ...detail, purchasersCreated, purchasersReused, message: "Case submitted for approval." });
     return;
   } catch (e) {
     const pg = (() => {
@@ -3653,6 +3774,225 @@ router.post("/cases", requireAuthHandler, requireFirmUserHandler, requirePermiss
     res.status(500).json({ error: "Internal Server Error" });
     return;
   }
+}));
+
+const CaseApprovalParams = z.object({ caseId: z.coerce.number().int().positive() });
+
+router.patch("/cases/:caseId/approval", requireAuthHandler, requireFirmUserHandler, requirePermission("cases", "update") as RequestHandler, authed(async (req, res) => {
+  const r = req.rlsDb;
+  if (!r) {
+    res.status(500).json({ error: "Internal Server Error" });
+    return;
+  }
+  const params = CaseApprovalParams.safeParse(req.params);
+  if (!params.success) {
+    res.status(400).json({ error: params.error.message });
+    return;
+  }
+  const roleName = await getRoleName(r, req.firmId!, req.roleId);
+  if (!isCaseApprovalRoleName(roleName)) {
+    res.status(403).json({ error: "Forbidden" });
+    return;
+  }
+  const bodySchema = z.object({ approvalNote: z.string().trim().max(5000).optional().nullable() });
+  const body = bodySchema.safeParse(req.body);
+  if (!body.success) {
+    res.status(400).json({ error: "Validation failed" });
+    return;
+  }
+  const [c] = await r
+    .select({ id: casesTable.id, approvalStatus: casesTable.approvalStatus })
+    .from(casesTable)
+    .where(and(eq(casesTable.id, params.data.caseId), eq(casesTable.firmId, req.firmId!)))
+    .limit(1);
+  if (!c) {
+    res.status(404).json({ error: "Case not found" });
+    return;
+  }
+  if (c.approvalStatus !== "pending_approval") {
+    res.status(409).json({ error: "Case is not pending approval" });
+    return;
+  }
+  await r
+    .update(casesTable)
+    .set({ approvalNote: body.data.approvalNote ?? null })
+    .where(and(eq(casesTable.id, params.data.caseId), eq(casesTable.firmId, req.firmId!)));
+  await writeAuditLog({
+    firmId: req.firmId,
+    actorId: req.userId,
+    actorType: "firm_user",
+    action: "cases.approval.save",
+    entityType: "case",
+    entityId: params.data.caseId,
+    detail: "approval_note_updated",
+    ipAddress: req.ip,
+    userAgent: req.headers["user-agent"],
+  }, { db: req.rlsDb });
+  res.json({ ok: true });
+}));
+
+router.post("/cases/:caseId/approve", requireAuthHandler, requireFirmUserHandler, requirePermission("cases", "update") as RequestHandler, authed(async (req, res) => {
+  const r = req.rlsDb;
+  if (!r) {
+    res.status(500).json({ error: "Internal Server Error" });
+    return;
+  }
+  const params = CaseApprovalParams.safeParse(req.params);
+  if (!params.success) {
+    res.status(400).json({ error: params.error.message });
+    return;
+  }
+  const roleName = await getRoleName(r, req.firmId!, req.roleId);
+  if (!isCaseApprovalRoleName(roleName)) {
+    res.status(403).json({ error: "Forbidden" });
+    return;
+  }
+  const bodySchema = z.object({
+    referenceNo: z.string().trim().min(1).max(80),
+    approvalNote: z.string().trim().max(5000).optional().nullable(),
+  });
+  const body = bodySchema.safeParse(req.body);
+  if (!body.success) {
+    res.status(400).json({ error: "Validation failed", fields: body.error.flatten().fieldErrors });
+    return;
+  }
+  const [c] = await r
+    .select({
+      id: casesTable.id,
+      approvalStatus: casesTable.approvalStatus,
+      caseType: casesTable.caseType,
+      purchaseMode: casesTable.purchaseMode,
+      titleType: casesTable.titleType,
+    })
+    .from(casesTable)
+    .where(and(eq(casesTable.id, params.data.caseId), eq(casesTable.firmId, req.firmId!)))
+    .limit(1);
+  if (!c) {
+    res.status(404).json({ error: "Case not found" });
+    return;
+  }
+  if (c.approvalStatus !== "pending_approval") {
+    res.status(409).json({ error: "Case is not pending approval" });
+    return;
+  }
+  try {
+    await r
+      .update(casesTable)
+      .set({
+        approvalStatus: "approved",
+        referenceNo: body.data.referenceNo.trim(),
+        approvedBy: req.userId ?? null,
+        approvedAt: new Date(),
+        approvalNote: body.data.approvalNote ?? null,
+        status: "File Opened / SPA Pending Signing",
+      })
+      .where(and(eq(casesTable.id, params.data.caseId), eq(casesTable.firmId, req.firmId!)));
+  } catch (err: any) {
+    const code = typeof err?.code === "string" ? err.code : "";
+    if (code === "23505") {
+      res.status(409).json({ error: "Reference Number already exists in this firm" });
+      return;
+    }
+    throw err;
+  }
+
+  if (c.caseType === "developer_sales") {
+    const wfExists = await tableExists(r, "public.case_workflow_steps");
+    if (wfExists) {
+      const existing = await r
+        .select({ id: caseWorkflowStepsTable.id })
+        .from(caseWorkflowStepsTable)
+        .where(eq(caseWorkflowStepsTable.caseId, params.data.caseId))
+        .limit(1);
+      if (existing.length === 0) {
+        const workflowSteps = buildWorkflowSteps(c.purchaseMode === "loan" ? "loan" : "cash", normalizeTitleType(c.titleType) ?? "master");
+        if (workflowSteps.length > 0) {
+          await r.insert(caseWorkflowStepsTable).values(
+            workflowSteps.map((s) => ({
+              caseId: params.data.caseId,
+              stepKey: s.stepKey,
+              stepName: s.stepName,
+              stepOrder: s.stepOrder,
+              pathType: s.pathType,
+              status: "pending",
+            }))
+          );
+        }
+      }
+    }
+  }
+
+  await writeAuditLog({
+    firmId: req.firmId,
+    actorId: req.userId,
+    actorType: "firm_user",
+    action: "cases.approve",
+    entityType: "case",
+    entityId: params.data.caseId,
+    detail: `referenceNo=${body.data.referenceNo.trim()}`,
+    ipAddress: req.ip,
+    userAgent: req.headers["user-agent"],
+  }, { db: req.rlsDb });
+  res.json({ ok: true });
+}));
+
+router.post("/cases/:caseId/reject", requireAuthHandler, requireFirmUserHandler, requirePermission("cases", "update") as RequestHandler, authed(async (req, res) => {
+  const r = req.rlsDb;
+  if (!r) {
+    res.status(500).json({ error: "Internal Server Error" });
+    return;
+  }
+  const params = CaseApprovalParams.safeParse(req.params);
+  if (!params.success) {
+    res.status(400).json({ error: params.error.message });
+    return;
+  }
+  const roleName = await getRoleName(r, req.firmId!, req.roleId);
+  if (!isCaseApprovalRoleName(roleName)) {
+    res.status(403).json({ error: "Forbidden" });
+    return;
+  }
+  const bodySchema = z.object({ approvalNote: z.string().trim().min(1).max(5000) });
+  const body = bodySchema.safeParse(req.body);
+  if (!body.success) {
+    res.status(400).json({ error: "Validation failed", fields: body.error.flatten().fieldErrors });
+    return;
+  }
+  const [c] = await r
+    .select({ id: casesTable.id, approvalStatus: casesTable.approvalStatus })
+    .from(casesTable)
+    .where(and(eq(casesTable.id, params.data.caseId), eq(casesTable.firmId, req.firmId!)))
+    .limit(1);
+  if (!c) {
+    res.status(404).json({ error: "Case not found" });
+    return;
+  }
+  if (c.approvalStatus !== "pending_approval") {
+    res.status(409).json({ error: "Case is not pending approval" });
+    return;
+  }
+  await r
+    .update(casesTable)
+    .set({
+      approvalStatus: "rejected",
+      approvedBy: req.userId ?? null,
+      approvedAt: new Date(),
+      approvalNote: body.data.approvalNote.trim(),
+      status: "Rejected",
+    })
+    .where(and(eq(casesTable.id, params.data.caseId), eq(casesTable.firmId, req.firmId!)));
+  await writeAuditLog({
+    firmId: req.firmId,
+    actorId: req.userId,
+    actorType: "firm_user",
+    action: "cases.reject",
+    entityType: "case",
+    entityId: params.data.caseId,
+    detail: "rejected",
+    ipAddress: req.ip,
+    userAgent: req.headers["user-agent"],
+  }, { db: req.rlsDb });
+  res.json({ ok: true });
 }));
 
 router.get("/cases/:caseId", requireAuthHandler, requireFirmUserHandler, requirePermission("cases", "read") as RequestHandler, authed(async (req, res) => {

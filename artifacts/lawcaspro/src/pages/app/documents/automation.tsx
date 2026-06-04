@@ -24,6 +24,7 @@ import { RequestTimeoutError } from "@/lib/fetch-with-timeout";
 import {
   createGenerationJob,
   downloadGenerationJob,
+  finalizeGenerationJob,
   runNextGenerationJob,
   getGenerationJobStatus,
   type NormalizedGenerationJob,
@@ -791,7 +792,7 @@ export default function DocumentAutomationHub() {
             if (contentType.includes("application/json") || contentType.includes("text/")) {
               const body = (await resp.json().catch(() => null)) as any;
               const code = body?.error?.code ? String(body.error.code) : "";
-              if (code === "JOB_NOT_COMPLETED") {
+              if (code === "JOB_NOT_COMPLETED" || code === "JOB_NOT_FINALIZED") {
                 setFinalizingZip(true);
                 toast({
                   title: "Job is still finalizing, retrying download...",
@@ -800,6 +801,12 @@ export default function DocumentAutomationHub() {
                 try {
                   const st = await getGenerationJobStatus(jobId);
                   setJob(st);
+                  if (st.nextAction === "finalize" || String(st.status ?? "") === "finalizing") {
+                    try {
+                      const fin = await finalizeGenerationJob(jobId);
+                      setJob(fin);
+                    } catch {}
+                  }
                 } catch {}
                 await new Promise<void>((r) => setTimeout(r, 500 * attempt));
                 continue;
@@ -836,162 +843,132 @@ export default function DocumentAutomationHub() {
         throw new Error("Job is still finalizing. Please retry download.");
       };
 
-      const tick = async () => {
-        if (runNextInFlightRef.current) return;
-        const inFlightBefore = pollInFlightRef.current;
-        pollInFlightRef.current += 1;
-        runNextInFlightRef.current = true;
-        const startedAt = Date.now();
-        if (inFlightBefore > 0) {
-          emitDbg({
-            hypothesisId: "H1",
-            msg: "poll:overlap-detected",
-            data: { jobId, inFlightBefore },
-          });
-        }
-        emitDbg({
-          hypothesisId: "H1",
-          msg: "poll:tick-start",
-          data: { jobId, inFlight: pollInFlightRef.current },
-        });
-        try {
-          pollAbortRef.current?.abort();
-          const ctrl = new AbortController();
-          pollAbortRef.current = ctrl;
-          const next = await runNextGenerationJob(jobId, {
-            signal: ctrl.signal,
-          });
-          pollConsecutiveErrorRef.current = 0;
-          setJob(next);
-          const st = String(next.status ?? "");
-          const nextAction =
-            next.nextAction ??
-            (() => {
-              if (next.pendingCount > 0) return "run_next";
-              if ((next.runningCount ?? 0) > 0) return "run_next";
-              if (st === "completed" || st === "completed_with_errors") return "download";
-              if (st === "failed") return "stop";
-              return "run_next";
-            })();
-          emitDbg({
-            hypothesisId: "H3",
-            msg: "poll:tick-success",
-            data: {
-              jobId,
-              status: st,
-              successCount: next.successCount,
-              failedCount: next.failedCount,
-              pendingCount: next.pendingCount,
-              totalCount: next.totalCount,
-              ms: Date.now() - startedAt,
-            },
-          });
-          if (nextAction === "download") {
-            stopPolling();
-            setFinalizingZip(true);
-            await downloadWithRetry(jobId, next);
-            setFinalizingZip(false);
-            setBusy(false);
-            return;
-          }
-          if (nextAction === "stop" || st === "failed") {
-            stopPolling();
-            setJobError(next.errorSummary ?? "Generation failed");
-            setBusy(false);
+      const getApiErrorCode = (err: unknown): string => {
+        const r = asRecord(err) ?? {};
+        const direct = safeText((r as any).code);
+        if (direct) return direct;
+        const data = asRecord((r as any).data);
+        const errObj = data ? (asRecord((data as any).error) ?? null) : null;
+        return errObj ? safeText((errObj as any).code) : "";
+      };
+
+      const drive = async () => {
+        while (!stopped) {
+          if (runNextInFlightRef.current) return;
+          runNextInFlightRef.current = true;
+          const startedAt = Date.now();
+          try {
+            pollAbortRef.current?.abort();
+            const ctrl = new AbortController();
+            pollAbortRef.current = ctrl;
+            const next = await runNextGenerationJob(jobId, { signal: ctrl.signal });
+            pollConsecutiveErrorRef.current = 0;
+            setJob(next);
+            const st = String(next.status ?? "");
+            const nextAction =
+              next.nextAction ??
+              (() => {
+                if (next.pendingCount > 0) return "run_next";
+                if ((next.runningCount ?? 0) > 0) return "run_next";
+                if (st === "completed" || st === "completed_with_errors") return "download";
+                if (st === "finalizing") return "finalize";
+                if (st === "failed") return "stop";
+                return "run_next";
+              })();
             emitDbg({
               hypothesisId: "H3",
-              msg: "poll:job-failed",
-              data: { jobId, errorSummary: next.errorSummary ?? null },
+              msg: "drive:step-ok",
+              data: {
+                jobId,
+                status: st,
+                nextAction,
+                successCount: next.successCount,
+                failedCount: next.failedCount,
+                pendingCount: next.pendingCount,
+                totalCount: next.totalCount,
+                ms: Date.now() - startedAt,
+              },
             });
-          }
-        } catch (err) {
-          const shouldStatusCheck =
-            err instanceof RequestTimeoutError || isAbortLike(err);
-          if (shouldStatusCheck) {
-            try {
-              const st = await getGenerationJobStatus(jobId);
-              setJob(st);
-              const nextAction =
-                st.nextAction ??
-                (() => {
-                  const status = String(st.status ?? "");
-                  if (st.pendingCount > 0) return "run_next";
-                  if ((st.runningCount ?? 0) > 0) return "run_next";
-                  if (status === "completed" || status === "completed_with_errors") return "download";
-                  if (status === "failed") return "stop";
-                  return "run_next";
-                })();
-              if (nextAction === "download") {
-                stopPolling();
-                setFinalizingZip(true);
-                await downloadWithRetry(jobId, st);
-                setFinalizingZip(false);
-                setBusy(false);
-                return;
-              }
+
+            if (nextAction === "finalize") {
+              setFinalizingZip(true);
+              const fin = await finalizeGenerationJob(jobId, { signal: ctrl.signal });
+              setJob(fin);
+              continue;
+            }
+            if (nextAction === "download") {
+              stopPolling();
+              setFinalizingZip(true);
+              await downloadWithRetry(jobId, next);
+              setFinalizingZip(false);
+              setBusy(false);
               return;
-            } catch {}
+            }
+            if (nextAction === "stop" || st === "failed") {
+              stopPolling();
+              setJobError(next.errorSummary ?? "Generation failed");
+              setBusy(false);
+              return;
+            }
+            await new Promise<void>((r) => setTimeout(r, 250));
+          } catch (err) {
+            const code = getApiErrorCode(err);
+            if (code === "RUN_NEXT_IN_FLIGHT") {
+              await new Promise<void>((r) => setTimeout(r, 400));
+              continue;
+            }
+            const status =
+              err && typeof err === "object" && "status" in (err as any) && typeof (err as any).status === "number"
+                ? Number((err as any).status)
+                : null;
+            if (code === "JOB_NOT_FOUND" || status === 404) {
+              stopPolling();
+              setJobError("Job not found (JOB_NOT_FOUND). Please start a new job.");
+              setBusy(false);
+              return;
+            }
+            if (
+              err instanceof RequestTimeoutError ||
+              isAbortLike(err)
+            ) {
+              try {
+                const st = await getGenerationJobStatus(jobId);
+                setJob(st);
+                if (st.nextAction === "finalize" || String(st.status ?? "") === "finalizing") {
+                  try {
+                    setFinalizingZip(true);
+                    const fin = await finalizeGenerationJob(jobId);
+                    setJob(fin);
+                  } catch {}
+                }
+              } catch {}
+              await new Promise<void>((r) => setTimeout(r, 500));
+              continue;
+            }
+            if (status === 503 || status === 504) {
+              try {
+                const st = await getGenerationJobStatus(jobId);
+                setJob(st);
+              } catch {}
+              await new Promise<void>((r) => setTimeout(r, 800));
+              continue;
+            }
+            pollConsecutiveErrorRef.current += 1;
+            const msg = formatPollError(err);
+            setJobError(msg);
+            if (pollConsecutiveErrorRef.current >= 3) {
+              stopPolling();
+              setBusy(false);
+              return;
+            }
+            await new Promise<void>((r) => setTimeout(r, 700));
+          } finally {
+            runNextInFlightRef.current = false;
           }
-          pollConsecutiveErrorRef.current += 1;
-          const msg =
-            err instanceof RequestTimeoutError
-              ? "Request timed out. Checking job status..."
-              : formatPollError(err).includes("signal is aborted")
-                ? "Generation request was interrupted, checking job status..."
-                : formatPollError(err);
-          emitDbg({
-            hypothesisId: "H4",
-            msg: "poll:tick-error",
-            data: {
-              jobId,
-              consecutiveErrors: pollConsecutiveErrorRef.current,
-              errorMessage: msg,
-              errorType: typeof err,
-              ms: Date.now() - startedAt,
-            },
-          });
-          throw err;
-        } finally {
-          pollInFlightRef.current = Math.max(0, pollInFlightRef.current - 1);
-          runNextInFlightRef.current = false;
-          emitDbg({
-            hypothesisId: "H1",
-            msg: "poll:tick-end",
-            data: { jobId, inFlight: pollInFlightRef.current },
-          });
         }
       };
 
-      const scheduleNext = () => {
-        if (stopped) return;
-        pollTimerRef.current = window.setTimeout(() => {
-          tick()
-            .catch((err) => {
-              const msg = formatPollError(err);
-              setJobError(msg);
-              if (pollConsecutiveErrorRef.current >= 3) {
-                stopPolling();
-                setBusy(false);
-                emitDbg({
-                  hypothesisId: "H4",
-                  msg: "poll:stopped-after-max-errors",
-                  data: {
-                    jobId,
-                    consecutiveErrors: pollConsecutiveErrorRef.current,
-                    errorMessage: msg,
-                  },
-                });
-                return;
-              }
-            })
-            .finally(() => {
-              if (!stopped) scheduleNext();
-            });
-        }, 1200) as unknown as ReturnType<typeof window.setInterval>;
-      };
-
-      await tick();
-      scheduleNext();
+      await drive();
     } catch (err) {
       toastError(toast, err);
     } finally {

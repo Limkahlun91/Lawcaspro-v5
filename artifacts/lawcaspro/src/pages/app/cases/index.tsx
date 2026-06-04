@@ -12,11 +12,22 @@ import { Badge } from "@/components/ui/badge";
 import { Checkbox } from "@/components/ui/checkbox";
 import { useToast } from "@/hooks/use-toast";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Label } from "@/components/ui/label";
+import { Textarea } from "@/components/ui/textarea";
 import { QueryFallback } from "@/components/query-fallback";
 import { toastError } from "@/lib/toast-error";
 import { useAuth } from "@/lib/auth-context";
 import { DateOnlyInput } from "@/components/date-only-input";
 import { TemplateFolderPicker, type TemplateFolderPickerFolder, type TemplateFolderPickerTemplate } from "@/components/documents/TemplateFolderPicker";
+import {
+  createGenerationJob,
+  downloadGenerationJob,
+  finalizeGenerationJob,
+  getGenerationJobStatus,
+  runNextGenerationJob,
+  type NormalizedGenerationJob,
+} from "@/lib/document-generation-client";
 import { normalizeAssignedToUserIdParam } from "./case-filter-utils";
 
 async function apiFetchCsv(path: string): Promise<Blob> {
@@ -29,6 +40,13 @@ function fmtYmd(ymd: string | null | undefined): string {
   if (parts.length !== 3) return ymd;
   const [y, m, d] = parts;
   return `${d}/${m}/${y}`;
+}
+
+function fmtIsoToYmd(iso: string | null | undefined): string {
+  if (!iso) return "—";
+  const s = String(iso);
+  if (s.length < 10) return s;
+  return fmtYmd(s.slice(0, 10));
 }
 
 function normalizeMilestonePresence(raw: string | null): MilestonePresence {
@@ -66,6 +84,15 @@ export default function CasesList() {
   const myUserId = typeof (user as any)?.id === "number" ? (user as any).id : Number((user as any)?.id);
   const roleName = String((user as any)?.roleName ?? "");
   const isPartnerOrManager = roleName.toLowerCase().includes("partner") || roleName.toLowerCase().includes("manager");
+  const canApproveCases = (() => {
+    const n = roleName.trim().toLowerCase();
+    if (!n) return false;
+    if (n.includes("partner")) return true;
+    if (n === "account admin" || n === "account manager") return true;
+    if (n.includes("account") && n.includes("admin")) return true;
+    if (n.includes("account") && n.includes("manager")) return true;
+    return false;
+  })();
 
   const me = Number.isFinite(myUserId) && myUserId > 0 ? myUserId : null;
   const normalizeAssignedToUserId = (raw: string | null): string =>
@@ -104,6 +131,21 @@ export default function CasesList() {
   const [milestonePresence, setMilestonePresence] = useState<MilestonePresence>(() => initialPresence);
   const [page, setPage] = useState<number>(() => Number.isInteger(initialPage) && initialPage > 0 ? initialPage : 1);
   const [limit, setLimit] = useState<number>(() => Number.isInteger(initialLimit) && initialLimit > 0 ? initialLimit : 50);
+  const normalizeApprovalStatus = (raw: string | null): "approved" | "pending_approval" | "rejected" => {
+    const s = String(raw ?? "").trim().toLowerCase();
+    if (s === "pending_approval") return "pending_approval";
+    if (s === "rejected") return "rejected";
+    return "approved";
+  };
+  const [approvalStatus, setApprovalStatus] = useState<"approved" | "pending_approval" | "rejected">(() => normalizeApprovalStatus(sp.get("approvalStatus")));
+
+  useEffect(() => {
+    if (canApproveCases) return;
+    if (approvalStatus !== "approved") {
+      setApprovalStatus("approved");
+      setPage(1);
+    }
+  }, [canApproveCases, approvalStatus]);
 
 
   useEffect(() => {
@@ -124,6 +166,7 @@ export default function CasesList() {
     const nextProjectId = q.get("projectId") ?? "all";
     const nextPurchaseMode = q.get("purchaseMode") ?? "all";
     const nextTitleType = q.get("titleType") ?? "all";
+    const nextApprovalStatus = normalizeApprovalStatus(q.get("approvalStatus"));
     const legacy = parseLegacyMilestoneParams(q);
     const nextMilestone = legacy ? legacy.milestone : normalizeMilestoneKey(q.get("milestone"));
     const nextPresence = legacy ? legacy.presence : normalizeMilestonePresence(q.get("milestoneStatus") ?? q.get("milestonePresence") ?? q.get("status"));
@@ -137,6 +180,7 @@ export default function CasesList() {
     setProjectId((prev) => prev === nextProjectId ? prev : nextProjectId);
     setPurchaseMode((prev) => prev === nextPurchaseMode ? prev : nextPurchaseMode);
     setTitleType((prev) => prev === nextTitleType ? prev : nextTitleType);
+    setApprovalStatus((prev) => prev === nextApprovalStatus ? prev : nextApprovalStatus);
     setMilestoneFilter((prev) => prev === nextMilestone ? prev : nextMilestone);
     setMilestonePresence((prev) => prev === nextPresence ? prev : nextPresence);
     setPage((prev) => prev === (Number.isInteger(nextPage) && nextPage > 0 ? nextPage : 1) ? prev : (Number.isInteger(nextPage) && nextPage > 0 ? nextPage : 1));
@@ -162,6 +206,7 @@ export default function CasesList() {
     setIf("projectId", projectId);
     setIf("purchaseMode", purchaseMode);
     setIf("titleType", titleType);
+    if (approvalStatus !== "approved") nextSp.set("approvalStatus", approvalStatus);
     setIf("milestone", milestoneFilter === "all" ? undefined : milestoneFilter);
     if (milestoneFilter !== "all") {
       const status = milestonePresence === "completed" ? "done" : milestonePresence;
@@ -187,6 +232,7 @@ export default function CasesList() {
     milestonePresence,
     page,
     limit,
+    approvalStatus,
     currentQs,
     setLocation,
   ]);
@@ -205,6 +251,18 @@ export default function CasesList() {
     titleType: titleType !== "all" ? titleType : undefined,
     milestone: milestoneFilter !== "all" ? milestoneFilter : undefined,
     milestonePresence: milestoneFilter !== "all" ? milestonePresence : undefined,
+  });
+
+  const approvalListQuery = useQuery<{
+    data: any[];
+    total: number;
+    page: number;
+    limit: number;
+  }>({
+    queryKey: ["cases", "approval-list", approvalStatus, page, limit, search],
+    enabled: approvalStatus !== "approved" && canApproveCases,
+    queryFn: () => apiFetchJson(`/cases?approvalStatus=${encodeURIComponent(approvalStatus)}&page=${page}&limit=${limit}&search=${encodeURIComponent(search.trim())}`),
+    retry: false,
   });
 
   type CaseFilterOptionsResponse = {
@@ -241,10 +299,16 @@ export default function CasesList() {
   const { data: projectsRes } = useListProjects({ page: 1, limit: 200 }, { query: { staleTime: 5 * 60 * 1000 } });
   const projects = projectsRes?.data ?? [];
   const cases = response?.data ?? [];
-  const total = response?.total ?? 0;
+  const approvalCases = approvalStatus === "approved" ? cases : (approvalListQuery.data?.data ?? []);
+  const listIsLoading = approvalStatus === "approved" ? isLoading : approvalListQuery.isLoading;
+  const listIsError = approvalStatus === "approved" ? isError : approvalListQuery.isError;
+  const listError = approvalStatus === "approved" ? error : approvalListQuery.error;
+  const listRefetch = approvalStatus === "approved" ? refetch : approvalListQuery.refetch;
+  const listIsFetching = approvalStatus === "approved" ? isFetching : approvalListQuery.isFetching;
+  const total = approvalStatus === "approved" ? (response?.total ?? 0) : (approvalListQuery.data?.total ?? 0);
   const pageCount = Math.max(1, Math.ceil(total / limit));
   const safePage = Math.min(page, pageCount);
-  const caseById = useMemo(() => new Map(cases.map((c) => [c.id, c])), [cases]);
+  const caseById = useMemo(() => new Map(approvalCases.map((c) => [c.id, c])), [approvalCases]);
 
   useEffect(() => {
     if (safePage !== page) setPage(safePage);
@@ -269,29 +333,31 @@ export default function CasesList() {
   const activeChips = useMemo(() => {
     const chips: Array<{ key: string; label: string; onClear: () => void }> = [];
     if (search.trim()) chips.push({ key: "search", label: `Search: ${search.trim()}`, onClear: () => { setSearch(""); setPage(1); } });
-    if (spaStatus !== "all") chips.push({ key: "spaStatus", label: `SPA: ${spaStatus}`, onClear: () => { setSpaStatus("all"); setPage(1); } });
-    if (loanStatus !== "all") chips.push({ key: "loanStatus", label: `Loan: ${loanStatus}`, onClear: () => { setLoanStatus("all"); setPage(1); } });
-    if (milestoneFilter !== "all") {
-      const label = milestoneLabelByKey.get(milestoneFilter) ?? milestoneFilter;
-      const presenceLabel =
-        milestonePresence === "missing" ? "Missing"
-          : milestonePresence === "filled" ? "Filled"
-            : milestonePresence === "completed" ? "Done"
-              : "Pending";
-      chips.push({
-        key: "milestone",
-        label: `${label}: ${presenceLabel}`,
-        onClear: () => { setMilestoneFilter("all"); setMilestonePresence("filled"); setPage(1); },
-      });
+    if (approvalStatus === "approved") {
+      if (spaStatus !== "all") chips.push({ key: "spaStatus", label: `SPA: ${spaStatus}`, onClear: () => { setSpaStatus("all"); setPage(1); } });
+      if (loanStatus !== "all") chips.push({ key: "loanStatus", label: `Loan: ${loanStatus}`, onClear: () => { setLoanStatus("all"); setPage(1); } });
+      if (milestoneFilter !== "all") {
+        const label = milestoneLabelByKey.get(milestoneFilter) ?? milestoneFilter;
+        const presenceLabel =
+          milestonePresence === "missing" ? "Missing"
+            : milestonePresence === "filled" ? "Filled"
+              : milestonePresence === "completed" ? "Done"
+                : "Pending";
+        chips.push({
+          key: "milestone",
+          label: `${label}: ${presenceLabel}`,
+          onClear: () => { setMilestoneFilter("all"); setMilestonePresence("filled"); setPage(1); },
+        });
+      }
+      if (assignedToUserId !== "all") {
+        const me = Number.isFinite(myUserId) && myUserId > 0 ? myUserId : null;
+        const label = me && String(me) === assignedToUserId ? "Assigned: Me" : `Assigned: ${assignedToUserId}`;
+        chips.push({ key: "assignedToUserId", label, onClear: () => { setAssignedToUserId("all"); setPage(1); } });
+      }
+      if (lawyerId !== "all") chips.push({ key: "assignedLawyerId", label: `Lawyer: ${lawyerNameById.get(lawyerId) ?? lawyerId}`, onClear: () => { setLawyerId("all"); setPage(1); } });
+      if (clerkId !== "all") chips.push({ key: "assignedClerkId", label: `Clerk: ${clerkNameById.get(clerkId) ?? clerkId}`, onClear: () => { setClerkId("all"); setPage(1); } });
+      if (projectId !== "all") chips.push({ key: "projectId", label: `Project: ${projectNameById.get(projectId) ?? projectId}`, onClear: () => { setProjectId("all"); setPage(1); } });
     }
-    if (assignedToUserId !== "all") {
-      const me = Number.isFinite(myUserId) && myUserId > 0 ? myUserId : null;
-      const label = me && String(me) === assignedToUserId ? "Assigned: Me" : `Assigned: ${assignedToUserId}`;
-      chips.push({ key: "assignedToUserId", label, onClear: () => { setAssignedToUserId("all"); setPage(1); } });
-    }
-    if (lawyerId !== "all") chips.push({ key: "assignedLawyerId", label: `Lawyer: ${lawyerNameById.get(lawyerId) ?? lawyerId}`, onClear: () => { setLawyerId("all"); setPage(1); } });
-    if (clerkId !== "all") chips.push({ key: "assignedClerkId", label: `Clerk: ${clerkNameById.get(clerkId) ?? clerkId}`, onClear: () => { setClerkId("all"); setPage(1); } });
-    if (projectId !== "all") chips.push({ key: "projectId", label: `Project: ${projectNameById.get(projectId) ?? projectId}`, onClear: () => { setProjectId("all"); setPage(1); } });
     return chips;
   }, [
     search,
@@ -308,6 +374,7 @@ export default function CasesList() {
     projectNameById,
     milestoneLabelByKey,
     myUserId,
+    approvalStatus,
   ]);
 
   const [selectedCaseIds, setSelectedCaseIds] = useState<Set<number>>(new Set());
@@ -321,6 +388,69 @@ export default function CasesList() {
   const [isBatchGenerateOpen, setIsBatchGenerateOpen] = useState(false);
   const [selectedTemplateIds, setSelectedTemplateIds] = useState<Set<number>>(new Set());
   const [bulkGenerateDownloading, setBulkGenerateDownloading] = useState(false);
+  const [reviewCaseId, setReviewCaseId] = useState<number | null>(null);
+  const [reviewOpen, setReviewOpen] = useState(false);
+  const [reviewReferenceNo, setReviewReferenceNo] = useState("");
+  const [reviewNote, setReviewNote] = useState("");
+
+  const reviewCaseQuery = useQuery<Record<string, any>>({
+    queryKey: ["cases", "review", reviewCaseId],
+    enabled: reviewOpen && typeof reviewCaseId === "number",
+    queryFn: () => apiFetchJson(`/cases/${reviewCaseId}`),
+    retry: false,
+  });
+
+  const approveCaseMutation = useMutation({
+    mutationFn: async (vars: { caseId: number; referenceNo: string; approvalNote: string }) => {
+      return await apiFetchJson(`/cases/${vars.caseId}/approve`, {
+        method: "POST",
+        body: JSON.stringify({ referenceNo: vars.referenceNo, approvalNote: vars.approvalNote.trim() ? vars.approvalNote.trim() : null }),
+      });
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["cases", "approval-list"] });
+      queryClient.invalidateQueries({ queryKey: getListCasesQueryKey() });
+      setReviewOpen(false);
+      setReviewCaseId(null);
+      setReviewReferenceNo("");
+      setReviewNote("");
+      toast({ title: "Case approved" });
+    },
+    onError: (err) => toastError(toast, err, "Approve failed"),
+  });
+
+  const rejectCaseMutation = useMutation({
+    mutationFn: async (vars: { caseId: number; approvalNote: string }) => {
+      return await apiFetchJson(`/cases/${vars.caseId}/reject`, {
+        method: "POST",
+        body: JSON.stringify({ approvalNote: vars.approvalNote }),
+      });
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["cases", "approval-list"] });
+      queryClient.invalidateQueries({ queryKey: getListCasesQueryKey() });
+      setReviewOpen(false);
+      setReviewCaseId(null);
+      setReviewReferenceNo("");
+      setReviewNote("");
+      toast({ title: "Case rejected" });
+    },
+    onError: (err) => toastError(toast, err, "Reject failed"),
+  });
+
+  const saveApprovalNoteMutation = useMutation({
+    mutationFn: async (vars: { caseId: number; approvalNote: string }) => {
+      return await apiFetchJson(`/cases/${vars.caseId}/approval`, {
+        method: "PATCH",
+        body: JSON.stringify({ approvalNote: vars.approvalNote.trim() ? vars.approvalNote.trim() : null }),
+      });
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["cases", "approval-list"] });
+      toast({ title: "Saved" });
+    },
+    onError: (err) => toastError(toast, err, "Save failed"),
+  });
 
   useEffect(() => {
     setSelectedCaseIds(new Set());
@@ -334,7 +464,7 @@ export default function CasesList() {
     setSelectedTemplateIds(new Set());
   }, [sp.toString()]);
 
-  const currentPageIds = (response?.data ?? []).map((c) => c.id);
+  const currentPageIds = approvalStatus === "approved" ? (response?.data ?? []).map((c) => c.id) : [];
   const allOnPageSelected = currentPageIds.length > 0 && currentPageIds.every((id) => selectedCaseIds.has(id));
   const someOnPageSelected = currentPageIds.some((id) => selectedCaseIds.has(id));
 
@@ -401,6 +531,44 @@ export default function CasesList() {
     a.click();
     a.remove();
     URL.revokeObjectURL(url);
+  };
+
+  const caseTypeLabel = (v: string | null | undefined): string => {
+    const s = String(v ?? "").trim().toLowerCase();
+    if (s === "subsale") return "Subsale";
+    if (s === "perfection") return "Perfection";
+    return "Developer Sales";
+  };
+
+  const approvalStatusLabel = (v: string | null | undefined): string => {
+    const s = String(v ?? "").trim().toLowerCase();
+    if (s === "rejected") return "Rejected";
+    if (s === "pending_approval") return "Pending Approval";
+    return "Approved";
+  };
+
+  const buildCaseSummary = (c: any): string => {
+    const ct = String((c as any)?.caseType ?? "").trim().toLowerCase();
+    if (ct === "subsale") {
+      const parts = [
+        (c as any)?.titleType ? `Title: ${(c as any).titleType}` : null,
+        (c as any)?.landCondition ? `Land: ${(c as any).landCondition}` : null,
+        (c as any)?.encumbrances ? `Encumbrances: ${(c as any).encumbrances}` : null,
+        (c as any)?.actingFor ? `Acting: ${(c as any).actingFor}` : null,
+      ].filter(Boolean);
+      return parts.join(" · ") || "—";
+    }
+    if (ct === "perfection") {
+      const pt = String((c as any)?.perfectionType ?? "").trim();
+      return pt ? `Perfection: ${pt}` : "—";
+    }
+    const parts = [
+      (c as any)?.projectName ? `Project: ${(c as any).projectName}` : null,
+      (c as any)?.developerName ? `Developer: ${(c as any).developerName}` : null,
+      (c as any)?.titleType ? `Title: ${(c as any).titleType}` : null,
+      (c as any)?.purchaseMode ? `Mode: ${(c as any).purchaseMode}` : null,
+    ].filter(Boolean);
+    return parts.join(" · ") || "—";
   };
 
   if (mode === "create") return null;
@@ -472,192 +640,258 @@ export default function CasesList() {
             onChange={(e) => { setSearch(e.target.value); setPage(1); }}
           />
         </div>
+        {approvalStatus === "approved" ? (
+          <>
+            <Select value={projectId} onValueChange={(v) => { setProjectId(v); setPage(1); }}>
+              <SelectTrigger className="md:col-span-3">
+                <SelectValue placeholder="Project" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">All Projects</SelectItem>
+                {projects.map((p) => (
+                  <SelectItem key={p.id} value={String(p.id)}>{p.name}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
 
-        <Select value={projectId} onValueChange={(v) => { setProjectId(v); setPage(1); }}>
-          <SelectTrigger className="md:col-span-3">
-            <SelectValue placeholder="Project" />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="all">All Projects</SelectItem>
-            {projects.map((p) => (
-              <SelectItem key={p.id} value={String(p.id)}>{p.name}</SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
+            <Select value={spaStatus} onValueChange={(v) => { setSpaStatus(v); setPage(1); }}>
+              <SelectTrigger className="md:col-span-3">
+                <SelectValue placeholder="SPA Status" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">All SPA Status</SelectItem>
+                {spaStatuses.map((s) => (
+                  <SelectItem key={s} value={s}>{s}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
 
-        <Select value={spaStatus} onValueChange={(v) => { setSpaStatus(v); setPage(1); }}>
-          <SelectTrigger className="md:col-span-3">
-            <SelectValue placeholder="SPA Status" />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="all">All SPA Status</SelectItem>
-            {spaStatuses.map((s) => (
-              <SelectItem key={s} value={s}>{s}</SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
+            <Select value={loanStatus} onValueChange={(v) => { setLoanStatus(v); setPage(1); }}>
+              <SelectTrigger className="md:col-span-3">
+                <SelectValue placeholder="Loan Status" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">All Loan Status</SelectItem>
+                {loanStatuses.map((s) => (
+                  <SelectItem key={s} value={s}>{s}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
 
-        <Select value={loanStatus} onValueChange={(v) => { setLoanStatus(v); setPage(1); }}>
-          <SelectTrigger className="md:col-span-3">
-            <SelectValue placeholder="Loan Status" />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="all">All Loan Status</SelectItem>
-            {loanStatuses.map((s) => (
-              <SelectItem key={s} value={s}>{s}</SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
+            <Select value={lawyerId} onValueChange={(v) => { setLawyerId(v); setPage(1); }}>
+              <SelectTrigger className="md:col-span-3">
+                <SelectValue placeholder="Assigned Lawyer" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">All Lawyers</SelectItem>
+                {lawyers.map(l => <SelectItem key={l.id} value={l.id.toString()}>{l.name}</SelectItem>)}
+              </SelectContent>
+            </Select>
 
-        <Select value={lawyerId} onValueChange={(v) => { setLawyerId(v); setPage(1); }}>
-          <SelectTrigger className="md:col-span-3">
-            <SelectValue placeholder="Assigned Lawyer" />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="all">All Lawyers</SelectItem>
-            {lawyers.map(l => <SelectItem key={l.id} value={l.id.toString()}>{l.name}</SelectItem>)}
-          </SelectContent>
-        </Select>
-
-        <Select value={clerkId} onValueChange={(v) => { setClerkId(v); setPage(1); }}>
-          <SelectTrigger className="md:col-span-3">
-            <SelectValue placeholder="Assigned Clerk" />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="all">All Clerks</SelectItem>
-            {clerks.map(c => <SelectItem key={c.id} value={c.id.toString()}>{c.name}</SelectItem>)}
-          </SelectContent>
-        </Select>
+            <Select value={clerkId} onValueChange={(v) => { setClerkId(v); setPage(1); }}>
+              <SelectTrigger className="md:col-span-3">
+                <SelectValue placeholder="Assigned Clerk" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">All Clerks</SelectItem>
+                {clerks.map(c => <SelectItem key={c.id} value={c.id.toString()}>{c.name}</SelectItem>)}
+              </SelectContent>
+            </Select>
+          </>
+        ) : null}
       </div>
+
+      {canApproveCases ? (
+        <Tabs value={approvalStatus} onValueChange={(v) => { setApprovalStatus(normalizeApprovalStatus(v)); setPage(1); }}>
+          <TabsList>
+            <TabsTrigger value="approved">Approved Cases</TabsTrigger>
+            <TabsTrigger value="pending_approval">Pending Approval</TabsTrigger>
+            <TabsTrigger value="rejected">Rejected</TabsTrigger>
+          </TabsList>
+        </Tabs>
+      ) : null}
 
       <Card>
         <CardContent className="p-0">
-          {isLoading ? (
+          {listIsLoading ? (
             <div className="p-8 text-center text-slate-500">Loading cases...</div>
-          ) : isError ? (
+          ) : listIsError ? (
             <div className="p-6">
-              <QueryFallback title="Cases unavailable" error={error} onRetry={() => refetch()} isRetrying={isFetching} />
+              <QueryFallback title="Cases unavailable" error={listError} onRetry={() => listRefetch()} isRetrying={listIsFetching} />
             </div>
           ) : (
             <div className="overflow-x-auto">
               <table className="w-full text-sm text-left">
-                <thead className="text-xs text-slate-500 uppercase bg-slate-50 border-b border-slate-200">
-                  <tr>
-                    <th className="px-4 py-3 font-semibold">
-                      <Checkbox
-                        checked={allOnPageSelected ? true : (someOnPageSelected ? "indeterminate" : false)}
-                        onCheckedChange={toggleSelectAllPage}
-                      />
-                    </th>
-                    <th className="px-6 py-3 font-semibold">Our Reference</th>
-                    <th className="px-6 py-3 font-semibold">Client / Purchaser</th>
-                    <th className="px-6 py-3 font-semibold">Project / Property</th>
-                    <th className="px-6 py-3 font-semibold">Assigned</th>
-                    <th className="px-6 py-3 font-semibold">SPA Status</th>
-                    <th className="px-6 py-3 font-semibold">Loan Status</th>
-                    <th className="px-6 py-3 font-semibold">Milestones</th>
-                    <th className="px-6 py-3 font-semibold">Updated</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-100">
-                  {cases.map((c) => (
-                    <tr key={c.id} className="hover:bg-slate-50/50">
-                      <td className="px-4 py-4">
-                        <Checkbox
-                          checked={selectedCaseIds.has(c.id)}
-                          onCheckedChange={() => toggleSelectOne(c.id)}
-                        />
-                      </td>
-                      <td className="px-6 py-4">
-                        <Link
-                          href={`/app/cases/${c.id}?returnTo=${encodeURIComponent(location)}`}
-                          onClick={(e) => {
-                            if (isPartnerOrManager) return;
-                            if (!Number.isFinite(myUserId)) return;
-                            const assignedLawyerId = typeof (c as any).assignedLawyerId === "number" ? (c as any).assignedLawyerId : Number((c as any).assignedLawyerId);
-                            const assignedClerkId = typeof (c as any).assignedClerkId === "number" ? (c as any).assignedClerkId : Number((c as any).assignedClerkId);
-                            const ok = myUserId === assignedLawyerId || myUserId === assignedClerkId;
-                            if (!ok) {
-                              e.preventDefault();
-                              toast({
-                                title: "Access Denied",
-                                description: "Access Denied: You are not assigned to this case. You can only view its basic info here.",
-                                variant: "destructive",
-                              });
-                            }
-                          }}
-                        >
-                          <span className="font-medium text-slate-900 hover:text-amber-600 cursor-pointer transition-colors">
-                            {c.referenceNo}
-                          </span>
-                        </Link>
-                      </td>
-                      <td className="px-6 py-4 text-slate-700">
-                        {c.clientName ?? "—"}
-                      </td>
-                      <td className="px-6 py-4">
-                        <div className="font-medium text-slate-800">{c.projectName}</div>
-                        <div className="text-slate-500 text-xs mt-0.5">
-                          {c.property ? c.property : c.developerName}
-                        </div>
-                      </td>
-                      <td className="px-6 py-4">
-                        <div className="text-slate-800">{c.assignedLawyerName ?? "—"}</div>
-                        <div className="text-slate-500 text-xs mt-0.5">{c.assignedClerkName ?? "—"}</div>
-                      </td>
-                      <td className="px-6 py-4">
-                        <span className="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-semibold bg-slate-100 text-slate-700">
-                          {c.spaStatus}
-                        </span>
-                      </td>
-                      <td className="px-6 py-4">
-                        <span className="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-semibold bg-slate-100 text-slate-700">
-                          {c.loanStatus ?? "N/A"}
-                        </span>
-                      </td>
-                      <td className="px-6 py-4">
-                        <div className="text-xs text-slate-700">
-                          <span className="font-semibold">SPA</span>: {fmtYmd(c.milestones.spa_date)}
-                          <span className="text-slate-400"> · </span>
-                          <span className="font-semibold">Stamped</span>: {fmtYmd(c.milestones.spa_stamped_date)}
-                        </div>
-                        <div className="text-xs text-slate-500 mt-0.5">
-                          <span className="font-semibold">LOF</span>: {fmtYmd(c.milestones.letter_of_offer_date)}
-                          <span className="text-slate-400"> · </span>
-                          <span className="font-semibold">Loan</span>: {fmtYmd(c.milestones.loan_docs_signed_date)}
-                          <span className="text-slate-400"> · </span>
-                          <span className="font-semibold">Comp</span>: {fmtYmd(c.milestones.completion_date)}
-                        </div>
-                        {(c as any).completionSla?.status ? (
-                          <div className="mt-1">
-                            <span
-                              className={[
-                                "inline-flex items-center px-2 py-0.5 rounded text-[11px] font-semibold",
-                                (c as any).completionSla.status === "overdue"
-                                  ? "bg-red-100 text-red-700"
-                                  : (c as any).completionSla.status === "soon"
-                                    ? "bg-amber-100 text-amber-800"
-                                    : "bg-emerald-100 text-emerald-800",
-                              ].join(" ")}
+                {approvalStatus === "approved" ? (
+                  <>
+                    <thead className="text-xs text-slate-500 uppercase bg-slate-50 border-b border-slate-200">
+                      <tr>
+                        <th className="px-4 py-3 font-semibold">
+                          <Checkbox
+                            checked={allOnPageSelected ? true : (someOnPageSelected ? "indeterminate" : false)}
+                            onCheckedChange={toggleSelectAllPage}
+                          />
+                        </th>
+                        <th className="px-6 py-3 font-semibold">Our Reference</th>
+                        <th className="px-6 py-3 font-semibold">Client / Purchaser</th>
+                        <th className="px-6 py-3 font-semibold">Project / Property</th>
+                        <th className="px-6 py-3 font-semibold">Assigned</th>
+                        <th className="px-6 py-3 font-semibold">SPA Status</th>
+                        <th className="px-6 py-3 font-semibold">Loan Status</th>
+                        <th className="px-6 py-3 font-semibold">Milestones</th>
+                        <th className="px-6 py-3 font-semibold">Updated</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                      {cases.map((c) => (
+                        <tr key={c.id} className="hover:bg-slate-50/50">
+                          <td className="px-4 py-4">
+                            <Checkbox
+                              checked={selectedCaseIds.has(c.id)}
+                              onCheckedChange={() => toggleSelectOne(c.id)}
+                            />
+                          </td>
+                          <td className="px-6 py-4">
+                            <Link
+                              href={`/app/cases/${c.id}?returnTo=${encodeURIComponent(location)}`}
+                              onClick={(e) => {
+                                if (isPartnerOrManager) return;
+                                if (!Number.isFinite(myUserId)) return;
+                                const assignedLawyerId = typeof (c as any).assignedLawyerId === "number" ? (c as any).assignedLawyerId : Number((c as any).assignedLawyerId);
+                                const assignedClerkId = typeof (c as any).assignedClerkId === "number" ? (c as any).assignedClerkId : Number((c as any).assignedClerkId);
+                                const ok = myUserId === assignedLawyerId || myUserId === assignedClerkId;
+                                if (!ok) {
+                                  e.preventDefault();
+                                  toast({
+                                    title: "Access Denied",
+                                    description: "Access Denied: You are not assigned to this case. You can only view its basic info here.",
+                                    variant: "destructive",
+                                  });
+                                }
+                              }}
                             >
-                              Advice SLA: {(c as any).completionSla.status === "overdue" ? "Overdue" : (c as any).completionSla.status === "soon" ? "Soon" : "Due"}
+                              <span className="font-medium text-slate-900 hover:text-amber-600 cursor-pointer transition-colors">
+                                {c.referenceNo}
+                              </span>
+                            </Link>
+                          </td>
+                          <td className="px-6 py-4 text-slate-700">
+                            {c.clientName ?? "—"}
+                          </td>
+                          <td className="px-6 py-4">
+                            <div className="font-medium text-slate-800">{c.projectName}</div>
+                            <div className="text-slate-500 text-xs mt-0.5">
+                              {c.property ? c.property : c.developerName}
+                            </div>
+                          </td>
+                          <td className="px-6 py-4">
+                            <div className="text-slate-800">{c.assignedLawyerName ?? "—"}</div>
+                            <div className="text-slate-500 text-xs mt-0.5">{c.assignedClerkName ?? "—"}</div>
+                          </td>
+                          <td className="px-6 py-4">
+                            <span className="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-semibold bg-slate-100 text-slate-700">
+                              {c.spaStatus}
                             </span>
-                          </div>
-                        ) : null}
-                      </td>
-                      <td className="px-6 py-4 text-slate-600 text-xs">
-                        {fmtYmd(c.updatedAt.slice(0, 10))}
-                      </td>
-                    </tr>
-                  ))}
-                  {cases.length === 0 && (
-                    <tr>
-                      <td colSpan={9} className="px-6 py-8 text-center text-slate-500">
-                        No cases found.
-                      </td>
-                    </tr>
-                  )}
-                </tbody>
+                          </td>
+                          <td className="px-6 py-4">
+                            <span className="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-semibold bg-slate-100 text-slate-700">
+                              {c.loanStatus ?? "N/A"}
+                            </span>
+                          </td>
+                          <td className="px-6 py-4">
+                            <div className="text-xs text-slate-700">
+                              <span className="font-semibold">SPA</span>: {fmtYmd(c.milestones.spa_date)}
+                              <span className="text-slate-400"> · </span>
+                              <span className="font-semibold">Stamped</span>: {fmtYmd(c.milestones.spa_stamped_date)}
+                            </div>
+                            <div className="text-xs text-slate-500 mt-0.5">
+                              <span className="font-semibold">LOF</span>: {fmtYmd(c.milestones.letter_of_offer_date)}
+                              <span className="text-slate-400"> · </span>
+                              <span className="font-semibold">Loan</span>: {fmtYmd(c.milestones.loan_docs_signed_date)}
+                              <span className="text-slate-400"> · </span>
+                              <span className="font-semibold">Comp</span>: {fmtYmd(c.milestones.completion_date)}
+                            </div>
+                            {(c as any).completionSla?.status ? (
+                              <div className="mt-1">
+                                <span
+                                  className={[
+                                    "inline-flex items-center px-2 py-0.5 rounded text-[11px] font-semibold",
+                                    (c as any).completionSla.status === "overdue"
+                                      ? "bg-red-100 text-red-700"
+                                      : (c as any).completionSla.status === "soon"
+                                        ? "bg-amber-100 text-amber-800"
+                                        : "bg-emerald-100 text-emerald-800",
+                                  ].join(" ")}
+                                >
+                                  Advice SLA: {(c as any).completionSla.status === "overdue" ? "Overdue" : (c as any).completionSla.status === "soon" ? "Soon" : "Due"}
+                                </span>
+                              </div>
+                            ) : null}
+                          </td>
+                          <td className="px-6 py-4 text-slate-600 text-xs">
+                            {fmtYmd(c.updatedAt.slice(0, 10))}
+                          </td>
+                        </tr>
+                      ))}
+                      {cases.length === 0 && (
+                        <tr>
+                          <td colSpan={9} className="px-6 py-8 text-center text-slate-500">
+                            No cases found.
+                          </td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </>
+                ) : (
+                  <>
+                    <thead className="text-xs text-slate-500 uppercase bg-slate-50 border-b border-slate-200">
+                      <tr>
+                        <th className="px-6 py-3 font-semibold">Submitted Date</th>
+                        <th className="px-6 py-3 font-semibold">Submitted By</th>
+                        <th className="px-6 py-3 font-semibold">Case Type</th>
+                        <th className="px-6 py-3 font-semibold">Case Summary</th>
+                        <th className="px-6 py-3 font-semibold">Status</th>
+                        <th className="px-6 py-3 font-semibold">Action</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                      {approvalCases.map((c: any) => (
+                        <tr key={c.id} className="hover:bg-slate-50/50">
+                          <td className="px-6 py-4 text-slate-600 text-xs">{fmtIsoToYmd((c as any).submittedAt)}</td>
+                          <td className="px-6 py-4 text-slate-700">{(c as any).submittedByName ?? (c as any).submittedBy ?? "—"}</td>
+                          <td className="px-6 py-4 text-slate-700">{caseTypeLabel((c as any).caseType)}</td>
+                          <td className="px-6 py-4 text-slate-700">{buildCaseSummary(c)}</td>
+                          <td className="px-6 py-4">
+                            <span className="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-semibold bg-slate-100 text-slate-700">
+                              {approvalStatusLabel((c as any).approvalStatus ?? approvalStatus)}
+                            </span>
+                          </td>
+                          <td className="px-6 py-4">
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              onClick={() => {
+                                setReviewCaseId(c.id);
+                                setReviewOpen(true);
+                                setReviewReferenceNo(String((c as any).referenceNo ?? ""));
+                                setReviewNote(String((c as any).approvalNote ?? ""));
+                              }}
+                            >
+                              Review
+                            </Button>
+                          </td>
+                        </tr>
+                      ))}
+                      {approvalCases.length === 0 && (
+                        <tr>
+                          <td colSpan={6} className="px-6 py-8 text-center text-slate-500">
+                            No cases found.
+                          </td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </>
+                )}
               </table>
             </div>
           )}
@@ -684,7 +918,7 @@ export default function CasesList() {
         </div>
       </div>
 
-      {selectedCaseIds.size > 0 && (
+      {approvalStatus === "approved" && selectedCaseIds.size > 0 && (
         <div className="fixed inset-x-0 bottom-0 z-40">
           <div className="mx-auto w-full max-w-6xl px-4 pb-4">
             <Card className="shadow-lg border-slate-200">
@@ -733,171 +967,310 @@ export default function CasesList() {
         </div>
       )}
 
-      <Dialog open={isBatchStatusOpen} onOpenChange={setIsBatchStatusOpen}>
-        <DialogContent>
+      {approvalStatus === "approved" ? (
+        <>
+          <Dialog open={isBatchStatusOpen} onOpenChange={setIsBatchStatusOpen}>
+            <DialogContent>
+              <DialogHeader>
+                <DialogTitle>Batch Update Status</DialogTitle>
+                <DialogDescription>Update workflow status for multiple cases at once.</DialogDescription>
+              </DialogHeader>
+
+              <div className="space-y-4">
+                <div className="space-y-1">
+                  <div className="text-sm font-medium">Module</div>
+                  <Select
+                    value={batchStatusModule}
+                    onValueChange={(v: "spa" | "loan") => {
+                      setBatchStatusModule(v);
+                      setBatchStatusValue("");
+                    }}
+                  >
+                    <SelectTrigger>
+                      <SelectValue placeholder="Select module" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="spa">SPA Status</SelectItem>
+                      <SelectItem value="loan">Loan Status</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+
+                <div className="space-y-1">
+                  <div className="text-sm font-medium">New Status</div>
+                  <Select value={batchStatusValue} onValueChange={setBatchStatusValue}>
+                    <SelectTrigger>
+                      <SelectValue placeholder="Select status" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {(batchStatusModule === "spa" ? spaStatuses : loanStatuses)
+                        .filter((s) => s !== "Pending")
+                        .map((s) => (
+                          <SelectItem key={s} value={s}>{s}</SelectItem>
+                        ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+              </div>
+
+              <DialogFooter>
+                <Button variant="outline" onClick={() => setIsBatchStatusOpen(false)}>Cancel</Button>
+                <Button
+                  disabled={!batchStatusValue || bulkStatusMutation.isPending}
+                  onClick={() => {
+                    const ids = Array.from(selectedCaseIds);
+                    const filtered = batchStatusModule === "loan"
+                      ? ids.filter((id) => String((caseById.get(id) as any)?.purchaseMode ?? "").trim().toLowerCase() === "loan")
+                      : ids;
+                    if (filtered.length === 0) {
+                      toast({ title: "No eligible cases selected", description: "Select at least one matching case for this module.", variant: "destructive" });
+                      return;
+                    }
+                    bulkStatusMutation.mutate({ module: batchStatusModule, status: batchStatusValue, caseIds: filtered });
+                  }}
+                >
+                  Update
+                </Button>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
+
+          <Dialog open={isBatchDateOpen} onOpenChange={setIsBatchDateOpen}>
+            <DialogContent>
+              <DialogHeader>
+                <DialogTitle>Batch Update Date</DialogTitle>
+                <DialogDescription>Update a key date for multiple cases at once.</DialogDescription>
+              </DialogHeader>
+
+              <div className="space-y-4">
+                <div className="space-y-1">
+                  <div className="text-sm font-medium">Field</div>
+                  <Select value={batchDateField} onValueChange={setBatchDateField}>
+                    <SelectTrigger>
+                      <SelectValue placeholder="Select field" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {milestoneOptions.map((m) => (
+                        <SelectItem key={m.key} value={m.key}>{m.label}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+
+                <div className="space-y-1">
+                  <div className="text-sm font-medium">Date</div>
+                  <DateOnlyInput valueYmd={batchDateValue} onChangeYmd={setBatchDateValue} />
+                </div>
+              </div>
+
+              <DialogFooter>
+                <Button variant="outline" onClick={() => setIsBatchDateOpen(false)}>Cancel</Button>
+                <Button
+                  disabled={!batchDateField || !batchDateValue || bulkKeyDatesMutation.isPending}
+                  onClick={() => {
+                    const ids = Array.from(selectedCaseIds);
+                    const loanOnly = new Set([
+                      "letter_of_offer_date",
+                      "letter_of_offer_stamped_date",
+                      "loan_docs_pending_date",
+                      "loan_docs_signed_date",
+                      "acting_letter_issued_date",
+                      "loan_sent_bank_execution_date",
+                      "loan_bank_executed_date",
+                      "bank_lu_received_date",
+                      "advice_to_bank_date",
+                      "bank_lu_forward_to_developer_on",
+                      "developer_lu_received_on",
+                      "developer_lu_dated",
+                      "register_poa_on",
+                      "letter_disclaimer_dated",
+                      "loan_agreement_stamped_date",
+                      "bank_1st_release_on",
+                      "discharge_date",
+                      "caveat_lodged_date",
+                      "first_advice_date",
+                      "dev_informed_redemption_date",
+                      "request_discharge_date",
+                      "charge_date",
+                      "presentation_date",
+                      "second_advice_date",
+                      "mot_received_date",
+                      "mot_signed_date",
+                      "mot_stamped_date",
+                      "mot_registered_date",
+                      "noa_served_on",
+                    ]);
+                    const filtered = loanOnly.has(batchDateField)
+                      ? ids.filter((id) => String((caseById.get(id) as any)?.purchaseMode ?? "").trim().toLowerCase() === "loan")
+                      : ids;
+                    if (filtered.length === 0) {
+                      toast({ title: "No eligible cases selected", description: "Select at least one matching case for this field.", variant: "destructive" });
+                      return;
+                    }
+                    bulkKeyDatesMutation.mutate({ field: batchDateField, date: batchDateValue, caseIds: filtered });
+                  }}
+                >
+                  Update
+                </Button>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
+
+          <BatchGenerateDialog
+            open={isBatchGenerateOpen}
+            onOpenChange={(v) => {
+              setIsBatchGenerateOpen(v);
+              if (!v) setSelectedTemplateIds(new Set());
+            }}
+            selectedCaseIds={selectedCaseIds}
+            caseById={caseById}
+            selectedTemplateIds={selectedTemplateIds}
+            setSelectedTemplateIds={setSelectedTemplateIds}
+            bulkZipDownloading={bulkZipDownloading}
+            setBulkZipDownloading={setBulkZipDownloading}
+            bulkGenerateDownloading={bulkGenerateDownloading}
+            setBulkGenerateDownloading={setBulkGenerateDownloading}
+            onSuccess={() => {
+              setSelectedCaseIds(new Set());
+            }}
+            toast={toast}
+          />
+        </>
+      ) : null}
+
+      <Dialog
+        open={reviewOpen}
+        onOpenChange={(open) => {
+          setReviewOpen(open);
+          if (!open) {
+            setReviewCaseId(null);
+            setReviewReferenceNo("");
+            setReviewNote("");
+          }
+        }}
+      >
+        <DialogContent className="max-w-[900px] w-[95vw]">
           <DialogHeader>
-            <DialogTitle>Batch Update Status</DialogTitle>
-            <DialogDescription>Update workflow status for multiple cases at once.</DialogDescription>
+            <DialogTitle>Case Approval Review</DialogTitle>
+            <DialogDescription>Review the case submission and approve or reject.</DialogDescription>
           </DialogHeader>
 
-          <div className="space-y-4">
-            <div className="space-y-1">
-              <div className="text-sm font-medium">Module</div>
-              <Select
-                value={batchStatusModule}
-                onValueChange={(v: "spa" | "loan") => {
-                  setBatchStatusModule(v);
-                  setBatchStatusValue("");
-                }}
-              >
-                <SelectTrigger>
-                  <SelectValue placeholder="Select module" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="spa">SPA Status</SelectItem>
-                  <SelectItem value="loan">Loan Status</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
+          {reviewCaseQuery.isLoading ? (
+            <div className="py-6 text-center text-slate-500 text-sm">Loading...</div>
+          ) : reviewCaseQuery.isError ? (
+            <div className="py-6 text-center text-slate-600 text-sm">Failed to load case details.</div>
+          ) : (
+            (() => {
+              const raw = reviewCaseQuery.data;
+              const data = raw && typeof raw === "object" && "data" in (raw as any) ? (raw as any).data : raw;
+              const c = data && typeof data === "object" ? (data as any) : null;
+              const status = String(c?.approvalStatus ?? approvalStatus).trim().toLowerCase();
+              const isPending = status === "pending_approval";
 
-            <div className="space-y-1">
-              <div className="text-sm font-medium">New Status</div>
-              <Select value={batchStatusValue} onValueChange={setBatchStatusValue}>
-                <SelectTrigger>
-                  <SelectValue placeholder="Select status" />
-                </SelectTrigger>
-                <SelectContent>
-                  {(batchStatusModule === "spa" ? spaStatuses : loanStatuses)
-                    .filter((s) => s !== "Pending")
-                    .map((s) => (
-                      <SelectItem key={s} value={s}>{s}</SelectItem>
-                    ))}
-                </SelectContent>
-              </Select>
-            </div>
-          </div>
+              return (
+                <div className="space-y-4">
+                  <div className="grid grid-cols-1 md:grid-cols-12 gap-3">
+                    <div className="md:col-span-6">
+                      <div className="text-xs text-slate-500">Submitted By</div>
+                      <div className="text-sm text-slate-900">{c?.submittedByName ?? c?.submittedBy ?? "—"}</div>
+                    </div>
+                    <div className="md:col-span-6">
+                      <div className="text-xs text-slate-500">Submitted At</div>
+                      <div className="text-sm text-slate-900">{fmtIsoToYmd(c?.submittedAt)}</div>
+                    </div>
+                    <div className="md:col-span-6">
+                      <div className="text-xs text-slate-500">Case Type</div>
+                      <div className="text-sm text-slate-900">{caseTypeLabel(c?.caseType)}</div>
+                    </div>
+                    <div className="md:col-span-6">
+                      <div className="text-xs text-slate-500">Status</div>
+                      <div className="text-sm text-slate-900">{approvalStatusLabel(c?.approvalStatus)}</div>
+                    </div>
+                    <div className="md:col-span-12">
+                      <div className="text-xs text-slate-500">Summary</div>
+                      <div className="text-sm text-slate-900">{buildCaseSummary(c)}</div>
+                    </div>
+                  </div>
 
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setIsBatchStatusOpen(false)}>Cancel</Button>
-            <Button
-              disabled={!batchStatusValue || bulkStatusMutation.isPending}
-              onClick={() => {
-                const ids = Array.from(selectedCaseIds);
-                const filtered = batchStatusModule === "loan"
-                  ? ids.filter((id) => String((caseById.get(id) as any)?.purchaseMode ?? "").trim().toLowerCase() === "loan")
-                  : ids;
-                if (filtered.length === 0) {
-                  toast({ title: "No eligible cases selected", description: "Select at least one matching case for this module.", variant: "destructive" });
-                  return;
-                }
-                bulkStatusMutation.mutate({ module: batchStatusModule, status: batchStatusValue, caseIds: filtered });
-              }}
-            >
-              Update
-            </Button>
-          </DialogFooter>
+                  <div className="grid grid-cols-1 md:grid-cols-12 gap-3">
+                    <div className="md:col-span-6 space-y-1.5">
+                      <Label>Reference Number *</Label>
+                      <Input
+                        value={reviewReferenceNo}
+                        onChange={(e) => setReviewReferenceNo(e.target.value)}
+                        disabled={!isPending || approveCaseMutation.isPending || rejectCaseMutation.isPending}
+                        placeholder="e.g. LCP-2026-000123"
+                      />
+                      {!isPending ? (
+                        <div className="text-xs text-slate-500">Reference Number can only be set while Pending Approval.</div>
+                      ) : null}
+                    </div>
+                    <div className="md:col-span-12 space-y-1.5">
+                      <Label>Approval Notes</Label>
+                      <Textarea
+                        value={reviewNote}
+                        onChange={(e) => setReviewNote(e.target.value)}
+                        disabled={!isPending || approveCaseMutation.isPending || rejectCaseMutation.isPending || saveApprovalNoteMutation.isPending}
+                        placeholder="Optional notes (required for reject)"
+                      />
+                    </div>
+                  </div>
+
+                  <DialogFooter className="gap-2 sm:gap-2">
+                    <Button
+                      variant="outline"
+                      onClick={() => setReviewOpen(false)}
+                      disabled={approveCaseMutation.isPending || rejectCaseMutation.isPending || saveApprovalNoteMutation.isPending}
+                    >
+                      Close
+                    </Button>
+                    <Button
+                      variant="secondary"
+                      onClick={() => {
+                        if (!reviewCaseId) return;
+                        if (!isPending) return;
+                        saveApprovalNoteMutation.mutate({ caseId: reviewCaseId, approvalNote: reviewNote });
+                      }}
+                      disabled={!isPending || !reviewCaseId || saveApprovalNoteMutation.isPending}
+                    >
+                      Save Changes
+                    </Button>
+                    <Button
+                      variant="destructive"
+                      onClick={() => {
+                        if (!reviewCaseId) return;
+                        if (!isPending) return;
+                        if (!reviewNote.trim()) {
+                          toast({ title: "Approval Notes is required for reject", variant: "destructive" });
+                          return;
+                        }
+                        rejectCaseMutation.mutate({ caseId: reviewCaseId, approvalNote: reviewNote.trim() });
+                      }}
+                      disabled={!isPending || !reviewCaseId || rejectCaseMutation.isPending}
+                    >
+                      Reject
+                    </Button>
+                    <Button
+                      onClick={() => {
+                        if (!reviewCaseId) return;
+                        if (!isPending) return;
+                        if (!reviewReferenceNo.trim()) {
+                          toast({ title: "Reference Number is required", variant: "destructive" });
+                          return;
+                        }
+                        approveCaseMutation.mutate({ caseId: reviewCaseId, referenceNo: reviewReferenceNo.trim(), approvalNote: reviewNote });
+                      }}
+                      disabled={!isPending || !reviewCaseId || approveCaseMutation.isPending}
+                    >
+                      Approve
+                    </Button>
+                  </DialogFooter>
+                </div>
+              );
+            })()
+          )}
         </DialogContent>
       </Dialog>
-
-      <Dialog open={isBatchDateOpen} onOpenChange={setIsBatchDateOpen}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>Batch Update Date</DialogTitle>
-            <DialogDescription>Update a key date for multiple cases at once.</DialogDescription>
-          </DialogHeader>
-
-          <div className="space-y-4">
-            <div className="space-y-1">
-              <div className="text-sm font-medium">Field</div>
-              <Select value={batchDateField} onValueChange={setBatchDateField}>
-                <SelectTrigger>
-                  <SelectValue placeholder="Select field" />
-                </SelectTrigger>
-                <SelectContent>
-                  {milestoneOptions.map((m) => (
-                    <SelectItem key={m.key} value={m.key}>{m.label}</SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-
-            <div className="space-y-1">
-              <div className="text-sm font-medium">Date</div>
-              <DateOnlyInput valueYmd={batchDateValue} onChangeYmd={setBatchDateValue} />
-            </div>
-          </div>
-
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setIsBatchDateOpen(false)}>Cancel</Button>
-            <Button
-              disabled={!batchDateField || !batchDateValue || bulkKeyDatesMutation.isPending}
-              onClick={() => {
-                const ids = Array.from(selectedCaseIds);
-                const loanOnly = new Set([
-                  "letter_of_offer_date",
-                  "letter_of_offer_stamped_date",
-                  "loan_docs_pending_date",
-                  "loan_docs_signed_date",
-                  "acting_letter_issued_date",
-                  "loan_sent_bank_execution_date",
-                  "loan_bank_executed_date",
-                  "bank_lu_received_date",
-                  "advice_to_bank_date",
-                  "bank_lu_forward_to_developer_on",
-                  "developer_lu_received_on",
-                  "developer_lu_dated",
-                  "register_poa_on",
-                  "letter_disclaimer_dated",
-                  "loan_agreement_stamped_date",
-                  "bank_1st_release_on",
-                  "discharge_date",
-                  "caveat_lodged_date",
-                  "first_advice_date",
-                  "dev_informed_redemption_date",
-                  "request_discharge_date",
-                  "charge_date",
-                  "presentation_date",
-                  "second_advice_date",
-                  "mot_received_date",
-                  "mot_signed_date",
-                  "mot_stamped_date",
-                  "mot_registered_date",
-                  "noa_served_on",
-                ]);
-                const filtered = loanOnly.has(batchDateField)
-                  ? ids.filter((id) => String((caseById.get(id) as any)?.purchaseMode ?? "").trim().toLowerCase() === "loan")
-                  : ids;
-                if (filtered.length === 0) {
-                  toast({ title: "No eligible cases selected", description: "Select at least one matching case for this field.", variant: "destructive" });
-                  return;
-                }
-                bulkKeyDatesMutation.mutate({ field: batchDateField, date: batchDateValue, caseIds: filtered });
-              }}
-            >
-              Update
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      <BatchGenerateDialog
-        open={isBatchGenerateOpen}
-        onOpenChange={(v) => {
-          setIsBatchGenerateOpen(v);
-          if (!v) setSelectedTemplateIds(new Set());
-        }}
-        selectedCaseIds={selectedCaseIds}
-        selectedTemplateIds={selectedTemplateIds}
-        setSelectedTemplateIds={setSelectedTemplateIds}
-        bulkZipDownloading={bulkZipDownloading}
-        setBulkZipDownloading={setBulkZipDownloading}
-        bulkGenerateDownloading={bulkGenerateDownloading}
-        setBulkGenerateDownloading={setBulkGenerateDownloading}
-        onSuccess={() => {
-          setSelectedCaseIds(new Set());
-        }}
-        toast={toast}
-      />
     </div>
   );
 }
@@ -906,6 +1279,7 @@ function BatchGenerateDialog(props: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   selectedCaseIds: Set<number>;
+  caseById: Map<number, any>;
   selectedTemplateIds: Set<number>;
   setSelectedTemplateIds: (next: Set<number> | ((prev: Set<number>) => Set<number>)) => void;
   bulkZipDownloading: boolean;
@@ -919,6 +1293,7 @@ function BatchGenerateDialog(props: {
     open,
     onOpenChange,
     selectedCaseIds,
+    caseById,
     selectedTemplateIds,
     setSelectedTemplateIds,
     bulkZipDownloading,
@@ -931,6 +1306,23 @@ function BatchGenerateDialog(props: {
 
   const [mode, setMode] = useState<"download" | "print">("download");
   const [copies, setCopies] = useState("1");
+  const [job, setJob] = useState<NormalizedGenerationJob | null>(null);
+  const [progressText, setProgressText] = useState<string | null>(null);
+  const [currentText, setCurrentText] = useState<string | null>(null);
+  const [failureLines, setFailureLines] = useState<string[]>([]);
+  const abortRef = useRef<AbortController | null>(null);
+  const runKeyRef = useRef<string>("");
+
+  useEffect(() => {
+    if (open) return;
+    abortRef.current?.abort();
+    abortRef.current = null;
+    runKeyRef.current = "";
+    setJob(null);
+    setProgressText(null);
+    setCurrentText(null);
+    setFailureLines([]);
+  }, [open]);
 
   const foldersQuery = useQuery<TemplateFolderPickerFolder[]>({
     queryKey: ["document-automation", "folders"],
@@ -954,51 +1346,242 @@ function BatchGenerateDialog(props: {
   const selectedTemplateCount = selectedTemplateIds.size;
   const selectedCaseCount = selectedCaseIds.size;
 
+  const safeText = (v: unknown): string => (typeof v === "string" ? v.trim() : "");
+
+  const parseFilenameFromDisposition = (v: string | null): string | null => {
+    if (!v) return null;
+    const m = /filename\*=UTF-8''([^;]+)|filename=\"?([^\";]+)\"?/i.exec(v);
+    const raw = m?.[1] ?? m?.[2] ?? "";
+    if (!raw) return null;
+    try {
+      return decodeURIComponent(raw);
+    } catch {
+      return raw;
+    }
+  };
+
+  const getApiErrorCode = (err: unknown): string => {
+    const r = err && typeof err === "object" && !Array.isArray(err) ? (err as any) : {};
+    const direct = safeText(r.code);
+    if (direct) return direct;
+    const data = r.data && typeof r.data === "object" && !Array.isArray(r.data) ? r.data : null;
+    const errObj = data && typeof (data as any).error === "object" ? (data as any).error : null;
+    return errObj ? safeText(errObj.code) : "";
+  };
+
+  const caseLabel = (caseId: number): string => {
+    const c = caseById.get(caseId);
+    const ref =
+      safeText((c as any)?.referenceNo) ||
+      safeText((c as any)?.reference_no) ||
+      safeText((c as any)?.reference) ||
+      "";
+    return ref ? ref : `Case ${caseId}`;
+  };
+
+  const computeCurrentText = (snapshot: NormalizedGenerationJob): string | null => {
+    const items = snapshot.items ?? [];
+    const running =
+      items.find((it) => String(it.status ?? "") === "running") ??
+      items.find((it) => String(it.status ?? "") === "processing") ??
+      null;
+    const pending = items.find((it) => String(it.status ?? "") === "pending") ?? null;
+    const pick = running ?? pending;
+    if (!pick) return null;
+    const cid = typeof pick.caseId === "number" ? pick.caseId : 0;
+    const tpl = safeText(pick.templateName) || "Template";
+    return `${caseLabel(cid)} - ${tpl}`;
+  };
+
+  const updateProgressUi = (snapshot: NormalizedGenerationJob) => {
+    const total = snapshot.progress?.total ?? snapshot.totalCount ?? 0;
+    const done =
+      (snapshot.progress?.success ?? snapshot.successCount ?? 0) +
+      (snapshot.progress?.failed ?? snapshot.failedCount ?? 0);
+    setProgressText(total > 0 ? `${done} / ${total} completed` : null);
+    setCurrentText(computeCurrentText(snapshot));
+    const failed = (snapshot.items ?? []).filter((it) => String(it.status ?? "") === "failed");
+    const lines = failed.slice(0, 5).map((it) => {
+      const cid = typeof it.caseId === "number" ? it.caseId : 0;
+      const tpl = safeText(it.templateName) || "Template";
+      const code = safeText(it.errorCode);
+      const msg = safeText(it.errorMessage);
+      const diag = it.diagnostic && typeof it.diagnostic === "object" ? (it.diagnostic as any) : null;
+      const sqlState = diag ? safeText(diag.sqlstate ?? diag.sqlState) : "";
+      const parts = [
+        `${caseLabel(cid)} - ${tpl}`,
+        code ? `(${code})` : "",
+        sqlState ? `SQLSTATE=${sqlState}` : "",
+        msg ? `- ${msg}` : "",
+      ].filter(Boolean);
+      return parts.join(" ");
+    });
+    setFailureLines(lines);
+  };
+
   const generateAndDownloadZip = async () => {
     const ids = Array.from(selectedCaseIds);
     const templateIds = Array.from(selectedTemplateIds);
     if (ids.length === 0 || templateIds.length === 0) return;
     setBulkGenerateDownloading(true);
     try {
-      const res = await apiRequest("/cases/bulk/generate-documents-zip", {
-        method: "POST",
-        body: JSON.stringify({ caseIds: ids, templateIds, actionType: mode, printCopies: mode === "print" ? Number(copies || 1) : undefined }),
-        timeoutMs: 180000,
-      });
-      const blob = await res.blob();
-      const cd = res.headers.get("content-disposition") ?? "";
-      const m = /filename\*=UTF-8''([^;]+)|filename=\"?([^\";]+)\"?/i.exec(cd);
-      const fileNameRaw = m?.[1] ?? m?.[2] ?? "batch-documents.zip";
-      const fileName = decodeURIComponent(String(fileNameRaw).trim());
+      abortRef.current?.abort();
+      const ctrl = new AbortController();
+      abortRef.current = ctrl;
+      const runKey = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+      runKeyRef.current = runKey;
 
-      if (mode === "print") {
-        const url = URL.createObjectURL(blob);
-        const iframe = document.createElement("iframe");
-        iframe.style.position = "fixed";
-        iframe.style.right = "0";
-        iframe.style.bottom = "0";
-        iframe.style.width = "0";
-        iframe.style.height = "0";
-        iframe.src = url;
-        iframe.onload = () => {
-          try { iframe.contentWindow?.focus(); iframe.contentWindow?.print(); } catch {}
-          setTimeout(() => { URL.revokeObjectURL(url); iframe.remove(); }, 60000);
-        };
-        document.body.appendChild(iframe);
-        toast({ title: "Printable PDF ready", description: `${ids.length} case(s), ${templateIds.length} template(s)` });
-      } else {
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement("a");
-        a.href = url;
-        a.download = fileName || "batch-documents.zip";
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
-        URL.revokeObjectURL(url);
-        toast({ title: "Download started", description: `${ids.length} case(s), ${templateIds.length} template(s)` });
+      const templates = templateIds.map((id) => ({ source: "firm" as const, id }));
+      const created = await createGenerationJob({
+        caseIds: ids,
+        templates,
+        config: {
+          action: mode,
+          outputFormat: "pdf",
+          ...(mode === "print" ? { copies: copies || "1" } : {}),
+        },
+      });
+      const jobId = created.jobId;
+      if (!jobId) throw new Error("Missing jobId");
+
+      try {
+        const st = await getGenerationJobStatus(jobId, { signal: ctrl.signal });
+        if (runKeyRef.current === runKey) {
+          setJob(st);
+          updateProgressUi(st);
+        }
+      } catch {}
+
+      for (;;) {
+        if (runKeyRef.current !== runKey) return;
+        let next: NormalizedGenerationJob;
+        try {
+          next = await runNextGenerationJob(jobId, { signal: ctrl.signal });
+        } catch (err) {
+          const code = getApiErrorCode(err);
+          if (code === "RUN_NEXT_IN_FLIGHT") {
+            await new Promise<void>((r) => setTimeout(r, 600));
+            continue;
+          }
+          const status =
+            err && typeof err === "object" && "status" in (err as any) && typeof (err as any).status === "number"
+              ? Number((err as any).status)
+              : null;
+          if (code === "JOB_NOT_FOUND" || status === 404) {
+            throw new Error("Job not found (JOB_NOT_FOUND). Please start a new job.");
+          }
+          next = await getGenerationJobStatus(jobId, { signal: ctrl.signal });
+        }
+
+        if (runKeyRef.current !== runKey) return;
+        setJob(next);
+        updateProgressUi(next);
+
+        const st = String(next.status ?? "");
+        const action =
+          next.nextAction ??
+          (() => {
+            if ((next.progress?.pending ?? next.pendingCount) > 0) return "run_next";
+            if ((next.progress?.running ?? next.runningCount ?? 0) > 0) return "run_next";
+            if (st === "finalizing") return "finalize";
+            if (st === "completed" || st === "completed_with_errors") return "download";
+            if (st === "failed") return "stop";
+            return "run_next";
+          })();
+
+        if (action === "finalize") {
+          const fin = await finalizeGenerationJob(jobId, { signal: ctrl.signal });
+          if (runKeyRef.current !== runKey) return;
+          setJob(fin);
+          updateProgressUi(fin);
+          continue;
+        }
+
+        if (action === "download") {
+          let resp: Response | null = null;
+          for (let attempt = 1; attempt <= 3; attempt++) {
+            resp = await downloadGenerationJob(jobId, { signal: ctrl.signal });
+            if (resp.status !== 409) break;
+            const ct = resp.headers.get("Content-Type") ?? "";
+            if (!ct.includes("application/json") && !ct.includes("text/")) break;
+            const body = (await resp.json().catch(() => null)) as any;
+            const code = body?.error?.code ? String(body.error.code) : "";
+            if (code !== "JOB_NOT_FINALIZED" && code !== "JOB_NOT_COMPLETED") break;
+            await new Promise<void>((r) => setTimeout(r, 500 * attempt));
+            try {
+              const fin = await finalizeGenerationJob(jobId, { signal: ctrl.signal });
+              if (runKeyRef.current !== runKey) return;
+              setJob(fin);
+              updateProgressUi(fin);
+            } catch {}
+          }
+          if (!resp) throw new Error("Download failed");
+          const contentType = resp.headers.get("Content-Type") ?? "";
+          if (!resp.ok) {
+            const text = await resp.text().catch(() => "");
+            throw new Error(text || "Download failed");
+          }
+          if (
+            contentType.includes("application/json") ||
+            contentType.includes("text/")
+          ) {
+            const text = await resp.text().catch(() => "");
+            throw new Error(text || "Download failed");
+          }
+          const blob = await resp.blob();
+          const fileName =
+            parseFilenameFromDisposition(resp.headers.get("content-disposition")) ||
+            (mode === "print" ? "system-print.pdf" : "batch-documents.zip");
+          if (mode === "print") {
+            const url = URL.createObjectURL(blob);
+            const iframe = document.createElement("iframe");
+            iframe.style.position = "fixed";
+            iframe.style.right = "0";
+            iframe.style.bottom = "0";
+            iframe.style.width = "0";
+            iframe.style.height = "0";
+            iframe.src = url;
+            iframe.onload = () => {
+              try {
+                iframe.contentWindow?.focus();
+                iframe.contentWindow?.print();
+              } catch {}
+              setTimeout(() => {
+                URL.revokeObjectURL(url);
+                iframe.remove();
+              }, 60_000);
+            };
+            document.body.appendChild(iframe);
+            toast({
+              title: "Printable PDF ready",
+              description: `${ids.length} case(s), ${templateIds.length} template(s)`,
+            });
+          } else {
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement("a");
+            a.href = url;
+            a.download = fileName || "batch-documents.zip";
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+            URL.revokeObjectURL(url);
+            toast({
+              title: "Download started",
+              description: `${ids.length} case(s), ${templateIds.length} template(s)`,
+            });
+          }
+          onOpenChange(false);
+          onSuccess();
+          return;
+        }
+
+        if (action === "stop" || st === "failed") {
+          const summary = next.errorSummary || "Generation failed";
+          throw new Error(summary);
+        }
+
+        await new Promise<void>((r) => setTimeout(r, 250));
       }
-      onOpenChange(false);
-      onSuccess();
     } catch (err) {
       toastError(toast, err, mode === "print" ? "Batch print failed" : "Batch generate failed");
     } finally {
@@ -1021,6 +1604,23 @@ function BatchGenerateDialog(props: {
             <div className="text-sm text-slate-600">
               {selectedCaseCount} case(s) selected · {selectedTemplateCount} template(s) selected
             </div>
+            {bulkGenerateDownloading ? (
+              <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-sm">
+                <div className="font-medium">Generating documents...</div>
+                {progressText ? <div className="text-slate-600">{progressText}</div> : null}
+                {currentText ? <div className="text-slate-600">Current: {currentText}</div> : null}
+                {failureLines.length > 0 ? (
+                  <div className="mt-2 space-y-1">
+                    <div className="text-slate-600">Failures:</div>
+                    <ul className="list-disc pl-5 text-slate-600">
+                      {failureLines.map((l) => (
+                        <li key={l}>{l}</li>
+                      ))}
+                    </ul>
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
             <TemplateFolderPicker
               folders={folders}
               templates={templates}

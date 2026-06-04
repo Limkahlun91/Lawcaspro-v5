@@ -47,6 +47,15 @@ export function normalizeTitleType(v: string | null | undefined): TitleType | nu
   return null;
 }
 
+export function normalizeCaseType(v: string | null | undefined): "developer_sales" | "subsale" | "perfection" | null {
+  const s = (v || "").trim().toLowerCase();
+  if (!s) return null;
+  if (s === "developer_sales" || s === "developer sales" || s === "primary market" || s === "primary_market") return "developer_sales";
+  if (s === "subsale" || s === "sub sale" || s === "sub_sale" || s === "secondary market" || s === "secondary_market") return "subsale";
+  if (s === "perfection") return "perfection";
+  return null;
+}
+
 export function normalizeTemplatePurchaseModeRule(v: string | null | undefined): TemplatePurchaseModeRule {
   const s = (v || "").trim().toLowerCase();
   if (!s || s === "null" || s === "any") return null;
@@ -93,11 +102,15 @@ export function evaluateTemplateApplicability(
     if (ttRule !== tt) reasons.push(`Not applicable for title type: ${tt}`);
   }
 
-  const caseTypeRule = (template.appliesToCaseType || "").trim();
-  const caseType = (input.caseType || "").trim();
-  if (caseTypeRule && caseType) {
-    if (caseTypeRule.toLowerCase() !== caseType.toLowerCase()) {
-      reasons.push(`Not applicable for case type: ${caseType}`);
+  const caseTypeRuleRaw = (template.appliesToCaseType || "").trim();
+  const caseTypeRaw = (input.caseType || "").trim();
+  if (caseTypeRuleRaw && caseTypeRaw) {
+    const ruleNorm = normalizeCaseType(caseTypeRuleRaw);
+    const inputNorm = normalizeCaseType(caseTypeRaw);
+    if (ruleNorm && inputNorm) {
+      if (ruleNorm !== inputNorm) reasons.push(`Not applicable for case type: ${caseTypeRaw}`);
+    } else if (caseTypeRuleRaw.toLowerCase() !== caseTypeRaw.toLowerCase()) {
+      reasons.push(`Not applicable for case type: ${caseTypeRaw}`);
     }
   }
 

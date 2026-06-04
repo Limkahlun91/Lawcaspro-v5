@@ -86,6 +86,14 @@ describe("document generation render (unit)", () => {
       missingMode: "placeholder",
     });
     expect(renderedMissing.toString("latin1")).toContain("[MISSING: name]");
+
+    const renderedEmpty = await renderPdfMappedTemplate({
+      pdfBytes: baseBytes,
+      data: {},
+      mappingConfig: { name: { page: 1, x: 50, y: 720, size: 12 } },
+      missingMode: "empty",
+    });
+    expect(renderedEmpty.toString("latin1")).not.toContain("[MISSING:");
   });
 
   it("pdf textBox mapping draws interpolated content", async () => {
@@ -121,4 +129,3 @@ describe("document generation render (unit)", () => {
     expect(rendered.toString("latin1")).toContain("Alice");
   });
 });
-

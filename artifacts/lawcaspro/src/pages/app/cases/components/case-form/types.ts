@@ -1,6 +1,11 @@
 export type TitleCategory = "master" | "strata" | "individual";
 export type PurchaseMode = "cash" | "loan" | "other";
 export type LoanPartyType = "1st_party" | "3rd_party";
+export type CaseType = "developer_sales" | "subsale" | "perfection";
+export type LandCondition = "freehold" | "leasehold";
+export type Encumbrances = "no_encumbrance" | "has_encumbrance" | "to_confirm";
+export type ActingFor = "vendor" | "purchaser" | "both";
+export type PerfectionType = "transfer_and_charge" | "transfer" | "charge";
 
 export type AddressLines = {
   line1: string;
@@ -38,11 +43,15 @@ export type BorrowerForm = {
 };
 
 export type CaseFormValues = {
-  referenceNo: string;
+  caseType: CaseType | "";
   projectId: string;
   developerId: string;
   titleCategory: TitleCategory | "";
   purchaseMode: PurchaseMode;
+  landCondition: LandCondition | "";
+  encumbrances: Encumbrances | "";
+  actingFor: ActingFor | "";
+  perfectionType: PerfectionType | "";
 
   purchasers: PurchaserForm[];
 

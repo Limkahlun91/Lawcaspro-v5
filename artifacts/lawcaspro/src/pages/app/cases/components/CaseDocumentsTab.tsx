@@ -30,7 +30,7 @@ import { hasPermission } from "@/lib/permissions";
 import { getGetCaseWorkflowQueryKey, getListCasesQueryKey } from "@workspace/api-client-react";
 import { validateUploadFile } from "@/lib/upload-validation";
 import { TemplateFolderPicker, type TemplateFolderPickerFolder, type TemplateFolderPickerTemplate } from "@/components/documents/TemplateFolderPicker";
-import { generateDocumentsNow, getGenerationJobStatus, runNextGenerationJob, type NormalizedGenerationJob } from "@/lib/document-generation-client";
+import { createGenerationJob, downloadGenerationJob, finalizeGenerationJob, getGenerationJobStatus, runNextGenerationJob, type NormalizedGenerationJob } from "@/lib/document-generation-client";
 import { blocksTemplateGenerate, isTemplateFileReadinessKnown, isTemplateFileReady, templateFileReadinessLabel } from "@/lib/template-readiness";
 
 function docTypeLabel(dt: string): string {
@@ -480,6 +480,158 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
     return pretty.length ? pretty.replace(/\b\w/g, (m) => m.toUpperCase()) : key;
   }
 
+  function safeText(v: unknown): string {
+    return typeof v === "string" ? v.trim() : "";
+  }
+
+  function getApiErrorCode(err: unknown): string {
+    const r = asRecord(err) ?? {};
+    const direct = safeText((r as any).code);
+    if (direct) return direct;
+    const data = asRecord((r as any).data);
+    const errObj = data ? (asRecord((data as any).error) ?? null) : null;
+    return errObj ? safeText((errObj as any).code) : "";
+  }
+
+  async function runGenerationJobToDownload(jobId: string): Promise<NormalizedGenerationJob> {
+    for (;;) {
+      let job: NormalizedGenerationJob;
+      try {
+        job = await runNextGenerationJob(jobId);
+      } catch (err) {
+        const code = getApiErrorCode(err);
+        if (code === "RUN_NEXT_IN_FLIGHT") {
+          await new Promise<void>((r) => setTimeout(r, 350));
+          continue;
+        }
+        const status =
+          err && typeof err === "object" && "status" in (err as any) && typeof (err as any).status === "number"
+            ? Number((err as any).status)
+            : null;
+        if (code === "JOB_NOT_FOUND" || status === 404) {
+          throw new Error("Job not found (JOB_NOT_FOUND). Please start a new job.");
+        }
+        if (status === 503 || status === 504) {
+          try {
+            const st = await getGenerationJobStatus(jobId);
+            job = st;
+            continue;
+          } catch {}
+        }
+        if (err instanceof RequestTimeoutError || isAbortLikeError(err)) {
+          const st = await getGenerationJobStatus(jobId);
+          job = st;
+        } else {
+          throw err;
+        }
+      }
+
+      const status = String(job.status ?? "");
+      const nextAction =
+        job.nextAction ??
+        (() => {
+          if (job.pendingCount > 0) return "run_next";
+          if ((job.runningCount ?? 0) > 0) return "run_next";
+          if (status === "finalizing") return "finalize";
+          if (status === "completed" || status === "completed_with_errors") return "download";
+          if (status === "failed") return "stop";
+          return "run_next";
+        })();
+
+      if (nextAction === "finalize") {
+        try {
+          const fin = await finalizeGenerationJob(jobId);
+          job = fin;
+        } catch (err) {
+          const code = getApiErrorCode(err);
+          if (code === "RUN_NEXT_IN_FLIGHT" || code === "JOB_NOT_READY_FOR_FINALIZE") {
+            await new Promise<void>((r) => setTimeout(r, 450));
+            continue;
+          }
+          throw err;
+        }
+        const status2 = String(job.status ?? "");
+        if (status2 === "completed" || status2 === "completed_with_errors") return job;
+        await new Promise<void>((r) => setTimeout(r, 250));
+        continue;
+      }
+
+      if (nextAction === "download") return job;
+      if (nextAction === "stop" || status === "failed") {
+        const summary = job.errorSummary || "Generation failed";
+        const firstFailed =
+          job.items.find((it) => String(it.status ?? "") === "failed") ?? null;
+        const detail = firstFailed
+          ? [safeText(firstFailed.errorCode), safeText(firstFailed.errorMessage)]
+              .filter(Boolean)
+              .join(": ")
+          : "";
+        throw new Error(detail ? `${summary}: ${detail}` : summary);
+      }
+
+      await new Promise<void>((r) => setTimeout(r, 250));
+    }
+  }
+
+  async function downloadGenerationJobBundle(
+    jobId: string,
+    snapshot: NormalizedGenerationJob,
+    mode: "download" | "print",
+  ): Promise<void> {
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      const resp = await downloadGenerationJob(jobId);
+      const contentType = resp.headers.get("Content-Type") ?? "";
+      if (resp.status === 409 && (contentType.includes("application/json") || contentType.includes("text/"))) {
+        const body = (await resp.json().catch(() => null)) as any;
+        const code = body?.error?.code ? String(body.error.code) : "";
+        if (code === "JOB_NOT_COMPLETED" || code === "JOB_NOT_FINALIZED") {
+          await new Promise<void>((r) => setTimeout(r, 500 * attempt));
+          continue;
+        }
+      }
+      if (!resp.ok) {
+        const text = await resp.text().catch(() => "");
+        throw new Error(text || "Failed to download generated documents");
+      }
+      if (contentType.includes("application/json") || contentType.includes("text/")) {
+        const text = await resp.text().catch(() => "");
+        throw new Error(text || "Failed to download generated documents");
+      }
+      const blob = await resp.blob();
+      const raw =
+        parseFilenameFromDisposition(resp.headers.get("Content-Disposition")) ||
+        (snapshot.downloadFileName ?? null) ||
+        `lawcaspro-generated-documents-${Date.now()}${mode === "print" ? ".pdf" : ".zip"}`;
+      const filename = normalizeDownloadFilename(raw, contentType);
+      if (mode === "print") {
+        const url = URL.createObjectURL(blob);
+        const iframe = document.createElement("iframe");
+        iframe.style.position = "fixed";
+        iframe.style.right = "0";
+        iframe.style.bottom = "0";
+        iframe.style.width = "0";
+        iframe.style.height = "0";
+        iframe.src = url;
+        iframe.onload = () => {
+          try {
+            iframe.contentWindow?.focus();
+            iframe.contentWindow?.print();
+          } catch {}
+          setTimeout(() => {
+            URL.revokeObjectURL(url);
+            iframe.remove();
+          }, 60_000);
+        };
+        document.body.appendChild(iframe);
+      } else {
+        downloadBlob(blob, filename);
+      }
+      toast({ title: mode === "print" ? "Printable PDF ready" : "Download started", description: filename });
+      return;
+    }
+    throw new Error("Download is not ready yet. Please retry.");
+  }
+
   async function generateAndDownloadBlind(item: ChecklistItem): Promise<void> {
     if (!canGenerate) return;
     if (item.kind !== "template" || typeof item.templateId !== "number") return;
@@ -490,21 +642,17 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
 
     setOneClickGeneratingTemplateId(templateId);
     try {
-      const resp = await generateDocumentsNow({ caseIds: [caseId], templates });
-      const contentType = resp.headers.get("Content-Type");
-      if (contentType && (contentType.includes("application/json") || contentType.includes("text/"))) {
-        const text = await resp.text().catch(() => "");
-        throw new Error(text || "Failed to generate documents");
-      }
-      const blob = await resp.blob();
-      const raw =
-        parseFilenameFromDisposition(resp.headers.get("Content-Disposition")) ||
-        `lawcaspro-generated-documents-${Date.now()}.zip`;
-      const filename = normalizeDownloadFilename(raw, contentType);
-      downloadBlob(blob, filename);
+      const created = await createGenerationJob({
+        caseIds: [caseId],
+        templates,
+        config: { action: "download" },
+      });
+      const jobId = created.jobId;
+      if (!jobId) throw new Error("Missing jobId");
+      const job = await runGenerationJobToDownload(jobId);
+      await downloadGenerationJobBundle(jobId, job, "download");
       await qc.invalidateQueries({ queryKey: ["case-documents", caseId] });
       await qc.invalidateQueries({ queryKey: ["case-documents-checklist", caseId] });
-      toast({ title: "Download started", description: filename });
     } catch (err) {
       const failures =
         err && typeof err === "object" && "data" in (err as any) && Array.isArray((err as any).data?.failures)
@@ -552,23 +700,36 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
     if (!templates.length) return;
 
     setBatchLoopGenerating(true);
-    setBatchLoopProgress({ current: 0, total: 1 });
+    setBatchLoopProgress({ current: 0, total: templates.length });
     try {
-      const resp = await generateDocumentsNow({ caseIds: [caseId], templates });
-      const contentType = resp.headers.get("Content-Type");
-      if (contentType && (contentType.includes("application/json") || contentType.includes("text/"))) {
-        const text = await resp.text().catch(() => "");
-        throw new Error(text || "Failed to generate documents");
+      const created = await createGenerationJob({
+        caseIds: [caseId],
+        templates,
+        config: { action: "download" },
+      });
+      const jobId = created.jobId;
+      if (!jobId) throw new Error("Missing jobId");
+      let last: NormalizedGenerationJob | null = null;
+      for (;;) {
+        const st = await getGenerationJobStatus(jobId).catch(() => null);
+        if (st) {
+          last = st;
+          const done = (st.progress?.success ?? st.successCount) + (st.progress?.failed ?? st.failedCount);
+          const total = st.progress?.total ?? st.totalCount ?? templates.length;
+          setBatchLoopProgress({ current: done, total });
+        }
+        if (last && (last.nextAction === "download" || String(last.status ?? "") === "completed" || String(last.status ?? "") === "completed_with_errors")) break;
+        if (last && (last.nextAction === "stop" || String(last.status ?? "") === "failed")) break;
+        break;
       }
-      const blob = await resp.blob();
-      const raw =
-        parseFilenameFromDisposition(resp.headers.get("Content-Disposition")) ||
-        `lawcaspro-generated-documents-${Date.now()}.zip`;
-      const filename = normalizeDownloadFilename(raw, contentType);
-      downloadBlob(blob, filename);
+      const job = await runGenerationJobToDownload(jobId);
+      setBatchGenerateResult(job);
+      const done = (job.progress?.success ?? job.successCount) + (job.progress?.failed ?? job.failedCount);
+      const total = job.progress?.total ?? job.totalCount ?? templates.length;
+      setBatchLoopProgress({ current: done, total });
+      await downloadGenerationJobBundle(jobId, job, "download");
       await qc.invalidateQueries({ queryKey: ["case-documents", caseId] });
       await qc.invalidateQueries({ queryKey: ["case-documents-checklist", caseId] });
-      toast({ title: "Downloaded", description: filename });
     } catch (err) {
       const failures =
         err && typeof err === "object" && "data" in (err as any) && Array.isArray((err as any).data?.failures)
@@ -625,127 +786,40 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
     const templateIds = Array.from(enterpriseSelectedTemplateIds);
     if (templateIds.length === 0) return;
     setEnterpriseBusy(true);
-    let pollId: any = null;
     try {
-      const created = await apiFetchJson<{ jobId: string; downloadUrl?: string }>(`/cases/bulk/generate-documents-zip`, {
-        method: "POST",
-        timeoutMs: 15000,
-        body: JSON.stringify({
-          caseIds: [caseId],
-          templateIds,
-          actionType: enterpriseMode,
-          printCopies: enterpriseMode === "print" ? Number(enterpriseCopies || 1) : undefined,
-        }),
+      const templates = templateIds
+        .map((id) => Number(id))
+        .filter((id) => Number.isFinite(id) && id > 0)
+        .map((id) => ({ source: "firm" as const, id }));
+      if (!templates.length) return;
+
+      const created = await createGenerationJob({
+        caseIds: [caseId],
+        templates,
+        config: {
+          action: enterpriseMode,
+          ...(enterpriseMode === "print"
+            ? { copies: enterpriseCopies || "1" }
+            : {}),
+        },
       });
-      const jobId = typeof created?.jobId === "string" ? created.jobId : "";
+      const jobId = created.jobId;
       if (!jobId) throw new Error("Missing jobId");
-      const downloadUrl = typeof created?.downloadUrl === "string" ? created.downloadUrl : `/documents/jobs/${jobId}/download`;
 
       try {
         const initial = await getGenerationJobStatus(jobId);
         setBatchGenerateResult(initial);
       } catch {}
 
-      let inFlight = false;
-      const pollOnce = async (): Promise<boolean> => {
-        if (inFlight) return false;
-        inFlight = true;
-        try {
-          let job: NormalizedGenerationJob;
-          try {
-            job = await runNextGenerationJob(jobId);
-          } catch (err) {
-            if (err instanceof RequestTimeoutError || isAbortLikeError(err)) {
-              const st = await getGenerationJobStatus(jobId);
-              setBatchGenerateResult(st);
-              job = st;
-            } else {
-              throw err;
-            }
-          }
-          setBatchGenerateResult(job);
-          const effectiveStatus = (() => {
-            const status = typeof job.status === "string" ? job.status : "";
-            if (job.totalCount > 0 && job.pendingCount === 0 && job.failedCount === 0 && job.successCount === job.totalCount) return "completed";
-            return status;
-          })();
-          if (effectiveStatus === "completed" || effectiveStatus === "completed_with_errors" || effectiveStatus === "completed-with-errors") {
-          const fileName = job.downloadFileName || (enterpriseMode === "print" ? "system-print.pdf" : "documents.zip");
-
-          if (enterpriseMode === "print") {
-            const res = await apiRequest(downloadUrl, { timeoutMs: 60_000, allowStatuses: [400, 401, 403, 404, 409, 422, 429, 500, 503] });
-            const contentType = res.headers.get("Content-Type");
-            if (!res.ok || !contentType || !contentType.includes("application/pdf")) {
-              const text = await res.text().catch(() => "");
-              throw new Error(text || "Print failed (expected PDF)");
-            }
-            const blob = await res.blob();
-            const url = URL.createObjectURL(blob);
-            const iframe = document.createElement("iframe");
-            iframe.style.position = "fixed";
-            iframe.style.right = "0";
-            iframe.style.bottom = "0";
-            iframe.style.width = "0";
-            iframe.style.height = "0";
-            iframe.src = url;
-            iframe.onload = () => {
-              try { iframe.contentWindow?.focus(); iframe.contentWindow?.print(); } catch {}
-              setTimeout(() => { URL.revokeObjectURL(url); iframe.remove(); }, 60000);
-            };
-            document.body.appendChild(iframe);
-            toast({ title: "Printable PDF ready" });
-          } else {
-            await downloadFromApi(downloadUrl, fileName || "document-automation.zip");
-            toast({ title: "Download started" });
-          }
-          return true;
-        }
-        if (status === "failed") {
-          const summary = job.errorSummary || "Generation failed";
-          const firstFailed = job.items.find((it) => String(it.status ?? "") === "failed") ?? null;
-          const code = firstFailed?.errorCode ? String(firstFailed.errorCode) : "";
-          const msg = firstFailed?.errorMessage ? String(firstFailed.errorMessage) : "";
-          const detail = code && msg ? `${code}: ${msg}` : msg || code;
-          throw new Error(detail ? `${summary}: ${detail}` : summary);
-        }
-        return false;
-        } finally {
-          inFlight = false;
-        }
-      };
-
-      const done = await pollOnce();
-      if (!done) {
-        await new Promise<void>((resolve, reject) => {
-          pollId = window.setInterval(() => {
-            pollOnce()
-              .then((ok) => {
-                if (!ok) return;
-                if (pollId) {
-                  window.clearInterval(pollId);
-                  pollId = null;
-                }
-                resolve();
-              })
-              .catch((e) => {
-                if (pollId) {
-                  window.clearInterval(pollId);
-                  pollId = null;
-                }
-                reject(e);
-              });
-          }, 2000);
-        });
-      }
+      const job = await runGenerationJobToDownload(jobId);
+      setBatchGenerateResult(job);
+      await downloadGenerationJobBundle(jobId, job, enterpriseMode);
 
       setEnterpriseDialogOpen(false);
       setEnterpriseSelectedTemplateIds(new Set());
     } catch (err) {
       toastError(toast, err, enterpriseMode === "print" ? "Print failed" : "Generate failed");
     } finally {
-      if (pollId) {
-        try { window.clearInterval(pollId); } catch {}
-      }
       setEnterpriseBusy(false);
     }
   }
@@ -1760,21 +1834,17 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
                     if (templates.length === 0) return;
                     setIsGenerating(true);
                     try {
-                      const resp = await generateDocumentsNow({ caseIds: [caseId], templates });
-                      const contentType = resp.headers.get("Content-Type");
-                      if (contentType && (contentType.includes("application/json") || contentType.includes("text/"))) {
-                        const text = await resp.text().catch(() => "");
-                        throw new Error(text || "Failed to generate documents");
-                      }
-                      const blob = await resp.blob();
-                      const raw =
-                        parseFilenameFromDisposition(resp.headers.get("Content-Disposition")) ||
-                        `lawcaspro-generated-documents-${Date.now()}.zip`;
-                      const filename = normalizeDownloadFilename(raw, contentType);
-                      downloadBlob(blob, filename);
+                      const created = await createGenerationJob({
+                        caseIds: [caseId],
+                        templates,
+                        config: { action: "download" },
+                      });
+                      const jobId = created.jobId;
+                      if (!jobId) throw new Error("Missing jobId");
+                      const job = await runGenerationJobToDownload(jobId);
+                      await downloadGenerationJobBundle(jobId, job, "download");
                       await qc.invalidateQueries({ queryKey: ["case-documents", caseId] });
                       await qc.invalidateQueries({ queryKey: ["case-documents-checklist", caseId] });
-                      toast({ title: "Download started", description: filename });
                     } catch (err) {
                       toastError(toast, err, "Generation failed");
                     } finally {
