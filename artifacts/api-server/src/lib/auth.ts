@@ -94,10 +94,26 @@ export async function writeAuditLog(params: {
   const targetDb = options?.db;
   const strict = options?.strict ?? false;
   try {
+    const firmId = params.firmId ?? null;
+    const actorId = params.actorId ?? null;
+    if (firmId === null || actorId === null) {
+      logger.warn(
+        {
+          action: params.action,
+          firmId,
+          actorId,
+          actorType: params.actorType ?? null,
+          entityType: params.entityType ?? null,
+          entityId: params.entityId ?? null,
+        },
+        "audit.skipped_missing_context",
+      );
+      return;
+    }
     if (targetDb) {
       await targetDb.insert(auditLogsTable).values({
-        firmId: params.firmId ?? null,
-        actorId: params.actorId ?? null,
+        firmId,
+        actorId,
         actorType: params.actorType ?? "firm_user",
         action: params.action,
         entityType: params.entityType ?? null,
@@ -108,8 +124,8 @@ export async function writeAuditLog(params: {
       });
     } else {
       await db.insert(auditLogsTable).values({
-        firmId: params.firmId ?? null,
-        actorId: params.actorId ?? null,
+        firmId,
+        actorId,
         actorType: params.actorType ?? "firm_user",
         action: params.action,
         entityType: params.entityType ?? null,
@@ -190,7 +206,15 @@ export async function requireAuth(
   }
 
   if (!user || user.status !== "active") {
-    await writeAuditLog({ action: "auth.user_inactive", detail: `userId=${session.userId}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+    await writeAuditLog({
+      firmId: user?.firmId ?? null,
+      actorId: user?.id ?? null,
+      actorType: user?.userType ?? "unknown",
+      action: "auth.user_inactive",
+      detail: `userId=${session.userId} route=${req.method} ${req.path}`,
+      ipAddress: req.ip,
+      userAgent: req.headers["user-agent"],
+    });
     res.status(401).json({ error: "User not found or inactive" });
     return;
   }

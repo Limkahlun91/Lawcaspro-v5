@@ -3616,17 +3616,20 @@ router.post(
       }
       if (
         err instanceof DocumentGenerationError &&
-        (err.code === "DOCX_TO_PDF_CONVERTER_NOT_CONFIGURED" ||
+        (err.code === "DOCX_TO_PDF_ENGINE_NOT_CONFIGURED" ||
+          err.code === "DOCX_TO_PDF_CONVERTER_NOT_CONFIGURED" ||
           err.code === "DOCX_TO_PDF_UNAVAILABLE" ||
           err.code === "DOCX_PDF_CONVERTER_UNAVAILABLE" ||
           err.code === "DOCX_TO_PDF_FAILED" ||
           err.code === "DOCX_TO_PDF_TIMEOUT")
       ) {
         const code =
-          err.code === "DOCX_TO_PDF_CONVERTER_NOT_CONFIGURED" ||
+          err.code === "DOCX_TO_PDF_ENGINE_NOT_CONFIGURED"
+            ? "DOCX_TO_PDF_ENGINE_NOT_CONFIGURED"
+            : err.code === "DOCX_TO_PDF_CONVERTER_NOT_CONFIGURED" ||
           err.code === "DOCX_TO_PDF_UNAVAILABLE" ||
           err.code === "DOCX_PDF_CONVERTER_UNAVAILABLE"
-            ? "DOCX_TO_PDF_CONVERTER_NOT_CONFIGURED"
+            ? "DOCX_TO_PDF_ENGINE_NOT_CONFIGURED"
             : err.code;
         res.status(503).json({ error: err.message, code });
         return;
@@ -3691,13 +3694,14 @@ router.post(
           return;
         }
         if (
+          derived.code === "DOCX_TO_PDF_ENGINE_NOT_CONFIGURED" ||
           derived.code === "DOCX_TO_PDF_CONVERTER_NOT_CONFIGURED" ||
           derived.code === "DOCX_TO_PDF_UNAVAILABLE" ||
           derived.code === "DOCX_PDF_CONVERTER_UNAVAILABLE"
         ) {
           res.status(503).json({
             error: derived.message,
-            code: "DOCX_TO_PDF_CONVERTER_NOT_CONFIGURED",
+            code: "DOCX_TO_PDF_ENGINE_NOT_CONFIGURED",
           });
           return;
         }
@@ -10101,11 +10105,26 @@ async function renderFallbackPdfFromDocx(docxBytes: Buffer): Promise<Buffer> {
 }
 
 async function convertDocxToPdf(docxBytes: Buffer): Promise<Buffer> {
-  const provider =
-    typeof process.env.DOCX_CONVERTER_PROVIDER === "string" &&
-    process.env.DOCX_CONVERTER_PROVIDER.trim()
-      ? process.env.DOCX_CONVERTER_PROVIDER.trim().toLowerCase()
-      : "gotenberg";
+  const engineRaw = (() => {
+    const v1 =
+      typeof process.env.DOCX_TO_PDF_ENGINE === "string"
+        ? process.env.DOCX_TO_PDF_ENGINE.trim()
+        : "";
+    if (v1) return v1;
+    const legacy =
+      typeof process.env.DOCX_CONVERTER_PROVIDER === "string"
+        ? process.env.DOCX_CONVERTER_PROVIDER.trim()
+        : "";
+    return legacy || "disabled";
+  })();
+  const engine = (() => {
+    const s = engineRaw.trim().toLowerCase();
+    if (s === "gotenberg") return "gotenberg";
+    if (s === "libreoffice") return "libreoffice";
+    if (s === "disabled") return "disabled";
+    return "disabled";
+  })();
+
   const baseUrlRaw =
     (typeof process.env.DOCX_CONVERTER_URL === "string"
       ? process.env.DOCX_CONVERTER_URL.trim()
@@ -10114,7 +10133,20 @@ async function convertDocxToPdf(docxBytes: Buffer): Promise<Buffer> {
       ? process.env.GOTENBERG_URL.trim()
       : "");
   const baseUrl = baseUrlRaw.replace(/\/+$/, "");
-  if (!baseUrl || provider !== "gotenberg") {
+
+  const configured =
+    engine === "gotenberg"
+      ? Boolean(baseUrl)
+      : engine === "libreoffice"
+        ? Boolean(
+            (typeof process.env.LIBREOFFICE_BIN === "string" &&
+              process.env.LIBREOFFICE_BIN.trim()) ||
+              (typeof process.env.SOFFICE_BIN === "string" &&
+                process.env.SOFFICE_BIN.trim()),
+          )
+        : false;
+
+  if (!configured) {
     // #region debug-point D:docx-convert-unavailable
     (() => {
       import("node:fs")
@@ -10139,7 +10171,7 @@ async function convertDocxToPdf(docxBytes: Buffer): Promise<Buffer> {
               ts: Date.now(),
               data: {
                 gotenbergUrlPresent: Boolean(baseUrl),
-                provider,
+                engine,
                 docxBytesLength: docxBytes?.length ?? null,
               },
             }),
@@ -10151,8 +10183,74 @@ async function convertDocxToPdf(docxBytes: Buffer): Promise<Buffer> {
     throw new DocumentGenerationError(
       503,
       "DOCX_TO_PDF_ENGINE_NOT_CONFIGURED",
-      "DOCX to PDF converter is not configured",
+      "Please configure DOCX-to-PDF converter before generating PDF from Word templates.",
     );
+  }
+
+  if (engine === "libreoffice") {
+    const { mkdtemp, readFile, rm, writeFile } = await import("node:fs/promises");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const { execFile } = await import("node:child_process");
+    const { promisify } = await import("node:util");
+    const execFileAsync = promisify(execFile);
+
+    const binRaw =
+      (typeof process.env.LIBREOFFICE_BIN === "string"
+        ? process.env.LIBREOFFICE_BIN.trim()
+        : "") ||
+      (typeof process.env.SOFFICE_BIN === "string"
+        ? process.env.SOFFICE_BIN.trim()
+        : "") ||
+      "soffice";
+
+    const dir = await mkdtemp(join(tmpdir(), "lawcaspro-docx-"));
+    try {
+      const inPath = join(dir, "document.docx");
+      await writeFile(inPath, docxBytes);
+      await execFileAsync(binRaw, [
+        "--headless",
+        "--nologo",
+        "--nofirststartwizard",
+        "--convert-to",
+        "pdf",
+        "--outdir",
+        dir,
+        inPath,
+      ]);
+      const outPath = join(dir, "document.pdf");
+      const out = await readFile(outPath);
+      if (!Buffer.isBuffer(out) || out.length < 800) {
+        throw new DocumentGenerationError(
+          503,
+          "DOCX_TO_PDF_FAILED",
+          "PDF conversion returned an empty file",
+          { byteLength: out?.length ?? 0 },
+        );
+      }
+      try {
+        const pdf = await PDFDocument.load(out);
+        const pages = pdf.getPageCount();
+        if (!Number.isFinite(pages) || pages <= 0) throw new Error("empty_pages");
+      } catch {
+        throw new DocumentGenerationError(
+          503,
+          "DOCX_TO_PDF_FAILED",
+          "PDF conversion returned an invalid PDF",
+          { byteLength: out.length },
+        );
+      }
+      return out;
+    } catch (err) {
+      if (err instanceof DocumentGenerationError) throw err;
+      throw new DocumentGenerationError(
+        503,
+        "DOCX_TO_PDF_FAILED",
+        "PDF conversion failed",
+      );
+    } finally {
+      await rm(dir, { recursive: true, force: true }).catch(() => {});
+    }
   }
 
   const controller = new AbortController();
@@ -10269,9 +10367,16 @@ async function convertDocxToPdfWithFallback(
   docxBytes: Buffer,
   opts?: { allowFallbackOnFailure?: boolean },
 ): Promise<{ pdfBytes: Buffer; fallbackUsed: boolean }> {
-  void opts;
-  const pdfBytes = await convertDocxToPdf(docxBytes);
-  return { pdfBytes, fallbackUsed: false };
+  const allow = opts?.allowFallbackOnFailure === true;
+  try {
+    const pdfBytes = await convertDocxToPdf(docxBytes);
+    return { pdfBytes, fallbackUsed: false };
+  } catch (err) {
+    if (!allow) throw err;
+    if (err instanceof DocumentGenerationError && err.code === "DOCX_TO_PDF_ENGINE_NOT_CONFIGURED") throw err;
+    const pdfBytes = await renderFallbackPdfFromDocx(docxBytes);
+    return { pdfBytes, fallbackUsed: true };
+  }
 }
 
 async function mergePdfBuffers(buffers: Buffer[]): Promise<Buffer> {
@@ -16276,12 +16381,13 @@ async function processAutomationGenerationJobStep(
         return { code: "DOCX_RENDER_ERROR", message: derived.message };
       }
       if (
+        derived.code === "DOCX_TO_PDF_ENGINE_NOT_CONFIGURED" ||
         derived.code === "DOCX_TO_PDF_CONVERTER_NOT_CONFIGURED" ||
         derived.code === "DOCX_TO_PDF_UNAVAILABLE" ||
         derived.code === "DOCX_PDF_CONVERTER_UNAVAILABLE"
       ) {
         return {
-          code: "DOCX_TO_PDF_CONVERTER_NOT_CONFIGURED",
+          code: "DOCX_TO_PDF_ENGINE_NOT_CONFIGURED",
           message: derived.message,
         };
       }

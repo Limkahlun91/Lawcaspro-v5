@@ -13,6 +13,7 @@ export type ApiFetchOptions = Omit<RequestInit, "headers"> & {
   responseType?: ApiResponseType;
   headers?: HeadersInit;
   allowStatuses?: number[];
+  skipAuthConfirm?: boolean;
 };
 
 function resolveApiUrl(path: string): string {
@@ -46,6 +47,28 @@ function handleUnauthorized(): void {
   emitAuthUnauthorized();
 }
 
+let authConfirmInFlight: Promise<boolean> | null = null;
+
+async function confirmAuthStillValid(headers: Headers, timeoutMs: number): Promise<boolean> {
+  if (authConfirmInFlight) return await authConfirmInFlight;
+  authConfirmInFlight = (async () => {
+    try {
+      const res = await fetchWithTimeout(resolveApiUrl("/auth/me"), {
+        method: "GET",
+        timeoutMs: Math.min(8000, Math.max(2000, Math.trunc(timeoutMs / 2))),
+        credentials: "include",
+        headers,
+      });
+      return res.status !== 401;
+    } catch {
+      return true;
+    } finally {
+      authConfirmInFlight = null;
+    }
+  })();
+  return await authConfirmInFlight;
+}
+
 export async function apiRequest(path: string, options: ApiFetchOptions = {}): Promise<Response> {
   const url = resolveApiUrl(path);
   const timeoutMs = options.timeoutMs ?? 15000;
@@ -71,7 +94,22 @@ export async function apiRequest(path: string, options: ApiFetchOptions = {}): P
   });
 
   const allow = new Set(options.allowStatuses ?? []);
-  if (res.status === 401 && !allow.has(401)) handleUnauthorized();
+  if (res.status === 401 && !allow.has(401)) {
+    const p = path.startsWith("/") ? path : `/${path}`;
+    const isAuthEndpoint =
+      p === "/auth/me" ||
+      p === "/auth/login" ||
+      p.startsWith("/auth/") ||
+      p === "/api/auth/me" ||
+      p === "/api/auth/login" ||
+      p.startsWith("/api/auth/");
+    if (isAuthEndpoint || options.skipAuthConfirm) {
+      handleUnauthorized();
+    } else {
+      const ok = await confirmAuthStillValid(headers, timeoutMs);
+      if (!ok) handleUnauthorized();
+    }
+  }
   if (!res.ok && !allow.has(res.status)) throw await apiErrorFromResponse(res);
   return res;
 }

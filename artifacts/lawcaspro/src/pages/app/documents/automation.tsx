@@ -854,7 +854,10 @@ export default function DocumentAutomationHub() {
 
       const drive = async () => {
         while (!stopped) {
-          if (runNextInFlightRef.current) return;
+          if (runNextInFlightRef.current) {
+            await new Promise<void>((r) => setTimeout(r, 120));
+            continue;
+          }
           runNextInFlightRef.current = true;
           const startedAt = Date.now();
           try {
@@ -906,21 +909,66 @@ export default function DocumentAutomationHub() {
             }
             if (nextAction === "stop" || st === "failed") {
               stopPolling();
-              setJobError(next.errorSummary ?? "Generation failed");
+              const hasDocxPdfConfigError = Array.isArray(next.items) && next.items.some((i) => i?.errorCode === "DOCX_TO_PDF_ENGINE_NOT_CONFIGURED");
+              setJobError(
+                hasDocxPdfConfigError
+                  ? "Word template cannot be exported to PDF because DOCX-to-PDF converter is not configured."
+                  : (next.errorSummary ?? "Generation failed"),
+              );
               setBusy(false);
               return;
             }
             await new Promise<void>((r) => setTimeout(r, 250));
           } catch (err) {
             const code = getApiErrorCode(err);
-            if (code === "RUN_NEXT_IN_FLIGHT") {
-              await new Promise<void>((r) => setTimeout(r, 400));
-              continue;
-            }
             const status =
               err && typeof err === "object" && "status" in (err as any) && typeof (err as any).status === "number"
                 ? Number((err as any).status)
                 : null;
+            if (status === 401) {
+              stopPolling();
+              setJobError("Session expired. Please sign in again.");
+              setBusy(false);
+              return;
+            }
+            if (code === "DOCX_TO_PDF_ENGINE_NOT_CONFIGURED") {
+              stopPolling();
+              setJobError("Word template cannot be exported to PDF because DOCX-to-PDF converter is not configured.");
+              setBusy(false);
+              return;
+            }
+            if (status === 409 || code === "RUN_NEXT_IN_FLIGHT") {
+              try {
+                const st = await getGenerationJobStatus(jobId);
+                setJob(st);
+                const s = String(st.status ?? "");
+                if (st.nextAction === "finalize" || s === "finalizing") {
+                  await new Promise<void>((r) => setTimeout(r, 900));
+                  continue;
+                }
+                if (st.nextAction === "download" || s === "completed" || s === "completed_with_errors") {
+                  stopPolling();
+                  setFinalizingZip(true);
+                  await downloadWithRetry(jobId, st);
+                  setFinalizingZip(false);
+                  setBusy(false);
+                  return;
+                }
+                if (st.nextAction === "stop" || s === "failed" || s === "cancelled") {
+                  stopPolling();
+                  const hasDocxPdfConfigError = Array.isArray(st.items) && st.items.some((i) => i?.errorCode === "DOCX_TO_PDF_ENGINE_NOT_CONFIGURED");
+                  setJobError(
+                    hasDocxPdfConfigError
+                      ? "Word template cannot be exported to PDF because DOCX-to-PDF converter is not configured."
+                      : (st.errorSummary ?? "Generation failed"),
+                  );
+                  setBusy(false);
+                  return;
+                }
+              } catch {}
+              await new Promise<void>((r) => setTimeout(r, 900));
+              continue;
+            }
             if (code === "JOB_NOT_FOUND" || status === 404) {
               stopPolling();
               setJobError("Job not found (JOB_NOT_FOUND). Please start a new job.");

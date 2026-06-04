@@ -45,6 +45,71 @@ routerInternal.get("/healthz", (_req: ReqLike, res: ResLike) => {
   res.json(data);
 });
 
+routerInternal.get("/healthz/docx-pdf", async (_req: ReqLike, res: ResLike) => {
+  res.setHeader("cache-control", "no-store, max-age=0");
+  const engineRaw = (() => {
+    const v =
+      typeof process.env.DOCX_TO_PDF_ENGINE === "string"
+        ? process.env.DOCX_TO_PDF_ENGINE.trim()
+        : "";
+    if (v) return v;
+    const legacy =
+      typeof process.env.DOCX_CONVERTER_PROVIDER === "string"
+        ? process.env.DOCX_CONVERTER_PROVIDER.trim()
+        : "";
+    return legacy || "disabled";
+  })();
+  const engine = (() => {
+    const s = engineRaw.trim().toLowerCase();
+    if (s === "gotenberg") return "gotenberg";
+    if (s === "libreoffice") return "libreoffice";
+    if (s === "disabled") return "disabled";
+    return "disabled";
+  })();
+  const baseUrlRaw =
+    (typeof process.env.DOCX_CONVERTER_URL === "string"
+      ? process.env.DOCX_CONVERTER_URL.trim()
+      : "") ||
+    (typeof process.env.GOTENBERG_URL === "string"
+      ? process.env.GOTENBERG_URL.trim()
+      : "");
+  const baseUrl = baseUrlRaw.replace(/\/+$/, "");
+
+  const configured = await (async () => {
+    if (engine === "gotenberg") return Boolean(baseUrl);
+    if (engine === "libreoffice") {
+      const binRaw =
+        (typeof process.env.LIBREOFFICE_BIN === "string"
+          ? process.env.LIBREOFFICE_BIN.trim()
+          : "") ||
+        (typeof process.env.SOFFICE_BIN === "string"
+          ? process.env.SOFFICE_BIN.trim()
+          : "") ||
+        "";
+      if (!binRaw) return false;
+      try {
+        const fs = await import("node:fs/promises");
+        await fs.access(binRaw);
+        return true;
+      } catch {
+        return false;
+      }
+    }
+    return false;
+  })();
+
+  if (!configured) {
+    res.status(200).json({
+      ok: false,
+      engine,
+      configured: false,
+      error: "DOCX_TO_PDF_ENGINE_NOT_CONFIGURED",
+    });
+    return;
+  }
+  res.status(200).json({ ok: true, engine, configured: true });
+});
+
 routerInternal.get("/healthz/dbinfo", async (_req: ReqLike, res: ResLike) => {
   const databaseUrl = process.env.DATABASE_URL ?? null;
   const isPostgresUrl = typeof databaseUrl === "string" && (databaseUrl.startsWith("postgres://") || databaseUrl.startsWith("postgresql://"));
