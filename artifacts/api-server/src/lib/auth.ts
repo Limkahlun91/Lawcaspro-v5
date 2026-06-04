@@ -630,24 +630,20 @@ export async function requireFirmUser(
   };
 
   try {
+    const originalQuery = client.query.bind(client);
+    let chain = Promise.resolve();
+    (client as any).query = (...args: unknown[]) => {
+      const run = () => (originalQuery as any)(...args);
+      const p = chain.then(run, run);
+      chain = p.then(
+        () => undefined,
+        () => undefined,
+      );
+      return p;
+    };
     await client.query("BEGIN");
     await setTenantContext(client, req.firmId, req.userId ?? undefined);
-    const rlsDb = makeRlsDb(client) as any;
-    const originalExecute: unknown = rlsDb.execute;
-    if (typeof originalExecute === "function") {
-      const exec = originalExecute.bind(rlsDb);
-      let chain = Promise.resolve();
-      rlsDb.execute = (query: unknown) => {
-        const run = () => exec(query);
-        const p = chain.then(run, run);
-        chain = p.then(
-          () => undefined,
-          () => undefined,
-        );
-        return p;
-      };
-    }
-    req.rlsDb = rlsDb;
+    req.rlsDb = makeRlsDb(client);
   } catch (err) {
     try {
       await releaseClient(false);
@@ -784,23 +780,19 @@ export async function requireFirmUserSession(
   };
 
   try {
+    const originalQuery = client.query.bind(client);
+    let chain = Promise.resolve();
+    (client as any).query = (...args: unknown[]) => {
+      const run = () => (originalQuery as any)(...args);
+      const p = chain.then(run, run);
+      chain = p.then(
+        () => undefined,
+        () => undefined,
+      );
+      return p;
+    };
     await setTenantContextSession(client, req.firmId, req.userId ?? undefined);
-    const rlsDb = makeRlsDb(client) as any;
-    const originalExecute: unknown = rlsDb.execute;
-    if (typeof originalExecute === "function") {
-      const exec = originalExecute.bind(rlsDb);
-      let chain = Promise.resolve();
-      rlsDb.execute = (query: unknown) => {
-        const run = () => exec(query);
-        const p = chain.then(run, run);
-        chain = p.then(
-          () => undefined,
-          () => undefined,
-        );
-        return p;
-      };
-    }
-    req.rlsDb = rlsDb;
+    req.rlsDb = makeRlsDb(client);
   } catch (err) {
     try {
       await releaseClient(false);
@@ -841,8 +833,9 @@ export function requirePermission(moduleName: string, action: string) {
   ): Promise<void> {
     try {
       const safeAudit = async (detail: string) => {
-        try {
-          await writeAuditLog({
+        if (!req.rlsDb) return;
+        await writeAuditLog(
+          {
             actorId: req.userId,
             firmId: req.firmId,
             actorType: req.userType ?? "unknown",
@@ -850,22 +843,9 @@ export function requirePermission(moduleName: string, action: string) {
             detail,
             ipAddress: req.ip,
             userAgent: req.headers["user-agent"],
-          });
-        } catch (err) {
-          logger.warn(
-            {
-              route: req.path,
-              requestId: getReqId(req) ?? null,
-              userId: req.userId ?? null,
-              firmId: req.firmId ?? null,
-              roleId: req.roleId ?? null,
-              moduleName,
-              action,
-              err,
-            },
-            "auth.audit_log_failed",
-          );
-        }
+          },
+          { db: req.rlsDb },
+        );
       };
 
       if (req.userType !== "firm_user" || !req.firmId || !req.roleId) {
@@ -891,6 +871,33 @@ export function requirePermission(moduleName: string, action: string) {
       }
 
       if (!roleName) {
+        try {
+          const diag = await rlsDb.execute(sql`
+            SELECT
+              current_user AS current_user,
+              current_setting('app.current_firm_id', true) AS current_firm_id,
+              current_setting('app.is_founder', true) AS is_founder
+          `);
+          const rows = Array.isArray(diag) ? (diag as any[]) : ((diag as any)?.rows ?? []);
+          const first = rows?.[0] ?? null;
+          logger.error(
+            {
+              route: req.path,
+              requestId: getReqId(req) ?? null,
+              userId: req.userId ?? null,
+              firmId: req.firmId ?? null,
+              roleId: req.roleId ?? null,
+              moduleName,
+              action,
+              hasRlsDb: Boolean(req.rlsDb),
+              currentUser: first?.current_user ?? null,
+              currentFirmId: first?.current_firm_id ?? null,
+              isFounder: first?.is_founder ?? null,
+            },
+            "auth.permission.role_not_found",
+          );
+        } catch {
+        }
         await safeAudit(`${moduleName}:${action} ${req.method} ${req.path} reason=role_not_found`);
         res.status(403).json({ error: "Permission denied" });
         return;

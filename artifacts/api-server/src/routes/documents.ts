@@ -18268,7 +18268,7 @@ router.post(
 router.post(
   "/documents/jobs/:jobId/run-next",
   requireAuth,
-  requireFirmUserSession,
+  requireFirmUser,
   requirePermission("documents", "generate"),
   async (req: AuthRequest, res): Promise<void> => {
     const startedAt = Date.now();
@@ -18849,7 +18849,7 @@ router.get(
 router.post(
   "/documents/jobs/:jobId/finalize",
   requireAuth,
-  requireFirmUserSession,
+  requireFirmUser,
   requirePermission("documents", "generate"),
   async (req: AuthRequest, res): Promise<void> => {
     const startedAt = Date.now();

@@ -2,7 +2,7 @@ import express, { type Router as ExpressRouter } from "express";
 import bcrypt from "bcryptjs";
 import crypto from "crypto";
 import { and, eq } from "drizzle-orm";
-import { auditLogsTable, db, firmsTable, permissionsTable, rolesTable, sessionsTable, sql, usersTable } from "@workspace/db";
+import { auditLogsTable, clearTenantContext, db, firmsTable, makeRlsDb, permissionsTable, pool, rolesTable, sessionsTable, setTenantContextSession, sql, usersTable } from "@workspace/db";
 import { LoginBody } from "@workspace/api-zod";
 import { ensureRolePermissionsInitialized, loadFounderPermissions, lookupSessionAndUserByTokenHash, requireAuth, requireReAuth, issueReauthToken, type AuthRequest, writeAuditLog } from "../lib/auth.js";
 import { ApiError, sendError, sendOk } from "../lib/api-response.js";
@@ -705,10 +705,44 @@ routerInternal.get("/auth/me", async (req: ReqLike, res: RouteResLike): Promise<
       return;
     }
 
+    const withFirmRlsDb = async <T,>(
+      firmId: number,
+      userId: number,
+      fn: (r: ReturnType<typeof makeRlsDb>) => Promise<T>,
+    ): Promise<T> => {
+      if (process.env.NODE_ENV === "test") {
+        return await fn(db as any);
+      }
+      const client = await pool.connect();
+      let destroy = false;
+      try {
+        await setTenantContextSession(client, firmId, userId);
+        const r = makeRlsDb(client);
+        return await fn(r);
+      } catch (err) {
+        destroy = true;
+        throw err;
+      } finally {
+        try {
+          await clearTenantContext(client);
+        } catch {
+        }
+        client.release(destroy);
+      }
+    };
+
     let roleName: string | null = null;
     if (user.roleId) {
       try {
-        const [role] = await db.select().from(rolesTable).where(eq(rolesTable.id, user.roleId));
+        const [role] =
+          user.userType === "firm_user" && user.firmId
+            ? await withFirmRlsDb(user.firmId, user.id, async (r) => {
+                return await r
+                  .select({ name: rolesTable.name })
+                  .from(rolesTable)
+                  .where(and(eq(rolesTable.id, user.roleId!), eq(rolesTable.firmId, user.firmId!)));
+              })
+            : await db.select({ name: rolesTable.name }).from(rolesTable).where(eq(rolesTable.id, user.roleId));
         roleName = (role as { name?: unknown } | undefined)?.name as string | undefined ?? null;
       } catch (err) {
         logger.error({ route: getRoute(req), reqId, stage: "role_lookup", err }, "auth.me.degraded");
@@ -729,16 +763,23 @@ routerInternal.get("/auth/me", async (req: ReqLike, res: RouteResLike): Promise<
     if (user.userType === "firm_user" && user.roleId) {
       try {
         if (user.firmId) {
-          try {
-            await ensureRolePermissionsInitialized(db as any, user.firmId, user.roleId);
-          } catch (err) {
-            logger.error({ route: getRoute(req), reqId, stage: "permissions_seed", err }, "auth.me.degraded");
-          }
+          await withFirmRlsDb(user.firmId, user.id, async (r) => {
+            try {
+              await ensureRolePermissionsInitialized(r as any, user.firmId!, user.roleId!);
+            } catch (err) {
+              logger.error({ route: getRoute(req), reqId, stage: "permissions_seed", err }, "auth.me.degraded");
+            }
+            permissions = await r
+              .select({ module: permissionsTable.module, action: permissionsTable.action })
+              .from(permissionsTable)
+              .where(and(eq(permissionsTable.roleId, user.roleId!), eq(permissionsTable.allowed, true)));
+          });
+        } else {
+          permissions = await db
+            .select({ module: permissionsTable.module, action: permissionsTable.action })
+            .from(permissionsTable)
+            .where(and(eq(permissionsTable.roleId, user.roleId), eq(permissionsTable.allowed, true)));
         }
-        permissions = await db
-          .select({ module: permissionsTable.module, action: permissionsTable.action })
-          .from(permissionsTable)
-          .where(and(eq(permissionsTable.roleId, user.roleId), eq(permissionsTable.allowed, true)));
       } catch (err) {
         logger.error({ route: getRoute(req), reqId, stage: "permissions_lookup", err }, "auth.me.degraded");
         permissions = [];
