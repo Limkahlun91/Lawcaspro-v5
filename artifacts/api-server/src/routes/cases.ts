@@ -84,7 +84,7 @@ async function checkCasesSchemaHealth(r: DbConn): Promise<{ ok: boolean; issues:
     from information_schema.columns
     where table_schema = 'public'
       and table_name = 'cases'
-      and column_name = any(${mustExist}::text[])
+      and column_name in (${sql.join(mustExist.map((c) => sql`${c}`), sql`, `)})
   `);
 
   const byName = new Map<string, { isNullable: boolean }>();
@@ -3294,17 +3294,27 @@ router.post("/cases", requireAuthHandler, requireFirmUserHandler, requirePermiss
       return v;
     }, z.number().finite().nullable());
 
+    const optionalTrimmedString = (value: unknown): string | undefined => {
+      if (typeof value !== "string") return undefined;
+      const trimmed = value.trim();
+      return trimmed.length > 0 ? trimmed : undefined;
+    };
+    const normalizeOptionalLower = (value: unknown): string | undefined => {
+      const trimmed = optionalTrimmedString(value);
+      return trimmed ? trimmed.toLowerCase() : undefined;
+    };
+
     const createCaseSchema = z.object({
       caseType: z.string().min(1),
       projectId: z.coerce.number().int().positive().optional(),
       developerId: z.coerce.number().int().positive().optional(),
       referenceNo: z.string().trim().max(80).optional(),
-      purchaseMode: z.string().optional().default("cash").transform((v) => v.trim().toLowerCase()),
-      titleType: z.string().optional().transform((v) => v.trim().toLowerCase()),
-      landCondition: z.string().optional().transform((v) => v.trim().toLowerCase()),
-      encumbrances: z.string().optional().transform((v) => v.trim().toLowerCase()),
-      actingFor: z.string().optional().transform((v) => v.trim().toLowerCase()),
-      perfectionType: z.string().optional().transform((v) => v.trim().toLowerCase()),
+      purchaseMode: z.preprocess((v) => normalizeOptionalLower(v), z.string().optional()).default("cash"),
+      titleType: z.preprocess((v) => normalizeOptionalLower(v), z.string().optional()),
+      landCondition: z.preprocess((v) => normalizeOptionalLower(v), z.string().optional()),
+      encumbrances: z.preprocess((v) => normalizeOptionalLower(v), z.string().optional()),
+      actingFor: z.preprocess((v) => normalizeOptionalLower(v), z.string().optional()),
+      perfectionType: z.preprocess((v) => normalizeOptionalLower(v), z.string().optional()),
       spaPrice: money.optional(),
       apdlPrice: money.optional(),
       developerDiscount: money.optional(),
