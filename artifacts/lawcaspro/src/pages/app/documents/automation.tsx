@@ -157,15 +157,26 @@ export default function DocumentAutomationHub() {
     jobId: string | null;
     startedAt: number;
     runNextAttempts: number;
-    statusOnly: boolean;
-    statusOnlySince: number;
+    state:
+      | "idle"
+      | "creatingJob"
+      | "runningItems"
+      | "statusOnly"
+      | "finalizing"
+      | "downloading"
+      | "completed"
+      | "failed"
+      | "cancelled";
+    statusOnlyUntil: number;
+    finalizeRequestedAt: number;
   }>({
     running: false,
     jobId: null,
     startedAt: 0,
     runNextAttempts: 0,
-    statusOnly: false,
-    statusOnlySince: 0,
+    state: "idle",
+    statusOnlyUntil: 0,
+    finalizeRequestedAt: 0,
   });
   const pollConsecutiveErrorRef = useRef(0);
   const pollAbortRef = useRef<AbortController | null>(null);
@@ -755,8 +766,9 @@ export default function DocumentAutomationHub() {
     runnerRef.current.jobId = null;
     runnerRef.current.startedAt = Date.now();
     runnerRef.current.runNextAttempts = 0;
-    runnerRef.current.statusOnly = false;
-    runnerRef.current.statusOnlySince = 0;
+    runnerRef.current.state = "creatingJob";
+    runnerRef.current.statusOnlyUntil = 0;
+    runnerRef.current.finalizeRequestedAt = 0;
     try {
       const templates = [
         ...selectedTemplateIds.map((id) => ({ source: "firm" as const, id })),
@@ -781,6 +793,7 @@ export default function DocumentAutomationHub() {
       const jobId = created.jobId;
       if (!jobId) throw new Error("jobId is missing");
       runnerRef.current.jobId = jobId;
+      runnerRef.current.state = "runningItems";
       try {
         const initial = await getGenerationJobStatus(jobId);
         setJob(initial);
@@ -848,13 +861,19 @@ export default function DocumentAutomationHub() {
           if (!resp.ok) {
             if (contentType.includes("application/json") || contentType.includes("text/")) {
               const text = await resp.text().catch(() => "");
-              throw new Error(text || "Failed to download generated documents");
+              const e = new Error(text || "Failed to download generated documents") as any;
+              e.status = resp.status;
+              throw e;
             }
-            throw new Error("Failed to download generated documents");
+            const e = new Error("Failed to download generated documents") as any;
+            e.status = resp.status;
+            throw e;
           }
           if (contentType.includes("application/json") || contentType.includes("text/")) {
             const text = await resp.text().catch(() => "");
-            throw new Error(text || "Failed to download generated documents");
+            const e = new Error(text || "Failed to download generated documents") as any;
+            e.status = resp.status;
+            throw e;
           }
           const blob = await resp.blob();
           const raw =
@@ -872,7 +891,9 @@ export default function DocumentAutomationHub() {
           });
           return;
         }
-        throw new Error("Job is still finalizing. Please retry download.");
+        const e = new Error("Job is still finalizing. Please retry download.") as any;
+        e.status = 409;
+        throw e;
       };
 
       const getApiErrorCode = (err: unknown): string => {
@@ -917,7 +938,14 @@ export default function DocumentAutomationHub() {
             await new Promise<void>((r) => setTimeout(r, 120));
             continue;
           }
-          if (runnerRef.current.statusOnly) {
+          const now = Date.now();
+          const shouldStatusOnly =
+            runnerRef.current.state !== "runningItems" ||
+            now < runnerRef.current.statusOnlyUntil;
+          if (shouldStatusOnly) {
+            if (runnerRef.current.state === "runningItems") {
+              runnerRef.current.state = "statusOnly";
+            }
             runNextInFlightRef.current = true;
             const startedAt = Date.now();
             try {
@@ -929,25 +957,52 @@ export default function DocumentAutomationHub() {
               const s = String(st.status ?? "");
 
               if (st.nextAction === "finalize" || s === "finalizing") {
+                runnerRef.current.state = "finalizing";
                 setFinalizingZip(true);
-                try {
-                  const fin = await finalizeGenerationJob(jobId, { signal: ctrl.signal });
-                  setJob(fin);
-                } catch {}
-                await new Promise<void>((r) => setTimeout(r, 900));
+                if (!runnerRef.current.finalizeRequestedAt && st.nextAction === "finalize") {
+                  runnerRef.current.finalizeRequestedAt = Date.now();
+                  try {
+                    const fin = await finalizeGenerationJob(jobId, { signal: ctrl.signal });
+                    setJob(fin);
+                  } catch {}
+                }
+                await new Promise<void>((r) => setTimeout(r, 1200));
                 continue;
               }
 
               if (st.nextAction === "download" || s === "completed" || s === "completed_with_errors") {
+                runnerRef.current.state = "downloading";
                 stopPolling();
                 setFinalizingZip(true);
-                await downloadWithRetry(jobId, st);
-                setFinalizingZip(false);
-                setBusy(false);
-                return;
+                try {
+                  await downloadWithRetry(jobId, st);
+                  setFinalizingZip(false);
+                  setBusy(false);
+                  return;
+                } catch (err) {
+                  const status =
+                    err && typeof err === "object" && "status" in (err as any) && typeof (err as any).status === "number"
+                      ? Number((err as any).status)
+                      : null;
+                  if (status === 409) {
+                    runnerRef.current.state = "finalizing";
+                    runnerRef.current.statusOnlyUntil = Date.now() + 15_000;
+                    await new Promise<void>((r) => setTimeout(r, 1500));
+                    continue;
+                  }
+                  if (status === 401 || status === 403) {
+                    stopWithError("Download failed: your session could not be verified. Please refresh and login again.");
+                    setFinalizingZip(false);
+                    return;
+                  }
+                  stopWithError(formatPollError(err));
+                  setFinalizingZip(false);
+                  return;
+                }
               }
 
               if (st.nextAction === "stop" || s === "failed" || s === "cancelled") {
+                runnerRef.current.state = s === "cancelled" ? "cancelled" : "failed";
                 const hasDocxPdfConfigError =
                   Array.isArray(st.items) &&
                   st.items.some((i) => i?.errorCode === "DOCX_TO_PDF_ENGINE_NOT_CONFIGURED");
@@ -964,13 +1019,15 @@ export default function DocumentAutomationHub() {
                 (typeof st.runningCount === "number" && st.runningCount > 0);
               const pending =
                 typeof st.pendingCount === "number" && st.pendingCount > 0;
-              if (running || !pending) {
-                await new Promise<void>((r) => setTimeout(r, 1500));
+              if (st.nextAction === "run_next" && pending && !running) {
+                runnerRef.current.state = "runningItems";
+                runnerRef.current.statusOnlyUntil = 0;
+                await new Promise<void>((r) => setTimeout(r, 250));
                 continue;
               }
 
-              runnerRef.current.statusOnly = false;
-              await new Promise<void>((r) => setTimeout(r, 250));
+              runnerRef.current.state = "statusOnly";
+              await new Promise<void>((r) => setTimeout(r, 1500));
               continue;
             } catch (err) {
               const status =
@@ -1018,11 +1075,11 @@ export default function DocumentAutomationHub() {
             const nextAction =
               next.nextAction ??
               (() => {
-                if (next.pendingCount > 0) return "run_next";
-                if ((next.runningCount ?? 0) > 0) return "run_next";
                 if (st === "completed" || st === "completed_with_errors") return "download";
                 if (st === "finalizing") return "finalize";
                 if (st === "failed") return "stop";
+                if ((next.runningCount ?? 0) > 0) return "run_next";
+                if (next.pendingCount > 0) return "run_next";
                 return "run_next";
               })();
             emitDbg({
@@ -1041,20 +1098,46 @@ export default function DocumentAutomationHub() {
             });
 
             if (nextAction === "finalize") {
+              runnerRef.current.state = "finalizing";
+              runnerRef.current.statusOnlyUntil = Date.now() + 15_000;
+              if (!runnerRef.current.finalizeRequestedAt) runnerRef.current.finalizeRequestedAt = Date.now();
               setFinalizingZip(true);
               const fin = await finalizeGenerationJob(jobId, { signal: ctrl.signal });
               setJob(fin);
               continue;
             }
             if (nextAction === "download") {
+              runnerRef.current.state = "downloading";
               stopPolling();
               setFinalizingZip(true);
-              await downloadWithRetry(jobId, next);
-              setFinalizingZip(false);
-              setBusy(false);
-              return;
+              try {
+                await downloadWithRetry(jobId, next);
+                setFinalizingZip(false);
+                setBusy(false);
+                return;
+              } catch (err) {
+                const status =
+                  err && typeof err === "object" && "status" in (err as any) && typeof (err as any).status === "number"
+                    ? Number((err as any).status)
+                    : null;
+                if (status === 409) {
+                  runnerRef.current.state = "finalizing";
+                  runnerRef.current.statusOnlyUntil = Date.now() + 15_000;
+                  await new Promise<void>((r) => setTimeout(r, 1500));
+                  continue;
+                }
+                if (status === 401 || status === 403) {
+                  stopWithError("Download failed: your session could not be verified. Please refresh and login again.");
+                  setFinalizingZip(false);
+                  return;
+                }
+                stopWithError(formatPollError(err));
+                setFinalizingZip(false);
+                return;
+              }
             }
             if (nextAction === "stop" || st === "failed") {
+              runnerRef.current.state = st === "cancelled" ? "cancelled" : "failed";
               stopPolling();
               const hasDocxPdfConfigError = Array.isArray(next.items) && next.items.some((i) => i?.errorCode === "DOCX_TO_PDF_ENGINE_NOT_CONFIGURED");
               setJobError(
@@ -1085,8 +1168,8 @@ export default function DocumentAutomationHub() {
               return;
             }
             if (status === 409 || code === "RUN_NEXT_IN_FLIGHT") {
-              runnerRef.current.statusOnly = true;
-              if (!runnerRef.current.statusOnlySince) runnerRef.current.statusOnlySince = Date.now();
+              runnerRef.current.state = "statusOnly";
+              runnerRef.current.statusOnlyUntil = Date.now() + 15_000;
               await new Promise<void>((r) => setTimeout(r, 1500));
               continue;
             }
@@ -1143,8 +1226,9 @@ export default function DocumentAutomationHub() {
     } finally {
       runnerRef.current.running = false;
       runnerRef.current.jobId = null;
-      runnerRef.current.statusOnly = false;
-      runnerRef.current.statusOnlySince = 0;
+      runnerRef.current.state = "idle";
+      runnerRef.current.statusOnlyUntil = 0;
+      runnerRef.current.finalizeRequestedAt = 0;
       if (!pollTimerRef.current) setBusy(false);
     }
   }
@@ -1732,8 +1816,15 @@ export default function DocumentAutomationHub() {
                                 (job?.failedCount ?? 0);
                               const total =
                                 job?.totalCount || expectedTotal || 0;
-                              const fin = finalizingZip ? " Finalizing ZIP..." : "";
-                              return `Progress: ${done}/${total}  (success=${job?.successCount ?? 0}, failed=${job?.failedCount ?? 0}, pending=${job?.pendingCount ?? 0})${fin}`;
+                              const status = String(job?.status ?? "");
+                              const isFinalizing =
+                                finalizingZip ||
+                                job?.nextAction === "finalize" ||
+                                status === "finalizing";
+                              if (isFinalizing) {
+                                return `Generated items completed. Preparing ZIP... (success=${job?.successCount ?? 0}, failed=${job?.failedCount ?? 0})`;
+                              }
+                              return `Progress: ${done}/${total}  (success=${job?.successCount ?? 0}, failed=${job?.failedCount ?? 0}, pending=${job?.pendingCount ?? 0})`;
                             })()}
                           </div>
                           {jobError && (

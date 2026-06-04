@@ -3,7 +3,7 @@ import { clearTenantContext, db, makeRlsDb, permissionsTable, pool, RlsDb, roles
 import { and, eq } from "drizzle-orm";
 import crypto from "crypto";
 import { logger } from "./logger";
-import { isTransientDbConnectionError } from "./auth-safe-db";
+import { isTransientDbConnectionError, withAuthSafeDb } from "./auth-safe-db";
 
 export interface AuthRequest extends Request {
   userId?: number;
@@ -157,20 +157,18 @@ export async function requireAuth(
   res: Response,
   next: NextFunction
 ): Promise<void> {
-  let token = req.cookies?.["auth_token"] as string | undefined;
-  if (!token) {
-    const authHeader = req.headers["authorization"];
-    if (typeof authHeader === "string" && authHeader.startsWith("Bearer ")) {
-      token = authHeader.slice(7);
-    }
-  }
-  if (!token) {
+  const cookieToken = req.cookies?.["auth_token"] as string | undefined;
+  const authHeader = req.headers["authorization"];
+  const headerToken =
+    typeof authHeader === "string" && authHeader.startsWith("Bearer ")
+      ? authHeader.slice(7)
+      : undefined;
+  const candidates = Array.from(new Set([cookieToken, headerToken].filter(Boolean))) as string[];
+  if (candidates.length === 0) {
     await writeAuditLog({ action: "auth.missing_token", detail: `${req.method} ${req.path}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
-    res.status(401).json({ error: "Not authenticated" });
+    res.status(401).json({ error: "Not authenticated", code: "AUTH_MISSING_TOKEN" });
     return;
   }
-
-  const tokenHash = crypto.createHash("sha256").update(token).digest("hex");
 
   let session: typeof sessionsTable.$inferSelect | undefined;
   let user:
@@ -186,9 +184,15 @@ export async function requireAuth(
   try {
     const reqId = getReqId(req);
     const lookupStartedAt = Date.now();
-    const result = await lookupSessionAndUserByTokenHash(tokenHash);
-    session = result?.session;
-    user = result?.user;
+    for (const token of candidates) {
+      const tokenHash = crypto.createHash("sha256").update(token).digest("hex");
+      const result = await lookupSessionAndUserByTokenHash(tokenHash);
+      if (result?.session) {
+        session = result.session;
+        user = result.user;
+        break;
+      }
+    }
     const ms = Date.now() - lookupStartedAt;
     if (ms > 1000) {
       logger.warn({ route: req.path, reqId, ms }, "auth.require_auth.slow");
@@ -199,13 +203,30 @@ export async function requireAuth(
     return;
   }
 
-  if (!session || session.expiresAt < new Date()) {
-    await writeAuditLog({ action: "auth.session_expired", detail: `${req.method} ${req.path}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
-    res.status(401).json({ error: "Session expired" });
+  if (!session) {
+    await writeAuditLog({ action: "auth.session_not_found", detail: `${req.method} ${req.path}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+    res.status(401).json({ error: "Session not found", code: "AUTH_SESSION_NOT_FOUND" });
     return;
   }
 
-  if (!user || user.status !== "active") {
+  if (session.expiresAt < new Date()) {
+    await writeAuditLog({ action: "auth.session_expired", detail: `${req.method} ${req.path}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+    res.status(401).json({ error: "Session expired", code: "AUTH_SESSION_EXPIRED" });
+    return;
+  }
+
+  if (!user) {
+    await writeAuditLog({
+      action: "auth.user_not_found",
+      detail: `userId=${session.userId} route=${req.method} ${req.path}`,
+      ipAddress: req.ip,
+      userAgent: req.headers["user-agent"],
+    });
+    res.status(401).json({ error: "User not found", code: "AUTH_USER_NOT_FOUND" });
+    return;
+  }
+
+  if (user.status !== "active") {
     await writeAuditLog({
       firmId: user?.firmId ?? null,
       actorId: user?.id ?? null,
@@ -215,7 +236,7 @@ export async function requireAuth(
       ipAddress: req.ip,
       userAgent: req.headers["user-agent"],
     });
-    res.status(401).json({ error: "User not found or inactive" });
+    res.status(401).json({ error: "User inactive", code: "AUTH_USER_INACTIVE" });
     return;
   }
 
@@ -251,44 +272,150 @@ export async function lookupSessionAndUserByTokenHash(
 > {
   const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
+  const lookupViaDb = async (): Promise<
+    | {
+        session: typeof sessionsTable.$inferSelect;
+        user:
+          | {
+              id: number;
+              email: string;
+              name: string;
+              userType: string;
+              firmId: number | null;
+              roleId: number | null;
+              developerId: number | null;
+              status: string;
+            }
+          | undefined;
+      }
+    | null
+  > => {
+    const [s] = await db
+      .select()
+      .from(sessionsTable)
+      .where(eq(sessionsTable.tokenHash, tokenHash))
+      ;
+    if (!s) return null;
+    const [u] = await db
+      .select({
+        id: usersTable.id,
+        email: usersTable.email,
+        name: usersTable.name,
+        userType: usersTable.userType,
+        firmId: usersTable.firmId,
+        roleId: usersTable.roleId,
+        developerId: usersTable.developerId,
+        status: usersTable.status,
+      })
+      .from(usersTable)
+      .where(eq(usersTable.id, s.userId))
+      .catch(async (err) => {
+        const code = err && typeof err === "object" ? (err as { code?: unknown }).code : undefined;
+        if (code !== "42703") throw err;
+        const [u2] = await db
+          .select({
+            id: usersTable.id,
+            email: usersTable.email,
+            name: usersTable.name,
+            userType: usersTable.userType,
+            firmId: usersTable.firmId,
+            roleId: usersTable.roleId,
+            status: usersTable.status,
+          })
+          .from(usersTable)
+          .where(eq(usersTable.id, s.userId))
+          ;
+        return [u2 ? ({ ...u2, developerId: null }) : undefined] as any;
+      });
+    return { session: s, user: u as any };
+  };
+
+  const lookupViaAuthSafeDb = async (): Promise<
+    | {
+        session: typeof sessionsTable.$inferSelect;
+        user:
+          | {
+              id: number;
+              email: string;
+              name: string;
+              userType: string;
+              firmId: number | null;
+              roleId: number | null;
+              developerId: number | null;
+              status: string;
+            }
+          | undefined;
+      }
+    | null
+  > => {
+    return await withAuthSafeDb(
+      async (authDb) => {
+        const [s] = await authDb
+          .select()
+          .from(sessionsTable)
+          .where(eq(sessionsTable.tokenHash, tokenHash))
+          ;
+        if (!s) return null;
+        const [u] = await authDb
+          .select({
+            id: usersTable.id,
+            email: usersTable.email,
+            name: usersTable.name,
+            userType: usersTable.userType,
+            firmId: usersTable.firmId,
+            roleId: usersTable.roleId,
+            developerId: usersTable.developerId,
+            status: usersTable.status,
+          })
+          .from(usersTable)
+          .where(eq(usersTable.id, s.userId))
+          .catch(async (err) => {
+            const code = err && typeof err === "object" ? (err as { code?: unknown }).code : undefined;
+            if (code !== "42703") throw err;
+            const [u2] = await authDb
+              .select({
+                id: usersTable.id,
+                email: usersTable.email,
+                name: usersTable.name,
+                userType: usersTable.userType,
+                firmId: usersTable.firmId,
+                roleId: usersTable.roleId,
+                status: usersTable.status,
+              })
+              .from(usersTable)
+              .where(eq(usersTable.id, s.userId))
+              ;
+            return [u2 ? ({ ...u2, developerId: null }) : undefined] as any;
+          });
+        return { session: s, user: u as any };
+      },
+      { retry: true, maxRetries: 1, ctx: { stage: "lookup_session_user" }, allowUnsafe: true },
+    );
+  };
+
   for (let attempt = 1; attempt <= 3; attempt++) {
     try {
-      const [s] = await db.select().from(sessionsTable).where(eq(sessionsTable.tokenHash, tokenHash));
-      if (!s) {
-        if (attempt < 2) continue;
+      const primary = await lookupViaDb();
+      if (!primary?.session) {
+        if (attempt < 2) {
+          await sleep(30 * attempt);
+          continue;
+        }
         return null;
       }
-      const [u] = await db
-        .select({
-          id: usersTable.id,
-          email: usersTable.email,
-          name: usersTable.name,
-          userType: usersTable.userType,
-          firmId: usersTable.firmId,
-          roleId: usersTable.roleId,
-          developerId: usersTable.developerId,
-          status: usersTable.status,
-        })
-        .from(usersTable)
-        .where(eq(usersTable.id, s.userId))
-        .catch(async (err) => {
-          const code = err && typeof err === "object" ? (err as { code?: unknown }).code : undefined;
-          if (code !== "42703") throw err;
-          const [u2] = await db
-            .select({
-              id: usersTable.id,
-              email: usersTable.email,
-              name: usersTable.name,
-              userType: usersTable.userType,
-              firmId: usersTable.firmId,
-              roleId: usersTable.roleId,
-              status: usersTable.status,
-            })
-            .from(usersTable)
-            .where(eq(usersTable.id, s.userId));
-          return [u2 ? ({ ...u2, developerId: null }) : undefined] as any;
-        });
-      return { session: s, user: u };
+      if (primary.user) return primary;
+
+      try {
+        const fallback = await lookupViaAuthSafeDb();
+        return fallback?.session ? fallback : primary;
+      } catch (err) {
+        const shouldRetry = isTransientDbConnectionError(err);
+        if (shouldRetry && attempt < 3) {
+          await sleep(50 * attempt);
+          continue;
+        }
+        return primary;
+      }
     } catch (err) {
       const shouldRetry = isTransientDbConnectionError(err);
       if (shouldRetry && attempt < 3) {
@@ -298,6 +425,7 @@ export async function lookupSessionAndUserByTokenHash(
       throw err;
     }
   }
+
   return null;
 }
 

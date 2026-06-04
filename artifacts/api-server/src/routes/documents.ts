@@ -14817,8 +14817,6 @@ function resolveDocGenNextAction(args: {
   progress: DocGenJobProgress;
   downloadObjectPath?: string | null;
 }): "run_next" | "finalize" | "download" | "stop" {
-  if (args.progress.pending > 0) return "run_next";
-  if (args.progress.running > 0) return "run_next";
   if (args.status === "failed") return "stop";
   const downloadReady =
     typeof args.downloadObjectPath === "string" && args.downloadObjectPath.trim().length > 0;
@@ -14826,6 +14824,8 @@ function resolveDocGenNextAction(args: {
     return downloadReady ? "download" : "finalize";
   }
   if (args.status === "finalizing") return "finalize";
+  if (args.progress.pending > 0) return "run_next";
+  if (args.progress.running > 0) return "run_next";
   if (
     args.progress.total > 0 &&
     args.progress.pending === 0 &&
@@ -18451,7 +18451,7 @@ router.post(
         total_count: progress.total,
         success_count: progress.success,
         failed_count: progress.failed,
-        pending_count: progress.pending + progress.running,
+        pending_count: progress.pending,
         ...(downloadUrl ? { downloadUrl } : {}),
       };
 
@@ -19190,6 +19190,7 @@ router.get(
       });
       return;
     }
+    res.setHeader("cache-control", "no-store, max-age=0");
     const jobs = await queryRows(
       r,
       sql`SELECT * FROM document_generation_jobs WHERE id = ${jobId} AND firm_id = ${req.firmId!}`,
@@ -19207,15 +19208,55 @@ router.get(
       });
       return;
     }
-    const st = String(job.status ?? "");
-    res.json({
+    let status = String(job.status ?? "");
+    let progress = await computeDocGenJobProgress(r, {
+      firmId: req.firmId!,
+      jobId,
+    });
+
+    if (
+      progress.total > 0 &&
+      progress.pending === 0 &&
+      progress.running === 0 &&
+      (status === "pending" || status === "running")
+    ) {
+      const fin = await finalizeDocGenJobIfDone(r, {
+        firmId: req.firmId!,
+        jobId,
+      });
+      status = fin.status;
+      progress = fin.progress;
+    }
+
+    const nextAction = resolveDocGenNextAction({
+      status,
+      progress,
+      downloadObjectPath:
+        typeof (job as any).download_object_path === "string"
+          ? String((job as any).download_object_path)
+          : null,
+    });
+    const downloadUrl =
+      nextAction === "download" ? `/documents/jobs/${jobId}/download` : undefined;
+    const jobPayload: Record<string, unknown> = {
+      ...(job as any),
+      status,
+      total_count: progress.total,
+      success_count: progress.success,
+      failed_count: progress.failed,
+      pending_count: progress.pending,
+      ...(downloadUrl ? { downloadUrl } : {}),
+    };
+
+    res.status(200).json({
       ok: true,
       jobId,
-      status: st || "pending",
-      ...(st === "completed" || st === "completed_with_errors"
-        ? { downloadUrl: `/documents/jobs/${jobId}/download` }
-        : {}),
-      ...(st === "failed"
+      status,
+      progress,
+      nextAction,
+      ...(downloadUrl ? { downloadUrl } : {}),
+      job: jobPayload,
+      ...(status === "failed"
         ? {
             error:
               typeof job.error_summary === "string"

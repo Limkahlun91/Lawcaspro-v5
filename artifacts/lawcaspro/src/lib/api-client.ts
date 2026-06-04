@@ -42,6 +42,16 @@ function mergeHeaders(...sources: Array<HeadersInit | undefined>): Headers {
   return h;
 }
 
+function isSameOriginUrl(url: string): boolean {
+  if (typeof window === "undefined") return false;
+  if (!/^https?:\/\//i.test(url)) return true;
+  try {
+    return new URL(url).origin === window.location.origin;
+  } catch {
+    return false;
+  }
+}
+
 function handleUnauthorized(): void {
   clearStoredAuthToken();
   emitAuthUnauthorized();
@@ -73,8 +83,9 @@ export async function apiRequest(path: string, options: ApiFetchOptions = {}): P
   const url = resolveApiUrl(path);
   const timeoutMs = options.timeoutMs ?? 15000;
   const token = getStoredAuthToken();
-  const baseHeaders = token ? { Authorization: `Bearer ${token}` } : undefined;
-  const headers = mergeHeaders(baseHeaders, options.headers);
+  const headers = mergeHeaders(options.headers);
+  const shouldAttachBearer = Boolean(token) && !headers.has("authorization") && !isSameOriginUrl(url);
+  if (shouldAttachBearer) headers.set("authorization", `Bearer ${token}`);
   const supportSessionId = getSupportSessionId();
   if (supportSessionId && !headers.has("x-support-session-id")) {
     headers.set("x-support-session-id", supportSessionId);
@@ -86,12 +97,25 @@ export async function apiRequest(path: string, options: ApiFetchOptions = {}): P
     else headers.set("content-type", "application/json");
   }
 
-  const res = await fetchWithTimeout(url, {
+  const credentials = options.credentials ?? "include";
+  const requestInit: RequestInit = {
     ...options,
     timeoutMs,
-    credentials: options.credentials ?? "include",
+    credentials,
     headers,
-  });
+  } as any;
+  let res = await fetchWithTimeout(url, requestInit);
+  if (res.status === 401 && shouldAttachBearer && credentials === "include") {
+    clearStoredAuthToken();
+    const retryHeaders = mergeHeaders(options.headers);
+    const retryInit: RequestInit = {
+      ...options,
+      timeoutMs,
+      credentials,
+      headers: retryHeaders,
+    } as any;
+    res = await fetchWithTimeout(url, retryInit);
+  }
 
   const allow = new Set(options.allowStatuses ?? []);
   if (res.status === 401 && !allow.has(401)) {
