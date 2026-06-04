@@ -264,6 +264,7 @@ export function CaseFormModal(props: {
   title?: string;
   initialValues?: CaseFormValues;
   onSubmit: (payload: Record<string, unknown>) => Promise<void>;
+  showSuccessToast?: boolean;
 }) {
   const { toast } = useToast();
   const { user } = useAuth();
@@ -330,7 +331,9 @@ export function CaseFormModal(props: {
     setSubmitting(true);
     try {
       await props.onSubmit(buildCasePayloadFromFormValues(value));
-      toast({ title: props.mode === "create" ? "Case submitted for approval." : "Case updated" });
+      if (props.showSuccessToast !== false) {
+        toast({ title: props.mode === "create" ? "Open file submitted for approval." : "Case updated" });
+      }
       props.onOpenChange(false);
     } catch (err) {
       const status = getHttpStatus(err);

@@ -73,6 +73,7 @@ import DocumentsPage from "@/pages/app/documents";
 import DocumentAutomationHub from "@/pages/app/documents/automation";
 import DocumentGenerationLogsPage from "@/pages/app/documents/generation-logs";
 import Accounting from "@/pages/app/accounting";
+import AccountingFileListing from "@/pages/app/accounting/file-listing";
 import BankReconciliationPage from "@/pages/app/accounting/bank-reconciliation";
 import InvoiceDetail from "@/pages/app/accounting/invoices/detail";
 import ReceiptDetail from "@/pages/app/accounting/receipts/detail";
@@ -288,6 +289,11 @@ function AppRoutes() {
           <Route path="/app/accounting/bank-reconciliation" component={() => (
             <PermissionGuard module="accounting" action="read">
               <BankReconciliationPage />
+            </PermissionGuard>
+          )} />
+          <Route path="/app/accounting/file-listing" component={() => (
+            <PermissionGuard module="accounting" action="read">
+              <AccountingFileListing />
             </PermissionGuard>
           )} />
           <Route path="/app/accounting" component={() => (

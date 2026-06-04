@@ -13,8 +13,6 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { useToast } from "@/hooks/use-toast";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Label } from "@/components/ui/label";
-import { Textarea } from "@/components/ui/textarea";
 import { QueryFallback } from "@/components/query-fallback";
 import { toastError } from "@/lib/toast-error";
 import { useAuth } from "@/lib/auth-context";
@@ -131,21 +129,12 @@ export default function CasesList() {
   const [milestonePresence, setMilestonePresence] = useState<MilestonePresence>(() => initialPresence);
   const [page, setPage] = useState<number>(() => Number.isInteger(initialPage) && initialPage > 0 ? initialPage : 1);
   const [limit, setLimit] = useState<number>(() => Number.isInteger(initialLimit) && initialLimit > 0 ? initialLimit : 50);
-  const normalizeApprovalStatus = (raw: string | null): "approved" | "pending_approval" | "rejected" => {
+  const normalizeApprovalStatus = (raw: string | null): "approved" | "rejected" => {
     const s = String(raw ?? "").trim().toLowerCase();
-    if (s === "pending_approval") return "pending_approval";
     if (s === "rejected") return "rejected";
     return "approved";
   };
-  const [approvalStatus, setApprovalStatus] = useState<"approved" | "pending_approval" | "rejected">(() => normalizeApprovalStatus(sp.get("approvalStatus")));
-
-  useEffect(() => {
-    if (canApproveCases) return;
-    if (approvalStatus !== "approved") {
-      setApprovalStatus("approved");
-      setPage(1);
-    }
-  }, [canApproveCases, approvalStatus]);
+  const [approvalStatus, setApprovalStatus] = useState<"approved" | "rejected">(() => normalizeApprovalStatus(sp.get("approvalStatus")));
 
 
   useEffect(() => {
@@ -260,7 +249,7 @@ export default function CasesList() {
     limit: number;
   }>({
     queryKey: ["cases", "approval-list", approvalStatus, page, limit, search],
-    enabled: approvalStatus !== "approved" && canApproveCases,
+    enabled: approvalStatus === "rejected",
     queryFn: () => apiFetchJson(`/cases?approvalStatus=${encodeURIComponent(approvalStatus)}&page=${page}&limit=${limit}&search=${encodeURIComponent(search.trim())}`),
     retry: false,
   });
@@ -388,68 +377,16 @@ export default function CasesList() {
   const [isBatchGenerateOpen, setIsBatchGenerateOpen] = useState(false);
   const [selectedTemplateIds, setSelectedTemplateIds] = useState<Set<number>>(new Set());
   const [bulkGenerateDownloading, setBulkGenerateDownloading] = useState(false);
-  const [reviewCaseId, setReviewCaseId] = useState<number | null>(null);
-  const [reviewOpen, setReviewOpen] = useState(false);
-  const [reviewReferenceNo, setReviewReferenceNo] = useState("");
-  const [reviewNote, setReviewNote] = useState("");
-
-  const reviewCaseQuery = useQuery<Record<string, any>>({
-    queryKey: ["cases", "review", reviewCaseId],
-    enabled: reviewOpen && typeof reviewCaseId === "number",
-    queryFn: () => apiFetchJson(`/cases/${reviewCaseId}`),
-    retry: false,
-  });
-
-  const approveCaseMutation = useMutation({
-    mutationFn: async (vars: { caseId: number; referenceNo: string; approvalNote: string }) => {
-      return await apiFetchJson(`/cases/${vars.caseId}/approve`, {
-        method: "POST",
-        body: JSON.stringify({ referenceNo: vars.referenceNo, approvalNote: vars.approvalNote.trim() ? vars.approvalNote.trim() : null }),
-      });
+  const resubmitMutation = useMutation({
+    mutationFn: async (caseId: number) => {
+      return await apiFetchJson(`/cases/${caseId}/resubmit`, { method: "POST" });
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["cases", "approval-list"] });
       queryClient.invalidateQueries({ queryKey: getListCasesQueryKey() });
-      setReviewOpen(false);
-      setReviewCaseId(null);
-      setReviewReferenceNo("");
-      setReviewNote("");
-      toast({ title: "Case approved" });
+      toast({ title: "Resubmitted for approval" });
     },
-    onError: (err) => toastError(toast, err, "Approve failed"),
-  });
-
-  const rejectCaseMutation = useMutation({
-    mutationFn: async (vars: { caseId: number; approvalNote: string }) => {
-      return await apiFetchJson(`/cases/${vars.caseId}/reject`, {
-        method: "POST",
-        body: JSON.stringify({ approvalNote: vars.approvalNote }),
-      });
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["cases", "approval-list"] });
-      queryClient.invalidateQueries({ queryKey: getListCasesQueryKey() });
-      setReviewOpen(false);
-      setReviewCaseId(null);
-      setReviewReferenceNo("");
-      setReviewNote("");
-      toast({ title: "Case rejected" });
-    },
-    onError: (err) => toastError(toast, err, "Return for amendment failed"),
-  });
-
-  const saveApprovalNoteMutation = useMutation({
-    mutationFn: async (vars: { caseId: number; approvalNote: string }) => {
-      return await apiFetchJson(`/cases/${vars.caseId}/approval`, {
-        method: "PATCH",
-        body: JSON.stringify({ approvalNote: vars.approvalNote.trim() ? vars.approvalNote.trim() : null }),
-      });
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["cases", "approval-list"] });
-      toast({ title: "Saved" });
-    },
-    onError: (err) => toastError(toast, err, "Save failed"),
+    onError: (err) => toastError(toast, err, "Resubmit failed"),
   });
 
   useEffect(() => {
@@ -538,13 +475,6 @@ export default function CasesList() {
     if (s === "subsale") return "Subsale";
     if (s === "perfection") return "Perfection";
     return "Developer Sales";
-  };
-
-  const approvalStatusLabel = (v: string | null | undefined): string => {
-    const s = String(v ?? "").trim().toLowerCase();
-    if (s === "rejected") return "Case Details to Amend";
-    if (s === "pending_approval") return "Open File Pending Approval";
-    return "Approved";
   };
 
   const buildCaseSummary = (c: any): string => {
@@ -701,15 +631,12 @@ export default function CasesList() {
         ) : null}
       </div>
 
-      {canApproveCases ? (
-        <Tabs value={approvalStatus} onValueChange={(v) => { setApprovalStatus(normalizeApprovalStatus(v)); setPage(1); }}>
-          <TabsList>
-            <TabsTrigger value="approved">Approved Cases</TabsTrigger>
-            <TabsTrigger value="pending_approval">Open File Pending Approval</TabsTrigger>
-            <TabsTrigger value="rejected">Case Details to Amend</TabsTrigger>
-          </TabsList>
-        </Tabs>
-      ) : null}
+      <Tabs value={approvalStatus} onValueChange={(v) => { setApprovalStatus(normalizeApprovalStatus(v)); setPage(1); }}>
+        <TabsList>
+          <TabsTrigger value="approved">Approved Cases</TabsTrigger>
+          <TabsTrigger value="rejected">Case Details to Amend</TabsTrigger>
+        </TabsList>
+      </Tabs>
 
       <Card>
         <CardContent className="p-0">
@@ -847,10 +774,10 @@ export default function CasesList() {
                     <thead className="text-xs text-slate-500 uppercase bg-slate-50 border-b border-slate-200">
                       <tr>
                         <th className="px-6 py-3 font-semibold">Submitted Date</th>
-                        <th className="px-6 py-3 font-semibold">Submitted By</th>
+                        <th className="px-6 py-3 font-semibold">Returned Date</th>
                         <th className="px-6 py-3 font-semibold">Case Type</th>
                         <th className="px-6 py-3 font-semibold">Case Summary</th>
-                        <th className="px-6 py-3 font-semibold">Status</th>
+                        <th className="px-6 py-3 font-semibold">Amendment Notes</th>
                         <th className="px-6 py-3 font-semibold">Action</th>
                       </tr>
                     </thead>
@@ -858,27 +785,19 @@ export default function CasesList() {
                       {approvalCases.map((c: any) => (
                         <tr key={c.id} className="hover:bg-slate-50/50">
                           <td className="px-6 py-4 text-slate-600 text-xs">{fmtIsoToYmd((c as any).submittedAt)}</td>
-                          <td className="px-6 py-4 text-slate-700">{(c as any).submittedByName ?? (c as any).submittedBy ?? "—"}</td>
+                          <td className="px-6 py-4 text-slate-600 text-xs">{fmtIsoToYmd((c as any).approvedAt)}</td>
                           <td className="px-6 py-4 text-slate-700">{caseTypeLabel((c as any).caseType)}</td>
                           <td className="px-6 py-4 text-slate-700">{buildCaseSummary(c)}</td>
+                          <td className="px-6 py-4 text-slate-700 text-xs">{String((c as any).approvalNote ?? "—")}</td>
                           <td className="px-6 py-4">
-                            <span className="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-semibold bg-slate-100 text-slate-700">
-                              {approvalStatusLabel((c as any).approvalStatus ?? approvalStatus)}
-                            </span>
-                          </td>
-                          <td className="px-6 py-4">
-                            <Button
-                              size="sm"
-                              variant="outline"
-                              onClick={() => {
-                                setReviewCaseId(c.id);
-                                setReviewOpen(true);
-                                setReviewReferenceNo(String((c as any).referenceNo ?? ""));
-                                setReviewNote(String((c as any).approvalNote ?? ""));
-                              }}
-                            >
-                              Review
-                            </Button>
+                            <div className="flex items-center gap-2">
+                              <Link href={`/app/cases/${c.id}`}>
+                                <Button size="sm" variant="outline">Edit Details</Button>
+                              </Link>
+                              <Button size="sm" onClick={() => resubmitMutation.mutate(c.id)} disabled={resubmitMutation.isPending}>
+                                Resubmit for Approval
+                              </Button>
+                            </div>
                           </td>
                         </tr>
                       ))}
@@ -1137,140 +1056,6 @@ export default function CasesList() {
           />
         </>
       ) : null}
-
-      <Dialog
-        open={reviewOpen}
-        onOpenChange={(open) => {
-          setReviewOpen(open);
-          if (!open) {
-            setReviewCaseId(null);
-            setReviewReferenceNo("");
-            setReviewNote("");
-          }
-        }}
-      >
-        <DialogContent className="max-w-[900px] w-[95vw]">
-          <DialogHeader>
-            <DialogTitle>Open File Review</DialogTitle>
-            <DialogDescription>Review the case submission and approve or return for amendment.</DialogDescription>
-          </DialogHeader>
-
-          {reviewCaseQuery.isLoading ? (
-            <div className="py-6 text-center text-slate-500 text-sm">Loading...</div>
-          ) : reviewCaseQuery.isError ? (
-            <div className="py-6 text-center text-slate-600 text-sm">Failed to load case details.</div>
-          ) : (
-            (() => {
-              const raw = reviewCaseQuery.data;
-              const data = raw && typeof raw === "object" && "data" in (raw as any) ? (raw as any).data : raw;
-              const c = data && typeof data === "object" ? (data as any) : null;
-              const status = String(c?.approvalStatus ?? approvalStatus).trim().toLowerCase();
-              const isPending = status === "pending_approval";
-
-              return (
-                <div className="space-y-4">
-                  <div className="grid grid-cols-1 md:grid-cols-12 gap-3">
-                    <div className="md:col-span-6">
-                      <div className="text-xs text-slate-500">Submitted By</div>
-                      <div className="text-sm text-slate-900">{c?.submittedByName ?? c?.submittedBy ?? "—"}</div>
-                    </div>
-                    <div className="md:col-span-6">
-                      <div className="text-xs text-slate-500">Submitted At</div>
-                      <div className="text-sm text-slate-900">{fmtIsoToYmd(c?.submittedAt)}</div>
-                    </div>
-                    <div className="md:col-span-6">
-                      <div className="text-xs text-slate-500">Case Type</div>
-                      <div className="text-sm text-slate-900">{caseTypeLabel(c?.caseType)}</div>
-                    </div>
-                    <div className="md:col-span-6">
-                      <div className="text-xs text-slate-500">Status</div>
-                      <div className="text-sm text-slate-900">{approvalStatusLabel(c?.approvalStatus)}</div>
-                    </div>
-                    <div className="md:col-span-12">
-                      <div className="text-xs text-slate-500">Summary</div>
-                      <div className="text-sm text-slate-900">{buildCaseSummary(c)}</div>
-                    </div>
-                  </div>
-
-                  <div className="grid grid-cols-1 md:grid-cols-12 gap-3">
-                    <div className="md:col-span-6 space-y-1.5">
-                      <Label>Reference Number *</Label>
-                      <Input
-                        value={reviewReferenceNo}
-                        onChange={(e) => setReviewReferenceNo(e.target.value)}
-                        disabled={!isPending || approveCaseMutation.isPending || rejectCaseMutation.isPending}
-                        placeholder="e.g. LCP-2026-000123"
-                      />
-                      {!isPending ? (
-                        <div className="text-xs text-slate-500">Reference Number can only be set while Open File Pending Approval.</div>
-                      ) : null}
-                    </div>
-                    <div className="md:col-span-12 space-y-1.5">
-                      <Label>Amendment Notes</Label>
-                      <Textarea
-                        value={reviewNote}
-                        onChange={(e) => setReviewNote(e.target.value)}
-                        disabled={!isPending || approveCaseMutation.isPending || rejectCaseMutation.isPending || saveApprovalNoteMutation.isPending}
-                        placeholder="Optional notes (required to return for amendment)"
-                      />
-                    </div>
-                  </div>
-
-                  <DialogFooter className="gap-2 sm:gap-2">
-                    <Button
-                      variant="outline"
-                      onClick={() => setReviewOpen(false)}
-                      disabled={approveCaseMutation.isPending || rejectCaseMutation.isPending || saveApprovalNoteMutation.isPending}
-                    >
-                      Close
-                    </Button>
-                    <Button
-                      variant="secondary"
-                      onClick={() => {
-                        if (!reviewCaseId) return;
-                        if (!isPending) return;
-                        saveApprovalNoteMutation.mutate({ caseId: reviewCaseId, approvalNote: reviewNote });
-                      }}
-                      disabled={!isPending || !reviewCaseId || saveApprovalNoteMutation.isPending}
-                    >
-                      Save Amendment Notes
-                    </Button>
-                    <Button
-                      variant="destructive"
-                      onClick={() => {
-                        if (!reviewCaseId) return;
-                        if (!isPending) return;
-                        if (!reviewNote.trim()) {
-                          toast({ title: "Amendment Notes is required", variant: "destructive" });
-                          return;
-                        }
-                        rejectCaseMutation.mutate({ caseId: reviewCaseId, approvalNote: reviewNote.trim() });
-                      }}
-                      disabled={!isPending || !reviewCaseId || rejectCaseMutation.isPending}
-                    >
-                      Return for Amendment
-                    </Button>
-                    <Button
-                      onClick={() => {
-                        if (!reviewCaseId) return;
-                        if (!isPending) return;
-                        if (!reviewReferenceNo.trim()) {
-                          toast({ title: "Reference Number is required", variant: "destructive" });
-                          return;
-                        }
-                        approveCaseMutation.mutate({ caseId: reviewCaseId, referenceNo: reviewReferenceNo.trim(), approvalNote: reviewNote });
-                      }}
-                      disabled={!isPending || !reviewCaseId || approveCaseMutation.isPending}
-                    >
-                      Approve Case
-                    </Button>
-                  </DialogFooter>
-                </div>
-              );
-            })()
-          )}
-        </DialogContent>
-      </Dialog>
     </div>
   );
 }

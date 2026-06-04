@@ -240,15 +240,7 @@ export default function AppDashboard() {
               sub: null,
               icon: Briefcase,
               color: "bg-slate-100 text-slate-700",
-              href: "/app/cases?approvalStatus=pending_approval",
-            },
-            {
-              label: "CASE DETAILS TO AMEND",
-              value: showValue("rejectedCases", (resolvedStats as any).rejectedCases),
-              sub: null,
-              icon: Briefcase,
-              color: "bg-slate-100 text-slate-700",
-              href: "/app/cases?approvalStatus=rejected",
+              href: "/app/accounting/file-listing?approvalStatus=pending_approval",
             },
           ].map((item) => (
             <Card
@@ -272,6 +264,38 @@ export default function AppDashboard() {
           ))}
         </div>
       ) : null}
+
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+        {[
+          {
+            label: "CASE DETAILS TO AMEND",
+            value: showValue("rejectedCases", (resolvedStats as any).rejectedCases),
+            sub: null,
+            icon: Briefcase,
+            color: "bg-slate-100 text-slate-700",
+            href: "/app/cases?approvalStatus=rejected",
+          },
+        ].map((item) => (
+          <Card
+            key={item.label}
+            className="cursor-pointer hover:shadow-md transition-shadow"
+            onClick={() => setLocation(item.href)}
+          >
+            <CardContent className="pt-5 pb-4">
+              <div className="flex items-center gap-3">
+                <div className={`w-10 h-10 rounded-lg flex items-center justify-center ${item.color}`}>
+                  <item.icon className="w-5 h-5" />
+                </div>
+                <div>
+                  <div className="text-xs text-slate-500">{item.label}</div>
+                  <div className="text-2xl font-bold text-slate-900 leading-tight">{item.value}</div>
+                  {item.sub && <div className="text-xs text-slate-400 mt-0.5">{item.sub}</div>}
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+        ))}
+      </div>
 
       <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
         <Card className="cursor-pointer hover:shadow-md transition-shadow" onClick={() => setLocation("/app/communications")}>

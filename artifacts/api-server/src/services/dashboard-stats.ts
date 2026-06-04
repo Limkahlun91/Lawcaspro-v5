@@ -122,8 +122,17 @@ export async function computeDashboardStats(
   const rejectedWhere = and(eq(casesTable.firmId, firmId), isNull(casesTable.deletedAt), eq(casesTable.approvalStatus, "rejected"));
 
   const approvedCases = await countCases(approvedWhere, "approvedCases");
-  const pendingApprovalCases = await countCases(pendingWhere, "pendingApprovalCases");
-  const rejectedCases = await countCases(rejectedWhere, "rejectedCases");
+  const countCasesFirmWide = async (where: SQL, fieldKey: string) => {
+    try {
+      const [row] = await db.select({ c: count() }).from(casesTable).where(where);
+      return toNumber0(row?.c);
+    } catch (err) {
+      warn(`cases.${fieldKey}`, err, [fieldKey]);
+      return 0;
+    }
+  };
+  const pendingApprovalCases = await countCasesFirmWide(pendingWhere, "pendingApprovalCases");
+  const rejectedCases = await countCasesFirmWide(rejectedWhere, "rejectedCases");
 
   const totalCases = approvedCases;
   const cashCases = await countCases(and(approvedWhere, eq(casesTable.purchaseMode, "cash")), "cashCases");

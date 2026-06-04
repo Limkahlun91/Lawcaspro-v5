@@ -1802,6 +1802,7 @@ function LedgerTab() {
 
 export default function Accounting() {
   const searchString = useSearch();
+  const [, setLocation] = useLocation();
   const params = new URLSearchParams(searchString);
   const tabFromUrl = params.get("tab");
   const initialTab = (tabFromUrl && TAB_KEYS[tabFromUrl]) ? TAB_KEYS[tabFromUrl] : "Overview";
@@ -1810,6 +1811,10 @@ export default function Accounting() {
   useEffect(() => {
     if (tabFromUrl && TAB_KEYS[tabFromUrl]) setActiveTab(TAB_KEYS[tabFromUrl]);
   }, [tabFromUrl]);
+
+  useEffect(() => {
+    if (tabFromUrl === "file-listing") setLocation("/app/accounting/file-listing");
+  }, [setLocation, tabFromUrl]);
 
   const TAB_ICONS: Record<Tab, React.ReactNode> = {
     "Overview": <DollarSign className="w-4 h-4" />,
@@ -1834,7 +1839,13 @@ export default function Accounting() {
         {TABS.map((tab) => (
           <button
             key={tab}
-            onClick={() => setActiveTab(tab)}
+            onClick={() => {
+              if (tab === "File Listing") {
+                setLocation("/app/accounting/file-listing");
+                return;
+              }
+              setActiveTab(tab);
+            }}
             className={cn(
               "flex items-center gap-2 px-4 py-2.5 text-sm font-medium border-b-2 transition-colors whitespace-nowrap",
               activeTab === tab

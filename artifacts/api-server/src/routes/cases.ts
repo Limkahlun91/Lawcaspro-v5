@@ -2750,7 +2750,7 @@ router.get("/cases", requireAuthHandler, requireFirmUserHandler, requirePermissi
   })();
   const roleNameForApproval = await getRoleName(r, req.firmId!, req.roleId);
   const canReviewApproval = isCaseApprovalRoleName(roleNameForApproval);
-  if (approvalStatus !== "approved" && !canReviewApproval) {
+  if (approvalStatus === "pending_approval" && !canReviewApproval) {
     res.status(403).json({ error: "Forbidden" });
     return;
   }
@@ -4094,6 +4094,54 @@ router.post("/cases/:caseId/reject", requireAuthHandler, requireFirmUserHandler,
     entityType: "case",
     entityId: params.data.caseId,
     detail: "rejected",
+    ipAddress: req.ip,
+    userAgent: req.headers["user-agent"],
+  }, { db: req.rlsDb });
+  res.json({ ok: true });
+}));
+
+router.post("/cases/:caseId/resubmit", requireAuthHandler, requireFirmUserHandler, requirePermission("cases", "update") as RequestHandler, authed(async (req, res) => {
+  const r = req.rlsDb;
+  if (!r) {
+    res.status(500).json({ error: "Internal Server Error" });
+    return;
+  }
+  const params = CaseApprovalParams.safeParse(req.params);
+  if (!params.success) {
+    res.status(400).json({ error: params.error.message });
+    return;
+  }
+  const [c] = await r
+    .select({ id: casesTable.id, approvalStatus: casesTable.approvalStatus })
+    .from(casesTable)
+    .where(and(eq(casesTable.id, params.data.caseId), eq(casesTable.firmId, req.firmId!)))
+    .limit(1);
+  if (!c) {
+    res.status(404).json({ error: "Case not found" });
+    return;
+  }
+  if (c.approvalStatus !== "rejected") {
+    res.status(409).json({ error: "Case is not returned for amendment" });
+    return;
+  }
+  await r
+    .update(casesTable)
+    .set({
+      approvalStatus: "pending_approval",
+      submittedBy: req.userId ?? null,
+      submittedAt: new Date(),
+      approvedBy: null,
+      approvedAt: null,
+    })
+    .where(and(eq(casesTable.id, params.data.caseId), eq(casesTable.firmId, req.firmId!)));
+  await writeAuditLog({
+    firmId: req.firmId,
+    actorId: req.userId,
+    actorType: "firm_user",
+    action: "cases.resubmit",
+    entityType: "case",
+    entityId: params.data.caseId,
+    detail: "resubmitted_for_approval",
     ipAddress: req.ip,
     userAgent: req.headers["user-agent"],
   }, { db: req.rlsDb });
