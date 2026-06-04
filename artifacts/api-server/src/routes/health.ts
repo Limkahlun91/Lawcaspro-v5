@@ -38,6 +38,8 @@ const maskEmail = (email: string): string => {
 
 type HealthCheckResponseBody = { status: string };
 
+const startedAtIso = new Date().toISOString();
+
 routerInternal.get("/healthz", (_req: ReqLike, res: ResLike) => {
   const data: HealthCheckResponseBody = { status: "ok" };
   res.json(data);
@@ -192,15 +194,35 @@ routerInternal.get("/healthz/founder-status", async (_req: ReqLike, res: ResLike
 });
 
 routerInternal.get("/healthz/version", (_req: ReqLike, res: ResLike) => {
-  const commit =
+  const commit = (
     process.env.VERCEL_GIT_COMMIT_SHA ??
     process.env.GIT_COMMIT_SHA ??
     process.env.COMMIT_SHA ??
-    null;
+    ""
+  ).trim() || null;
+  const buildTime = (process.env.BUILD_TIME ?? process.env.VERCEL_BUILD_TIME ?? "").trim() || null;
+  const appVersion = (process.env.APP_VERSION ?? process.env.npm_package_version ?? "").trim() || null;
+  const environment = (process.env.VERCEL_ENV ?? process.env.NODE_ENV ?? "").trim() || null;
+  const deploymentId = (process.env.VERCEL_DEPLOYMENT_ID ?? process.env.VERCEL_DEPLOYMENT ?? "").trim() || null;
+  const region = (process.env.VERCEL_REGION ?? "").trim() || null;
+  const vercelUrl = (process.env.VERCEL_URL ?? "").trim() || null;
+  const now = Date.now();
+  const uptimeMs = now - Date.parse(startedAtIso);
   res.setHeader("cache-control", "no-store, max-age=0");
   res.setHeader("pragma", "no-cache");
   res.setHeader("expires", "0");
-  res.json({ status: "ok", commit });
+  res.json({
+    status: "ok",
+    commit,
+    appVersion,
+    environment,
+    deploymentId,
+    region,
+    vercelUrl,
+    buildTime,
+    startedAt: startedAtIso,
+    uptimeMs: Number.isFinite(uptimeMs) ? uptimeMs : null,
+  });
 });
 
 routerInternal.get("/healthz/db", async (_req: ReqLike, res: ResLike) => {
