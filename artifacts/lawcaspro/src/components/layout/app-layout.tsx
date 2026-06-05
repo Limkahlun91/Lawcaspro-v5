@@ -43,7 +43,11 @@ export function AppLayout({ children }: { children: ReactNode }) {
   }
 
   type SidebarGroupKey = "main" | "documents" | "settings_system";
-  const storageKey = "lawcaspro.sidebar.groups";
+  const storageKey = useMemo(() => {
+    const firmId = (user as any)?.firmId ?? "unknown";
+    const userKey = (user as any)?.id ?? (user as any)?.email ?? "unknown";
+    return `lawcaspro.sidebar.groups:${firmId}:${userKey}`;
+  }, [(user as any)?.firmId, (user as any)?.id, (user as any)?.email]);
 
   const navGroups: Array<{
     key: SidebarGroupKey;

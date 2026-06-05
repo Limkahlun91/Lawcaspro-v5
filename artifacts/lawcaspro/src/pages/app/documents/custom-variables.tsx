@@ -56,6 +56,11 @@ function norm(s: unknown): string {
   return String(s ?? "").trim().toLowerCase();
 }
 
+function isAbortError(e: unknown): boolean {
+  const n = typeof (e as any)?.name === "string" ? String((e as any).name) : "";
+  return n === "AbortError";
+}
+
 export default function CustomVariablesPage() {
   const { toast } = useToast();
   const qc = useQueryClient();
@@ -129,21 +134,25 @@ export default function CustomVariablesPage() {
   const caseQuery = useMemo(() => caseQueryRaw.trim(), [caseQueryRaw]);
   const [caseResults, setCaseResults] = useState<CaseSearchItem[]>([]);
   const [caseSearching, setCaseSearching] = useState(false);
+  const [caseSearchError, setCaseSearchError] = useState<string | null>(null);
   const [selectedCase, setSelectedCase] = useState<CaseSearchItem | null>(null);
   const [caseOpen, setCaseOpen] = useState(false);
   const lastAbortRef = useRef<AbortController | null>(null);
+  const lastGoodPreviewRef = useRef<Map<string, PreviewResponse>>(new Map());
 
   useEffect(() => {
     if (!caseOpen) {
       lastAbortRef.current?.abort();
       setCaseResults([]);
       setCaseSearching(false);
+      setCaseSearchError(null);
       return;
     }
     const q = caseQuery;
     if (!q) {
       setCaseResults([]);
       setCaseSearching(false);
+      setCaseSearchError(null);
       return;
     }
     const t = setTimeout(async () => {
@@ -151,11 +160,13 @@ export default function CustomVariablesPage() {
       const controller = new AbortController();
       lastAbortRef.current = controller;
       setCaseSearching(true);
+      setCaseSearchError(null);
       try {
         const res = await apiFetchJson<CaseListResponse>(`/cases?search=${encodeURIComponent(q)}&page=1&limit=10`, { signal: controller.signal });
         setCaseResults(Array.isArray(res.data) ? res.data : []);
-      } catch {
-        setCaseResults([]);
+      } catch (e) {
+        if (isAbortError(e) || controller.signal.aborted) return;
+        setCaseSearchError("Failed to load cases.");
       } finally {
         if (!controller.signal.aborted) setCaseSearching(false);
       }
@@ -167,11 +178,26 @@ export default function CustomVariablesPage() {
   const previewQuery = useQuery({
     queryKey: ["documents", "custom-variable-preview", previewId, selectedCase?.id ?? null],
     enabled: typeof previewId === "number" && previewId > 0 && typeof selectedCase?.id === "number" && selectedCase.id > 0,
-    queryFn: async () => {
-      return await apiFetchJson<PreviewResponse>(`/documents/custom-variables/${previewId}/preview?caseId=${selectedCase!.id}`);
+    queryFn: async ({ signal }) => {
+      return await apiFetchJson<PreviewResponse>(`/documents/custom-variables/${previewId}/preview?caseId=${selectedCase!.id}`, { signal });
     },
     retry: false,
+    placeholderData: (prev) => prev,
   });
+
+  useEffect(() => {
+    if (!previewId || !selectedCase?.id) return;
+    const d = previewQuery.data as PreviewResponse | undefined;
+    if (!d) return;
+    lastGoodPreviewRef.current.set(`${previewId}:${selectedCase.id}`, d);
+  }, [previewQuery.data, previewId, selectedCase?.id]);
+
+  const cachedPreview = (previewId && selectedCase?.id)
+    ? (lastGoodPreviewRef.current.get(`${previewId}:${selectedCase.id}`) ?? null)
+    : null;
+  const previewData = (previewQuery.data as PreviewResponse | undefined) ?? cachedPreview;
+  const previewIsAbort = isAbortError(previewQuery.error);
+  const showPreviewWarning = previewQuery.isError && !previewIsAbort && !!previewData;
 
   async function copyText(text: string) {
     try {
@@ -186,7 +212,7 @@ export default function CustomVariablesPage() {
     <div className="space-y-6">
       <div className="flex items-center justify-between gap-3">
         <div className="space-y-1">
-          <h1 className="text-3xl font-bold text-slate-900 tracking-tight">Custom Variables</h1>
+          <h1 className="text-3xl font-bold text-slate-900 tracking-tight">Custom Dictionary</h1>
           <p className="text-slate-500">Create reusable paragraphs with existing variables.</p>
         </div>
         <Button
@@ -335,7 +361,7 @@ export default function CustomVariablesPage() {
                     <CommandList>
                       <CommandEmpty>
                         <div className="text-sm text-slate-500">
-                          {caseSearching ? "Searching…" : (caseQuery ? "No results." : "Type to search.")}
+                          {caseSearchError ? caseSearchError : (caseSearching ? "Searching…" : (caseQuery ? "No results." : "Type to search."))}
                         </div>
                       </CommandEmpty>
                       <CommandGroup heading="Cases">
@@ -375,21 +401,34 @@ export default function CustomVariablesPage() {
 
             <div className="space-y-2">
               <div className="text-xs text-slate-500">Rendered Output</div>
-              {previewQuery.isFetching || previewQuery.isLoading ? (
+              {(previewQuery.isFetching || previewQuery.isLoading) && !previewData ? (
                 <div className="rounded-md border border-slate-200 bg-white p-3 text-sm text-slate-500">Loading…</div>
-              ) : previewQuery.isError ? (
-                <div className="rounded-md border border-slate-200 bg-white p-3 text-sm text-slate-700">Preview unavailable.</div>
-              ) : previewQuery.data ? (
+              ) : previewQuery.isError && !previewIsAbort && !previewData ? (
+                <div className="rounded-md border border-slate-200 bg-white p-3 text-sm text-slate-700 flex items-center justify-between gap-3">
+                  <div>Preview unavailable.</div>
+                  <Button size="sm" variant="outline" onClick={() => previewQuery.refetch()} disabled={previewQuery.isFetching}>
+                    Retry
+                  </Button>
+                </div>
+              ) : previewData ? (
                 <div className="space-y-2">
+                  {showPreviewWarning ? (
+                    <div className="rounded-md border border-amber-200 bg-amber-50 p-2 text-sm text-amber-900 flex items-center justify-between gap-3">
+                      <div>Failed to refresh preview. Showing cached results.</div>
+                      <Button size="sm" variant="outline" onClick={() => previewQuery.refetch()} disabled={previewQuery.isFetching}>
+                        Retry
+                      </Button>
+                    </div>
+                  ) : null}
                   <div className="rounded-md border border-slate-200 bg-white p-3 text-sm text-slate-800 whitespace-pre-wrap">
-                    {previewQuery.data.rendered?.trim() ? previewQuery.data.rendered : "—"}
+                    {previewData.rendered?.trim() ? previewData.rendered : "—"}
                   </div>
                   <div className="flex gap-2">
-                    <Button size="sm" variant="outline" onClick={() => copyText(previewQuery.data.token)}>Copy Token</Button>
-                    <Button size="sm" variant="outline" onClick={() => copyText(previewQuery.data.rendered?.trim() ? previewQuery.data.rendered : "")}>Copy Output</Button>
+                    <Button size="sm" variant="outline" onClick={() => copyText(previewData.token)}>Copy Token</Button>
+                    <Button size="sm" variant="outline" onClick={() => copyText(previewData.rendered?.trim() ? previewData.rendered : "")}>Copy Output</Button>
                   </div>
-                  {previewQuery.data.missingVariables?.length ? (
-                    <div className="text-xs text-amber-700">Missing: {previewQuery.data.missingVariables.join(", ")}</div>
+                  {previewData.missingVariables?.length ? (
+                    <div className="text-xs text-amber-700">Missing: {previewData.missingVariables.join(", ")}</div>
                   ) : null}
                 </div>
               ) : (

@@ -76,6 +76,11 @@ function norm(s: unknown): string {
   return String(s ?? "").trim().toLowerCase();
 }
 
+function isAbortError(e: unknown): boolean {
+  const n = typeof (e as any)?.name === "string" ? String((e as any).name) : "";
+  return n === "AbortError";
+}
+
 function formatPreviewValue(v: unknown): string {
   if (v === null || v === undefined) return "—";
   if (typeof v === "string") return v.trim() ? v : "—";
@@ -121,24 +126,28 @@ export default function VariableDictionaryPage() {
   const caseQuery = useMemo(() => caseQueryRaw.trim(), [caseQueryRaw]);
   const [caseResults, setCaseResults] = useState<CaseSearchItem[]>([]);
   const [caseSearching, setCaseSearching] = useState(false);
+  const [caseSearchError, setCaseSearchError] = useState<string | null>(null);
   const [selectedCase, setSelectedCase] = useState<CaseSearchItem | null>(null);
   const [caseOpen, setCaseOpen] = useState(false);
   const [varQueryRaw, setVarQueryRaw] = useState("");
   const varQuery = useMemo(() => norm(varQueryRaw), [varQueryRaw]);
   const [groupFilter, setGroupFilter] = useState<string>("all");
   const lastAbortRef = useRef<AbortController | null>(null);
+  const lastGoodByCaseIdRef = useRef<Map<number, VariablesPreviewResponse>>(new Map());
 
   useEffect(() => {
     if (!caseOpen) {
       lastAbortRef.current?.abort();
       setCaseResults([]);
       setCaseSearching(false);
+      setCaseSearchError(null);
       return;
     }
     const q = caseQuery;
     if (!q) {
       setCaseResults([]);
       setCaseSearching(false);
+      setCaseSearchError(null);
       return;
     }
     const t = setTimeout(async () => {
@@ -146,11 +155,13 @@ export default function VariableDictionaryPage() {
       const controller = new AbortController();
       lastAbortRef.current = controller;
       setCaseSearching(true);
+      setCaseSearchError(null);
       try {
         const res = await apiFetchJson<CaseListResponse>(`/cases?search=${encodeURIComponent(q)}&page=1&limit=10`, { signal: controller.signal });
         setCaseResults(Array.isArray(res.data) ? res.data : []);
-      } catch {
-        setCaseResults([]);
+      } catch (e) {
+        if (isAbortError(e) || controller.signal.aborted) return;
+        setCaseSearchError("Failed to load cases.");
       } finally {
         if (!controller.signal.aborted) setCaseSearching(false);
       }
@@ -161,15 +172,29 @@ export default function VariableDictionaryPage() {
   const previewQuery = useQuery<VariablesPreviewResponse>({
     queryKey: ["documents", "variables-preview", selectedCase?.id ?? null],
     enabled: typeof selectedCase?.id === "number" && selectedCase.id > 0,
-    queryFn: async () => {
+    queryFn: async ({ signal }) => {
       const caseId = selectedCase!.id;
-      return await apiFetchJson<VariablesPreviewResponse>(`/documents/variables?caseId=${caseId}&includeLoops=1`);
+      return await apiFetchJson<VariablesPreviewResponse>(`/documents/variables?caseId=${caseId}&includeLoops=1`, { signal });
     },
     retry: false,
+    placeholderData: (prev) => prev,
   });
 
-  const variables = Array.isArray(previewQuery.data?.variables) ? previewQuery.data!.variables : [];
-  const loops = Array.isArray(previewQuery.data?.loops) ? previewQuery.data!.loops : [];
+  useEffect(() => {
+    const id = selectedCase?.id;
+    if (!id || id <= 0) return;
+    const d = previewQuery.data;
+    if (!d) return;
+    if (!Array.isArray(d.variables) || !Array.isArray(d.loops)) return;
+    lastGoodByCaseIdRef.current.set(id, d);
+  }, [previewQuery.data, selectedCase?.id]);
+
+  const cachedPreview = selectedCase?.id ? (lastGoodByCaseIdRef.current.get(selectedCase.id) ?? null) : null;
+  const previewData = previewQuery.data ?? cachedPreview;
+  const variables = Array.isArray(previewData?.variables) ? previewData!.variables : [];
+  const loops = Array.isArray(previewData?.loops) ? previewData!.loops : [];
+  const previewIsAbortError = isAbortError(previewQuery.error);
+  const showPreviewWarning = previewQuery.isError && !previewIsAbortError && !!previewData;
 
   const groupOptions = useMemo(() => {
     const s = new Set<string>(["all"]);
@@ -251,7 +276,7 @@ export default function VariableDictionaryPage() {
                     <CommandList>
                       <CommandEmpty>
                         <div className="text-sm text-slate-500">
-                          {caseSearching ? "Searching…" : (caseQuery ? "No results." : "Type to search.")}
+                          {caseSearchError ? caseSearchError : (caseSearching ? "Searching…" : (caseQuery ? "No results." : "Type to search."))}
                         </div>
                       </CommandEmpty>
                       <CommandGroup heading="Cases">
@@ -312,9 +337,9 @@ export default function VariableDictionaryPage() {
       {selectedCase ? (
         <Card className="border-slate-200">
           <CardContent className="p-0">
-            {previewQuery.isLoading ? (
+            {(previewQuery.isLoading && !previewData) ? (
               <div className="p-8 text-center text-slate-500">Loading variables…</div>
-            ) : previewQuery.isError ? (
+            ) : (previewQuery.isError && !previewIsAbortError && !previewData) ? (
               <div className="p-6 text-sm text-slate-700">
                 Variables unavailable.
                 <Button className="ml-2" size="sm" variant="outline" onClick={() => previewQuery.refetch()} disabled={previewQuery.isFetching}>
@@ -323,6 +348,16 @@ export default function VariableDictionaryPage() {
               </div>
             ) : (
               <div className="overflow-x-auto">
+                {showPreviewWarning ? (
+                  <div className="px-4 py-3 border-b border-slate-200 bg-amber-50 flex items-center justify-between gap-3">
+                    <div className="text-sm text-amber-900">
+                      Failed to refresh variables. Showing cached results.
+                    </div>
+                    <Button size="sm" variant="outline" onClick={() => previewQuery.refetch()} disabled={previewQuery.isFetching}>
+                      Retry
+                    </Button>
+                  </div>
+                ) : null}
                 <table className="w-full text-sm text-left">
                   <thead className="text-xs text-slate-500 uppercase bg-slate-50 border-b border-slate-200">
                     <tr>

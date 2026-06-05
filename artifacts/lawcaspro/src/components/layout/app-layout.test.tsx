@@ -102,7 +102,7 @@ describe("AppLayout sidebar groups", () => {
     expect((await screen.findAllByText("Variable Dictionary")).length).toBeGreaterThan(0);
     for (const btn of screen.getAllByRole("button", { name: "DOCUMENTS" })) fireEvent.click(btn);
     await waitFor(() => {
-      const raw = localStorage.getItem("lawcaspro.sidebar.groups");
+      const raw = localStorage.getItem("lawcaspro.sidebar.groups:1:1");
       expect(raw).toBeTruthy();
       expect(JSON.parse(raw as string).documents).toBe(false);
     });
@@ -111,7 +111,7 @@ describe("AppLayout sidebar groups", () => {
     renderLayout();
     for (const btn of screen.getAllByRole("button", { name: "DOCUMENTS" })) fireEvent.click(btn);
     await waitFor(() => {
-      const raw = localStorage.getItem("lawcaspro.sidebar.groups");
+      const raw = localStorage.getItem("lawcaspro.sidebar.groups:1:1");
       expect(raw).toBeTruthy();
       expect(JSON.parse(raw as string).documents).toBe(true);
     });
@@ -119,7 +119,7 @@ describe("AppLayout sidebar groups", () => {
 
   it("keeps active route group expanded", async () => {
     localStorage.setItem(
-      "lawcaspro.sidebar.groups",
+      "lawcaspro.sidebar.groups:1:1",
       JSON.stringify({ main: true, documents: false, settings_system: true }),
     );
     locationValue = "/app/documents/variables";

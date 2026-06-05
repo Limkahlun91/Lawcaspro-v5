@@ -724,8 +724,13 @@ export default function CasesList() {
           ) : (
             <div className="overflow-x-auto">
               {showListInlineError ? (
-                <div className="p-4 border-b border-slate-200 bg-slate-50">
-                  <QueryFallback title="Cases unavailable" error={listError} onRetry={() => listRefetch()} isRetrying={listIsFetching} />
+                <div className="px-4 py-3 border-b border-slate-200 bg-amber-50 flex items-center justify-between gap-3">
+                  <div className="text-sm text-amber-900">
+                    Failed to refresh cases. Showing cached results.
+                  </div>
+                  <Button size="sm" variant="outline" onClick={() => listRefetch()} disabled={listIsFetching}>
+                    Retry
+                  </Button>
                 </div>
               ) : null}
               <table className="w-full text-sm text-left">
