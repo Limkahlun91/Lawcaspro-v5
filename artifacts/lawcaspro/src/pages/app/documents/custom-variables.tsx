@@ -56,6 +56,22 @@ function norm(s: unknown): string {
   return String(s ?? "").trim().toLowerCase();
 }
 
+function formatValue(v: unknown): string {
+  if (v === null || v === undefined) return "—";
+  if (typeof v === "string") return v.trim() ? v : "—";
+  if (typeof v === "number") return Number.isFinite(v) ? String(v) : "—";
+  if (typeof v === "boolean") return v ? "true" : "false";
+  if (Array.isArray(v)) {
+    const flat = v
+      .map((x) => (typeof x === "string" ? x.trim() : typeof x === "number" ? String(x) : ""))
+      .filter(Boolean);
+    if (flat.length) return flat.join(", ");
+    return v.length ? JSON.stringify(v) : "—";
+  }
+  if (typeof v === "object") return JSON.stringify(v);
+  return String(v);
+}
+
 function isAbortError(e: unknown): boolean {
   const n = typeof (e as any)?.name === "string" ? String((e as any).name) : "";
   return n === "AbortError";
@@ -136,12 +152,14 @@ export default function CustomVariablesPage() {
   const [caseSearching, setCaseSearching] = useState(false);
   const [caseSearchError, setCaseSearchError] = useState<string | null>(null);
   const [selectedCase, setSelectedCase] = useState<CaseSearchItem | null>(null);
-  const [caseOpen, setCaseOpen] = useState(false);
+  const [pageCaseOpen, setPageCaseOpen] = useState(false);
+  const [modalCaseOpen, setModalCaseOpen] = useState(false);
+  const anyCaseOpen = pageCaseOpen || modalCaseOpen;
   const lastAbortRef = useRef<AbortController | null>(null);
   const lastGoodPreviewRef = useRef<Map<string, PreviewResponse>>(new Map());
 
   useEffect(() => {
-    if (!caseOpen) {
+    if (!anyCaseOpen) {
       lastAbortRef.current?.abort();
       setCaseResults([]);
       setCaseSearching(false);
@@ -172,7 +190,7 @@ export default function CustomVariablesPage() {
       }
     }, 180);
     return () => clearTimeout(t);
-  }, [caseQuery, caseOpen]);
+  }, [caseQuery, anyCaseOpen]);
 
   const [previewId, setPreviewId] = useState<number | null>(null);
   const previewQuery = useQuery({
@@ -184,6 +202,68 @@ export default function CustomVariablesPage() {
     retry: false,
     placeholderData: (prev) => prev,
   });
+
+  type VariableItem = {
+    id: number;
+    key: string;
+    label: string;
+    category: string;
+    groupKey?: string | null;
+    valueType?: string;
+    isSystem: boolean;
+    isActive: boolean;
+    isHidden?: boolean;
+    isPublished?: boolean;
+    deprecatedAt?: string | null;
+    replacementKey?: string | null;
+    sortOrder: number;
+    previewValue?: unknown;
+    custom?: { scope: "founder_master" | "firm" | "template_specific"; status: "active" | "disabled" | "deprecated"; currentVersionNo: number };
+  };
+
+  const variablesRegistryQuery = useQuery<VariableItem[]>({
+    queryKey: ["documents", "variable-registry"],
+    queryFn: async ({ signal }) => {
+      const res = await apiFetchJson<VariableItem[]>(`/document-variables?active=1`, { signal });
+      return Array.isArray(res) ? res : [];
+    },
+    retry: false,
+    staleTime: 60_000,
+  });
+
+  const variablesPreviewQuery = useQuery<{ variables: VariableItem[]; loops: any[] }>({
+    queryKey: ["documents", "variables-preview", selectedCase?.id ?? null],
+    enabled: typeof selectedCase?.id === "number" && selectedCase.id > 0,
+    queryFn: async ({ signal }) => {
+      const caseId = selectedCase!.id;
+      return await apiFetchJson<{ variables: VariableItem[]; loops: any[] }>(`/documents/variables?caseId=${caseId}&includeLoops=1`, { signal });
+    },
+    retry: false,
+    placeholderData: (prev) => prev,
+  });
+
+  const variablePreviewByKey = useMemo(() => {
+    const m = new Map<string, VariableItem>();
+    const vars = Array.isArray(variablesPreviewQuery.data?.variables) ? variablesPreviewQuery.data!.variables : [];
+    for (const v of vars) if (typeof v?.key === "string" && v.key) m.set(v.key, v);
+    return m;
+  }, [variablesPreviewQuery.data]);
+
+  const templateValueByKey = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const [k, v] of variablePreviewByKey.entries()) m.set(k, formatValue((v as any).previewValue));
+    return m;
+  }, [variablePreviewByKey]);
+
+  function renderTemplate(body: string): string {
+    const text = String(body ?? "");
+    return text.replace(/\{\{\s*([^{}\s]+)\s*\}\}/g, (_m, keyRaw: string) => {
+      const key = String(keyRaw).trim();
+      if (!key) return "—";
+      const v = templateValueByKey.get(key);
+      return v && v !== "—" ? v : "—";
+    });
+  }
 
   useEffect(() => {
     if (!previewId || !selectedCase?.id) return;
@@ -208,12 +288,85 @@ export default function CustomVariablesPage() {
     }
   }
 
+  function sourceLevelFor(v: VariableItem): string {
+    if (v.category === "custom") return "Custom";
+    if (v.isSystem) return "System";
+    const scope = (v as any).custom?.scope;
+    if (scope === "firm") return "Firm";
+    if (scope === "founder_master") return "Founder";
+    return "Founder";
+  }
+
+  const [varSearchRaw, setVarSearchRaw] = useState("");
+  const varSearch = useMemo(() => norm(varSearchRaw), [varSearchRaw]);
+  const [varFilter, setVarFilter] = useState<string>("all");
+  const bodyRef = useRef<HTMLTextAreaElement | null>(null);
+
+  const pickerItems = useMemo(() => {
+    const registry = Array.isArray(variablesRegistryQuery.data) ? variablesRegistryQuery.data : [];
+    const merged = registry.map((r) => {
+      const pv = variablePreviewByKey.get(r.key);
+      return { ...r, previewValue: pv ? (pv as any).previewValue : undefined };
+    });
+    return merged
+      .filter((v) => {
+        const cat = String(v.category ?? "").toLowerCase();
+        const key = String(v.key ?? "").toLowerCase();
+        const label = String(v.label ?? "").toLowerCase();
+
+        if (varFilter !== "all") {
+          if (varFilter === "borrower") {
+            if (!key.includes("borrower")) return false;
+          } else if (varFilter === "vendor") {
+            if (!key.includes("vendor")) return false;
+          } else if (varFilter === "firm") {
+            if (!(key.startsWith("firm_") || cat === "firm")) return false;
+          } else if (varFilter === "purchaser") {
+            if (!(cat === "purchaser" || key.includes("purchaser") || key.includes("buyer"))) return false;
+          } else if (cat !== varFilter) {
+            return false;
+          }
+        }
+
+        if (!varSearch) return true;
+        const token = `{{${v.key}}}`;
+        const actual = formatValue((v as any).previewValue);
+        const hay = `${label} ${key} ${token.toLowerCase()} ${actual.toLowerCase()} ${sourceLevelFor(v).toLowerCase()}`;
+        return hay.includes(varSearch);
+      })
+      .sort((a, b) => {
+        const ac = String(a.category ?? "");
+        const bc = String(b.category ?? "");
+        if (ac !== bc) return ac.localeCompare(bc);
+        return String(a.key ?? "").localeCompare(String(b.key ?? ""));
+      });
+  }, [varFilter, varSearch, variablesRegistryQuery.data, variablePreviewByKey]);
+
+  function insertToken(token: string) {
+    const el = bodyRef.current;
+    const current = el ? el.value : form.bodyTemplate;
+    const hasFocus = !!el && document.activeElement === el;
+    const start = hasFocus && typeof el!.selectionStart === "number" ? el!.selectionStart : current.length;
+    const end = hasFocus && typeof el!.selectionEnd === "number" ? el!.selectionEnd : current.length;
+    const next = `${current.slice(0, start)}${token}${current.slice(end)}`;
+    const caret = start + token.length;
+    setForm((p) => ({ ...p, bodyTemplate: next }));
+    requestAnimationFrame(() => {
+      const node = bodyRef.current;
+      if (!node) return;
+      node.focus();
+      node.setSelectionRange(caret, caret);
+    });
+  }
+
+  const livePreview = useMemo(() => renderTemplate(form.bodyTemplate), [form.bodyTemplate, templateValueByKey]);
+
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between gap-3">
         <div className="space-y-1">
           <h1 className="text-3xl font-bold text-slate-900 tracking-tight">Custom Dictionary</h1>
-          <p className="text-slate-500">Create reusable paragraphs with existing variables.</p>
+          <p className="text-slate-500">Create reusable clauses using existing variables. Use the picker to insert tokens.</p>
         </div>
         <Button
           className="gap-2"
@@ -335,10 +488,13 @@ export default function CustomVariablesPage() {
             <div className="space-y-2">
               <div className="text-xs text-slate-500">Case</div>
               <Popover
-                open={caseOpen}
+                open={pageCaseOpen}
                 onOpenChange={(open) => {
-                  setCaseOpen(open);
-                  if (open) setCaseQueryRaw("");
+                  setPageCaseOpen(open);
+                  if (open) {
+                    setModalCaseOpen(false);
+                    setCaseQueryRaw("");
+                  }
                 }}
               >
                 <PopoverTrigger asChild>
@@ -346,7 +502,17 @@ export default function CustomVariablesPage() {
                     type="button"
                     variant="outline"
                     role="combobox"
-                    aria-expanded={caseOpen}
+                    aria-expanded={pageCaseOpen}
+                    onClick={() => {
+                      setPageCaseOpen((prev) => {
+                        const next = !prev;
+                        if (next) {
+                          setModalCaseOpen(false);
+                          setCaseQueryRaw("");
+                        }
+                        return next;
+                      });
+                    }}
                     className="w-full justify-between"
                   >
                     <span className="truncate">
@@ -371,7 +537,7 @@ export default function CustomVariablesPage() {
                             value={`${c.referenceNo ?? ""} ${c.clientName ?? ""} ${c.projectName ?? ""} ${c.property ?? ""}`}
                             onSelect={() => {
                               setSelectedCase(c);
-                              setCaseOpen(false);
+                              setPageCaseOpen(false);
                             }}
                           >
                             <div className="min-w-0 flex-1">
@@ -440,37 +606,220 @@ export default function CustomVariablesPage() {
       </Card>
 
       <Dialog open={editOpen} onOpenChange={setEditOpen}>
-        <DialogContent className="max-w-3xl">
+        <DialogContent className="max-w-[1100px]">
           <DialogHeader>
             <DialogTitle>{editId ? "Edit Custom Variable" : "New Custom Variable"}</DialogTitle>
           </DialogHeader>
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 py-2">
-            <div className="space-y-1.5">
-              <Label>Key</Label>
-              <Input value={form.key} onChange={(e) => setForm((p) => ({ ...p, key: e.target.value }))} disabled={!!editId} placeholder="e.g. property_full_description" />
+          <div className="grid grid-cols-1 lg:grid-cols-[1fr_420px] gap-6 py-2">
+            <div className="space-y-4">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div className="space-y-1.5">
+                  <Label>Key</Label>
+                  <Input value={form.key} onChange={(e) => setForm((p) => ({ ...p, key: e.target.value }))} disabled={!!editId} placeholder="e.g. property_full_description" />
+                </div>
+                <div className="space-y-1.5">
+                  <Label>Display Name</Label>
+                  <Input value={form.displayName} onChange={(e) => setForm((p) => ({ ...p, displayName: e.target.value }))} placeholder="e.g. Property Full Description" />
+                </div>
+                <div className="space-y-1.5">
+                  <Label>Group</Label>
+                  <Input value={form.groupKey} onChange={(e) => setForm((p) => ({ ...p, groupKey: e.target.value }))} placeholder="custom_variables" />
+                </div>
+                <div className="space-y-1.5">
+                  <Label>Status</Label>
+                  <Select value={form.status} onValueChange={(v) => setForm((p) => ({ ...p, status: v }))}>
+                    <SelectTrigger><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="active">active</SelectItem>
+                      <SelectItem value="deprecated">deprecated</SelectItem>
+                      <SelectItem value="disabled">disabled</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+              </div>
+
+              <div className="space-y-1.5">
+                <Label>Body Template</Label>
+                <Textarea
+                  ref={bodyRef}
+                  value={form.bodyTemplate}
+                  onChange={(e) => setForm((p) => ({ ...p, bodyTemplate: e.target.value }))}
+                  rows={12}
+                  placeholder="Use {{variable_tokens}} inside."
+                />
+              </div>
+
+              <div className="space-y-1.5">
+                <div className="text-sm font-semibold text-slate-900">Preview</div>
+                <div className="rounded-md border border-slate-200 bg-white p-3 text-sm text-slate-800 whitespace-pre-wrap">
+                  {livePreview.trim() ? livePreview : "—"}
+                </div>
+              </div>
             </div>
-            <div className="space-y-1.5">
-              <Label>Display Name</Label>
-              <Input value={form.displayName} onChange={(e) => setForm((p) => ({ ...p, displayName: e.target.value }))} placeholder="e.g. Property Full Description" />
-            </div>
-            <div className="space-y-1.5">
-              <Label>Group</Label>
-              <Input value={form.groupKey} onChange={(e) => setForm((p) => ({ ...p, groupKey: e.target.value }))} placeholder="custom_variables" />
-            </div>
-            <div className="space-y-1.5">
-              <Label>Status</Label>
-              <Select value={form.status} onValueChange={(v) => setForm((p) => ({ ...p, status: v }))}>
-                <SelectTrigger><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="active">active</SelectItem>
-                  <SelectItem value="deprecated">deprecated</SelectItem>
-                  <SelectItem value="disabled">disabled</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-            <div className="md:col-span-2 space-y-1.5">
-              <Label>Body Template</Label>
-              <Textarea value={form.bodyTemplate} onChange={(e) => setForm((p) => ({ ...p, bodyTemplate: e.target.value }))} rows={10} placeholder="Use {{variable_tokens}} inside." />
+
+            <div className="space-y-4">
+              <div className="space-y-2">
+                <div className="text-sm font-semibold text-slate-900">Case Preview</div>
+                <Popover
+                  open={modalCaseOpen}
+                  onOpenChange={(open) => {
+                    setModalCaseOpen(open);
+                    if (open) {
+                      setPageCaseOpen(false);
+                      setCaseQueryRaw("");
+                    }
+                  }}
+                >
+                  <PopoverTrigger asChild>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      role="combobox"
+                      aria-expanded={modalCaseOpen}
+                      onClick={() => {
+                        setModalCaseOpen((prev) => {
+                          const next = !prev;
+                          if (next) {
+                            setPageCaseOpen(false);
+                            setCaseQueryRaw("");
+                          }
+                          return next;
+                        });
+                      }}
+                      className="w-full justify-between"
+                    >
+                      <span className="truncate">
+                        {selectedCase ? (selectedCase.referenceNo || `Case #${selectedCase.id}`) : "Select a case…"}
+                      </span>
+                      <ChevronDown className="w-4 h-4 text-slate-500" />
+                    </Button>
+                  </PopoverTrigger>
+                  <PopoverContent portalled={false} align="start" className="p-0 w-[520px] max-w-[calc(100vw-2rem)]">
+                    <Command>
+                      <CommandInput value={caseQueryRaw} onValueChange={setCaseQueryRaw} placeholder="Search case…" />
+                      <CommandList>
+                        <CommandEmpty>
+                          <div className="text-sm text-slate-500">
+                            {caseSearchError ? caseSearchError : (caseSearching ? "Searching…" : (caseQuery ? "No results." : "Type to search."))}
+                          </div>
+                        </CommandEmpty>
+                        <CommandGroup heading="Cases">
+                          {caseResults.map((c) => (
+                            <CommandItem
+                              key={c.id}
+                              value={`${c.referenceNo ?? ""} ${c.clientName ?? ""} ${c.projectName ?? ""} ${c.property ?? ""}`}
+                              onSelect={() => {
+                                setSelectedCase(c);
+                                setModalCaseOpen(false);
+                              }}
+                            >
+                              <div className="min-w-0 flex-1">
+                                <div className="text-sm font-semibold text-slate-900 truncate">{c.referenceNo || `Case #${c.id}`}</div>
+                                <div className="text-xs text-slate-500 truncate">
+                                  {c.clientName ? `Client: ${c.clientName}` : "Client: —"}
+                                  <span className="text-slate-300"> · </span>
+                                  {c.projectName ? `Project: ${c.projectName}` : "Project: —"}
+                                  <span className="text-slate-300"> · </span>
+                                  {c.property ? `Parcel: ${c.property}` : "Parcel: —"}
+                                </div>
+                              </div>
+                            </CommandItem>
+                          ))}
+                        </CommandGroup>
+                      </CommandList>
+                    </Command>
+                  </PopoverContent>
+                </Popover>
+                {selectedCase ? (
+                  <div className="text-sm text-slate-700">
+                    Selected: <span className="font-semibold">{selectedCase.referenceNo || `Case #${selectedCase.id}`}</span>
+                    <Button variant="ghost" size="sm" className="ml-2" onClick={() => setSelectedCase(null)}>Clear</Button>
+                  </div>
+                ) : (
+                  <div className="text-xs text-slate-500">Select a case to preview actual values.</div>
+                )}
+              </div>
+
+              <div className="space-y-2">
+                <div className="text-sm font-semibold text-slate-900">Variables</div>
+                <div className="flex gap-2">
+                  <Input value={varSearchRaw} onChange={(e) => setVarSearchRaw(e.target.value)} placeholder="Search variables..." />
+                  <Select value={varFilter} onValueChange={setVarFilter}>
+                    <SelectTrigger className="w-[160px]"><SelectValue placeholder="Filter" /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="all">All</SelectItem>
+                      <SelectItem value="case">case</SelectItem>
+                      <SelectItem value="purchaser">purchaser</SelectItem>
+                      <SelectItem value="borrower">borrower</SelectItem>
+                      <SelectItem value="vendor">vendor</SelectItem>
+                      <SelectItem value="project">project</SelectItem>
+                      <SelectItem value="property">property</SelectItem>
+                      <SelectItem value="loan">loan</SelectItem>
+                      <SelectItem value="workflow">workflow</SelectItem>
+                      <SelectItem value="firm">firm</SelectItem>
+                      <SelectItem value="custom">custom</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+
+                <div className="rounded-md border border-slate-200 bg-white overflow-hidden">
+                  <div className="max-h-[520px] overflow-auto divide-y divide-slate-100">
+                    {variablesRegistryQuery.isLoading ? (
+                      <div className="p-3 text-sm text-slate-500">Loading variables…</div>
+                    ) : variablesRegistryQuery.isError ? (
+                      <div className="p-3 text-sm text-slate-700 flex items-center justify-between gap-3">
+                        <div>Variables unavailable.</div>
+                        <Button size="sm" variant="outline" onClick={() => variablesRegistryQuery.refetch()} disabled={variablesRegistryQuery.isFetching}>
+                          Retry
+                        </Button>
+                      </div>
+                    ) : pickerItems.length ? (
+                      pickerItems.map((v) => {
+                        const token = `{{${v.key}}}`;
+                        const valueText =
+                          !selectedCase
+                            ? "Select case to preview value"
+                            : variablesPreviewQuery.isLoading && !variablesPreviewQuery.data
+                              ? "Loading…"
+                              : formatValue((v as any).previewValue);
+                        const canCopyValue = !!selectedCase && valueText !== "Select case to preview value" && valueText !== "Loading…" && valueText !== "—";
+                        return (
+                          <div key={v.key} className="p-3">
+                            <div className="flex items-start justify-between gap-3">
+                              <div className="min-w-0 flex-1">
+                                <div className="text-sm font-semibold text-slate-900 truncate">{v.label || v.key}</div>
+                                <div className="text-xs text-slate-500 font-mono">{token}</div>
+                                <div className="mt-1 text-xs text-slate-700">
+                                  <span className="text-slate-500">Value: </span>
+                                  <span className="font-mono">{valueText}</span>
+                                </div>
+                                <div className="mt-1 text-xs text-slate-500">
+                                  <span className="uppercase">{String(v.category ?? "")}</span>
+                                  <span className="text-slate-300"> · </span>
+                                  {sourceLevelFor(v)}
+                                </div>
+                              </div>
+                              <div className="shrink-0 flex flex-col gap-2">
+                                <Button size="sm" variant="outline" onClick={() => insertToken(token)}>
+                                  Insert
+                                </Button>
+                                <Button size="sm" variant="outline" onClick={() => copyText(token)}>
+                                  Copy Token
+                                </Button>
+                                <Button size="sm" variant="outline" disabled={!canCopyValue} onClick={() => copyText(canCopyValue ? valueText : "")}>
+                                  Copy Value
+                                </Button>
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      })
+                    ) : (
+                      <div className="p-3 text-sm text-slate-500">No variables.</div>
+                    )}
+                  </div>
+                </div>
+              </div>
             </div>
           </div>
           <DialogFooter>
