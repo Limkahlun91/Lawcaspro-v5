@@ -19911,6 +19911,103 @@ router.post(
         });
         return;
       }
+
+      {
+        let statusBefore = String(preJob.status ?? "");
+        let progressBefore = await computeDocGenJobProgress(r, {
+          firmId: req.firmId!,
+          jobId,
+        });
+        const progressComplete =
+          progressBefore.total > 0 &&
+          progressBefore.pending === 0 &&
+          progressBefore.running === 0 &&
+          progressBefore.success + progressBefore.failed === progressBefore.total;
+        if (
+          statusBefore === "completed" ||
+          statusBefore === "completed_with_errors" ||
+          statusBefore === "failed" ||
+          progressComplete
+        ) {
+          if (
+            progressBefore.total > 0 &&
+            progressBefore.pending === 0 &&
+            progressBefore.running === 0 &&
+            (statusBefore === "pending" || statusBefore === "running")
+          ) {
+            const fin = await finalizeDocGenJobIfDone(r, {
+              firmId: req.firmId!,
+              jobId,
+            });
+            statusBefore = fin.status;
+            progressBefore = fin.progress;
+          }
+          const nextActionBefore = resolveDocGenNextAction({
+            status: statusBefore,
+            progress: progressBefore,
+            downloadObjectPath:
+              typeof preJob.download_object_path === "string"
+                ? String(preJob.download_object_path)
+                : null,
+          });
+          const downloadUrl =
+            nextActionBefore === "download"
+              ? `/documents/jobs/${jobId}/download`
+              : undefined;
+          const downloadManifestUrl =
+            nextActionBefore === "download"
+              ? `/documents/jobs/${jobId}/download-manifest`
+              : undefined;
+          const jobPayload: Record<string, unknown> = {
+            ...(preJob as any),
+            status: statusBefore,
+            total_count: progressBefore.total,
+            success_count: progressBefore.success,
+            failed_count: progressBefore.failed,
+            pending_count: progressBefore.pending,
+            ...(downloadUrl ? { downloadUrl } : {}),
+            ...(downloadManifestUrl ? { downloadManifestUrl } : {}),
+          };
+          res.status(200).json({
+            ok: true,
+            jobId,
+            status: statusBefore,
+            progress: progressBefore,
+            nextAction: nextActionBefore,
+            ...(downloadUrl ? { downloadUrl } : {}),
+            ...(downloadManifestUrl ? { downloadManifestUrl } : {}),
+            job: jobPayload,
+            meta: {
+              request_id: requestId ?? null,
+              jobId,
+              firmId: req.firmId ?? null,
+              userId: req.userId ?? null,
+              status_before: statusBefore,
+              status_after: statusBefore,
+              nextAction: nextActionBefore,
+              terminal: true,
+              timestamp: new Date().toISOString(),
+              duration_ms: Date.now() - startedAt,
+            },
+          });
+          try {
+            logger.info(
+              {
+                firmId: req.firmId ?? null,
+                userId: req.userId ?? null,
+                jobId,
+                requestId: requestId ?? null,
+                status: statusBefore,
+                nextAction: nextActionBefore,
+                progress: progressBefore,
+                elapsedMs: Date.now() - startedAt,
+              },
+              "docgen.run_next.terminal",
+            );
+          } catch {}
+          return;
+        }
+      }
       const timeoutAtRaw = (preJob as any).timeout_at;
       const timeoutAtMs =
         timeoutAtRaw ? new Date(String(timeoutAtRaw)).getTime() : null;
@@ -20027,6 +20124,10 @@ router.post(
         );
         const downloadUrl =
           nextActionBefore === "download" ? `/documents/jobs/${jobId}/download` : undefined;
+        const downloadManifestUrl =
+          nextActionBefore === "download"
+            ? `/documents/jobs/${jobId}/download-manifest`
+            : undefined;
         const jobPayload: Record<string, unknown> = {
           ...(preJob as any),
           status: statusBefore,
@@ -20035,6 +20136,7 @@ router.post(
           failed_count: progressBefore.failed,
           pending_count: progressBefore.pending,
           ...(downloadUrl ? { downloadUrl } : {}),
+          ...(downloadManifestUrl ? { downloadManifestUrl } : {}),
         };
         res.status(200).json({
           ok: true,
@@ -20043,6 +20145,7 @@ router.post(
           progress: progressBefore,
           nextAction: nextActionBefore,
           ...(downloadUrl ? { downloadUrl } : {}),
+          ...(downloadManifestUrl ? { downloadManifestUrl } : {}),
           job: jobPayload,
           items,
           meta: {
@@ -20156,6 +20259,8 @@ router.post(
       });
       const downloadUrl =
         nextAction === "download" ? `/documents/jobs/${jobId}/download` : undefined;
+      const downloadManifestUrl =
+        nextAction === "download" ? `/documents/jobs/${jobId}/download-manifest` : undefined;
 
       const jobPayload: Record<string, unknown> = {
         ...(job as any),
@@ -20165,6 +20270,7 @@ router.post(
         failed_count: progress.failed,
         pending_count: progress.pending,
         ...(downloadUrl ? { downloadUrl } : {}),
+        ...(downloadManifestUrl ? { downloadManifestUrl } : {}),
       };
 
       res.status(200).json({
@@ -20174,6 +20280,7 @@ router.post(
         progress,
         nextAction,
         ...(downloadUrl ? { downloadUrl } : {}),
+        ...(downloadManifestUrl ? { downloadManifestUrl } : {}),
         job: jobPayload,
         items,
         meta: {
@@ -21142,22 +21249,42 @@ router.get(
       ...(downloadUrl ? { downloadUrl } : {}),
       ...(downloadManifestUrl ? { downloadManifestUrl } : {}),
     };
+    const progressComplete =
+      progress.total > 0 &&
+      progress.pending === 0 &&
+      progress.running === 0 &&
+      progress.success + progress.failed === progress.total;
+    const canDownload =
+      progressComplete ||
+      status === "completed" ||
+      status === "completed_with_errors";
+    const completedAt =
+      job.finished_at ? new Date(String(job.finished_at)).toISOString() : null;
 
     res.status(200).json({
       ok: true,
       jobId,
       status,
+      action: typeof job.action === "string" ? String(job.action) : "download",
       progress,
       nextAction,
       ...(downloadUrl ? { downloadUrl } : {}),
       ...(downloadManifestUrl ? { downloadManifestUrl } : {}),
+      ...(canDownload
+        ? { canDownload: true, downloadManifestUrl: `/documents/jobs/${jobId}/download-manifest` }
+        : { canDownload: false }),
+      completedAt,
       job: jobPayload,
       ...(status === "failed"
         ? {
-            error:
-              typeof job.error_summary === "string"
-                ? String(job.error_summary)
-                : "Generation failed",
+            error: {
+              code:
+                typeof job.error_code === "string" ? String(job.error_code) : "GENERATION_FAILED",
+              message:
+                typeof job.error_summary === "string"
+                  ? String(job.error_summary)
+                  : "Generation failed",
+            },
           }
         : {}),
       meta: {
@@ -21166,6 +21293,22 @@ router.get(
         duration_ms: Date.now() - startedAt,
       },
     });
+    try {
+      logger.info(
+        {
+          firmId: req.firmId ?? null,
+          userId: req.userId ?? null,
+          jobId,
+          requestId: requestId ?? null,
+          status,
+          nextAction,
+          canDownload,
+          progress,
+          elapsedMs: Date.now() - startedAt,
+        },
+        "docgen.status",
+      );
+    } catch {}
   },
 );
 
@@ -21253,6 +21396,17 @@ router.get(
       });
     };
     const jobId = one((req.params as any).jobId) ?? "";
+    try {
+      logger.info(
+        {
+          firmId: req.firmId ?? null,
+          userId: req.userId ?? null,
+          jobId,
+          requestId: requestId ?? null,
+        },
+        "docgen.download_manifest.start",
+      );
+    } catch {}
     if (!/^[0-9a-fA-F-]{36}$/.test(jobId)) {
       fail(400, "INVALID_JOB_ID", "Invalid jobId", null, false);
       return;
@@ -21545,6 +21699,19 @@ router.get(
         duration_ms: Date.now() - startedAt,
       },
     });
+    try {
+      logger.info(
+        {
+          firmId: req.firmId ?? null,
+          userId: req.userId ?? null,
+          jobId,
+          requestId: requestId ?? null,
+          fileCount: files.length,
+          elapsedMs: Date.now() - startedAt,
+        },
+        "docgen.download_manifest.complete",
+      );
+    } catch {}
   },
 );
 

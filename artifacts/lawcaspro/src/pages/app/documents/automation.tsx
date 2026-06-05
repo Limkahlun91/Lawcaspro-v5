@@ -162,7 +162,23 @@ export default function DocumentAutomationHub() {
     "double",
   );
   const [customDuplexRange, setCustomDuplexRange] = useState("");
-  const [busy, setBusy] = useState(false);
+  const [jobStage, setJobStage] = useState<
+    | "idle"
+    | "ready"
+    | "creating"
+    | "generating"
+    | "finalizing"
+    | "preparing_download"
+    | "downloading"
+    | "packaging"
+    | "error"
+  >("idle");
+  const [activeJobId, setActiveJobId] = useState<string | null>(null);
+  const hasActiveJob = activeJobId !== null;
+  const busy =
+    jobStage !== "idle" &&
+    jobStage !== "ready" &&
+    jobStage !== "error";
   const [finalizingZip, setFinalizingZip] = useState(false);
   const [job, setJob] = useState<NormalizedGenerationJob | null>(null);
   const [jobError, setJobError] = useState<string | null>(null);
@@ -187,77 +203,106 @@ export default function DocumentAutomationHub() {
 
   const downloadZipFromManifest = async (jobId: string, snapshot: NormalizedGenerationJob) => {
     for (let attempt = 1; attempt <= 2; attempt++) {
-      setRunnerNotice("Preparing download...");
-      const raw = await getGenerationJobDownloadManifest(jobId);
-      const m = raw && typeof raw === "object" ? (raw as any) : null;
-      if (!m || m.ok !== true) {
-        const code = m?.error?.code ? String(m.error.code) : "";
-        const msg = m?.error?.message ? String(m.error.message) : "Failed to prepare download";
-        const e = new Error(code && msg ? `${code}: ${msg}` : msg) as any;
-        e.status = 500;
-        throw e;
-      }
-
-      const manifest = m as DownloadManifest;
-      const fileName =
-        typeof manifest.fileName === "string" && manifest.fileName.trim()
-          ? manifest.fileName.trim()
-          : snapshot.downloadFileName ?? `document-automation-${Date.now()}.zip`;
-      const downloadable = manifest.files.filter(
-        (f) => f.status === "success" && typeof f.signedUrl === "string" && f.signedUrl.trim(),
-      );
-      const total = downloadable.length;
-      if (total <= 0) {
-        const e = new Error("No downloadable files found in manifest") as any;
-        e.status = 409;
-        throw e;
-      }
-
-      const zip = new JSZip();
-      let downloaded = 0;
-      let cursor = 0;
-      const workerCount = Math.max(1, Math.min(4, downloadable.length));
-      const workers = Array.from({ length: workerCount }).map(async () => {
-        while (cursor < downloadable.length) {
-          const i = cursor++;
-          const f = downloadable[i]!;
-          setRunnerNotice(`Downloading files ${downloaded}/${total}...`);
-          const resp = await fetch(String(f.signedUrl));
-          if (!resp.ok) {
-            const e = new Error(`Download failed: ${f.fileName} (${resp.status})`) as any;
-            e.status = resp.status;
-            throw e;
-          }
-          const buf = await resp.arrayBuffer();
-          zip.file(f.zipPath, buf);
-          downloaded += 1;
-          setRunnerNotice(`Downloading files ${downloaded}/${total}...`);
+      try {
+        devLog("manifest:start", { jobId, attempt });
+        setRunnerNotice("Preparing download...");
+        setJobStage("preparing_download");
+        const raw = await getGenerationJobDownloadManifest(jobId);
+        const m = raw && typeof raw === "object" ? (raw as any) : null;
+        if (!m || m.ok !== true) {
+          const code = m?.error?.code ? String(m.error.code) : "";
+          const msg = m?.error?.message
+            ? String(m.error.message)
+            : "Failed to prepare download";
+          const e = new Error(code && msg ? `${code}: ${msg}` : msg) as any;
+          e.status = 500;
+          throw e;
         }
-      });
-      await Promise.all(workers);
 
-      setRunnerNotice("Packaging ZIP...");
-      const blob = await zip.generateAsync(
-        { type: "blob" },
-        (metadata) => {
-          const pct =
-            typeof (metadata as any)?.percent === "number"
-              ? Math.max(0, Math.min(100, Math.round((metadata as any).percent)))
-              : null;
-          setRunnerNotice(pct !== null ? `Packaging ZIP... ${pct}%` : "Packaging ZIP...");
-        },
-      );
+        const manifest = m as DownloadManifest;
+        const fileName =
+          typeof manifest.fileName === "string" && manifest.fileName.trim()
+            ? manifest.fileName.trim()
+            : snapshot.downloadFileName ?? `document-automation-${Date.now()}.zip`;
+        const downloadable = manifest.files.filter(
+          (f) =>
+            f.status === "success" &&
+            typeof f.signedUrl === "string" &&
+            f.signedUrl.trim(),
+        );
+        const total = downloadable.length;
+        if (total <= 0) {
+          const e = new Error("No downloadable files found in manifest") as any;
+          e.status = 409;
+          throw e;
+        }
 
-      downloadBlob(blob, fileName);
-      setRunnerNotice("Download ready");
-      toast({
-        title:
-          String(snapshot.status ?? "") === "completed"
-            ? "Download started"
-            : "Download started (with warnings)",
-        description: fileName,
-      });
-      return;
+        devLog("zip:download:start", { jobId, files: total });
+        const zip = new JSZip();
+        let downloaded = 0;
+        let cursor = 0;
+        const workerCount = Math.max(1, Math.min(4, downloadable.length));
+        const workers = Array.from({ length: workerCount }).map(async () => {
+          while (cursor < downloadable.length) {
+            const i = cursor++;
+            const f = downloadable[i]!;
+            setRunnerNotice(`Downloading files ${downloaded}/${total}...`);
+            setJobStage("downloading");
+            const resp = await fetch(String(f.signedUrl));
+            if (!resp.ok) {
+              const e = new Error(
+                `Download failed: ${f.fileName} (${resp.status})`,
+              ) as any;
+              e.status = resp.status;
+              throw e;
+            }
+            const buf = await resp.arrayBuffer();
+            zip.file(f.zipPath, buf);
+            downloaded += 1;
+            setRunnerNotice(`Downloading files ${downloaded}/${total}...`);
+          }
+        });
+        await Promise.all(workers);
+
+        devLog("zip:packaging:start", { jobId });
+        setRunnerNotice("Packaging ZIP...");
+        setJobStage("packaging");
+        const blob = await zip.generateAsync(
+          { type: "blob" },
+          (metadata) => {
+            const pct =
+              typeof (metadata as any)?.percent === "number"
+                ? Math.max(
+                    0,
+                    Math.min(100, Math.round((metadata as any).percent)),
+                  )
+                : null;
+            setRunnerNotice(
+              pct !== null ? `Packaging ZIP... ${pct}%` : "Packaging ZIP...",
+            );
+          },
+        );
+
+        devLog("zip:packaging:complete", { jobId });
+        downloadBlob(blob, fileName);
+        setRunnerNotice("Download ready");
+        toast({
+          title:
+            String(snapshot.status ?? "") === "completed"
+              ? "Download started"
+              : "Download started (with warnings)",
+          description: fileName,
+        });
+        return;
+      } catch (err) {
+        devLog("download:failed", {
+          jobId,
+          attempt,
+          message: err instanceof Error ? err.message : String(err ?? ""),
+        });
+        if (attempt >= 2) throw err;
+        await new Promise<void>((r) => setTimeout(r, 900));
+      }
     }
     const e = new Error("Generated successfully, but ZIP packaging failed. Retry download.") as any;
     e.status = 409;
@@ -269,6 +314,10 @@ export default function DocumentAutomationHub() {
   const pollInFlightRef = useRef(0);
   const runNextInFlightRef = useRef(false);
   const finalizeInFlightRef = useRef(false);
+  const downloadInFlightRef = useRef(false);
+  const finalizeAttemptedJobIdRef = useRef<string | null>(null);
+  const downloadAttemptedJobIdRef = useRef<string | null>(null);
+  const jobStageRef = useRef(jobStage);
   const runnerRef = useRef<{
     running: boolean;
     jobId: string | null;
@@ -345,6 +394,13 @@ export default function DocumentAutomationHub() {
   };
   // #endregion
 
+  const devLog = (msg: string, data?: Record<string, unknown>) => {
+    if (!import.meta.env.DEV) return;
+    try {
+      console.log(`[docgen] ${msg}`, data ?? {});
+    } catch {}
+  };
+
   useEffect(() => {
     return () => {
       if (pollTimerRef.current) window.clearInterval(pollTimerRef.current);
@@ -355,11 +411,135 @@ export default function DocumentAutomationHub() {
   }, []);
 
   useEffect(() => {
+    jobStageRef.current = jobStage;
+  }, [jobStage]);
+
+  const storageKey = "lawcaspro_doc_automation_last_job";
+
+  const getProgress = (
+    snapshot: NormalizedGenerationJob | null,
+  ): { total: number; success: number; failed: number; pending: number; running: number } => {
+    const p = snapshot?.progress;
+    if (p) return p;
+    return {
+      total: snapshot?.totalCount ?? 0,
+      success: snapshot?.successCount ?? 0,
+      failed: snapshot?.failedCount ?? 0,
+      pending: snapshot?.pendingCount ?? 0,
+      running: snapshot?.runningCount ?? 0,
+    };
+  };
+
+  const isProgressComplete = (snapshot: NormalizedGenerationJob | null): boolean => {
+    const p = getProgress(snapshot);
+    return (
+      p.total > 0 &&
+      p.pending === 0 &&
+      p.running === 0 &&
+      p.success + p.failed === p.total
+    );
+  };
+
+  const setDownloadPrepError = (message?: string) => {
+    setRunnerNotice("Download preparation failed. Retry Download");
+    if (message) setJobError(message);
+    setJobStage("error");
+  };
+
+  const clearActiveJob = () => {
+    setActiveJobId(null);
+    setJob(null);
+    setJobError(null);
+    setRunnerNotice(null);
+    setFinalizingZip(false);
+    setJobStage("idle");
+    finalizeAttemptedJobIdRef.current = null;
+    downloadAttemptedJobIdRef.current = null;
+    try {
+      window.localStorage.removeItem(storageKey);
+    } catch {}
+  };
+
+  const finalizeAndDownload = async (
+    jobId: string,
+    opts?: { force?: boolean; snapshot?: NormalizedGenerationJob | null },
+  ) => {
+    const force = opts?.force === true;
+    if (force) {
+      finalizeAttemptedJobIdRef.current = null;
+      downloadAttemptedJobIdRef.current = null;
+    }
+    if (!jobId) throw new Error("jobId is missing");
+    if (!force && downloadAttemptedJobIdRef.current === jobId) return;
+    if (downloadInFlightRef.current) return;
+
+    downloadInFlightRef.current = true;
+    downloadAttemptedJobIdRef.current = jobId;
+    try {
+      devLog("finalizeAndDownload:start", { jobId, force });
+      setJobError(null);
+      setFinalizingZip(true);
+      setActiveJobId(jobId);
+      try {
+        window.localStorage.setItem(storageKey, jobId);
+      } catch {}
+
+      let snap = opts?.snapshot ?? null;
+      if (!snap) {
+        snap = await getGenerationJobStatus(jobId);
+        setJob(snap);
+      }
+
+      const s = String(snap.status ?? "");
+      const progressCompleteNow = isProgressComplete(snap);
+      const shouldFinalize =
+        snap.nextAction === "finalize" ||
+        s === "finalizing" ||
+        (progressCompleteNow &&
+          snap.nextAction !== "download" &&
+          s !== "completed" &&
+          s !== "completed_with_errors");
+
+      if (shouldFinalize) {
+        if (!force && finalizeAttemptedJobIdRef.current === jobId) {
+          devLog("finalize:skipped", { jobId });
+        } else if (!finalizeInFlightRef.current) {
+          finalizeAttemptedJobIdRef.current = jobId;
+          finalizeInFlightRef.current = true;
+          setJobStage("finalizing");
+          devLog("finalize:start", { jobId });
+          try {
+            const fin = await finalizeGenerationJob(jobId);
+            setJob(fin);
+            snap = fin;
+            devLog("finalize:complete", { jobId, status: String(fin.status ?? "") });
+          } finally {
+            finalizeInFlightRef.current = false;
+          }
+        }
+      }
+
+      setJobStage("preparing_download");
+      await downloadZipFromManifest(jobId, snap);
+      devLog("finalizeAndDownload:downloaded", { jobId });
+      clearActiveJob();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err ?? "");
+      devLog("finalizeAndDownload:failed", { jobId, message: msg });
+      setDownloadPrepError(msg || undefined);
+      throw err;
+    } finally {
+      downloadInFlightRef.current = false;
+      setFinalizingZip(false);
+    }
+  };
+
+  useEffect(() => {
     if (busy) return;
     if (job) return;
     let jobId: string | null = null;
     try {
-      jobId = window.localStorage.getItem("lawcaspro_doc_automation_last_job");
+      jobId = window.localStorage.getItem(storageKey);
     } catch {
       jobId = null;
     }
@@ -367,8 +547,11 @@ export default function DocumentAutomationHub() {
     if (!/^[0-9a-fA-F-]{36}$/.test(jobId)) return;
     void (async () => {
       try {
+        setActiveJobId(jobId);
         const st = await getGenerationJobStatus(jobId);
         setJob(st);
+        setJobStage("ready");
+        devLog("job:recovered", { jobId, status: String(st.status ?? ""), nextAction: st.nextAction ?? null });
         if (
           st.nextAction === "download" ||
           String(st.status ?? "") === "completed" ||
@@ -376,7 +559,11 @@ export default function DocumentAutomationHub() {
         ) {
           setRunnerNotice("Previous generation job found. You can retry download.");
         }
-      } catch {}
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err ?? "");
+        setJobError(msg || "Failed to recover previous job");
+        setJobStage("error");
+      }
     })();
   }, [busy, job]);
 
@@ -1019,9 +1206,13 @@ export default function DocumentAutomationHub() {
       mode = "download";
     }
 
-    setBusy(true);
+    setJobStage("creating");
     setJob(null);
     setJobError(null);
+    setRunnerNotice(null);
+    setActiveJobId(null);
+    finalizeAttemptedJobIdRef.current = null;
+    downloadAttemptedJobIdRef.current = null;
     if (pollTimerRef.current) window.clearInterval(pollTimerRef.current);
     pollAbortRef.current?.abort();
     runnerRef.current.running = true;
@@ -1055,8 +1246,11 @@ export default function DocumentAutomationHub() {
       const jobId = created.jobId;
       if (!jobId) throw new Error("jobId is missing");
       runnerRef.current.jobId = jobId;
+      setActiveJobId(jobId);
+      setJobStage("generating");
+      devLog("job:created", { jobId });
       try {
-        window.localStorage.setItem("lawcaspro_doc_automation_last_job", jobId);
+        window.localStorage.setItem(storageKey, jobId);
       } catch {}
       runnerRef.current.state = "runningItems";
       try {
@@ -1091,10 +1285,7 @@ export default function DocumentAutomationHub() {
         if (pollTimerRef.current) window.clearInterval(pollTimerRef.current);
         pollTimerRef.current = null;
         pollAbortRef.current?.abort();
-        runnerRef.current.running = false;
       };
-
-      const downloadWithRetry = downloadZipFromManifest;
 
       const getApiErrorCode = (err: unknown): string => {
         const r = asRecord(err) ?? {};
@@ -1122,13 +1313,12 @@ export default function DocumentAutomationHub() {
           stopPolling();
           setJobError(message);
           setRunnerNotice(null);
-          setBusy(false);
+          setJobStage("error");
         };
 
         while (!stopped) {
-          if (!runnerRef.current.running || runnerRef.current.jobId !== jobId) {
+          if (runnerRef.current.jobId !== jobId) {
             stopPolling();
-            setBusy(false);
             return;
           }
           if (Date.now() - runnerRef.current.startedAt > maxRuntimeMs) {
@@ -1157,24 +1347,21 @@ export default function DocumentAutomationHub() {
               setJob(st);
               setRunnerNotice(null);
               const s = String(st.status ?? "");
+              const p = getProgress(st);
+              devLog("status:poll", { jobId, status: s, nextAction: st.nextAction ?? null, progress: p });
+              const progressCompleteNow = isProgressComplete(st);
+              if (progressCompleteNow && p.success > 0) {
+                stopPolling();
+                try {
+                  await finalizeAndDownload(jobId, { snapshot: st });
+                } catch {}
+                return;
+              }
 
               if (st.nextAction === "finalize" || s === "finalizing") {
                 runnerRef.current.state = "finalizing";
                 setFinalizingZip(true);
-                if (!runnerRef.current.finalizeRequestedAt && st.nextAction === "finalize") {
-                  runnerRef.current.finalizeRequestedAt = Date.now();
-                  try {
-                    if (!finalizeInFlightRef.current) {
-                      finalizeInFlightRef.current = true;
-                      try {
-                        const fin = await finalizeGenerationJob(jobId, { signal: ctrl.signal });
-                        setJob(fin);
-                      } finally {
-                        finalizeInFlightRef.current = false;
-                      }
-                    }
-                  } catch {}
-                }
+                setJobStage("finalizing");
                 await new Promise<void>((r) => setTimeout(r, 1200));
                 continue;
               }
@@ -1182,32 +1369,15 @@ export default function DocumentAutomationHub() {
               if (st.nextAction === "download" || s === "completed" || s === "completed_with_errors") {
                 runnerRef.current.state = "downloading";
                 stopPolling();
-                setFinalizingZip(true);
-                try {
-                  await downloadWithRetry(jobId, st);
-                  setFinalizingZip(false);
-                  setBusy(false);
-                  return;
-                } catch (err) {
-                  const status =
-                    err && typeof err === "object" && "status" in (err as any) && typeof (err as any).status === "number"
-                      ? Number((err as any).status)
-                      : null;
-                  if (status === 409) {
-                    runnerRef.current.state = "finalizing";
-                    runnerRef.current.statusOnlyUntil = Date.now() + 15_000;
-                    await new Promise<void>((r) => setTimeout(r, 1500));
-                    continue;
-                  }
-                  if (status === 401 || status === 403) {
-                    stopWithError("Download failed: your session could not be verified. Please refresh and login again.");
-                    setFinalizingZip(false);
-                    return;
-                  }
-                  stopWithError(formatPollError(err));
-                  setFinalizingZip(false);
+                if (p.success <= 0) {
+                  setJobError("Generation completed but no documents were generated successfully.");
+                  setJobStage("error");
                   return;
                 }
+                try {
+                  await finalizeAndDownload(jobId, { snapshot: st });
+                } catch {}
+                return;
               }
 
               if (st.nextAction === "stop" || s === "failed" || s === "cancelled") {
@@ -1282,6 +1452,8 @@ export default function DocumentAutomationHub() {
             setJob(next);
             setRunnerNotice(null);
             const st = String(next.status ?? "");
+              const p = getProgress(next);
+              const progressCompleteNow = isProgressComplete(next);
             const nextAction =
               next.nextAction ??
               (() => {
@@ -1292,6 +1464,13 @@ export default function DocumentAutomationHub() {
                 if (next.pendingCount > 0) return "run_next";
                 return "run_next";
               })();
+            devLog("run-next:ok", {
+              jobId,
+              status: st,
+              nextAction,
+              progress: p,
+              ms: Date.now() - startedAt,
+            });
             emitDbg({
               hypothesisId: "H3",
               msg: "drive:step-ok",
@@ -1307,51 +1486,26 @@ export default function DocumentAutomationHub() {
               },
             });
 
-            if (nextAction === "finalize") {
-              runnerRef.current.state = "finalizing";
-              runnerRef.current.statusOnlyUntil = Date.now() + 15_000;
-              if (!runnerRef.current.finalizeRequestedAt) runnerRef.current.finalizeRequestedAt = Date.now();
-              setFinalizingZip(true);
-              if (!finalizeInFlightRef.current) {
-                finalizeInFlightRef.current = true;
-                try {
-                  const fin = await finalizeGenerationJob(jobId, { signal: ctrl.signal });
-                  setJob(fin);
-                } finally {
-                  finalizeInFlightRef.current = false;
-                }
-              }
-              continue;
-            }
-            if (nextAction === "download") {
+            if (progressCompleteNow && p.success > 0) {
               runnerRef.current.state = "downloading";
               stopPolling();
-              setFinalizingZip(true);
               try {
-                await downloadWithRetry(jobId, next);
-                setFinalizingZip(false);
-                setBusy(false);
-                return;
-              } catch (err) {
-                const status =
-                  err && typeof err === "object" && "status" in (err as any) && typeof (err as any).status === "number"
-                    ? Number((err as any).status)
-                    : null;
-                if (status === 409) {
-                  runnerRef.current.state = "finalizing";
-                  runnerRef.current.statusOnlyUntil = Date.now() + 15_000;
-                  await new Promise<void>((r) => setTimeout(r, 1500));
-                  continue;
-                }
-                if (status === 401 || status === 403) {
-                  stopWithError("Download failed: your session could not be verified. Please refresh and login again.");
-                  setFinalizingZip(false);
-                  return;
-                }
-                stopWithError(formatPollError(err));
-                setFinalizingZip(false);
+                await finalizeAndDownload(jobId, { snapshot: next });
+              } catch {}
+              return;
+            }
+            if (nextAction === "finalize" || nextAction === "download") {
+              runnerRef.current.state = nextAction === "finalize" ? "finalizing" : "downloading";
+              stopPolling();
+              if (p.success <= 0 && nextAction === "download") {
+                setJobError("Generation completed but no documents were generated successfully.");
+                setJobStage("error");
                 return;
               }
+              try {
+                await finalizeAndDownload(jobId, { snapshot: next });
+              } catch {}
+              return;
             }
             if (nextAction === "stop" || st === "failed") {
               runnerRef.current.state = st === "cancelled" ? "cancelled" : "failed";
@@ -1362,7 +1516,7 @@ export default function DocumentAutomationHub() {
                   ? "Word template cannot be exported to PDF because DOCX-to-PDF converter is not configured."
                   : (next.errorSummary ?? "Generation failed"),
               );
-              setBusy(false);
+              setJobStage("error");
               return;
             }
             await new Promise<void>((r) => setTimeout(r, 250));
@@ -1375,13 +1529,13 @@ export default function DocumentAutomationHub() {
             if (status === 401) {
               stopPolling();
               setJobError("Session expired. Please sign in again.");
-              setBusy(false);
+              setJobStage("error");
               return;
             }
             if (code === "DOCX_TO_PDF_ENGINE_NOT_CONFIGURED") {
               stopPolling();
               setJobError("Word template cannot be exported to PDF because DOCX-to-PDF converter is not configured.");
-              setBusy(false);
+              setJobStage("error");
               return;
             }
             if (code === "RUN_NEXT_IN_FLIGHT") {
@@ -1394,7 +1548,7 @@ export default function DocumentAutomationHub() {
             if (status === 409) {
               stopPolling();
               setJobError(formatPollError(err));
-              setBusy(false);
+              setJobStage("error");
               return;
             }
             if (code === "JOB_NOT_FOUND" || status === 404) {
@@ -1423,7 +1577,7 @@ export default function DocumentAutomationHub() {
               } catch {
                 setJobError("Job not found (JOB_NOT_FOUND). Please start a new job.");
               }
-              setBusy(false);
+              setJobStage("error");
               return;
             }
             if (
@@ -1434,21 +1588,21 @@ export default function DocumentAutomationHub() {
               try {
                 const st = await getGenerationJobStatus(jobId);
                 setJob(st);
-                if (st.nextAction === "finalize" || String(st.status ?? "") === "finalizing") {
+                const p = getProgress(st);
+                const progressCompleteNow = isProgressComplete(st);
+                if (progressCompleteNow && p.success > 0) {
+                  stopPolling();
                   try {
-                    setFinalizingZip(true);
-                    if (!finalizeInFlightRef.current) {
-                      finalizeInFlightRef.current = true;
-                      try {
-                        const fin = await finalizeGenerationJob(jobId);
-                        setJob(fin);
-                      } finally {
-                        finalizeInFlightRef.current = false;
-                      }
-                    }
+                    await finalizeAndDownload(jobId, { snapshot: st });
                   } catch {}
+                  return;
                 }
-              } catch {}
+              } catch (err2) {
+                const msg = err2 instanceof Error ? err2.message : String(err2 ?? "");
+                setJobError(msg || "Failed to resume job");
+                setJobStage("error");
+                return;
+              }
               runnerRef.current.state = "statusOnly";
               runnerRef.current.statusOnlyUntil = Date.now() + 5_000;
               await new Promise<void>((r) => setTimeout(r, 2500));
@@ -1470,7 +1624,7 @@ export default function DocumentAutomationHub() {
             setJobError(msg);
             if (pollConsecutiveErrorRef.current >= 3) {
               stopPolling();
-              setBusy(false);
+              setJobStage("error");
               return;
             }
             await new Promise<void>((r) => setTimeout(r, 700));
@@ -1489,7 +1643,6 @@ export default function DocumentAutomationHub() {
       runnerRef.current.state = "idle";
       runnerRef.current.statusOnlyUntil = 0;
       runnerRef.current.finalizeRequestedAt = 0;
-      if (!pollTimerRef.current) setBusy(false);
     }
   }
 
@@ -2174,29 +2327,39 @@ export default function DocumentAutomationHub() {
                         Generates PDFs, applies naming rules, and exports a ZIP
                         with the required folder structure.
                       </div>
-                      {busy && (
+                      {hasActiveJob && (
                         <div className="rounded-md border border-slate-200 bg-slate-50 p-3 text-sm text-slate-700">
-                          <div className="font-medium">Generating...</div>
+                          <div className="font-medium">
+                            {jobStage === "creating"
+                              ? "Creating..."
+                              : jobStage === "generating"
+                                ? "Generating..."
+                                : jobStage === "finalizing"
+                                  ? "Finalizing..."
+                                  : jobStage === "preparing_download"
+                                    ? "Preparing download..."
+                                    : jobStage === "downloading"
+                                      ? "Downloading..."
+                                      : jobStage === "packaging"
+                                        ? "Packaging ZIP..."
+                                        : jobStage === "ready"
+                                          ? "Ready"
+                                          : jobStage === "error"
+                                            ? "Error"
+                                            : "Working..."}
+                          </div>
                           <div className="mt-1 text-xs text-slate-600">
                             {(() => {
                               const expectedTotal =
                                 selectedCaseIds.length *
                                 (selectedTemplateIds.length +
                                   selectedMasterDocIds.length);
-                              const done =
-                                (job?.successCount ?? 0) +
-                                (job?.failedCount ?? 0);
-                              const total =
-                                job?.totalCount || expectedTotal || 0;
+                              const p = getProgress(job);
+                              const done = p.success + p.failed;
+                              const total = p.total || expectedTotal || 0;
                               const status = String(job?.status ?? "");
-                              const isFinalizing =
-                                finalizingZip ||
-                                job?.nextAction === "finalize" ||
-                                status === "finalizing";
-                              if (isFinalizing) {
-                                return `Generated items completed. Preparing ZIP... (success=${job?.successCount ?? 0}, failed=${job?.failedCount ?? 0})`;
-                              }
-                              return `Progress: ${done}/${total}  (success=${job?.successCount ?? 0}, failed=${job?.failedCount ?? 0}, pending=${job?.pendingCount ?? 0})`;
+                              const action = String(job?.nextAction ?? "");
+                              return `Job: ${activeJobId}  Status: ${status || "-"}  Next: ${action || "-"}  Progress: ${done}/${total} (success=${p.success}, failed=${p.failed}, pending=${p.pending}, running=${p.running})`;
                             })()}
                           </div>
                           {runnerNotice && (
@@ -2209,63 +2372,84 @@ export default function DocumentAutomationHub() {
                               {jobError}
                             </div>
                           )}
+                          <div className="mt-3 flex flex-wrap gap-2">
+                            <Button
+                              type="button"
+                              size="sm"
+                              variant="outline"
+                              disabled={busy || !activeJobId}
+                              onClick={() => {
+                                if (!activeJobId) return;
+                                void (async () => {
+                                  setJobError(null);
+                                  try {
+                                    const st = await getGenerationJobStatus(activeJobId);
+                                    setJob(st);
+                                    devLog("job:refresh", {
+                                      jobId: activeJobId,
+                                      status: String(st.status ?? ""),
+                                      nextAction: st.nextAction ?? null,
+                                    });
+                                    setJobStage("ready");
+                                  } catch (err) {
+                                    const msg = err instanceof Error ? err.message : String(err ?? "");
+                                    setJobError(msg || "Failed to refresh job status");
+                                    setJobStage("error");
+                                  }
+                                })();
+                              }}
+                            >
+                              Refresh Status
+                            </Button>
+                            <Button
+                              type="button"
+                              size="sm"
+                              variant="outline"
+                              disabled={busy || !activeJobId}
+                              onClick={() => {
+                                if (!activeJobId) return;
+                                void (async () => {
+                                  try {
+                                    await finalizeAndDownload(activeJobId, { force: true, snapshot: job });
+                                  } catch {}
+                                })();
+                              }}
+                            >
+                              Retry Download
+                            </Button>
+                            <Button
+                              type="button"
+                              size="sm"
+                              variant="outline"
+                              disabled={busy}
+                              onClick={() => clearActiveJob()}
+                            >
+                              Clear Job
+                            </Button>
+                          </div>
                         </div>
                       )}
                       <Button
-                        disabled={busy}
+                        disabled={busy || hasActiveJob}
                         className="w-full"
                         onClick={() => runGenerate("download")}
                       >
-                        {busy ? "Generating..." : "Generate & Download"}
+                        {jobStage === "creating"
+                          ? "Creating..."
+                          : jobStage === "generating"
+                            ? "Generating..."
+                            : jobStage === "finalizing"
+                              ? "Finalizing..."
+                              : jobStage === "preparing_download"
+                                ? "Preparing download..."
+                                : jobStage === "downloading"
+                                  ? "Downloading..."
+                                  : jobStage === "packaging"
+                                    ? "Packaging ZIP..."
+                                    : hasActiveJob
+                                      ? "Job Active"
+                                      : "Generate & Download"}
                       </Button>
-                      {!busy &&
-                      job &&
-                      (job.nextAction === "download" ||
-                        job.nextAction === "finalize" ||
-                        String(job.status ?? "") === "completed" ||
-                        String(job.status ?? "") === "completed_with_errors" ||
-                        String(job.status ?? "") === "finalizing") ? (
-                        <Button
-                          type="button"
-                          variant="outline"
-                          className="w-full"
-                          onClick={() => {
-                            void (async () => {
-                              const jobId = job.jobId;
-                              setBusy(true);
-                              setJobError(null);
-                              setFinalizingZip(true);
-                              try {
-                                let snap: NormalizedGenerationJob = job;
-                                const s = String(job.status ?? "");
-                                if (job.nextAction === "finalize" || s === "finalizing") {
-                                  if (!finalizeInFlightRef.current) {
-                                    finalizeInFlightRef.current = true;
-                                    try {
-                                      const fin = await finalizeGenerationJob(jobId);
-                                      setJob(fin);
-                                      snap = fin;
-                                    } finally {
-                                      finalizeInFlightRef.current = false;
-                                    }
-                                  }
-                                }
-                                await downloadZipFromManifest(jobId, snap);
-                              } catch (err) {
-                                toastError(toast, err, "Download failed");
-                                setJobError(
-                                  "Generated successfully, but ZIP packaging failed. Retry download.",
-                                );
-                              } finally {
-                                setFinalizingZip(false);
-                                setBusy(false);
-                              }
-                            })();
-                          }}
-                        >
-                          Retry Download
-                        </Button>
-                      ) : null}
                     </TabsContent>
 
                     <TabsContent value="print" className="mt-4 space-y-4">
@@ -2352,7 +2536,7 @@ export default function DocumentAutomationHub() {
                         </div>
                       )}
                       <Button
-                        disabled={busy}
+                        disabled={busy || hasActiveJob}
                         className="w-full"
                         onClick={() => runGenerate("print")}
                       >
