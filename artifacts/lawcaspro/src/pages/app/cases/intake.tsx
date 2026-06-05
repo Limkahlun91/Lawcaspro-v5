@@ -11,6 +11,7 @@ import { useToast } from "@/hooks/use-toast";
 import { toastError } from "@/lib/toast-error";
 import { apiRequest } from "@/lib/api-client";
 import { isApiSuccess, unwrapApiData } from "@/lib/api-contract";
+import { isFeatureEnabled } from "@/lib/feature-flags";
 import { FileUp, Sparkles } from "lucide-react";
 
 type Purchaser = { name: string; ic: string };
@@ -36,6 +37,7 @@ function encodePayload(payload: IntakePayload): string {
 export default function CaseIntakeInboxPage() {
   const [, setLocation] = useLocation();
   const { toast } = useToast();
+  const intakeEnabled = isFeatureEnabled("intake_inbox");
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [isDragging, setIsDragging] = useState(false);
   const [file, setFile] = useState<File | null>(null);
@@ -49,6 +51,29 @@ export default function CaseIntakeInboxPage() {
   const [price, setPrice] = useState("");
   const [loanBank, setLoanBank] = useState("");
   const [loanAmount, setLoanAmount] = useState("");
+
+  if (!intakeEnabled) {
+    return (
+      <div className="space-y-4">
+        <div className="flex flex-col gap-1">
+          <h1 className="text-3xl font-bold text-slate-900 tracking-tight">Intake Inbox</h1>
+          <p className="text-slate-500">This feature is coming soon / temporarily disabled.</p>
+        </div>
+        <Card className="border-slate-200">
+          <CardContent className="p-6">
+            <div className="flex items-center justify-between gap-4">
+              <div className="text-sm text-slate-700">
+                Please use Cases for now.
+              </div>
+              <Button onClick={() => setLocation("/app/cases")} variant="outline">
+                Back to Cases
+              </Button>
+            </div>
+          </CardContent>
+        </Card>
+      </div>
+    );
+  }
 
   useEffect(() => {
     if (!file) {

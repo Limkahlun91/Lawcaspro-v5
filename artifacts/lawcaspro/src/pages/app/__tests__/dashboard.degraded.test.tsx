@@ -64,7 +64,7 @@ describe("dashboard degraded UI", () => {
     );
 
     expect(await screen.findByText("Dashboard")).toBeInTheDocument();
-    expect(await screen.findByText("Dashboard partially unavailable")).toBeInTheDocument();
+    expect(await screen.findByText("Some widgets are temporarily unavailable. Core stats are still shown.")).toBeInTheDocument();
     expect(screen.queryByText("Dashboard unavailable")).not.toBeInTheDocument();
   });
 });

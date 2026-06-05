@@ -4514,6 +4514,111 @@ router.get(
   },
 );
 
+router.get(
+  "/documents/variables",
+  requireAuth,
+  requireFirmUser,
+  requirePermission("documents", "read"),
+  async (req: AuthRequest, res): Promise<void> => {
+    const r = getRlsDb(req, res);
+    if (!r) return;
+
+    const caseIdRaw = one((req.query as any).caseId);
+    const caseIdNum = caseIdRaw ? Number(caseIdRaw) : NaN;
+    if (!Number.isInteger(caseIdNum) || caseIdNum <= 0) {
+      res.status(400).json({ error: "Invalid caseId" });
+      return;
+    }
+
+    const activeRaw = one((req.query as any).active);
+    const active =
+      activeRaw === undefined
+        ? true
+        : activeRaw === "0" ||
+            activeRaw.toLowerCase() === "false" ||
+            activeRaw.toLowerCase() === "no"
+          ? false
+          : true;
+
+    const includeLoopsRaw = one((req.query as any).includeLoops);
+    const includeLoops =
+      includeLoopsRaw === undefined
+        ? true
+        : includeLoopsRaw === "0" ||
+            includeLoopsRaw.toLowerCase() === "false" ||
+            includeLoopsRaw.toLowerCase() === "no"
+          ? false
+          : true;
+
+    const registry = await listDocumentVariables(r, { active });
+    const caseContext = await buildCaseContext(r, caseIdNum, req.firmId!, undefined, { includeDebug: false });
+    if (!caseContext) {
+      res.status(404).json({ error: "Case not found" });
+      return;
+    }
+
+    const placeholderKeys = registry.map((v) => v.key);
+    const resolved = resolveVariablesForTemplate({
+      registry,
+      bindings: [],
+      caseContext,
+      placeholders: placeholderKeys,
+    }).resolvedVariables;
+
+    const variables = registry.map((v) => ({
+      ...v,
+      token: `{{${v.key}}}`,
+      previewValue: Object.prototype.hasOwnProperty.call(resolved, v.key) ? (resolved as any)[v.key] : null,
+    }));
+
+    const loops = (() => {
+      if (!includeLoops) return [];
+      const loopDefs: Array<{ key: string; label: string; itemKeys: string[]; template: string }> = [
+        { key: "purchasers", label: "Purchasers", itemKeys: ["index", "name", "ic", "nric", "nationality", "address", "phone", "email", "role"], template: "{{index}}. {{name}} ({{ic}})" },
+        { key: "borrowers", label: "Borrowers", itemKeys: ["index", "name", "ic", "nric", "address", "phone", "email"], template: "{{index}}. {{name}}" },
+        { key: "vendors", label: "Vendors", itemKeys: ["index", "name", "ic", "nric", "address", "phone", "email"], template: "{{index}}. {{name}}" },
+        { key: "bank_accounts", label: "Bank Accounts", itemKeys: ["index", "bank_name", "account_no", "account_type"], template: "{{index}}. {{bank_name}} {{account_no}}" },
+      ];
+
+      const renderOne = (items: unknown, tpl: string): string => {
+        const arr = Array.isArray(items) ? items : [];
+        const lines: string[] = [];
+        for (const item of arr) {
+          const rec = item && typeof item === "object" ? (item as Record<string, unknown>) : {};
+          const line = tpl.replace(/\{\{\s*([a-zA-Z0-9_.-]+)\s*\}\}/g, (_m, k) => {
+            const raw = (rec as any)[String(k)];
+            if (raw === null || raw === undefined) return "";
+            if (typeof raw === "string") return raw;
+            if (typeof raw === "number") return Number.isFinite(raw) ? String(raw) : "";
+            if (typeof raw === "boolean") return raw ? "true" : "false";
+            return "";
+          });
+          const cleaned = line.trim();
+          if (cleaned) lines.push(cleaned);
+        }
+        return lines.join("\n");
+      };
+
+      return loopDefs.map((d) => {
+        const startToken = `{{#${d.key}}}`;
+        const endToken = `{{/${d.key}}}`;
+        const loopBlock = `${startToken}\n${d.template}\n${endToken}`;
+        return {
+          key: d.key,
+          label: d.label,
+          startToken,
+          endToken,
+          template: loopBlock,
+          innerVariables: d.itemKeys.map((k) => ({ key: k, token: `{{${k}}}` })),
+          preview: renderOne((caseContext as any)[d.key], d.template) || null,
+        };
+      });
+    })();
+
+    sendOk(res as any, { variables, loops });
+  },
+);
+
 const variableCategorySchema = z.enum([
   "case",
   "purchaser",
@@ -19135,6 +19240,20 @@ router.post(
         return;
       }
 
+      try {
+        logger.info(
+          {
+            firmId: req.firmId ?? null,
+            userId: req.userId ?? null,
+            jobId,
+            requestId: requestId ?? null,
+            progress,
+            elapsedMs: Date.now() - startedAt,
+          },
+          "docgen.finalize.start",
+        );
+      } catch {}
+
       // TODO(docgen): implement finalize-next resumable finalization to avoid serverless timeouts for large/slow bundles.
       const finalStatus =
         progress.failed === 0
@@ -19168,6 +19287,20 @@ router.post(
             duration_ms: Date.now() - startedAt,
           },
         });
+        try {
+          logger.info(
+            {
+              firmId: req.firmId ?? null,
+              userId: req.userId ?? null,
+              jobId,
+              requestId: requestId ?? null,
+              status: "failed",
+              progress,
+              elapsedMs: Date.now() - startedAt,
+            },
+            "docgen.finalize.complete",
+          );
+        } catch {}
         return;
       }
 
@@ -19219,6 +19352,21 @@ router.post(
           duration_ms: Date.now() - startedAt,
         },
       });
+      try {
+        logger.info(
+          {
+            firmId: req.firmId ?? null,
+            userId: req.userId ?? null,
+            jobId,
+            requestId: requestId ?? null,
+            status: finalStatus,
+            progress,
+            downloadObjectPath: (download as any)?.downloadObjectPath ?? null,
+            elapsedMs: Date.now() - startedAt,
+          },
+          "docgen.finalize.complete",
+        );
+      } catch {}
     } catch (err) {
       const info = extractDbErrorInfo(err);
       const errMessage = err instanceof Error ? err.message : info.message ?? "";
@@ -19226,6 +19374,24 @@ router.post(
       const timeoutLike =
         durationMs >= 25_000 ||
         /timed?\s*out|timeout|etimedout|abort/i.test(String(errMessage).toLowerCase());
+      try {
+        logger.warn(
+          {
+            firmId: req.firmId ?? null,
+            userId: req.userId ?? null,
+            jobId,
+            requestId: requestId ?? null,
+            durationMs,
+            timeoutLike,
+            sqlState: info.sqlstate,
+            table: info.table,
+            column: info.column,
+            constraint: info.constraint,
+            message: errMessage,
+          },
+          "docgen.finalize.failed",
+        );
+      } catch {}
       res.status(timeoutLike ? 504 : 500).json({
         ok: false,
         error: {

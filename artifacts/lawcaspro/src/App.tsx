@@ -72,6 +72,7 @@ import Settings from "@/pages/app/settings";
 import DocumentsPage from "@/pages/app/documents";
 import DocumentAutomationHub from "@/pages/app/documents/automation";
 import DocumentGenerationLogsPage from "@/pages/app/documents/generation-logs";
+import VariableDictionaryPage from "@/pages/app/documents/variables";
 import Accounting from "@/pages/app/accounting";
 import AccountingFileListing from "@/pages/app/accounting/file-listing";
 import BankReconciliationPage from "@/pages/app/accounting/bank-reconciliation";
@@ -269,6 +270,11 @@ function AppRoutes() {
           <Route path="/app/documents/automation" component={() => (
             <PermissionGuard module="documents" action="read">
               <DocumentAutomationHub />
+            </PermissionGuard>
+          )} />
+          <Route path="/app/documents/variables" component={() => (
+            <PermissionGuard module="documents" action="read">
+              <VariableDictionaryPage />
             </PermissionGuard>
           )} />
           <Route path="/app/documents" component={() => (

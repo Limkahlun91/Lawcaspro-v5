@@ -1235,7 +1235,7 @@ export default function DocumentAutomationHub() {
               continue;
             }
             if (status === 503 || status === 504) {
-              setRunnerNotice("Server is busy, checking status...");
+              setRunnerNotice("Generation is still processing. Please wait. Do not click Generate again.");
               try {
                 const st = await getGenerationJobStatus(jobId);
                 setJob(st);

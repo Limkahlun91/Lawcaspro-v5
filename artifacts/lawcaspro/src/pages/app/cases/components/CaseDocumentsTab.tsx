@@ -494,14 +494,24 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
   }
 
   async function runGenerationJobToDownload(jobId: string): Promise<NormalizedGenerationJob> {
+    const startedAt = Date.now();
+    const maxTotalMs = 4 * 60_000;
+    let backoffMs = 250;
+    let busyNoticeShown = false;
+
     for (;;) {
+      if (Date.now() - startedAt > maxTotalMs) {
+        throw new Error("Generation is still processing. Please wait. Do not click Generate again.");
+      }
       let job: NormalizedGenerationJob;
       try {
         job = await runNextGenerationJob(jobId);
+        backoffMs = 250;
       } catch (err) {
         const code = getApiErrorCode(err);
         if (code === "RUN_NEXT_IN_FLIGHT") {
-          await new Promise<void>((r) => setTimeout(r, 350));
+          backoffMs = Math.min(5000, Math.max(350, Math.floor(backoffMs * 1.4)));
+          await new Promise<void>((r) => setTimeout(r, backoffMs));
           continue;
         }
         const status =
@@ -512,6 +522,12 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
           throw new Error("Job not found (JOB_NOT_FOUND). Please start a new job.");
         }
         if (status === 503 || status === 504) {
+          if (!busyNoticeShown) {
+            busyNoticeShown = true;
+            toast({ title: "Processing", description: "Generation is still processing. Please wait. Do not click Generate again." });
+          }
+          backoffMs = Math.min(7000, Math.max(1500, Math.floor(backoffMs * 1.6)));
+          await new Promise<void>((r) => setTimeout(r, backoffMs));
           try {
             const st = await getGenerationJobStatus(jobId);
             job = st;
@@ -519,6 +535,12 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
           } catch {}
         }
         if (err instanceof RequestTimeoutError || isAbortLikeError(err)) {
+          if (!busyNoticeShown) {
+            busyNoticeShown = true;
+            toast({ title: "Processing", description: "Generation is still processing. Please wait. Do not click Generate again." });
+          }
+          backoffMs = Math.min(7000, Math.max(1500, Math.floor(backoffMs * 1.4)));
+          await new Promise<void>((r) => setTimeout(r, backoffMs));
           const st = await getGenerationJobStatus(jobId);
           job = st;
         } else {
@@ -545,14 +567,15 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
         } catch (err) {
           const code = getApiErrorCode(err);
           if (code === "RUN_NEXT_IN_FLIGHT" || code === "JOB_NOT_READY_FOR_FINALIZE") {
-            await new Promise<void>((r) => setTimeout(r, 450));
+            backoffMs = Math.min(7000, Math.max(450, Math.floor(backoffMs * 1.4)));
+            await new Promise<void>((r) => setTimeout(r, backoffMs));
             continue;
           }
           throw err;
         }
         const status2 = String(job.status ?? "");
         if (status2 === "completed" || status2 === "completed_with_errors") return job;
-        await new Promise<void>((r) => setTimeout(r, 250));
+        await new Promise<void>((r) => setTimeout(r, Math.min(1500, Math.max(350, backoffMs))));
         continue;
       }
 
@@ -569,7 +592,7 @@ export default function CaseDocumentsTab({ caseId }: { caseId: number }) {
         throw new Error(detail ? `${summary}: ${detail}` : summary);
       }
 
-      await new Promise<void>((r) => setTimeout(r, 250));
+      await new Promise<void>((r) => setTimeout(r, Math.min(1200, Math.max(250, Math.floor(backoffMs * 0.8)))));
     }
   }
 

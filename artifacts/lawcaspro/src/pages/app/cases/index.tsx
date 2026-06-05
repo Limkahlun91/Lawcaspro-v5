@@ -140,6 +140,7 @@ export default function CasesList() {
   const [approvalStatus, setApprovalStatus] = useState<
     "pending_approval" | "approved" | "rejected"
   >(() => normalizeApprovalStatus(sp.get("approvalStatus")));
+  const [pendingViewCaseId, setPendingViewCaseId] = useState<number | null>(null);
 
 
   useEffect(() => {
@@ -383,7 +384,6 @@ export default function CasesList() {
   const [isBatchGenerateOpen, setIsBatchGenerateOpen] = useState(false);
   const [selectedTemplateIds, setSelectedTemplateIds] = useState<Set<number>>(new Set());
   const [bulkGenerateDownloading, setBulkGenerateDownloading] = useState(false);
-  const [pendingViewCaseId, setPendingViewCaseId] = useState<number | null>(null);
   const resubmitMutation = useMutation({
     mutationFn: async (caseId: number) => {
       return await apiFetchJson(`/cases/${caseId}/resubmit`, { method: "POST" });
@@ -682,7 +682,9 @@ export default function CasesList() {
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-100">
-                      {cases.map((c) => (
+                      {cases.map((c) => {
+                        const ms = (c as any)?.milestones && typeof (c as any).milestones === "object" ? (c as any).milestones : {};
+                        return (
                         <tr key={c.id} className="hover:bg-slate-50/50">
                           <td className="px-4 py-4">
                             <Checkbox
@@ -710,45 +712,45 @@ export default function CasesList() {
                               }}
                             >
                               <span className="font-medium text-slate-900 hover:text-amber-600 cursor-pointer transition-colors">
-                                {c.referenceNo}
+                                {String((c as any).referenceNo ?? "—") || "—"}
                               </span>
                             </Link>
                           </td>
                           <td className="px-6 py-4 text-slate-700">
-                            {c.clientName ?? "—"}
+                            {String((c as any).clientName ?? "—") || "—"}
                           </td>
                           <td className="px-6 py-4">
-                            <div className="font-medium text-slate-800">{c.projectName}</div>
+                            <div className="font-medium text-slate-800">{String((c as any).projectName ?? "—") || "—"}</div>
                             <div className="text-slate-500 text-xs mt-0.5">
-                              {c.property ? c.property : c.developerName}
+                              {String((c as any).property ?? "") || String((c as any).developerName ?? "—") || "—"}
                             </div>
                           </td>
                           <td className="px-6 py-4">
-                            <div className="text-slate-800">{c.assignedLawyerName ?? "—"}</div>
-                            <div className="text-slate-500 text-xs mt-0.5">{c.assignedClerkName ?? "—"}</div>
+                            <div className="text-slate-800">{String((c as any).assignedLawyerName ?? "—") || "—"}</div>
+                            <div className="text-slate-500 text-xs mt-0.5">{String((c as any).assignedClerkName ?? "—") || "—"}</div>
                           </td>
                           <td className="px-6 py-4">
                             <span className="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-semibold bg-slate-100 text-slate-700">
-                              {c.spaStatus}
+                              {String((c as any).spaStatus ?? "—") || "—"}
                             </span>
                           </td>
                           <td className="px-6 py-4">
                             <span className="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-semibold bg-slate-100 text-slate-700">
-                              {c.loanStatus ?? "N/A"}
+                              {String((c as any).loanStatus ?? "N/A") || "N/A"}
                             </span>
                           </td>
                           <td className="px-6 py-4">
                             <div className="text-xs text-slate-700">
-                              <span className="font-semibold">SPA</span>: {fmtYmd(c.milestones.spa_date)}
+                              <span className="font-semibold">SPA</span>: {fmtYmd((ms as any).spa_date)}
                               <span className="text-slate-400"> · </span>
-                              <span className="font-semibold">Stamped</span>: {fmtYmd(c.milestones.spa_stamped_date)}
+                              <span className="font-semibold">Stamped</span>: {fmtYmd((ms as any).spa_stamped_date)}
                             </div>
                             <div className="text-xs text-slate-500 mt-0.5">
-                              <span className="font-semibold">LOF</span>: {fmtYmd(c.milestones.letter_of_offer_date)}
+                              <span className="font-semibold">LOF</span>: {fmtYmd((ms as any).letter_of_offer_date)}
                               <span className="text-slate-400"> · </span>
-                              <span className="font-semibold">Loan</span>: {fmtYmd(c.milestones.loan_docs_signed_date)}
+                              <span className="font-semibold">Loan</span>: {fmtYmd((ms as any).loan_docs_signed_date)}
                               <span className="text-slate-400"> · </span>
-                              <span className="font-semibold">Comp</span>: {fmtYmd(c.milestones.completion_date)}
+                              <span className="font-semibold">Comp</span>: {fmtYmd((ms as any).completion_date)}
                             </div>
                             {(c as any).completionSla?.status ? (
                               <div className="mt-1">
@@ -768,10 +770,11 @@ export default function CasesList() {
                             ) : null}
                           </td>
                           <td className="px-6 py-4 text-slate-600 text-xs">
-                            {fmtYmd(c.updatedAt.slice(0, 10))}
+                            {fmtIsoToYmd((c as any).updatedAt)}
                           </td>
                         </tr>
-                      ))}
+                        );
+                      })}
                       {cases.length === 0 && (
                         <tr>
                           <td colSpan={9} className="px-6 py-8 text-center text-slate-500">

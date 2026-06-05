@@ -22,6 +22,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { apiFetchJson } from "@/lib/api-client";
 import { getListCasesQueryKey, getListDevelopersQueryKey, getListProjectsQueryKey, getListUsersQueryKey } from "@workspace/api-client-react";
+import { isFeatureEnabled } from "@/lib/feature-flags";
 
 export function AppLayout({ children }: { children: ReactNode }) {
   const { user, logout } = useAuth();
@@ -50,6 +51,7 @@ export function AppLayout({ children }: { children: ReactNode }) {
     { label: "Projects", href: "/app/projects", icon: Building2, perm: ["projects", "read"] as const },
     { label: "Developers", href: "/app/developers", icon: HardHat, perm: ["developers", "read"] as const },
     { label: "Documents", href: "/app/documents", icon: FileText, perm: ["documents", "read"] as const },
+    { label: "Variable Dictionary", href: "/app/documents/variables", icon: FileText, perm: ["documents", "read"] as const },
     { label: "Doc Automation", href: "/app/documents/automation", icon: FileText, perm: ["documents", "read"] as const },
     { label: "Communications", href: "/app/hub", icon: MessageSquare, perm: ["communications", "read"] as const },
     { label: "Accounting", href: "/app/accounting", icon: Calculator, perm: ["accounting", "read"] as const },
@@ -59,6 +61,7 @@ export function AppLayout({ children }: { children: ReactNode }) {
     { label: "Settings", href: "/app/settings", icon: Settings, perm: ["settings", "read"] as const },
   ];
   const visibleNavItems = navItems.filter((i) => {
+    if (i.href === "/app/cases/intake" && !isFeatureEnabled("intake_inbox")) return false;
     if (!hasPermission(user, i.perm[0], i.perm[1])) return false;
     if (i.href === "/app/accounting") return isAccountingRoleAllowed(user.roleName);
     return true;
