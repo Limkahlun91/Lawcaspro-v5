@@ -27,12 +27,17 @@ export type VariableDefinition = {
   label: string;
   description: string | null;
   category: VariableCategory;
+  groupKey?: string | null;
   valueType: VariableValueType;
   sourcePath: string | null;
   formatter: string | null;
   exampleValue: string | null;
   isSystem: boolean;
   isActive: boolean;
+  isHidden?: boolean;
+  isPublished?: boolean;
+  deprecatedAt?: string | null;
+  replacementKey?: string | null;
   sortOrder: number;
 };
 
@@ -109,8 +114,10 @@ export async function listDocumentVariables(r: DbConn, filters: { category?: str
         sql`
           SELECT
             id, key, label, description, category, value_type,
-            source_path, formatter, example_value,
-            is_system, is_active, sort_order
+            group_key, source_path, formatter, example_value,
+            is_system, is_active, is_hidden, is_published,
+            deprecated_at, replacement_key,
+            sort_order
           FROM document_variable_definitions
           WHERE ${sql.join(where, sql` AND `)}
           ORDER BY category ASC, sort_order ASC, key ASC
@@ -128,12 +135,17 @@ export async function listDocumentVariables(r: DbConn, filters: { category?: str
     label: String(x.label),
     description: typeof x.description === "string" ? x.description : null,
     category: String(x.category) as VariableCategory,
+    groupKey: typeof (x as any).group_key === "string" ? String((x as any).group_key) : (typeof (x as any).groupKey === "string" ? String((x as any).groupKey) : null),
     valueType: String(x.value_type) as VariableValueType,
     sourcePath: typeof x.source_path === "string" ? x.source_path : null,
     formatter: typeof x.formatter === "string" ? x.formatter : null,
     exampleValue: typeof x.example_value === "string" ? x.example_value : null,
     isSystem: Boolean(x.is_system),
     isActive: Boolean(x.is_active),
+    isHidden: Boolean((x as any).is_hidden ?? false),
+    isPublished: Boolean((x as any).is_published ?? true),
+    deprecatedAt: typeof (x as any).deprecated_at === "string" ? String((x as any).deprecated_at) : ((x as any).deprecated_at instanceof Date ? (x as any).deprecated_at.toISOString() : null),
+    replacementKey: typeof (x as any).replacement_key === "string" ? String((x as any).replacement_key) : null,
     sortOrder: typeof x.sort_order === "number" ? x.sort_order : Number(x.sort_order ?? 0),
   }));
 }
@@ -154,8 +166,10 @@ export async function listDocumentVariablesByKeys(
         sql`
           SELECT
             id, key, label, description, category, value_type,
-            source_path, formatter, example_value,
-            is_system, is_active, sort_order
+            group_key, source_path, formatter, example_value,
+            is_system, is_active, is_hidden, is_published,
+            deprecated_at, replacement_key,
+            sort_order
           FROM document_variable_definitions
           WHERE ${sql.join(where, sql` AND `)}
           ORDER BY category ASC, sort_order ASC, key ASC
@@ -173,12 +187,17 @@ export async function listDocumentVariablesByKeys(
     label: String(x.label),
     description: typeof x.description === "string" ? x.description : null,
     category: String(x.category) as VariableCategory,
+    groupKey: typeof (x as any).group_key === "string" ? String((x as any).group_key) : (typeof (x as any).groupKey === "string" ? String((x as any).groupKey) : null),
     valueType: String(x.value_type) as VariableValueType,
     sourcePath: typeof x.source_path === "string" ? x.source_path : null,
     formatter: typeof x.formatter === "string" ? x.formatter : null,
     exampleValue: typeof x.example_value === "string" ? x.example_value : null,
     isSystem: Boolean(x.is_system),
     isActive: Boolean(x.is_active),
+    isHidden: Boolean((x as any).is_hidden ?? false),
+    isPublished: Boolean((x as any).is_published ?? true),
+    deprecatedAt: typeof (x as any).deprecated_at === "string" ? String((x as any).deprecated_at) : ((x as any).deprecated_at instanceof Date ? (x as any).deprecated_at.toISOString() : null),
+    replacementKey: typeof (x as any).replacement_key === "string" ? String((x as any).replacement_key) : null,
     sortOrder: typeof x.sort_order === "number" ? x.sort_order : Number(x.sort_order ?? 0),
   }));
 }

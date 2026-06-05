@@ -35,14 +35,24 @@ type VariableItem = {
   label: string;
   description: string | null;
   category: string;
+  groupKey?: string | null;
   valueType: string;
   sourcePath: string | null;
   formatter: string | null;
   exampleValue: string | null;
   isSystem: boolean;
   isActive: boolean;
+  isHidden?: boolean;
+  isPublished?: boolean;
+  deprecatedAt?: string | null;
+  replacementKey?: string | null;
   sortOrder: number;
   previewValue: unknown;
+  custom?: {
+    scope: "founder_master" | "firm" | "template_specific";
+    status: "active" | "disabled" | "deprecated";
+    currentVersionNo: number;
+  };
 };
 
 type LoopItem = {
@@ -81,10 +91,25 @@ function formatPreviewValue(v: unknown): string {
 }
 
 function groupKeyFor(v: VariableItem): string {
+  const g = typeof v.groupKey === "string" ? v.groupKey.trim() : "";
+  if (g) return g;
   const k = String(v.key ?? "");
   if (k.startsWith("firm_")) return "firm";
   if (k.endsWith("_date") || k.includes("date_") || k.includes("_date_")) return "date";
   return String(v.category ?? "general") || "general";
+}
+
+function sourceFor(v: VariableItem): string {
+  const scope = v.custom?.scope;
+  if (scope === "template_specific") return "Template";
+  if (scope === "firm") return "Firm";
+  if (scope === "founder_master") return "Founder";
+  return "Founder";
+}
+
+function deprecatedWarning(v: VariableItem): string | null {
+  if (!v.deprecatedAt) return null;
+  return "Deprecated — still supported for old templates, not recommended for new templates.";
 }
 
 export default function VariableDictionaryPage() {
@@ -149,7 +174,7 @@ export default function VariableDictionaryPage() {
       if (groupFilter !== "all" && groupFilter !== g) return false;
       if (!varQuery) return true;
       const pv = formatPreviewValue(v.previewValue);
-      const hay = `${norm(g)} ${norm(v.label)} ${norm(v.key)} ${norm(v.token)} ${norm(pv)} ${norm(v.sourcePath)}`;
+      const hay = `${norm(g)} ${norm(v.label)} ${norm(v.key)} ${norm(v.token)} ${norm(pv)} ${norm(sourceFor(v))}`;
       return hay.includes(varQuery);
     });
   }, [variables, varQuery, groupFilter]);
@@ -285,10 +310,15 @@ export default function VariableDictionaryPage() {
                     {filteredVariables.map((v) => (
                       <tr key={v.key} className="hover:bg-slate-50/50">
                         <td className="px-6 py-4 text-slate-700">{groupKeyFor(v)}</td>
-                        <td className="px-6 py-4 text-slate-900 font-medium">{v.label || v.key}</td>
+                        <td className="px-6 py-4">
+                          <div className="text-slate-900 font-medium">{v.label || v.key}</div>
+                          {deprecatedWarning(v) ? (
+                            <div className="text-xs text-amber-700 mt-1">{deprecatedWarning(v)}</div>
+                          ) : null}
+                        </td>
                         <td className="px-6 py-4 font-mono text-xs text-slate-700">{v.token}</td>
                         <td className="px-6 py-4 text-slate-700 whitespace-pre-wrap">{formatPreviewValue(v.previewValue)}</td>
-                        <td className="px-6 py-4 text-xs text-slate-500">{v.sourcePath || v.key}</td>
+                        <td className="px-6 py-4 text-xs text-slate-500">{sourceFor(v)}</td>
                         <td className="px-6 py-4">
                           <div className="flex items-center gap-2">
                             <Button size="sm" variant="outline" onClick={() => copyText(v.token)} aria-label="Copy token">
@@ -360,4 +390,3 @@ export default function VariableDictionaryPage() {
     </div>
   );
 }
-

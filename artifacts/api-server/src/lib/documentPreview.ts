@@ -3,6 +3,7 @@ import { listDocumentVariablesByKeys, resolveVariablesForTemplate } from "./docu
 import { getFirmTemplateBindings, getPlatformDocumentBindings } from "./documentBindings";
 import { sql } from "@workspace/db";
 import { normalizeClauseCode, renderClauseBodyWithResolvedVariables, scanPlaceholdersInText } from "./clauseLibrary";
+import { applyResolvedAliases, listEffectiveCustomVariables, listVariableAliases, resolveCustomVariables } from "./customVariables";
 
 type DbConn = { execute: (q: any) => any };
 
@@ -63,7 +64,42 @@ export async function runDocumentPreview(r: DbConn, input: PreviewInput): Promis
     overrides: input.overrides ?? null,
   });
 
-  const resolvedVariablesWithClauses = { ...resolved.resolvedVariables } as Record<string, unknown>;
+  let resolvedVariablesWithClauses = { ...resolved.resolvedVariables } as Record<string, unknown>;
+
+  const templateIdForCustom =
+    input.templateRef.kind === "firm" ? input.templateRef.templateId : null;
+  const [customVars, aliases] = await Promise.all([
+    listEffectiveCustomVariables(r, {
+      firmId: input.firmId,
+      templateId: templateIdForCustom,
+      includeUnpublishedFounder: true,
+    }),
+    listVariableAliases(r),
+  ]);
+  if (customVars.length > 0) {
+    const cv = resolveCustomVariables({
+      customVariables: customVars.map((v) => ({ key: v.key, bodyTemplate: v.bodyTemplate })),
+      baseResolved: resolvedVariablesWithClauses,
+      maxDepth: 5,
+    });
+    resolvedVariablesWithClauses = cv.resolved;
+    for (const w of cv.warnings) {
+      resolved.placeholderWarnings.push({
+        placeholder: w.key,
+        warning: `Custom variable: ${w.warning}`,
+      });
+    }
+  }
+  {
+    const aliased = applyResolvedAliases(resolvedVariablesWithClauses, aliases);
+    resolvedVariablesWithClauses = aliased.resolved;
+    for (const fromKey of aliased.usedAliases) {
+      resolved.placeholderWarnings.push({
+        placeholder: fromKey,
+        warning: "Alias resolved to replacement token",
+      });
+    }
+  }
   for (const row of firmClauses) {
     const status = typeof row.status === "string" ? row.status : "draft";
     if (status === "archived") continue;

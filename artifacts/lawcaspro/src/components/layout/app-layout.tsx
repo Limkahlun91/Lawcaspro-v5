@@ -52,6 +52,7 @@ export function AppLayout({ children }: { children: ReactNode }) {
     { label: "Developers", href: "/app/developers", icon: HardHat, perm: ["developers", "read"] as const },
     { label: "Documents", href: "/app/documents", icon: FileText, perm: ["documents", "read"] as const },
     { label: "Variable Dictionary", href: "/app/documents/variables", icon: FileText, perm: ["documents", "read"] as const },
+    { label: "Custom Variables", href: "/app/documents/custom-variables", icon: FileText, perm: ["documents", "read"] as const },
     { label: "Doc Automation", href: "/app/documents/automation", icon: FileText, perm: ["documents", "read"] as const },
     { label: "Communications", href: "/app/hub", icon: MessageSquare, perm: ["communications", "read"] as const },
     { label: "Accounting", href: "/app/accounting", icon: Calculator, perm: ["accounting", "read"] as const },

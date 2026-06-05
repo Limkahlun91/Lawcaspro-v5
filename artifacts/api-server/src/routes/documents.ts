@@ -78,6 +78,7 @@ import {
   resolveVariablesForTemplate,
   type PlaceholderWarning,
 } from "../lib/documentVariables.js";
+import { applyResolvedAliases, listEffectiveCustomVariables, listVariableAliases, resolveCustomVariables } from "../lib/customVariables.js";
 import { DEFAULT_DOCUMENT_VARIABLES } from "../lib/default-document-variables.js";
 import {
   getFirmTemplateBindings,
@@ -123,6 +124,7 @@ import {
   isHeartbeatStale,
 } from "../services/document-generation.service.js";
 import { normalizeMissingRequiredVariables } from "../services/document-variable.service.js";
+import { loadFounderGovernanceContext } from "../services/founder-governance/index.js";
 import { formatMalaysiaAddressStringForDocument } from "../utils/my-address-helper.js";
 import {
   applyCaseVariableAliases,
@@ -4495,11 +4497,37 @@ router.get(
           ? false
           : true;
     try {
-      const vars = await listDocumentVariables(r, {
+      const varsAll = await listDocumentVariables(r, {
         category: category || undefined,
         active,
       });
-      sendOk(res as any, vars);
+      const vars = varsAll.filter((v: any) => Boolean(v.isPublished ?? true) && !Boolean(v.isHidden ?? false));
+      const custom = await listEffectiveCustomVariables(r, {
+        firmId: req.firmId!,
+        templateId: null,
+        includeUnpublishedFounder: false,
+      });
+      const customAsVariables = custom.map((cv) => ({
+        id: cv.id,
+        key: cv.key,
+        label: cv.displayName,
+        description: null,
+        category: "custom",
+        groupKey: cv.groupKey,
+        valueType: "string",
+        sourcePath: null,
+        formatter: null,
+        exampleValue: null,
+        isSystem: cv.scope === "founder_master",
+        isActive: true,
+        isHidden: cv.status === "disabled",
+        isPublished: cv.scope === "founder_master" ? cv.isPublished : true,
+        deprecatedAt: cv.deprecatedAt,
+        replacementKey: null,
+        sortOrder: 0,
+        custom: { scope: cv.scope, status: cv.status, currentVersionNo: cv.currentVersionNo },
+      }));
+      sendOk(res as any, [...vars, ...customAsVariables]);
     } catch (err) {
       if (
         isUndefinedTableError(err) ||
@@ -4550,26 +4578,84 @@ router.get(
           ? false
           : true;
 
-    const registry = await listDocumentVariables(r, { active });
+    const registryAll = await listDocumentVariables(r, { active });
     const caseContext = await buildCaseContext(r, caseIdNum, req.firmId!, undefined, { includeDebug: false });
     if (!caseContext) {
       res.status(404).json({ error: "Case not found" });
       return;
     }
 
-    const placeholderKeys = registry.map((v) => v.key);
-    const resolved = resolveVariablesForTemplate({
-      registry,
+    const placeholderKeys = registryAll.map((v) => v.key);
+    let resolved = resolveVariablesForTemplate({
+      registry: registryAll,
       bindings: [],
       caseContext,
       placeholders: placeholderKeys,
     }).resolvedVariables;
 
-    const variables = registry.map((v) => ({
-      ...v,
-      token: `{{${v.key}}}`,
-      previewValue: Object.prototype.hasOwnProperty.call(resolved, v.key) ? (resolved as any)[v.key] : null,
-    }));
+    const customVars = await listEffectiveCustomVariables(r, {
+      firmId: req.firmId!,
+      templateId: null,
+      includeUnpublishedFounder: false,
+    });
+    if (customVars.length > 0) {
+      const cv = resolveCustomVariables({
+        customVariables: customVars.map((v) => ({ key: v.key, bodyTemplate: v.bodyTemplate })),
+        baseResolved: resolved as any,
+        maxDepth: 5,
+      });
+      resolved = cv.resolved as any;
+    }
+    const aliased = applyResolvedAliases(resolved as any, await listVariableAliases(r));
+    resolved = aliased.resolved as any;
+
+    const registry = registryAll.filter((v: any) => Boolean(v.isPublished ?? true) && !Boolean(v.isHidden ?? false));
+    type VariablePreviewItem = (typeof registryAll)[number] & {
+      token: string;
+      previewValue: unknown;
+      custom?: {
+        scope: "founder_master" | "firm" | "template_specific";
+        status: "active" | "disabled" | "deprecated";
+        currentVersionNo: number;
+      };
+    };
+    const variables: VariablePreviewItem[] = registry.map((v) => {
+      const item = {
+        ...v,
+        token: `{{${v.key}}}`,
+        previewValue: Object.prototype.hasOwnProperty.call(resolved, v.key)
+          ? (resolved as any)[v.key]
+          : null,
+      } satisfies VariablePreviewItem;
+      return item;
+    });
+    for (const cv of customVars) {
+      if (cv.scope === "founder_master" && !cv.isPublished) continue;
+      if (cv.status === "disabled") continue;
+      const item = {
+        id: cv.id,
+        key: cv.key,
+        label: cv.displayName,
+        description: null,
+        category: "custom",
+        groupKey: cv.groupKey,
+        valueType: "string",
+        sourcePath: null,
+        formatter: null,
+        exampleValue: null,
+        isSystem: cv.scope === "founder_master",
+        isActive: true,
+        isHidden: false,
+        isPublished: true,
+        deprecatedAt: cv.deprecatedAt,
+        replacementKey: null,
+        sortOrder: 0,
+        token: `{{${cv.key}}}`,
+        previewValue: Object.prototype.hasOwnProperty.call(resolved, cv.key) ? (resolved as any)[cv.key] : null,
+        custom: { scope: cv.scope, status: cv.status, currentVersionNo: cv.currentVersionNo },
+      } satisfies VariablePreviewItem;
+      variables.push(item);
+    }
 
     const loops = (() => {
       if (!includeLoops) return [];
@@ -4619,6 +4705,878 @@ router.get(
   },
 );
 
+async function withFounderFirmRlsDb<T>(req: AuthRequest, firmId: number, fn: (r: ReturnType<typeof makeRlsDb>) => Promise<T>): Promise<T> {
+  const ctx = await withAuthSafeDb(
+    async (authDb) => await loadFounderGovernanceContext(authDb as any, req),
+    { retry: true, allowUnsafe: true, ctx: { route: req.path, stage: "founder_context", firmId, userId: req.userId ?? null } },
+  );
+  if (!ctx.impersonation.active || ctx.impersonation.targetFirmId !== firmId) {
+    throw new Error("Support session required");
+  }
+
+  const client = await pool.connect();
+  let ok = false;
+  try {
+    await client.query("BEGIN");
+    await setTenantContext(client, firmId, req.userId ?? undefined);
+    const rls = makeRlsDb(client);
+    const out = await fn(rls);
+    await client.query("COMMIT");
+    ok = true;
+    return out;
+  } finally {
+    try {
+      if (!ok) await client.query("ROLLBACK");
+    } catch {
+    }
+    try {
+      await clearTenantContext(client);
+    } catch {
+    }
+    client.release(!ok);
+  }
+}
+
+const platformCreateCustomVariableBodySchema = z.object({
+  key: z.string().trim().min(1).max(120).regex(/^[a-z0-9_]+$/i),
+  displayName: z.string().trim().min(1).max(200),
+  groupKey: z.string().trim().max(80).optional(),
+  bodyTemplate: z.string().min(1).max(20000),
+  status: z.enum(["active", "disabled", "deprecated"]).optional(),
+  isPublished: z.boolean().optional(),
+});
+
+router.get(
+  "/platform/custom-variables",
+  requireAuth,
+  requireFounder,
+  requireFounderPermission("founder.documents.read"),
+  async (req: AuthRequest, res): Promise<void> => {
+    const q = (one((req.query as any).q) ?? "").trim();
+    const status = one((req.query as any).status);
+
+    const rows = await withAuthSafeDb(async (authDb) => {
+      return await queryRows(
+        authDb,
+        sql`
+          SELECT
+            v.id, v.scope, v.firm_id, v.template_id,
+            v.key, v.display_name, v.group_key, v.status,
+            v.is_published, v.deprecated_at, v.current_version_no,
+            v.created_at, v.updated_at,
+            vv.body_template
+          FROM document_custom_variables v
+          JOIN document_custom_variable_versions vv
+            ON vv.custom_variable_id = v.id
+           AND vv.version_no = v.current_version_no
+          WHERE v.scope = 'founder_master' AND v.firm_id IS NULL AND v.template_id IS NULL
+            AND (${status ?? null} IS NULL OR v.status = ${status as any})
+            AND (${q} = '' OR (v.key ILIKE ${"%" + q + "%"} OR v.display_name ILIKE ${"%" + q + "%"} OR vv.body_template ILIKE ${"%" + q + "%"}))
+          ORDER BY v.group_key ASC, v.key ASC
+        `,
+      );
+    }, { retry: true, ctx: { route: req.path, stage: "platform_custom_variables.list", firmId: null, userId: req.userId ?? null } });
+
+    sendOk(res as any, rows);
+  },
+);
+
+router.post(
+  "/platform/custom-variables",
+  requireAuth,
+  requireFounder,
+  requireFounderPermission("founder.documents.manage"),
+  async (req: AuthRequest, res): Promise<void> => {
+    const parsed = platformCreateCustomVariableBodySchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: "Invalid request" });
+      return;
+    }
+    const v = parsed.data;
+
+    const created = await withAuthSafeDb(async (authDb) => {
+      const sysVar = await queryRows(authDb, sql`SELECT id FROM document_variable_definitions WHERE key = ${v.key} LIMIT 1`);
+      if (sysVar[0]) return { status: 409 as const, body: { error: "Key conflicts with system variable", code: "KEY_CONFLICT_SYSTEM" } };
+
+      const rows = await queryRows(
+        authDb,
+        sql`
+          INSERT INTO document_custom_variables (
+            scope, firm_id, template_id, key,
+            display_name, group_key,
+            status, is_published,
+            deprecated_at, current_version_no,
+            created_by, updated_by
+          ) VALUES (
+            'founder_master', NULL, NULL, ${v.key},
+            ${v.displayName}, ${v.groupKey ?? "custom_variables"},
+            ${v.status ?? "active"}, ${v.isPublished ?? false},
+            ${v.status === "deprecated" ? new Date() : null},
+            1,
+            ${req.userId ?? null}, ${req.userId ?? null}
+          )
+          RETURNING id
+        `,
+      );
+      const id = typeof rows[0]?.id === "number" ? Number(rows[0]?.id) : Number(rows[0]?.id ?? 0);
+      if (!Number.isFinite(id) || id <= 0) return { status: 500 as const, body: { error: "Failed to create" } };
+      await queryRows(
+        authDb,
+        sql`
+          INSERT INTO document_custom_variable_versions (custom_variable_id, version_no, body_template, created_by)
+          VALUES (${id}, 1, ${v.bodyTemplate}, ${req.userId ?? null})
+        `,
+      );
+      await writeAuditLog(
+        {
+          firmId: null,
+          actorId: req.userId,
+          actorType: req.userType,
+          action: "documents.custom_variable.create",
+          entityType: "document_custom_variable",
+          entityId: id,
+          detail: `key=${v.key} scope=founder_master`,
+          ipAddress: req.ip,
+          userAgent: req.headers["user-agent"],
+        },
+        { db: authDb },
+      );
+      return { status: 201 as const, body: { ok: true, id } };
+    }, { retry: true, ctx: { route: req.path, stage: "platform_custom_variables.create", firmId: null, userId: req.userId ?? null } });
+
+    res.status(created.status).json(created.body);
+  },
+);
+
+const platformUpdateCustomVariableBodySchema = z.object({
+  displayName: z.string().trim().min(1).max(200).optional(),
+  groupKey: z.string().trim().max(80).optional(),
+  bodyTemplate: z.string().min(1).max(20000).optional(),
+  status: z.enum(["active", "disabled", "deprecated"]).optional(),
+  isPublished: z.boolean().optional(),
+});
+
+router.put(
+  "/platform/custom-variables/:id",
+  requireAuth,
+  requireFounder,
+  requireFounderPermission("founder.documents.manage"),
+  async (req: AuthRequest, res): Promise<void> => {
+    const idStr = one((req.params as any).id);
+    const id = idStr ? parseInt(idStr, 10) : NaN;
+    if (Number.isNaN(id)) {
+      res.status(400).json({ error: "Invalid ID" });
+      return;
+    }
+    const parsed = platformUpdateCustomVariableBodySchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: "Invalid request" });
+      return;
+    }
+    const patch = parsed.data;
+
+    const out = await withAuthSafeDb(async (authDb) => {
+      const rows = await queryRows(authDb, sql`SELECT * FROM document_custom_variables WHERE id = ${id} AND scope = 'founder_master' AND firm_id IS NULL AND template_id IS NULL LIMIT 1`);
+      const existing = rows[0] as any;
+      if (!existing) return { status: 404 as const, body: { error: "Not found" } };
+
+      const cur = Number(existing.current_version_no ?? 1);
+      const nextVer = cur + (typeof patch.bodyTemplate === "string" ? 1 : 0);
+      if (typeof patch.bodyTemplate === "string") {
+        await queryRows(
+          authDb,
+          sql`INSERT INTO document_custom_variable_versions (custom_variable_id, version_no, body_template, created_by) VALUES (${id}, ${nextVer}, ${patch.bodyTemplate}, ${req.userId ?? null})`,
+        );
+      }
+      await queryRows(
+        authDb,
+        sql`
+          UPDATE document_custom_variables
+          SET
+            display_name = COALESCE(${patch.displayName ?? null}, display_name),
+            group_key = COALESCE(${patch.groupKey ?? null}, group_key),
+            status = COALESCE(${patch.status ?? null}, status),
+            is_published = COALESCE(${typeof patch.isPublished === "boolean" ? patch.isPublished : null}, is_published),
+            deprecated_at = CASE
+              WHEN ${patch.status ?? null} = 'deprecated' THEN COALESCE(deprecated_at, now())
+              WHEN ${patch.status ?? null} IS NOT NULL AND ${patch.status ?? null} <> 'deprecated' THEN NULL
+              ELSE deprecated_at
+            END,
+            current_version_no = CASE WHEN ${typeof patch.bodyTemplate === "string"} THEN ${nextVer} ELSE current_version_no END,
+            updated_by = ${req.userId ?? null},
+            updated_at = now()
+          WHERE id = ${id}
+        `,
+      );
+
+      await writeAuditLog(
+        {
+          firmId: null,
+          actorId: req.userId,
+          actorType: req.userType,
+          action: "documents.custom_variable.update",
+          entityType: "document_custom_variable",
+          entityId: id,
+          detail: `key=${String(existing.key ?? "")} scope=founder_master`,
+          ipAddress: req.ip,
+          userAgent: req.headers["user-agent"],
+        },
+        { db: authDb },
+      );
+      return { status: 200 as const, body: { ok: true } };
+    }, { retry: true, ctx: { route: req.path, stage: "platform_custom_variables.update", firmId: null, userId: req.userId ?? null } });
+
+    res.status(out.status).json(out.body);
+  },
+);
+
+router.get(
+  "/platform/custom-variables/:id/preview",
+  requireAuth,
+  requireFounder,
+  requireFounderPermission("founder.documents.read"),
+  async (req: AuthRequest, res): Promise<void> => {
+    const idStr = one((req.params as any).id);
+    const id = idStr ? parseInt(idStr, 10) : NaN;
+    const firmIdRaw = one((req.query as any).firmId);
+    const caseIdRaw = one((req.query as any).caseId);
+    const firmId = firmIdRaw ? parseInt(String(firmIdRaw), 10) : NaN;
+    const caseId = caseIdRaw ? parseInt(String(caseIdRaw), 10) : NaN;
+    if (Number.isNaN(id) || Number.isNaN(firmId) || Number.isNaN(caseId)) {
+      res.status(400).json({ error: "Invalid params" });
+      return;
+    }
+
+    const cv = await withAuthSafeDb(async (authDb) => {
+      const rows = await queryRows(
+        authDb,
+        sql`
+          SELECT v.id, v.key, v.display_name, v.status, v.current_version_no, vv.body_template
+          FROM document_custom_variables v
+          JOIN document_custom_variable_versions vv
+            ON vv.custom_variable_id = v.id AND vv.version_no = v.current_version_no
+          WHERE v.id = ${id} AND v.scope = 'founder_master' AND v.firm_id IS NULL AND v.template_id IS NULL
+          LIMIT 1
+        `,
+      );
+      return rows[0] as any;
+    }, { retry: true, ctx: { route: req.path, stage: "platform_custom_variables.preview.load", firmId: null, userId: req.userId ?? null } });
+    if (!cv) {
+      res.status(404).json({ error: "Not found" });
+      return;
+    }
+
+    try {
+      const out = await withFounderFirmRlsDb(req, firmId, async (r) => {
+        const registryAll = await listDocumentVariables(r as any, { active: true });
+        const context = await buildCaseContext(r as any, caseId, firmId, undefined, { includeDebug: false });
+        if (!context) return { status: 404 as const, body: { error: "Case not found" } };
+        const baseResolved = resolveVariablesForTemplate({
+          registry: registryAll,
+          bindings: [],
+          caseContext: context,
+          placeholders: registryAll.map((x) => x.key),
+        }).resolvedVariables as any;
+        const effective = await listEffectiveCustomVariables(r as any, { firmId, templateId: null, includeUnpublishedFounder: true });
+        const computed = resolveCustomVariables({ customVariables: effective.map((x) => ({ key: x.key, bodyTemplate: x.bodyTemplate })), baseResolved, maxDepth: 5 });
+        const rendered = computed.resolved[String((cv as any).key)] ?? null;
+        return { status: 200 as const, body: { id: Number((cv as any).id), key: String((cv as any).key), token: `{{${String((cv as any).key)}}}`, rendered: typeof rendered === "string" ? rendered : rendered === null ? "" : String(rendered ?? ""), warnings: computed.warnings } };
+      });
+      res.status(out.status).json(out.body);
+    } catch {
+      res.status(403).json({ error: "Support session required", code: "SUPPORT_SESSION_REQUIRED" });
+    }
+  },
+);
+
+const customVariableScopeSchema = z.enum(["firm", "template_specific"]);
+const customVariableStatusSchema = z.enum(["active", "disabled", "deprecated"]);
+
+const createCustomVariableBodySchema = z.object({
+  key: z.string().trim().min(1).max(120).regex(/^[a-z0-9_]+$/i),
+  displayName: z.string().trim().min(1).max(200),
+  groupKey: z.string().trim().max(80).optional(),
+  bodyTemplate: z.string().min(1).max(20000),
+  scope: customVariableScopeSchema.optional(),
+  templateId: z.number().int().positive().optional(),
+  status: customVariableStatusSchema.optional(),
+  allowOverrideFounder: z.boolean().optional(),
+});
+
+router.get(
+  "/documents/custom-variables",
+  requireAuth,
+  requireFirmUser,
+  requirePermission("documents", "read"),
+  async (req: AuthRequest, res): Promise<void> => {
+    const r = getRlsDb(req, res);
+    if (!r) return;
+
+    const scope = one((req.query as any).scope);
+    const status = one((req.query as any).status);
+    const q = (one((req.query as any).q) ?? "").trim();
+
+    const rows = await queryRows(
+      r,
+      sql`
+        SELECT
+          v.id, v.scope, v.firm_id, v.template_id,
+          v.key, v.display_name, v.group_key, v.status,
+          v.is_published, v.deprecated_at, v.current_version_no,
+          v.created_at, v.updated_at,
+          vv.body_template
+        FROM document_custom_variables v
+        JOIN document_custom_variable_versions vv
+          ON vv.custom_variable_id = v.id
+         AND vv.version_no = v.current_version_no
+        WHERE (
+          (v.scope = 'firm' AND v.firm_id = ${req.firmId!})
+          OR (v.scope = 'template_specific' AND v.firm_id = ${req.firmId!})
+          OR (v.scope = 'founder_master' AND v.firm_id IS NULL AND v.is_published = true)
+        )
+          AND (${scope ?? null} IS NULL OR v.scope = ${scope as any})
+          AND (${status ?? null} IS NULL OR v.status = ${status as any})
+          AND (${q} = '' OR (v.key ILIKE ${"%" + q + "%"} OR v.display_name ILIKE ${"%" + q + "%"} OR vv.body_template ILIKE ${"%" + q + "%"}))
+        ORDER BY v.scope ASC, v.group_key ASC, v.key ASC
+      `,
+    );
+    sendOk(res as any, rows);
+  },
+);
+
+router.post(
+  "/documents/custom-variables",
+  requireAuth,
+  requireFirmUser,
+  requirePermission("documents", "update"),
+  async (req: AuthRequest, res): Promise<void> => {
+    const r = getRlsDb(req, res);
+    if (!r) return;
+
+    const parsed = createCustomVariableBodySchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: "Invalid request" });
+      return;
+    }
+    const v = parsed.data;
+    const scope = v.scope ?? (typeof v.templateId === "number" ? "template_specific" : "firm");
+    const templateId = typeof v.templateId === "number" ? v.templateId : null;
+
+    const sysVar = await queryRows(r, sql`SELECT id FROM document_variable_definitions WHERE key = ${v.key} LIMIT 1`);
+    if (sysVar[0]) {
+      res.status(409).json({ error: "Key conflicts with system variable", code: "KEY_CONFLICT_SYSTEM" });
+      return;
+    }
+
+    const founderConflict = await queryRows(
+      r,
+      sql`
+        SELECT id
+        FROM document_custom_variables
+        WHERE scope = 'founder_master' AND firm_id IS NULL AND template_id IS NULL AND key = ${v.key}
+        LIMIT 1
+      `,
+    );
+    if (founderConflict[0] && !v.allowOverrideFounder) {
+      res.status(409).json({ error: "Key conflicts with founder master custom variable", code: "FOUNDER_TOKEN_CONFLICT" });
+      return;
+    }
+
+    if (scope === "template_specific") {
+      if (!templateId) {
+        res.status(400).json({ error: "templateId required for template_specific scope" });
+        return;
+      }
+      const tpl = await queryRows(
+        r,
+        sql`SELECT id FROM document_templates WHERE id = ${templateId} AND firm_id = ${req.firmId!} LIMIT 1`,
+      );
+      if (!tpl[0]) {
+        res.status(404).json({ error: "Template not found" });
+        return;
+      }
+    }
+
+    const created = await queryRows(
+      r,
+      sql`
+        INSERT INTO document_custom_variables (
+          scope, firm_id, template_id, key,
+          display_name, group_key,
+          status, is_published,
+          deprecated_at, current_version_no,
+          created_by, updated_by
+        ) VALUES (
+          ${scope}, ${req.firmId!}, ${templateId},
+          ${v.key},
+          ${v.displayName},
+          ${v.groupKey ?? "custom_variables"},
+          ${v.status ?? "active"},
+          ${false},
+          ${v.status === "deprecated" ? new Date() : null},
+          1,
+          ${req.userId ?? null}, ${req.userId ?? null}
+        )
+        RETURNING id
+      `,
+    );
+    const id = typeof created[0]?.id === "number" ? Number(created[0]?.id) : Number(created[0]?.id ?? 0);
+    if (!Number.isFinite(id) || id <= 0) {
+      res.status(500).json({ error: "Failed to create custom variable" });
+      return;
+    }
+    await queryRows(
+      r,
+      sql`
+        INSERT INTO document_custom_variable_versions (custom_variable_id, version_no, body_template, created_by)
+        VALUES (${id}, 1, ${v.bodyTemplate}, ${req.userId ?? null})
+      `,
+    );
+    await writeAuditLog({
+      firmId: req.firmId,
+      actorId: req.userId,
+      actorType: req.userType,
+      action: "documents.custom_variable.create",
+      entityType: "document_custom_variable",
+      entityId: id,
+      detail: `key=${v.key} scope=${scope}`,
+      ipAddress: req.ip,
+      userAgent: req.headers["user-agent"],
+    });
+    res.status(201).json({ ok: true, id });
+  },
+);
+
+const updateCustomVariableBodySchema = z.object({
+  displayName: z.string().trim().min(1).max(200).optional(),
+  groupKey: z.string().trim().max(80).optional(),
+  bodyTemplate: z.string().min(1).max(20000).optional(),
+  status: customVariableStatusSchema.optional(),
+});
+
+router.put(
+  "/documents/custom-variables/:id",
+  requireAuth,
+  requireFirmUser,
+  requirePermission("documents", "update"),
+  async (req: AuthRequest, res): Promise<void> => {
+    const r = getRlsDb(req, res);
+    if (!r) return;
+    const idStr = one((req.params as any).id);
+    const id = idStr ? parseInt(idStr, 10) : NaN;
+    if (Number.isNaN(id)) {
+      res.status(400).json({ error: "Invalid ID" });
+      return;
+    }
+    const parsed = updateCustomVariableBodySchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: "Invalid request" });
+      return;
+    }
+    const patch = parsed.data;
+    const rows = await queryRows(
+      r,
+      sql`
+        SELECT *
+        FROM document_custom_variables
+        WHERE id = ${id} AND firm_id = ${req.firmId!} AND scope IN ('firm','template_specific')
+        LIMIT 1
+      `,
+    );
+    const existing = rows[0] as any;
+    if (!existing) {
+      res.status(404).json({ error: "Custom variable not found" });
+      return;
+    }
+    const nextVer = Number(existing.current_version_no ?? 1) + (typeof patch.bodyTemplate === "string" ? 1 : 0);
+    if (typeof patch.bodyTemplate === "string") {
+      await queryRows(
+        r,
+        sql`
+          INSERT INTO document_custom_variable_versions (custom_variable_id, version_no, body_template, created_by)
+          VALUES (${id}, ${nextVer}, ${patch.bodyTemplate}, ${req.userId ?? null})
+        `,
+      );
+    }
+    await queryRows(
+      r,
+      sql`
+        UPDATE document_custom_variables
+        SET
+          display_name = COALESCE(${patch.displayName ?? null}, display_name),
+          group_key = COALESCE(${patch.groupKey ?? null}, group_key),
+          status = COALESCE(${patch.status ?? null}, status),
+          deprecated_at = CASE
+            WHEN ${patch.status ?? null} = 'deprecated' THEN COALESCE(deprecated_at, now())
+            WHEN ${patch.status ?? null} IS NOT NULL AND ${patch.status ?? null} <> 'deprecated' THEN NULL
+            ELSE deprecated_at
+          END,
+          current_version_no = CASE WHEN ${typeof patch.bodyTemplate === "string"} THEN ${nextVer} ELSE current_version_no END,
+          updated_by = ${req.userId ?? null},
+          updated_at = now()
+        WHERE id = ${id} AND firm_id = ${req.firmId!}
+      `,
+    );
+    await writeAuditLog({
+      firmId: req.firmId,
+      actorId: req.userId,
+      actorType: req.userType,
+      action: "documents.custom_variable.update",
+      entityType: "document_custom_variable",
+      entityId: id,
+      detail: `key=${String(existing.key ?? "")}`,
+      ipAddress: req.ip,
+      userAgent: req.headers["user-agent"],
+    });
+    res.json({ ok: true });
+  },
+);
+
+router.get(
+  "/documents/custom-variables/:id/preview",
+  requireAuth,
+  requireFirmUser,
+  requirePermission("documents", "read"),
+  async (req: AuthRequest, res): Promise<void> => {
+    const r = getRlsDb(req, res);
+    if (!r) return;
+    const idStr = one((req.params as any).id);
+    const id = idStr ? parseInt(idStr, 10) : NaN;
+    if (Number.isNaN(id)) {
+      res.status(400).json({ error: "Invalid ID" });
+      return;
+    }
+    const caseIdRaw = one((req.query as any).caseId);
+    const caseId = caseIdRaw ? parseInt(String(caseIdRaw), 10) : NaN;
+    if (Number.isNaN(caseId)) {
+      res.status(400).json({ error: "Invalid caseId" });
+      return;
+    }
+
+    const rows = await queryRows(
+      r,
+      sql`
+        SELECT
+          v.id, v.key, v.display_name, v.group_key, v.status, v.scope, v.current_version_no,
+          vv.body_template
+        FROM document_custom_variables v
+        JOIN document_custom_variable_versions vv
+          ON vv.custom_variable_id = v.id AND vv.version_no = v.current_version_no
+        WHERE v.id = ${id} AND (
+          (v.scope IN ('firm','template_specific') AND v.firm_id = ${req.firmId!})
+          OR (v.scope = 'founder_master' AND v.firm_id IS NULL AND v.is_published = true)
+        )
+        LIMIT 1
+      `,
+    );
+    const cv = rows[0] as any;
+    if (!cv) {
+      res.status(404).json({ error: "Custom variable not found" });
+      return;
+    }
+    const bodyTemplate = String(cv.body_template ?? "");
+    const used = Array.from(new Set(bodyTemplate.match(/\{\{\s*([^{}\s]+)\s*\}\}/g)?.map((x) => x.replace(/[{}]/g, "").trim()) ?? [])).filter(Boolean);
+    const registryAll = await listDocumentVariables(r, { active: true });
+    const caseContext = await buildCaseContext(r, caseId, req.firmId!, undefined, { includeDebug: false });
+    if (!caseContext) {
+      res.status(404).json({ error: "Case not found" });
+      return;
+    }
+    const baseResolved = resolveVariablesForTemplate({
+      registry: registryAll,
+      bindings: [],
+      caseContext,
+      placeholders: registryAll.map((x) => x.key),
+    }).resolvedVariables as any;
+
+    const effective = await listEffectiveCustomVariables(r, { firmId: req.firmId!, templateId: null, includeUnpublishedFounder: false });
+    const computed = resolveCustomVariables({
+      customVariables: effective.map((x) => ({ key: x.key, bodyTemplate: x.bodyTemplate })),
+      baseResolved,
+      maxDepth: 5,
+    });
+    const rendered = computed.resolved[String(cv.key)] ?? null;
+    const missing = used.filter((k) => {
+      const v = (computed.resolved as any)[k];
+      return v === null || v === undefined || (typeof v === "string" && !v.trim());
+    });
+    res.json({
+      id: Number(cv.id),
+      key: String(cv.key),
+      displayName: String(cv.display_name),
+      token: `{{${String(cv.key)}}}`,
+      rendered: typeof rendered === "string" ? rendered : rendered === null ? "" : String(rendered ?? ""),
+      usedVariables: used,
+      missingVariables: missing,
+      warnings: computed.warnings,
+    });
+  },
+);
+
+function likePatternForToken(key: string): string {
+  const raw = String(key ?? "");
+  const escaped = raw.replace(/[%_\\]/g, (m) => `\\${m}`);
+  return `%{{${escaped}}}%`;
+}
+
+async function getPlatformVariableUsage(authDb: DbConn, key: string): Promise<Record<string, number>> {
+  const k = String(key ?? "").trim();
+  if (!k) return {};
+  const like = likePatternForToken(k);
+  const rows = await queryRows(
+    authDb,
+    sql`
+      SELECT
+        (SELECT COUNT(*)::int FROM document_template_bindings WHERE variable_key = ${k}) AS bindings_count,
+        (SELECT COUNT(*)::int FROM document_template_versions WHERE variables_snapshot -> 'keys' ? ${k}) AS docx_templates_count,
+        (SELECT COUNT(*)::int FROM document_template_versions WHERE COALESCE(pdf_mappings_snapshot::text,'') LIKE ${like} ESCAPE '\\') AS pdf_mappings_count,
+        (SELECT COUNT(*)::int FROM templates WHERE COALESCE(mapping_config::text,'') LIKE ${like} ESCAPE '\\') AS legacy_pdf_mappings_count,
+        (SELECT COUNT(*)::int FROM platform_documents WHERE COALESCE(pdf_mappings::text,'') LIKE ${like} ESCAPE '\\') AS platform_pdf_mappings_count,
+        (SELECT COUNT(*)::int FROM firm_clauses WHERE COALESCE(body,'') LIKE ${like} ESCAPE '\\') AS firm_clauses_count,
+        (SELECT COUNT(*)::int FROM platform_clauses WHERE COALESCE(body,'') LIKE ${like} ESCAPE '\\') AS platform_clauses_count,
+        (SELECT COUNT(*)::int FROM document_custom_variable_versions WHERE COALESCE(body_template,'') LIKE ${like} ESCAPE '\\') AS custom_variables_count,
+        (SELECT COUNT(*)::int FROM document_generation_runs WHERE rendered_variables_snapshot ? ${k}) AS generation_runs_count,
+        (SELECT COUNT(*)::int FROM case_documents WHERE COALESCE(clause_snapshot::text,'') LIKE ${like} ESCAPE '\\') AS case_documents_clause_snapshot_count,
+        (SELECT COUNT(*)::int FROM document_variable_aliases WHERE from_key = ${k} AND is_active = true) AS aliases_from_count,
+        (SELECT COUNT(*)::int FROM document_variable_aliases WHERE to_key = ${k} AND is_active = true) AS aliases_to_count
+    `,
+  );
+  const row = rows[0] ?? {};
+  const toN = (v: unknown) => (typeof v === "number" ? v : Number(v ?? 0));
+  return {
+    bindings: toN((row as any).bindings_count),
+    docxTemplates: toN((row as any).docx_templates_count),
+    pdfMappings: toN((row as any).pdf_mappings_count),
+    legacyPdfMappings: toN((row as any).legacy_pdf_mappings_count),
+    platformPdfMappings: toN((row as any).platform_pdf_mappings_count),
+    firmClauses: toN((row as any).firm_clauses_count),
+    platformClauses: toN((row as any).platform_clauses_count),
+    customVariables: toN((row as any).custom_variables_count),
+    generationRuns: toN((row as any).generation_runs_count),
+    clauseSnapshots: toN((row as any).case_documents_clause_snapshot_count),
+    aliasesFrom: toN((row as any).aliases_from_count),
+    aliasesTo: toN((row as any).aliases_to_count),
+  };
+}
+
+router.get(
+  "/platform/document-variables/:id/usage",
+  requireAuth,
+  requireFounder,
+  requireFounderPermission("founder.documents.read"),
+  async (req: AuthRequest, res): Promise<void> => {
+    const idStr = one((req.params as any).id);
+    const id = idStr ? parseInt(idStr, 10) : NaN;
+    if (Number.isNaN(id)) {
+      res.status(400).json({ error: "Invalid variable ID" });
+      return;
+    }
+
+    const out = await withAuthSafeDb(async (authDb) => {
+      const rows = await queryRows(authDb, sql`SELECT id, key FROM document_variable_definitions WHERE id = ${id}`);
+      const v = rows[0];
+      if (!v) return { status: 404 as const, body: { error: "Variable not found" } };
+      const key = String((v as any).key ?? "");
+      const usage = await getPlatformVariableUsage(authDb, key);
+      const total = Object.values(usage).reduce((acc, n) => acc + (Number.isFinite(n) ? n : 0), 0);
+      return { status: 200 as const, body: { id, key, usage, canDelete: total === 0 } };
+    }, { retry: true, ctx: { route: req.path, stage: "platform_document_variables.usage", firmId: null, userId: req.userId ?? null } });
+
+    res.status(out.status).json(out.body);
+  },
+);
+
+router.delete(
+  "/platform/document-variables/:id",
+  requireAuth,
+  requireFounder,
+  requireFounderPermission("founder.documents.manage"),
+  async (req: AuthRequest, res): Promise<void> => {
+    const idStr = one((req.params as any).id);
+    const id = idStr ? parseInt(idStr, 10) : NaN;
+    if (Number.isNaN(id)) {
+      res.status(400).json({ error: "Invalid variable ID" });
+      return;
+    }
+
+    const result = await withAuthSafeDb(async (authDb) => {
+      const rows = await queryRows(authDb, sql`SELECT id, key FROM document_variable_definitions WHERE id = ${id}`);
+      const v = rows[0];
+      if (!v) return { status: 404 as const, body: { error: "Variable not found" } };
+      const key = String((v as any).key ?? "");
+      const usage = await getPlatformVariableUsage(authDb, key);
+      const total = Object.values(usage).reduce((acc, n) => acc + (Number.isFinite(n) ? n : 0), 0);
+
+      await writeAuditLog(
+        {
+          firmId: null,
+          actorId: req.userId,
+          actorType: req.userType,
+          action: "documents.variable_registry.delete.attempt",
+          entityType: "document_variable_definition",
+          entityId: id,
+          detail: `key=${key} totalUsage=${total}`,
+          ipAddress: req.ip,
+          userAgent: req.headers["user-agent"],
+        },
+        { db: authDb },
+      );
+
+      if (total > 0) {
+        return { status: 409 as const, body: { error: "Variable is in use", code: "VARIABLE_IN_USE", usage } };
+      }
+      await queryRows(authDb, sql`DELETE FROM document_variable_definitions WHERE id = ${id}`);
+      await writeAuditLog(
+        {
+          firmId: null,
+          actorId: req.userId,
+          actorType: req.userType,
+          action: "documents.variable_registry.delete",
+          entityType: "document_variable_definition",
+          entityId: id,
+          detail: `key=${key}`,
+          ipAddress: req.ip,
+          userAgent: req.headers["user-agent"],
+        },
+        { db: authDb },
+      );
+      return { status: 200 as const, body: { ok: true } };
+    }, { retry: true, ctx: { route: req.path, stage: "platform_document_variables.delete", firmId: null, userId: req.userId ?? null } });
+
+    res.status(result.status).json(result.body);
+  },
+);
+
+const createAliasBodySchema = z.object({
+  toKey: z.string().trim().min(1).max(120).regex(/^[a-z0-9_]+$/i),
+});
+
+router.post(
+  "/platform/document-variables/:id/aliases",
+  requireAuth,
+  requireFounder,
+  requireFounderPermission("founder.documents.manage"),
+  async (req: AuthRequest, res): Promise<void> => {
+    const idStr = one((req.params as any).id);
+    const id = idStr ? parseInt(idStr, 10) : NaN;
+    if (Number.isNaN(id)) {
+      res.status(400).json({ error: "Invalid variable ID" });
+      return;
+    }
+    const parsed = createAliasBodySchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: "Invalid request" });
+      return;
+    }
+    const toKey = parsed.data.toKey;
+
+    const result = await withAuthSafeDb(async (authDb) => {
+      const rows = await queryRows(authDb, sql`SELECT id, key FROM document_variable_definitions WHERE id = ${id}`);
+      const v = rows[0];
+      if (!v) return { status: 404 as const, body: { error: "Variable not found" } };
+      const fromKey = String((v as any).key ?? "");
+      const target = await queryRows(authDb, sql`SELECT id, key FROM document_variable_definitions WHERE key = ${toKey} LIMIT 1`);
+      if (!target[0]) return { status: 400 as const, body: { error: "Target variable not found" } };
+
+      await queryRows(
+        authDb,
+        sql`
+          INSERT INTO document_variable_aliases (from_key, to_key, created_by, is_active)
+          VALUES (${fromKey}, ${toKey}, ${req.userId ?? null}, true)
+          ON CONFLICT (from_key) DO UPDATE SET to_key = EXCLUDED.to_key, is_active = true
+        `,
+      );
+      await queryRows(
+        authDb,
+        sql`
+          UPDATE document_variable_definitions
+          SET deprecated_at = COALESCE(deprecated_at, now()),
+              replacement_key = ${toKey},
+              updated_at = now()
+          WHERE id = ${id}
+        `,
+      );
+
+      await writeAuditLog(
+        {
+          firmId: null,
+          actorId: req.userId,
+          actorType: req.userType,
+          action: "documents.variable_registry.alias.create",
+          entityType: "document_variable_definition",
+          entityId: id,
+          detail: `from=${fromKey} to=${toKey}`,
+          ipAddress: req.ip,
+          userAgent: req.headers["user-agent"],
+        },
+        { db: authDb },
+      );
+
+      return { status: 201 as const, body: { ok: true, fromKey, toKey } };
+    }, { retry: true, ctx: { route: req.path, stage: "platform_document_variables.alias", firmId: null, userId: req.userId ?? null } });
+
+    res.status(result.status).json(result.body);
+  },
+);
+
+const bulkVariablePatchSchema = z.object({
+  items: z.array(z.object({
+    id: z.number().int().positive(),
+    groupKey: z.string().trim().max(80).optional(),
+    sortOrder: z.number().int().min(0).max(100000).optional(),
+    isHidden: z.boolean().optional(),
+    isPublished: z.boolean().optional(),
+  })).min(1).max(500),
+});
+
+router.patch(
+  "/platform/document-variables/bulk",
+  requireAuth,
+  requireFounder,
+  requireFounderPermission("founder.documents.manage"),
+  async (req: AuthRequest, res): Promise<void> => {
+    const parsed = bulkVariablePatchSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: "Invalid request" });
+      return;
+    }
+    const items = parsed.data.items;
+    const result = await withAuthSafeDb(async (authDb) => {
+      for (const it of items) {
+        await queryRows(
+          authDb,
+          sql`
+            UPDATE document_variable_definitions
+            SET
+              group_key = COALESCE(${it.groupKey ?? null}, group_key),
+              sort_order = COALESCE(${typeof it.sortOrder === "number" ? it.sortOrder : null}, sort_order),
+              is_hidden = COALESCE(${typeof it.isHidden === "boolean" ? it.isHidden : null}, is_hidden),
+              is_published = COALESCE(${typeof it.isPublished === "boolean" ? it.isPublished : null}, is_published),
+              updated_at = now()
+            WHERE id = ${it.id}
+          `,
+        );
+      }
+      await writeAuditLog(
+        {
+          firmId: null,
+          actorId: req.userId,
+          actorType: req.userType,
+          action: "documents.variable_registry.bulk_update",
+          entityType: "document_variable_definition",
+          entityId: undefined,
+          detail: `count=${items.length}`,
+          ipAddress: req.ip,
+          userAgent: req.headers["user-agent"],
+        },
+        { db: authDb },
+      );
+      return { ok: true };
+    }, { retry: true, ctx: { route: req.path, stage: "platform_document_variables.bulk", firmId: null, userId: req.userId ?? null } });
+    res.json(result);
+  },
+);
+
 const variableCategorySchema = z.enum([
   "case",
   "purchaser",
@@ -4648,11 +5606,16 @@ const createVariableBodySchema = z.object({
   label: z.string().trim().min(1).max(200),
   description: z.string().trim().max(1000).nullable().optional(),
   category: variableCategorySchema,
+  groupKey: z.string().trim().max(80).nullable().optional(),
   valueType: variableValueTypeSchema,
   sourcePath: z.string().trim().max(300).nullable().optional(),
   formatter: z.string().trim().max(80).nullable().optional(),
   exampleValue: z.string().trim().max(300).nullable().optional(),
   isActive: z.boolean().optional(),
+  isHidden: z.boolean().optional(),
+  isPublished: z.boolean().optional(),
+  deprecatedAt: z.string().trim().max(80).nullable().optional(),
+  replacementKey: z.string().trim().max(120).nullable().optional(),
   sortOrder: z.number().int().min(0).max(100000).optional(),
 });
 
@@ -4759,9 +5722,9 @@ router.post(
             authDb,
             sql`
         INSERT INTO document_variable_definitions
-          (key, label, description, category, value_type, source_path, formatter, example_value, is_system, is_active, sort_order)
+          (key, label, description, category, group_key, value_type, source_path, formatter, example_value, is_system, is_active, is_hidden, is_published, deprecated_at, replacement_key, sort_order)
         VALUES
-          (${v.key}, ${v.label}, ${v.description ?? null}, ${v.category}, ${v.valueType}, ${v.sourcePath ?? null}, ${v.formatter ?? null}, ${v.exampleValue ?? null}, TRUE, ${v.isActive ?? true}, ${v.sortOrder ?? 0})
+          (${v.key}, ${v.label}, ${v.description ?? null}, ${v.category}, ${v.groupKey ?? v.category}, ${v.valueType}, ${v.sourcePath ?? null}, ${v.formatter ?? null}, ${v.exampleValue ?? null}, TRUE, ${v.isActive ?? true}, ${v.isHidden ?? false}, ${v.isPublished ?? true}, ${v.deprecatedAt ? new Date(v.deprecatedAt) : null}, ${v.replacementKey ?? null}, ${v.sortOrder ?? 0})
         RETURNING *
       `,
           );
@@ -4870,11 +5833,16 @@ router.put(
           label = COALESCE(${patch.label ?? null}, label),
           description = CASE WHEN ${Object.prototype.hasOwnProperty.call(patch, "description")} THEN ${patch.description ?? null} ELSE description END,
           category = COALESCE(${patch.category ?? null}, category),
+          group_key = CASE WHEN ${Object.prototype.hasOwnProperty.call(patch, "groupKey")} THEN COALESCE(${patch.groupKey ?? null}, group_key) ELSE group_key END,
           value_type = COALESCE(${patch.valueType ?? null}, value_type),
           source_path = CASE WHEN ${Object.prototype.hasOwnProperty.call(patch, "sourcePath")} THEN ${patch.sourcePath ?? null} ELSE source_path END,
           formatter = CASE WHEN ${Object.prototype.hasOwnProperty.call(patch, "formatter")} THEN ${patch.formatter ?? null} ELSE formatter END,
           example_value = CASE WHEN ${Object.prototype.hasOwnProperty.call(patch, "exampleValue")} THEN ${patch.exampleValue ?? null} ELSE example_value END,
           is_active = COALESCE(${typeof patch.isActive === "boolean" ? patch.isActive : null}, is_active),
+          is_hidden = COALESCE(${typeof (patch as any).isHidden === "boolean" ? (patch as any).isHidden : null}, is_hidden),
+          is_published = COALESCE(${typeof (patch as any).isPublished === "boolean" ? (patch as any).isPublished : null}, is_published),
+          deprecated_at = CASE WHEN ${Object.prototype.hasOwnProperty.call(patch, "deprecatedAt")} THEN ${typeof (patch as any).deprecatedAt === "string" && (patch as any).deprecatedAt ? new Date(String((patch as any).deprecatedAt)) : null} ELSE deprecated_at END,
+          replacement_key = CASE WHEN ${Object.prototype.hasOwnProperty.call(patch, "replacementKey")} THEN ${typeof (patch as any).replacementKey === "string" ? String((patch as any).replacementKey) : null} ELSE replacement_key END,
           sort_order = COALESCE(${typeof patch.sortOrder === "number" ? patch.sortOrder : null}, sort_order),
           updated_at = now()
         WHERE id = ${id}
@@ -22628,12 +23596,13 @@ router.post(
               authDb,
               sql`
           INSERT INTO document_variable_definitions
-            (key, label, description, category, value_type, source_path, formatter, example_value, is_system, is_active, sort_order, updated_at)
+            (key, label, description, category, group_key, value_type, source_path, formatter, example_value, is_system, is_active, is_hidden, is_published, deprecated_at, replacement_key, sort_order, updated_at)
           VALUES
             (
               ${v.key},
               ${v.label},
               ${v.description ?? null},
+              ${v.category},
               ${v.category},
               ${v.valueType},
               ${v.sourcePath ?? v.key},
@@ -22641,6 +23610,10 @@ router.post(
               ${v.exampleValue ?? null},
               TRUE,
               TRUE,
+              FALSE,
+              TRUE,
+              NULL,
+              NULL,
               ${v.sortOrder},
               now()
             )
@@ -22648,12 +23621,17 @@ router.post(
             label = EXCLUDED.label,
             description = EXCLUDED.description,
             category = EXCLUDED.category,
+            group_key = EXCLUDED.group_key,
             value_type = EXCLUDED.value_type,
             source_path = EXCLUDED.source_path,
             formatter = EXCLUDED.formatter,
             example_value = EXCLUDED.example_value,
             is_system = TRUE,
             is_active = TRUE,
+            is_hidden = FALSE,
+            is_published = TRUE,
+            deprecated_at = NULL,
+            replacement_key = NULL,
             sort_order = EXCLUDED.sort_order,
             updated_at = now()
           RETURNING (xmax = 0) AS inserted

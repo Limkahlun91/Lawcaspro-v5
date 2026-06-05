@@ -41,6 +41,8 @@ import PlatformDocuments from "@/pages/platform/documents";
 import PlatformMessages from "@/pages/platform/messages";
 import FounderBillingPage from "@/pages/founder/billing";
 import PlatformSubscriptionPlansPage from "@/pages/platform/subscription-plans";
+import PlatformVariablesPage from "@/pages/platform/variables";
+import PlatformCustomVariablesPage from "@/pages/platform/custom-variables";
 
 // App Pages
 import AppDashboard from "@/pages/app/dashboard";
@@ -73,6 +75,7 @@ import DocumentsPage from "@/pages/app/documents";
 import DocumentAutomationHub from "@/pages/app/documents/automation";
 import DocumentGenerationLogsPage from "@/pages/app/documents/generation-logs";
 import VariableDictionaryPage from "@/pages/app/documents/variables";
+import CustomVariablesPage from "@/pages/app/documents/custom-variables";
 import Accounting from "@/pages/app/accounting";
 import AccountingFileListing from "@/pages/app/accounting/file-listing";
 import BankReconciliationPage from "@/pages/app/accounting/bank-reconciliation";
@@ -136,6 +139,8 @@ function PlatformRoutes() {
           <Route path="/platform/billing" component={FounderBillingPage} />
           <Route path="/platform/subscription-plans" component={PlatformSubscriptionPlansPage} />
           <Route path="/platform/documents" component={PlatformDocuments} />
+          <Route path="/platform/variables" component={PlatformVariablesPage} />
+          <Route path="/platform/custom-variables" component={PlatformCustomVariablesPage} />
           <Route path="/platform/messages" component={PlatformMessages} />
           <Route path="/platform/monitoring" component={PlatformMonitoring} />
           <Route path="/platform/audit-logs" component={PlatformAuditLogs} />
@@ -275,6 +280,11 @@ function AppRoutes() {
           <Route path="/app/documents/variables" component={() => (
             <PermissionGuard module="documents" action="read">
               <VariableDictionaryPage />
+            </PermissionGuard>
+          )} />
+          <Route path="/app/documents/custom-variables" component={() => (
+            <PermissionGuard module="documents" action="read">
+              <CustomVariablesPage />
             </PermissionGuard>
           )} />
           <Route path="/app/documents" component={() => (

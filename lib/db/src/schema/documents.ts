@@ -326,17 +326,69 @@ export const documentVariableDefinitionsTable = pgTable("document_variable_defin
   label: text("label").notNull(),
   description: text("description"),
   category: text("category").notNull().default("case"),
+  groupKey: text("group_key").notNull().default("case"),
   valueType: text("value_type").notNull().default("string"),
   sourcePath: text("source_path"),
   formatter: text("formatter"),
   exampleValue: text("example_value"),
   isSystem: boolean("is_system").notNull().default(true),
   isActive: boolean("is_active").notNull().default(true),
+  isHidden: boolean("is_hidden").notNull().default(false),
+  isPublished: boolean("is_published").notNull().default(true),
+  deprecatedAt: timestamp("deprecated_at", { withTimezone: true }),
+  replacementKey: text("replacement_key"),
   sortOrder: integer("sort_order").notNull().default(0),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow().$onUpdate(() => new Date()),
 }, (t) => ({
   activeIdx: index("idx_document_variable_definitions_active").on(t.isActive, t.category, t.sortOrder, t.key),
+  visibilityIdx: index("idx_document_variable_definitions_visibility").on(t.isPublished, t.isHidden, t.category, t.sortOrder, t.key),
+  deprecatedIdx: index("idx_document_variable_definitions_deprecated").on(t.deprecatedAt),
+}));
+
+export const documentVariableAliasesTable = pgTable("document_variable_aliases", {
+  id: serial("id").primaryKey(),
+  fromKey: text("from_key").notNull(),
+  toKey: text("to_key").notNull(),
+  createdBy: integer("created_by"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  isActive: boolean("is_active").notNull().default(true),
+}, (t) => ({
+  fromKeyUq: uniqueIndex("uq_document_variable_aliases_from_key").on(t.fromKey),
+  toKeyIdx: index("idx_document_variable_aliases_to_key").on(t.toKey),
+}));
+
+export const documentCustomVariablesTable = pgTable("document_custom_variables", {
+  id: serial("id").primaryKey(),
+  scope: text("scope").notNull(),
+  firmId: integer("firm_id"),
+  templateId: integer("template_id"),
+  key: text("key").notNull(),
+  displayName: text("display_name").notNull(),
+  groupKey: text("group_key").notNull().default("custom_variables"),
+  status: text("status").notNull().default("active"),
+  isPublished: boolean("is_published").notNull().default(false),
+  deprecatedAt: timestamp("deprecated_at", { withTimezone: true }),
+  currentVersionNo: integer("current_version_no").notNull().default(1),
+  createdBy: integer("created_by"),
+  updatedBy: integer("updated_by"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow().$onUpdate(() => new Date()),
+}, (t) => ({
+  lookupIdx: index("idx_document_custom_variables_lookup").on(t.scope, t.firmId, t.templateId, t.key),
+  visibleIdx: index("idx_document_custom_variables_visible").on(t.scope, t.firmId, t.templateId, t.isPublished, t.status, t.groupKey),
+}));
+
+export const documentCustomVariableVersionsTable = pgTable("document_custom_variable_versions", {
+  id: serial("id").primaryKey(),
+  customVariableId: integer("custom_variable_id").notNull(),
+  versionNo: integer("version_no").notNull(),
+  bodyTemplate: text("body_template").notNull(),
+  createdBy: integer("created_by"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => ({
+  versionUq: uniqueIndex("uq_document_custom_variable_versions").on(t.customVariableId, t.versionNo),
+  parentIdx: index("idx_document_custom_variable_versions_parent").on(t.customVariableId, t.createdAt),
 }));
 
 export const documentTemplateBindingsTable = pgTable("document_template_bindings", {
