@@ -1,4 +1,4 @@
-import { ReactNode, useCallback, useRef } from "react";
+import { ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useAuth } from "@/lib/auth-context";
 import { hasPermission, isAccountingRoleAllowed } from "@/lib/permissions";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
@@ -6,9 +6,7 @@ import { Link, useLocation } from "wouter";
 import { 
   LayoutDashboard, 
   ListTodo,
-  ListOrdered,
   Briefcase, 
-  Inbox,
   Building2, 
   HardHat, 
   MessageSquare, 
@@ -18,11 +16,12 @@ import {
   Settings,
   FileText,
   LogOut,
+  ChevronDown,
+  ChevronRight,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { apiFetchJson } from "@/lib/api-client";
 import { getListCasesQueryKey, getListDevelopersQueryKey, getListProjectsQueryKey, getListUsersQueryKey } from "@workspace/api-client-react";
-import { isFeatureEnabled } from "@/lib/feature-flags";
 
 export function AppLayout({ children }: { children: ReactNode }) {
   const { user, logout } = useAuth();
@@ -43,17 +42,21 @@ export function AppLayout({ children }: { children: ReactNode }) {
     return null;
   }
 
+  type SidebarGroupKey = "main" | "documents" | "settings_system";
+  const storageKey = "lawcaspro.sidebar.groups";
+
   const navGroups: Array<{
+    key: SidebarGroupKey;
     label: string;
     items: Array<{ label: string; href: string; icon: any; perm: readonly [string, string] }>;
   }> = [
     {
-      label: "Main",
+      key: "main",
+      label: "MAIN",
       items: [
         { label: "Dashboard", href: "/app/dashboard", icon: LayoutDashboard, perm: ["dashboard", "read"] as const },
         { label: "My Work", href: "/app/workbench", icon: ListTodo, perm: ["cases", "read"] as const },
         { label: "Cases", href: "/app/cases", icon: Briefcase, perm: ["cases", "read"] as const },
-        { label: "Intake Inbox", href: "/app/cases/intake", icon: Inbox, perm: ["cases", "create"] as const },
         { label: "Projects", href: "/app/projects", icon: Building2, perm: ["projects", "read"] as const },
         { label: "Developers", href: "/app/developers", icon: HardHat, perm: ["developers", "read"] as const },
         { label: "Communications", href: "/app/hub", icon: MessageSquare, perm: ["communications", "read"] as const },
@@ -62,7 +65,8 @@ export function AppLayout({ children }: { children: ReactNode }) {
       ],
     },
     {
-      label: "Documents",
+      key: "documents",
+      label: "DOCUMENTS",
       items: [
         { label: "Documents", href: "/app/documents", icon: FileText, perm: ["documents", "read"] as const },
         { label: "Doc Automation", href: "/app/documents/automation", icon: FileText, perm: ["documents", "read"] as const },
@@ -71,9 +75,10 @@ export function AppLayout({ children }: { children: ReactNode }) {
       ],
     },
     {
-      label: "Settings",
+      key: "settings_system",
+      label: "SETTINGS / SYSTEM",
       items: [
-        { label: "Firm Settings", href: "/app/settings", icon: Settings, perm: ["settings", "read"] as const },
+        { label: "Settings", href: "/app/settings", icon: Settings, perm: ["settings", "read"] as const },
         { label: "Audit Logs", href: "/app/audit-logs", icon: ScrollText, perm: ["audit", "read"] as const },
         { label: "Doc Gen Logs", href: "/app/documents/generation-logs", icon: ScrollText, perm: ["audit", "read"] as const },
       ],
@@ -82,15 +87,60 @@ export function AppLayout({ children }: { children: ReactNode }) {
 
   const visibleNavGroups = navGroups
     .map((g) => ({
+      key: g.key,
       label: g.label,
       items: g.items.filter((i) => {
-        if (i.href === "/app/cases/intake" && !isFeatureEnabled("intake_inbox")) return false;
         if (!hasPermission(user, i.perm[0], i.perm[1])) return false;
         if (i.href === "/app/accounting") return isAccountingRoleAllowed(user.roleName);
         return true;
       }),
     }))
     .filter((g) => g.items.length > 0);
+
+  const activeGroupKeys = useMemo(() => {
+    const keys = new Set<SidebarGroupKey>();
+    for (const group of visibleNavGroups) {
+      for (const item of group.items) {
+        const isActive =
+          (item.href === "/app/documents"
+            ? location === "/app/documents"
+            : location === item.href || location.startsWith(`${item.href}/`)) ||
+          (item.href === "/app/accounting" && location.startsWith("/app/quotations"));
+        if (isActive) keys.add(group.key);
+      }
+    }
+    return keys;
+  }, [location, visibleNavGroups]);
+
+  const [expandedGroups, setExpandedGroups] = useState<Record<SidebarGroupKey, boolean>>(() => {
+    try {
+      if (typeof window === "undefined" || typeof localStorage === "undefined") return { main: true, documents: true, settings_system: true };
+      const raw = localStorage.getItem(storageKey);
+      if (!raw) return { main: true, documents: true, settings_system: true };
+      const parsed = JSON.parse(raw) as any;
+      const groups = (parsed && typeof parsed === "object" && parsed.groups && typeof parsed.groups === "object") ? parsed.groups : parsed;
+      return {
+        main: typeof groups?.main === "boolean" ? groups.main : true,
+        documents: typeof groups?.documents === "boolean" ? groups.documents : true,
+        settings_system: typeof groups?.settings_system === "boolean" ? groups.settings_system : true,
+      };
+    } catch {
+      return { main: true, documents: true, settings_system: true };
+    }
+  });
+
+  useEffect(() => {
+    try {
+      if (typeof window === "undefined" || typeof localStorage === "undefined") return;
+      localStorage.setItem(storageKey, JSON.stringify(expandedGroups));
+    } catch {
+      return;
+    }
+  }, [expandedGroups]);
+
+  const toggleGroup = (key: SidebarGroupKey) => {
+    setExpandedGroups((prev) => ({ ...prev, [key]: !prev[key] }));
+  };
 
   const prefetchByHref: Record<string, () => void> = {
     "/app/cases": () => {
@@ -190,37 +240,48 @@ export function AppLayout({ children }: { children: ReactNode }) {
         <nav className="flex-1 py-4 px-3 space-y-4">
           {visibleNavGroups.map((group) => (
             <div key={group.label} className="space-y-1">
-              <div className="px-3 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
-                {group.label}
-              </div>
-              {group.items.map((item) => {
-                const isActive =
-                  (item.href === "/app/documents"
-                    ? location === "/app/documents"
-                    : location === item.href || location.startsWith(`${item.href}/`)) ||
-                  (item.href === "/app/accounting" && location.startsWith("/app/quotations"));
-                return (
-                  <Link key={item.href} href={item.href}>
-                    <div
-                      onMouseEnter={() => schedulePrefetch(item.href)}
-                      onMouseLeave={() => cancelPrefetch(item.href)}
-                      className={`flex items-center gap-3 px-3 py-2.5 rounded-md text-sm font-medium transition-colors ${
-                        isActive
-                          ? "bg-blue-500/10 text-blue-200"
-                          : "text-slate-300 hover:bg-slate-800 hover:text-slate-100 cursor-pointer"
-                      }`}
-                    >
-                      <item.icon className="w-4 h-4 shrink-0" />
-                      <span className="truncate flex-1">{item.label}</span>
-                      {item.label === "Communications" && unreadCount > 0 && (
-                        <span className="inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 text-[10px] font-bold text-white bg-blue-500 rounded-full">
-                          {unreadCount}
-                        </span>
-                      )}
-                    </div>
-                  </Link>
-                );
-              })}
+              <button
+                type="button"
+                className="w-full flex items-center justify-between px-3 text-[11px] font-semibold uppercase tracking-wide text-slate-500 hover:text-slate-300"
+                onClick={() => toggleGroup(group.key)}
+              >
+                <span>{group.label}</span>
+                {((expandedGroups[group.key] ?? true) || activeGroupKeys.has(group.key)) ? (
+                  <ChevronDown className="w-3.5 h-3.5" />
+                ) : (
+                  <ChevronRight className="w-3.5 h-3.5" />
+                )}
+              </button>
+              {((expandedGroups[group.key] ?? true) || activeGroupKeys.has(group.key)) ? (
+                group.items.map((item) => {
+                  const isActive =
+                    (item.href === "/app/documents"
+                      ? location === "/app/documents"
+                      : location === item.href || location.startsWith(`${item.href}/`)) ||
+                    (item.href === "/app/accounting" && location.startsWith("/app/quotations"));
+                  return (
+                    <Link key={item.href} href={item.href}>
+                      <div
+                        onMouseEnter={() => schedulePrefetch(item.href)}
+                        onMouseLeave={() => cancelPrefetch(item.href)}
+                        className={`flex items-center gap-3 px-3 py-2.5 rounded-md text-sm font-medium transition-colors ${
+                          isActive
+                            ? "bg-blue-500/10 text-blue-200"
+                            : "text-slate-300 hover:bg-slate-800 hover:text-slate-100 cursor-pointer"
+                        }`}
+                      >
+                        <item.icon className="w-4 h-4 shrink-0" />
+                        <span className="truncate flex-1">{item.label}</span>
+                        {item.label === "Communications" && unreadCount > 0 && (
+                          <span className="inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 text-[10px] font-bold text-white bg-blue-500 rounded-full">
+                            {unreadCount}
+                          </span>
+                        )}
+                      </div>
+                    </Link>
+                  );
+                })
+              ) : null}
             </div>
           ))}
         </nav>

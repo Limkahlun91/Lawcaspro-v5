@@ -10,7 +10,9 @@ import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "
 import { apiFetchJson } from "@/lib/api-client";
 import { useToast } from "@/hooks/use-toast";
 import { toastError } from "@/lib/toast-error";
-import { Copy, Plus, Search } from "lucide-react";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList } from "@/components/ui/command";
+import { ChevronDown, Copy, Plus } from "lucide-react";
 
 type CustomVariableRow = {
   id: number;
@@ -109,14 +111,35 @@ export default function CustomVariablesPage() {
     onError: (e) => toastError(toast, e, "Save failed"),
   });
 
+  const deprecateMutation = useMutation({
+    mutationFn: async (id: number) => {
+      return await apiFetchJson(`/documents/custom-variables/${id}`, {
+        method: "PUT",
+        body: JSON.stringify({ status: "deprecated" }),
+      });
+    },
+    onSuccess: async () => {
+      await qc.invalidateQueries({ queryKey: ["documents", "custom-variables"] });
+      toast({ title: "Deprecated" });
+    },
+    onError: (e) => toastError(toast, e, "Update failed"),
+  });
+
   const [caseQueryRaw, setCaseQueryRaw] = useState("");
   const caseQuery = useMemo(() => caseQueryRaw.trim(), [caseQueryRaw]);
   const [caseResults, setCaseResults] = useState<CaseSearchItem[]>([]);
   const [caseSearching, setCaseSearching] = useState(false);
   const [selectedCase, setSelectedCase] = useState<CaseSearchItem | null>(null);
+  const [caseOpen, setCaseOpen] = useState(false);
   const lastAbortRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
+    if (!caseOpen) {
+      lastAbortRef.current?.abort();
+      setCaseResults([]);
+      setCaseSearching(false);
+      return;
+    }
     const q = caseQuery;
     if (!q) {
       setCaseResults([]);
@@ -138,7 +161,7 @@ export default function CustomVariablesPage() {
       }
     }, 180);
     return () => clearTimeout(t);
-  }, [caseQuery]);
+  }, [caseQuery, caseOpen]);
 
   const [previewId, setPreviewId] = useState<number | null>(null);
   const previewQuery = useQuery({
@@ -252,6 +275,14 @@ export default function CustomVariablesPage() {
                           >
                             Edit
                           </Button>
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            onClick={() => deprecateMutation.mutate(v.id)}
+                            disabled={v.status === "deprecated" || deprecateMutation.isPending}
+                          >
+                            Deprecate
+                          </Button>
                           <Button size="sm" variant="outline" onClick={() => setPreviewId(v.id)} disabled={!selectedCase}>
                             Preview
                           </Button>
@@ -277,47 +308,67 @@ export default function CustomVariablesPage() {
           <div className="grid grid-cols-1 md:grid-cols-2 gap-3 items-start">
             <div className="space-y-2">
               <div className="text-xs text-slate-500">Case</div>
-              <div className="relative">
-                <Input value={caseQueryRaw} onChange={(e) => setCaseQueryRaw(e.target.value)} placeholder="Search case…" />
-                <div className="absolute right-2 top-2 text-slate-400"><Search className="w-4 h-4" /></div>
-              </div>
+              <Popover
+                open={caseOpen}
+                onOpenChange={(open) => {
+                  setCaseOpen(open);
+                  if (open) setCaseQueryRaw("");
+                }}
+              >
+                <PopoverTrigger asChild>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    role="combobox"
+                    aria-expanded={caseOpen}
+                    className="w-full justify-between"
+                  >
+                    <span className="truncate">
+                      {selectedCase ? (selectedCase.referenceNo || `Case #${selectedCase.id}`) : "Select a case…"}
+                    </span>
+                    <ChevronDown className="w-4 h-4 text-slate-500" />
+                  </Button>
+                </PopoverTrigger>
+                <PopoverContent align="start" className="p-0 w-[520px] max-w-[calc(100vw-2rem)]">
+                  <Command>
+                    <CommandInput value={caseQueryRaw} onValueChange={setCaseQueryRaw} placeholder="Search case…" />
+                    <CommandList>
+                      <CommandEmpty>
+                        <div className="text-sm text-slate-500">
+                          {caseSearching ? "Searching…" : (caseQuery ? "No results." : "Type to search.")}
+                        </div>
+                      </CommandEmpty>
+                      <CommandGroup heading="Cases">
+                        {caseResults.map((c) => (
+                          <CommandItem
+                            key={c.id}
+                            value={`${c.referenceNo ?? ""} ${c.clientName ?? ""} ${c.projectName ?? ""} ${c.property ?? ""}`}
+                            onSelect={() => {
+                              setSelectedCase(c);
+                              setCaseOpen(false);
+                            }}
+                          >
+                            <div className="min-w-0 flex-1">
+                              <div className="text-sm font-semibold text-slate-900 truncate">{c.referenceNo || `Case #${c.id}`}</div>
+                              <div className="text-xs text-slate-500 truncate">
+                                {c.clientName ? `Client: ${c.clientName}` : "Client: —"}
+                                <span className="text-slate-300"> · </span>
+                                {c.projectName ? `Project: ${c.projectName}` : "Project: —"}
+                                <span className="text-slate-300"> · </span>
+                                {c.property ? `Parcel: ${c.property}` : "Parcel: —"}
+                              </div>
+                            </div>
+                          </CommandItem>
+                        ))}
+                      </CommandGroup>
+                    </CommandList>
+                  </Command>
+                </PopoverContent>
+              </Popover>
               {selectedCase ? (
                 <div className="text-sm text-slate-700">
                   Selected: <span className="font-semibold">{selectedCase.referenceNo || `Case #${selectedCase.id}`}</span>
-                  <Button variant="ghost" size="sm" className="ml-2" onClick={() => setSelectedCase(null)}>Change</Button>
-                </div>
-              ) : null}
-              {!selectedCase && (caseQuery || caseSearching) ? (
-                <div className="rounded-md border border-slate-200 bg-white overflow-hidden">
-                  <div className="max-h-64 overflow-auto divide-y divide-slate-100">
-                    {caseSearching ? (
-                      <div className="px-3 py-2 text-sm text-slate-500">Searching…</div>
-                    ) : caseResults.length ? (
-                      caseResults.map((c) => (
-                        <button
-                          key={c.id}
-                          type="button"
-                          className="w-full text-left px-3 py-2 hover:bg-slate-50"
-                          onClick={() => {
-                            setSelectedCase(c);
-                            setCaseQueryRaw("");
-                            setCaseResults([]);
-                          }}
-                        >
-                          <div className="text-sm font-semibold text-slate-900">{c.referenceNo || `Case #${c.id}`}</div>
-                          <div className="text-xs text-slate-500 truncate">
-                            {c.clientName ? `Client: ${c.clientName}` : "Client: —"}
-                            <span className="text-slate-300"> · </span>
-                            {c.projectName ? `Project: ${c.projectName}` : "Project: —"}
-                            <span className="text-slate-300"> · </span>
-                            {c.property ? `Parcel: ${c.property}` : "Parcel: —"}
-                          </div>
-                        </button>
-                      ))
-                    ) : (
-                      <div className="px-3 py-2 text-sm text-slate-500">{caseQuery ? "No results." : "Type to search."}</div>
-                    )}
-                  </div>
+                  <Button variant="ghost" size="sm" className="ml-2" onClick={() => setSelectedCase(null)}>Clear</Button>
                 </div>
               ) : null}
             </div>
@@ -394,4 +445,3 @@ export default function CustomVariablesPage() {
     </div>
   );
 }
-

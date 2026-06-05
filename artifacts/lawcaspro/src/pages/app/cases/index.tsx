@@ -70,6 +70,11 @@ function parseLegacyMilestoneParams(sp: URLSearchParams): { milestone: CaseMiles
   return null;
 }
 
+function isAbortError(e: unknown): boolean {
+  const n = typeof (e as any)?.name === "string" ? String((e as any).name) : "";
+  return n === "AbortError";
+}
+
 export default function CasesList() {
   const [location, setLocation] = useLocation();
   const searchString = typeof window !== "undefined" ? window.location.search : (location.includes("?") ? location.slice(location.indexOf("?")) : "");
@@ -232,21 +237,30 @@ export default function CasesList() {
     setLocation,
   ]);
 
-  const { data: response, isLoading, isError, error, refetch, isFetching } = useListCases({ 
-    page,
-    limit,
-    search: search || undefined,
-    projectId: projectId !== "all" ? Number(projectId) : undefined,
-    assignedLawyerId: lawyerId !== "all" ? parseInt(lawyerId) : undefined,
-    assignedClerkId: clerkId !== "all" ? parseInt(clerkId) : undefined,
-    assignedToUserId: assignedToUserId !== "all" ? parseInt(assignedToUserId) : undefined,
-    spaStatus: spaStatus !== "all" ? spaStatus : undefined,
-    loanStatus: loanStatus !== "all" ? loanStatus : undefined,
-    purchaseMode: purchaseMode !== "all" ? purchaseMode : undefined,
-    titleType: titleType !== "all" ? titleType : undefined,
-    milestone: milestoneFilter !== "all" ? milestoneFilter : undefined,
-    milestonePresence: milestoneFilter !== "all" ? milestonePresence : undefined,
-  });
+  const approvedQuery = useListCases(
+    {
+      page,
+      limit,
+      search: search || undefined,
+      projectId: projectId !== "all" ? Number(projectId) : undefined,
+      assignedLawyerId: lawyerId !== "all" ? parseInt(lawyerId) : undefined,
+      assignedClerkId: clerkId !== "all" ? parseInt(clerkId) : undefined,
+      assignedToUserId: assignedToUserId !== "all" ? parseInt(assignedToUserId) : undefined,
+      spaStatus: spaStatus !== "all" ? spaStatus : undefined,
+      loanStatus: loanStatus !== "all" ? loanStatus : undefined,
+      purchaseMode: purchaseMode !== "all" ? purchaseMode : undefined,
+      titleType: titleType !== "all" ? titleType : undefined,
+      milestone: milestoneFilter !== "all" ? milestoneFilter : undefined,
+      milestonePresence: milestoneFilter !== "all" ? milestonePresence : undefined,
+    },
+    {
+      query: {
+        retry: false,
+        staleTime: 10_000,
+        placeholderData: (prev) => prev,
+      },
+    },
+  );
 
   const approvalListQuery = useQuery<{
     data: any[];
@@ -256,8 +270,13 @@ export default function CasesList() {
   }>({
     queryKey: ["cases", "approval-list", approvalStatus, page, limit, search],
     enabled: approvalStatus !== "approved",
-    queryFn: () => apiFetchJson(`/cases?approvalStatus=${encodeURIComponent(approvalStatus)}&page=${page}&limit=${limit}&search=${encodeURIComponent(search.trim())}`),
+    queryFn: ({ signal }) =>
+      apiFetchJson(
+        `/cases?approvalStatus=${encodeURIComponent(approvalStatus)}&page=${page}&limit=${limit}&search=${encodeURIComponent(search.trim())}`,
+        { signal },
+      ),
     retry: false,
+    placeholderData: (prev) => prev,
   });
 
   type CaseFilterOptionsResponse = {
@@ -292,19 +311,63 @@ export default function CasesList() {
   const milestoneOptions: Array<{ key: CaseMilestoneKey; label: string }> = Array.isArray(filterOptions?.milestones) ? filterOptions.milestones : [];
 
   const { data: projectsRes } = useListProjects({ page: 1, limit: 200 }, { query: { staleTime: 5 * 60 * 1000 } });
-  const projects = projectsRes?.data ?? [];
-  const cases = response?.data ?? [];
-  const approvalCases = approvalStatus === "approved" ? cases : (approvalListQuery.data?.data ?? []);
-  const listIsLoading = approvalStatus === "approved" ? isLoading : approvalListQuery.isLoading;
-  const listIsError = approvalStatus === "approved" ? isError : approvalListQuery.isError;
-  const listError = approvalStatus === "approved" ? error : approvalListQuery.error;
-  const listRefetch = approvalStatus === "approved" ? refetch : approvalListQuery.refetch;
-  const listIsFetching = approvalStatus === "approved" ? isFetching : approvalListQuery.isFetching;
-  const total = approvalStatus === "approved" ? (response?.total ?? 0) : (approvalListQuery.data?.total ?? 0);
+  const projects = Array.isArray((projectsRes as any)?.data) ? ((projectsRes as any).data as any[]) : [];
+
+  const lastApprovedRef = useRef<{ data: any[]; total: number; page: number; limit: number } | null>(null);
+  const lastApprovalListRef = useRef<{ data: any[]; total: number; page: number; limit: number } | null>(null);
+
+  const approvedData = approvedQuery.data;
+  useEffect(() => {
+    if (!approvedData || !Array.isArray((approvedData as any).data)) return;
+    const data = (approvedData as any).data;
+    lastApprovedRef.current = {
+      data,
+      total: typeof (approvedData as any).total === "number" ? (approvedData as any).total : data.length,
+      page: typeof (approvedData as any).page === "number" ? (approvedData as any).page : page,
+      limit: typeof (approvedData as any).limit === "number" ? (approvedData as any).limit : limit,
+    };
+  }, [approvedData, page, limit]);
+
+  useEffect(() => {
+    const cur = approvalListQuery.data;
+    if (!cur || !Array.isArray((cur as any).data)) return;
+    const data = (cur as any).data;
+    lastApprovalListRef.current = {
+      data,
+      total: typeof (cur as any).total === "number" ? (cur as any).total : data.length,
+      page: typeof (cur as any).page === "number" ? (cur as any).page : page,
+      limit: typeof (cur as any).limit === "number" ? (cur as any).limit : limit,
+    };
+  }, [approvalListQuery.data, page, limit]);
+
+  const cases = Array.isArray((approvedData as any)?.data)
+    ? ((approvedData as any).data as any[])
+    : (lastApprovedRef.current?.data ?? []);
+  const approvalCases = approvalStatus === "approved"
+    ? cases
+    : (Array.isArray((approvalListQuery.data as any)?.data)
+      ? ((approvalListQuery.data as any).data as any[])
+      : (lastApprovalListRef.current?.data ?? []));
+
+  const listIsLoading = approvalStatus === "approved" ? approvedQuery.isLoading : approvalListQuery.isLoading;
+  const listIsError = approvalStatus === "approved" ? approvedQuery.isError : approvalListQuery.isError;
+  const listError = approvalStatus === "approved" ? approvedQuery.error : approvalListQuery.error;
+  const listRefetch = approvalStatus === "approved" ? approvedQuery.refetch : approvalListQuery.refetch;
+  const listIsFetching = approvalStatus === "approved" ? approvedQuery.isFetching : approvalListQuery.isFetching;
+  const total =
+    approvalStatus === "approved"
+      ? (typeof (approvedData as any)?.total === "number" ? (approvedData as any).total : (lastApprovedRef.current?.total ?? 0))
+      : (typeof (approvalListQuery.data as any)?.total === "number" ? (approvalListQuery.data as any).total : (lastApprovalListRef.current?.total ?? 0));
   const pageCount = Math.max(1, Math.ceil(total / limit));
   const safePage = Math.min(page, pageCount);
   const caseById = useMemo(() => new Map(approvalCases.map((c) => [c.id, c])), [approvalCases]);
   const pendingViewCase = pendingViewCaseId ? (caseById.get(pendingViewCaseId) ?? null) : null;
+  const listRows = approvalStatus === "approved" ? cases : approvalCases;
+  const hasListRows = listRows.length > 0;
+  const isListAbortError = isAbortError(listError);
+  const showListLoading = listIsLoading && !hasListRows;
+  const showListBlockingError = listIsError && !isListAbortError && !hasListRows;
+  const showListInlineError = listIsError && !isListAbortError && hasListRows;
 
   useEffect(() => {
     if (safePage !== page) setPage(safePage);
@@ -412,7 +475,7 @@ export default function CasesList() {
     setSelectedTemplateIds(new Set());
   }, [sp.toString()]);
 
-  const currentPageIds = approvalStatus === "approved" ? (response?.data ?? []).map((c) => c.id) : [];
+  const currentPageIds = approvalStatus === "approved" ? cases.map((c) => c.id) : [];
   const allOnPageSelected = currentPageIds.length > 0 && currentPageIds.every((id) => selectedCaseIds.has(id));
   const someOnPageSelected = currentPageIds.some((id) => selectedCaseIds.has(id));
 
@@ -652,14 +715,19 @@ export default function CasesList() {
 
       <Card>
         <CardContent className="p-0">
-          {listIsLoading ? (
+          {showListLoading ? (
             <div className="p-8 text-center text-slate-500">Loading cases...</div>
-          ) : listIsError ? (
+          ) : showListBlockingError ? (
             <div className="p-6">
               <QueryFallback title="Cases unavailable" error={listError} onRetry={() => listRefetch()} isRetrying={listIsFetching} />
             </div>
           ) : (
             <div className="overflow-x-auto">
+              {showListInlineError ? (
+                <div className="p-4 border-b border-slate-200 bg-slate-50">
+                  <QueryFallback title="Cases unavailable" error={listError} onRetry={() => listRefetch()} isRetrying={listIsFetching} />
+                </div>
+              ) : null}
               <table className="w-full text-sm text-left">
                 {approvalStatus === "approved" ? (
                   <>

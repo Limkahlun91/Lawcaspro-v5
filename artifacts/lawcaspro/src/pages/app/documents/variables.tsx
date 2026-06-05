@@ -4,8 +4,10 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList } from "@/components/ui/command";
 import { apiFetchJson } from "@/lib/api-client";
-import { Copy, Search } from "lucide-react";
+import { ChevronDown, Copy } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import { toastError } from "@/lib/toast-error";
 
@@ -100,6 +102,7 @@ function groupKeyFor(v: VariableItem): string {
 }
 
 function sourceFor(v: VariableItem): string {
+  if (v.isSystem) return "System";
   const scope = v.custom?.scope;
   if (scope === "template_specific") return "Template";
   if (scope === "firm") return "Firm";
@@ -119,12 +122,19 @@ export default function VariableDictionaryPage() {
   const [caseResults, setCaseResults] = useState<CaseSearchItem[]>([]);
   const [caseSearching, setCaseSearching] = useState(false);
   const [selectedCase, setSelectedCase] = useState<CaseSearchItem | null>(null);
+  const [caseOpen, setCaseOpen] = useState(false);
   const [varQueryRaw, setVarQueryRaw] = useState("");
   const varQuery = useMemo(() => norm(varQueryRaw), [varQueryRaw]);
   const [groupFilter, setGroupFilter] = useState<string>("all");
   const lastAbortRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
+    if (!caseOpen) {
+      lastAbortRef.current?.abort();
+      setCaseResults([]);
+      setCaseSearching(false);
+      return;
+    }
     const q = caseQuery;
     if (!q) {
       setCaseResults([]);
@@ -146,7 +156,7 @@ export default function VariableDictionaryPage() {
       }
     }, 180);
     return () => clearTimeout(t);
-  }, [caseQuery]);
+  }, [caseQuery, caseOpen]);
 
   const previewQuery = useQuery<VariablesPreviewResponse>({
     queryKey: ["documents", "variables-preview", selectedCase?.id ?? null],
@@ -210,55 +220,73 @@ export default function VariableDictionaryPage() {
           <div className="grid grid-cols-1 md:grid-cols-3 gap-3 items-start">
             <div className="md:col-span-2 space-y-2">
               <div className="text-xs text-slate-500">Case</div>
-              <div className="relative">
-                <Input
-                  value={caseQueryRaw}
-                  onChange={(e) => setCaseQueryRaw(e.target.value)}
-                  placeholder="Search by ref / purchaser / project / property / parcel…"
-                />
-                <div className="absolute right-2 top-2 text-slate-400">
-                  <Search className="w-4 h-4" />
-                </div>
-              </div>
+              <Popover
+                open={caseOpen}
+                onOpenChange={(open) => {
+                  setCaseOpen(open);
+                  if (open) setCaseQueryRaw("");
+                }}
+              >
+                <PopoverTrigger asChild>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    role="combobox"
+                    aria-expanded={caseOpen}
+                    className="w-full justify-between"
+                  >
+                    <span className="truncate">
+                      {selectedCase ? (selectedCase.referenceNo || `Case #${selectedCase.id}`) : "Select a case…"}
+                    </span>
+                    <ChevronDown className="w-4 h-4 text-slate-500" />
+                  </Button>
+                </PopoverTrigger>
+                <PopoverContent align="start" className="p-0 w-[520px] max-w-[calc(100vw-2rem)]">
+                  <Command>
+                    <CommandInput
+                      value={caseQueryRaw}
+                      onValueChange={setCaseQueryRaw}
+                      placeholder="Search by ref / purchaser / project / property / parcel…"
+                    />
+                    <CommandList>
+                      <CommandEmpty>
+                        <div className="text-sm text-slate-500">
+                          {caseSearching ? "Searching…" : (caseQuery ? "No results." : "Type to search.")}
+                        </div>
+                      </CommandEmpty>
+                      <CommandGroup heading="Cases">
+                        {caseResults.map((c) => (
+                          <CommandItem
+                            key={c.id}
+                            value={`${c.referenceNo ?? ""} ${c.clientName ?? ""} ${c.projectName ?? ""} ${c.property ?? ""}`}
+                            onSelect={() => {
+                              setSelectedCase(c);
+                              setCaseOpen(false);
+                            }}
+                          >
+                            <div className="min-w-0 flex-1">
+                              <div className="text-sm font-semibold text-slate-900 truncate">{c.referenceNo || `Case #${c.id}`}</div>
+                              <div className="text-xs text-slate-500 truncate">
+                                {c.clientName ? `Client: ${c.clientName}` : "Client: —"}
+                                <span className="text-slate-300"> · </span>
+                                {c.projectName ? `Project: ${c.projectName}` : "Project: —"}
+                                <span className="text-slate-300"> · </span>
+                                {c.property ? `Parcel: ${c.property}` : "Parcel: —"}
+                              </div>
+                            </div>
+                          </CommandItem>
+                        ))}
+                      </CommandGroup>
+                    </CommandList>
+                  </Command>
+                </PopoverContent>
+              </Popover>
               {selectedCase ? (
                 <div className="text-sm text-slate-700">
                   Selected: <span className="font-semibold">{selectedCase.referenceNo || `Case #${selectedCase.id}`}</span>
                   <Button variant="ghost" size="sm" className="ml-2" onClick={() => setSelectedCase(null)}>
-                    Change
+                    Clear
                   </Button>
-                </div>
-              ) : null}
-              {!selectedCase && (caseQuery || caseSearching) ? (
-                <div className="rounded-md border border-slate-200 bg-white overflow-hidden">
-                  <div className="max-h-64 overflow-auto divide-y divide-slate-100">
-                    {caseSearching ? (
-                      <div className="px-3 py-2 text-sm text-slate-500">Searching…</div>
-                    ) : caseResults.length ? (
-                      caseResults.map((c) => (
-                        <button
-                          key={c.id}
-                          type="button"
-                          className="w-full text-left px-3 py-2 hover:bg-slate-50"
-                          onClick={() => {
-                            setSelectedCase(c);
-                            setCaseQueryRaw("");
-                            setCaseResults([]);
-                          }}
-                        >
-                          <div className="text-sm font-semibold text-slate-900">{c.referenceNo || `Case #${c.id}`}</div>
-                          <div className="text-xs text-slate-500 truncate">
-                            {c.clientName ? `Client: ${c.clientName}` : "Client: —"}
-                            <span className="text-slate-300"> · </span>
-                            {c.projectName ? `Project: ${c.projectName}` : "Project: —"}
-                            <span className="text-slate-300"> · </span>
-                            {c.property ? `Parcel: ${c.property}` : "Parcel: —"}
-                          </div>
-                        </button>
-                      ))
-                    ) : (
-                      <div className="px-3 py-2 text-sm text-slate-500">{caseQuery ? "No results." : "Type to search."}</div>
-                    )}
-                  </div>
                 </div>
               ) : null}
             </div>
@@ -298,12 +326,12 @@ export default function VariableDictionaryPage() {
                 <table className="w-full text-sm text-left">
                   <thead className="text-xs text-slate-500 uppercase bg-slate-50 border-b border-slate-200">
                     <tr>
-                      <th className="px-6 py-3 font-semibold">Group</th>
-                      <th className="px-6 py-3 font-semibold">Variable Name</th>
+                      <th className="px-6 py-3 font-semibold">Group / Section</th>
+                      <th className="px-6 py-3 font-semibold">Display Name</th>
                       <th className="px-6 py-3 font-semibold">Token</th>
-                      <th className="px-6 py-3 font-semibold">Preview Value</th>
-                      <th className="px-6 py-3 font-semibold">Source</th>
-                      <th className="px-6 py-3 font-semibold">Action</th>
+                      <th className="px-6 py-3 font-semibold">Actual Value</th>
+                      <th className="px-6 py-3 font-semibold">Source Level</th>
+                      <th className="px-6 py-3 font-semibold">Actions</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100">
@@ -321,10 +349,11 @@ export default function VariableDictionaryPage() {
                         <td className="px-6 py-4 text-xs text-slate-500">{sourceFor(v)}</td>
                         <td className="px-6 py-4">
                           <div className="flex items-center gap-2">
-                            <Button size="sm" variant="outline" onClick={() => copyText(v.token)} aria-label="Copy token">
+                            <Button size="sm" variant="outline" onClick={() => copyText(v.token)}>
                               <Copy className="w-4 h-4" />
+                              <span className="ml-2">Copy Token</span>
                             </Button>
-                            <Button size="sm" variant="outline" onClick={() => copyText(formatPreviewValue(v.previewValue) === "—" ? "" : formatPreviewValue(v.previewValue))} aria-label="Copy value">
+                            <Button size="sm" variant="outline" onClick={() => copyText(formatPreviewValue(v.previewValue) === "—" ? "" : formatPreviewValue(v.previewValue))}>
                               Copy Value
                             </Button>
                           </div>

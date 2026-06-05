@@ -14,5 +14,11 @@ describe("documentVariables inline list formatting", () => {
     expect(joinNamesWithAmpersand(["A", "B", "C"])).toBe("A, B & C");
     expect(joinNamesWithAmpersand(["A", "B", "C", "D"])).toBe("A, B, C & D");
   });
-});
 
+  it("formats purchaser/borrower inline list examples", () => {
+    expect(joinNamesWithAmpersand(["LIMKL"])).toBe("LIMKL");
+    expect(joinNamesWithAmpersand(["LIMKL", "LIMKL 1"])).toBe("LIMKL & LIMKL 1");
+    expect(joinNamesWithAmpersand(["LIMKL", "LIMKL 1", "LIMKL 2"])).toBe("LIMKL, LIMKL 1 & LIMKL 2");
+    expect(joinNamesWithAmpersand(["LIMKL", "LIMKL 1", "LIMKL 2", "LIMKL 3"])).toBe("LIMKL, LIMKL 1, LIMKL 2 & LIMKL 3");
+  });
+});

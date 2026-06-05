@@ -7,7 +7,10 @@ function parseBool(v: unknown): boolean {
 }
 
 export function isFeatureEnabled(key: FeatureFlagKey): boolean {
-  if (key === "intake_inbox") return parseBool((import.meta as any).env?.VITE_FEATURE_INTAKE_INBOX);
+  if (key === "intake_inbox") {
+    const env = (import.meta as any).env ?? {};
+    const v = env.VITE_CASE_INTAKE_ENABLED ?? env.VITE_FEATURE_INTAKE_INBOX;
+    return parseBool(v);
+  }
   return false;
 }
-

@@ -55,11 +55,12 @@ function renderWithQueryClient() {
       mutations: { retry: false },
     },
   });
-  return render(
+  const view = render(
     <QueryClientProvider client={qc}>
       <CasesList />
     </QueryClientProvider>
   );
+  return { ...view, qc };
 }
 
 beforeEach(() => {
@@ -118,7 +119,7 @@ describe("/app/cases regressions", () => {
 
     renderWithQueryClient();
 
-    expect(await screen.findByText("Approved Cases")).toBeInTheDocument();
+    expect((await screen.findAllByText("Approved Cases")).length).toBeGreaterThan(0);
     expect(screen.queryByText("No cases found.")).not.toBeInTheDocument();
 
     const table = screen.getByRole("table");
@@ -263,5 +264,71 @@ describe("/app/cases regressions", () => {
 
     renderWithQueryClient();
     expect(await screen.findByRole("button", { name: "Resubmit for Approval" })).toBeInTheDocument();
+  });
+
+  it("keeps last-known-good data when a request is aborted", async () => {
+    useListCasesMock
+      .mockReturnValueOnce({
+        data: {
+          data: [
+            {
+              id: 901,
+              referenceNo: "SUB-001",
+              clientName: "Buyer A",
+              projectName: "—",
+              developerName: "—",
+              property: "Parcel 1",
+              assignedLawyerName: "Lawyer 1",
+              assignedClerkName: "Clerk 1",
+              spaStatus: "Pending",
+              loanStatus: null,
+              milestones: {},
+              updatedAt: new Date().toISOString(),
+              caseType: "subsale",
+            },
+          ],
+          total: 1,
+          page: 1,
+          limit: 50,
+        },
+        isLoading: false,
+        isError: false,
+        error: null,
+        isFetching: false,
+        refetch: vi.fn(),
+      })
+      .mockReturnValueOnce({
+        data: undefined,
+        isLoading: false,
+        isError: true,
+        error: { name: "AbortError" },
+        isFetching: false,
+        refetch: vi.fn(),
+      });
+
+    const view = renderWithQueryClient();
+    expect(await screen.findByText("SUB-001")).toBeInTheDocument();
+
+    view.rerender(
+      <QueryClientProvider client={view.qc}>
+        <CasesList />
+      </QueryClientProvider>,
+    );
+
+    expect(await screen.findByText("SUB-001")).toBeInTheDocument();
+  });
+
+  it("does not crash on unexpected list response shapes", async () => {
+    useListCasesMock.mockReturnValue({
+      data: { data: null, total: 0, page: 1, limit: 50 },
+      isLoading: false,
+      isError: false,
+      error: null,
+      isFetching: false,
+      refetch: vi.fn(),
+    });
+
+    renderWithQueryClient();
+    expect((await screen.findAllByText("Approved Cases")).length).toBeGreaterThan(0);
   });
 });
