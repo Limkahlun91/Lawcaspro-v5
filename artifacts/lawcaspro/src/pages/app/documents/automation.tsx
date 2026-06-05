@@ -318,6 +318,7 @@ export default function DocumentAutomationHub() {
   const finalizeAttemptedJobIdRef = useRef<string | null>(null);
   const downloadAttemptedJobIdRef = useRef<string | null>(null);
   const jobStageRef = useRef(jobStage);
+  const runNextConsecutive504Ref = useRef(0);
   const runnerRef = useRef<{
     running: boolean;
     jobId: string | null;
@@ -440,10 +441,50 @@ export default function DocumentAutomationHub() {
     );
   };
 
+  const extractErrorMessage = (err: unknown): string => {
+    const r = asRecord(err);
+    const nested = r ? (asRecord((r as any).error) ?? asRecord((r as any).data)?.error) : null;
+    const nestedMsg = nested ? safeText((nested as any).message) : "";
+    if (nestedMsg) return nestedMsg;
+    if (err instanceof Error && safeText(err.message)) return err.message;
+    const nestedStr = nested ? JSON.stringify(nested) : "";
+    if (nestedStr && nestedStr !== "{}") return nestedStr;
+    const str = r ? JSON.stringify(r) : String(err ?? "");
+    if (str && str !== "{}" && str !== "[object Object]") return str;
+    return "Unknown error";
+  };
+
+  const formatProcessingNotice = (snapshot: NormalizedGenerationJob | null): string => {
+    const p = getProgress(snapshot);
+    const done = p.success + p.failed;
+    if (p.total > 0) {
+      return `Generation is still processing. Completed ${done}/${p.total}. Pending ${p.pending}. Please wait.`;
+    }
+    return "Generation is still processing. Please wait.";
+  };
+
+  const canDownloadNow = (snapshot: NormalizedGenerationJob | null): boolean => {
+    const p = getProgress(snapshot);
+    if (p.total > 0) return isProgressComplete(snapshot) && p.success > 0;
+    const s = String(snapshot?.status ?? "");
+    const success = snapshot?.successCount ?? 0;
+    return (s === "completed" || s === "completed_with_errors") && success > 0;
+  };
+
   const setDownloadPrepError = (message?: string) => {
     setRunnerNotice("Download preparation failed. Retry Download");
     if (message) setJobError(message);
     setJobStage("error");
+  };
+
+  const isJobNotReadyForDownload = (err: unknown): boolean => {
+    const r = asRecord(err);
+    const status = r && typeof (r as any).status === "number" ? Number((r as any).status) : null;
+    if (status !== 409) return false;
+    const data = asRecord((r as any).data);
+    const e = asRecord(data?.error) ?? asRecord((r as any).error);
+    const code = e ? safeText((e as any).code) : "";
+    return code === "JOB_NOT_READY_FOR_DOWNLOAD";
   };
 
   const clearActiveJob = () => {
@@ -458,6 +499,97 @@ export default function DocumentAutomationHub() {
     try {
       window.localStorage.removeItem(storageKey);
     } catch {}
+  };
+
+  const continueJob = async (jobId: string) => {
+    if (!jobId) return;
+    if (runnerRef.current.running) return;
+    setJobError(null);
+    setRunnerNotice(null);
+    setJobStage("generating");
+    setActiveJobId(jobId);
+    runNextConsecutive504Ref.current = 0;
+    try {
+      window.localStorage.setItem(storageKey, jobId);
+    } catch {}
+    runnerRef.current.running = true;
+    runnerRef.current.jobId = jobId;
+    runnerRef.current.startedAt = Date.now();
+    runnerRef.current.runNextAttempts = 0;
+    runnerRef.current.state = "runningItems";
+    try {
+      while (runnerRef.current.running && runnerRef.current.jobId === jobId) {
+        const st = await getGenerationJobStatus(jobId);
+        setJob(st);
+        const p = getProgress(st);
+        const progressCompleteNow = isProgressComplete(st);
+        if (progressCompleteNow) {
+          if (p.success > 0) {
+            await finalizeAndDownload(jobId, { snapshot: st });
+          } else {
+            setJobError("Generation completed but no documents were generated successfully.");
+            setJobStage("error");
+          }
+          return;
+        }
+        if (p.running > 0) {
+          setRunnerNotice("The server is still processing this job. Retrying safely...");
+          runnerRef.current.state = "statusOnly";
+          await new Promise<void>((r) => setTimeout(r, 1500));
+          continue;
+        }
+        if (p.pending <= 0) {
+          setRunnerNotice("The server is still processing this job. Retrying safely...");
+          await new Promise<void>((r) => setTimeout(r, 1500));
+          continue;
+        }
+
+        try {
+          const next = await runNextGenerationJob(jobId);
+          setJob(next);
+          runNextConsecutive504Ref.current = 0;
+          const p2 = getProgress(next);
+          if (isProgressComplete(next) && p2.success > 0) {
+            await finalizeAndDownload(jobId, { snapshot: next });
+            return;
+          }
+          setRunnerNotice(formatProcessingNotice(next));
+          const backoff = 800 + Math.floor(Math.random() * 700);
+          await new Promise<void>((r) => setTimeout(r, backoff));
+        } catch (err) {
+          const r = asRecord(err);
+          const status =
+            r && typeof (r as any).status === "number" ? Number((r as any).status) : null;
+          if (status === 504 || status === 503 || err instanceof RequestTimeoutError) {
+            runNextConsecutive504Ref.current += 1;
+            setRunnerNotice("The server is still processing this job. Retrying safely...");
+            try {
+              const st2 = await getGenerationJobStatus(jobId);
+              setJob(st2);
+              const p3 = getProgress(st2);
+              if (isProgressComplete(st2) && p3.success > 0) {
+                await finalizeAndDownload(jobId, { snapshot: st2 });
+                return;
+              }
+              if (runNextConsecutive504Ref.current >= 3) {
+                setRunnerNotice("Generation is slow/stuck. Refresh Status or Continue Job.");
+                setJobStage("ready");
+                return;
+              }
+            } catch {}
+            const backoff = 2000 + Math.floor(Math.random() * 3000);
+            await new Promise<void>((r2) => setTimeout(r2, backoff));
+            continue;
+          }
+          const msg = extractErrorMessage(err);
+          setJobError(msg);
+          setJobStage("error");
+          return;
+        }
+      }
+    } finally {
+      runnerRef.current.running = false;
+    }
   };
 
   const finalizeAndDownload = async (
@@ -491,7 +623,13 @@ export default function DocumentAutomationHub() {
       }
 
       const s = String(snap.status ?? "");
+      const p = getProgress(snap);
       const progressCompleteNow = isProgressComplete(snap);
+      if (!progressCompleteNow || p.success <= 0) {
+        setRunnerNotice(formatProcessingNotice(snap));
+        setJobStage("generating");
+        return;
+      }
       const shouldFinalize =
         snap.nextAction === "finalize" ||
         s === "finalizing" ||
@@ -520,11 +658,21 @@ export default function DocumentAutomationHub() {
       }
 
       setJobStage("preparing_download");
-      await downloadZipFromManifest(jobId, snap);
+      try {
+        await downloadZipFromManifest(jobId, snap);
+      } catch (err) {
+        if (isJobNotReadyForDownload(err)) {
+          setRunnerNotice(formatProcessingNotice(snap));
+          setJobStage("generating");
+          await continueJob(jobId);
+          return;
+        }
+        throw err;
+      }
       devLog("finalizeAndDownload:downloaded", { jobId });
       clearActiveJob();
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err ?? "");
+      const msg = extractErrorMessage(err);
       devLog("finalizeAndDownload:failed", { jobId, message: msg });
       setDownloadPrepError(msg || undefined);
       throw err;
@@ -552,15 +700,13 @@ export default function DocumentAutomationHub() {
         setJob(st);
         setJobStage("ready");
         devLog("job:recovered", { jobId, status: String(st.status ?? ""), nextAction: st.nextAction ?? null });
-        if (
-          st.nextAction === "download" ||
-          String(st.status ?? "") === "completed" ||
-          String(st.status ?? "") === "completed_with_errors"
-        ) {
-          setRunnerNotice("Previous generation job found. You can retry download.");
-        }
+        setRunnerNotice(
+          canDownloadNow(st)
+            ? "Previous generation job found. You can retry download."
+            : formatProcessingNotice(st),
+        );
       } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err ?? "");
+        const msg = extractErrorMessage(err);
         setJobError(msg || "Failed to recover previous job");
         setJobStage("error");
       }
@@ -1366,18 +1512,21 @@ export default function DocumentAutomationHub() {
                 continue;
               }
 
-              if (st.nextAction === "download" || s === "completed" || s === "completed_with_errors") {
-                runnerRef.current.state = "downloading";
-                stopPolling();
-                if (p.success <= 0) {
-                  setJobError("Generation completed but no documents were generated successfully.");
-                  setJobStage("error");
-                  return;
+              if (
+                st.nextAction === "download" ||
+                s === "completed" ||
+                s === "completed_with_errors"
+              ) {
+                setRunnerNotice(formatProcessingNotice(st));
+                if (p.pending > 0 && p.running === 0) {
+                  runnerRef.current.state = "runningItems";
+                  runnerRef.current.statusOnlyUntil = 0;
+                  await new Promise<void>((r) => setTimeout(r, 250));
+                  continue;
                 }
-                try {
-                  await finalizeAndDownload(jobId, { snapshot: st });
-                } catch {}
-                return;
+                runnerRef.current.state = "statusOnly";
+                await new Promise<void>((r) => setTimeout(r, 1500));
+                continue;
               }
 
               if (st.nextAction === "stop" || s === "failed" || s === "cancelled") {
@@ -1449,11 +1598,12 @@ export default function DocumentAutomationHub() {
             pollAbortRef.current = ctrl;
             const next = await runNextGenerationJob(jobId, { signal: ctrl.signal });
             pollConsecutiveErrorRef.current = 0;
+            runNextConsecutive504Ref.current = 0;
             setJob(next);
             setRunnerNotice(null);
             const st = String(next.status ?? "");
-              const p = getProgress(next);
-              const progressCompleteNow = isProgressComplete(next);
+            const p = getProgress(next);
+            const progressCompleteNow = isProgressComplete(next);
             const nextAction =
               next.nextAction ??
               (() => {
@@ -1494,18 +1644,15 @@ export default function DocumentAutomationHub() {
               } catch {}
               return;
             }
-            if (nextAction === "finalize" || nextAction === "download") {
-              runnerRef.current.state = nextAction === "finalize" ? "finalizing" : "downloading";
-              stopPolling();
-              if (p.success <= 0 && nextAction === "download") {
-                setJobError("Generation completed but no documents were generated successfully.");
-                setJobStage("error");
-                return;
-              }
-              try {
-                await finalizeAndDownload(jobId, { snapshot: next });
-              } catch {}
-              return;
+            if (
+              nextAction === "finalize" ||
+              nextAction === "download" ||
+              nextAction === "continue" ||
+              nextAction === "wait"
+            ) {
+              setRunnerNotice(formatProcessingNotice(next));
+              await new Promise<void>((r) => setTimeout(r, 600));
+              continue;
             }
             if (nextAction === "stop" || st === "failed") {
               runnerRef.current.state = st === "cancelled" ? "cancelled" : "failed";
@@ -1598,7 +1745,7 @@ export default function DocumentAutomationHub() {
                   return;
                 }
               } catch (err2) {
-                const msg = err2 instanceof Error ? err2.message : String(err2 ?? "");
+                const msg = extractErrorMessage(err2);
                 setJobError(msg || "Failed to resume job");
                 setJobStage("error");
                 return;
@@ -1609,14 +1756,30 @@ export default function DocumentAutomationHub() {
               continue;
             }
             if (status === 503 || status === 504) {
-              setRunnerNotice("Generation is still processing. Please wait. Do not click Generate again.");
+              runNextConsecutive504Ref.current += 1;
+              setRunnerNotice("The server is still processing this job. Retrying safely...");
               try {
                 const st = await getGenerationJobStatus(jobId);
                 setJob(st);
+                const p = getProgress(st);
+                if (isProgressComplete(st) && p.success > 0) {
+                  stopPolling();
+                  try {
+                    await finalizeAndDownload(jobId, { snapshot: st });
+                  } catch {}
+                  return;
+                }
+                if (runNextConsecutive504Ref.current >= 3) {
+                  stopPolling();
+                  setRunnerNotice("Generation is slow/stuck. Refresh Status or Continue Job.");
+                  setJobStage("ready");
+                  return;
+                }
               } catch {}
               runnerRef.current.state = "statusOnly";
               runnerRef.current.statusOnlyUntil = Date.now() + 5_000;
-              await new Promise<void>((r) => setTimeout(r, 2500));
+              const backoff = 2000 + Math.floor(Math.random() * 3000);
+              await new Promise<void>((r) => setTimeout(r, backoff));
               continue;
             }
             pollConsecutiveErrorRef.current += 1;
@@ -2392,7 +2555,7 @@ export default function DocumentAutomationHub() {
                                     });
                                     setJobStage("ready");
                                   } catch (err) {
-                                    const msg = err instanceof Error ? err.message : String(err ?? "");
+                                    const msg = extractErrorMessage(err);
                                     setJobError(msg || "Failed to refresh job status");
                                     setJobStage("error");
                                   }
@@ -2401,22 +2564,51 @@ export default function DocumentAutomationHub() {
                             >
                               Refresh Status
                             </Button>
-                            <Button
-                              type="button"
-                              size="sm"
-                              variant="outline"
-                              disabled={busy || !activeJobId}
-                              onClick={() => {
-                                if (!activeJobId) return;
-                                void (async () => {
-                                  try {
-                                    await finalizeAndDownload(activeJobId, { force: true, snapshot: job });
-                                  } catch {}
-                                })();
-                              }}
-                            >
-                              Retry Download
-                            </Button>
+                            {(() => {
+                              const p = getProgress(job);
+                              const s = String(job?.status ?? "");
+                              const retryEnabled =
+                                Boolean(activeJobId) &&
+                                (job?.canDownload === true || canDownloadNow(job)) &&
+                                (isProgressComplete(job) ||
+                                  s === "completed" ||
+                                  s === "completed_with_errors");
+                              const showContinue = Boolean(activeJobId) && !retryEnabled && (p.pending > 0 || p.running > 0);
+                              if (showContinue) {
+                                return (
+                                  <Button
+                                    type="button"
+                                    size="sm"
+                                    variant="outline"
+                                    disabled={busy || !activeJobId}
+                                    onClick={() => {
+                                      if (!activeJobId) return;
+                                      void continueJob(activeJobId);
+                                    }}
+                                  >
+                                    Continue Job
+                                  </Button>
+                                );
+                              }
+                              return (
+                                <Button
+                                  type="button"
+                                  size="sm"
+                                  variant="outline"
+                                  disabled={busy || !retryEnabled || !activeJobId}
+                                  onClick={() => {
+                                    if (!activeJobId) return;
+                                    void (async () => {
+                                      try {
+                                        await finalizeAndDownload(activeJobId, { force: true, snapshot: job });
+                                      } catch {}
+                                    })();
+                                  }}
+                                >
+                                  Retry Download
+                                </Button>
+                              );
+                            })()}
                             <Button
                               type="button"
                               size="sm"

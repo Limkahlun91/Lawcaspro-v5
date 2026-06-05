@@ -50,7 +50,8 @@ export type NormalizedGenerationJob = {
   runningCount?: number;
   totalCount: number;
   progress?: { total: number; success: number; failed: number; pending: number; running: number };
-  nextAction?: "run_next" | "finalize" | "download" | "stop";
+  nextAction?: "run_next" | "finalize" | "download" | "stop" | "wait" | "continue" | "failed";
+  canDownload?: boolean;
   downloadUrl?: string | null;
   downloadManifestUrl?: string | null;
   downloadObjectPath?: string | null;
@@ -247,9 +248,14 @@ export function normalizeGenerationJob(raw: unknown): NormalizedGenerationJob {
     nextActionRaw === "download" ||
     nextActionRaw === "run_next" ||
     nextActionRaw === "finalize" ||
-    nextActionRaw === "stop"
-      ? (nextActionRaw as "run_next" | "finalize" | "download" | "stop")
+    nextActionRaw === "stop" ||
+    nextActionRaw === "wait" ||
+    nextActionRaw === "continue" ||
+    nextActionRaw === "failed"
+      ? (nextActionRaw as "run_next" | "finalize" | "download" | "stop" | "wait" | "continue" | "failed")
       : undefined;
+
+  const canDownload = typeof (root as any).canDownload === "boolean" ? Boolean((root as any).canDownload) : undefined;
 
   const downloadUrl =
     asString((root as any).downloadUrl ?? (root as any).download_url ?? (jobRaw as any).downloadUrl) ?? null;
@@ -289,6 +295,7 @@ export function normalizeGenerationJob(raw: unknown): NormalizedGenerationJob {
     runningCount,
     progress,
     nextAction,
+    canDownload,
     downloadUrl,
     downloadManifestUrl,
     downloadObjectPath,

@@ -11308,6 +11308,11 @@ async function convertDocxToPdf(docxBytes: Buffer): Promise<Buffer> {
     const { execFile } = await import("node:child_process");
     const { promisify } = await import("node:util");
     const execFileAsync = promisify(execFile);
+    const timeoutMs = (() => {
+      const raw = process.env.DOCX_TO_PDF_TIMEOUT_MS;
+      const n = typeof raw === "string" ? Number(raw) : NaN;
+      return Number.isFinite(n) && n > 0 ? Math.trunc(n) : 20000;
+    })();
 
     const binRaw =
       (typeof process.env.LIBREOFFICE_BIN === "string"
@@ -11322,16 +11327,37 @@ async function convertDocxToPdf(docxBytes: Buffer): Promise<Buffer> {
     try {
       const inPath = join(dir, "document.docx");
       await writeFile(inPath, docxBytes);
-      await execFileAsync(binRaw, [
-        "--headless",
-        "--nologo",
-        "--nofirststartwizard",
-        "--convert-to",
-        "pdf",
-        "--outdir",
-        dir,
-        inPath,
-      ]);
+      try {
+        await execFileAsync(
+          binRaw,
+          [
+            "--headless",
+            "--nologo",
+            "--nofirststartwizard",
+            "--convert-to",
+            "pdf",
+            "--outdir",
+            dir,
+            inPath,
+          ],
+          { timeout: timeoutMs, killSignal: "SIGKILL" } as any,
+        );
+      } catch (err) {
+        const rec = err && typeof err === "object" ? (err as any) : null;
+        const timedOut =
+          rec?.code === "ETIMEDOUT" ||
+          rec?.signal === "SIGKILL" ||
+          rec?.killed === true ||
+          /timed?\s*out|timeout/i.test(String(rec?.message ?? ""));
+        if (timedOut) {
+          throw new DocumentGenerationError(
+            503,
+            "DOCX_TO_PDF_TIMEOUT",
+            "PDF conversion timed out",
+          );
+        }
+        throw err;
+      }
       const outPath = join(dir, "document.pdf");
       const out = await readFile(outPath);
       if (!Buffer.isBuffer(out) || out.length < 800) {
@@ -17236,7 +17262,7 @@ async function processAutomationGenerationJobStep(
     typeof opts?.deadlineAt === "number" && Number.isFinite(opts.deadlineAt)
       ? Math.trunc(opts.deadlineAt)
       : null;
-  if (deadlineAt != null && deadlineAt - Date.now() < 2_500) {
+  if (deadlineAt != null && deadlineAt - Date.now() < 1_500) {
     try {
       const setParts: Array<ReturnType<typeof sql>> = [sql`status = 'pending'`];
       if (caps.items.phase) setParts.push(sql`phase = 'deadline_stop'`);
@@ -17279,6 +17305,32 @@ async function processAutomationGenerationJobStep(
     } catch {}
     return;
   }
+
+  const withItemTimeout = async <T,>(
+    p: Promise<T>,
+    timeoutMs: number,
+  ): Promise<T> => {
+    const ms = Number.isFinite(timeoutMs) ? Math.max(1, Math.trunc(timeoutMs)) : 20_000;
+    return await new Promise<T>((resolve, reject) => {
+      const t = setTimeout(() => {
+        reject(
+          new DocumentGenerationError(
+            503,
+            "ITEM_TIMEOUT",
+            "Generation step timed out",
+            { timeoutMs: ms },
+          ),
+        );
+      }, ms);
+      p.then((v) => {
+        clearTimeout(t);
+        resolve(v);
+      }).catch((e) => {
+        clearTimeout(t);
+        reject(e);
+      });
+    });
+  };
 
   const actorId = reqIdToNumber((job as any).created_by);
   const jobConfig =
@@ -17442,7 +17494,7 @@ async function processAutomationGenerationJobStep(
         }
       }
       const genStartedAt = Date.now();
-      const out = await generateMasterDocument({
+      const out = await withItemTimeout(generateMasterDocument({
         r,
         firmId: args.firmId,
         actorId,
@@ -17461,7 +17513,7 @@ async function processAutomationGenerationJobStep(
         preloadedCaseContext,
         preloadedMasterDoc,
         requestCache,
-      });
+      }), 20_000);
       timing.generate_ms = Date.now() - genStartedAt;
       await finishGenerationRunSuccess(
         r,
@@ -17722,7 +17774,7 @@ async function processAutomationGenerationJobStep(
       await persistJobCache();
     }
 
-    const out = await generateFirmDocument({
+    const out = await withItemTimeout(generateFirmDocument({
       r,
       firmId: args.firmId,
       actorId,
@@ -17748,7 +17800,7 @@ async function processAutomationGenerationJobStep(
         filename: sourceTemplateFileName,
       },
       requestCache,
-    });
+    }), 20_000);
     await finishGenerationRunSuccess(
       r,
       args.firmId,
@@ -20249,18 +20301,37 @@ router.post(
         progress = fin.progress;
       }
 
-      const nextAction = resolveDocGenNextAction({
-        status,
-        progress,
-        downloadObjectPath:
-          typeof (job as any).download_object_path === "string"
-            ? String((job as any).download_object_path)
-            : null,
-      });
+      const progressComplete =
+        progress.total > 0 &&
+        progress.pending === 0 &&
+        progress.running === 0 &&
+        progress.success + progress.failed === progress.total;
+      const canDownload = progressComplete && progress.success > 0;
+      const baseNextAction =
+        progress.total > 0 && progress.failed === progress.total
+          ? ("failed" as const)
+          : canDownload
+            ? ("download" as const)
+            : progress.running > 0
+              ? ("wait" as const)
+              : progress.pending > 0
+                ? ("run_next" as const)
+                : ("wait" as const);
+      const nextAction =
+        (runnerOut.stoppedReason === "deadline" || runnerOut.stoppedReason === "budget") &&
+        baseNextAction === "run_next"
+          ? ("continue" as const)
+          : baseNextAction;
+      const message =
+        nextAction === "continue"
+          ? "Deadline reached, continue next run"
+          : nextAction === "wait"
+            ? "Job is still processing, please wait"
+            : undefined;
       const downloadUrl =
-        nextAction === "download" ? `/documents/jobs/${jobId}/download` : undefined;
+        canDownload ? `/documents/jobs/${jobId}/download` : undefined;
       const downloadManifestUrl =
-        nextAction === "download" ? `/documents/jobs/${jobId}/download-manifest` : undefined;
+        canDownload ? `/documents/jobs/${jobId}/download-manifest` : undefined;
 
       const jobPayload: Record<string, unknown> = {
         ...(job as any),
@@ -20536,20 +20607,26 @@ router.get(
       progress = fin.progress;
     }
 
-    const nextAction = resolveDocGenNextAction({
-      status,
-      progress,
-      downloadObjectPath:
-        typeof (job as any).download_object_path === "string"
-          ? String((job as any).download_object_path)
-          : null,
-    });
+    const progressComplete =
+      progress.total > 0 &&
+      progress.pending === 0 &&
+      progress.running === 0 &&
+      progress.success + progress.failed === progress.total;
+    const canDownload = progressComplete && progress.success > 0;
+    const nextAction =
+      progress.total > 0 && progress.failed === progress.total
+        ? ("failed" as const)
+        : canDownload
+          ? ("download" as const)
+          : progress.running > 0
+            ? ("wait" as const)
+            : progress.pending > 0
+              ? ("run_next" as const)
+              : ("wait" as const);
     const downloadUrl =
-      nextAction === "download" ? `/documents/jobs/${jobId}/download` : undefined;
+      canDownload ? `/documents/jobs/${jobId}/download` : undefined;
     const downloadManifestUrl =
-      nextAction === "download"
-        ? `/documents/jobs/${jobId}/download-manifest`
-        : undefined;
+      canDownload ? `/documents/jobs/${jobId}/download-manifest` : undefined;
 
     const jobPayload: Record<string, unknown> = {
       ...(job as any),
@@ -20570,6 +20647,7 @@ router.get(
       nextAction,
       ...(downloadUrl ? { downloadUrl } : {}),
       ...(downloadManifestUrl ? { downloadManifestUrl } : {}),
+      canDownload,
       job: jobPayload,
       items,
       meta: {
@@ -21225,20 +21303,26 @@ router.get(
       progress = fin.progress;
     }
 
-    const nextAction = resolveDocGenNextAction({
-      status,
-      progress,
-      downloadObjectPath:
-        typeof (job as any).download_object_path === "string"
-          ? String((job as any).download_object_path)
-          : null,
-    });
+    const progressComplete =
+      progress.total > 0 &&
+      progress.pending === 0 &&
+      progress.running === 0 &&
+      progress.success + progress.failed === progress.total;
+    const canDownload = progressComplete && progress.success > 0;
+    const nextAction =
+      progress.total > 0 && progress.failed === progress.total
+        ? ("failed" as const)
+        : canDownload
+          ? ("download" as const)
+          : progress.running > 0
+            ? ("wait" as const)
+            : progress.pending > 0
+              ? ("run_next" as const)
+              : ("wait" as const);
     const downloadUrl =
-      nextAction === "download" ? `/documents/jobs/${jobId}/download` : undefined;
+      canDownload ? `/documents/jobs/${jobId}/download` : undefined;
     const downloadManifestUrl =
-      nextAction === "download"
-        ? `/documents/jobs/${jobId}/download-manifest`
-        : undefined;
+      canDownload ? `/documents/jobs/${jobId}/download-manifest` : undefined;
     const jobPayload: Record<string, unknown> = {
       ...(job as any),
       status,
@@ -21249,15 +21333,6 @@ router.get(
       ...(downloadUrl ? { downloadUrl } : {}),
       ...(downloadManifestUrl ? { downloadManifestUrl } : {}),
     };
-    const progressComplete =
-      progress.total > 0 &&
-      progress.pending === 0 &&
-      progress.running === 0 &&
-      progress.success + progress.failed === progress.total;
-    const canDownload =
-      progressComplete ||
-      status === "completed" ||
-      status === "completed_with_errors";
     const completedAt =
       job.finished_at ? new Date(String(job.finished_at)).toISOString() : null;
 
@@ -21270,9 +21345,7 @@ router.get(
       nextAction,
       ...(downloadUrl ? { downloadUrl } : {}),
       ...(downloadManifestUrl ? { downloadManifestUrl } : {}),
-      ...(canDownload
-        ? { canDownload: true, downloadManifestUrl: `/documents/jobs/${jobId}/download-manifest` }
-        : { canDownload: false }),
+      canDownload,
       completedAt,
       job: jobPayload,
       ...(status === "failed"
