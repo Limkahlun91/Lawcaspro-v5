@@ -76,6 +76,7 @@ import {
 import {
   listDocumentVariables,
   joinNamesWithAmpersand,
+  formatLegalDate,
   resolveVariablesForTemplate,
   type PlaceholderWarning,
 } from "../lib/documentVariables.js";
@@ -1125,23 +1126,13 @@ function formatDateValue(raw: unknown): Date | null {
 }
 
 function fmtDateDDMMYYYY(raw: unknown): string {
-  const d = formatDateValue(raw);
-  if (!d) return "";
-  return d.toLocaleDateString("en-MY", {
-    day: "2-digit",
-    month: "2-digit",
-    year: "numeric",
-  });
+  const s = formatLegalDate(raw);
+  return s === "—" ? "" : s;
 }
 
 function fmtDateLong(raw: unknown): string {
-  const d = formatDateValue(raw);
-  if (!d) return "";
-  return d.toLocaleDateString("en-MY", {
-    day: "2-digit",
-    month: "long",
-    year: "numeric",
-  });
+  const s = formatLegalDate(raw);
+  return s === "—" ? "" : s;
 }
 
 function fmtDateIso(raw: unknown): string {

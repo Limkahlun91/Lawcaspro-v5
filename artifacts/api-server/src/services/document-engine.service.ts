@@ -5,6 +5,7 @@ import { PDFDocument, rgb, StandardFonts } from "pdf-lib";
 import { db, casesTable, firmsTable, templatesTable } from "@workspace/db";
 import { and, eq, isNull, or } from "drizzle-orm";
 import { SupabaseStorageService } from "../lib/objectStorage.js";
+import { formatLegalDate } from "../lib/documentVariables.js";
 
 const supabaseStorage = new SupabaseStorageService();
 
@@ -47,6 +48,7 @@ export class DocumentEngineService {
           ? Number(caseData.spaPrice)
           : null;
 
+    const dateToday = formatLegalDate(today);
     return {
       case_id: caseData.id,
       reference_no: caseData.referenceNo,
@@ -56,7 +58,7 @@ export class DocumentEngineService {
       title_type: caseData.titleType,
       parcel_no: caseData.parcelNo ?? "",
       spa_price: Number.isFinite(spaPrice as number) ? spaPrice : "",
-      date_today: today.toLocaleDateString("en-MY"),
+      date_today: dateToday === "—" ? "" : dateToday,
       date_today_iso: today.toISOString().slice(0, 10),
     };
   }

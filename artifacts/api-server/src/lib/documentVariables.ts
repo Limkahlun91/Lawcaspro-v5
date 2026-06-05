@@ -251,17 +251,110 @@ export function resolveValueFromPath(root: Record<string, unknown>, path: string
   return cur;
 }
 
-function formatDateDmy(v: unknown): string | null {
-  const s = typeof v === "string" ? v.trim() : "";
-  const d =
-    v instanceof Date ? v
-    : s ? new Date(s)
-    : null;
-  if (!d || Number.isNaN(d.getTime())) return typeof v === "string" ? v : null;
-  const dd = String(d.getDate()).padStart(2, "0");
-  const mm = String(d.getMonth() + 1).padStart(2, "0");
-  const yyyy = String(d.getFullYear());
-  return `${dd}/${mm}/${yyyy}`;
+function parseMonthName(v: string): number | null {
+  const s = v.trim().toLowerCase();
+  const map: Record<string, number> = {
+    jan: 1, january: 1,
+    feb: 2, february: 2,
+    mar: 3, march: 3,
+    apr: 4, april: 4,
+    may: 5,
+    jun: 6, june: 6,
+    jul: 7, july: 7,
+    aug: 8, august: 8,
+    sep: 9, sept: 9, september: 9,
+    oct: 10, october: 10,
+    nov: 11, november: 11,
+    dec: 12, december: 12,
+  };
+  return typeof map[s] === "number" ? map[s] : null;
+}
+
+function isValidYmd(y: number, m: number, d: number): boolean {
+  if (!Number.isFinite(y) || !Number.isFinite(m) || !Number.isFinite(d)) return false;
+  if (y < 1000 || y > 9999) return false;
+  if (m < 1 || m > 12) return false;
+  if (d < 1 || d > 31) return false;
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  return dt.getUTCFullYear() === y && dt.getUTCMonth() === m - 1 && dt.getUTCDate() === d;
+}
+
+export function formatLegalDate(value: unknown): string {
+  if (value === null || value === undefined) return "—";
+  if (typeof value === "string") {
+    const s = value.trim();
+    if (!s) return "—";
+    {
+      const m = /^(\d{4})-(\d{1,2})-(\d{1,2})(?:$|[T\s])/.exec(s);
+      if (m) {
+        const y = Number(m[1]);
+        const mo = Number(m[2]);
+        const d = Number(m[3]);
+        if (!isValidYmd(y, mo, d)) return "—";
+        return `${String(d).padStart(2, "0")}.${String(mo).padStart(2, "0")}.${String(y)}`;
+      }
+    }
+    {
+      const m = /^(\d{1,2})[/.](\d{1,2})[/.](\d{4})$/.exec(s);
+      if (m) {
+        const d = Number(m[1]);
+        const mo = Number(m[2]);
+        const y = Number(m[3]);
+        if (!isValidYmd(y, mo, d)) return "—";
+        return `${String(d).padStart(2, "0")}.${String(mo).padStart(2, "0")}.${String(y)}`;
+      }
+    }
+    {
+      const m = /^(\d{4})[/.](\d{1,2})[/.](\d{1,2})$/.exec(s);
+      if (m) {
+        const y = Number(m[1]);
+        const mo = Number(m[2]);
+        const d = Number(m[3]);
+        if (!isValidYmd(y, mo, d)) return "—";
+        return `${String(d).padStart(2, "0")}.${String(mo).padStart(2, "0")}.${String(y)}`;
+      }
+    }
+    {
+      const m = /^(\d{1,2})\s+([A-Za-z]{3,9})\s+(\d{4})$/.exec(s);
+      if (m) {
+        const d = Number(m[1]);
+        const mo = parseMonthName(m[2]);
+        const y = Number(m[3]);
+        if (!mo) return "—";
+        if (!isValidYmd(y, mo, d)) return "—";
+        return `${String(d).padStart(2, "0")}.${String(mo).padStart(2, "0")}.${String(y)}`;
+      }
+    }
+    const dt = new Date(s);
+    if (Number.isNaN(dt.getTime())) return "—";
+    const d = dt.getUTCDate();
+    const mo = dt.getUTCMonth() + 1;
+    const y = dt.getUTCFullYear();
+    if (!isValidYmd(y, mo, d)) return "—";
+    return `${String(d).padStart(2, "0")}.${String(mo).padStart(2, "0")}.${String(y)}`;
+  }
+
+  if (value instanceof Date) {
+    if (Number.isNaN(value.getTime())) return "—";
+    const d = value.getUTCDate();
+    const mo = value.getUTCMonth() + 1;
+    const y = value.getUTCFullYear();
+    if (!isValidYmd(y, mo, d)) return "—";
+    return `${String(d).padStart(2, "0")}.${String(mo).padStart(2, "0")}.${String(y)}`;
+  }
+
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) return "—";
+    const dt = new Date(value);
+    if (Number.isNaN(dt.getTime())) return "—";
+    const d = dt.getUTCDate();
+    const mo = dt.getUTCMonth() + 1;
+    const y = dt.getUTCFullYear();
+    if (!isValidYmd(y, mo, d)) return "—";
+    return `${String(d).padStart(2, "0")}.${String(mo).padStart(2, "0")}.${String(y)}`;
+  }
+
+  return "—";
 }
 
 function formatCurrency(v: unknown): string | null {
@@ -317,7 +410,7 @@ export function applyFormatter(formatter: string | null | undefined, value: unkn
   if (!f) return value;
   if (f === "upper") return typeof value === "string" ? value.toUpperCase() : toScalarString(value)?.toUpperCase() ?? value;
   if (f === "lower") return typeof value === "string" ? value.toLowerCase() : toScalarString(value)?.toLowerCase() ?? value;
-  if (f === "date_dmy") return formatDateDmy(value) ?? value;
+  if (f === "date_dmy") return formatLegalDate(value);
   if (f === "currency") return formatCurrency(value) ?? value;
   if (f === "nric") return formatNric(value) ?? value;
   return value;
@@ -373,10 +466,27 @@ export function resolveVariablesForTemplate(params: {
     if (isEmptyValue(val) && binding?.fallbackValue) val = binding.fallbackValue;
     if (isEmptyValue(val)) val = null;
 
+    const keyLower = String(key).toLowerCase();
+    const labelLower = String(def?.label ?? "").toLowerCase();
+    const isDateLike =
+      def?.valueType === "date" ||
+      String(formatter ?? "").trim().toLowerCase() === "date_dmy" ||
+      keyLower.includes("_date") ||
+      keyLower.endsWith("date") ||
+      keyLower.includes("date_") ||
+      keyLower.includes("issued_date") ||
+      keyLower.includes("stamped_date") ||
+      keyLower.includes("received_on") ||
+      labelLower.includes("date") ||
+      labelLower.includes("issued") ||
+      labelLower.includes("stamped") ||
+      labelLower.includes("received on");
+    if (isDateLike) val = formatLegalDate(val);
+
     resolved[key] = val;
 
     if (binding?.isRequired && placeholderSet.has(key)) {
-      if (val === null || val === undefined || (typeof val === "string" && val.trim() === "")) {
+      if (val === null || val === undefined || val === "—" || (typeof val === "string" && val.trim() === "")) {
         missing.push({ variableKey: key, reason: "Required variable is missing" });
       }
     }
