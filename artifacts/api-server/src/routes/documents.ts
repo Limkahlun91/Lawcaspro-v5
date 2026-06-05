@@ -14733,11 +14733,13 @@ async function touchJobHeartbeat(
   touchActiveRunnerHeartbeat(args);
   if (!caps.jobs.lastHeartbeatAt) return;
   try {
+    const setParts: Array<ReturnType<typeof sql>> = [sql`last_heartbeat_at = now()`];
+    if (caps.jobs.timeoutAt) setParts.push(sql`timeout_at = now() + interval '2 minutes'`);
     await queryRows(
       r,
       sql`
       UPDATE document_generation_jobs
-      SET last_heartbeat_at = now()
+      SET ${sql.join(setParts, sql`, `)}
       WHERE id = ${args.jobId} AND firm_id = ${args.firmId}
     `,
     );
@@ -15383,7 +15385,7 @@ async function recoverStaleDocumentGenerationJob(
         AND job_id = ${args.jobId}
         AND status = 'running'
         AND started_at IS NOT NULL
-        AND started_at < now() - interval '5 minutes'
+        AND started_at < now() - (${Math.max(1, Math.trunc(args.staleMs))}::int * interval '1 millisecond')
     `,
     );
   }
@@ -15419,8 +15421,8 @@ async function recoverStaleDocumentGenerationJob(
 async function startDocumentGenerationJobRunner(
   r: DbConn,
   args: { firmId: number; jobId: string },
-  opts?: { maxSteps?: number; maxMs?: number; caps?: DocGenRunnerSchemaCaps },
-): Promise<void> {
+  opts?: { maxSteps?: number; maxMs?: number; deadlineAt?: number; caps?: DocGenRunnerSchemaCaps },
+): Promise<{ stoppedReason: "no_work" | "deadline" | "budget" | "error"; stepsRun: number; elapsedMs: number }> {
   const key = `${args.firmId}:${args.jobId}`;
   activeDocumentGenerationJobRunners.set(key, {
     startedAt: Date.now(),
@@ -15435,6 +15437,10 @@ async function startDocumentGenerationJobRunner(
       ? Math.max(50, Math.trunc(opts.maxMs))
       : 1200;
   const started = Date.now();
+  const deadlineAt =
+    typeof opts?.deadlineAt === "number" && Number.isFinite(opts.deadlineAt)
+      ? Math.trunc(opts.deadlineAt)
+      : null;
   const caps =
     opts?.caps ??
     ({
@@ -15472,7 +15478,7 @@ async function startDocumentGenerationJobRunner(
         setParts.push(sql`runner_attempts = COALESCE(runner_attempts, 0) + 1`);
       if (caps.jobs.timeoutAt)
         setParts.push(
-          sql`timeout_at = COALESCE(timeout_at, now() + interval '10 minutes')`,
+          sql`timeout_at = now() + interval '2 minutes'`,
         );
       if (caps.jobs.lastHeartbeatAt)
         setParts.push(sql`last_heartbeat_at = now()`);
@@ -15489,8 +15495,13 @@ async function startDocumentGenerationJobRunner(
       }
     }
 
+    let stepsRun = 0;
     for (let i = 0; i < maxSteps && Date.now() - started < maxMs; i++) {
-      await processAutomationGenerationJobStep(r, args, caps);
+      if (deadlineAt != null && Date.now() >= deadlineAt) {
+        return { stoppedReason: "deadline", stepsRun, elapsedMs: Date.now() - started };
+      }
+      await processAutomationGenerationJobStep(r, args, caps, { deadlineAt });
+      stepsRun += 1;
       const rows = await queryRows(
         r,
         sql`
@@ -15509,8 +15520,9 @@ async function startDocumentGenerationJobRunner(
         status === "failed" ||
         pending <= 0
       )
-        return;
+        return { stoppedReason: "no_work", stepsRun, elapsedMs: Date.now() - started };
     }
+    return { stoppedReason: deadlineAt != null ? "budget" : "no_work", stepsRun, elapsedMs: Date.now() - started };
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
     try {
@@ -15532,6 +15544,7 @@ async function startDocumentGenerationJobRunner(
         `,
       );
     } catch {}
+    return { stoppedReason: "error", stepsRun: 0, elapsedMs: Date.now() - started };
   } finally {
     activeDocumentGenerationJobRunners.delete(key);
   }
@@ -15541,6 +15554,7 @@ async function processAutomationGenerationJobStep(
   r: DbConn,
   args: { firmId: number; jobId: string },
   caps: DocGenRunnerSchemaCaps,
+  opts?: { deadlineAt?: number | null },
 ): Promise<void> {
   const stepStartedAt = Date.now();
   const timing: Record<string, number> = {};
@@ -15770,6 +15784,75 @@ async function processAutomationGenerationJobStep(
     templateSource === "master"
       ? Number((item as any).platform_document_id)
       : NaN;
+
+  const jobItemId = Number((item as any).id) || null;
+  try {
+    logger.info(
+      {
+        firmId: args.firmId,
+        jobId: args.jobId,
+        userId: reqIdToNumber((job as any).created_by) || null,
+        itemId: jobItemId,
+        caseId,
+        templateSource,
+        templateId: templateSource === "master" ? platformDocumentId : templateId,
+        elapsedMs: Date.now() - stepStartedAt,
+        remainingBudgetMs:
+          typeof opts?.deadlineAt === "number" && Number.isFinite(opts.deadlineAt)
+            ? Math.max(0, Math.trunc(opts.deadlineAt) - Date.now())
+            : null,
+      },
+      "docgen.run_next.claimed_item",
+    );
+  } catch {}
+
+  const deadlineAt =
+    typeof opts?.deadlineAt === "number" && Number.isFinite(opts.deadlineAt)
+      ? Math.trunc(opts.deadlineAt)
+      : null;
+  if (deadlineAt != null && deadlineAt - Date.now() < 2_500) {
+    try {
+      const setParts: Array<ReturnType<typeof sql>> = [sql`status = 'pending'`];
+      if (caps.items.phase) setParts.push(sql`phase = 'deadline_stop'`);
+      if (caps.items.diagnostic)
+        setParts.push(
+          sql`diagnostic = jsonb_build_object(
+                'stoppedAt', now(),
+                'reason', 'deadline_stop',
+                'previousStatus', 'running',
+                'startedAt', started_at
+              )`,
+        );
+      await queryRows(
+        r,
+        sql`
+          UPDATE document_generation_job_items
+          SET ${sql.join(setParts, sql`, `)}
+          WHERE id = ${Number((item as any).id)} AND firm_id = ${args.firmId}
+        `,
+      );
+      await updateJobCounts(r, args);
+      await touchJobHeartbeat(r, args, caps);
+      try {
+        const progress = await computeDocGenJobProgress(r, args);
+        logger.info(
+          {
+            firmId: args.firmId,
+            jobId: args.jobId,
+            itemId: jobItemId,
+            caseId,
+            templateSource,
+            templateId: templateSource === "master" ? platformDocumentId : templateId,
+            progress,
+            elapsedMs: Date.now() - stepStartedAt,
+            remainingBudgetMs: Math.max(0, deadlineAt - Date.now()),
+          },
+          "docgen.run_next.deadline_stop",
+        );
+      } catch {}
+    } catch {}
+    return;
+  }
 
   const actorId = reqIdToNumber((job as any).created_by);
   const jobConfig =
@@ -16039,18 +16122,25 @@ async function processAutomationGenerationJobStep(
       }
       await touchJobHeartbeat(r, args, caps);
       try {
+        const progress = await computeDocGenJobProgress(r, args);
         logger.info(
           {
             firmId: args.firmId,
             jobId: args.jobId,
-            jobItemId: Number((item as any).id) || null,
-            templateSource,
-            templateId: Number.isFinite(platformDocumentId) ? platformDocumentId : null,
+            userId: actorId > 0 ? actorId : null,
+            itemId: Number((item as any).id) || null,
             caseId,
-            ...timing,
-            total_ms: Date.now() - stepStartedAt,
+            templateSource,
+            templateId: templateSource === "master" ? platformDocumentId : templateId,
+            progress,
+            elapsedMs: Date.now() - stepStartedAt,
+            remainingBudgetMs:
+              typeof opts?.deadlineAt === "number" && Number.isFinite(opts.deadlineAt)
+                ? Math.max(0, Math.trunc(opts.deadlineAt) - Date.now())
+                : null,
+            timing,
           },
-          "[documents] run-next timing",
+          "docgen.run_next.item_success",
         );
       } catch {}
       return;
@@ -16475,6 +16565,30 @@ async function processAutomationGenerationJobStep(
         `,
       );
     }
+
+    try {
+      const progress = await computeDocGenJobProgress(r, args);
+      logger.info(
+        {
+          firmId: args.firmId,
+          jobId: args.jobId,
+          userId: actorId > 0 ? actorId : null,
+          itemId: Number((item as any).id) || null,
+          caseId,
+          templateSource,
+          templateId: templateSource === "master" ? platformDocumentId : templateId,
+          errorCode: mapped.code,
+          errorMessage: mapped.message,
+          progress,
+          elapsedMs: Date.now() - stepStartedAt,
+          remainingBudgetMs:
+            typeof opts?.deadlineAt === "number" && Number.isFinite(opts.deadlineAt)
+              ? Math.max(0, Math.trunc(opts.deadlineAt) - Date.now())
+              : null,
+        },
+        "docgen.run_next.item_failed",
+      );
+    } catch {}
 
     await updateJobCounts(r, args);
     await finalizeDocGenJobIfDone(r, args);
@@ -18179,7 +18293,7 @@ router.post(
         ${jobId}::uuid, ${req.firmId!}, 'document_automation', 'pending', ${parsed.data.config.action},
         ${JSON.stringify(caseIds)}::jsonb, ${JSON.stringify(firmTemplateIds)}::jsonb, ${JSON.stringify(masterDocIds)}::jsonb, ${JSON.stringify(jobConfig)}::jsonb,
         ${caseIds.length * templateRefs.length}, 0, 0, ${caseIds.length * templateRefs.length},
-        ${req.userId as any}, now(), now(), now() + interval '10 minutes', 0
+        ${req.userId as any}, now(), now(), NULL, 0
       )
     `,
         );
@@ -18329,34 +18443,22 @@ router.post(
       });
       return;
     }
-    let locked = false;
+    const deadlineAt = Date.now() + 8_000;
+    const lockTtlMs = 120_000;
+    let lockAcquired = false;
     try {
-      {
-        const lockRows = await queryRows(
-          r,
-          sql`SELECT pg_try_advisory_lock(hashtext(${jobId}), ${req.firmId!}) AS locked`,
+      try {
+        logger.info(
+          {
+            firmId: req.firmId ?? null,
+            userId: req.userId ?? null,
+            jobId,
+            requestId: requestId ?? null,
+            deadlineMs: deadlineAt - Date.now(),
+          },
+          "docgen.run_next.start",
         );
-        locked = Boolean((lockRows[0] as any)?.locked);
-        if (!locked) {
-          res.status(409).json({
-            ok: false,
-            error: {
-              code: "RUN_NEXT_IN_FLIGHT",
-              message: "Another runner is processing this job. Please retry.",
-              details: null,
-              retryable: true,
-            },
-            meta: {
-              request_id: requestId ?? null,
-              jobId,
-              firmId: req.firmId ?? null,
-              timestamp: new Date().toISOString(),
-              duration_ms: Date.now() - startedAt,
-            },
-          });
-          return;
-        }
-      }
+      } catch {}
       const preJobs = await queryRows(
         r,
         sql`SELECT * FROM document_generation_jobs WHERE id = ${jobId} AND firm_id = ${req.firmId!}`,
@@ -18382,6 +18484,78 @@ router.post(
           },
         });
         return;
+      }
+      const timeoutAtRaw = (preJob as any).timeout_at;
+      const timeoutAtMs =
+        timeoutAtRaw ? new Date(String(timeoutAtRaw)).getTime() : null;
+      const heartbeatStale = isHeartbeatStale(
+        (preJob as any).last_heartbeat_at,
+        lockTtlMs,
+      );
+      const timeoutStale =
+        typeof timeoutAtMs === "number" &&
+        Number.isFinite(timeoutAtMs) &&
+        timeoutAtMs < Date.now();
+      const acquiredRows = await queryRows(
+        r,
+        sql`
+          UPDATE document_generation_jobs
+          SET timeout_at = now() + interval '2 minutes',
+              last_heartbeat_at = now()
+          WHERE id = ${jobId} AND firm_id = ${req.firmId!}
+            AND status IN ('pending','running','finalizing')
+            AND (
+              timeout_at IS NULL OR timeout_at < now()
+              OR last_heartbeat_at IS NULL OR last_heartbeat_at < now() - interval '2 minutes'
+            )
+          RETURNING id
+        `,
+      );
+      lockAcquired = acquiredRows.length > 0;
+      if (!lockAcquired) {
+        res.status(409).json({
+          ok: false,
+          error: {
+            code: "RUN_NEXT_IN_FLIGHT",
+            message: "Another runner is processing this job. Please retry.",
+            details: null,
+            retryable: true,
+          },
+          meta: {
+            request_id: requestId ?? null,
+            jobId,
+            firmId: req.firmId ?? null,
+            userId: req.userId ?? null,
+            lockTimeoutAt: timeoutAtRaw ? String(timeoutAtRaw) : null,
+            lastHeartbeatAt:
+              (preJob as any).last_heartbeat_at
+                ? String((preJob as any).last_heartbeat_at)
+                : null,
+            timestamp: new Date().toISOString(),
+            duration_ms: Date.now() - startedAt,
+          },
+        });
+        return;
+      }
+      if (heartbeatStale || timeoutStale) {
+        try {
+          logger.warn(
+            {
+              firmId: req.firmId ?? null,
+              userId: req.userId ?? null,
+              jobId,
+              requestId: requestId ?? null,
+              heartbeatStale,
+              timeoutStale,
+              lockTimeoutAt: timeoutAtRaw ? String(timeoutAtRaw) : null,
+              lastHeartbeatAt:
+                (preJob as any).last_heartbeat_at
+                  ? String((preJob as any).last_heartbeat_at)
+                  : null,
+            },
+            "docgen.run_next.stale_lock_recovered",
+          );
+        } catch {}
       }
       let statusBefore = String(preJob.status ?? "");
       let progressBefore = await computeDocGenJobProgress(r, {
@@ -18459,7 +18633,7 @@ router.post(
         });
         return;
       }
-      const MAX_JOB_STEP_MS = 6000;
+      const MAX_JOB_STEP_MS = 8_000;
       const MAX_ITEMS_PER_CALL = 1;
       const cache = createRequestCache();
       const caps = await getDocGenRunnerSchemaCaps(r, cache);
@@ -18468,14 +18642,14 @@ router.post(
         {
           firmId: req.firmId!,
           jobId,
-          staleMs: 3 * 60_000,
+          staleMs: 2 * 60_000,
         },
         caps,
       );
-      await startDocumentGenerationJobRunner(
+      const runnerOut = await startDocumentGenerationJobRunner(
         r,
         { firmId: req.firmId!, jobId },
-        { maxSteps: MAX_ITEMS_PER_CALL, maxMs: MAX_JOB_STEP_MS, caps },
+        { maxSteps: MAX_ITEMS_PER_CALL, maxMs: MAX_JOB_STEP_MS, deadlineAt, caps },
       );
 
       const jobs = await queryRows(
@@ -18584,10 +18758,28 @@ router.post(
           status_before: statusBefore,
           status_after: status,
           nextAction,
+          runner: runnerOut,
           timestamp: new Date().toISOString(),
           duration_ms: Date.now() - startedAt,
         },
       });
+      try {
+        logger.info(
+          {
+            firmId: req.firmId ?? null,
+            userId: req.userId ?? null,
+            jobId,
+            requestId: requestId ?? null,
+            status,
+            nextAction,
+            progress,
+            runner: runnerOut,
+            elapsedMs: Date.now() - startedAt,
+            remainingBudgetMs: Math.max(0, deadlineAt - Date.now()),
+          },
+          "docgen.run_next.complete",
+        );
+      } catch {}
     } catch (err) {
       const info = extractDbErrorInfo(err);
       const errMessage =
@@ -18714,14 +18906,18 @@ router.post(
         },
       });
     } finally {
-      if (locked) {
+      if (lockAcquired) {
         try {
           await queryRows(
             r,
-            sql`SELECT pg_advisory_unlock(hashtext(${jobId}), ${req.firmId!}) AS unlocked`,
+            sql`
+              UPDATE document_generation_jobs
+              SET timeout_at = NULL,
+                  last_heartbeat_at = now()
+              WHERE id = ${jobId} AND firm_id = ${req.firmId!}
+            `,
           );
-        } catch {
-        }
+        } catch {}
       }
     }
   },
@@ -18873,33 +19069,9 @@ router.post(
       return;
     }
 
-    let locked = false;
+    const lockTtlMs = 120_000;
+    let lockAcquired = false;
     try {
-      const lockRows = await queryRows(
-        r,
-        sql`SELECT pg_try_advisory_lock(hashtext(${jobId}), ${req.firmId!}) AS locked`,
-      );
-      locked = Boolean((lockRows[0] as any)?.locked);
-      if (!locked) {
-        res.status(409).json({
-          ok: false,
-          error: {
-            code: "RUN_NEXT_IN_FLIGHT",
-            message: "Another runner is processing this job. Please retry.",
-            details: null,
-            retryable: true,
-          },
-          meta: {
-            request_id: requestId ?? null,
-            jobId,
-            firmId: req.firmId ?? null,
-            timestamp: new Date().toISOString(),
-            duration_ms: Date.now() - startedAt,
-          },
-        });
-        return;
-      }
-
       const jobs = await queryRows(
         r,
         sql`SELECT * FROM document_generation_jobs WHERE id = ${jobId} AND firm_id = ${req.firmId!}`,
@@ -19071,14 +19243,18 @@ router.post(
         },
       });
     } finally {
-      if (locked) {
+      if (lockAcquired) {
         try {
           await queryRows(
             r,
-            sql`SELECT pg_advisory_unlock(hashtext(${jobId}), ${req.firmId!}) AS unlocked`,
+            sql`
+              UPDATE document_generation_jobs
+              SET timeout_at = NULL,
+                  last_heartbeat_at = now()
+              WHERE id = ${jobId} AND firm_id = ${req.firmId!}
+            `,
           );
-        } catch {
-        }
+        } catch {}
       }
     }
   },

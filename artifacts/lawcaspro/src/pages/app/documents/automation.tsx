@@ -147,6 +147,7 @@ export default function DocumentAutomationHub() {
   const [finalizingZip, setFinalizingZip] = useState(false);
   const [job, setJob] = useState<NormalizedGenerationJob | null>(null);
   const [jobError, setJobError] = useState<string | null>(null);
+  const [runnerNotice, setRunnerNotice] = useState<string | null>(null);
   const pollTimerRef = useRef<ReturnType<typeof window.setInterval> | null>(
     null,
   );
@@ -921,6 +922,7 @@ export default function DocumentAutomationHub() {
         const stopWithError = (message: string) => {
           stopPolling();
           setJobError(message);
+          setRunnerNotice(null);
           setBusy(false);
         };
 
@@ -954,6 +956,7 @@ export default function DocumentAutomationHub() {
               pollAbortRef.current = ctrl;
               const st = await getGenerationJobStatus(jobId, { signal: ctrl.signal });
               setJob(st);
+              setRunnerNotice(null);
               const s = String(st.status ?? "");
 
               if (st.nextAction === "finalize" || s === "finalizing") {
@@ -1071,6 +1074,7 @@ export default function DocumentAutomationHub() {
             const next = await runNextGenerationJob(jobId, { signal: ctrl.signal });
             pollConsecutiveErrorRef.current = 0;
             setJob(next);
+            setRunnerNotice(null);
             const st = String(next.status ?? "");
             const nextAction =
               next.nextAction ??
@@ -1169,8 +1173,9 @@ export default function DocumentAutomationHub() {
             }
             if (code === "RUN_NEXT_IN_FLIGHT") {
               runnerRef.current.state = "statusOnly";
-              runnerRef.current.statusOnlyUntil = Date.now() + 15_000;
-              await new Promise<void>((r) => setTimeout(r, 1500));
+              runnerRef.current.statusOnlyUntil = Date.now() + 5_000;
+              setRunnerNotice("Generation still running, checking status...");
+              await new Promise<void>((r) => setTimeout(r, 2500));
               continue;
             }
             if (status === 409) {
@@ -1212,6 +1217,7 @@ export default function DocumentAutomationHub() {
               err instanceof RequestTimeoutError ||
               isAbortLike(err)
             ) {
+              setRunnerNotice("Previous runner timed out, resuming...");
               try {
                 const st = await getGenerationJobStatus(jobId);
                 setJob(st);
@@ -1223,15 +1229,20 @@ export default function DocumentAutomationHub() {
                   } catch {}
                 }
               } catch {}
-              await new Promise<void>((r) => setTimeout(r, 500));
+              runnerRef.current.state = "statusOnly";
+              runnerRef.current.statusOnlyUntil = Date.now() + 5_000;
+              await new Promise<void>((r) => setTimeout(r, 2500));
               continue;
             }
             if (status === 503 || status === 504) {
+              setRunnerNotice("Server is busy, checking status...");
               try {
                 const st = await getGenerationJobStatus(jobId);
                 setJob(st);
               } catch {}
-              await new Promise<void>((r) => setTimeout(r, 800));
+              runnerRef.current.state = "statusOnly";
+              runnerRef.current.statusOnlyUntil = Date.now() + 5_000;
+              await new Promise<void>((r) => setTimeout(r, 2500));
               continue;
             }
             pollConsecutiveErrorRef.current += 1;
@@ -1856,6 +1867,11 @@ export default function DocumentAutomationHub() {
                               return `Progress: ${done}/${total}  (success=${job?.successCount ?? 0}, failed=${job?.failedCount ?? 0}, pending=${job?.pendingCount ?? 0})`;
                             })()}
                           </div>
+                          {runnerNotice && (
+                            <div className="mt-2 text-xs text-blue-700">
+                              {runnerNotice}
+                            </div>
+                          )}
                           {jobError && (
                             <div className="mt-2 text-xs text-red-700">
                               {jobError}
