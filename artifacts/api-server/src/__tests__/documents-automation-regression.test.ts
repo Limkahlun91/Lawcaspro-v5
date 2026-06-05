@@ -10,6 +10,7 @@ let mockJobStatus: "finalizing" | "completed" | "running" = "finalizing";
 let mockDownloadObjectPath: string | null = null;
 let lockHeld = false;
 let delayNextJobSelectMs = 0;
+let mockProgress = { total: 2, success: 1, failed: 1, pending: 0, running: 0 };
 
 type FakeDb = {
   execute: (query?: unknown) => Promise<unknown>;
@@ -75,7 +76,13 @@ function makeDb(): FakeDb {
         text.includes("COUNT(*) AS total") &&
         text.includes("FROM document_generation_job_items")
       ) {
-        return [{ total: 2, success: 1, failed: 1, pending: 0, running: 0 }];
+        return [{
+          total: mockProgress.total,
+          success: mockProgress.success,
+          failed: mockProgress.failed,
+          pending: mockProgress.pending,
+          running: mockProgress.running,
+        }];
       }
       if (text.includes("FROM cases c") && text.includes("WHERE c.id")) {
         return [{
@@ -484,5 +491,40 @@ describe("Documents automation regressions", () => {
     if (res.status === 404) {
       expect(res.body?.error?.code).toBe("JOB_NOT_FOUND");
     }
+  });
+
+  it("GET /api/documents/jobs/:jobId/status returns canDownload=false and no downloadManifestUrl when pending > 0", async () => {
+    mockJobStatus = "running";
+    mockProgress = { total: 15, success: 11, failed: 0, pending: 4, running: 0 };
+    const res = await request(app).get(`/api/documents/jobs/${TEST_JOB_ID}/status`);
+    expect(res.status).toBe(200);
+    expect(res.body?.ok).toBe(true);
+    expect(res.body?.progress?.pending).toBe(4);
+    expect(res.body?.canDownload).toBe(false);
+    expect(res.body?.nextAction).toMatch(/run_next|wait/);
+    expect(res.body?.downloadManifestUrl).toBeUndefined();
+  });
+
+  it("GET /api/documents/jobs/:jobId/status returns canDownload=true and downloadManifestUrl only when progress is complete", async () => {
+    mockJobStatus = "running";
+    mockProgress = { total: 15, success: 15, failed: 0, pending: 0, running: 0 };
+    const res = await request(app).get(`/api/documents/jobs/${TEST_JOB_ID}/status`);
+    expect(res.status).toBe(200);
+    expect(res.body?.ok).toBe(true);
+    expect(res.body?.canDownload).toBe(true);
+    expect(res.body?.nextAction).toBe("download");
+    expect(typeof res.body?.downloadManifestUrl).toBe("string");
+  });
+
+  it("GET /api/documents/jobs/:jobId/download-manifest returns 409 JOB_NOT_READY_FOR_DOWNLOAD with progress when pending > 0", async () => {
+    mockJobStatus = "running";
+    mockProgress = { total: 15, success: 11, failed: 0, pending: 4, running: 0 };
+    const res = await request(app).get(`/api/documents/jobs/${TEST_JOB_ID}/download-manifest`);
+    expect(res.status).toBe(409);
+    expect(res.body?.ok).toBe(false);
+    expect(res.body?.error?.code).toBe("JOB_NOT_READY_FOR_DOWNLOAD");
+    expect(res.body?.error?.details?.progress?.total).toBe(15);
+    expect(res.body?.error?.details?.progress?.pending).toBe(4);
+    expect(res.body?.error?.retryable).toBe(true);
   });
 });

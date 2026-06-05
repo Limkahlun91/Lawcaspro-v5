@@ -29,6 +29,14 @@ import {
   getGenerationJobDownloadManifest,
   type NormalizedGenerationJob,
 } from "@/lib/document-generation-client";
+import {
+  canDownloadNow,
+  extractErrorMessage,
+  formatProcessingNotice,
+  getProgress,
+  isJobNotReadyForDownload,
+  isProgressComplete,
+} from "./automation-guards";
 import { downloadBlob } from "@/lib/download";
 import { toastError } from "@/lib/toast-error";
 import { useToast } from "@/hooks/use-toast";
@@ -417,74 +425,10 @@ export default function DocumentAutomationHub() {
 
   const storageKey = "lawcaspro_doc_automation_last_job";
 
-  const getProgress = (
-    snapshot: NormalizedGenerationJob | null,
-  ): { total: number; success: number; failed: number; pending: number; running: number } => {
-    const p = snapshot?.progress;
-    if (p) return p;
-    return {
-      total: snapshot?.totalCount ?? 0,
-      success: snapshot?.successCount ?? 0,
-      failed: snapshot?.failedCount ?? 0,
-      pending: snapshot?.pendingCount ?? 0,
-      running: snapshot?.runningCount ?? 0,
-    };
-  };
-
-  const isProgressComplete = (snapshot: NormalizedGenerationJob | null): boolean => {
-    const p = getProgress(snapshot);
-    return (
-      p.total > 0 &&
-      p.pending === 0 &&
-      p.running === 0 &&
-      p.success + p.failed === p.total
-    );
-  };
-
-  const extractErrorMessage = (err: unknown): string => {
-    const r = asRecord(err);
-    const nested = r ? (asRecord((r as any).error) ?? asRecord((r as any).data)?.error) : null;
-    const nestedMsg = nested ? safeText((nested as any).message) : "";
-    if (nestedMsg) return nestedMsg;
-    if (err instanceof Error && safeText(err.message)) return err.message;
-    const nestedStr = nested ? JSON.stringify(nested) : "";
-    if (nestedStr && nestedStr !== "{}") return nestedStr;
-    const str = r ? JSON.stringify(r) : String(err ?? "");
-    if (str && str !== "{}" && str !== "[object Object]") return str;
-    return "Unknown error";
-  };
-
-  const formatProcessingNotice = (snapshot: NormalizedGenerationJob | null): string => {
-    const p = getProgress(snapshot);
-    const done = p.success + p.failed;
-    if (p.total > 0) {
-      return `Generation is still processing. Completed ${done}/${p.total}. Pending ${p.pending}. Please wait.`;
-    }
-    return "Generation is still processing. Please wait.";
-  };
-
-  const canDownloadNow = (snapshot: NormalizedGenerationJob | null): boolean => {
-    const p = getProgress(snapshot);
-    if (p.total > 0) return isProgressComplete(snapshot) && p.success > 0;
-    const s = String(snapshot?.status ?? "");
-    const success = snapshot?.successCount ?? 0;
-    return (s === "completed" || s === "completed_with_errors") && success > 0;
-  };
-
   const setDownloadPrepError = (message?: string) => {
     setRunnerNotice("Download preparation failed. Retry Download");
     if (message) setJobError(message);
     setJobStage("error");
-  };
-
-  const isJobNotReadyForDownload = (err: unknown): boolean => {
-    const r = asRecord(err);
-    const status = r && typeof (r as any).status === "number" ? Number((r as any).status) : null;
-    if (status !== 409) return false;
-    const data = asRecord((r as any).data);
-    const e = asRecord(data?.error) ?? asRecord((r as any).error);
-    const code = e ? safeText((e as any).code) : "";
-    return code === "JOB_NOT_READY_FOR_DOWNLOAD";
   };
 
   const clearActiveJob = () => {

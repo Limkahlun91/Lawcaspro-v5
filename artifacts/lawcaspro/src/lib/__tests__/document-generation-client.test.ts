@@ -43,6 +43,25 @@ describe("normalizeGenerationJob", () => {
     expect(out.items[0]?.errorCode).toBe("TEMPLATE_OBJECT_PATH_MISSING");
   });
 
+  it("normalizes canDownload and nextAction from status payload", () => {
+    const raw = {
+      ok: true,
+      jobId: "44444444-4444-4444-4444-444444444444",
+      status: "completed",
+      action: "download",
+      progress: { total: 15, success: 15, failed: 0, pending: 0, running: 0 },
+      nextAction: "download",
+      canDownload: true,
+      downloadManifestUrl: "/documents/jobs/444/download-manifest",
+      job: { id: "44444444-4444-4444-4444-444444444444" },
+      items: [],
+    };
+    const out = normalizeGenerationJob(raw);
+    expect(out.jobId).toBe("44444444-4444-4444-4444-444444444444");
+    expect(out.canDownload).toBe(true);
+    expect(out.nextAction).toBe("download");
+  });
+
   it("handles camelCase job/items", () => {
     const raw = {
       job: {
