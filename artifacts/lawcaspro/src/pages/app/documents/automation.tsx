@@ -23,16 +23,17 @@ import { apiFetchJson } from "@/lib/api-client";
 import { RequestTimeoutError } from "@/lib/fetch-with-timeout";
 import {
   createGenerationJob,
-  downloadGenerationJob,
   finalizeGenerationJob,
   runNextGenerationJob,
   getGenerationJobStatus,
+  getGenerationJobDownloadManifest,
   type NormalizedGenerationJob,
 } from "@/lib/document-generation-client";
-import { downloadBlob, normalizeDownloadFilename } from "@/lib/download";
+import { downloadBlob } from "@/lib/download";
 import { toastError } from "@/lib/toast-error";
 import { useToast } from "@/hooks/use-toast";
 import { ChevronRight, FileText, Printer } from "lucide-react";
+import JSZip from "jszip";
 
 type AutomationCaseRow = {
   id: number;
@@ -166,11 +167,108 @@ export default function DocumentAutomationHub() {
   const [job, setJob] = useState<NormalizedGenerationJob | null>(null);
   const [jobError, setJobError] = useState<string | null>(null);
   const [runnerNotice, setRunnerNotice] = useState<string | null>(null);
+
+  type DownloadManifest = {
+    ok: true;
+    jobId: string;
+    fileName: string;
+    files: Array<{
+      itemId: number;
+      status: string;
+      fileName: string;
+      folderPath: string;
+      zipPath: string;
+      storagePath: string | null;
+      signedUrl: string | null;
+      errorCode: string | null;
+      errorMessage: string | null;
+    }>;
+  };
+
+  const downloadZipFromManifest = async (jobId: string, snapshot: NormalizedGenerationJob) => {
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      setRunnerNotice("Preparing download...");
+      const raw = await getGenerationJobDownloadManifest(jobId);
+      const m = raw && typeof raw === "object" ? (raw as any) : null;
+      if (!m || m.ok !== true) {
+        const code = m?.error?.code ? String(m.error.code) : "";
+        const msg = m?.error?.message ? String(m.error.message) : "Failed to prepare download";
+        const e = new Error(code && msg ? `${code}: ${msg}` : msg) as any;
+        e.status = 500;
+        throw e;
+      }
+
+      const manifest = m as DownloadManifest;
+      const fileName =
+        typeof manifest.fileName === "string" && manifest.fileName.trim()
+          ? manifest.fileName.trim()
+          : snapshot.downloadFileName ?? `document-automation-${Date.now()}.zip`;
+      const downloadable = manifest.files.filter(
+        (f) => f.status === "success" && typeof f.signedUrl === "string" && f.signedUrl.trim(),
+      );
+      const total = downloadable.length;
+      if (total <= 0) {
+        const e = new Error("No downloadable files found in manifest") as any;
+        e.status = 409;
+        throw e;
+      }
+
+      const zip = new JSZip();
+      let downloaded = 0;
+      let cursor = 0;
+      const workerCount = Math.max(1, Math.min(4, downloadable.length));
+      const workers = Array.from({ length: workerCount }).map(async () => {
+        while (cursor < downloadable.length) {
+          const i = cursor++;
+          const f = downloadable[i]!;
+          setRunnerNotice(`Downloading files ${downloaded}/${total}...`);
+          const resp = await fetch(String(f.signedUrl));
+          if (!resp.ok) {
+            const e = new Error(`Download failed: ${f.fileName} (${resp.status})`) as any;
+            e.status = resp.status;
+            throw e;
+          }
+          const buf = await resp.arrayBuffer();
+          zip.file(f.zipPath, buf);
+          downloaded += 1;
+          setRunnerNotice(`Downloading files ${downloaded}/${total}...`);
+        }
+      });
+      await Promise.all(workers);
+
+      setRunnerNotice("Packaging ZIP...");
+      const blob = await zip.generateAsync(
+        { type: "blob" },
+        (metadata) => {
+          const pct =
+            typeof (metadata as any)?.percent === "number"
+              ? Math.max(0, Math.min(100, Math.round((metadata as any).percent)))
+              : null;
+          setRunnerNotice(pct !== null ? `Packaging ZIP... ${pct}%` : "Packaging ZIP...");
+        },
+      );
+
+      downloadBlob(blob, fileName);
+      setRunnerNotice("Download ready");
+      toast({
+        title:
+          String(snapshot.status ?? "") === "completed"
+            ? "Download started"
+            : "Download started (with warnings)",
+        description: fileName,
+      });
+      return;
+    }
+    const e = new Error("Generated successfully, but ZIP packaging failed. Retry download.") as any;
+    e.status = 409;
+    throw e;
+  };
   const pollTimerRef = useRef<ReturnType<typeof window.setInterval> | null>(
     null,
   );
   const pollInFlightRef = useRef(0);
   const runNextInFlightRef = useRef(false);
+  const finalizeInFlightRef = useRef(false);
   const runnerRef = useRef<{
     running: boolean;
     jobId: string | null;
@@ -255,6 +353,32 @@ export default function DocumentAutomationHub() {
       runnerRef.current.jobId = null;
     };
   }, []);
+
+  useEffect(() => {
+    if (busy) return;
+    if (job) return;
+    let jobId: string | null = null;
+    try {
+      jobId = window.localStorage.getItem("lawcaspro_doc_automation_last_job");
+    } catch {
+      jobId = null;
+    }
+    if (!jobId) return;
+    if (!/^[0-9a-fA-F-]{36}$/.test(jobId)) return;
+    void (async () => {
+      try {
+        const st = await getGenerationJobStatus(jobId);
+        setJob(st);
+        if (
+          st.nextAction === "download" ||
+          String(st.status ?? "") === "completed" ||
+          String(st.status ?? "") === "completed_with_errors"
+        ) {
+          setRunnerNotice("Previous generation job found. You can retry download.");
+        }
+      } catch {}
+    })();
+  }, [busy, job]);
 
   type AutomationBootstrapResponse = {
     cases:
@@ -931,6 +1055,9 @@ export default function DocumentAutomationHub() {
       const jobId = created.jobId;
       if (!jobId) throw new Error("jobId is missing");
       runnerRef.current.jobId = jobId;
+      try {
+        window.localStorage.setItem("lawcaspro_doc_automation_last_job", jobId);
+      } catch {}
       runnerRef.current.state = "runningItems";
       try {
         const initial = await getGenerationJobStatus(jobId);
@@ -967,72 +1094,7 @@ export default function DocumentAutomationHub() {
         runnerRef.current.running = false;
       };
 
-      const downloadWithRetry = async (jobId: string, snapshot: NormalizedGenerationJob) => {
-        for (let attempt = 1; attempt <= 3; attempt++) {
-          const resp = await downloadGenerationJob(jobId);
-          const contentType = resp.headers.get("Content-Type") ?? "";
-          if (resp.status === 409) {
-            if (contentType.includes("application/json") || contentType.includes("text/")) {
-              const body = (await resp.json().catch(() => null)) as any;
-              const code = body?.error?.code ? String(body.error.code) : "";
-              if (code === "JOB_NOT_COMPLETED" || code === "JOB_NOT_FINALIZED") {
-                setFinalizingZip(true);
-                toast({
-                  title: "Job is still finalizing, retrying download...",
-                  description: `Attempt ${attempt}/3`,
-                });
-                try {
-                  const st = await getGenerationJobStatus(jobId);
-                  setJob(st);
-                  if (st.nextAction === "finalize" || String(st.status ?? "") === "finalizing") {
-                    try {
-                      const fin = await finalizeGenerationJob(jobId);
-                      setJob(fin);
-                    } catch {}
-                  }
-                } catch {}
-                await new Promise<void>((r) => setTimeout(r, 500 * attempt));
-                continue;
-              }
-            }
-          }
-          if (!resp.ok) {
-            if (contentType.includes("application/json") || contentType.includes("text/")) {
-              const text = await resp.text().catch(() => "");
-              const e = new Error(text || "Failed to download generated documents") as any;
-              e.status = resp.status;
-              throw e;
-            }
-            const e = new Error("Failed to download generated documents") as any;
-            e.status = resp.status;
-            throw e;
-          }
-          if (contentType.includes("application/json") || contentType.includes("text/")) {
-            const text = await resp.text().catch(() => "");
-            const e = new Error(text || "Failed to download generated documents") as any;
-            e.status = resp.status;
-            throw e;
-          }
-          const blob = await resp.blob();
-          const raw =
-            parseFilenameFromDisposition(resp.headers.get("Content-Disposition")) ||
-            (snapshot.downloadFileName ?? null) ||
-            `lawcaspro-generated-documents-${Date.now()}.zip`;
-          const filename = normalizeDownloadFilename(raw, contentType);
-          downloadBlob(blob, filename);
-          toast({
-            title:
-              String(snapshot.status ?? "") === "completed"
-                ? "Download started"
-                : "Download started (with warnings)",
-            description: filename,
-          });
-          return;
-        }
-        const e = new Error("Job is still finalizing. Please retry download.") as any;
-        e.status = 409;
-        throw e;
-      };
+      const downloadWithRetry = downloadZipFromManifest;
 
       const getApiErrorCode = (err: unknown): string => {
         const r = asRecord(err) ?? {};
@@ -1102,8 +1164,15 @@ export default function DocumentAutomationHub() {
                 if (!runnerRef.current.finalizeRequestedAt && st.nextAction === "finalize") {
                   runnerRef.current.finalizeRequestedAt = Date.now();
                   try {
-                    const fin = await finalizeGenerationJob(jobId, { signal: ctrl.signal });
-                    setJob(fin);
+                    if (!finalizeInFlightRef.current) {
+                      finalizeInFlightRef.current = true;
+                      try {
+                        const fin = await finalizeGenerationJob(jobId, { signal: ctrl.signal });
+                        setJob(fin);
+                      } finally {
+                        finalizeInFlightRef.current = false;
+                      }
+                    }
                   } catch {}
                 }
                 await new Promise<void>((r) => setTimeout(r, 1200));
@@ -1243,8 +1312,15 @@ export default function DocumentAutomationHub() {
               runnerRef.current.statusOnlyUntil = Date.now() + 15_000;
               if (!runnerRef.current.finalizeRequestedAt) runnerRef.current.finalizeRequestedAt = Date.now();
               setFinalizingZip(true);
-              const fin = await finalizeGenerationJob(jobId, { signal: ctrl.signal });
-              setJob(fin);
+              if (!finalizeInFlightRef.current) {
+                finalizeInFlightRef.current = true;
+                try {
+                  const fin = await finalizeGenerationJob(jobId, { signal: ctrl.signal });
+                  setJob(fin);
+                } finally {
+                  finalizeInFlightRef.current = false;
+                }
+              }
               continue;
             }
             if (nextAction === "download") {
@@ -1361,8 +1437,15 @@ export default function DocumentAutomationHub() {
                 if (st.nextAction === "finalize" || String(st.status ?? "") === "finalizing") {
                   try {
                     setFinalizingZip(true);
-                    const fin = await finalizeGenerationJob(jobId);
-                    setJob(fin);
+                    if (!finalizeInFlightRef.current) {
+                      finalizeInFlightRef.current = true;
+                      try {
+                        const fin = await finalizeGenerationJob(jobId);
+                        setJob(fin);
+                      } finally {
+                        finalizeInFlightRef.current = false;
+                      }
+                    }
                   } catch {}
                 }
               } catch {}
@@ -2135,6 +2218,54 @@ export default function DocumentAutomationHub() {
                       >
                         {busy ? "Generating..." : "Generate & Download"}
                       </Button>
+                      {!busy &&
+                      job &&
+                      (job.nextAction === "download" ||
+                        job.nextAction === "finalize" ||
+                        String(job.status ?? "") === "completed" ||
+                        String(job.status ?? "") === "completed_with_errors" ||
+                        String(job.status ?? "") === "finalizing") ? (
+                        <Button
+                          type="button"
+                          variant="outline"
+                          className="w-full"
+                          onClick={() => {
+                            void (async () => {
+                              const jobId = job.jobId;
+                              setBusy(true);
+                              setJobError(null);
+                              setFinalizingZip(true);
+                              try {
+                                let snap: NormalizedGenerationJob = job;
+                                const s = String(job.status ?? "");
+                                if (job.nextAction === "finalize" || s === "finalizing") {
+                                  if (!finalizeInFlightRef.current) {
+                                    finalizeInFlightRef.current = true;
+                                    try {
+                                      const fin = await finalizeGenerationJob(jobId);
+                                      setJob(fin);
+                                      snap = fin;
+                                    } finally {
+                                      finalizeInFlightRef.current = false;
+                                    }
+                                  }
+                                }
+                                await downloadZipFromManifest(jobId, snap);
+                              } catch (err) {
+                                toastError(toast, err, "Download failed");
+                                setJobError(
+                                  "Generated successfully, but ZIP packaging failed. Retry download.",
+                                );
+                              } finally {
+                                setFinalizingZip(false);
+                                setBusy(false);
+                              }
+                            })();
+                          }}
+                        >
+                          Retry Download
+                        </Button>
+                      ) : null}
                     </TabsContent>
 
                     <TabsContent value="print" className="mt-4 space-y-4">

@@ -293,13 +293,10 @@ export function formatPersonList(persons: Array<{ name?: unknown; nric?: unknown
         .filter((p) => Boolean(p.name))
         .map((p) => (p.nric ? `${p.name} (NRIC NO.: ${p.nric})` : p.name))
     : [];
-  if (items.length === 0) return "";
-  if (items.length === 1) return items[0]!;
-  if (items.length === 2) return `${items[0]} & ${items[1]}`;
-  return `${items.slice(0, -1).join(", ")} & ${items[items.length - 1]}`;
+  return joinNamesWithAmpersand(items);
 }
 
-function formatNameInlineList(names: unknown): string {
+export function joinNamesWithAmpersand(names: unknown): string {
   const items = Array.isArray(names)
     ? names
         .map((n) => (typeof n === "string" ? n.trim() : String(n ?? "").trim()))
@@ -307,8 +304,12 @@ function formatNameInlineList(names: unknown): string {
     : [];
   if (items.length === 0) return "";
   if (items.length === 1) return items[0]!;
-  if (items.length === 2) return `${items[0]} and ${items[1]}`;
-  return `${items.slice(0, -1).join(", ")} and ${items[items.length - 1]}`;
+  if (items.length === 2) return `${items[0]} & ${items[1]}`;
+  return `${items.slice(0, -1).join(", ")} & ${items[items.length - 1]}`;
+}
+
+function formatNameInlineList(names: unknown): string {
+  return joinNamesWithAmpersand(names);
 }
 
 export function applyFormatter(formatter: string | null | undefined, value: unknown): unknown {

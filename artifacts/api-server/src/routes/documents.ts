@@ -75,6 +75,7 @@ import {
 } from "../lib/loanStamping.js";
 import {
   listDocumentVariables,
+  joinNamesWithAmpersand,
   resolveVariablesForTemplate,
   type PlaceholderWarning,
 } from "../lib/documentVariables.js";
@@ -2935,7 +2936,7 @@ async function buildCaseContext(
     is_plural_purchaser: purchaserRowsResolved.length > 1,
     purchaser_count: purchaserRowsResolved.length,
     is_joint_purchaser: purchaserRowsResolved.length > 1 ? "YES" : "",
-    purchasers_inline: purchaserNames.join(", "),
+    purchasers_inline: joinNamesWithAmpersand(purchaserNames),
     purchasers_multiline: purchaserNames.join("\n"),
     purchasers_nric_inline: purchaserNrics.join(", "),
     purchasers_nric_multiline: purchaserNrics.join("\n"),
@@ -16247,10 +16248,8 @@ function resolveDocGenNextAction(args: {
   downloadObjectPath?: string | null;
 }): "run_next" | "finalize" | "download" | "stop" {
   if (args.status === "failed") return "stop";
-  const downloadReady =
-    typeof args.downloadObjectPath === "string" && args.downloadObjectPath.trim().length > 0;
   if (args.status === "completed" || args.status === "completed_with_errors") {
-    return downloadReady ? "download" : "finalize";
+    return "download";
   }
   if (args.status === "finalizing") return "finalize";
   if (args.progress.pending > 0) return "run_next";
@@ -20440,6 +20439,10 @@ router.get(
     });
     const downloadUrl =
       nextAction === "download" ? `/documents/jobs/${jobId}/download` : undefined;
+    const downloadManifestUrl =
+      nextAction === "download"
+        ? `/documents/jobs/${jobId}/download-manifest`
+        : undefined;
 
     const jobPayload: Record<string, unknown> = {
       ...(job as any),
@@ -20449,6 +20452,7 @@ router.get(
       failed_count: progress.failed,
       pending_count: progress.pending + progress.running,
       ...(downloadUrl ? { downloadUrl } : {}),
+      ...(downloadManifestUrl ? { downloadManifestUrl } : {}),
     };
 
     res.status(200).json({
@@ -20458,6 +20462,7 @@ router.get(
       progress,
       nextAction,
       ...(downloadUrl ? { downloadUrl } : {}),
+      ...(downloadManifestUrl ? { downloadManifestUrl } : {}),
       job: jobPayload,
       items,
       meta: {
@@ -20515,6 +20520,42 @@ router.post(
           },
         });
         return;
+      }
+
+      {
+        const acquiredRows = await queryRows(
+          r,
+          sql`
+            UPDATE document_generation_jobs
+            SET timeout_at = now() + interval '2 minutes',
+                last_heartbeat_at = now()
+            WHERE id = ${jobId} AND firm_id = ${req.firmId!}
+              AND status IN ('pending','running','finalizing','completed','completed_with_errors')
+              AND (
+                timeout_at IS NULL OR timeout_at < now()
+                OR last_heartbeat_at IS NULL OR last_heartbeat_at < now() - interval '2 minutes'
+              )
+            RETURNING id
+          `,
+        );
+        lockAcquired = acquiredRows.length > 0;
+        if (!lockAcquired) {
+          res.status(409).json({
+            ok: false,
+            error: {
+              code: "FINALIZE_IN_FLIGHT",
+              message: "Another finalize is processing this job. Please retry.",
+              details: null,
+              retryable: true,
+            },
+            meta: {
+              request_id: requestId ?? null,
+              timestamp: new Date().toISOString(),
+              duration_ms: Date.now() - startedAt,
+            },
+          });
+          return;
+        }
       }
 
       const progress = await computeDocGenJobProgress(r, {
@@ -20627,19 +20668,62 @@ router.post(
       }
 
       await finalizeDocGenJobIfDone(r, { firmId: req.firmId!, jobId });
-      const download = await ensureDocGenJobDownloadObject(r, {
-        firmId: req.firmId!,
-        jobId,
-      });
-      if (!download) {
-        res.status(409).json({
-          ok: false,
-          error: {
-            code: "FINALIZE_FAILED",
-            message: "Failed to finalize download bundle",
-            details: { progress },
-            retryable: true,
-          },
+
+      const action = String((job as any).action ?? "download").toLowerCase();
+      if (action === "print") {
+        const download = await ensureDocGenJobDownloadObject(r, {
+          firmId: req.firmId!,
+          jobId,
+        });
+        if (!download) {
+          res.status(409).json({
+            ok: false,
+            error: {
+              code: "FINALIZE_FAILED",
+              message: "Failed to finalize print bundle",
+              details: { progress },
+              retryable: true,
+            },
+            meta: {
+              request_id: requestId ?? null,
+              timestamp: new Date().toISOString(),
+              duration_ms: Date.now() - startedAt,
+            },
+          });
+          return;
+        }
+
+        await queryRows(
+          r,
+          sql`
+            UPDATE document_generation_jobs
+            SET status = ${finalStatus},
+                finished_at = now()
+            WHERE id = ${jobId} AND firm_id = ${req.firmId!}
+          `,
+        );
+
+        await writeAuditLog({
+          firmId: req.firmId,
+          actorId: req.userId,
+          actorType: req.userType,
+          action: "documents.generation_jobs.finalize",
+          entityType: "document_generation_job",
+          entityId: undefined,
+          detail: `jobId=${jobId}`,
+          ipAddress: req.ip,
+          userAgent: req.headers["user-agent"],
+        });
+
+        res.status(200).json({
+          ok: true,
+          jobId,
+          status: finalStatus,
+          progress,
+          nextAction: "download",
+          downloadUrl: `/documents/jobs/${jobId}/download`,
+          fileName: download.downloadFileName,
+          mimeType: download.downloadMimeType,
           meta: {
             request_id: requestId ?? null,
             timestamp: new Date().toISOString(),
@@ -20649,15 +20733,39 @@ router.post(
         return;
       }
 
+      const zipFileName =
+        safeFilenameAscii(
+          `Document_Automation_${new Date().toISOString().slice(0, 10)}.zip`,
+        ) || `document-automation-${jobId}.zip`;
+
       await queryRows(
         r,
         sql`
           UPDATE document_generation_jobs
           SET status = ${finalStatus},
+              total_count = ${progress.total},
+              success_count = ${progress.success},
+              failed_count = ${progress.failed},
+              pending_count = 0,
+              download_object_path = NULL,
+              download_file_name = ${zipFileName},
+              download_mime_type = 'application/zip',
               finished_at = now()
           WHERE id = ${jobId} AND firm_id = ${req.firmId!}
         `,
       );
+
+      await writeAuditLog({
+        firmId: req.firmId,
+        actorId: req.userId,
+        actorType: req.userType,
+        action: "documents.generation_jobs.finalize",
+        entityType: "document_generation_job",
+        entityId: undefined,
+        detail: `jobId=${jobId}`,
+        ipAddress: req.ip,
+        userAgent: req.headers["user-agent"],
+      });
 
       res.status(200).json({
         ok: true,
@@ -20665,9 +20773,9 @@ router.post(
         status: finalStatus,
         progress,
         nextAction: "download",
-        downloadUrl: `/documents/jobs/${jobId}/download`,
-        fileName: download.downloadFileName,
-        mimeType: download.downloadMimeType,
+        downloadManifestUrl: `/documents/jobs/${jobId}/download-manifest`,
+        fileName: zipFileName,
+        mimeType: "application/zip",
         meta: {
           request_id: requestId ?? null,
           timestamp: new Date().toISOString(),
@@ -20683,7 +20791,7 @@ router.post(
             requestId: requestId ?? null,
             status: finalStatus,
             progress,
-            downloadObjectPath: (download as any)?.downloadObjectPath ?? null,
+            downloadObjectPath: null,
             elapsedMs: Date.now() - startedAt,
           },
           "docgen.finalize.complete",
@@ -21020,6 +21128,10 @@ router.get(
     });
     const downloadUrl =
       nextAction === "download" ? `/documents/jobs/${jobId}/download` : undefined;
+    const downloadManifestUrl =
+      nextAction === "download"
+        ? `/documents/jobs/${jobId}/download-manifest`
+        : undefined;
     const jobPayload: Record<string, unknown> = {
       ...(job as any),
       status,
@@ -21028,6 +21140,7 @@ router.get(
       failed_count: progress.failed,
       pending_count: progress.pending,
       ...(downloadUrl ? { downloadUrl } : {}),
+      ...(downloadManifestUrl ? { downloadManifestUrl } : {}),
     };
 
     res.status(200).json({
@@ -21037,6 +21150,7 @@ router.get(
       progress,
       nextAction,
       ...(downloadUrl ? { downloadUrl } : {}),
+      ...(downloadManifestUrl ? { downloadManifestUrl } : {}),
       job: jobPayload,
       ...(status === "failed"
         ? {
@@ -21099,6 +21213,332 @@ router.get(
     res.status(200).json({
       ok: true,
       items,
+      meta: {
+        request_id: requestId ?? null,
+        timestamp: new Date().toISOString(),
+        duration_ms: Date.now() - startedAt,
+      },
+    });
+  },
+);
+
+router.get(
+  "/documents/jobs/:jobId/download-manifest",
+  requireAuth,
+  requireFirmUser,
+  requirePermission("documents", "export"),
+  async (req: AuthRequest, res): Promise<void> => {
+    const r = getRlsDb(req, res);
+    if (!r) return;
+    const startedAt = Date.now();
+    const requestId =
+      one(req.headers["x-request-id"] as any) ||
+      one(req.headers["x-vercel-id"] as any) ||
+      undefined;
+    const fail = (
+      httpStatus: number,
+      code: string,
+      message: string,
+      details: unknown,
+      retryable: boolean,
+    ) => {
+      res.status(httpStatus).json({
+        ok: false,
+        error: { code, message, details, retryable },
+        meta: {
+          request_id: requestId ?? null,
+          timestamp: new Date().toISOString(),
+          duration_ms: Date.now() - startedAt,
+        },
+      });
+    };
+    const jobId = one((req.params as any).jobId) ?? "";
+    if (!/^[0-9a-fA-F-]{36}$/.test(jobId)) {
+      fail(400, "INVALID_JOB_ID", "Invalid jobId", null, false);
+      return;
+    }
+
+    const jobs = await queryRows(
+      r,
+      sql`SELECT status, action, config, case_ids FROM document_generation_jobs WHERE id = ${jobId} AND firm_id = ${req.firmId!} LIMIT 1`,
+    );
+    const job = jobs[0] as any;
+    if (!job) {
+      fail(404, "JOB_NOT_FOUND", "Job not found", null, false);
+      return;
+    }
+
+    const progress = await computeDocGenJobProgress(r, { firmId: req.firmId!, jobId });
+    const done =
+      progress.total > 0 &&
+      progress.pending === 0 &&
+      progress.running === 0 &&
+      progress.success + progress.failed === progress.total;
+    if (!done) {
+      fail(409, "JOB_NOT_READY_FOR_DOWNLOAD", "Job is not ready for download yet", { progress }, true);
+      return;
+    }
+
+    const items = await queryRows(
+      r,
+      sql`
+        SELECT
+          i.*,
+          COALESCE(t.name, pd.name) AS template_name
+        FROM document_generation_job_items i
+        LEFT JOIN document_templates t
+          ON t.firm_id = i.firm_id AND t.id = i.template_id
+        LEFT JOIN platform_documents pd
+          ON pd.id = i.platform_document_id AND (pd.firm_id IS NULL OR pd.firm_id = i.firm_id)
+        WHERE i.job_id = ${jobId} AND i.firm_id = ${req.firmId!}
+        ORDER BY i.id ASC
+      `,
+    );
+
+    const jobConfig =
+      job?.config && typeof job.config === "object"
+        ? (job.config as Record<string, unknown>)
+        : {};
+    const outputExt =
+      (jobConfig as any).outputFormat === "pdf"
+        ? "pdf"
+        : (jobConfig as any).outputFormat === "docx"
+          ? "docx"
+          : "pdf";
+
+    const safeZipSegment = (input: unknown): string => {
+      return String(input || "UNTITLED")
+        .replace(/[\\/:*?"<>|]+/g, "-")
+        .replace(/\s+/g, " ")
+        .trim()
+        .slice(0, 120);
+    };
+
+    const selectedCaseIds = (() => {
+      const raw = job?.case_ids;
+      const arr = Array.isArray(raw) ? raw : [];
+      return arr
+        .map((x) => (typeof x === "number" ? x : Number.parseInt(String(x), 10)))
+        .filter((x) => Number.isFinite(x))
+        .map((x) => Math.trunc(x))
+        .filter((x) => x > 0);
+    })();
+
+    const selectedTemplateRefs = (() => {
+      const raw = (jobConfig as any)?.templates;
+      if (!Array.isArray(raw)) return [] as Array<{ source: "firm" | "master"; id: number }>;
+      return raw
+        .map((x) => {
+          const r0 = x && typeof x === "object" ? (x as any) : null;
+          const source = r0?.source === "master" ? ("master" as const) : ("firm" as const);
+          const id =
+            typeof r0?.id === "number" ? r0.id : Number.parseInt(String(r0?.id ?? ""), 10);
+          return Number.isFinite(id) && id > 0 ? { source, id: Math.trunc(id) } : null;
+        })
+        .filter((x): x is { source: "firm" | "master"; id: number } => Boolean(x));
+    })();
+
+    const selectedTemplateIndexByKey = new Map<string, number>();
+    for (let i = 0; i < selectedTemplateRefs.length; i++) {
+      const ref = selectedTemplateRefs[i]!;
+      selectedTemplateIndexByKey.set(`${ref.source}:${ref.id}`, i);
+    }
+
+    const caseIndexById = new Map<number, number>();
+    for (let i = 0; i < selectedCaseIds.length; i++) {
+      caseIndexById.set(selectedCaseIds[i]!, i);
+    }
+
+    const caseRefById = new Map<number, string>();
+    if (selectedCaseIds.length > 0) {
+      const rows2 = await queryRows(
+        r,
+        sql`
+          SELECT id, reference_no
+          FROM cases
+          WHERE firm_id = ${req.firmId!}
+            AND deleted_at IS NULL
+            AND id IN (${sql.join(
+              selectedCaseIds.map((id) => sql`${id}`),
+              sql`, `,
+            )})
+        `,
+      );
+      for (const row of rows2) {
+        const id = typeof (row as any).id === "number" ? Number((row as any).id) : NaN;
+        if (!Number.isFinite(id)) continue;
+        caseRefById.set(
+          Math.trunc(id),
+          typeof (row as any).reference_no === "string"
+            ? String((row as any).reference_no)
+            : `case-${id}`,
+        );
+      }
+    }
+
+    const purchaser1NameByCaseId = new Map<number, string>();
+    if (selectedCaseIds.length > 0) {
+      const hasOrderNo = await columnExists(r, {
+        schema: "public",
+        table: "case_purchasers",
+        column: "order_no",
+      });
+      const rows3 = await queryRows(
+        r,
+        sql`
+          SELECT cp.case_id, cl.name
+          FROM case_purchasers cp
+          JOIN cases c
+            ON c.id = cp.case_id AND c.firm_id = ${req.firmId!}
+          JOIN clients cl
+            ON cl.id = cp.client_id AND cl.firm_id = c.firm_id
+          WHERE cp.case_id IN (${sql.join(
+            selectedCaseIds.map((id) => sql`${id}`),
+            sql`, `,
+          )})
+          ORDER BY cp.case_id ASC, ${
+            hasOrderNo
+              ? sql`COALESCE(cp.order_no, 999999) ASC, cp.id ASC`
+              : sql`cp.id ASC`
+          }
+        `,
+      );
+      for (const row of rows3) {
+        const caseId =
+          typeof (row as any).case_id === "number"
+            ? Number((row as any).case_id)
+            : Number.parseInt(String((row as any).case_id ?? ""), 10);
+        if (!Number.isFinite(caseId) || caseId <= 0) continue;
+        if (purchaser1NameByCaseId.has(Math.trunc(caseId))) continue;
+        const name = typeof (row as any).name === "string" ? String((row as any).name) : "";
+        if (name.trim()) purchaser1NameByCaseId.set(Math.trunc(caseId), name.trim());
+      }
+    }
+
+    const normalizeZipFolderBase = (raw: string): string => {
+      const s = safeZipSegment(raw).replace(/[. ]+$/g, "");
+      return s.slice(0, 80);
+    };
+
+    const caseFolderById = new Map<number, string>();
+    const usedFolderBases = new Set<string>();
+    for (let i = 0; i < selectedCaseIds.length; i++) {
+      const caseId = selectedCaseIds[i]!;
+      const caseRefRaw = caseRefById.get(caseId) ?? `case-${caseId}`;
+      const purchaser1Raw = purchaser1NameByCaseId.get(caseId) ?? "";
+      const base0 =
+        normalizeZipFolderBase(purchaser1Raw) ||
+        normalizeZipFolderBase(caseRefRaw) ||
+        `case-${caseId}`;
+      let base = base0;
+      if (usedFolderBases.has(base)) {
+        const refSeg = normalizeZipFolderBase(caseRefRaw);
+        base = refSeg ? `${base}_${refSeg}` : `${base}_${caseId}`;
+      }
+      if (usedFolderBases.has(base)) base = `${base}_${caseId}`;
+      usedFolderBases.add(base);
+      const prefix = `${String(i + 1).padStart(2, "0")}_`;
+      caseFolderById.set(caseId, `${prefix}${base}`);
+    }
+
+    const sorted = [...items].sort((a, b) => {
+      const aCaseId = Number((a as any).case_id ?? 0);
+      const bCaseId = Number((b as any).case_id ?? 0);
+      const aCaseIndex = caseIndexById.get(aCaseId) ?? 0;
+      const bCaseIndex = caseIndexById.get(bCaseId) ?? 0;
+      if (aCaseIndex !== bCaseIndex) return aCaseIndex - bCaseIndex;
+      const aSource = String((a as any).template_source ?? "firm");
+      const bSource = String((b as any).template_source ?? "firm");
+      const aTplId =
+        aSource === "master"
+          ? Number((a as any).platform_document_id ?? 0)
+          : Number((a as any).template_id ?? 0);
+      const bTplId =
+        bSource === "master"
+          ? Number((b as any).platform_document_id ?? 0)
+          : Number((b as any).template_id ?? 0);
+      const aKey = `${aSource}:${aTplId}`;
+      const bKey = `${bSource}:${bTplId}`;
+      const aTplIndex = selectedTemplateIndexByKey.get(aKey) ?? 0;
+      const bTplIndex = selectedTemplateIndexByKey.get(bKey) ?? 0;
+      if (aTplIndex !== bTplIndex) return aTplIndex - bTplIndex;
+      return Number((a as any).id ?? 0) - Number((b as any).id ?? 0);
+    });
+
+    const rootFolder = safeZipSegment(`Document_Automation_${new Date().toISOString().slice(0, 10)}`);
+    const rootPrefix = rootFolder ? `${rootFolder}/` : "";
+    const zipFileName = safeFilenameAscii(`${rootFolder}.zip`) || `document-automation-${jobId}.zip`;
+
+    type ManifestFile = {
+      itemId: number;
+      status: string;
+      fileName: string;
+      folderPath: string;
+      zipPath: string;
+      storagePath: string | null;
+      signedUrl: string | null;
+      errorCode: string | null;
+      errorMessage: string | null;
+    };
+
+    const files: ManifestFile[] = sorted.map((it) => {
+      const caseId = Number((it as any).case_id ?? NaN);
+      const caseFolder = caseFolderById.get(caseId) ?? `${String(1).padStart(2, "0")}_case-${caseId}`;
+      const templateSource = String((it as any).template_source ?? "firm");
+      const templateId =
+        templateSource === "master"
+          ? Number((it as any).platform_document_id ?? NaN)
+          : Number((it as any).template_id ?? NaN);
+      const templateKey = `${templateSource}:${templateId}`;
+      const templateIndex = selectedTemplateIndexByKey.get(templateKey);
+      const templateOrder = typeof templateIndex === "number" && Number.isFinite(templateIndex) ? templateIndex : 0;
+      const templateName =
+        typeof (it as any).template_name === "string" && String((it as any).template_name).trim()
+          ? String((it as any).template_name).trim()
+          : `template-${templateId || "unknown"}`;
+      const baseName = safeFilenameAscii(`${templateName}.${outputExt}`) || `document.${outputExt}`;
+      const fileBase = `${String(templateOrder + 1).padStart(2, "0")}_${baseName}`;
+      const zipPath = `${rootPrefix}${caseFolder}/${fileBase}`;
+      const folderPath = `${rootPrefix}${caseFolder}`.replace(/\/+$/g, "");
+      const op = typeof (it as any).object_path === "string" ? String((it as any).object_path) : "";
+      return {
+        itemId:
+          typeof (it as any).id === "number"
+            ? Number((it as any).id)
+            : Number.parseInt(String((it as any).id ?? "0"), 10) || 0,
+        status: String((it as any).status ?? ""),
+        fileName: fileBase,
+        folderPath,
+        zipPath,
+        storagePath: op || null,
+        signedUrl: null,
+        errorCode: typeof (it as any).error_code === "string" ? String((it as any).error_code) : null,
+        errorMessage: typeof (it as any).error_message === "string" ? String((it as any).error_message) : null,
+      };
+    });
+
+    const ttlSec = 10 * 60;
+    const toSign = files.filter((f) => f.status === "success" && f.storagePath);
+    let cursor = 0;
+    const workerCount = Math.max(1, Math.min(5, toSign.length));
+    const workers = Array.from({ length: workerCount }).map(async () => {
+      while (cursor < toSign.length) {
+        const i = cursor++;
+        const f = toSign[i]!;
+        try {
+          f.signedUrl = await supabaseStorage.createSignedDownloadUrl(String(f.storagePath), ttlSec);
+        } catch {
+          f.signedUrl = null;
+        }
+      }
+    });
+    await Promise.all(workers);
+
+    res.status(200).json({
+      ok: true,
+      jobId,
+      fileName: zipFileName,
+      files,
       meta: {
         request_id: requestId ?? null,
         timestamp: new Date().toISOString(),

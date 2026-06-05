@@ -20,6 +20,7 @@ export default defineConfig({
         "src/__tests__/not-found-json.test.ts",
         "src/__tests__/dateOnly.test.ts",
         "src/__tests__/caseVariableResolver.test.ts",
+        "src/__tests__/documentVariables.inlineList.test.ts",
         "src/__tests__/customVariables.unit.test.ts",
         "src/__tests__/caseWorkflowDocuments.unit.test.ts",
         "src/__tests__/loanStamping.unit.test.ts",

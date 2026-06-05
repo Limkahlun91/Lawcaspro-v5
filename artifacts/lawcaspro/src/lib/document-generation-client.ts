@@ -52,6 +52,7 @@ export type NormalizedGenerationJob = {
   progress?: { total: number; success: number; failed: number; pending: number; running: number };
   nextAction?: "run_next" | "finalize" | "download" | "stop";
   downloadUrl?: string | null;
+  downloadManifestUrl?: string | null;
   downloadObjectPath?: string | null;
   downloadFileName?: string | null;
   errorSummary?: string | null;
@@ -182,6 +183,16 @@ export async function downloadGenerationJob(
   });
 }
 
+export async function getGenerationJobDownloadManifest(
+  jobId: string,
+  opts?: { signal?: AbortSignal },
+): Promise<unknown> {
+  return await apiFetchJson<unknown>(`/documents/jobs/${jobId}/download-manifest`, {
+    timeoutMs: 20000,
+    signal: opts?.signal,
+  });
+}
+
 export function normalizeGenerationJobItem(raw: unknown): NormalizedGenerationJobItem {
   const r = asRecord(raw) ?? {};
   const diagnostic = asRecord(r.diagnostic) ?? undefined;
@@ -243,6 +254,10 @@ export function normalizeGenerationJob(raw: unknown): NormalizedGenerationJob {
   const downloadUrl =
     asString((root as any).downloadUrl ?? (root as any).download_url ?? (jobRaw as any).downloadUrl) ?? null;
 
+  const downloadManifestUrl =
+    asString((root as any).downloadManifestUrl ?? (root as any).download_manifest_url ?? (jobRaw as any).downloadManifestUrl) ??
+    null;
+
   const downloadObjectPath = asString(jobRaw.downloadObjectPath ?? jobRaw.download_object_path) ?? null;
   const downloadFileName =
     asString(jobRaw.downloadFileName ?? jobRaw.download_file_name) ??
@@ -275,6 +290,7 @@ export function normalizeGenerationJob(raw: unknown): NormalizedGenerationJob {
     progress,
     nextAction,
     downloadUrl,
+    downloadManifestUrl,
     downloadObjectPath,
     downloadFileName,
     errorSummary,
