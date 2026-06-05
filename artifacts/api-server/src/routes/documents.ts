@@ -3011,9 +3011,13 @@ router.get(
   async (req: AuthRequest, res): Promise<void> => {
     const r = getRlsDb(req, res);
     if (!r) return;
+    const limitStr = one((req.query as any).limit);
+    const limit = limitStr ? parseInt(limitStr, 10) : 500;
+    const safeLimit =
+      Number.isFinite(limit) && limit > 0 && limit <= 2000 ? limit : 500;
     const rows = await queryRows(
       r,
-      sql`SELECT * FROM firm_document_folders WHERE firm_id = ${req.firmId!} ORDER BY parent_id NULLS FIRST, sort_order ASC, name ASC`,
+      sql`SELECT * FROM firm_document_folders WHERE firm_id = ${req.firmId!} ORDER BY parent_id NULLS FIRST, sort_order ASC, name ASC LIMIT ${safeLimit}`,
     );
     res.json(rows);
   },
@@ -3250,6 +3254,11 @@ router.get(
     const folderId = folderIdStr ? parseInt(folderIdStr, 10) : null;
     const kind = one((req.query as any).kind);
     const templateCapable = truthy((req.query as any).templateCapable);
+    const summary = truthy((req.query as any).summary);
+    const limitStr = one((req.query as any).limit);
+    const limit = limitStr ? parseInt(limitStr, 10) : 500;
+    const safeLimit =
+      Number.isFinite(limit) && limit > 0 && limit <= 2000 ? limit : 500;
     const clauses: Array<ReturnType<typeof sql>> = [
       sql`firm_id = ${req.firmId!}`,
     ];
@@ -3263,10 +3272,41 @@ router.get(
     if (kind) clauses.push(sql`kind = ${kind}`);
     if (templateCapable) clauses.push(sql`is_template_capable = true`);
     const where = sql.join(clauses, sql` AND `);
-    const rows = await queryRows(
-      r,
-      sql`SELECT * FROM document_templates WHERE ${where} ORDER BY created_at DESC`,
-    );
+    const rows = await queryRows(r, summary
+      ? sql`
+        SELECT
+          id,
+          firm_id,
+          name,
+          kind,
+          document_type,
+          folder_id,
+          is_active,
+          is_template_capable,
+          print_mode,
+          file_name,
+          extension,
+          object_path,
+          mime_type,
+          sort_order,
+          document_group,
+          applies_to_purchase_mode,
+          applies_to_title_type,
+          applies_to_case_type,
+          created_at,
+          updated_at
+        FROM document_templates
+        WHERE ${where}
+        ORDER BY created_at DESC
+        LIMIT ${safeLimit}
+      `
+      : sql`
+        SELECT *
+        FROM document_templates
+        WHERE ${where}
+        ORDER BY created_at DESC
+        LIMIT ${safeLimit}
+      `);
     res.json(rows);
   },
 );
@@ -14860,9 +14900,17 @@ router.get(
       c.reference_no,
       c.parcel_no,
       c.status,
+      c.case_type,
       c.purchase_mode,
       c.title_type,
-      c.loan_details,
+      p.name AS project_name,
+      COALESCE(
+        c.loan_details->>'end_financier',
+        c.loan_details->>'endFinancier',
+        c.loan_details->>'endFinancierBank',
+        c.loan_details->>'bank',
+        c.loan_details->>'financier'
+      ) AS loan_bank,
       (
         SELECT cl.name
         FROM case_purchasers cp
@@ -14872,6 +14920,9 @@ router.get(
         LIMIT 1
       ) AS purchaser_name
     FROM cases c
+    LEFT JOIN projects p
+      ON p.id = c.project_id
+     AND p.firm_id = c.firm_id
     WHERE c.firm_id = ${req.firmId!}
       AND c.deleted_at IS NULL
       ${accessClause}
@@ -14882,28 +14933,13 @@ router.get(
     );
 
     const items = rows.map((row) => {
-      const rawLoan =
-        typeof (row as any).loan_details === "string"
-          ? String((row as any).loan_details)
-          : "";
-      const loanBank = (() => {
-        if (!rawLoan) return "";
-        try {
-          const obj = JSON.parse(rawLoan) as Record<string, unknown>;
-          const v =
-            obj["end_financier"] ??
-            obj["endFinancier"] ??
-            obj["bank"] ??
-            obj["financier"];
-          return v ? String(v) : "";
-        } catch {
-          return "";
-        }
-      })();
-
       return {
         id: Number((row as any).id),
         referenceNo:
+          typeof (row as any).reference_no === "string"
+            ? String((row as any).reference_no)
+            : "",
+        fileReference:
           typeof (row as any).reference_no === "string"
             ? String((row as any).reference_no)
             : "",
@@ -14915,10 +14951,21 @@ router.get(
           typeof (row as any).purchaser_name === "string"
             ? String((row as any).purchaser_name)
             : null,
-        loanBank: loanBank || null,
+        projectName:
+          typeof (row as any).project_name === "string"
+            ? String((row as any).project_name)
+            : null,
+        loanBank:
+          typeof (row as any).loan_bank === "string"
+            ? String((row as any).loan_bank)
+            : null,
         status:
           typeof (row as any).status === "string"
             ? String((row as any).status)
+            : "",
+        caseType:
+          typeof (row as any).case_type === "string"
+            ? String((row as any).case_type)
             : "",
         purchaseMode:
           typeof (row as any).purchase_mode === "string"
@@ -14932,6 +14979,313 @@ router.get(
     });
 
     res.json({ items, page: safePage, limit: safeLimit });
+  },
+);
+
+router.get(
+  "/documents/automation/bootstrap",
+  requireAuth,
+  requireFirmUser,
+  requirePermission("documents", "read"),
+  requirePermission("cases", "read"),
+  async (req: AuthRequest, res): Promise<void> => {
+    const r = getRlsDb(req, res);
+    if (!r) return;
+
+    const q = one((req.query as any).search) ?? "";
+    const search = q.trim();
+    const limitStr = one((req.query as any).limit);
+    const limit = limitStr ? parseInt(limitStr, 10) : 80;
+    const safeLimit =
+      Number.isFinite(limit) && limit > 0 && limit <= 100 ? limit : 80;
+
+    const roleRows = await queryRows(
+      r,
+      sql`SELECT name FROM roles WHERE id = ${req.roleId!} AND firm_id = ${req.firmId!} LIMIT 1`,
+    );
+    const roleName = roleRows[0]?.name
+      ? String(roleRows[0].name).toLowerCase()
+      : "";
+    const elevated =
+      roleName.includes("partner") || roleName.includes("manager");
+
+    const like = `%${search.replace(/%/g, "\\%").replace(/_/g, "\\_")}%`;
+    const searchClause = search
+      ? sql`AND (
+        c.reference_no ILIKE ${like}
+        OR COALESCE(c.parcel_no, '') ILIKE ${like}
+        OR EXISTS (
+          SELECT 1
+          FROM case_purchasers cp
+          INNER JOIN clients cl ON cl.id = cp.client_id
+          WHERE cp.case_id = c.id
+            AND cl.name ILIKE ${like}
+        )
+      )`
+      : sql``;
+
+    const accessClause = elevated
+      ? sql``
+      : sql`AND EXISTS (
+        SELECT 1 FROM case_assignments ca
+        WHERE ca.case_id = c.id
+          AND ca.user_id = ${req.userId!}
+          AND ca.role_in_case IN ('lawyer','clerk')
+          AND ca.unassigned_at IS NULL
+      )`;
+
+    const runCases = async () => {
+      const settled = await Promise.allSettled([
+        queryRows(
+          r,
+          sql`
+            SELECT
+              c.id,
+              c.reference_no,
+              c.parcel_no,
+              c.status,
+              c.case_type,
+              c.purchase_mode,
+              c.title_type,
+              p.name AS project_name,
+              COALESCE(
+                c.loan_details->>'end_financier',
+                c.loan_details->>'endFinancier',
+                c.loan_details->>'endFinancierBank',
+                c.loan_details->>'bank',
+                c.loan_details->>'financier'
+              ) AS loan_bank,
+              (
+                SELECT cl.name
+                FROM case_purchasers cp
+                INNER JOIN clients cl ON cl.id = cp.client_id
+                WHERE cp.case_id = c.id
+                ORDER BY cp.order_no ASC
+                LIMIT 1
+              ) AS purchaser_name
+            FROM cases c
+            LEFT JOIN projects p
+              ON p.id = c.project_id
+             AND p.firm_id = c.firm_id
+            WHERE c.firm_id = ${req.firmId!}
+              AND c.deleted_at IS NULL
+              ${accessClause}
+              ${searchClause}
+            ORDER BY c.updated_at DESC
+            LIMIT ${safeLimit}
+          `,
+        ),
+        queryRows(
+          r,
+          sql`
+            SELECT COUNT(*)::int AS total
+            FROM cases c
+            WHERE c.firm_id = ${req.firmId!}
+              AND c.deleted_at IS NULL
+              ${accessClause}
+              ${searchClause}
+          `,
+        ),
+      ]);
+
+      if (settled[0].status === "rejected") throw settled[0].reason;
+      const rows = settled[0].value;
+      const totalRows = settled[1].status === "fulfilled" ? settled[1].value : [];
+
+      const total =
+        typeof (totalRows[0] as any)?.total === "number"
+          ? Number((totalRows[0] as any).total)
+          : Number((totalRows[0] as any)?.total ?? rows.length);
+
+      const items = rows.map((row) => ({
+        id: Number((row as any).id),
+        fileReference:
+          typeof (row as any).reference_no === "string"
+            ? String((row as any).reference_no)
+            : "",
+        referenceNo:
+          typeof (row as any).reference_no === "string"
+            ? String((row as any).reference_no)
+            : "",
+        purchaserName:
+          typeof (row as any).purchaser_name === "string"
+            ? String((row as any).purchaser_name)
+            : null,
+        projectName:
+          typeof (row as any).project_name === "string"
+            ? String((row as any).project_name)
+            : null,
+        parcelNo:
+          typeof (row as any).parcel_no === "string"
+            ? String((row as any).parcel_no)
+            : null,
+        loanBank:
+          typeof (row as any).loan_bank === "string"
+            ? String((row as any).loan_bank)
+            : null,
+        status:
+          typeof (row as any).status === "string" ? String((row as any).status) : "",
+        caseType:
+          typeof (row as any).case_type === "string" ? String((row as any).case_type) : "",
+        purchaseMode:
+          typeof (row as any).purchase_mode === "string" ? String((row as any).purchase_mode) : "",
+        titleType:
+          typeof (row as any).title_type === "string" ? String((row as any).title_type) : "",
+      }));
+
+      return { items, total, limit: safeLimit };
+    };
+
+    const runFolders = async () => {
+      const rows = await queryRows(
+        r,
+        sql`
+          SELECT id, name, parent_id, sort_order
+          FROM firm_document_folders
+          WHERE firm_id = ${req.firmId!}
+          ORDER BY parent_id NULLS FIRST, sort_order ASC, name ASC
+          LIMIT 2000
+        `,
+      );
+      return rows.map((x) => ({
+        id: Number((x as any).id),
+        name: typeof (x as any).name === "string" ? String((x as any).name) : "",
+        parent_id:
+          typeof (x as any).parent_id === "number"
+            ? Number((x as any).parent_id)
+            : (x as any).parent_id
+              ? Number((x as any).parent_id)
+              : null,
+        sort_order:
+          typeof (x as any).sort_order === "number"
+            ? Number((x as any).sort_order)
+            : Number((x as any).sort_order ?? 0),
+        source: "firm",
+      }));
+    };
+
+    const runTemplates = async () => {
+      const rows = await queryRows(
+        r,
+        sql`
+          SELECT
+            id, name, folder_id, kind, document_type,
+            is_template_capable, is_active,
+            print_mode, file_name, extension,
+            created_at, updated_at
+          FROM document_templates
+          WHERE firm_id = ${req.firmId!}
+            AND kind = 'template'
+            AND is_template_capable = true
+          ORDER BY created_at DESC
+          LIMIT 2000
+        `,
+      );
+      return rows.map((x) => ({
+        id: Number((x as any).id),
+        name: typeof (x as any).name === "string" ? String((x as any).name) : "",
+        folder_id:
+          typeof (x as any).folder_id === "number"
+            ? Number((x as any).folder_id)
+            : (x as any).folder_id
+              ? Number((x as any).folder_id)
+              : null,
+        kind: typeof (x as any).kind === "string" ? String((x as any).kind) : "template",
+        document_type: typeof (x as any).document_type === "string" ? String((x as any).document_type) : null,
+        template_type: typeof (x as any).extension === "string" ? String((x as any).extension) : null,
+        is_template_capable: Boolean((x as any).is_template_capable ?? true),
+        is_active: Boolean((x as any).is_active ?? true),
+        status: Boolean((x as any).is_active ?? true) ? "active" : "inactive",
+        source: "firm",
+      }));
+    };
+
+    const runSettings = async () => {
+      const firmRows = await queryRows(
+        r,
+        sql`SELECT show_master_documents FROM firms WHERE id = ${req.firmId!} LIMIT 1`,
+      );
+      const settingsRows = await queryRows(
+        r,
+        sql`SELECT use_master_documents FROM firm_settings WHERE firm_id = ${req.firmId!} LIMIT 1`,
+      );
+      return {
+        showMasterDocuments: firmRows[0]
+          ? Boolean((firmRows[0] as any).show_master_documents ?? true)
+          : true,
+        useMasterDocuments: settingsRows[0]
+          ? Boolean((settingsRows[0] as any).use_master_documents ?? true)
+          : true,
+      };
+    };
+
+    const runPermissions = async () => {
+      if (!req.roleId) return { permissions: [] as Array<{ module: string; action: string }> };
+      const rows = await queryRows(
+        r,
+        sql`
+          SELECT module, action, allowed
+          FROM permissions
+          WHERE role_id = ${req.roleId!}
+          LIMIT 2000
+        `,
+      );
+      const perms = rows
+        .filter((x) => Boolean((x as any).allowed ?? false))
+        .map((x) => ({
+          module: typeof (x as any).module === "string" ? String((x as any).module) : "",
+          action: typeof (x as any).action === "string" ? String((x as any).action) : "",
+        }))
+        .filter((p) => p.module && p.action);
+      return { permissions: perms };
+    };
+
+    const settled = await Promise.allSettled([
+      runCases(),
+      runFolders(),
+      runTemplates(),
+      runSettings(),
+      runPermissions(),
+    ]);
+
+    const pick = <T,>(idx: number): { ok: true; data: T } | { ok: false; error: string } => {
+      const r0 = settled[idx];
+      if (r0.status === "fulfilled") return { ok: true, data: r0.value as T };
+      const msg = r0.reason && typeof r0.reason === "object" && "message" in (r0.reason as any)
+        ? String((r0.reason as any).message)
+        : String(r0.reason ?? "Unknown error");
+      return { ok: false, error: msg };
+    };
+
+    const casesR = pick<{ items: any[]; total: number; limit: number }>(0);
+    const foldersR = pick<any[]>(1);
+    const templatesR = pick<any[]>(2);
+    const settingsR = pick<{ showMasterDocuments: boolean; useMasterDocuments: boolean }>(3);
+    const permissionsR = pick<{ permissions: Array<{ module: string; action: string }> }>(4);
+
+    const casesOut = casesR.ok
+      ? { ok: true as const, items: casesR.data.items, total: casesR.data.total, limit: casesR.data.limit }
+      : { ok: false as const, error: "error" in casesR ? casesR.error : "Unknown error" };
+    const foldersOut = foldersR.ok
+      ? { ok: true as const, items: foldersR.data }
+      : { ok: false as const, error: "error" in foldersR ? foldersR.error : "Unknown error" };
+    const templatesOut = templatesR.ok
+      ? { ok: true as const, items: templatesR.data }
+      : { ok: false as const, error: "error" in templatesR ? templatesR.error : "Unknown error" };
+    const settingsOut = settingsR.ok
+      ? { ok: true as const, data: settingsR.data }
+      : { ok: false as const, error: "error" in settingsR ? settingsR.error : "Unknown error" };
+    const permissionsOut = permissionsR.ok
+      ? { ok: true as const, data: permissionsR.data }
+      : { ok: false as const, error: "error" in permissionsR ? permissionsR.error : "Unknown error" };
+
+    res.json({
+      cases: casesOut,
+      folders: foldersOut,
+      templates: templatesOut,
+      settings: settingsOut,
+      permissions: permissionsOut,
+    });
   },
 );
 

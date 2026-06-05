@@ -44,6 +44,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const meQuery = useQuery<AuthUser | null>({
     queryKey: ME_QUERY_KEY,
     retry: false,
+    staleTime: 30_000,
+    gcTime: 5 * 60_000,
+    refetchOnWindowFocus: false,
+    refetchOnMount: false,
     queryFn: async ({ signal }) => {
       const res = await apiRequest("/api/auth/me", {
         allowStatuses: [401],
@@ -79,6 +83,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         !(Array.isArray((user as any)?.permissions) && (user as any).permissions.length > 0),
     ),
     retry: false,
+    staleTime: 30_000,
+    gcTime: 5 * 60_000,
+    refetchOnWindowFocus: false,
+    refetchOnMount: false,
     queryFn: async ({ signal }) => {
       const res = await apiRequest("/api/auth/permissions", {
         allowStatuses: [401, 404],

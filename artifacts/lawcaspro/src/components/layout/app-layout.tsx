@@ -43,30 +43,54 @@ export function AppLayout({ children }: { children: ReactNode }) {
     return null;
   }
 
-  const navItems = [
-    { label: "Dashboard", href: "/app/dashboard", icon: LayoutDashboard, perm: ["dashboard", "read"] as const },
-    { label: "My Work", href: "/app/workbench", icon: ListTodo, perm: ["cases", "read"] as const },
-    { label: "Cases", href: "/app/cases", icon: Briefcase, perm: ["cases", "read"] as const },
-    { label: "Intake Inbox", href: "/app/cases/intake", icon: Inbox, perm: ["cases", "create"] as const },
-    { label: "Projects", href: "/app/projects", icon: Building2, perm: ["projects", "read"] as const },
-    { label: "Developers", href: "/app/developers", icon: HardHat, perm: ["developers", "read"] as const },
-    { label: "Documents", href: "/app/documents", icon: FileText, perm: ["documents", "read"] as const },
-    { label: "Variable Dictionary", href: "/app/documents/variables", icon: FileText, perm: ["documents", "read"] as const },
-    { label: "Custom Variables", href: "/app/documents/custom-variables", icon: FileText, perm: ["documents", "read"] as const },
-    { label: "Doc Automation", href: "/app/documents/automation", icon: FileText, perm: ["documents", "read"] as const },
-    { label: "Communications", href: "/app/hub", icon: MessageSquare, perm: ["communications", "read"] as const },
-    { label: "Accounting", href: "/app/accounting", icon: Calculator, perm: ["accounting", "read"] as const },
-    { label: "Reports", href: "/app/reports", icon: BarChart, perm: ["reports", "read"] as const },
-    { label: "Audit Logs", href: "/app/audit-logs", icon: ScrollText, perm: ["audit", "read"] as const },
-    { label: "Doc Gen Logs", href: "/app/documents/generation-logs", icon: ScrollText, perm: ["audit", "read"] as const },
-    { label: "Settings", href: "/app/settings", icon: Settings, perm: ["settings", "read"] as const },
+  const navGroups: Array<{
+    label: string;
+    items: Array<{ label: string; href: string; icon: any; perm: readonly [string, string] }>;
+  }> = [
+    {
+      label: "Main",
+      items: [
+        { label: "Dashboard", href: "/app/dashboard", icon: LayoutDashboard, perm: ["dashboard", "read"] as const },
+        { label: "My Work", href: "/app/workbench", icon: ListTodo, perm: ["cases", "read"] as const },
+        { label: "Cases", href: "/app/cases", icon: Briefcase, perm: ["cases", "read"] as const },
+        { label: "Intake Inbox", href: "/app/cases/intake", icon: Inbox, perm: ["cases", "create"] as const },
+        { label: "Projects", href: "/app/projects", icon: Building2, perm: ["projects", "read"] as const },
+        { label: "Developers", href: "/app/developers", icon: HardHat, perm: ["developers", "read"] as const },
+        { label: "Communications", href: "/app/hub", icon: MessageSquare, perm: ["communications", "read"] as const },
+        { label: "Accounting", href: "/app/accounting", icon: Calculator, perm: ["accounting", "read"] as const },
+        { label: "Reports", href: "/app/reports", icon: BarChart, perm: ["reports", "read"] as const },
+      ],
+    },
+    {
+      label: "Documents",
+      items: [
+        { label: "Documents", href: "/app/documents", icon: FileText, perm: ["documents", "read"] as const },
+        { label: "Doc Automation", href: "/app/documents/automation", icon: FileText, perm: ["documents", "read"] as const },
+        { label: "Variable Dictionary", href: "/app/documents/variables", icon: FileText, perm: ["documents", "read"] as const },
+        { label: "Custom Dictionary", href: "/app/documents/custom-variables", icon: FileText, perm: ["documents", "read"] as const },
+      ],
+    },
+    {
+      label: "Settings",
+      items: [
+        { label: "Firm Settings", href: "/app/settings", icon: Settings, perm: ["settings", "read"] as const },
+        { label: "Audit Logs", href: "/app/audit-logs", icon: ScrollText, perm: ["audit", "read"] as const },
+        { label: "Doc Gen Logs", href: "/app/documents/generation-logs", icon: ScrollText, perm: ["audit", "read"] as const },
+      ],
+    },
   ];
-  const visibleNavItems = navItems.filter((i) => {
-    if (i.href === "/app/cases/intake" && !isFeatureEnabled("intake_inbox")) return false;
-    if (!hasPermission(user, i.perm[0], i.perm[1])) return false;
-    if (i.href === "/app/accounting") return isAccountingRoleAllowed(user.roleName);
-    return true;
-  });
+
+  const visibleNavGroups = navGroups
+    .map((g) => ({
+      label: g.label,
+      items: g.items.filter((i) => {
+        if (i.href === "/app/cases/intake" && !isFeatureEnabled("intake_inbox")) return false;
+        if (!hasPermission(user, i.perm[0], i.perm[1])) return false;
+        if (i.href === "/app/accounting") return isAccountingRoleAllowed(user.roleName);
+        return true;
+      }),
+    }))
+    .filter((g) => g.items.length > 0);
 
   const prefetchByHref: Record<string, () => void> = {
     "/app/cases": () => {
@@ -163,34 +187,42 @@ export function AppLayout({ children }: { children: ReactNode }) {
           </div>
         </div>
         
-        <nav className="flex-1 py-4 px-3 space-y-1">
-          {visibleNavItems.map((item) => {
-            const isActive =
-              item.href === "/app/documents"
-                ? (location === "/app/documents" || (location.startsWith("/app/documents/") && !location.startsWith("/app/documents/automation")))
-                : location === item.href || location.startsWith(`${item.href}/`) || (item.href === "/app/accounting" && location.startsWith("/app/quotations"));
-            return (
-              <Link key={item.href} href={item.href}>
-                <div
-                  onMouseEnter={() => schedulePrefetch(item.href)}
-                  onMouseLeave={() => cancelPrefetch(item.href)}
-                  className={`flex items-center gap-3 px-3 py-2.5 rounded-md text-sm font-medium transition-colors ${
-                  isActive 
-                    ? "bg-blue-500/10 text-blue-200" 
-                    : "text-slate-300 hover:bg-slate-800 hover:text-slate-100 cursor-pointer"
-                  }`}
-                >
-                  <item.icon className="w-4 h-4 shrink-0" />
-                  <span className="truncate flex-1">{item.label}</span>
-                  {item.label === "Communications" && unreadCount > 0 && (
-                    <span className="inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 text-[10px] font-bold text-white bg-blue-500 rounded-full">
-                      {unreadCount}
-                    </span>
-                  )}
-                </div>
-              </Link>
-            );
-          })}
+        <nav className="flex-1 py-4 px-3 space-y-4">
+          {visibleNavGroups.map((group) => (
+            <div key={group.label} className="space-y-1">
+              <div className="px-3 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                {group.label}
+              </div>
+              {group.items.map((item) => {
+                const isActive =
+                  (item.href === "/app/documents"
+                    ? location === "/app/documents"
+                    : location === item.href || location.startsWith(`${item.href}/`)) ||
+                  (item.href === "/app/accounting" && location.startsWith("/app/quotations"));
+                return (
+                  <Link key={item.href} href={item.href}>
+                    <div
+                      onMouseEnter={() => schedulePrefetch(item.href)}
+                      onMouseLeave={() => cancelPrefetch(item.href)}
+                      className={`flex items-center gap-3 px-3 py-2.5 rounded-md text-sm font-medium transition-colors ${
+                        isActive
+                          ? "bg-blue-500/10 text-blue-200"
+                          : "text-slate-300 hover:bg-slate-800 hover:text-slate-100 cursor-pointer"
+                      }`}
+                    >
+                      <item.icon className="w-4 h-4 shrink-0" />
+                      <span className="truncate flex-1">{item.label}</span>
+                      {item.label === "Communications" && unreadCount > 0 && (
+                        <span className="inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 text-[10px] font-bold text-white bg-blue-500 rounded-full">
+                          {unreadCount}
+                        </span>
+                      )}
+                    </div>
+                  </Link>
+                );
+              })}
+            </div>
+          ))}
         </nav>
 
         <div className="p-4 border-t border-slate-800 mt-auto sticky bottom-0 bg-slate-900">

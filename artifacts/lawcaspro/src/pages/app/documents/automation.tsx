@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -37,12 +37,15 @@ import { ChevronRight, FileText, Printer } from "lucide-react";
 type AutomationCaseRow = {
   id: number;
   referenceNo: string;
+  fileReference?: string;
   parcelNo: string | null;
   purchaserName: string | null;
+  projectName?: string | null;
   loanBank: string | null;
   status: string;
-  purchaseMode: string;
+  purchaseMode?: string;
   titleType: string;
+  caseType?: string;
 };
 
 type AutomationCasesResponse = {
@@ -53,20 +56,24 @@ type AutomationCasesResponse = {
 
 type FirmFolder = {
   id: number;
-  firm_id: number;
+  firm_id?: number;
   name: string;
   parent_id: number | null;
   sort_order: number;
-  created_at: string;
+  created_at?: string;
+  source?: string;
 };
 
 type FirmDocumentTemplate = {
   id: number;
   name: string;
-  file_name: string;
+  file_name?: string;
   folder_id: number | null;
-  extension: string | null;
-  is_template_capable: boolean;
+  extension?: string | null;
+  is_template_capable?: boolean;
+  is_active?: boolean;
+  status?: string;
+  source?: string;
 };
 
 const EMPTY_AUTOMATION_CASES: AutomationCaseRow[] = [];
@@ -124,9 +131,20 @@ function isAbortLike(err: unknown): boolean {
   return false;
 }
 
+function useDebouncedValue<T>(value: T, delayMs: number): T {
+  const [debounced, setDebounced] = useState(value);
+  useEffect(() => {
+    const t = window.setTimeout(() => setDebounced(value), delayMs);
+    return () => window.clearTimeout(t);
+  }, [value, delayMs]);
+  return debounced;
+}
+
 export default function DocumentAutomationHub() {
   const { toast } = useToast();
-  const [caseSearch, setCaseSearch] = useState("");
+  const queryClient = useQueryClient();
+  const [caseSearchRaw, setCaseSearchRaw] = useState("");
+  const caseSearch = useDebouncedValue(caseSearchRaw, 300).trim();
   const [selectedCaseIds, setSelectedCaseIds] = useState<number[]>([]);
   const [selectedTemplateIds, setSelectedTemplateIds] = useState<number[]>([]);
   const [activeMode, setActiveMode] = useState<"download" | "print">(
@@ -238,31 +256,99 @@ export default function DocumentAutomationHub() {
     };
   }, []);
 
+  type AutomationBootstrapResponse = {
+    cases:
+      | { ok: true; items: AutomationCaseRow[]; total: number; limit: number }
+      | { ok: false; error: string };
+    folders:
+      | { ok: true; items: FirmFolder[] }
+      | { ok: false; error: string };
+    templates:
+      | { ok: true; items: FirmDocumentTemplate[] }
+      | { ok: false; error: string };
+    settings:
+      | { ok: true; data: { showMasterDocuments: boolean; useMasterDocuments: boolean } }
+      | { ok: false; error: string };
+    permissions:
+      | { ok: true; data: { permissions: Array<{ module: string; action: string }> } }
+      | { ok: false; error: string };
+  };
+
+  const bootstrapQuery = useQuery<AutomationBootstrapResponse>({
+    queryKey: ["document-automation", "bootstrap"],
+    queryFn: ({ signal }) =>
+      apiFetchJson("/documents/automation/bootstrap?limit=80", {
+        signal,
+        timeoutMs: 20000,
+      }),
+    retry: false,
+    staleTime: 30_000,
+    refetchOnWindowFocus: false,
+  });
+
+  useEffect(() => {
+    const b = bootstrapQuery.data;
+    if (!b) return;
+    if (b.cases.ok) {
+      queryClient.setQueryData(["document-automation", "cases", ""], {
+        items: b.cases.items,
+        page: 1,
+        limit: b.cases.limit,
+      } satisfies AutomationCasesResponse);
+    }
+    if (b.folders.ok) {
+      queryClient.setQueryData(["document-automation", "folders"], b.folders.items);
+    }
+    if (b.templates.ok) {
+      queryClient.setQueryData(["document-automation", "templates"], b.templates.items);
+    }
+    if (b.settings.ok) {
+      queryClient.setQueryData(["firm-settings", "document-automation"], b.settings.data);
+    }
+  }, [bootstrapQuery.data, queryClient]);
+
+  const bootstrapReady = bootstrapQuery.isSuccess || bootstrapQuery.isError;
+
   const casesQuery = useQuery<AutomationCasesResponse>({
     queryKey: ["document-automation", "cases", caseSearch],
+    enabled: bootstrapReady,
     queryFn: ({ signal }) =>
       apiFetchJson(
         `/documents/automation/cases?search=${encodeURIComponent(caseSearch)}&page=1&limit=80`,
-        { signal, timeoutMs: 8000 },
+        { signal, timeoutMs: 20000 },
       ),
     retry: false,
+    staleTime: 30_000,
+    refetchOnWindowFocus: false,
+    refetchOnMount: false,
   });
 
   const foldersQuery = useQuery<FirmFolder[]>({
     queryKey: ["document-automation", "folders"],
+    enabled: bootstrapReady,
     queryFn: ({ signal }) =>
-      apiFetchJson("/firm-document-folders", { signal, timeoutMs: 8000 }),
+      apiFetchJson("/firm-document-folders?limit=2000", {
+        signal,
+        timeoutMs: 20000,
+      }),
     retry: false,
+    staleTime: 30_000,
+    refetchOnWindowFocus: false,
+    refetchOnMount: false,
   });
 
   const templatesQuery = useQuery<FirmDocumentTemplate[]>({
     queryKey: ["document-automation", "templates"],
+    enabled: bootstrapReady,
     queryFn: ({ signal }) =>
-      apiFetchJson("/document-templates?templateCapable=true&kind=template", {
+      apiFetchJson("/document-templates?templateCapable=true&kind=template&summary=1&limit=2000", {
         signal,
-        timeoutMs: 8000,
+        timeoutMs: 20000,
       }),
     retry: false,
+    staleTime: 30_000,
+    refetchOnWindowFocus: false,
+    refetchOnMount: false,
   });
 
   const firmSettingsQuery = useQuery<{
@@ -270,16 +356,20 @@ export default function DocumentAutomationHub() {
     useMasterDocuments?: boolean;
   }>({
     queryKey: ["firm-settings", "document-automation"],
+    enabled: bootstrapReady,
     queryFn: async ({ signal }) => {
       const res = await apiFetchJson<any>("/firm-settings", {
         signal,
-        timeoutMs: 8000,
+        timeoutMs: 20000,
       });
       return res && typeof res === "object" && "data" in res
         ? (res as any).data
         : res;
     },
     retry: false,
+    staleTime: 30_000,
+    refetchOnWindowFocus: false,
+    refetchOnMount: false,
   });
   const showMasterDocuments =
     (firmSettingsQuery.data?.showMasterDocuments ??
@@ -301,16 +391,19 @@ export default function DocumentAutomationHub() {
   const masterFoldersQuery = useQuery<SystemFolder[]>({
     queryKey: ["hub-folders", "document-automation"],
     queryFn: ({ signal }) =>
-      apiFetchJson<SystemFolder[]>("/hub/folders", { signal, timeoutMs: 8000 }),
+      apiFetchJson<SystemFolder[]>("/hub/folders", { signal, timeoutMs: 20000 }),
     enabled: showMasterDocuments,
     retry: false,
+    staleTime: 30_000,
+    refetchOnWindowFocus: false,
+    refetchOnMount: false,
   });
   const masterDocsQuery = useQuery<SystemDoc[]>({
     queryKey: ["hub-documents", "document-automation"],
     queryFn: async ({ signal }) => {
       const res = await apiFetchJson<any>("/hub/documents", {
         signal,
-        timeoutMs: 8000,
+        timeoutMs: 20000,
       });
       if (Array.isArray(res)) return res as SystemDoc[];
       return Array.isArray(res?.documents)
@@ -319,13 +412,57 @@ export default function DocumentAutomationHub() {
     },
     enabled: showMasterDocuments,
     retry: false,
+    staleTime: 30_000,
+    refetchOnWindowFocus: false,
+    refetchOnMount: false,
   });
 
-  const cases = casesQuery.data?.items ?? EMPTY_AUTOMATION_CASES;
-  const folders = foldersQuery.data ?? EMPTY_FIRM_FOLDERS;
-  const templates = templatesQuery.data ?? EMPTY_FIRM_TEMPLATES;
-  const masterFolders = masterFoldersQuery.data ?? [];
-  const masterDocs = masterDocsQuery.data ?? [];
+  const lastCasesRef = useRef<AutomationCaseRow[]>(EMPTY_AUTOMATION_CASES);
+  const lastFoldersRef = useRef<FirmFolder[]>(EMPTY_FIRM_FOLDERS);
+  const lastTemplatesRef = useRef<FirmDocumentTemplate[]>(EMPTY_FIRM_TEMPLATES);
+  const lastMasterFoldersRef = useRef<SystemFolder[]>([]);
+  const lastMasterDocsRef = useRef<SystemDoc[]>([]);
+
+  useEffect(() => {
+    if (!casesQuery.isSuccess) return;
+    const next = casesQuery.data?.items;
+    if (!Array.isArray(next)) return;
+    lastCasesRef.current = next;
+  }, [casesQuery.data, casesQuery.isSuccess]);
+
+  useEffect(() => {
+    if (!foldersQuery.isSuccess) return;
+    const next = foldersQuery.data;
+    if (!Array.isArray(next)) return;
+    lastFoldersRef.current = next;
+  }, [foldersQuery.data, foldersQuery.isSuccess]);
+
+  useEffect(() => {
+    if (!templatesQuery.isSuccess) return;
+    const next = templatesQuery.data;
+    if (!Array.isArray(next)) return;
+    lastTemplatesRef.current = next;
+  }, [templatesQuery.data, templatesQuery.isSuccess]);
+
+  useEffect(() => {
+    if (!masterFoldersQuery.isSuccess) return;
+    const next = masterFoldersQuery.data;
+    if (!Array.isArray(next)) return;
+    lastMasterFoldersRef.current = next;
+  }, [masterFoldersQuery.data, masterFoldersQuery.isSuccess]);
+
+  useEffect(() => {
+    if (!masterDocsQuery.isSuccess) return;
+    const next = masterDocsQuery.data;
+    if (!Array.isArray(next)) return;
+    lastMasterDocsRef.current = next;
+  }, [masterDocsQuery.data, masterDocsQuery.isSuccess]);
+
+  const cases = casesQuery.data?.items ?? lastCasesRef.current;
+  const folders = foldersQuery.data ?? lastFoldersRef.current;
+  const templates = templatesQuery.data ?? lastTemplatesRef.current;
+  const masterFolders = masterFoldersQuery.data ?? lastMasterFoldersRef.current;
+  const masterDocs = masterDocsQuery.data ?? lastMasterDocsRef.current;
 
   const caseCacheById = useMemo(() => {
     const m = new Map<number, AutomationCaseRow>();
@@ -1481,10 +1618,24 @@ export default function DocumentAutomationHub() {
                   </div>
                   <div className="mt-3">
                     <Input
-                      value={caseSearch}
-                      onChange={(e) => setCaseSearch(e.target.value)}
+                      value={caseSearchRaw}
+                      onChange={(e) => setCaseSearchRaw(e.target.value)}
                       placeholder="Search by reference / parcel / purchaser..."
                     />
+                    {casesQuery.isError && !isAbortLike(casesQuery.error) ? (
+                      <div className="mt-2 flex items-center justify-between gap-2 text-xs text-amber-700">
+                        <div className="truncate">Unable to load cases.</div>
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          onClick={() => void casesQuery.refetch()}
+                          disabled={casesQuery.isFetching}
+                        >
+                          Retry
+                        </Button>
+                      </div>
+                    ) : null}
                   </div>
                 </div>
 
@@ -1554,9 +1705,13 @@ export default function DocumentAutomationHub() {
                             colSpan={5}
                             className="px-4 py-10 text-center text-sm text-slate-400"
                           >
-                            {casesQuery.isLoading
+                            {casesQuery.isLoading || !bootstrapReady
                               ? "Loading cases..."
-                              : "No cases found"}
+                              : casesQuery.isError && !isAbortLike(casesQuery.error)
+                                ? "Unable to load cases."
+                                : casesQuery.isSuccess
+                                  ? "No cases found"
+                                  : "Loading cases..."}
                           </td>
                         </tr>
                       )}
@@ -1607,6 +1762,76 @@ export default function DocumentAutomationHub() {
                       </TabsList>
                     </Tabs>
                   </div>
+
+                  {templateSourceTab === "firm" &&
+                  foldersQuery.isError &&
+                  !isAbortLike(foldersQuery.error) ? (
+                    <div className="mt-2 flex items-center justify-between gap-2 text-xs text-amber-700">
+                      <div className="truncate">Unable to load folders.</div>
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        onClick={() => void foldersQuery.refetch()}
+                        disabled={foldersQuery.isFetching}
+                      >
+                        Retry
+                      </Button>
+                    </div>
+                  ) : null}
+
+                  {templateSourceTab === "firm" &&
+                  templatesQuery.isError &&
+                  !isAbortLike(templatesQuery.error) ? (
+                    <div className="mt-2 flex items-center justify-between gap-2 text-xs text-amber-700">
+                      <div className="truncate">Unable to load templates.</div>
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        onClick={() => void templatesQuery.refetch()}
+                        disabled={templatesQuery.isFetching}
+                      >
+                        Retry
+                      </Button>
+                    </div>
+                  ) : null}
+
+                  {templateSourceTab === "master" &&
+                  showMasterDocuments &&
+                  masterFoldersQuery.isError &&
+                  !isAbortLike(masterFoldersQuery.error) ? (
+                    <div className="mt-2 flex items-center justify-between gap-2 text-xs text-amber-700">
+                      <div className="truncate">Unable to load master folders.</div>
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        onClick={() => void masterFoldersQuery.refetch()}
+                        disabled={masterFoldersQuery.isFetching}
+                      >
+                        Retry
+                      </Button>
+                    </div>
+                  ) : null}
+
+                  {templateSourceTab === "master" &&
+                  showMasterDocuments &&
+                  masterDocsQuery.isError &&
+                  !isAbortLike(masterDocsQuery.error) ? (
+                    <div className="mt-2 flex items-center justify-between gap-2 text-xs text-amber-700">
+                      <div className="truncate">Unable to load master documents.</div>
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        onClick={() => void masterDocsQuery.refetch()}
+                        disabled={masterDocsQuery.isFetching}
+                      >
+                        Retry
+                      </Button>
+                    </div>
+                  ) : null}
 
                   {templateSourceTab === "firm" && (
                     <>
@@ -1728,15 +1953,27 @@ export default function DocumentAutomationHub() {
                           </div>
                         )}
 
-                        {templatesQuery.isLoading && (
+                        {(templatesQuery.isLoading || !bootstrapReady) && templates.length === 0 && (
                           <div className="px-4 py-10 text-center text-sm text-slate-400">
                             Loading templates...
                           </div>
                         )}
-                        {!templatesQuery.isLoading &&
-                          templates.length === 0 && (
+                        {templates.length === 0 &&
+                          bootstrapReady &&
+                          !templatesQuery.isLoading &&
+                          !templatesQuery.isFetching &&
+                          templatesQuery.isSuccess && (
                             <div className="px-4 py-10 text-center text-sm text-slate-400">
                               No templates found
+                            </div>
+                          )}
+                        {templates.length === 0 &&
+                          bootstrapReady &&
+                          !templatesQuery.isLoading &&
+                          templatesQuery.isError &&
+                          !isAbortLike(templatesQuery.error) && (
+                            <div className="px-4 py-10 text-center text-sm text-slate-400">
+                              Unable to load templates.
                             </div>
                           )}
                       </>
@@ -1782,15 +2019,27 @@ export default function DocumentAutomationHub() {
                           </div>
                         )}
 
-                        {masterDocsQuery.isLoading && (
+                        {(masterDocsQuery.isLoading || !bootstrapReady) && masterDocs.length === 0 && (
                           <div className="px-4 py-10 text-center text-sm text-slate-400">
                             Loading documents...
                           </div>
                         )}
-                        {!masterDocsQuery.isLoading &&
-                          masterDocs.length === 0 && (
+                        {masterDocs.length === 0 &&
+                          bootstrapReady &&
+                          !masterDocsQuery.isLoading &&
+                          !masterDocsQuery.isFetching &&
+                          masterDocsQuery.isSuccess && (
                             <div className="px-4 py-10 text-center text-sm text-slate-400">
                               No documents found
+                            </div>
+                          )}
+                        {masterDocs.length === 0 &&
+                          bootstrapReady &&
+                          !masterDocsQuery.isLoading &&
+                          masterDocsQuery.isError &&
+                          !isAbortLike(masterDocsQuery.error) && (
+                            <div className="px-4 py-10 text-center text-sm text-slate-400">
+                              Unable to load documents.
                             </div>
                           )}
                       </>
