@@ -24775,14 +24775,13 @@ router.post(
 
     const documentName =
       typeof body.documentName === "string" ? body.documentName.trim() : "";
-    const letterheadId =
-      typeof body.letterheadId === "number" ? body.letterheadId : null;
+    const letterheadId = normalizeLetterheadId((body as any).letterheadId);
     const requestedOutputFormat =
-      body.outputFormat === "pdf"
-        ? "pdf"
-        : body.outputFormat === "docx"
-          ? "docx"
-          : undefined;
+      body.outputFormat === "docx"
+        ? "docx"
+        : body.outputFormat === "pdf"
+          ? "pdf"
+          : "pdf";
 
     const cache = createRequestCache();
     const [context, templateRows] = await Promise.all([
@@ -24886,288 +24885,53 @@ router.post(
     });
 
     try {
-      const fail = (
-        statusCode: number,
-        code: string,
-        message: string,
-        payload?: Record<string, unknown>,
-      ) => {
-        throw new DocumentGenerationError(statusCode, code, message, payload);
-      };
-      const warnings: Array<{ code: string; message: string }> = [];
-
-      const templateVersionId = Number.isNaN(templateId)
-        ? null
-        : await ensureFirmTemplatePublishedVersionId(
-            r,
-            req.firmId!,
-            templateId,
-            req.userId!,
-          );
-      if (templateVersionId) {
-        await queryRows(
-          r,
-          sql`UPDATE document_generation_runs SET template_version_id = ${templateVersionId} WHERE id = ${runId} AND firm_id = ${req.firmId!}`,
-        );
-      }
-      const vRows = templateVersionId
-        ? await queryRows(
-            r,
-            sql`SELECT * FROM document_template_versions WHERE id = ${templateVersionId} AND firm_id = ${req.firmId!}`,
-          )
-        : [];
-      const v = vRows[0];
-      const templateObjectPathRaw =
-        typeof (v as any)?.source_object_path === "string"
-          ? String((v as any).source_object_path)
-          : typeof (template as any).object_path === "string"
-            ? String((template as any).object_path)
-            : "";
-      const templateObjectPath = decodeStoragePath(templateObjectPathRaw);
-      if (!templateObjectPath) {
-        fail(404, "TEMPLATE_FILE_MISSING", "Template file missing");
-      }
-      const fileContents = await downloadPrivateObjectBytes(templateObjectPath);
-      const placeholders = placeholdersFromVariablesSnapshot(
-        (v as any)?.variables_snapshot,
-      );
-      const storedOverrides = await getCaseVariableOverrides(
+      const out = await generateFirmDocument({
         r,
-        cache,
-        req.firmId!,
-        caseId,
-      );
-      const effectivePlaceholders =
-        placeholders.length > 0
-          ? placeholders
-          : detectDocxVariables(fileContents);
-      const preview = await runDocumentPreview(r, {
         firmId: req.firmId!,
-        caseContext: context as any,
-        templateRef: { kind: "firm", templateId },
-        placeholders: effectivePlaceholders,
-        overrides: storedOverrides,
-      });
-      const input = fillMissingScalarsForRender(
-        effectivePlaceholders,
-        preview.usedMode === "bindings"
-          ? preview.resolvedVariables
-          : (context as any),
-        { missingMode: "empty" },
-      );
-
-      const templateDocType =
-        template && typeof template === "object" && "document_type" in template
-          ? String((template as any).document_type)
-          : "other";
-      const isLetterLike = isLetterheadApplicableDocumentType(templateDocType);
-      const letterheadBytesPromise = isLetterLike
-        ? (async () => {
-            try {
-              const lhIdNum = letterheadId;
-              let lh: Record<string, unknown> | undefined;
-              if (lhIdNum !== null) {
-                const byId = await queryRows(
-                  r,
-                  sql`SELECT * FROM firm_letterheads WHERE id = ${lhIdNum} AND firm_id = ${req.firmId!}`,
-                );
-                const candidate = byId[0];
-                if (!candidate) {
-                  warnings.push({
-                    code: "LETTERHEAD_NOT_FOUND",
-                    message:
-                      "Selected letterhead not found; generated without letterhead.",
-                  });
-                  return null;
-                }
-                if (
-                  String((candidate as any).status ?? "active") !== "active"
-                ) {
-                  warnings.push({
-                    code: "LETTERHEAD_INACTIVE",
-                    message:
-                      "Selected letterhead inactive; generated without letterhead.",
-                  });
-                  return null;
-                }
-                lh = candidate;
-              } else {
-                const defaults = await queryRows(
-                  r,
-                  sql`SELECT * FROM firm_letterheads WHERE firm_id = ${req.firmId!} AND status = 'active' ORDER BY is_default DESC, created_at DESC LIMIT 1`,
-                );
-                lh = defaults[0];
-                if (!lh) {
-                  warnings.push({
-                    code: "NO_LETTERHEAD",
-                    message:
-                      "No active firm letterhead configured; generated without letterhead.",
-                  });
-                  return null;
-                }
-              }
-              const usedLetterheadId =
-                typeof (lh as any).id === "number"
-                  ? Number((lh as any).id)
-                  : null;
-              const firstPath = decodeStoragePath(
-                String((lh as any).first_page_object_path),
-              );
-              const contPath = decodeStoragePath(
-                String((lh as any).continuation_header_object_path),
-              );
-              const footerPath = (lh as any).footer_object_path
-                ? decodeStoragePath(String((lh as any).footer_object_path))
-                : null;
-              const footerMode =
-                (lh as any).footer_mode === "last_page_only"
-                  ? "last_page_only"
-                  : "every_page";
-              const [firstBytes, contBytes, footerBytes] = await Promise.all([
-                downloadPrivateObjectBytes(firstPath),
-                downloadPrivateObjectBytes(contPath),
-                footerPath
-                  ? downloadPrivateObjectBytes(footerPath)
-                  : Promise.resolve(null),
-              ]);
-              return {
-                usedLetterheadId,
-                footerMode,
-                firstBytes,
-                contBytes,
-                footerBytes,
-              };
-            } catch (err) {
-              if (err instanceof StorageRequestTimeoutError) {
-                warnings.push({
-                  code: "LETTERHEAD_TIMEOUT",
-                  message:
-                    "Letterhead download timed out; generated without letterhead.",
-                });
-                return null;
-              }
-              if (err instanceof ObjectNotFoundError) {
-                warnings.push({
-                  code: "LETTERHEAD_FILE_NOT_FOUND",
-                  message:
-                    "Letterhead file not found; generated without letterhead.",
-                });
-                return null;
-              }
-              logger.warn(
-                { err, firmId: req.firmId, caseId, printKey },
-                "[documents.print] letterhead_apply_skipped",
-              );
-              warnings.push({
-                code: "LETTERHEAD_SKIPPED",
-                message:
-                  "Letterhead skipped due to an error; generated without letterhead.",
-              });
-              return null;
-            }
-          })()
-        : Promise.resolve(null);
-
-      const letterheadBytes = await letterheadBytesPromise;
-
-      const zip = new PizZip(fileContents);
-      const doc = new Docxtemplater(zip, {
-        paragraphLoop: true,
-        linebreaks: true,
-        modules: [makeDocxImageModule()],
-      });
-      await maybeHydrateFirmLogoBuffer(input as any);
-      try {
-        doc.render(input);
-      } catch (err) {
-        const detail = extractDocxTemplateErrorDetail(err);
-        logger.error(
-          {
-            err,
-            path: req.path,
-            firmId: req.firmId,
-            userId: req.userId,
-            caseId,
-            templateId: (template as any).id,
-            printKey,
-          },
-          "[documents] template_render_failed",
-        );
-        fail(422, "TEMPLATE_RENDER_FAILED", detail.message, {
-          tags: detail.tags,
-        });
-      }
-      let buffer = doc
-        .getZip()
-        .generate({ type: "nodebuffer", compression: "DEFLATE" }) as Buffer;
-
-      let usedLetterheadId: number | null = null;
-      if (letterheadBytes) {
-        usedLetterheadId = letterheadBytes.usedLetterheadId ?? null;
-        buffer = await applyLetterheadToDocxBuffer({
-          baseDocx: buffer,
-          firstPageTemplateDocx: letterheadBytes.firstBytes,
-          continuationHeaderTemplateDocx: letterheadBytes.contBytes,
-          footerTemplateDocx: letterheadBytes.footerBytes,
-          footerMode: letterheadBytes.footerMode,
-        });
-      }
-
-      const gotenbergUrl =
-        typeof process.env.GOTENBERG_URL === "string"
-          ? process.env.GOTENBERG_URL.trim()
-          : "";
-      const wantPdf =
-        requestedOutputFormat === "pdf"
-          ? true
-          : requestedOutputFormat === "docx"
-            ? false
-            : Boolean(gotenbergUrl);
-      const outBytes = wantPdf ? await convertDocxToPdf(buffer) : buffer;
-      const outExt = wantPdf ? "pdf" : "docx";
-      const outContentType = wantPdf
-        ? "application/pdf"
-        : "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
-
-      const normalizedPath = newGeneratedDocObjectPath(
-        req.firmId!,
+        actorId: req.userId!,
+        actorType: req.userType,
+        ipAddress: req.ip,
+        userAgent: String(req.headers["user-agent"] ?? ""),
         caseId,
-        outExt,
-      );
-      await supabaseStorage.uploadPrivateObject({
-        objectPath: normalizedPath,
-        fileBytes: outBytes,
-        contentType: outContentType,
+        templateId,
+        documentName: documentName || cfg.label,
+        letterheadId,
+        runId,
+        outputFormat: requestedOutputFormat,
+        preloadedCaseContext: context as any,
+        preloadedTemplate: template as any,
+        requestCache: cache,
       });
-      const outSize = outBytes.length;
-      const nameToUse =
-        documentName || `${cfg.label} - ${context.reference_no}`;
-      const fileName = `${nameToUse.replace(/[^a-zA-Z0-9 \-_]/g, "_")}.${outExt}`;
-
-      const docRows = await queryRows(
-        r,
-        sql`
-      INSERT INTO case_documents (case_id, firm_id, template_id, name, document_type, status, object_path, file_name, file_size, is_uploaded, generated_by, generated_at)
-      VALUES (${caseId}, ${req.firmId!}, ${(template as any).id as number}, ${nameToUse}, ${cfg.documentType}, 'generated', ${normalizedPath}, ${fileName}, ${outSize}, false, ${req.userId!}, now())
-      RETURNING *`,
+      const outBytes = out.outputBytes;
+      const outContentType = out.outputContentType;
+      if (!Buffer.isBuffer(outBytes) || outBytes.length === 0) {
+        throw new DocumentGenerationError(
+          500,
+          "OUTPUT_MISSING",
+          "Generated output missing",
+        );
+      }
+      const createdId = out.caseDocumentId;
+      const outFileName = String(
+        (out.caseDocument as any)?.fileName ??
+          (out.caseDocument as any)?.file_name ??
+          "",
       );
-
-      const created = docRows[0];
-      const createdId =
-        created &&
-        typeof created === "object" &&
-        "id" in created &&
-        typeof (created as { id?: unknown }).id === "number"
-          ? (created as { id: number }).id
-          : undefined;
+      if (!outFileName) {
+        throw new DocumentGenerationError(
+          500,
+          "OUTPUT_FILENAME_MISSING",
+          "Generated file name missing",
+        );
+      }
       await writeAuditLog({
         firmId: req.firmId,
         actorId: req.userId,
         actorType: req.userType,
         action: "documents.case.print",
         entityType: "case_document",
-        entityId: createdId,
-        detail: `caseId=${caseId} printKey=${printKey} templateId=${(template as any).id} name=${nameToUse} letterhead=${isLetterLike ? (usedLetterheadId ?? "default") : "n/a"} output=${outExt}`,
+        entityId: createdId ?? undefined,
+        detail: `caseId=${caseId} printKey=${printKey} templateId=${templateId} name=${documentName || cfg.label} letterhead=${letterheadId ?? "default"} output=${requestedOutputFormat}`,
         ipAddress: req.ip,
         userAgent: req.headers["user-agent"],
       });
@@ -25175,10 +24939,10 @@ router.post(
         r,
         req.firmId!,
         runId,
-        createdId ?? null,
-        context,
-        null,
-        null,
+        createdId,
+        out.renderedVars,
+        out.checklistSnapshot,
+        out.readinessSnapshot,
       );
       await writeAuditLog({
         firmId: req.firmId,
@@ -25194,9 +24958,11 @@ router.post(
       if (createdId) res.setHeader("x-case-document-id", String(createdId));
       res.setHeader(
         "Content-Disposition",
-        contentDispositionAttachment(fileName),
+        contentDispositionAttachment(outFileName),
       );
-      res.setHeader("Content-Type", outContentType);
+      if (typeof outContentType === "string" && outContentType.trim()) {
+        res.setHeader("Content-Type", outContentType);
+      }
       res.status(201).send(outBytes);
     } catch (err: unknown) {
       const cfgErr = getSupabaseStorageConfigError(err);

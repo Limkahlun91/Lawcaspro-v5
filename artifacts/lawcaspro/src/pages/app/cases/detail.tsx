@@ -7,7 +7,7 @@ import {
 } from "@workspace/api-client-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { ArrowLeft, CheckCircle2, Clock, User, Building2, MapPin, Tag, Receipt, Printer, Upload, Download, Trash2, Plus, Minus, X, MoreHorizontal, Share2, AlertTriangle } from "lucide-react";
+import { ArrowLeft, CheckCircle2, Clock, User, Building2, MapPin, Tag, Receipt, Printer, Upload, Download, Trash2, Plus, Minus, X, MoreHorizontal, Share2, AlertTriangle, Loader2 } from "lucide-react";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from "@/components/ui/accordion";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -34,7 +34,6 @@ import { toastError } from "@/lib/toast-error";
 import { apiFetchBlob, apiFetchJson, apiRequest } from "@/lib/api-client";
 import { DateOnlyInput, formatYmdToDmy, normalizeDateOnlyFromApi } from "@/components/date-only-input";
 import { downloadBlob } from "@/lib/download";
-import { printWordBlob } from "@/lib/documents/BrowserPrinter";
 import { useAuth } from "@/lib/auth-context";
 import { hasPermission } from "@/lib/permissions";
 import { DEFAULT_ALLOWED_MIME_TYPES, validateUploadFile } from "@/lib/upload-validation";
@@ -502,8 +501,8 @@ export default function CaseDetail() {
     mutationFn: async (payload: { printKey: string }) => {
       const res = await apiRequest(`/cases/${caseId}/documents/print`, {
         method: "POST",
-        timeoutMs: 60000,
-        body: JSON.stringify({ ...payload, outputFormat: "docx" }),
+        timeoutMs: 120000,
+        body: JSON.stringify({ ...payload, outputFormat: "pdf" }),
       });
       const blob = await res.blob();
       const cd = res.headers.get("content-disposition") ?? "";
@@ -518,19 +517,8 @@ export default function CaseDetail() {
       if (Number.isFinite(docId)) {
         queryClient.invalidateQueries({ queryKey: ["case-documents", caseId] });
       }
-      const key = vars?.printKey ?? "";
-      const downloadKeys = new Set([
-        "letter_send_spa_to_developer_execution",
-        "letter_send_stamped_spa_to_developer",
-        "letter_send_stamped_spa_to_purchaser",
-      ]);
-      if (downloadKeys.has(key)) {
-        downloadBlob(blob, fileName);
-        toast({ title: "Downloaded" });
-      } else {
-        await printWordBlob(blob, { title: fileName });
-        toast({ title: "Print preview opened" });
-      }
+      downloadBlob(blob, fileName);
+      toast({ title: "Downloaded" });
 
       if (vars?.printKey === "acting_letter") {
         const existing = typeof keyDatesDraft.acting_letter_issued_date === "string" ? keyDatesDraft.acting_letter_issued_date : "";
@@ -1758,6 +1746,7 @@ export default function CaseDetail() {
     const showStatus = showPrinter && st?.status !== "configured";
     const statusLabel = showStatus ? printStatusLabel(st) : "";
     const showRequired = Boolean(props.required) && !dateVal;
+    const isGenerating = printMutation.isPending && printMutation.variables?.printKey === printerKey;
 
     return (
       <div className="group rounded-lg border border-slate-200 bg-white p-3">
@@ -1811,11 +1800,11 @@ export default function CaseDetail() {
                 size="icon"
                 variant={canPrint(printerKey, dateVal) ? "default" : "outline"}
                 className={canPrint(printerKey, dateVal) ? "bg-slate-900 hover:bg-slate-800" : undefined}
-                title={printTitle(printerKey, dateVal)}
+                title={isGenerating ? "Generating..." : printTitle(printerKey, dateVal)}
                 onClick={() => printMutation.mutate({ printKey: printerKey })}
                 disabled={printMutation.isPending || props.disabled || !canPrint(printerKey, dateVal)}
               >
-                <Printer className="w-4 h-4" />
+                {isGenerating ? <Loader2 className="w-4 h-4 animate-spin" /> : <Printer className="w-4 h-4" />}
               </Button>
             </div>
           )}
@@ -1842,6 +1831,7 @@ export default function CaseDetail() {
     const st = showPrinter ? printState(printerKey) : null;
     const showStatus = showPrinter && st?.status !== "configured";
     const statusLabel = showStatus ? printStatusLabel(st) : "";
+    const isGenerating = printMutation.isPending && printMutation.variables?.printKey === printerKey;
 
     return (
       <div className="group rounded-lg border border-slate-200 bg-white p-3">
@@ -1894,11 +1884,11 @@ export default function CaseDetail() {
                 size="icon"
                 variant={canPrint(printerKey, value) ? "default" : "outline"}
                 className={canPrint(printerKey, value) ? "bg-slate-900 hover:bg-slate-800" : undefined}
-                title={printTitle(printerKey, value)}
+                title={isGenerating ? "Generating..." : printTitle(printerKey, value)}
                 onClick={() => printMutation.mutate({ printKey: printerKey })}
                 disabled={printMutation.isPending || props.disabled || !canPrint(printerKey, value)}
               >
-                <Printer className="w-4 h-4" />
+                {isGenerating ? <Loader2 className="w-4 h-4 animate-spin" /> : <Printer className="w-4 h-4" />}
               </Button>
             </div>
           )}
