@@ -14,6 +14,7 @@ describe("Healthz docx-pdf", () => {
     process.env.DOCX_TO_PDF_ENGINE = "disabled";
     delete process.env.GOTENBERG_URL;
     delete process.env.DOCX_CONVERTER_URL;
+    delete process.env.DOCX_PDF_SERVICE_URL;
     const res = await request(app).get("/api/healthz/docx-pdf");
     expect(res.status).toBe(200);
     expect(res.body).toMatchObject({
@@ -24,12 +25,11 @@ describe("Healthz docx-pdf", () => {
     });
   });
 
-  it("returns configured=true when gotenberg url is present", async () => {
-    process.env.DOCX_TO_PDF_ENGINE = "gotenberg";
-    process.env.GOTENBERG_URL = "https://gotenberg.example";
+  it("returns configured=true when http_service url is present", async () => {
+    process.env.DOCX_TO_PDF_ENGINE = "http_service";
+    process.env.DOCX_PDF_SERVICE_URL = "https://docx-pdf.example/convert";
     const res = await request(app).get("/api/healthz/docx-pdf");
     expect(res.status).toBe(200);
-    expect(res.body).toMatchObject({ ok: true, engine: "gotenberg", configured: true });
+    expect(res.body).toMatchObject({ ok: true, engine: "http_service", configured: true });
   });
 });
-

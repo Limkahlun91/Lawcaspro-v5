@@ -46,6 +46,11 @@ import { PDFDocument, rgb, StandardFonts } from "pdf-lib";
 import fontkit from "@pdf-lib/fontkit";
 import { z } from "zod";
 import {
+  convertDocxToPdf as convertDocxToPdfService,
+  getDocxToPdfHealth,
+} from "../services/document-generation/docx-to-pdf.js";
+import { renderDocxTemplate } from "../services/document-generation/docx-template-renderer.js";
+import {
   normalizePurchaseMode,
   normalizeTitleType,
 } from "../lib/documentApplicability.js";
@@ -889,20 +894,35 @@ function extractDocxTemplateErrorDetail(err: unknown): {
 function fillMissingScalarsForRender(
   placeholders: string[],
   input: Record<string, unknown>,
-  opts?: { missingMode?: "placeholder" | "empty" },
+  opts?: { missingMode?: "placeholder" | "empty" | "dash" },
 ): Record<string, unknown> {
   const out: Record<string, unknown> = { ...input };
-  const missingMode = opts?.missingMode === "placeholder" ? "placeholder" : "empty";
+  const missingMode =
+    opts?.missingMode === "placeholder"
+      ? "placeholder"
+      : opts?.missingMode === "dash"
+        ? "dash"
+        : "empty";
   for (const k of placeholders) {
     if (!k) continue;
     const v = out[k];
     if (Array.isArray(v)) continue;
     if (v === null || v === undefined) {
-      out[k] = missingMode === "empty" ? "" : `[MISSING: ${k}]`;
+      out[k] =
+        missingMode === "empty"
+          ? ""
+          : missingMode === "dash"
+            ? "—"
+            : `[MISSING: ${k}]`;
       continue;
     }
     if (typeof v === "string" && v.trim() === "") {
-      out[k] = missingMode === "empty" ? "" : `[MISSING: ${k}]`;
+      out[k] =
+        missingMode === "empty"
+          ? ""
+          : missingMode === "dash"
+            ? "—"
+            : `[MISSING: ${k}]`;
       continue;
     }
   }
@@ -11210,287 +11230,26 @@ async function renderFallbackPdfFromDocx(docxBytes: Buffer): Promise<Buffer> {
 }
 
 async function convertDocxToPdf(docxBytes: Buffer): Promise<Buffer> {
-  const engineRaw = (() => {
-    const v1 =
-      typeof process.env.DOCX_TO_PDF_ENGINE === "string"
-        ? process.env.DOCX_TO_PDF_ENGINE.trim()
-        : "";
-    if (v1) return v1;
-    const legacy =
-      typeof process.env.DOCX_CONVERTER_PROVIDER === "string"
-        ? process.env.DOCX_CONVERTER_PROVIDER.trim()
-        : "";
-    return legacy || "disabled";
-  })();
-  const engine = (() => {
-    const s = engineRaw.trim().toLowerCase();
-    if (s === "gotenberg") return "gotenberg";
-    if (s === "libreoffice") return "libreoffice";
-    if (s === "disabled") return "disabled";
-    return "disabled";
-  })();
-
-  const baseUrlRaw =
-    (typeof process.env.DOCX_CONVERTER_URL === "string"
-      ? process.env.DOCX_CONVERTER_URL.trim()
-      : "") ||
-    (typeof process.env.GOTENBERG_URL === "string"
-      ? process.env.GOTENBERG_URL.trim()
-      : "");
-  const baseUrl = baseUrlRaw.replace(/\/+$/, "");
-
-  const configured =
-    engine === "gotenberg"
-      ? Boolean(baseUrl)
-      : engine === "libreoffice"
-        ? Boolean(
-            (typeof process.env.LIBREOFFICE_BIN === "string" &&
-              process.env.LIBREOFFICE_BIN.trim()) ||
-              (typeof process.env.SOFFICE_BIN === "string" &&
-                process.env.SOFFICE_BIN.trim()),
-          )
-        : false;
-
-  if (!configured) {
-    // #region debug-point D:docx-convert-unavailable
-    (() => {
-      import("node:fs")
-        .then((fs) => {
-          const p = ".dbg/document-generation-stability.env";
-          let u = "http://127.0.0.1:7777/event";
-          let s = "document-generation-stability";
-          try {
-            const e = fs.readFileSync(p, "utf8");
-            u = e.match(/DEBUG_SERVER_URL=(.+)/)?.[1] || u;
-            s = e.match(/DEBUG_SESSION_ID=(.+)/)?.[1] || s;
-          } catch {}
-          fetch(u, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              sessionId: s,
-              runId: "pre",
-              hypothesisId: "D",
-              location: "documents.ts:convertDocxToPdf",
-              msg: "[DEBUG] GOTENBERG_URL missing -> fallback",
-              ts: Date.now(),
-              data: {
-                gotenbergUrlPresent: Boolean(baseUrl),
-                engine,
-                docxBytesLength: docxBytes?.length ?? null,
-              },
-            }),
-          }).catch(() => {});
-        })
-        .catch(() => {});
-    })();
-    // #endregion
-    throw new DocumentGenerationError(
-      503,
-      "DOCX_TO_PDF_ENGINE_NOT_CONFIGURED",
-      "Please configure DOCX-to-PDF converter before generating PDF from Word templates.",
-    );
-  }
-
-  if (engine === "libreoffice") {
-    const { mkdtemp, readFile, rm, writeFile } = await import("node:fs/promises");
-    const { tmpdir } = await import("node:os");
-    const { join } = await import("node:path");
-    const { execFile } = await import("node:child_process");
-    const { promisify } = await import("node:util");
-    const execFileAsync = promisify(execFile);
-    const timeoutMs = (() => {
-      const raw = process.env.DOCX_TO_PDF_TIMEOUT_MS;
-      const n = typeof raw === "string" ? Number(raw) : NaN;
-      return Number.isFinite(n) && n > 0 ? Math.trunc(n) : 20000;
-    })();
-
-    const binRaw =
-      (typeof process.env.LIBREOFFICE_BIN === "string"
-        ? process.env.LIBREOFFICE_BIN.trim()
-        : "") ||
-      (typeof process.env.SOFFICE_BIN === "string"
-        ? process.env.SOFFICE_BIN.trim()
-        : "") ||
-      "soffice";
-
-    const dir = await mkdtemp(join(tmpdir(), "lawcaspro-docx-"));
-    try {
-      const inPath = join(dir, "document.docx");
-      await writeFile(inPath, docxBytes);
-      try {
-        await execFileAsync(
-          binRaw,
-          [
-            "--headless",
-            "--nologo",
-            "--nofirststartwizard",
-            "--convert-to",
-            "pdf",
-            "--outdir",
-            dir,
-            inPath,
-          ],
-          { timeout: timeoutMs, killSignal: "SIGKILL" } as any,
-        );
-      } catch (err) {
-        const rec = err && typeof err === "object" ? (err as any) : null;
-        const timedOut =
-          rec?.code === "ETIMEDOUT" ||
-          rec?.signal === "SIGKILL" ||
-          rec?.killed === true ||
-          /timed?\s*out|timeout/i.test(String(rec?.message ?? ""));
-        if (timedOut) {
-          throw new DocumentGenerationError(
-            503,
-            "DOCX_TO_PDF_TIMEOUT",
-            "PDF conversion timed out",
-          );
-        }
-        throw err;
-      }
-      const outPath = join(dir, "document.pdf");
-      const out = await readFile(outPath);
-      if (!Buffer.isBuffer(out) || out.length < 800) {
-        throw new DocumentGenerationError(
-          503,
-          "DOCX_TO_PDF_FAILED",
-          "PDF conversion returned an empty file",
-          { byteLength: out?.length ?? 0 },
-        );
-      }
-      try {
-        const pdf = await PDFDocument.load(out);
-        const pages = pdf.getPageCount();
-        if (!Number.isFinite(pages) || pages <= 0) throw new Error("empty_pages");
-      } catch {
-        throw new DocumentGenerationError(
-          503,
-          "DOCX_TO_PDF_FAILED",
-          "PDF conversion returned an invalid PDF",
-          { byteLength: out.length },
-        );
-      }
-      return out;
-    } catch (err) {
-      if (err instanceof DocumentGenerationError) throw err;
-      throw new DocumentGenerationError(
-        503,
-        "DOCX_TO_PDF_FAILED",
-        "PDF conversion failed",
-      );
-    } finally {
-      await rm(dir, { recursive: true, force: true }).catch(() => {});
-    }
-  }
-
-  const controller = new AbortController();
-  const timeoutMs = (() => {
-    const raw = process.env.DOCX_TO_PDF_TIMEOUT_MS;
-    const n = typeof raw === "string" ? Number(raw) : NaN;
-    return Number.isFinite(n) && n > 0 ? Math.trunc(n) : 20000;
-  })();
-  const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const url = `${baseUrl}/forms/libreoffice/convert`;
-    const boundary = `----lawcaspro-${randomUUID()}`;
-    const head = Buffer.from(
-      `--${boundary}\r\n` +
-        `Content-Disposition: form-data; name="files"; filename="document.docx"\r\n` +
-        `Content-Type: application/vnd.openxmlformats-officedocument.wordprocessingml.document\r\n\r\n`,
-      "utf8",
-    );
-    const tail = Buffer.from(`\r\n--${boundary}--\r\n`, "utf8");
-    const body = Buffer.concat([head, docxBytes, tail]);
-    const resp = await fetch(url, {
-      method: "POST",
-      headers: { "content-type": `multipart/form-data; boundary=${boundary}` },
-      body,
-      signal: controller.signal,
-    });
-    // #region debug-point D:docx-convert-response
-    (() => {
-      import("node:fs")
-        .then((fs) => {
-          const p = ".dbg/document-generation-stability.env";
-          let u = "http://127.0.0.1:7777/event";
-          let s = "document-generation-stability";
-          try {
-            const e = fs.readFileSync(p, "utf8");
-            u = e.match(/DEBUG_SERVER_URL=(.+)/)?.[1] || u;
-            s = e.match(/DEBUG_SESSION_ID=(.+)/)?.[1] || s;
-          } catch {}
-          fetch(u, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              sessionId: s,
-              runId: "pre",
-              hypothesisId: "D",
-              location: "documents.ts:convertDocxToPdf",
-              msg: "[DEBUG] gotenberg response received",
-              ts: Date.now(),
-              data: {
-                gotenbergUrlPresent: true,
-                status: resp.status,
-                ok: resp.ok,
-                contentType: resp.headers.get("content-type"),
-              },
-            }),
-          }).catch(() => {});
-        })
-        .catch(() => {});
-    })();
-    // #endregion
-    if (!resp.ok) {
-      const txt = await resp.text().catch(() => "");
-      const short = txt && txt.length ? txt.slice(0, 200) : "";
-      throw new DocumentGenerationError(
-        503,
-        "DOCX_TO_PDF_FAILED",
-        "PDF conversion failed",
-        { status: resp.status, detail: short },
-      );
-    }
-    const ab = await resp.arrayBuffer();
-    const out = Buffer.from(ab);
-    if (!Buffer.isBuffer(out) || out.length < 800) {
-      throw new DocumentGenerationError(
-        503,
-        "DOCX_TO_PDF_FAILED",
-        "PDF conversion returned an empty file",
-        { byteLength: out?.length ?? 0 },
-      );
-    }
-    try {
-      const pdf = await PDFDocument.load(out);
-      const pages = pdf.getPageCount();
-      if (!Number.isFinite(pages) || pages <= 0) throw new Error("empty_pages");
-    } catch {
-      throw new DocumentGenerationError(
-        503,
-        "DOCX_TO_PDF_FAILED",
-        "PDF conversion returned an invalid PDF",
-        { byteLength: out.length },
-      );
-    }
-    return out;
+    return await convertDocxToPdfService(docxBytes);
   } catch (err) {
     if (err instanceof DocumentGenerationError) throw err;
-    const aborted = err instanceof Error && err.name === "AbortError";
-    if (aborted)
+    if (isDocumentGenerationErrorLike(err)) {
       throw new DocumentGenerationError(
-        503,
-        "DOCX_TO_PDF_TIMEOUT",
-        "PDF conversion timed out",
+        typeof (err as any).statusCode === "number"
+          ? Number((err as any).statusCode)
+          : 503,
+        String((err as any).code),
+        String((err as any).message ?? "DOCX to PDF conversion failed"),
+        (err as any).payload,
       );
+    }
     throw new DocumentGenerationError(
       503,
       "DOCX_TO_PDF_FAILED",
-      "PDF conversion failed",
+      "DOCX to PDF conversion failed",
+      { cause: err instanceof Error ? err.message : String(err) },
     );
-  } finally {
-    clearTimeout(timeout);
   }
 }
 
@@ -12480,7 +12239,7 @@ async function generateFirmDocument({
       ? preview.resolvedVariables
       : (context as any);
   input = fillMissingScalarsForRender(effectivePlaceholders, input, {
-    missingMode: "empty",
+    missingMode: templateExt === "docx" ? "dash" : "empty",
   });
   let clauseSnapshot: Record<string, unknown> | null = null;
   let checklistEval = evaluateTemplateChecklist({
@@ -12539,7 +12298,7 @@ async function generateFirmDocument({
     fileContents = applied.docxBytes;
     input = applied.data;
     input = fillMissingScalarsForRender(effectivePlaceholders, input, {
-      missingMode: "empty",
+      missingMode: "dash",
     });
     clauseSnapshot = {
       insertionModeUsed: decision.insertionModeUsed,
@@ -12714,6 +12473,7 @@ async function generateFirmDocument({
   let outFormat: "docx" | "pdf" = "docx";
   let outputBytes: Buffer;
   let outputContentType: string;
+  let docxRenderWarnings: Array<{ placeholder: string; warning: string }> = [];
 
   if (templateExt === "pdf") {
     outFormat = "pdf";
@@ -12747,21 +12507,21 @@ async function generateFirmDocument({
         "Template file buffer is missing or corrupted in the database.",
       );
     }
-    const zip = new PizZip(fileContents);
-    const doc = new Docxtemplater(zip, {
-      paragraphLoop: true,
-      linebreaks: true,
-      modules: [makeDocxImageModule()],
-      delimiters: { start: "{{", end: "}}" },
-      nullGetter(part: any) {
-        const k = typeof part?.value === "string" ? String(part.value) : "";
-        if (!k) return "";
-        return "";
-      },
-    });
     await maybeHydrateFirmLogoBuffer(input as any);
+    let buffer: Buffer;
     try {
-      doc.render(input);
+      const rendered = renderDocxTemplate({
+        templateBytes: fileContents,
+        data: input,
+        placeholders: effectivePlaceholders,
+      });
+      buffer = rendered.docxBytes;
+      docxRenderWarnings = rendered.warnings.map((w) => ({
+        placeholder: w.key,
+        warning: w.code === "UNSUPPORTED_LOOP"
+          ? "Unsupported loop section; rendered as empty list"
+          : "Invalid render data; normalized to placeholder",
+      }));
     } catch (err) {
       const detail = extractDocxTemplateErrorDetail(err);
       console.error(err);
@@ -12780,10 +12540,6 @@ async function generateFirmDocument({
         { details: detail.message, tags: detail.tags, syntaxErrors },
       );
     }
-
-    let buffer = doc
-      .getZip()
-      .generate({ type: "nodebuffer", compression: "DEFLATE" }) as Buffer;
     if (letterheadBytes) {
       buffer = await applyLetterheadToDocxBuffer({
         baseDocx: buffer,
@@ -12900,7 +12656,7 @@ async function generateFirmDocument({
       checklist: checklistEval,
       checklistOverrideUsed,
       bindingMode: preview.usedMode,
-      placeholderWarnings: preview.placeholderWarnings,
+      placeholderWarnings: [...preview.placeholderWarnings, ...docxRenderWarnings],
     },
     readinessSnapshot: { readiness },
     renderedVars:
@@ -15756,9 +15512,7 @@ async function runSimpleDocumentGenerationPreflight(args: {
     }
   >();
 
-  const gotenbergConfigured =
-    typeof process.env.GOTENBERG_URL === "string" &&
-    process.env.GOTENBERG_URL.trim().length > 0;
+  const docxPdfHealth = await getDocxToPdfHealth();
 
   for (const templateId of args.templateIds) {
     const t = templateById.get(templateId);
@@ -15792,7 +15546,7 @@ async function runSimpleDocumentGenerationPreflight(args: {
     const ext = fileExtensionFromName(templateFileName);
     const templateType: "pdf" | "docx" = ext === "pdf" ? "pdf" : "docx";
     const converterStatus: "ready" | "missing" =
-      templateType === "docx" && !gotenbergConfigured ? "missing" : "ready";
+      templateType === "docx" && !docxPdfHealth.configured ? "missing" : "ready";
 
     if (!objectPathUsed) {
       templateMetaById.set(templateId, {
@@ -17357,6 +17111,12 @@ async function processAutomationGenerationJobStep(
       : null;
   const outputFormat =
     jobConfig.outputFormat === "pdf" ? ("pdf" as const) : undefined;
+  const docxItemTimeoutMs = (() => {
+    const raw = process.env.DOCX_TO_PDF_TIMEOUT_MS;
+    const n = typeof raw === "string" ? Number(raw) : NaN;
+    const base = Number.isFinite(n) && n > 0 ? Math.trunc(n) : 90_000;
+    return Math.min(120_000, Math.max(20_000, base + 15_000));
+  })();
   const bypassReq = Boolean(jobConfig.bypassApplicability);
   const createdRoleId = reqIdToNumber(jobConfig.createdRoleId);
   const bypassApplicability =
@@ -17485,6 +17245,11 @@ async function processAutomationGenerationJobStep(
         }
       }
       const genStartedAt = Date.now();
+      const masterFileName =
+        preloadedMasterDoc && typeof (preloadedMasterDoc as any).file_name === "string"
+          ? String((preloadedMasterDoc as any).file_name)
+          : "";
+      const masterExt = fileExtensionFromName(masterFileName);
       const out = await withItemTimeout(generateMasterDocument({
         r,
         firmId: args.firmId,
@@ -17504,7 +17269,7 @@ async function processAutomationGenerationJobStep(
         preloadedCaseContext,
         preloadedMasterDoc,
         requestCache,
-      }), 20_000);
+      }), masterExt === "docx" && outputFormat === "pdf" ? docxItemTimeoutMs : 20_000);
       timing.generate_ms = Date.now() - genStartedAt;
       await finishGenerationRunSuccess(
         r,
@@ -17765,6 +17530,12 @@ async function processAutomationGenerationJobStep(
       await persistJobCache();
     }
 
+    const firmTemplateExt = fileExtensionFromName(
+      sourceTemplateFileName ||
+        (templateRow && typeof (templateRow as any).file_name === "string"
+          ? String((templateRow as any).file_name)
+          : ""),
+    );
     const out = await withItemTimeout(generateFirmDocument({
       r,
       firmId: args.firmId,
@@ -17791,7 +17562,7 @@ async function processAutomationGenerationJobStep(
         filename: sourceTemplateFileName,
       },
       requestCache,
-    }), 20_000);
+    }), firmTemplateExt === "docx" && outputFormat === "pdf" ? docxItemTimeoutMs : 20_000);
     await finishGenerationRunSuccess(
       r,
       args.firmId,
@@ -19430,9 +19201,7 @@ router.post(
       .toLowerCase();
     const validate =
       qValidate === "1" || qValidate === "true" || qValidate === "yes";
-    const gotenbergConfigured =
-      typeof process.env.GOTENBERG_URL === "string" &&
-      process.env.GOTENBERG_URL.trim().length > 0;
+    const docxPdfHealth = await getDocxToPdfHealth();
 
     const showMasterDocuments = await (async () => {
       try {
@@ -19656,7 +19425,7 @@ router.post(
               });
             }
 
-            if (templateType === "docx" && !gotenbergConfigured) {
+            if (templateType === "docx" && !docxPdfHealth.configured) {
               templateCheckByKey.set(key, {
                 source: ref.source,
                 ...(ref.source === "firm"
@@ -19665,8 +19434,8 @@ router.post(
                 templateName,
                 templateType,
                 hardBlocked: true,
-                code: "DOCX_PDF_CONVERTER_UNAVAILABLE",
-                message: "DOCX to PDF converter is not configured",
+                code: "DOCX_TO_PDF_ENGINE_NOT_CONFIGURED",
+                message: "Word template PDF conversion is not configured.",
               });
               return;
             }

@@ -43,6 +43,8 @@ interface DocumentTemplate {
   description: string | null;
   file_name: string;
   object_path: string;
+  extension?: string | null;
+  mime_type?: string | null;
   created_at: string;
   is_active?: boolean;
   print_mode?: string | null;
@@ -225,6 +227,14 @@ export default function DocumentTemplates() {
     enabled: canRead,
   });
   const templates = templatesQuery.data ?? [];
+
+  const docxPdfHealthQuery = useQuery<{ ok: boolean; engine: string; configured: boolean; error?: string }>({
+    queryKey: ["docx-pdf-health"],
+    queryFn: ({ signal }) => apiFetchJson("/healthz/docx-pdf", { signal }),
+    retry: false,
+    enabled: canRead,
+  });
+  const docxPdfConfigured = docxPdfHealthQuery.data?.configured !== false;
 
   type ClauseRow = {
     id: number;
@@ -539,6 +549,11 @@ export default function DocumentTemplates() {
         </div>
       </CardHeader>
       <CardContent>
+        {!docxPdfConfigured && (
+          <div className="mb-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900">
+            Word templates require PDF conversion service before generation.
+          </div>
+        )}
         {!canRead ? (
           <div className="text-slate-500 py-8 text-center">You do not have permission to view document templates.</div>
         ) : templatesQuery.isError ? (
@@ -557,6 +572,13 @@ export default function DocumentTemplates() {
         ) : (
           <div className="space-y-2">
             {templates.map((t) => (
+              (() => {
+                const extRaw =
+                  (typeof (t as any).extension === "string" ? String((t as any).extension) : "") ||
+                  (typeof t.file_name === "string" ? t.file_name.split(".").pop() ?? "" : "");
+                const ext = extRaw.trim().toLowerCase();
+                const templateTypeLabel = ext === "pdf" ? "PDF Template" : "Word Template";
+                return (
               <div
                 key={t.id}
                 className="flex items-center gap-3 p-4 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 transition-colors"
@@ -571,6 +593,9 @@ export default function DocumentTemplates() {
                   <div className="flex items-center gap-2 mt-0.5">
                     <span className="text-xs px-1.5 py-0.5 rounded bg-slate-100 text-slate-600 font-medium">
                       {docTypeLabel(t.document_type)}
+                    </span>
+                    <span className="text-xs px-1.5 py-0.5 rounded bg-slate-100 text-slate-600 font-medium">
+                      {templateTypeLabel}{ext === "pdf" ? "" : " · Output: PDF"}
                     </span>
                   <span className="text-xs text-slate-400 truncate" title={t.file_name}>{t.file_name}</span>
                     {t.description && (
@@ -591,6 +616,8 @@ export default function DocumentTemplates() {
                   <Trash2 className="w-4 h-4" />
                 </Button>
               </div>
+                );
+              })()
             ))}
           </div>
         )}
@@ -624,6 +651,21 @@ export default function DocumentTemplates() {
                             ? DOCUMENT_TYPE_LABELS[dt as keyof typeof DOCUMENT_TYPE_LABELS]
                             : dt;
                         })()}
+                      </div>
+                    </div>
+                    <div>
+                      <div className="text-xs text-slate-500">Template</div>
+                      <div className="text-sm text-slate-900">
+                        {(() => {
+                          const extRaw =
+                            (typeof (activeTemplate as any).extension === "string" ? String((activeTemplate as any).extension) : "") ||
+                            (typeof activeFileName === "string" ? activeFileName.split(".").pop() ?? "" : "");
+                          const ext = extRaw.trim().toLowerCase();
+                          return ext === "pdf" ? "PDF Template" : "Word Template";
+                        })()}
+                      </div>
+                      <div className="text-xs text-slate-500 mt-0.5">
+                        Output: PDF
                       </div>
                     </div>
                   </div>

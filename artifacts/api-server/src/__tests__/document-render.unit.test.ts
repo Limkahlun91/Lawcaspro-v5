@@ -44,23 +44,20 @@ function makeMinimalDocxTemplateXml(bodyText: string): Buffer {
 }
 
 describe("document generation render (unit)", () => {
-  it("docx -> pdf (fallback) produces a non-empty PDF with merged text", async () => {
-    process.env.GOTENBERG_URL = "";
+  it("docx -> pdf (fallback) does not run when conversion engine is not configured", async () => {
+    process.env.DOCX_TO_PDF_ENGINE = "disabled";
+    delete process.env.GOTENBERG_URL;
+    delete process.env.DOCX_CONVERTER_URL;
+    delete process.env.DOCX_PDF_SERVICE_URL;
     const templateBytes = makeMinimalDocxTemplateXml("Hello {{name}}");
     const zip = new PizZip(templateBytes);
     const doc = new Docxtemplater(zip, { paragraphLoop: true, linebreaks: true, delimiters: { start: "{{", end: "}}" } });
     doc.render({ name: "Alice" });
     const renderedDocx = doc.getZip().generate({ type: "nodebuffer", compression: "DEFLATE" }) as Buffer;
 
-    const conv = await convertDocxToPdfWithFallback(renderedDocx, { allowFallbackOnFailure: true });
-    expect(conv.pdfBytes.length).toBeGreaterThan(800);
-
-    const pdf = await PDFDocument.load(conv.pdfBytes);
-    expect(pdf.getPageCount()).toBeGreaterThan(0);
-
-    const raw = conv.pdfBytes.toString("latin1");
-    expect(raw).toContain("Hello");
-    expect(raw).toContain("Alice");
+    await expect(convertDocxToPdfWithFallback(renderedDocx, { allowFallbackOnFailure: true })).rejects.toMatchObject({
+      code: "DOCX_TO_PDF_ENGINE_NOT_CONFIGURED",
+    });
   });
 
   it("pdf legacy mapping draws values / placeholders", async () => {

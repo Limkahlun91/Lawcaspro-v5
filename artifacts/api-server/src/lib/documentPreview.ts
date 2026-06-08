@@ -115,6 +115,16 @@ export async function runDocumentPreview(r: DbConn, input: PreviewInput): Promis
     if (Array.isArray(p)) resolvedVariablesWithClauses.purchasers = p;
   }
 
+  if (!Object.prototype.hasOwnProperty.call(resolvedVariablesWithClauses, "borrowers")) {
+    const b = (input.caseContext as any)?.borrowers;
+    if (Array.isArray(b)) resolvedVariablesWithClauses.borrowers = b;
+  }
+
+  if (!Object.prototype.hasOwnProperty.call(resolvedVariablesWithClauses, "vendors")) {
+    const v = (input.caseContext as any)?.vendors;
+    if (Array.isArray(v)) resolvedVariablesWithClauses.vendors = v;
+  }
+
   if (!Object.prototype.hasOwnProperty.call(resolvedVariablesWithClauses, "is_plural_purchaser")) {
     const p = (input.caseContext as any)?.purchasers;
     resolvedVariablesWithClauses.is_plural_purchaser = Array.isArray(p) ? p.length > 1 : false;

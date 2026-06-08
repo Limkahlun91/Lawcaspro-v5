@@ -752,6 +752,17 @@ export default function DocumentAutomationHub() {
     refetchOnMount: false,
   });
 
+  const docxPdfHealthQuery = useQuery<{ ok: boolean; engine: string; configured: boolean; error?: string }>({
+    queryKey: ["docx-pdf-health"],
+    enabled: bootstrapReady,
+    queryFn: ({ signal }) => apiFetchJson("/healthz/docx-pdf", { signal, timeoutMs: 10000 }),
+    retry: false,
+    staleTime: 30_000,
+    refetchOnWindowFocus: false,
+    refetchOnMount: false,
+  });
+  const docxPdfConfigured = docxPdfHealthQuery.data?.configured !== false;
+
   const firmSettingsQuery = useQuery<{
     showMasterDocuments?: boolean;
     useMasterDocuments?: boolean;
@@ -921,6 +932,23 @@ export default function DocumentAutomationHub() {
     () => new Set(selectedMasterDocIds),
     [selectedMasterDocIds],
   );
+
+  const selectedHasDocxTemplate = useMemo(() => {
+    const hasFirmDocx = templates.some((t) => {
+      if (!selectedTemplateIdSet.has(t.id)) return false;
+      const ext = String(t.extension ?? "").trim().toLowerCase();
+      return ext === "docx";
+    });
+    if (hasFirmDocx) return true;
+    const hasMasterDocx = masterDocs.some((d) => {
+      if (!selectedMasterDocIdSet.has(d.id)) return false;
+      const fileName = String(d.fileName ?? "").trim().toLowerCase();
+      return fileName.endsWith(".docx");
+    });
+    return hasMasterDocx;
+  }, [masterDocs, selectedMasterDocIdSet, selectedTemplateIdSet, templates]);
+
+  const blocksWordTemplates = selectedHasDocxTemplate && !docxPdfConfigured;
 
   const folderById = useMemo(() => {
     const m = new Map<number, FirmFolder>();
@@ -1288,6 +1316,11 @@ export default function DocumentAutomationHub() {
       toast({ title: "Please select at least one document" });
       return;
     }
+    if (blocksWordTemplates) {
+      setJobError("Word template PDF conversion is not configured.");
+      setJobStage("error");
+      return;
+    }
     if (mode === "print") {
       toast({
         title: "Print: Coming soon",
@@ -1625,7 +1658,7 @@ export default function DocumentAutomationHub() {
             }
             if (code === "DOCX_TO_PDF_ENGINE_NOT_CONFIGURED") {
               stopPolling();
-              setJobError("Word template cannot be exported to PDF because DOCX-to-PDF converter is not configured.");
+              setJobError("Word template PDF conversion is not configured.");
               setJobStage("error");
               return;
             }
@@ -2414,6 +2447,11 @@ export default function DocumentAutomationHub() {
                       setActiveMode(v === "print" ? "print" : "download")
                     }
                   >
+                    {blocksWordTemplates && (
+                      <div className="rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
+                        Word templates require PDF conversion service before generation.
+                      </div>
+                    )}
                     <TabsList className="grid grid-cols-2 w-full">
                       <TabsTrigger value="download" className="gap-2">
                         <FileText className="h-4 w-4" />
@@ -2566,7 +2604,7 @@ export default function DocumentAutomationHub() {
                         </div>
                       )}
                       <Button
-                        disabled={busy || hasActiveJob}
+                        disabled={busy || hasActiveJob || blocksWordTemplates}
                         className="w-full"
                         onClick={() => runGenerate("download")}
                       >
@@ -2672,7 +2710,7 @@ export default function DocumentAutomationHub() {
                         </div>
                       )}
                       <Button
-                        disabled={busy || hasActiveJob}
+                        disabled={busy || hasActiveJob || blocksWordTemplates}
                         className="w-full"
                         onClick={() => runGenerate("print")}
                       >
