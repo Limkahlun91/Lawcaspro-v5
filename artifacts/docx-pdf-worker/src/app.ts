@@ -35,7 +35,10 @@ function getRequiredToken(): string {
 async function isLibreOfficeAvailable(): Promise<boolean> {
   const bin = normalizeLibreOfficeBin();
   try {
-    await access(bin);
+    if (bin.includes("/") || bin.includes("\\") || bin.includes(":")) {
+      await access(bin);
+    }
+    await execFileAsync(bin, ["--version"], { timeout: 3000, windowsHide: true });
     return true;
   } catch {
     return false;
@@ -139,4 +142,3 @@ export function createApp() {
 
   return app;
 }
-
