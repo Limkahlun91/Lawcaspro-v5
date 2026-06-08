@@ -12,11 +12,12 @@ import { Plus, Trash2, Clock, DollarSign, TrendingUp } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import { QueryFallback } from "@/components/query-fallback";
 import { apiFetchJson } from "@/lib/api-client";
+import { formatRMAmount } from "@/lib/money";
 import { toastError } from "@/lib/toast-error";
 import { DateOnlyInput, formatYmdToDmy } from "@/components/date-only-input";
 
 function fmt(val: unknown) {
-  return `RM ${Number(val ?? 0).toLocaleString("en-MY", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  return formatRMAmount(val);
 }
 
 export default function CaseTimeTab({ caseId }: { caseId: number }) {
@@ -130,7 +131,7 @@ export default function CaseTimeTab({ caseId }: { caseId: number }) {
                 <div className="text-right flex-shrink-0">
                   <p className="text-sm font-medium text-slate-800">{Number(e.hours).toFixed(1)} hrs</p>
                   <p className="text-xs text-slate-500">{fmt(Number(e.hours) * Number(e.ratePerHour))}</p>
-                  <p className="text-xs text-slate-400">@ RM {Number(e.ratePerHour).toFixed(0)}/hr</p>
+                  <p className="text-xs text-slate-400">@ {formatRMAmount(e.ratePerHour)}/hr</p>
                 </div>
                 <Button
                   size="sm"

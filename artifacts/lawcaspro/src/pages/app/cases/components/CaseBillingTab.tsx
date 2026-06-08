@@ -9,11 +9,12 @@ import { useToast } from "@/hooks/use-toast";
 import { ChevronRight, FileText, Plus } from "lucide-react";
 import { QueryFallback } from "@/components/query-fallback";
 import { apiFetchJson } from "@/lib/api-client";
+import { formatRMAmount } from "@/lib/money";
 import { toastError } from "@/lib/toast-error";
 import { useAuth } from "@/lib/auth-context";
 
 function fmt(val: unknown) {
-  return `RM ${Number(val ?? 0).toLocaleString("en-MY", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  return formatRMAmount(val);
 }
 
 export default function CaseBillingTab({ caseId }: { caseId: number }) {

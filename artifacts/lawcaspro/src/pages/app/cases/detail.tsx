@@ -36,6 +36,8 @@ import { DateOnlyInput, formatYmdToDmy, normalizeDateOnlyFromApi } from "@/compo
 import { downloadBlob } from "@/lib/download";
 import { getApiFailureCodeFromError } from "@/lib/api-failure";
 import { getGenerationJobDownloadManifest, getGenerationJobStatus, runNextGenerationJob } from "@/lib/document-generation-client";
+import { amountToEnglishWords, formatRMAmount, toMoneyNumber } from "@/lib/money";
+import { calculateLoanAmounts } from "@/lib/loan-amounts";
 import { useAuth } from "@/lib/auth-context";
 import { hasPermission } from "@/lib/permissions";
 import { DEFAULT_ALLOWED_MIME_TYPES, validateUploadFile } from "@/lib/upload-validation";
@@ -103,7 +105,7 @@ function safeFileNamePart(name: string): string {
 }
 
 function fmtMoney(val: unknown) {
-  return `RM ${Number(val ?? 0).toLocaleString("en-MY", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  return formatRMAmount(val);
 }
 
 function CaseLedgerTab({ caseId }: { caseId: number }) {
@@ -1615,15 +1617,30 @@ export default function CaseDetail() {
     return v ? String(v).trim() : "";
   })();
 
-  const loanAmountValue = (() => {
-    const v = loanDetailsObj?.loanAmountNum ?? loanDetailsObj?.loanAmount ?? loanDetailsObj?.loan_amount ?? loanDetailsObj?.amount;
-    if (typeof v === "number") return v;
-    if (typeof v === "string") {
-      const n = Number(v.replace(/[^0-9.]/g, "").trim());
-      return Number.isFinite(n) ? n : v.trim();
-    }
-    return "";
-  })();
+  const purchasePriceRaw = (caseMeta as any)?.spaPrice;
+  const hasPurchasePrice = purchasePriceRaw != null && String(purchasePriceRaw).trim() !== "";
+  const purchasePriceAmount = hasPurchasePrice ? toMoneyNumber(purchasePriceRaw) : 0;
+  const purchasePriceWords = hasPurchasePrice ? amountToEnglishWords(purchasePriceAmount) : "";
+
+  const financingSumRaw =
+    loanDetailsObj?.propertyFinancingSum ??
+    loanDetailsObj?.financingSum ??
+    loanDetailsObj?.loanAmountNum ??
+    loanDetailsObj?.loanAmount ??
+    loanDetailsObj?.loan_amount ??
+    loanDetailsObj?.amount;
+  const othersRaw = loanDetailsObj?.othersText ?? loanDetailsObj?.othersSum ?? loanDetailsObj?.otherCharges ?? loanDetailsObj?.other_charges;
+  const totalLoanRaw = loanDetailsObj?.totalLoan ?? loanDetailsObj?.total_loan;
+  const loanAmounts = calculateLoanAmounts({
+    financingSum: financingSumRaw,
+    others: typeof othersRaw === "string" ? othersRaw : othersRaw == null ? "" : String(othersRaw),
+  });
+  const hasFinancingSum = financingSumRaw != null && String(financingSumRaw).trim() !== "";
+  const hasOthersTotal = loanAmounts.othersTotal > 0;
+  const hasStoredTotalLoan = totalLoanRaw != null && String(totalLoanRaw).trim() !== "";
+  const totalLoanAmount = hasStoredTotalLoan ? toMoneyNumber(totalLoanRaw) : loanAmounts.totalLoan;
+  const hasTotalLoan = hasStoredTotalLoan || hasFinancingSum || hasOthersTotal;
+  const totalLoanWords = hasTotalLoan ? amountToEnglishWords(totalLoanAmount) : "";
 
   const saveScope = (scope: "SPA Status" | "Loan Status" | "Title Case with Consent" | "Title Case") => {
     const key: keyof typeof scopeKeys =
@@ -2175,7 +2192,7 @@ export default function CaseDetail() {
             </p>
             {Number.isFinite(outstandingAdvances) && outstandingAdvances > 0 ? (
               <div className="mt-3 rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-900">
-                ⚠️ This case has <span className="font-semibold">RM {outstandingAdvances.toLocaleString("en-MY", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span> in outstanding advances. Please issue an Invoice / Collect payment.
+                ⚠️ This case has <span className="font-semibold">{formatRMAmount(outstandingAdvances)}</span> in outstanding advances. Please issue an Invoice / Collect payment.
               </div>
             ) : null}
           </div>
@@ -2382,12 +2399,15 @@ export default function CaseDetail() {
                       <div className="text-sm font-semibold text-slate-900 capitalize">{String((caseInfo as any)?.titleType ?? "") || "—"}</div>
                     </div>
                     <div className="space-y-1">
-                      <div className="text-xs font-medium text-slate-500">SPA Price</div>
+                      <div className="text-xs font-medium text-slate-500">Purchase Price</div>
                       <div className="text-sm font-semibold text-slate-900">
-                        {(() => {
-                          const v = (caseMeta as any)?.spaPrice;
-                          return v == null || String(v).trim() === "" ? "Not set" : fmtMoney(v);
-                        })()}
+                        {hasPurchasePrice ? fmtMoney(purchasePriceAmount) : "Not set"}
+                      </div>
+                    </div>
+                    <div className="space-y-1 md:col-span-2">
+                      <div className="text-xs font-medium text-slate-500">Purchase Price In Words</div>
+                      <div className="text-sm font-semibold text-slate-900 break-words">
+                        {purchasePriceWords || "Not set"}
                       </div>
                     </div>
 
@@ -2398,9 +2418,27 @@ export default function CaseDetail() {
                           <div className="text-sm font-semibold text-slate-900">{loanBank || "—"}</div>
                         </div>
                         <div className="space-y-1">
-                          <div className="text-xs font-medium text-slate-500">Loan Amount</div>
+                          <div className="text-xs font-medium text-slate-500">Financing Sum</div>
                           <div className="text-sm font-semibold text-slate-900">
-                            {typeof loanAmountValue === "number" ? fmtMoney(loanAmountValue) : String(loanAmountValue || "—")}
+                            {hasFinancingSum ? fmtMoney(financingSumRaw) : "Not set"}
+                          </div>
+                        </div>
+                        <div className="space-y-1">
+                          <div className="text-xs font-medium text-slate-500">Others Total</div>
+                          <div className="text-sm font-semibold text-slate-900">
+                            {hasOthersTotal ? fmtMoney(loanAmounts.othersTotal) : "RM0.00"}
+                          </div>
+                        </div>
+                        <div className="space-y-1">
+                          <div className="text-xs font-medium text-slate-500">Total Loan Amount</div>
+                          <div className="text-sm font-semibold text-slate-900">
+                            {hasTotalLoan ? fmtMoney(totalLoanAmount) : "Not set"}
+                          </div>
+                        </div>
+                        <div className="space-y-1 md:col-span-2">
+                          <div className="text-xs font-medium text-slate-500">Total Loan In Words</div>
+                          <div className="text-sm font-semibold text-slate-900 break-words">
+                            {totalLoanWords || "Not set"}
                           </div>
                         </div>
                       </>

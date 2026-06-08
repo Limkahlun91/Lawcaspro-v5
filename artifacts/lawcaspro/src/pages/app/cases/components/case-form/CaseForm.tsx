@@ -12,7 +12,8 @@ import { AddressLinesFields } from "./AddressLinesFields";
 import { PricingBreakdown } from "./PricingBreakdown";
 import { composeMalaysiaAddress, emptyAddressLines, joinAddressLines, normalizeMalaysiaPostcodeInput } from "./address";
 import type { BorrowerForm, CaseFormValues, CaseType, Encumbrances, LandCondition, LoanPartyType, PerfectionType, PurchaserForm, PurchaseMode, TitleCategory } from "./types";
-import { toRinggitMalaysiaWords } from "@/lib/ringgit-words";
+import { calculateLoanAmounts } from "@/lib/loan-amounts";
+import { amountToEnglishWords, formatRMAmount, toMoneyNumber } from "@/lib/money";
 import { getStateFromPostcode } from "@/utils/my-address-helper";
 
 const MALAYSIA_STATE_OPTIONS = [
@@ -61,16 +62,6 @@ function newBorrower(): BorrowerForm {
     addressLines: emptyAddressLines(),
     address: "",
   };
-}
-
-function parseMoney(v: string): number {
-  const n = Number(String(v ?? "").replace(/[^0-9.]/g, ""));
-  return Number.isFinite(n) ? n : 0;
-}
-
-function fmtMoney(n: number): string {
-  if (!Number.isFinite(n)) return "";
-  return n.toFixed(2);
 }
 
 export function createDefaultCaseFormValues(): CaseFormValues {
@@ -184,12 +175,12 @@ export function CaseForm(props: {
   }, [selectedProject]);
 
   useEffect(() => {
-    const apdl = parseMoney(v.apdlPrice);
-    const dev = parseMoney(v.developerDiscount);
-    const bumi = parseMoney(v.bumiputraDiscount);
+    const apdl = toMoneyNumber(v.apdlPrice);
+    const dev = toMoneyNumber(v.developerDiscount);
+    const bumi = toMoneyNumber(v.bumiputraDiscount);
     if (!v.apdlPrice && !v.developerDiscount && !v.bumiputraDiscount) return;
     const computed = apdl - dev - bumi;
-    set({ ...v, purchasePrice: fmtMoney(Math.max(0, computed)) });
+    set({ ...v, purchasePrice: Math.max(0, computed).toFixed(2) });
   }, [v.apdlPrice, v.developerDiscount, v.bumiputraDiscount]);
 
   useEffect(() => {
@@ -212,16 +203,15 @@ export function CaseForm(props: {
     });
   }, [v.purchaseMode, v.loanPartyType]);
 
-  const totalLoan = useMemo(() => {
-    const fin = parseMoney(v.financingSum);
-    const oth = parseMoney(v.othersSum);
-    return fin + oth;
-  }, [v.financingSum, v.othersSum]);
+  const loanAmounts = useMemo(() => calculateLoanAmounts({
+    financingSum: v.financingSum,
+    others: v.othersSum,
+  }), [v.financingSum, v.othersSum]);
 
-  const totalLoanWords = useMemo(() => {
-    if (!totalLoan) return "";
-    return toRinggitMalaysiaWords(totalLoan);
-  }, [totalLoan]);
+  const totalLoan = loanAmounts.totalLoan;
+  const totalLoanWords = loanAmounts.totalLoanWords;
+  const purchasePriceAmount = useMemo(() => toMoneyNumber(v.purchasePrice), [v.purchasePrice]);
+  const purchasePriceWords = useMemo(() => amountToEnglishWords(purchasePriceAmount), [purchasePriceAmount]);
 
   const canSubmit = (() => {
     if (!v.caseType) return false;
@@ -786,17 +776,30 @@ export function CaseForm(props: {
                   <div className="md:col-span-4 space-y-1.5">
                     <Label>Financing Sum</Label>
                     <Input value={v.financingSum} onChange={(e) => set({ ...v, financingSum: e.target.value })} disabled={submitting} inputMode="decimal" />
+                    {v.financingSum.trim() ? (
+                      <div className="text-xs text-slate-500">Formatted: {formatRMAmount(v.financingSum)}</div>
+                    ) : null}
                   </div>
                   <div className="md:col-span-4 space-y-1.5">
                     <Label>Others (MRTA/Legal Fees)</Label>
-                    <Input value={v.othersSum} onChange={(e) => set({ ...v, othersSum: e.target.value })} disabled={submitting} inputMode="decimal" />
+                    <Input value={v.othersSum} onChange={(e) => set({ ...v, othersSum: e.target.value })} disabled={submitting} />
+                    {v.othersSum.trim() ? (
+                      loanAmounts.detectedAmounts.length > 0 ? (
+                        <div className="space-y-1 text-xs text-slate-500">
+                          <div>Detected amounts: {loanAmounts.detectedAmounts.map((amount) => formatRMAmount(amount)).join(" + ")}</div>
+                          <div>Others Total: {formatRMAmount(loanAmounts.othersTotal)}</div>
+                        </div>
+                      ) : (
+                        <div className="text-xs text-slate-500">No valid amount detected from Others field.</div>
+                      )
+                    ) : null}
                   </div>
                   <div className="md:col-span-4 space-y-1.5">
-                    <Label>Total Loan</Label>
-                    <Input value={fmtMoney(totalLoan)} readOnly />
+                    <Label>Total Loan Amount</Label>
+                    <Input value={formatRMAmount(totalLoan)} readOnly />
                   </div>
                   <div className="md:col-span-12 space-y-1.5">
-                    <Label>Total Loan (Words)</Label>
+                    <Label>Total Loan In Words</Label>
                     <Input value={totalLoanWords} readOnly />
                   </div>
                 </div>
@@ -1011,7 +1014,11 @@ export function CaseForm(props: {
             <div className="grid grid-cols-1 md:grid-cols-12 gap-3">
               <div className="md:col-span-3 space-y-1.5">
                 <Label>Purchase Price</Label>
-                <Input value={v.purchasePrice} readOnly />
+                <Input value={formatRMAmount(purchasePriceAmount)} readOnly />
+              </div>
+              <div className="md:col-span-9 space-y-1.5">
+                <Label>Purchase Price In Words</Label>
+                <Input value={purchasePriceWords} readOnly />
               </div>
               <div className="md:col-span-3 space-y-1.5">
                 <Label>APDL Price</Label>

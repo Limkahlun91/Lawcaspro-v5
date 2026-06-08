@@ -2,6 +2,8 @@ import { useEffect, useState } from "react";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { useToast } from "@/hooks/use-toast";
 import { getHttpStatus, isApiErrorLike } from "@/lib/error-message";
+import { calculateLoanAmounts } from "@/lib/loan-amounts";
+import { toMoneyNumber } from "@/lib/money";
 import { toastError } from "@/lib/toast-error";
 import { CaseForm, createDefaultCaseFormValues } from "./CaseForm";
 import type { CaseFormValues, CaseType, Encumbrances, LandCondition, LoanPartyType, PerfectionType, PurchaseMode, TitleCategory } from "./types";
@@ -10,7 +12,10 @@ import { getStateFromPostcode } from "@/utils/my-address-helper";
 import { useAuth } from "@/lib/auth-context";
 
 function parseMoneyOrNull(v: string): number | null {
-  const n = Number(String(v ?? "").replace(/[^0-9.]/g, ""));
+  const normalized = String(v ?? "").trim();
+  if (!normalized) return null;
+
+  const n = toMoneyNumber(normalized);
   return Number.isFinite(n) ? n : null;
 }
 
@@ -97,7 +102,7 @@ export function mapCaseToFormValues(caseInfo: any): CaseFormValues {
     bankRef: String((loanDetails as any)?.bankRef ?? ""),
     branch: String((loanDetails as any)?.branch ?? ""),
     financingSum: String((loanDetails as any)?.propertyFinancingSum ?? ""),
-    othersSum: String((loanDetails as any)?.othersSum ?? ""),
+    othersSum: String((loanDetails as any)?.othersText ?? (loanDetails as any)?.othersSum ?? ""),
     branchAddress: "",
     property: {
       ...v.property,
@@ -223,6 +228,12 @@ export function buildCasePayloadFromFormValues(values: CaseFormValues): Record<s
     propertyAddress: propertyAddressComposed || undefined,
   };
 
+  const loanAmounts = calculateLoanAmounts({
+    financingSum: values.financingSum,
+    others: values.othersSum,
+  });
+  const rawOthersText = values.othersSum.trim();
+
   const loanDetails: Record<string, unknown> = {
     loanPartyType: values.loanPartyType === "3rd_party" ? "3rd Party" : "1st Party",
     borrowers,
@@ -235,7 +246,10 @@ export function buildCasePayloadFromFormValues(values: CaseFormValues): Record<s
     branchAddressLine4: values.branchAddressLines.line4.trim() || undefined,
     branchAddressLine5: values.branchAddressLines.line5.trim() || undefined,
     propertyFinancingSum: parseMoneyOrNull(values.financingSum) ?? undefined,
-    othersSum: parseMoneyOrNull(values.othersSum) ?? undefined,
+    othersSum: loanAmounts.othersTotal > 0 ? loanAmounts.othersTotal : undefined,
+    othersText: rawOthersText || undefined,
+    totalLoan: loanAmounts.totalLoan > 0 ? loanAmounts.totalLoan : undefined,
+    totalLoanWords: loanAmounts.totalLoanWords || undefined,
   };
 
   return {
