@@ -349,6 +349,7 @@ function CaseLedgerTab({ caseId }: { caseId: number }) {
 }
 
 export default function CaseDetail() {
+  const SHOW_COMPLIANCE_TAB = false;
   const { id } = useParams<{ id: string }>();
   const caseId = parseInt(id || "0", 10);
   const [, setLocation] = useLocation();
@@ -658,7 +659,7 @@ export default function CaseDetail() {
       "ledger",
       "communications",
       "client-interaction",
-      "compliance",
+      ...(SHOW_COMPLIANCE_TAB ? (["compliance"] as const) : []),
     ]);
     const next = allowed.has(tabFromUrlRaw) ? tabFromUrlRaw : "overview";
     if (next === "client-interaction" && !canAccessClientInteraction) return "overview";
@@ -1131,6 +1132,10 @@ export default function CaseDetail() {
   }, [loanStampingQuery.data, stampingDirty]);
 
   useEffect(() => {
+    if (initialActiveTab === "compliance" && !SHOW_COMPLIANCE_TAB) {
+      setActiveTab("overview");
+      return;
+    }
     setActiveTab(initialActiveTab);
   }, [initialActiveTab]);
 
@@ -2336,7 +2341,9 @@ export default function CaseDetail() {
               )}
             </TabsTrigger>
           )}
-          <TabsTrigger value="compliance">Compliance</TabsTrigger>
+          {SHOW_COMPLIANCE_TAB && (
+            <TabsTrigger value="compliance">Compliance</TabsTrigger>
+          )}
         </TabsList>
 
         <TabsContent value="overview" className="space-y-6">
@@ -3568,9 +3575,22 @@ export default function CaseDetail() {
           </TabsContent>
         )}
 
-        <TabsContent value="compliance">
-          <CaseComplianceTab caseId={caseId} />
-        </TabsContent>
+        {SHOW_COMPLIANCE_TAB ? (
+          <TabsContent value="compliance">
+            <CaseComplianceTab caseId={caseId} />
+          </TabsContent>
+        ) : (
+          <TabsContent value="compliance">
+            <Card>
+              <CardHeader>
+                <CardTitle>Compliance</CardTitle>
+              </CardHeader>
+              <CardContent className="text-sm text-slate-600">
+                This feature is not available yet.
+              </CardContent>
+            </Card>
+          </TabsContent>
+        )}
       </Tabs>
     </div>
   );
